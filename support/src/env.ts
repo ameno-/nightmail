@@ -25,16 +25,16 @@ export interface Env {
   MODEL_FAKE?: Fetcher;
 
   STAGE: 'dev' | 'production';
-  /** https://support.bane.mx: links in emails (confirm, continue in Nightmail). */
+  /** https://support.nightmail.dev: links in emails (confirm, continue in Nightmail). */
   PUBLIC_URL: string;
-  /** The dashboard origin allowed to start chats and open sockets (https://bane.mx). Comma-separated for dev. */
+  /** The dashboard origin allowed to start chats and open sockets (https://nightmail.dev). Comma-separated for dev. */
   DASHBOARD_ORIGINS: string;
-  /** Nightmail's own origin, for API paths over BANE_API and dashboard links (https://bane.mx). */
+  /** Nightmail's own origin, for API paths over BANE_API and dashboard links (https://nightmail.dev). */
   BANE_ORIGIN: string;
-  /** support@bane.mx and its inbound address ID in the platform workspace. */
+  /** support@nightmail.dev and its inbound address ID in the platform workspace. */
   SUPPORT_ADDRESS: string;
   SUPPORT_ADDRESS_ID: string;
-  /** The intake addresses, e.g. "abuse@bane.mx,privacy@bane.mx,legal@bane.mx" (local part = the mailbox). */
+  /** The intake addresses, e.g. "abuse@nightmail.dev,privacy@nightmail.dev,legal@nightmail.dev" (local part = the mailbox). */
   INTAKE_ADDRESSES: string;
   /** Where tickets are emailed. */
   TICKET_TO: string;

@@ -3,8 +3,8 @@
  * names integrations see. The API, dashboard and support Worker import this file; `bun run sdk` (in api/) copies it
  * verbatim to sdk/src/brand.ts, so edit only api/src/brand.ts. It imports nothing, so every package compiles it.
  *
- * Bane is becoming Nightmail (nightmail.dev). Until that domain is live the hosted service stays on bane.mx: the
- * switch is `hostedDomain`, with bane.mx moving to `previousDomains` so it stays served. A name a customer may already
+ * Bane became Nightmail (nightmail.dev). The hosted service is on nightmail.dev; bane.mx, its earlier domain, is in
+ * `previousDomains` and stays served (API, SNS feedback, unsubscribe links; GETs redirect). A name a customer may already
  * have (key prefix, DNS proof, header, scope, cookie) stays accepted until the cutover, which removes them all at once
  * (each site is marked "remove after rename cleanup"). Infrastructure names (Workers, buckets, SES resources) are not here.
  */
@@ -17,13 +17,13 @@ export const legacySlugs = ['bane', 'opensend'] as const;
 /** The product's own domain. The hosted service moves to it once it is live. */
 export const productDomain = 'nightmail.dev';
 /** The hosted service's domain: dashboard, API, docs and /mcp, with support.<domain> beside it and dev.<domain>. */
-export const hostedDomain = 'bane.mx';
-/** Domains the hosted service answered on before `hostedDomain`, still served. Empty until the switch. */
-export const previousDomains: readonly string[] = [];
+export const hostedDomain = 'nightmail.dev';
+/** Domains the hosted service answered on before `hostedDomain`, still served. */
+export const previousDomains: readonly string[] = ['bane.mx'];
 export const servedDomains: readonly string[] = [hostedDomain, ...previousDomains];
 /** Every dashboard and API host of the hosted service: production and dev, on each served domain. */
 export const hostedHosts: readonly string[] = servedDomains.flatMap(domain => [domain, `dev.${domain}`]);
-/** The support Worker's host beside a dashboard host (support.bane.mx, support.dev.bane.mx). */
+/** The support Worker's host beside a dashboard host (support.nightmail.dev, support.dev.nightmail.dev). */
 export const supportHost = (host: string) => `support.${host}`;
 
 /**
