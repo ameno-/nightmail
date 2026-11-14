@@ -27,6 +27,7 @@ import './receiving.css'
 import { useSingleFlight } from '../../lib/single-flight'
 import { actorText, changedLines, diffLines, useLiveVersion, type ChangeActor, type DiffLine, type LiveChange } from './live'
 import { addressOption } from './shared'
+import { maskedParts } from '../../lib/private-address'
 import { productName } from '../../../../api/src/brand'
 
 const errorText = (e: unknown): string => e instanceof ApiError ? e.text : (e as Error).message
@@ -437,6 +438,8 @@ export function RitualsPage() {
   const bindings = saved?.config.attachments ?? []
   const targets = (addresses.data ?? []).flatMap(a => [{ label: a.address, value: a.id }, ...a.aliases.map(alias => ({ label: alias, value: alias }))])
   const targetName = (value: string) => targets.find(t => t.value === value)?.label ?? value
+  // A label can't hold a PrivateAddress: it names an address as masked, by its first two characters.
+  const spoken = (value: string) => { const m = maskedParts(value); return m ? `${m.shown}…` : value }
   // This ritual's attachments, each with its place among the rituals on that address. Moving one swaps it with the
   // ritual before or after it there; the rest of the list keeps its order.
   type Row = Binding & { i: number; place: number; of: number; before?: number; after?: number }
@@ -457,8 +460,8 @@ export function RitualsPage() {
       ...(b.after !== undefined ? [{ label: 'Move down', disabled: binding, onSelect: () => swap(b, b.after, 1) }] : []),
       { label: 'Detach', destructive: true, disabled: binding, onSelect: () => void saveBindings(bindings.filter((_, i) => i !== b.i), `Detached ${b.ritual}`) },
     ]} />, render: b => <span className="ritual-row-actions">
-      <IconButton label={`Move ${b.ritual} up on ${targetName(b.target)}`} disabled={b.before === undefined || binding} onClick={() => swap(b, b.before, -1)}>↑</IconButton>
-      <IconButton label={`Move ${b.ritual} down on ${targetName(b.target)}`} disabled={b.after === undefined || binding} onClick={() => swap(b, b.after, 1)}>↓</IconButton>
+      <IconButton label={`Move ${b.ritual} up on ${spoken(targetName(b.target))}`} disabled={b.before === undefined || binding} onClick={() => swap(b, b.before, -1)}>↑</IconButton>
+      <IconButton label={`Move ${b.ritual} down on ${spoken(targetName(b.target))}`} disabled={b.after === undefined || binding} onClick={() => swap(b, b.after, 1)}>↓</IconButton>
       <IconButton label={`Detach ${b.ritual}`} disabled={binding} onClick={() => void saveBindings(bindings.filter((_, i) => i !== b.i), `Detached ${b.ritual}`)}>×</IconButton>
     </span> },
   ]
