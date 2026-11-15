@@ -356,13 +356,13 @@ async function billing(db) {
   for (const [i, [send, receive, omen]] of [[412, 38, 12], [1260, 75, 30], [96, 12, 0], [884, 41, 9], [57, 3, 0], [2210, 120, 44]].entries()) await usage('ws_northwind', i, send, receive, omen);
   await post('ws_northwind', 'topup', 'attempt:bpa_cls_recharge', 2_500_000_000n, 0n, { recharge: true }, 'stripe');
   await db.query(`UPDATE billing_accounts SET stripe_customer='cus_cls_northwind',stripe_payment_method='pm_cls_northwind',card_brand='visa',card_last4='4242',card_exp_month=4,card_exp_year=2028,card_fingerprint='fp_cls',
-    recharge_enabled=true,free_month=date_trunc('month',now() AT TIME ZONE 'UTC')::date,free_emails_used=2140,month_spend_uc=104000000 WHERE workspace_id='ws_northwind'`);
+    recharge_enabled=true,free_month=date_trunc('month',now() AT TIME ZONE 'UTC')::date,free_sent_used=1640,free_received_used=500,month_spend_uc=104000000 WHERE workspace_id='ws_northwind'`);
   await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,settled_quantity) SELECT 'ws_northwind',date_trunc('hour',now())-make_interval(hours=>g),m.meter,m.q,m.q
     FROM generate_series(2,7) g CROSS JOIN (VALUES ('send',820),('receive',48),('omen',16)) m(meter,q)`);
   await db.query("INSERT INTO mail_storage_aged(workspace_id,aged_bytes,aged_through) VALUES ('ws_northwind',214000000,(now() AT TIME ZONE 'UTC')::date-91)");
   await post('ws_harbor', 'topup', 'attempt:bpa_cls_harbor', 2_000_000_000n, 0n, {}, 'stripe');
   await usage('ws_harbor', 0, 158_000, 4000);
-  await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '2 days',empty_since=now()-interval '2 days',free_month=date_trunc('month',now() AT TIME ZONE 'UTC')::date,free_emails_used=3000,month_spend_uc=3240000000 WHERE workspace_id='ws_harbor'`);
+  await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '2 days',empty_since=now()-interval '2 days',free_month=date_trunc('month',now() AT TIME ZONE 'UTC')::date,free_sent_used=3000,free_received_used=3000,month_spend_uc=3240000000 WHERE workspace_id='ws_harbor'`);
 }
 
 /** Driftwood's triage ritual, version `n`: each agent save in a live job changes one line in place, so the line count

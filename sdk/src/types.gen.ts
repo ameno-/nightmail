@@ -1988,9 +1988,17 @@ export type Usage = {
          */
         perThousand: number;
         /**
-         * Emails included free each calendar month (UTC), sent and received combined.
+         * Emails included free each calendar month (UTC) in each direction, counted separately: this many sent and this many received (freeSentEmails, freeReceivedEmails). Sends beyond it are charged even while received mail is still free, and the other way round.
          */
         freeEmails: number;
+        /**
+         * Sent emails (each recipient) included free each calendar month (UTC).
+         */
+        freeSentEmails: number;
+        /**
+         * Received messages included free each calendar month (UTC), separate from the sent allowance.
+         */
+        freeReceivedEmails: number;
         /**
          * Bytes of received mail older than 90 days stored free.
          */
@@ -5648,11 +5656,39 @@ export type BillingSummary = {
     } | null;
     free: {
         month: string;
+        /**
+         * The sent allowance (same as sent), kept for older clients. Each direction has its own allowance: see sent and received.
+         */
         emails: {
             limit: number;
+            /**
+             * Used this month, settled and unsettled.
+             */
             used: number;
             left: number;
         };
+        /**
+         * Free sent emails this month, each recipient counting once. Sends beyond it are charged even while received mail is still free.
+         */
+        sent: {
+            limit: number;
+            /**
+             * Used this month, settled and unsettled.
+             */
+            used: number;
+            left: number;
+        };
+        /**
+         * Free received messages this month, separate from the sent allowance. Null unless the credential may read every received message (owners, admins and manage credentials), as in GET /v1/usage.
+         */
+        received: {
+            limit: number;
+            /**
+             * Used this month, settled and unsettled.
+             */
+            used: number;
+            left: number;
+        } | null;
         storage: {
             limitBytes: number;
             /**
@@ -5697,7 +5733,18 @@ export type BillingSummary = {
          * USD per GB-month for received mail older than 90 days, beyond the free GB.
          */
         storagePerGbMonth: string;
+        /**
+         * Free emails each calendar month (UTC) in each direction, counted separately (freeSentEmails, freeReceivedEmails).
+         */
         freeEmails: number;
+        /**
+         * Sent emails (each recipient) free each calendar month (UTC).
+         */
+        freeSentEmails: number;
+        /**
+         * Received messages free each calendar month (UTC), separate from the sent allowance.
+         */
+        freeReceivedEmails: number;
         freeStorageBytes: number;
         topUpMinCents: number;
         currency: 'USD';

@@ -423,7 +423,6 @@
   },
   "app/src/features/settings/billing.tsx": {
    "duplicate": [
-    "74: … of … free emails used ⟨dup⟩",
     "74: usage after the free emails ⟨dup⟩",
     "238: … added to your balance ⟨dup⟩"
    ],
@@ -548,9 +547,6 @@
   "app/src/features/settings/usage.tsx": {
    "length/description": [
     "50: new workspaces start small so one mistake can’t hurt everyon"
-   ],
-   "length/label": [
-    "42: free emails used this month"
    ]
   },
   "app/src/features/settings/webhook-headers.tsx": {

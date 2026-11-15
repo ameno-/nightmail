@@ -551,7 +551,7 @@ export default tool({
 ```
 ## Billing modes
 
-Hosted installations (`MULTI_TENANT=true`) bill a prepaid USD balance per workspace; self-hosted installations have no billing. Money is integer micro-cents (µ¢: 1¢ = 1,000,000 µ¢). Rate version 1: $0.20 per 1,000 emails sent (per recipient) or received (per message), $0.10 per 1,000 Omen evaluations, $0.25 per GB-month of received mail older than 90 days. Each UTC month includes 3,000 emails (sent and received combined) and 1 GB of that storage. IMAP/SMTP access is free, with a fair-use download limit of 5 GB a day and 30 GB a month per inbox (override per inbox with `inbox_state.egress_daily_bytes` / `egress_monthly_bytes`). BYO workspaces are metered at $0.
+Hosted installations (`MULTI_TENANT=true`) bill a prepaid USD balance per workspace; self-hosted installations have no billing. Money is integer micro-cents (µ¢: 1¢ = 1,000,000 µ¢). Rate version 1: $0.20 per 1,000 emails sent (per recipient) or received (per message), $0.10 per 1,000 Omen evaluations, $0.25 per GB-month of received mail older than 90 days. Each UTC month includes 3,000 sent and 3,000 received emails, counted separately (sends beyond 3,000 are charged even while received mail is still free, and the other way round), and 1 GB of that storage. IMAP/SMTP access is free, with a fair-use download limit of 5 GB a day and 30 GB a month per inbox (override per inbox with `inbox_state.egress_daily_bytes` / `egress_monthly_bytes`). BYO workspaces are metered at $0.
 
 `billing_config.mode` is a database row, so switching needs no deploy and rolls back instantly:
 

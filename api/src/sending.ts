@@ -2482,12 +2482,12 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
         return {count:0, completed:false, hostedUntil, balanceUntil: null as string | null};
       }
     }
-    // Billing (Hosted, enforced prepaid): release only what the balance and the free allowance cover; with nothing
+    // Billing (Hosted, enforced prepaid): release only what the balance and the free sending allowance cover; with nothing
     // covered the campaign waits on 'balance' until a credit (billing.restored wakes it) or an hour passes.
     const bill = buffer!.billing;
     if (allowance && bill && bill.mode === 'prepaid' && bill.enforcement !== 'off') {
-      const available = BigInt(bill.availableUc), affordable = available < 0n ? 0 : bill.freeEmailsLeft + Number(available / 20000n);
-      if (affordable < recipients.length && !bill.enforced) log('info', { code: 'BILLING_SHADOW_DENY', workspaceId: a.workspaceId, campaignId: campaign.id, requiredUc: String(20000 * Math.max(0, recipients.length - bill.freeEmailsLeft)), availableUc: bill.availableUc });
+      const available = BigInt(bill.availableUc), affordable = available < 0n ? 0 : bill.freeSentLeft + Number(available / 20000n);
+      if (affordable < recipients.length && !bill.enforced) log('info', { code: 'BILLING_SHADOW_DENY', workspaceId: a.workspaceId, campaignId: campaign.id, requiredUc: String(20000 * Math.max(0, recipients.length - bill.freeSentLeft)), availableUc: bill.availableUc });
       else if (affordable < recipients.length) {
         const until = new Date(Date.now() + 3_600_000).toISOString();
         if (affordable === 0) {

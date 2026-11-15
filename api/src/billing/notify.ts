@@ -17,7 +17,7 @@ export type NoticeContext = {
   link: string;
   /** Paid + promotional credit, after settlement. */
   totalUc: MicroCents;
-  /** Free emails left this month, from billing_position. */
+  /** Free sends left this month, from billing_position. */
   freeLeft: number;
   unpaidSince: Date | null;
   data: Record<string, unknown>;
@@ -45,7 +45,7 @@ export function noticeEmail(kind: NoticeKind, n: NoticeContext) {
     case 'low_balance': {
       const emails = (n.totalUc > 0n ? n.totalUc / RATES.emailUc : 0n) + BigInt(Math.max(0, n.freeLeft));
       return { subject: `${productName}: ${n.workspace} balance is low (${total})`,
-        text: body(`The prepaid balance of ${n.workspace} is ${total}. That covers about ${count(emails)} more emails at $0.20 per 1,000.`,
+        text: body(`The prepaid balance of ${n.workspace} is ${total}. That covers about ${count(emails)} more sent emails at $0.20 per 1,000.`,
           `Nothing yet: sending and receiving continue. When the balance reaches $0, ${productName} pauses sending.`,
           ['Add credit in Settings → Billing.', `Or turn on auto-recharge there, so ${productName} adds credit from your saved card before the balance runs out.`]) };
     }
@@ -58,7 +58,7 @@ export function noticeEmail(kind: NoticeKind, n: NoticeContext) {
     }
     case 'sends_paused':
       return { subject: `${productName} paused sending for ${n.workspace}`,
-        text: body(`The prepaid balance of ${n.workspace} reached ${total}, and this month's ${count(RATES.freeEmails)} free emails are used.`,
+        text: body(`The prepaid balance of ${n.workspace} reached ${total}, and this month's ${count(RATES.freeSentEmails)} free sent emails are used.`,
           `${productName} paused sending. The API answers 402 BALANCE_EXHAUSTED, campaigns wait and resume on their own, and SMTP submissions get a temporary 451, so mail clients keep the message and retry. ${holdAt ? `Received mail is still accepted until ${day(holdAt)}.` : `Received mail is still accepted; if the balance stays below $0 for 7 days, ${productName} holds new received mail.`} Nothing is deleted.`,
           ['Add credit in Settings → Billing. Sending resumes within a minute, and any amount owed is settled from the top-up.', 'Turn on auto-recharge so it doesn’t happen again.']) };
     case 'receive_hold_soon':
@@ -82,7 +82,7 @@ export function noticeEmail(kind: NoticeKind, n: NoticeContext) {
   }
 }
 
-type Row = { id: string; kind: NoticeKind; data: Record<string, unknown>; enforcement: string; mode: string; name: string | null; position: { availableUc?: string; balanceUc?: string; promoUc?: string; freeEmailsLeft?: number } | null; unpaid_since: Date | string | null; recipients: string[] };
+type Row = { id: string; kind: NoticeKind; data: Record<string, unknown>; enforcement: string; mode: string; name: string | null; position: { availableUc?: string; balanceUc?: string; promoUc?: string; freeSentLeft?: number } | null; unpaid_since: Date | string | null; recipients: string[] };
 
 export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, payload, job) => {
   const noticeId = typeof payload.noticeId === 'string' ? payload.noticeId : '';
@@ -114,7 +114,7 @@ export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
   const position = notice.position ?? {};
   const totalUc = microCents(BigInt(position.balanceUc ?? '0') + BigInt(position.promoUc ?? '0'));
   const email = noticeEmail(notice.kind, { workspace: oneLine(notice.name ?? ''), link: `${runtime.config.publicUrl.replace(/\/$/, '')}/settings#billing`, totalUc,
-    freeLeft: Number(position.freeEmailsLeft ?? 0), unpaidSince: notice.unpaid_since ? new Date(notice.unpaid_since) : null, data: notice.data ?? {} });
+    freeLeft: Number(position.freeSentLeft ?? 0), unpaidSince: notice.unpaid_since ? new Date(notice.unpaid_since) : null, data: notice.data ?? {} });
   const { sendSystemEmail } = await import('../sending.js');
   await sendSystemEmail(runtime, sender, { from, to: notice.recipients, subject: email.subject, text: email.text, idempotencyKey: `billing:${notice.id}`, billingNotice: notice.id });
   await settle('sent');

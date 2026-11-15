@@ -73,7 +73,7 @@ Never ask for passwords, API keys, app passwords, webhook secrets or sign-in cod
 
 **Sending errors.** Find the request with `explain_request` (from the request ID), or the message with `list_emails` and `get_email`. A `202` means queued, not delivered.
 
-- `402 BALANCE_EXHAUSTED`: the balance and the free allowance are used up. An owner or admin needs to add credit.
+- `402 BALANCE_EXHAUSTED`: the balance and the free sending allowance (3,000 sent emails a month, separate from the 3,000 received) are used up. An owner or admin needs to add credit.
 - `409 MARKETING_HELD` and `409 HOSTED_SENDING_PAUSED`: the workspace is restricted or paused. Use the standing playbook.
 - `CONTENT_REJECTED_SPAM`, `CONTENT_IMAGE_ONLY` and `ATTACHMENT_*`: the spam screen rejected the message. Use `screen_rejections` and lint. Image-heavy mail needs about 25 words of real text per 600×300 of image area. Screen rejections count against the daily limit and are charged as sends.
 - `acceptance_unknown`: **don't resend**. SES may have accepted it.

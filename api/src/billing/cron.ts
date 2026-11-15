@@ -101,7 +101,7 @@ export async function settleClosedHours(runtime: Runtime, cutoff?: string): Prom
   const seen = new Set<string>();
   while (Date.now() < deadline) {
     const { rows } = await runtime.db.execute<{ workspace_id: string }>(sql`SELECT DISTINCT workspace_id FROM billing_usage_hourly
-      WHERE quantity<>settled_quantity AND hour<${at} LIMIT ${SETTLE_PAGE}`);
+      WHERE (quantity <> settled_quantity OR refunds <> '{}') AND hour<${at} LIMIT ${SETTLE_PAGE}`);
     const queue = rows.map(r => r.workspace_id).filter(w => !seen.has(w));
     if (!queue.length) break;
     await Promise.all(Array.from({ length: Math.min(SETTLE_CONCURRENCY, queue.length) }, async () => {
@@ -115,7 +115,7 @@ export async function settleClosedHours(runtime: Runtime, cutoff?: string): Prom
     }));
   }
   log('info', { code: 'BILLING_SETTLED', workspaces, entries, busy, ms: Date.now() - started });
-  const { rows: [lag] } = await runtime.db.execute<{ oldest: string | null }>(sql`SELECT (extract(epoch FROM min(hour))*1000)::bigint::text AS oldest FROM billing_usage_hourly WHERE quantity<>settled_quantity`);
+  const { rows: [lag] } = await runtime.db.execute<{ oldest: string | null }>(sql`SELECT (extract(epoch FROM min(hour))*1000)::bigint::text AS oldest FROM billing_usage_hourly WHERE quantity <> settled_quantity OR refunds <> '{}'`);
   if (lag?.oldest && Date.now() - Number(lag.oldest) > LAG_ALERT_MS) log('error', { code: 'BILLING_SETTLE_LAG', oldestOpenHour: new Date(Number(lag.oldest)).toISOString() });
   return { workspaces, entries, busy };
 }

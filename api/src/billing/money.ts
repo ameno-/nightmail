@@ -5,7 +5,7 @@ import { z } from '@hono/zod-openapi';
 // Stripe amounts are cents.
 export type MicroCents = bigint & { readonly __brand: 'MicroCents' };
 export const UC_PER_CENT = 1_000_000n, UC_PER_USD = 100_000_000n;
-export const RATES = { version: 1, emailUc: 20_000n, omenUc: 10_000n, storageUcPerGbMonth: 25_000_000n, freeEmails: 3000, freeStorageBytes: 1_000_000_000n } as const;
+export const RATES = { version: 1, emailUc: 20_000n, omenUc: 10_000n, storageUcPerGbMonth: 25_000_000n, freeSentEmails: 3000, freeReceivedEmails: 3000, freeStorageBytes: 1_000_000_000n } as const;
 
 /** Parses an integer µ¢ value (bigint or integer string). Throws on anything else. */
 export const microCents = (v: bigint | string): MicroCents => {

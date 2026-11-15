@@ -8,7 +8,7 @@ import { queries } from '../../data/queries'
 import { ApiError } from '../../data/types'
 import { balanceState, billingApi, cardBrand, centsUsd, declineText, fullDay, monthDay, parseDollars, total, usd, type AutoRechargeInput, type BillingSummary, type LedgerEntry, type Payment } from '../../data/billing'
 import { useCursorPagination } from '../../lib/pagination'
-import { date, number } from '../../lib/format'
+import { date } from '../../lib/format'
 import './billing.css'
 import { productName } from '../../../../api/src/brand'
 
@@ -50,7 +50,7 @@ export function BillingSection({ row: Row }: { row: (props: RowProps) => ReactNo
         <span className="billing-balance__amount">{b?.balance ? usd(total(b.balance)) : <Skeleton width={136} height={36} />}</span>
         <span className="muted billing-balance__detail">{b?.balance ? balanceDetail(b.balance) : <Skeleton width={220} height={16} />}</span>
       </div>
-      <Row title="This month" hint={b ? `${number(b.free.emails.used)} of ${number(b.free.emails.limit)} free emails used` : 'Usage after the free emails'}>{b?.monthToDate ? usd(b.monthToDate.cost) : <Skeleton width={64} height={20} />}</Row>
+      <Row title="This month" hint="Usage after the free emails">{b?.monthToDate ? usd(b.monthToDate.cost) : <Skeleton width={64} height={20} />}</Row>
       <Row title="Payment method" hint="For auto-recharge and one-click top-ups"><CardControl summary={b} /></Row>
     </div>
     <AutoRecharge summary={b} Row={Row} />
@@ -71,7 +71,7 @@ function FreePlan({ summary: b, Row }: { summary: BillingSummary | undefined; Ro
         <span className="billing-balance__amount billing-balance__amount--plan">Free plan</span>
         <span className="muted billing-balance__detail">{b ? `Courtesy of Anomaly · ${b.freePlan?.until ? `until ${fullDay(b.freePlan.until)}` : 'no end date'}` : <Skeleton width={220} height={16} />}</span>
       </div>
-      <Row title="This month" hint={b ? `${number(b.free.emails.used)} of ${number(b.free.emails.limit)} free emails used` : 'Usage after the free emails'}>{b?.monthToDate ? <span>{usd(b.monthToDate.cost)} <span className="muted">not charged</span></span> : <Skeleton width={120} height={20} />}</Row>
+      <Row title="This month" hint="Usage after the free emails">{b?.monthToDate ? <span>{usd(b.monthToDate.cost)} <span className="muted">not charged</span></span> : <Skeleton width={120} height={20} />}</Row>
     </div>
     <History />
   </>
