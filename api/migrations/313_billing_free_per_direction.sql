@@ -14,7 +14,41 @@ ALTER TABLE billing_accounts ADD COLUMN free_sent_used integer NOT NULL DEFAULT 
 ALTER TABLE billing_config ADD COLUMN free_split_from date;                              -- first month priced per direction
 UPDATE billing_config SET free_split_from=(date_trunc('month', now() AT TIME ZONE 'UTC'))::date WHERE singleton;
 
--- 293's position with one allowance per direction. freeEmailsLeft repeats freeSentLeft for Workers deployed before
+-- A refund reverses only what was actually charged for the mail it refunds (review of #301, billing sweep B1): before,
+-- the settler priced a refund from quantities alone and moved money by the account's mode at settlement, so canceling
+-- mail that settled at $0 (exempt, shadow, off, or free) paid out credit once the account was prepaid.
+-- - billing_usage_paid: units of an hour's mail that a settlement actually charged, net of refunds. Only the settler
+--   writes it, under the account lock, so writers never wait on it.
+-- - billing_usage_hourly.refunds: the units a row's pending refunds take back, by the hour their mail was metered in
+--   (sending_emails.created_at's hour; keys are epoch seconds). billing_adjust_sends adds to it; the settler empties it.
+-- Hours settled before this migration have no charged units recorded, so their refunds reverse nothing automatically
+-- (the PR lists the read-only query for anyone the combined rule charged).
+CREATE TABLE billing_usage_paid (workspace_id text NOT NULL, hour timestamptz NOT NULL, meter text NOT NULL,
+  units bigint NOT NULL CHECK (units >= 0), PRIMARY KEY (workspace_id, hour, meter));
+ALTER TABLE billing_usage_hourly ADD COLUMN refunds jsonb NOT NULL DEFAULT '{}';
+
+-- 300's billing_adjust_sends, with each refund's origin hour noted on the row it lands in.
+CREATE OR REPLACE FUNCTION billing_adjust_sends() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE d bigint; m text; h timestamptz; k text := extract(epoch FROM date_trunc('hour', NEW.created_at, 'UTC'))::bigint::text;
+BEGIN
+  IF NEW.simulated AND NOT (SELECT bill_simulated FROM billing_config WHERE singleton) THEN RETURN NULL; END IF;
+  d := (hosted_charged(NEW.status,NEW.provider_id,NEW.error_code)::int - hosted_charged(OLD.status,OLD.provider_id,OLD.error_code)::int)
+       * jsonb_array_length(NEW.to_addresses||NEW.cc_addresses||NEW.bcc_addresses);
+  SELECT CASE WHEN (NEW.feedback_topic_arn IS NULL AND kind='shared') OR EXISTS (SELECT FROM provider_pool_regions p WHERE p.feedback_topic_arn=NEW.feedback_topic_arn)
+         THEN 'send' ELSE 'byo_send' END INTO m FROM provider_connections WHERE workspace_id=NEW.workspace_id ORDER BY kind LIMIT 1;
+  IF d=0 OR m IS NULL THEN RETURN NULL; END IF;
+  -- Month arithmetic on UTC wall-clock timestamps: timestamptz + interval '1 month' would follow the session TimeZone.
+  h := CASE WHEN date_trunc('month',NEW.created_at,'UTC') < date_trunc('month',now(),'UTC')
+         THEN (date_trunc('month',NEW.created_at AT TIME ZONE 'UTC') + interval '1 month' - interval '1 hour') AT TIME ZONE 'UTC'
+         ELSE date_trunc('hour',now(),'UTC') END;
+  INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,rate_version,quantity,settled_quantity,refunds)
+    VALUES (NEW.workspace_id,h,m,1,d,0,CASE WHEN d<0 THEN jsonb_build_object(k,d) ELSE '{}' END)
+    ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity,
+      refunds=CASE WHEN excluded.quantity<0 THEN u.refunds || jsonb_build_object(k, coalesce((u.refunds->>k)::bigint,0)+excluded.quantity) ELSE u.refunds END;
+  RETURN NULL;
+END $$;
+
+-- 293's position with one allowance per direction; pending refunds don't count until settled. freeEmailsLeft repeats freeSentLeft for Workers deployed before
 -- this migration (sending gates read it) and can go once every Worker reads freeSentLeft.
 CREATE OR REPLACE FUNCTION billing_position(wid text) RETURNS jsonb LANGUAGE sql STABLE AS $$
 WITH cfg AS (SELECT mode AS enforcement, receive_hold FROM billing_config WHERE singleton),
@@ -24,10 +58,15 @@ a AS (SELECT coalesce(b.mode,'prepaid') AS mode, coalesce(b.balance_uc,0) AS bal
         b.unpaid_since, coalesce(b.recharge_threshold_uc,0) AS threshold,
         coalesce(b.recharge_enabled AND b.recharge_disabled_at IS NULL AND b.recharge_pending_attempt IS NULL AND b.stripe_payment_method IS NOT NULL,false) AS can_recharge
       FROM (SELECT 1) one LEFT JOIN billing_accounts b ON b.workspace_id=wid),
-o AS (SELECT coalesce(sum(quantity-settled_quantity) FILTER (WHERE meter='send'),0) AS sends,
-             coalesce(sum(quantity-settled_quantity) FILTER (WHERE meter='receive'),0) AS receives,
+o AS (SELECT coalesce(sum(new_units) FILTER (WHERE meter='send'),0) AS sends,
+             coalesce(sum(new_units) FILTER (WHERE meter='receive'),0) AS receives,
              coalesce(sum((quantity-settled_quantity)*billing_rate_uc(meter,rate_version,hour)) FILTER (WHERE meter IN ('omen','storage')),0) AS other_uc
-      FROM billing_usage_hourly WHERE workspace_id=wid AND quantity<>settled_quantity),
+      FROM billing_usage_hourly
+      -- Refunds of other hours' mail give back no allowance or credit until the settler knows what they reverse; this
+      -- hour's own cancel its unsettled units.
+      CROSS JOIN LATERAL (SELECT greatest(0, quantity-settled_quantity-coalesce((SELECT sum(v::bigint) FROM jsonb_each_text(refunds) x(k,v)
+        WHERE k<>extract(epoch FROM hour)::bigint::text),0)) AS new_units) n
+      WHERE workspace_id=wid AND quantity<>settled_quantity),
 p AS (SELECT a.*, cfg.*,
         round((greatest(0,coalesce(a.sent,0)+o.sends-3000)-greatest(0,coalesce(a.sent,0)-3000)
               +greatest(0,coalesce(a.received,0)+o.receives-3000)-greatest(0,coalesce(a.received,0)-3000))*20000+o.other_uc)::bigint AS open_uc,
@@ -60,18 +99,24 @@ END $$;
 -- 300's settler with a free pool per direction. A late write into a past month, or any write into a month before
 -- free_split_from (an account dormant since then still has that month cached, with zeroed counters), is priced against
 -- that month's own settled pool: units of the same meter, or of both meters before free_split_from.
+-- A row's refunds settle first: the pool shrinks by all of them, but money comes back only for units their own hours
+-- were actually charged (billing_usage_paid), never more, whatever the account's mode was or is; a refund of mail that
+-- settled at $0 (free, exempt, shadow, off) gives nothing back. The rest of the delta is new mail, priced against the
+-- allowance; when the settlement charges it, its payable units become this hour's charged units.
 CREATE OR REPLACE FUNCTION billing_settle(wid text, cutoff timestamptz) RETURNS jsonb LANGUAGE plpgsql AS $$
 DECLARE a billing_accounts; cfg billing_config; r record; delta bigint; before bigint; after bigint; payable numeric;
   line numeric; cost numeric := 0; spend numeric; det jsonb := '{}'; m jsonb; rmonth date; mon date; sent bigint; received bigint;
   n int := 0; cost_uc bigint; charged boolean; promo_draw bigint := 0; paid_draw bigint := 0; total bigint;
   posted jsonb; first_hour timestamptz; last_hour timestamptz; recharging boolean;
+  pending jsonb; own text; refund bigint; fresh bigint; back bigint; take bigint; o record;
 BEGIN
   INSERT INTO billing_accounts(workspace_id) VALUES (wid) ON CONFLICT DO NOTHING;
   SELECT * INTO a FROM billing_accounts WHERE workspace_id=wid FOR UPDATE SKIP LOCKED;
   IF NOT FOUND THEN RETURN '{"busy":true}'; END IF;
   SELECT * INTO cfg FROM billing_config WHERE singleton;
+  charged := cfg.mode='enforce' AND a.mode IN ('prepaid','invoiced');
   mon := a.free_month; sent := a.free_sent_used; received := a.free_received_used; spend := a.month_spend_uc;
-  FOR r IN SELECT hour, meter, rate_version, quantity, settled_quantity FROM billing_usage_hourly
+  FOR r IN SELECT hour, meter, rate_version, quantity, settled_quantity, refunds FROM billing_usage_hourly
       WHERE workspace_id=wid AND quantity<>settled_quantity AND hour<cutoff ORDER BY hour, meter FOR UPDATE SKIP LOCKED LOOP
     delta := r.quantity - r.settled_quantity;
     rmonth := (date_trunc('month', r.hour AT TIME ZONE 'UTC'))::date;
@@ -81,10 +126,36 @@ BEGIN
         SELECT coalesce(sum(settled_quantity),0) INTO before FROM billing_usage_hourly
           WHERE workspace_id=wid AND (meter=r.meter OR (rmonth < cfg.free_split_from AND meter IN ('send','receive')))
             AND hour >= rmonth::timestamp AT TIME ZONE 'UTC' AND hour < (rmonth + interval '1 month')::timestamp AT TIME ZONE 'UTC';
-        after := greatest(0, before + delta);
-      ELSIF r.meter = 'send' THEN before := sent; after := greatest(0, before + delta); sent := after;
-      ELSE before := received; after := greatest(0, before + delta); received := after; END IF;
+      ELSIF r.meter = 'send' THEN before := sent;
+      ELSE before := received; END IF;
+      -- fresh: units metered since the last settlement. A negative remainder with no noted origin is this hour's own;
+      -- refunds of this hour's own unsettled mail cancel it out before anything is priced.
+      own := extract(epoch FROM r.hour)::bigint::text;
+      SELECT coalesce(sum(v::bigint), 0) INTO refund FROM jsonb_each_text(r.refunds) x(k, v);
+      pending := r.refunds; fresh := delta - refund;
+      IF fresh < 0 THEN pending := pending || jsonb_build_object(own, coalesce((pending->>own)::bigint, 0) + fresh); fresh := 0; END IF;
+      take := least(fresh, -coalesce((pending->>own)::bigint, 0));
+      IF take > 0 THEN fresh := fresh - take; pending := pending || jsonb_build_object(own, (pending->>own)::bigint + take); END IF;
+      SELECT coalesce(sum(v::bigint), 0) INTO refund FROM jsonb_each_text(pending) x(k, v);
+      -- Refunds leave the pool; money comes back only for units their own hours were charged.
+      after := greatest(0, before + refund);
+      back := 0;
+      FOR o IN SELECT to_timestamp(k::bigint) AS origin, -v::bigint AS units FROM jsonb_each_text(pending) x(k, v) WHERE v::bigint < 0 ORDER BY k::bigint LOOP
+        SELECT least(o.units, coalesce((SELECT units FROM billing_usage_paid WHERE workspace_id=wid AND hour=o.origin AND meter=r.meter), 0)) INTO take;
+        IF take > 0 THEN
+          UPDATE billing_usage_paid SET units=units-take WHERE workspace_id=wid AND hour=o.origin AND meter=r.meter;
+          back := back + take;
+        END IF;
+      END LOOP;
+      before := after; after := before + fresh;
       payable := greatest(0, after - 3000) - greatest(0, before - 3000);
+      IF charged AND payable > 0 THEN
+        INSERT INTO billing_usage_paid AS p VALUES (wid, r.hour, r.meter, payable) ON CONFLICT (workspace_id, hour, meter) DO UPDATE SET units=p.units+excluded.units;
+      END IF;
+      payable := payable - back;
+      IF NOT (rmonth < mon OR rmonth < cfg.free_split_from) THEN
+        IF r.meter = 'send' THEN sent := after; ELSE received := after; END IF;
+      END IF;
       line := payable * 20000;
     ELSIF r.meter = 'omen' THEN payable := delta; line := delta * 10000::numeric;
     ELSIF r.meter = 'storage' THEN payable := delta; line := delta * billing_rate_uc('storage', r.rate_version, r.hour);
@@ -94,13 +165,12 @@ BEGIN
     m := coalesce(det->r.meter, '{"quantity":0,"payable":0,"costUc":0}'::jsonb);
     det := det || jsonb_build_object(r.meter, jsonb_build_object('quantity', (m->>'quantity')::numeric + delta,
       'payable', (m->>'payable')::numeric + payable, 'costUc', (m->>'costUc')::numeric + line));
-    UPDATE billing_usage_hourly SET settled_quantity=r.quantity
+    UPDATE billing_usage_hourly SET settled_quantity=r.quantity, refunds='{}'
       WHERE workspace_id=wid AND hour=r.hour AND meter=r.meter AND rate_version=r.rate_version;
     first_hour := least(first_hour, r.hour); last_hour := greatest(last_hour, r.hour); n := n + 1;
   END LOOP;
   IF n = 0 THEN RETURN jsonb_build_object('entries', 0); END IF;
   cost_uc := round(cost);
-  charged := cfg.mode='enforce' AND a.mode IN ('prepaid','invoiced');
   IF charged THEN
     IF cost_uc >= 0 THEN promo_draw := least(a.promo_uc, cost_uc);
     ELSE promo_draw := -least(a.promo_spent_uc, -cost_uc); END IF;   -- a refund returns promo first, up to what it paid
@@ -132,40 +202,6 @@ BEGIN
   END IF;
   RETURN jsonb_build_object('entries', n, 'costUc', cost_uc::text, 'charged', charged, 'entryId', posted->>'entryId');
 END $$;
-
--- 300's billing_post, with a settlement that returns money (refunds outweighing new usage) counted as a credit: when it
--- leaves the balance at $0 or above, the unpaid episode ends and billing.restored releases held mail and waiting
--- campaigns, as a top-up's would. Before, a refunded charge left the account unpaid at $0 and still heading for a hold.
-CREATE OR REPLACE FUNCTION billing_post(wid text, k text, src text, paid bigint, promo bigint, det jsonb, who text) RETURNS jsonb
-LANGUAGE plpgsql AS $$
-DECLARE a billing_accounts; eid bigint;
-  credit boolean := k IN ('topup','grant','refund_release','dispute_reversal') OR (k IN ('adjustment','usage') AND paid+promo>0);
-BEGIN
-  INSERT INTO billing_accounts(workspace_id) VALUES (wid) ON CONFLICT DO NOTHING;
-  SELECT * INTO a FROM billing_accounts WHERE workspace_id=wid FOR UPDATE;
-  INSERT INTO billing_ledger(workspace_id,kind,source_id,paid_uc,promo_uc,balance_after_uc,promo_after_uc,detail,actor)
-    VALUES (wid,k,src,paid,promo,a.balance_uc+paid,a.promo_uc+promo,coalesce(det,'{}'),who)
-    ON CONFLICT (kind,source_id) DO NOTHING RETURNING id INTO eid;
-  IF eid IS NULL THEN RETURN jsonb_build_object('applied',false,'balanceUc',a.balance_uc::text,'promoUc',a.promo_uc::text); END IF;
-  IF a.promo_uc+promo < 0 THEN RAISE EXCEPTION 'promo below zero' USING ERRCODE='23514'; END IF;
-  UPDATE billing_accounts SET balance_uc=balance_uc+paid, promo_uc=promo_uc+promo, updated_at=now(),
-    unpaid_since = CASE WHEN balance_uc+paid<0 THEN coalesce(unpaid_since,now()) WHEN credit THEN NULL ELSE unpaid_since END,
-    empty_since  = CASE WHEN credit AND balance_uc+paid+promo_uc+promo>0 THEN NULL ELSE empty_since END,
-    low_since    = CASE WHEN credit AND balance_uc+paid+promo_uc+promo>=low_balance_uc THEN NULL ELSE low_since END,
-    recharge_month_total_uc = CASE WHEN det->>'recharge'='true' THEN
-      CASE WHEN recharge_month=(date_trunc('month',now() AT TIME ZONE 'UTC'))::date THEN recharge_month_total_uc ELSE 0 END + paid
-      ELSE recharge_month_total_uc END,
-    recharge_month = CASE WHEN det->>'recharge'='true' THEN (date_trunc('month',now() AT TIME ZONE 'UTC'))::date ELSE recharge_month END
-  WHERE workspace_id=wid;
-  IF paid<>0 THEN PERFORM billing_lots(wid, k, src, paid, a.balance_uc, coalesce(det,'{}')); END IF;   -- 7: credit lots
-  IF credit THEN
-    INSERT INTO jobs(id,type,workspace_id,payload) VALUES ('billing.restored:'||wid,'billing.restored',wid,'{}')
-      ON CONFLICT (id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL
-      WHERE jobs.status IN ('completed','failed');
-  END IF;
-  RETURN jsonb_build_object('applied',true,'entryId',eid::text,'balanceUc',(a.balance_uc+paid)::text,'promoUc',(a.promo_uc+promo)::text);
-END $$;
-
 
 -- This month's own counts for accounts that settled this month; any other account starts the month at zero anyway.
 UPDATE billing_accounts b SET free_sent_used=least(u.sent, 2147483647)::int, free_received_used=least(u.received, 2147483647)::int
