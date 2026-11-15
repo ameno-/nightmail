@@ -10,9 +10,11 @@ const CLOSED_HOURS = sql`date_trunc('hour', now() - interval '5 minutes', 'UTC')
 /**
  * Hourly (worker.ts `7 * * * *`, runner.ts hourly), Hosted only: once a UTC day the storage day, the unpaid scan, the
  * drift check and the BYO fair-use report; then settlement of every workspace with unsettled usage in closed hours.
- * Nothing runs while billing_config.mode is 'off' (an operator kill-switch; meters still record).
+ * Nothing else runs while billing_config.mode is 'off' (an operator kill-switch; meters still record), but mail held
+ * for the balance is still released: nothing is held then.
  */
 export async function billingHourly(runtime: Runtime): Promise<void> {
+  try { await releaseLapsedHolds(runtime); } catch (error) { log('error', { code: 'BILLING_HOLD_SWEEP_FAILED', message: error instanceof Error ? error.message : String(error) }); }
   const { rows: [cfg] } = await runtime.db.execute<{ mode: string }>(sql`SELECT mode FROM billing_config WHERE singleton`);
   if (!cfg || cfg.mode === 'off') return;
   // One runner a day: the same durable election as maintenance:sending-depth, due again at the next 00:05 UTC.
@@ -28,6 +30,23 @@ export async function billingHourly(runtime: Runtime): Promise<void> {
   await settleClosedHours(runtime);
   // Prepaid credit expires 12 months after purchase: only real money moves, so only under enforce.
   if (cfg.mode === 'enforce') try { await creditExpiry(runtime); } catch (error) { log('error', { code: 'BILLING_CREDIT_EXPIRY_FAILED', message: error instanceof Error ? error.message : String(error) }); }
+}
+
+/**
+ * Receipts parked for the balance (status 'held', error 'BILLING_HOLD') of workspaces that are no longer held get a
+ * billing.restored run. The wake a credit queues can miss them: a receipt parked after the restore had already run,
+ * or more than one run releases. Billing holds keep budget_retry_at NULL (the mail_budget_held_due index).
+ */
+export async function releaseLapsedHolds(runtime: Runtime): Promise<number> {
+  const { rows } = await runtime.db.execute<{ workspace_id: string }>(sql`INSERT INTO jobs(id,type,workspace_id,payload)
+    SELECT 'billing.restored:'||w,'billing.restored',w,'{}' FROM (SELECT DISTINCT workspace_id AS w FROM mail_receipts
+      WHERE status='held' AND budget_retry_at IS NULL AND error='BILLING_HOLD') h
+    WHERE NOT coalesce((billing_position(w)->>'receiveHeld')::boolean,false) ORDER BY w
+    ON CONFLICT (id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL
+      WHERE jobs.status IN ('completed','failed')
+    RETURNING workspace_id`);
+  if (rows.length) log('info', { code: 'BILLING_HOLDS_RELEASING', workspaces: rows.length });
+  return rows.length;
 }
 
 /**

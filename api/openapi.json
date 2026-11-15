@@ -7282,12 +7282,25 @@
                   "null"
                 ],
                 "description": "Messages received this month on any address, routed, unrouted or spam. Null unless the credential may read every received message (owners, admins and manage credentials): members and read-only keys never learn about mail they can't open."
+              },
+              "billedSent": {
+                "type": "integer",
+                "description": "Sent emails billing counts this month, each recipient once (Hosted sending; mail canceled or rejected before it went out is taken off). The free sent allowance and the price apply to this count."
+              },
+              "billedReceived": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "Received messages billing counts this month: mail Amazon's spam scan flagged and simulated mail are free. The free received allowance and the price apply to this count. Null like received."
               }
             },
             "required": [
               "from",
               "sent",
-              "received"
+              "received",
+              "billedSent",
+              "billedReceived"
             ]
           },
           "daily": {
@@ -18582,7 +18595,7 @@
                   "grace",
                   "held"
                 ],
-                "description": "grace: the balance is below $0 and received mail is still accepted; held: new received mail is stored but not delivered until a top-up."
+                "description": "grace: the balance is below $0 and received mail is still accepted until grace.receiveHoldAt; held: new received mail is stored but not delivered until a top-up. While the installation doesn’t hold received mail, receiving stays ok."
               },
               "autoRecharge": {
                 "type": "string",
@@ -18781,7 +18794,8 @@
                 "type": [
                   "string",
                   "null"
-                ]
+                ],
+                "description": "When new received mail starts being held; null when nothing is owed or the installation doesn’t hold received mail."
               },
               "writeOffAt": {
                 "type": [

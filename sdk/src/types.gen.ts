@@ -2017,6 +2017,14 @@ export type Usage = {
          * Messages received this month on any address, routed, unrouted or spam. Null unless the credential may read every received message (owners, admins and manage credentials): members and read-only keys never learn about mail they can't open.
          */
         received: number | null;
+        /**
+         * Sent emails billing counts this month, each recipient once (Hosted sending; mail canceled or rejected before it went out is taken off). The free sent allowance and the price apply to this count.
+         */
+        billedSent: number;
+        /**
+         * Received messages billing counts this month: mail Amazon's spam scan flagged and simulated mail are free. The free received allowance and the price apply to this count. Null like received.
+         */
+        billedReceived: number | null;
     };
     /**
      * Null until the workspace connects hosted sending.
@@ -5640,7 +5648,7 @@ export type BillingSummary = {
          */
         sending: 'ok' | 'low' | 'paused';
         /**
-         * grace: the balance is below $0 and received mail is still accepted; held: new received mail is stored but not delivered until a top-up.
+         * grace: the balance is below $0 and received mail is still accepted until grace.receiveHoldAt; held: new received mail is stored but not delivered until a top-up. While the installation doesn’t hold received mail, receiving stays ok.
          */
         receiving: 'ok' | 'grace' | 'held';
         autoRecharge: 'off' | 'on' | 'pending' | 'failed' | 'capped';
@@ -5702,6 +5710,9 @@ export type BillingSummary = {
     } | null;
     grace: {
         unpaidSince: string | null;
+        /**
+         * When new received mail starts being held; null when nothing is owed or the installation doesn’t hold received mail.
+         */
         receiveHoldAt: string | null;
         writeOffAt: string | null;
     };

@@ -14,8 +14,13 @@ const flag = (value: string | undefined, name: string) => {
 /**
  * Switches billing for the whole installation (billing_config, one row): off → shadow → enforce, and back. Shadow runs
  * the meters, settlement and ledger with usage posted at $0; enforce charges usage settled from then on. A database row,
- * not a deploy, so a rollback is this script with `shadow`. The change and its audit row (workspace 'installation')
- * commit together. No debt is forgiven or created by a switch: shadow never charged anything.
+ * not a deploy, so a rollback is this script with `shadow`. Run it in a transaction: the change, the settlement before
+ * it and its audit row (workspace 'installation') commit together.
+ *
+ * Usage is priced under the mode it was metered in: before the mode changes, every workspace's unsettled usage is
+ * settled under the old one (billing_settle_all), so nothing metered while billing was off or in shadow is charged
+ * later. Switching to off doesn't settle (the kill-switch never waits on the settler); what it leaves open is settled
+ * at $0 when billing comes back on.
  */
 export async function setBillingEnforcement(db: Client, args: string[]) {
   const { positionals, values } = parseArgs({ args, allowPositionals: true, options: {
@@ -25,6 +30,8 @@ export async function setBillingEnforcement(db: Client, args: string[]) {
   const receiveHold = flag(values['receive-hold'], 'receive-hold'), billSimulated = flag(values['bill-simulated'], 'bill-simulated');
   const storage = values['storage-from'];
   if (storage !== undefined && storage !== 'none' && !(/^\d{4}-\d{2}-\d{2}$/.test(storage) && Number.isFinite(Date.parse(`${storage}T00:00:00Z`)))) throw new Error(`--storage-from takes a date (YYYY-MM-DD) or none.\n${usage}`);
+  const { rows: [current] } = await db.query<{ mode: string }>(`SELECT mode FROM billing_config WHERE singleton FOR UPDATE`);
+  if (current && current.mode !== mode && mode !== 'off') await db.query(`SELECT billing_settle_all('infinity')`);
   const { rows: [audit] } = await db.query(`WITH previous AS (
     SELECT mode,receive_hold,bill_simulated,storage_billing_from FROM billing_config WHERE singleton FOR UPDATE
   ), changed AS (
@@ -47,5 +54,9 @@ export async function setBillingEnforcement(db: Client, args: string[]) {
 if (import.meta.main) {
   const db = new Client(postgresConnection(process.env.DATABASE_URL));
   await db.connect();
-  try { await setBillingEnforcement(db, process.argv.slice(2)); } finally { await db.end(); }
+  try {
+    await db.query('BEGIN');
+    await setBillingEnforcement(db, process.argv.slice(2));
+    await db.query('COMMIT');
+  } catch (error) { await db.query('ROLLBACK').catch(() => {}); throw error; } finally { await db.end(); }
 }

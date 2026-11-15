@@ -21,6 +21,8 @@ export interface BillingPosition {
   /** Free received messages left this month. */
   freeReceivedLeft: number;
   unpaidSince: string | null;
+  /** Receive holds are on for the installation (billing_config.receive_hold). */
+  receiveHold: boolean;
   receiveHeld: boolean;
   /** Whether Omens may run (false only when enforced, prepaid and nothing is available). */
   omens: boolean;
