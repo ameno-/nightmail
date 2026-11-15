@@ -1,5 +1,7 @@
 config:
   bane:prepareNightmailMail: "true"
+  bane:nightmailCloud: "true"
+  bane:nightmailMailActive: "true"
   bane:stageNightmailRuntime: "true"
   bane:nightmailGateway: "true"
   bane:nightmailGatewayDesired: "0"

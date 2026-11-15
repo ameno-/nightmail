@@ -35,7 +35,7 @@ export function prepareProductionMail(ohio:aws.Provider,va:aws.Provider,account:
   if (pulumi.getStack()!=='production'||account!=='009882681002') throw Error('Expected the dedicated production account');
   const dates=new pulumi.Config('bane').getObject<string[]>('copiedMailExpiryDates')??[];
   if(!Array.isArray(dates)||dates.length>366||new Set(dates).size!==dates.length||dates.some(d=>typeof d!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(d)||new Date(`${d}T00:00:00Z`).toISOString().slice(0,10)!==d)) throw Error('Invalid copied mail expiry dates');
-  mailPath(ohio,va,account,false,dates);
+  mailPath(ohio,va,account,new pulumi.Config('bane').getBoolean('nightmailMailActive')===true,dates);
 }
 
 function mailPath(ohio:aws.Provider,va:aws.Provider,account:string,active:boolean,copiedExpiryDates:string[]=[]) {
