@@ -109,7 +109,7 @@ export async function settleClosedHours(runtime: Runtime, cutoff?: string): Prom
         seen.add(wid);
         try {
           const { rows: [r] } = await runtime.db.execute<{ s: { busy?: boolean; entries?: number } }>(sql`SELECT billing_settle(${wid}, ${at}) AS s`);
-          if (r?.s.busy) busy++; else { workspaces++; entries += r?.s.entries ? 1 : 0; }
+          if (r?.s.busy) busy++; else { workspaces++; entries += Number(r?.s.entries ?? 0); }
         } catch (error) { log('error', { code: 'BILLING_SETTLE_FAILED', workspaceId: wid, message: error instanceof Error ? error.message : String(error) }); }
       }
     }));

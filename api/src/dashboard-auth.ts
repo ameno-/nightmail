@@ -36,12 +36,14 @@ export function registerDashboardAuth(app: App) {
         .nullable().optional().openapi({description:'Hosted dashboard sessions: whether the workspace is free, whether an empty balance has paused sending or held received mail, and auto-recharge, so the dashboard can show it on its first frame. Null otherwise; GET /v1/billing has the detail.'})})),...errors}}),async c=>{
     const identity=c.get('actor'), userId=identity.keyId.startsWith('user_')?identity.keyId.slice(5):null;
     const origin=new URL(c.env.config.publicUrl).origin, hosted=c.env.config.multiTenant;
-    const connection=hosted?await connectionSummary(c.env,identity.workspaceId):null;
-    const session=hosted && identity.credential==='dashboard' && userId?await sessionMemberships(c.env.db,userId):null;
+    // Independent reads run together; the UI-notes and billing reads depend on the session, so they follow it.
+    const [connection,session]=await Promise.all([hosted?connectionSummary(c.env,identity.workspaceId):null,
+      hosted && identity.credential==='dashboard' && userId?sessionMemberships(c.env.db,userId):null]);
     // One statement (billing_position and the account row), only for hosted dashboard sessions: the banner's first frame.
     // Staff UI notes: an operator in UI_NOTES_SUBJECTS only (operator-identity.ts); no query when the list is empty.
-    const uiNotes=session?.operator==='operator' && userId ? await import('./operator-identity.js').then(({uiNotesAllowed})=>uiNotesAllowed(c.env.db,c.env.config.uiNotesSubjects,userId)) : false;
-    const billing=session?await import('./billing/state.js').then(async({readBilling})=>{const b=await readBilling(c.env.db,identity.workspaceId,{amounts:false});return {enforcement:b.enforcement,free:b.mode==='exempt',...b.state};}):null;
+    const [uiNotes,billing]=await Promise.all([
+      session?.operator==='operator' && userId ? import('./operator-identity.js').then(({uiNotesAllowed})=>uiNotesAllowed(c.env.db,c.env.config.uiNotesSubjects,userId)) : false,
+      session?import('./billing/state.js').then(async({readBilling})=>{const b=await readBilling(c.env.db,identity.workspaceId,{amounts:false});return {enforcement:b.enforcement,free:b.mode==='exempt',...b.state};}):null]);
     return c.json({id:userId??identity.keyId,workspaceId:identity.workspaceId,role:WorkspaceRole.nullable().parse(identity.role??null),multiTenant:hosted,simulated:isSimulatedSes(c.env),email:identity.email??null,name:identity.name??null,permissions:identity.permissions,domains:identity.domains,origin,host:new URL(origin).host,mcpScopes:requestedScopes(c.env.config),connection,workspaces:session?.workspaces??null,operator:session?.operator??null,uiNotes,billing},200);
   });
 }
