@@ -241,9 +241,9 @@ export type CampaignScreen = {
 };
 /**
  * A campaign copy's verdict key: the classifier and model, and the copy exactly as it is delivered (sender, reply-to,
- * subject, HTML, text and raw parts, its headers and attachments), with only the parts Nightmail writes per recipient
- * at delivery set aside: the generated unsubscribe link is the placeholder (src/sending.ts screenedAs), and the
- * recipient's address and the List-Unsubscribe headers aren't part of a snapshot.
+ * subject, HTML, text and raw parts, its headers and attachments), built with the slots Nightmail adds per recipient
+ * (the unsubscribe footer's link and the List-Unsubscribe headers) generated for the placeholder link
+ * (src/sending.ts screenedAs) rather than the recipient's. The recipient's address isn't part of it.
  */
 export async function copyKey(runtime: Runtime, snapshot: EmailSnapshot): Promise<string> {
   const settings = runtime.config.screen;

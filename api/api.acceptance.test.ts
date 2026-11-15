@@ -14026,23 +14026,41 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([respun.state, respun.delivery.error.code, screened.length - start], ['failed', 'CONTENT_REJECTED_SPAM', 2]);
     }));
   });
-  test('hosted campaign copy keys: the copy as delivered, less only the generated unsubscribe link', async t => {
+  test('hosted campaign copy keys: the customer copy byte for byte, with only the unsubscribe slots Nightmail generates set for a placeholder', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => t.test('classifier', async t => {
       await hostedScreenFixture(t, runtime, db, '112223330015', 'keyed.invalid');
-      const { copyKey } = await import('./src/screen.js'), { screenedAs } = await import('./src/sending.js');
-      const link = (token: string) => `${runtime.config.publicUrl}/unsubscribe/u_${token.repeat(64)}`;
-      const copy = (token: string, to: string) => ({ testCampaignId: null, from: 'news@keyed.invalid', fromName: 'News', to: [to], cc: [], bcc: [], replyTo: ['help@keyed.invalid'], region: REGION, kind: 'marketing' as const,
-        subject: 'Hello Ana', html: `<p>Hello Ana</p><p><a href="${link(token)}">Unsubscribe</a></p>`, text: `Hello Ana\n\nUnsubscribe: ${link(token)}`, attachments: [], tracking: true,
-        headers: [{ Name: 'List-Unsubscribe', Value: `<${link(token)}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }] });
-      const key = (token: string, to = 'a@example.net', change: Record<string, unknown> = {}) => copyKey(runtime, screenedAs(runtime, { ...copy(token, to), ...change }, link(token)));
-      // Two recipients' copies differ only in what Nightmail writes per recipient: one key.
-      assert.equal(await key('a'), await key('b', 'b@example.net'));
-      // Any other difference, a byte in any part or header, the sender's name, the reply-to: another key.
-      const base = await key('a'), original = copy('a', 'a@example.net');
-      for (const change of [{ subject: 'Hello Ana.' }, { html: original.html.replace('Ana', 'Anа') }, { text: original.text + ' ' }, { fromName: 'News!' }, { replyTo: ['other@keyed.invalid'] },
-        { headers: [...original.headers, { Name: 'X-Campaign', Value: '1' }] }, { attachments: ['att_1'] }]) assert.notEqual(await key('a', 'a@example.net', change), base, JSON.stringify(change));
+      const { copyKey } = await import('./src/screen.js'), { screenedAs, withUnsubscribe, generatedUnsubscribeUrl } = await import('./src/sending.js');
+      const { createUnsubscribeLink } = await import('./src/operations.js');
+      const generated = async () => (await createUnsubscribeLink(runtime, runtime.config.workspaceId, 'a@example.net')).url;
+      const customer = (change: Record<string, unknown> = {}) => ({ testCampaignId: null, from: 'news@keyed.invalid', fromName: 'News', to: ['a@example.net'], cc: [], bcc: [], replyTo: ['help@keyed.invalid'],
+        region: REGION, kind: 'marketing' as const, subject: 'Hello Ana', html: '<p>Hello Ana</p>', text: 'Hello Ana', attachments: [], tracking: true, headers: [] as { Name: string; Value: string }[], ...change });
+      const key = (change: Record<string, unknown> = {}) => copyKey(runtime, screenedAs(runtime, customer(change)));
+      // Two recipients' copies differ only in the slots Nightmail generates per recipient: the footer's link and the
+      // List-Unsubscribe headers. Delivered, they differ; keyed, they are one copy.
+      const [one, two] = [await generated(), await generated()];
+      const delivered = [withUnsubscribe(runtime, customer(), one), withUnsubscribe(runtime, customer(), two)];
+      assert.ok(delivered[0]!.html!.includes(one) && delivered[0]!.text!.endsWith(one) && delivered[0]!.headers.some(h => h.Name === 'List-Unsubscribe' && h.Value === `<${one}>`));
+      assert.notEqual(JSON.stringify(delivered[0]), JSON.stringify(delivered[1]));
+      assert.equal(await copyKey(runtime, screenedAs(runtime, customer())), await key());
+      // #294 check: customer content that holds a generated link is the customer's, kept byte for byte in the key, even
+      // where it holds the very link the copy is delivered with: two such copies are two keys.
+      const embedding = (url: string) => `https://other.invalid/redirect?next=${url}/customer`;
+      const [first, second] = await Promise.all([one, two].map(url => key({ html: `<p>${embedding(url)}</p>`, text: embedding(url), headers: [{ Name: 'X-Customer', Value: embedding(url) }] })));
+      assert.notEqual(first, second, 'Customer content embedding the generated link stays part of the key.');
+      assert.notEqual(await key({ html: `<p><a href="${one}">Unsubscribe</a></p>` }), await key({ html: `<p><a href="${two}">Unsubscribe</a></p>` }), 'A footer of the customer\'s own is customer content.');
+      // Any other difference, a byte in any part or header, the sender's name, the reply-to, an attachment: another key.
+      const base = await key();
+      for (const change of [{ subject: 'Hello Ana.' }, { html: '<p>Hello Anа</p>' }, { text: 'Hello Ana ' }, { fromName: 'News!' }, { replyTo: ['other@keyed.invalid'] },
+        { headers: [{ Name: 'X-Campaign', Value: '1' }] }, { attachments: ['att_1'] }]) assert.notEqual(await key(change), base, JSON.stringify(change));
+      // The recipient's link is only ever this installation's generated one: its origin, /unsubscribe/u_ and 64 lowercase
+      // hex digits. A foreign or look-alike origin, a malformed token, a suffix or another path is refused.
+      const token = one.slice(one.lastIndexOf('/u_') + 3), origin = runtime.config.publicUrl.replace(/\/$/, '');
+      assert.equal(generatedUnsubscribeUrl(runtime, one), one);
+      for (const bad of [`https://evil.invalid/unsubscribe/u_${token}`, `${origin}.evil.invalid/unsubscribe/u_${token}`, `${origin}/unsubscribe/u_${token.slice(1)}`, `${origin}/unsubscribe/u_${token.toUpperCase()}`,
+        `${origin}/unsubscribe/u_${token.slice(1)}g`, `${origin}/unsubscribe/u_${token}/x`, `${origin}/unsubscribe/u_${token}?next=x`, `${origin}/x/unsubscribe/u_${token}`, 'not-a-generated-url', ''])
+        assert.throws(() => withUnsubscribe(runtime, customer(), bad), (e: { code?: string }) => e.code === 'UNSUBSCRIBE_LINK_INVALID', bad);
       runtime.config.screen = { ...runtime.config.screen!, model: 'fixture-next' };
-      assert.notEqual(await key('a'), base, 'Another model: another key.');
+      assert.notEqual(await key(), base, 'Another model: another key.');
     }));
   });
   test('hosted campaigns: one classifier request per distinct copy, however many recipients share it', async t => {

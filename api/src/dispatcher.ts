@@ -2,7 +2,7 @@ import { getTableColumns, sql, type SQL } from 'drizzle-orm';
 import type { Attachment, SESv2Client, SendEmailCommandInput } from '@aws-sdk/client-sesv2';
 import { ApiError, getSes, isSimulatedSes, id, lazyModule, log, logError, ModuleLoadError, preloadSesTransport, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachments, emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
-import { approvedOriginUser, campaignVerdicts, checkedDispatchAttachments, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, QUOTA_REFRESH_MS, queueSimulatedFeedback, rank, screenedAs, sesDailyReserve, sizeCheck, statusForEvent, terminalColumns, terminalEvents, verifiedAttachment } from './sending.js';
+import { approvedOriginUser, campaignVerdicts, checkedDispatchAttachments, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, QUOTA_REFRESH_MS, queueSimulatedFeedback, rank, sesDailyReserve, sizeCheck, statusForEvent, terminalColumns, terminalEvents, verifiedAttachment } from './sending.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
 import { principal } from './mail-gateway.js';
 import { regionalSender, sendingConnections, verifiedClaim } from './domain-claims.js';
@@ -452,9 +452,10 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
   let rows: AttachmentRow[] | undefined;
   let unsubscribe: Prepared['unsubscribe'];
   let stored: Prepared['stored'];
+  let keyed: EmailSnapshot | undefined;
   if (mail.snapshot.deferredCampaign) {
     const materialized = await materializeCampaignEmail(runtime, a, mail, leased.review, await loadAttachments(mail));
-    mail = materialized.mail; rows = materialized.rows; unsubscribe = materialized.unsubscribe; stored = materialized.stored;
+    mail = materialized.mail; rows = materialized.rows; unsubscribe = materialized.unsubscribe; stored = materialized.stored; keyed = materialized.keyed;
   }
   let s = mail.snapshot;
   if(leased.owner.tenantName && s.raw) throw new ApiError(422,'SHARED_RAW_UNSUPPORTED','Hosted sending requires structured SES content.');
@@ -463,16 +464,18 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
   if (!isSimulatedSes(runtime) && (hosted || (s.screen && s.kind==='transactional'))) {
     const required=hosted && (!leased.owner.trusted || s.kind==='marketing');
     // A screened campaign's copy (src/sending.ts campaignVerdicts) goes out only under a verdict for its exact bytes
-    // (src/screen.ts copyKey), keyed here from the copy being sent (its generated unsubscribe link set back to the
-    // placeholder): the release screened it ahead, and a copy without a verdict (another tier or model since) is
-    // screened now, through the same path, or waits. No verdict, no send.
-    const review=hosted && leased.mail.snapshot.deferredCampaign && leased.review?.screen?.template && leased.review.screen.contentHash===leased.review.reviewHash ? leased.review : null;
+    // (src/screen.ts copyKey): keyed here from the same customer copy it is delivered from, with Nightmail's
+    // unsubscribe slots generated for the placeholder link (src/sending.ts screenedAs), and rewritten for probation as
+    // the delivered copy is. The release screened it ahead, and a copy without a verdict (another tier or model since)
+    // is screened now, through the same path, or waits. No verdict, no send.
+    const review=hosted && keyed && leased.review?.screen?.template && leased.review.screen.contentHash===leased.review.reviewHash ? leased.review : null;
     // Probation mail goes out as the copy the screen reads: every textual field without the bidi controls that
     // reorder it, the markup reduced to what a client shows as text, the campaign preheader added back from its own
     // field. Trusted senders keep their message.
-    if (probation) s = (await import('./screened-html.js')).probationCopy(s);
+    const probationCopy = probation ? (await import('./screened-html.js')).probationCopy : undefined;
+    if (probationCopy) s = probationCopy(s);
     if (review) {
-      const [verdict] = await campaignVerdicts(runtime, { workspaceId: mail.workspaceId, campaignId: mail.campaignId!, reviewId: mail.reviewId! }, [screenedAs(runtime, s, stored?.unsubscribeUrl)], Date.now() + MAX_PRE_SEND_MS);
+      const [verdict] = await campaignVerdicts(runtime, { workspaceId: mail.workspaceId, campaignId: mail.campaignId!, reviewId: mail.reviewId! }, [probationCopy ? probationCopy(keyed!) : keyed!], Date.now() + MAX_PRE_SEND_MS);
       if (!verdict) throw new ApiError(503,'CONTENT_SCREEN_UNAVAILABLE','This copy has no verdict yet; deferring without calling SES.',undefined,true);
       if ('refused' in verdict) throw verdict.refused;
       // The release counted every released recipient's verdict toward reputation (src/sending.ts screenAhead).

@@ -1998,19 +1998,20 @@ export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail:
   // discard their render without writing a different snapshot over the winner.
   const rows = prefetched ? checkedDispatchAttachments(mail.snapshot.attachments, prefetched) : await attachmentRows(runtime.db, a, mail.snapshot.attachments);
   if (!review?.rendered || !review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The reviewed recipient is unavailable.');
-  const snapshot = await campaignMessage(runtime, runtime.db, a, review.draft, review.recipient, false, true, rows, review.rendered, true, !review.rendered.html?.includes('{{'), review.version);
-  if (await digest(canonical(snapshot)) !== review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_CHANGED', 'The renderer no longer reproduces the reviewed message. No provider attempt was made.');
+  const customer = await campaignMessage(runtime, runtime.db, a, review.draft, review.recipient, false, true, rows, review.rendered, true, !review.rendered.html?.includes('{{'), review.version);
+  if (await digest(canonical(customer)) !== review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_CHANGED', 'The renderer no longer reproduces the reviewed message. No provider attempt was made.');
   // A retried row (throttled requeue) reuses the link it was first rendered with, so every attempt sends the same message.
   const reused = mail.snapshot.unsubscribeUrl;
   const unsubscribe = reused
-    ? { url: reused, record: { tokenHash: await digest(reused.slice(reused.lastIndexOf('/') + 1)), workspaceId: a.workspaceId, email: snapshot.to[0]!.trim().toLowerCase() } }
-    : await (await loadOpsUnsub()).createUnsubscribeLink(runtime, a.workspaceId, snapshot.to[0]!);
-  marketingFooter(snapshot, unsubscribe.url);
+    ? { url: reused, record: { tokenHash: await digest(reused.slice(reused.lastIndexOf('/') + 1)), workspaceId: a.workspaceId, email: customer.to[0]!.trim().toLowerCase() } }
+    : await (await loadOpsUnsub()).createUnsubscribeLink(runtime, a.workspaceId, customer.to[0]!);
+  const snapshot = withUnsubscribe(runtime, customer, unsubscribe.url);
   sizeCheck(snapshot, rows);
   // Persist only the compact stub plus the unsubscribe URL: the body is reproducible from the frozen review and
   // recipient (verified by contentHash), so storing ~2-3 KB of rendered HTML per recipient bought nothing.
   const stored = { kind:'marketing' as const,deferredCampaign:true,unsubscribeUrl:unsubscribe.url };
-  return { mail: { ...mail, snapshot }, rows, unsubscribe: unsubscribe.record, stored };
+  // `keyed`: the same customer copy with the footer generated for the placeholder link, as campaign screening keys it.
+  return { mail: { ...mail, snapshot }, rows, unsubscribe: unsubscribe.record, stored, keyed: screenedAs(runtime, customer) };
 }
 // Bump when interpolation, preheader or footer output changes, and keep the previous renderer for older reviews.
 export const CAMPAIGN_RENDERER_VERSION = 2;
@@ -2152,12 +2153,30 @@ export async function campaignVerdicts(runtime: Runtime, ref: CampaignScreenRef,
     return row?.judged ? { key, spam: Number(row.spam), model: row.model ?? '' } : null;
   });
 }
-/** A copy as it is keyed and screened: the generated unsubscribe link set back to the placeholder. */
-export function screenedAs(runtime: Runtime, snapshot: EmailSnapshot, unsubscribeUrl?: string): EmailSnapshot {
-  if (!unsubscribeUrl) return snapshot;
-  const own = (value: string) => value.split(unsubscribeUrl).join(unsubscribePlaceholder(runtime));
-  return { ...snapshot, html: snapshot.html === undefined ? undefined : own(snapshot.html), text: snapshot.text === undefined ? undefined : own(snapshot.text),
-    headers: snapshot.headers.map(header => ({ ...header, Value: own(header.Value) })) };
+/** The unsubscribe link Nightmail generates for one recipient (src/operations.ts createUnsubscribeLink): this
+ *  installation's origin, `/unsubscribe/u_` and 64 lowercase hex digits, and nothing else. */
+export function generatedUnsubscribeUrl(runtime: Runtime, value: string): string {
+  const prefix = `${runtime.config.publicUrl.replace(/\/$/, '')}/unsubscribe/u_`;
+  if (!value.startsWith(prefix) || !/^[0-9a-f]{64}$/.test(value.slice(prefix.length))) throw new ApiError(409, 'UNSUBSCRIBE_LINK_INVALID', 'The unsubscribe link of this message is not one this installation generated. No provider attempt was made.');
+  return value;
+}
+/**
+ * A campaign copy as it is keyed and screened (src/screen.ts copyKey): the customer's copy byte for byte, with the slots
+ * Nightmail adds to it (the unsubscribe footer's link and the List-Unsubscribe headers, marketingFooter) generated for
+ * the placeholder link. The copy is delivered with the same slots generated for the recipient's own link
+ * (withUnsubscribe), from the same customer copy, so the two differ only there: nothing is ever found or replaced in the
+ * customer's content, and the customer's bytes, whatever they hold, are part of the key.
+ */
+export function screenedAs(runtime: Runtime, customer: EmailSnapshot): EmailSnapshot {
+  const copy = { ...customer, headers: [...customer.headers] };
+  marketingFooter(copy, unsubscribePlaceholder(runtime));
+  return copy;
+}
+/** A campaign copy as delivered: the customer's copy with the footer and headers generated for the recipient's link. */
+export function withUnsubscribe(runtime: Runtime, customer: EmailSnapshot, url: string): EmailSnapshot {
+  const copy = { ...customer, headers: [...customer.headers] };
+  marketingFooter(copy, generatedUnsubscribeUrl(runtime, url));
+  return copy;
 }
 const SCREEN_AHEAD = 2000, SCREEN_PAGE = 500, SCREEN_BUDGET_MS = 8000, SCREEN_CONCURRENCY = 4, SCREEN_BYTES_IN_FLIGHT = 8 * 1024 * 1024;
 const screenBackoff = (failures: number) => new Date(Date.now() + Math.min(15 * 60_000, 30_000 * 2 ** Math.min(failures, 5))).toISOString();
@@ -2203,10 +2222,9 @@ async function screenAhead(runtime: Runtime, a: Actor, row: RunRow, state: Campa
   // Copies that are the same up to their recipient share one screen: by a digest of the copy, never the copy itself.
   const forms = new Map<string, Promise<CopyVerdict>>();
   const verdictOf = async (recipient: ReviewedRecipient) => {
-    const delivered = await campaignMessage(runtime, runtime.db, a, draft, recipient, false, true, assets, rendered, true, !rendered.html?.includes('{{'), row.reviewVersion!);
-    marketingFooter(delivered, unsubscribePlaceholder(runtime));
-    // The copy as the dispatcher delivers it (probation senders' rewritten), keyed as it keys it (src/screen.ts copyKey).
-    const copy = probationCopy ? probationCopy({ ...delivered, to: [] }) : { ...delivered, to: [] };
+    const keyed = screenedAs(runtime, await campaignMessage(runtime, runtime.db, a, draft, recipient, false, true, assets, rendered, true, !rendered.html?.includes('{{'), row.reviewVersion!));
+    // The copy as the dispatcher keys it (probation senders' rewritten, src/dispatcher.ts prepareMail).
+    const copy = probationCopy ? probationCopy({ ...keyed, to: [] }) : { ...keyed, to: [] };
     const size = Buffer.byteLength(copy.html ?? '') + Buffer.byteLength(copy.text ?? ''), form = await screen.copyKey(runtime, copy);
     let verdict = forms.get(form);
     if (!verdict) { verdict = campaignVerdicts(runtime, ref, [copy], Number.POSITIVE_INFINITY).then(([one]) => one ?? null); forms.set(form, verdict); }
