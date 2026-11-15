@@ -3,7 +3,7 @@
 // the one-time setup (D1 database, address, webhook, secrets) and the deploy.
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "bane-support",
+  "name": "nightmail-support",
   "account_id": "15d29c8639fd3733b1b5486a2acfd968",
   "main": "src/worker.ts",
   "compatibility_date": "2026-09-08",
@@ -15,18 +15,21 @@
   // The system prompt and the voice guide are Markdown files bundled as text.
   "rules": [{ "type": "Text", "globs": ["**/*.md"], "fallthrough": true }],
   "durable_objects": { "bindings": [{ "name": "CONVERSATION", "class_name": "SupportConversation" }, { "name": "INTAKE", "class_name": "SupportIntake" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SupportConversation"] }, { "tag": "v2", "new_sqlite_classes": ["SupportIntake"] }],
+  "migrations": [{ "tag": "transfer-from-bane-support", "transferred_classes": [
+    { "from_script": "bane-support", "from": "SupportConversation", "to": "SupportConversation" },
+    { "from_script": "bane-support", "from": "SupportIntake", "to": "SupportIntake" }
+  ] }],
   // Created 2026-11-13 in anomaly-production (ENAM).
-  "d1_databases": [{ "binding": "DB", "database_name": "bane-support", "database_id": "89176622-b4a7-4075-af7c-5f479729f7b9", "migrations_dir": "migrations" }],
+  "d1_databases": [{ "binding": "DB", "database_name": "nightmail-support", "database_id": "816f937d-ad05-4987-8c27-9b1a1e99ee32", "migrations_dir": "migrations" }],
   // Screenshots (chat uploads and email image attachments): private, with a 90-day lifecycle rule (support/README.md).
-  "r2_buckets": [{ "binding": "UPLOADS", "bucket_name": "bane-support-uploads" }],
+  "r2_buckets": [{ "binding": "UPLOADS", "bucket_name": "nightmail-support-uploads" }],
   // Downscales screenshots too large to send to the model (Cloudflare Images binding; optional in code).
   "images": { "binding": "IMAGES" },
   "services": [
     // Bane's SupportPlatform entrypoint (api/src/support-platform.ts): handoffs, sender checks, grants, grant reads.
-    { "binding": "BANE", "service": "bane-production", "entrypoint": "SupportPlatform" },
+    { "binding": "BANE", "service": "nightmail-production", "entrypoint": "SupportPlatform" },
     // Bane's public API, called with the support address's API key (limited to that address).
-    { "binding": "BANE_API", "service": "bane-production" }
+    { "binding": "BANE_API", "service": "nightmail-production" }
   ],
   // Rate limiter namespaces are per account; Bane's own use 8794001–8794002.
   "ratelimits": [

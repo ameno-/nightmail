@@ -250,12 +250,18 @@ jobs:
           AUTO_SHA: ${{ steps.source.outputs.sha }}
           GH_TOKEN: ${{ github.token }}
           DEV_CLOUD_CHECKPOINT: ${{ vars.DEV_CLOUD_CHECKPOINT }}
+          PROD_CLOUD_CHECKPOINT: ${{ vars.PROD_CLOUD_CHECKPOINT }}
         run: |
           if [[ $STAGE == dev ]]; then
             checkpoint=$(jq -er '.checkpoint | strings | select(length > 0)' infra/dev-cloud-switch.json)
             if [[ $checkpoint != "$DEV_CLOUD_CHECKPOINT" ]]; then
               echo '::error::Dev cloud switch not armed: verify the writer fence, target DSNs, secrets, queue IDs and final data sync first.'
               exit 1
+            fi
+          elif [[ $STAGE == production ]]; then
+            checkpoint=$(jq -er '.checkpoint | strings | select(length > 0)' infra/production-cloud-switch.json)
+            if [[ $checkpoint != "$PROD_CLOUD_CHECKPOINT" ]]; then
+              echo '::error::Production switch not armed: verify the writer fence, final sync and owner-promotion confirmation first.'; exit 1
             fi
           fi
           if [[ $EVENT == workflow_dispatch && -z $AUTO_SHA ]]; then
@@ -359,7 +365,7 @@ jobs:
           # a placeholder.
           case "$STAGE" in
             dev) hyperdrive=1e39000095604539b994ea966a744ced ;;
-            production) hyperdrive=556aba191add406eaa58a0e26eebb6b1 ;;
+            production) hyperdrive=4e85373aed5e4d5ca66e62fd13b254d2 ;;
             *) echo "::error::unknown stage $STAGE"; exit 1 ;;
           esac
           origin=$(printf 'header = "Authorization: Bearer %s"\nurl = "https://api.cloudflare.com/client/v4/accounts/%s/hyperdrive/configs/%s"\n' \
@@ -536,18 +542,21 @@ jobs:
 
       # Hyperdrive uses a runtime role, migrations use a different role. PlanetScale PG
       # usernames include the same branch routing suffix for both. Never log either URL.
-      - name: Verify the dev migrator is paired with the cutover branch
-        if: needs.authorize.outputs.stage == 'dev'
+      - name: Verify the stage migrator is paired with the cutover branch
         working-directory: api
         run: |
           node --input-type=module <<'JS'
           import fs from 'node:fs';
           import {createHash} from 'node:crypto';
-          const {branchRoutingHash} = JSON.parse(fs.readFileSync('../infra/dev-cloud-switch.json'));
+          const stage = process.env.STAGE;
+          if (!['dev','production'].includes(stage)) throw Error('Unknown migration stage');
+          const {branchRoutingHash,ownerRoutingHash} = JSON.parse(fs.readFileSync(`../infra/${stage}-cloud-switch.json`));
           const u = new URL(process.env.DATABASE_URL);
-          const [role,branch,...rest] = decodeURIComponent(u.username).split('.');
-          if (!role || !branch || rest.length || createHash('sha256').update(branch).digest('hex') !== branchRoutingHash || u.searchParams.get('sslmode') !== 'verify-full') {
-            throw Error('Dev migrator is not configured for the verified target branch');
+          const username=decodeURIComponent(u.username), [role,branch,...rest] = username.split('.');
+          const hash=v=>createHash('sha256').update(v).digest('hex');
+          if (!role || !branch || rest.length || hash(branch) !== branchRoutingHash || u.searchParams.get('sslmode') !== 'verify-full' ||
+              (stage==='production' && (hash(username)!==ownerRoutingHash || !u.hostname.endsWith('.psdb.cloud')))) {
+            throw Error('Migrator does not match the verified stage database');
           }
           JS
 
@@ -728,7 +737,7 @@ jobs:
         run: |
           case "$STAGE" in
             dev) config=wrangler.dev.jsonc; database=nightmail-support-dev; url=https://support.dev.bane.mx ;;
-            production) config=wrangler.prod.jsonc; database=bane-support; url=https://support.bane.mx ;;
+            production) config=wrangler.prod.jsonc; database=nightmail-support; url=https://support.bane.mx ;;
             *) echo "::error::unknown stage $STAGE"; exit 1 ;;
           esac
           { echo "SUPPORT_CONFIG=$config"; echo "SUPPORT_DATABASE=$database"; echo "SUPPORT_URL=$url"; } >> "$GITHUB_ENV"

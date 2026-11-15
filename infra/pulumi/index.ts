@@ -28,8 +28,9 @@ if (stack !== "dev" && stack !== "production") throw new Error(`Unsupported Bane
 const stage = stages[stack];
 const production = stack === "production";
 const config = new pulumi.Config("bane");
-const nightmailCloud = !production && config.getBoolean("nightmailCloud") === true;
-const queuePrefix = nightmailCloud ? 'nightmail-dev' : stage.prefix;
+const nightmailCloud = config.getBoolean("nightmailCloud") === true;
+const cloudPrefix = production ? 'nightmail-prod' : 'nightmail-dev';
+const queuePrefix = nightmailCloud ? cloudPrefix : stage.prefix;
 
 const roleArn = config.require("deployRoleArn");
 if (!roleArn.startsWith(`arn:aws:iam::${stage.account}:role/`)) {
@@ -87,7 +88,7 @@ new cf.R2BucketLifecycle("mail-lifecycle", { accountId: cloudflareAccountId, buc
 // addition; changing either existing physical name would request a bucket replacement.
 if (nightmailCloud) {
   for (const purpose of ['mail', 'attachments']) {
-    const name = `nightmail-dev-${purpose}`;
+    const name = `${cloudPrefix}-${purpose}`;
     new cf.R2Bucket(`nightmail-${purpose}`, { accountId: cloudflareAccountId, name, jurisdiction: 'default', storageClass: 'Standard' }, {
       ...adopt(`${cloudflareAccountId}/${name}/default`, cloudflare), ignoreChanges: ['location'],
     });
@@ -223,7 +224,7 @@ if (writeWorkerSecrets) {
     accountId: cloudflareAccountId, scriptName: 'nightmail-production', name: 'AWS_RUNTIME_CREDENTIALS',
     secretText: pulumi.secret(pulumi.jsonStringify({accessKeyId:standbyKey.id,secretAccessKey:standbyKey.secret})),
   }, { provider, retainOnDelete: true });
-  if (nightmailCloud) {
+  if (!production && nightmailCloud) {
     // Both scripts need the old runtime credential during this CF-only switch. Never
     // rotate the IAM key, delete the old binding or move the SES receipt set here.
     new cfV5.WorkersSecret('nightmail-dev-runtime-credentials', {
