@@ -1,5 +1,15 @@
 config:
   bane:prepareNightmailMail: "true"
+  # Original S3 expiration dates observed before copying to the inactive bucket.
+  bane:copiedMailExpiryDates:
+    - "2026-11-16"
+    - "2026-11-17"
+    - "2026-11-18"
+    - "2026-11-19"
+    - "2026-12-12"
+    - "2026-12-15"
+    - "2026-12-16"
+    - "2027-02-10"
   bane:writeWorkerSecrets: "true"
   bane:publishDomainConnectKey: "false"
   bane:deployRoleArn: arn:aws:iam::009882681002:role/bane-deploy
