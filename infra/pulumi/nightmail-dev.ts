@@ -46,7 +46,7 @@ function mailPath(ohio:aws.Provider,va:aws.Provider,account:string,active:boolea
   const mirror=retention.flatMap(r=>r.filter.tag?[{...r,id:r.id+'-renamed-tag',filter:{tag:{...r.filter.tag,key:'nightmail-kind'}}}]:[]);
   // CopyObject resets LastModified. Only copied, expiring objects get this additional
   // tag, set atomically on copy; source tags and ordinary relative lifecycle stay intact.
-  const expiry=copiedExpiryDates.map(date=>({id:`nightmail-copy-expiry-${date}`,status:'Enabled',filter:{tag:{key:'nightmail-copy-expiry',value:date}},expiration:{date}}));
+  const expiry=copiedExpiryDates.map(date=>({id:`nightmail-copy-expiry-${date}`,status:'Enabled',filter:{tag:{key:'nightmail-copy-expiry',value:date}},expiration:{date:`${date}T00:00:00Z`}}));
   new aws.s3.BucketLifecycleConfiguration('nightmail-mail-retention',{bucket:bucket.id,rules:[...retention,...mirror,...expiry]},keep);
   const topics=new Map<string,aws.sns.Topic>();
   for(const [provider,region] of [[ohio,'us-east-2'],[va,'us-east-1']] as const){
