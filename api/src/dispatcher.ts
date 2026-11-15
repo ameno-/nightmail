@@ -1136,7 +1136,6 @@ function schedulePartialFlush(flush: () => void) {
 async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[]) {
   if (!prepared.length) return;
   const {gate, options, counters, phase} = lane;
-  const origins = base.config.multiTenant ? new Map<string, boolean>() : await originDecisions(prepared, base.db);
   const pendingRecords: Promise<void>[] = [];
   const delayed: Mail[] = [], unpaced: Mail[] = [];
   for (const candidates of chunk(prepared, options.sendConcurrency)) {
@@ -1158,12 +1157,12 @@ async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[])
       delayed.push(item.mail); counters.deferred++; counters.claimed--; return false;
     });
     if (!group.length) continue;
-    // Hold MX grant/membership SHARE locks through the durable attempt, never during SES I/O.
-    // Direct dashboard/API-key batches still need just the single claim statement.
-    const checkMcp = base.config.multiTenant && group.some(item => item.mail.actorKeyId.startsWith('mcp_'));
+    // Read MCP grants in the claim's transaction and hold their SHARE locks through the durable attempt, never during
+    // SES I/O, so a grant revoked during an earlier group's sends stops this group. Other origins need just the claim.
+    const checkMcp = group.some(item => item.mail.actorKeyId.startsWith('mcp_'));
     let webhooks=0;
     const claim = async (items: Prepared[], db: DbExecutor) => {
-      const result=await claimGroup(base,items,checkMcp ? await originDecisions(items,db) : origins,db); webhooks=result.webhooks; return result.statuses;
+      const result=await claimGroup(base,items,checkMcp ? await originDecisions(items,db) : new Map(),db); webhooks=result.webhooks; return result.statuses;
     };
     const credits = marketingCredits(gate.quota!, base.config.dispatch.dailyHeadroomPercent);
     const statuses = await phase('claim', async () => {

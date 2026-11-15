@@ -4097,6 +4097,30 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  // Sweep #276: a self-hosted dispatcher read MCP grants once per prepared batch, so a grant revoked while an
+  // earlier claim group was sending still dispatched the later groups.
+  test('single-tenant dispatch rereads an MCP grant in each claim: one revoked during an earlier group stops the next', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const { runDispatcher } = await import('./src/dispatcher.js');
+      assert.equal(runtime.config.multiTenant, false);
+      const grant = 'mcp_' + (await oauthGrant(t, db, writableScope, request)).consentId, ids: string[] = [];
+      for (let i = 0; i < 2; i++) ids.push(ok(await local('POST', '/v1/emails/send', mail()), 202).id);
+      await db.query('UPDATE sending_emails SET actor_key_id=$1 WHERE id=ANY($2)', [grant, ids]);
+      // The grant is revoked right after the first group's claim, before the second group is claimed.
+      const query = db.query as (...args: unknown[]) => Promise<unknown>; let claims = 0;
+      t.mock.method(db, 'query', async function (this: pg.Client, ...args: unknown[]) {
+        const result = await query.apply(this, args);
+        const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
+        if (text.includes('mcp_allowed boolean') && ++claims === 1) await query.call(this, 'UPDATE nightmail_resource_grants SET revoked=true WHERE id=$1', [grant]);
+        return result;
+      } as typeof db.query);
+      await runDispatcher(runtime, { region: REGION, sendConcurrency: 1 });
+      assert.equal(claims, 2, 'One claim group per email.');
+      const rows = (await db.query('SELECT status,error_code FROM sending_emails WHERE id=ANY($1)', [ids])).rows.map(row => `${row.status}:${row.error_code}`).sort();
+      assert.deepEqual(rows, ['accepted:null', 'canceled:ORIGIN_KEY_REVOKED']);
+    });
+  });
+
   test('a sending webhook an approval sets up, changes or rotates the secret of follows the approval', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
       const tools = (bearer: string) => async (name: string, args: Json) => { const r = ok(await request('POST', '/mcp?codemode=true', bearer, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, rpcHeaders)).result; assert.equal(r.isError, false, redact(r)); return r.structuredContent; };
@@ -6100,7 +6124,8 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       const headers = (n:number) => Array.from({length:n},(_,i)=>({name:`X-Fixture-${i}`,value:'v'}));
       const send = (extra:Json) => local('POST','/v1/emails/send',mail(extra));
       error(await send({headers:headers(16)}),422);
-      error(await local('POST','/v1/emails/batch',{emails:[mail(),mail({headers:headers(14),kind:'marketing'})]}),422,'TOO_MANY_HEADERS');
+      // A batch item's failure names the item, as a validation error does.
+      assert.equal(error(await local('POST','/v1/emails/batch',{emails:[mail(),mail({headers:headers(14),kind:'marketing'})]}),422,'TOO_MANY_HEADERS').field,'emails.1.headers');
       error(await send({to:'x'.repeat(65)+'@example.net'}),422);
       error(await send({bcc:['a@'+'x'.repeat(64)+'.net']}),422);
       error(await send({to:Array.from({length:50},address),cc:[address()]}),422);
@@ -7716,6 +7741,30 @@ describe('Campaign authorization and dispatch credentials', () => {
       await meter('conversation-attachment-denied', async () => error(await request('POST', '/v1/emails/send', sender.secret, { ...direct, attachments: [conversationFile.id] }), 404, 'ATTACHMENT_NOT_FOUND'), 1);
       await meter('conversation-attachment-admitted', async () => ok(await request('POST', '/v1/emails/send', managing.secret, { ...direct, attachments: [conversationFile.id] }), 202), 1);
       await meter('shared-attachment-admitted', async () => ok(await request('POST', '/v1/emails/send', sender.secret, { ...direct, attachments: [privateFile.id] }), 202), 1);
+    });
+  });
+  // Sweep #276: a test send checked the pending limit without the admission lock, so it and a concurrent
+  // admission could both pass the cap.
+  test('a campaign test send waits for the workspace admission lock before it checks the pending limit', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const list = ok(await local('POST', '/v1/lists', { name: 'Fixture' }), 201);
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: 'Fixture', from: 'a@sender.example', subject: 'Locked test', html: '<p>Fixture</p>', audience: { listId: list.id } }), 201);
+      const wid = runtime.config.workspaceId, holder = await fixtureDatabase(t);
+      assert.equal((await db.query('SELECT FROM job_schedule WHERE workspace_id=$1', [wid])).rowCount, 0);
+      // Another admission in this workspace holds its lock: the job_schedule row lockAdmission upserts.
+      await holder.query('BEGIN');
+      try {
+        await holder.query('INSERT INTO job_schedule(workspace_id) VALUES($1)', [wid]);
+        let settled = false;
+        const test = local('POST', `/v1/campaigns/${campaign.id}/test`, { to: 'fixture@example.invalid' }).finally(() => { settled = true; });
+        test.catch(() => undefined);
+        const waiting = async () => !!(await holder.query('SELECT FROM pg_stat_activity WHERE pg_backend_pid()=ANY(pg_blocking_pids(pid))')).rowCount;
+        for (let i = 0; i < 200 && !settled && !await waiting(); i++) await new Promise(resolve => setTimeout(resolve, 10));
+        assert.equal(settled, false, 'The test send checked the pending limit without waiting for the admission lock.');
+        assert.equal(await waiting(), true);
+        await holder.query('ROLLBACK');
+        ok(await test, 202);
+      } finally { await holder.query('ROLLBACK'); }
     });
   });
   test('domain-restricted keys see and control campaigns only on their sender domains, never the workspace audience', async t => {
@@ -14738,9 +14787,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const before=await db.query(`SELECT (SELECT count(*) FROM sending_emails WHERE workspace_id=$1) mail,(SELECT count(*) FROM sending_idempotency WHERE workspace_id=$1) receipts`,[wid]);
       const used=async()=>Number((await db.query('SELECT used FROM api_request_budgets WHERE workspace_id=$1 AND key_id=$2',[wid,key.id])).rows[0].used);
       const credits=await used();
-      await meter('denied-batch',async()=>error(await local('POST','/v1/emails/batch',{emails:[good,late]},'live',headers),403,'SENDER_DOMAIN_NOT_VERIFIED'),1);
+      await meter('denied-batch',async()=>assert.equal(error(await local('POST','/v1/emails/batch',{emails:[good,late]},'live',headers),403,'SENDER_DOMAIN_NOT_VERIFIED').field,'emails.1.from'),1);
       assert.equal(await used(),credits+1,'A rejected request is still charged exactly once');
-      error(await local('POST','/v1/emails/batch',{emails:[good,{...good,attachments:['missing-asset']}]},'live',headers),404,'ATTACHMENT_NOT_FOUND');
+      // A denied batch names the item that failed: in the denial's checks and in local preparation.
+      assert.equal(error(await local('POST','/v1/emails/batch',{emails:[good,{...good,attachments:['missing-asset']}]},'live',headers),404,'ATTACHMENT_NOT_FOUND').field,'emails.1');
+      const crowded={...good,kind:'marketing',headers:Array.from({length:14},(_,i)=>({name:`X-Fixture-${i}`,value:'v'}))};
+      assert.equal(error(await local('POST','/v1/emails/batch',{emails:[good,crowded]},'live',headers),422,'TOO_MANY_HEADERS').field,'emails.1.headers');
+      assert.equal(error(await local('POST','/v1/emails/send',crowded,'live',headers),422,'TOO_MANY_HEADERS').field,'headers','A single send keeps its own field.');
       assert.deepEqual((await db.query(`SELECT (SELECT count(*) FROM sending_emails WHERE workspace_id=$1) mail,(SELECT count(*) FROM sending_idempotency WHERE workspace_id=$1) receipts`,[wid])).rows,before.rows);
       const retry=()=>local('POST','/v1/emails/batch',{emails:[good]},'live',headers);
       const saved=ok(await retry(),202);assert.deepEqual(ok(await retry(),202),saved); // No losing receipt from the previous failure.
@@ -18164,6 +18217,80 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  // Sweep #276: each cid: reference became the image's whole data URI. 60 references to a 6 MiB image built a 480 MiB
+  // string (a Worker has 128 MB); more failed only at V8's string limit. Now the expansion is measured first, from stored sizes.
+  test('visual previews bound inline image expansion: many or huge cid: references are refused before any image is read', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local }) => {
+      const objects = new Map<string, { body: Uint8Array; contentType: string }>();
+      let reads = 0;
+      runtime.storage = {
+        async put(key, body, contentType) { objects.set(key, { body, contentType }); },
+        async get(key) { reads++; return objects.get(key) ?? null; },
+        async delete(key) { objects.delete(key); },
+      };
+      const rendered: string[] = [];
+      // Like Browser Rendering's binding, serialize the page: a lazily concatenated string is built in full here.
+      runtime.renderHtmlImage = async html => { rendered.push(html); JSON.stringify({ html }); return { data: Uint8Array.of(1), mimeType: 'image/png' }; };
+      const MiB = 1024 * 1024, cap = 16 * MiB, body = (bytes: number) => Buffer.alloc(bytes, 7).toString('base64');
+      const upload = async (path: string, contentId: string, bytes: number, contentType = 'image/png') =>
+        ok(await local('POST', path, { filename: `${contentId}.png`, contentType, disposition: 'inline', contentId, content: body(bytes) }), 201).id as string;
+      const refs = (ids: string[], times = 1) => Array.from({ length: times }, () => ids.map(id => `<img src="cid:${id}">`).join('')).join('');
+      const occurrences = (text: string, part: string) => text.split(part).length - 1;
+      // 40,000 references in under 512 KiB of block HTML (images, and text the old replaceAll expanded too):
+      // about 320 GB if each became the 6 MiB image's data URI.
+      const hostile = refs(['hero'], 10_000) + `<p>${'cid:hero '.repeat(30_000)}</p>`;
+      assert.ok(hostile.length < 512 * 1024);
+      const measure = async (path: string) => {
+        reads = 0; rendered.length = 0;
+        const heap = process.memoryUsage().heapUsed, started = performance.now();
+        const reply = await local('GET', path);
+        return { reply, ms: performance.now() - started, heap: process.memoryUsage().heapUsed - heap };
+      };
+      const refused = async (path: string) => {
+        const { reply, ms, heap } = await measure(path);
+        assert.equal(error(reply, 413, 'PREVIEW_TOO_LARGE').retryable, false);
+        assert.deepEqual([reads, rendered.length], [0, 0], 'Refused before any image is read or rendered.');
+        assert.ok(ms < 5000, `Refused in ${Math.round(ms)} ms.`);
+        assert.ok(heap < 128 * MiB, `Heap grew ${Math.round(heap / MiB)} MiB.`); // 924 MiB for 60 references before the fix
+      };
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: 'Preview bound' }), 201);
+      let revision = campaign.revision;
+      const draft = async (html: string, attachments: string[]) => {
+        revision = ok(await local('PATCH', `/v1/campaigns/${campaign.id}`, { revision, draft: { ...campaign.draft, html, attachments } })).revision;
+        return `/v1/campaigns/${campaign.id}/preview-image`;
+      };
+
+      // One huge part: embedded once, refused when referenced from a hostile draft.
+      const hero = await upload('/v1/attachments', 'hero', 6 * MiB), heroUri = `data:image/png;base64,${body(6 * MiB)}`;
+      let result = await measure(await draft(refs(['hero']), [hero]));
+      ok(result.reply);
+      assert.equal(reads, 1); assert.equal(occurrences(rendered[0]!, heroUri), 1); assert.ok(rendered[0]!.length < cap);
+      await refused(await draft(refs(['hero'], 60), [hero]));
+      await refused(await draft(hostile, [hero]));
+
+      // Many parts (7 MiB together, under the draft limit): each embedded once, refused when each is referenced twice (over 16 MiB).
+      const names = Array.from({ length: 7 }, (_, i) => `part${i}`), parts: string[] = [];
+      for (const name of names) parts.push(await upload('/v1/attachments', name, MiB));
+      result = await measure(await draft(refs(names), parts));
+      ok(result.reply);
+      assert.equal(reads, 7); assert.equal(occurrences(rendered[0]!, `data:image/png;base64,${body(MiB)}`), 7);
+      await refused(await draft(refs(names, 2), parts));
+
+      // A content type may contain "cid:". Its 10,000 data URIs are never scanned again for references, so the
+      // 1 MiB part referenced once is embedded once, not 10,001 times.
+      const tiny = await upload('/v1/attachments', 'tiny', 1, 'image/png;x=cid:part0');
+      result = await measure(await draft(refs(['tiny'], 10_000) + refs(['part0']), [tiny, parts[0]!]));
+      ok(result.reply);
+      assert.equal(reads, 2); assert.equal(occurrences(rendered[0]!, `data:image/png;base64,${body(MiB)}`), 1); assert.ok(rendered[0]!.length < 4 * MiB);
+
+      // Template previews embed inline assets the same way.
+      const template = ok(await local('POST', '/v1/templates', { name: 'Preview bound' }), 201);
+      const asset = await upload('/v1/template-assets', 'hero', 6 * MiB);
+      ok(await local('PATCH', `/v1/templates/${template.id}`, { revision: template.revision, draft: { ...template.draft, html: hostile, attachments: [asset] } }));
+      await refused(`/v1/templates/${template.id}/preview-image`);
+    });
+  });
+
   test('expired final leases fail without rerunning the job or blocking other workspaces', async t => {
     await simulatedSesFixture(t,async ({runtime,db})=>{
       const {processJobs,MAX_ATTEMPTS}=await import('./src/jobs.js');
@@ -20034,6 +20161,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       view = ok(await local('POST', `/v1/campaigns/${campaign.id}/pacing`, { perDay: 200 }));
       assert.equal(view.delivery.pacing.perDay, 200);
       assert.equal(view.delivery.pacing.autoPause, true);
+      // perDay may be omitted too: changing only autoPause keeps the cap (null removes it, below).
+      view = ok(await local('POST', `/v1/campaigns/${campaign.id}/pacing`, { autoPause: true }));
+      assert.deepEqual([view.delivery.pacing.perDay, view.delivery.pacing.autoPause], [200, true]);
       ok(await local('POST', `/v1/campaigns/${campaign.id}/resume`, {}));
 
       // The SES 24-hour quota holds expansion while remaining capacity is within the transactional reserve.

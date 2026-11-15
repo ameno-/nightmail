@@ -7,7 +7,7 @@ import { templateAssetLinks, templateAssets, templates, type TemplateDraft } fro
 import { BlockContentError, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
 import { readPublicImage } from './adapters/public-image.js';
 import { readOwnMailObject } from './mail-object-route.js';
-import { AttachmentContentId, AttachmentFilename, AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BYTES, senderDisplayName, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
+import { AttachmentContentId, AttachmentFilename, AttachmentMetadata, AttachmentUpload, decodeBase64, embedInlineImages, mailAddress, MAX_ATTACHMENT_BYTES, senderDisplayName, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
 import { productName } from './brand.js';
 
 const MAX_ASSET_BYTES = MAX_ATTACHMENT_BYTES;
@@ -87,12 +87,13 @@ export function registerTemplates(app: App) {
     if (!draft) throw new ApiError(404, 'NOT_FOUND', 'This template has no published revision.');
     if (!c.env.renderHtmlImage) throw new ApiError(503, 'PREVIEW_RENDERING_UNAVAILABLE', 'Visual template preview rendering is not configured.', undefined, true);
     await chargeRenderBudget(c, identity.workspaceId);
-    assertContent(draft.html); let html = draft.html ? renderBlockHtml(draft.html, { fontBase: `${c.env.config.publicUrl}/fonts/`, title: draft.subject }) : '';
-    for (const item of (await assetRows(c.env.db, identity.workspaceId, draft.attachments)).filter(asset => asset.disposition === 'inline' && asset.contentId)) {
+    assertContent(draft.html);
+    const inline = (await assetRows(c.env.db, identity.workspaceId, draft.attachments)).filter(asset => asset.disposition === 'inline' && asset.contentId);
+    const html = await embedInlineImages(draft.html ? renderBlockHtml(draft.html, { fontBase: `${c.env.config.publicUrl}/fonts/`, title: draft.subject }) : '', inline, async item => {
       const stored = await c.env.storage.get(item.storageKey);
       if (!stored || stored.body.length !== item.size || await checksum(stored.body) !== item.checksum) throw new ApiError(503, 'TEMPLATE_ASSET_STORAGE_UNAVAILABLE', 'An inline template image is missing or changed.', undefined, true);
-      html = html.replaceAll(`cid:${item.contentId}`, `data:${item.contentType};base64,${Buffer.from(stored.body).toString('base64')}`);
-    }
+      return stored.body;
+    });
     try { const image = await c.env.renderHtmlImage(html); return c.json({ data: Buffer.from(image.data).toString('base64'), mimeType: image.mimeType, revision: published ? row.publishedRevision! : row.revision, published }, 200); }
     catch (error) { if (error instanceof ApiError) throw error; throw new ApiError(503, 'PREVIEW_RENDERING_FAILED', 'The visual template preview could not be rendered. Try again.', undefined, true); }
   });

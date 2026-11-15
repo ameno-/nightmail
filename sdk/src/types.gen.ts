@@ -1381,7 +1381,10 @@ export type CampaignCanceled = {
 };
 
 export type CampaignPacingUpdate = {
-    perDay: number | null;
+    /**
+     * Release at most this many recipients per rolling 24-hour window. Omit to keep the current cap; null removes it. Delivery always also respects the SES 24-hour quota.
+     */
+    perDay?: number | null;
     /**
      * Omit to keep the current setting. Hosted shared sending always enforces automatic pause; false is rejected.
      */
