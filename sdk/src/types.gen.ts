@@ -39,7 +39,7 @@ export type ApiError = {
          */
         resetAt?: string;
         /**
-         * Every problem found, when there is more than one part, such as ritual diagnostics with ritual, line, column, message and hint.
+         * Every problem found, when there is more than one part, such as ritual diagnostics with ritual, line, column, message and hint, or a measurement, such as CONTENT_TOO_LARGE_TO_SCREEN with screenedBytes and limitBytes (and index in a batch).
          */
         details?: Array<{
             [key: string]: unknown;

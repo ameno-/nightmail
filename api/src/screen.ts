@@ -8,8 +8,11 @@ import { formattedSender } from './sending.js';
 // gambling ad set as a workspace name in an invitation). The dispatcher decides what to do with the score.
 
 const MAX_BODY = 8000;
-export const MAX_SCREEN_BYTES = 24 * 1024;
-const MAX_CHUNKS = 4;
+// Link signals (every host a message links or loads, and link labels that name another host) repeat in each request.
+const MAX_SIGNALS = 60, MAX_SIGNAL_BYTES = 1000, OVERLAP = 256;
+/** Requests the longest text a limit admits needs: windows of a request less the most signals, overlapping by 256 bytes
+ *  and a few bytes less at UTF-8 boundaries. 24 KiB (the message limit) takes 4; 48 KiB (a campaign copy's) takes 8. */
+export const chunksFor = (limitBytes: number) => { const width = MAX_BODY - MAX_SIGNAL_BYTES - 1; return 1 + Math.ceil(Math.max(0, limitBytes - width) / (width - OVERLAP - 6)); };
 const TTL_MS = 60 * 60 * 1000;
 const MAX_ENTRIES = 5000;
 const DEADLINE_MS = 500;
@@ -37,21 +40,35 @@ function copy(s = '') {
   const sentences = normalize(s).split(/\n+|(?<=[.!?])\s+/).map(p => p.replace(/\s+/g, ' ').trim()).filter(Boolean);
   return [...new Set(sentences)].join(' ');
 }
-const tooLarge = () => new ApiError(422,'CONTENT_TOO_LARGE_TO_SCREEN','Shorten the message so Hosted sending can screen it.');
+const bytes = (n: number) => n.toLocaleString('en-US');
+function refused(message: string, details?: Record<string, unknown>, index?: number) {
+  const error = new ApiError(422, 'CONTENT_TOO_LARGE_TO_SCREEN', message, index === undefined ? undefined : `emails.${index}`);
+  if (details) error.details = [{ ...details, ...(index === undefined ? {} : { index }) }];
+  return error;
+}
+const unreadable = () => refused('Shorten the message so Hosted sending can screen it.');
+/** Over the screened-text limit: the measured size and the limit, so the sender knows how much to cut. */
+export const tooLarge = (screenedBytes: number, limitBytes: number, scope: 'message' | 'campaign' = 'message', index?: number) =>
+  refused(`The screened text is ${bytes(screenedBytes)} UTF-8 bytes; Hosted sending screens at most ${bytes(limitBytes)} per ${scope}. It counts the HTML's text (with its alt and title text), the text part and raw MIME. Shorten the copy by ${bytes(screenedBytes - limitBytes)} bytes.`,
+    { screenedBytes, limitBytes }, index);
+const tooManyHosts = (linkHosts: number, index?: number) =>
+  refused(`The message links to or loads ${linkHosts} distinct hosts (counting link labels that name another host); Hosted sending screens at most ${MAX_SIGNALS}. Link to fewer domains.`,
+    { linkHosts, linkHostLimit: MAX_SIGNALS }, index);
 // Repeat link signals and a little preceding context in each window. Split on
 // UTF-8 boundaries; a clean result is meaningful only after the last window.
-function completeBodies(content: string, links: string) {
-  const bytes = Buffer.from(content), prefix = links ? links+'\n' : '';
-  if (bytes.length > MAX_SCREEN_BYTES || Buffer.byteLength(links) > 1000) throw tooLarge();
+function completeBodies(content: string, links: string, limitBytes: number, scope: 'message' | 'campaign' = 'message') {
+  const bytes = Buffer.from(content), prefix = links ? links+'\n' : '', most = chunksFor(limitBytes);
+  if (bytes.length > limitBytes) throw tooLarge(bytes.length, limitBytes, scope);
+  if (Buffer.byteLength(links) > MAX_SIGNAL_BYTES) throw tooManyHosts(links.split('\n').length);
   const bodies: string[] = [], width = MAX_BODY - Buffer.byteLength(prefix);
   let start = 0;
   do {
-    if (bodies.length === MAX_CHUNKS) throw tooLarge();
+    if (bodies.length === most) throw tooLarge(bytes.length, limitBytes, scope);
     let end = Math.min(bytes.length, start + width);
     while (end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
     bodies.push(prefix + bytes.toString('utf8', start, end));
     if (end === bytes.length) break;
-    start = end - 256;
+    start = end - OVERLAP;
     while ((bytes[start]! & 0xc0) === 0x80) start--;
   } while (true);
   return bodies;
@@ -66,9 +83,9 @@ const INLINE=new Set(['a','abbr','b','bdi','bdo','big','cite','code','data','del
  */
 export async function readHtml(html: string, visit?: (tag: string) => void) {
   const { boundedHtmlFragment } = await import('./bounded-html.js');
-  if (html.length>512*1024) throw tooLarge();
+  if (html.length>512*1024) throw unreadable();
   const fragment=boundedHtmlFragment(html,'fragment',{clients:true});
-  if (!fragment) throw tooLarge();
+  if (!fragment) throw unreadable();
   const hosts=new Set<string>(), mismatches=new Set<string>(), links:string[]=[], images:{ alt: boolean }[]=[];
   // Text as a client lays it out: inline runs stay one word, block elements end the line, and text a client shows
   // beside the flow (alt, title) follows on its own lines, as does a table row whose cells hold short pieces read
@@ -125,12 +142,23 @@ export function screenTextSignals(visible: string, text?: string, rawPart?: stri
   }
   return { content:[rendered,plain,raw].filter(Boolean).join('\n'), textHtmlOverlap:overlap(plain,rendered) };
 }
-async function body(snapshot: EmailSnapshot) {
+export type ScreenMeasure = { signals: string[]; content: string; textHtmlOverlap?: number; screenedBytes: number };
+/** What the screen reads of a message, measured without asking the classifier: the same text and link signals it sends. */
+export async function measureScreen(snapshot: Pick<EmailSnapshot, 'html' | 'text' | 'raw'>): Promise<ScreenMeasure> {
   const read=snapshot.html ? await readHtml(snapshot.html) : undefined;
   const signals=read ? [...read.mismatches,...read.hosts] : [];
-  if(signals.length>60) throw tooLarge();
   const {content,textHtmlOverlap}=screenTextSignals(read?.text ?? '',snapshot.text,snapshot.raw);
-  return { bodies:completeBodies(content,signals.join('\n')), textHtmlOverlap };
+  return { signals, content, textHtmlOverlap, screenedBytes: Buffer.byteLength(content) };
+}
+/** Refuses a message the screen cannot read within a limit, with the measured size; `index` names a batch item. */
+export function assertScreenable(measure: ScreenMeasure, limitBytes: number, scope: 'message' | 'campaign' = 'message', index?: number) {
+  if (measure.signals.length>MAX_SIGNALS || Buffer.byteLength(measure.signals.join('\n'))>MAX_SIGNAL_BYTES) throw tooManyHosts(measure.signals.length,index);
+  if (measure.screenedBytes>limitBytes) throw tooLarge(measure.screenedBytes,limitBytes,scope,index);
+}
+async function body(snapshot: EmailSnapshot, limitBytes: number, scope: 'message' | 'campaign' = 'message') {
+  const measure=await measureScreen(snapshot);
+  assertScreenable(measure,limitBytes,scope);
+  return { bodies:completeBodies(measure.content,measure.signals.join('\n'),limitBytes,scope), textHtmlOverlap:measure.textHtmlOverlap };
 }
 export async function jevQuestions(endpoint:string,apiKey:string,model:string,state:unknown,questions:unknown,deadline:number):Promise<unknown> {
   // The deadline includes reading the response body. Never retry inside a send lease.
@@ -160,8 +188,14 @@ async function evaluate(endpoint: string, apiKey: string, model: string, state: 
   return { spam, model: typeof parsed?.model === 'string' ? parsed.model : model };
 }
 
-/** Spam probability for one snapshot, or null when the installation has no classifier configured. */
-export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot, required=false): Promise<ScreenResult | null> {
+// The classifier's input for a snapshot: what screenSnapshot sends it, request by request.
+function classifierState(snapshot: EmailSnapshot, required: boolean, textHtmlOverlap: number | undefined) {
+  const sender=copy(formattedSender(snapshot.from, snapshot.fromName)), subject=copy(snapshot.subject), recipients=snapshot.to.length+snapshot.cc.length+snapshot.bcc.length;
+  return (body: string) => ({email:{from:required?sender:sender.slice(0,100),kind:snapshot.kind,subject:required?subject:subject.slice(0,200),body},signals:{recipients,textHtmlOverlap}});
+}
+/** Spam probability for one snapshot, or null when the installation has no classifier configured. A campaign test has
+ *  the campaign limit. `reserve` is told how many requests a classification will make before the first one. */
+export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot, required=false, reserve?: (requests: number) => Promise<void>): Promise<ScreenResult | null> {
   const settings = runtime.config.screen;
   if (!settings) return null;
   const from = formattedSender(snapshot.from, snapshot.fromName);
@@ -174,11 +208,13 @@ export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot, 
   // Concurrent copies share one request; failures are not cached so the next copy retries.
   let pending=flights.get(runtime.storage);if(!pending){pending=new Map();flights.set(runtime.storage,pending);}
   const existing=pending.get(key);if(existing)return existing;
-  const lookup=body(snapshot).then(async ({bodies,textHtmlOverlap})=>{
-    const sender=copy(from), subject=copy(snapshot.subject);
+  const limits=runtime.config.screenLimits, test=!!snapshot.testCampaignId;
+  const lookup=body(snapshot,test ? limits.campaignBytes : limits.messageBytes,test ? 'campaign' : 'message').then(async ({bodies,textHtmlOverlap})=>{
+    await reserve?.(bodies.length);
+    const state=classifierState(snapshot,required,textHtmlOverlap);
     let highest: ScreenResult | undefined;
     for (const body of bodies) {
-      const result=await evaluate(settings.endpoint,settings.apiKey,settings.model,{email:{from:required?sender:sender.slice(0,100),kind:snapshot.kind,subject:required?subject:subject.slice(0,200),body},signals:{recipients,textHtmlOverlap}});
+      const result=await evaluate(settings.endpoint,settings.apiKey,settings.model,state(body));
       if (!highest || result.spam>highest.spam) highest=result;
     }
     return highest!;
@@ -186,4 +222,46 @@ export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot, 
   try{const result=await lookup;cache.set(key,{expires:now+TTL_MS,result});
     while(cache.size>MAX_ENTRIES)cache.delete(cache.keys().next().value!);return result;
   }finally{pending.delete(key);}
+}
+
+// A Hosted campaign is screened copy by copy, exactly as single messages are, but each distinct copy only once
+// (src/sending.ts campaignVerdicts): a copy's verdict is keyed by the copy as it is delivered (copyKey), so recipients
+// whose copies are the same share it.
+
+/** A campaign's screening state, on its review (sending_campaign_reviews.screen). */
+export type CampaignScreen = {
+  /** The review content it belongs to (sending_campaign_reviews.content_hash). */
+  contentHash: string; probation: boolean;
+  /** The campaign's own copy, placeholders unresolved, screened first as an early refusal. */
+  template: { key: string; spam: number; model: string } | null;
+  /** Recipients whose copies have verdicts, in send order, and how many of them were refused as spam. */
+  screenedThrough: number; recipients: number; rejected: number;
+  /** Classifier outages in a row, for the wait before the next attempt; whether the refused share paused it once. */
+  failures: number; quarantined: boolean;
+};
+/**
+ * A campaign copy's verdict key: the classifier and model, and the copy exactly as it is delivered (sender, reply-to,
+ * subject, HTML, text and raw parts, its headers and attachments), with only the parts Nightmail writes per recipient
+ * at delivery set aside: the generated unsubscribe link is the placeholder (src/sending.ts screenedAs), and the
+ * recipient's address and the List-Unsubscribe headers aren't part of a snapshot.
+ */
+export async function copyKey(runtime: Runtime, snapshot: EmailSnapshot): Promise<string> {
+  const settings = runtime.config.screen;
+  return digest(JSON.stringify([settings?.endpoint ?? null, settings?.model ?? null, snapshot.kind, snapshot.from, snapshot.fromName ?? null, snapshot.replyTo,
+    snapshot.subject, snapshot.html ?? null, snapshot.text ?? null, snapshot.raw ?? null, snapshot.headers, snapshot.attachments, snapshot.tracking]));
+}
+/** What the classifier is sent for one campaign copy, request by request: what screenSnapshot sends for that copy as
+ *  required Hosted mail to its one recipient, with the campaign limit. */
+export type ScreenInput = { requests: unknown[] };
+/** A campaign copy's screen input, refused past the campaign limit. */
+export async function screenInput(runtime: Runtime, snapshot: EmailSnapshot): Promise<ScreenInput> {
+  const { bodies, textHtmlOverlap } = await body(snapshot, runtime.config.screenLimits.campaignBytes, 'campaign');
+  const state = classifierState({ ...snapshot, to: ['recipient'], cc: [], bcc: [] }, true, textHtmlOverlap);
+  return { requests: bodies.map(state) };
+}
+/** One request of a campaign copy's screen. */
+export async function screenWindow(runtime: Runtime, input: ScreenInput, window: number): Promise<ScreenResult> {
+  const settings = runtime.config.screen;
+  if (!settings) throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'Hosted content screening is unavailable.', undefined, true);
+  return evaluate(settings.endpoint, settings.apiKey, settings.model, input.requests[window]);
 }
