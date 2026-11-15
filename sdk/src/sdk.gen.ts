@@ -1177,6 +1177,9 @@ export const checkEmail = <ThrowOnError extends boolean = false>(options: Option
     }
 });
 
+/**
+ * Screened-text limit: Hosted sending screens each message before delivery: it reads the HTML’s text (with its alt and title text), the text part and raw MIME, and the hosts the message links to or loads from. It reads at most 24,576 UTF-8 bytes per message (installation default) and 60 distinct link hosts, counting link labels that name another host. Over either limit, a Hosted message is refused at once with 422 CONTENT_TOO_LARGE_TO_SCREEN and error.details[0] holding { screenedBytes, limitBytes } or { linkHosts, linkHostLimit }; in a batch, details also carry the item’s index, and no message of the batch is queued.
+ */
 export const sendEmail = <ThrowOnError extends boolean = false>(options: Options<SendEmailData, ThrowOnError>): RequestResult<SendEmailResponses, SendEmailErrors, ThrowOnError> => (options.client ?? client).post<SendEmailResponses, SendEmailErrors, ThrowOnError>({
     security: [
         { scheme: 'bearer', type: 'http' },
@@ -1199,6 +1202,9 @@ export const sendEmail = <ThrowOnError extends boolean = false>(options: Options
     }
 });
 
+/**
+ * Screened-text limit: Hosted sending screens each message before delivery: it reads the HTML’s text (with its alt and title text), the text part and raw MIME, and the hosts the message links to or loads from. It reads at most 24,576 UTF-8 bytes per message (installation default) and 60 distinct link hosts, counting link labels that name another host. Over either limit, a Hosted message is refused at once with 422 CONTENT_TOO_LARGE_TO_SCREEN and error.details[0] holding { screenedBytes, limitBytes } or { linkHosts, linkHostLimit }; in a batch, details also carry the item’s index, and no message of the batch is queued.
+ */
 export const sendEmailBatch = <ThrowOnError extends boolean = false>(options: Options<SendEmailBatchData, ThrowOnError>): RequestResult<SendEmailBatchResponses, SendEmailBatchErrors, ThrowOnError> => (options.client ?? client).post<SendEmailBatchResponses, SendEmailBatchErrors, ThrowOnError>({
     security: [
         { scheme: 'bearer', type: 'http' },
@@ -1681,6 +1687,9 @@ export const setCampaignArchived = <ThrowOnError extends boolean = false>(option
     }
 });
 
+/**
+ * Send the current draft, personalized with data, to one address as a transactional test. On Hosted sending a test is screened on its own, with the campaign limit (49,152 bytes of screened text by default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } over it).
+ */
 export const testCampaign = <ThrowOnError extends boolean = false>(options: Options<TestCampaignData, ThrowOnError>): RequestResult<TestCampaignResponses, TestCampaignErrors, ThrowOnError> => (options.client ?? client).post<TestCampaignResponses, TestCampaignErrors, ThrowOnError>({
     security: [
         { scheme: 'bearer', type: 'http' },
@@ -1704,7 +1713,7 @@ export const testCampaign = <ThrowOnError extends boolean = false>(options: Opti
 });
 
 /**
- * Accept the current revision for durable background delivery: the audience is frozen now, every message is validated in the background, then recipients are released into the dispatch queue. The 202 count is accepted recipient intents, not SES acceptance or delivery; poll the campaign for its state.
+ * Accept the current revision for durable background delivery: the audience is frozen now, every message is validated in the background, then recipients are released into the dispatch queue. The 202 count is accepted recipient intents, not SES acceptance or delivery; poll the campaign for its state. Hosted campaigns are screened copy by copy before they are released, as single messages are, but each distinct copy only once: recipients whose personalized copies read the same share one verdict, so a campaign personalized only with first names costs one screen per distinct first name, and one with a unique value per recipient costs one per recipient. Each copy is screened exactly as a single message is, and sent only under a verdict for its exact content. The campaign’s own copy, placeholders unresolved, is screened first and may hold 49,152 bytes of screened text (installation default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } otherwise); so may each copy, and a copy over it is refused alone. A copy the screen refuses is never sent (CONTENT_REJECTED_SPAM); when refused copies pass 5% and 10 recipients the campaign pauses once for review, and a positive verdict on the campaign’s own copy fails it before anyone is sent to.
  */
 export const sendCampaign = <ThrowOnError extends boolean = false>(options: Options<SendCampaignData, ThrowOnError>): RequestResult<SendCampaignResponses, SendCampaignErrors, ThrowOnError> => (options.client ?? client).post<SendCampaignResponses, SendCampaignErrors, ThrowOnError>({
     security: [
@@ -1729,7 +1738,7 @@ export const sendCampaign = <ThrowOnError extends boolean = false>(options: Opti
 });
 
 /**
- * Accept the current revision for durable scheduled delivery. The audience is frozen and validated now; no recipient is materialized or sent before scheduledAt. The 202 count is accepted recipient intents.
+ * Accept the current revision for durable scheduled delivery. The audience is frozen and validated now; no recipient is materialized or sent before scheduledAt. The 202 count is accepted recipient intents. Hosted campaigns are screened copy by copy before they are released, as single messages are, but each distinct copy only once: recipients whose personalized copies read the same share one verdict, so a campaign personalized only with first names costs one screen per distinct first name, and one with a unique value per recipient costs one per recipient. Each copy is screened exactly as a single message is, and sent only under a verdict for its exact content. The campaign’s own copy, placeholders unresolved, is screened first and may hold 49,152 bytes of screened text (installation default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } otherwise); so may each copy, and a copy over it is refused alone. A copy the screen refuses is never sent (CONTENT_REJECTED_SPAM); when refused copies pass 5% and 10 recipients the campaign pauses once for review, and a positive verdict on the campaign’s own copy fails it before anyone is sent to.
  */
 export const scheduleCampaign = <ThrowOnError extends boolean = false>(options: Options<ScheduleCampaignData, ThrowOnError>): RequestResult<ScheduleCampaignResponses, ScheduleCampaignErrors, ThrowOnError> => (options.client ?? client).post<ScheduleCampaignResponses, ScheduleCampaignErrors, ThrowOnError>({
     security: [
