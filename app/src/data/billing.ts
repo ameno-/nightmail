@@ -5,17 +5,20 @@ import { request } from './live'
 // Amounts are null for members and read-only credentials; GET /v1/me carries the state for the app-wide banner.
 export type Enforcement = 'off' | 'shadow' | 'enforce'
 export type BillingState = { sending: 'ok' | 'low' | 'paused'; receiving: 'ok' | 'grace' | 'held'; autoRecharge: 'off' | 'on' | 'pending' | 'failed' | 'capped' }
+export interface FreeAllowance { limit: number; used: number; left: number }
 export interface BillingSummary {
   enforcement: Enforcement
   mode: 'prepaid' | 'invoiced' | 'exempt'
   state: BillingState
   balance: { paid: string; promo: string; unsettled: string; available: string } | null
-  free: { month: string; emails: { limit: number; used: number; left: number }; storage: { limitBytes: number; agedBytes: string } }
+  /** One allowance per direction, counted separately; emails repeats sent for older clients. received is null unless the
+   *  credential may read every received message (owners and admins). */
+  free: { month: string; emails: FreeAllowance; sent: FreeAllowance; received: FreeAllowance | null; storage: { limitBytes: number; agedBytes: string } }
   monthToDate: { cost: string } | null
   grace: { unpaidSince: string | null; receiveHoldAt: string | null; writeOffAt: string | null }
   autoRecharge: { enabled: boolean; thresholdCents: number; amountCents: number; monthlyCapCents: number; monthTotalCents: number; disabledReason: string | null; pending: boolean } | null
   paymentMethod: { brand: string; last4: string; expMonth: number; expYear: number } | null
-  prices: { emailPerThousand: string; omenPerThousand: string; storagePerGbMonth: string; freeEmails: number; freeStorageBytes: number; topUpMinCents: number; currency: 'USD' }
+  prices: { emailPerThousand: string; omenPerThousand: string; storagePerGbMonth: string; freeEmails: number; freeSentEmails: number; freeReceivedEmails: number; freeStorageBytes: number; topUpMinCents: number; currency: 'USD' }
   topUpUrl: string
   /** Anomaly made this workspace free: nothing is charged; usage is still measured (monthToDate is what it would cost). */
   freePlan: { until: string | null } | null

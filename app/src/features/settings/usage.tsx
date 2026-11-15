@@ -12,8 +12,8 @@ import { productName } from '../../../../api/src/brand'
 
 const money = (value: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: value > 0 && value < 0.01 ? 4 : 2 }).format(value)
 
-// Plan & usage (hosted): what billing charges and whether it does yet, the free allowance used this month, this month's
-// counts and cost, and the daily sending limit with the steps it grows through. Every member can read it; members see
+// Plan & usage (hosted): what billing charges and whether it does yet, the free sent and received allowances (separate)
+// used this month, this month's counts and cost, and the daily sending limit with the steps it grows through. Every member can read it; members see
 // sent mail only and no amounts (received mail includes messages they can't open), and the note says so before data
 // arrives. Each value has a skeleton of its own width in a 53px row, so nothing moves as the three reads land.
 export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; hint?: ReactNode; children: ReactNode }) => ReactNode }) {
@@ -39,7 +39,8 @@ export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; hint?
         <StatusBadge status={enforced || free ? state!.label : 'Not charged yet'} tone={enforced || free ? state!.tone : 'neutral'} />
         {b!.balance && !free && <Link to="/settings#billing" replace className="settings-score"><span>{usd(total(b!.balance))}</span><ArrowUpRight size={14} aria-hidden="true" /></Link>}
       </span>, 160)}</Row>
-      <Row title="Free this month" hint="Recipients and received mail, this UTC month">{value(b, () => <Meter used={b!.free.emails.used} cap={b!.free.emails.limit} label="Free emails used this month" />, 160)}</Row>
+      <Row title="Free sent" hint="Each recipient, this UTC month">{value(b, () => <Meter used={b!.free.sent.used} cap={b!.free.sent.limit} label="Free sends used" />, 160)}</Row>
+      <Row title="Free received" hint="Counted separately, this UTC month">{value(b, () => b!.free.received ? <Meter used={b!.free.received.used} cap={b!.free.received.limit} label="Free received used" /> : <span className="muted">Owners and admins</span>, 160)}</Row>
       <Row title="Stored past 90 days" hint="1 GB free, then $0.25 per GB-month">{value(b, () => `${gigabytes(aged)} of ${gigabytes(b!.free.storage.limitBytes)}`, 140)}</Row>
       <Row title="This month" hint={usage ? `Since ${date(usage.month.from, { month: 'short', day: 'numeric', timeZone: 'UTC' })}${usage.simulated ? ', simulated' : ''}` : 'This calendar month'}>{value(usage && (!canAdminister || omens.data || omens.isError), () => [`${number(usage!.month.sent)}\u00a0emails sent`, usage!.month.received === null ? null : `${number(usage!.month.received)}\u00a0received`, canAdminister && !omens.isError ? `${number(omenCount)}\u00a0Omens` : null].filter(Boolean).join(' · '), 200)}</Row>
       <Row title="Estimated cost" hint={free ? 'Not charged: free plan' : b?.monthToDate ? 'At $0.20 per 1,000 emails' : usage?.month.received === null ? 'Sent mail only' : 'This month'}>{value(b && usage, () => b!.monthToDate ? usd(b!.monthToDate.cost) : money(monthEstimate(usage!)), 80)}</Row>

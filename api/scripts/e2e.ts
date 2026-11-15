@@ -998,9 +998,10 @@ async function run() {
       // read-only keys get null), and the daily limit names its steps.
       const usage = await api('getUsage', {});
       check(usage.billing.enabled === (usage.billing.enforcement === 'enforce') && usage.pricing.perThousand > 0 && usage.month.sent >= 3 && typeof usage.month.received === 'number' && usage.steps.length === 3 && (usage.daily === null || usage.daily.step === null || usage.steps[usage.daily.step]?.cap === usage.daily.cap), 'invalid plan and usage summary');
-      // Billing as a manage key reads it: the balance and state, today's metered usage, and the ledger and payments pages.
+      // Billing as a manage key reads it: the balance and state, the sent and received allowances, today's metered usage,
+      // and the ledger and payments pages.
       const bill = await api('getBilling', {});
-      check(bill.balance !== null && bill.free.emails.limit === usage.pricing.freeEmails && ['off', 'shadow', 'enforce'].includes(bill.enforcement), 'billing summary without amounts for a manage key');
+      check(bill.balance !== null && bill.free.sent.limit === usage.pricing.freeSentEmails && bill.free.received?.limit === usage.pricing.freeReceivedEmails && bill.free.emails.limit === usage.pricing.freeEmails && ['off', 'shadow', 'enforce'].includes(bill.enforcement), 'billing summary without amounts or allowances for a manage key');
       const metered = await api('getBillingUsage', { query: { granularity: 'day' } });
       check(Array.isArray(metered.data) && metered.data.every(p => /^\d+$/.test(p.quantity)), 'billing usage is not a list of integer quantities');
       for (const list of [await api('listBillingLedger', { query: { limit: 5 } }), await api('listBillingPayments', { query: { limit: 5 } })]) check(Array.isArray(list.data) && list.data.length <= 5, 'billing page over its limit');

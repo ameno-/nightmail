@@ -43,7 +43,7 @@ export function registerDashboardAuth(app: App) {
     // Staff UI notes: an operator in UI_NOTES_SUBJECTS only (operator-identity.ts); no query when the list is empty.
     const [uiNotes,billing]=await Promise.all([
       session?.operator==='operator' && userId ? import('./operator-identity.js').then(({uiNotesAllowed})=>uiNotesAllowed(c.env.db,c.env.config.uiNotesSubjects,userId)) : false,
-      session?import('./billing/state.js').then(async({readBilling})=>{const b=await readBilling(c.env.db,identity.workspaceId,{amounts:false});return {enforcement:b.enforcement,free:b.mode==='exempt',...b.state};}):null]);
+      session?import('./billing/state.js').then(async({readBilling})=>{const b=await readBilling(c.env.db,identity.workspaceId,{amounts:false,received:false});return {enforcement:b.enforcement,free:b.mode==='exempt',...b.state};}):null]);
     return c.json({id:userId??identity.keyId,workspaceId:identity.workspaceId,role:WorkspaceRole.nullable().parse(identity.role??null),multiTenant:hosted,simulated:isSimulatedSes(c.env),email:identity.email??null,name:identity.name??null,permissions:identity.permissions,domains:identity.domains,origin,host:new URL(origin).host,mcpScopes:requestedScopes(c.env.config),connection,workspaces:session?.workspaces??null,operator:session?.operator??null,uiNotes,billing},200);
   });
 }

@@ -16,7 +16,10 @@ export interface BillingPosition {
   openUc: string;
   /** balance + promo − open. */
   availableUc: string;
-  freeEmailsLeft: number;
+  /** Free sends left this month (each recipient counts); sending is gated on this allowance only. */
+  freeSentLeft: number;
+  /** Free received messages left this month. */
+  freeReceivedLeft: number;
   unpaidSince: string | null;
   receiveHeld: boolean;
   /** Whether Omens may run (false only when enforced, prepaid and nothing is available). */
@@ -31,17 +34,18 @@ export type ReceivingState = 'ok' | 'grace' | 'held';
 export type AutoRechargeState = 'off' | 'on' | 'pending' | 'failed' | 'capped';
 export interface AutoRechargeSettings { enabled: boolean; thresholdCents: number; amountCents: number; monthlyCapCents: number }
 
+export interface FreeAllowance { limit: number; used: number; left: number }
 export interface BillingSummary {
   enforcement: Enforcement;
   mode: AccountMode;
   state: { sending: SendingState; receiving: ReceivingState; autoRecharge: AutoRechargeState };
   balance: { paid: string; promo: string; unsettled: string; available: string } | null;
-  free: { month: string; emails: { limit: number; used: number; left: number }; storage: { limitBytes: number; agedBytes: string } };
+  free: { month: string; emails: FreeAllowance; sent: FreeAllowance; received: FreeAllowance | null; storage: { limitBytes: number; agedBytes: string } };
   monthToDate: { cost: string } | null;
   grace: { unpaidSince: string | null; receiveHoldAt: string | null; writeOffAt: string | null };
   autoRecharge: (AutoRechargeSettings & { monthTotalCents: number; disabledReason: string | null; pending: boolean }) | null;
   paymentMethod: { brand: string; last4: string; expMonth: number; expYear: number } | null;
-  prices: { emailPerThousand: string; omenPerThousand: string; storagePerGbMonth: string; freeEmails: number; freeStorageBytes: number; topUpMinCents: number; currency: 'USD' };
+  prices: { emailPerThousand: string; omenPerThousand: string; storagePerGbMonth: string; freeEmails: number; freeSentEmails: number; freeReceivedEmails: number; freeStorageBytes: number; topUpMinCents: number; currency: 'USD' };
   topUpUrl: string;
 }
 

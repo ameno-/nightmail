@@ -2467,7 +2467,7 @@ export const releaseSenderStanding = <ThrowOnError extends boolean = false>(opti
 /**
  * Plan, pricing and sending limits
  *
- * Hosted only. Pricing and whether billing charges yet, this month's sent and received counts against the combined free allowance (received only for credentials that may read all received mail), and the rolling daily sending limit with the steps it grows through. Workspace-wide: keys restricted to domains get 403. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results.
+ * Hosted only. Pricing and whether billing charges yet, this month's sent and received counts against their free allowances, 3,000 each, counted separately (received only for credentials that may read all received mail), and the rolling daily sending limit with the steps it grows through. Workspace-wide: keys restricted to domains get 403. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results.
  */
 export const getUsage = <ThrowOnError extends boolean = false>(options?: Options<GetUsageData, ThrowOnError>): RequestResult<GetUsageResponses, GetUsageErrors, ThrowOnError> => (options?.client ?? client).get<GetUsageResponses, GetUsageErrors, ThrowOnError>({
     security: [
@@ -5653,7 +5653,7 @@ export const getSupportAudienceHealth = <ThrowOnError extends boolean = false>(o
 /**
  * Balance, free allowance and billing state
  *
- * Hosted only. The prepaid balance, this month’s free allowance and cost, whether sending or receiving is paused for an empty balance, auto-recharge and the saved card, and the prices. Amounts are null unless the caller is an owner or admin session, or a manage key or grant. Keys restricted to domains get 403.
+ * Hosted only. The prepaid balance, this month’s free allowances (sent and received, counted separately) and cost, whether sending or receiving is paused for an empty balance, auto-recharge and the saved card, and the prices. Amounts are null unless the caller is an owner or admin session, or a manage key or grant. Keys restricted to domains get 403.
  */
 export const getBilling = <ThrowOnError extends boolean = false>(options?: Options<GetBillingData, ThrowOnError>): RequestResult<GetBillingResponses, GetBillingErrors, ThrowOnError> => (options?.client ?? client).get<GetBillingResponses, GetBillingErrors, ThrowOnError>({
     security: [

@@ -20,8 +20,12 @@ import { productName } from '../brand.js';
 // Stripe itself is package B (stripe.ts); these handlers only authorize, validate and shape.
 
 const MicroCents = MicroCentsJson;
+const FreeAllowance = z.object({ limit: z.number().int(), used: z.number().int().describe('Used this month, settled and unsettled.'), left: z.number().int() });
 const Prices = z.object({ emailPerThousand: z.string().describe('USD per 1,000 emails, sent (per recipient) or received (per message).'), omenPerThousand: z.string(), storagePerGbMonth: z.string().describe('USD per GB-month for received mail older than 90 days, beyond the free GB.'),
-  freeEmails: z.number().int(), freeStorageBytes: z.number().int(), topUpMinCents: z.number().int(), currency: z.literal('USD') });
+  freeEmails: z.number().int().describe('Free emails each calendar month (UTC) in each direction, counted separately (freeSentEmails, freeReceivedEmails).'),
+  freeSentEmails: z.number().int().describe('Sent emails (each recipient) free each calendar month (UTC).'),
+  freeReceivedEmails: z.number().int().describe('Received messages free each calendar month (UTC), separate from the sent allowance.'),
+  freeStorageBytes: z.number().int(), topUpMinCents: z.number().int(), currency: z.literal('USD') });
 export const BillingSummarySchema = z.object({
   enforcement: z.enum(['off', 'shadow', 'enforce']).describe('off: nothing is metered for billing. shadow: usage is recorded and priced but nothing is charged. enforce: usage is taken from the balance hourly.'),
   mode: z.enum(['prepaid', 'invoiced', 'exempt']),
@@ -32,7 +36,11 @@ export const BillingSummarySchema = z.object({
   }),
   balance: z.object({ paid: MicroCents, promo: MicroCents.describe('Promotional credit: spent first, never refunded.'), unsettled: MicroCents.describe('Usage not yet taken from the balance (settled hourly).'), available: MicroCents.describe('paid + promo − unsettled.') })
     .nullable().describe('Null unless the caller is an owner or admin session, or a manage key or grant.'),
-  free: z.object({ month: z.string().regex(/^\d{4}-\d{2}$/), emails: z.object({ limit: z.number().int(), used: z.number().int(), left: z.number().int() }), storage: z.object({ limitBytes: z.number().int(), agedBytes: z.string().describe('Bytes of received mail older than 90 days.') }) }),
+  free: z.object({ month: z.string().regex(/^\d{4}-\d{2}$/),
+    emails: FreeAllowance.describe('The sent allowance (same as sent), kept for older clients. Each direction has its own allowance: see sent and received.'),
+    sent: FreeAllowance.describe('Free sent emails this month, each recipient counting once. Sends beyond it are charged even while received mail is still free.'),
+    received: FreeAllowance.nullable().describe('Free received messages this month, separate from the sent allowance. Null unless the credential may read every received message (owners, admins and manage credentials), as in GET /v1/usage.'),
+    storage: z.object({ limitBytes: z.number().int(), agedBytes: z.string().describe('Bytes of received mail older than 90 days.') }) }),
   monthToDate: z.object({ cost: MicroCents.describe('This month’s usage cost after the free allowance, settled and unsettled, charged or not.') }).nullable(),
   grace: z.object({ unpaidSince: z.string().nullable(), receiveHoldAt: z.string().nullable(), writeOffAt: z.string().nullable() }),
   autoRecharge: z.object({ enabled: z.boolean(), thresholdCents: z.number().int(), amountCents: z.number().int(), monthlyCapCents: z.number().int(), monthTotalCents: z.number().int(),
@@ -76,8 +84,8 @@ function moneySession(c: Ctx) {
   return { ...session, actor: `user:${session.userId}` };
 }
 /** The summary plus, for a free workspace, when its free plan ends (one more statement, only then). */
-async function summary(c: Ctx, workspaceId: string, amounts: boolean) {
-  const b = await readBilling(c.env.db, workspaceId, { amounts, publicUrl: c.env.config.publicUrl.replace(/\/$/, '') });
+async function summary(c: Ctx, workspaceId: string, view: { amounts: boolean; received: boolean }) {
+  const b = await readBilling(c.env.db, workspaceId, { ...view, publicUrl: c.env.config.publicUrl.replace(/\/$/, '') });
   if (b.mode !== 'exempt') return { ...b, freePlan: null };
   const { rows: [row] } = await c.env.db.execute<{ until: string | null }>(sql`SELECT to_char((billing_free_state(${workspaceId})->>'until')::timestamptz AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS until`);
   return { ...b, freePlan: { until: row?.until ?? null } };
@@ -97,6 +105,7 @@ function period(from: unknown, to: unknown) {
 function describe(kind: LedgerKind, detail: Record<string, unknown>) {
   switch (kind) {
     case 'usage': {
+      if (detail.freeSplit) return `Free allowance now 3,000 sent and 3,000 received a month: this month’s difference returned${detail.charged === false ? ' (not charged)' : ''}`;
       const meters = (typeof detail.meters === 'object' && detail.meters ? detail.meters : detail) as Record<string, MeterDetail | undefined>;
       const q = (m: string) => Number(meters[m]?.quantity ?? 0);
       const parts = [q('send') + q('receive') ? `${count(q('send') + q('receive'))} emails` : '', q('omen') ? `${count(q('omen'))} Omens` : '', q('storage') ? 'stored mail' : '',
@@ -134,10 +143,10 @@ async function ledgerPage(db: DbExecutor, workspaceId: string, cursor: string | 
 
 export function registerBilling(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/billing', operationId: 'getBilling', tags: ['Billing'], security, summary: 'Balance, free allowance and billing state',
-    description: 'Hosted only. The prepaid balance, this month’s free allowance and cost, whether sending or receiving is paused for an empty balance, auto-recharge and the saved card, and the prices. Amounts are null unless the caller is an owner or admin session, or a manage key or grant. Keys restricted to domains get 403.',
+    description: 'Hosted only. The prepaid balance, this month’s free allowances (sent and received, counted separately) and cost, whether sending or receiving is paused for an empty balance, auto-recharge and the saved card, and the prices. Amounts are null unless the caller is an owner or admin session, or a manage key or grant. Keys restricted to domains get 403.',
     responses: { 200: response(BillingSummarySchema), ...errors } }), async c => {
     const a = billingActor(c, 'read');
-    return c.json(await summary(c, a.workspaceId, seesMoney(a)), 200);
+    return c.json(await summary(c, a.workspaceId, { amounts: seesMoney(a), received: actorMailAccess(a)?.admin === true }), 200);
   });
 
   app.openapi(createRoute({ method: 'get', path: '/v1/billing/usage', operationId: 'getBillingUsage', tags: ['Billing'], security, summary: 'Metered usage by day, hour or month',
@@ -223,7 +232,7 @@ export function registerBilling(app: App) {
     request: { body: json(AutoRecharge) }, responses: { 200: response(BillingSummarySchema), ...errors } }), async c => {
     const session = moneySession(c);
     await setAutoRecharge(c.env, session.workspaceId, c.req.valid('json'));
-    return c.json(await summary(c, session.workspaceId, true), 200);
+    return c.json(await summary(c, session.workspaceId, { amounts: true, received: true }), 200);
   });
 
   app.openapi(createRoute({ method: 'post', path: '/v1/billing/payment-method', operationId: 'createBillingCardSetup', tags: ['Billing'], security, summary: 'Save or replace the card',
@@ -239,7 +248,7 @@ export function registerBilling(app: App) {
     responses: { 200: response(BillingSummarySchema), ...errors } }), async c => {
     const session = moneySession(c);
     await removePaymentMethod(c.env, session.workspaceId);
-    return c.json(await summary(c, session.workspaceId, true), 200);
+    return c.json(await summary(c, session.workspaceId, { amounts: true, received: true }), 200);
   });
 
   registerOperatorBilling(app);

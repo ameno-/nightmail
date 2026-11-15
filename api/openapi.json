@@ -7240,7 +7240,15 @@
               },
               "freeEmails": {
                 "type": "integer",
-                "description": "Emails included free each calendar month (UTC), sent and received combined."
+                "description": "Emails included free each calendar month (UTC) in each direction, counted separately: this many sent and this many received (freeSentEmails, freeReceivedEmails). Sends beyond it are charged even while received mail is still free, and the other way round."
+              },
+              "freeSentEmails": {
+                "type": "integer",
+                "description": "Sent emails (each recipient) included free each calendar month (UTC)."
+              },
+              "freeReceivedEmails": {
+                "type": "integer",
+                "description": "Received messages included free each calendar month (UTC), separate from the sent allowance."
               },
               "freeStorageBytes": {
                 "type": "integer",
@@ -7251,6 +7259,8 @@
               "currency",
               "perThousand",
               "freeEmails",
+              "freeSentEmails",
+              "freeReceivedEmails",
               "freeStorageBytes"
             ]
           },
@@ -18653,7 +18663,8 @@
                     "type": "integer"
                   },
                   "used": {
-                    "type": "integer"
+                    "type": "integer",
+                    "description": "Used this month, settled and unsettled."
                   },
                   "left": {
                     "type": "integer"
@@ -18663,7 +18674,53 @@
                   "limit",
                   "used",
                   "left"
-                ]
+                ],
+                "description": "The sent allowance (same as sent), kept for older clients. Each direction has its own allowance: see sent and received."
+              },
+              "sent": {
+                "type": "object",
+                "properties": {
+                  "limit": {
+                    "type": "integer"
+                  },
+                  "used": {
+                    "type": "integer",
+                    "description": "Used this month, settled and unsettled."
+                  },
+                  "left": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "limit",
+                  "used",
+                  "left"
+                ],
+                "description": "Free sent emails this month, each recipient counting once. Sends beyond it are charged even while received mail is still free."
+              },
+              "received": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "limit": {
+                    "type": "integer"
+                  },
+                  "used": {
+                    "type": "integer",
+                    "description": "Used this month, settled and unsettled."
+                  },
+                  "left": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "limit",
+                  "used",
+                  "left"
+                ],
+                "description": "Free received messages this month, separate from the sent allowance. Null unless the credential may read every received message (owners, admins and manage credentials), as in GET /v1/usage."
               },
               "storage": {
                 "type": "object",
@@ -18685,6 +18742,8 @@
             "required": [
               "month",
               "emails",
+              "sent",
+              "received",
               "storage"
             ]
           },
@@ -18820,7 +18879,16 @@
                 "description": "USD per GB-month for received mail older than 90 days, beyond the free GB."
               },
               "freeEmails": {
-                "type": "integer"
+                "type": "integer",
+                "description": "Free emails each calendar month (UTC) in each direction, counted separately (freeSentEmails, freeReceivedEmails)."
+              },
+              "freeSentEmails": {
+                "type": "integer",
+                "description": "Sent emails (each recipient) free each calendar month (UTC)."
+              },
+              "freeReceivedEmails": {
+                "type": "integer",
+                "description": "Received messages free each calendar month (UTC), separate from the sent allowance."
               },
               "freeStorageBytes": {
                 "type": "integer"
@@ -18840,6 +18908,8 @@
               "omenPerThousand",
               "storagePerGbMonth",
               "freeEmails",
+              "freeSentEmails",
+              "freeReceivedEmails",
               "freeStorageBytes",
               "topUpMinCents",
               "currency"
@@ -39558,7 +39628,7 @@
           }
         ],
         "summary": "Plan, pricing and sending limits",
-        "description": "Hosted only. Pricing and whether billing charges yet, this month's sent and received counts against the combined free allowance (received only for credentials that may read all received mail), and the rolling daily sending limit with the steps it grows through. Workspace-wide: keys restricted to domains get 403. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results.",
+        "description": "Hosted only. Pricing and whether billing charges yet, this month's sent and received counts against their free allowances, 3,000 each, counted separately (received only for credentials that may read all received mail), and the rolling daily sending limit with the steps it grows through. Workspace-wide: keys restricted to domains get 403. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results.",
         "responses": {
           "200": {
             "description": "Success",
@@ -69081,7 +69151,7 @@
           }
         ],
         "summary": "Balance, free allowance and billing state",
-        "description": "Hosted only. The prepaid balance, this month’s free allowance and cost, whether sending or receiving is paused for an empty balance, auto-recharge and the saved card, and the prices. Amounts are null unless the caller is an owner or admin session, or a manage key or grant. Keys restricted to domains get 403.",
+        "description": "Hosted only. The prepaid balance, this month’s free allowances (sent and received, counted separately) and cost, whether sending or receiving is paused for an empty balance, auto-recharge and the saved card, and the prices. Amounts are null unless the caller is an owner or admin session, or a manage key or grant. Keys restricted to domains get 403.",
         "responses": {
           "200": {
             "description": "Success",

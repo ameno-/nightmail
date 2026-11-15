@@ -15,6 +15,8 @@ import { productName } from '../../../../api/src/brand'
 type RowProps = { title: ReactNode; hint?: ReactNode; children: ReactNode }
 const errorText = (error: unknown) => error instanceof ApiError ? error.text : error instanceof Error ? error.message : 'Something went wrong. Try again.'
 const cardLabel = (card: { brand: string; last4: string }) => `${cardBrand(card.brand)}\u00a0••••\u00a0${card.last4}`
+/** "1,200 of 3,000 free sends · 40 of 3,000 free received": each direction has its own allowance. */
+const freeUsed = (b: BillingSummary) => [`${number(b.free.sent.used)} of ${number(b.free.sent.limit)} free sends`, b.free.received && `${number(b.free.received.used)} of ${number(b.free.received.limit)} free received`].filter(Boolean).join(' · ')
 const final = (payment: Payment | undefined) => !!payment && !['created', 'pending', 'requires_action'].includes(payment.status)
 
 /** Every billing read refreshes together after money moves, and the session's banner state with them. */
@@ -50,7 +52,7 @@ export function BillingSection({ row: Row }: { row: (props: RowProps) => ReactNo
         <span className="billing-balance__amount">{b?.balance ? usd(total(b.balance)) : <Skeleton width={136} height={36} />}</span>
         <span className="muted billing-balance__detail">{b?.balance ? balanceDetail(b.balance) : <Skeleton width={220} height={16} />}</span>
       </div>
-      <Row title="This month" hint={b ? `${number(b.free.emails.used)} of ${number(b.free.emails.limit)} free emails used` : 'Usage after the free emails'}>{b?.monthToDate ? usd(b.monthToDate.cost) : <Skeleton width={64} height={20} />}</Row>
+      <Row title="This month" hint={b ? freeUsed(b) : 'Usage after the free emails'}>{b?.monthToDate ? usd(b.monthToDate.cost) : <Skeleton width={64} height={20} />}</Row>
       <Row title="Payment method" hint="For auto-recharge and one-click top-ups"><CardControl summary={b} /></Row>
     </div>
     <AutoRecharge summary={b} Row={Row} />
@@ -71,7 +73,7 @@ function FreePlan({ summary: b, Row }: { summary: BillingSummary | undefined; Ro
         <span className="billing-balance__amount billing-balance__amount--plan">Free plan</span>
         <span className="muted billing-balance__detail">{b ? `Courtesy of Anomaly · ${b.freePlan?.until ? `until ${fullDay(b.freePlan.until)}` : 'no end date'}` : <Skeleton width={220} height={16} />}</span>
       </div>
-      <Row title="This month" hint={b ? `${number(b.free.emails.used)} of ${number(b.free.emails.limit)} free emails used` : 'Usage after the free emails'}>{b?.monthToDate ? <span>{usd(b.monthToDate.cost)} <span className="muted">not charged</span></span> : <Skeleton width={120} height={20} />}</Row>
+      <Row title="This month" hint={b ? freeUsed(b) : 'Usage after the free emails'}>{b?.monthToDate ? <span>{usd(b.monthToDate.cost)} <span className="muted">not charged</span></span> : <Skeleton width={120} height={20} />}</Row>
     </div>
     <History />
   </>
