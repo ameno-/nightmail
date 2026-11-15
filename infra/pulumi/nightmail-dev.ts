@@ -7,6 +7,14 @@ const tag=(purpose:string)=>({'nightmail:installation-id':'nightmail:pool','nigh
 
 export function prepareDevMail(ohio:aws.Provider,va:aws.Provider,account:string,boundary:string,policies:Record<string,unknown>,active:boolean) {
   if (pulumi.getStack()!=='dev'||account!=='905840579680'||boundary!==`arn:aws:iam::${account}:policy/bane-runtime-boundary`) throw Error('Expected the bounded dev stage');
+  mailPath(ohio,va,account,active);
+  return prepareRuntime(va,account,boundary,policies,active);
+}
+
+// Authorize only the same dedicated stage and the existing operator-managed boundary.
+export function prepareRuntime(va:aws.Provider,account:string,boundary:string,policies:Record<string,unknown>,issueKey:boolean) {
+  const expected=({dev:'905840579680',production:'009882681002'} as Record<string,string>)[pulumi.getStack()];
+  if(!expected||account!==expected||boundary!==`arn:aws:iam::${account}:policy/bane-runtime-boundary`) throw Error('Runtime must use its dedicated account and permissions boundary');
   const name='nightmail-runtime';
   const user=new aws.iam.User(name,{name,path:'/',permissionsBoundary:boundary,tags:tag('hosted-runtime')},{provider:va,protect:true});
   for(const [old,doc] of Object.entries(policies)) {
@@ -19,8 +27,7 @@ export function prepareDevMail(ohio:aws.Provider,va:aws.Provider,account:string,
     const managed=new aws.iam.Policy(name,{name,policy},{provider:va,protect:true});
     new aws.iam.UserPolicyAttachment(name,{user:user.name,policyArn:managed.arn},{provider:va,protect:true});
   }
-  mailPath(ohio,va,account,active);
-  return active ? new aws.iam.AccessKey('nightmail-runtime-key',{user:user.name},{provider:va,protect:true}) : undefined;
+  return issueKey ? new aws.iam.AccessKey('nightmail-runtime-key',{user:user.name},{provider:va,protect:true}) : undefined;
 }
 
 // Independent of dev activation: no runtime key, subscription, event destination or route switch.
@@ -62,7 +69,10 @@ function mailPath(ohio:aws.Provider,va:aws.Provider,account:string,active:boolea
       const dlqName=name+'-dead-letters';
       const queue=new aws.sqs.Queue(dlqName,{name:dlqName,sqsManagedSseEnabled:true,messageRetentionSeconds:86400*(inbound?3:14),tags:tag('dead-letters')},opts);
       new aws.sqs.QueuePolicy(dlqName+'-policy',{queueUrl:queue.url,policy:pulumi.jsonStringify({Version:'2012-10-17',Statement:[{Effect:'Allow',Principal:{Service:'sns.amazonaws.com'},Action:'sqs:SendMessage',Resource:queue.arn,Condition:{ArnEquals:{'aws:SourceArn':topic.arn},StringEquals:{'aws:SourceAccount':account}}}]})},opts);
-      new aws.cloudwatch.MetricAlarm(dlqName,{...deadLetterAlarm(account,region,dlqName,queue.name,`arn:aws:sns:${region}:${account}:nightmail-alerts`),alarmActions:[pager.arn]},opts);
+      // The existing production topic has the confirmed pager. Keep it until the
+      // renamed topic has independently confirmed its operator subscriptions.
+      const alarmActions=account==='009882681002'?[pager.arn,`arn:aws:sns:${region}:${account}:bane-alerts`]:[pager.arn];
+      new aws.cloudwatch.MetricAlarm(dlqName,{...deadLetterAlarm(account,region,dlqName,queue.name,`arn:aws:sns:${region}:${account}:nightmail-alerts`),alarmActions},opts);
     }
   }
   const set=new aws.ses.ReceiptRuleSet('nightmail-inbound',{ruleSetName:'nightmail-inbound'},keep);
