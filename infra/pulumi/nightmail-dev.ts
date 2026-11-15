@@ -3,12 +3,10 @@ import * as pulumi from '@pulumi/pulumi';
 import {bucketPolicy, deliveryPolicy, feedbackPolicy, FEEDBACK_EVENTS, inboundPolicy, lifecycleRules, receiptRule} from '../../api/src/mail-controls.js';
 import {deadLetterAlarm} from './receiving-alarm.js';
 
-/** Prepare a second, private mail path. Nothing here publishes events, creates a live
- * subscription, sets the active receipt set, changes an identity or issues an access key. */
+const tag=(purpose:string)=>({'nightmail:installation-id':'nightmail:pool','nightmail:owner':'nightmail','nightmail:purpose':purpose});
+
 export function prepareDevMail(ohio:aws.Provider,va:aws.Provider,account:string,boundary:string,policies:Record<string,unknown>,active:boolean) {
   if (pulumi.getStack()!=='dev'||account!=='905840579680'||boundary!==`arn:aws:iam::${account}:policy/bane-runtime-boundary`) throw Error('Expected the bounded dev stage');
-  const keep={provider:ohio,protect:true};
-  const tag=(purpose:string)=>({'nightmail:installation-id':'nightmail:pool','nightmail:owner':'nightmail','nightmail:purpose':purpose});
   const name='nightmail-runtime';
   const user=new aws.iam.User(name,{name,path:'/',permissionsBoundary:boundary,tags:tag('hosted-runtime')},{provider:va,protect:true});
   for(const [old,doc] of Object.entries(policies)) {
@@ -21,6 +19,18 @@ export function prepareDevMail(ohio:aws.Provider,va:aws.Provider,account:string,
     const managed=new aws.iam.Policy(name,{name,policy},{provider:va,protect:true});
     new aws.iam.UserPolicyAttachment(name,{user:user.name,policyArn:managed.arn},{provider:va,protect:true});
   }
+  mailPath(ohio,va,account,active);
+  return active ? new aws.iam.AccessKey('nightmail-runtime-key',{user:user.name},{provider:va,protect:true}) : undefined;
+}
+
+// Independent of dev activation: no runtime key, subscription, event destination or route switch.
+export function prepareProductionMail(ohio:aws.Provider,va:aws.Provider,account:string) {
+  if (pulumi.getStack()!=='production'||account!=='009882681002') throw Error('Expected the dedicated production account');
+  mailPath(ohio,va,account,false);
+}
+
+function mailPath(ohio:aws.Provider,va:aws.Provider,account:string,active:boolean) {
+  const keep={provider:ohio,protect:true};
   const bucketName=`nightmail-${account}-mail-us-east-2`;
   const bucket=new aws.s3.Bucket('nightmail-mail',{bucket:bucketName,tags:tag('mailbox-inbound')},keep);
   const block=new aws.s3.BucketPublicAccessBlock('nightmail-mail-private',{bucket:bucket.id,blockPublicAcls:true,ignorePublicAcls:true,blockPublicPolicy:true,restrictPublicBuckets:true},keep);
@@ -55,5 +65,4 @@ export function prepareDevMail(ohio:aws.Provider,va:aws.Provider,account:string,
   const rule=receiptRule('nightmail-inbound-all',[],{bucket:bucketName,topicArn:`arn:aws:sns:us-east-2:${account}:nightmail-inbound`});
   new aws.ses.ReceiptRule('nightmail-inbound-all',{ruleSetName:set.ruleSetName,name:rule.Name,enabled:rule.Enabled,scanEnabled:rule.ScanEnabled,tlsPolicy:rule.TlsPolicy,
     s3Actions:[{position:1,bucketName:bucket.bucket,objectKeyPrefix:rule.Actions[0].S3Action.ObjectKeyPrefix,topicArn:inbound.arn}]},{...keep,dependsOn:[policy]});
-  return active ? new aws.iam.AccessKey('nightmail-runtime-key',{user:user.name},{provider:va,protect:true}) : undefined;
 }

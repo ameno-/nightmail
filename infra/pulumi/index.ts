@@ -4,7 +4,7 @@ import * as cfV5 from "@pulumi/cloudflare-v5";
 import * as pulumi from "@pulumi/pulumi";
 import { render } from "../aws-shared/runtime-policies.mjs";
 import { mailGateway } from "./mail-gateway.js";
-import {prepareDevMail} from './nightmail-dev.js';
+import {prepareDevMail,prepareProductionMail} from './nightmail-dev.js';
 import { deadLetterAlarm, receivingAlarm } from './receiving-alarm.js';
 import { bucketPolicy, deliveryPolicy, feedbackPolicy, inboundPolicy, lifecycleRules, POOL_STREAMS, poolEventDestination, publicAccessBlock, receiptRule, redrivePolicy } from '../../api/src/mail-controls.js';
 
@@ -187,6 +187,7 @@ const user = new aws.iam.User(runtime, {
 
 const policies = render("--fresh", { account: stage.account, origin: stage.origin });
 const renamedKey = !production && config.getBoolean('prepareNightmailMail') ? prepareDevMail(ohio,iam,stage.account,config.require('permissionsBoundary'),policies,config.getBoolean('nightmailMailActive')===true) : undefined;
+if (production && config.getBoolean('prepareNightmailMail')) prepareProductionMail(ohio,iam,stage.account);
 const attachments = Object.entries(policies).map(([name, document]) => {
   const arn = `arn:aws:iam::${stage.account}:policy/${name}`;
   const policy = new aws.iam.Policy(name, { name, path: "/", policy: JSON.stringify(document) }, {...adopt(arn, iam),dependsOn:[route,...feedback,...destinations]});

@@ -1,4 +1,5 @@
 config:
+  bane:prepareNightmailMail: "true"
   bane:writeWorkerSecrets: "true"
   bane:publishDomainConnectKey: "false"
   bane:deployRoleArn: arn:aws:iam::009882681002:role/bane-deploy
