@@ -445,8 +445,9 @@
    ]
   },
   "Settings · plan & usage · phone": {
-   "score": 45,
+   "score": 48,
    "findings": [
+    "inert|# days after connecting sending, with at",
     "inert|## days after connecting sending, with a",
     "long-block|new workspaces start small so one mistak"
    ]
