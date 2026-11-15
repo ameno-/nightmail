@@ -29,6 +29,7 @@ export function mailGateway(stage: "dev" | "production", { account, cloudflareAc
   // The deploy reads the same committed flag: true binds the Worker's MAILGW_API_TOKEN (and fails
   // without it), false removes it. Tasks only run against a Worker that can authenticate them.
   const enabled = config.getBoolean("mailGatewayEnabled") ?? false;
+  if (green && stage === 'production' && (desired !== 0 || config.getBoolean('nightmailGatewayDns'))) throw new Error('The staged production gateway must have zero tasks and no published DNS');
   if (desired > 0 && !enabled) throw new Error("Set bane:mailGatewayEnabled to true before scaling bane:mailGatewayDesired above 0");
   const image = config.get(green ? 'nightmailGatewayImage' : 'mailGatewayImage');
   const repoUrl = `${account}.dkr.ecr.us-east-2.amazonaws.com/${name}`;
@@ -136,7 +137,7 @@ export function mailGateway(stage: "dev" | "production", { account, cloudflareAc
   }, { ...opts, dependsOn: [...listeners, executionAccess], customTimeouts: { update: "30m" } });
 
   const alarm = { namespace: "AWS/NetworkELB", comparisonOperator: "GreaterThanThreshold", treatMissingData: "notBreaching",
-    period: 60, evaluationPeriods: 2, alarmActions: [pager], tags };
+    period: 60, evaluationPeriods: 2, alarmActions: green && stage==='production' ? [pager,`arn:aws:sns:us-east-2:${account}:bane-alerts`] : [pager], tags };
   groups.forEach((group, i) => {
     const id = `${name}-unhealthy-${ports[i]}`;
     new aws.cloudwatch.MetricAlarm(id, { ...alarm, name: id, metricName: "UnHealthyHostCount", statistic: "Maximum", threshold: 0,

@@ -4,7 +4,7 @@ import * as cfV5 from "@pulumi/cloudflare-v5";
 import * as pulumi from "@pulumi/pulumi";
 import { render } from "../aws-shared/runtime-policies.mjs";
 import { mailGateway } from "./mail-gateway.js";
-import {prepareDevMail,prepareProductionMail} from './nightmail-dev.js';
+import {prepareDevMail,prepareProductionMail,prepareRuntime} from './nightmail-dev.js';
 import { deadLetterAlarm, receivingAlarm } from './receiving-alarm.js';
 import { bucketPolicy, deliveryPolicy, feedbackPolicy, inboundPolicy, lifecycleRules, POOL_STREAMS, poolEventDestination, publicAccessBlock, receiptRule, redrivePolicy } from '../../api/src/mail-controls.js';
 
@@ -188,6 +188,9 @@ const user = new aws.iam.User(runtime, {
 const policies = render("--fresh", { account: stage.account, origin: stage.origin });
 const renamedKey = !production && config.getBoolean('prepareNightmailMail') ? prepareDevMail(ohio,iam,stage.account,config.require('permissionsBoundary'),policies,config.getBoolean('nightmailMailActive')===true) : undefined;
 if (production && config.getBoolean('prepareNightmailMail')) prepareProductionMail(ohio,iam,stage.account);
+const standbyRuntime = production && config.getBoolean('stageNightmailRuntime');
+if (standbyRuntime && !writeWorkerSecrets) throw Error('Staged production runtime requires private Worker secret delivery');
+const standbyKey = standbyRuntime ? prepareRuntime(iam,stage.account,config.require('permissionsBoundary'),policies,true) : undefined;
 const attachments = Object.entries(policies).map(([name, document]) => {
   const arn = `arn:aws:iam::${stage.account}:policy/${name}`;
   const policy = new aws.iam.Policy(name, { name, path: "/", policy: JSON.stringify(document) }, {...adopt(arn, iam),dependsOn:[route,...feedback,...destinations]});
@@ -215,6 +218,10 @@ if (writeWorkerSecrets) {
   const target = { accountId: cloudflareAccountId, scriptName: stage.worker };
   new cfV5.WorkersSecret("worker-runtime-credentials", {
     ...target, name: "AWS_RUNTIME_CREDENTIALS", secretText: pulumi.secret(pulumi.jsonStringify({ accessKeyId: key.id, secretAccessKey: key.secret })),
+  }, { provider, retainOnDelete: true });
+  if (standbyKey) new cfV5.WorkersSecret('nightmail-production-runtime-credentials', {
+    accountId: cloudflareAccountId, scriptName: 'nightmail-production', name: 'AWS_RUNTIME_CREDENTIALS',
+    secretText: pulumi.secret(pulumi.jsonStringify({accessKeyId:standbyKey.id,secretAccessKey:standbyKey.secret})),
   }, { provider, retainOnDelete: true });
   if (nightmailCloud) {
     // Both scripts need the old runtime credential during this CF-only switch. Never
