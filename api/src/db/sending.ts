@@ -97,7 +97,7 @@ export const campaignReviews = pgTable('sending_campaign_reviews', {
   // Version of the per-recipient renderer (interpolation, preheader, footer) that must reproduce this review's emails.
   rendererVersion: integer('renderer_version').notNull().default(1),
   rendered: jsonb('rendered').$type<{ html?: string; text?: string }>(),
-  // Hosted screening state and its classifier budget, charged before each request (migration 310, src/sending.ts campaignVerdicts).
+  // Hosted screening state and its classifier budget, charged before each request (migration 312, src/sending.ts campaignVerdicts).
   screen: jsonb('screen').$type<CampaignScreen>(), screenBudget: integer('screen_budget'), screenCharged: integer('screen_charged').notNull().default(0),
 }, t => [index('sending_review_campaign').on(t.workspaceId, t.campaignId)]);
 // One verdict per campaign and copy as delivered (src/screen.ts copyKey), shared by every recipient whose copy is the same.
