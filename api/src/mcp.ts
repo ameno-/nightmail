@@ -209,7 +209,7 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Mc
       try { inspect(data); }
       catch { return fail('INVALID_API_RESPONSE', 'API response exceeds structural limits. The operation may already have completed; reconcile before retrying.'); }
       apiRequestId ??= object(data) && object(data.error) && typeof data.error.requestId === 'string' ? data.error.requestId : null;
-      if (!response.ok) throw new ApiFailure({ status, requestId: apiRequestId, error: object(data) && object(data.error) ? data.error : { code: 'API_ERROR', message: 'API request failed.' } });
+      if (!response.ok && status !== 303) throw new ApiFailure({ status, requestId: apiRequestId, error: object(data) && object(data.error) ? data.error : { code: 'API_ERROR', message: 'API request failed.' } });
       return { status, requestId: apiRequestId, response: data };
   }
   function resolveAction(resource: string, action: unknown) {

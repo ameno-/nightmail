@@ -258,7 +258,8 @@ function successSchemas(spec: ObjectValue, operation: ObjectValue, pollPage: boo
   const variants: Tool['inputSchema'][] = [];
   const validators = new Map<number, (value: unknown) => boolean>();
   for (const [status, definition] of Object.entries(operation.responses)) {
-    if (!/^2\d\d$/.test(status)) continue;
+    // A 303 with a JSON body (a stored preview's link) is a result too: the tool returns the link, never the bytes behind it.
+    if (!/^2\d\d$/.test(status) && !(status === '303' && reference(spec, definition as ObjectValue).content?.['application/json'])) continue;
     const body = reference(spec, definition as ObjectValue).content?.['application/json']?.schema;
     if (!object(body)) invalid('Expected a JSON object response.');
     let root = reference(spec, body);

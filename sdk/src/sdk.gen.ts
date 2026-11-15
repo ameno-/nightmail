@@ -1007,7 +1007,7 @@ export const previewCampaignTemplate = <ThrowOnError extends boolean = false>(op
 });
 
 /**
- * Renders a template draft or published revision as a full-page PNG. Inline template assets are embedded, so agents can verify the result without browser automation.
+ * Renders a template draft or published revision as a full-page PNG. Inline template assets are embedded, so agents can verify the result without browser automation. Answers 303 See Other: Location (also url in the body) serves the result as JSON { data, mimeType } for five minutes without a credential, so HTTP clients that follow redirects receive it as before. Inline images may total about 1.5 MiB, counted once per reference (413 PREVIEW_TOO_LARGE above); while the server renders other previews it answers 429 PREVIEW_BUSY with Retry-After. HEAD is refused with 405: it would render a preview it cannot return.
  */
 export const renderCampaignTemplatePreviewImage = <ThrowOnError extends boolean = false>(options: Options<RenderCampaignTemplatePreviewImageData, ThrowOnError>): RequestResult<RenderCampaignTemplatePreviewImageResponses, RenderCampaignTemplatePreviewImageErrors, ThrowOnError> => (options.client ?? client).get<RenderCampaignTemplatePreviewImageResponses, RenderCampaignTemplatePreviewImageErrors, ThrowOnError>({
     security: [
@@ -1621,7 +1621,7 @@ export const previewCampaignAudience = <ThrowOnError extends boolean = false>(op
 });
 
 /**
- * Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer.
+ * Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer. Answers 303 See Other: Location (also url in the body) serves the result as JSON { data, mimeType } for five minutes without a credential, so HTTP clients that follow redirects receive it as before. Inline images may total about 1.5 MiB, counted once per reference (413 PREVIEW_TOO_LARGE above); while the server renders other previews it answers 429 PREVIEW_BUSY with Retry-After. HEAD is refused with 405: it would render a preview it cannot return.
  */
 export const renderCampaignPreviewImage = <ThrowOnError extends boolean = false>(options: Options<RenderCampaignPreviewImageData, ThrowOnError>): RequestResult<RenderCampaignPreviewImageResponses, RenderCampaignPreviewImageErrors, ThrowOnError> => (options.client ?? client).get<RenderCampaignPreviewImageResponses, RenderCampaignPreviewImageErrors, ThrowOnError>({
     security: [

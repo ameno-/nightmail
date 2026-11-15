@@ -4097,6 +4097,51 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  // Sweep #276: a self-hosted dispatcher read MCP grants once per prepared batch, so a grant revoked while an
+  // earlier claim group was sending still dispatched the later groups.
+  test('single-tenant dispatch rereads an MCP grant in each claim: one revoked during an earlier group stops the next', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const { runDispatcher } = await import('./src/dispatcher.js');
+      assert.equal(runtime.config.multiTenant, false);
+      const grant = 'mcp_' + (await oauthGrant(t, db, writableScope, request)).consentId, ids: string[] = [];
+      for (let i = 0; i < 2; i++) ids.push(ok(await local('POST', '/v1/emails/send', mail()), 202).id);
+      await db.query('UPDATE sending_emails SET actor_key_id=$1 WHERE id=ANY($2)', [grant, ids]);
+      // The grant is revoked right after the first group's claim, before the second group is claimed.
+      const query = db.query as (...args: unknown[]) => Promise<unknown>; let claims = 0;
+      t.mock.method(db, 'query', async function (this: pg.Client, ...args: unknown[]) {
+        const result = await query.apply(this, args);
+        const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
+        if (text.includes('mcp_allowed boolean') && ++claims === 1) await query.call(this, 'UPDATE nightmail_resource_grants SET revoked=true WHERE id=$1', [grant]);
+        return result;
+      } as typeof db.query);
+      await runDispatcher(runtime, { region: REGION, sendConcurrency: 1 });
+      assert.equal(claims, 2, 'One claim group per email.');
+      const rows = (await db.query('SELECT status,error_code FROM sending_emails WHERE id=ANY($1)', [ids])).rows.map(row => `${row.status}:${row.error_code}`).sort();
+      assert.deepEqual(rows, ['accepted:null', 'canceled:ORIGIN_KEY_REVOKED']);
+    });
+  });
+
+  // Rechecks of #295: an MCP exchange copied a preview's bytes several times and held them in its response. The tool
+  // now returns the stored preview's link, so none of the screenshot passes through MCP, and MCP has no size cap of its own.
+  test('MCP preview tools return the stored preview\'s link, never its bytes', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request, fetch }) => {
+      const { browserImageRenderer } = await import('./src/adapters/browser-rendering.js');
+      const MiB = 1024 * 1024, { token } = await oauthGrant(t, db, writableScope, request), objects = new Map<string, Uint8Array>();
+      runtime.storage = { async put(key, body) { objects.set(key, body); }, async get(key) { const body = objects.get(key); return body ? { body, contentType: 'application/json' } : null; }, async delete(key) { objects.delete(key); } };
+      const png = Buffer.alloc(3 * MiB, 9);
+      runtime.renderHtmlImage = browserImageRenderer({ async quickAction() { return new Response(png, { headers: { 'content-length': String(png.byteLength) } }); } } as never);
+      const template = ok(await local('POST', '/v1/templates', { name: 'MCP preview' }), 201);
+      const reply = await fetch(new Request(`${PUBLIC_ORIGIN}/mcp?codemode=true`, { method: 'POST', headers: { ...rpcHeaders, 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'renderCampaignTemplatePreviewImage', arguments: { templateId: template.id } } }) }));
+      const text = await reply.text(), result = (JSON.parse(text) as Json).result;
+      assert.equal(result.isError, false, text.slice(0, 500));
+      assert.ok(text.length < 4096, 'The MCP response carries the link, not the screenshot.');
+      assert.equal(result.structuredContent.mimeType, 'image/png'); assert.ok(Date.parse(result.structuredContent.expiresAt) > Date.now());
+      const served = await (await fetch(new Request(result.structuredContent.url))).json() as Json;
+      assert.ok(Buffer.from(served.data, 'base64').equals(png)); assert.deepEqual([served.revision, served.published], [template.revision, false]);
+    });
+  });
+
   test('a sending webhook an approval sets up, changes or rotates the secret of follows the approval', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
       const tools = (bearer: string) => async (name: string, args: Json) => { const r = ok(await request('POST', '/mcp?codemode=true', bearer, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, rpcHeaders)).result; assert.equal(r.isError, false, redact(r)); return r.structuredContent; };
@@ -5139,11 +5184,12 @@ describe('Hosted MCP OAuth and tools', () => {
       ok(await local('PATCH',`/v1/templates/${template.id}`,{revision:template.revision,draft:{...template.draft,html:'<p>Scope fixture</p>'}}));
       let renders=0;
       runtime.renderHtmlImage=async()=>{renders++;return {data:Uint8Array.of(1),mimeType:'image/png'};};
+      const stored=new Map<string,Uint8Array>();runtime.storage={async put(key,body){stored.set(key,body);},async get(key){const body=stored.get(key);return body?{body,contentType:'application/json'}:null;},async delete(key){stored.delete(key);}};
       for (const [grant,visual] of [[reader,false],[manager,true]] as const) {
         const preview=await rpc(grant.token,'tools/call',{name:'previewCampaignTemplate',arguments:{templateId:template.id}});
         assert.equal(preview.isError,false); assert.match(preview.structuredContent.html,/Scope fixture/); assert.equal(preview.structuredContent.text,'Scope fixture');
         const image=await rpc(grant.token,'tools/call',{name:'renderCampaignTemplatePreviewImage',arguments:{templateId:template.id}});
-        if (visual) assert.equal(image.structuredContent.mimeType,'image/png');
+        if (visual) { assert.equal(image.structuredContent.mimeType,'image/png'); assert.match(image.structuredContent.url,/\/v1\/preview-images\//); }
         else assert.equal(image.structuredContent.error.code,'TOOL_UNAVAILABLE');
         assert.equal(renders,visual?1:0);
       }
@@ -6100,7 +6146,8 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       const headers = (n:number) => Array.from({length:n},(_,i)=>({name:`X-Fixture-${i}`,value:'v'}));
       const send = (extra:Json) => local('POST','/v1/emails/send',mail(extra));
       error(await send({headers:headers(16)}),422);
-      error(await local('POST','/v1/emails/batch',{emails:[mail(),mail({headers:headers(14),kind:'marketing'})]}),422,'TOO_MANY_HEADERS');
+      // A batch item's failure names the item, as a validation error does.
+      assert.equal(error(await local('POST','/v1/emails/batch',{emails:[mail(),mail({headers:headers(14),kind:'marketing'})]}),422,'TOO_MANY_HEADERS').field,'emails.1.headers');
       error(await send({to:'x'.repeat(65)+'@example.net'}),422);
       error(await send({bcc:['a@'+'x'.repeat(64)+'.net']}),422);
       error(await send({to:Array.from({length:50},address),cc:[address()]}),422);
@@ -7716,6 +7763,30 @@ describe('Campaign authorization and dispatch credentials', () => {
       await meter('conversation-attachment-denied', async () => error(await request('POST', '/v1/emails/send', sender.secret, { ...direct, attachments: [conversationFile.id] }), 404, 'ATTACHMENT_NOT_FOUND'), 1);
       await meter('conversation-attachment-admitted', async () => ok(await request('POST', '/v1/emails/send', managing.secret, { ...direct, attachments: [conversationFile.id] }), 202), 1);
       await meter('shared-attachment-admitted', async () => ok(await request('POST', '/v1/emails/send', sender.secret, { ...direct, attachments: [privateFile.id] }), 202), 1);
+    });
+  });
+  // Sweep #276: a test send checked the pending limit without the admission lock, so it and a concurrent
+  // admission could both pass the cap.
+  test('a campaign test send waits for the workspace admission lock before it checks the pending limit', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const list = ok(await local('POST', '/v1/lists', { name: 'Fixture' }), 201);
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: 'Fixture', from: 'a@sender.example', subject: 'Locked test', html: '<p>Fixture</p>', audience: { listId: list.id } }), 201);
+      const wid = runtime.config.workspaceId, holder = await fixtureDatabase(t);
+      assert.equal((await db.query('SELECT FROM job_schedule WHERE workspace_id=$1', [wid])).rowCount, 0);
+      // Another admission in this workspace holds its lock: the job_schedule row lockAdmission upserts.
+      await holder.query('BEGIN');
+      try {
+        await holder.query('INSERT INTO job_schedule(workspace_id) VALUES($1)', [wid]);
+        let settled = false;
+        const test = local('POST', `/v1/campaigns/${campaign.id}/test`, { to: 'fixture@example.invalid' }).finally(() => { settled = true; });
+        test.catch(() => undefined);
+        const waiting = async () => !!(await holder.query('SELECT FROM pg_stat_activity WHERE pg_backend_pid()=ANY(pg_blocking_pids(pid))')).rowCount;
+        for (let i = 0; i < 200 && !settled && !await waiting(); i++) await new Promise(resolve => setTimeout(resolve, 10));
+        assert.equal(settled, false, 'The test send checked the pending limit without waiting for the admission lock.');
+        assert.equal(await waiting(), true);
+        await holder.query('ROLLBACK');
+        ok(await test, 202);
+      } finally { await holder.query('ROLLBACK'); }
     });
   });
   test('domain-restricted keys see and control campaigns only on their sender domains, never the workspace audience', async t => {
@@ -14738,9 +14809,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const before=await db.query(`SELECT (SELECT count(*) FROM sending_emails WHERE workspace_id=$1) mail,(SELECT count(*) FROM sending_idempotency WHERE workspace_id=$1) receipts`,[wid]);
       const used=async()=>Number((await db.query('SELECT used FROM api_request_budgets WHERE workspace_id=$1 AND key_id=$2',[wid,key.id])).rows[0].used);
       const credits=await used();
-      await meter('denied-batch',async()=>error(await local('POST','/v1/emails/batch',{emails:[good,late]},'live',headers),403,'SENDER_DOMAIN_NOT_VERIFIED'),1);
+      await meter('denied-batch',async()=>assert.equal(error(await local('POST','/v1/emails/batch',{emails:[good,late]},'live',headers),403,'SENDER_DOMAIN_NOT_VERIFIED').field,'emails.1.from'),1);
       assert.equal(await used(),credits+1,'A rejected request is still charged exactly once');
-      error(await local('POST','/v1/emails/batch',{emails:[good,{...good,attachments:['missing-asset']}]},'live',headers),404,'ATTACHMENT_NOT_FOUND');
+      // A denied batch names the item that failed: in the denial's checks and in local preparation.
+      assert.equal(error(await local('POST','/v1/emails/batch',{emails:[good,{...good,attachments:['missing-asset']}]},'live',headers),404,'ATTACHMENT_NOT_FOUND').field,'emails.1');
+      const crowded={...good,kind:'marketing',headers:Array.from({length:14},(_,i)=>({name:`X-Fixture-${i}`,value:'v'}))};
+      assert.equal(error(await local('POST','/v1/emails/batch',{emails:[good,crowded]},'live',headers),422,'TOO_MANY_HEADERS').field,'emails.1.headers');
+      assert.equal(error(await local('POST','/v1/emails/send',crowded,'live',headers),422,'TOO_MANY_HEADERS').field,'headers','A single send keeps its own field.');
       assert.deepEqual((await db.query(`SELECT (SELECT count(*) FROM sending_emails WHERE workspace_id=$1) mail,(SELECT count(*) FROM sending_idempotency WHERE workspace_id=$1) receipts`,[wid])).rows,before.rows);
       const retry=()=>local('POST','/v1/emails/batch',{emails:[good]},'live',headers);
       const saved=ok(await retry(),202);assert.deepEqual(ok(await retry(),202),saved); // No losing receipt from the previous failure.
@@ -18150,7 +18225,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       error(await request('GET', previews[1]!, restricted.secret), 404, 'NOT_FOUND');
       const importImage = () => local('POST', '/v1/template-assets/import', { url: 'https://example.com/logo.png' });
       ok(await importImage(), 201);
-      for (let i = 0; i < 29; i++) ok(await request('GET', previews[i % 2]!, sender.secret));
+      for (let i = 0; i < 29; i++) ok(await request('GET', previews[i % 2]!, sender.secret), 303);
       for (const reply of [await importImage(), await local('GET', previews[0]!), await local('GET', previews[1]!)]) {
         assert.equal(error(reply, 429, 'RENDER_RATE_LIMITED').retryable, true);
         assert.equal(reply.headers.get('retry-after'), '60');
@@ -18160,7 +18235,209 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query("UPDATE api_keys SET workspace_id='default' WHERE id=$1", [other.id]);
       ok(await request('POST', '/v1/template-assets/import', other.secret, { url: 'https://example.com/other.png' }), 201);
       await db.query("UPDATE api_request_budgets SET window_start=window_start - interval '1 minute' WHERE workspace_id=$1 AND key_id='render:images'", [runtime.config.workspaceId]);
-      ok(await request('GET', previews[0]!, sender.secret));
+      ok(await request('GET', previews[0]!, sender.secret), 303);
+    });
+  });
+
+  // Sweep #276: each cid: reference became the image's whole data URI. 60 references to a 6 MiB image built a 480 MiB
+  // string (a Worker has 128 MB); more failed only at V8's string limit. A preview is now measured first, from stored
+  // sizes, counting what it holds (the largest raw image, then the page three times), and refused over 8 MiB.
+  test('visual previews bound inline image expansion: many or huge cid: references are refused before any image is read', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local }) => {
+      const objects = new Map<string, { body: Uint8Array; contentType: string }>();
+      let reads = 0;
+      runtime.storage = {
+        async put(key, body, contentType) { objects.set(key, { body, contentType }); },
+        async get(key) { reads++; return objects.get(key) ?? null; },
+        async delete(key) { objects.delete(key); },
+      };
+      const rendered: string[] = [];
+      // Like Browser Rendering's binding, serialize the page: a lazily concatenated string is built in full here.
+      runtime.renderHtmlImage = async html => { rendered.push(html); JSON.stringify({ html }); return { data: Uint8Array.of(1), mimeType: 'image/png' }; };
+      const MiB = 1024 * 1024, body = (bytes: number) => Buffer.alloc(bytes, 7).toString('base64');
+      const upload = async (path: string, contentId: string, bytes: number, contentType = 'image/png') =>
+        ok(await local('POST', path, { filename: `${contentId}.png`, contentType, disposition: 'inline', contentId, content: body(bytes) }), 201).id as string;
+      const refs = (ids: string[], times = 1) => Array.from({ length: times }, () => ids.map(id => `<img src="cid:${id}">`).join('')).join('');
+      const occurrences = (text: string, part: string) => text.split(part).length - 1;
+      // 40,000 references in under 512 KiB of block HTML (images, and text the old replaceAll expanded too):
+      // about 320 GB if each became the 6 MiB image's data URI.
+      const hostile = refs(['hero'], 10_000) + `<p>${'cid:hero '.repeat(30_000)}</p>`;
+      assert.ok(hostile.length < 512 * 1024);
+      const measure = async (path: string) => {
+        reads = 0; rendered.length = 0;
+        const heap = process.memoryUsage().heapUsed, started = performance.now();
+        const reply = await local('GET', path);
+        return { reply, ms: performance.now() - started, heap: process.memoryUsage().heapUsed - heap };
+      };
+      const refused = async (path: string) => {
+        const { reply, ms, heap } = await measure(path);
+        assert.equal(error(reply, 413, 'PREVIEW_TOO_LARGE').retryable, false);
+        assert.deepEqual([reads, rendered.length], [0, 0], 'Refused before any image is read or rendered.');
+        assert.ok(ms < 5000, `Refused in ${Math.round(ms)} ms.`);
+        assert.ok(heap < 128 * MiB, `Heap grew ${Math.round(heap / MiB)} MiB.`); // 924 MiB for 60 references to the 6 MiB image before the fix
+      };
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: 'Preview bound' }), 201);
+      let revision = campaign.revision;
+      const draft = async (html: string, attachments: string[]) => {
+        revision = ok(await local('PATCH', `/v1/campaigns/${campaign.id}`, { revision, draft: { ...campaign.draft, html, attachments } })).revision;
+        return `/v1/campaigns/${campaign.id}/preview-image`;
+      };
+
+      // A 1 MiB image once holds about 5 MiB: embedded once.
+      const logo = await upload('/v1/attachments', 'logo', MiB);
+      ok((await measure(await draft(refs(['logo']), [logo]))).reply, 303);
+      assert.equal(reads, 1); assert.equal(occurrences(rendered[0]!, `data:image/png;base64,${body(MiB)}`), 1);
+      // A 6 MiB image would hold about 30 MiB even once; 60 references, about 1.5 GB; the hostile draft, far more.
+      const hero = await upload('/v1/attachments', 'hero', 6 * MiB);
+      for (const html of [refs(['hero']), refs(['hero'], 60), hostile]) await refused(await draft(html, [hero]));
+
+      // Many parts: each embedded once (about 6.3 MiB held), refused when each is referenced twice (about 12.3 MiB).
+      const names = Array.from({ length: 6 }, (_, i) => `part${i}`), parts: string[] = [], part = `data:image/png;base64,${body(MiB / 4)}`;
+      for (const name of names) parts.push(await upload('/v1/attachments', name, MiB / 4));
+      ok((await measure(await draft(refs(names), parts))).reply, 303);
+      assert.equal(reads, 6); assert.equal(occurrences(rendered[0]!, part), 6);
+      await refused(await draft(refs(names, 2), parts));
+
+      // A content type may contain "cid:". Its 1,000 data URIs are never scanned again for references, so the part
+      // referenced once is embedded once, not 1,001 times (334 MiB).
+      const tiny = await upload('/v1/attachments', 'tiny', 1, 'image/png;x=cid:part0');
+      ok((await measure(await draft(refs(['tiny'], 1000) + refs(['part0']), [tiny, parts[0]!]))).reply, 303);
+      assert.equal(reads, 2); assert.equal(occurrences(rendered[0]!, part), 1); assert.ok(rendered[0]!.length < 2 * MiB);
+
+      // Template previews embed inline assets the same way.
+      const template = ok(await local('POST', '/v1/templates', { name: 'Preview bound' }), 201);
+      const asset = await upload('/v1/template-assets', 'hero', 6 * MiB);
+      ok(await local('PATCH', `/v1/templates/${template.id}`, { revision: template.revision, draft: { ...template.draft, html: hostile, attachments: [asset] } }));
+      await refused(`/v1/templates/${template.id}/preview-image`);
+    });
+  });
+
+  // Review of #295: each preview fit its own limit, but 16 at once held 179 MB of pages in one isolate (a Worker has
+  // 128 MB). Previews now reserve what they hold from one 24 MiB budget per isolate, before reading any image.
+  test('concurrent visual previews share one memory budget per isolate: extra ones get 429 PREVIEW_BUSY before any read', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local }) => {
+      const { browserImageRenderer } = await import('./src/adapters/browser-rendering.js'), { PREVIEW_MEMORY_BUDGET } = await import('./src/preview-images.js');
+      const objects = new Map<string, { body: Uint8Array; contentType: string }>();
+      let reads = 0;
+      runtime.storage = {
+        async put(key, body, contentType) { objects.set(key, { body, contentType }); },
+        async get(key) { reads++; return objects.get(key) ?? null; },
+        async delete(key) { objects.delete(key); },
+      };
+      // Browser Run behind the real adapter: each action's JSON (with its page) is built, then held until released.
+      let release = () => {}, gate = new Promise<void>(resolve => { release = resolve; }), inflight = 0, pages = 0, peak = 0, fail = false;
+      const binding = {
+        async quickAction(_action: string, options: { html: string }) {
+          const body = JSON.stringify(options); inflight++; pages += body.length; peak = Math.max(peak, pages);
+          try { await gate; if (fail) throw new Error('Synthetic Browser Run failure.'); return new Response(Uint8Array.of(1)); }
+          finally { inflight--; pages -= body.length; }
+        },
+      };
+      runtime.renderHtmlImage = browserImageRenderer(binding as never);
+      const MiB = 1024 * 1024, { setFlagsFromString } = await import('node:v8'), { runInNewContext } = await import('node:vm');
+      // Live heap, not garbage: collect before each reading.
+      setFlagsFromString('--expose-gc');
+      const gc = runInNewContext('gc') as () => void, live = () => { gc(); return process.memoryUsage().heapUsed; };
+      const image = ok(await local('POST', '/v1/attachments', { filename: 'hero.png', contentType: 'image/png', disposition: 'inline', contentId: 'hero', content: Buffer.alloc(1.5 * MiB, 7).toString('base64') }), 201);
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: 'Concurrent previews', html: '<img src="cid:hero">', attachments: [image.id] }), 201);
+      const path = `/v1/campaigns/${campaign.id}/preview-image`;
+      const until = async (done: () => boolean) => { for (let i = 0; i < 500 && !done(); i++) await new Promise(resolve => setTimeout(resolve, 10)); };
+
+      // Each preview holds about 9.5 MiB (the 1.5 MiB image, its 2 MiB page three times, the screenshot reserve): two fit.
+      const heap = live(), settled: Reply[] = [];
+      const burst = Array.from({ length: 16 }, () => local('GET', path).then(reply => { settled.push(reply); return reply; }));
+      await until(() => inflight === 2 && settled.length === 14);
+      const grown = live() - heap;
+      assert.deepEqual([inflight, settled.length], [2, 14]);
+      for (const reply of settled) { assert.equal(error(reply, 429, 'PREVIEW_BUSY').retryable, true); assert.ok(reply.headers.get('retry-after')); }
+      assert.equal(reads, 2, 'Refused previews read no image.');
+      assert.ok(peak <= PREVIEW_MEMORY_BUDGET, `The renderer held ${(peak / MiB).toFixed(1)} MiB of pages.`);
+      assert.ok(grown < 32 * MiB, `Heap grew ${Math.round(grown / MiB)} MiB with previews in flight.`); // 65 MiB with all 16 in flight
+      release();
+      assert.equal((await Promise.all(burst)).filter(reply => reply.status === 303 && reply.body.mimeType === 'image/png').length, 2);
+
+      // A failed render releases its share: after one, two previews are in flight together again.
+      fail = true; gate = Promise.resolve();
+      error(await local('GET', path), 503, 'PREVIEW_RENDERING_FAILED');
+      fail = false; gate = new Promise<void>(resolve => { release = resolve; });
+      const again = [local('GET', path), local('GET', path)];
+      await until(() => inflight === 2);
+      assert.equal(inflight, 2);
+      release();
+      for (const reply of await Promise.all(again)) ok(reply, 303);
+
+      // The per-workspace limiter (on Workers, the ADMISSION binding weighted by bytes) refuses before any read.
+      const asked: [string, number][] = [];
+      runtime.allowPreview = async (workspaceId, bytes) => { asked.push([workspaceId, bytes]); return false; };
+      reads = 0;
+      assert.equal(error(await local('GET', path), 429, 'RENDER_RATE_LIMITED').retryable, true);
+      assert.equal(reads, 0);
+      assert.deepEqual(asked.map(([workspaceId]) => workspaceId), [runtime.config.workspaceId]);
+      assert.ok(asked[0]![1] > 9.5 * MiB && asked[0]![1] < 10 * MiB, `Asked for ${asked[0]![1]} bytes.`);
+    });
+  });
+
+  // Rechecks of #295: response bodies holding preview memory could outlive their requests (slow readers, then HEAD and
+  // abandoned Worker streams). A preview is now stored and its permit released before the handler answers 303 with a
+  // five-minute link that streams the stored object, so clients that read slowly, disconnect or send HEAD hold nothing.
+  test('stored previews: the permit is released before responding, HEAD never renders, and links expire and stay in their workspace', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, fetch }) => {
+      const [{ browserImageRenderer }, { previewLink, sweepPreviews }] = await Promise.all([import('./src/adapters/browser-rendering.js'), import('./src/preview-images.js')]);
+      const MiB = 1024 * 1024, objects = new Map<string, { body: Uint8Array; contentType: string; uploaded: Date }>();
+      let streamed = 0;
+      runtime.storage = {
+        async put(key, body, contentType) { objects.set(key, { body, contentType, uploaded: new Date() }); },
+        async get(key) { return objects.get(key) ?? null; },
+        async stream(key) { const object = objects.get(key); if (!object) return null; streamed++; return { body: new Blob([object.body as Uint8Array<ArrayBuffer>]).stream(), contentType: object.contentType }; },
+        async delete(key) { objects.delete(key); },
+        async list(prefix) { return { objects: [...objects].filter(([key]) => key.startsWith(prefix)).map(([key, object]) => ({ key, uploaded: object.uploaded })) }; },
+      };
+      // Browser Run returns a 7 MiB screenshot, as a tall page with one remote image can. Storing it holds the PNG and
+      // its 9.3 MiB of JSON, about 16 MiB of the 24 MiB budget: a permit held past its handler would refuse the next.
+      const png = Buffer.alloc(7 * MiB, 9);
+      let renders = 0;
+      runtime.renderHtmlImage = browserImageRenderer({ async quickAction() { renders++; return new Response(png, { headers: { 'content-length': String(png.byteLength) } }); } } as never);
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: 'Stored previews', html: '<img src="https://fixture.example/texture.png" width="600" height="4000">' }), 201);
+      const path = `${PUBLIC_ORIGIN}/v1/campaigns/${campaign.id}/preview-image`, wid = runtime.config.workspaceId;
+      const preview = (method = 'GET') => fetch(new Request(path, { method, headers: { origin: PUBLIC_ORIGIN, cookie: manager!.cookie } }));
+      const link = (url: string, method = 'GET') => fetch(new Request(url, { method }));
+      const links: Json[] = [], paused: Response[] = [];
+      try {
+        for (let i = 0; i < 6; i++) {
+          const reply = await preview(), body = await reply.json() as Json;
+          assert.equal(reply.status, 303, JSON.stringify(body)); assert.equal(reply.headers.get('location'), body.url); assert.equal(body.mimeType, 'image/png');
+          assert.ok(Math.abs(Date.parse(body.expiresAt) - Date.now() - 300_000) < 5000);
+          links.push(body);
+        }
+        assert.equal(renders, 6);
+        // Readers of the links hold no budget: with three paused and one of them cancelled, a preview still renders.
+        for (const { url } of links.slice(0, 3)) paused.push(await link(url));
+        assert.deepEqual(paused.map(reply => reply.status), [200, 200, 200]);
+        await paused[0]!.body!.cancel();
+        assert.equal((await preview()).status, 303);
+        // Following a link returns what the route used to: the screenshot as JSON, without a credential.
+        const served = await paused[1]!.json() as Json;
+        assert.equal(served.mimeType, 'image/png'); assert.ok(Buffer.from(served.data, 'base64').equals(png));
+        // HEAD never renders: the preview route refuses it before any work, and a link's HEAD reads nothing.
+        const [rendered, read] = [renders, streamed];
+        const head = await preview('HEAD');
+        assert.equal(head.status, 405); assert.equal(head.headers.get('allow'), 'GET');
+        assert.equal((await link(links[3]!.url, 'HEAD')).status, 200);
+        assert.deepEqual([renders, streamed], [rendered, read]);
+        // Links are signed, expire, and serve only their own workspace's previews.
+        const missing = async (url: string) => { const reply = await link(url); assert.equal(reply.status, 404); assert.equal((await reply.json() as Json).error.code, 'NOT_FOUND'); };
+        const key = [...objects.keys()].find(k => k.startsWith(`previews/${wid}/`))!, other = `previews/another-workspace/${key.split('/')[2]}`;
+        objects.set(other, objects.get(key)!);
+        await (await link(previewLink(runtime, wid, key).url)).body?.cancel();
+        await missing(previewLink(runtime, wid, key, Date.now() - 301_000).url);
+        await missing(previewLink(runtime, 'another-workspace', key).url);
+        await missing(previewLink(runtime, wid, other).url);
+        await missing((links[4]!.url as string).replace(/.$/, (last: string) => last === 'A' ? 'B' : 'A'));
+        // Stored previews are deleted ten minutes after they were made; their links then fail.
+        const stored = [...objects.keys()].filter(k => k.startsWith('previews/')).length;
+        assert.equal(await sweepPreviews(runtime, 60_000, Date.now() + 11 * 60_000), stored);
+        await missing(links[5]!.url);
+      } finally { for (const reply of paused) await reply.body?.cancel().catch(() => undefined); }
     });
   });
 
@@ -20034,6 +20311,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       view = ok(await local('POST', `/v1/campaigns/${campaign.id}/pacing`, { perDay: 200 }));
       assert.equal(view.delivery.pacing.perDay, 200);
       assert.equal(view.delivery.pacing.autoPause, true);
+      // perDay may be omitted too: changing only autoPause keeps the cap (null removes it, below).
+      view = ok(await local('POST', `/v1/campaigns/${campaign.id}/pacing`, { autoPause: true }));
+      assert.deepEqual([view.delivery.pacing.perDay, view.delivery.pacing.autoPause], [200, true]);
       ok(await local('POST', `/v1/campaigns/${campaign.id}/resume`, {}));
 
       // The SES 24-hour quota holds expansion while remaining capacity is within the transactional reserve.

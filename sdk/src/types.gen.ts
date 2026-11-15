@@ -513,6 +513,15 @@ export type CampaignTemplatePreviewImage = {
     published: boolean;
 };
 
+export type PreviewImageLink = {
+    /**
+     * Serves the 200 response (the base64 PNG as JSON) without a credential until expiresAt.
+     */
+    url: string;
+    expiresAt: string;
+    mimeType: 'image/png';
+};
+
 export type TemplateAsset = {
     id: string;
     filename: string;
@@ -1381,7 +1390,10 @@ export type CampaignCanceled = {
 };
 
 export type CampaignPacingUpdate = {
-    perDay: number | null;
+    /**
+     * Release at most this many recipients per rolling 24-hour window. Omit to keep the current cap; null removes it. Delivery always also respects the SES 24-hour quota.
+     */
+    perDay?: number | null;
     /**
      * Omit to keep the current setting. Hosted shared sending always enforces automatic pause; false is rejected.
      */
@@ -9029,7 +9041,7 @@ export type RenderCampaignTemplatePreviewImageError = RenderCampaignTemplatePrev
 
 export type RenderCampaignTemplatePreviewImageResponses = {
     /**
-     * Success
+     * What the 303 link serves.
      */
     200: CampaignTemplatePreviewImage;
 };
@@ -10903,7 +10915,7 @@ export type RenderCampaignPreviewImageError = RenderCampaignPreviewImageErrors[k
 
 export type RenderCampaignPreviewImageResponses = {
     /**
-     * Success
+     * What the 303 link serves.
      */
     200: CampaignPreviewImage;
 };

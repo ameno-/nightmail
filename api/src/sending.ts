@@ -33,6 +33,7 @@ import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_AT
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { headerPrefix, requestHeader } from './brand.js';
+import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, registerPreviewImages, renderPreview } from './preview-images.js';
 
 type HtmlParser = typeof import('parse5').parse;
 const loadParse5 = lazyModule((): Promise<HtmlParser> => import('parse5').then(m => m.parse));
@@ -867,6 +868,12 @@ function checkCapacity(state: AdmissionState, cost: number, marketing: number) {
   assertPending(state);
   if (state.default_region === null) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
 }
+// A batch item's own failure names the item, as a validation error does (emails.3.from); a batch-wide limit names none.
+function atItem(error: unknown, index?: number) {
+  if (index !== undefined && error instanceof ApiError && !(error instanceof ModuleLoadError) && error.code !== 'BATCH_CONTENT_TOO_LARGE' && !error.field?.startsWith('emails.'))
+    error.field = `emails.${index}${error.field ? `.${error.field}` : ''}`;
+  return error;
+}
 function checkSender(runtime: Runtime, a: Actor, state: AdmissionState, mail: SendRequest, bulk?:BulkFacts,cost=0) {
   const host=mail.from.split('@')[1]!.toLowerCase();
   const needsDmarc=mail.kind==='marketing' || (cost>0 && (state.hosted?.used??0)+cost>=5000);
@@ -917,7 +924,7 @@ async function atomicAdmission(c:Ctx,input:SendRequest|{emails:SendRequest[]},id
   for(const [i,m] of mails.entries()){
     const snapshot=structuredSnapshot({...m,region:m.region??''});let token:{hash:string;email:string}|undefined;
     if(bulk[i])snapshot.bulk=true;
-    if(snapshot.html) await validateHtmlUrls(snapshot.html);
+    if(snapshot.html) await validateHtmlUrls(snapshot.html).catch(e=>{throw atItem(e,batch?i:undefined);});
     try {
       sesHeaders(snapshot.headers.length+(m.kind==='marketing'?2:0));distinctAttachmentIds(m.attachments);
       if(m.kind==='marketing'){
@@ -929,7 +936,7 @@ async function atomicAdmission(c:Ctx,input:SendRequest|{emails:SendRequest[]},id
       sizeCheck(snapshot,[]);
       expanded+=Buffer.byteLength(JSON.stringify(snapshot))+40;
       if(batch && expanded>SENDING_LIMITS.expandedCampaignBytes)throw new ApiError(413,'BATCH_CONTENT_TOO_LARGE','Expanded batch content exceeds the installation limit.');
-    }catch(e){if(e instanceof ModuleLoadError)throw e;prepError??=e;}
+    }catch(e){if(e instanceof ModuleLoadError)throw e;prepError??=atItem(e,batch?i:undefined);}
     rows.push({id:data[i]!.id,snapshot,...token});
     if(screens && c.env.config.hostedScreen)oversize[i]=await screenRefusal(c.env,snapshot,batch?i:undefined);
     wanted.push({host:m.from.split('@')[1]!.toLowerCase(),region:m.region,kind:m.kind,attachments:m.attachments,bodyBytes:Buffer.byteLength((snapshot.html??'')+(snapshot.text??'')+snapshot.subject)});
@@ -978,11 +985,11 @@ async function atomicAdmission(c:Ctx,input:SendRequest|{emails:SendRequest[]},id
     // Only report a denial here; the server-local savepoint already rolled back.
     checkCapacity(state,cost,marketing);
     if(state.invalidMime)throw new ApiError(422,'ATTACHMENT_METADATA_INVALID','SES attachment metadata exceeds its MIME limits.','attachments');
-    for(const [i,m] of mails.entries()){
+    for(const [i,m] of mails.entries()) try{
       checkSender(c.env,a,state,m,state.bulk,cost);
       const assets=(state.assets??[]).filter(asset=>m.attachments.includes(asset.id));validateAttachmentRows(distinctAttachmentIds(m.attachments),assets);
       sizeCheck(rows[i]!.snapshot,assets);
-    }
+    }catch(e){throw atItem(e,batch?i:undefined);}
     if(prepError)throw prepError;
     for(const [i,refused] of oversize.entries()){
       const connection=state.routes?.[wanted[i]!.host]?.connection??state.connection;
@@ -1004,7 +1011,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
   const batch = 'emails' in input, mails = batch ? input.emails : [input];
   const assetIds = [...new Set(mails.flatMap(mail => mail.attachments))];
   if (c.env.config.multiTenant && mails.every(m => !m.template) && !assetIds.some(id => id.includes('\0'))) return atomicAdmission(c,input,{actor:a});
-  for (const mail of mails) if (mail.html) await validateHtmlUrls(mail.html);
+  for (const [i, mail] of mails.entries()) if (mail.html) await validateHtmlUrls(mail.html).catch(error => { throw atItem(error, batch ? i : undefined); });
   const data = mails.map(() => ({ id: id('email'), status: 'queued' as const, simulated: isSimulatedSes(c.env) }));
   const receipt = batch ? { data } : data[0]!;
   const mx = c.env.config.multiTenant, simulated = isSimulatedSes(c.env);
@@ -1044,7 +1051,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
     const runtime = { ...c.env, config: { ...c.env.config, workspaceId: a.workspaceId, regions: state.enabled_regions } };
     const locked = new Map(state.assets?.map(row => [row.id, row]));
     const rows = []; let expandedBytes = 0;
-    for (const [i, mail] of mails.entries()) {
+    for (const [i, mail] of mails.entries()) try {
       const region = checkSender(c.env, a, state, mail,state.bulk,cost);
       if (!mx && !isSimulatedSes(c.env) && !state.ready.includes(`${region}:${mail.kind}`)) throw new ApiError(409, 'SES_SETUP_REQUIRED', 'Run discovery and complete provisioning for this region before live sending.', 'region');
       if (!mx) keySender(a, mail.from);
@@ -1063,7 +1070,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
         if (expandedBytes > SENDING_LIMITS.expandedCampaignBytes) throw new ApiError(413, 'BATCH_CONTENT_TOO_LARGE', `Expanded batch content exceeds the ${SENDING_LIMITS.expandedCampaignBytes / 1024 / 1024} MiB limit. Submit smaller batches.`);
       }
       rows.push({ id: data[i]!.id, snapshot, hash: link?.record.tokenHash, email: link?.record.email });
-    }
+    } catch (error) { throw atItem(error, batch ? i : undefined); }
     await db.execute(sql`WITH submitted AS (SELECT * FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) m(id text, snapshot jsonb, hash text, email text)),
       links AS (INSERT INTO sending_attachment_links (workspace_id, attachment_id, owner_type, owner_id)
         SELECT ${a.workspaceId}, attachment_id, 'email', id FROM submitted, jsonb_array_elements_text(snapshot->'attachments') attachment_id),
@@ -1210,6 +1217,7 @@ export async function admitTestEmail(c: Ctx, a: Actor, domain: string, to: strin
 }
 
 export function registerSending(app: App) {
+  registerPreviewImages(app);
   app.openapi(createRoute({method:'post',path:'/v1/emails/check',operationId:'checkEmail',tags:['Emails'],security,
     summary:'Check email sendability without sending', description:`Read-only 0–100 advisory score, not an inbox-placement probability or admission decision. Supply one draft (HTML or text), outbound email ID, or campaign ID. Uses visible retained content, cached From-domain facts, and workspace reputation for unrestricted readers. No DNS/asset fetches or paid screen. Scores use current evidence, not a historical delivery verdict. HTML has the preview lint’s 256 KiB UTF-8 and tree budgets. Marketing drafts are checked as supplied; ${productName} generates the unsubscribe headers and link for campaigns. MIME bytes are estimated.`,
     request:{body:json(CheckInput)},responses:{200:response(CheckResult),...errors}}),async c=>{
@@ -1417,25 +1425,23 @@ export function registerSending(app: App) {
     if (!audience.success) throw new ApiError(422, 'CAMPAIGN_INCOMPLETE', 'Choose an audience list before counting recipients.', 'audience.listId');
     return c.json(AudienceCounts.parse(await (await wrapModuleLoad(() => import('./audience.js'))).countCampaignAudience(c.env.db, a, audience.data)), 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview-image', operationId: 'renderCampaignPreviewImage', description: 'Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignPreviewImage), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview-image', operationId: 'renderCampaignPreviewImage', description: 'Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer.' + PREVIEW_ROUTE_NOTE, tags: ['Campaigns'], security, request: { params: IdParams }, responses: { ...previewResponses(CampaignPreviewImage), ...errors } }), async c => {
+    refuseHead(c);
     const a = actor(c, 'send'), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
     if (!c.env.renderHtmlImage) throw new ApiError(503, 'PREVIEW_RENDERING_UNAVAILABLE', 'Visual campaign preview rendering is not configured.', undefined, true);
     await chargeRenderBudget(c, a.workspaceId);
-    const rendered = await renderCampaignContent(c.env, row.draft, false);
-    let html = rendered.html ?? '';
-    const inline = (await attachmentRows(c.env.db, a, row.draft.attachments)).filter(item => item.disposition === 'inline' && item.contentId);
-    for (const item of inline) {
+    const inline = (await attachmentRows(c.env.db, a, row.draft.attachments)).filter(item => item.disposition === 'inline' && item.contentId), render = c.env.renderHtmlImage;
+    // The page is passed on, not kept here: renderPreview drops it once it is rendered.
+    const link = await renderPreview(c.env, a.workspaceId, (await renderCampaignContent(c.env, row.draft, false)).html ?? '', inline, async item => {
       const asset = await c.env.storage.get(item.storageKey);
       if (!asset || asset.body.length !== item.size || await bytesDigest(asset.body) !== item.checksum) throw new ApiError(503, 'ATTACHMENT_STORAGE_UNAVAILABLE', 'An inline campaign image is missing or changed.', undefined, true);
-      html = html.replaceAll(`cid:${item.contentId}`, `data:${item.contentType};base64,${Buffer.from(asset.body).toString('base64')}`);
-    }
-    try {
-      const image = await c.env.renderHtmlImage(html);
-      return c.json(CampaignPreviewImage.parse({ ...image, data: Buffer.from(image.data).toString('base64') }), 200);
-    } catch (error) {
-      if (error instanceof ApiError) throw error;
-      throw new ApiError(503, 'PREVIEW_RENDERING_FAILED', 'The visual campaign preview could not be rendered. Try again.', undefined, true);
-    }
+      return asset.body;
+    }, async (page, grow) => {
+      try { return await render(page, grow); }
+      catch (error) { if (error instanceof ApiError) throw error; throw new ApiError(503, 'PREVIEW_RENDERING_FAILED', 'The visual campaign preview could not be rendered. Try again.', undefined, true); }
+    });
+    c.header('Location', link.url);
+    return c.json({ ...link, mimeType: 'image/png' as const }, 303);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/state', operationId: 'getCampaignState', description: 'Compact authenticated state for draft sync polling; fetch the full campaign with getCampaign when state changes. Compare all returned fields, not only revision: archive and delivery changes need not increment the draft revision. Omits draft content and delivery counts.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignState), ...errors } }), async c => {
     const [row] = await c.env.db.select(campaignStateColumns).from(campaigns).where(campaignWhere(actor(c), c.req.valid('param').id)).limit(1);
@@ -1478,7 +1484,8 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/test', operationId: 'testCampaign', description: 'Send the current draft, personalized with data, to one address as a transactional test. On Hosted sending a test is screened on its own, with the campaign limit (49,152 bytes of screened text by default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } over it).', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(TestCampaign) }, responses: { 202: response(Receipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id;
-    const result = await idempotent(c, a, input, async db => { const row = await findCampaign(db, a, campaignId, true); if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.'); await checkPending(c.env, db, a, hostedCost(input.to)); const snapshot = await campaignMessage(c.env, db, a, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true); await assertScreenable(c.env, { ...snapshot, testCampaignId: campaignId }, a.dispatchAccount?.kind === 'shared'); return queueEmail(c.env, db, a, { ...snapshot, testCampaignId: campaignId }, undefined, undefined, c.get('requestId')); });
+    // checkPending reads the queue under the admission lock, taken after the campaign row as launch, resume and release do.
+    const result = await idempotent(c, a, input, async db => { const row = await findCampaign(db, a, campaignId, true); if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.'); await lockAdmission(db, a); await checkPending(c.env, db, a, hostedCost(input.to)); const snapshot = await campaignMessage(c.env, db, a, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true); await assertScreenable(c.env, { ...snapshot, testCampaignId: campaignId }, a.dispatchAccount?.kind === 'shared'); return queueEmail(c.env, db, a, { ...snapshot, testCampaignId: campaignId }, undefined, undefined, c.get('requestId')); });
     return c.json(Receipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/send', operationId: 'sendCampaign', description: 'Accept the current revision for durable background delivery: the audience is frozen now, every message is validated in the background, then recipients are released into the dispatch queue. The 202 count is accepted recipient intents, not SES acceptance or delivery; poll the campaign for its state. ' + CAMPAIGN_SCREEN_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSend) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
@@ -1538,12 +1545,12 @@ export function registerSending(app: App) {
     await recordAudit(db, c, { action: 'campaign.resume', workspaceId: a.workspaceId, target: { type: 'campaign', id: campaign.id }, before: { state: campaign.state }, after: { state: next } });
     a.wakeJobs = Math.max(a.wakeJobs ?? 0, 1);
   }));
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/pacing', operationId: 'setCampaignPacing', description: 'Change the daily cap or automatic pause of a scheduled or sending campaign, for example to raise 50,000 to 100,000 per day. Takes effect on the next release.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({ perDay: Pacing.shape.perDay.unwrap(), autoPause: z.boolean().optional().describe('Omit to keep the current setting. Hosted shared sending always enforces automatic pause; false is rejected.'), rateShare: z.number().min(0.05).max(1).optional().describe('Omit to keep the current setting.') }).strict().openapi('CampaignPacingUpdate')) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, async (db, a, campaign) => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/pacing', operationId: 'setCampaignPacing', description: 'Change the daily cap or automatic pause of a scheduled or sending campaign, for example to raise 50,000 to 100,000 per day. Takes effect on the next release.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({ perDay: z.number().int().min(100).max(10000000).nullable().optional().describe('Release at most this many recipients per rolling 24-hour window. Omit to keep the current cap; null removes it. Delivery always also respects the SES 24-hour quota.'), autoPause: z.boolean().optional().describe('Omit to keep the current setting. Hosted shared sending always enforces automatic pause; false is rejected.'), rateShare: z.number().min(0.05).max(1).optional().describe('Omit to keep the current setting.') }).strict().openapi('CampaignPacingUpdate')) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, async (db, a, campaign) => {
     if (campaign.expanded >= campaign.total) throw new ApiError(409, 'CAMPAIGN_NOT_SENDING', 'This campaign has finished releasing recipients.');
     if (campaign.state === 'failed') throw new ApiError(409, 'CAMPAIGN_NOT_SENDING', 'Resume this campaign before changing its pacing.');
     const input = c.req.valid('json'), ref = { workspaceId: a.workspaceId, id: campaign.id };
     if (input.autoPause === false && c.env.config.multiTenant && (await db.execute(sql`SELECT 1 WHERE ${sharedConnection(a.workspaceId)}`)).rowCount) throw hostedAutoPauseRequired();
-    await db.execute(setCampaignPacing(ref, { pacePerDay: input.perDay ?? null, autoPause: input.autoPause ?? campaign.autoPause, rateShare: input.rateShare ?? campaign.rateShare }));
+    await db.execute(setCampaignPacing(ref, { pacePerDay: input.perDay === undefined ? campaign.pacePerDay : input.perDay, autoPause: input.autoPause ?? campaign.autoPause, rateShare: input.rateShare ?? campaign.rateShare }));
     // A release waiting for the next window or quota rechecks now under the new settings.
     if (campaign.state === 'sending') { await db.execute(wakeCampaignRun(ref)); a.wakeJobs = Math.max(a.wakeJobs ?? 0, 1); }
   }));

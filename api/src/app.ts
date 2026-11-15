@@ -32,7 +32,7 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   if (pathname === '/v1/domains' || pathname.startsWith('/v1/domains/')) return 'ops-domains';
   if (/^\/v1\/(?:settings|webhooks|metrics|sender-score|usage)(?:\/|$)/.test(pathname) || pathname === '/unsubscribe' || pathname.startsWith('/unsubscribe/')) return 'ops-other';
   if (pathname === '/v1/emails' || pathname.startsWith('/v1/emails/')) return 'sending-emails';
-  if (/^\/v1\/(?:attachments|campaigns|campaign-content-guide)(?:\/|$)/.test(pathname)) return 'sending-other';
+  if (/^\/v1\/(?:attachments|campaigns|campaign-content-guide|preview-images)(?:\/|$)/.test(pathname)) return 'sending-other';
   if (/^\/v1\/(?:contacts|lists|segments|contact-imports)(?:\/|$)/.test(pathname)) return 'audience';
   if (pathname === '/v1/audience-query' || pathname.startsWith('/v1/audience-query/')) return 'audience-query';
   if (/^\/v1\/(?:templates|template-assets)(?:\/|$)/.test(pathname)) return 'templates';
@@ -198,7 +198,8 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     if (c.req.path === '/v1/public/support-keys') return next();
     // Inbound authenticates its own address-scoped keys as well as live administrators.
     if (/^\/v1\/inboxes(?:\/|$)/.test(c.req.path) || c.req.path.startsWith('/v1/inbound/') || c.req.method === 'GET' && c.req.path.startsWith('/v1/objects/')) return next();
-    // A UI note's screenshot link is its own short-lived credential (src/ui-notes.ts).
+    // A UI note's screenshot link is its own short-lived credential (src/ui-notes.ts), as is a stored preview's (src/preview-images.ts).
+    if (['GET', 'HEAD'].includes(c.req.method) && /^\/v1\/preview-images\/[^/]+$/.test(c.req.path)) return next();
     if (c.req.method === 'GET' && /^\/v1\/ui-notes\/screenshots\/[^/]+$/.test(c.req.path)) return next();
     // The homepage's installation-wide aggregates are public; the route returns nothing workspace-scoped.
     if (c.req.path === '/v1/public/stats') return next();

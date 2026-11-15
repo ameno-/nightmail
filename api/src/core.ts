@@ -35,6 +35,8 @@ export interface Storage {
    */
   put(key: string, body: Uint8Array, contentType: string, signal?: AbortSignal): Promise<void>;
   get(key: string): Promise<{ body: Uint8Array; contentType: string } | null>;
+  /** The object's body as a stream from the bucket, for responses that should not buffer it (preview links). */
+  stream?(key: string): Promise<{ body: ReadableStream<Uint8Array>; contentType: string } | null>;
   delete(key: string): Promise<void>;
   /** Up to 1,000 objects in key order after `after`; `cursor` continues the listing and is absent at its end. */
   list?(prefix: string, after?: string): Promise<{ objects: { key: string; uploaded: Date }[]; cursor?: string }>;
@@ -132,10 +134,12 @@ export interface Runtime {
   allowSnsCertMiss?: (peer: string) => Promise<boolean>;
   snsCertificateState?: import('./operations.js').SnsCertificateState; // Omitted by production: share one state per isolate, not per request.
   allowMalformedSns?: (peer: string) => Promise<boolean>;
+  // A workspace's preview memory a minute (Workers: the ADMISSION limiter, weighted by bytes). Node has only the per-process budget.
+  allowPreview?: (workspaceId: string, bytes: number) => Promise<boolean>;
   jwksCacheScope?: object; // Workers create a new DB adapter per request; scope public keys to the binding instead.
   // Set only by the SupportPlatform service-binding entrypoint (src/support-platform.ts), never from a request.
   platformCaller?: 'bane-support';
-  renderHtmlImage?: (html: string) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>;
+  renderHtmlImage?: (html: string, grow?: (bytes: number) => void) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>;
   // Outbound webhook transport. Node supplies a connect-time guard against private addresses
   // (see adapters/node.ts); Workers use plain fetch, which cannot reach them.
   webhookFetch?: WebhookFetch;
