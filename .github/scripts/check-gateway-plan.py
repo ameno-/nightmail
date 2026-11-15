@@ -27,3 +27,26 @@ if any(changes[urn] for urn in containers):
     for urn, ops in changes.items():
         if ops - allowed.get(urn, set()):
             sys.exit(f"unexpected gateway migration change: {urn}: {sorted(ops)}")
+
+# First production mail preparation (including retries of a partial apply) may only
+# add the inactive #256 mail path. Never mix it with a live resource update.
+mail = {
+    'aws:s3/bucket:Bucket::nightmail-mail',
+    'aws:s3/bucketPublicAccessBlock:BucketPublicAccessBlock::nightmail-mail-private',
+    'aws:s3/bucketPolicy:BucketPolicy::nightmail-mail-policy',
+    'aws:s3/bucketLifecycleConfiguration:BucketLifecycleConfiguration::nightmail-mail-retention',
+    'aws:ses/receiptRuleSet:ReceiptRuleSet::nightmail-inbound',
+    'aws:ses/receiptRule:ReceiptRule::nightmail-inbound-all',
+    *(f'aws:sns/topic:Topic::nightmail-alerts-{r}' for r in ('us-east-1','us-east-2')),
+}
+for topic in ('nightmail-inbound', 'nightmail-feedback', 'nightmail-trusted-feedback'):
+    dlq = topic + '-dead-letters'
+    mail.update({f'aws:sns/topic:Topic::{topic}', f'aws:sqs/queue:Queue::{dlq}',
+                 f'aws:sqs/queuePolicy:QueuePolicy::{dlq}-policy', f'aws:cloudwatch/metricAlarm:MetricAlarm::{dlq}'})
+mail = {prefix + suffix for suffix in mail}
+if stage == 'production' and any('create' in changes.get(urn, set()) for urn in mail):
+    if not mail <= changes.keys():
+        sys.exit('incomplete production mail staging plan')
+    for urn, ops in changes.items():
+        if ops and (urn not in mail or ops != {'create'}):
+            sys.exit(f'unexpected production mail staging change: {urn}: {sorted(ops)}')
