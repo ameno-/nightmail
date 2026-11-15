@@ -7,14 +7,33 @@ SET LOCAL lock_timeout='2s';
 -- set-billing-enforcement settles every workspace under the old installation mode (billing_settle_all) and
 -- billing_free_sync settles the workspace under its old mode. Switching to 'off' doesn't settle: the kill-switch
 -- must not depend on the settler, and what it leaves open is then priced at $0 when billing comes back on.
-CREATE FUNCTION billing_settle_all(cutoff timestamptz) RETURNS int LANGUAGE plpgsql AS $$
+--
+-- The switch is a fence. Every meter write first takes billing_meter_fence's shared locks (the installation's and its
+-- workspace's) until its transaction ends; a switch takes the installation's (or the workspace's) exclusively, so it
+-- waits for the writes in flight, settles with no writer running, and every write that commits after it is the new
+-- mode's. At the switch the settler also waits for usage rows instead of skipping a locked one.
+CREATE FUNCTION billing_meter_fence(wid text) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM pg_advisory_xact_lock_shared(31401, 0);
+  PERFORM pg_advisory_xact_lock_shared(31402, hashtext(wid));
+END $$;
+
+-- Settles a workspace up to now under its current mode, waiting for its account and every open usage row.
+CREATE FUNCTION billing_settle_switch(wid text) RETURNS jsonb LANGUAGE plpgsql AS $$
+BEGIN
+  INSERT INTO billing_accounts(workspace_id) VALUES (wid) ON CONFLICT DO NOTHING;
+  PERFORM 1 FROM billing_accounts WHERE workspace_id=wid FOR UPDATE;
+  PERFORM 1 FROM billing_usage_hourly WHERE workspace_id=wid AND (quantity <> settled_quantity OR refunds <> '{}')
+    ORDER BY hour, meter, rate_version FOR UPDATE;
+  RETURN billing_settle(wid, 'infinity');
+END $$;
+
+CREATE FUNCTION billing_settle_all() RETURNS int LANGUAGE plpgsql AS $$
 DECLARE w text; n int := 0;
 BEGIN
-  FOR w IN SELECT DISTINCT workspace_id FROM billing_usage_hourly WHERE (quantity <> settled_quantity OR refunds <> '{}') AND hour<cutoff ORDER BY 1 LOOP
-    -- Wait for the account (billing_settle itself skips a busy one), then settle with the lock already held.
-    INSERT INTO billing_accounts(workspace_id) VALUES (w) ON CONFLICT DO NOTHING;
-    PERFORM 1 FROM billing_accounts WHERE workspace_id=w FOR UPDATE;
-    PERFORM billing_settle(w, cutoff);
+  PERFORM pg_advisory_xact_lock(31401, 0);
+  FOR w IN SELECT DISTINCT workspace_id FROM billing_usage_hourly WHERE quantity <> settled_quantity OR refunds <> '{}' ORDER BY 1 LOOP
+    PERFORM billing_settle_switch(w);
     n := n + 1;
   END LOOP;
   RETURN n;
@@ -28,12 +47,40 @@ BEGIN
   IF NOT FOUND THEN RETURN jsonb_build_object('free', false, 'via', null, 'until', null, 'mode', 'prepaid'); END IF;
   s := billing_free_state(wid);
   target := CASE WHEN (s->>'free')::boolean THEN 'exempt' ELSE (SELECT paid_mode FROM billing_accounts WHERE workspace_id=wid) END;
-  IF target <> old AND (SELECT mode FROM billing_config WHERE singleton) <> 'off' THEN PERFORM billing_settle(wid, 'infinity'); END IF;
+  IF target <> old AND (SELECT mode FROM billing_config WHERE singleton) <> 'off' THEN
+    PERFORM pg_advisory_xact_lock(31402, hashtext(wid));
+    PERFORM billing_settle_switch(wid);
+  END IF;
   UPDATE billing_accounts SET mode=target, free_via=s->>'via', updated_at=now()
     WHERE workspace_id=wid AND (mode, free_via) IS DISTINCT FROM (target, s->>'via');
   SELECT mode INTO m FROM billing_accounts WHERE workspace_id=wid;
   RETURN s || jsonb_build_object('mode', m);
 END $$;
+
+-- 292's send meter behind the fence.
+CREATE OR REPLACE FUNCTION billing_meter_sends() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM billing_meter_fence(w) FROM (SELECT DISTINCT workspace_id AS w FROM new_mail ORDER BY 1) x;
+  INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,rate_version,quantity)
+  SELECT n.workspace_id, date_trunc('hour',now(),'UTC'),
+         CASE WHEN (n.feedback_topic_arn IS NULL AND pc.kind='shared')
+                OR EXISTS (SELECT FROM provider_pool_regions p WHERE p.feedback_topic_arn=n.feedback_topic_arn)
+              THEN 'send' ELSE 'byo_send' END,
+         1, sum(jsonb_array_length(n.to_addresses||n.cc_addresses||n.bcc_addresses))
+  FROM new_mail n
+  CROSS JOIN LATERAL (SELECT kind FROM provider_connections WHERE workspace_id=n.workspace_id ORDER BY kind LIMIT 1) pc
+  CROSS JOIN (SELECT bill_simulated FROM billing_config WHERE singleton) cfg
+  WHERE (NOT n.simulated OR cfg.bill_simulated) AND hosted_charged(n.status,n.provider_id,n.error_code)
+  GROUP BY 1,2,3 ORDER BY 1,2,3
+  ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity;
+  RETURN NULL;
+END $$;
+
+-- Refunds take free units first. 313 keyed what a refund may give back to its hour's charged units, so a cancellation
+-- of mail settled at $0 (exempt, shadow, off) could take the charge of different mail metered in the same hour on the
+-- other side of a mode change. Each hour now also records its units settled uncharged; a refund is taken from those
+-- first and gives back money only beyond them.
+ALTER TABLE billing_usage_paid ADD COLUMN free_units bigint NOT NULL DEFAULT 0 CHECK (free_units >= 0);
 
 -- The position prices this month's open sends and receives against this month's allowances only. Open rows of an
 -- earlier month (a late write: a refund or a charge of mail admitted then) were netted into this month's free
@@ -51,10 +98,15 @@ a AS (SELECT coalesce(b.mode,'prepaid') AS mode, coalesce(b.balance_uc,0) AS bal
       FROM (SELECT 1) one LEFT JOIN billing_accounts b ON b.workspace_id=wid),
 -- 313: refunds of other hours' mail give back no allowance or credit until the settler knows what they reverse; this
 -- hour's own cancel its unsettled units.
-u AS (SELECT hour, meter, rate_version, quantity-settled_quantity AS delta, n.new_units FROM billing_usage_hourly
-      CROSS JOIN LATERAL (SELECT greatest(0, quantity-settled_quantity-coalesce((SELECT sum(v::bigint) FROM jsonb_each_text(refunds) x(k,v)
-        WHERE k<>extract(epoch FROM hour)::bigint::text),0)) AS new_units) n
-      WHERE workspace_id=wid AND (quantity <> settled_quantity OR refunds <> '{}')),
+-- 314: as in the settler, the part of an hour's own refunds its units settled uncharged absorb cancels no new units.
+u AS (SELECT h.hour, h.meter, h.rate_version, h.quantity-h.settled_quantity AS delta,
+             greatest(0, h.quantity-h.settled_quantity-rf.other+least(-rf.own, coalesce(pd.free_units,0))) AS new_units
+      FROM billing_usage_hourly h
+      CROSS JOIN LATERAL (SELECT coalesce(sum(v::bigint) FILTER (WHERE k<>extract(epoch FROM h.hour)::bigint::text),0) AS other,
+                                 coalesce(sum(v::bigint) FILTER (WHERE k=extract(epoch FROM h.hour)::bigint::text),0) AS own
+                          FROM jsonb_each_text(h.refunds) x(k,v)) rf
+      LEFT JOIN billing_usage_paid pd ON pd.workspace_id=h.workspace_id AND pd.hour=h.hour AND pd.meter=h.meter
+      WHERE h.workspace_id=wid AND (h.quantity <> h.settled_quantity OR h.refunds <> '{}')),
 o AS (SELECT coalesce(sum(new_units) FILTER (WHERE meter='send' AND hour>=mon.start),0) AS sends,
              coalesce(sum(new_units) FILTER (WHERE meter='receive' AND hour>=mon.start),0) AS receives,
              coalesce(sum(delta*billing_rate_uc(meter,rate_version,hour)) FILTER (WHERE meter IN ('omen','storage')),0) AS other_uc
@@ -105,7 +157,7 @@ DECLARE a billing_accounts; cfg billing_config; r record; delta bigint; before b
   line numeric; spend numeric; det jsonb := '{}'; m jsonb; rmonth date; mon date; sent bigint; received bigint;
   n int := 0; cost_uc bigint; charged boolean; promo_draw bigint := 0; paid_draw bigint := 0; total bigint;
   posted jsonb; first_hour timestamptz; last_hour timestamptz; recharging boolean;
-  pending jsonb; own text; refund bigint; fresh bigint; back bigint; take bigint; o record;
+  pending jsonb; own text; refund bigint; fresh bigint; back bigint; take bigint; o record; gone bigint; f bigint; c bigint;
   months jsonb := '{}'; mc record; spent bigint; promo_left bigint;
 BEGIN
   INSERT INTO billing_accounts(workspace_id) VALUES (wid) ON CONFLICT DO NOTHING;
@@ -132,16 +184,28 @@ BEGIN
       SELECT coalesce(sum(v::bigint), 0) INTO refund FROM jsonb_each_text(r.refunds) x(k, v);
       pending := r.refunds; fresh := delta - refund;
       IF fresh < 0 THEN pending := pending || jsonb_build_object(own, coalesce((pending->>own)::bigint, 0) + fresh); fresh := 0; END IF;
+      -- Free first (314): this hour's own refunds are taken from its units already settled uncharged before they cancel
+      -- new units. They leave the pool and give nothing back.
+      gone := 0;
+      take := least(-coalesce((pending->>own)::bigint, 0), coalesce((SELECT free_units FROM billing_usage_paid WHERE workspace_id=wid AND hour=r.hour AND meter=r.meter), 0));
+      IF take > 0 THEN
+        UPDATE billing_usage_paid SET free_units=free_units-take WHERE workspace_id=wid AND hour=r.hour AND meter=r.meter;
+        gone := take; pending := pending || jsonb_build_object(own, (pending->>own)::bigint + take);
+      END IF;
       take := least(fresh, -coalesce((pending->>own)::bigint, 0));
       IF take > 0 THEN fresh := fresh - take; pending := pending || jsonb_build_object(own, (pending->>own)::bigint + take); END IF;
       SELECT coalesce(sum(v::bigint), 0) INTO refund FROM jsonb_each_text(pending) x(k, v);
       -- Refunds leave the pool; money comes back only for units their own hours were charged.
-      after := greatest(0, before + refund);
+      after := greatest(0, before + refund - gone);
       back := 0;
+      -- Free first (314): a refund is taken from its hour's units settled uncharged before its charged ones. Which send
+      -- of a mixed hour it cancels isn't known, and this way it never gives back another send's charge.
       FOR o IN SELECT to_timestamp(ltrim(k, 's')::bigint) AS origin, -v::bigint AS units FROM jsonb_each_text(pending) x(k, v) WHERE v::bigint < 0 ORDER BY ltrim(k, 's')::bigint LOOP
-        SELECT least(o.units, coalesce((SELECT units FROM billing_usage_paid WHERE workspace_id=wid AND hour=o.origin AND meter=r.meter), 0)) INTO take;
-        IF take > 0 THEN
-          UPDATE billing_usage_paid SET units=units-take WHERE workspace_id=wid AND hour=o.origin AND meter=r.meter;
+        f := NULL; c := NULL;
+        SELECT free_units, units INTO f, c FROM billing_usage_paid WHERE workspace_id=wid AND hour=o.origin AND meter=r.meter;
+        f := least(o.units, coalesce(f, 0)); take := least(o.units - f, coalesce(c, 0));
+        IF f > 0 OR take > 0 THEN
+          UPDATE billing_usage_paid SET free_units=free_units-f, units=units-take WHERE workspace_id=wid AND hour=o.origin AND meter=r.meter;
           back := back + take;
         END IF;
       END LOOP;
@@ -149,6 +213,11 @@ BEGIN
       payable := greatest(0, after - 3000) - greatest(0, before - 3000);
       IF charged AND payable > 0 THEN
         INSERT INTO billing_usage_paid AS p VALUES (wid, r.hour, r.meter, payable) ON CONFLICT (workspace_id, hour, meter) DO UPDATE SET units=p.units+excluded.units;
+      END IF;
+      -- Units settled uncharged (exempt, shadow, off) are this hour's free units: refunds take them first.
+      IF NOT charged AND fresh > 0 THEN
+        INSERT INTO billing_usage_paid AS p (workspace_id, hour, meter, units, free_units) VALUES (wid, r.hour, r.meter, 0, fresh)
+          ON CONFLICT (workspace_id, hour, meter) DO UPDATE SET free_units=p.free_units+excluded.free_units;
       END IF;
       payable := payable - back;
       IF NOT (rmonth < mon OR rmonth < cfg.free_split_from) THEN
@@ -213,11 +282,8 @@ BEGIN
   RETURN jsonb_build_object('entries', n, 'costUc', cost_uc::text, 'charged', charged, 'entryId', posted->>'entryId');
 END $$;
 
--- 300's billing_post with three changes:
--- - A settlement that gives money back is a credit like a top-up: when it leaves the account at $0 or above, the unpaid
---   episode ends and billing.restored releases held mail. A solvent workspace used to stay held until an unrelated
---   top-up. Since 313 a refund gives back only what its mail was charged, so this never ends an episode on credit
---   that wasn't paid.
+-- 300's billing_post with two changes (a payment, a grant or a credit adjustment still ends an episode; a usage
+-- refund doesn't, as in 313):
 -- - The unpaid episode follows paid + promotional credit. A promo grant that covers a debt ends the episode (and its
 --   receive hold) like a top-up; before, the hold stayed while sends ran on the promo, and survived the write-off.
 --   The paid debt itself stays and the next top-up pays it first. A write-off still never ends an episode.
@@ -226,7 +292,7 @@ END $$;
 CREATE OR REPLACE FUNCTION billing_post(wid text, k text, src text, paid bigint, promo bigint, det jsonb, who text) RETURNS jsonb
 LANGUAGE plpgsql AS $$
 DECLARE a billing_accounts; eid bigint;
-  credit boolean := k IN ('topup','grant','refund_release','dispute_reversal') OR (k IN ('adjustment','usage') AND paid+promo>0);
+  credit boolean := k IN ('topup','grant','refund_release','dispute_reversal') OR (k='adjustment' AND paid+promo>0);
 BEGIN
   INSERT INTO billing_accounts(workspace_id) VALUES (wid) ON CONFLICT DO NOTHING;
   SELECT * INTO a FROM billing_accounts WHERE workspace_id=wid FOR UPDATE;
@@ -295,6 +361,7 @@ BEGIN
     ELSE (SELECT CASE WHEN NEW.feedback_topic_arn IS NULL AND kind='shared' THEN 'send' ELSE 'byo_send' END
           FROM provider_connections WHERE workspace_id=NEW.workspace_id ORDER BY kind LIMIT 1) END;
   IF d=0 OR m IS NULL THEN RETURN NULL; END IF;
+  PERFORM billing_meter_fence(NEW.workspace_id);
   -- Month arithmetic on UTC wall-clock timestamps: timestamptz + interval '1 month' would follow the session TimeZone.
   h := CASE WHEN date_trunc('month',NEW.created_at,'UTC') < date_trunc('month',now(),'UTC')
          THEN (date_trunc('month',NEW.created_at AT TIME ZONE 'UTC') + interval '1 month' - interval '1 hour') AT TIME ZONE 'UTC'
@@ -346,6 +413,7 @@ BEGIN
 END $$;
 CREATE OR REPLACE FUNCTION billing_meter_mail() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+  PERFORM billing_meter_fence(w) FROM (SELECT DISTINCT workspace_id AS w FROM new_rows WHERE direction='inbound' ORDER BY 1) x;
   INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,rate_version,quantity)
   SELECT n.workspace_id, date_trunc('hour',now(),'UTC'), m.meter, 1, sum(m.q)
   FROM new_rows n
@@ -374,18 +442,25 @@ BEGIN
     - billing_stored_bytes(OLD.direction,OLD.spam,OLD.verdicts,OLD.region,OLD.lifecycle,OLD.size_bytes));
   RETURN NULL;
 END $$;
-CREATE TRIGGER billing_restore_mail AFTER UPDATE OF lifecycle ON mail_messages FOR EACH ROW
-  WHEN (OLD.lifecycle IS DISTINCT FROM NEW.lifecycle AND NEW.direction='inbound') EXECUTE FUNCTION billing_restore_mail();
 
--- Rebuild the storage tables under the new rule, as 300 did; the next daily run sums the aged days again and meters from there.
-DELETE FROM mail_storage_aged;
-DELETE FROM mail_storage_days;
-UPDATE billing_config SET storage_aged_through=NULL WHERE singleton;
-INSERT INTO mail_storage_days AS s (workspace_id,day,bytes)
-SELECT workspace_id, (received_at AT TIME ZONE 'UTC')::date, sum(billing_stored_bytes(direction,spam,verdicts,region,lifecycle,size_bytes))
-FROM mail_messages WHERE direction='inbound' AND lifecycle='kept'
-GROUP BY 1,2 HAVING sum(billing_stored_bytes(direction,spam,verdicts,region,lifecycle,size_bytes)) > 0
-ON CONFLICT (workspace_id,day) DO UPDATE SET bytes=excluded.bytes;
+-- Rebuilds the storage tables under the new rule, keeping the storage cursor: the aged sums are summed again up to the
+-- day it reached, so the next daily run meters every day since the last one it metered.
+CREATE FUNCTION billing_storage_rebuild() RETURNS void LANGUAGE plpgsql AS $$
+DECLARE through date;
+BEGIN
+  SELECT storage_aged_through INTO through FROM billing_config WHERE singleton FOR UPDATE;
+  DELETE FROM mail_storage_aged;
+  DELETE FROM mail_storage_days;
+  INSERT INTO mail_storage_days AS s (workspace_id,day,bytes)
+  SELECT workspace_id, (received_at AT TIME ZONE 'UTC')::date, sum(billing_stored_bytes(direction,spam,verdicts,region,lifecycle,size_bytes))
+  FROM mail_messages WHERE direction='inbound' AND lifecycle='kept'
+  GROUP BY 1,2 HAVING sum(billing_stored_bytes(direction,spam,verdicts,region,lifecycle,size_bytes)) > 0
+  ON CONFLICT (workspace_id,day) DO UPDATE SET bytes=excluded.bytes;
+  IF through IS NOT NULL THEN
+    INSERT INTO mail_storage_aged (workspace_id, aged_bytes, aged_through)
+    SELECT workspace_id, sum(bytes), through FROM mail_storage_days WHERE day <= through GROUP BY 1 ORDER BY 1;
+  END IF;
+END $$;
 
 -- The storage job meters every day since the last one it metered, each against its own aged sum. It metered only
 -- the day it was called for, and its cursor then refused a re-run of a missed day, so that day was never charged.
@@ -404,6 +479,7 @@ BEGIN
     UPDATE mail_storage_aged SET aged_through=x - 91 WHERE aged_through<x - 91;
     -- billing_store_bytes reads the cursor: keep it in step with the sums.
     UPDATE billing_config SET storage_aged_through=x - 91, updated_at=now() WHERE singleton;
+    PERFORM billing_meter_fence(workspace_id) FROM mail_storage_aged WHERE aged_bytes > 1000000000 ORDER BY workspace_id;
     INSERT INTO billing_usage_hourly (workspace_id, hour, meter, rate_version, quantity)
       SELECT workspace_id, x::timestamp AT TIME ZONE 'UTC', 'storage', 1, aged_bytes - 1000000000
       FROM mail_storage_aged WHERE aged_bytes > 1000000000 ORDER BY workspace_id
@@ -413,3 +489,33 @@ BEGIN
   END LOOP;
   RETURN jsonb_build_object('aged', aged, 'metered', metered, 'through', since);
 END $$;
+
+-- Unpaid episodes the old rule kept open on a debt that paid plus promotional credit covers (a promo grant to a
+-- workspace in debt) end now, as billing_post would end them, and held mail is released. Replays each unpaid
+-- account's ledger under the new rule: an episode starts when paid + promo goes below $0 and ends on a credit that
+-- leaves it at $0 or more. A write-off still ends nothing, so its hold stays. Only clears; returns the workspaces.
+CREATE FUNCTION billing_reconcile_unpaid() RETURNS text[] LANGUAGE plpgsql AS $$
+DECLARE w record; l record; st timestamptz; done text[] := '{}';
+BEGIN
+  FOR w IN SELECT workspace_id FROM billing_accounts WHERE unpaid_since IS NOT NULL ORDER BY workspace_id FOR UPDATE LOOP
+    st := NULL;
+    FOR l IN SELECT kind, paid_uc + promo_uc AS amount, balance_after_uc + promo_after_uc AS total, created_at
+        FROM billing_ledger WHERE workspace_id=w.workspace_id ORDER BY id LOOP
+      IF l.total < 0 THEN st := coalesce(st, l.created_at);
+      ELSIF l.kind IN ('topup','grant','refund_release','dispute_reversal') OR (l.kind='adjustment' AND l.amount > 0) THEN st := NULL; END IF;
+    END LOOP;
+    CONTINUE WHEN st IS NOT NULL;
+    UPDATE billing_accounts SET unpaid_since=NULL, updated_at=now() WHERE workspace_id=w.workspace_id;
+    INSERT INTO jobs(id,type,workspace_id,payload) VALUES ('billing.restored:'||w.workspace_id,'billing.restored',w.workspace_id,'{}')
+      ON CONFLICT (id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL;
+    done := done || w.workspace_id;
+  END LOOP;
+  RETURN done;
+END $$;
+
+SELECT billing_storage_rebuild();
+SELECT billing_reconcile_unpaid();
+
+-- Last, so its lock on mail_messages is held only until this migration commits.
+CREATE TRIGGER billing_restore_mail AFTER UPDATE OF lifecycle ON mail_messages FOR EACH ROW
+  WHEN (OLD.lifecycle IS DISTINCT FROM NEW.lifecycle AND NEW.direction='inbound') EXECUTE FUNCTION billing_restore_mail();

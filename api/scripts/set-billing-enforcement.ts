@@ -19,8 +19,9 @@ const flag = (value: string | undefined, name: string) => {
  *
  * Usage is priced under the mode it was metered in: before the mode changes, every workspace's unsettled usage is
  * settled under the old one (billing_settle_all), so nothing metered while billing was off or in shadow is charged
- * later. Switching to off doesn't settle (the kill-switch never waits on the settler); what it leaves open is settled
- * at $0 when billing comes back on.
+ * later. That waits for meter writes in flight and holds new ones until the switch commits (migration 314's fence).
+ * Switching to off doesn't settle (the kill-switch never waits on the settler or the writers); what it leaves open is
+ * settled at $0 when billing comes back on.
  */
 export async function setBillingEnforcement(db: Client, args: string[]) {
   const { positionals, values } = parseArgs({ args, allowPositionals: true, options: {
@@ -31,7 +32,7 @@ export async function setBillingEnforcement(db: Client, args: string[]) {
   const storage = values['storage-from'];
   if (storage !== undefined && storage !== 'none' && !(/^\d{4}-\d{2}-\d{2}$/.test(storage) && Number.isFinite(Date.parse(`${storage}T00:00:00Z`)))) throw new Error(`--storage-from takes a date (YYYY-MM-DD) or none.\n${usage}`);
   const { rows: [current] } = await db.query<{ mode: string }>(`SELECT mode FROM billing_config WHERE singleton FOR UPDATE`);
-  if (current && current.mode !== mode && mode !== 'off') await db.query(`SELECT billing_settle_all('infinity')`);
+  if (current && current.mode !== mode && mode !== 'off') await db.query(`SELECT billing_settle_all()`);
   const { rows: [audit] } = await db.query(`WITH previous AS (
     SELECT mode,receive_hold,bill_simulated,storage_billing_from FROM billing_config WHERE singleton FOR UPDATE
   ), changed AS (
