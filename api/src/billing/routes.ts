@@ -105,7 +105,7 @@ function period(from: unknown, to: unknown) {
 function describe(kind: LedgerKind, detail: Record<string, unknown>) {
   switch (kind) {
     case 'usage': {
-      if (detail.freeSplit) return `Free allowance now 3,000 sent and 3,000 received a month: this month’s difference returned${detail.charged === false ? ' (not charged)' : ''}`;
+      if (detail.freeSplit) return `Free allowance now 3,000 sent and 3,000 received a month: ${(detail.freeSplit as { unresolved?: boolean }).unresolved ? `${productName} is checking this month’s difference` : `this month’s difference returned${detail.charged === false ? ' (not charged)' : ''}`}`;
       const meters = (typeof detail.meters === 'object' && detail.meters ? detail.meters : detail) as Record<string, MeterDetail | undefined>;
       const q = (m: string) => Number(meters[m]?.quantity ?? 0);
       const parts = [q('send') + q('receive') ? `${count(q('send') + q('receive'))} emails` : '', q('omen') ? `${count(q('omen'))} Omens` : '', q('storage') ? 'stored mail' : '',
