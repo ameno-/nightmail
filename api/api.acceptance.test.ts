@@ -7081,6 +7081,44 @@ describe('Billing: metering, gate and settlement', () => {
     });
   });
 
+  test('the storage rebuild holds mail writes off before it reads: a concurrent insert or lifecycle change waits for it, then counts, without a deadlock', { skip: DATABASE_FIXTURE_SKIP }, async t => {
+    // Committed rows on two connections, as migration 314 runs against live mail writers: A rebuilds (and then takes the
+    // lock its CREATE TRIGGER takes) while B writes kept mail of the same workspace and day.
+    const a = await fixtureDatabase(t), b = await fixtureDatabase(t), wid = unique('billing-rebuild-race'), thread = unique('thread'), id = unique('msg');
+    const message = (suffix: string, bytes: number, lifecycle: string) => `INSERT INTO mail_messages(id,workspace_id,direction,thread_id,ses_message_id,size_bytes,received_at,lifecycle)
+      VALUES ('${id}-${suffix}','${wid}','inbound','${thread}','${id}-${suffix}',${bytes},'2026-08-01 12:00Z','${lifecycle}')`;
+    await a.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [wid]);
+    await a.query('INSERT INTO mail_threads(id,workspace_id) VALUES ($1,$2)', [thread, wid]);
+    await a.query(message('kept', 1_000_000_000, 'kept'));
+    await a.query(message('default', 500_000_000, 'default'));
+    const waitingOn = async () => {
+      for (const until = Date.now() + 4000; ;) {
+        const { rows: [w] } = await a.query(`SELECT l.locktype, c.relname FROM pg_locks l LEFT JOIN pg_class c ON c.oid=l.relation WHERE l.pid=$1 AND NOT l.granted`, [(b as unknown as { processID: number }).processID]);
+        if (w) return w;
+        assert.ok(Date.now() < until, 'The mail write waits for the rebuild.');
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    };
+    try {
+      for (const write of [message('late', 250_000_000, 'kept'), `UPDATE mail_messages SET lifecycle='kept' WHERE id='${id}-default'`]) {
+        await a.query('BEGIN');
+        try {
+          await a.query('SELECT billing_storage_rebuild()');
+          const pending = b.query(write);
+          // The write waits on mail_messages itself, not on a storage row the rebuild holds.
+          assert.deepEqual(await waitingOn(), { locktype: 'relation', relname: 'mail_messages' });
+          await a.query('LOCK TABLE mail_messages IN SHARE ROW EXCLUSIVE MODE');
+          await a.query('COMMIT');
+          await pending;
+        } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
+      }
+      assert.equal((await a.query(`SELECT bytes::text FROM mail_storage_days WHERE workspace_id=$1 AND day='2026-08-01'`, [wid])).rows[0]?.bytes, '1750000000');
+    } finally {
+      for (const table of ['mail_messages', 'mail_threads', 'billing_usage_hourly', 'mail_storage_days', 'mail_storage_aged']) await a.query(`DELETE FROM ${table} WHERE workspace_id=$1`, [wid]);
+      await a.query('DELETE FROM workspaces WHERE id=$1', [wid]).catch(() => {});
+    }
+  });
+
   test('a write-off takes only the debt left when it runs: a top-up landing during the daily scan is collected, not forgiven', { skip: DATABASE_FIXTURE_SKIP }, async t => {
     // Committed rows on two connections: the scan reads the account, then a top-up commits before the write-off posts.
     const a = await fixtureDatabase(t), b = await fixtureDatabase(t), wid = unique('billing-writeoff-race');

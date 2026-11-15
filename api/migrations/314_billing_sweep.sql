@@ -1,6 +1,12 @@
 SET LOCAL lock_timeout='2s';
 -- Billing fixes from a review of hosted billing (2026-11-15), one section each.
 
+-- First, the writer barrier for the storage rebuild below: received mail is written (inserted, deleted, its lifecycle
+-- changed) with mail_messages locked first and the storage tables after, so this migration takes mail_messages first
+-- too, in a mode no mail write shares. It waits for the writes in flight, and holds new ones until it commits; none
+-- runs while the storage tables are rebuilt and the lifecycle trigger is installed.
+LOCK TABLE mail_messages IN SHARE ROW EXCLUSIVE MODE;
+
 -- Usage is priced under the mode it was metered in. Settlement used to take the mode at settle time, so usage
 -- metered while billing was off (or in shadow, or while a workspace was free) was charged once it was priced
 -- later, and the last open hour before a workspace became free was forgiven. Now a mode change settles first:
@@ -444,10 +450,12 @@ BEGIN
 END $$;
 
 -- Rebuilds the storage tables under the new rule, keeping the storage cursor: the aged sums are summed again up to the
--- day it reached, so the next daily run meters every day since the last one it metered.
+-- day it reached, so the next daily run meters every day since the last one it metered. It blocks mail writes first
+-- (as at the top of this migration), then waits for the storage job (the cursor), as the job never writes mail.
 CREATE FUNCTION billing_storage_rebuild() RETURNS void LANGUAGE plpgsql AS $$
 DECLARE through date;
 BEGIN
+  LOCK TABLE mail_messages IN SHARE ROW EXCLUSIVE MODE;
   SELECT storage_aged_through INTO through FROM billing_config WHERE singleton FOR UPDATE;
   DELETE FROM mail_storage_aged;
   DELETE FROM mail_storage_days;
@@ -516,6 +524,6 @@ END $$;
 SELECT billing_storage_rebuild();
 SELECT billing_reconcile_unpaid();
 
--- Last, so its lock on mail_messages is held only until this migration commits.
+-- Mail writes see it from the moment they resume: mail_messages has been locked since the top of this migration.
 CREATE TRIGGER billing_restore_mail AFTER UPDATE OF lifecycle ON mail_messages FOR EACH ROW
   WHEN (OLD.lifecycle IS DISTINCT FROM NEW.lifecycle AND NEW.direction='inbound') EXECUTE FUNCTION billing_restore_mail();
