@@ -28,6 +28,9 @@
 // greeting streams in to its end; in-app, the chat stays open on Overview while the sidebar link goes to Logs (on a
 // phone, where the chat is a sheet over the page, the tab bar's link closes it).
 //
+// Withheld stats (`withheld`): the signed-out homepage as /v1/public/stats answers until enough workspaces send
+// (available: false, every figure null), rewritten in the page so the response keeps its delay.
+//
 // Dialogs (`dialog`): once the page has settled, the control whose text starts with `dialog` opens its dialog (a bottom
 // sheet on a phone), and the measurement covers the load and the open dialog together.
 //
@@ -54,7 +57,7 @@ const workers = Number(process.env.CLS_WORKERS) || Math.min(32, availableParalle
 const began = Date.now();
 const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 
-// [name, path, { user, from, click, row, switchTo, support, notes, dialog }]. The in-app navigation starts on `from` and clicks the
+// [name, path, { user, from, click, row, switchTo, support, notes, dialog, withheld }]. The in-app navigation starts on `from` and clicks the
 // control whose text starts with `click`, the table row containing `row`, picks the workspace `switchTo` in the account
 // switcher, or else a link to `path`; with none of those (pages reached from a dropdown menu) it pushes `path` through
 // the router's history. It must land on `path`. `support` opens the support chat first, `dialog` a dialog (see above).
@@ -140,6 +143,7 @@ const pages = ids => [
   // Two accounts in one browser: a cold load as the default (dana), then switching to nia's workspace from the switcher.
   ['Two accounts · switch', '/', { user: ['dana', 'nia'], from: '/', switchTo: 'Lumen Labs' }],
   ['Signed out', '/', { user: null }],
+  ['Signed out · stats withheld', '/', { user: null, withheld: true }],
   // The public legal pages: signed out from the homepage and between documents, and signed in from the sidebar.
   ['Legal', '/legal', { user: null, from: '/legal/terms', click: 'Overview' }],
   ['Legal · terms', '/legal/terms', { user: null, from: '/' }],
@@ -162,7 +166,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Overview · range', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Receiving', 'Receiving · rituals', 'Receiving · new ritual', 'Receiving · recipe form', 'Receiving · recipe ritual', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'API keys · create key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
+const phonePages = new Set(['Overview', 'Overview · range', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Receiving', 'Receiving · rituals', 'Receiving · new ritual', 'Receiving · recipe form', 'Receiving · recipe ritual', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · stats withheld', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'API keys · create key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -335,6 +339,15 @@ async function measure(browser, job, fx) {
     if (job.support) await context.addInitScript(() => sessionStorage.setItem('bane.support', 'demo'));
     // UI notes mode, as an operator turns it on (lib/ui-notes-mode.ts).
     if (job.notes) await context.addInitScript(() => localStorage.setItem('bane.ui-notes', 'on'));
+    if (job.withheld) await context.addInitScript(() => {
+      const original = window.fetch;
+      window.fetch = async function (...args) {
+        const response = await original.apply(this, args);
+        if (!String(args[0] instanceof Request ? args[0].url : args[0]).includes('/v1/public/stats') || !response.ok) return response;
+        const { generatedAt } = await response.json();
+        return new Response(JSON.stringify({ generatedAt, available: false, acceptedLast30Days: null, acceptedLastHour: null, acceptedHourly: Array(24).fill(null), deliveryRate: null, medianSendLatencyMs: null, regions: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      };
+    });
     page = await context.newPage();
     net = network(page);
     page.on('request', request => { const url = request.url(); if (/^https?:\/\//i.test(url) && !url.startsWith(origin)) problems.push(`external request ${url}`); });
@@ -500,10 +513,10 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, notes, dialog }] of pages(ids)) {
+  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, notes, dialog, withheld }] of pages(ids)) {
     if (only && !only.test(name) || device === 'phone' && !phonePages.has(name)) continue;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    const load = { name, path, user, scheme, device, support, live, notes, dialog, mode: 'load', slug: slug + '-load' };
+    const load = { name, path, user, scheme, device, support, live, notes, dialog, withheld, mode: 'load', slug: slug + '-load' };
     if (densityOnly && !density.wanted(load)) continue;
     jobs.push(load);
     if (from && !densityOnly) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, scheme, device, mode: 'in-app', slug: slug + '-in-app' });

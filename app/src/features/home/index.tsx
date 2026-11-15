@@ -114,8 +114,8 @@ function CurrentHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps) {
         <SignInConsent className="home-invite muted" />
         {notice}
       </section>
-      {/* No board until there are figures to show: while they're withheld (available: false) or failing, the page goes straight to the capabilities. */}
-      {stats.data?.available ? <Board stats={stats.data} fetchedAt={stats.dataUpdatedAt} /> : stats.isPending && <BoardSkeleton />}
+      {/* The board keeps the skeleton's place whatever arrives: withheld (available: false) or failing figures show as dashes, so nothing below moves. */}
+      {stats.isPending ? <BoardSkeleton /> : <Board stats={stats.data ?? withheldStats} fetchedAt={stats.dataUpdatedAt} />}
       <section className="home-capabilities" aria-label="Capabilities">
         {capabilities.map(([name, line, endpoint]) => <div className="home-capability" key={name}>
           <h2>{name}</h2>
@@ -128,14 +128,16 @@ function CurrentHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps) {
   </div>
 }
 
+const withheldStats: PublicStats = { generatedAt: '', available: false, acceptedLast30Days: null, acceptedLastHour: null, acceptedHourly: Array(24).fill(null), deliveryRate: null, medianSendLatencyMs: null, regions: [] }
+
 export function Board({ stats, fetchedAt }: { stats: PublicStats; fetchedAt: number }) {
   const perMinute = (stats.acceptedLastHour ?? 0) / 60
   const sent = useLiveCount(stats.acceptedLast30Days ?? 0, perMinute, fetchedAt)
   return <section className="home-board" aria-label="Sending stats">
     <div className="home-counter">
       <div>
-        <div className="home-counter-label muted"><span className="home-live" aria-hidden="true" />Emails sent · 30 days</div>
-        <div className="home-counter-value">{number(sent)}</div>
+        <div className="home-counter-label muted"><span className={stats.available ? 'home-live' : 'home-live home-live--idle'} aria-hidden="true" />Emails sent · 30 days</div>
+        <div className="home-counter-value">{stats.acceptedLast30Days === null ? '—' : number(sent)}</div>
       </div>
       <div className="home-counter-chart">
         <VolumeBars values={stats.acceptedHourly.map(value => value ?? 0)} />
@@ -146,7 +148,7 @@ export function Board({ stats, fetchedAt }: { stats: PublicStats; fetchedAt: num
       <Stat title="Delivery rate" value={stats.deliveryRate === null ? '—' : percent(stats.deliveryRate)} note="30 days" tone={stats.deliveryRate === null ? undefined : 'success'} />
       <Stat title="Median latency" value={stats.medianSendLatencyMs === null ? '—' : `${number(stats.medianSendLatencyMs)} ms`} note="API to SES" />
       <Stat title="Last hour" value={stats.acceptedLastHour === null ? '—' : number(stats.acceptedLastHour)} note={stats.acceptedLastHour === null ? 'Too few senders' : perMinute >= 1 ? `≈ ${number(Math.round(perMinute))}/min` : '< 1/min'} />
-      <Stat title="Regions" value={String(stats.regions.length)} note={stats.regions.map((region, index) => <span key={region}>{index > 0 && ' · '}<span className="nowrap">{region}</span></span>)} />
+      <Stat title="Regions" value={stats.available ? String(stats.regions.length) : '—'} note={stats.regions.map((region, index) => <span key={region}>{index > 0 && ' · '}<span className="nowrap">{region}</span></span>)} />
     </div>
   </section>
 }
