@@ -7119,6 +7119,52 @@ describe('Billing: metering, gate and settlement', () => {
     }
   });
 
+  test('migration 314 and the settler lock in one order: whichever starts first, the other waits at billing_accounts and neither deadlocks', { skip: DATABASE_FIXTURE_SKIP }, async t => {
+    // Committed rows on two connections. A runs 314's own lock prologue (the statements between its lock-order markers)
+    // and then its reconciliation; B runs the settler on an unpaid account with 4,000 unsettled sends.
+    const file = await readFile(new URL('./migrations/314_billing_sweep.sql', import.meta.url), 'utf8');
+    const prologue = file.slice(file.indexOf('-- lock order: begin'), file.indexOf('-- lock order: end'));
+    assert.match(prologue, /LOCK TABLE billing_accounts IN EXCLUSIVE MODE;\nLOCK TABLE billing_usage_paid IN ACCESS EXCLUSIVE MODE;/);
+    const a = await fixtureDatabase(t), b = await fixtureDatabase(t), pid = (db: pg.Client) => (db as unknown as { processID: number }).processID;
+    const waitingOn = async (watcher: pg.Client, waiter: pg.Client) => {
+      for (const until = Date.now() + 4000; ;) {
+        const { rows: [w] } = await watcher.query(`SELECT l.locktype, c.relname FROM pg_locks l LEFT JOIN pg_class c ON c.oid=l.relation WHERE l.pid=$1 AND NOT l.granted`, [pid(waiter)]);
+        if (w) return w;
+        assert.ok(Date.now() < until, 'One side waits for the other.');
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    };
+    for (const first of ['settler', 'migration'] as const) {
+      const wid = unique(`billing-314-${first}`);
+      await a.query(`SELECT billing_post($1,'adjustment','adjustment:'||$1,-1000000,0,'{}','system')`, [wid]);
+      await a.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'send',4000)`, [wid]);
+      const settle = (db: pg.Client) => db.query(`SELECT billing_settle($1, now() + interval '1 hour') AS s`, [wid]);
+      try {
+        if (first === 'settler') {
+          // The settler holds the account and has written billing_usage_paid: the migration waits at billing_accounts.
+          await b.query('BEGIN');
+          assert.equal((await settle(b)).rows[0].s.costUc, '20000000');
+          await a.query('BEGIN');
+          const migrating = a.query(prologue);
+          assert.deepEqual(await waitingOn(b, a), { locktype: 'relation', relname: 'billing_accounts' });
+          await b.query('COMMIT');
+          await migrating;
+          await a.query('SELECT billing_reconcile_unpaid()');
+        } else {
+          // The migration holds its locks first: the settler waits at billing_accounts while the migration locks unpaid
+          // accounts, and settles once it is done.
+          await a.query('BEGIN');
+          await a.query(prologue);
+          const settling = settle(b);
+          assert.deepEqual(await waitingOn(a, b), { locktype: 'relation', relname: 'billing_accounts' });
+          await a.query('SELECT billing_reconcile_unpaid()');
+          await a.query('ROLLBACK');
+          assert.equal((await settling).rows[0].s.costUc, '20000000');
+        }
+      } finally { await b.query('ROLLBACK').catch(() => {}); await a.query('ROLLBACK').catch(() => {}); }
+    }
+  });
+
   test('a write-off takes only the debt left when it runs: a top-up landing during the daily scan is collected, not forgiven', { skip: DATABASE_FIXTURE_SKIP }, async t => {
     // Committed rows on two connections: the scan reads the account, then a top-up commits before the write-off posts.
     const a = await fixtureDatabase(t), b = await fixtureDatabase(t), wid = unique('billing-writeoff-race');

@@ -1,11 +1,33 @@
 SET LOCAL lock_timeout='2s';
 -- Billing fixes from a review of hosted billing (2026-11-15), one section each.
 
--- First, the writer barrier for the storage rebuild below: received mail is written (inserted, deleted, its lifecycle
--- changed) with mail_messages locked first and the storage tables after, so this migration takes mail_messages first
--- too, in a mode no mail write shares. It waits for the writes in flight, and holds new ones until it commits; none
--- runs while the storage tables are rebuilt and the lifecycle trigger is installed.
+-- lock order: begin
+-- 314 takes every lock it needs here, before anything else, in one order:
+--   mail_messages > billing_config (its row) > billing_accounts > billing_usage_paid > mail_storage_days >
+--   mail_storage_aged > jobs (rows, last)
+-- Every live path that writes these tables takes a subsequence of them in this same order, so 314 waits for what is in
+-- flight, holds the rest off until it commits, and never closes a cycle:
+-- - Mail writes: inbound ingest (mail_store_incoming), the gateway (mailgw_append), mailbox and SMTP sent copies,
+--   sandbox mail, lifecycle promotion, API deletes and retention GC (mail_gc_batch). They lock mail_messages, then
+--   through its triggers billing_usage_hourly, mail_storage_days and mail_storage_aged.
+-- - The settler (billing_settle, billing_expire_lot): billing_accounts, billing_usage_hourly, billing_usage_paid, then
+--   billing_post's billing_ledger, billing_credit_lots, jobs and billing_notices.
+-- - Money posts (Stripe, operator routes, write-offs, free flags and mode changes, membership triggers):
+--   billing_accounts, then billing_ledger, billing_credit_lots and jobs.
+-- - The storage day (billing_storage_day): billing_config, mail_storage_aged, billing_usage_hourly. The daily drift
+--   check updates billing_config after only reading billing_accounts.
+-- - set-billing-enforcement: billing_config (and, from 314, billing_accounts and billing_usage_hourly).
+-- - Sends, campaign releases, the gate, positions and billing.restored read billing_accounts and billing_config
+--   without locks and write sending_emails, billing_usage_hourly, mail_receipts and jobs.
+-- 314 locks none of billing_usage_hourly, billing_ledger or billing_credit_lots. EXCLUSIVE on billing_accounts still
+-- lets plain reads through, so sending and positions keep working; money writes wait at billing_accounts, mail
+-- writes at mail_messages, and the storage day and the enforcement switch at billing_config.
 LOCK TABLE mail_messages IN SHARE ROW EXCLUSIVE MODE;
+SELECT 1 FROM billing_config WHERE singleton FOR UPDATE;
+LOCK TABLE billing_accounts IN EXCLUSIVE MODE;
+LOCK TABLE billing_usage_paid IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE mail_storage_days, mail_storage_aged IN EXCLUSIVE MODE;
+-- lock order: end
 
 -- Usage is priced under the mode it was metered in. Settlement used to take the mode at settle time, so usage
 -- metered while billing was off (or in shadow, or while a workspace was free) was charged once it was priced
