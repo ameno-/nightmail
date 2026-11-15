@@ -151,6 +151,8 @@ const webhookUrl = 'https://example.com/';
 const key = setting('API_KEY');
 const base = new URL(setting('URL') ?? 'https://bane.mx');
 const client = createClient({ baseUrl: base.origin, redirect: 'error', auth: scheme => scheme.scheme === 'bearer' ? key : undefined });
+// Previews answer 303 to their stored result; a client that follows it gets the JSON they used to return.
+const previews = createClient({ baseUrl: base.origin, redirect: 'follow', auth: scheme => scheme.scheme === 'bearer' ? key : undefined });
 const attempted = new Set<Op>();
 const successResponses = new Set<Op>();
 const errorResponses = new Set<Op>();
@@ -524,7 +526,7 @@ async function template() {
   const preview = await api('previewCampaignTemplate', { path, query: { published: 'true' } });
   check(preview.html.includes(text) && preview.text.includes(text), 'published content missing in preview');
   await step('Render published template PNG', async () => {
-    const image = await api('renderCampaignTemplatePreviewImage', { path, query: { published: 'true' } });
+    const image = await api('renderCampaignTemplatePreviewImage', { client: previews, path, query: { published: 'true' } });
     check(image.published && image.revision === saved.revision, 'renderer returned another template revision');
     checkScreenshot(image);
   });
@@ -597,7 +599,7 @@ async function campaign(audience: Audience, templateId?: string) {
   check(hasId(await api('listCampaigns', { query: { search: prefix } }), item.id), 'campaign not listed');
   const preview = await api('previewCampaign', { path });
   check(preview.html.includes(text) && preview.text.includes(text), 'campaign preview differs');
-  await step('Render campaign PNG', async () => checkScreenshot(await api('renderCampaignPreviewImage', { path })));
+  await step('Render campaign PNG', async () => checkScreenshot(await api('renderCampaignPreviewImage', { client: previews, path })));
   const allowed = await api('previewCampaignAudience', { path });
   check(saved.draft.audience?.listId === audience.listId && saved.draft.audience.segmentId === audience.segmentId && allowed.matched === 1 && allowed.eligible === 1, 'refusing campaign: not the verified one-member exact-email audience');
   const test = await api('testCampaign', { path, body: { to: success }, headers: idKey('campaign-test') });

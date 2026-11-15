@@ -513,6 +513,15 @@ export type CampaignTemplatePreviewImage = {
     published: boolean;
 };
 
+export type PreviewImageLink = {
+    /**
+     * Serves the 200 response (the base64 PNG as JSON) without a credential until expiresAt.
+     */
+    url: string;
+    expiresAt: string;
+    mimeType: 'image/png';
+};
+
 export type TemplateAsset = {
     id: string;
     filename: string;
@@ -9032,7 +9041,7 @@ export type RenderCampaignTemplatePreviewImageError = RenderCampaignTemplatePrev
 
 export type RenderCampaignTemplatePreviewImageResponses = {
     /**
-     * Success
+     * What the 303 link serves.
      */
     200: CampaignTemplatePreviewImage;
 };
@@ -10906,7 +10915,7 @@ export type RenderCampaignPreviewImageError = RenderCampaignPreviewImageErrors[k
 
 export type RenderCampaignPreviewImageResponses = {
     /**
-     * Success
+     * What the 303 link serves.
      */
     200: CampaignPreviewImage;
 };

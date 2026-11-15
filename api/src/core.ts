@@ -35,6 +35,8 @@ export interface Storage {
    */
   put(key: string, body: Uint8Array, contentType: string, signal?: AbortSignal): Promise<void>;
   get(key: string): Promise<{ body: Uint8Array; contentType: string } | null>;
+  /** The object's body as a stream from the bucket, for responses that should not buffer it (preview links). */
+  stream?(key: string): Promise<{ body: ReadableStream<Uint8Array>; contentType: string } | null>;
   delete(key: string): Promise<void>;
   /** Up to 1,000 objects in key order after `after`; `cursor` continues the listing and is absent at its end. */
   list?(prefix: string, after?: string): Promise<{ objects: { key: string; uploaded: Date }[]; cursor?: string }>;

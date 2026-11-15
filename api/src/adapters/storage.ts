@@ -13,6 +13,10 @@ export function r2Storage(bucket: R2Bucket): Storage {
       if (object.size > MAX_OBJECT_BYTES) throw new ApiError(413, 'ATTACHMENT_TOO_LARGE', 'Stored attachment exceeds the supported size limit.');
       return { body: new Uint8Array(await object.arrayBuffer()), contentType: object.httpMetadata?.contentType ?? 'application/octet-stream' };
     },
+    async stream(key) {
+      const object = await bucket.get(key);
+      return object && { body: object.body, contentType: object.httpMetadata?.contentType ?? 'application/octet-stream' };
+    },
     async delete(key) { await bucket.delete(key); },
     async list(prefix, after) {
       const page = await bucket.list({ prefix, startAfter: after, limit: 1000 });
@@ -37,6 +41,17 @@ export function s3Storage(env: Record<string, string | undefined>): Storage {
         if ((object.ContentLength ?? Infinity) > MAX_OBJECT_BYTES) throw new ApiError(413, 'ATTACHMENT_TOO_LARGE', 'Stored attachment exceeds the supported size limit.');
         if (!object.Body) return null;
         return { body: await object.Body.transformToByteArray(), contentType: object.ContentType ?? 'application/octet-stream' };
+      } catch (error) {
+        if (error instanceof ModuleLoadError) throw error;
+        if (error instanceof Error && error.name === 'NoSuchKey') return null;
+        throw error;
+      }
+    },
+    async stream(key) {
+      try {
+        const { client, s3 } = await getClient();
+        const object = await client.send(new s3.GetObjectCommand({ Bucket: bucket, Key: key }));
+        return object.Body ? { body: object.Body.transformToWebStream() as ReadableStream<Uint8Array>, contentType: object.ContentType ?? 'application/octet-stream' } : null;
       } catch (error) {
         if (error instanceof ModuleLoadError) throw error;
         if (error instanceof Error && error.name === 'NoSuchKey') return null;

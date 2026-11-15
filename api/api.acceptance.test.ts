@@ -4121,32 +4121,24 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
-  // Recheck of #295: an MCP exchange copies a preview screenshot several times (parsed, as text and structured content,
-  // serialized). Those copies are charged to the preview budget until the MCP response is sent.
-  test('MCP preview responses hold their preview memory until sent, and screenshots too large for MCP are refused', async t => {
+  // Rechecks of #295: an MCP exchange copied a preview's bytes several times and held them in its response. The tool
+  // now returns the stored preview's link, so none of the screenshot passes through MCP, and MCP has no size cap of its own.
+  test('MCP preview tools return the stored preview\'s link, never its bytes', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request, fetch }) => {
-      const [{ browserImageRenderer }, { holdPreviewMemory, PREVIEW_MEMORY_BUDGET }] = await Promise.all([import('./src/adapters/browser-rendering.js'), import('./src/preview-images.js')]);
-      const MiB = 1024 * 1024, { token } = await oauthGrant(t, db, writableScope, request);
-      let png = Buffer.alloc(MiB, 9);
+      const { browserImageRenderer } = await import('./src/adapters/browser-rendering.js');
+      const MiB = 1024 * 1024, { token } = await oauthGrant(t, db, writableScope, request), objects = new Map<string, Uint8Array>();
+      runtime.storage = { async put(key, body) { objects.set(key, body); }, async get(key) { const body = objects.get(key); return body ? { body, contentType: 'application/json' } : null; }, async delete(key) { objects.delete(key); } };
+      const png = Buffer.alloc(3 * MiB, 9);
       runtime.renderHtmlImage = browserImageRenderer({ async quickAction() { return new Response(png, { headers: { 'content-length': String(png.byteLength) } }); } } as never);
       const template = ok(await local('POST', '/v1/templates', { name: 'MCP preview' }), 201);
-      const call = () => fetch(new Request(`${PUBLIC_ORIGIN}/mcp?codemode=true`, { method: 'POST', headers: { ...rpcHeaders, 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      const reply = await fetch(new Request(`${PUBLIC_ORIGIN}/mcp?codemode=true`, { method: 'POST', headers: { ...rpcHeaders, 'content-type': 'application/json', authorization: `Bearer ${token}` },
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'renderCampaignTemplatePreviewImage', arguments: { templateId: template.id } } }) }));
-      const free = () => { try { holdPreviewMemory(PREVIEW_MEMORY_BUDGET).release(); return true; } catch { return false; } };
-      // An unread MCP response keeps its share; reading it to the end releases it.
-      const paused = await call();
-      assert.equal(paused.status, 200); assert.equal(free(), false);
-      const result = (await paused.json() as Json).result;
-      assert.equal(result.isError, false, JSON.stringify(result).slice(0, 500)); assert.ok(Buffer.from(result.structuredContent.data, 'base64').equals(png));
-      assert.equal(free(), true);
-      // So does cancelling it.
-      const dropped = await call();
-      assert.equal(free(), false); await dropped.body!.cancel(); assert.equal(free(), true);
-      // Copied eight times, a 3 MiB screenshot would hold 32 MiB: refused, holding nothing.
-      png = Buffer.alloc(3 * MiB, 9);
-      const refused = (await (await call()).json() as Json).result;
-      assert.equal(refused.isError, true); assert.equal(refused.structuredContent.error.code, 'PREVIEW_TOO_LARGE');
-      assert.equal(free(), true);
+      const text = await reply.text(), result = (JSON.parse(text) as Json).result;
+      assert.equal(result.isError, false, text.slice(0, 500));
+      assert.ok(text.length < 4096, 'The MCP response carries the link, not the screenshot.');
+      assert.equal(result.structuredContent.mimeType, 'image/png'); assert.ok(Date.parse(result.structuredContent.expiresAt) > Date.now());
+      const served = await (await fetch(new Request(result.structuredContent.url))).json() as Json;
+      assert.ok(Buffer.from(served.data, 'base64').equals(png)); assert.deepEqual([served.revision, served.published], [template.revision, false]);
     });
   });
 
@@ -5192,11 +5184,12 @@ describe('Hosted MCP OAuth and tools', () => {
       ok(await local('PATCH',`/v1/templates/${template.id}`,{revision:template.revision,draft:{...template.draft,html:'<p>Scope fixture</p>'}}));
       let renders=0;
       runtime.renderHtmlImage=async()=>{renders++;return {data:Uint8Array.of(1),mimeType:'image/png'};};
+      const stored=new Map<string,Uint8Array>();runtime.storage={async put(key,body){stored.set(key,body);},async get(key){const body=stored.get(key);return body?{body,contentType:'application/json'}:null;},async delete(key){stored.delete(key);}};
       for (const [grant,visual] of [[reader,false],[manager,true]] as const) {
         const preview=await rpc(grant.token,'tools/call',{name:'previewCampaignTemplate',arguments:{templateId:template.id}});
         assert.equal(preview.isError,false); assert.match(preview.structuredContent.html,/Scope fixture/); assert.equal(preview.structuredContent.text,'Scope fixture');
         const image=await rpc(grant.token,'tools/call',{name:'renderCampaignTemplatePreviewImage',arguments:{templateId:template.id}});
-        if (visual) assert.equal(image.structuredContent.mimeType,'image/png');
+        if (visual) { assert.equal(image.structuredContent.mimeType,'image/png'); assert.match(image.structuredContent.url,/\/v1\/preview-images\//); }
         else assert.equal(image.structuredContent.error.code,'TOOL_UNAVAILABLE');
         assert.equal(renders,visual?1:0);
       }
@@ -18232,7 +18225,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       error(await request('GET', previews[1]!, restricted.secret), 404, 'NOT_FOUND');
       const importImage = () => local('POST', '/v1/template-assets/import', { url: 'https://example.com/logo.png' });
       ok(await importImage(), 201);
-      for (let i = 0; i < 29; i++) ok(await request('GET', previews[i % 2]!, sender.secret));
+      for (let i = 0; i < 29; i++) ok(await request('GET', previews[i % 2]!, sender.secret), 303);
       for (const reply of [await importImage(), await local('GET', previews[0]!), await local('GET', previews[1]!)]) {
         assert.equal(error(reply, 429, 'RENDER_RATE_LIMITED').retryable, true);
         assert.equal(reply.headers.get('retry-after'), '60');
@@ -18242,7 +18235,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query("UPDATE api_keys SET workspace_id='default' WHERE id=$1", [other.id]);
       ok(await request('POST', '/v1/template-assets/import', other.secret, { url: 'https://example.com/other.png' }), 201);
       await db.query("UPDATE api_request_budgets SET window_start=window_start - interval '1 minute' WHERE workspace_id=$1 AND key_id='render:images'", [runtime.config.workspaceId]);
-      ok(await request('GET', previews[0]!, sender.secret));
+      ok(await request('GET', previews[0]!, sender.secret), 303);
     });
   });
 
@@ -18292,7 +18285,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
       // A 1 MiB image once holds about 5 MiB: embedded once.
       const logo = await upload('/v1/attachments', 'logo', MiB);
-      ok((await measure(await draft(refs(['logo']), [logo]))).reply);
+      ok((await measure(await draft(refs(['logo']), [logo]))).reply, 303);
       assert.equal(reads, 1); assert.equal(occurrences(rendered[0]!, `data:image/png;base64,${body(MiB)}`), 1);
       // A 6 MiB image would hold about 30 MiB even once; 60 references, about 1.5 GB; the hostile draft, far more.
       const hero = await upload('/v1/attachments', 'hero', 6 * MiB);
@@ -18301,14 +18294,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Many parts: each embedded once (about 6.3 MiB held), refused when each is referenced twice (about 12.3 MiB).
       const names = Array.from({ length: 6 }, (_, i) => `part${i}`), parts: string[] = [], part = `data:image/png;base64,${body(MiB / 4)}`;
       for (const name of names) parts.push(await upload('/v1/attachments', name, MiB / 4));
-      ok((await measure(await draft(refs(names), parts))).reply);
+      ok((await measure(await draft(refs(names), parts))).reply, 303);
       assert.equal(reads, 6); assert.equal(occurrences(rendered[0]!, part), 6);
       await refused(await draft(refs(names, 2), parts));
 
       // A content type may contain "cid:". Its 1,000 data URIs are never scanned again for references, so the part
       // referenced once is embedded once, not 1,001 times (334 MiB).
       const tiny = await upload('/v1/attachments', 'tiny', 1, 'image/png;x=cid:part0');
-      ok((await measure(await draft(refs(['tiny'], 1000) + refs(['part0']), [tiny, parts[0]!]))).reply);
+      ok((await measure(await draft(refs(['tiny'], 1000) + refs(['part0']), [tiny, parts[0]!]))).reply, 303);
       assert.equal(reads, 2); assert.equal(occurrences(rendered[0]!, part), 1); assert.ok(rendered[0]!.length < 2 * MiB);
 
       // Template previews embed inline assets the same way.
@@ -18361,7 +18354,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.ok(peak <= PREVIEW_MEMORY_BUDGET, `The renderer held ${(peak / MiB).toFixed(1)} MiB of pages.`);
       assert.ok(grown < 32 * MiB, `Heap grew ${Math.round(grown / MiB)} MiB with previews in flight.`); // 65 MiB with all 16 in flight
       release();
-      assert.equal((await Promise.all(burst)).filter(reply => reply.status === 200 && reply.body.mimeType === 'image/png').length, 2);
+      assert.equal((await Promise.all(burst)).filter(reply => reply.status === 303 && reply.body.mimeType === 'image/png').length, 2);
 
       // A failed render releases its share: after one, two previews are in flight together again.
       fail = true; gate = Promise.resolve();
@@ -18371,7 +18364,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await until(() => inflight === 2);
       assert.equal(inflight, 2);
       release();
-      for (const reply of await Promise.all(again)) ok(reply);
+      for (const reply of await Promise.all(again)) ok(reply, 303);
 
       // The per-workspace limiter (on Workers, the ADMISSION binding weighted by bytes) refuses before any read.
       const asked: [string, number][] = [];
@@ -18384,52 +18377,67 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
-  // Recheck of #295: a preview's share was released once its response was built, so 16 clients that stopped reading kept
-  // 16 screenshots (about 300 MB in workerd). Responses are now sent from the PNG as they are read, and hold its share
-  // until the body is read, cancelled, or cut off at the deadline.
-  test('preview responses hold their memory until sent: slow readers cannot push past the budget, and cancel or the deadline releases it', async t => {
+  // Rechecks of #295: response bodies holding preview memory could outlive their requests (slow readers, then HEAD and
+  // abandoned Worker streams). A preview is now stored and its permit released before the handler answers 303 with a
+  // five-minute link that streams the stored object, so clients that read slowly, disconnect or send HEAD hold nothing.
+  test('stored previews: the permit is released before responding, HEAD never renders, and links expire and stay in their workspace', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, fetch }) => {
-      const [{ browserImageRenderer }, { holdPreviewMemory, PREVIEW_MEMORY_BUDGET, PREVIEW_SEND_DEADLINE_MS }] = await Promise.all([import('./src/adapters/browser-rendering.js'), import('./src/preview-images.js')]);
-      const MiB = 1024 * 1024, { setFlagsFromString } = await import('node:v8'), { runInNewContext } = await import('node:vm');
-      setFlagsFromString('--expose-gc');
-      const gc = runInNewContext('gc') as () => void, live = () => { gc(); const memory = process.memoryUsage(); return memory.heapUsed + memory.arrayBuffers; };
-      const free = () => { try { holdPreviewMemory(PREVIEW_MEMORY_BUDGET).release(); return true; } catch { return false; } };
-      // Browser Run returns a 7 MiB screenshot, as a tall page with one remote image can, with its Content-Length.
+      const [{ browserImageRenderer }, { previewLink, sweepPreviews }] = await Promise.all([import('./src/adapters/browser-rendering.js'), import('./src/preview-images.js')]);
+      const MiB = 1024 * 1024, objects = new Map<string, { body: Uint8Array; contentType: string; uploaded: Date }>();
+      let streamed = 0;
+      runtime.storage = {
+        async put(key, body, contentType) { objects.set(key, { body, contentType, uploaded: new Date() }); },
+        async get(key) { return objects.get(key) ?? null; },
+        async stream(key) { const object = objects.get(key); if (!object) return null; streamed++; return { body: new Blob([object.body as Uint8Array<ArrayBuffer>]).stream(), contentType: object.contentType }; },
+        async delete(key) { objects.delete(key); },
+        async list(prefix) { return { objects: [...objects].filter(([key]) => key.startsWith(prefix)).map(([key, object]) => ({ key, uploaded: object.uploaded })) }; },
+      };
+      // Browser Run returns a 7 MiB screenshot, as a tall page with one remote image can. Storing it holds the PNG and
+      // its 9.3 MiB of JSON, about 16 MiB of the 24 MiB budget: a permit held past its handler would refuse the next.
       const png = Buffer.alloc(7 * MiB, 9);
       let renders = 0;
       runtime.renderHtmlImage = browserImageRenderer({ async quickAction() { renders++; return new Response(png, { headers: { 'content-length': String(png.byteLength) } }); } } as never);
-      const campaign = ok(await local('POST', '/v1/campaigns', { name: 'Slow readers', html: '<img src="https://fixture.example/texture.png" width="600" height="4000">' }), 201);
-      const open = () => fetch(new Request(`${PUBLIC_ORIGIN}/v1/campaigns/${campaign.id}/preview-image`, { headers: { origin: PUBLIC_ORIGIN, cookie: manager!.cookie, 'x-bane-environment': 'live' } }));
-      const heap = live(), paused: Response[] = [];
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: 'Stored previews', html: '<img src="https://fixture.example/texture.png" width="600" height="4000">' }), 201);
+      const path = `${PUBLIC_ORIGIN}/v1/campaigns/${campaign.id}/preview-image`, wid = runtime.config.workspaceId;
+      const preview = (method = 'GET') => fetch(new Request(path, { method, headers: { origin: PUBLIC_ORIGIN, cookie: manager!.cookie } }));
+      const link = (url: string, method = 'GET') => fetch(new Request(url, { method }));
+      const links: Json[] = [], paused: Response[] = [];
       try {
-        // Clients that stop reading after the headers: each response holds its 7 MiB PNG and 1 MiB to send it, so three
-        // fill the 24 MiB budget and the next ones are refused before rendering.
-        const refused: Response[] = [];
-        for (let i = 0; i < 6; i++) { const response = await open(); (response.status === 200 ? paused : refused).push(response); }
-        assert.deepEqual([paused.length, refused.length, renders], [3, 3, 3]);
-        for (const response of refused) { assert.equal((await response.json() as Json).error.code, 'PREVIEW_BUSY'); assert.ok(response.headers.get('retry-after')); }
-        const grown = live() - heap;
-        assert.ok(grown < 32 * MiB, `Memory grew ${Math.round(grown / MiB)} MiB with three responses unread.`); // 21 MiB: the three PNGs
-        // A client that disconnects releases its share at once.
-        await paused.shift()!.body!.cancel();
-        paused.push(await open());
-        assert.equal(paused.at(-1)!.status, 200);
-        // So does one that reads the body to the end: the screenshot as JSON, exactly Content-Length bytes.
-        const reader = paused.shift()!, text = await reader.text();
-        assert.equal(text.length, Number(reader.headers.get('content-length')));
-        const read = JSON.parse(text);
-        assert.equal(read.mimeType, 'image/png'); assert.ok(Buffer.from(read.data, 'base64').equals(png));
-        // A client still reading at the deadline is cut off, and its share released.
-        t.mock.timers.enable({ apis: ['setTimeout'] });
-        let late: Response;
-        try { late = await open(); assert.equal(late.status, 200); t.mock.timers.tick(PREVIEW_SEND_DEADLINE_MS); }
-        finally { t.mock.timers.reset(); }
-        await assert.rejects(late.arrayBuffer());
-        paused.push(await open());
-        assert.equal(paused.at(-1)!.status, 200);
+        for (let i = 0; i < 6; i++) {
+          const reply = await preview(), body = await reply.json() as Json;
+          assert.equal(reply.status, 303, JSON.stringify(body)); assert.equal(reply.headers.get('location'), body.url); assert.equal(body.mimeType, 'image/png');
+          assert.ok(Math.abs(Date.parse(body.expiresAt) - Date.now() - 300_000) < 5000);
+          links.push(body);
+        }
         assert.equal(renders, 6);
-      } finally { for (const response of paused) await response.body?.cancel().catch(() => undefined); }
-      assert.equal(free(), true, 'Every share is released.');
+        // Readers of the links hold no budget: with three paused and one of them cancelled, a preview still renders.
+        for (const { url } of links.slice(0, 3)) paused.push(await link(url));
+        assert.deepEqual(paused.map(reply => reply.status), [200, 200, 200]);
+        await paused[0]!.body!.cancel();
+        assert.equal((await preview()).status, 303);
+        // Following a link returns what the route used to: the screenshot as JSON, without a credential.
+        const served = await paused[1]!.json() as Json;
+        assert.equal(served.mimeType, 'image/png'); assert.ok(Buffer.from(served.data, 'base64').equals(png));
+        // HEAD never renders: the preview route refuses it before any work, and a link's HEAD reads nothing.
+        const [rendered, read] = [renders, streamed];
+        const head = await preview('HEAD');
+        assert.equal(head.status, 405); assert.equal(head.headers.get('allow'), 'GET');
+        assert.equal((await link(links[3]!.url, 'HEAD')).status, 200);
+        assert.deepEqual([renders, streamed], [rendered, read]);
+        // Links are signed, expire, and serve only their own workspace's previews.
+        const missing = async (url: string) => { const reply = await link(url); assert.equal(reply.status, 404); assert.equal((await reply.json() as Json).error.code, 'NOT_FOUND'); };
+        const key = [...objects.keys()].find(k => k.startsWith(`previews/${wid}/`))!, other = `previews/another-workspace/${key.split('/')[2]}`;
+        objects.set(other, objects.get(key)!);
+        await (await link(previewLink(runtime, wid, key).url)).body?.cancel();
+        await missing(previewLink(runtime, wid, key, Date.now() - 301_000).url);
+        await missing(previewLink(runtime, 'another-workspace', key).url);
+        await missing(previewLink(runtime, wid, other).url);
+        await missing((links[4]!.url as string).replace(/.$/, (last: string) => last === 'A' ? 'B' : 'A'));
+        // Stored previews are deleted ten minutes after they were made; their links then fail.
+        const stored = [...objects.keys()].filter(k => k.startsWith('previews/')).length;
+        assert.equal(await sweepPreviews(runtime, 60_000, Date.now() + 11 * 60_000), stored);
+        await missing(links[5]!.url);
+      } finally { for (const reply of paused) await reply.body?.cancel().catch(() => undefined); }
     });
   });
 

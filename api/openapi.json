@@ -2032,6 +2032,31 @@
           "published"
         ]
       },
+      "PreviewImageLink": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Serves the 200 response (the base64 PNG as JSON) without a credential until expiresAt."
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "mimeType": {
+            "type": "string",
+            "enum": [
+              "image/png"
+            ]
+          }
+        },
+        "required": [
+          "url",
+          "expiresAt",
+          "mimeType"
+        ]
+      },
       "TemplateAsset": {
         "type": "object",
         "properties": {
@@ -27812,7 +27837,7 @@
     "/v1/templates/{id}/preview-image": {
       "get": {
         "operationId": "renderCampaignTemplatePreviewImage",
-        "description": "Renders a template draft or published revision as a full-page PNG. Inline template assets are embedded, so agents can verify the result without browser automation. Inline images may total about 1.5 MiB, counted once per reference (413 PREVIEW_TOO_LARGE above); while the server renders or sends other previews it answers 429 PREVIEW_BUSY with Retry-After. A response not read within 30 seconds is cut off.",
+        "description": "Renders a template draft or published revision as a full-page PNG. Inline template assets are embedded, so agents can verify the result without browser automation. Answers 303 See Other: Location (also url in the body) serves the result as JSON { data, mimeType } for five minutes without a credential, so HTTP clients that follow redirects receive it as before. Inline images may total about 1.5 MiB, counted once per reference (413 PREVIEW_TOO_LARGE above); while the server renders other previews it answers 429 PREVIEW_BUSY with Retry-After. HEAD is refused with 405: it would render a preview it cannot return.",
         "tags": [
           "Templates"
         ],
@@ -27854,11 +27879,30 @@
         ],
         "responses": {
           "200": {
-            "description": "Success",
+            "description": "What the 303 link serves.",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CampaignTemplatePreviewImage"
+                }
+              }
+            }
+          },
+          "303": {
+            "description": "The preview is stored: follow Location within five minutes.",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string",
+                  "format": "uri"
+                },
+                "required": true
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewImageLink"
                 }
               }
             }
@@ -32657,7 +32701,7 @@
     "/v1/campaigns/{id}/preview-image": {
       "get": {
         "operationId": "renderCampaignPreviewImage",
-        "description": "Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer. Inline images may total about 1.5 MiB, counted once per reference (413 PREVIEW_TOO_LARGE above); while the server renders or sends other previews it answers 429 PREVIEW_BUSY with Retry-After. A response not read within 30 seconds is cut off.",
+        "description": "Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer. Answers 303 See Other: Location (also url in the body) serves the result as JSON { data, mimeType } for five minutes without a credential, so HTTP clients that follow redirects receive it as before. Inline images may total about 1.5 MiB, counted once per reference (413 PREVIEW_TOO_LARGE above); while the server renders other previews it answers 429 PREVIEW_BUSY with Retry-After. HEAD is refused with 405: it would render a preview it cannot return.",
         "tags": [
           "Campaigns"
         ],
@@ -32686,11 +32730,30 @@
         ],
         "responses": {
           "200": {
-            "description": "Success",
+            "description": "What the 303 link serves.",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CampaignPreviewImage"
+                }
+              }
+            }
+          },
+          "303": {
+            "description": "The preview is stored: follow Location within five minutes.",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string",
+                  "format": "uri"
+                },
+                "required": true
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewImageLink"
                 }
               }
             }

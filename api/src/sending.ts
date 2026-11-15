@@ -33,7 +33,7 @@ import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_AT
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { headerPrefix, requestHeader } from './brand.js';
-import { renderPreview } from './preview-images.js';
+import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, registerPreviewImages, renderPreview } from './preview-images.js';
 
 type HtmlParser = typeof import('parse5').parse;
 const loadParse5 = lazyModule((): Promise<HtmlParser> => import('parse5').then(m => m.parse));
@@ -1217,6 +1217,7 @@ export async function admitTestEmail(c: Ctx, a: Actor, domain: string, to: strin
 }
 
 export function registerSending(app: App) {
+  registerPreviewImages(app);
   app.openapi(createRoute({method:'post',path:'/v1/emails/check',operationId:'checkEmail',tags:['Emails'],security,
     summary:'Check email sendability without sending', description:`Read-only 0–100 advisory score, not an inbox-placement probability or admission decision. Supply one draft (HTML or text), outbound email ID, or campaign ID. Uses visible retained content, cached From-domain facts, and workspace reputation for unrestricted readers. No DNS/asset fetches or paid screen. Scores use current evidence, not a historical delivery verdict. HTML has the preview lint’s 256 KiB UTF-8 and tree budgets. Marketing drafts are checked as supplied; ${productName} generates the unsubscribe headers and link for campaigns. MIME bytes are estimated.`,
     request:{body:json(CheckInput)},responses:{200:response(CheckResult),...errors}}),async c=>{
@@ -1424,13 +1425,14 @@ export function registerSending(app: App) {
     if (!audience.success) throw new ApiError(422, 'CAMPAIGN_INCOMPLETE', 'Choose an audience list before counting recipients.', 'audience.listId');
     return c.json(AudienceCounts.parse(await (await wrapModuleLoad(() => import('./audience.js'))).countCampaignAudience(c.env.db, a, audience.data)), 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview-image', operationId: 'renderCampaignPreviewImage', description: 'Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer. Inline images may total about 1.5 MiB, counted once per reference (413 PREVIEW_TOO_LARGE above); while the server renders or sends other previews it answers 429 PREVIEW_BUSY with Retry-After. A response not read within 30 seconds is cut off.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignPreviewImage), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview-image', operationId: 'renderCampaignPreviewImage', description: 'Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer.' + PREVIEW_ROUTE_NOTE, tags: ['Campaigns'], security, request: { params: IdParams }, responses: { ...previewResponses(CampaignPreviewImage), ...errors } }), async c => {
+    refuseHead(c);
     const a = actor(c, 'send'), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
     if (!c.env.renderHtmlImage) throw new ApiError(503, 'PREVIEW_RENDERING_UNAVAILABLE', 'Visual campaign preview rendering is not configured.', undefined, true);
     await chargeRenderBudget(c, a.workspaceId);
     const inline = (await attachmentRows(c.env.db, a, row.draft.attachments)).filter(item => item.disposition === 'inline' && item.contentId), render = c.env.renderHtmlImage;
     // The page is passed on, not kept here: renderPreview drops it once it is rendered.
-    return renderPreview(c.env, a.workspaceId, (await renderCampaignContent(c.env, row.draft, false)).html ?? '', inline, async item => {
+    const link = await renderPreview(c.env, a.workspaceId, (await renderCampaignContent(c.env, row.draft, false)).html ?? '', inline, async item => {
       const asset = await c.env.storage.get(item.storageKey);
       if (!asset || asset.body.length !== item.size || await bytesDigest(asset.body) !== item.checksum) throw new ApiError(503, 'ATTACHMENT_STORAGE_UNAVAILABLE', 'An inline campaign image is missing or changed.', undefined, true);
       return asset.body;
@@ -1438,6 +1440,8 @@ export function registerSending(app: App) {
       try { return await render(page, grow); }
       catch (error) { if (error instanceof ApiError) throw error; throw new ApiError(503, 'PREVIEW_RENDERING_FAILED', 'The visual campaign preview could not be rendered. Try again.', undefined, true); }
     });
+    c.header('Location', link.url);
+    return c.json({ ...link, mimeType: 'image/png' as const }, 303);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/state', operationId: 'getCampaignState', description: 'Compact authenticated state for draft sync polling; fetch the full campaign with getCampaign when state changes. Compare all returned fields, not only revision: archive and delivery changes need not increment the draft revision. Omits draft content and delivery counts.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignState), ...errors } }), async c => {
     const [row] = await c.env.db.select(campaignStateColumns).from(campaigns).where(campaignWhere(actor(c), c.req.valid('param').id)).limit(1);
