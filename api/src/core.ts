@@ -132,6 +132,8 @@ export interface Runtime {
   allowSnsCertMiss?: (peer: string) => Promise<boolean>;
   snsCertificateState?: import('./operations.js').SnsCertificateState; // Omitted by production: share one state per isolate, not per request.
   allowMalformedSns?: (peer: string) => Promise<boolean>;
+  // A workspace's preview memory a minute (Workers: the ADMISSION limiter, weighted by bytes). Node has only the per-process budget.
+  allowPreview?: (workspaceId: string, bytes: number) => Promise<boolean>;
   jwksCacheScope?: object; // Workers create a new DB adapter per request; scope public keys to the binding instead.
   // Set only by the SupportPlatform service-binding entrypoint (src/support-platform.ts), never from a request.
   platformCaller?: 'bane-support';

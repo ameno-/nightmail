@@ -18218,7 +18218,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   });
 
   // Sweep #276: each cid: reference became the image's whole data URI. 60 references to a 6 MiB image built a 480 MiB
-  // string (a Worker has 128 MB); more failed only at V8's string limit. Now the expansion is measured first, from stored sizes.
+  // string (a Worker has 128 MB); more failed only at V8's string limit. A preview is now measured first, from stored
+  // sizes, counting what it holds (the largest raw image, then the page three times), and refused over 8 MiB.
   test('visual previews bound inline image expansion: many or huge cid: references are refused before any image is read', async t => {
     await simulatedSesFixture(t, async ({ runtime, local }) => {
       const objects = new Map<string, { body: Uint8Array; contentType: string }>();
@@ -18231,7 +18232,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const rendered: string[] = [];
       // Like Browser Rendering's binding, serialize the page: a lazily concatenated string is built in full here.
       runtime.renderHtmlImage = async html => { rendered.push(html); JSON.stringify({ html }); return { data: Uint8Array.of(1), mimeType: 'image/png' }; };
-      const MiB = 1024 * 1024, cap = 16 * MiB, body = (bytes: number) => Buffer.alloc(bytes, 7).toString('base64');
+      const MiB = 1024 * 1024, body = (bytes: number) => Buffer.alloc(bytes, 7).toString('base64');
       const upload = async (path: string, contentId: string, bytes: number, contentType = 'image/png') =>
         ok(await local('POST', path, { filename: `${contentId}.png`, contentType, disposition: 'inline', contentId, content: body(bytes) }), 201).id as string;
       const refs = (ids: string[], times = 1) => Array.from({ length: times }, () => ids.map(id => `<img src="cid:${id}">`).join('')).join('');
@@ -18251,7 +18252,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal(error(reply, 413, 'PREVIEW_TOO_LARGE').retryable, false);
         assert.deepEqual([reads, rendered.length], [0, 0], 'Refused before any image is read or rendered.');
         assert.ok(ms < 5000, `Refused in ${Math.round(ms)} ms.`);
-        assert.ok(heap < 128 * MiB, `Heap grew ${Math.round(heap / MiB)} MiB.`); // 924 MiB for 60 references before the fix
+        assert.ok(heap < 128 * MiB, `Heap grew ${Math.round(heap / MiB)} MiB.`); // 924 MiB for 60 references to the 6 MiB image before the fix
       };
       const campaign = ok(await local('POST', '/v1/campaigns', { name: 'Preview bound' }), 201);
       let revision = campaign.revision;
@@ -18260,34 +18261,97 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         return `/v1/campaigns/${campaign.id}/preview-image`;
       };
 
-      // One huge part: embedded once, refused when referenced from a hostile draft.
-      const hero = await upload('/v1/attachments', 'hero', 6 * MiB), heroUri = `data:image/png;base64,${body(6 * MiB)}`;
-      let result = await measure(await draft(refs(['hero']), [hero]));
-      ok(result.reply);
-      assert.equal(reads, 1); assert.equal(occurrences(rendered[0]!, heroUri), 1); assert.ok(rendered[0]!.length < cap);
-      await refused(await draft(refs(['hero'], 60), [hero]));
-      await refused(await draft(hostile, [hero]));
+      // A 1 MiB image once holds about 5 MiB: embedded once.
+      const logo = await upload('/v1/attachments', 'logo', MiB);
+      ok((await measure(await draft(refs(['logo']), [logo]))).reply);
+      assert.equal(reads, 1); assert.equal(occurrences(rendered[0]!, `data:image/png;base64,${body(MiB)}`), 1);
+      // A 6 MiB image would hold about 30 MiB even once; 60 references, about 1.5 GB; the hostile draft, far more.
+      const hero = await upload('/v1/attachments', 'hero', 6 * MiB);
+      for (const html of [refs(['hero']), refs(['hero'], 60), hostile]) await refused(await draft(html, [hero]));
 
-      // Many parts (7 MiB together, under the draft limit): each embedded once, refused when each is referenced twice (over 16 MiB).
-      const names = Array.from({ length: 7 }, (_, i) => `part${i}`), parts: string[] = [];
-      for (const name of names) parts.push(await upload('/v1/attachments', name, MiB));
-      result = await measure(await draft(refs(names), parts));
-      ok(result.reply);
-      assert.equal(reads, 7); assert.equal(occurrences(rendered[0]!, `data:image/png;base64,${body(MiB)}`), 7);
+      // Many parts: each embedded once (about 6.3 MiB held), refused when each is referenced twice (about 12.3 MiB).
+      const names = Array.from({ length: 6 }, (_, i) => `part${i}`), parts: string[] = [], part = `data:image/png;base64,${body(MiB / 4)}`;
+      for (const name of names) parts.push(await upload('/v1/attachments', name, MiB / 4));
+      ok((await measure(await draft(refs(names), parts))).reply);
+      assert.equal(reads, 6); assert.equal(occurrences(rendered[0]!, part), 6);
       await refused(await draft(refs(names, 2), parts));
 
-      // A content type may contain "cid:". Its 10,000 data URIs are never scanned again for references, so the
-      // 1 MiB part referenced once is embedded once, not 10,001 times.
+      // A content type may contain "cid:". Its 1,000 data URIs are never scanned again for references, so the part
+      // referenced once is embedded once, not 1,001 times (334 MiB).
       const tiny = await upload('/v1/attachments', 'tiny', 1, 'image/png;x=cid:part0');
-      result = await measure(await draft(refs(['tiny'], 10_000) + refs(['part0']), [tiny, parts[0]!]));
-      ok(result.reply);
-      assert.equal(reads, 2); assert.equal(occurrences(rendered[0]!, `data:image/png;base64,${body(MiB)}`), 1); assert.ok(rendered[0]!.length < 4 * MiB);
+      ok((await measure(await draft(refs(['tiny'], 1000) + refs(['part0']), [tiny, parts[0]!]))).reply);
+      assert.equal(reads, 2); assert.equal(occurrences(rendered[0]!, part), 1); assert.ok(rendered[0]!.length < 2 * MiB);
 
       // Template previews embed inline assets the same way.
       const template = ok(await local('POST', '/v1/templates', { name: 'Preview bound' }), 201);
       const asset = await upload('/v1/template-assets', 'hero', 6 * MiB);
       ok(await local('PATCH', `/v1/templates/${template.id}`, { revision: template.revision, draft: { ...template.draft, html: hostile, attachments: [asset] } }));
       await refused(`/v1/templates/${template.id}/preview-image`);
+    });
+  });
+
+  // Review of #295: each preview fit its own limit, but 16 at once held 179 MB of pages in one isolate (a Worker has
+  // 128 MB). Previews now reserve what they hold from one 24 MiB budget per isolate, before reading any image.
+  test('concurrent visual previews share one memory budget per isolate: extra ones get 429 PREVIEW_BUSY before any read', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local }) => {
+      const { browserImageRenderer } = await import('./src/adapters/browser-rendering.js'), { PREVIEW_MEMORY_BUDGET } = await import('./src/preview-images.js');
+      const objects = new Map<string, { body: Uint8Array; contentType: string }>();
+      let reads = 0;
+      runtime.storage = {
+        async put(key, body, contentType) { objects.set(key, { body, contentType }); },
+        async get(key) { reads++; return objects.get(key) ?? null; },
+        async delete(key) { objects.delete(key); },
+      };
+      // Browser Run behind the real adapter: each action's JSON (with its page) is built, then held until released.
+      let release = () => {}, gate = new Promise<void>(resolve => { release = resolve; }), inflight = 0, pages = 0, peak = 0, fail = false;
+      const binding = {
+        async quickAction(_action: string, options: { html: string }) {
+          const body = JSON.stringify(options); inflight++; pages += body.length; peak = Math.max(peak, pages);
+          try { await gate; if (fail) throw new Error('Synthetic Browser Run failure.'); return new Response(Uint8Array.of(1)); }
+          finally { inflight--; pages -= body.length; }
+        },
+      };
+      runtime.renderHtmlImage = browserImageRenderer(binding as never);
+      const MiB = 1024 * 1024, { setFlagsFromString } = await import('node:v8'), { runInNewContext } = await import('node:vm');
+      // Live heap, not garbage: collect before each reading.
+      setFlagsFromString('--expose-gc');
+      const gc = runInNewContext('gc') as () => void, live = () => { gc(); return process.memoryUsage().heapUsed; };
+      const image = ok(await local('POST', '/v1/attachments', { filename: 'hero.png', contentType: 'image/png', disposition: 'inline', contentId: 'hero', content: Buffer.alloc(1.5 * MiB, 7).toString('base64') }), 201);
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: 'Concurrent previews', html: '<img src="cid:hero">', attachments: [image.id] }), 201);
+      const path = `/v1/campaigns/${campaign.id}/preview-image`;
+      const until = async (done: () => boolean) => { for (let i = 0; i < 500 && !done(); i++) await new Promise(resolve => setTimeout(resolve, 10)); };
+
+      // Each preview holds about 10.6 MiB (the 1.5 MiB image, its 2 MiB page three times, the screenshot reserve): two fit.
+      const heap = live(), settled: Reply[] = [];
+      const burst = Array.from({ length: 16 }, () => local('GET', path).then(reply => { settled.push(reply); return reply; }));
+      await until(() => inflight === 2 && settled.length === 14);
+      const grown = live() - heap;
+      assert.deepEqual([inflight, settled.length], [2, 14]);
+      for (const reply of settled) { assert.equal(error(reply, 429, 'PREVIEW_BUSY').retryable, true); assert.ok(reply.headers.get('retry-after')); }
+      assert.equal(reads, 2, 'Refused previews read no image.');
+      assert.ok(peak <= PREVIEW_MEMORY_BUDGET, `The renderer held ${(peak / MiB).toFixed(1)} MiB of pages.`);
+      assert.ok(grown < 32 * MiB, `Heap grew ${Math.round(grown / MiB)} MiB with previews in flight.`); // 65 MiB with all 16 in flight
+      release();
+      assert.equal((await Promise.all(burst)).filter(reply => reply.status === 200 && reply.body.mimeType === 'image/png').length, 2);
+
+      // A failed render releases its share: after one, two previews are in flight together again.
+      fail = true; gate = Promise.resolve();
+      error(await local('GET', path), 503, 'PREVIEW_RENDERING_FAILED');
+      fail = false; gate = new Promise<void>(resolve => { release = resolve; });
+      const again = [local('GET', path), local('GET', path)];
+      await until(() => inflight === 2);
+      assert.equal(inflight, 2);
+      release();
+      for (const reply of await Promise.all(again)) ok(reply);
+
+      // The per-workspace limiter (on Workers, the ADMISSION binding weighted by bytes) refuses before any read.
+      const asked: [string, number][] = [];
+      runtime.allowPreview = async (workspaceId, bytes) => { asked.push([workspaceId, bytes]); return false; };
+      reads = 0;
+      assert.equal(error(await local('GET', path), 429, 'RENDER_RATE_LIMITED').retryable, true);
+      assert.equal(reads, 0);
+      assert.deepEqual(asked.map(([workspaceId]) => workspaceId), [runtime.config.workspaceId]);
+      assert.ok(asked[0]![1] > 10 * MiB && asked[0]![1] < 11 * MiB, `Asked for ${asked[0]![1]} bytes.`);
     });
   });
 

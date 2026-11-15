@@ -27812,7 +27812,7 @@
     "/v1/templates/{id}/preview-image": {
       "get": {
         "operationId": "renderCampaignTemplatePreviewImage",
-        "description": "Renders a template draft or published revision as a full-page PNG. Inline template assets are embedded, so agents can verify the result without browser automation.",
+        "description": "Renders a template draft or published revision as a full-page PNG. Inline template assets are embedded, so agents can verify the result without browser automation. Inline images may total about 1.5 MiB, counted once per reference (413 PREVIEW_TOO_LARGE above); while the server renders other previews it answers 429 PREVIEW_BUSY with Retry-After.",
         "tags": [
           "Templates"
         ],
@@ -32657,7 +32657,7 @@
     "/v1/campaigns/{id}/preview-image": {
       "get": {
         "operationId": "renderCampaignPreviewImage",
-        "description": "Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer.",
+        "description": "Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer. Inline images may total about 1.5 MiB, counted once per reference (413 PREVIEW_TOO_LARGE above); while the server renders other previews it answers 429 PREVIEW_BUSY with Retry-After.",
         "tags": [
           "Campaigns"
         ],

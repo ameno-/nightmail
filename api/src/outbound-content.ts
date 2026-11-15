@@ -74,23 +74,3 @@ export function validateAttachment<T extends AttachmentMetadataInput>(metadata: 
   if (metadata.disposition === 'inline' && !metadata.contentId) throw new ApiError(422, 'INLINE_ATTACHMENT_INVALID', 'Inline attachments require contentId.', 'contentId');
   return metadata;
 }
-
-// A visual preview embeds every cid: reference as the image's whole data URI, so 3 KB of references to one 8 MiB
-// image would build gigabytes. Measure the expansion from the stored sizes first, then read only referenced images.
-export const MAX_PREVIEW_INLINE_BYTES = 16 * 1024 * 1024;
-export async function embedInlineImages<T extends { contentId: string | null; contentType: string; size: number }>(html: string, items: T[], read: (item: T) => Promise<Uint8Array>) {
-  const byReference = new Map<string, T>();
-  for (const item of items) if (item.contentId && !byReference.has(`cid:${item.contentId}`)) byReference.set(`cid:${item.contentId}`, item);
-  if (!byReference.size) return html;
-  // One pass, longest reference first: an embedded URI is never scanned again (a content type may contain "cid:"),
-  // and cid:logo never replaces the start of cid:logo2.
-  const pattern = new RegExp([...byReference.keys()].sort((a, b) => b.length - a.length).map(reference => reference.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
-  const counts = new Map<string, number>();
-  for (const [reference] of html.matchAll(pattern)) counts.set(reference, (counts.get(reference) ?? 0) + 1);
-  let added = 0;
-  for (const [reference, count] of counts) { const item = byReference.get(reference)!; added += count * (`data:${item.contentType};base64,`.length + 4 * Math.ceil(item.size / 3)); }
-  if (added > MAX_PREVIEW_INLINE_BYTES) throw new ApiError(413, 'PREVIEW_TOO_LARGE', 'Inline images would add more than 16 MiB to this preview. Reference each large image once, or use smaller images.');
-  const uris = new Map<string, string>();
-  for (const reference of counts.keys()) { const item = byReference.get(reference)!; uris.set(reference, `data:${item.contentType};base64,${Buffer.from(await read(item)).toString('base64')}`); }
-  return html.replace(pattern, reference => uris.get(reference)!);
-}
