@@ -6519,6 +6519,75 @@ describe('Billing: metering, gate and settlement', () => {
     });
   });
 
+  test('a refund and a new send that net to zero in one hour are still work: the gate counts the send, the settler charges it, and paid attribution moves with it', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const f = await billingFixture(runtime, db, local, request);
+      const free = (on: boolean) => db.query(`SELECT billing_set_workspace_free($1,$2,'Fixture',NULL,'operator:fixture')`, [f.wid, on]);
+      const hour = (h: number) => `date_trunc('hour', now(), 'UTC') - interval '${h} hours'`;
+      // Mail queued an hour ago, as its hour's meter recorded it: one 3,000-recipient send and two single ones.
+      const queuedLastHour = async () => {
+        const ids = (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+          SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,CASE WHEN i=0 THEN 3000 ELSE 1 END) n),'[]','[]','Queued','{}',false,now()-interval '1 hour'
+          FROM generate_series(0,2) i ORDER BY i RETURNING id`, [unique('queued'), f.wid, REGION, f.from])).rows.map(r => r.id as string);
+        await db.query(`UPDATE billing_usage_hourly SET hour=${hour(1)} WHERE workspace_id=$1 AND meter='send' AND hour=${hour(0)}`, [f.wid]);
+        assert.equal((await settle(db, f.wid, hour(0))).entries, 1);
+        return ids;
+      };
+      const cancel = (id: string) => db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [id]);
+      await f.mode('enforce');
+      // Exempt origin: 3,002 recipients settle at $0. Prepaid again with credit for exactly two sends.
+      await free(true);
+      const [, a, b] = await queuedLastHour();
+      await free(false);
+      await f.post('topup', `attempt:${unique('two')}`, 40_000n);
+      // A new send, and one of the exempt recipients canceled in the same hour: the row nets to zero but owes the send,
+      // so the second send takes the last of the credit and the third is refused.
+      ok(await f.send(1), 202);
+      await cancel(a!);
+      assert.deepEqual([(await f.position()).openUc, (await f.position()).availableUc], ['20000', '20000']);
+      ok(await f.send(1), 202);
+      await cancel(b!);
+      assert.equal((await f.position()).availableUc, '0');
+      error(await f.send(1), 402, 'BALANCE_EXHAUSTED');
+      // The net-zero row is still settled, and both sends are charged; the exempt refunds give nothing back.
+      const row = (await db.query(`SELECT quantity::int, settled_quantity::int, refunds <> '{}' AS pending FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='send' AND hour=${hour(0)}`, [f.wid])).rows[0];
+      assert.deepEqual(row, { quantity: 0, settled_quantity: 0, pending: true });
+      const { settleClosedHours } = await import('./src/billing/cron.js');
+      await settleClosedHours(runtime, (await db.query(`SELECT (${hour(0)} + interval '1 hour')::text AS c`)).rows[0].c);
+      const settled = (await db.query(`SELECT refunds = '{}' AS done FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='send' AND hour=${hour(0)}`, [f.wid])).rows[0];
+      assert.equal(settled.done, true, 'Cron discovery finds the net-zero row.');
+      assert.deepEqual([(await f.account()).balance_uc, (await f.position()).availableUc], ['0', '0']);
+    });
+  });
+
+  test('a net-zero hour whose refunded mail was paid moves the charge to the new send, and refunding that send returns it', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const f = await billingFixture(runtime, db, local, request);
+      const hour = (h: number) => `date_trunc('hour', now(), 'UTC') - interval '${h} hours'`;
+      const paid = async () => Object.fromEntries((await db.query(`SELECT CASE WHEN hour = ${hour(0)} THEN 'now' ELSE 'before' END AS h, units::int FROM billing_usage_paid WHERE workspace_id=$1 AND meter='send'`, [f.wid])).rows.map(r => [r.h, r.units]));
+      await f.mode('enforce');
+      await f.post('topup', `attempt:${unique('dollar')}`, 100_000_000n);
+      // Prepaid origin an hour ago: 3,002 recipients, the last two charged.
+      const ids = (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,CASE WHEN i=0 THEN 3000 ELSE 1 END) n),'[]','[]','Queued','{}',false,now()-interval '1 hour'
+        FROM generate_series(0,2) i ORDER BY i RETURNING id`, [unique('queued'), f.wid, REGION, f.from])).rows.map(r => r.id as string);
+      await db.query(`UPDATE billing_usage_hourly SET hour=${hour(1)} WHERE workspace_id=$1 AND meter='send' AND hour=${hour(0)}`, [f.wid]);
+      assert.equal((await settle(db, f.wid, hour(0))).costUc, '40000');
+      assert.deepEqual(await paid(), { before: 2 });
+      // A new send and one of the paid recipients canceled in the same hour: the refund pays for the new send.
+      const sent = ok(await f.send(1), 202).id as string;
+      await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [ids[1]]);
+      assert.equal((await f.position()).openUc, '20000', 'Until it settles, the refund lends nothing.');
+      const moved = await settle(db, f.wid, "now() + interval '1 hour'");
+      assert.deepEqual([moved.entries, moved.costUc], [1, '0']);
+      assert.deepEqual(await paid(), { before: 1, now: 1 });
+      // Canceling the new send now returns its charge.
+      await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [sent]);
+      assert.equal((await settle(db, f.wid, "now() + interval '1 hour'")).costUc, '-20000');
+      assert.deepEqual([await paid(), (await f.account()).balance_uc], [{ before: 1, now: 0 }, '99980000']);
+    });
+  });
+
   test('meters: pre-SES refunds land in the current hour, spam rejections stay charged, receives, Omens and storage count once', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const f = await billingFixture(runtime, db, local, request);
