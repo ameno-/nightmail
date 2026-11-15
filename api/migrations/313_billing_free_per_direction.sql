@@ -3,10 +3,12 @@ SET LOCAL lock_timeout='2s';
 -- 3,000 sent and received combined. Each direction has its own allowance: sends beyond 3,000 are charged even while
 -- received mail is still free, and the other way round. The rate stays $0.20 per 1,000 for each.
 --
--- The new rule applies to the whole month this ships in: billing_free_split returns what this month's charged
--- settlements paid under the combined rule beyond what the split rule charges, so no workspace pays more this month than
--- either rule asks. Months before it keep their combined pool for late writes (a refund of mail admitted then), priced
--- from that month's settled history: the cached counters only describe a month priced per direction.
+-- The rule applies from the month this ships in, to that month's own counts: the per-direction counters are filled from
+-- this month's settled usage, and everything settled from now on is priced per direction. What already settled stays as
+-- it was charged (production is alpha and Anomaly's own workspace is free; the PR carries a read-only query listing any
+-- workspace the combined rule charged this month, for an operator). Months before it keep their combined pool for late
+-- writes (a refund of mail admitted then), priced from that month's settled history: the cached counters only describe
+-- a month priced per direction.
 ALTER TABLE billing_accounts ADD COLUMN free_sent_used integer NOT NULL DEFAULT 0,       -- settled send units in free_month
   ADD COLUMN free_received_used integer NOT NULL DEFAULT 0;                               -- settled receive units in free_month
 ALTER TABLE billing_config ADD COLUMN free_split_from date;                              -- first month priced per direction
@@ -131,97 +133,44 @@ BEGIN
   RETURN jsonb_build_object('entries', n, 'costUc', cost_uc::text, 'charged', charged, 'entryId', posted->>'entryId');
 END $$;
 
--- The settlements that settled any of this month's mail, as the combined-rule settler recorded them (one usage row per
--- run: per-meter quantity, payable units and cost, whether money moved, the hours it covered). A settlement is pure when
--- every hour it settled is in this month; one that starts earlier also settled a past month's units (a late refund,
--- or a run across the month boundary), so its quantities aren't all this month's.
-CREATE FUNCTION billing_free_split_settlements(wid text, since timestamptz)
-RETURNS TABLE(id bigint, charged boolean, promo bigint, pure boolean, sends bigint, receives bigint, payable bigint, mail_uc numeric)
-LANGUAGE sql STABLE AS $$
-  SELECT l.id, coalesce((l.detail->>'charged')::boolean, false), -l.promo_uc, (l.detail->>'from')::timestamptz >= since,
-    coalesce((l.detail#>>'{meters,send,quantity}')::numeric, 0)::bigint, coalesce((l.detail#>>'{meters,receive,quantity}')::numeric, 0)::bigint,
-    (coalesce((l.detail#>>'{meters,send,payable}')::numeric, 0) + coalesce((l.detail#>>'{meters,receive,payable}')::numeric, 0))::bigint,
-    coalesce((l.detail#>>'{meters,send,costUc}')::numeric, 0) + coalesce((l.detail#>>'{meters,receive,costUc}')::numeric, 0)
-  FROM billing_ledger l
-  WHERE l.workspace_id=wid AND l.kind='usage' AND l.detail ? 'from' AND (l.detail->>'to')::timestamptz > since
-  ORDER BY l.id
-$$;
-
--- The switch for one account in the month it ships. The per-direction counters come from this month's settled usage.
--- The correction is what the combined rule charged beyond the split rule for this month's mail, counted only for
--- settlements that moved money: shadow, exempt and free runs paid nothing, so nothing comes back for them, whatever the
--- account's mode is now. Omens and storage are not involved. Provenance comes from each settlement's own record, never
--- from the hours it covered (an hour can settle across runs: a row skipped while locked, a late write):
--- - At most one settlement also covers a past month: replay the settlements in order. A pure one brings its own
---   quantities and the units it actually charged; the other takes the rest of this month's settled mail, priced as the
---   combined settler priced it.
--- - Several do, all charged or none: the month's totals give it exactly (the combined rule took g(sent + received),
---   the split rule takes g(sent) + g(received), g(x) = max(0, x − 3,000)).
--- - Otherwise the records can't say which run charged which units: no correction. A $0 row with freeSplit.unresolved
---   records it, and an operator reconciles that account.
--- The credit is never negative and never more than the mail units those settlements charged, and it is posted once (its
--- ledger key). Promo comes back first, only up to the promo the corrected settlements drew. It is money the account never
--- owed, so like a top-up it ends an unpaid episode it settles and queues billing.restored, which releases held mail.
-CREATE FUNCTION billing_free_split(wid text) RETURNS jsonb LANGUAGE plpgsql AS $$
-DECLARE a billing_accounts; mon date := (date_trunc('month', now() AT TIME ZONE 'UTC'))::date; since timestamptz := mon::timestamp AT TIME ZONE 'UTC';
-  sent bigint; received bigint; units bigint; mixed int; all_charged boolean; any_charged boolean; pure_sends bigint; pure_receives bigint;
-  e record; q_send bigint; q_receive bigint; old_u bigint; new_u bigint; used bigint := 0; s bigint := 0; r bigint := 0;
-  charged_units bigint := 0; old_charged bigint := 0; promo_funded bigint := 0; unresolved boolean := false;
-  back bigint := 0; promo_back bigint := 0; posted jsonb;
+-- 300's billing_post, with a settlement that returns money (refunds outweighing new usage) counted as a credit: when it
+-- leaves the balance at $0 or above, the unpaid episode ends and billing.restored releases held mail and waiting
+-- campaigns, as a top-up's would. Before, a refunded charge left the account unpaid at $0 and still heading for a hold.
+CREATE OR REPLACE FUNCTION billing_post(wid text, k text, src text, paid bigint, promo bigint, det jsonb, who text) RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE a billing_accounts; eid bigint;
+  credit boolean := k IN ('topup','grant','refund_release','dispute_reversal') OR (k IN ('adjustment','usage') AND paid+promo>0);
 BEGIN
+  INSERT INTO billing_accounts(workspace_id) VALUES (wid) ON CONFLICT DO NOTHING;
   SELECT * INTO a FROM billing_accounts WHERE workspace_id=wid FOR UPDATE;
-  IF NOT FOUND OR a.free_month <> mon THEN RETURN jsonb_build_object('creditUc', '0'); END IF;
-  SELECT greatest(0, coalesce(sum(settled_quantity) FILTER (WHERE meter='send'),0)), greatest(0, coalesce(sum(settled_quantity) FILTER (WHERE meter='receive'),0))
-    INTO sent, received FROM billing_usage_hourly
-    WHERE workspace_id=wid AND meter IN ('send','receive') AND hour >= since AND hour < (mon + interval '1 month')::timestamp AT TIME ZONE 'UTC';
-  UPDATE billing_accounts SET free_sent_used=least(sent, 2147483647)::int, free_received_used=least(received, 2147483647)::int, updated_at=now() WHERE workspace_id=wid;
-  units := greatest(0, sent + received - 3000) - greatest(0, sent - 3000) - greatest(0, received - 3000);
-  IF units <= 0 THEN RETURN jsonb_build_object('creditUc', '0', 'sent', sent, 'received', received); END IF;
-  SELECT count(*) FILTER (WHERE NOT x.pure), coalesce(bool_and(x.charged), true), coalesce(bool_or(x.charged), false),
-      coalesce(sum(x.sends) FILTER (WHERE x.pure), 0), coalesce(sum(x.receives) FILTER (WHERE x.pure), 0)
-    INTO mixed, all_charged, any_charged, pure_sends, pure_receives FROM billing_free_split_settlements(wid, since) x;
-  IF NOT any_charged THEN NULL;
-  ELSIF mixed = 0 AND (pure_sends <> sent OR pure_receives <> received) THEN unresolved := true;   -- settled mail no record accounts for
-  ELSIF mixed <= 1 THEN
-    FOR e IN SELECT * FROM billing_free_split_settlements(wid, since) ORDER BY id LOOP
-      IF e.pure THEN q_send := e.sends; q_receive := e.receives; old_u := e.payable;
-      ELSE q_send := sent - pure_sends; q_receive := received - pure_receives;
-        old_u := greatest(0, greatest(0, used + q_send + q_receive) - 3000) - greatest(0, used - 3000); END IF;
-      used := greatest(0, used + q_send + q_receive);
-      new_u := greatest(0, greatest(0, s + q_send) - 3000) - greatest(0, s - 3000) + greatest(0, greatest(0, r + q_receive) - 3000) - greatest(0, r - 3000);
-      s := greatest(0, s + q_send); r := greatest(0, r + q_receive);
-      IF e.charged THEN
-        charged_units := charged_units + old_u - new_u; old_charged := old_charged + old_u;
-        promo_funded := promo_funded + least(greatest(0, old_u - new_u) * 20000, greatest(0, e.promo));
-      END IF;
-    END LOOP;
-  ELSIF all_charged THEN
-    charged_units := units; old_charged := greatest(0, sent + received - 3000);
-    SELECT coalesce(sum(least(greatest(0, x.promo), greatest(0, x.mail_uc))), 0) INTO promo_funded
-      FROM billing_free_split_settlements(wid, since) x WHERE x.sends <> 0 OR x.receives <> 0;
-  ELSE unresolved := true; END IF;
-  back := least(greatest(0, charged_units), greatest(0, old_charged)) * 20000;
-  promo_back := least(back, a.promo_spent_uc, promo_funded);
-  IF unresolved THEN RAISE WARNING 'billing_free_split: % needs a manual correction for %', wid, mon; END IF;
-  posted := billing_post(wid, 'usage', 'usage:free-split:'||wid||':'||mon, back - promo_back, promo_back,
-    jsonb_build_object('freeSplit', jsonb_build_object('sent', sent, 'received', received, 'units', units, 'chargedUnits', back / 20000, 'unresolved', unresolved),
-      'costUc', (-(CASE WHEN back > 0 OR unresolved THEN back ELSE units * 20000 END))::text, 'charged', back > 0, 'month', mon), 'system');
-  IF NOT (posted->>'applied')::boolean THEN RETURN jsonb_build_object('creditUc', '0', 'sent', sent, 'received', received); END IF;
-  -- billing_post treats usage as a debit; a credit that settles the debt ends the episode as its credit branch would.
-  UPDATE billing_accounts SET month_spend_uc=CASE WHEN unresolved THEN month_spend_uc ELSE greatest(0, month_spend_uc - units * 20000) END,
-      promo_spent_uc=promo_spent_uc - promo_back,
-      unpaid_since = CASE WHEN back > 0 AND balance_uc >= 0 THEN NULL ELSE unpaid_since END,
-      empty_since  = CASE WHEN back > 0 AND balance_uc + promo_uc > 0 THEN NULL ELSE empty_since END,
-      low_since    = CASE WHEN back > 0 AND balance_uc + promo_uc >= low_balance_uc THEN NULL ELSE low_since END, updated_at=now()
-    WHERE workspace_id=wid;
-  IF back > 0 THEN
+  INSERT INTO billing_ledger(workspace_id,kind,source_id,paid_uc,promo_uc,balance_after_uc,promo_after_uc,detail,actor)
+    VALUES (wid,k,src,paid,promo,a.balance_uc+paid,a.promo_uc+promo,coalesce(det,'{}'),who)
+    ON CONFLICT (kind,source_id) DO NOTHING RETURNING id INTO eid;
+  IF eid IS NULL THEN RETURN jsonb_build_object('applied',false,'balanceUc',a.balance_uc::text,'promoUc',a.promo_uc::text); END IF;
+  IF a.promo_uc+promo < 0 THEN RAISE EXCEPTION 'promo below zero' USING ERRCODE='23514'; END IF;
+  UPDATE billing_accounts SET balance_uc=balance_uc+paid, promo_uc=promo_uc+promo, updated_at=now(),
+    unpaid_since = CASE WHEN balance_uc+paid<0 THEN coalesce(unpaid_since,now()) WHEN credit THEN NULL ELSE unpaid_since END,
+    empty_since  = CASE WHEN credit AND balance_uc+paid+promo_uc+promo>0 THEN NULL ELSE empty_since END,
+    low_since    = CASE WHEN credit AND balance_uc+paid+promo_uc+promo>=low_balance_uc THEN NULL ELSE low_since END,
+    recharge_month_total_uc = CASE WHEN det->>'recharge'='true' THEN
+      CASE WHEN recharge_month=(date_trunc('month',now() AT TIME ZONE 'UTC'))::date THEN recharge_month_total_uc ELSE 0 END + paid
+      ELSE recharge_month_total_uc END,
+    recharge_month = CASE WHEN det->>'recharge'='true' THEN (date_trunc('month',now() AT TIME ZONE 'UTC'))::date ELSE recharge_month END
+  WHERE workspace_id=wid;
+  IF paid<>0 THEN PERFORM billing_lots(wid, k, src, paid, a.balance_uc, coalesce(det,'{}')); END IF;   -- 7: credit lots
+  IF credit THEN
     INSERT INTO jobs(id,type,workspace_id,payload) VALUES ('billing.restored:'||wid,'billing.restored',wid,'{}')
       ON CONFLICT (id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL
       WHERE jobs.status IN ('completed','failed');
   END IF;
-  RETURN jsonb_build_object('creditUc', back::text, 'promoUc', promo_back::text, 'sent', sent, 'received', received, 'unresolved', unresolved);
+  RETURN jsonb_build_object('applied',true,'entryId',eid::text,'balanceUc',(a.balance_uc+paid)::text,'promoUc',(a.promo_uc+promo)::text);
 END $$;
 
-SELECT billing_free_split(workspace_id) FROM billing_accounts
-  WHERE free_month=(date_trunc('month', now() AT TIME ZONE 'UTC'))::date ORDER BY workspace_id;
+
+-- This month's own counts for accounts that settled this month; any other account starts the month at zero anyway.
+UPDATE billing_accounts b SET free_sent_used=least(u.sent, 2147483647)::int, free_received_used=least(u.received, 2147483647)::int
+  FROM (SELECT workspace_id, greatest(0, sum(settled_quantity) FILTER (WHERE meter='send')) AS sent,
+               greatest(0, sum(settled_quantity) FILTER (WHERE meter='receive')) AS received
+        FROM billing_usage_hourly WHERE meter IN ('send','receive') AND hour >= date_trunc('month', now(), 'UTC') GROUP BY 1) u
+  WHERE b.workspace_id=u.workspace_id AND b.free_month=(date_trunc('month', now() AT TIME ZONE 'UTC'))::date;
 ALTER TABLE billing_accounts DROP COLUMN free_emails_used;
