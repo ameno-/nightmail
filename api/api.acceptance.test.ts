@@ -14047,8 +14047,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   });
   test('hosted campaigns: one classifier request per distinct copy, however many recipients share it', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, run, jobs }) => t.test('classifier', async t => {
-      // CI: 2,000 recipients over 40 first names. BANE_BENCH=1: 100,000 over 5,000.
-      const recipients = BENCH ? 100_000 : 2_000, names = BENCH ? 5_000 : 40, acct = '112223330016';
+      // CI: 150 recipients over 12 first names (CI's disk-backed database makes every send slow). BANE_BENCH=1: 100,000 over 5,000.
+      const recipients = BENCH ? 100_000 : 150, names = BENCH ? 5_000 : 12, acct = '112223330016';
       const { wid, screened } = await hostedScreenFixture(t, runtime, db, acct, 'scale.invalid');
       await db.query('UPDATE workspaces SET send_cap_override=$2 WHERE id=$1', [wid, 10 * recipients]); await gradedSender(db, wid, 10 * recipients);
       await db.query(`SELECT billing_post($1,'grant','grant:scale-fixture',0,$2,'{}','operator:fixture')`, [wid, String(BigInt(recipients) * 10_000_000n)]);
