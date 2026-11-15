@@ -4121,6 +4121,35 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  // Recheck of #295: an MCP exchange copies a preview screenshot several times (parsed, as text and structured content,
+  // serialized). Those copies are charged to the preview budget until the MCP response is sent.
+  test('MCP preview responses hold their preview memory until sent, and screenshots too large for MCP are refused', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request, fetch }) => {
+      const [{ browserImageRenderer }, { holdPreviewMemory, PREVIEW_MEMORY_BUDGET }] = await Promise.all([import('./src/adapters/browser-rendering.js'), import('./src/preview-images.js')]);
+      const MiB = 1024 * 1024, { token } = await oauthGrant(t, db, writableScope, request);
+      let png = Buffer.alloc(MiB, 9);
+      runtime.renderHtmlImage = browserImageRenderer({ async quickAction() { return new Response(png, { headers: { 'content-length': String(png.byteLength) } }); } } as never);
+      const template = ok(await local('POST', '/v1/templates', { name: 'MCP preview' }), 201);
+      const call = () => fetch(new Request(`${PUBLIC_ORIGIN}/mcp?codemode=true`, { method: 'POST', headers: { ...rpcHeaders, 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'renderCampaignTemplatePreviewImage', arguments: { templateId: template.id } } }) }));
+      const free = () => { try { holdPreviewMemory(PREVIEW_MEMORY_BUDGET).release(); return true; } catch { return false; } };
+      // An unread MCP response keeps its share; reading it to the end releases it.
+      const paused = await call();
+      assert.equal(paused.status, 200); assert.equal(free(), false);
+      const result = (await paused.json() as Json).result;
+      assert.equal(result.isError, false, JSON.stringify(result).slice(0, 500)); assert.ok(Buffer.from(result.structuredContent.data, 'base64').equals(png));
+      assert.equal(free(), true);
+      // So does cancelling it.
+      const dropped = await call();
+      assert.equal(free(), false); await dropped.body!.cancel(); assert.equal(free(), true);
+      // Copied eight times, a 3 MiB screenshot would hold 32 MiB: refused, holding nothing.
+      png = Buffer.alloc(3 * MiB, 9);
+      const refused = (await (await call()).json() as Json).result;
+      assert.equal(refused.isError, true); assert.equal(refused.structuredContent.error.code, 'PREVIEW_TOO_LARGE');
+      assert.equal(free(), true);
+    });
+  });
+
   test('a sending webhook an approval sets up, changes or rotates the secret of follows the approval', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
       const tools = (bearer: string) => async (name: string, args: Json) => { const r = ok(await request('POST', '/mcp?codemode=true', bearer, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, rpcHeaders)).result; assert.equal(r.isError, false, redact(r)); return r.structuredContent; };
@@ -18321,7 +18350,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const path = `/v1/campaigns/${campaign.id}/preview-image`;
       const until = async (done: () => boolean) => { for (let i = 0; i < 500 && !done(); i++) await new Promise(resolve => setTimeout(resolve, 10)); };
 
-      // Each preview holds about 10.6 MiB (the 1.5 MiB image, its 2 MiB page three times, the screenshot reserve): two fit.
+      // Each preview holds about 9.5 MiB (the 1.5 MiB image, its 2 MiB page three times, the screenshot reserve): two fit.
       const heap = live(), settled: Reply[] = [];
       const burst = Array.from({ length: 16 }, () => local('GET', path).then(reply => { settled.push(reply); return reply; }));
       await until(() => inflight === 2 && settled.length === 14);
@@ -18351,7 +18380,56 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(error(await local('GET', path), 429, 'RENDER_RATE_LIMITED').retryable, true);
       assert.equal(reads, 0);
       assert.deepEqual(asked.map(([workspaceId]) => workspaceId), [runtime.config.workspaceId]);
-      assert.ok(asked[0]![1] > 10 * MiB && asked[0]![1] < 11 * MiB, `Asked for ${asked[0]![1]} bytes.`);
+      assert.ok(asked[0]![1] > 9.5 * MiB && asked[0]![1] < 10 * MiB, `Asked for ${asked[0]![1]} bytes.`);
+    });
+  });
+
+  // Recheck of #295: a preview's share was released once its response was built, so 16 clients that stopped reading kept
+  // 16 screenshots (about 300 MB in workerd). Responses are now sent from the PNG as they are read, and hold its share
+  // until the body is read, cancelled, or cut off at the deadline.
+  test('preview responses hold their memory until sent: slow readers cannot push past the budget, and cancel or the deadline releases it', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, fetch }) => {
+      const [{ browserImageRenderer }, { holdPreviewMemory, PREVIEW_MEMORY_BUDGET, PREVIEW_SEND_DEADLINE_MS }] = await Promise.all([import('./src/adapters/browser-rendering.js'), import('./src/preview-images.js')]);
+      const MiB = 1024 * 1024, { setFlagsFromString } = await import('node:v8'), { runInNewContext } = await import('node:vm');
+      setFlagsFromString('--expose-gc');
+      const gc = runInNewContext('gc') as () => void, live = () => { gc(); const memory = process.memoryUsage(); return memory.heapUsed + memory.arrayBuffers; };
+      const free = () => { try { holdPreviewMemory(PREVIEW_MEMORY_BUDGET).release(); return true; } catch { return false; } };
+      // Browser Run returns a 7 MiB screenshot, as a tall page with one remote image can, with its Content-Length.
+      const png = Buffer.alloc(7 * MiB, 9);
+      let renders = 0;
+      runtime.renderHtmlImage = browserImageRenderer({ async quickAction() { renders++; return new Response(png, { headers: { 'content-length': String(png.byteLength) } }); } } as never);
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: 'Slow readers', html: '<img src="https://fixture.example/texture.png" width="600" height="4000">' }), 201);
+      const open = () => fetch(new Request(`${PUBLIC_ORIGIN}/v1/campaigns/${campaign.id}/preview-image`, { headers: { origin: PUBLIC_ORIGIN, cookie: manager!.cookie, 'x-bane-environment': 'live' } }));
+      const heap = live(), paused: Response[] = [];
+      try {
+        // Clients that stop reading after the headers: each response holds its 7 MiB PNG and 1 MiB to send it, so three
+        // fill the 24 MiB budget and the next ones are refused before rendering.
+        const refused: Response[] = [];
+        for (let i = 0; i < 6; i++) { const response = await open(); (response.status === 200 ? paused : refused).push(response); }
+        assert.deepEqual([paused.length, refused.length, renders], [3, 3, 3]);
+        for (const response of refused) { assert.equal((await response.json() as Json).error.code, 'PREVIEW_BUSY'); assert.ok(response.headers.get('retry-after')); }
+        const grown = live() - heap;
+        assert.ok(grown < 32 * MiB, `Memory grew ${Math.round(grown / MiB)} MiB with three responses unread.`); // 21 MiB: the three PNGs
+        // A client that disconnects releases its share at once.
+        await paused.shift()!.body!.cancel();
+        paused.push(await open());
+        assert.equal(paused.at(-1)!.status, 200);
+        // So does one that reads the body to the end: the screenshot as JSON, exactly Content-Length bytes.
+        const reader = paused.shift()!, text = await reader.text();
+        assert.equal(text.length, Number(reader.headers.get('content-length')));
+        const read = JSON.parse(text);
+        assert.equal(read.mimeType, 'image/png'); assert.ok(Buffer.from(read.data, 'base64').equals(png));
+        // A client still reading at the deadline is cut off, and its share released.
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        let late: Response;
+        try { late = await open(); assert.equal(late.status, 200); t.mock.timers.tick(PREVIEW_SEND_DEADLINE_MS); }
+        finally { t.mock.timers.reset(); }
+        await assert.rejects(late.arrayBuffer());
+        paused.push(await open());
+        assert.equal(paused.at(-1)!.status, 200);
+        assert.equal(renders, 6);
+      } finally { for (const response of paused) await response.body?.cancel().catch(() => undefined); }
+      assert.equal(free(), true, 'Every share is released.');
     });
   });
 

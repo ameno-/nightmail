@@ -1424,7 +1424,7 @@ export function registerSending(app: App) {
     if (!audience.success) throw new ApiError(422, 'CAMPAIGN_INCOMPLETE', 'Choose an audience list before counting recipients.', 'audience.listId');
     return c.json(AudienceCounts.parse(await (await wrapModuleLoad(() => import('./audience.js'))).countCampaignAudience(c.env.db, a, audience.data)), 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview-image', operationId: 'renderCampaignPreviewImage', description: 'Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer. Inline images may total about 1.5 MiB, counted once per reference (413 PREVIEW_TOO_LARGE above); while the server renders other previews it answers 429 PREVIEW_BUSY with Retry-After.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignPreviewImage), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview-image', operationId: 'renderCampaignPreviewImage', description: 'Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer. Inline images may total about 1.5 MiB, counted once per reference (413 PREVIEW_TOO_LARGE above); while the server renders or sends other previews it answers 429 PREVIEW_BUSY with Retry-After. A response not read within 30 seconds is cut off.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignPreviewImage), ...errors } }), async c => {
     const a = actor(c, 'send'), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
     if (!c.env.renderHtmlImage) throw new ApiError(503, 'PREVIEW_RENDERING_UNAVAILABLE', 'Visual campaign preview rendering is not configured.', undefined, true);
     await chargeRenderBudget(c, a.workspaceId);
@@ -1434,10 +1434,10 @@ export function registerSending(app: App) {
       const asset = await c.env.storage.get(item.storageKey);
       if (!asset || asset.body.length !== item.size || await bytesDigest(asset.body) !== item.checksum) throw new ApiError(503, 'ATTACHMENT_STORAGE_UNAVAILABLE', 'An inline campaign image is missing or changed.', undefined, true);
       return asset.body;
-    }, async page => {
-      try { return await render(page); }
+    }, async (page, grow) => {
+      try { return await render(page, grow); }
       catch (error) { if (error instanceof ApiError) throw error; throw new ApiError(503, 'PREVIEW_RENDERING_FAILED', 'The visual campaign preview could not be rendered. Try again.', undefined, true); }
-    }, image => c.json(CampaignPreviewImage.parse(image), 200));
+    });
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/state', operationId: 'getCampaignState', description: 'Compact authenticated state for draft sync polling; fetch the full campaign with getCampaign when state changes. Compare all returned fields, not only revision: archive and delivery changes need not increment the draft revision. Omits draft content and delivery counts.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignState), ...errors } }), async c => {
     const [row] = await c.env.db.select(campaignStateColumns).from(campaigns).where(campaignWhere(actor(c), c.req.valid('param').id)).limit(1);

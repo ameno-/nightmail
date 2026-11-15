@@ -1,7 +1,8 @@
 import { createMcpHandler, Server, type CallToolResult, type Tool } from '@modelcontextprotocol/server';
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/server/validators/cf-worker';
 import { dispatchAsActor,dispatchAsMailboxAccess } from './auth.js';
-import { actorMailAccess, ModuleLoadError, type Actor, type MailboxAccess, type App, type Runtime } from './core.js';
+import { actorMailAccess, ApiError, ModuleLoadError, type Actor, type MailboxAccess, type App, type Runtime } from './core.js';
+import { heldBody, holdPreviewMemory, PREVIEW_MEMORY_BUDGET, type PreviewLease } from './preview-images.js';
 import { getMcpGrantActor, withMcpAuthorization } from './mcp-auth.js';
 import { chooseWorkspace, setDefaultWorkspace, WorkspaceChoice, type McpConnection } from './oidc-resource.js';
 import { buildMcpCatalog, TOOLSETS, EMAIL_SEND_CONFIRMATION, EMAIL_SEND_ROUTING, type McpOperation } from './mcp-catalog.js';
@@ -12,6 +13,9 @@ type ObjectValue = Record<string, any>;
 const INPUT_LIMIT = 12 * 1024 * 1024;
 const RESPONSE_LIMIT = 16 * 1024 * 1024;
 const WIRE_LIMIT = RESPONSE_LIMIT + 1024 * 1024;
+// An MCP exchange holds a preview screenshot again: the API body, parsed, as tool text and structured content, the SDK's
+// message and the response sent back. That many copies are charged to the preview budget until the response is sent.
+const PREVIEW_TOOLS = new Set(['renderCampaignPreviewImage', 'renderCampaignTemplatePreviewImage']), PREVIEW_COPIES = 8;
 class Failure extends Error {
   constructor(readonly code: string, message: string, readonly status: number | null = null) { super(message); }
 }
@@ -148,6 +152,34 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Mc
     return { ...actor, permissions };
   }
   const pending = new Set<Promise<CallToolResult>>();
+  const previewLeases: PreviewLease[] = [];
+  async function holdPreview(response: Response) {
+    const bytes = PREVIEW_COPIES * (Number(response.headers.get('content-length')) || RESPONSE_LIMIT), mib = (n: number) => (n * 3 / 4 / PREVIEW_COPIES / 1024 / 1024).toFixed(1);
+    try {
+      if (bytes > PREVIEW_MEMORY_BUDGET) fail('PREVIEW_TOO_LARGE', `This ${mib(bytes)} MiB screenshot is too large to return over MCP, which returns up to ${mib(PREVIEW_MEMORY_BUDGET)} MiB. Shorten the page or use smaller images.`, 413);
+      previewLeases.push(holdPreviewMemory(bytes));
+    } catch (error) {
+      await response.body?.cancel();
+      if (error instanceof ApiError) fail(error.code, error.message, error.status);
+      throw error;
+    }
+  }
+  // A response carrying a preview keeps its share until it has been sent (or the client is cut off).
+  function send(text: string, init: ResponseInit) {
+    const [memory, ...extra] = previewLeases.splice(0);
+    for (const lease of extra) lease.release();
+    if (!memory) return new Response(text, init);
+    try { memory.resize(text.length * (/[^\x00-\xff]/.test(text) ? 2 : 1) + 1024 * 1024); }
+    catch (error) { memory.release(); throw error; }
+    const encoder = new TextEncoder();
+    let rest: string | undefined = text, at = 0;
+    return new Response(heldBody(memory, () => {
+      if (rest === undefined || at >= rest.length) { rest = undefined; return null; }
+      let end = Math.min(at + 65536, rest.length);
+      if (end < rest.length && /[\ud800-\udbff]/.test(rest[end - 1]!)) end--;
+      const chunk = encoder.encode(rest.slice(at, end)); at = end; return chunk;
+    }), init);
+  }
   const servers: Server[] = [];
   let accepting = true;
   let parsedBody: unknown;
@@ -202,6 +234,7 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Mc
       const response='admin' in actor?await dispatchAsMailboxAccess(app,internal,runtime,actor):await dispatchAsActor(app,internal,runtime,actor);
       const status = response.status;
       let apiRequestId = response.headers.get('x-request-id');
+      if (response.ok && PREVIEW_TOOLS.has(op.tool.name)) await holdPreview(response);
       const text = await boundedText(response, RESPONSE_LIMIT);
       let data: unknown;
       try { data = text ? JSON.parse(text) : null; }
@@ -303,7 +336,7 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Mc
     if (response.status === 405) headers.set('Allow', 'POST, OPTIONS');
     if (!response.body) return new Response(null, { status: response.status, headers });
     const text = await boundedText(response, WIRE_LIMIT);
-    if (headers.get('content-type')?.split(';')[0]?.trim() !== 'text/event-stream') return new Response(redact(text), { status: response.status, headers });
+    if (headers.get('content-type')?.split(';')[0]?.trim() !== 'text/event-stream') return send(redact(text), { status: response.status, headers });
     // SDK2's legacy stateless leg emits SSE even for a single result. Drain it
     // completely and return its terminal JSON-RPC message, not an open DB-backed stream.
     let terminal: ObjectValue | undefined;
@@ -315,7 +348,7 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Mc
     }
     if (!terminal) return rpcError(500, -32603, 'MCP exchange ended without a result. Reconcile an uncertain write before retrying.', requestId);
     headers.set('Content-Type', 'application/json');
-    return new Response(redact(JSON.stringify(terminal)), { status: response.status, headers });
+    return send(redact(JSON.stringify(terminal)), { status: response.status, headers });
   } catch {
     return rpcError(500, -32603, 'MCP exchange could not be completed. Reconcile an uncertain write before retrying.', requestId);
   } finally {
@@ -323,6 +356,7 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Mc
     // let that release the request-local database while a tool is still using it.
     accepting = false;
     await Promise.allSettled([...pending]);
+    for (const lease of previewLeases.splice(0)) lease.release();
     await handler.close();
     await Promise.allSettled(servers.map(server => server.close()));
   }

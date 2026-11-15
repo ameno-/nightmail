@@ -137,7 +137,7 @@ export interface Runtime {
   jwksCacheScope?: object; // Workers create a new DB adapter per request; scope public keys to the binding instead.
   // Set only by the SupportPlatform service-binding entrypoint (src/support-platform.ts), never from a request.
   platformCaller?: 'bane-support';
-  renderHtmlImage?: (html: string) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>;
+  renderHtmlImage?: (html: string, grow?: (bytes: number) => void) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>;
   // Outbound webhook transport. Node supplies a connect-time guard against private addresses
   // (see adapters/node.ts); Workers use plain fetch, which cannot reach them.
   webhookFetch?: WebhookFetch;
