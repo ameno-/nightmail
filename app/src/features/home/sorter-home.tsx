@@ -1,5 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
+import { Volume2, VolumeX } from 'lucide-react'
 import { ThemeToggle } from '../../components/ThemeToggle'
+import { IconButton } from '../../components/ui'
 import { SignInConsent } from '../../components/LegalLinks'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { NightmailMark } from '../../components/NightmailLogo'
@@ -10,6 +12,7 @@ import { DashboardLink, StartButton } from './start'
 import { DX, DY, onFront, plan, type Plan, type Rect } from './sorter/plan'
 import { drawStill } from './sorter/still'
 import { toneVars } from './sorter/tones'
+import { createSound } from './sorter/sound'
 import { COLS } from './sorter/price'
 import { Stations } from './sorter-stations'
 import type { Hooks, Letter, Phase, Sorter } from './sorter/engine'
@@ -54,6 +57,10 @@ export function SorterHome({ start, notice }: HomeProps) {
   // not there before the floor is; `whole`: fitted out, with everything on it that can be pressed.
   const [tower, setTower] = useState(() => ({ floors: reduced ? 2 : 0, whole: reduced }))
 
+  // The machine's sound: off until the header's button is pressed (sorter/sound.ts), and never there without motion.
+  const [audio] = useState(createSound), [sound, setSound] = useState(false)
+  useEffect(() => () => audio.destroy(), [audio])
+
   // What the machine tells the page: the letter under the scanner, the tally, where it is in its day, the letter under the pointer.
   const [hooks] = useState<Hooks>(() => ({
     scan(letter, verdict) {
@@ -76,6 +83,8 @@ export function SorterHome({ start, notice }: HomeProps) {
       else if (box?.dataset.screen === 'off') box.dataset.screen = 'on'
     },
     // Smoke in front of what is written on the machine hides it, as it hides the machine.
+    // Each little thing the machine does, as it does it, and where across the page (sorter/sound.ts plays it).
+    sound(name, x, gain) { audio.play(name, x, gain) },
     floors(count, whole) { setTower(now => now.floors === count && now.whole === whole ? now : { floors: count, whole }) },
     // (A side unit's name comes on as the unit seats on the tower, with its lamp.)
     units(seated) { setDocked(now => now && now.length === seated.length && now.every((on, i) => on === seated[i]) ? now : seated) },
@@ -135,10 +144,16 @@ export function SorterHome({ start, notice }: HomeProps) {
   useEffect(() => { sorter.current?.setTheme(dark) }, [dark])
   // Off screen the machine stands still.
   useEffect(() => {
-    const observer = new IntersectionObserver(([entry]) => sorter.current?.setVisible(entry.isIntersecting), { threshold: .02 })
+    const observer = new IntersectionObserver(([entry]) => { sorter.current?.setVisible(entry.isIntersecting); audio.setShown(entry.isIntersecting) }, { threshold: .02 })
     observer.observe(scene.current!)
     return () => observer.disconnect()
   }, [])
+  // Under everything the machine does, its hum while it runs, and its works straining while it is overloaded; both
+  // cut at the blast, and there is quiet until it is put back together.
+  useEffect(() => {
+    const cut = phase === 'boom' ? .05 : .6
+    audio.loop('hum', phase === 'run' || phase === 'overload' ? 1 : 0, cut); audio.loop('strain', phase === 'overload' ? 1 : 0, phase === 'boom' ? .05 : 1.2)
+  }, [audio, phase, sound])
   // `?perf`: a frame meter in the corner, for checking pace on a real phone.
   useEffect(() => { if (new URLSearchParams(location.search).has('perf')) void import('./sorter/meter').then(meter => meter.mountMeter()) }, [])
   // The old code brings the flood.
@@ -184,6 +199,7 @@ export function SorterHome({ start, notice }: HomeProps) {
         {/* Signed in, the way into the dashboard; signed out, where the page is too short for the machine's own button to
             be seen before scrolling, the button. */}
         {visitor ? p?.short && <button type="button" className="srt-head-cta" disabled={visitor.busy} aria-busy={visitor.busy || undefined} onClick={visitor.onSignIn} onPointerDown={visitor.onSignInIntent}>Get started</button> : <DashboardLink>Dashboard</DashboardLink>}
+        {!reduced && <IconButton className="theme-toggle srt-sound" variant="ghost" size="sm" label={sound ? 'Turn sound off' : 'Turn sound on'} aria-pressed={sound} onClick={() => { void audio.set(!sound); setSound(!sound) }}>{sound ? <Volume2 size={16} /> : <VolumeX size={16} />}</IconButton>}
         <ThemeToggle />
       </nav>
     </header>
