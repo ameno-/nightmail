@@ -29,7 +29,8 @@
 // phone, where the chat is a sheet over the page, the tab bar's link closes it).
 //
 // Withheld stats (`withheld`): the signed-out homepage as /v1/public/stats answers until enough workspaces send
-// (available: false, every figure null), rewritten in the page so the response keeps its delay.
+// (available: false, every figure null), rewritten in the page so the response keeps its delay. (The homepage, the
+// sorter, shows none of these figures; the pass still loads it as such an installation serves it.)
 //
 // Dialogs (`dialog`): once the page has settled, the control whose text starts with `dialog` opens its dialog (a bottom
 // sheet on a phone), and the measurement covers the load and the open dialog together.
@@ -166,7 +167,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Overview · range', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Receiving', 'Receiving · rituals', 'Receiving · new ritual', 'Receiving · recipe form', 'Receiving · recipe ritual', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · stats withheld', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'API keys · create key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
+const phonePages = new Set(['Overview', 'Overview · range', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Receiving', 'Receiving · rituals', 'Receiving · new ritual', 'Receiving · recipe form', 'Receiving · recipe ritual', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · stats withheld', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'API keys · create key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
