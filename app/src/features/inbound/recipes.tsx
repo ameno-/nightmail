@@ -15,12 +15,10 @@ import { staleAfterWrite } from '../../data/invalidation'
 import { queries } from '../../data/queries'
 import { ApiError } from '../../data/types'
 import { useSingleFlight } from '../../lib/single-flight'
-import { productName } from '../../../../api/src/brand'
 import { ritualRecipes } from '../../../../api/src/ritual-schema'
-import { concepts, guides } from './concepts'
+import { concepts } from './concepts'
 import { useLiveVersion } from './live'
 import { ago, firstOverview, useOverview, type Overview, type OverviewEndpoint, type OverviewRitual } from './overview'
-import { ConceptLine } from './parts'
 import { CreatedEndpointDialog, discordUrl, slackUrl, targetProblem, type Endpoint } from './ritual-connections'
 import { AskAgentLink } from './ritual-agent'
 import { addressOption, idempotencyFor } from './shared'
@@ -31,8 +29,6 @@ import './recipes.css'
 const RitualsPage = lazy(() => import('./rituals').then(m => ({ default: m.RitualsPage })))
 const errorText = (e: unknown) => e instanceof ApiError ? e.text : (e as Error).message
 const LIST = '/receiving?tab=rituals'
-/** The add screen's last tile: everything a recipe can't say. */
-const script = { name: 'Write a script', description: 'The full ritual language, checked as you type.' }
 
 // listRitualRecipes, as the add screen and the form read it.
 type FieldType = 'slack' | 'discord' | 'chat' | 'forward' | 'webhook' | 'meaning' | 'label' | 'senders'
@@ -97,9 +93,9 @@ export function RitualsTab({ overview, refresh }: { overview: Overview; refresh:
   const runsOn = (r: OverviewRitual) => r.addresses.length ? <Addresses list={r.addresses} />
     : <Link className="rcv-add" to={r.recipe ? editPath(r) : `${codePath(r.key)}#attach`} onClick={e => e.stopPropagation()}>Not attached · attach</Link>
   return <div className="stack rcv-tab">
-    <div className="rcv-kindline"><ConceptLine line={concepts.rituals.line} example={concepts.rituals.example} guide={guides.rituals} /><Link className="ui-button ui-button--secondary ui-button--sm" to="/receiving/rituals/new">New ritual</Link></div>
+    <div className="rcv-kindline"><Link className="ui-button ui-button--secondary ui-button--sm" to="/receiving/rituals/new">New ritual</Link></div>
     <DataTable className="rcv-table recipe-table" rows={overview.rituals} rowKey={r => r.key} rowHref={editPath}
-      empty={<EmptyState title="No rituals yet" description="Post new mail to Slack, forward it, or keep out junk." action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rituals/new">New ritual</Link>} />}
+      empty={<EmptyState title="No rituals yet" action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rituals/new">New ritual</Link>} />}
       columns={[
         { key: 'what', label: 'Ritual', width: '50%', card: 'title', render: r => <span className="recipe-row" data-off={!r.enabled || undefined}><RecipeIcon id={r.recipe?.id ?? null} /><span className="recipe-sentence"><Sentence ritual={r} /></span></span> },
         { key: 'on', label: 'Runs on', width: '24%', card: 'line', render: runsOn, cardRender: r => <span className="recipe-card-line">{runsOn(r)}<span aria-hidden="true">·</span>{last(r)}</span> },
@@ -141,19 +137,18 @@ export function NewRitualPage() {
       : <div className="recipe-groups">
         {c.groups.map(g => {
           const recipes = c.data.filter(r => r.group === g.id)
-          // AI recipes are billed per email checked: said once, over the group's cards.
+          // A tile is its name under the group's heading. An AI recipe's price per email checked is on its form, above Save.
           return <section key={g.id} className="recipe-group" aria-labelledby={`recipes-${g.id}`}>
-            <h2 id={`recipes-${g.id}`}>{g.title}{recipes.every(r => r.omens) && <span className="recipe-group__price"> · ${c.omenPricePerThousand} per 1,000 emails checked</span>}</h2>
+            <h2 id={`recipes-${g.id}`}>{g.title}</h2>
             <div className="recipe-tiles">{recipes.map(r => <Link key={r.id} className="recipe-tile" to={`/receiving/rituals/new/${r.id}${suffix}`}>
-              <RecipeIcon id={r.id} size={16} />
-              <span className="recipe-tile__text"><strong>{r.name}</strong><span className="muted">{r.description}</span></span>
+              <RecipeIcon id={r.id} size={16} /><strong>{r.name}</strong>
             </Link>)}</div>
           </section>
         })}
         <section className="recipe-group" aria-labelledby="recipes-script">
           <h2 id="recipes-script">Anything else</h2>
           <div className="recipe-tiles">
-            <Link className="recipe-tile" to="/receiving/rituals/new/script"><RecipeIcon id={null} size={16} /><span className="recipe-tile__text"><strong>{script.name}</strong><span className="muted">{script.description}</span></span></Link>
+            <Link className="recipe-tile" to="/receiving/rituals/new/script"><RecipeIcon id={null} size={16} /><strong>Write a script</strong></Link>
           </div>
           <AskAgentLink address={agentAddress} />
         </section>
@@ -192,7 +187,7 @@ function RecipeForm({ recipeId, ritualKey }: { recipeId?: string; ritualKey?: st
   const error = catalog.error ?? overview.error ?? options.error
   if (error && !(catalog.data && overview.data && options.data)) return <div className="stack inbound-stack">{header()}<ErrorState error={error} onRetry={() => { void catalog.refetch(); void overview.refetch(); void options.refetch() }} /></div>
   if (!catalog.data || !overview.data || !options.data) return <div className="stack inbound-stack recipe-page">{header()}
-    <LoadingRegion label="Loading the form"><div className="recipe-form" aria-hidden="true"><Skeleton width="70%" height={14} /><FieldSkeleton /><FieldSkeleton /></div></LoadingRegion></div>
+    <LoadingRegion label="Loading the form"><div className="recipe-form" aria-hidden="true">{ritualRecipes.find(r => r.id === recipeId)?.omens && <Skeleton width="50%" height={14} />}<FieldSkeleton /><FieldSkeleton /></div></LoadingRegion></div>
   if (ritualKey && !existing) return <div className="stack inbound-stack">{header()}<EmptyState title={`No ritual named ${ritualKey}`} action={<Link className="ui-button ui-button--secondary ui-button--md" to={LIST}>Rituals</Link>} /></div>
   if (existing && !existing.recipe) return <Navigate replace to={codePath(existing.key)} />
   if (!recipe) return <div className="stack inbound-stack">{header()}<EmptyState title={`No recipe named ${id}`} action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rituals/new">New ritual</Link>} /></div>
@@ -206,13 +201,15 @@ type AddressOption = { id: string; address: string; aliases: string[]; expiresAt
 type EndpointType = OverviewEndpoint['type']
 const NEW = '+new'
 const endpointTypes: Partial<Record<FieldType, EndpointType[]>> = { slack: ['slack'], discord: ['discord'], chat: ['slack', 'discord'], forward: ['forward'], webhook: ['webhook'] }
-const newOption: Partial<Record<FieldType, string>> = { slack: 'New Slack channel', discord: 'New Discord channel', chat: 'New channel', forward: 'Someone new', webhook: 'New webhook' }
-const newTarget: Partial<Record<FieldType, { label: string; placeholder: string; hint: string; empty: string }>> = {
-  slack: { label: 'Slack webhook URL', placeholder: 'https://hooks.slack.com/services/…', hint: 'From Slack’s Incoming Webhooks app.', empty: 'Paste the Slack webhook URL.' },
-  discord: { label: 'Discord webhook URL', placeholder: 'https://discord.com/api/webhooks/…', hint: 'Channel settings, Integrations, Webhooks.', empty: 'Paste the Discord webhook URL.' },
-  chat: { label: 'Slack or Discord webhook URL', placeholder: 'https://hooks.slack.com/services/…', hint: 'An incoming webhook URL from either one.', empty: 'Paste the channel’s webhook URL.' },
-  webhook: { label: 'Your URL', placeholder: 'https://', hint: `${productName} posts signed JSON; the secret shows once.`, empty: 'Enter your URL.' },
-  forward: { label: 'Their address', placeholder: 'team@example.com', hint: 'They agree by email first, unless it’s your domain.', empty: 'Enter their address.' },
+// A new forward's option says what happens next: the recipient confirms by email first (unless it's on a domain this
+// workspace verified), and the form says so again, with Save waiting, once the email is out.
+const newOption: Partial<Record<FieldType, string>> = { slack: 'New Slack channel', discord: 'New Discord channel', chat: 'New channel', forward: 'Someone new, who confirms by email', webhook: 'New webhook' }
+const newTarget: Partial<Record<FieldType, { label: string; placeholder: string; empty: string }>> = {
+  slack: { label: 'Slack incoming webhook URL', placeholder: 'https://hooks.slack.com/services/…', empty: 'Paste the Slack webhook URL.' },
+  discord: { label: 'Discord webhook URL', placeholder: 'https://discord.com/api/webhooks/…', empty: 'Paste the Discord webhook URL.' },
+  chat: { label: 'Slack or Discord webhook URL', placeholder: 'https://hooks.slack.com/services/…', empty: 'Paste the channel’s webhook URL.' },
+  webhook: { label: 'Your URL', placeholder: 'https://', empty: 'Enter your URL.' },
+  forward: { label: 'Their address', placeholder: 'team@example.com', empty: 'Enter their address.' },
 }
 /** The endpoint type a pasted URL is for (Slack or Discord, for a field that takes either), or what is wrong with it. */
 function targetCheck(type: FieldType, value: string): { type?: EndpointType; error?: string } {
@@ -327,7 +324,6 @@ function RecipeEditor({ recipe, price, existing, overview, addresses, preset, he
   return <div className="stack inbound-stack recipe-page">
     {header(existing && <Link className="ui-button ui-button--secondary ui-button--md" to={codePath(existing.key)}>Edit as code</Link>)}
     <form className="recipe-form" onSubmit={submit} noValidate>
-      <p className="recipe-form__intro muted">{recipe.description}</p>
       {recipe.omens && <p className="recipe-price"><Sparkles size={14} aria-hidden="true" /><span>${price} per 1,000 emails checked{domains.length ? <> · reads mail at {domains.join(', ')}</> : null}</span></p>}
       <Field label="Runs on mail to" error={targetsError || undefined}>
         <div className="recipe-targets">
@@ -348,14 +344,14 @@ function RecipeEditor({ recipe, price, existing, overview, addresses, preset, he
             <Field label={f.label} error={value === NEW ? undefined : err || undefined}>
               <Select id={id} value={value} onValueChange={v => { setValues({ ...values, [f.name]: v }); setError(null) }} options={opts} />
             </Field>
-            {value === NEW && <Field label={add.label} error={err || undefined} hint={`${add.hint} Saved as endpoint ${freeName(f.type === 'forward' ? url.split('@')[0] ?? '' : labelOf(targets[0] ?? '').split('@')[0] || f.type, taken)}.`}>
+            {value === NEW && <Field label={add.label} error={err || undefined}>
               <SecretInput type={f.type === 'forward' ? 'email' : f.type === 'webhook' ? 'url' : 'password'} autoComplete="off" value={url} placeholder={add.placeholder} aria-invalid={!!err || undefined}
                 onChange={e => { setUrls({ ...urls, [f.name]: e.target.value }); setError(null) }} />
             </Field>}
           </div>
         }
         const value = values[f.name] ?? ''
-        return <Field key={f.name} label={f.label} htmlFor={id} error={err || undefined} hint={f.hint ?? undefined}>
+        return <Field key={f.name} label={f.label} htmlFor={id} error={err || undefined}>
           {f.type === 'senders'
             ? <Textarea id={id} rows={3} value={value} placeholder={f.placeholder ?? undefined} spellCheck={false} aria-invalid={!!err || undefined} onChange={e => { setValues({ ...values, [f.name]: e.target.value }); setError(null) }} />
             : <Input id={id} value={value} placeholder={f.placeholder ?? undefined} autoComplete="off" aria-invalid={!!err || undefined} onChange={e => { setValues({ ...values, [f.name]: f.type === 'label' ? e.target.value.toLowerCase().replace(/\s+/g, '-') : e.target.value }); setError(null) }} />}

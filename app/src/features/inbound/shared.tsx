@@ -4,6 +4,8 @@ import { NameText, PrivateAddress } from '../../components/PrivateAddress'
 import { cleanName, nameParts } from '../../lib/private-address'
 
 export { cleanName }
+/** Under a secret shown once (an inbox's API key, a webhook endpoint's signing secret): kept on purpose. */
+export const shownOnce = 'Shown once: copy it now.'
 /** A sender in a list: the display name, or the masked address when there is none (or it only repeats the address). */
 export function Sender({ value }: { value: MailAddress }) { const parts = nameParts(value.name, value.address); return parts ? <NameText parts={parts} /> : <PrivateAddress value={value.address} /> }
 /** A sender in words, for a label or a title: the display name, never a piece of the address. */

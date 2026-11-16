@@ -11,12 +11,11 @@ import { request } from '../../data/live'
 import { ApiError } from '../../data/types'
 import { concepts, outcomes } from './concepts'
 import { useOverview, type Overview } from './overview'
-import { ConceptLine, Match, RitualIcon, TargetIcon } from './parts'
+import { Match, RitualIcon, TargetIcon } from './parts'
 import { MaskedText } from '../docs/agent-setup'
 import { when } from './shared'
 import { ownRecipient, receivedTo, type ReceivedRecipients } from '../../lib/private-address'
 import './receiving.css'
-import { productName } from '../../../../api/src/brand'
 
 export type TimelineStep =
   | { kind: 'condition'; line: number; column: number; endLine: number; endColumn: number; result: boolean }
@@ -53,14 +52,13 @@ export const defaultChoice = (recent: Received[] | undefined, to: string): Email
 /** Recent received mail to trace, or a sample email, or a pasted message. With no mail yet, the sample is the default. */
 export function EmailPicker({ value, onChange, addresses, preferredTo }: { value: EmailChoice; onChange: (next: EmailChoice) => void; addresses: string[]; preferredTo?: string }) {
   const recent = useRecentMail()
-  const none = recent.data !== undefined && !recent.data.length
   return <div className="trace-picker">
     <Tabs label="Email" value={value.mode} onValueChange={mode => onChange(mode === 'recent' ? { mode, messageId: recent.data?.[0]?.id ?? null, to: recent.data?.[0] ? arrivedAt(recent.data[0]) : undefined } : mode === 'sample' ? { mode, to: preferredTo ?? addresses[0] ?? '' } : { mode: 'paste', mime: '' })}
       items={[{ value: 'recent', label: 'Recent mail' }, { value: 'sample', label: 'Sample email' }, { value: 'paste', label: 'Paste a message' }]} />
     <div className="trace-picker__body">
       {value.mode === 'recent' ? recent.error ? <ErrorState error={recent.error} onRetry={() => void recent.refetch()} />
         : !recent.data ? <div className="trace-recent" aria-hidden="true">{[0, 1, 2].map(i => <div key={i} className="trace-recent__row"><SkeletonText width="70%" /></div>)}</div>
-        : !recent.data.length ? <p className="muted trace-picker__empty">No mail yet: try the sample email, or paste one.</p>
+        : !recent.data.length ? <p className="muted trace-picker__empty">No mail yet</p>
         : <ul className="trace-recent" role="radiogroup" aria-label="Recent mail">{recent.data.map(m => <li key={m.id}>
           <button type="button" role="radio" aria-checked={value.messageId === m.id} className="trace-recent__row" onClick={() => onChange({ mode: 'recent', messageId: m.id, to: arrivedAt(m) })}>
             <span className="trace-recent__from"><PrivateAddress value={m.from.address} /></span>
@@ -69,14 +67,13 @@ export function EmailPicker({ value, onChange, addresses, preferredTo }: { value
             <time className="trace-recent__time">{when(m.at)}</time>
           </button></li>)}</ul>
         : value.mode === 'sample' ? <div className="trace-sample">
-          <Field label="Send it to" htmlFor="trace-sample-to" hint="Any address on a receiving domain, including one that doesn’t exist yet.">
+          <Field label="Send it to" htmlFor="trace-sample-to">
             <Input id="trace-sample-to" className="private-field" list="trace-addresses" value={value.to} onChange={e => onChange({ mode: 'sample', to: e.target.value })} placeholder="support@acme.com" autoComplete="off" />
           </Field>
           <datalist id="trace-addresses">{addresses.map(a => <option key={a} value={a} />)}</datalist>
           <pre className="trace-sample__mime"><MaskedText text={sampleMime(value.to || 'support@acme.com').replace(/\r\n/g, '\n')} /></pre>
         </div>
-        : <Field label="Message" htmlFor="trace-paste" hint="The full message with its headers. Its To and Cc addresses are traced."><Textarea id="trace-paste" rows={8} spellCheck={false} value={value.mime} onChange={e => onChange({ mode: 'paste', mime: e.target.value })} placeholder={'From: ana@example.org\nTo: support@acme.com\nSubject: Invoice\n\nHello'} /></Field>}
-      {none && value.mode === 'sample' && <p className="muted trace-picker__note">No mail yet, so a sample stands in; paste one to trace it.</p>}
+        : <Field label="Full message, with headers" htmlFor="trace-paste"><Textarea id="trace-paste" rows={8} spellCheck={false} value={value.mime} onChange={e => onChange({ mode: 'paste', mime: e.target.value })} placeholder={'From: ana@example.org\nTo: support@acme.com\nSubject: Invoice\n\nHello'} /></Field>}
     </div>
   </div>
 }
@@ -142,7 +139,7 @@ export function TraceView({ result, sources, overview, inboxes, runId }: { resul
   const position = (row: number, step: number) => flat.findIndex(f => f.row === row && f.step === step)
   const done = at >= flat.length
   return <div className="trace-view" data-done={done || undefined}>
-    <div className="trace-view__bar"><span className="muted">{result.trace.length ? `Ran ${result.trace.length === 1 ? `the ${result.trace[0]!.key} ritual` : `${result.trace.length} rituals`}: each check lights up true or false, then what it did.` : 'No ritual runs on this mail.'}</span>
+    <div className="trace-view__bar"><span className="muted">{result.trace.length ? `Ran ${result.trace.length === 1 ? `the ${result.trace[0]!.key} ritual` : `${result.trace.length} rituals`}` : 'No ritual runs on this mail'}</span>
       <div className="cluster">{!done && <Button size="sm" variant="ghost" onClick={skip}>Show all</Button>}</div></div>
     {result.recipients.map(rcpt => {
       const rows = result.trace.map((row, r) => ({ row, r })).filter(x => x.row.recipient === rcpt.address)
@@ -156,7 +153,7 @@ export function TraceView({ result, sources, overview, inboxes, runId }: { resul
           return <article key={`${row.key}-${r}`} className="trace-ritual">
             <h3><RitualIcon /><code>{row.key}</code><span className="muted">{row.error ? 'stopped with an error' : row.actions.length ? `${row.actions.length} ${row.actions.length === 1 ? 'action' : 'actions'}` : 'no actions'}</span></h3>
             <div className="trace-ritual__body">
-              {sources[row.key] ? <Code source={sources[row.key]!} steps={row.timeline} active={active < 0 ? null : active} revealed={reveal} /> : <p className="muted">Source not available.</p>}
+              {sources[row.key] ? <Code source={sources[row.key]!} steps={row.timeline} active={active < 0 ? null : active} revealed={reveal} /> : <p className="muted">No source</p>}
               <ol className="trace-steps">
                 {row.timeline.map((s, i) => {
                   const state = i < reveal ? (i === active ? 'active' : 'done') : 'pending'
@@ -238,19 +235,19 @@ export function TracePage() {
   }
   return <div className="stack inbound-stack">
     <PageHeader title={concepts.trace.title} backTo="/receiving" />
-    <ConceptLine line={concepts.trace.line} />
     {ready && <>
     <form className="trace-form" onSubmit={submit}>
       <EmailPicker value={choice} onChange={next => { setChoice(next); dry.clear() }} addresses={addresses} preferredTo={preferred} />
-      {choice.mode !== 'sample' && <Field label="Trace it as mail to" htmlFor="trace-to" hint="Optional. Leave empty to use the message’s own recipients.">
-        <Input id="trace-to" className="private-field" list="trace-addresses" value={to} onChange={e => { setTo(e.target.value); dry.clear() }} placeholder="The message’s own recipients" autoComplete="off" />
+      {choice.mode !== 'sample' && <Field label="Trace it as mail to" htmlFor="trace-to">
+        <Input id="trace-to" className="private-field trace-to" list="trace-addresses" value={to} onChange={e => { setTo(e.target.value); dry.clear() }} placeholder="The message’s own recipients" autoComplete="off" />
       </Field>}
-      <div className="cluster"><Button variant="primary" type="submit" loading={dry.pending} disabled={!input}>Trace</Button><span className="muted">Runs your rituals as saved. Omens (questions for {productName}’s AI) give their default answer; to set answers, try a ritual in its editor.</span></div>
+      {/* Rituals run as saved, and omens give their default answer; a ritual's own Try it sets the answers. */}
+      <div className="cluster"><Button variant="primary" type="submit" loading={dry.pending} disabled={!input}>Trace</Button></div>
     </form>
     <div ref={view} className="trace-out">
       {dry.error ? <Alert tone="danger" title="The trace didn’t run">{dry.error}</Alert>
         : dry.result ? <TraceView result={dry.result} sources={sources} overview={overview.data} inboxes={new Map((options.data ?? []).map(a => [a.id, a.address]))} runId={dry.runId} />
-        : <EmptyState title="Pick an email and trace it" description="See which route it takes, which ritual conditions are true or false, and where it ends up." action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving?tab=rituals">Rituals</Link>} />}
+        : <EmptyState title="Pick an email and trace it" action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving?tab=rituals">Rituals</Link>} />}
     </div>
     </>}
   </div>

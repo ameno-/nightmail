@@ -1,34 +1,11 @@
-import { productName } from '../../../../api/src/brand'
-// The words Receiving uses, in one place. docs/receiving.md says the same thing in the same words; change both together.
-// Names follow the API: routes, rituals, endpoints, catch-all (catchAll), store.
+// The words Receiving uses, in one place. Names follow the API: routes, rituals, endpoints, catch-all (catchAll), store.
+// What each one means is said once, in the Docs guides (docs/guides.tsx and docs/receiving.md), not on the screens.
 
 export const concepts = {
-  routes: {
-    title: 'Routes',
-    line: 'Every address that receives mail, and where its mail goes.',
-    example: 'support@acme.com → triage → Inbox, Slack support',
-  },
-  rituals: {
-    title: 'Rituals',
-    line: 'What happens to an address’s mail: post, forward, junk or label it.',
-    example: 'Post new mail to support in Slack',
-    adminOnly: 'Owners and admins manage rituals',
-  },
-  endpoints: {
-    title: 'Endpoints',
-    line: 'Named places mail can be sent: Slack, Discord, a webhook or a forward.',
-    example: 'endpoints.support({ text: email.subject })',
-  },
-  trace: {
-    title: 'Trace',
-    line: 'Dry-run an email through your routes and rituals; nothing is sent or saved.',
-  },
-  // Jev is the AI model behind omens. The API and its docs keep the name; the dashboard says what it does.
-  omens: {
-    title: 'Omens',
-    line: `Questions a ritual asks ${productName}’s AI about an email, answered 0 to 1.`,
-    example: 'omens(email, { refund: "Is the sender asking for a refund?" })',
-  },
+  routes: { title: 'Routes' },
+  rituals: { title: 'Rituals', adminOnly: 'Owners and admins manage rituals' },
+  endpoints: { title: 'Endpoints' },
+  trace: { title: 'Trace' },
 } as const
 
 // Where each concept is explained in full: the guides in Docs.
@@ -42,13 +19,13 @@ export const guides = {
 } as const
 
 export type KindFilter = 'all' | 'address' | 'pattern' | 'catch_all' | 'inbox' | 'auto'
-export const kinds: Record<KindFilter, { label: string; line: string; example?: string }> = {
-  all: { label: 'All', line: concepts.routes.line, example: concepts.routes.example },
-  address: { label: 'Addresses', line: 'Each keeps its own threads in the Inbox; a route can send its mail elsewhere.', example: 'support@acme.com' },
-  pattern: { label: 'Patterns', line: 'A pattern catches many addresses with *.', example: 'reply+*@acme.com catches reply+4821@acme.com' },
-  catch_all: { label: 'Catch-alls', line: 'What happens to mail for an address that doesn’t exist.', example: '*@acme.com' },
-  inbox: { label: 'Agent inboxes', line: 'Expiring addresses that agents and tests create and read over the API or MCP.' },
-  auto: { label: 'Auto-created', line: 'Addresses a catch-all created for new recipients.' },
+export const kinds: Record<KindFilter, { label: string }> = {
+  all: { label: 'All' },
+  address: { label: 'Addresses' },
+  pattern: { label: 'Patterns' },
+  catch_all: { label: 'Catch-alls' },
+  inbox: { label: 'Agent inboxes' },
+  auto: { label: 'Auto-created' },
 }
 
 // What a row is, in a few words, under its address.
@@ -66,11 +43,11 @@ export const outcomes = {
   create_address: 'New address per recipient',
 } as const
 
-// The three steps on an address's page, and what to say when a step is empty.
+// The three steps on an address's page.
 export const steps = {
-  route: { title: 'Route', line: 'Mail sent to these addresses.' },
-  rituals: { title: 'Rituals', line: 'Run in order on every message.', empty: 'No ritual yet' },
-  goesTo: { title: 'Goes to', line: 'Where the mail ends up.', empty: 'Only its inbox' },
+  route: { title: 'Route' },
+  rituals: { title: 'Rituals', empty: 'No ritual yet' },
+  goesTo: { title: 'Goes to' },
 } as const
 
 export const catchAllSetting = {

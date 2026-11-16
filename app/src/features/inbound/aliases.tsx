@@ -90,9 +90,8 @@ export function AliasEditor({ id, address, temporary, saved, value, onChange, di
     add(value.draft.slice(0, target.selectionStart ?? value.draft.length) + ' ' + text + ' ' + value.draft.slice(target.selectionEnd ?? value.draft.length), true)
   }
   const shown = value.message ?? (error ? { tone: 'error' as const, text: error } : null)
-  const hint = temporary ? 'Temporary addresses cannot have aliases.'
-    : full ? `This address has the maximum of ${MAX_ALIASES} aliases.`
-    : 'Other addresses that deliver here. Paste several to add them at once.'
+  // A line under the field only when there is something to say: what went wrong, or why it can't take more.
+  const note = shown?.text ?? (temporary ? 'Temporary addresses cannot have aliases.' : full ? `This address has the maximum of ${MAX_ALIASES} aliases.` : '')
   const typedDomain = value.draft.includes('@')
   return <div className="ui-field alias-editor">
     <label className="ui-field__label" id={labelId} htmlFor={id}>Aliases</label>
@@ -108,18 +107,14 @@ export function AliasEditor({ id, address, temporary, saved, value, onChange, di
         {/* The local part grows with its text so the fixed domain reads as the rest of the address. */}
         <span className="alias-input__sizer" data-value={value.draft || (locked ? '' : 'name')}>
           <input ref={input} id={id} className="alias-input__field" size={1} value={value.draft} disabled={locked} placeholder={locked ? undefined : 'name'} autoComplete="off" autoCapitalize="off" spellCheck={false} enterKeyHint="done"
-            aria-invalid={shown?.tone === 'error' || undefined} aria-describedby={`${typedDomain ? '' : `${suffixId} `}${messageId}`}
+            aria-invalid={shown?.tone === 'error' || undefined} aria-describedby={[typedDomain ? '' : suffixId, note ? messageId : ''].filter(Boolean).join(' ') || undefined}
             onChange={event => onChange({ ...value, draft: event.target.value, message: null })} onKeyDown={keyDown} onPaste={paste} />
         </span>
         {!typedDomain && <span className="alias-input__suffix" id={suffixId} title={`@${domain}`}>@{domain}</span>}
       </div>
       <Button disabled={locked || !value.draft.trim()} onClick={() => { add(); input.current?.focus() }}>Add</Button>
     </div>
-    {/* The hint keeps its space while a message shows over it, so messages up to its length never move the page. */}
-    <div className="alias-message">
-      <div id={messageId} className={`ui-field__hint${shown?.tone === 'error' ? ' ui-field__error' : ''}`} role={shown?.tone === 'error' ? 'alert' : undefined}>{shown?.text ?? hint}</div>
-      {shown && <div className="ui-field__hint" aria-hidden="true">{hint}</div>}
-    </div>
+    {note && <div id={messageId} className={`ui-field__hint${shown?.tone === 'error' ? ' ui-field__error' : ''}`} role={shown?.tone === 'error' ? 'alert' : undefined}>{note}</div>}
     <span className="sr-only" role="status">{announcement}</span>
   </div>
 }
