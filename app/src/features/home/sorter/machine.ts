@@ -65,10 +65,11 @@ export function buildMachine(p: Plan) {
   // What the page writes on the tower is set in it. The sentence under the price stands on a board let into the band,
   // as wide as the price and a little more, in a thin frame (the page gives its letters their depth and their light);
   // a phone's two facts, which are its own type under the button, are on a plate riveted to the base, as a machine's
-  // rating is.
-  { const half = COLS * U / 2 + 1.3 * U, y0 = yBand + (p.phone ? .09 : .15) * p.band, y1 = yBand + (p.phone ? .91 : .85) * p.band, e = 1.2 * px
-    b.mark(-half, y0, half, y1, -.2, M.plinth, -1)
-    for (const [xa, ya, xb, yb] of [[-half - e, y1, half + e, y1 + e], [-half - e, y0 - e, half + e, y0], [-half - e, y0, -half, y1], [half, y0, half + e, y1]]) b.box(xa, ya, -1.1 * px, xb, yb, 0, M.trim)
+  // rating is. (On a wide page the sentence's full stop hangs past the price's right edge: the board runs on a little
+  // further on that side, so the sentence has as much room at its end as at its start.)
+  { const half = COLS * U / 2 + 1.3 * U, right = half + (p.phone ? 0 : .017 * COLS * U), y0 = yBand + (p.phone ? .09 : .15) * p.band, y1 = yBand + (p.phone ? .91 : .85) * p.band, e = 1.2 * px
+    b.mark(-half, y0, right, y1, -.2, M.plinth, -1)
+    for (const [xa, ya, xb, yb] of [[-half - e, y1, right + e, y1 + e], [-half - e, y0 - e, right + e, y0], [-half - e, y0, -half, y1], [right, y0, right + e, y1]]) b.box(xa, ya, -1.1 * px, xb, yb, 0, M.trim)
     if (p.phone) { const f = p.facts, xa = f[0].x - 1.3 * U, xb = f[1].x + f[1].w + 1.3 * U, ya = f[0].y - 10, yb = f[0].y + f[0].h + 9
       b.box(xa, ya, -.9 * px, xb, yb, 0, M.plinth)
       for (const x of [xa + .8 * U, xb - .8 * U]) for (const y of [ya + .8 * U, yb - .8 * U]) b.cyl([x, y, 0], 2, -1.6 * px, -.9 * px, .26 * U, M.trim, 8, 1) } }
@@ -152,10 +153,11 @@ export function buildMachine(p: Plan) {
   // (A phone's roof is kept to what it needs: the hopper, the two lasers, the slot scams leave by, the cannon, the beacon.)
   const vents: V3[] = p.phone ? [] : [[-Xw * .84, yTop + 13 * px, D * .7], [Xw * .88, yTop + 13 * px, D * .66]]
   // The lasers stand on brackets at the roof's front corners, ahead of the front and (where the page is wide) out
-  // past the side: whatever they fire at, in front of the machine, beside it or over it, the beam is clear of it.
-  const tz = -5 * px, turrets: V3[] = [-1, 1].map(s => [s * (p.phone ? Xc - 2.4 * U : Xc + 1.15 * U), yTop + 16 * px, tz]), ejects: V3[] = [-1, 1].map(s => [s * p.eject.x, yTop + 5 * px, p.eject.z])
+  // past the side: whatever they fire at, in front of the machine, beside it or over it, the beam is clear of it. (A
+  // phone's stand at the very corners, clear of the port and of the crane's deck as it comes down past them.)
+  const tz = -5 * px, turrets: V3[] = [-1, 1].map(s => [s * (p.phone ? Xc - .7 * U : Xc + 1.15 * U), yTop + 16 * px, tz]), ejects: V3[] = [-1, 1].map(s => [s * p.eject.x, yTop + 5 * px, p.eject.z])
   turrets.forEach((t, k) => {
-    const s = k ? 1 : -1, in0 = s * (p.phone ? Xc - 4.2 * U : Xc - 1.6 * U), out0 = t[0] + s * 1.05 * U, a = Math.min(in0, out0), e = Math.max(in0, out0)
+    const s = k ? 1 : -1, in0 = s * (p.phone ? Xc - 2.4 * U : Xc - 1.6 * U), out0 = t[0] + s * 1.05 * U, a = Math.min(in0, out0), e = Math.max(in0, out0)
     b.box(a, yTop + 2 * px, tz - 6 * px, e, yTop + 4.4 * px, 7 * px, M.trim, ALL)
     for (const x of [in0 + s * .6 * U, in0 + s * 1.5 * U]) b.cyl([x, 0, 3.4 * px], 1, yTop + 4.4 * px, yTop + 5.4 * px, 1.2 * px, M.steel, 8, 2)
     // (Under what overhangs the side, a gusset against the wall.)
@@ -370,7 +372,8 @@ export function buildMachine(p: Plan) {
     b.cyl([v.x, v.y, 0], 2, z0 - 1.2 * px, z0, .34 * vs, M.steel, 10, 1)
   }
   idx.panel = b.part('panel', [panelX, (panel.y0 + panel.y1) / 2, -.7 * px])
-  b.box(panel.x0, panel.y0, -1.4 * px, panel.x1, panel.y1, 0, M.plinth, ALL)
+  // (A phone's column is narrow: its panel is of the column's own enamel, a cover flush in it, not a dark slot.)
+  b.box(panel.x0, panel.y0, -1.4 * px, panel.x1, panel.y1, 0, p.phone ? M.body : M.plinth, ALL)
   for (const x of [panel.x0 + 2.2 * px, panel.x1 - 2.2 * px]) for (const y of [panel.y0 + 2.2 * px, panel.y1 - 2.2 * px]) b.cyl([x, y, 0], 2, -2.2 * px, -1.4 * px, .9 * px, M.steel, 8, 1)
   b.box(panelX - .9 * px, (panel.y0 + panel.y1) / 2 - .9 * vs, -2.6 * px, panelX + .9 * px, (panel.y0 + panel.y1) / 2 + .9 * vs, -1.4 * px, M.trim, ALL)
 
@@ -406,53 +409,50 @@ export function buildMachine(p: Plan) {
     for (const s of [-1, 1]) b.prism(ccw([[x + s * .48 * P, yR - rr - 3 * px], [x + s * .48 * P - s * 1.6 * px, yR - rr - 3 * px], [x + s * .4 * P - s * 1.6 * px, yCav], [x + s * .4 * P, yCav]]), z0, z1, M.trim, 'fs')
   })
 
-  // The fitters. Over the outermost lane each side there is a port in the roof, under a cover: on a wide page a plate
-  // that draws back over the roof; a phone's roof has no room behind its ports (its cannon, its slot, its beacon), and
-  // its cover is a plate that sinks into the port. Beyond the port, at the roof's end, an arm on a short column: an
-  // upper arm and a forearm, jointed, working in the plane the column is turned to, and a hand that a wrist keeps level
-  // and square to the page: a bar with a finger down at each end, the fingers closing on a deck's bearing blocks. It
-  // takes each deck from where it waits, lifts it clear of whatever it is to pass over, carries it round to over the
-  // port (round the back on a wide page; on a phone, whose cannon stands at the back, round the front and close in)
-  // and lowers it in.
+  // The fitters. On a wide page, over the outermost lane each side there is a port in the roof, under a cover that
+  // draws back over the roof; beyond it, at the roof's end, an arm on a short column: an upper arm and a forearm,
+  // jointed, working in the plane the column is turned to, and a hand that a wrist keeps level and square to the page:
+  // a bar with a finger down at each end, the fingers closing on a deck's bearing blocks. It takes each deck from the
+  // top of a magazine on the console's side, lifts it clear of what it is to pass over (the chimney, the beacon),
+  // carries it round the back to over the port and lowers it in. A phone's roof has room for none of that beside its
+  // cannon: it has one port, on the left, under a cover that sinks into it, and its decks come down to it out of the
+  // night on a crane's hook (the same hand on the end of a cable), lowered into the port and let go.
   const au = (p.phone ? .7 : .82) * U, deckH = 2 * rr + 4.5 * px, grip = 2.3 * au, hw = P / 2 + .3 * au + .25 * U, pd = (z1 - z0) / 2 + 3.5 * px, rb = 1.5 * au, half = P / 2 + .3 * au
-  const pageL = -p.ox - DX * zL, pageR = p.W - p.ox - DX * zL
-  // (How high the wrist carries a deck: the deck's underside a little over the tallest thing under its way, on a wide
-  // page the chimney and the beacon behind the ports, on a phone the lasers in front, hanging as they do until the
-  // machine is fitted out.)
-  const travel = (p.phone ? yTop + 27.5 * px : yTop + 14.2 * px) + 3 * px + deckH + grip
-  const arms = [-1, 1].map((s, k) => {
-    const portX = s * Math.abs(lanes[0]), bx = s * Math.min(Xc - 2.5 * px - rb - .1 * U, Math.abs(portX) + hw + rb + 1.5 * U), shoulder: V3 = [bx, yTop + 2.7 * au, zL]
-    const mine = p.fit.slice(1).filter(i => (lanes[i] < 0 ? -1 : 1) === s), front = p.phone
-    // Where the deck it takes next waits (its pivot, the middle of its roller line): on a wide page at the top of a
-    // magazine on the console's side, the rest stacked under it on a lift that brings the next up once it is taken;
-    // on a phone just off the page's side.
-    const top: V3 = p.phone ? [s < 0 ? Math.min(pageL, -Xc) - P / 2 - .5 * U : Math.max(pageR, Xc) + P / 2 + .5 * U, yTop - 2 * U - rr, zL] : [s * (Xc + .8 * U + P / 2), yTop - 1.3 * U - rr, zL]
+  // (How high the wrist carries a deck: the deck's underside a little over the tallest thing under its way. A crane's
+  // brings it to a stop just over the port's kerb.)
+  const travel = (p.phone ? yTop + 6 * px : yTop + 14.2 * px + 3 * px) + deckH + grip
+  const arms = (p.phone ? [-1] : [-1, 1]).map((s, k) => {
+    const crane = p.phone, portX = s * Math.abs(lanes[0]), bx = crane ? portX : s * Math.min(Xc - 2.5 * px - rb - .1 * U, Math.abs(portX) + hw + rb + 1.5 * U), shoulder: V3 = [bx, yTop + 2.7 * au, zL]
+    const mine = crane ? p.fit.slice(1) : p.fit.slice(1).filter(i => (lanes[i] < 0 ? -1 : 1) === s)
+    // Where the deck it takes next waits (its pivot, the middle of its roller line): at the top of the magazine, the
+    // rest stacked under it on a lift that brings the next up once it is taken; it stands low enough on the console's
+    // side that the laser over it, folded or raised, is clear of it as the page sees them. (A crane's hangs on its
+    // hook out of sight over the page.)
+    const top: V3 = [crane ? portX : s * (Xc + .8 * U + P / 2), yTop - 3.25 * U - rr, zL]
     // Which way the arm points over the port (`inn`) and over the deck (`out`), set so that turning from the one to the
-    // other goes round the side it should; how far out the wrist is over each, and half way round; and how high.
-    const inn = s < 0 ? 0 : front ? -Math.PI : Math.PI, out = s < 0 ? (front ? -Math.PI : Math.PI) : 0
-    // (Round the front the wrist is drawn in to no nearer than over the port: the deck stays clear of the lasers and,
-    // on the page, over the roof's front edge, and the elbow stays over the column, out of the cannon's way.)
-    const rw = Math.abs(top[0] - bx), rp = Math.abs(portX - bx), rMid = front ? rp : (rw + rp) / 2
+    // other goes round the back; how far out the wrist is over each, and half way round; and how high.
+    const inn = s < 0 ? 0 : Math.PI, out = s < 0 ? Math.PI : 0
+    const rw = Math.abs(top[0] - bx), rp = Math.abs(portX - bx), rMid = (rw + rp) / 2
     const yw = top[1] + rr + grip, low = yTop - .3 * U + grip, rest: [number, number, number] = [inn, rp, travel + .2 * U]
-    const reach = Math.max(...[[rw, yw], [rw, travel], [rp, travel], [rp, low], [rMid, travel], [rest[1], rest[2]]].map(([r, y]) => Math.hypot(r, y - shoulder[1]))), L = reach / 1.9
+    const reach = crane ? 1 : Math.max(...[[rw, yw], [rw, travel], [rp, travel], [rp, low], [rMid, travel], [rest[1], rest[2]]].map(([r, y]) => Math.hypot(r, y - shoulder[1]))), L = reach / 1.9
     b.part('static3'); b.floor(ROOF)
     // The port: a kerb round it, the dark inside; the well the arm's column stands in.
     for (const [x0, x1, za, zb] of [[portX - hw - 1.4 * px, portX + hw + 1.4 * px, zL - pd - 1.4 * px, zL - pd], [portX - hw - 1.4 * px, portX + hw + 1.4 * px, zL + pd, zL + pd + 1.4 * px], [portX - hw - 1.4 * px, portX - hw, zL - pd, zL + pd], [portX + hw, portX + hw + 1.4 * px, zL - pd, zL + pd]]) b.box(x0, yTop, za, x1, yTop + 1.3 * px, zb, M.trim)
     b.quad([portX - hw, yTop + .14, zL - pd], [portX + hw, yTop + .14, zL - pd], [portX + hw, yTop + .14, zL + pd], [portX - hw, yTop + .14, zL + pd], M.slot, [0, 1, 0])
-    b.cyl([bx, 0, zL], 1, yTop, yTop + .8 * px, rb + 1.2 * px, M.trim, 18, 2, M.slot)
-    // The magazine (a wide page): a back plate on two posts, bolted to the console's side over a gusset, and the lift
-    // the decks stand on, which rides up between the posts. Its front and top are open: the hand comes down from over
-    // it, its fingers outside the deck's ends.
+    if (!crane) b.cyl([bx, 0, zL], 1, yTop, yTop + .8 * px, rb + 1.2 * px, M.trim, 18, 2, M.slot)
+    // The magazine (a wide page): a back plate on two posts, bolted flat to the console's side by a flange, and the
+    // lift the decks stand on, which rides up between the posts. Its front and top are open: the hand comes down from
+    // over it, its fingers outside the deck's ends. (It ends over the console's foot: the console is slid in over the
+    // sorting floor with it.)
     let lift = -1
     const pitch = deckH, count = mine.length, foot = top[1] + rr - deckH - (count - 1) * pitch
-    if (!p.phone) {
+    if (!crane) {
       b.floor(DESK)
-      const xa = s < 0 ? -Xc - P - 1.5 * U : Xc, xb = s < 0 ? -Xc : Xc + P + 1.5 * U, zp = z1 + 2 * px, head = top[1] + rr
-      b.box(xa, foot - .9 * U, zp, xb, head, zp + 1.4 * px, M.plinth)
-      for (const x of [xa, xb - .3 * U]) b.box(x, foot - .9 * U, z1 - .6 * px, x + .3 * U, head + .3 * U, zp + 1.4 * px, M.steel, ALL)
-      b.box(xa, foot - 1.25 * U, z1 - .6 * px, xb, foot - .9 * U, zp + 1.4 * px, M.trim, ALL)
-      b.prism(ccw([[s * Xc, foot - 1.25 * U], [s * (Xc + .6 * P), foot - 1.25 * U], [s * Xc, foot - 2.5 * U]]), zp, zp + 1.4 * px, M.trim, 'fks', M.steel)
-      for (const y of [foot + .4 * U, head - .8 * U]) b.cyl([s * (Xc + .55 * U), y, 0], 2, zp - .9 * px, zp, .9 * px, M.steel, 8, 1)
+      const xa = s < 0 ? -Xc - P - 1.5 * U : Xc, xb = s < 0 ? -Xc : Xc + P + 1.5 * U, zp = z1 + 2 * px, head = top[1] + rr, bottom = foot - .5 * U
+      b.box(xa, bottom, zp, xb, head, zp + 1.4 * px, M.plinth)
+      for (const x of [xa, xb - .3 * U]) b.box(x, bottom, z1 - .6 * px, x + .3 * U, head + .3 * U, zp + 1.4 * px, M.steel, ALL)
+      b.box(s < 0 ? -Xc - .6 * U : Xc, bottom, zp - .5 * px, s < 0 ? -Xc : Xc + .6 * U, head + .9 * U, zp + 1.4 * px, M.trim, ALL)
+      for (const y of [bottom + .45 * U, (bottom + head) / 2 + .4 * U, head + .45 * U]) b.cyl([s * (Xc + .3 * U), y, 0], 2, zp - 1.4 * px, zp - .5 * px, .9 * px, M.steel, 8, 1)
       lift = b.part(`lift${k}`, [top[0], foot, zL])
       b.box(top[0] - P / 2 - .2 * U, foot - .45 * U, z0 - 3 * px, top[0] + P / 2 + .2 * U, foot, z1 + 1.6 * px, M.trim, ALL)
       b.box(top[0] - P / 2 - .2 * U, foot, z0 - 3 * px, top[0] + P / 2 + .2 * U, foot + .25 * U, z0 - 2.2 * px, M.steel, ALL)
@@ -461,33 +461,43 @@ export function buildMachine(p: Plan) {
     const cover = b.part(`port${k}`, [portX, yTop, zL])
     b.box(portX - hw + .5 * px, yTop + .3, zL - pd + .5 * px, portX + hw - .5 * px, yTop + 1.1 * px, zL + pd - .5 * px, M.steel, ALL, M.plinth)
     b.box(portX - .2 * P, yTop + 1.1 * px, zL - 1.2 * px, portX + .2 * P, yTop + 2 * px, zL + 1.2 * px, M.steel, ALL)
-    const base = b.part(`arm${k}`, [bx, yTop, zL])
-    b.cyl([bx, 0, zL], 1, yTop, yTop + .7 * au, rb, M.trim, 18, 2)
-    b.cyl([bx, 0, zL], 1, yTop + .7 * au, shoulder[1] - .1 * au, .85 * au, M.arm, 14, 0)
-    b.cyl([bx, shoulder[1], 0], 2, zL - 1.25 * au, zL + 1.25 * au, 1.05 * au, M.steel, 16, 3)
-    const upper = b.part(`upper${k}`, shoulder)
-    b.box(bx, shoulder[1] - .5 * au, zL - .55 * au, bx + L, shoulder[1] + .5 * au, zL + .55 * au, M.arm, ALL)
-    b.box(bx + L * .62, shoulder[1] - .52 * au, zL - .57 * au, bx + L * .7, shoulder[1] + .52 * au, zL + .57 * au, M.brand, ALL)
-    const fore = b.part(`fore${k}`, shoulder)
-    b.cyl([bx, shoulder[1], 0], 2, zL - .85 * au, zL + .85 * au, .8 * au, M.steel, 14, 3)
-    b.box(bx, shoulder[1] - .38 * au, zL - .42 * au, bx + L, shoulder[1] + .38 * au, zL + .42 * au, M.arm, ALL)
-    b.cyl([bx + L, shoulder[1], 0], 2, zL - .62 * au, zL + .62 * au, .56 * au, M.steel, 12, 3)
+    let base = -1, upper = -1, fore = -1, cable = -1
+    if (!crane) {
+      base = b.part(`arm${k}`, [bx, yTop, zL])
+      b.cyl([bx, 0, zL], 1, yTop, yTop + .7 * au, rb, M.trim, 18, 2)
+      b.cyl([bx, 0, zL], 1, yTop + .7 * au, shoulder[1] - .1 * au, .85 * au, M.arm, 14, 0)
+      b.cyl([bx, shoulder[1], 0], 2, zL - 1.25 * au, zL + 1.25 * au, 1.05 * au, M.steel, 16, 3)
+      upper = b.part(`upper${k}`, shoulder)
+      b.box(bx, shoulder[1] - .5 * au, zL - .55 * au, bx + L, shoulder[1] + .5 * au, zL + .55 * au, M.arm, ALL)
+      b.box(bx + L * .62, shoulder[1] - .52 * au, zL - .57 * au, bx + L * .7, shoulder[1] + .52 * au, zL + .57 * au, M.brand, ALL)
+      fore = b.part(`fore${k}`, shoulder)
+      b.cyl([bx, shoulder[1], 0], 2, zL - .85 * au, zL + .85 * au, .8 * au, M.steel, 14, 3)
+      b.box(bx, shoulder[1] - .38 * au, zL - .42 * au, bx + L, shoulder[1] + .38 * au, zL + .42 * au, M.arm, ALL)
+      b.cyl([bx + L, shoulder[1], 0], 2, zL - .62 * au, zL + .62 * au, .56 * au, M.steel, 12, 3)
+    } else {
+      // (The crane's cable, and the block on its end the hand hangs from.)
+      cable = b.part(`crane${k}`, shoulder); b.parts[cable].plain = true
+      b.box(bx - .7 * px, shoulder[1] + 2.4 * px, zL - .7 * px, bx + .7 * px, shoulder[1] + 6000, zL + .7 * px, M.steel, ALL)
+      b.box(bx - 2 * px, shoulder[1], zL - 1.6 * px, bx + 2 * px, shoulder[1] + 2.4 * px, zL + 1.6 * px, M.trim, ALL)
+    }
     // (The hand: the wrist's pin, the bar, and on the bar's ends the two fingers, each a part: they open and close.)
     const hand = b.part(`hand${k}`, shoulder)
     b.cyl([bx, 0, zL], 1, shoulder[1] - .9 * au, shoulder[1], .26 * au, M.steel, 8, 0)
     b.box(bx - half - .25 * au, shoulder[1] - 1.35 * au, zL - .5 * au, bx + half + .25 * au, shoulder[1] - .9 * au, zL + .5 * au, M.trim, ALL)
     const fingers = [-1, 1].map(e => { const part = b.part(`finger${k}${e}`, shoulder); b.parts[part].plain = true; b.box(bx + (e < 0 ? -half : half - .3 * au), shoulder[1] - grip - deckH * .62, zL - .4 * au, bx + (e < 0 ? -half + .3 * au : half), shoulder[1] - 1.35 * au, zL + .4 * au, M.steel, ALL); return part })
     b.floor(SORT)
-    return { s, portX, shoulder, L, lanes: mine, top, pitch, foot, count, inn, out, rw, rp, rMid, yw, low, travel, rest, front, hw, pd, rb, open: .45 * au, parts: { cover, base, upper, fore, hand, fingers, lift }, slide: 2 * pd + 2 * px, sink: 2.6 * px }
+    return { s, crane, portX, shoulder, L, lanes: mine, top, pitch, foot, count, inn, out, rw, rp, rMid, yw, low, travel, rest, hw, pd, rb, open: .45 * au, parts: { cover, base, upper, fore, hand, fingers, lift, cable }, slide: 2 * pd + 2 * px, sink: 2.6 * px }
   })
   // The roof hangs from two cables while the floors under it are slid in: they come down out of the night to an eye
   // each side of it, a hook on the end of each, and are drawn up out of sight once it stands on the console.
+  // (On a phone they hang nearer the middle, between the hopper and the ports, so that where they rise past the
+  // header they are clear of its links; and their fittings are drawn larger, to be seen at a phone's size.)
   b.floor(ROOF)
-  const eyes: V3[] = [-1, 1].map(s => [s * .74 * Xc, yTop, D * (p.phone ? .62 : .5)])
+  const eyes: V3[] = [-1, 1].map(s => [s * (p.phone ? .38 : .74) * Xc, yTop, D * (p.phone ? .62 : .5)]), ep = (p.phone ? 1.6 : 1) * px
   b.part('static4')
-  for (const e of eyes) { b.box(e[0] - 2.4 * px, yTop, e[2] - 2.4 * px, e[0] + 2.4 * px, yTop + 1.6 * px, e[2] + 2.4 * px, M.trim); b.cyl([e[0], yTop + 3.4 * px, 0], 2, e[2] - .8 * px, e[2] + .8 * px, 1.9 * px, M.steel, 10, 3) }
+  for (const e of eyes) { b.box(e[0] - 2.4 * ep, yTop, e[2] - 2.4 * ep, e[0] + 2.4 * ep, yTop + 1.6 * ep, e[2] + 2.4 * ep, M.trim); b.cyl([e[0], yTop + 3.4 * ep, 0], 2, e[2] - .8 * ep, e[2] + .8 * ep, 1.9 * ep, M.steel, 10, 3); b.cyl([e[0], yTop + 3.4 * ep, 0], 2, e[2] - .85 * ep, e[2] - .8 * ep, .9 * ep, M.slot, 8, 1) }
   const cables = b.part('cables')
-  for (const e of eyes) { b.box(e[0] - .7 * px, yTop + 9 * px, e[2] - .7 * px, e[0] + .7 * px, yTop + 6000, e[2] + .7 * px, M.steel, ALL); b.box(e[0] - 1.5 * px, yTop + 5.4 * px, e[2] - 1.2 * px, e[0] + 1.5 * px, yTop + 9 * px, e[2] + 1.2 * px, M.trim, ALL) }
+  for (const e of eyes) { b.box(e[0] - .7 * ep, yTop + 9 * ep, e[2] - .7 * ep, e[0] + .7 * ep, yTop + 6000, e[2] + .7 * ep, M.steel, ALL); b.box(e[0] - 1.5 * ep, yTop + 5.4 * ep, e[2] - 1.2 * ep, e[0] + 1.5 * ep, yTop + 9 * ep, e[2] + 1.2 * ep, M.trim, ALL); for (const x of [-1.3, 1.1]) b.box(e[0] + x * ep, yTop + 3.4 * ep, e[2] - 1.2 * ep, e[0] + (x + .2) * ep, yTop + 5.4 * ep, e[2] - 1 * ep, M.trim, ALL) }
 
   // Capsules for the tubes, and bolts that can pop.
   const capH = r * 1.5, capR = r * .68
@@ -500,7 +510,7 @@ export function buildMachine(p: Plan) {
   // it sends. (Each is a floor of its own, so it is carried in whole; what moves on it is a part, and moves only while
   // the machine works.)
   const pods = p.pods.map((pod, k) => {
-    const { x, y, z, w, h, d, s } = pod, x1 = x + w, y1 = y + h, route = p.routes[pod.lane], cx = x + w / 2, f0 = y + 2.9 * U, f1 = y1 - 1.1 * U, cy = (f0 + f1) / 2, wx0 = x + .55 * U, wx1 = x1 - .55 * U
+    const { x, y, z, w, h, d, s, plate: pl } = pod, x1 = x + w, y1 = y + h, route = p.routes[pod.lane], cx = x + w / 2, ly = pl.y + pl.h / 2, f0 = Math.max(y + 2.9 * U, pl.y + pl.h + .5 * U), f1 = y1 - 1.1 * U, cy = (f0 + f1) / 2, wx0 = x + .55 * U, wx1 = x1 - .55 * U
     b.floor(4 + k); b.part(`static-pod${k}`)
     b.box(x, y, z, x1, y1, z + d, M.plinth)
     b.box(x - .25 * U, y1 - .5 * U, z - .25 * U, x1 + .25 * U, y1, z + d, M.trim); b.box(x - .25 * U, y, z - .25 * U, x1 + .25 * U, y + .5 * U, z + d, M.trim)
@@ -508,8 +518,8 @@ export function buildMachine(p: Plan) {
     b.prism(ccw(s < 0 ? [[x1, y], [x1, y - 2.2 * U], [x1 - 2.6 * U, y]] : [[x, y], [x + 2.6 * U, y], [x, y - 2.2 * U]]), z + .6 * U, z + 1.2 * U, M.trim, 'fks', M.steel)
     b.box(s < 0 ? x1 - .5 * U : x, y + .28 * h, z - .4 * U, s < 0 ? x1 : x + .5 * U, y + .72 * h, z, M.steel)
     for (const bx of [x + .7 * U, x1 - .7 * U]) for (const by of [y + .25 * U, y1 - .25 * U]) b.cyl([bx, by, 0], 2, z - .25 * U - 1.1 * px, z - .25 * U, 1.1 * px, M.steel, 8, 1)
-    b.mark(x + .5 * U, y + .9 * U, x1 - 1.7 * U, y + 2.3 * U, z - .2, M.dark, 1)
-    b.cyl([x1 - .95 * U, y + 1.6 * U, 0], 2, z - 1.6 * px, z, .38 * U + 1.2 * px, M.trim, 14, 1); b.cyl([x1 - .95 * U, y + 1.6 * U, 0], 2, z - 2 * px, z - 1.7 * px, .38 * U, M.lampOff, 14, 1)
+    b.mark(pl.x, pl.y, pl.x + pl.w, pl.y + pl.h, z - .2, M.dark, 1)
+    b.cyl([x1 - .95 * U, ly, 0], 2, z - 1.6 * px, z, .38 * U + 1.2 * px, M.trim, 14, 1); b.cyl([x1 - .95 * U, ly, 0], 2, z - 2 * px, z - 1.7 * px, .38 * U, M.lampOff, 14, 1)
     // The window and its bezel (an inbox's is the rack its pigeonholes are let into).
     b.mark(wx0, f0, wx1, f1, z - .2, route === 3 ? M.trim : M.screen, -1)
     for (const [a0, b0, a1, b1] of [[wx0 - .25 * U, f1, wx1 + .25 * U, f1 + .25 * U], [wx0 - .25 * U, f0 - .25 * U, wx1 + .25 * U, f0], [wx0 - .25 * U, f0, wx0, f1], [wx1, f0, wx1 + .25 * U, f1]]) b.box(a0, b0, z - .3 * U, a1, b1, z, M.trim)
@@ -570,7 +580,7 @@ export function buildMachine(p: Plan) {
       b.cyl([0, hy, hz], 0, throat - s * .5 * U, throat, .38 * U, M.steel, 10, 3)
       for (let r = 0; r < 4; r++) b.box(x + 1.4 * U + r * .12 * U, f0 + .2 * U + r * .42 * U, z - 1.3 * U, x1 - 1.4 * U - r * .1 * U, f0 + .2 * U + r * .42 * U + .32 * U, z - .25, r % 2 ? M.dim : M.paper, ALL)
     }
-    const lamp = b.part(`pod-lamp${k}`); b.cyl([x1 - .95 * U, y + 1.6 * U, 0], 2, z - 2.3 * px, z - 2.1 * px, .38 * U, M.lampOn, 14, 1)
+    const lamp = b.part(`pod-lamp${k}`); b.cyl([x1 - .95 * U, ly, 0], 2, z - 2.3 * px, z - 2.1 * px, .38 * U, M.lampOn, 14, 1)
     return { lamp, lane: pod.lane, route, ...moving }
   })
 
@@ -696,6 +706,7 @@ export const JOB = { out: .15, down: .22, shut: .26, lift: .35, round: .55, low:
 /** Where a fitter's hand is at `u` through a job that began with it at `from` (which way, how far out, how high):
  *  into `out` with how far its fingers are closed and its port's cover open. */
 export function fitterAt(A: Fitter, from: ArrayLike<number>, u: number, out: Float32Array) {
+  if (A.crane) return craneAt(A, from[2], u, out)
   const J = JOB
   let yaw: number, r: number, y: number
   const swing = (t: number, y0: number, r0: number, h0: number, y1: number, r1: number, h1: number, settle: boolean) => {
@@ -714,3 +725,16 @@ export function fitterAt(A: Fitter, from: ArrayLike<number>, u: number, out: Flo
   out[3] = smooth((u - J.down) / (J.shut - J.down)) * (1 - smooth((u - J.low - .01) / (J.open - J.low - .01)))
   out[4] = smooth((u - J.cover[0]) / (J.cover[1] - J.cover[0])) * (1 - smooth((u - J.cover[2]) / (J.cover[3] - J.cover[2])))
 }
+// A crane's job: down out of the night with the deck on its hook (from `sky`, its height out of sight), slowing to a
+// stop over the port and bobbing there a moment on its cable, then down into it, let go, and away up again, gathering
+// way. (The same moments as an arm's: the deck is let go at `JOB.open`.)
+function craneAt(A: Fitter, sky: number, u: number, out: Float32Array) {
+  const J = JOB, down = clamp01(u / .44), held = u - .44, bob = held > 0 && u < J.round ? .35 * A.pd * Math.sin(held * 38) * Math.exp(-held * 26) : 0
+  let y = sky + (A.travel - sky) * (1 - (1 - down) ** 3) + bob
+  if (u >= J.round) y = A.travel + (A.low - A.travel) * smooth((u - J.round) / (J.low - J.round))
+  if (u >= .73) { const t = clamp01((u - .73) / (1 - .73)); y = A.low + (sky - A.low) * t * t }
+  out[0] = A.inn; out[1] = A.rp; out[2] = y
+  out[3] = 1 - smooth((u - J.low - .01) / (J.open - J.low - .01))
+  out[4] = smooth((u - J.cover[0]) / (J.cover[1] - J.cover[0])) * (1 - smooth((u - J.cover[2]) / (J.cover[3] - J.cover[2])))
+}
+const clamp01 = (t: number) => t < 0 ? 0 : t > 1 ? 1 : t

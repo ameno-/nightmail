@@ -33,8 +33,8 @@ export function drawStill(canvas: HTMLCanvasElement, p: Plan, over: number, dark
   if (whole) { fill('dark', 1); front(-Xb, yCav, Xb, yFas) }
   // The board the sentence stands on, in its frame; a wide page's rail over the base; a phone's plate the two facts
   // are on, riveted to the base.
-  { const e = 1.2 * U / 9, half = COLS * U / 2 + 1.3 * U, y0 = p.yBand + (p.phone ? .09 : .15) * p.band, y1 = p.yBand + (p.phone ? .91 : .85) * p.band
-    fill('plinth', 2); front(-half, y0, half, y1); fill('trim', 1); front(-half - e, y1, half + e, y1 + e); front(-half - e, y0 - e, half + e, y0); front(-half - e, y0, -half, y1); front(half, y0, half + e, y1)
+  { const e = 1.2 * U / 9, half = COLS * U / 2 + 1.3 * U, right = half + (p.phone ? 0 : .017 * COLS * U), y0 = p.yBand + (p.phone ? .09 : .15) * p.band, y1 = p.yBand + (p.phone ? .91 : .85) * p.band
+    fill('plinth', 2); front(-half, y0, right, y1); fill('trim', 1); front(-half - e, y1, right + e, y1 + e); front(-half - e, y0 - e, right + e, y0); front(-half - e, y0, -half, y1); front(right, y0, right + e, y1)
     if (!p.phone) { fill('trim', 1); front(-Xc, p.yBand - U / 9, Xc, p.yBand + U / 9) }
     else { const f = p.facts, xa = f[0].x - 1.3 * U, xb = f[1].x + f[1].w + 1.3 * U, ya = f[0].y - 10, yb = f[0].y + f[0].h + 9; fill('plinth', 0); front(xa, ya, xb, yb); fill('trim', 1); for (const x of [xa + .8 * U, xb - .8 * U]) for (const y of [ya + .8 * U, yb - .8 * U]) { c.beginPath(); c.arc(X(x), Y(y), .26 * U, 0, Math.PI * 2); c.fill() } } }
   fill('body', 1); front(p.cta.x - p.plate, p.cta.y - p.plate, p.cta.x + p.cta.w + p.plate, p.cta.y + p.cta.h + p.plate)
@@ -71,14 +71,14 @@ export function drawStill(canvas: HTMLCanvasElement, p: Plan, over: number, dark
   box(beacon - 1.2 * px, yTop, D * .82, beacon + 1.2 * px, yTop + 8 * px, D * .82 + .1, 'steel'); box(beacon - 3.6 * px, yTop + 8 * px, D * .82 - 3.6 * px, beacon + 3.6 * px, yTop + 9.5 * px, D * .82 + 3.6 * px, 'trim'); box(beacon - 2.8 * px, yTop + 9.5 * px, D * .82 - 2.8 * px, beacon + 2.8 * px, yTop + 14 * px, D * .82 + 2.8 * px, 'lampOff')
   // (The fitters' ports and wells: machine.ts has the same numbers.)
   const au = (p.phone ? .7 : .82) * U, hw = p.P / 2 + .3 * au + .25 * U, pd = 15.5 * px, rb = 1.5 * au
-  for (const s of [-1, 1]) {
+  for (const s of p.phone ? [-1] : [-1, 1]) {
     const portX = s * Math.abs(p.lanes[0]), bx = s * Math.min(Xc - 2.5 * px - rb - .1 * U, Math.abs(portX) + hw + rb + 1.5 * U)
     box(portX - hw - 1.4 * px, yTop, zL - pd - 1.4 * px, portX + hw + 1.4 * px, yTop + 1.3 * px, zL + pd + 1.4 * px, 'trim')
     box(portX - hw + .5 * px, yTop + .3, zL - pd + .5 * px, portX + hw - .5 * px, yTop + 1.1 * px, zL + pd - .5 * px, 'steel', 'plinth'); box(portX - .2 * p.P, yTop + 1.1 * px, zL - 1.2 * px, portX + .2 * p.P, yTop + 2 * px, zL + 1.2 * px, 'steel')
-    fill('trim', 0); disc(bx, yTop + .8 * px, zL, rb + 1.2 * px); fill('slot', 0); disc(bx, yTop + .8 * px, zL, rb)
+    if (!p.phone) { fill('trim', 0); disc(bx, yTop + .8 * px, zL, rb + 1.2 * px); fill('slot', 0); disc(bx, yTop + .8 * px, zL, rb) }
   }
   for (const s of [-1, 1]) {
-    const tx = s * (p.phone ? Xc - 2.4 * U : Xc + 1.15 * U), tz = -5 * px, a = whole ? (s > 0 ? .5 : Math.PI - .5) : s > 0 ? -1.35 : Math.PI + 1.35, in0 = s * (p.phone ? Xc - 4.2 * U : Xc - 1.6 * U), out0 = tx + s * 1.05 * U
+    const tx = s * (p.phone ? Xc - .7 * U : Xc + 1.15 * U), tz = -5 * px, a = whole ? (s > 0 ? .5 : Math.PI - .5) : s > 0 ? -1.35 : Math.PI + 1.35, in0 = s * (p.phone ? Xc - 2.4 * U : Xc - 1.6 * U), out0 = tx + s * 1.05 * U
     box(Math.min(in0, out0), yTop + 2 * px, tz - 6 * px, Math.max(in0, out0), yTop + 4.4 * px, 7 * px, 'trim')
     box(tx - 5.6 * px, yTop + 4.4 * px, tz - 5.6 * px, tx + 5.6 * px, yTop + 6.4 * px, tz + 5.6 * px, 'trim'); box(tx - 3.2 * px, yTop + 6.4 * px, tz, tx + 3.2 * px, yTop + 16 * px, tz + .1, 'steel')
     c.save(); c.translate(X(tx, tz), Y(yTop + 16 * px, tz)); c.rotate(-a)
@@ -87,9 +87,9 @@ export function drawStill(canvas: HTMLCanvasElement, p: Plan, over: number, dark
     fill('red', 1); c.fillRect(22 * px - .7, -2.6 * px, 1.4, 5.2 * px); c.restore()
     if (s < 0 || !p.phone) box(s * p.eject.x - .62 * p.lw, yTop, p.eject.z - 6 * px, s * p.eject.x + .62 * p.lw, yTop + 5 * px, p.eject.z + 6 * px, 'steel')
     // (The eye each side, the hook on it, and the cable up out of sight. A whole machine has been unhooked.)
-    const ex = s * .74 * Xc, ez = D * (p.phone ? .62 : .5)
-    box(ex - 2.4 * px, yTop, ez - 2.4 * px, ex + 2.4 * px, yTop + 1.6 * px, ez + 2.4 * px, 'trim'); fill('steel', 1); c.beginPath(); c.arc(X(ex, ez - .8 * px), Y(yTop + 3.4 * px, ez - .8 * px), 1.9 * px, 0, Math.PI * 2); c.fill()
-    if (!whole) { box(ex - 1.5 * px, yTop + 5.4 * px, ez - 1.2 * px, ex + 1.5 * px, yTop + 9 * px, ez + 1.2 * px, 'trim'); fill('steel', 1); c.fillRect(X(ex - .7 * px, ez - .7 * px), -drop, 1.4 * px, Y(yTop + 9 * px, ez - .7 * px) + drop) }
+    const ex = s * (p.phone ? .38 : .74) * Xc, ez = D * (p.phone ? .62 : .5), ep = (p.phone ? 1.6 : 1) * px
+    box(ex - 2.4 * ep, yTop, ez - 2.4 * ep, ex + 2.4 * ep, yTop + 1.6 * ep, ez + 2.4 * ep, 'trim'); fill('steel', 1); c.beginPath(); c.arc(X(ex, ez - .8 * ep), Y(yTop + 3.4 * ep, ez - .8 * ep), 1.9 * ep, 0, Math.PI * 2); c.fill(); fill('slot', 1); c.beginPath(); c.arc(X(ex, ez - .85 * ep), Y(yTop + 3.4 * ep, ez - .85 * ep), .9 * ep, 0, Math.PI * 2); c.fill()
+    if (!whole) { box(ex - 1.5 * ep, yTop + 5.4 * ep, ez - 1.2 * ep, ex + 1.5 * ep, yTop + 9 * ep, ez + 1.2 * ep, 'trim'); fill('trim', 1); for (const x of [-1.3, 1.1]) c.fillRect(X(ex + x * ep, ez - 1.2 * ep), Y(yTop + 5.4 * ep, ez - 1.2 * ep), .2 * ep, 2 * ep); fill('steel', 1); c.fillRect(X(ex - .7 * ep, ez - .7 * ep), -drop, 1.4 * ep, Y(yTop + 9 * ep, ez - .7 * ep) + drop) }
   }
   const hh = p.hopper * .82, ht = p.lw * 1.3, hb = p.lw * .62, hd = p.lw * .36
   box(-hb - 3 * px, yTop, zL - hd - 3 * px, hb + 3 * px, yTop + 2.4 * px, zL + hd + 3 * px, 'plinth')

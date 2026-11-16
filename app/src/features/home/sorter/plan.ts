@@ -23,11 +23,13 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   // seven), no tubes down its front (its mail goes down through the slab, and the tubes begin at its lip), a cabinet
   // as wide as the page less a gutter each side, and everything on its front between the price's own two edges.
   const phone = W < 900
-  // The machine is built up as the product is, a part at a time: it begins with one lane, the middle one (a phone's:
-  // the nearer the middle on the left), and the others are fitted outwards from it in turn, left then right (`fit`:
-  // the lanes in that order). So the lanes stand, left to right, in the order that fitting them from the middle brings
-  // the product's own: endpoints first, then threads, agents, inboxes, IMAP, rituals, campaigns.
-  const routes = phone ? [3, 0, 2, 5] : [5, 3, 0, 1, 2, 4, 6], fit = phone ? [1, 2, 0, 3] : [3, 2, 4, 1, 5, 0, 6], count = routes.length, per = phone ? 0 : 4
+  // The machine is built up as the product is, a part at a time: it begins with one lane, the middle one, and the
+  // others are fitted outwards from it in turn, left then right (`fit`: the lanes in that order). So the lanes stand,
+  // left to right, in the order that fitting them from the middle brings the product's own: endpoints first, then
+  // threads, agents, inboxes, IMAP, rituals, campaigns. (A phone's roof has room for one port only, on the left, clear
+  // of its cannon: it begins with its rightmost lane, threads, and is fitted from the right to the left, each new deck
+  // running along the roller line to stop short of the last: agents, inboxes, rituals.)
+  const routes = phone ? [5, 3, 2, 0] : [5, 3, 0, 1, 2, 4, 6], fit = phone ? [3, 2, 1, 0] : [3, 2, 4, 1, 5, 0, 6], count = routes.length, per = phone ? 0 : 4
   // In cells: the unlit columns and rows round the price, the strip the tubes run down (a phone: the cabinet's stile),
   // and each floor of the machine. (Over the price the frame is ten rows high, not two: the wordmark stands in them.)
   const side = 2, over = 10, under = 2, strip = phone ? .6 : 9.8
@@ -133,18 +135,21 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   const front = set ? set.front : frontU * U, lip = lipU * U, floor = front + lip + below, ox = phone ? Math.round(edgeL + (W - edgeL - edgeR + depth * -DX * U) / 2) : Math.round(W / 2), oy = Math.round(H - floor)
   const zLip = -front / DY, zOver = zLip - tubeR - 3 * U / 9, zBack = D * (phone ? 1.4 : 1.5), zt = -(tubeR + 1.5 * U / 9), zProud = zt - tubeR - 4 * U / 9
   const tubes = per ? [0, 1, 2, 3].map(k => -(Xw + first + k * pitch)).concat([0, 1, 2, 3].map(k => Xw + first + k * pitch)).map(x => x - DX * zt) : []
-  const spread = Math.max(24, Math.min(13.5 * U, (W / 2 - Xc - 26) / 4.05))
   // A tube that runs straight forward leans across the page as depth does: the right-hand four must still come out
   // clear of the riser at the cabinet's corner, so the nearest stands at least that far out (and its twin on the left
-  // the same). The header's front, the riser's and the blocks' are one plane.
-  const riser = 2.4 * U, headD = 4.4 * U, headH = 2 * tubeR + 1.6 * U, clear = Math.max(.6 * spread, DX * zOver + riser + tubeR + 1.2 * U)
+  // the same). The header's front, the riser's and the blocks' are one plane. (And the outermost, where it leaves its
+  // header, which is further left as it is seen than where it goes over the lip, stays its radius and 12 px more
+  // inside the page's edge: on a narrow page the four close up.)
+  const riser = 2.4 * U, headD = 4.4 * U, headH = 2 * tubeR + 1.6 * U, clear0 = DX * zOver + riser + tubeR + 1.2 * U, edge = 2 * tubeR + 12 + DX * (zOver - zProud)
+  const spread = Math.max(24, Math.min(13.5 * U, (W / 2 - Xc - 26) / 4.05, (W / 2 - Xc - clear0 - edge) / 3, (W / 2 - Xc - edge) / 3.6)), clear = Math.max(.6 * spread, clear0)
   const fan = phone ? [] : [0, 1, 2, 3, 4, 5, 6, 7].map(t => { const at = (t < 4 ? -1 : 1) * (Xc + clear + (t % 4) * spread); return { at, x: at - DX * zOver } })
   const heads = phone ? [] : [{ x0: fan[3].x - 2.2 * U, x1: -Xc }, { x0: Xc, x1: fan[7].x + 2.2 * U }].map(head => ({ ...head, z0: zProud, z1: zProud + headD, h: headH }))
   // The column the appliances stand in under the machine: its middle (a phone's is the page's own) and its width.
   const sx = phone ? Math.round((edgeL + W - edgeR) / 2) : ox, inner = phone ? Math.min(W - edgeL - edgeR - 8, 520) : 2 * (Xc + clear)
   /** Where each tube goes under the lip, across the page from its left edge. (A phone: the two that begin there, a wide one down each edge of the page.) */
   const drops = phone ? [sx - inner / 2 - 5, sx + inner / 2 + 5] : tubes.map((_, t) => ox + fan[t].at)
-  const slabX = phone ? W : Xc + clear + 4.3 * spread
+  // (The slab runs on past both of the page's edges, its far corners too: it never ends just inside the page.)
+  const slabX = phone ? W : Math.max(Xc + clear + 4.3 * spread, W / 2 + 12 - DX * Math.max(D * 1.5, front / DY))
   // What is sent comes back up the page in one more tube (`out`: where across the page, from the middle of the column
   // under the machine, `sx`), into the slab under the machine, and up a ramp out of the floor (or the roof) into the
   // cannon's breech. `x, y, z` is where the cannon's base stands.
@@ -163,18 +168,28 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   // coming up. `x` is where across the page, `r` the tube's radius.
   const hung = phone ? [{ x: drops[0], r: 5 }, { x: drops[1], r: 5 }, { x: sx + Math.round(out), r: tubeR }] : []
   // The button, and beside it (under it, stacked) the two facts. `tight`: too little room for the longer fact on one line.
-  const plate = set ? set.plate : Math.max(6, Math.min(9, .9 * U)), ctaW = set ? set.ctaW : Math.max(18.5 * U, 150), ctaH = set ? set.ctaH : Math.min(Math.max(50, 8.6 * V), base - 2 * plate - 1.5 * V - 5)
-  const cta: Rect = set ? { x: -ctaW / 2, y: set.ctaY, w: ctaW, h: ctaH } : { x: -ctaW / 2, y: 1.5 * V + (base - 1.5 * V - ctaH) / 2, w: ctaW, h: ctaH }
-  const tight = set ? set.tight : (2 * Xc - 4.8 * U - ctaW) / 2 < 206
   // The button's faceplate (`plate`: how far it stands round the button), and the two facts. Wide, they are
   // instruments in the base: a display each, as tall as the button and narrower (the button is the largest thing in
-  // its row), the one to the left of the button and the other to its right. Stacked, they are two columns of the
-  // page's own type under the button, between its two edges.
-  const fw = Math.min(-ctaW / 2 - plate - 1.5 * U + Xc - 2.4 * U, Math.max(17 * U, 128))
+  // its row), the one to the left of the button and the other to its right, each window wide enough for its longest
+  // line (118 px). On a narrow cabinet the gaps between them close up first, and then the button gives way, down to
+  // a faceplate still a little wider than a window in its bezel. Stacked, they are two columns of the page's own type
+  // under the button, between its two edges.
+  const plate = set ? set.plate : Math.max(6, Math.min(9, .9 * U)), ctaH = set ? set.ctaH : Math.min(Math.max(50, 8.6 * V), base - 2 * plate - 1.5 * V - 5)
+  let ctaW = set ? set.ctaW : Math.max(18.5 * U, 150), margin = 2.4 * U, apart = 1.5 * U
+  const room2 = () => 2 * (Xc - margin - apart - plate), longest = Math.max(17 * U, 128)
+  if (!set && (room2() - ctaW) / 2 < 118) { margin = 1.5 * U; apart = .9 * U; if ((room2() - ctaW) / 2 < 118) ctaW = Math.max(room2() / 3, room2() - 236) }
+  const cta: Rect = set ? { x: -ctaW / 2, y: set.ctaY, w: ctaW, h: ctaH } : { x: -ctaW / 2, y: 1.5 * V + (base - 1.5 * V - ctaH) / 2, w: ctaW, h: ctaH }
+  const tight = set ? set.tight : (2 * Xc - 2 * margin - ctaW) / 2 < 206
+  const fw = Math.min((room2() - ctaW) / 2, longest)
   const facts: Rect[] = set ? [{ x: cta.x, y: set.factsY, w: 88, h: set.factsH }, { x: cta.x + 88, y: set.factsY, w: ctaW - 88, h: set.factsH }]
-    : [{ x: -Xc + 2.4 * U, y: cta.y, w: fw, h: cta.h }, { x: Xc - 2.4 * U - fw, y: cta.y, w: fw, h: cta.h }]
-  // The tally: a counter in the right header's front, beside the last outlet (Logs): everything sorted is on record.
-  const tally = phone ? null : { x: fan[7].x - tubeR - 2 * U - 38, y: (headH - 14) / 2 + 1, w: 38, h: 14, z: zProud }
+    : [{ x: -Xc + margin, y: cta.y, w: fw, h: cta.h }, { x: Xc - margin - fw, y: cta.y, w: fw, h: cta.h }]
+  // The tally: a counter in the right header's front, in the gap between the last two outlets (Campaigns and Logs):
+  // everything sorted is on record. (Where that gap is too narrow for it, the header has none.)
+  const tallyW = 38, tallyRoom = spread - 2 * (tubeR + 2 * U / 9) - 2 * 1.2 * U / 9 - 8
+  const tally = phone || tallyRoom < tallyW ? null : { x: (fan[6].x + fan[7].x) / 2 - tallyW / 2, y: (headH - 14) / 2 + 1, w: tallyW, h: 14, z: zProud }
+  /** How much room each tube's mouth has for its name beside it, to its right as the page sees it: to the next mouth
+   *  (or the outbound tube), less both tubes, or to 12 px short of the page's edge. In the order of `drops`. */
+  const mouthRoom = phone ? [] : tubes.map((_, t) => { const x = ox + fan[t].at, outX = ox + out - DX * zOver, next = [...tubes.map((__, u) => ox + fan[u].at), outX].filter(n => n > x + 1).sort((a, b) => a - b)[0]; return (next === undefined ? W - 12 : next - tubeR) - x - tubeR })
   // On the fascia: the gauge at its right, three lamps beside it (a phone: one over another), and the readout from
   // its left as far as the lamps. Stacked, they stand between the two edges of the works' bay.
   const gaugeR = set ? 19 * Math.min(set.k, 1.2) : Math.min(fascia * .36, 24)
@@ -194,15 +209,17 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   // price's, and half way between the price and the frame's top. `x, y` is its left end on its baseline, `cap` its cap
   // height (its width is 10.8 of them: lib/marks.ts), `z` the plane its face is in, proud of the frame by `depth`.
   // On a wide page each lane fitted after the first brings a unit of its own, plugged onto the tower's side beside
-  // the price: three down each side in the order they come (the left's: threads, inboxes, rituals; the right's:
-  // agents, IMAP, campaigns). `pods`: each one's lane and side, its place (its left edge, its foot, how far back its
-  // front stands) and its size.
+  // the price: three up each side in the order they come, each lowered in from over the page on to the one before
+  // (the left's: threads, inboxes, rituals; the right's: agents, IMAP, campaigns). `pods`: each one's lane and side,
+  // its place (its left edge, its foot, how far back its front stands), its size, and the plate its name is on (its
+  // left edge, its foot, its size: never under 12 px tall).
   const podW = 9 * U, podH = 9.6 * U, pods = phone ? [] : fit.slice(1).map(lane => {
-    const s = lanes[lane] < 0 ? -1 : 1, n = fit.slice(1, fit.indexOf(lane)).filter(other => (lanes[other] < 0 ? -1 : 1) === s).length
-    return { lane, s, x: s < 0 ? -Xc - podW : Xc, y: yMan - 1.5 * U - (n + 1) * podH - n * 2 * U, z: 1.4 * U, w: podW, h: podH, d: 5.6 * U }
+    const s = lanes[lane] < 0 ? -1 : 1, mine = fit.slice(1).filter(other => (lanes[other] < 0 ? -1 : 1) === s), n = mine.indexOf(lane), y = yMan - 1.5 * U - mine.length * podH - (mine.length - 1) * 2 * U + n * (podH + 2 * U)
+    const x = s < 0 ? -Xc - podW : Xc, plateH = Math.max(1.4 * U, 12)
+    return { lane, s, x, y, z: 1.4 * U, w: podW, h: podH, d: 5.6 * U, plate: { x: x + .5 * U, y: y + .55 * U, w: podW - 2.2 * U, h: plateH } }
   })
   const name = { x: -COLS * U / 2, y: yMan - over * V / 2 - COLS * U / 21.6, cap: COLS * U / 10.8, z: -.6 * U, depth: .6 * U }
-  return { phone, routes, fit, pods, eject, tight, short, name, W, H, fold, inset, ext, cannon, out: Math.round(out), room, widest, lean, ox, oy, sx, U, V, side, over, under, Xw, Xc, Xb, D, base, band, wall, manifold, slot, cavity, fascia, yBand, yWall, yMan, ySlot, yCav, yFas, yTop, P, lanes, label, lw, lh, cavD, zL, tubeR, tubes, post, zt, zProud, riser, fan, heads, drops, hung, front, lip, floor, zLip, zOver, zBack, slabX, hopper: hopperU * U, cta, consent, plate, facts, tally, readout, fromMax, subjectMax, gauge, lamps }
+  return { phone, routes, fit, pods, eject, tight, short, name, W, H, fold, inset, ext, cannon, out: Math.round(out), room, widest, lean, ox, oy, sx, U, V, side, over, under, Xw, Xc, Xb, D, base, band, wall, manifold, slot, cavity, fascia, yBand, yWall, yMan, ySlot, yCav, yFas, yTop, P, lanes, label, lw, lh, cavD, zL, tubeR, tubes, post, zt, zProud, riser, fan, heads, drops, mouthRoom, hung, front, lip, floor, zLip, zOver, zBack, slabX, hopper: hopperU * U, cta, consent, plate, facts, tally, readout, fromMax, subjectMax, gauge, lamps }
 }
 
 /** A box on the machine's front, as the page places it: left and top in the scene, width and height. */

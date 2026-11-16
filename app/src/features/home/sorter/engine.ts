@@ -139,8 +139,9 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   let rush = 1
   // Mail coming to each lane (1 as a letter goes down its chute, dying away): its unit on the tower's side shows it.
   // `reel`, `dial`, `stepAt`: a thread's reels, a ritual's clock hand, and which of its lamps is lit.
-  // (`got`: whether an inbox's unit has had its letter; `podOf`: which unit each lane has, if any.)
-  const arrived = new Float32Array(7), reel = new Float32Array(6), dial = new Float32Array(6), dialV = new Float32Array(6), dialTo = new Float32Array(6), stepAt = new Uint8Array(6), got = new Uint8Array(6), podOf = new Int8Array(7)
+  // (`got`: whether an inbox's unit has had its letter; `podOf`: which unit each lane has, if any; `armOf`: which
+  // fitter fits each lane.)
+  const arrived = new Float32Array(7), reel = new Float32Array(6), dial = new Float32Array(6), dialV = new Float32Array(6), dialTo = new Float32Array(6), stepAt = new Uint8Array(6), got = new Uint8Array(6), podOf = new Int8Array(7), armOf = new Int8Array(7)
   let raf = 0, last = 0, visible = true, dead = false
   const pointer = { x: 0, y: 0, in: false, down: false, moved: 0, held: -1, hover: -1, dirty: false, mouse: true, holdY: 0, fromX: 0, fromY: 0 }
 
@@ -157,7 +158,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     // gate and bolt. (The lasers are bolted to the roof's ends, and stay.)
     debrisPart = [m.idx.hopper, ...m.idx.vents, ...(m.idx.hatch < 0 ? [] : [m.idx.hatch]), m.idx.panel, ...m.idx.panes, ...m.idx.rollers, ...m.idx.flaps, ...m.idx.bolts]
     selfPosed = new Set([m.idx.hatch, ...m.idx.rollers, ...m.idx.flaps]); boltBody = debrisPart.length - m.idx.bolts.length; hatchBody = debrisPart.indexOf(m.idx.hatch); panelBody = debrisPart.indexOf(m.idx.panel); paneBody = debrisPart.indexOf(m.idx.panes[0])
-    deckHome = p.lanes.map(x => [x, m.yR, p.zL] as V3); podOf.fill(-1); m.pods.forEach((unit, k) => { podOf[unit.lane] = k })
+    deckHome = p.lanes.map(x => [x, m.yR, p.zL] as V3); m.arms.forEach((A, k) => { for (const lane of A.lanes) armOf[lane] = k }); podOf.fill(-1); m.pods.forEach((unit, k) => { podOf[unit.lane] = k })
     // (How high what hangs on the tower's sides reaches, and how far out: what flies home from under it goes out first.)
     sides = Math.max(-Infinity, ...p.pods.map(at => at.y + at.h), ...m.arms.filter(A => A.parts.lift >= 0).map(A => A.top[1] + m.rr + .3 * p.U)); clearX = p.Xc + Math.max(9.3 * p.U, p.P + 1.5 * p.U) + .7 * p.lw
     Dn = bodies(debrisPart.length, false); away0 = new Float32Array(Dn.cap * 7)
@@ -178,7 +179,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       ...p.pods.map(at => ({ x0: at.x - .3 * U, x1: at.x + at.w + .3 * U, z0: at.z - 2.7 * U, z1: at.z + at.d, y: at.y + at.h, y0: at.y - 2.2 * U, side: at.s })),
       ...m.arms.filter(A => A.parts.lift >= 0).map(A => ({ x0: A.s < 0 ? -p.Xc - p.P - 1.5 * U : p.Xc, x1: A.s < 0 ? -p.Xc : p.Xc + p.P + 1.5 * U, z0: m.z0 - 3 * px, z1: m.z1 + 3.4 * px, y: A.top[1] + m.rr + .3 * U, y0: A.foot - 2.5 * U, side: A.s }))]
     // (And on the roof the beacon, and each fitter's column.)
-    keepClear = [{ x: C.x - C.cs, z: C.z, y: C.y, r: C.back + 2 * C.cs }, ...(p.tally ? [{ x: p.tally.x + p.tally.w / 2, z: p.tally.z - 12 * px, y: 0, r: 16 * px }] : []), { x: m.beacon[0], z: m.beacon[2], y: p.yTop, r: 4 * px }, ...m.arms.map(A => ({ x: A.shoulder[0], z: p.zL, y: p.yTop, r: A.rb + 2 * px }))]
+    keepClear = [{ x: C.x - C.cs, z: C.z, y: C.y, r: C.back + 2 * C.cs }, ...(p.tally ? [{ x: p.tally.x + p.tally.w / 2, z: p.tally.z - 12 * px, y: 0, r: 16 * px }] : []), { x: m.beacon[0], z: m.beacon[2], y: p.yTop, r: 4 * px }, ...m.arms.filter(A => !A.crane).map(A => ({ x: A.shoulder[0], z: p.zL, y: p.yTop, r: A.rb + 2 * px }))]
     base = keepClear.length
     zones = [p.readout, { x: -p.Xw, y: p.ySlot, w: 2 * p.Xw, h: p.slot }, { x: -p.Xw, y: p.yBand, w: 2 * p.Xw, h: p.band }, ...p.facts].map(r => [r.x + r.w / 2, r.y + r.h / 2, r.w / 2, r.h / 2])
     recoil = 0; sendIn = 2.4; volley = 0
@@ -250,7 +251,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     // leave by, the wells the fitters stand in, the lasers' pedestals, (on a wide page) the cables back to their
     // junction boxes, and the eyes the roof hung from. (What is taller is kept clear: the beacon, a fitter's column.)
     const raise = (x0: number, x1: number, z0: number, z1: number, y: number) => { for (let z = z0; z < z1 + CELL / 2; z += CELL / 2) for (let x = x0; x < x1 + CELL / 2; x += CELL / 2) { const c = cell(Math.min(x, x1), Math.min(z, z1)); if (c >= 0 && ground[c] >= p.yTop && ground[c] < y) ground[c] = y } }
-    for (const A of m.arms) { raise(A.portX - A.hw - 1.4 * px, A.portX + A.hw + 1.4 * px, p.zL - A.pd - 1.4 * px, p.zL + A.pd + 1.4 * px, p.yTop + 2 * px); raise(A.shoulder[0] - A.rb - 1.2 * px, A.shoulder[0] + A.rb + 1.2 * px, p.zL - A.rb - 1.2 * px, p.zL + A.rb + 1.2 * px, p.yTop + .8 * px) }
+    for (const A of m.arms) { raise(A.portX - A.hw - 1.4 * px, A.portX + A.hw + 1.4 * px, p.zL - A.pd - 1.4 * px, p.zL + A.pd + 1.4 * px, p.yTop + 2 * px); if (!A.crane) raise(A.shoulder[0] - A.rb - 1.2 * px, A.shoulder[0] + A.rb + 1.2 * px, p.zL - A.rb - 1.2 * px, p.zL + A.rb + 1.2 * px, p.yTop + .8 * px) }
     for (const e of p.phone ? m.ejects.slice(0, 1) : m.ejects) raise(e[0] - .62 * p.lw, e[0] + .62 * p.lw, e[2] - 6 * px, e[2] + 6 * px, p.yTop + 5 * px)
     for (const s of [-1, 1]) {
       const in0 = s * (p.phone ? p.Xc - 4.2 * p.U : p.Xc - 1.6 * p.U), ex = s * .74 * p.Xc, ez = p.D * (p.phone ? .62 : .5)
@@ -324,12 +325,15 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     else if (building) {
       buildT += dt
       // First the fitters themselves: up out of their wells, the left one and then the right.
-      for (let k = 0; k < 2; k++) if (buildT > .3 + k * .32 && arm[k].pop < 1) { if (arm[k].pop === 0) { const A = m.arms[k]; jet(A.shoulder[0], p.yTop + 2 * px, p.zL, 0, 1, 110, 3, .8) } arm[k].down = false; arm[k].pop = Math.min(1, arm[k].pop + dt / .5) }
+      for (let k = 0; k < m.arms.length; k++) if (!m.arms[k].crane && buildT > .3 + k * .32 && arm[k].pop < 1) { if (arm[k].pop === 0) { const A = m.arms[k]; jet(A.shoulder[0], p.yTop + 2 * px, p.zL, 0, 1, 110, 3, .8) } arm[k].down = false; arm[k].pop = Math.min(1, arm[k].pop + dt / .5) }
       // Then a deck at a time, each side's arm in turn; a new one begins before the last is home.
-      if (arm[1].pop >= 1 && fitNext < p.fit.length) {
+      let ready = true
+      for (let k = 0; k < m.arms.length; k++) ready &&= m.arms[k].crane || arm[k].pop >= 1
+      if (ready && fitNext < p.fit.length) {
         fitIn -= dt
-        const i = p.fit[fitNext], k = p.lanes[i] < 0 ? 0 : 1, a = arm[k]
-        if ((fitIn <= 0 || rush > 1) && a.job < 0) { a.job = i; a.t = 0; put(a.from, a.yaw, a.r, a.y); fitNext++; fitIn = B.gap }
+        const i = p.fit[fitNext], k = armOf[i], a = arm[k]
+        // (A crane's hook comes down from out of sight over the page, with the deck already on it.)
+        if ((fitIn <= 0 || rush > 1) && a.job < 0) { a.job = i; a.t = 0; if (m.arms[k].crane) { put(a.from, 0, 0, oyc - DY * p.zL + m.grip + m.deckH + 10 * px); deck[i].stage = CARRIED } else put(a.from, a.yaw, a.r, a.y); fitNext++; fitIn = B.gap }
       }
       // (Each lane's unit is plugged onto the tower's side while its deck is on its way in.)
       for (let k = 0; k < m.pods.length; k++) if (pod[k] < 1 && p.fit.indexOf(m.pods[k].lane) < fitNext) {
@@ -339,7 +343,8 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       }
       // And once every lane is in: the lasers come up, the cannon is given something to send, and the day begins
       // (or, hurried, it overloads).
-      let done = fitNext >= p.fit.length && arm[0].job < 0 && arm[1].job < 0
+      let done = fitNext >= p.fit.length
+      for (let k = 0; k < m.arms.length; k++) done &&= arm[k].job < 0
       for (let i = 0; i < p.lanes.length && done; i++) done = deck[i].stage === FITTED
       if (done) {
         tailT += dt
@@ -348,14 +353,15 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
         if (tailT > 1.7) { built = true; rush = 1; hooks.floors(2, true) }
       }
     }
-    for (let k = 0; k < 2; k++) {
+    for (let k = 0; k < m.arms.length; k++) {
       const A = m.arms[k], a = arm[k]
       // Once the machine is whole the fitters stand by over their ports; as it overloads they fold down into their
       // wells, out of the way of what is to come, and once it is put back together they come up again.
-      if (built) {
+      if (built && !A.crane) {
         if (phase === 'overload' || phase === 'boom' || phase === 'rest' || phase === 'rebuild') { if (a.pop > 0) { a.down = true; a.pop = Math.max(0, a.pop - dt / .4) } }
         else if (a.pop < 1 && clock > .25 + .3 * k) { if (a.pop === 0) jet(A.shoulder[0], p.yTop + 2 * px, p.zL, 0, 1, 110, 3, .8); a.down = false; a.pop = Math.min(1, a.pop + dt / .5) }
       }
+      if (a.job < 0 && A.crane) continue
       if (a.job < 0) { const e = Math.min(1, dt * 5); a.yaw += (A.rest[0] - a.yaw) * e; a.r += (A.rest[1] - a.r) * e; a.y += (A.rest[2] - a.y) * e; a.cover -= a.cover * Math.min(1, dt * 9); a.grip -= a.grip * Math.min(1, dt * 9); continue }
       a.t += dt / B.job
       const u = Math.min(1, a.t), i = a.job, d = deck[i], n = A.lanes.indexOf(i)
@@ -366,17 +372,17 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       if (d.stage === AWAIT && u >= JOB.shut) d.stage = CARRIED
       if (u >= JOB.lift && taken[k] < n + 1) taken[k] = n + 1
       if (d.stage === CARRIED) {
-        d.x = A.shoulder[0] + Math.cos(a.yaw) * a.r; d.y = a.y - m.grip - m.rr; d.z = p.zL + Math.sin(a.yaw) * a.r
+        d.x = A.crane ? A.portX : A.shoulder[0] + Math.cos(a.yaw) * a.r; d.y = a.y - m.grip - m.rr; d.z = A.crane ? p.zL : p.zL + Math.sin(a.yaw) * a.r
         if (u >= JOB.open) { d.stage = LOWERED; d.t = 0; d.from = d.y }
       }
       if (u >= 1) a.job = -1
     }
     // (A magazine's lift comes up a deck at a time, a little past, and settles.)
-    for (let k = 0; k < 2; k++) { liftV[k] += ((taken[k] - lift[k]) * 90 - liftV[k] * 12) * dt; lift[k] += liftV[k] * dt; if (Math.abs(taken[k] - lift[k]) < 1e-3 && Math.abs(liftV[k]) < 1e-3) { lift[k] = taken[k]; liftV[k] = 0 } }
+    for (let k = 0; k < m.arms.length; k++) { liftV[k] += ((taken[k] - lift[k]) * 90 - liftV[k] * 12) * dt; lift[k] += liftV[k] * dt; if (Math.abs(taken[k] - lift[k]) < 1e-3 && Math.abs(liftV[k]) < 1e-3) { lift[k] = taken[k]; liftV[k] = 0 } }
     // A deck let go of: down inside to the roller line, along it to its place, and its chute up under it.
     for (let i = 0; i < p.lanes.length; i++) {
       const x = p.lanes[i], d = deck[i]
-      if (d.stage === AWAIT) { const k = x < 0 ? 0 : 1, A = m.arms[k], n = A.lanes.indexOf(i); if (n >= 0) { d.x = A.top[0] + shifts[6] - shifts[3]; d.y = A.top[1] - (n - lift[k]) * A.pitch + shifts[7] - shifts[4]; d.z = A.top[2] } }
+      if (d.stage === AWAIT) { const k = armOf[i], A = m.arms[k], n = A.lanes.indexOf(i); if (n >= 0) { d.x = A.top[0] + shifts[6] - shifts[3]; d.y = A.top[1] - (n - lift[k]) * A.pitch + shifts[7] - shifts[4]; d.z = A.top[2] } }
       else if (d.stage === LOWERED) { d.t += dt / (options.quick ? .3 : .42); d.y = d.from + (m.yR - d.from) * ease(clamp(d.t)); if (d.t >= 1) { d.stage = ALONG; d.t = 0; d.from = d.x } }
       else if (d.stage === ALONG) {
         const far = Math.abs(x - d.from) / p.P; d.t += far < .1 ? 1 : dt / (.16 + .11 * far)
@@ -1017,11 +1023,18 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     }
     // The fitters: the column turned to where the hand is, the two arms bent to reach it, the hand level and square
     // to the page, its fingers open or closed; the port's cover; the magazine's lift.
-    for (let k = 0; k < 2; k++) {
-      const A = m.arms[k], a = arm[k], S = A.shoulder, P = A.parts, on = a.pop > 0
-      parts[P.base].on = parts[P.upper].on = parts[P.fore].on = parts[P.hand].on = parts[P.fingers[0]].on = parts[P.fingers[1]].on = on
-      pose(parts[P.cover].m, ORIGIN, A.front ? put(AT, 0, -a.cover * A.sink, 0) : put(AT, 0, 0, a.cover * A.slide), NONE)
+    for (let k = 0; k < m.arms.length; k++) {
+      const A = m.arms[k], a = arm[k], S = A.shoulder, P = A.parts, on = A.crane ? a.job >= 0 : a.pop > 0
+      parts[P.hand].on = parts[P.fingers[0]].on = parts[P.fingers[1]].on = on
+      pose(parts[P.cover].m, ORIGIN, A.crane ? put(AT, 0, -a.cover * A.sink, 0) : put(AT, 0, 0, a.cover * A.slide), NONE)
       if (P.lift >= 0) pose(parts[P.lift].m, ORIGIN, put(AT, 0, Math.min(lift[k], A.count - 1) * A.pitch, 0), NONE)
+      if (A.crane) {
+        // (A crane: the hand and its cable straight over the port, at the height its job has it.)
+        parts[P.cable].on = on
+        if (on) { const dy = a.y - S[1], open = (1 - a.grip) * A.open; pose(parts[P.cable].m, ORIGIN, put(AT, 0, dy, 0), NONE); pose(parts[P.hand].m, ORIGIN, AT, NONE); pose(parts[P.fingers[0]].m, ORIGIN, put(AT2, -open, dy, 0), NONE); pose(parts[P.fingers[1]].m, ORIGIN, put(AT2, open, dy, 0), NONE) }
+        continue
+      }
+      parts[P.base].on = parts[P.upper].on = parts[P.fore].on = on
       if (!on) continue
       // (It comes up out of its well a little past its size and settles; it goes down into it gathering way.)
       const u = a.pop, pop = a.down ? u * u * (3 - 2 * u) : 1 + 2.7 * (u - 1) ** 3 + 1.7 * (u - 1) ** 2
