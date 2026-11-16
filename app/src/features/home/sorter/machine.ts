@@ -173,7 +173,7 @@ export function buildMachine(p: Plan) {
   const beacon: V3 = [Xc - (p.phone ? 4.5 : 3) * U, yTop + 12 * px, D * .82]
   b.cyl([beacon[0], 0, beacon[2]], 1, yTop, yTop + 8 * px, 1.2 * px, M.steel, 8, 0); b.cyl([beacon[0], 0, beacon[2]], 1, yTop + 8 * px, yTop + 9.5 * px, 3.6 * px, M.trim, 12, 2); b.cyl([beacon[0], 0, beacon[2]], 1, yTop + 9.5 * px, yTop + 14 * px, 2.8 * px, M.lampOff, 12, 2)
   // Each laser's cable runs back to a junction box by the kerb. (Not on a phone's roof: there is little enough of it.)
-  if (!p.phone) turrets.forEach((t, k) => { const s = k ? 1 : -1, x = s * (Xc - 2.6 * U); b.tube([[x, yTop + 1.4 * px, 7 * px], [x, yTop + 1.4 * px, D * .52], [x - s * 2.2 * U, yTop + 1.4 * px, D * .52]], 1.3 * px, M.rubber, 6, 5 * px); b.box(x - s * 2.2 * U - 4 * px, yTop, D * .52 - 4 * px, x - s * 2.2 * U + 4 * px, yTop + 4 * px, D * .52 + 4 * px, M.plinth) })
+  if (!p.phone) turrets.forEach((t, k) => { const s = k ? 1 : -1, x = s * (Xc - 2.6 * U); b.tube([[x, yTop + 1.4 * px, 7 * px], [x, yTop + 1.4 * px, D * .52], [x - s * 1.6 * U, yTop + 1.4 * px, D * .52]], 1.3 * px, M.rubber, 6, 5 * px); b.box(x - s * 1.6 * U - 4 * px, yTop, D * .52 - 4 * px, x - s * 1.6 * U + 4 * px, yTop + 4 * px, D * .52 + 4 * px, M.plinth) })
   // What the hopper and the chimneys stand over: holes, seen once they are gone.
   b.quad([-lw * .5, yTop + .15, zL - lw * .26], [lw * .5, yTop + .15, zL - lw * .26], [lw * .5, yTop + .15, zL + lw * .26], [-lw * .5, yTop + .15, zL + lw * .26], M.slot, [0, 1, 0])
   for (const v of vents) b.cyl([v[0], 0, v[2]], 1, yTop + .1, yTop + .2, 3.6 * px, M.slot, 12, 2)
@@ -439,7 +439,15 @@ export function buildMachine(p: Plan) {
     // The port: a kerb round it, the dark inside; the well the arm's column stands in.
     for (const [x0, x1, za, zb] of [[portX - hw - 1.4 * px, portX + hw + 1.4 * px, zL - pd - 1.4 * px, zL - pd], [portX - hw - 1.4 * px, portX + hw + 1.4 * px, zL + pd, zL + pd + 1.4 * px], [portX - hw - 1.4 * px, portX - hw, zL - pd, zL + pd], [portX + hw, portX + hw + 1.4 * px, zL - pd, zL + pd]]) b.box(x0, yTop, za, x1, yTop + 1.3 * px, zb, M.trim)
     b.quad([portX - hw, yTop + .14, zL - pd], [portX + hw, yTop + .14, zL - pd], [portX + hw, yTop + .14, zL + pd], [portX - hw, yTop + .14, zL + pd], M.slot, [0, 1, 0])
-    if (!crane) b.cyl([bx, 0, zL], 1, yTop, yTop + .8 * px, rb + 1.2 * px, M.trim, 18, 2, M.slot)
+    // (The arm's well. Folded, the arm stands in it: the upper arm straight up, the forearm hanging back down beside
+    // it and the hand turned along the well behind the column, its fingers clear of the roof (`foldR`: how far back
+    // the wrist is then). Sunk, all of it is under the roof: the well runs back from the column far enough to take
+    // the hand, as narrow as the column's foot.)
+    const foldR = half + .25 * au + 1.5 * px - rb - 1.2 * px, sunk = shoulder[1] - yTop + L + .62 * au + 2 * px, wellX = rb + 1.2 * px, wellZ = [zL - wellX, zL + foldR + half + .25 * au + 1.5 * px]
+    if (!crane) {
+      for (const [x0, x1, za, zb] of [[bx - wellX - 1.4 * px, bx + wellX + 1.4 * px, wellZ[0] - 1.4 * px, wellZ[0]], [bx - wellX - 1.4 * px, bx + wellX + 1.4 * px, wellZ[1], wellZ[1] + 1.4 * px], [bx - wellX - 1.4 * px, bx - wellX, wellZ[0], wellZ[1]], [bx + wellX, bx + wellX + 1.4 * px, wellZ[0], wellZ[1]]]) b.box(x0, yTop, za, x1, yTop + 1.3 * px, zb, M.trim)
+      b.quad([bx - wellX, yTop + .14, wellZ[0]], [bx + wellX, yTop + .14, wellZ[0]], [bx + wellX, yTop + .14, wellZ[1]], [bx - wellX, yTop + .14, wellZ[1]], M.slot, [0, 1, 0])
+    }
     // The magazine (a wide page): a back plate on two posts, bolted flat to the console's side by a flange, and the
     // lift the decks stand on, which rides up between the posts. Its front and top are open: the hand comes down from
     // over it, its fingers outside the deck's ends. (It ends over the console's foot: the console is slid in over the
@@ -486,7 +494,7 @@ export function buildMachine(p: Plan) {
     b.box(bx - half - .25 * au, shoulder[1] - 1.35 * au, zL - .5 * au, bx + half + .25 * au, shoulder[1] - .9 * au, zL + .5 * au, M.trim, ALL)
     const fingers = [-1, 1].map(e => { const part = b.part(`finger${k}${e}`, shoulder); b.parts[part].plain = true; b.box(bx + (e < 0 ? -half : half - .3 * au), shoulder[1] - grip - deckH * .62, zL - .4 * au, bx + (e < 0 ? -half + .3 * au : half), shoulder[1] - 1.35 * au, zL + .4 * au, M.steel, ALL); return part })
     b.floor(SORT)
-    return { s, crane, portX, shoulder, L, lanes: mine, top, pitch, foot, count, inn, out, rw, rp, rMid, yw, low, travel, rest, hw, pd, rb, open: .45 * au, parts: { cover, base, upper, fore, hand, fingers, lift, cable }, slide: 2 * pd + 2 * px, sink: 2.6 * px }
+    return { s, crane, portX, shoulder, L, foldR, foldT2: -Math.acos(Math.min(1, foldR / L)), sunk, wellX, wellZ, lanes: mine, top, pitch, foot, count, inn, out, rw, rp, rMid, yw, low, travel, rest, hw, pd, rb, open: .45 * au, parts: { cover, base, upper, fore, hand, fingers, lift, cable }, slide: 2 * pd + 2 * px, sink: 2.6 * px }
   })
   // The roof hangs from two cables while the floors under it are slid in: they come down out of the night to an eye
   // each side of it, a hook on the end of each, and are drawn up out of sight once it stands on the console.

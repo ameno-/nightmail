@@ -69,7 +69,7 @@ export function drawStill(canvas: HTMLCanvasElement, p: Plan, over: number, dark
   if (!p.phone) {
     for (const [x, z] of [[-Xw * .84, D * .7], [Xw * .88, D * .66]]) { box(x - 4.5 * px, yTop, z, x + 4.5 * px, yTop + 11 * px, z + .1, 'steel'); box(x - 6 * px, yTop + 11 * px, z - 4 * px, x + 6 * px, yTop + 13 * px, z + 4 * px, 'trim', 'slot') }
     box(-Xw * .46, yTop, D * .64, -Xw * .14, yTop + 4.4 * px, D * .88, 'steel', 'body'); box(-Xw * .33, yTop + 4.4 * px, D * .73, -Xw * .27, yTop + 6.2 * px, D * .79, 'steel')
-    for (const s of [-1, 1]) { const x = s * (Xc - 2.6 * U), jx = x - s * 2.2 * U; box(x - 1.3 * px, yTop, 7 * px, x + 1.3 * px, yTop + 2.7 * px, D * .52, 'rubber'); box(Math.min(x, jx), yTop, D * .52 - 1.3 * px, Math.max(x, jx), yTop + 2.7 * px, D * .52 + 1.3 * px, 'rubber'); box(jx - 4 * px, yTop, D * .52 - 4 * px, jx + 4 * px, yTop + 4 * px, D * .52 + 4 * px, 'plinth') }
+    for (const s of [-1, 1]) { const x = s * (Xc - 2.6 * U), jx = x - s * 1.6 * U; box(x - 1.3 * px, yTop, 7 * px, x + 1.3 * px, yTop + 2.7 * px, D * .52, 'rubber'); box(Math.min(x, jx), yTop, D * .52 - 1.3 * px, Math.max(x, jx), yTop + 2.7 * px, D * .52 + 1.3 * px, 'rubber'); box(jx - 4 * px, yTop, D * .52 - 4 * px, jx + 4 * px, yTop + 4 * px, D * .52 + 4 * px, 'plinth') }
   }
   const beacon = Xc - (p.phone ? 4.5 : 3) * U
   box(beacon - 1.2 * px, yTop, D * .82, beacon + 1.2 * px, yTop + 8 * px, D * .82 + .1, 'steel'); box(beacon - 3.6 * px, yTop + 8 * px, D * .82 - 3.6 * px, beacon + 3.6 * px, yTop + 9.5 * px, D * .82 + 3.6 * px, 'trim'); box(beacon - 2.8 * px, yTop + 9.5 * px, D * .82 - 2.8 * px, beacon + 2.8 * px, yTop + 14 * px, D * .82 + 2.8 * px, 'lampOff')
@@ -79,7 +79,8 @@ export function drawStill(canvas: HTMLCanvasElement, p: Plan, over: number, dark
     const portX = s * Math.abs(p.lanes[0]), bx = s * Math.min(Xc - 2.5 * px - rb - .1 * U, Math.abs(portX) + hw + rb + 1.5 * U)
     box(portX - hw - 1.4 * px, yTop, zL - pd - 1.4 * px, portX + hw + 1.4 * px, yTop + 1.3 * px, zL + pd + 1.4 * px, 'trim')
     box(portX - hw + .5 * px, yTop + .3, zL - pd + .5 * px, portX + hw - .5 * px, yTop + 1.1 * px, zL + pd - .5 * px, 'steel', 'plinth'); box(portX - .2 * p.P, yTop + 1.1 * px, zL - 1.2 * px, portX + .2 * p.P, yTop + 2 * px, zL + 1.2 * px, 'steel')
-    if (!p.phone) { fill('trim', 0); disc(bx, yTop + .8 * px, zL, rb + 1.2 * px); fill('slot', 0); disc(bx, yTop + .8 * px, zL, rb) }
+    if (!p.phone) { const half = p.P / 2 + .3 * au, wx = rb + 1.2 * px, z0 = zL - wx, z1 = zL + 2 * half + .5 * au + 3 * px - rb - 1.2 * px
+      box(bx - wx - 1.4 * px, yTop, z0 - 1.4 * px, bx + wx + 1.4 * px, yTop + 1.3 * px, z1 + 1.4 * px, 'trim'); fill('slot', 0); face([[bx - wx, yTop + .14, z0], [bx + wx, yTop + .14, z0], [bx + wx, yTop + .14, z1], [bx - wx, yTop + .14, z1]]) }
   }
   for (const s of [-1, 1]) {
     const tx = s * (p.phone ? Xc - .7 * U : Xc + 1.15 * U), tz = -5 * px, a = whole ? (s > 0 ? .5 : Math.PI - .5) : s > 0 ? -1.35 : Math.PI + 1.35, in0 = s * (p.phone ? Xc - 2.4 * U : Xc - 1.6 * U), out0 = tx + s * 1.05 * U

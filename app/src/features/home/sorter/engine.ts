@@ -251,7 +251,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     // leave by, the wells the fitters stand in, the lasers' pedestals, (on a wide page) the cables back to their
     // junction boxes, and the eyes the roof hung from. (What is taller is kept clear: the beacon, a fitter's column.)
     const raise = (x0: number, x1: number, z0: number, z1: number, y: number) => { for (let z = z0; z < z1 + CELL / 2; z += CELL / 2) for (let x = x0; x < x1 + CELL / 2; x += CELL / 2) { const c = cell(Math.min(x, x1), Math.min(z, z1)); if (c >= 0 && ground[c] >= p.yTop && ground[c] < y) ground[c] = y } }
-    for (const A of m.arms) { raise(A.portX - A.hw - 1.4 * px, A.portX + A.hw + 1.4 * px, p.zL - A.pd - 1.4 * px, p.zL + A.pd + 1.4 * px, p.yTop + 2 * px); if (!A.crane) raise(A.shoulder[0] - A.rb - 1.2 * px, A.shoulder[0] + A.rb + 1.2 * px, p.zL - A.rb - 1.2 * px, p.zL + A.rb + 1.2 * px, p.yTop + .8 * px) }
+    for (const A of m.arms) { raise(A.portX - A.hw - 1.4 * px, A.portX + A.hw + 1.4 * px, p.zL - A.pd - 1.4 * px, p.zL + A.pd + 1.4 * px, p.yTop + 2 * px); if (!A.crane) raise(A.shoulder[0] - A.wellX - 1.4 * px, A.shoulder[0] + A.wellX + 1.4 * px, A.wellZ[0] - 1.4 * px, A.wellZ[1] + 1.4 * px, p.yTop + 1.3 * px) }
     for (const e of p.phone ? m.ejects.slice(0, 1) : m.ejects) raise(e[0] - .62 * p.lw, e[0] + .62 * p.lw, e[2] - 6 * px, e[2] + 6 * px, p.yTop + 5 * px)
     for (const s of [-1, 1]) {
       const in0 = s * (p.phone ? p.Xc - 4.2 * p.U : p.Xc - 1.6 * p.U), ex = s * .74 * p.Xc, ez = p.D * (p.phone ? .62 : .5)
@@ -326,7 +326,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     else if (building) {
       buildT += dt
       // First the fitters themselves: up out of their wells, the left one and then the right.
-      for (let k = 0; k < m.arms.length; k++) if (!m.arms[k].crane && buildT > .3 + k * .32 && arm[k].pop < 1) { if (arm[k].pop === 0) { const A = m.arms[k]; jet(A.shoulder[0], p.yTop + 2 * px, p.zL, 0, 1, 110, 3, .8) } arm[k].down = false; arm[k].pop = Math.min(1, arm[k].pop + dt / .5) }
+      for (let k = 0; k < m.arms.length; k++) if (!m.arms[k].crane && buildT > .3 + k * .32 && arm[k].pop < 1) { if (arm[k].pop === 0) { const A = m.arms[k]; jet(A.shoulder[0], p.yTop + 2 * px, p.zL, 0, 1, 110, 3, .8) } arm[k].down = false; arm[k].pop = Math.min(1, arm[k].pop + dt / .6) }
       // Then a deck at a time, each side's arm in turn; a new one begins before the last is home.
       let ready = true
       for (let k = 0; k < m.arms.length; k++) ready &&= m.arms[k].crane || arm[k].pop >= 1
@@ -359,8 +359,8 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       // Once the machine is whole the fitters stand by over their ports; as it overloads they fold down into their
       // wells, out of the way of what is to come, and once it is put back together they come up again.
       if (built && !A.crane) {
-        if (phase === 'overload' || phase === 'boom' || phase === 'rest' || phase === 'rebuild') { if (a.pop > 0) { a.down = true; a.pop = Math.max(0, a.pop - dt / .4) } }
-        else if (a.pop < 1 && clock > .25 + .3 * k) { if (a.pop === 0) jet(A.shoulder[0], p.yTop + 2 * px, p.zL, 0, 1, 110, 3, .8); a.down = false; a.pop = Math.min(1, a.pop + dt / .5) }
+        if (phase === 'overload' || phase === 'boom' || phase === 'rest' || phase === 'rebuild') { if (a.pop > 0) { a.down = true; a.pop = Math.max(0, a.pop - dt / .5) } }
+        else if (a.pop < 1 && clock > .25 + .3 * k) { if (a.pop === 0) jet(A.shoulder[0], p.yTop + 2 * px, p.zL, 0, 1, 110, 3, .8); a.down = false; a.pop = Math.min(1, a.pop + dt / .6) }
       }
       if (a.job < 0 && A.crane) continue
       if (a.job < 0) { const e = Math.min(1, dt * 5); a.yaw += (A.rest[0] - a.yaw) * e; a.r += (A.rest[1] - a.r) * e; a.y += (A.rest[2] - a.y) * e; a.cover -= a.cover * Math.min(1, dt * 9); a.grip -= a.grip * Math.min(1, dt * 9); continue }
@@ -1059,16 +1059,20 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       }
       parts[P.base].on = parts[P.upper].on = parts[P.fore].on = on
       if (!on) continue
-      // (It comes up out of its well a little past its size and settles; it goes down into it gathering way.)
-      const u = a.pop, pop = a.down ? u * u * (3 - 2 * u) : 1 + 2.7 * (u - 1) ** 3 + 1.7 * (u - 1) ** 2
+      // (It rises out of its well folded, the upper arm straight up, the forearm hanging back down beside it and the
+      // hand turned along the well, then unfolds over the port, the elbow running a little past and settling back. It
+      // goes down the same way, folding first and then sinking, gathering way. It is never drawn larger or smaller.)
+      const u = a.pop, rise = a.down ? 1 - (1 - clamp(u / .45)) ** 2 : 1 - (1 - clamp(u / .4)) ** 3, f = a.down ? ease(clamp((u - .4) / .6)) : clamp((u - .28) / .72)
+      const e1 = a.down ? f : ease(f), e2 = a.down ? f : 1 + 2.4 * (f - 1) ** 3 + 1.4 * (f - 1) ** 2
       bendArm(A.L, a.r, a.y - S[1], angles)
-      const t1 = angles[0], t2 = angles[1], er = Math.cos(t1) * A.L, ey = Math.sin(t1) * A.L, cy = Math.cos(a.yaw), sn = Math.sin(a.yaw), bx = S[0], by = p.yTop, bz = S[2]
-      const wr = er + Math.cos(t2) * A.L, wy = by + (S[1] - by + ey + Math.sin(t2) * A.L) * pop, wx = bx + cy * wr * pop, wz = bz + sn * wr * pop, open = (1 - a.grip) * A.open * pop
-      put(AT2, bx, by, bz); pose(parts[P.base].m, AT2, AT2, turnY(a.yaw), pop)
-      pose(parts[P.upper].m, S, put(AT, bx, by + (S[1] - by) * pop, bz), turnYZ(a.yaw, t1), pop)
-      pose(parts[P.fore].m, S, put(AT, bx + cy * er * pop, by + (S[1] - by + ey) * pop, bz + sn * er * pop), turnYZ(a.yaw, t2), pop)
-      pose(parts[P.hand].m, S, put(AT, wx, wy, wz), NONE, pop)
-      pose(parts[P.fingers[0]].m, S, put(AT, wx - open, wy, wz), NONE, pop); pose(parts[P.fingers[1]].m, S, put(AT, wx + open, wy, wz), NONE, pop)
+      const back = Math.PI / 2, dyaw = Math.atan2(Math.sin(a.yaw - back), Math.cos(a.yaw - back)), yaw = back + dyaw * e1, turn = (1 - e1) * back
+      const t1 = back + (angles[0] - back) * e1, t2 = A.foldT2 + (angles[1] - A.foldT2) * e2, er = Math.cos(t1) * A.L, ey = Math.sin(t1) * A.L, cy = Math.cos(yaw), sn = Math.sin(yaw), bx = S[0], by = p.yTop - (1 - rise) * A.sunk, bz = S[2], sy = by + S[1] - p.yTop
+      const wr = er + Math.cos(t2) * A.L, wy = sy + ey + Math.sin(t2) * A.L, wx = bx + cy * wr, wz = bz + sn * wr, open = (1 - a.grip) * A.open * e1, ox = Math.cos(turn) * open, oz = Math.sin(turn) * open
+      put(AT2, bx, p.yTop, bz); pose(parts[P.base].m, AT2, put(AT, bx, by, bz), turnY(yaw))
+      pose(parts[P.upper].m, S, put(AT, bx, sy, bz), turnYZ(yaw, t1))
+      pose(parts[P.fore].m, S, put(AT, bx + cy * er, sy + ey, bz + sn * er), turnYZ(yaw, t2))
+      pose(parts[P.hand].m, S, put(AT, wx, wy, wz), turnY(turn))
+      pose(parts[P.fingers[0]].m, S, put(AT, wx - ox, wy, wz - oz), turnY(turn)); pose(parts[P.fingers[1]].m, S, put(AT, wx + ox, wy, wz + oz), turnY(turn))
     }
     // The units on the tower's sides: each lit once its lane works, and blinking off for a moment as a letter comes
     // to it; a thread's reels turned as its mail comes, a ritual's hand stepped round and its lamps along, an agent's
