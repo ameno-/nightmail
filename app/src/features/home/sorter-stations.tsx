@@ -8,7 +8,8 @@ import { DX, DY, type Plan } from './sorter/plan'
 
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches
 
-// Under the slab the machine stands on, its eight tubes run on down the page and one by one bend in to an appliance:
+// Under the slab the machine stands on, its eight tubes (a phone's two wide ones) run on down the page and one by one
+// bend in to an appliance:
 // the places mail can go. Capsules run down every tube all the time, round the bends and into the appliances (each
 // one's lamp winks as one arrives); and one more tube, the outbound main, runs back up the page from the plate the
 // last button is on, past the appliances that send (they tee into it), to the slab, where the machine's cannon fires
@@ -93,41 +94,43 @@ export function Stations({ plan: p, onSignIn, onSignInIntent, busy }: { plan: Pl
   const phone = p.phone, r = p.tubeR, wide = r * 2, depth = phone ? 40 : 60, dx = -DX * depth, dy = DY * depth
   // Each appliance stands between the two fours of tubes, a little towards the side its own tube comes from: those on
   // the left share one left edge, those on the right another, so their names stand in two columns down the page.
-  const inner = Math.min(...p.drops.slice(4)) - Math.max(...p.drops.slice(0, 4)), room = inner - 2 * (phone ? 20 : 74), widest = Math.min(446, room), lean = phone ? 0 : Math.min(46, Math.max(0, (room - widest) / 2))
+  // (sorter/plan.ts has the column's width and its middle: under the machine's front, or on a phone the page's own.)
+  const { room, widest, lean, sx } = p
   const captionH = phone ? 58 : 66, gap = phone ? 96 : 128
-  let top = phone ? 96 : 110
-  // (On a phone the printed paper is narrower, so longer: nothing printed is cut short.)
+  let top = phone ? 52 : 110
+  // (On a narrow phone what is printed and what is said wraps more: the paper and the thread's screen are longer for it.)
+  const narrow = phone && p.W < 380, feed = narrow ? 232 : 168
+  // (Stacked the printed paper is narrower, so longer, and the ritual's call takes three lines: nothing is cut short.)
   const units = STATIONS.map(spec => {
-    const station = phone ? { ...spec, h: spec.kind === 'inbox' ? 339 : spec.kind === 'thread' ? 288 : spec.h, up: spec.up && spec.kind === 'agent' ? 232 : spec.up, down: spec.kind === 'logs' ? 272 : spec.down } : spec
+    const station = phone ? { ...spec, h: spec.kind === 'inbox' ? 339 : spec.kind === 'thread' ? (narrow ? 288 : 262) : spec.kind === 'ritual' ? 262 : spec.kind === 'endpoint' ? 280 : spec.h, up: spec.kind === 'agent' ? feed : spec.up, down: spec.kind === 'logs' ? 272 : spec.down } : spec
     const w = Math.min(station.w, room), left = station.tube < 4
-    const boxLeft = Math.round(p.ox - widest / 2 + (left ? -lean : lean) + dx / 2), boxTop = top + captionH + dy + 18 + station.up
+    const boxLeft = Math.round(sx - widest / 2 + (left ? -lean : lean) + dx / 2), boxTop = top + captionH + dy + 18 + station.up
     const unit = { station, w, left, top, boxLeft, boxTop: boxTop - top, port: boxTop + Math.round(station.h * station.port), end: left ? boxLeft - dx * .5 : boxLeft + w - 4, sends: boxTop + Math.round(station.h * .74) }
     top = boxTop + station.h + station.down + gap
     return unit
   })
   // Under the last appliance, the plate the last button is on; the outbound main comes out of its top.
-  const plate = { w: phone ? widest : Math.min(540, room + 60), h: phone ? 164 : 138, top: top + dy + 8 }, plateLeft = Math.round(p.ox - plate.w / 2 + dx / 2), mainX = p.ox + p.out
-  const height = plate.top + plate.h + (phone ? 150 : 132)
+  const plate = { w: phone ? widest : Math.min(540, room + 60), h: phone ? 164 : 138, top: top + dy + 8 }, plateLeft = Math.round(sx - plate.w / 2 + dx / 2), mainX = sx + p.out
+  // (Under the plate: what signing in agrees to and the last links, clear of a phone's home indicator.)
+  const height = plate.top + plate.h + (phone ? 164 : 132) + p.inset.bottom
   // The tubes. A wide page: each side's four start where they left the slab's lip; after each appliance on that side
   // the tubes that are left step in one place towards the column (the inner ones first, so none crosses another),
   // and the innermost then bends in to the next appliance: into a flange on its side wall, at half its depth (an
   // appliance on the right shows no such wall: its tube goes in behind its front). A phone has no room for four a
-  // side: under the lip each four go into a collector, and one tube twice as wide comes out of it and runs down the
-  // page's edge, with a tee off it to each appliance on its side and a bend into the last.
+  // side: its machine sends two wide tubes over the slab's lip, one down each side of the column, with a tee off it
+  // to each appliance on its side and a bend into the last.
   const pw = phone ? 10 : wide, bend = pw * 1.5
   const runs: { key: string; points: Pt[]; wide: number; rings: Ring[] }[] = [], ways: Pt[][] = [], sleeve = (x: number): Ring => ({ at: [x, 12], across: false, tall: 30 })
-  const collectors: { x0: number; x1: number; out: number }[] = []
   if (!phone) units.forEach(({ station, left, port, end }, k) => {
     const side = left ? 0 : 4, n = station.tube - side, slot = (j: number) => p.drops[side + j], points: Pt[] = [[slot(n), 0]]
     for (let m = 0; m < n; m++) { const y = units.find(u => u.station.tube === side + m)!.port + 78 + (n - m - 1) * (wide + 16); points.push([slot(n - m), y], [slot(n - m - 1), y]) }
     points.push([points.at(-1)![0], port], [end, port])
     runs.push({ key: `t${station.tube}`, points, wide, rings: [sleeve(points[0][0]), ...rings(points, bend, left ? dx / 2 + 5 : 17, !left).slice(1)] }); ways[k] = points
   })
-  else for (const side of [0, 4]) {
-    const mine = units.filter(u => u.left === (side === 0)), last = mine.at(-1)!, x = Math.round((p.drops[side] + p.drops[side + 3]) / 2), out = 24, towards = side ? -1 : 1
-    collectors.push({ x0: Math.min(p.drops[side], p.drops[side + 3]) - r - 3, x1: Math.max(p.drops[side], p.drops[side + 3]) + r + 3, out })
-    for (let k = 0; k < 4; k++) runs.push({ key: `in${side + k}`, points: [[p.drops[side + k], 0], [p.drops[side + k], 9]], wide, rings: [{ at: [p.drops[side + k], 5.5], across: false, tall: 3 }] })
+  else for (const side of [0, 1]) {
+    const mine = units.filter(u => u.left === (side === 0)), last = mine.at(-1)!, x = Math.round(p.drops[side]), out = 0, towards = side ? -1 : 1
     const trunk: Pt[] = [[x, out], [x, last.port], [last.end, last.port]], collars = rings(trunk, bend, side ? 17 : dx / 2 + 5, !!side)
+    collars[0] = sleeve(x)
     for (const unit of mine) {
       ways[units.indexOf(unit)] = [[x, out], [x, unit.port], [unit.end, unit.port]]
       if (unit === last) continue
@@ -157,7 +160,7 @@ export function Stations({ plan: p, onSignIn, onSignInIntent, busy }: { plan: Pl
   runs.push({ key: 'main', points: main, wide, rings: mainRings })
   // Every capsule's way: down each tube from under its sleeve into its appliance; up the main from each that sends.
   flows.current = [...ways.map((points, k) => ({ points: [[points[0][0], phone ? points[0][1] + 4 : 16] as Pt, ...points.slice(1, -1), [units[k].left ? units[k].end - dx / 2 - 2 : units[k].end - 2, points.at(-1)![1]] as Pt], bend, speed: phone ? 150 : 230, unit: k, wide: phone })), ...outWays.map(points => ({ points, bend: wide * 1.5, speed: phone ? 130 : 200, unit: undefined, wide: false }))]
-  const vars = { '--srt-r': `${pw / 2}px`, '--srt-pipe': `${pw}px`, '--srt-dx': `${dx}px`, '--srt-dy': `${dy}px`, '--srt-slope': dy / dx, '--srt-over': phone ? '4px' : '7px', height } as CSSProperties
+  const vars = { ...phone && { '--srt-feed': `${feed}px` }, '--srt-r': `${pw / 2}px`, '--srt-pipe': `${pw}px`, '--srt-dx': `${dx}px`, '--srt-dy': `${dy}px`, '--srt-slope': dy / dx, '--srt-over': phone ? '4px' : '7px', height } as CSSProperties
   return <section className="srt-stations" ref={root} style={vars} data-phone={phone || undefined} aria-label="Where mail goes">
     {/* The tubes' far walls; over them the capsules; over those (further down) the tubes' near walls and their collars. */}
     <svg className="srt-pipes" aria-hidden="true">
@@ -168,7 +171,7 @@ export function Stations({ plan: p, onSignIn, onSignInIntent, busy }: { plan: Pl
     <div className="srt-traffic" ref={traffic} aria-hidden="true" />
     {units.map(({ station, w, left, top, boxLeft, boxTop }, k) => <div key={station.kind} className="srt-unit" data-kind={station.kind} data-side={left ? 'l' : 'r'} style={{ top, '--srt-w': `${w}px`, '--srt-h': `${station.h}px` } as CSSProperties}>
       <span className="srt-shadow" style={{ left: boxLeft, top: boxTop }} aria-hidden="true" />
-      <div className="srt-caption" style={{ left: boxLeft - dx, width: w + dx }}>
+      <div className="srt-caption" style={phone ? { left: boxLeft + 10, width: w - 10 } : { left: boxLeft - dx, width: w + dx }}>
         <h2>{station.name}</h2>
         <p>{station.line}</p>
       </div>
@@ -180,10 +183,7 @@ export function Stations({ plan: p, onSignIn, onSignInIntent, busy }: { plan: Pl
       </div>
     </div>)}
     <svg className="srt-pipes srt-glass" aria-hidden="true">
-      {/* A phone's collectors: a box each in the machine's projection (its top, the side that is seen, its front). */}
-      {collectors.map(({ x0, x1 }, i) => <g key={i}><polygon className="srt-ring-lit" points={`${x0},9 ${x1},9 ${x1 - 3},4 ${x0 - 3},4`} /><polygon className="srt-flange" points={`${x0},9 ${x0 - 3},4 ${x0 - 3},16 ${x0},21`} /></g>)}
       {runs.map(run => <Tube key={run.key} layer="front" points={run.points} wide={run.wide} bend={bend} rings={run.rings} />)}
-      {collectors.map(({ x0, x1 }, i) => <rect key={i} className="srt-ring" x={x0} y={9} width={x1 - x0} height={12} />)}
     </svg>
     {/* Where a tube meets the side wall of an appliance on the left: a flange on the wall, the tube's last length, a collar. */}
     <svg className="srt-pipes srt-ports" aria-hidden="true">
@@ -379,7 +379,9 @@ const APPLIANCES: Record<Kind, ReactNode> = {
       <pre><span>export default function route(email) {'{'}</span>
         <span className="srt-step srt-run" style={step(.1, .3)}>  if (email.subject.includes("pager")) {'{'}</span>
         <span className="srt-step srt-run" style={step(.4, .56)}>    label("on-call")</span>
-        <span className="srt-step srt-run" style={step(.62, .8)}>    endpoints.pager({'{'} text: email.subject {'}'})</span>
+        <span className="srt-step srt-run srt-line-wide" style={step(.62, .8)}>    endpoints.pager({'{'} text: email.subject {'}'})</span>
+        {/* (Stacked, the call is set over three lines: nothing on the screen is too long for it at a size that can be read.) */}
+        <span className="srt-step srt-run srt-line-narrow" style={step(.62, .8)}>{'    endpoints.pager({\n      text: email.subject,\n    })'}</span>
         <span>  {'}'}</span>
         <span>{'}'}</span></pre>
     </div>
