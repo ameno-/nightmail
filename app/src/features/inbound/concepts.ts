@@ -10,7 +10,7 @@ export const concepts = {
   },
   rituals: {
     title: 'Rituals',
-    line: 'What happens to an address’s mail: post it, forward it, junk it or label it.',
+    line: 'What happens to an address’s mail: post, forward, junk or label it.',
     example: 'Post new mail to support in Slack',
     adminOnly: 'Owners and admins manage rituals',
   },
@@ -21,12 +21,12 @@ export const concepts = {
   },
   trace: {
     title: 'Trace',
-    line: 'Run an email through your routes and rituals to see what would happen. Nothing is sent or saved.',
+    line: 'Dry-run an email through your routes and rituals; nothing is sent or saved.',
   },
   // Jev is the AI model behind omens. The API and its docs keep the name; the dashboard says what it does.
   omens: {
     title: 'Omens',
-    line: `Questions a ritual asks ${productName}’s AI about an email. Each answer is a score from 0 to 1.`,
+    line: `Questions a ritual asks ${productName}’s AI about an email, answered 0 to 1.`,
     example: 'omens(email, { refund: "Is the sender asking for a refund?" })',
   },
 } as const
@@ -44,7 +44,7 @@ export const guides = {
 export type KindFilter = 'all' | 'address' | 'pattern' | 'catch_all' | 'inbox' | 'auto'
 export const kinds: Record<KindFilter, { label: string; line: string; example?: string }> = {
   all: { label: 'All', line: concepts.routes.line, example: concepts.routes.example },
-  address: { label: 'Addresses', line: 'An address keeps its own threads in the Inbox. A route can send its mail somewhere else instead.', example: 'support@acme.com' },
+  address: { label: 'Addresses', line: 'Each keeps its own threads in the Inbox; a route can send its mail elsewhere.', example: 'support@acme.com' },
   pattern: { label: 'Patterns', line: 'A pattern catches many addresses with *.', example: 'reply+*@acme.com catches reply+4821@acme.com' },
   catch_all: { label: 'Catch-alls', line: 'What happens to mail for an address that doesn’t exist.', example: '*@acme.com' },
   inbox: { label: 'Agent inboxes', line: 'Expiring addresses that agents and tests create and read over the API or MCP.' },

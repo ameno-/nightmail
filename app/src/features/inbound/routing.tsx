@@ -89,12 +89,12 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks }: 
         {action === 'deliver' && <>
           {group('inbox', 'Inboxes', <>No addresses yet. <Link to="/receiving">Create one</Link>.</>)}
           {group('webhook', 'Webhooks', 'No webhooks yet. A webhook posts each message to your server as signed JSON.')}
-          <p className="muted routing-explain">Slack, Discord and forwards go through a ritual, which picks the mail and the message. <Link to="/receiving/rituals/new">New ritual</Link>. If a ritual calls one of these webhooks with its own payload, the webhook gets that payload instead of the whole message, once per message.</p>
+          <p className="muted routing-explain">Slack, Discord and forwards need a <Link to="/receiving/rituals/new">ritual</Link>; webhooks it calls get its payload instead.</p>
         </>}
         {action === 'keep' && <p className="muted routing-explain">Stored and readable over the API by message ID, but in no inbox.</p>}
         {action === 'drop' && <Alert tone="warning">Dropped mail is not stored and cannot be recovered. Its receipt still records that it arrived.</Alert>}
         {losesOwner && <Alert tone="warning">Mail to <PrivateAddress value={normalized} /> will stop reaching {owner.displayName || <PrivateAddress value={owner.address} />}. Tick its inbox to keep it.</Alert>}
-        {route && <Switch checked={enabled} disabled={save.isPending} onCheckedChange={setEnabled} label="On. When off, this mail follows the next most specific rule." />}
+        {route && <Switch checked={enabled} disabled={save.isPending} onCheckedChange={setEnabled} label="On; when off, the next rule applies" />}
         {problem && <p className="ui-field__error" role="alert">{problem}</p>}
         {!fieldError(save.error, 'match') && !fieldError(save.error, 'to') && <MutationError error={save.error} />}
       </form>
@@ -105,7 +105,7 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks }: 
       if (hook) { setAction('deliver'); setSelected(current => current.includes(hook.id) ? current : [...current, hook.id]) }
     }} />
     <CreatedEndpointDialog created={created} onClose={() => setCreated(null)} writeRitual={false} />
-    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} danger title="Delete route?" description="Mail to this route falls back to the next most specific rule: its own inbox, a pattern or the domain default." confirmLabel="Delete route" pending={remove.isPending}
+    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} danger title="Delete route?" description="Its mail falls back to the next rule: its inbox, a pattern or the domain default." confirmLabel="Delete route" pending={remove.isPending}
       onConfirm={async () => { try { await remove.mutateAsync(); setConfirmDelete(false); onClose() } catch { /* The dialog stays open. */ } }} />
   </>
 }

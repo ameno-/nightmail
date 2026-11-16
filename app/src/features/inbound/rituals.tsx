@@ -9,7 +9,7 @@ import { RangeSetBuilder, StateEffect, StateField } from '@codemirror/state'
 import { Decoration, EditorView, type DecorationSet } from '@codemirror/view'
 import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/language'
 import { tags } from '@lezer/highlight'
-import { Alert, Button, Checkbox, ConfirmDialog, DataTable, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, SectionHeader, Select, Textarea, useToast, type Column } from '../../components/ui'
+import { Alert, Button, Checkbox, ConfirmDialog, DataTable, Disclosure, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, SectionHeader, Select, Textarea, useToast, type Column } from '../../components/ui'
 import { request } from '../../data/live'
 import { ApiError } from '../../data/types'
 import { useApiDef, useWorkspaceAccess } from '../../data/context'
@@ -29,6 +29,8 @@ import { actorText, changedLines, diffLines, useLiveVersion, type ChangeActor, t
 import { addressOption } from './shared'
 import { maskedParts } from '../../lib/private-address'
 import { productName } from '../../../../api/src/brand'
+const runNext = 'Run the next one too'
+const savedMeanwhile = (version: number) => `Version ${version} was saved meanwhile: load theirs or keep yours.`
 
 const errorText = (e: unknown): string => e instanceof ApiError ? e.text : (e as Error).message
 type Binding = { ritual: string; target: string; continue: boolean }
@@ -342,7 +344,7 @@ export function RitualsPage() {
     // Deleted in theirs: saving brings yours back as a new ritual.
     if (isSaved && !s.config.rituals.some(r => r.key === key)) setOrigin(baseScript ?? origin)
     setSaved(s); setIncoming(null); setConfirmKeep(false); setShowDiff(false)
-    toast(`Your edits are on top of version ${s.version}. Save to apply them.`, 'success')
+    toast(`Your edits now sit on version ${s.version}. Save to apply.`, 'success')
   }
 
   const refresh = () => void client.invalidateQueries({ predicate: query => staleAfterWrite(query.queryKey, false) }).catch(() => {})
@@ -358,7 +360,7 @@ export function RitualsPage() {
    *  and report a conflict next to the success; it gets the first one's result instead. */
   const save = useSingleFlight('rituals.save', async (attachments?: Binding[]): Promise<boolean> => {
     if (!saved || !config || !keyValid || clash) return false
-    if (incoming) { toast(`Version ${incoming.version} was saved while you were editing: load theirs or keep yours first.`, 'error'); return false }
+    if (incoming) { toast(savedMeanwhile(incoming.version), 'error'); return false }
     setPending(true); setProblems([])
     try {
       const s = await request<Saved>('/v1/rituals', { method: 'PUT', body: { ...config, ...(attachments ? { attachments } : {}) }, ifMatch: saved.version })
@@ -376,7 +378,7 @@ export function RitualsPage() {
   /** Attach, detach, reorder and "Run the next one too" save at once; the draft script is left as it is. */
   const saveBindings = useSingleFlight('rituals.attachments', async (attachments: Binding[], done: string) => {
     if (!saved) return
-    if (incoming) { toast(`Version ${incoming.version} was saved while you were editing: load theirs or keep yours first.`, 'error'); return }
+    if (incoming) { toast(savedMeanwhile(incoming.version), 'error'); return }
     // A ritual that was never saved can't be attached on its own: it is saved with its first attachment.
     if (!isSaved && attachments.some(b => b.ritual === key)) { if (await save(attachments)) setTarget(''); return }
     setBinding(true)
@@ -453,9 +455,9 @@ export function RitualsPage() {
   const bindingColumns: Column<Row>[] = [
     { key: 'target', label: 'Runs on mail to', card: 'title', render: b => <PrivateAddress value={targetName(b.target)} /> },
     { key: 'order', label: 'Order', width: 120, card: 'line', render: b => b.of > 1 ? `${b.place} of ${b.of}` : 'Only ritual', cardRender: b => <>{b.of > 1 ? `Runs ${b.place} of ${b.of}` : 'Only ritual here'}{b.continue ? ', then the next one' : ''}</> },
-    { key: 'continue', label: 'After it acts', width: 190, card: 'hide', render: b => <Checkbox checked={b.continue} disabled={binding} onCheckedChange={v => void saveBindings(bindings.map((x, i) => i === b.i ? { ...x, continue: v } : x), v ? `${b.ritual} now lets the next ritual run` : `${b.ritual} now stops the next ritual`)} label="Run the next one too" /> },
+    { key: 'continue', label: 'After it acts', width: 190, card: 'hide', render: b => <Checkbox checked={b.continue} disabled={binding} onCheckedChange={v => void saveBindings(bindings.map((x, i) => i === b.i ? { ...x, continue: v } : x), v ? `${b.ritual} now lets the next ritual run` : `${b.ritual} now stops the next ritual`)} label={runNext} /> },
     { key: 'actions', label: '', width: 132, align: 'right', card: 'end', cardRender: b => <DropdownMenu label={`Actions for ${b.ritual}`} title={<>{b.ritual} on <PrivateAddress value={targetName(b.target)} /></>} items={[
-      { label: b.continue ? 'Stop the next one after it acts' : 'Run the next one too', disabled: binding, onSelect: () => void saveBindings(bindings.map((x, i) => i === b.i ? { ...x, continue: !b.continue } : x), b.continue ? `${b.ritual} now stops the next ritual` : `${b.ritual} now lets the next ritual run`) },
+      { label: b.continue ? 'Stop the next one after it acts' : runNext, disabled: binding, onSelect: () => void saveBindings(bindings.map((x, i) => i === b.i ? { ...x, continue: !b.continue } : x), b.continue ? `${b.ritual} now stops the next ritual` : `${b.ritual} now lets the next ritual run`) },
       ...(b.before !== undefined ? [{ label: 'Move up', disabled: binding, onSelect: () => swap(b, b.before, -1) }] : []),
       ...(b.after !== undefined ? [{ label: 'Move down', disabled: binding, onSelect: () => swap(b, b.after, 1) }] : []),
       { label: 'Detach', destructive: true, disabled: binding, onSelect: () => void saveBindings(bindings.filter((_, i) => i !== b.i), `Detached ${b.ritual}`) },
@@ -503,12 +505,13 @@ export function RitualsPage() {
           Gated on recent mail's first answer (isFetched), not data or error: the picker retries a failed read when it mounts, which
           clears the error, so a gate on the error unmounted it and remounted it in a loop of requests. */}
       {check !== null && recent.isFetched && <>
-      <section ref={tryRef} id="try" className="section section--bordered stack ritual-try" aria-labelledby="ritual-try">
-        <SectionHeader title={<span id="ritual-try">Try it on an email</span>} />
-        <ConceptLine line={`Runs ${key || 'this ritual'} as written, as if attached to the address the email went to. Nothing is sent or saved; omens use the answers you set.`} />
+      {/* A dry run, one click away: opens from its heading, or already open when a link lands on #try. */}
+      <section ref={tryRef} className="section ritual-try ritual-more" aria-label="Try it on an email">
+        <Disclosure id="try" title="Try it on an email" hint="Nothing is sent or saved" defaultOpen={routeLocation.hash === '#try'}>
+        <ConceptLine line={`Runs ${key || 'this ritual'} as if attached to the address the email went to. Omens use the answers you set.`} />
         <EmailPicker value={choice} onChange={next => { setChoice(next); dry.clear() }} addresses={recipients} />
         <div className="ritual-try__options">
-          {choice.mode !== 'sample' && <Field label="As mail to" htmlFor="ritual-try-to"><Input id="ritual-try-to" list="trace-addresses" value={as} onChange={e => { setAs(e.target.value); dry.clear() }} placeholder={recipient || recipients[0] || 'support@acme.com'} autoComplete="off" /></Field>}
+          {choice.mode !== 'sample' && <Field label="As mail to" htmlFor="ritual-try-to"><Input id="ritual-try-to" className="private-field" list="trace-addresses" value={as} onChange={e => { setAs(e.target.value); dry.clear() }} placeholder={recipient || recipients[0] || 'support@acme.com'} autoComplete="off" /></Field>}
           {omens.map(name => <Field key={name} label={<>If omen <code>{name}</code> answers <strong className="ritual-try__score">{(answers[name] ?? 0.5).toFixed(2)}</strong></>} hint={check?.questions[name]}>
             <input className="ritual-try__range" type="range" min={0} max={1} step={0.05} value={answers[name] ?? 0.5} onChange={e => { setAnswers({ ...answers, [name]: Number(e.target.value) }); dry.clear() }} aria-label={`Answer for ${name}`} />
           </Field>)}
@@ -516,28 +519,31 @@ export function RitualsPage() {
         <div className="cluster"><Button variant="primary" loading={dry.pending} disabled={!key || !recipient.includes('@') || (check !== null && !check.ok)} onClick={() => void tryIt()}>Run {key || 'ritual'}</Button>
           {check && !check.ok && <span className="ritual-error">Fix the problem above first.</span>}</div>
         <div className="trace-out">{dry.error ? <Alert tone="danger">{dry.error}</Alert> : dry.result && <TraceView result={dry.result} sources={{ [key]: source }} overview={overview.data} inboxes={new Map((addresses.data ?? []).map(a => [a.id, a.address]))} runId={dry.runId} />}</div>
+        </Disclosure>
       </section>
 
       <section id="attach" className="section section--bordered stack" aria-labelledby="ritual-attach">
         <SectionHeader title={<span id="ritual-attach">Runs on</span>} />
-        <ConceptLine line={`Up to ${RITUALS_PER_ADDRESS} per address, in order; the first that acts stops the rest unless “Run the next one too” is on. Saves at once.`} />
+        <ConceptLine line={`Up to ${RITUALS_PER_ADDRESS} per address, in order. The first that acts stops the rest unless “${runNext}” is on.`} />
         <DataTable columns={bindingColumns} rows={rows} rowKey={b => `${b.target}/${b.ritual}`}
           empty={<EmptyState title="Not attached yet" description="Pick an address below. A ritual runs only on mail to its addresses." />} />
         <div className="ritual-attach">
           <Field label={`Attach ${key || 'this ritual'} to`} hint={!isSaved && key ? `Saves ${key} with it.` : undefined}><Select className="address-select-trigger" menuClassName="address-select" value={target} onValueChange={setTarget} placeholder="Choose an address" options={[{ label: 'Choose an address', value: '' }, ...targets.map(t => addressOption(t.value, t.label))]} /></Field>
-          <Checkbox checked={next} onCheckedChange={setNext} label="Run the next one too" />
+          <Checkbox checked={next} onCheckedChange={setNext} label={runNext} />
           <Button loading={binding || (pending && !isSaved)} disabled={!target || !keyValid || clash || attached || binding || pending} onClick={() => void saveBindings([...bindings, { ritual: key, target, continue: next }], `Attached ${key}`)}>{isSaved ? 'Attach' : 'Save and attach'}</Button>
         </div>
         {attached && <p className="muted ritual-attach__note">{key} already runs on <PrivateAddress value={targetName(target)} />.</p>}
       </section>
 
-      <section className="section section--bordered stack ritual-settings" aria-label="Sender lists and omens">
+      <section className="section ritual-settings ritual-more" aria-label="Sender lists and omens">
+        <Disclosure title="Sender lists and omens" hint="Used by every ritual">
         <Field label="Sender lists" hint={<>One per line: <code>vip: <PrivateAddress value="ceo@example.com" />, @partner.example</code>. Check with <code>lists.has("vip", email.from.address)</code>.</>}>
-          <Textarea className="ritual-lists" rows={3} value={lists} onChange={e => setLists(e.target.value)} spellCheck={false} />
+          <Textarea className="ritual-lists private-field" rows={3} value={lists} onChange={e => setLists(e.target.value)} spellCheck={false} />
         </Field>
         <Field label="Omens can read mail at" hint={<>Receiving hosts, comma-separated. Elsewhere an omen gives its default answer and {productName}’s AI doesn’t read the mail. <Link to={guides.rituals}>How omens work</Link></>}>
           <Input value={domains} onChange={e => setDomains(e.target.value)} placeholder={(overview.data?.domains ?? []).find(d => d.status === 'active')?.name ?? 'reply.example.com'} />
         </Field>
+        </Disclosure>
       </section>
 
       {/* Always on screen while editing, so the save state and Save are never scrolled away. It arrives with the
@@ -545,7 +551,7 @@ export function RitualsPage() {
       <div className="ritual-savebar" data-dirty={dirty || !isSaved || undefined} data-remote={remoteStatus ? true : undefined}>
         {/* Saved elsewhere while you were editing: above the bar, over the page, so nothing on it moves. */}
         {incoming && changes && <div className="ritual-incoming" role="group" aria-label={`Version ${incoming.version} saved elsewhere`}>
-          <p className="ritual-incoming__title"><strong>{whoSaved(incoming.actor)} saved version {incoming.version}</strong> while you were editing.</p>
+          <p className="ritual-incoming__title"><strong>{whoSaved(incoming.actor)} saved version {incoming.version}</strong></p>
           <p className="ritual-incoming__detail muted">{(() => {
             // What you both changed, then what only they changed (theirs stays either way).
             const both = overlaps.map(o => o.replace(/^their (deletion of |changes to |ritual named )?/, ''))

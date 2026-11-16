@@ -73,7 +73,7 @@ function AgentSetup({ address }: { address: string | null }) {
           <pre className="developer-code developer-code--wrap" tabIndex={0} aria-label="OpenCode command"><code>{command || 'Loading this installation’s address…'}</code></pre>
           {command && <CopyAction value={command} label="Copy the OpenCode command" variant="ghost" size="sm" compact className="developer-copy-icon developer-snippet__copy" />}
         </div>
-        <p className="ritual-agent__hint muted">Then run <code>/mcps</code>, choose bane, sign in and approve full access. Its tools work in any of your workspaces; name this one in your prompt.</p>
+        <p className="ritual-agent__hint muted">Then run <code>/mcps</code>, pick bane and approve full access. Name this workspace in prompts.</p>
       </div>
       <div className="stack ritual-agent__step">
         <h3 className="ritual-agent__heading">Or another client</h3>
@@ -98,6 +98,6 @@ function AgentSetup({ address }: { address: string | null }) {
         <CopyAction value={p.text} label="Copy prompt" variant="ghost" size="sm" compact />
       </li>)}</ul>
     </div>
-    <p className="ritual-agent__hint muted"><Link to={guides.mcp}>How agents connect over MCP</Link></p>
+    <p className="ritual-agent__hint muted"><Link to={guides.mcp}>How MCP works</Link></p>
   </div>
 }

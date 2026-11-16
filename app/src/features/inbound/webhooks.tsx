@@ -74,7 +74,7 @@ function WebhookFields({ input, urlHint, onChange, addresses, errors, apiError, 
 
 // Inbound webhooks are admin-only; members get a calm notice instead of requests that would be refused.
 function AdminOnly({ title, backTo }: { title: string; backTo: string }) {
-  return <div className="stack inbound-stack"><PageHeader title={title} backTo={backTo} /><EmptyState title="Only owners and admins can manage webhooks" /></div>
+  return <div className="stack inbound-stack"><PageHeader title={title} backTo={backTo} /><EmptyState title="Owners and admins manage webhooks" /></div>
 }
 export function InboundWebhooksPage() { return useWorkspaceAccess().canAdminister ? <WebhooksList /> : <AdminOnly title="Inbound webhooks" backTo="/receiving" /> }
 export function InboundWebhookDetailPage() { return useWorkspaceAccess().canAdminister ? <WebhookDetail /> : <AdminOnly title="Inbound webhook" backTo="/receiving" /> }
@@ -102,8 +102,8 @@ function WebhooksList() {
   }
   return <div className="stack inbound-stack">
     <PageHeader title="Inbound webhooks" backTo="/receiving?tab=endpoints" actions={<Button variant="primary" onClick={openCreate}>Add webhook</Button>} />
-    <p className="muted inbound-note rcv-note">Signed POSTs (Standard Webhooks) for received mail and your replies. No public URL? Long-poll <code>GET /v1/inbound/events</code>. Events for sent email are in <Link to="/settings#webhooks">Settings webhooks</Link>.</p>
-    {addressId && <p className="muted inbound-note">The active and paused webhooks that get this address’s mail. <Link to="/receiving/webhooks">Show all webhooks</Link></p>}
+    <p className="muted inbound-note rcv-note">POSTs for received mail and replies, or long-poll <code>GET /v1/inbound/events</code>; sent mail is in <Link to="/settings#webhooks">Settings</Link>.</p>
+    {addressId && <p className="muted inbound-note">Webhooks that get this address’s mail, active or paused · <Link to="/receiving/webhooks">Show all</Link></p>}
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable loading={webhooks.isPending || (addresses.isPending && !addresses.error)} skeletonRows={2} minRows={2} rows={webhooks.data?.data ?? []} rowKey={row => row.id} rowHref={row => `/receiving/webhooks/${row.id}`}
       empty={addressId ? <EmptyState title="No webhook gets this address’s mail" description="Webhooks subscribed to message.received for it, or for every address, show up here." /> : <EmptyState title="No inbound webhooks" description="Get a POST when mail arrives or a sent message is delivered." action={<Button onClick={openCreate}>Add webhook</Button>} />}
       columns={[

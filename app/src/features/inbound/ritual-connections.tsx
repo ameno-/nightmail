@@ -116,7 +116,7 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
         <Input value={name} onChange={e => { setName(e.target.value.toLowerCase().replace(/[\s_]+/g, '-')); if (serverError('name')) setError(null) }} placeholder={type === 'forward' ? 'team' : type === 'webhook' ? 'crm' : type === 'discord' ? 'alerts' : 'support'} autoComplete="off" aria-invalid={!!(nameError || serverError('name')) || undefined} />
       </Field>
       {editing?.type === 'forward'
-        ? <Field label="Recipient address" hint="Its recipient confirmed this address, so it can’t change. Create a new forward for another one."><p className="endpoint-recipient"><PrivateAddress value={editing.target} /></p></Field>
+        ? <Field label="Recipient address" hint="Confirmed by its recipient, so it can’t change; create another forward instead."><p className="endpoint-recipient"><PrivateAddress value={editing.target} /></p></Field>
         : <Field label={editing ? 'Replace URL' : targetLabel[type]} error={targetError || serverError('url') || undefined} hint={urlHint}>
           <SecretInput type={type === 'forward' ? 'email' : type === 'webhook' ? 'url' : 'password'} autoComplete="off" value={target} onChange={e => { setTarget(e.target.value); if (serverError('url')) setError(null) }}
             placeholder={type === 'forward' ? 'team@example.com' : editing && !retyped ? 'Keep the current URL' : 'https://'} aria-invalid={!!(targetError || serverError('url')) || undefined} />
@@ -125,7 +125,7 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
         <Field label="Ask from" hint="The receiving address that sends the request and the forwards.">
           <Select mask value={from} onValueChange={setFrom} options={[{ value: '', label: 'Oldest receiving address' }, ...(boxes.data ?? []).map(a => ({ value: a.id, label: a.address }))]} />
         </Field>
-        <Checkbox checked={preverify} onCheckedChange={setPreverify} label="Skip the email: the address is on a domain this workspace verified" />
+        <Checkbox checked={preverify} onCheckedChange={setPreverify} label="Skip the email: it’s on a domain you verified" />
       </>}
       {editing && <Checkbox checked={enabled} onCheckedChange={setEnabled} label="Enabled: rituals and routes can deliver to it" />}
       {(generalError || serverError('type') || serverError('paused')) && <Alert tone="danger">{generalError || serverError('type') || serverError('paused')}</Alert>}

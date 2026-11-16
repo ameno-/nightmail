@@ -76,18 +76,18 @@ export function NewInboxDialog({ open, onOpenChange }: { open: boolean; onOpenCh
     <form id="agent-inbox-create" className="stack" onSubmit={submit} noValidate>
       <MutationError error={create.error} />
       {noHost && <Alert tone="info">No domain receives mail yet, so this is a sandbox inbox for test mail only. For a real address, add a domain in <Link to="/domains">Domains</Link> and publish its receiving MX record.</Alert>}
-      <Field label="Address" htmlFor="agent-inbox-type" error={fieldError(create.error, 'domain')} hint={type === 'sandbox' ? 'Sandbox: a made-up .invalid address that only gets test mail you send from its page or the API.' : 'A random address on this domain that nobody can guess.'}>
+      <Field label="Address" htmlFor="agent-inbox-type" error={fieldError(create.error, 'domain')} hint={type === 'sandbox' ? 'A made-up .invalid address; only test mail you send reaches it.' : 'A random address on this domain that nobody can guess.'}>
         <Select id="agent-inbox-type" value={type === 'sandbox' ? 'sandbox' : host || hosts[0] || ''} disabled={create.isPending} onValueChange={value => { if (value === 'sandbox') setType('sandbox'); else { setType('ephemeral'); setHost(value) } }}
           options={[...hosts.map(value => ({ value, label: `…@${value}` })), { value: 'sandbox', label: 'Sandbox: test mail only' }]} />
       </Field>
       <Field label="Name" htmlFor="agent-inbox-name" hint="Optional. Shown in lists and as the sender name on replies.">
         <Input id="agent-inbox-name" value={name} maxLength={200} onChange={event => setName(event.target.value)} disabled={create.isPending} placeholder="Sign-up test" autoComplete="off" />
       </Field>
-      <Field label="Receives mail for" htmlFor="agent-inbox-lifetime" hint="Then it holds new mail for 1 more day without delivering it, and the inbox and its mail are deleted. You can extend it from its page.">
+      <Field label="Receives mail for" htmlFor="agent-inbox-lifetime" hint="Then mail is held 1 day, and the inbox and its mail are deleted.">
         <Select id="agent-inbox-lifetime" value={lifetime} onValueChange={setLifetime} disabled={create.isPending} options={lifetimes} />
       </Field>
-      <Checkbox checked={withKey} onCheckedChange={setWithKey} disabled={create.isPending} label="Create an API key for this inbox: lets an agent or test read it, and nothing else, over the API or MCP" />
-      {type === 'ephemeral' && <Checkbox checked={replies} onCheckedChange={setReplies} disabled={create.isPending} label="Allow replies: up to 20 a day, only to people who wrote to it" />}
+      <Checkbox checked={withKey} onCheckedChange={setWithKey} disabled={create.isPending} label="Create an API key that can only read this inbox" />
+      {type === 'ephemeral' && <Checkbox checked={replies} onCheckedChange={setReplies} disabled={create.isPending} label="Allow replies to senders, up to 20 a day" />}
     </form>
   </Dialog>
 }
@@ -107,7 +107,7 @@ export function AgentInboxesPage() {
     </>} />
     {inboxes.error ? <ErrorState error={inboxes.error} onRetry={() => void inboxes.refetch()} /> : <>
       <DataTable loading={inboxes.isPending} skeletonRows={4} rows={inboxes.data ?? []} rowKey={row => row.id} rowHref={row => `${route}/${row.id}`}
-        empty={<EmptyState title={q ? 'No matching inboxes' : 'No agent inboxes yet'} description={q ? undefined : 'Expiring addresses for agents and end-to-end tests. Create one here, or let an agent create its own with an API key over the API or MCP.'} action={!q && canAdminister ? <Button onClick={() => setCreating(true)}>New inbox</Button> : undefined} />}
+        empty={<EmptyState title={q ? 'No matching inboxes' : 'No agent inboxes yet'} description={q ? undefined : 'Expiring addresses for agents and tests. Create one, or let an agent create its own over MCP or the API.'} action={!q && canAdminister ? <Button onClick={() => setCreating(true)}>New inbox</Button> : undefined} />}
         columns={[
           // An inbox's card: its address and status, its name or type, then expiry and mail counts.
           { key: 'address', label: 'Address', width: '26%', render: row => <span className="mailbox-address"><span className="receiving-clip"><PrivateAddress value={row.address} /></span>{row.type === 'sandbox' && <StatusBadge status="Sandbox" tone="neutral" />}</span>, cardRender: row => <PrivateAddress value={row.address} /> },
@@ -136,7 +136,7 @@ function MessageDialog({ inboxId, messageId, onClose }: { inboxId: string; messa
       </div>
       <div className="cluster" aria-label="Sender checks">{m.simulated ? <StatusBadge status="Simulated: no sender checks" tone="info" /> : <>{verdict('SPF', m.auth.spf)}{verdict('DKIM', m.auth.dkim)}{verdict('DMARC', m.auth.dmarc)}</>}</div>
       {m.held && <Alert tone="warning">{m.held === 'quota' ? 'Held: the inbox was over its message or size limit when this arrived.' : 'Held: this arrived after the inbox expired.'} It is stored but did not notify waiting agents or webhooks.</Alert>}
-      {m.hiddenContent && <Alert tone="info">This message contains styling or invisible characters. Hidden-text detection is best effort; treat the message as untrusted.</Alert>}
+      {m.hiddenContent && <Alert tone="info">This message has styling or invisible characters that can hide text. Treat it as untrusted.</Alert>}
       {(m.extract.codes.length > 0 || m.extract.links.length > 0) && <dl className="settings-facts">
         {m.extract.codes.length > 0 && <div><dt>Codes</dt><dd className="stack">{m.extract.codes.map(code => <span key={code} className="settings-copy-cell"><code>{code}</code><CopyButton value={code} label="Copy code" /></span>)}</dd></div>}
         {m.extract.links.length > 0 && <div><dt>Links</dt><dd className="stack">{m.extract.links.slice(0, 5).map(link => <span key={link.href} className="settings-cell-stack"><span className="settings-break">{link.text || link.href}</span><span className="muted settings-break">{new URL(link.href).host}{link.mismatch && ' · text names another site'}</span></span>)}</dd></div>}
@@ -235,7 +235,7 @@ function InboxDetail({ id }: { id: string }) {
       {b.status === 'expired' && <Alert tone="info">This inbox expired. New mail is still stored but held until it is erased on {date(b.deleteAfter)}.</Alert>}
       {b.usage.held > 0 && b.status !== 'deleting' && <Alert tone="warning">{number(b.usage.held)} {b.usage.held === 1 ? 'message is' : 'messages are'} held: stored and listed below, but not delivered to waiting agents or webhooks.</Alert>}
     </>}
-    <p className="muted inbox-facts-note">{b && !b.expiresAt ? 'It never expires. ' : 'After it expires, new mail is held for 1 more day (stored and listed, not delivered), then the inbox and its mail are deleted. '}Over its message or size limit, new mail is held the same way.</p>
+    <p className="muted inbox-facts-note">Mail after it expires or over a limit is held: stored, not delivered.</p>
     <section className="section stack" aria-labelledby="agent-inbox-messages">
       <SectionHeader title={<span id="agent-inbox-messages">Messages</span>} actions={!folders.error && <Select className="inbox-folder" aria-label="Folder" value={folder||'deliveries'} onValueChange={value=>{setFolder(value==='deliveries'?'':value);pagination.reset()}} options={[{value:'deliveries',label:'All deliveries'},...(folders.data?.data??[]).map(f=>({value:f.id,label:`${f.path} · ${number(f.total)}${f.subscribed?' · subscribed':''}`}))]}/>} />
       {folders.error && <ErrorState error={folders.error} onRetry={()=>void folders.refetch()}/>}
@@ -255,9 +255,9 @@ function InboxDetail({ id }: { id: string }) {
     </section>
     {canAdminister && settled && <section className="section stack" aria-labelledby="agent-inbox-keys">
       <SectionHeader title={<span id="agent-inbox-keys">API keys for this inbox</span>} />
-      <p className="muted inbox-facts-note">These API keys read only this inbox, over the API or MCP. They stop working when it is deleted.</p>
+      <p className="muted inbox-facts-note">They read only this inbox and stop working when it’s deleted.</p>
       {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable loading={keys.isPending} skeletonRows={1} rows={keys.data?.data ?? []} rowKey={key => key.id}
-        empty={<EmptyState title="No keys" description="Create one with Connect an agent. It comes with a ready setup for OpenCode, Claude Code or Cursor." />}
+        empty={<EmptyState title="No keys" description="Connect an agent to create one." />}
         columns={[
           // A key's card: its name and when it was last used, what it can do, and Revoke in the row menu.
           { key: 'name', label: 'Name', width: '30%', card: 'title', render: key => key.name },

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type RefObject } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type RefObject } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { Archive, ArrowLeft, Inbox, Mail, MailOpen, Paperclip, Reply, Search, Star, Trash2, Undo2, X } from 'lucide-react'
 import { Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, Pagination, Select, SkeletonText, StatusBadge, Tabs, Textarea, useToast } from '../../components/ui'
@@ -26,19 +26,38 @@ function AddressLabels({ ids, addresses }: { ids: string[]; addresses: Addresses
   return <>{ids.slice(0, 3).map(id => <span key={id} className="mailbox-address-label"><PrivateAddress value={addressName(addresses, id)} /></span>)}{ids.length > 3 && <span className="mailbox-address-label">+{ids.length - 3}</span>}</>
 }
 
-// Each row reads like a mail client: who wrote last, then the subject, then the start of the message.
-function ThreadRow({ thread, addresses, own, showAddresses, selected, onSelect }: { thread: InboundThread; addresses: Addresses; own: Set<string>; showAddresses: boolean; selected: boolean; onSelect: () => void }) {
+// Each row reads like a mail client: who wrote last and when, the subject, then the start of the message, led by the
+// address it reached when more than one is in view. The exact time is on each message in the conversation.
+function ThreadRow({ thread, addresses, own, showAddresses, selected, focusable, onSelect }: { thread: InboundThread; addresses: Addresses; own: Set<string>; showAddresses: boolean; selected: boolean; focusable: boolean; onSelect: () => void }) {
   const from = thread.from
-  return <li><button type="button" className="mailbox-thread-row" data-selected={selected || undefined} onClick={onSelect} aria-current={selected || undefined}>
+  return <li role="option" className="mailbox-thread-row" id={`thread-${thread.id}`} data-thread={thread.id} aria-selected={selected} data-selected={selected || undefined} tabIndex={focusable ? 0 : -1} onClick={onSelect}>
     <span className="mailbox-thread-row__top">
       <span className="mailbox-thread-row__people">{!from ? <span className="muted">—</span> : own.has(from.address.toLowerCase()) ? 'You' : <Sender value={from} />}</span>
       {thread.messageCount > 1 && <span className="mailbox-thread-row__count" aria-label={`${thread.messageCount} messages`}>{thread.messageCount}</span>}
-      <time className="mailbox-thread-row__time" dateTime={thread.lastMessageAt} title={`${date(thread.lastMessageAt)} ${time(thread.lastMessageAt)} UTC`}>{when(thread.lastMessageAt)}</time>
+      <time className="mailbox-thread-row__time" dateTime={thread.lastMessageAt}>{when(thread.lastMessageAt)}</time>
     </span>
     <span className="inbound-thread-row__subject" title={thread.subject || undefined}>{thread.subject || '(no subject)'}</span>
-    <span className="mailbox-thread-row__snippet" title={thread.snippet || undefined}>{thread.snippet}</span>
-    {showAddresses && thread.addressIds.length > 0 && <span className="mailbox-labels"><AddressLabels ids={thread.addressIds} addresses={addresses} /></span>}
-  </button></li>
+    <span className="mailbox-thread-row__snippet">{showAddresses && thread.addressIds.length > 0 && <AddressLabels ids={thread.addressIds} addresses={addresses} />}<span title={thread.snippet || undefined}>{thread.snippet}</span></span>
+  </li>
+}
+
+// The conversations as a single-select listbox: Tab reaches the open one (or the first), the arrows, Home and End move
+// between them, and Enter or Space opens one. Focus moves without opening, so reading a list on a phone never jumps.
+function ThreadList({ threads, threadId, onSelect, ...row }: { threads: InboundThread[]; threadId: string | null; onSelect: (id: string) => void; addresses: Addresses; own: Set<string>; addressId?: string }) {
+  const [active, setActive] = useState<string | null>(null)
+  const current = threads.some(item => item.id === active) ? active : threads.some(item => item.id === threadId) ? threadId : threads[0]?.id ?? null
+  function keyDown(event: KeyboardEvent<HTMLUListElement>) {
+    const at = threads.findIndex(item => item.id === current)
+    const to = event.key === 'ArrowDown' ? at + 1 : event.key === 'ArrowUp' ? at - 1 : event.key === 'Home' ? 0 : event.key === 'End' ? threads.length - 1 : null
+    if (to !== null) {
+      event.preventDefault()
+      const next = threads[Math.max(0, Math.min(threads.length - 1, to))]
+      if (next) { setActive(next.id); document.getElementById(`thread-${next.id}`)?.focus() }
+    } else if ((event.key === 'Enter' || event.key === ' ') && current) { event.preventDefault(); onSelect(current) }
+  }
+  return <ul className="mailbox-threads" role="listbox" aria-label="Conversations" onKeyDown={keyDown} onFocus={event => { const id = (event.target as HTMLElement).dataset.thread; if (id) setActive(id) }}>
+    {threads.map(item => <ThreadRow key={item.id} thread={item} addresses={row.addresses} own={row.own} showAddresses={!row.addressId || item.addressIds.length > 1} selected={item.id === threadId} focusable={item.id === current} onSelect={() => onSelect(item.id)} />)}
+  </ul>
 }
 
 function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, isTarget, showAddresses, addresses, own }: {
@@ -167,7 +186,7 @@ function Conversation({ thread, addressId, addresses, focusMessage, onBack }: { 
         <IconButton variant="ghost" label={flags.trashed ? 'Restore' : 'Move to trash'} onClick={() => act({ trashed: !flags.trashed })}>{flags.trashed ? <Undo2 size={16} /> : <Trash2 size={16} />}</IconButton>
       </div>}
     </header>
-    {!stateAddress && states.length > 1 && <p className="muted inbound-scope-note">This conversation reached several addresses. Filter by one to star, archive or mark it read.</p>}
+    {!stateAddress && states.length > 1 && <p className="muted inbound-scope-note">It reached several addresses: filter by one to star, archive or mark it read.</p>}
     {update.error && <Alert tone="danger">{update.error instanceof Error ? update.error.message : 'The conversation could not be updated.'}</Alert>}
     {olderCursor && <div className="inbound-older">{olderError ? <ErrorState error={olderError} onRetry={() => void loadOlder()} /> : <Button variant="ghost" size="sm" loading={loadingOlder} onClick={() => void loadOlder()}>Show earlier messages</Button>}</div>}
     <ol className="mailbox-messages">
@@ -314,14 +333,16 @@ export function InboundPage() {
     <PageHeader title="Inbox" backTo="/receiving" actions={<Button variant="primary" disabled={!addresses.size} onClick={() => setComposing(true)}>New message</Button>} />
     <div className="mailbox-layout">
       <aside className="mailbox-list" aria-label="Conversations">
-        <div className="inbound-filter"><Select className="address-select-trigger" menuClassName="address-select" aria-label="Filter by address" value={addressId ?? ''} onValueChange={filterAddress} disabled={addressList.isPending} placeholder="All addresses"
-          options={[{ value: '', label: 'All addresses' }, ...[...addresses.values()].map(address => addressOption(address.id, address.address))]} /></div>
+        <div className="mailbox-toolbar">
+          <div className="search-box mailbox-search"><Search size={16} /><Input type="search" aria-label="Search conversations" placeholder="Search mail" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} /></div>
+          <Select className="address-select-trigger mailbox-address-filter" menuClassName="address-select" aria-label="Filter by address" value={addressId ?? ''} onValueChange={filterAddress} disabled={addressList.isPending} placeholder="All addresses"
+            options={[{ value: '', label: 'All addresses' }, ...[...addresses.values()].map(address => addressOption(address.id, address.address))]} />
+        </div>
         <Tabs label="Conversation views" value={view} onValueChange={value => { pagination.reset(); change({ view: value, thread: null, message: null }) }} items={views} />
-        <div className="search-box mailbox-search"><Search size={16} /><Input type="search" aria-label="Search conversations" placeholder="Search mail" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} /></div>
         {addressList.error && <Alert tone="warning">Addresses could not be loaded, so they show as IDs.</Alert>}
         {threads.error ? <ErrorState error={threads.error} onRetry={() => void threads.refetch()} /> : threads.isPending ? <div className="mailbox-thread-skeleton">{[0, 1, 2, 3].map(index => <div key={index}><SkeletonText width="40%" /><SkeletonText width="60%" /><SkeletonText width="85%" /></div>)}</div>
           : threads.data.length ? <>
-            <ul className="mailbox-threads">{threads.data.map(item => <ThreadRow key={item.id} thread={item} addresses={addresses} own={own} showAddresses={!addressId || item.addressIds.length > 1} selected={item.id === threadId} onSelect={() => change({ thread: item.id, message: null })} />)}</ul>
+            <ThreadList threads={threads.data} threadId={threadId} addresses={addresses} own={own} addressId={addressId} onSelect={id => change({ thread: id, message: null })} />
             {(pagination.page > 1 || threads.data.nextCursor) && <Pagination page={pagination.page} pageSize={50} nextCursor={threads.data.nextCursor} onPageChange={next => pagination.onPageChange(next, threads.data.nextCursor)} />}
           </> : <EmptyState title={q ? 'No matching conversations' : `Nothing in ${views.find(item => item.value === view)!.label.toLowerCase()}`} description={!q && !addresses.size && !addressList.isPending ? 'Create an address to start receiving mail.' : undefined} action={!q && !addresses.size && !addressList.isPending ? <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving">Create an address</Link> : undefined} />}
       </aside>
