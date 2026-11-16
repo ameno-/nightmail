@@ -28,7 +28,7 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   const side = 2, over = 2, under = 2, strip = phone ? .6 : 9.8
   const rows = { base: 14, band: 7.5, manifold: 2, slot: 3.4, cavity: 19, fascia: 11 }
   // The slab in front of the machine, its lip, and the page under the lip.
-  const depth = phone ? 8 : 20, hopperU = 4.2, skyU = 1.5, frontU = phone ? 4.6 : 5.75, lipU = phone ? 1.6 : 2, belowU = phone ? 6.4 : 7.6
+  const depth = phone ? 8 : 20, hopperU = 4.2, skyU = 1.5, frontU = phone ? 4.6 : 5.75, lipU = phone ? 1.6 : 2, belowU = 7.6
   const wallRows = ROWS + over + under, wide = 2 * (COLS / 2 + side + strip) + depth * -DX + (phone ? 0 : 9)
   const edgeL = Math.max(16, inset.left), edgeR = Math.max(16, inset.right)
   // The send cannon: the sending half. On a wide page it stands on the slab to the right of the cabinet, behind the
@@ -48,12 +48,17 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   const stack = (U: number, t: number, sky = 0, apart = 0, slab = 0) => {
     const V = U * 13 / 18, k = Math.min(1.5, Math.max(1, U / 7)), lw = COLS * U / count * .46, lh = lw * .7
     // (The headline's two lines stand as far under the price as over the button's bay: no rail parts them from it.)
-    const fascia = mix(96, 84, t) * Math.min(k, 1.1), pad = mix(10, 8, t) * Math.min(k, 1.1), cavity = mix(3.5, 3.1, t) * lh, slot = mix(30, 28, t) * Math.min(k, 1.2), manifold = 2 * V, band = 2.32 * COLS * U / 11 + 2 * mix(19, 14, t) * k
-    // The base, from the floor up: the two facts, then the button in its bay. (On a narrow phone what is free takes two lines.)
-    const ctaW = COLS * U, ctaH = U > 8 ? 60 : 54, plate = 6, tight = ctaW - 88 < 192, factsH = tight ? 56 : 38, factsY = mix(34, 26, t), ctaY = factsY + factsH + Math.max(apart, mix(22, 18, t)) + plate
-    const base = ctaY + ctaH + plate, below = Math.max(belowU * U, 58), front = frontU * U + slab
-    const top = sky + mix(30, 16, t) + Math.max(gun(U, lw, lh, .42 * U).rise, (depth * DY + hopperU) * U), over = top + fascia + cavity + slot + manifold + wallRows * V + band
-    return { V, k, fascia, pad, cavity, slot, manifold, band, base, below, front, ctaW, ctaH, ctaY, plate, tight, factsH, factsY, toCta: over + base - ctaY + plate, tall: over + base + front + lipU * U + below }
+    const fascia = mix(96, 80, t) * Math.min(k, 1.1), pad = mix(10, 7, t) * Math.min(k, 1.1), cavity = mix(3.5, 3, t) * lh, slot = mix(30, 26, t) * Math.min(k, 1.2), manifold = 2 * V, band = 2.32 * COLS * U / 11 + 2 * mix(19, 13, t) * k
+    // The base, from the floor up: the two facts; what signing in agrees to (one line where the button is wide enough
+    // for it, two where it is not); and directly over that the button in its bay. (On a narrow phone what is free
+    // takes two lines.) `sky` is more room over the roof, `apart` more between the consent and the facts, `slab` more
+    // slab in front of the machine.
+    const ctaW = COLS * U, ctaH = U > 8 ? 60 : Math.round(mix(54, 50, t)), plate = 6, tight = ctaW - 88 < 192, factsH = tight ? 56 : 38, factsY = mix(34, 26, t)
+    const consentH = ctaW < 392 ? 32 : 16, consentY = factsY + factsH + Math.max(apart, mix(22, 18, t)), ctaY = consentY + consentH + mix(12, 8, t) + plate
+    const base = ctaY + ctaH + plate, below = Math.max(3.6 * U, 24), front = frontU * U + slab
+    const top = sky + mix(30, 10, t) + Math.max(gun(U, lw, lh, .42 * U).rise, (depth * DY + hopperU) * U), over = top + fascia + cavity + slot + manifold + wallRows * V + band
+    // (`toConsent`, `toFacts`: how far down the hero the consent ends, and the facts.)
+    return { V, k, fascia, pad, cavity, slot, manifold, band, base, below, front, ctaW, ctaH, ctaY, plate, tight, factsH, factsY, consentH, consentY, toConsent: over + base - consentY, toFacts: over + base - factsY, tall: over + base + front + lipU * U + below }
   }
   // Wide: every floor is so many cells, and the whole machine is seen at once (the page is at least 600 high).
   const sized = (U: number) => {
@@ -62,28 +67,30 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   }
   let U: number, H: number, short = false, set: ReturnType<typeof stack> | null = null
   if (phone) {
-    // (The button's bay ends 24 px over the fold, or more. A short page takes its height from the machine before it
-    // takes much from the gaps: the machine may be a fifth smaller than the page's width allows.)
-    const most = Math.max(4.6, Math.min(12, Math.floor((W - edgeL - edgeR) / wide / .05) * .05)), least = Math.max(4.6, .8 * most), room = fold - 24 - inset.bottom
+    // (The button and, directly under it, what signing in agrees to are seen before any scrolling: the consent ends
+    // 12 px over the fold, or more. A short page takes its height from the machine before it takes much from the
+    // gaps: the machine may be a fifth smaller than the page's width allows, and a little more.)
+    const most = Math.max(4.6, Math.min(12, Math.floor((W - edgeL - edgeR) / wide / .05) * .05)), least = Math.max(4.6, .76 * most), room = fold - 12 - inset.bottom
     U = most
     search: {
       // The fold falls somewhere plain, never through something: over it are the whole page (where it fits), or the
       // two facts whole with room under them and the slab's bare top at the fold. The page is set as closely as gives
-      // one of those; where none does, the machine stands a little lower (the button's bay just over the fold, the
-      // facts beginning under it), or the slab runs on a little further forward (its lip under the fold).
-      const facts = (made: ReturnType<typeof stack>) => made.toCta + made.ctaY - made.plate - made.factsY, edge = (made: ReturnType<typeof stack>) => made.tall - made.below - lipU * U - 18
+      // one of those; where none does, the machine stands a little lower (the consent just over the fold, the facts
+      // beginning under it), or the slab runs on a little further forward (its lip under the fold).
+      const edge = (made: ReturnType<typeof stack>) => made.tall - made.below - lipU * U - 18
       for (let u = most; u >= least - 1e-6; u = Math.round((u - .05) * 20) / 20) {
-        const fits = [0, .25, .5, .75, 1].filter(t => stack(u, t).toCta <= room)
+        const fits = [0, .25, .5, .75, 1].filter(t => stack(u, t).toConsent <= room)
         if (!fits.length) continue
-        const clean = fits.find(t => stack(u, t).tall + inset.bottom <= fold) ?? fits.find(t => { const made = stack(u, t); return facts(made) + 12 + inset.bottom <= fold && fold <= edge(made) })
+        const clean = fits.find(t => { const made = stack(u, t); return made.tall + inset.bottom <= fold || (made.toFacts + 12 + inset.bottom <= fold && fold <= edge(made)) })
         U = u; set = stack(u, clean ?? fits[0])
-        if (clean === undefined) set = fold > facts(set) - set.factsH - 6 && fold < facts(set) + 12 + inset.bottom ? stack(u, fits[0], room - set.toCta, 34 + inset.bottom) : fold > edge(set) ? stack(u, fits[0], 0, 0, fold - edge(set) + 4) : set
+        if (clean === undefined) set = fold > set.toFacts - set.factsH - 6 && fold < set.toFacts + 12 + inset.bottom ? stack(u, fits[0], room - set.toConsent, 26 + inset.bottom) : fold > edge(set) ? stack(u, fits[0], 0, 0, fold - edge(set) + 4) : set
         break search
       }
       // Too short a page for the button to be seen on the machine at any size worth having: the machine is as it
       // would be on a tall page (on a phone held on its side, small enough that half the price is seen), and the
       // header carries a button of its own.
-      short = true; U = Math.min(most, Math.max(5.6, fold / 60)); set = stack(U, fold < 520 ? 1 : .5)
+      // (Under the header's button, at the hero's top, stands what signing in agrees to: the sky is higher by it.)
+      short = true; U = Math.min(most, Math.max(5.6, fold / 60)); set = stack(U, fold < 520 ? 1 : .5, W < 700 ? 40 : 0)
     }
     H = Math.ceil(Math.max(fold, set.tall))
   } else {
@@ -170,9 +177,11 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   // The page sets them at 12.5 px or a little more, in a face six tenths of its size wide.)
   const inside = readout.w - 2 * Math.min(18, Math.max(12, 1.6 * U)), wide1 = .6 * Math.min(15, Math.max(12.5, 1.5 * U))
   const fromMax = set ? Math.floor((inside - 64) / (.96 * wide1)) : Infinity, subjectMax = set ? Math.floor(inside / wide1) - 1 : Infinity
+  // What signing in agrees to, directly under a phone's button, between its two edges. (A wide page has it under the slab's lip.)
+  const consent: Rect | null = set ? { x: cta.x, y: set.consentY, w: ctaW, h: set.consentH } : null
   // (Whether the button is seen before any scrolling: where it is not, the header carries one.)
   short ||= oy - cta.y > fold - inset.bottom
-  return { phone, routes, tight, short, W, H, fold, inset, ext, cannon, out: Math.round(out), room, widest, lean, ox, oy, sx, U, V, side, over, under, Xw, Xc, Xb, D, base, band, wall, manifold, slot, cavity, fascia, yBand, yWall, yMan, ySlot, yCav, yFas, yTop, P, lanes, label, lw, lh, cavD, zL, tubeR, tubes, post, zt, zProud, riser, fan, heads, drops, hung, front, lip, floor, zLip, zOver, zBack, slabX, hopper: hopperU * U, cta, plate, facts, tally, readout, fromMax, subjectMax, gauge, lamps }
+  return { phone, routes, tight, short, W, H, fold, inset, ext, cannon, out: Math.round(out), room, widest, lean, ox, oy, sx, U, V, side, over, under, Xw, Xc, Xb, D, base, band, wall, manifold, slot, cavity, fascia, yBand, yWall, yMan, ySlot, yCav, yFas, yTop, P, lanes, label, lw, lh, cavD, zL, tubeR, tubes, post, zt, zProud, riser, fan, heads, drops, hung, front, lip, floor, zLip, zOver, zBack, slabX, hopper: hopperU * U, cta, consent, plate, facts, tally, readout, fromMax, subjectMax, gauge, lamps }
 }
 
 /** A box on the machine's front, as the page places it: left and top in the scene, width and height. */

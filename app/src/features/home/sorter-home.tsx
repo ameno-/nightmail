@@ -185,9 +185,13 @@ export function SorterHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps
           <button type="button" className="srt-cta" ref={cta} style={at(p.cta)} disabled={busy} aria-busy={busy || undefined} data-busy={busy || undefined} onClick={onSignIn} onPointerDown={onSignInIntent}>
             <span className="srt-cta-label">Get started{busy ? <LoaderCircle className="ui-spinner" size={16} aria-hidden="true" /> : <ArrowRight className="srt-cta-arrow" size={16} strokeWidth={2} aria-hidden="true" />}</span>
           </button>
+          {/* What signing in agrees to, directly under a phone's button (a wide page has it under the slab's lip). */}
+          {p.consent && <div className="srt-consent-on" style={at(p.consent)}><SignInConsent className="srt-consent" /></div>}
         </div>}
         {p && <>
-          <SignInConsent className="srt-consent" />
+          {!p.consent && <SignInConsent className="srt-consent" />}
+          {/* And under the header's button, where the header carries one. */}
+          {p.short && <SignInConsent className="srt-consent srt-consent-head" />}
           {/* The letter under the pointer, opened. */}
           <div className="srt-card" ref={cardBox} data-open={card ? '' : undefined} aria-hidden="true">
             {card && <div className="srt-card-body" data-scam={card.scam || undefined}>

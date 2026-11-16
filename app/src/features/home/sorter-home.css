@@ -143,6 +143,12 @@
 /* Under the slab's lip, off the machine: what signing in agrees to. */
 .srt-consent { position: absolute; z-index: 2; bottom: calc(var(--srt-below) * .47); left: var(--srt-ox, 50%); width: max-content; max-width: calc(100% - 2 * var(--space-16)); margin: 0; color: var(--srt-text-2); font-size: 12px; line-height: 16px; text-align: center; text-wrap: balance; translate: -50% 50%; }
 .srt-consent a:hover { color: var(--srt-text); }
+/* A phone's stands on the machine, directly under the button and between its two edges, small and quiet: with the
+   button it is seen before any scrolling. (It is the page's own, like the button: nothing that flies is drawn over it.) */
+.srt-consent-on { position: absolute; z-index: 2; display: grid; place-items: center; pointer-events: auto; }
+.srt-consent-on .srt-consent { position: static; width: auto; max-width: none; translate: none; }
+/* Where the header carries the button (a page too short to show the machine's): under it, at the hero's top. */
+.srt-consent-head { top: 0; right: max(var(--space-12), var(--srt-safe-r) + var(--space-8)); bottom: auto; left: auto; width: min(300px, 100% - 2 * var(--space-16)); max-width: none; text-align: right; translate: none; }
 
 /* A letter, opened, over the one the pointer is on. */
 .srt-card { position: absolute; z-index: 5; top: 0; left: 0; width: 0; height: 0; pointer-events: none; }
