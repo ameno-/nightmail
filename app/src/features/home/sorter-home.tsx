@@ -68,7 +68,13 @@ export function SorterHome({ start, notice }: HomeProps) {
       else { from.textContent = `${productName.toLowerCase()} sorter`; subject.textContent = 'Waiting for mail'; go('') }
     },
     count(sorted, burnt) { counts.current = [sorted, burnt]; if (tally.current) tally.current.textContent = String(sorted % 100000).padStart(5, '0') },
-    phase(next) { setPhase(next); if (next === 'boom') try { localStorage.setItem(SEEN, '1') } catch { /* private mode: the long version again next time */ } },
+    phase(next) {
+      setPhase(next); if (next === 'boom') try { localStorage.setItem(SEEN, '1') } catch { /* private mode: the long version again next time */ }
+      // (The screen is out while the machine is put back together, and comes on again when it runs: sorter-home.css.)
+      const box = readout.current
+      if (box && next === 'rebuild') box.dataset.screen = 'off'
+      else if (box?.dataset.screen === 'off') box.dataset.screen = 'on'
+    },
     // Smoke in front of what is written on the machine hides it, as it hides the machine.
     floors(count, whole) { setTower(now => now.floors === count && now.whole === whole ? now : { floors: count, whole }) },
     fit(lanes) { setFitted(now => now && now.length === lanes.length && now.every((on, i) => on === lanes[i]) ? now : lanes) },
