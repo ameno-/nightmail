@@ -144,13 +144,15 @@
 .srt-band { position: absolute; z-index: 2; display: flex; align-items: center; margin: 0; color: var(--srt-text); font-size: calc(var(--srt-price) / var(--srt-k)); font-weight: 500; font-variant-numeric: proportional-nums; font-variation-settings: 'opsz' 32; line-height: 1; letter-spacing: -.022em; white-space: nowrap; pointer-events: none; }
 /* What is written on the tower belongs to it. The sentence under the price is letters in lights, as the name over it
    is: each stands a little proud of its board (its far side seen, up and to the left, as depth runs on this page) and
-   by night sheds a little of its light on the board round it. By day they are dark letters on a pale board, with the
-   lamp's shadow under them. And what an instrument shows is lit from behind its glass. */
+   by night sheds a little of its light on the board round it. By day they are dark letters on a pale board: the
+   lamp catches their edges, up and to the left, and throws a soft shadow under them (a side as dark as the rim by
+   night read, on a pale board, as a doubled outline). And what an instrument shows is lit from behind its glass. */
 /* (The side is three copies of the letters a third, two thirds and all of the depth back, each on the screen's own
    pixels, at least one deep: a fraction of a pixel would only blur the letter's edge.) */
 .srt-band { --srt-deep: calc(var(--srt-price) / 520);
   --srt-relief: round(calc(var(--srt-deep) * -1 / 3), var(--srt-dev)) round(calc(var(--srt-deep) * -1.6 / 3), var(--srt-dev)) 0 var(--srt-rim), round(calc(var(--srt-deep) * -2 / 3), var(--srt-dev)) round(calc(var(--srt-deep) * -3.2 / 3), var(--srt-dev)) 0 var(--srt-rim), min(-1 * var(--srt-dev), round(calc(var(--srt-deep) * -1), var(--srt-dev))) min(-1 * var(--srt-dev), round(calc(var(--srt-deep) * -1.6), var(--srt-dev))) 0 var(--srt-rim);
-  text-shadow: var(--srt-relief), calc(var(--srt-deep) * -1) calc(var(--srt-deep) * 2.4) calc(var(--srt-deep) * 2.4) rgb(0 0 0 / 22%); }
+  text-shadow: var(--srt-relief), calc(var(--srt-deep) * -1) calc(var(--srt-deep) * 2) calc(var(--srt-deep) * 3) rgb(0 0 0 / 12%); }
+:root:not([data-theme='dark']) .srt-band { --srt-rim: rgb(255 255 255 / 45%); }
 :root[data-theme='dark'] .srt-band { color: var(--srt-lit); text-shadow: var(--srt-relief), 0 0 calc(var(--srt-price) / 40) rgb(255 232 190 / 14%); }
 .srt-page[data-phone] .srt-band { --srt-deep: calc(var(--srt-price) / 300); }
 .srt-readout, .srt-tally, .srt-page:not([data-phone]) .srt-fact { text-shadow: 0 0 .5em color-mix(in oklab, currentColor 42%, transparent); }
