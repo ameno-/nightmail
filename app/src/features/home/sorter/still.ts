@@ -143,9 +143,9 @@ export function drawStill(canvas: HTMLCanvasElement, p: Plan, over: number, dark
   // On the slab: each tube forward from its outlet in the header, over the lip and down.
   // (A tube's line as it is seen: forward along the slab, round over the lip, and down.)
   const leg = (x: number, zFrom: number) => { c.strokeStyle = glass(1, dark); c.lineWidth = 2 * r; c.lineCap = 'butt'; c.beginPath(); c.moveTo(X(x, zFrom), Y(yc, zFrom)); c.arcTo(X(x, p.zOver), Y(yc, p.zOver), X(x, p.zOver), Y(yc, p.zOver) + 200, r * 2.6); c.lineTo(X(x, p.zOver), Y(-p.floor - over, 0)); c.stroke() }
-  // The sleeper under each four, each tube's flange in the trunk, and the collar where it turns down over the lip.
+  // The saddle under each tube, each tube's flange in the trunk, and the collar where it turns down over the lip.
   const sleeperZ = p.fan.length ? (p.heads[0].z0 + p.zLip) / 2 - .6 * U : (zt + p.zLip) / 2
-  p.heads.forEach((_, side) => { const xs = [0, 1, 2, 3].map(k => p.fan[side * 4 + k].x); box(Math.min(...xs) - 1.9 * U, 0, sleeperZ - .8 * U, Math.max(...xs) + 1.9 * U, yc - r, sleeperZ + .8 * U, 'plinth') })
+  p.heads.forEach((_, side) => { for (let k = 0; k < 4; k++) { const x = p.fan[side * 4 + k].x; box(x - r - .9 * U, 0, sleeperZ - .8 * U, x + r + .9 * U, yc - r, sleeperZ + .8 * U, 'plinth') } })
   const lipCollar = (x: number) => { const w = r + 1.2 * px; fill('steel', 1); c.fillRect(X(x - w, p.zOver), Y(-p.lip * .5 + 1.4 * px, p.zOver), 2 * w, 2.8 * px); fill('steel', 0); c.beginPath(); c.ellipse(X(x, p.zOver), Y(-p.lip * .5 + 1.4 * px, p.zOver), w, w * .42, 0, 0, Math.PI * 2); c.fill() }
   p.fan.forEach(at => { leg(at.x, zBlock); fill('steel', 1); c.beginPath(); c.arc(X(at.x, zBlock), Y(yc, zBlock), r + 2 * px, 0, Math.PI * 2); c.fill(); lipCollar(at.x) })
   // The outbound tube: up over the lip, along the cabinet's front and into the plate at the riser's foot (a phone:

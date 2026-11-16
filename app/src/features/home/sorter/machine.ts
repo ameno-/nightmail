@@ -185,6 +185,9 @@ export function buildMachine(p: Plan) {
   // The scanner hangs from the bay's ceiling over the middle lane.
   b.floor(SORT)
   b.box(-lw * .6, yFas - 6 * px, zL - 7 * px, lw * .6, yFas, zL + 7 * px, M.steel); b.mark(-lw * .5, yFas - 6 * px - .1, lw * .5, yFas - 4.5 * px, zL - 7 * px - .1, M.red)
+  // Two guide rails the length of the bay, under where each deck's bearing blocks run: a deck let down through a
+  // port runs along them to its lane, never through the air.
+  for (const [za, zb] of [[z0 - 1.8 * px, z0 + .2 * px], [z1 - .2 * px, z1 + 1.8 * px]]) b.box(-Xb + px, yR - rr - 6 * px, za, Xb - px, yR - rr - 4.5 * px, zb, M.steel, ALL)
 
   b.floor(CORE)
   // The tubes' fittings on the front: a socket in each manifold, a dark channel behind each run, and brackets that
@@ -212,7 +215,7 @@ export function buildMachine(p: Plan) {
 
   // Where the tubes cross the slab. A wide page: the lower manifold's block goes on round each corner of the cabinet;
   // a riser comes down from it to a header on the slab, a trunk with a flanged outlet for each tube in its front
-  // (block, riser and header are one face); each tube runs straight forward from its outlet over a sleeper, held to
+  // (block, riser and header are one face); each tube runs straight forward from its outlet over a saddle, held to
   // it by a U-bolt, and over the lip.
   // Where a tube turns down over the lip it wears a collar.
   const yc = r + 3.5 * px, seat = yc - r
@@ -229,10 +232,11 @@ export function buildMachine(p: Plan) {
     const rx0 = s < 0 ? -Xc - p.riser - .2 * U : Xc + .2 * U
     b.box(rx0, head.h, zBlock, rx0 + p.riser, yWall + lower, zBlock + 3 * U, M.trim)
     for (const y of [head.h + 1.2 * U, yWall - 1.4 * U]) b.cyl([rx0 + p.riser / 2, y, 0], 2, zBlock - 1.1 * px, zBlock, 1.25 * px, M.steel, 8, 1)
-    const xs = [0, 1, 2, 3].map(k => p.fan[side * 4 + k].x), a = Math.min(...xs), e = Math.max(...xs)
+    const xs = [0, 1, 2, 3].map(k => p.fan[side * 4 + k].x)
     for (const x of xs) { b.cyl([x, yc, 0], 2, head.z0 - 2.6 * px, head.z0, r + 2 * px, M.steel, 16, 1); b.cyl([x, yc, 0], 2, head.z0 - 4.8 * px, head.z0 - 2.6 * px, r + 1 * px, M.steel, 14, 0) }
     for (let x = head.x0 + 1.6 * U; x < head.x1 - U; x += 3.2 * U) if (xs.every(at => Math.abs(at - x) > r + 4 * px) && (x < rx0 - U || x > rx0 + p.riser + U)) b.cyl([x, head.h - .9 * U, 0], 2, head.z0 - 1.1 * px, head.z0, 1.2 * px, M.steel, 8, 1)
-    b.box(a - 1.9 * U, 0, sleeperZ - .8 * U, e + 1.9 * U, seat, sleeperZ + .8 * U, M.plinth); for (const x of xs) strap(x, sleeperZ)
+    // (Each tube has a saddle of its own under it, not one long sleeper under the four: that read as a second ledge.)
+    for (const x of xs) { b.box(x - r - .9 * U, 0, sleeperZ - .8 * U, x + r + .9 * U, seat, sleeperZ + .8 * U, M.plinth); strap(x, sleeperZ) }
     for (const x of xs) b.cyl([x, 0, p.zOver], 1, -p.lip * .5 - 1.4 * px, -p.lip * .5 + 1.4 * px, r + 1.2 * px, M.steel, 14, 3)
     for (const x of xs) shade(x, p.zLip + 1, head.z0)
   })
