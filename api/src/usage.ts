@@ -31,6 +31,8 @@ const Usage = z.object({
     from: z.iso.datetime().describe('Start of the current calendar month, UTC.'),
     sent: z.number().int().describe('Emails created this month, each counted once however many recipients it has.'),
     received: z.number().int().nullable().describe('Messages received this month on any address, routed, unrouted or spam. Null unless the credential may read every received message (owners, admins and manage credentials): members and read-only keys never learn about mail they can\'t open.'),
+    billedSent: z.number().int().describe('Sent emails billing counts this month, each recipient once (Hosted sending; mail canceled or rejected before it went out is taken off). The free sent allowance and the price apply to this count.'),
+    billedReceived: z.number().int().nullable().describe('Received messages billing counts this month: mail Amazon\'s spam scan flagged and simulated mail are free. The free received allowance and the price apply to this count. Null like received.'),
   }),
   daily: z.object({
     cap: z.number().int().nullable().describe('Recipients allowed per rolling 24 hours; null when this workspace has no daily limit.'),
@@ -66,9 +68,12 @@ export function registerUsage(app: App) {
     const compute = async () => {
       const month = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1)).toISOString();
       // Both counts are index-only scans (sending_emails_created_page, mail_messages_tenant_page).
-      const { rows: [row] } = await c.env.db.execute<{ sent: number; received: number | null; allowance: HostedAllowance | null; enforcement: 'off' | 'shadow' | 'enforce' | null }>(sql`SELECT
+      // The billed counts are the meters billing prices (billing_usage_hourly): recipients, not messages.
+      const { rows: [row] } = await c.env.db.execute<{ sent: number; received: number | null; billed_sent: number; billed_received: number | null; allowance: HostedAllowance | null; enforcement: 'off' | 'shadow' | 'enforce' | null }>(sql`SELECT
         (SELECT count(*)::int FROM sending_emails WHERE workspace_id = ${a.workspaceId} AND created_at >= ${month}::timestamptz) AS sent,
         ${receiving ? sql`(SELECT count(*)::int FROM mail_messages WHERE workspace_id = ${a.workspaceId} AND direction = 'inbound' AND received_at >= ${month}::timestamptz)` : sql`NULL::int`} AS received,
+        (SELECT greatest(0, coalesce(sum(quantity), 0))::int FROM billing_usage_hourly WHERE workspace_id = ${a.workspaceId} AND meter = 'send' AND hour >= ${month}::timestamptz) AS billed_sent,
+        ${receiving ? sql`(SELECT greatest(0, coalesce(sum(quantity), 0))::int FROM billing_usage_hourly WHERE workspace_id = ${a.workspaceId} AND meter = 'receive' AND hour >= ${month}::timestamptz)` : sql`NULL::int`} AS billed_received,
         ${hostedAllowance(c.env.config, a.workspaceId, 1, 0, true)} AS allowance,
         (SELECT mode FROM billing_config WHERE singleton) AS enforcement`);
       const steps = usageSteps(c.env.config.hostedSendCaps), allowance = row?.allowance ?? null;
@@ -76,7 +81,7 @@ export function registerUsage(app: App) {
       const index = allowance?.cap == null ? -1 : steps.findIndex(s => s.cap === allowance.cap);
       return {
         billing: { enabled: row?.enforcement === 'enforce', enforcement: row?.enforcement ?? 'off' }, pricing: PRICING,
-        month: { from: month, sent: row?.sent ?? 0, received: receiving ? row?.received ?? 0 : null },
+        month: { from: month, sent: row?.sent ?? 0, received: receiving ? row?.received ?? 0 : null, billedSent: row?.billed_sent ?? 0, billedReceived: receiving ? row?.billed_received ?? 0 : null },
         daily: allowance ? { cap: allowance.cap, used: Number(allowance.used), resetAt: allowance.resetAt ? new Date(allowance.resetAt).toISOString() : null, step: index < 0 ? null : index } : null,
         steps,
         simulated: isSimulatedSes(c.env),

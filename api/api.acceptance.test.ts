@@ -6609,21 +6609,30 @@ describe('Billing: metering, gate and settlement', () => {
       // Receives: one per message with an SES message ID (spam included), Omens from verdicts.omenCalls, stored bytes per day.
       const thread = unique('thread');
       await db.query(`INSERT INTO mail_threads(id,workspace_id) VALUES ($1,$2)`, [thread, f.wid]);
-      const message = (id: string, ses: string | null, extra: { spam?: boolean; verdict?: string; omen?: number; bytes?: number; days?: number } = {}) => db.query(`INSERT INTO mail_messages(id,workspace_id,direction,thread_id,ses_message_id,spam,verdicts,size_bytes,received_at)
-        VALUES ($1,$2,'inbound',$3,$4,$5,$6,$7,now()-make_interval(days=>$8))`, [id, f.wid, thread, ses, !!extra.spam, JSON.stringify({ ...extra.omen ? { omenCalls: extra.omen } : {}, ...extra.verdict ? { spam: extra.verdict } : {} }), extra.bytes ?? 1000, extra.days ?? 0]);
+      type Extra = { spam?: boolean; verdict?: string; omen?: number; bytes?: number; days?: number; region?: string; lifecycle?: string };
+      const message = (id: string, ses: string | null, extra: Extra = {}) => db.query(`INSERT INTO mail_messages(id,workspace_id,direction,thread_id,ses_message_id,spam,verdicts,size_bytes,received_at,region,lifecycle)
+        VALUES ($1,$2,'inbound',$3,$4,$5,$6,$7,now()-make_interval(days=>$8),$9,$10)`, [id, f.wid, thread, ses, !!extra.spam, JSON.stringify({ ...extra.omen ? { omenCalls: extra.omen } : {}, ...extra.verdict ? { spam: extra.verdict } : {} }), extra.bytes ?? 1000, extra.days ?? 0,
+        extra.region ?? REGION, extra.lifecycle ?? 'kept']);
       await message(unique('msg'), unique('ses'), { omen: 2, bytes: 5000 });
       await message(unique('msg'), unique('ses'), { spam: true }); // Junked without an SES spam verdict: billed.
-      await message(unique('msg'), null, { bytes: 700 }); // IMAP APPEND or a sandbox copy: stored, never a receive.
+      await message(unique('msg'), null, { bytes: 700 }); // IMAP APPEND: stored, never a receive.
       // Mail SES's spam scan flagged (FAIL or GRAY) is free: no receive unit and no stored bytes, but its Omen calls count.
       await message(unique('msg'), unique('ses'), { spam: true, verdict: 'FAIL', bytes: 9000, omen: 1 });
       await message(unique('msg'), unique('ses'), { spam: true, verdict: 'GRAY', bytes: 9000 });
       await message(unique('msg'), unique('ses'), { verdict: 'FAIL', bytes: 9000 }); // Not junked: billed.
+      // Sandbox mail (POST /v1/inboxes/{id}/simulate stores it with its own ID as the SES message ID) never arrived: no
+      // receive, nothing of the free received allowance, no stored bytes.
+      await message(unique('msg'), unique('msg'), { region: 'sandbox', lifecycle: 'ephemeral', bytes: 900 });
       assert.deepEqual([(await usage()).receive, (await usage()).omen], [3, 3]);
-      const today = Number((await db.query(`SELECT bytes FROM mail_storage_days WHERE workspace_id=$1 AND day=(now() AT TIME ZONE 'UTC')::date`, [f.wid])).rows[0].bytes);
-      assert.equal(today, 15700);
+      // Storage counts mail kept past 90 days: default mail's raw message expires at 90 days, so it adds nothing.
+      await message(unique('msg'), unique('ses'), { lifecycle: 'default', bytes: 4000 });
+      const stored = async (days = 0) => Number((await db.query(`SELECT bytes FROM mail_storage_days WHERE workspace_id=$1 AND day=(now() AT TIME ZONE 'UTC')::date-$2::int`, [f.wid, days])).rows[0]?.bytes ?? 0);
+      assert.equal(await stored(), 15700);
       // Storage: bytes older than 90 days roll into the aged sum, which is metered beyond the free 1 GB, at $0 until storage_billing_from.
       const aged = unique('msg');
       await message(aged, unique('ses'), { bytes: 1_500_000_000, days: 120 });
+      await message(unique('msg'), unique('ses'), { bytes: 2_000_000_000, days: 120, lifecycle: 'default' });
+      await db.query(`UPDATE billing_config SET storage_aged_through=NULL`);
       const day = (await db.query(`SELECT billing_storage_day((now() AT TIME ZONE 'UTC')::date - 1) AS d`)).rows[0].d;
       assert.ok(day.metered >= 1);
       const storage = (await db.query(`SELECT quantity::text, billing_rate_uc('storage',1::smallint,hour)::text AS rate FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='storage'`, [f.wid])).rows[0];
@@ -6631,9 +6640,40 @@ describe('Billing: metering, gate and settlement', () => {
       assert.deepEqual((await db.query(`SELECT billing_storage_day((now() AT TIME ZONE 'UTC')::date - 1) AS d`)).rows[0].d.aged, 0, 'Rerunning a day is a no-op.');
       await db.query(`UPDATE billing_config SET storage_billing_from=now()::date - 30`);
       assert.ok(Number((await db.query(`SELECT billing_rate_uc('storage',1::smallint,date_trunc('hour',now(),'UTC')) AS r`)).rows[0].r) > 0);
+      const agedBytes = async () => (await db.query(`SELECT aged_bytes::text FROM mail_storage_aged WHERE workspace_id=$1`, [f.wid])).rows[0].aged_bytes;
+      // Mail released from a billing hold of more than 90 days keeps its received date: it joins the aged sum when it is
+      // stored, so deleting it later takes off only what it added.
+      const late = unique('msg');
+      await message(late, unique('ses'), { bytes: 200_000_000, days: 100 });
+      assert.equal(await agedBytes(), '1700000000');
+      await db.query(`DELETE FROM mail_messages WHERE id=$1`, [late]);
+      assert.equal(await agedBytes(), '1500000000');
+      // Default mail that a kept inbox takes later is kept from then on, and counted.
+      const moved = unique('msg');
+      await message(moved, unique('ses'), { bytes: 300_000_000, days: 120, lifecycle: 'default' });
+      assert.equal(await agedBytes(), '1500000000');
+      await db.query(`UPDATE mail_messages SET lifecycle='kept' WHERE id=$1`, [moved]);
+      assert.deepEqual([await agedBytes(), await stored(120)], ['1800000000', 1_800_000_000]);
       // Deleting aged mail takes its bytes off the aged sum.
-      await db.query(`DELETE FROM mail_messages WHERE id=$1`, [aged]);
-      assert.equal((await db.query(`SELECT aged_bytes::text FROM mail_storage_aged WHERE workspace_id=$1`, [f.wid])).rows[0].aged_bytes, '0');
+      await db.query(`DELETE FROM mail_messages WHERE id = ANY($1)`, [[aged, moved]]);
+      assert.equal(await agedBytes(), '0');
+    });
+  });
+
+  test('a send refunded after its workspace deleted its connection is still refunded as a Hosted send', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const f = await billingFixture(runtime, db, local, request), other = unique('billing-gone'), sent = unique('billing-gone-send');
+      await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [other]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared','222233334444','ready')`, [other, REGION]);
+      // Attempted through the pool's feedback topic: the row carries it from then on.
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,feedback_topic_arn)
+        VALUES ($1,$2,$3,'fixture',$4,'["a@example.net","b@example.net"]','[]','[]','Gone','{}',false,'sent','ses-gone',$5)`, [sent, other, REGION, f.from, `arn:aws:sns:${REGION}:222233334444:bane-feedback`]);
+      const open = async () => Number((await db.query(`SELECT coalesce(sum(quantity),0)::int AS n FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='send'`, [other])).rows[0].n);
+      assert.equal(await open(), 2);
+      await db.query('DELETE FROM provider_connections WHERE workspace_id=$1', [other]);
+      // A late SES validation suppression: both recipients are refunded to the meter that charged them.
+      await db.query(`UPDATE sending_emails SET status='suppressed',error_code='EMAIL_VALIDATION_SUPPRESSED' WHERE id=$1`, [sent]);
+      assert.equal(await open(), 0);
     });
   });
 
@@ -6676,6 +6716,9 @@ describe('Billing: metering, gate and settlement', () => {
       assert.equal((await position()).receiveHeld, false, 'Off (and shadow) never hold.');
       await db.query(`UPDATE billing_config SET mode='enforce'`);
       assert.equal((await position()).receiveHeld, false, 'receive_hold stays off until the held/ IAM is in place.');
+      // Nothing promises a hold while holds are off.
+      await db.query('SELECT billing_unpaid_scan()');
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM billing_notices WHERE workspace_id=$1 AND kind IN ('receive_hold_soon','receive_held')`, [wid])).rows[0].n, 0);
       await db.query(`UPDATE billing_config SET receive_hold=true`);
       assert.equal((await position()).receiveHeld, true);
       // The daily scan says so once per episode; billing holds are invisible to the 3-day budget-hold expiry.
@@ -6751,6 +6794,401 @@ describe('Billing: metering, gate and settlement', () => {
       assert.deepEqual(after, { balance_uc: '0', unpaid: true }, 'Written off again; unpaid_since (and a receive hold) stays until a top-up.');
     });
   });
+  test('usage is priced under the mode it was metered in: nothing metered while billing was off is charged when it comes back, and a free flag starting or ending prices its own hour', async t => {
+    await simulatedSesFixture(t, async ({ db }) => {
+      const { setBillingEnforcement } = await import('./scripts/set-billing-enforcement.js');
+      const usage = (wid: string, meter: string, hours: number, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity)
+        VALUES ($1, date_trunc('hour', now(), 'UTC') - make_interval(hours=>$3), $2, $4) ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, meter, hours, q]);
+      const balance = async (wid: string) => (await db.query('SELECT balance_uc::text AS b, unpaid_since IS NOT NULL AS unpaid FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
+      const closed = "date_trunc('hour', now() - interval '5 minutes', 'UTC')", later = "now() + interval '1 hour'";
+      await db.query(`UPDATE billing_config SET mode='enforce'`);
+      // The kill-switch for a day and a half: 50,000 sent and 20,000 received while billing is off, some in the open hour.
+      const off = unique('billing-off');
+      await setBillingEnforcement(db, ['off', '--reason', 'Kill-switch while the settler is checked']);
+      await db.query(`INSERT INTO billing_accounts(workspace_id) VALUES ($1)`, [off]);
+      await usage(off, 'send', 30, 50_000); await usage(off, 'receive', 20, 20_000); await usage(off, 'send', 0, 10);
+      // Back on: none of it is charged, not even the open hour, and no unpaid episode starts.
+      await setBillingEnforcement(db, ['enforce', '--reason', 'Billing back on after the check']);
+      assert.deepEqual(await settle(db, off, closed), { entries: 0 });
+      assert.equal((await settle(db, off, later)).entries, 0);
+      assert.deepEqual(await balance(off), { b: '0', unpaid: false });
+      // A workspace's free flag ends with usage still open: that usage stays free. A paying workspace becomes free with
+      // usage still open: that usage is charged as it was metered.
+      const ending = unique('billing-free-ends'), starting = unique('billing-free-starts');
+      await db.query(`SELECT billing_set_workspace_free($1, true, 'Partner trial for the quarter', NULL, 'script')`, [ending]);
+      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_sent_used) VALUES ($1,(date_trunc('month',now() AT TIME ZONE 'UTC'))::date,3000)`, [starting]);
+      await usage(ending, 'send', 0, 4000); await usage(starting, 'send', 0, 10);
+      await db.query(`SELECT billing_set_workspace_free($1, false, NULL, NULL, 'script')`, [ending]);
+      await db.query(`SELECT billing_set_workspace_free($1, true, 'Partner trial for the quarter', NULL, 'script')`, [starting]);
+      for (const wid of [ending, starting]) await settle(db, wid, later);
+      assert.deepEqual([await balance(ending), await balance(starting)], [{ b: '0', unpaid: false }, { b: '-200000', unpaid: true }]);
+    });
+  });
+
+  test('the gate prices an earlier month\'s unsettled usage against that month: a refund there never hands out free sends now', async t => {
+    await simulatedSesFixture(t, async ({ db }) => {
+      await db.query(`UPDATE billing_config SET mode='enforce'`);
+      const lastMonth = "(date_trunc('month', now() AT TIME ZONE 'UTC') - interval '1 month')::date", lastHour = "date_trunc('month', now(), 'UTC') - interval '1 hour'";
+      const gate = async (wid: string, n: number) => (await db.query('SELECT billing_gate($1, $2) AS g', [wid, n])).rows[0].g;
+      // Last month's 20,000 queued recipients are canceled today (the refund lands in last month's last hour) and this
+      // month's 3,000 free sends are admitted. With $0, another 3,000 needs $0.60.
+      const refunded = unique('billing-month-refund');
+      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month) VALUES ($1,${lastMonth})`, [refunded]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,${lastHour},'send',-20000),($1,date_trunc('hour',now(),'UTC'),'send',3000)`, [refunded]);
+      const g = await gate(refunded, 3000);
+      assert.deepEqual([g.ok, g.freeSentLeft, g.openUc, g.requiredUc], [false, 0, '0', '60000000']);
+      // Just after midnight on the 1st, last month's still-open hour is priced against last month's used-up allowance,
+      // and this month's 3,000 free sends are all left.
+      const rolled = unique('billing-month-open');
+      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_sent_used) VALUES ($1,${lastMonth},3000)`, [rolled]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,settled_quantity) VALUES ($1,${lastHour}-interval '1 day','send',3000,3000),($1,${lastHour},'send',500,0)`, [rolled]);
+      const p = (await db.query('SELECT billing_position($1) AS p', [rolled])).rows[0].p;
+      assert.deepEqual([p.freeSentLeft, p.openUc, p.availableUc], [3000, '10000000', '-10000000']);
+    });
+  });
+
+  test('a promotional credit that covers a debt ends the unpaid episode and its receive hold; the debt is paid by the next top-up', async t => {
+    await simulatedSesFixture(t, async ({ db }) => {
+      await db.query(`UPDATE billing_config SET mode='enforce', receive_hold=true`);
+      const wid = unique('billing-promo-debt'), position = async () => (await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p;
+      await db.query(`SELECT billing_post($1,'adjustment','adjustment:'||$1,-20000000,0,'{}','system')`, [wid]);
+      await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '8 days' WHERE workspace_id=$1`, [wid]);
+      assert.equal((await position()).receiveHeld, true);
+      // Support grants $5 of promotional credit: $4.80 is available, so receiving resumes and billing.restored releases it.
+      await db.query(`SELECT billing_post($1,'grant','grant:'||$1,0,500000000,'{}','operator:fixture')`, [wid]);
+      const p = await position();
+      assert.deepEqual([p.receiveHeld, p.unpaidSince, p.availableUc, p.balanceUc], [false, null, '480000000', '-20000000']);
+      assert.equal((await db.query('SELECT status FROM jobs WHERE id=$1', [`billing.restored:${wid}`])).rows[0].status, 'pending');
+      // Nothing is left to write off.
+      await db.query('SELECT billing_unpaid_scan()');
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM billing_ledger WHERE workspace_id=$1 AND kind='write_off'`, [wid])).rows[0].n, 0);
+      // The next top-up pays the debt first.
+      await db.query(`SELECT billing_post($1,'topup','attempt:'||$1,2000000000,0,'{}','stripe')`, [wid]);
+      assert.equal((await position()).balanceUc, '1980000000');
+    });
+  });
+
+  test('held mail is released after every credit: a restore already running is queued again, and the hourly sweep releases what a wake missed', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { releaseLapsedHolds } = await import('./src/billing/cron.js');
+      const wid = unique('billing-wake'), job = `billing.restored:${wid}`, status = async () => (await db.query('SELECT status FROM jobs WHERE id=$1', [job])).rows[0]?.status;
+      await db.query(`UPDATE billing_config SET mode='enforce', receive_hold=true`);
+      // A restore is running (it read the hold before this top-up): the top-up queues it again.
+      await db.query(`INSERT INTO jobs(id,type,workspace_id,payload,status,attempts,lease_until) VALUES ($1,'billing.restored',$2,'{}','running',1,now()+interval '3 minutes')`, [job, wid]);
+      await db.query(`SELECT billing_post($1,'topup','attempt:'||$1,2000000000,0,'{}','stripe')`, [wid]);
+      assert.equal(await status(), 'pending');
+      // A receipt parked after the restore ran (ingest read the hold first): the hourly sweep queues a restore for it.
+      await db.query(`UPDATE jobs SET status='completed',lease_until=NULL WHERE id=$1`, [job]);
+      const mid = unique('held');
+      await db.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,status,error)
+        VALUES ($1,$2,$3,'fixture',$4,'["inbox@billing.example"]','{}','held','BILLING_HOLD')`, [wid, mid, REGION, 'held/' + mid]);
+      assert.ok(await releaseLapsedHolds(runtime) >= 1);
+      assert.equal(await status(), 'pending');
+      // A workspace still held keeps its mail parked.
+      await db.query(`UPDATE jobs SET status='completed' WHERE id=$1`, [job]);
+      await db.query(`SELECT billing_post($1,'adjustment','adjustment:'||$1,-3000000000,0,'{}','system')`, [wid]);
+      await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '8 days' WHERE workspace_id=$1`, [wid]);
+      await releaseLapsedHolds(runtime);
+      assert.equal(await status(), 'completed');
+    });
+  });
+
+  test('a refund gives back promotional credit only up to what promo paid for that month\'s usage; the rest is paid credit again', async t => {
+    await simulatedSesFixture(t, async ({ db }) => {
+      await db.query(`UPDATE billing_config SET mode='enforce', free_split_from='2026-07-01'`);
+      const wid = unique('billing-promo-month');
+      const meter = (hour: string, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1,$2::timestamptz,'send',$3)
+        ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, hour, q]);
+      const account = async () => (await db.query('SELECT balance_uc::text AS paid, promo_uc::text AS promo FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
+      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_sent_used) VALUES ($1,'2026-07-01',3000)`, [wid]);
+      // July: a $1 grant pays for 5,000 sends beyond the free ones.
+      await db.query(`SELECT billing_post($1,'grant','grant:'||$1,0,100000000,'{}','operator:fixture')`, [wid]);
+      await meter('2026-07-10 10:00Z', 5000);
+      assert.equal((await settle(db, wid, "'2026-07-10 11:00Z'::timestamptz")).costUc, '100000000');
+      // August: a $25 top-up pays for 10,000 sends beyond August's free 3,000; those 10,000 are canceled before they go out.
+      await db.query(`SELECT billing_post($1,'topup','attempt:'||$1,2500000000,0,'{}','stripe')`, [wid]);
+      await meter('2026-08-02 10:00Z', 13000);
+      assert.equal((await settle(db, wid, "'2026-08-02 11:00Z'::timestamptz")).costUc, '200000000');
+      await refundInto(db, wid, '2026-08-02 11:00Z', '2026-08-02 10:00Z', 'send', -10000);
+      assert.equal((await settle(db, wid, "'2026-08-02 12:00Z'::timestamptz")).costUc, '-200000000');
+      // The $2 comes back as paid credit: no promo paid for August's sends.
+      assert.deepEqual(await account(), { paid: '2500000000', promo: '0' });
+    });
+  });
+
+  test('a missed daily storage run is caught up: every day is metered, each against its own aged sum', async t => {
+    await simulatedSesFixture(t, async ({ db }) => {
+      const wid = unique('billing-storage-days');
+      await db.query(`UPDATE billing_config SET storage_aged_through=NULL`);
+      await db.query(`INSERT INTO mail_storage_days(workspace_id,day,bytes) VALUES ($1,'2026-08-01',5000000000),($1,'2026-08-08',1000000000)`, [wid]);
+      const day = async (d: string) => (await db.query('SELECT billing_storage_day($1::date) AS d', [d])).rows[0].d;
+      await day('2026-11-05');
+      // The 2026-11-06 run is missed; the next one meters both days, and a late rerun of the missed day adds nothing.
+      assert.equal((await day('2026-11-07')).through, '2026-08-08');
+      assert.equal((await day('2026-11-06')).metered, 0);
+      const rows = (await db.query(`SELECT to_char(hour AT TIME ZONE 'UTC','YYYY-MM-DD') AS day, quantity::text FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='storage' ORDER BY hour`, [wid])).rows;
+      assert.deepEqual(rows.map(r => [r.day, r.quantity]), [['2026-11-05', '4000000000'], ['2026-11-06', '4000000000'], ['2026-11-07', '5000000000']]);
+    });
+  });
+
+  test('month boundaries and time zones: "sending paused" reads this month\'s allowance, and storage starts at 00:00 UTC in any session time zone', async t => {
+    await simulatedSesFixture(t, async ({ db }) => {
+      await db.query(`UPDATE billing_config SET mode='enforce', free_split_from='2026-01-01'`);
+      // Last month's free sends were used and $0.10 was left; 500 sends from its last hour settle just after midnight.
+      // This month's 3,000 free sends are all left, so sending isn't paused and no notice goes out.
+      const wid = unique('billing-month-end');
+      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_sent_used) VALUES ($1,(date_trunc('month',now() AT TIME ZONE 'UTC') - interval '1 month')::date,3000)`, [wid]);
+      await db.query(`SELECT billing_post($1,'topup','attempt:'||$1,10000000,0,'{}','stripe')`, [wid]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('month',now(),'UTC') - interval '1 hour','send',500)`, [wid]);
+      assert.equal((await settle(db, wid)).costUc, '10000000');
+      const after = (await db.query(`SELECT empty_since, (SELECT count(*)::int FROM billing_notices WHERE workspace_id=$1 AND kind='sends_paused') AS notices FROM billing_accounts WHERE workspace_id=$1`, [wid])).rows[0];
+      assert.deepEqual([after.empty_since, after.notices, (await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p.freeSentLeft], [null, 0, 3000]);
+      // Storage priced from December 1 starts at 00:00 UTC, also for a session in New York.
+      await db.query(`SET LOCAL TIME ZONE 'America/New_York'`);
+      await db.query(`UPDATE billing_config SET storage_billing_from='2026-12-01'`);
+      const rate = async (hour: string) => Number((await db.query(`SELECT billing_rate_uc('storage',1::smallint,$1::timestamptz) AS r`, [hour])).rows[0].r);
+      assert.deepEqual([await rate('2026-11-30T23:00:00Z') === 0, await rate('2026-12-01T00:00:00Z') > 0], [true, true]);
+    });
+  });
+
+  test('a mode switch waits for usage a writer holds and for meter writes in flight: none of the old mode\'s usage is priced under the new one', { skip: DATABASE_FIXTURE_SKIP }, async t => {
+    // Committed rows on two connections: B holds a meter row (or is a meter write in flight) while A switches the mode.
+    const { setBillingEnforcement } = await import('./scripts/set-billing-enforcement.js');
+    const a = await fixtureDatabase(t), b = await fixtureDatabase(t), wids: string[] = [];
+    // A runs the switch, so B (in its own transaction) watches for A waiting on a lock.
+    const waiting = async () => {
+      for (const until = Date.now() + 4000; ;) {
+        const { rows: [w] } = await b.query(`SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1`, [(a as unknown as { processID: number }).processID]);
+        if (w?.wait_event_type === 'Lock') return;
+        assert.ok(Date.now() < until, 'The switch waits for the writer.');
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    };
+    const account = async (wid: string) => (await a.query('SELECT balance_uc::text AS b, unpaid_since IS NOT NULL AS unpaid FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
+    const settleNow = async (wid: string) => { for (const cutoff of ["date_trunc('hour', now() - interval '5 minutes', 'UTC')", "now() + interval '1 hour'"]) await a.query(`SELECT billing_settle($1, ${cutoff})`, [wid]); };
+    // B holds the meter row of 50,000 sends metered while off; A turns billing back on, then settles. Nothing is charged.
+    // free: the same with a workspace whose free flag ends. writer: B is a meter write in flight to a row of its own.
+    try { for (const kind of ['installation', 'free', 'writer'] as const) {
+      const wid = unique(`billing-switch-${kind}`); wids.push(wid);
+      await a.query(`INSERT INTO billing_accounts(workspace_id) VALUES ($1)`, [wid]);
+      if (kind === 'free') await a.query(`SELECT billing_set_workspace_free($1, true, 'Partner trial for the quarter', NULL, 'script')`, [wid]);
+      await a.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'send',50000)`, [wid]);
+      await b.query('BEGIN');
+      await a.query('BEGIN');
+      try {
+        if (kind === 'writer') {
+          await b.query('SELECT billing_meter_fence($1)', [wid]);
+          await b.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'receive',20000)`, [wid]);
+        } else await b.query(`SELECT 1 FROM billing_usage_hourly WHERE workspace_id=$1 FOR UPDATE`, [wid]);
+        if (kind !== 'free') await a.query(`UPDATE billing_config SET mode='off' WHERE singleton`);
+        const switched = kind === 'free' ? a.query(`SELECT billing_set_workspace_free($1, false, NULL, NULL, 'script')`, [wid])
+          : setBillingEnforcement(a, ['enforce', '--reason', 'Billing back on after the check']);
+        await waiting();
+        await b.query('COMMIT');
+        await switched;
+        await settleNow(wid);
+        assert.deepEqual(await account(wid), { b: '0', unpaid: false }, kind);
+      } finally { await b.query('ROLLBACK').catch(() => {}); await a.query('ROLLBACK'); }
+    } } finally {
+      await a.query('DELETE FROM billing_usage_hourly WHERE workspace_id=ANY($1)', [wids]);
+      await a.query('DELETE FROM billing_accounts WHERE workspace_id=ANY($1)', [wids]);
+    }
+  });
+
+  for (const funding of ['top-up', 'promo'] as const) test(`canceling exempt mail never takes the charge of other mail metered in the same hour (${funding}), and a real debt keeps its hold`, async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const f = await billingFixture(runtime, db, local, request), { restoreJob } = await import('./src/billing/restore.js');
+      const free = (on: boolean) => db.query(`SELECT billing_set_workspace_free($1,$2,'Fixture',NULL,'operator:fixture')`, [f.wid, on]);
+      const queue = async (rows: number) => (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
+        SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,50) n),'[]','[]','Queued','{}',false
+        FROM generate_series(1,$5::int) i RETURNING id`, [unique('queued'), f.wid, REGION, f.from, rows])).rows.map(r => r.id as string);
+      const later = "now() + interval '1 hour'";
+      await f.mode('enforce', ', receive_hold=true');
+      // Exempt: 80 messages × 50 recipients. The exemption ends and they settle at $0.
+      await free(true);
+      const exempt = await queue(80);
+      await free(false);
+      // Funded with exactly $0.20, 20 more messages × 50 recipients in the same hour cost $0.20.
+      await db.query(`SELECT billing_post($1,$2,'fixture:'||$1,$3,$4,'{}','operator:fixture')`, funding === 'top-up' ? [f.wid, 'topup', 20_000_000, 0] : [f.wid, 'grant', 0, 20_000_000]);
+      const funded = await queue(20);
+      assert.equal((await settle(db, f.wid, later)).costUc, '20000000');
+      // 4,000 received messages owe $0.20; eight days later received mail is held.
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'receive',4000)`, [f.wid]);
+      assert.equal((await settle(db, f.wid, later)).costUc, '20000000');
+      await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '8 days' WHERE workspace_id=$1`, [f.wid]);
+      const mid = unique('held');
+      await db.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,status,error)
+        VALUES ($1,$2,$3,'fixture',$4,'["inbox@billing.example"]','{}','held','BILLING_HOLD')`, [f.wid, mid, REGION, 'held/' + mid]);
+      // 20 of the exempt messages are canceled: nothing comes back, the debt and its hold stay, and the funded mail is queued.
+      await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=ANY($1)`, [exempt.slice(0, 20)]);
+      assert.equal((await settle(db, f.wid, later)).costUc, '0');
+      const p = await f.position();
+      assert.deepEqual([p.balanceUc, p.promoUc, p.receiveHeld], ['-20000000', '0', true]);
+      await restoreJob(runtime, {}, { id: `billing.restored:${f.wid}`, attempts: 1, workspaceId: f.wid });
+      assert.equal((await db.query('SELECT status FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2', [f.wid, mid])).rows[0].status, 'held');
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM sending_emails WHERE id=ANY($1) AND status='queued'`, [funded])).rows[0].n, 20);
+    });
+  });
+
+  test('accounts the old rule kept unpaid on a debt promo covers are released by the migration; a written-off debt keeps its hold', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { releaseLapsedHolds } = await import('./src/billing/cron.js');
+      await db.query(`UPDATE billing_config SET mode='enforce', receive_hold=true`);
+      const covered = unique('billing-covered'), written = unique('billing-written');
+      const post = (wid: string, kind: string, paid: number, promo = 0) => db.query(`SELECT billing_post($1,$2,$3,$4,$5,'{}','system')`, [wid, kind, `${kind}:${wid}`, paid, promo]);
+      // A $0.20 debt, then a $5 grant; under the old rule the episode stayed open (as the migration finds it), with mail held.
+      await post(covered, 'adjustment', -20_000_000); await post(covered, 'grant', 0, 500_000_000);
+      // A debt written off with no credit since: the hold stays until a payment, by design.
+      await post(written, 'adjustment', -20_000_000); await post(written, 'write_off', 20_000_000);
+      for (const wid of [covered, written]) {
+        await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '8 days' WHERE workspace_id=$1`, [wid]);
+        await db.query(`INSERT INTO jobs(id,type,workspace_id,payload,status) VALUES ('billing.restored:'||$1,'billing.restored',$1,'{}','completed')
+          ON CONFLICT (id) DO UPDATE SET status='completed'`, [wid]);
+        await db.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,status,error)
+          VALUES ($1,$2,$3,'fixture','held/x','["inbox@billing.example"]','{}','held','BILLING_HOLD')`, [wid, unique('held'), REGION]);
+      }
+      const held = async (wid: string) => (await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p.receiveHeld;
+      assert.deepEqual([await held(covered), await held(written)], [true, true]);
+      const cleared: string[] = (await db.query('SELECT billing_reconcile_unpaid() AS w')).rows[0].w;
+      assert.ok(cleared.includes(covered) && !cleared.includes(written));
+      assert.deepEqual([await held(covered), await held(written)], [false, true]);
+      assert.equal((await db.query(`SELECT status FROM jobs WHERE id=$1`, [`billing.restored:${covered}`])).rows[0].status, 'pending');
+      assert.equal((await db.query('SELECT balance_uc::text AS b FROM billing_accounts WHERE workspace_id=$1', [covered])).rows[0].b, '-20000000', 'The paid debt stays for the next top-up.');
+      // The hourly sweep also releases a workspace that is no longer held, and leaves the written-off one held.
+      await db.query(`UPDATE jobs SET status='completed' WHERE id=$1`, [`billing.restored:${covered}`]);
+      await releaseLapsedHolds(runtime);
+      const status = async (wid: string) => (await db.query('SELECT status FROM jobs WHERE id=$1', [`billing.restored:${wid}`])).rows[0].status;
+      assert.deepEqual([await status(covered), await status(written)], ['pending', 'completed']);
+    });
+  });
+
+  test('the storage rebuild keeps the storage cursor: the next run meters every day since the last one metered', async t => {
+    await simulatedSesFixture(t, async ({ db }) => {
+      const wid = unique('billing-storage-rebuild'), thread = unique('thread');
+      await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [wid]);
+      await db.query(`INSERT INTO mail_threads(id,workspace_id) VALUES ($1,$2)`, [thread, wid]);
+      // 2 GB of kept mail and 1 GB of default mail received on 2026-08-01; November 10 was metered before the rebuild.
+      await db.query(`INSERT INTO mail_messages(id,workspace_id,direction,thread_id,ses_message_id,size_bytes,received_at,lifecycle) VALUES
+        ($1||'-k',$2,'inbound',$3,$1||'-k',2000000000,'2026-08-01 12:00Z','kept'),($1||'-d',$2,'inbound',$3,$1||'-d',1000000000,'2026-08-01 12:00Z','default')`, [unique('msg'), wid, thread]);
+      await db.query(`UPDATE billing_config SET storage_aged_through=NULL`);
+      await db.query(`SELECT billing_storage_day('2026-11-10')`);
+      await db.query('SELECT billing_storage_rebuild()');
+      assert.equal((await db.query('SELECT storage_aged_through::text AS d FROM billing_config')).rows[0].d, '2026-08-11');
+      // The runs of November 11 to 13 are missed; November 14's meters all four days.
+      await db.query(`SELECT billing_storage_day('2026-11-14')`);
+      const rows = (await db.query(`SELECT to_char(hour AT TIME ZONE 'UTC','MM-DD') AS day, quantity::text FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='storage' ORDER BY hour`, [wid])).rows;
+      assert.deepEqual(rows.map(r => [r.day, r.quantity]), [['11-10', '1000000000'], ['11-11', '1000000000'], ['11-12', '1000000000'], ['11-13', '1000000000'], ['11-14', '1000000000']]);
+    });
+  });
+
+  test('the storage rebuild holds mail writes off before it reads: a concurrent insert or lifecycle change waits for it, then counts, without a deadlock', { skip: DATABASE_FIXTURE_SKIP }, async t => {
+    // Committed rows on two connections, as migration 314 runs against live mail writers: A rebuilds (and then takes the
+    // lock its CREATE TRIGGER takes) while B writes kept mail of the same workspace and day.
+    const a = await fixtureDatabase(t), b = await fixtureDatabase(t), wid = unique('billing-rebuild-race'), thread = unique('thread'), id = unique('msg');
+    const message = (suffix: string, bytes: number, lifecycle: string) => `INSERT INTO mail_messages(id,workspace_id,direction,thread_id,ses_message_id,size_bytes,received_at,lifecycle)
+      VALUES ('${id}-${suffix}','${wid}','inbound','${thread}','${id}-${suffix}',${bytes},'2026-08-01 12:00Z','${lifecycle}')`;
+    await a.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [wid]);
+    await a.query('INSERT INTO mail_threads(id,workspace_id) VALUES ($1,$2)', [thread, wid]);
+    await a.query(message('kept', 1_000_000_000, 'kept'));
+    await a.query(message('default', 500_000_000, 'default'));
+    const waitingOn = async () => {
+      for (const until = Date.now() + 4000; ;) {
+        const { rows: [w] } = await a.query(`SELECT l.locktype, c.relname FROM pg_locks l LEFT JOIN pg_class c ON c.oid=l.relation WHERE l.pid=$1 AND NOT l.granted`, [(b as unknown as { processID: number }).processID]);
+        if (w) return w;
+        assert.ok(Date.now() < until, 'The mail write waits for the rebuild.');
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    };
+    try {
+      for (const write of [message('late', 250_000_000, 'kept'), `UPDATE mail_messages SET lifecycle='kept' WHERE id='${id}-default'`]) {
+        await a.query('BEGIN');
+        try {
+          await a.query('SELECT billing_storage_rebuild()');
+          const pending = b.query(write);
+          // The write waits on mail_messages itself, not on a storage row the rebuild holds.
+          assert.deepEqual(await waitingOn(), { locktype: 'relation', relname: 'mail_messages' });
+          await a.query('LOCK TABLE mail_messages IN SHARE ROW EXCLUSIVE MODE');
+          await a.query('COMMIT');
+          await pending;
+        } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
+      }
+      assert.equal((await a.query(`SELECT bytes::text FROM mail_storage_days WHERE workspace_id=$1 AND day='2026-08-01'`, [wid])).rows[0]?.bytes, '1750000000');
+    } finally {
+      for (const table of ['mail_messages', 'mail_threads', 'billing_usage_hourly', 'mail_storage_days', 'mail_storage_aged']) await a.query(`DELETE FROM ${table} WHERE workspace_id=$1`, [wid]);
+      await a.query('DELETE FROM workspaces WHERE id=$1', [wid]).catch(() => {});
+    }
+  });
+
+  test('migration 314 and the settler lock in one order: whichever starts first, the other waits at billing_accounts and neither deadlocks', { skip: DATABASE_FIXTURE_SKIP }, async t => {
+    // Committed rows on two connections. A runs 314's own lock prologue (the statements between its lock-order markers)
+    // and then its reconciliation; B runs the settler on an unpaid account with 4,000 unsettled sends.
+    const file = await readFile(new URL('./migrations/314_billing_sweep.sql', import.meta.url), 'utf8');
+    const prologue = file.slice(file.indexOf('-- lock order: begin'), file.indexOf('-- lock order: end'));
+    assert.match(prologue, /LOCK TABLE billing_accounts IN EXCLUSIVE MODE;\nLOCK TABLE billing_usage_paid IN ACCESS EXCLUSIVE MODE;/);
+    const a = await fixtureDatabase(t), b = await fixtureDatabase(t), pid = (db: pg.Client) => (db as unknown as { processID: number }).processID;
+    const waitingOn = async (watcher: pg.Client, waiter: pg.Client) => {
+      for (const until = Date.now() + 4000; ;) {
+        const { rows: [w] } = await watcher.query(`SELECT l.locktype, c.relname FROM pg_locks l LEFT JOIN pg_class c ON c.oid=l.relation WHERE l.pid=$1 AND NOT l.granted`, [pid(waiter)]);
+        if (w) return w;
+        assert.ok(Date.now() < until, 'One side waits for the other.');
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    };
+    for (const first of ['settler', 'migration'] as const) {
+      const wid = unique(`billing-314-${first}`);
+      await a.query(`SELECT billing_post($1,'adjustment','adjustment:'||$1,-1000000,0,'{}','system')`, [wid]);
+      await a.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'send',4000)`, [wid]);
+      const settle = (db: pg.Client) => db.query(`SELECT billing_settle($1, now() + interval '1 hour') AS s`, [wid]);
+      try {
+        if (first === 'settler') {
+          // The settler holds the account and has written billing_usage_paid: the migration waits at billing_accounts.
+          await b.query('BEGIN');
+          assert.equal((await settle(b)).rows[0].s.costUc, '20000000');
+          await a.query('BEGIN');
+          const migrating = a.query(prologue);
+          assert.deepEqual(await waitingOn(b, a), { locktype: 'relation', relname: 'billing_accounts' });
+          await b.query('COMMIT');
+          await migrating;
+          await a.query('SELECT billing_reconcile_unpaid()');
+        } else {
+          // The migration holds its locks first: the settler waits at billing_accounts while the migration locks unpaid
+          // accounts, and settles once it is done.
+          await a.query('BEGIN');
+          await a.query(prologue);
+          const settling = settle(b);
+          assert.deepEqual(await waitingOn(a, b), { locktype: 'relation', relname: 'billing_accounts' });
+          await a.query('SELECT billing_reconcile_unpaid()');
+          await a.query('ROLLBACK');
+          assert.equal((await settling).rows[0].s.costUc, '20000000');
+        }
+      } finally { await b.query('ROLLBACK').catch(() => {}); await a.query('ROLLBACK').catch(() => {}); }
+    }
+  });
+
+  test('a write-off takes only the debt left when it runs: a top-up landing during the daily scan is collected, not forgiven', { skip: DATABASE_FIXTURE_SKIP }, async t => {
+    // Committed rows on two connections: the scan reads the account, then a top-up commits before the write-off posts.
+    const a = await fixtureDatabase(t), b = await fixtureDatabase(t), wid = unique('billing-writeoff-race');
+    await a.query(`SELECT billing_post($1,'adjustment','adjustment:'||$1,-5000000000,0,'{}','system')`, [wid]);
+    await a.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '65 days' WHERE workspace_id=$1`, [wid]);
+    await a.query('BEGIN');
+    try {
+      await a.query('SELECT 1 FROM billing_accounts WHERE workspace_id=$1 FOR UPDATE', [wid]);
+      const scan = b.query('SELECT billing_unpaid_scan() AS s');
+      for (const until = Date.now() + 4000; ;) {
+        const { rows: [w] } = await a.query(`SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1`, [(b as unknown as { processID: number }).processID]);
+        if (w?.wait_event_type === 'Lock') break;
+        assert.ok(Date.now() < until, 'The scan waits for the account.');
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      await a.query(`SELECT billing_post($1,'topup','attempt:'||$1,6000000000,0,'{}','stripe')`, [wid]);
+      await a.query('COMMIT');
+      await scan;
+    } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
+    const account = (await a.query(`SELECT balance_uc::text AS b, (SELECT count(*)::int FROM billing_ledger WHERE workspace_id=$1 AND kind='write_off') AS written,
+      (SELECT count(*)::int FROM billing_credit_lots WHERE workspace_id=$1 AND expires_at IS NULL) AS forever FROM billing_accounts WHERE workspace_id=$1`, [wid])).rows[0];
+    assert.deepEqual(account, { b: '1000000000', written: 0, forever: 0 });
+  });
+
   test('prepaid credit: the oldest top-up is spent first, one notice 30 days before, and it expires once its hour has closed', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { creditExpiry } = await import('./src/billing/cron.js');
@@ -9029,9 +9467,13 @@ describe('Billing: API, MCP and notices', () => {
           error(await local(method, path, body), 403, 'PERMISSION_DENIED');
       } finally { await asRole(db, wid, 'owner'); }
 
-      // The state follows the balance: debt pauses sending (enforced, prepaid) and starts the received-mail grace.
+      // The state follows the balance: debt pauses sending (enforced, prepaid). While the installation doesn't hold
+      // received mail, nothing promises a hold; with holds on, the debt starts the received-mail grace.
       await db.query(`SELECT billing_post($1,'usage','usage:fixture-debt',-3000000000,-500000000,'{}','system')`, [wid]);
       await db.query(`UPDATE billing_accounts SET free_month=date_trunc('month',now() AT TIME ZONE 'UTC')::date,free_sent_used=3000 WHERE workspace_id=$1`, [wid]);
+      const unheld = ok(await local('GET', '/v1/billing'));
+      assert.deepEqual([unheld.state.sending, unheld.state.receiving, unheld.grace.receiveHoldAt, typeof unheld.grace.unpaidSince], ['paused', 'ok', null, 'string']);
+      await db.query('UPDATE billing_config SET receive_hold=true WHERE singleton');
       const paused = ok(await local('GET', '/v1/billing'));
       assert.deepEqual([paused.state.sending, paused.state.receiving, typeof paused.grace.receiveHoldAt], ['paused', 'grace', 'string']);
       assert.deepEqual(ok(await local('GET', '/v1/me')).billing.sending, 'paused');
@@ -9087,15 +9529,23 @@ describe('Billing: API, MCP and notices', () => {
         assert.deepEqual((await db.query(`SELECT actor_type,via,internal,retain_until>at+interval '6 years 11 months' AS kept FROM audit_events WHERE workspace_id=$1 AND action='billing.topup'`, [wid])).rows,
           [{ actor_type: 'stripe', via: 'webhook', internal: false, kept: true }]);
         assert.deepEqual(page(await local('GET', '/v1/activity?action=billing.')).map(e => e.action), ['billing.topup']);
-        error(await local('POST', refundPath, { ...refundBody, amountCents: 900_000 }), 409, 'REFUND_EXCEEDS_BALANCE');
+        error(await local('POST', refundPath, { ...refundBody, amountCents: 900_000 }, 'live', { 'Idempotency-Key': 'refund-2' }), 409, 'REFUND_EXCEEDS_BALANCE');
         assert.equal((await audits()).length, 1, 'A refused refund leaves no audit row.');
+        // Without an Idempotency-Key a retried refund would reach Stripe twice: it is refused before anything moves.
+        const refunds = fake.count(/\/v1\/refunds/);
+        assert.equal(error(await local('POST', refundPath, { ...refundBody, amountCents: 500 }), 422, 'VALIDATION_FAILED').field, 'Idempotency-Key');
+        assert.deepEqual([fake.count(/\/v1\/refunds/), (await audits()).length], [refunds, 1]);
         // Unused credit is refundable only for a billing error, a legal requirement or an account Anomaly closes.
-        error(await local('POST', refundPath, { attemptId: first.attemptId, reason: 'Customer no longer needs the credit' }), 422);
-        error(await local('POST', refundPath, { ...refundBody, basis: 'unused_credit' }), 422);
-        // Anomaly closes the account without cause: what is left of every top-up goes back to its card.
-        const closed = ok(await local('POST', `/v1/operator/billing/${wid}/close-refund`, { reason: 'Anomaly closed this account without cause' })).refunds;
+        error(await local('POST', refundPath, { attemptId: first.attemptId, reason: 'Customer no longer needs the credit' }, 'live', { 'Idempotency-Key': 'refund-3' }), 422);
+        error(await local('POST', refundPath, { ...refundBody, basis: 'unused_credit' }, 'live', { 'Idempotency-Key': 'refund-3' }), 422);
+        // Anomaly closes the account without cause: what is left of every top-up goes back to its card. A retry with the
+        // same key answers the same; another key finds nothing left to refund.
+        const closeBody = { reason: 'Anomaly closed this account without cause' }, closePath = `/v1/operator/billing/${wid}/close-refund`;
+        error(await local('POST', closePath, closeBody), 422, 'VALIDATION_FAILED');
+        const closed = ok(await local('POST', closePath, closeBody, 'live', { 'Idempotency-Key': 'close-1' })).refunds;
         assert.deepEqual(closed.map((r: Json) => [r.attemptId, r.amountCents]), [[first.attemptId, 4000]]);
-        assert.deepEqual(ok(await local('POST', `/v1/operator/billing/${wid}/close-refund`, { reason: 'Anomaly closed this account without cause' })).refunds, [], 'Nothing is left to refund twice.');
+        assert.deepEqual(ok(await local('POST', closePath, closeBody, 'live', { 'Idempotency-Key': 'close-1' })).refunds, closed);
+        assert.deepEqual(ok(await local('POST', closePath, closeBody, 'live', { 'Idempotency-Key': 'close-2' })).refunds, [], 'Nothing is left to refund twice.');
         assert.deepEqual((await db.query(`SELECT detail->>'basis' AS basis FROM billing_ledger WHERE workspace_id=$1 AND kind='refund_hold' ORDER BY id`, [wid])).rows.map(r => r.basis), ['billing_error', 'account_closure']);
         // The owner sets auto-recharge (the summary comes back), then removes the card, which turns it off.
         const on = ok(await local('PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1500, amountCents: 3000, monthlyCapCents: 30000 }));
@@ -9126,6 +9576,10 @@ describe('Billing: API, MCP and notices', () => {
       // Plan & usage carries the free allowances, one per direction, and whether billing charges yet.
       const plan = ok(await local('GET', '/v1/usage'));
       assert.deepEqual([plan.billing, plan.pricing], [{ enabled: true, enforcement: 'enforce' }, { currency: 'USD', perThousand: 0.2, freeEmails: 3000, freeSentEmails: 3000, freeReceivedEmails: 3000, freeStorageBytes: 1_000_000_000 }]);
+      // Its billed counts are the units billing prices (each recipient of a send, each billable received message), so an
+      // estimate from them matches the charge; a reader sees sends only, as with the received count.
+      assert.deepEqual([plan.month.billedSent, plan.month.billedReceived], [42, 7]);
+      assert.deepEqual([ok(await request('GET', '/v1/usage', reader)).month.billedSent, ok(await request('GET', '/v1/usage', reader)).month.billedReceived], [42, null]);
     });
   });
 
@@ -9203,6 +9657,7 @@ describe('Billing: API, MCP and notices', () => {
       const unpaidSince = new Date('2026-11-01T10:00:00Z'), base = { workspace: 'W', link: 'https://bane.example/settings#billing', freeLeft: 0, unpaidSince, data: {} };
       const debt = -1_240_000_000n as import('./src/billing/money.js').MicroCents;
       assert.match(noticeEmail('sends_paused', { ...base, totalUc: debt }).text, /this month's 3,000 free sent emails are used\..*402 BALANCE_EXHAUSTED.*451.*accepted until Nov 8, 2026\. Nothing is deleted\./s);
+      assert.match(noticeEmail('sends_paused', { ...base, totalUc: debt, receiveHold: false }).text, /451, so mail clients keep the message and retry\. Received mail is still accepted\. Nothing is deleted\./);
       assert.equal(noticeEmail('receive_hold_soon', { ...base, totalUc: debt }).subject, 'Received mail for W will be held on Nov 8, 2026');
       assert.match(noticeEmail('receive_held', { ...base, totalUc: debt }).text, /owed \$12\.40 since Nov 1, 2026.*written off, but the hold stays until a top-up/s);
     });
@@ -9212,13 +9667,14 @@ describe('Billing: API, MCP and notices', () => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const wid = await hostedBilling(runtime, db), base = `/v1/operator/billing/${wid}`;
       const key = ok(await local('POST', '/v1/api-keys', { name: 'Not an operator', permissions: ['manage'] }), 201); secrets.add(key.secret);
-      error(await local('POST', `${base}/credits`, { amountCents: 1000, reason: 'Goodwill after an outage' }), 403, 'OPERATOR_REQUIRED');
-      error(await request('POST', `${base}/credits`, key.secret, { amountCents: 1000, reason: 'Goodwill after an outage' }), 403, 'OPERATOR_REQUIRED');
+      const once = (k: string) => ({ 'Idempotency-Key': k });
+      error(await local('POST', `${base}/credits`, { amountCents: 1000, reason: 'Goodwill after an outage' }, 'live', once('refused-1')), 403, 'OPERATOR_REQUIRED');
+      error(await request('POST', `${base}/credits`, key.secret, { amountCents: 1000, reason: 'Goodwill after an outage' }, once('refused-2')), 403, 'OPERATOR_REQUIRED');
       error(await request('GET', base, key.secret), 403, 'OPERATOR_REQUIRED');
       const { setOperator } = await import('./scripts/set-operator.js');
       await setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic support helper']);
       assert.equal(ok(await local('GET', base)).account, null);
-      error(await local('POST', `${base}/credits`, { amountCents: 1000, reason: 'Goodwill after an outage' }), 403, 'OPERATOR_REQUIRED');
+      error(await local('POST', `${base}/credits`, { amountCents: 1000, reason: 'Goodwill after an outage' }, 'live', once('refused-3')), 403, 'OPERATOR_REQUIRED');
       await setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Bane operator']);
 
       // A promotional credit: the ledger row and its audit row commit in the same (sub)transaction; a retry with the
@@ -9231,16 +9687,24 @@ describe('Billing: API, MCP and notices', () => {
         FROM audit_events WHERE workspace_id=$1 AND action LIKE 'billing.%' AND retain_until>at+interval '6 years 11 months'`, [wid])).rows;
       assert.deepEqual([entry.kind, entry.source_id, entry.promo_uc, entry.actor], ['grant', `grant:${manager!.userId}:grant-1`, '1000000000', `operator:${manager!.userId}`]);
       assert.deepEqual([audit.action, audit.reason, audit.ticket_ref, audit.operator_id, audit.before, audit.after, audit.x], ['billing.credit_promo', 'Goodwill after an outage', 'T-42', manager!.userId, '0', '1000000000', entry.x]);
-      // Paid credit, a signed adjustment and the debt they leave; a write-off clears the debt but not unpaid_since.
-      ok(await local('POST', `${base}/credits`, { amountCents: 500, bucket: 'paid', reason: 'Refund outside Stripe, ticket T-43' }));
-      ok(await local('POST', `${base}/adjustments`, { amountCents: -2000, reason: 'Drift fix for the November usage' }));
-      error(await local('POST', `${base}/adjustments`, { amountCents: 0, reason: 'Drift fix for the November usage' }), 422, 'VALIDATION_FAILED');
+      // Money moves only under an Idempotency-Key: without one, a retried request (a lost response) would credit, debit or
+      // write off twice. Each is refused before anything is posted or audited.
+      const posted = async () => (await db.query(`SELECT count(*)::int AS n FROM billing_ledger WHERE workspace_id=$1`, [wid])).rows[0].n;
+      for (const [path, body] of [['credits', { amountCents: 500, bucket: 'paid', reason: 'Refund outside Stripe, ticket T-43' }], ['adjustments', { amountCents: -2000, reason: 'Drift fix for the November usage' }],
+        ['write-off', { reason: 'Customer closed the account' }]] as const)
+        assert.equal(error(await local('POST', `${base}/${path}`, body), 422, 'VALIDATION_FAILED').field, 'Idempotency-Key');
+      assert.equal(await posted(), 1);
+      // Paid credit, a signed adjustment and the debt they leave; a write-off clears the debt but not unpaid_since. A
+      // retried adjustment posts once.
+      ok(await local('POST', `${base}/credits`, { amountCents: 500, bucket: 'paid', reason: 'Refund outside Stripe, ticket T-43' }, 'live', once('paid-1')));
+      for (let i = 0; i < 2; i++) ok(await local('POST', `${base}/adjustments`, { amountCents: -2000, reason: 'Drift fix for the November usage' }, 'live', once('adjust-1')));
+      error(await local('POST', `${base}/adjustments`, { amountCents: 0, reason: 'Drift fix for the November usage' }, 'live', once('adjust-2')), 422, 'VALIDATION_FAILED');
       const owed = ok(await local('GET', base));
       assert.deepEqual([owed.account.balance_uc, owed.position.balanceUc, typeof owed.account.unpaid_since], [-1_500_000_000, '-1500000000', 'string']);
-      const written = ok(await local('POST', `${base}/write-off`, { reason: 'Customer closed the account' }));
+      const written = ok(await local('POST', `${base}/write-off`, { reason: 'Customer closed the account' }, 'live', once('write-off-1')));
       assert.deepEqual([written.account.balance_uc, typeof written.account.unpaid_since], ['0', 'string']);
       const before = (await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE workspace_id=$1`, [wid])).rows[0].n;
-      error(await local('POST', `${base}/write-off`, { reason: 'Customer closed the account' }), 409, 'NOTHING_OWED');
+      error(await local('POST', `${base}/write-off`, { reason: 'Customer closed the account' }, 'live', once('write-off-2')), 409, 'NOTHING_OWED');
       assert.equal((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE workspace_id=$1`, [wid])).rows[0].n, before, 'A refused change leaves no audit row.');
       const mode = ok(await local('PUT', `${base}/mode`, { mode: 'exempt', reason: 'Anomaly’s own workspace' }));
       assert.equal(mode.account.mode, 'exempt');

@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { actor, actorMailAccess, ApiError, dashboardSession, errors, json, notFound, response, security, type Actor, type App, type Ctx, type DbExecutor } from '../core.js';
@@ -31,7 +30,7 @@ export const BillingSummarySchema = z.object({
   mode: z.enum(['prepaid', 'invoiced', 'exempt']),
   state: z.object({
     sending: z.enum(['ok', 'low', 'paused']).describe('paused: sends get 402 BALANCE_EXHAUSTED until credit is added.'),
-    receiving: z.enum(['ok', 'grace', 'held']).describe('grace: the balance is below $0 and received mail is still accepted; held: new received mail is stored but not delivered until a top-up.'),
+    receiving: z.enum(['ok', 'grace', 'held']).describe('grace: the balance is below $0 and received mail is still accepted until grace.receiveHoldAt; held: new received mail is stored but not delivered until a top-up. While the installation doesn’t hold received mail, receiving stays ok.'),
     autoRecharge: z.enum(['off', 'on', 'pending', 'failed', 'capped']),
   }),
   balance: z.object({ paid: MicroCents, promo: MicroCents.describe('Promotional credit: spent first, never refunded.'), unsettled: MicroCents.describe('Usage not yet taken from the balance (settled hourly).'), available: MicroCents.describe('paid + promo − unsettled.') })
@@ -42,7 +41,7 @@ export const BillingSummarySchema = z.object({
     received: FreeAllowance.nullable().describe('Free received messages this month, separate from the sent allowance. Null unless the credential may read every received message (owners, admins and manage credentials), as in GET /v1/usage.'),
     storage: z.object({ limitBytes: z.number().int(), agedBytes: z.string().describe('Bytes of received mail older than 90 days.') }) }),
   monthToDate: z.object({ cost: MicroCents.describe('This month’s usage cost after the free allowance, settled and unsettled, charged or not.') }).nullable(),
-  grace: z.object({ unpaidSince: z.string().nullable(), receiveHoldAt: z.string().nullable(), writeOffAt: z.string().nullable() }),
+  grace: z.object({ unpaidSince: z.string().nullable(), receiveHoldAt: z.string().nullable().describe('When new received mail starts being held; null when nothing is owed or the installation doesn’t hold received mail.'), writeOffAt: z.string().nullable() }),
   autoRecharge: z.object({ enabled: z.boolean(), thresholdCents: z.number().int(), amountCents: z.number().int(), monthlyCapCents: z.number().int(), monthTotalCents: z.number().int(),
     disabledReason: z.string().nullable().describe(`Why ${productName} turned auto-recharge off (a card decline code, dispute or a removed card).`), pending: z.boolean() }).nullable(),
   paymentMethod: z.object({ brand: z.string(), last4: z.string(), expMonth: z.number().int(), expYear: z.number().int() }).nullable(),
@@ -261,6 +260,9 @@ const Reason = z.string().trim().min(10).max(1000).describe('Why, for the audit 
 const RefundBasis = z.enum(['billing_error', 'legal']);
 const WorkspaceParam = z.object({ wid: z.string().min(1).max(100) });
 const Mutation = z.object({ 'Idempotency-Key': z.string().min(1).max(200).optional() });
+// Money moves only under a key: a retried request (a lost response, a timeout) returns the first answer instead of
+// crediting, debiting or refunding through Stripe a second time.
+const MoneyMutation = z.object({ 'Idempotency-Key': z.string().min(1).max(200).describe('Required: a retry with the same key moves no money twice.') });
 type Account = { mode: string; paid_mode: string; balance_uc: string; promo_uc: string; unpaid_since: string | null; free_via: string | null; free_until: string | null; free_reason: string | null };
 const accountOf = async (tx: DbExecutor, wid: string, lock = false) => (await tx.execute<Account>(sql`SELECT mode,paid_mode,balance_uc::text,promo_uc::text,unpaid_since::text,free_via,free_until::text,free_reason
   FROM billing_accounts WHERE workspace_id=${wid} ${lock ? sql`FOR UPDATE` : sql``}`)).rows[0] ?? { mode: 'prepaid', paid_mode: 'prepaid', balance_uc: '0', promo_uc: '0', unpaid_since: null, free_via: null, free_until: null, free_reason: null };
@@ -288,7 +290,14 @@ const billingAudit = (tx: DbExecutor, c: Ctx, operator: OperatorIdentity, worksp
     action: `billing.${audit.action.replace(/^billing-/, '').replace(/-/g, '_')}`, workspaceId, userId: audit.userId ?? null,
     target: workspaceId ? { type: 'workspace', id: workspaceId } : { type: 'user', id: audit.userId ?? null },
     before: audit.before, after: audit.after, reason: audit.reason, ticketRef: audit.ticketRef ?? null, retention: 'billing' });
-const sourceKey = (c: Ctx, operatorId: string) => { const key = c.req.header('Idempotency-Key'); return key ? `${operatorId}:${key}` : randomUUID(); };
+/** The ledger source of an operator's money change: the operator and their Idempotency-Key (MoneyMutation requires it). */
+const sourceKey = (c: Ctx, operatorId: string) => `${operatorId}:${c.req.header('Idempotency-Key')}`;
+/** The stored answer to an earlier request with this Idempotency-Key, for a route that calls Stripe outside mutate(). */
+async function priorResponse<T>(c: Ctx, operatorId: string, key: string, hash: string) {
+  const { rows: [prior] } = await c.env.db.execute<{ request_hash: string; response: T }>(sql`SELECT request_hash,response FROM operator_idempotency WHERE operator_id=${operatorId} AND key=${key}`);
+  if (prior && prior.request_hash !== hash) throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This Idempotency-Key was used for a different request.');
+  return prior?.response ?? null;
+}
 
 const OperatorFree = z.object({ free: z.boolean(), via: z.enum(['workspace', 'account']).nullable(), until: z.string().nullable(),
   workspace: z.object({ at: z.string(), until: z.string().nullable(), reason: z.string().nullable(), by: z.string().nullable(), expired: z.boolean() }).nullable(),
@@ -336,7 +345,7 @@ function registerOperatorBilling(app: App) {
   const Done = z.object({ ok: z.literal(true), applied: z.boolean().optional(), entryId: z.string().nullable().optional(), account: z.unknown() });
 
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'post', path: '/v1/operator/billing/{wid}/credits', operationId: 'operatorGrantBillingCredit',
-    request: { params: WorkspaceParam, headers: Mutation, body: json(z.object({ amountCents: z.number().int().min(1).max(100_000), bucket: z.enum(['promo', 'paid']).default('promo'), reason: Reason,
+    request: { params: WorkspaceParam, headers: MoneyMutation, body: json(z.object({ amountCents: z.number().int().min(1).max(100_000), bucket: z.enum(['promo', 'paid']).default('promo'), reason: Reason,
       ticketRef: z.string().trim().min(1).max(200).optional() }).strict()) }, responses: { 200: response(Done), ...errors } }), async c => {
     const wid = c.req.valid('param').wid, body = c.req.valid('json'), uc = BigInt(body.amountCents) * 1_000_000n;
     return c.json(await moneyChange(c, wid, body, `billing-credit-${body.bucket}`, (tx, _before, who, operatorId) => {
@@ -347,7 +356,7 @@ function registerOperatorBilling(app: App) {
   });
 
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'post', path: '/v1/operator/billing/{wid}/adjustments', operationId: 'operatorAdjustBilling',
-    request: { params: WorkspaceParam, headers: Mutation, body: json(z.object({ amountCents: z.number().int().min(-1_000_000).max(1_000_000).refine(v => v !== 0, 'Use a non-zero amount.'), reason: Reason,
+    request: { params: WorkspaceParam, headers: MoneyMutation, body: json(z.object({ amountCents: z.number().int().min(-1_000_000).max(1_000_000).refine(v => v !== 0, 'Use a non-zero amount.'), reason: Reason,
       ticketRef: z.string().trim().min(1).max(200).optional() }).strict()) }, responses: { 200: response(Done), ...errors } }), async c => {
     const wid = c.req.valid('param').wid, body = c.req.valid('json');
     return c.json(await moneyChange(c, wid, body, 'billing-adjustment', (tx, _before, who, operatorId) =>
@@ -355,7 +364,7 @@ function registerOperatorBilling(app: App) {
   });
 
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'post', path: '/v1/operator/billing/{wid}/write-off', operationId: 'operatorWriteOffBilling',
-    request: { params: WorkspaceParam, headers: Mutation, body: json(z.object({ reason: Reason, ticketRef: z.string().trim().min(1).max(200).optional() }).strict()) }, responses: { 200: response(Done), ...errors } }), async c => {
+    request: { params: WorkspaceParam, headers: MoneyMutation, body: json(z.object({ reason: Reason, ticketRef: z.string().trim().min(1).max(200).optional() }).strict()) }, responses: { 200: response(Done), ...errors } }), async c => {
     const wid = c.req.valid('param').wid, body = c.req.valid('json');
     return c.json(await moneyChange(c, wid, body, 'billing-write-off', (tx, before, who, operatorId) => {
       const owed = -BigInt(before.balance_uc);
@@ -412,25 +421,23 @@ function registerOperatorBilling(app: App) {
   });
 
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'post', path: '/v1/operator/billing/{wid}/refunds', operationId: 'operatorRefundTopUp',
-    request: { params: WorkspaceParam, headers: Mutation, body: json(z.object({ attemptId: z.string().min(1).max(100), amountCents: z.number().int().min(1).max(1_000_000).optional(),
+    request: { params: WorkspaceParam, headers: MoneyMutation, body: json(z.object({ attemptId: z.string().min(1).max(100), amountCents: z.number().int().min(1).max(1_000_000).optional(),
       basis: RefundBasis.describe('Why this charge is refunded. Unused credit is not refundable otherwise; an account Anomaly closes is refunded with close-refund.'), reason: Reason,
       ticketRef: z.string().trim().min(1).max(200).optional() }).strict()) }, responses: { 200: response(z.object({ refundId: z.string(), status: z.string() })), ...errors } }), async c => {
-    const operator = await operatorActor(c, 'operator'), wid = c.req.valid('param').wid, body = c.req.valid('json'), key = c.req.header('Idempotency-Key'), hash = operatorRequestHash(c, body);
+    const operator = await operatorActor(c, 'operator'), wid = c.req.valid('param').wid, body = c.req.valid('json'), key = c.req.valid('header')['Idempotency-Key'], hash = operatorRequestHash(c, body);
     await existingWorkspace(c.env.db, wid);
-    if (key) {
-      const { rows: [prior] } = await c.env.db.execute<{ request_hash: string; response: { refundId: string; status: string } }>(sql`SELECT request_hash,response FROM operator_idempotency WHERE operator_id=${operator.userId} AND key=${key}`);
-      if (prior) { if (prior.request_hash !== hash) throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This Idempotency-Key was used for a different request.'); return c.json(prior.response, 200); }
-    }
+    const prior = await priorResponse<{ refundId: string; status: string }>(c, operator.userId, key, hash);
+    if (prior) return c.json(prior, 200);
     // Stripe is called outside any transaction (package B holds the amount first). The audit row, and the key that makes
     // a retry return this refund, commit in the transaction that writes the refund_hold ledger row: all or nothing.
     const refund = await refundTopUp(c.env, { workspaceId: wid, attemptId: body.attemptId, amountCents: body.amountCents, basis: body.basis, reason: body.reason, operator: `operator:${operator.userId}`,
       onHeld: async (tx, held) => {
         const after = await accountOf(tx, wid), before = { ...after, balance_uc: (BigInt(after.balance_uc) + held.amountUc).toString() };
         await billingAudit(tx, c, operator, wid, { action: 'billing-refund', before, after: { ...after, refundId: held.refundId, amountUc: held.amountUc.toString() }, reason: body.reason, ticketRef: body.ticketRef });
-        if (key && !(await tx.execute(sql`INSERT INTO operator_idempotency(operator_id,key,request_hash,response) VALUES(${operator.userId},${key},${hash},${JSON.stringify({ refundId: held.refundId, status: 'held' })}::jsonb)
+        if (!(await tx.execute(sql`INSERT INTO operator_idempotency(operator_id,key,request_hash,response) VALUES(${operator.userId},${key},${hash},${JSON.stringify({ refundId: held.refundId, status: 'held' })}::jsonb)
           ON CONFLICT DO NOTHING RETURNING 1`)).rows.length) throw new ApiError(409, 'IDEMPOTENCY_IN_PROGRESS', 'A request with this Idempotency-Key is already refunding; read the refund before trying again.', undefined, true);
       } });
-    if (key) await c.env.db.execute(sql`UPDATE operator_idempotency SET response=${JSON.stringify(refund)}::jsonb WHERE operator_id=${operator.userId} AND key=${key}`);
+    await c.env.db.execute(sql`UPDATE operator_idempotency SET response=${JSON.stringify(refund)}::jsonb WHERE operator_id=${operator.userId} AND key=${key}`);
     return c.json(refund, 200);
   });
 
@@ -438,10 +445,13 @@ function registerOperatorBilling(app: App) {
   // newest first). Repeating it refunds nothing more: each refund holds its amount first, and only unspent, unexpired
   // paid credit is refundable. Promotional credit never is.
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'post', path: '/v1/operator/billing/{wid}/close-refund', operationId: 'operatorRefundOnClosure',
-    request: { params: WorkspaceParam, body: json(z.object({ reason: Reason, ticketRef: z.string().trim().min(1).max(200).optional() }).strict()) },
+    request: { params: WorkspaceParam, headers: MoneyMutation, body: json(z.object({ reason: Reason, ticketRef: z.string().trim().min(1).max(200).optional() }).strict()) },
     responses: { 200: response(z.object({ refunds: z.array(z.object({ refundId: z.string(), attemptId: z.string(), amountCents: z.number().int(), status: z.string() })) })), ...errors } }), async c => {
-    const operator = await operatorActor(c, 'operator'), wid = c.req.valid('param').wid, body = c.req.valid('json');
+    const operator = await operatorActor(c, 'operator'), wid = c.req.valid('param').wid, body = c.req.valid('json'), key = c.req.valid('header')['Idempotency-Key'], hash = operatorRequestHash(c, body);
     await existingWorkspace(c.env.db, wid);
+    type Closed = { refunds: { refundId: string; attemptId: string; amountCents: number; status: string }[] };
+    const prior = await priorResponse<Closed>(c, operator.userId, key, hash);
+    if (prior) return c.json(prior, 200);
     const { rows: lots } = await c.env.db.execute<{ attempt_id: string; cents: number }>(sql`SELECT substr(source_id,9) AS attempt_id, (remaining_uc/1000000)::int AS cents FROM billing_credit_lots
       WHERE workspace_id=${wid} AND kind='topup' AND source_id LIKE 'attempt:%' AND expired_at IS NULL AND remaining_uc >= 1000000 ORDER BY expires_at DESC, created_at DESC`);
     const refunds = [];
@@ -455,6 +465,9 @@ function registerOperatorBilling(app: App) {
         refunds.push({ refundId: r.refundId, attemptId: lot.attempt_id, amountCents: lot.cents, status: r.status });
       } catch (error) { if (!(error instanceof ApiError && error.code === 'REFUND_EXCEEDS_BALANCE')) throw error; }   // spent meanwhile: nothing left of it
     }
+    // Each refund holds its amount before Stripe is called, so even a concurrent retry refunds nothing twice; the key
+    // makes a retry answer with these refunds.
+    await c.env.db.execute(sql`INSERT INTO operator_idempotency(operator_id,key,request_hash,response) VALUES(${operator.userId},${key},${hash},${JSON.stringify({ refunds })}::jsonb) ON CONFLICT DO NOTHING`);
     return c.json({ refunds }, 200);
   });
 }

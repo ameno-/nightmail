@@ -27,7 +27,8 @@ export async function readBilling(db: Database, workspaceId: string, view: { amo
   const enforced = p.enforcement === 'enforce' && p.mode === 'prepaid';
   const sending = enforced && (available < 0n || (available < RATES.emailUc && p.freeSentLeft === 0)) ? 'paused'
     : p.mode === 'prepaid' && bal + promo < BigInt(row!.low_balance_uc ?? '500000000') ? 'low' : 'ok';
-  const receiving = p.receiveHeld ? 'held' : p.unpaidSince ? 'grace' : 'ok';
+  // Grace counts down to a receive hold, so there is none while holds are off: received mail is then just accepted.
+  const receiving = p.receiveHeld ? 'held' : p.unpaidSince && p.receiveHold ? 'grace' : 'ok';
   const thisMonth = `${month}-01`;
   const monthTotal = row!.recharge_month === thisMonth ? BigInt(row!.recharge_month_total_uc ?? '0') : 0n;
   const cap = BigInt(row!.recharge_month_cap_uc ?? '50000000000'), amount = BigInt(row!.recharge_amount_uc ?? '2500000000');
@@ -41,7 +42,7 @@ export async function readBilling(db: Database, workspaceId: string, view: { amo
     balance: view.amounts ? { paid: bal.toString(), promo: promo.toString(), unsettled: open.toString(), available: available.toString() } : null,
     free: { month, emails: sent, sent, received: view.received ? { limit: RATES.freeReceivedEmails, used: RATES.freeReceivedEmails - p.freeReceivedLeft, left: p.freeReceivedLeft } : null, storage: { limitBytes: Number(RATES.freeStorageBytes), agedBytes: row!.aged_bytes ?? '0' } },
     monthToDate: view.amounts ? { cost: ((row!.free_month?.startsWith(month) ? BigInt(row!.month_spend_uc ?? '0') : 0n) + open).toString() } : null,
-    grace: { unpaidSince: p.unpaidSince, receiveHoldAt: unpaid === null ? null : new Date(unpaid + 7 * day).toISOString(), writeOffAt: unpaid === null ? null : new Date(unpaid + 60 * day).toISOString() },
+    grace: { unpaidSince: p.unpaidSince, receiveHoldAt: unpaid === null || !p.receiveHold ? null : new Date(unpaid + 7 * day).toISOString(), writeOffAt: unpaid === null ? null : new Date(unpaid + 60 * day).toISOString() },
     autoRecharge: view.amounts ? { enabled: !!row!.recharge_enabled, thresholdCents: cents(row!.recharge_threshold_uc, '1000000000'), amountCents: Number(amount / 1_000_000n), monthlyCapCents: Number(cap / 1_000_000n),
       monthTotalCents: Number(monthTotal / 1_000_000n), disabledReason: row!.recharge_disabled_reason, pending: !!row!.recharge_pending_attempt } : null,
     paymentMethod: view.amounts && row!.card_last4 ? { brand: row!.card_brand ?? 'card', last4: row!.card_last4, expMonth: row!.card_exp_month ?? 0, expYear: row!.card_exp_year ?? 0 } : null,

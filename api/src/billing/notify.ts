@@ -20,6 +20,8 @@ export type NoticeContext = {
   /** Free sends left this month, from billing_position. */
   freeLeft: number;
   unpaidSince: Date | null;
+  /** Receive holds are on (billing_config.receive_hold); unset means on. */
+  receiveHold?: boolean;
   data: Record<string, unknown>;
 };
 
@@ -59,7 +61,7 @@ export function noticeEmail(kind: NoticeKind, n: NoticeContext) {
     case 'sends_paused':
       return { subject: `${productName} paused sending for ${n.workspace}`,
         text: body(`The prepaid balance of ${n.workspace} reached ${total}, and this month's ${count(RATES.freeSentEmails)} free sent emails are used.`,
-          `${productName} paused sending. The API answers 402 BALANCE_EXHAUSTED, campaigns wait and resume on their own, and SMTP submissions get a temporary 451, so mail clients keep the message and retry. ${holdAt ? `Received mail is still accepted until ${day(holdAt)}.` : `Received mail is still accepted; if the balance stays below $0 for 7 days, ${productName} holds new received mail.`} Nothing is deleted.`,
+          `${productName} paused sending. The API answers 402 BALANCE_EXHAUSTED, campaigns wait and resume on their own, and SMTP submissions get a temporary 451, so mail clients keep the message and retry. ${n.receiveHold === false ? 'Received mail is still accepted.' : holdAt ? `Received mail is still accepted until ${day(holdAt)}.` : `Received mail is still accepted; if the balance stays below $0 for 7 days, ${productName} holds new received mail.`} Nothing is deleted.`,
           ['Add credit in Settings → Billing. Sending resumes within a minute, and any amount owed is settled from the top-up.', 'Turn on auto-recharge so it doesn’t happen again.']) };
     case 'receive_hold_soon':
       return { subject: `Received mail for ${n.workspace} will be held on ${holdAt ? day(holdAt) : 'day 7'}`,
@@ -82,7 +84,7 @@ export function noticeEmail(kind: NoticeKind, n: NoticeContext) {
   }
 }
 
-type Row = { id: string; kind: NoticeKind; data: Record<string, unknown>; enforcement: string; mode: string; name: string | null; position: { availableUc?: string; balanceUc?: string; promoUc?: string; freeSentLeft?: number } | null; unpaid_since: Date | string | null; recipients: string[] };
+type Row = { id: string; kind: NoticeKind; data: Record<string, unknown>; enforcement: string; receive_hold: boolean; mode: string; name: string | null; position: { availableUc?: string; balanceUc?: string; promoUc?: string; freeSentLeft?: number } | null; unpaid_since: Date | string | null; recipients: string[] };
 
 export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, payload, job) => {
   const noticeId = typeof payload.noticeId === 'string' ? payload.noticeId : '';
@@ -91,7 +93,7 @@ export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
   const { rows: [notice] } = await runtime.db.execute<Row>(sql`WITH leased AS (
       UPDATE billing_notices SET status='sending',lease_until=now()+interval '5 minutes'
       WHERE id=${noticeId} AND workspace_id=${job.workspaceId} AND (status='pending' OR (status='sending' AND lease_until<now())) RETURNING id,kind,data,workspace_id)
-    SELECT l.id,l.kind,l.data,c.mode AS enforcement,coalesce(a.mode,'prepaid') AS mode,a.unpaid_since,w.name,billing_position(l.workspace_id) AS position,
+    SELECT l.id,l.kind,l.data,c.mode AS enforcement,c.receive_hold,coalesce(a.mode,'prepaid') AS mode,a.unpaid_since,w.name,billing_position(l.workspace_id) AS position,
       ARRAY(SELECT u.email FROM workspace_members m JOIN nightmail_users u ON u.id=m.user_id WHERE m.workspace_id=l.workspace_id AND m.role IN ('owner','admin') ORDER BY u.email LIMIT 20) AS recipients
     FROM leased l CROSS JOIN billing_config c LEFT JOIN billing_accounts a ON a.workspace_id=l.workspace_id LEFT JOIN workspaces w ON w.id=l.workspace_id WHERE c.singleton`);
   if (!notice) return;
@@ -114,7 +116,7 @@ export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
   const position = notice.position ?? {};
   const totalUc = microCents(BigInt(position.balanceUc ?? '0') + BigInt(position.promoUc ?? '0'));
   const email = noticeEmail(notice.kind, { workspace: oneLine(notice.name ?? ''), link: `${runtime.config.publicUrl.replace(/\/$/, '')}/settings#billing`, totalUc,
-    freeLeft: Number(position.freeSentLeft ?? 0), unpaidSince: notice.unpaid_since ? new Date(notice.unpaid_since) : null, data: notice.data ?? {} });
+    freeLeft: Number(position.freeSentLeft ?? 0), unpaidSince: notice.unpaid_since ? new Date(notice.unpaid_since) : null, receiveHold: notice.receive_hold, data: notice.data ?? {} });
   const { sendSystemEmail } = await import('../sending.js');
   await sendSystemEmail(runtime, sender, { from, to: notice.recipients, subject: email.subject, text: email.text, idempotencyKey: `billing:${notice.id}`, billingNotice: notice.id });
   await settle('sent');

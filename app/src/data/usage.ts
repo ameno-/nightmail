@@ -8,14 +8,15 @@ export interface UsageStep { cap: number; requires: string }
 export interface Usage {
   billing: { enabled: boolean; enforcement: 'off' | 'shadow' | 'enforce' }
   pricing: { currency: 'USD'; perThousand: number; freeEmails: number; freeSentEmails: number; freeReceivedEmails: number; freeStorageBytes: number }
-  month: { from: string; sent: number; received: number | null }
+  month: { from: string; sent: number; received: number | null; billedSent: number; billedReceived: number | null }
   daily: { cap: number | null; used: number; resetAt: string | null; step: number | null } | null
   steps: UsageStep[]
   simulated: boolean
 }
 export const usageApi = { get: (signal?: AbortSignal) => request<Usage>('/v1/usage', { signal }) }
-/** What this month costs at the published price beyond each direction's free allowance. Sent mail only when the received count is hidden. */
+/** What this month costs at the published price beyond each direction's free allowance, from the counts billing prices
+ *  (each recipient of a send). Sent mail only when the received count is hidden. */
 export function monthEstimate(usage: Usage) {
   const { perThousand, freeSentEmails, freeReceivedEmails } = usage.pricing
-  return (Math.max(0, usage.month.sent - freeSentEmails) + Math.max(0, (usage.month.received ?? 0) - freeReceivedEmails)) / 1000 * perThousand
+  return (Math.max(0, usage.month.billedSent - freeSentEmails) + Math.max(0, (usage.month.billedReceived ?? 0) - freeReceivedEmails)) / 1000 * perThousand
 }
