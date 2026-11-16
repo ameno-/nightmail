@@ -5,12 +5,12 @@
 import url from './sounds.mp3?url'
 
 /** Where each effect is in the file: its start and its length, in seconds. (`hum` and `strain` loop.) */
-const AT = { hum: [0.200, 7.750], strain: [8.470, 5.750], drop: [14.540, 0.599], scan: [15.259, 0.251], tube: [15.631, 1.000], chute: [16.751, 0.364], slide: [17.235, 1.862], land: [19.217, 0.530], cable: [19.867, 1.181], arm: [21.168, 1.200], seat: [22.488, 0.680], dock: [23.288, 0.698], wake: [24.106, 0.880], laser: [25.106, 0.458], cannon: [25.684, 0.407], steam: [26.211, 1.268], burst: [27.600, 2.103], paper: [29.823, 2.715], rebuild: [32.659, 1.585], lamp: [34.363, 0.680], switch: [35.164, 0.106], press: [35.390, 0.299] } as const
+const AT = { hum: [0.200, 9.750], strain: [10.470, 5.750], drop: [16.540, 0.599], scan: [17.259, 0.251], tube: [17.631, 1.000], chute: [18.751, 0.364], slide: [19.235, 1.862], land: [21.217, 0.530], cable: [21.867, 1.181], arm: [23.168, 1.200], seat: [24.488, 0.680], dock: [25.288, 0.698], wake: [26.106, 0.880], laser: [27.106, 1.176], cannon: [28.402, 0.407], steam: [28.929, 1.268], burst: [30.318, 2.587], paper: [33.025, 2.715], rebuild: [35.860, 1.585], lamp: [37.565, 0.680], switch: [38.365, 0.106], press: [38.591, 0.299] } as const
 export type Cue = keyof typeof AT
 // How loud each is against the rest (the file has every one at full level), and the least time between two of the
 // same, in seconds: a machine that sorts ten letters a second must not play ten scans a second.
-const LEVEL: Record<Cue, number> = { hum: .5, strain: .3, drop: .3, scan: .16, tube: .22, chute: .22, slide: .55, land: .7, cable: .35, arm: .3, seat: .4, dock: .5, wake: .35, laser: .32, cannon: .45, steam: .28, burst: 1, paper: .7, rebuild: .55, lamp: .3, switch: .45, press: .5 }
-const APART: Partial<Record<Cue, number>> = { drop: .09, scan: .11, tube: .16, chute: .11, steam: .3, laser: .09, cannon: .12, seat: .1 }
+const LEVEL: Record<Cue, number> = { hum: .6, strain: .3, drop: .3, scan: .16, tube: .22, chute: .22, slide: .55, land: .7, cable: .35, arm: .3, seat: .4, dock: .5, wake: .35, laser: .3, cannon: .45, steam: .28, burst: 1, paper: .7, rebuild: .55, lamp: .3, switch: .45, press: .5 }
+const APART: Partial<Record<Cue, number>> = { drop: .09, scan: .11, tube: .16, chute: .11, steam: .3, laser: .16, cannon: .12, seat: .1 }
 /** No more than this many effects at once: past it, new ones are dropped (the burst and its paper always play). */
 const VOICES = 14
 
