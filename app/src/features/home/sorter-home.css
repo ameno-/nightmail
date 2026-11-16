@@ -69,8 +69,8 @@
    in front of it is paler than any of it, so it hides the writing, as a letter in front of it would; over the machine
    itself nothing changes. (By day the headline and the lane plates are dark on pale and cannot be hidden this way.)
    The button is not blended: it is the page's own and always on top, whatever flies past it. (Stacked, the two facts
-   are the page's type on the base, as the headline is: dark on pale by day.) */
-.srt-readout, .srt-page:not([data-phone]) .srt-fact, .srt-tally, :root[data-theme='dark'] .srt-fact, :root[data-theme='dark'] .srt-band, :root[data-theme='dark'] .srt-lanes li { mix-blend-mode: lighten; }
+   are the page's type on the base, as the headline is: dark on pale by day. A side unit's plate is dark by day too.) */
+.srt-readout, .srt-page:not([data-phone]) .srt-fact, .srt-tally, .srt-pods li, :root[data-theme='dark'] .srt-fact, :root[data-theme='dark'] .srt-band, :root[data-theme='dark'] .srt-lanes li { mix-blend-mode: lighten; }
 .srt-on > :is(button, a) { pointer-events: auto; }
 
 /* The readout: a small screen on the fascia. Who the letter under the scanner is from and where it goes, then its
@@ -108,6 +108,8 @@
 /* (Whole names where a plate holds them at 10 px; the lanes' codes where it does not.) */
 .srt-lanes[data-names] li { font-size: 10px; letter-spacing: 0; }
 .srt-mouths li { place-items: center start; color: var(--srt-text-2); font-size: 11px; }
+/* (A side unit's name plate is a dark one, by night and by day, as its screen is.) */
+.srt-pods li { color: color-mix(in oklab, var(--srt-screen-dim), var(--srt-screen-text) 40%); }
 /* The tally in the header by the Logs outlet: everything sorted, counted. */
 .srt-tally { position: absolute; z-index: 2; display: grid; place-items: center; color: var(--srt-screen-text); font-family: var(--font-mono); font-size: 10px; font-variant-numeric: tabular-nums; line-height: 1; letter-spacing: .04em; pointer-events: none; }
 .srt-mouths li[data-side='r'] { place-items: center end; }
@@ -188,9 +190,9 @@
 /* Where the header carries the button (a page too short to show the machine's): under it, at the hero's top. */
 .srt-consent-head { top: 0; right: max(var(--space-12), var(--srt-safe-r) + var(--space-8)); bottom: auto; left: auto; width: min(300px, 100% - 2 * var(--space-16)); max-width: none; text-align: right; translate: none; }
 
-/* A letter, opened, over the one the pointer is on. */
+/* A letter, opened, over the one the pointer is on: a sheet held up in the machine's light, its shadow soft under it. */
 .srt-card { position: absolute; z-index: 5; top: 0; left: 0; width: 0; height: 0; pointer-events: none; }
-.srt-card-body { position: absolute; bottom: 16px; left: 0; display: grid; row-gap: 3px; width: 264px; padding: 12px; border-radius: 4px; background: var(--srt-card); box-shadow: 0 0 0 1px var(--srt-card-edge), 0 6px 0 -3px oklch(0 0 0 / 22%); color: var(--srt-card-text); font-size: 12.5px; line-height: 17px; translate: -50% 0; animation: srt-card 140ms var(--srt-ease); }
+.srt-card-body { position: absolute; bottom: 16px; left: 0; display: grid; row-gap: 3px; width: 264px; padding: 12px; border-radius: 4px; background: var(--srt-card); box-shadow: 0 0 0 1px var(--srt-card-edge), 0 2px 5px oklch(0 0 0 / 14%), 0 14px 30px -12px oklch(0 0 0 / 40%); color: var(--srt-card-text); font-size: 12.5px; line-height: 17px; translate: -50% 0; animation: srt-card 140ms var(--srt-ease); }
 .srt-card[data-under] .srt-card-body { top: 22px; bottom: auto; }
 .srt-card-body > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .srt-card-body > b { font-size: 13.5px; font-weight: 600; letter-spacing: -.008em; text-wrap: balance; white-space: normal; }
