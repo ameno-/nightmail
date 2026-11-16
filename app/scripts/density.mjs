@@ -123,7 +123,7 @@ const probe = ({ LONG_BLOCK, INERT_WORDS, NEAR_PX, DETAIL_ROWS, DETAIL_WORDS, DE
     return [...text.matchAll(/(?<![\w#-])[$€£]?\d[\d,]*(\.\d+)?%?(?![\w-])/g)].map(m => {
       const before = text.slice(0, m.index), after = text.slice(m.index + m[0].length);
       const part = /^\s*(\/|of)\s*[$€£]?\d/.test(after) ? (/\b(left|remaining)\b/.test(text) ? 'left' : 'used') : /(\/|\bof)\s*$/.test(before) ? 'cap' : 'whole';
-      return { ...b, at: m.index, shown: m[0], part, value: m[0].replace(/[$€£,%]/g, '').replace(/\.0+$/, ''), unit: /^\s*([A-Za-z]+)/.exec(after)?.[1]?.toLowerCase().replace(/s$/, '') ?? '' };
+      return { ...b, at: m.index, shown: m[0], part, symbol: m[0].match(/[%$€£]/)?.[0] ?? '', value: m[0].replace(/[$€£,%]/g, '').replace(/\.0+$/, ''), unit: /^\s*([A-Za-z]+)/.exec(after)?.[1]?.toLowerCase().replace(/s$/, '') ?? '' };
     }).filter(v => !/^(19|20)\d\d$/.test(v.value) && !(v.value === '100' && /(\/|of|–)\s*$/.test(text.slice(0, v.at))));
   });
   const values = figures.filter(v => v.value.replace(/^[0.]+/, '').replace(/\D/g, '').length >= 2);
@@ -160,7 +160,8 @@ const probe = ({ LONG_BLOCK, INERT_WORDS, NEAR_PX, DETAIL_ROWS, DETAIL_WORDS, DE
   // a pair is the same finding whether or not its figures happen to be equal (the fixture's mail varies by hour).
   const FACTS = [
     { fact: 'the sender score', parts: [{ label: /^sender score$/i, test: v => v.text.replace(/\s*[A-F][+-]?$/, '') === v.shown }] },
-    { fact: 'emails in the last 24 hours', when: () => [...document.querySelectorAll('[role=tab][aria-selected=true]')].some(t => /^24\s?h$/i.test(norm(t.textContent))), parts: [{ label: /^emails$/i, part: 'whole' }, { label: /daily limit|recipients/i, part: 'used' }] },
+    // The Emails card also shows percentage change from the previous window; that isn't a second email count.
+    { fact: 'emails in the last 24 hours', when: () => [...document.querySelectorAll('[role=tab][aria-selected=true]')].some(t => /^24\s?h$/i.test(norm(t.textContent))), parts: [{ label: /^emails$/i, part: 'whole', test: v => !v.symbol }, { label: /daily limit|recipients/i, part: 'used', test: v => !v.symbol }] },
     { fact: 'the daily limit', parts: [{ label: /\blimit\b/i, test: v => /^\s*(\/\s*day|a day)/i.test(v.text.slice(v.at + v.shown.length)) }, { label: /daily limit/i, part: 'cap' }] },
   ];
   for (const { fact, when, parts } of FACTS) {
@@ -172,8 +173,11 @@ const probe = ({ LONG_BLOCK, INERT_WORDS, NEAR_PX, DETAIL_ROWS, DETAIL_WORDS, DE
     find('dup-fact', `${fact} shown ${apart.length} times: ${apart.map(v => `${v.shown} in ${context(v) || 'unlabelled'} (${where(v)})`).join(', ')}`, `${fact}|${apart.map(v => context(v)).join('|')}`, apart.map(v => v.el), fact);
   }
   const byValue = new Map();
-  for (const v of values) (byValue.get(v.value) ?? byValue.set(v.value, []).get(v.value)).push(v);
-  for (const [value, all] of byValue) for (const group of (units => units.length < 2 ? [all] : units.map(u => all.filter(v => !v.unit || v.unit === u)))([...new Set(all.map(v => v.unit).filter(Boolean))])) {
+  for (const v of values) {
+    const key = v.value + v.symbol; // 17%, 17 emails and $17 aren't the same reading.
+    (byValue.get(key) ?? byValue.set(key, []).get(key)).push(v);
+  }
+  for (const all of byValue.values()) for (const group of (units => units.length < 2 ? [all] : units.map(u => all.filter(v => !v.unit || v.unit === u)))([...new Set(all.map(v => v.unit).filter(Boolean))])) {
     const apart = group.filter((v, i) => !group.some((w, j) => j < i && near(v, w)));
     if (apart.length < 2 || !apart.some(v => v.inRoot) || isCovered(apart.map(v => v.el))) continue;
     // The same figure under unrelated labels is a coincidence (Delivered 240 and 240 of the daily limit), not the same
@@ -183,7 +187,7 @@ const probe = ({ LONG_BLOCK, INERT_WORDS, NEAR_PX, DETAIL_ROWS, DETAIL_WORDS, DE
     if (!related) continue;
     cover(apart.map(v => v.el));
     const labels = apart.map(v => `${context(v) || 'unlabelled'} (${where(v)})`);
-    find('dup-value', `${apart[0].shown} shown ${apart.length} times: ${labels.join(', ')}`, `${value}|${apart.map(v => context(v) || v.text.slice(0, 20)).join('|')}`, apart.map(v => v.el), apart[0].shown);
+    find('dup-value', `${apart[0].shown} shown ${apart.length} times: ${labels.join(', ')}`, `${apart[0].value}|${apart.map(v => context(v) || v.text.slice(0, 20)).join('|')}`, apart.map(v => v.el), apart[0].shown);
   }
   // Sections with the same label: two headings with the same text on one screen (navigation and tabs left out).
   const heads = list.filter(b => b.heading && !b.shell && b.words <= 8);

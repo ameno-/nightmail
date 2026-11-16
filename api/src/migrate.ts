@@ -60,13 +60,16 @@ try {
     END IF;
     IF to_regclass('bane_migrations') IS NULL THEN CREATE VIEW bane_migrations AS SELECT * FROM nightmail_migrations; END IF;
   END $$`);
+  // All migrators hold the same advisory lock. Read the ledger once under that lock, rather than paying a
+  // database round trip for every already-applied file; still hash and compare each file in order.
+  const ledger = await client.query<{ name: string; checksum: string }>('SELECT name, checksum FROM nightmail_migrations');
+  const applied = new Map(ledger.rows.map(({ name, checksum }) => [name, checksum]));
   const directory = new URL('../migrations/', import.meta.url);
   for (const name of (await readdir(directory)).filter(n => /^\d+_[a-z_]+\.sql$/.test(n)).sort()) {
     const source = await readFile(new URL(name, directory), 'utf8');
     const hash = createHash('sha256').update(source).digest('hex');
-    const previous = await client.query<{ checksum: string }>('SELECT checksum FROM nightmail_migrations WHERE name = $1', [name]);
-    if (previous.rowCount) {
-      if (previous.rows[0]!.checksum !== hash) throw new Error(`MIGRATION_CHANGED: ${name} differs from the applied migration. Add a new migration instead.`);
+    if (applied.has(name)) {
+      if (applied.get(name) !== hash) throw new Error(`MIGRATION_CHANGED: ${name} differs from the applied migration. Add a new migration instead.`);
       continue;
     }
     // Marked files contain one restartable concurrent index build per line. Separate query

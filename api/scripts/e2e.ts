@@ -791,7 +791,6 @@ async function inbound() {
   }
   const sender = await address(from), receiver = await address(inbox);
   const addressId = receiver.id;
-  await step('Verify inbound read key is restricted to one address', () => inboundKey(addressId, sender.id));
   const children = await api('listInboundSubdomains', { path: d, query: { limit: 1 } });
   check(Array.isArray(children.data) && children.data.every(r => r.parentDomainId === domainId), 'subdomain page includes another parent');
   await api('updateInboundAddress', { path: { addressId }, body: { displayName: prefix } });
@@ -815,6 +814,8 @@ async function inbound() {
       attachments: [{ filename: `${prefix}.png`, contentType:'image/png', content: pixelPng().toString('base64') }] },
   });
   check(sent.direction === 'outbound' && sent.from.address === from && sent.to.length === 1 && sent.to[0].address === inbox, 'wrong self-loop envelope');
+  // SES is delivering the run-owned message. The key probes only need the two verified addresses.
+  await step('Verify inbound read key is restricted to one address', () => inboundKey(addressId, sender.id));
   const arrival = await until('new inbound message event', () => api('listInboundEvents', { query: { addressId, types: 'message.received', after: events.cursor } }), e => e.data.some(v => v.addressId === addressId && v.type === 'message.received'), e => `${e.data.length} matching events`);
   const event = arrival.data.find(v => v.addressId === addressId && v.type === 'message.received')!;
   check(event.threadId && event.messageId, 'receipt missing thread/message IDs');
@@ -842,11 +843,13 @@ async function inbound() {
   check(unified.received && unified.data.some(row => row.id === msg.id && row.direction === 'received' && row.threadId === msg.threadId), 'arrived message missing from the unified logs');
   check((await api('getInboundThread', { path, query: { addressId } })).messages.some(m => m.id === msg.id), 'message absent from thread');
   check((await api('updateInboundThread', { path, body: { addressId, starred: true } })).starred, 'thread edit failed');
-  await step('Scoped inbound webhook, rotation and thread metadata delivery', () => inboundWebhook(addressId, path.threadId));
   const reply = await api('replyToInboundThread', { path, headers: idKey('reply'), body: {
     addressId, replyToMessageId: msg.id, text, expectedRecipients: { to: [from], cc: [], bcc: [] },
   } });
   check(reply.threadId === msg.threadId && reply.direction === 'outbound' && reply.to[0]?.address === from && reply.emailId, 'reply not bound to original conversation');
+  // The reply is on its way back to the sender. Exercise the receiver's scoped hook (including its own new
+  // label event and HTTP delivery) in the meantime; still verify the actual reply, its bytes and In-Reply-To.
+  await step('Scoped inbound webhook, rotation and thread metadata delivery', () => inboundWebhook(addressId, path.threadId));
   const replies = await until('reply received by original test sender', () => api('listInboundMessages', { query: { addressId: sender.id, direction: 'inbound', q: prefix } }), page => page.data.some(m => m.from.address === inbox && m.threadId === sent.threadId), page => `${page.data.length} messages`);
   const received = replies.data.find(m => m.from.address === inbox && m.threadId === sent.threadId)!;
   const delivered = await api('getInboundMessage', { path: { messageId: received.id }, query: { addressId: sender.id } });
