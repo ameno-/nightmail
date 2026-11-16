@@ -124,7 +124,7 @@ export const unit = (a: V3): V3 => { const l = len(a) || 1; return [a[0] / l, a[
 export const cross = (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 
 /** A part's matrix: turned by the quaternion about its pivot, the pivot then at `at`. */
-export function pose(m: Float32Array, pivot: V3, at: ArrayLike<number>, q: ArrayLike<number>, scale = 1, o = 0, qo = 0) {
+export function pose(m: Float32Array, pivot: ArrayLike<number>, at: ArrayLike<number>, q: ArrayLike<number>, scale = 1, o = 0, qo = 0) {
   const x = q[qo], y = q[qo + 1], z = q[qo + 2], w = q[qo + 3]
   m[0] = (1 - 2 * (y * y + z * z)) * scale; m[1] = 2 * (x * y + z * w) * scale; m[2] = 2 * (x * z - y * w) * scale
   m[4] = 2 * (x * y - z * w) * scale; m[5] = (1 - 2 * (x * x + z * z)) * scale; m[6] = 2 * (y * z + x * w) * scale

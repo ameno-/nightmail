@@ -8,8 +8,8 @@
 // contact with the floor and the cabinet through its corners, friction, and sleep once it lies still (a sleeping letter
 // raises the floor under it, so the next one comes to rest on top: piles). Nothing runs once everything is asleep.
 import { createRenderer, FX_FLOATS, LETTER_FLOATS, MATS, SMOKE_FLOATS, type Part } from './gl'
-import { buildMachine, type Machine } from './machine'
-import { aboutZ, FLOORS, pose, type V3 } from './mesh'
+import { bend as bendArm, buildMachine, fitterAt, JOB, type Machine } from './machine'
+import { FLOORS, pose, type V3 } from './mesh'
 import { MAT as M, oklch, paletteBytes } from './tones'
 import { DX, DY, type Plan } from './plan'
 
@@ -31,6 +31,15 @@ const ease = (t: number) => t * t * (3 - 2 * t), out = (t: number) => 1 - (1 - t
 type Bodies = { cap: number; pos: Float32Array; vel: Float32Array; quat: Float32Array; ang: Float32Array; half: Float32Array; state: Uint8Array; still: Float32Array; thin: boolean }
 const bodies = (cap: number, thin: boolean): Bodies => ({ cap, pos: new Float32Array(cap * 3), vel: new Float32Array(cap * 3), quat: new Float32Array(cap * 4), ang: new Float32Array(cap * 3), half: new Float32Array(cap * 3), state: new Uint8Array(cap), still: new Float32Array(cap), thin })
 const THIN = [-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0, 0, -1, 0, 1, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 0], BOX = [-1, -1, -1, 1, -1, -1, 1, 1, -1, -1, 1, -1, -1, -1, 1, 1, -1, 1, 1, 1, 1, -1, 1, 1]
+// (What a frame poses things with is written into these, never made anew: no turn, the origin, and scratch turns and places.)
+const NONE = new Float32Array([0, 0, 0, 1]), ORIGIN = new Float32Array(3), Q = new Float32Array(4), Q2 = new Float32Array(4), AT = new Float32Array(3), AT2 = new Float32Array(3)
+/** A turn of `angle` about z (the page's own plane), into `q`. */
+const turnZ = (angle: number, q = Q) => { q[0] = 0; q[1] = 0; q[2] = Math.sin(angle / 2); q[3] = Math.cos(angle / 2); return q }
+/** A turn about the upright, into `q`. */
+const turnY = (yaw: number, q = Q) => { q[0] = 0; q[1] = -Math.sin(yaw / 2); q[2] = 0; q[3] = Math.cos(yaw / 2); return q }
+/** A turn about the page's own axis (a pitch), then one about the upright, into `q`. */
+const turnYZ = (yaw: number, turn: number, q = Q) => { const ay = -Math.sin(yaw / 2), aw = Math.cos(yaw / 2), bz = Math.sin(turn / 2), bw = Math.cos(turn / 2); q[0] = ay * bz; q[1] = ay * bw; q[2] = aw * bz; q[3] = aw * bw; return q }
+const put = (v: Float32Array, x: number, y: number, z: number) => { v[0] = x; v[1] = y; v[2] = z; return v }
 
 type Script = { stage: number; t: number; lane: number; x0: number; y0: number; ax: number; ay: number; az: number; turn: number; data: number; x: number }
 type Fx = { x: number; y: number; z: number; vx: number; vy: number; vz: number; life: number; max: number; size: number; grow: number; rot: number; spin: number; r: number; g: number; b: number; a: number; shape: number; gravity: number; drag: number; glow: boolean; len: number }
@@ -53,7 +62,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   let m!: Machine, parts!: Part[], px = 1, G = 1500, oyc = 0
   const L = bodies(MAX, true), kind = new Uint8Array(MAX), data = new Int32Array(MAX), seed = new Float32Array(MAX), burn = new Float32Array(MAX), burning = new Uint8Array(MAX), delay = new Float32Array(MAX), from = new Float32Array(MAX * 7)
   const scripts = new Map<number, Script>(), scale = new Float32Array(MAX).fill(1), tilt = new Float32Array(MAX)
-  let Dn = bodies(0, false), debrisPart: number[] = [], debrisHome: V3[] = [], selfPosed = new Set<number>(), boltBody = 0, hatchBody = 0, panelBody = 0
+  let Dn = bodies(0, false), debrisPart: number[] = [], debrisHome: V3[] = [], selfPosed = new Set<number>(), boltBody = 0, hatchBody = 0, panelBody = 0, paneBody = 0, deckHome: V3[] = []
   const instances = new Float32Array(MAX * LETTER_FLOATS), fxData = new Float32Array(700 * FX_FLOATS), glowData = new Float32Array(64 * FX_FLOATS), airData = new Float32Array(4 * FX_FLOATS)
   // Quality, chosen for the device and lowered if frames come slowly: the canvas's pixel ratio, the shadow map, the size
   // of the smoke's buffer against the page, how many billows may be in the air, how much of the burst's mail is thrown.
@@ -70,8 +79,10 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   let fx: Fx[] = []
   const heights = new Float32Array(GW * GD), ground = new Float32Array(GW * GD)
   // What a body cannot be inside of: boxes on the floor, each pushed out of through its nearest side below `y` (its
-  // top is the floor grid's business).
-  let solids: { x0: number; x1: number; z0: number; z1: number; y: number }[] = []
+  // top is the floor grid's business); and boxes that hang in the air on the tower's sides (`y0` their underside: a
+  // unit, a magazine), pushed out of through their nearest face, and whatever lands on one carried off it (`side`:
+  // which way, away from the tower).
+  let solids: { x0: number; x1: number; z0: number; z1: number; y: number; y0: number; side: number }[] = []
   const colour = { steam: [1, 1, 1], smoke: [0, 0, 0], ember: [1, .6, .2], red: [1, .2, .2], paper: [1, 1, 1], spark: [1, .9, .6] }
 
   let phase: Phase = 'boot', clock = 0, runT = 0, heat = 0, speed = 1, feed = 1, spawnIn = .3, sorted = 0, burnt = 0, flash = 0, needle = 0, needleV = 0, time = 0, boomAt = -100
@@ -89,8 +100,10 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   const through = new Float32Array(40), veil = new Float32Array(8).fill(1), veilSent = new Float32Array(8).fill(1), SAMPLE = [0, 0, -.7, -.5, .7, -.5, -.7, .5, .7, .5]
   // The hatch after the burst: thrown back, hanging by one hinge.
   let hatchHang = 0
-  // The lasers, left and right: where each points (an angle on the page, from due right), where it means to, how long it holds that, and the beams being fired.
-  const turretAngle = [2.7, .45], turretAim = [2.7, .45], aimHold = [0, 0], beams: { id: number; k: number; until: number }[] = []
+  // The lasers, left and right: where each points (an angle on the page, from due right), where it means to, how long it
+  // holds that, and the beams being fired. (Until the machine is fitted out they hang free, muzzle down, and swing a
+  // little when the roof is lifted or set down: `swingV`.)
+  const turretAngle = [2.7, .45], turretAim = [2.7, .45], aimHold = [0, 0], swingV = [0, 0], beams: { id: number; k: number; until: number }[] = []
   const queue: number[] = [], QUEUE = 5
   const flapAngle = new Float32Array(7), flapWant = new Float32Array(7), rollerSpin = new Float32Array(56)
   const caps = Array.from({ length: 28 }, () => ({ tube: 0, run: 0, s: 0, wait: 0, on: false }))
@@ -107,18 +120,27 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   // the right, the same way (`B.floor`: how long each takes; `floors`: how many are in; `floorT`: how far through the
   // next is). `shifts`: where each floor now is, off its place (gl.ts moves all that belongs to a floor by it).
   // (And the units a wide page's tower takes on its sides, one with each lane: `pod`, how far in each is.)
-  const shifts = new Float32Array(3 * FLOORS), pod = new Float32Array(6)
+  const shifts = new Float32Array(3 * FLOORS), pod = new Float32Array(6), rests = new Float32Array(3)
   let floors = 0, floorT = -1, cableT = 0
   // The fitting out. Once its floors are in, the machine has one lane and is given the rest a lane at a time
-  // (plan.ts `fit`), as the product is: each lane's deck waits (on its rack, or off the page's side), is taken by its side's arm, carried
-  // round over the port and lowered in; inside it goes down to the roller line and along it to its place, and its
-  // chute stands up under it. `deck`: each lane's, where its pivot is and how far it is turned about the upright, and
-  // its stage. `arm`: each fitter's, how far it has popped up, the lane it is fitting and how far through, where its
-  // hand is (which way it points, how far out, how high), how far its port's cover is drawn back.
+  // (plan.ts `fit`), as the product is: each lane's deck waits (in its side's magazine, or off the page's side), is
+  // taken by its side's arm, carried round over the port and lowered in; inside it goes down to the roller line and
+  // along it to its place, and its chute stands up under it. `deck`: each lane's, where its pivot is and its stage.
+  // `arm`: each fitter's, how far it is up out of its well (and whether it is going down into it), the lane it is
+  // fitting and how far through, where its hand is (which way it points, how far out, how high), how far its fingers
+  // are closed and its port's cover open. `taken`, `lift`: how many decks each side's magazine has given, and how far
+  // its lift has come up for them.
   const AWAIT = 0, CARRIED = 1, LOWERED = 2, ALONG = 3, RISING = 4, FITTED = 5
-  const deck = Array.from({ length: 7 }, () => ({ stage: FITTED, t: 0, x: 0, y: 0, z: 0, turn: 0, chute: 1, from: 0 }))
-  const arm = [0, 1].map(() => ({ pop: 0, job: -1, t: 0, yaw: 0, r: 1, y: 0, cover: 0, mood: 0 }))
+  const deck = Array.from({ length: 7 }, () => ({ stage: FITTED, t: 0, x: 0, y: 0, z: 0, chute: 1, from: 0 }))
+  const arm = [0, 1].map(() => ({ pop: 0, down: false, job: -1, t: 0, yaw: 0, r: 1, y: 0, cover: 0, grip: 0, from: new Float32Array(3) }))
+  const taken = new Float32Array(2), lift = new Float32Array(2), liftV = new Float32Array(2), hand = new Float32Array(5), angles = new Float32Array(2)
   let fitNext = 1, fitIn = 0, buildT = 0, built = false, screenOn = false, sendOn = false, scamDue = false, begun = false
+  // Pressed mid-build, the gauge hurries the build (`rush`: how much faster it goes) and overloads it once it is whole.
+  let rush = 1
+  // Mail coming to each lane (1 as a letter goes down its chute, dying away): its unit on the tower's side shows it.
+  // `reel`, `dial`, `stepAt`: a thread's reels, a ritual's clock hand, and which of its lamps is lit.
+  // (`got`: whether an inbox's unit has had its letter; `podOf`: which unit each lane has, if any.)
+  const arrived = new Float32Array(7), reel = new Float32Array(6), dial = new Float32Array(6), dialV = new Float32Array(6), dialTo = new Float32Array(6), stepAt = new Uint8Array(6), got = new Uint8Array(6), podOf = new Int8Array(7)
   let raf = 0, last = 0, visible = true, dead = false
   const pointer = { x: 0, y: 0, in: false, down: false, moved: 0, held: -1, hover: -1, dirty: false, mouse: true, holdY: 0, fromX: 0, fromY: 0 }
 
@@ -134,7 +156,8 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     // What can be blown off: the hopper, the chimneys, the hatch, the service panel, the glass in panes, every roller,
     // gate and bolt. (The lasers are bolted to the roof's ends, and stay.)
     debrisPart = [m.idx.hopper, ...m.idx.vents, ...(m.idx.hatch < 0 ? [] : [m.idx.hatch]), m.idx.panel, ...m.idx.panes, ...m.idx.rollers, ...m.idx.flaps, ...m.idx.bolts]
-    selfPosed = new Set([m.idx.hatch, ...m.idx.rollers, ...m.idx.flaps]); boltBody = debrisPart.length - m.idx.bolts.length; hatchBody = debrisPart.indexOf(m.idx.hatch); panelBody = debrisPart.indexOf(m.idx.panel)
+    selfPosed = new Set([m.idx.hatch, ...m.idx.rollers, ...m.idx.flaps]); boltBody = debrisPart.length - m.idx.bolts.length; hatchBody = debrisPart.indexOf(m.idx.hatch); panelBody = debrisPart.indexOf(m.idx.panel); paneBody = debrisPart.indexOf(m.idx.panes[0])
+    deckHome = p.lanes.map(x => [x, m.yR, p.zL] as V3); podOf.fill(-1); m.pods.forEach((unit, k) => { podOf[unit.lane] = k })
     Dn = bodies(debrisPart.length, false)
     debrisHome = debrisPart.map((index, i) => {
       const part = m.parts[index], c: V3 = [(part.lo[0] + part.hi[0]) / 2, (part.lo[1] + part.hi[1]) / 2, (part.lo[2] + part.hi[2]) / 2]
@@ -143,22 +166,29 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     })
     // The cabinet; what stands out in front of it either side of the frame (tubes, blocks, brackets); on a wide page
     // the headers and the risers.
-    const reach = p.heads.length ? p.riser + .2 * p.U : 0, C = p.cannon
-    solids = [{ x0: -p.Xc, x1: p.Xc, z0: 0, z1: p.D, y: p.yTop - 14 }, ...(p.tubes.length ? [{ x0: -p.Xc - reach, x1: -p.Xw, z0: p.zProud, z1: 0, y: p.ySlot }, { x0: p.Xw, x1: p.Xc + reach, z0: p.zProud, z1: 0, y: p.ySlot }] : []),
-      ...p.heads.map(h => ({ x0: h.x0, x1: h.x1, z0: h.z0, z1: h.z1, y: h.h - 5 * px })),
-      ...(p.heads.length ? [-1, 1].map(side => ({ x0: side < 0 ? -p.Xc - reach : p.Xc + .2 * p.U, x1: side < 0 ? -p.Xc - .2 * p.U : p.Xc + reach, z0: p.zProud, z1: p.zProud + 3 * p.U, y: p.yWall + 1.7 * p.V - 5 * px })) : []),
-      ...(p.phone ? [] : [{ x0: C.x - C.back, x1: C.x + 3 * C.cs, z0: C.z - C.r - 3 * px, z1: C.z + C.r + 3 * px, y: C.y + C.pivot + C.r }])]
-    keepClear = [{ x: C.x - C.cs, z: C.z, y: C.y, r: C.back + 2 * C.cs }, ...(p.tally ? [{ x: p.tally.x + p.tally.w / 2, z: p.tally.z - 12 * px, y: 0, r: 16 * px }] : [])]
+    const reach = p.heads.length ? p.riser + .2 * p.U : 0, C = p.cannon, U = p.U
+    const floored = (x0: number, x1: number, z0: number, z1: number, y: number) => ({ x0, x1, z0, z1, y, y0: -Infinity, side: 0 })
+    solids = [floored(-p.Xc, p.Xc, 0, p.D, p.yTop - 14), ...(p.tubes.length ? [floored(-p.Xc - reach, -p.Xw, p.zProud, 0, p.ySlot), floored(p.Xw, p.Xc + reach, p.zProud, 0, p.ySlot)] : []),
+      ...p.heads.map(h => floored(h.x0, h.x1, h.z0, h.z1, h.h - 5 * px)),
+      ...(p.heads.length ? [-1, 1].map(side => floored(side < 0 ? -p.Xc - reach : p.Xc + .2 * U, side < 0 ? -p.Xc - .2 * U : p.Xc + reach, p.zProud, p.zProud + 3 * U, p.yWall + 1.7 * p.V - 5 * px)) : []),
+      ...(p.phone ? [] : [floored(C.x - C.back, C.x + 3 * C.cs, C.z - C.r - 3 * px, C.z + C.r + 3 * px, C.y + C.pivot + C.r)]),
+      // (The units on the tower's sides, each with its bracket under it and what stands out of its front; the magazines.)
+      ...p.pods.map(at => ({ x0: at.x - .3 * U, x1: at.x + at.w + .3 * U, z0: at.z - 2.7 * U, z1: at.z + at.d, y: at.y + at.h, y0: at.y - 2.2 * U, side: at.s })),
+      ...m.arms.filter(A => A.parts.lift >= 0).map(A => ({ x0: A.s < 0 ? -p.Xc - p.P - 1.5 * U : p.Xc, x1: A.s < 0 ? -p.Xc : p.Xc + p.P + 1.5 * U, z0: m.z0 - 3 * px, z1: m.z1 + 3.4 * px, y: A.top[1] + m.rr + .3 * U, y0: A.foot - 2.5 * U, side: A.s }))]
+    // (And on the roof the beacon, and each fitter's column.)
+    keepClear = [{ x: C.x - C.cs, z: C.z, y: C.y, r: C.back + 2 * C.cs }, ...(p.tally ? [{ x: p.tally.x + p.tally.w / 2, z: p.tally.z - 12 * px, y: 0, r: 16 * px }] : []), { x: m.beacon[0], z: m.beacon[2], y: p.yTop, r: 4 * px }, ...m.arms.map(A => ({ x: A.shoulder[0], z: p.zL, y: p.yTop, r: A.rb + 2 * px }))]
     base = keepClear.length
     zones = [p.readout, { x: -p.Xw, y: p.ySlot, w: 2 * p.Xw, h: p.slot }, { x: -p.Xw, y: p.yBand, w: 2 * p.Xw, h: p.band }, ...p.facts].map(r => [r.x + r.w / 2, r.y + r.h / 2, r.w / 2, r.h / 2])
     recoil = 0; sendIn = 2.4; volley = 0
     // (A machine built again for a page of another size keeps what has been fitted; what was on its way is home.)
     if (!begun) { begun = true; p.lanes.forEach((_, i) => { deck[i].stage = reduced || i === p.fit[0] ? FITTED : AWAIT; deck[i].chute = deck[i].stage === FITTED ? 1 : 0 }); if (reduced) fitAll() }
-    else { if (floorT >= 0) { floors++; floorT = -1 } for (let k = 0; k < 6; k++) pod[k] = built || k < fitNext - 1 ? 1 : 0; const done = p.fit.slice(0, fitNext); p.lanes.forEach((_, i) => { const on = built || done.includes(i); deck[i].stage = on ? FITTED : AWAIT; deck[i].chute = on ? 1 : 0 }); for (const a of arm) { a.job = -1; a.cover = 0 } }
+    else { if (floorT >= 0) { floors++; floorT = -1 } for (let k = 0; k < 6; k++) pod[k] = built || k < fitNext - 1 ? 1 : 0; const done = p.fit.slice(0, fitNext); p.lanes.forEach((_, i) => { const on = built || done.includes(i); deck[i].stage = on ? FITTED : AWAIT; deck[i].chute = on ? 1 : 0 }); for (const a of arm) { a.job = -1; a.cover = 0; a.grip = 0 } }
+    // (Each magazine has given as many decks as its side has had fitted.)
+    m.arms.forEach((A, k) => { taken[k] = lift[k] = A.lanes.filter(i => deck[i].stage === FITTED).length; liftV[k] = 0 })
     hooks.fit(p.lanes.map((_, i) => floors > 0 && deck[i].stage === FITTED)); hooks.floors(floors, built)
     stand()
-    m.arms.forEach((_, k) => { const h = rest(k); arm[k].yaw = h[0]; arm[k].r = h[1]; arm[k].y = h[2] })
-    if (!screenOn) { turretAngle[0] = turretAim[0] = Math.PI + 1.35; turretAngle[1] = turretAim[1] = -1.35 }
+    m.arms.forEach((A, k) => { arm[k].yaw = A.rest[0]; arm[k].r = A.rest[1]; arm[k].y = A.rest[2] })
+    if (!screenOn) { turretAngle[0] = turretAim[0] = Math.PI + 1.35; turretAngle[1] = turretAim[1] = -1.35; swingV[0] = swingV[1] = 0 }
     L.state.fill(FREE); scripts.clear(); fx = []; S.head = S.live = 0; S.life.fill(0); layGround(); resetHeights(true); queue.length = 0; spawned = 0; bend = 0; calm()
     for (const cap of caps) cap.on = false
     for (const index of m.idx.caps) parts[index].on = false
@@ -214,6 +244,17 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
         : z > p.zLip + 22 * px && z < p.zProud && p.fan.some(leg => Math.abs(x - leg.x) < p.tubeR + 2) ? yc
         : Math.abs(x) < p.slabX && z > p.zLip + 22 * px && z < p.zBack ? 0 : VOID
     }
+    // On the roof, what stands on it low enough to lie on is floor too: the ports' kerbs and covers, the slots scams
+    // leave by, the wells the fitters stand in, the lasers' pedestals, (on a wide page) the cables back to their
+    // junction boxes, and the eyes the roof hung from. (What is taller is kept clear: the beacon, a fitter's column.)
+    const raise = (x0: number, x1: number, z0: number, z1: number, y: number) => { for (let z = z0; z < z1 + CELL / 2; z += CELL / 2) for (let x = x0; x < x1 + CELL / 2; x += CELL / 2) { const c = cell(Math.min(x, x1), Math.min(z, z1)); if (c >= 0 && ground[c] >= p.yTop && ground[c] < y) ground[c] = y } }
+    for (const A of m.arms) { raise(A.portX - A.hw - 1.4 * px, A.portX + A.hw + 1.4 * px, p.zL - A.pd - 1.4 * px, p.zL + A.pd + 1.4 * px, p.yTop + 2 * px); raise(A.shoulder[0] - A.rb - 1.2 * px, A.shoulder[0] + A.rb + 1.2 * px, p.zL - A.rb - 1.2 * px, p.zL + A.rb + 1.2 * px, p.yTop + .8 * px) }
+    for (const e of p.phone ? m.ejects.slice(0, 1) : m.ejects) raise(e[0] - .62 * p.lw, e[0] + .62 * p.lw, e[2] - 6 * px, e[2] + 6 * px, p.yTop + 5 * px)
+    for (const s of [-1, 1]) {
+      const in0 = s * (p.phone ? p.Xc - 4.2 * p.U : p.Xc - 1.6 * p.U), ex = s * .74 * p.Xc, ez = p.D * (p.phone ? .62 : .5)
+      raise(Math.min(in0, s * p.Xc), Math.max(in0, s * p.Xc), 0, 7 * px, p.yTop + 4.4 * px); raise(ex - 2.4 * px, ex + 2.4 * px, ez - 2.4 * px, ez + 2.4 * px, p.yTop + 5.3 * px)
+      if (!p.phone) { const x = s * (p.Xc - 2.6 * p.U), jx = x - s * 2.2 * p.U, jz = p.D * .52; raise(x - 1.3 * px, x + 1.3 * px, 7 * px, jz, p.yTop + 2.7 * px); raise(Math.min(jx, x), Math.max(jx, x), jz - 1.3 * px, jz + 1.3 * px, p.yTop + 2.7 * px); raise(jx - 4 * px, jx + 4 * px, jz - 4 * px, jz + 4 * px, p.yTop + 4 * px) }
+    }
   }
   function resetHeights(hopper = false) {
     heights.set(ground)
@@ -228,93 +269,112 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   /** Everything fitted at once: for a visitor who will not wait, and a page shown without motion. */
   function fitAll() {
     p.lanes.forEach((_, i) => { deck[i].stage = FITTED; deck[i].chute = 1 })
-    for (const a of arm) { a.pop = 1; a.job = -1; a.cover = 0 }
-    fitNext = p.fit.length; built = screenOn = sendOn = true; floors = 2; floorT = -1; cableT = 1; pod.fill(1)
+    for (const a of arm) { a.pop = 1; a.down = false; a.job = -1; a.cover = 0; a.grip = 0 }
+    fitNext = p.fit.length; built = screenOn = sendOn = true; rush = 1; floors = 2; floorT = -1; cableT = 1; pod.fill(1)
+    if (m) m.arms.forEach((A, k) => { taken[k] = lift[k] = A.count; liftV[k] = 0 })
     hooks.fit(p.lanes.map(() => true)); hooks.floors(2, true)
     if (m) stand()
   }
   /** Where the floors stand now: the sorting floor and the console off to the side until they are slid in, the roof
    *  on whatever is under it (or drawn up over the floor that is coming in, and let down on it). */
   function stand() {
-    const rests = [p.ySlot - p.yTop, p.yFas - p.yTop, 0], gap = 2.4 * p.U, far = p.W + 2 * p.Xc + 30 * p.U
+    const U = p.U, gap = 2.4 * U, far = p.W + 2 * p.Xc + 30 * U
+    rests[0] = p.ySlot - p.yTop; rests[1] = p.yFas - p.yTop; rests[2] = 0
     let lid = rests[floors], sort = floors >= 1 ? 0 : -far, desk = floors >= 2 ? 0 : far
     if (floorT >= 0) {
-      const next = floors + 1, u = floorT, up = ease(clamp(u / .26)), slide = out(clamp((u - .18) / .5)), down = clamp((u - .76) / .22)
-      lid = rests[floors] + (rests[next] + gap - rests[floors]) * up - gap * down * down
-      if (next === 1) sort = -far * (1 - slide); else desk = far * (1 - slide)
+      // The roof is drawn up on its cables, slow to get going as a weight is, and bobs as they take it; the floor is
+      // slid in under it, braking hard, running on a hair past its place and back; and the roof is let down on it,
+      // gathering way and then at a steady rate, until the floor stops it dead.
+      const next = floors + 1, u = floorT, up = ease(clamp(u / .26)), held = u - .26, bob = held > 0 ? .14 * U * Math.sin(held * 24) * Math.exp(-held * 10) : 0
+      const s = clamp((u - .18) / .5), q = clamp((s - .75) / .25), slide = far * (1 - s) ** 4 - .5 * U * Math.sin(Math.PI * q) * (1 - q)
+      const t = clamp((u - .74) / .24), down = t < .3 ? t * t / .51 : (t - .15) / .85
+      lid = rests[floors] + (rests[next] + gap - rests[floors]) * up + bob - gap * down
+      if (next === 1) sort = -slide; else desk = slide
     }
     shifts[3] = sort; shifts[6] = desk; shifts[10] = lid
-    // (A side unit comes in from its own side of the page, and stops against the tower a hair late: it is pushed home.)
-    m.pods.forEach((unit, k) => { const u = clamp(pod[k]), side = p.pods[k].s; shifts[3 * (4 + k)] = side * far * (1 - out(clamp(u / .8))) + side * 1.2 * p.U * (1 - ease(clamp((u - .8) / .2))); parts[unit.lamp].on = pod[k] >= 1 })
-    // (The cables are drawn up out of the night's way once the roof stands on the console.)
-    parts[m.cables].on = cableT < 1; pose(parts[m.cables].m, [0, 0, 0], [0, ease(cableT) * (p.oy + over + 80 * p.U), 0], [0, 0, 0, 1])
+    // (A side unit comes in from its own side of the page, braking to a stop a hand short of the tower; then it is
+    // pushed home, gathering way, and gives a little as it seats.)
+    for (let k = 0; k < m.pods.length; k++) {
+      const u = clamp(pod[k]), push = clamp((u - .7) / .2), q = clamp((u - .9) / .1)
+      shifts[3 * (4 + k)] = p.pods[k].s * (far * (1 - clamp(u / .6)) ** 4 + 1.2 * U * (1 - push * push) + .3 * U * Math.sin(Math.PI * q) * (1 - q))
+    }
+    // (The cables are unhooked and drawn up out of the night's way once the roof stands on the console.)
+    parts[m.cables].on = cableT < 1; pose(parts[m.cables].m, ORIGIN, put(AT, 0, ease(clamp((cableT - .25) / .75)) * (p.oy + over + 80 * U), 0), NONE)
   }
   /** How far the roof now stands under where it will. */
   const lid = () => shifts[10]
-  /** A fitter's hand at rest: in over its own port, raised. (Which way it points, how far out, how high.) */
-  const rest = (k: number): [number, number, number] => { const A = m.arms[k]; return [A.s < 0 ? 0 : Math.PI, Math.abs(A.portX - A.shoulder[0]) * .8, p.yTop + m.grip + m.deckH + 2.6 * p.U] }
-  const armFrom: [number, number, number][] = [[0, 1, 0], [0, 1, 0]]
   let tailT = 0, dueRoute = -1
   function fitting(dt: number) {
-    if (!built && phase === 'run' && floors < 2) {
+    // (Pressed mid-build, the gauge hurries it: everything still to come comes faster, the fitters both at once.)
+    const building = !built && (phase === 'run' || phase === 'overload')
+    if (building) dt *= rush
+    if (building && floors < 2) {
       buildT += dt
-      if (floorT < 0) { if (buildT > (floors ? B.between : B.core)) floorT = 0 }
+      if (floorT < 0) { if (buildT > (floors ? B.between : B.core) && (scanning === -1 || scripts.get(scanning)?.stage !== 10)) { floorT = 0; swingV[0] -= .5; swingV[1] += .5 } }
       else {
         const before = floorT; floorT += dt / B.floor
-        // (As the roof comes down on the new floor: dust along the join, and the needle jumps.)
-        if (before < .97 && floorT >= .97) { const y = p.yTop + [p.ySlot - p.yTop, p.yFas - p.yTop, 0][floors + 1]; for (let k = 0; k < 7; k++) { const x = (k / 6 - .5) * 2 * p.Xc; dust(x, y, -3 * px); if (k % 3 === 0) sparks(x, y, -4 * px, 2, 110) } needleV += 2.2 }
+        // (As the roof comes down on the new floor: dust along the join, the needle jumps, the hanging lasers swing.)
+        if (before < .97 && floorT >= .97) { const y = p.yTop + rests[floors + 1]; for (let k = 0; k < 7; k++) { const x = (k / 6 - .5) * 2 * p.Xc; dust(x, y, -3 * px); if (k % 3 === 0) sparks(x, y, -4 * px, 2, 110) } needleV += 2.2; swingV[0] += 1.3; swingV[1] -= 1.1 }
         if (floorT >= 1) { floors++; floorT = -1; buildT = 0; lighting(); hooks.floors(floors, false); hooks.fit(p.lanes.map((_, i) => deck[i].stage === FITTED)); spawnIn = Math.min(spawnIn, .3) }
       }
       stand()
-    } else if (!built && phase === 'run' && cableT < 1) { cableT = Math.min(1, cableT + dt / .7); stand(); buildT = 0 }
-    else if (!built && phase === 'run') {
+    } else if (building && cableT < 1) { cableT = Math.min(1, cableT + dt); stand(); buildT = 0 }
+    else if (building) {
       buildT += dt
       // First the fitters themselves: up out of their wells, the left one and then the right.
-      for (let k = 0; k < 2; k++) if (buildT > .3 + k * .32 && arm[k].pop < 1) { if (arm[k].pop === 0) { const A = m.arms[k]; jet(A.shoulder[0], p.yTop + 2 * px, p.zL, 0, 1, 110, 3, .8) } arm[k].pop = Math.min(1, arm[k].pop + dt / .5) }
+      for (let k = 0; k < 2; k++) if (buildT > .3 + k * .32 && arm[k].pop < 1) { if (arm[k].pop === 0) { const A = m.arms[k]; jet(A.shoulder[0], p.yTop + 2 * px, p.zL, 0, 1, 110, 3, .8) } arm[k].down = false; arm[k].pop = Math.min(1, arm[k].pop + dt / .5) }
       // Then a deck at a time, each side's arm in turn; a new one begins before the last is home.
       if (arm[1].pop >= 1 && fitNext < p.fit.length) {
         fitIn -= dt
-        const i = p.fit[fitNext], k = p.lanes[i] < 0 ? 0 : 1
-        if (fitIn <= 0 && arm[k].job < 0) { arm[k].job = i; arm[k].t = 0; armFrom[k] = [arm[k].yaw, arm[k].r, arm[k].y]; fitNext++; fitIn = B.gap }
+        const i = p.fit[fitNext], k = p.lanes[i] < 0 ? 0 : 1, a = arm[k]
+        if ((fitIn <= 0 || rush > 1) && a.job < 0) { a.job = i; a.t = 0; put(a.from, a.yaw, a.r, a.y); fitNext++; fitIn = B.gap }
       }
       // (Each lane's unit is plugged onto the tower's side while its deck is on its way in.)
       for (let k = 0; k < m.pods.length; k++) if (pod[k] < 1 && p.fit.indexOf(m.pods[k].lane) < fitNext) {
         const before = pod[k]; pod[k] = Math.min(1, pod[k] + dt / (options.quick ? .9 : 1.25))
-        if (before < .8 && pod[k] >= .8) { const at = p.pods[k], x = at.s < 0 ? at.x + at.w : at.x; sparks(x, at.y + at.h * .5, at.z - 2 * px, 6, 150); dust(x, at.y + at.h * .2, at.z - 2 * px) }
+        if (before < .9 && pod[k] >= .9) { const at = p.pods[k], x = at.s < 0 ? at.x + at.w : at.x; sparks(x, at.y + at.h * .5, at.z - 2 * px, 6, 150); dust(x, at.y + at.h * .2, at.z - 2 * px) }
         stand()
       }
-      // And once every lane is in: the lasers come up, the cannon is given something to send, and the day begins.
-      if (fitNext >= p.fit.length && p.lanes.every((_, i) => deck[i].stage === FITTED) && arm.every(a => a.job < 0)) {
+      // And once every lane is in: the lasers come up, the cannon is given something to send, and the day begins
+      // (or, hurried, it overloads).
+      let done = fitNext >= p.fit.length && arm[0].job < 0 && arm[1].job < 0
+      for (let i = 0; i < p.lanes.length && done; i++) done = deck[i].stage === FITTED
+      if (done) {
         tailT += dt
         if (!screenOn && tailT > .35) { screenOn = true; scamDue = true; spawnIn = Math.min(spawnIn, .3) }
         if (!sendOn && tailT > 1) { sendOn = true; sendIn = .2 }
-        if (tailT > 1.7) { built = true; hooks.floors(2, true) }
+        if (tailT > 1.7) { built = true; rush = 1; hooks.floors(2, true) }
       }
     }
-    m.arms.forEach((A, k) => {
-      const a = arm[k], sx = A.shoulder[0], inn = A.s < 0 ? 0 : Math.PI, out = Math.PI - inn, home = rest(k)
-      if (a.job < 0) { const e = Math.min(1, dt * 5); a.yaw += (home[0] - a.yaw) * e; a.r += (home[1] - a.r) * e; a.y += (home[2] - a.y) * e; a.cover += (0 - a.cover) * Math.min(1, dt * 9); return }
+    for (let k = 0; k < 2; k++) {
+      const A = m.arms[k], a = arm[k]
+      // Once the machine is whole the fitters stand by over their ports; as it overloads they fold down into their
+      // wells, out of the way of what is to come, and once it is put back together they come up again.
+      if (built) {
+        if (phase === 'overload' || phase === 'boom' || phase === 'rest' || phase === 'rebuild') { if (a.pop > 0) { a.down = true; a.pop = Math.max(0, a.pop - dt / .4) } }
+        else if (a.pop < 1 && clock > .25 + .3 * k) { if (a.pop === 0) jet(A.shoulder[0], p.yTop + 2 * px, p.zL, 0, 1, 110, 3, .8); a.down = false; a.pop = Math.min(1, a.pop + dt / .5) }
+      }
+      if (a.job < 0) { const e = Math.min(1, dt * 5); a.yaw += (A.rest[0] - a.yaw) * e; a.r += (A.rest[1] - a.r) * e; a.y += (A.rest[2] - a.y) * e; a.cover -= a.cover * Math.min(1, dt * 9); a.grip -= a.grip * Math.min(1, dt * 9); continue }
       a.t += dt / B.job
-      const u = Math.min(1, a.t), i = a.job, w = A.wait[A.lanes.indexOf(i)], d = deck[i]
-      // The hand's way for one deck, as which way it points, how far out and how high at moments of the job: out to
-      // over the deck, down on it, up with it, round the back to over the port, down into it, up again and to rest.
-      const rw = Math.abs(w[0] - sx), yw = w[1] + m.rr + m.grip, over = Math.max(yw + 2.2 * p.U, p.yTop + m.grip + m.deckH + 1.2 * p.U), rp = Math.abs(A.portX - sx), carry = p.yTop + m.grip + m.deckH + 1.6 * p.U, low = A.low[1] + m.rr + m.grip
-      const keys = [[0, ...armFrom[k]], [.15, out, rw, over], [.25, out, rw, yw], [.3, out, rw, yw], [.4, out, rw, over], [.62, inn, rp, carry], [.76, inn, rp, low], [.8, inn, rp, low], [.9, inn, rp, carry], [1, ...home]]
-      let n = 1; while (n < keys.length - 1 && keys[n][0] < u) n++
-      const k0 = keys[n - 1], k1 = keys[n], e = ease(clamp((u - k0[0]) / (k1[0] - k0[0])))
-      a.yaw = k0[1] + (k1[1] - k0[1]) * e; a.r = k0[2] + (k1[2] - k0[2]) * e; a.y = k0[3] + (k1[3] - k0[3]) * e
-      a.cover = ease(clamp((u - .44) / .14)) * (1 - ease(clamp((u - .86) / .12)))
-      if (d.stage === AWAIT && u >= .275) d.stage = CARRIED
+      const u = Math.min(1, a.t), i = a.job, d = deck[i], n = A.lanes.indexOf(i)
+      fitterAt(A, a.from, u, hand)
+      a.yaw = hand[0]; a.r = hand[1]; a.y = hand[2]; a.grip = hand[3]; a.cover = hand[4]
+      // (The deck is the hand's once its fingers have closed on it, and the port's once they open; the magazine lifts
+      // the next up once this one is clear of it.)
+      if (d.stage === AWAIT && u >= JOB.shut) d.stage = CARRIED
+      if (u >= JOB.lift && taken[k] < n + 1) taken[k] = n + 1
       if (d.stage === CARRIED) {
-        d.x = sx + Math.cos(a.yaw) * a.r; d.y = a.y - m.grip - m.rr; d.z = p.zL + Math.sin(a.yaw) * a.r; d.turn = a.yaw - inn
-        if (u >= .78) { d.stage = LOWERED; d.t = 0; d.from = d.y; d.x = A.portX; d.z = p.zL; d.turn = 0 }
+        d.x = A.shoulder[0] + Math.cos(a.yaw) * a.r; d.y = a.y - m.grip - m.rr; d.z = p.zL + Math.sin(a.yaw) * a.r
+        if (u >= JOB.open) { d.stage = LOWERED; d.t = 0; d.from = d.y }
       }
       if (u >= 1) a.job = -1
-    })
+    }
+    // (A magazine's lift comes up a deck at a time, a little past, and settles.)
+    for (let k = 0; k < 2; k++) { liftV[k] += ((taken[k] - lift[k]) * 90 - liftV[k] * 12) * dt; lift[k] += liftV[k] * dt; if (Math.abs(taken[k] - lift[k]) < 1e-3 && Math.abs(liftV[k]) < 1e-3) { lift[k] = taken[k]; liftV[k] = 0 } }
     // A deck let go of: down inside to the roller line, along it to its place, and its chute up under it.
-    p.lanes.forEach((x, i) => {
-      const d = deck[i]
-      if (d.stage === AWAIT) { const A = m.arms[x < 0 ? 0 : 1], w = A.wait[A.lanes.indexOf(i)]; if (w) { d.x = w[0] + shifts[6] - shifts[3]; d.y = w[1]; d.z = w[2]; d.turn = Math.PI } }
+    for (let i = 0; i < p.lanes.length; i++) {
+      const x = p.lanes[i], d = deck[i]
+      if (d.stage === AWAIT) { const k = x < 0 ? 0 : 1, A = m.arms[k], n = A.lanes.indexOf(i); if (n >= 0) { d.x = A.top[0] + shifts[6] - shifts[3]; d.y = A.top[1] - (n - lift[k]) * A.pitch + shifts[7] - shifts[4]; d.z = A.top[2] } }
       else if (d.stage === LOWERED) { d.t += dt / (options.quick ? .3 : .42); d.y = d.from + (m.yR - d.from) * ease(clamp(d.t)); if (d.t >= 1) { d.stage = ALONG; d.t = 0; d.from = d.x } }
       else if (d.stage === ALONG) {
         const far = Math.abs(x - d.from) / p.P; d.t += far < .1 ? 1 : dt / (.16 + .11 * far)
@@ -325,12 +385,9 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
         d.t += dt / .28; d.chute = out(clamp(d.t))
         if (d.t >= 1) { d.stage = FITTED; d.chute = 1; dueRoute = p.routes[i]; spawnIn = Math.min(spawnIn, .25); hooks.fit(p.lanes.map((_, n) => deck[n].stage === FITTED)); parts[m.idx.lamps[1]].on = false; lampIn = .12 }
       }
-    })
+    }
   }
   let lampIn = 0
-  const yawQ = (yaw: number): [number, number, number, number] => [0, -Math.sin(yaw / 2), 0, Math.cos(yaw / 2)]
-  /** A turn about the page's own axis (a pitch, or a spin), then one about the upright. */
-  const yawThen = (yaw: number, turn: number): [number, number, number, number] => { const ay = -Math.sin(yaw / 2), aw = Math.cos(yaw / 2), bz = Math.sin(turn / 2), bw = Math.cos(turn / 2); return [ay * bz, ay * bw, aw * bz, aw * bw] }
 
   // ── Letters ──
   function alloc() {
@@ -381,17 +438,19 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       P[o] = s.x0 * (1 - out(u)); P[o + 1] = s.y0 + (topY - s.y0) * (u * u * .7 + u * .3); P[o + 2] = p.zL
       setQuat(i, s.ax, s.ay, s.az, s.turn * (1 - u) ** 1.6)
       if (u >= 1) {
-        if (queue.length < QUEUE && phase !== 'overload') { queue.push(i); s.stage = 1; s.t = 0 }
+        if (queue.length < QUEUE && (phase !== 'overload' || !built)) { queue.push(i); s.stage = 1; s.t = 0 }
         // (While the tower is going up, what the hopper has no room for is not thrown about: it is not taken.)
         else if (!built) { scripts.delete(i); L.state[i] = FREE }
         else loose(i, rnd(-1, 1) * 170 * px, rnd(140, 320) * px, rnd(-60, 150) * px, 5)
       }
     } else if (s.stage === 1) {
       // In the hopper, in line: the next to go lowest, the rest stacked over it, each a little askew.
+      // (It rides with the roof as the roof is drawn up or let down.)
       const j = queue.indexOf(i), k = Math.min(1, dt * 16), lean = j ? (j % 2 ? .2 : -.16) : 0
-      P[o] += ((j % 2 ? 1 : -1) * Math.min(j, 1) * p.lw * .09 - P[o]) * k; P[o + 1] += (p.yTop + lid() + p.hopper * .34 + j * p.lh * .34 - P[o + 1]) * k
+      P[o] += ((j % 2 ? 1 : -1) * Math.min(j, 1) * p.lw * .09 - P[o]) * k; P[o + 1] += lidMoved; P[o + 1] += (p.yTop + lid() + p.hopper * .34 + j * p.lh * .34 - P[o + 1]) * k
       setQuat(i, 0, 0, 1, lean)
-      if (j === 0 && scanning === -1 && s.t > .1 / rate) { queue.shift(); scanning = i; s.stage = 10; s.t = 0; s.y0 = P[o + 1] }
+      // (While the roof is drawn up off the tower the line waits: down its throat now would be out of its underside.)
+      if (j === 0 && scanning === -1 && floorT < 0 && s.t > .1 / rate) { queue.shift(); scanning = i; s.stage = 10; s.t = 0; s.y0 = P[o + 1] }
     } else if (s.stage === 10) {
       // Down the throat and out of sight.
       const u = clamp(s.t / (.16 / rate))
@@ -405,7 +464,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       if (u >= 1) { s.stage = 3; s.t = 0; hooks.scan(pool[s.data], pool[s.data].scam ? 'junk' : 'read') }
     } else if (s.stage === 3) {
       const d = Math.max(.09, .62 / rate), u = clamp(s.t / d), scan = parts[m.idx.scan]
-      scan.on = true; pose(scan.m, [0, m.scanY, p.zL], [0, m.scanY + Math.cos(u * Math.PI * 2) * p.lh * .42, p.zL], [0, 0, 0, 1])
+      scan.on = true; pose(scan.m, put(AT2, 0, m.scanY, p.zL), put(AT, 0, m.scanY + Math.cos(u * Math.PI * 2) * p.lh * .42, p.zL), NONE)
       if (u >= 1) { scan.on = false; s.stage = s.lane === 7 ? 20 : 4; s.t = 0; if (s.lane !== 7) scanning = -1 }
     } else if (s.stage === 4) {
       const u = clamp(s.t / (.14 / rate))
@@ -431,7 +490,10 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       P[o] = s.x0 + (p.lanes[s.lane] - s.x0) * out(u); P[o + 1] = s.y0 + (endY - s.y0) * u * u
       setQuat(i, 0, 0, 1, s.turn * (1 - out(u)))
       if (u > .35) flapWant[s.lane] = 0
-      if (u >= 1) { scripts.delete(i); L.state[i] = FREE; sorted++; hooks.count(sorted, burnt); launch(tubeOf(s.lane)); launch(7) }
+      if (u >= 1) {
+        scripts.delete(i); L.state[i] = FREE; sorted++; hooks.count(sorted, burnt); launch(tubeOf(s.lane)); launch(7)
+        arrived[s.lane] = 1; const k = podOf[s.lane]; if (k >= 0) { dialTo[k] += Math.PI / 2; stepAt[k] = (stepAt[k] + 1) % 4; got[k] = 1 }
+      }
     } else if (s.stage === 20) {
       // A scam: back up behind the fascia, then thrown out of the roof for the laser.
       const u = clamp(s.t / (.2 / rate))
@@ -503,19 +565,19 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     const nl = 1 / Math.hypot(nqx, nqy, nqz, nqw); quat[q] = nqx *= nl; quat[q + 1] = nqy *= nl; quat[q + 2] = nqz *= nl; quat[q + 3] = nqw *= nl
     matrix(quat, q)
     const rad = B.thin ? .8 : 0
-    let touching = 0, cx = 0, cy = 0, cz = 0
+    let touching = 0, cx = 0, cy = 0, cz = 0, ledge = 0
     for (let k = 0; k < pts.length; k += 3) {
       const lx = pts[k] * hx, ly = pts[k + 1] * hy, lz = pts[k + 2] * half[o + 2]
       const rx = R[0] * lx + R[1] * ly + R[2] * lz, ry = R[3] * lx + R[4] * ly + R[5] * lz, rz = R[6] * lx + R[7] * ly + R[8] * lz
       const x = pos[o] + rx, y = pos[o + 1] + ry, z = pos[o + 2] + rz
       let nx = 0, ny = 1, nz = 0, pen = 0
       let inside = null
-      for (const box of solids) if (x > box.x0 && x < box.x1 && z > box.z0 && z < box.z1 && y < box.y) { inside = box; break }
+      for (let b = 0; b < solids.length; b++) { const box = solids[b]; if (x > box.x0 && x < box.x1 && z > box.z0 && z < box.z1 && y < box.y && y > box.y0) { inside = box; break } }
       if (inside) {
-        // Inside a solid's walls: out through the nearest one.
-        const front = z - inside.z0, back = inside.z1 - z, left = x - inside.x0, right = inside.x1 - x, least = Math.min(front, back, left, right)
+        // Inside a solid's walls: out through the nearest one (or, where it hangs in the air, its top or its underside).
+        const front = z - inside.z0, back = inside.z1 - z, left = x - inside.x0, right = inside.x1 - x, top = inside.y0 > -Infinity ? inside.y - y : Infinity, under = y - inside.y0, least = Math.min(front, back, left, right, top, under)
         ny = 0; pen = least
-        if (least === front) nz = -1; else if (least === left) nx = -1; else if (least === right) nx = 1; else nz = 1
+        if (least === top) { ny = 1; ledge = inside.side } else if (least === under) ny = -1; else if (least === front) nz = -1; else if (least === left) nx = -1; else if (least === right) nx = 1; else nz = 1
       } else if (B.thin && z < 0 && z > -40 * px && x > -p.Xc - 8 && x < p.Xc + 8 && y < 40 * px) {
         // A kick plate that isn't drawn: nothing comes to rest against the foot of the front, where the page's small print is.
         ny = .743; nz = -.669; pen = rad - (y * ny + (z + 40 * px) * nz)
@@ -549,6 +611,8 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       const reach = Math.hypot(hx, hy)
       if (pos[o + 2] < reach + 2 * px) { vel[o + 2] = Math.min(vel[o + 2], -190 * px); touching = 0; pos[o + 1] += cy }
     }
+    // Nor on top of what hangs on the tower's sides (a unit, a magazine): it slides off, away from the tower.
+    if (touching && ledge) { vel[o] = ledge * 170 * px; vel[o + 2] = Math.min(vel[o + 2], -40 * px); touching = 0; pos[o + 1] += cy }
     // Nor up against the cabinet's front, where it would stand over what is written on the base: it is moved forward.
     if (touching && pos[o + 1] < p.base && Math.abs(pos[o]) < p.Xc + hx && pos[o + 2] < 0 && pos[o + 2] > -(Math.hypot(hx, hy) + 10 * px)) { vel[o + 2] = Math.min(vel[o + 2], -150 * px); touching = 0; pos[o + 1] += cy }
     // Nor half off the side of the page, cut by its edge: it is moved in.
@@ -745,22 +809,23 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   // last second the glass cracks, the service panel is blown off its screws, both valves blow without stopping and
   // the hatch stands open.
   function strain(dt: number) {
-    const hot = Math.min(1, heat), over = phase === 'overload', rate = Math.sqrt(LEVELS[quality].puffs / 240)
+    const hot = Math.min(1, heat), over = phase === 'overload' && built, rate = Math.sqrt(LEVELS[quality].puffs / 240)
     const tremble = (.003 + .015 * hot * hot) * (Math.sin(time * 31) + .6 * Math.sin(time * 53.3 + 1)) + (over ? Math.sin(time * 87) * .012 : 0)
     needleV += ((Math.min(1.04, hot * .84 + (over ? .12 + clock * .05 : 0)) + tremble - needle) * 60 - needleV * 9) * dt; needle += needleV * dt
     parts[m.idx.lamps[0]].on = hot > .45 && Math.sin(time * (8 + hot * 22)) > 0
     parts[m.idx.beaconOn].on = hot > .8 && Math.sin(time * 26) > 0
     jetIn[2] -= dt * Math.max(0, hot - .22) * (over ? 22 : 12) * rate
     // (From the chimneys; on a roof that has none, from its back seam.)
-    while (jetIn[2] < 0) { jetIn[2] += 1; const v = m.vents.length ? m.vents[Math.random() < .5 ? 0 : 1] : [(Math.random() < .5 ? -1 : 1) * p.Xw * rnd(.3, .7), p.yTop + 2 * px, p.D * .92]; wisp(v[0], v[1], v[2], hot > .9 ? .3 : 0, 3 + hot * 2.5, .34 + hot * .16) }
-    m.valves.forEach((v, k) => {
+    while (jetIn[2] < 0) { jetIn[2] += 1; const v = m.vents.length ? m.vents[Math.random() < .5 ? 0 : 1] : put(AT, (Math.random() < .5 ? -1 : 1) * p.Xw * rnd(.3, .7), p.yTop + 2 * px, p.D * .92); wisp(v[0], v[1], v[2], hot > .9 ? .3 : 0, 3 + hot * 2.5, .34 + hot * .16) }
+    for (let k = 0; k < m.valves.length; k++) {
+      const v = m.valves[k]
       if (over && clock > T.over * .28) ventFor[k] = 1
       if (ventFor[k] > 0) ventFor[k] -= dt
       else if (hot > .4) { ventIn[k] -= dt; if (ventIn[k] <= 0) { ventFor[k] = rnd(.3, .5) + hot * .45; ventIn[k] = rnd(.75, 1.25) * (3 - 2.5 * hot); needleV -= .9 } }
       const open = ventFor[k] > 0
       lever[k] += ((open ? .5 + Math.sin(time * 61 + k * 2) * .07 : hot > .3 ? Math.max(0, Math.sin(time * (29 + k * 7))) * .09 * hot : 0) - lever[k]) * Math.min(1, dt * 34)
       if (open) { jetIn[k] -= dt * 62 * rate; while (jetIn[k] < 0) { jetIn[k] += 1; jet(v.nozzle[0], v.nozzle[1], v.nozzle[2], v.side * .2, .98, 230 + hot * 130, 1, p.phone ? .8 : 1.15) } }
-    })
+    }
     if (over && clock > T.over * .45) hatchV += ((1.05 - hatch) * 130 - hatchV * 9) * dt
     else { if (hatch < .01 && hot > .5 && Math.random() < dt * (hot - .45) * 7) hatchV = rnd(1.6, 3.6); hatchV -= 30 * dt }
     hatch += hatchV * dt
@@ -800,10 +865,12 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   }
 
   // ── A frame ──
+  let scriptDt = 0, lidMoved = 0
+  const runScript = (s: Script, i: number) => script(i, s, scriptDt, speed)
   function advance(dt: number) {
     time += dt; clock += dt
     if (phase === 'boot') { needle = Math.sin(clamp(clock / .7) * Math.PI) * .9; parts[m.idx.lamps[2]].on = clock > .15; parts[m.idx.lamps[1]].on = clock > .3; if (clock > .75) { setPhase('run'); runT = 0; needle = 0 } }
-    fitting(dt)
+    const lidWas = shifts[10]; fitting(dt); lidMoved = shifts[10] - lidWas
     if (lampIn > 0) { lampIn -= dt; if (lampIn <= 0) parts[m.idx.lamps[1]].on = true }
     if (phase === 'run') {
       if (built) runT += dt
@@ -811,20 +878,23 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       if (e >= 1) setPhase('overload')
     }
     if (phase === 'overload') {
+      // (Hurried to it mid-build, it strains while the build is finished, and its last seconds begin once it is whole.)
+      if (!built) clock = 0
       heat = 1 + clock * .12
       // The glass gives twice before it goes; the gates chatter.
-      m.idx.cracks.forEach((index, n) => { const at = T.over * (.22 + n * .4); if (!parts[index].on && clock >= at) { parts[index].on = true; needleV += 1.4; sparks(m.crackAt[n][0], m.crackAt[n][1], -4, 12, 260, colour.steam) } })
+      for (let n = 0; n < m.idx.cracks.length; n++) { const index = m.idx.cracks[n], at = T.over * (.22 + n * .4); if (built && !parts[index].on && clock >= at) { parts[index].on = true; needleV += 1.4; sparks(m.crackAt[n][0], m.crackAt[n][1], -4, 12, 260, colour.steam) } }
       if (Math.random() < dt * 14) flapWant[Math.floor(rnd(0, p.lanes.length))] = Math.random() < .5 ? 1 : 0
-      if (clock > T.over) boom()
+      if (built && clock > T.over) boom()
     }
     const running = phase === 'run' || phase === 'overload'
     // The rollers quicken, the scanner more, but never as fast as the mail arrives: that is what backs up.
     speed = running ? 1 + 1.9 * Math.min(1, heat) ** 1.5 + (phase === 'overload' ? .4 : 0) : 1
     feed = running ? 1 + 4.4 * Math.min(1, heat) ** 1.2 : 1
+    for (let i = 0; i < 7; i++) arrived[i] = Math.max(0, arrived[i] - dt * 1.6)
     if (running) {
       spawnIn -= dt
       // (While it is being fitted out it has little to do; each lane more brings it more mail.)
-      if (spawnIn <= 0) { spawn(); spawnIn = phase === 'overload' ? .05 : (1.45 * (1 - heat) ** 3.4 + .07) * (built ? 1 : 1.5 - .5 * fitNext / p.fit.length) }
+      if (spawnIn <= 0) { spawn(); spawnIn = !built ? 1.52 * (1.5 - .5 * fitNext / p.fit.length) : phase === 'overload' ? .05 : 1.45 * (1 - heat) ** 3.4 + .07 }
       strain(dt)
     } else {
       parts[m.idx.lamps[0]].on = phase === 'rest' || phase === 'boom'
@@ -842,7 +912,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     else if (volley > 0 && phase === 'boom') { volleyIn -= dt; if (volleyIn <= 0) { cannonFire(); volley--; volleyIn = .14 } }
     cool = Math.max(0, cool - dt); recoil += (0 - recoil) * Math.min(1, dt * 6.5); if (recoil < .004) recoil = 0
 
-    for (const [i, s] of scripts) script(i, s, dt, speed)
+    scriptDt = dt; scripts.forEach(runScript)
     if (rainLeft > 0) { const n = Math.min(rainLeft, Math.ceil(dt * 140)); rainLeft -= n; for (let k = 0; k < n; k++) { const i = alloc(); nextLetter(i); place(i, rnd(-.5, .5) * p.W * 1.1 - DX * 600, oyc + rnd(20, 500), rnd(-150, (oyc - 120) / DY)); setQuat(i, rnd(-1, 1), rnd(-1, 1), rnd(-1, 1), rnd(0, 6)); loose(i, rnd(-60, 60), -rnd(200, 500), rnd(-40, 40), 6) } }
     // Rigid bodies, in steps of a 120th of a second or less: two a frame at full rate, more when frames come slowly.
     const passes = Math.max(2, Math.ceil(dt * 120)), h = dt / passes
@@ -896,75 +966,96 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
 
     // Capsules down the tubes: down the front between the manifolds, a moment out of sight inside the cabinet, then
     // out of its wall, across the slab and over the lip.
-    caps.forEach((cap, k) => {
-      const part = parts[m.idx.caps[k]]
+    for (let k = 0; k < caps.length; k++) {
+      const cap = caps[k], part = parts[m.idx.caps[k]]
       part.on = cap.on && cap.wait <= 0; part.clip = cap.run === 0 && cap.tube < p.tubes.length ? frontClip : undefined
-      if (!cap.on) return
-      if (cap.wait > 0) { cap.wait -= dt * Math.sqrt(speed); return }
+      if (!cap.on) continue
+      if (cap.wait > 0) { cap.wait -= dt * Math.sqrt(speed); continue }
       cap.s += dt * 540 * px * Math.sqrt(speed)
       const line = m.lines[cap.tube][cap.run], s = runLength[cap.tube][cap.run]
-      if (cap.s >= s[s.length - 1]) { if (cap.run + 1 < m.lines[cap.tube].length) { cap.run++; cap.s = 0; cap.wait = .16 } else { cap.on = false; if (cap.tube === p.tubes.length) cannonFire() } part.on = false; return }
+      if (cap.s >= s[s.length - 1]) { if (cap.run + 1 < m.lines[cap.tube].length) { cap.run++; cap.s = 0; cap.wait = .16 } else { cap.on = false; if (cap.tube === p.tubes.length) cannonFire() } part.on = false; continue }
       let i = 1; while (s[i] < cap.s) i++
       const a = line[i - 1], b = line[i], u = (cap.s - s[i - 1]) / (s[i] - s[i - 1]), tx = b[0] - a[0], ty = b[1] - a[1], tz = b[2] - a[2], tl = Math.hypot(tx, ty, tz), angle = Math.acos(clamp(ty / tl, -1, 1)), al = Math.hypot(tz, tx) || 1, sn = Math.sin(angle / 2)
-      pose(part.m, [0, 0, 0], [a[0] + tx * u, a[1] + ty * u, a[2] + tz * u], [tz / al * sn, 0, -tx / al * sn, Math.cos(angle / 2)])
-    })
+      Q2[0] = tz / al * sn; Q2[1] = 0; Q2[2] = -tx / al * sn; Q2[3] = Math.cos(angle / 2)
+      pose(part.m, ORIGIN, put(AT, a[0] + tx * u, a[1] + ty * u, a[2] + tz * u), Q2)
+    }
 
     // Gates, rollers, needle, laser.
     for (let i = 0; i < 7; i++) { flapAngle[i] += (flapWant[i] - flapAngle[i]) * Math.min(1, dt * 22 * Math.sqrt(speed)); if (!scripts.size) flapWant[i] = 0 }
     const spin = running ? 120 * px * speed / m.rr * dt : 0
     // (A deck that is not yet in its place is wherever its fitting has it, its rollers and its gate with it; one
     // still waiting off a narrow page's side is not drawn.)
-    const away = (lane: number) => deck[lane].stage !== FITTED
     for (let j = 0; j < m.idx.rollers.length; j++) {
-      const lane = m.rollerLane[j], k = j % 8, home = m.rollerHome[j], part = parts[m.idx.rollers[j]]
-      if (away(lane)) { const d = deck[lane], rx = home[0] - p.lanes[lane]; part.on = d.stage !== AWAIT || !p.phone; pose(part.m, home, [d.x + rx * Math.cos(d.turn), d.y, d.z + rx * Math.sin(d.turn)], yawQ(d.turn)); continue }
+      const lane = m.rollerLane[j], k = j % 8, home = m.rollerHome[j], part = parts[m.idx.rollers[j]], d = deck[lane]
+      if (d.stage !== FITTED) { part.on = d.stage !== AWAIT || !p.phone; pose(part.m, home, put(AT, d.x + home[0] - p.lanes[lane], d.y, d.z), NONE); continue }
       rollerSpin[j] += spin * (p.lanes[lane] < -1 ? 1 : p.lanes[lane] > 1 ? -1 : .4)
       if (k >= 2 && k <= 5) {
         const a = -m.swing[lane] * 1.02 * flapAngle[lane], hinge = m.hinge[lane], dx = home[0] - hinge[0]
-        pose(part.m, home, [hinge[0] + dx * Math.cos(a), hinge[1] + dx * Math.sin(a), home[2]], aboutZ(a + rollerSpin[j]))
-      } else pose(part.m, home, home, aboutZ(rollerSpin[j]))
+        pose(part.m, home, put(AT, hinge[0] + dx * Math.cos(a), hinge[1] + dx * Math.sin(a), home[2]), turnZ(a + rollerSpin[j]))
+      } else pose(part.m, home, home, turnZ(rollerSpin[j]))
     }
-    m.idx.flaps.forEach((index, i) => {
-      const d = deck[i], home: V3 = [p.lanes[i], m.yR, p.zL], rise = m.yR - m.rr - p.yCav
-      if (away(i)) { const rx = m.hinge[i][0] - home[0]; parts[index].on = d.stage !== AWAIT || !p.phone; pose(parts[index].m, m.hinge[i], [d.x + rx * Math.cos(d.turn), d.y, d.z + rx * Math.sin(d.turn)], yawQ(d.turn)) }
-      else pose(parts[index].m, m.hinge[i], m.hinge[i], aboutZ(-m.swing[i] * 1.02 * flapAngle[i]))
-      parts[m.idx.decks[i]].on = d.stage !== AWAIT || !p.phone
-      if (d.stage === FITTED) pose(parts[m.idx.decks[i]].m, home, home, [0, 0, 0, 1]); else pose(parts[m.idx.decks[i]].m, home, [d.x, d.y, d.z], yawQ(d.turn))
-      pose(parts[m.idx.chutes[i]].m, [0, 0, 0], [0, -(1 - d.chute) * rise, 0], [0, 0, 0, 1])
-    })
-    // The fitters: the column turned to where the hand is, the two arms bent to reach it, the hand level; the port's cover.
-    m.arms.forEach((A, k) => {
-      const a = arm[k], S = A.shoulder, base: V3 = [S[0], p.yTop, S[2]], on = a.pop > 0
-      for (const index of [A.parts.base, A.parts.upper, A.parts.fore, A.parts.hand]) parts[index].on = on
-      pose(parts[A.parts.cover].m, [0, 0, 0], [0, 0, a.cover * A.slide], [0, 0, 0, 1])
-      if (!on) return
-      // (It pops up out of its well: a little past its size, and back.)
-      const pop = 1 + 2.7 * (a.pop - 1) ** 3 + 1.7 * (a.pop - 1) ** 2, dy = a.y - S[1], reach = clamp(Math.hypot(a.r, dy), .2 * A.L, 1.98 * A.L), t1 = Math.atan2(dy, a.r) + Math.acos(reach / (2 * A.L))
-      const er = Math.cos(t1) * A.L, ey = Math.sin(t1) * A.L, t2 = Math.atan2(dy - ey, a.r - er), cy = Math.cos(a.yaw), sn = Math.sin(a.yaw)
-      const at = (r: number, y: number): V3 => [base[0] + cy * r * pop, base[1] + (S[1] - base[1] + y) * pop, base[2] + sn * r * pop]
-      pose(parts[A.parts.base].m, base, base, yawQ(a.yaw), pop)
-      pose(parts[A.parts.upper].m, S, at(0, 0), yawThen(a.yaw, t1), pop)
-      pose(parts[A.parts.fore].m, S, at(er, ey), yawThen(a.yaw, t2), pop)
-      pose(parts[A.parts.hand].m, S, at(er + Math.cos(t2) * A.L, ey + Math.sin(t2) * A.L), yawQ(a.yaw), pop)
-    })
-    pose(parts[m.idx.needle].m, [p.gauge.x, p.gauge.y, 0], [p.gauge.x, p.gauge.y, 0], aboutZ((135 - 270 * needle) * Math.PI / 180))
+    for (let i = 0; i < m.idx.flaps.length; i++) {
+      const d = deck[i], home = deckHome[i], flap = parts[m.idx.flaps[i]], body = parts[m.idx.decks[i]], rise = m.yR - m.rr - p.yCav
+      if (d.stage !== FITTED) { flap.on = body.on = d.stage !== AWAIT || !p.phone; pose(flap.m, m.hinge[i], put(AT, d.x + m.hinge[i][0] - home[0], d.y, d.z), NONE); pose(body.m, home, put(AT, d.x, d.y, d.z), NONE) }
+      else { flap.on = body.on = true; pose(flap.m, m.hinge[i], m.hinge[i], turnZ(-m.swing[i] * 1.02 * flapAngle[i])); pose(body.m, home, home, NONE) }
+      pose(parts[m.idx.chutes[i]].m, ORIGIN, put(AT, 0, -(1 - d.chute) * rise, 0), NONE)
+    }
+    // The fitters: the column turned to where the hand is, the two arms bent to reach it, the hand level and square
+    // to the page, its fingers open or closed; the port's cover; the magazine's lift.
     for (let k = 0; k < 2; k++) {
-      // At ease a laser sweeps the sky on its own side.
-      // (Until the machine is fitted out they hang muzzle down.)
-      aimHold[k] -= dt; if (!screenOn) turretAim[k] = k ? -1.35 : Math.PI + 1.35; else if (aimHold[k] <= 0) { const up = .5 + Math.sin(time * .7 + k * 2.1) * .28; turretAim[k] = k ? up : Math.PI - up }
-      turretAngle[k] += (turretAim[k] - turretAngle[k]) * Math.min(1, dt * 10)
-      pose(parts[m.idx.turrets[k]].m, m.turrets[k], m.turrets[k], aboutZ(turretAngle[k]))
+      const A = m.arms[k], a = arm[k], S = A.shoulder, P = A.parts, on = a.pop > 0
+      parts[P.base].on = parts[P.upper].on = parts[P.fore].on = parts[P.hand].on = parts[P.fingers[0]].on = parts[P.fingers[1]].on = on
+      pose(parts[P.cover].m, ORIGIN, A.front ? put(AT, 0, -a.cover * A.sink, 0) : put(AT, 0, 0, a.cover * A.slide), NONE)
+      if (P.lift >= 0) pose(parts[P.lift].m, ORIGIN, put(AT, 0, Math.min(lift[k], A.count - 1) * A.pitch, 0), NONE)
+      if (!on) continue
+      // (It comes up out of its well a little past its size and settles; it goes down into it gathering way.)
+      const u = a.pop, pop = a.down ? u * u * (3 - 2 * u) : 1 + 2.7 * (u - 1) ** 3 + 1.7 * (u - 1) ** 2
+      bendArm(A.L, a.r, a.y - S[1], angles)
+      const t1 = angles[0], t2 = angles[1], er = Math.cos(t1) * A.L, ey = Math.sin(t1) * A.L, cy = Math.cos(a.yaw), sn = Math.sin(a.yaw), bx = S[0], by = p.yTop, bz = S[2]
+      const wr = er + Math.cos(t2) * A.L, wy = by + (S[1] - by + ey + Math.sin(t2) * A.L) * pop, wx = bx + cy * wr * pop, wz = bz + sn * wr * pop, open = (1 - a.grip) * A.open * pop
+      put(AT2, bx, by, bz); pose(parts[P.base].m, AT2, AT2, turnY(a.yaw), pop)
+      pose(parts[P.upper].m, S, put(AT, bx, by + (S[1] - by) * pop, bz), turnYZ(a.yaw, t1), pop)
+      pose(parts[P.fore].m, S, put(AT, bx + cy * er * pop, by + (S[1] - by + ey) * pop, bz + sn * er * pop), turnYZ(a.yaw, t2), pop)
+      pose(parts[P.hand].m, S, put(AT, wx, wy, wz), NONE, pop)
+      pose(parts[P.fingers[0]].m, S, put(AT, wx - open, wy, wz), NONE, pop); pose(parts[P.fingers[1]].m, S, put(AT, wx + open, wy, wz), NONE, pop)
     }
-    { const c = m.cannon, back = recoil * 8 * px; pose(parts[m.idx.barrel].m, c.pivot, [c.pivot[0] - c.ce * back, c.pivot[1] - c.se * back, c.pivot[2]], aboutZ(p.cannon.el)); pose(parts[m.idx.cradle].m, c.pivot, c.pivot, aboutZ(p.cannon.el)) }
-    m.valves.forEach((v, k) => { const at = m.parts[m.idx.levers[k]].pivot; pose(parts[m.idx.levers[k]].m, at, at, aboutZ(v.side * lever[k])) })
+    // The units on the tower's sides: each lit once its lane works, and blinking off for a moment as a letter comes
+    // to it; a thread's reels turned as its mail comes, a ritual's hand stepped round and its lamps along, an agent's
+    // aerial lit, an inbox given its letter, a mail app's new line lit.
+    for (let k = 0; k < m.pods.length; k++) {
+      const unit = m.pods[k], a = arrived[unit.lane], working = deck[unit.lane].stage === FITTED && pod[k] >= 1
+      parts[unit.lamp].on = working && a < .82
+      reel[k] -= dt * 9 * a; dialV[k] += ((dialTo[k] - dial[k]) * 160 - dialV[k] * 15) * dt; dial[k] += dialV[k] * dt
+      for (let e = 0; e < unit.reels.length; e++) pose(parts[unit.reels[e]].m, unit.reelAt[e], unit.reelAt[e], turnZ(reel[k] * (e ? .78 : 1)))
+      if (unit.hand >= 0) { pose(parts[unit.hand].m, unit.handAt, unit.handAt, turnZ(-dial[k])); const at = unit.steps[stepAt[k]]; parts[unit.step].on = working; pose(parts[unit.step].m, ORIGIN, put(AT, at[0] - unit.steps[0][0], at[1] - unit.steps[0][1], 0), NONE) }
+      if (unit.tip >= 0) parts[unit.tip].on = a > .4
+      if (unit.letter >= 0) parts[unit.letter].on = got[k] === 1
+      if (unit.unread >= 0) parts[unit.unread].on = a > .25
+    }
+    put(AT, p.gauge.x, p.gauge.y, 0); pose(parts[m.idx.needle].m, AT, AT, turnZ((135 - 270 * needle) * Math.PI / 180))
+    for (let k = 0; k < 2; k++) {
+      // At ease a laser sweeps the sky on its own side. (Until the machine is fitted out they hang muzzle down, free
+      // to swing; once it is, they are driven, and come up to their work.)
+      aimHold[k] -= dt; if (!screenOn) turretAim[k] = k ? -1.35 : Math.PI + 1.35; else if (aimHold[k] <= 0) { const up = .5 + Math.sin(time * .7 + k * 2.1) * .28; turretAim[k] = k ? up : Math.PI - up }
+      if (!screenOn) { swingV[k] += ((turretAim[k] - turretAngle[k]) * 70 - swingV[k] * 3.4) * dt; turretAngle[k] += swingV[k] * dt; if (Math.abs(swingV[k]) < 1e-3 && Math.abs(turretAim[k] - turretAngle[k]) < 1e-4) swingV[k] = 0 }
+      else turretAngle[k] += (turretAim[k] - turretAngle[k]) * Math.min(1, dt * 10)
+      pose(parts[m.idx.turrets[k]].m, m.turrets[k], m.turrets[k], turnZ(turretAngle[k]))
+    }
+    { const c = m.cannon, back = recoil * 8 * px; pose(parts[m.idx.barrel].m, c.pivot, put(AT, c.pivot[0] - c.ce * back, c.pivot[1] - c.se * back, c.pivot[2]), turnZ(p.cannon.el)); pose(parts[m.idx.cradle].m, c.pivot, c.pivot, turnZ(p.cannon.el)) }
+    for (let k = 0; k < m.valves.length; k++) { const at = m.parts[m.idx.levers[k]].pivot; pose(parts[m.idx.levers[k]].m, at, at, turnZ(m.valves[k].side * lever[k])) }
     // (Thrown back by the burst it hangs by one hinge, askew: a turn about the hinge line, then a slew.)
-    if (Dn.state[hatchBody] === FREE) { const slew = clamp((hatch - 1.1) / 1.1) * .42, sx = Math.sin(hatch / 2), cx = Math.cos(hatch / 2), sy = Math.sin(slew / 2), cy = Math.cos(slew / 2); pose(parts[m.idx.hatch].m, m.hatchHinge, m.hatchHinge, [cy * sx, sy * cx, -sy * sx, cy * cx]) }
-    // Blown-off parts follow their bodies; at home they stand where they were built. The tube the burst bent stays bent.
-    debrisPart.forEach((index, i) => {
+    if (Dn.state[hatchBody] === FREE) { const slew = clamp((hatch - 1.1) / 1.1) * .42, sx = Math.sin(hatch / 2), cx = Math.cos(hatch / 2), sy = Math.sin(slew / 2), cy = Math.cos(slew / 2); Q2[0] = cy * sx; Q2[1] = sy * cx; Q2[2] = -sy * sx; Q2[3] = cy * cx; pose(parts[m.idx.hatch].m, m.hatchHinge, m.hatchHinge, Q2) }
+    // Blown-off parts follow their bodies; at home they stand where they were built.
+    for (let i = 0; i < debrisPart.length; i++) {
+      const index = debrisPart[i]
       if (Dn.state[i] !== FREE) pose(parts[index].m, debrisHome[i], Dn.pos, Dn.quat, dwindle(Dn.pos[i * 3 + 1], Dn.pos[i * 3 + 2]), i * 3, i * 4)
-      else if (!selfPosed.has(index)) { pose(parts[index].m, debrisHome[i], debrisHome[i], [0, 0, 0, 1]); if (m.idx.panes.includes(index)) parts[index].on = false }
-    })
-    for (const index of [m.idx.bent, m.idx.bentHeld]) pose(parts[index].m, m.parts[index].pivot, m.parts[index].pivot, aboutZ(-.36 * bend))
+      else if (!selfPosed.has(index)) { pose(parts[index].m, debrisHome[i], debrisHome[i], NONE); if (i >= paneBody && i < paneBody + m.idx.panes.length) parts[index].on = false }
+    }
+    // The tube the burst tore from its socket stays bent: out of the wall towards the page and over to its own side,
+    // in front of the tubes beside it, and short of the corner post. (A turn forward about the page's level, then one
+    // in its plane.)
+    { const fwd = -.24 * bend, over = -.15 * bend, sz = Math.sin(over / 2), cz = Math.cos(over / 2), sx = Math.sin(fwd / 2), cx = Math.cos(fwd / 2); Q2[0] = cz * sx; Q2[1] = sz * sx; Q2[2] = sz * cx; Q2[3] = cz * cx
+      pose(parts[m.idx.bent].m, m.parts[m.idx.bent].pivot, m.parts[m.idx.bent].pivot, Q2); pose(parts[m.idx.bentHeld].m, m.parts[m.idx.bentHeld].pivot, m.parts[m.idx.bentHeld].pivot, Q2) }
 
     // Effects.
     for (let k = fx.length - 1; k >= 0; k--) {
@@ -1117,7 +1208,8 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   const onLeave = () => { pointer.in = false; if (pointer.held < 0) setHover(-1) }
   canvas.addEventListener('pointermove', onMove); canvas.addEventListener('pointerdown', onDown); canvas.addEventListener('pointerup', onUp); canvas.addEventListener('pointercancel', onUp); canvas.addEventListener('pointerleave', onLeave)
 
-  const busy = () => phase !== 'rest' || fx.length > 0 || S.live > 0 || smokeLeft > 0 || pointer.held >= 0 || rainLeft > 0 || L.state.includes(DYN) || Dn.state.includes(DYN) || burning.includes(1) || beams.length > 0 || recoil > 0 || scripts.size > 0 || Math.abs(needleV) > .02 || hatchV !== 0 || veilSent.some(v => v < 1) || fading.length > 0
+  const veiled = (v: number) => v < 1
+  const busy = () => phase !== 'rest' || fx.length > 0 || S.live > 0 || smokeLeft > 0 || pointer.held >= 0 || rainLeft > 0 || L.state.includes(DYN) || Dn.state.includes(DYN) || burning.includes(1) || beams.length > 0 || recoil > 0 || scripts.size > 0 || Math.abs(needleV) > .02 || hatchV !== 0 || veilSent.some(veiled) || fading.length > 0
   function frame(now: number) {
     raf = 0
     if (dead) return
@@ -1166,7 +1258,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     setLetters(next: Letter[]) { if (next.length) { all = next; pool = routed(all, p); cursor = Math.floor(Math.random() * pool.length); for (let i = 0; i < MAX; i++) data[i] %= pool.length } },
     setVisible(next: boolean) { visible = next; if (next) kick() },
     /** The gauge: pressed while the machine runs it overloads it at once; pressed afterwards it puts it back together. */
-    gauge() { if (reduced) return; if (phase === 'run' || phase === 'boot') { if (!built) fitAll(); setPhase('overload'); heat = 1 } else rebuild(); kick() },
+    gauge() { if (reduced) return; if (phase === 'run' || phase === 'boot') { if (!built) { rush = 3.5; needleV += 4 } setPhase('overload'); heat = 1 } else rebuild(); kick() },
     rebuild() { rebuild(); kick() },
     /** The cannon fires one for a click, if it is not still recovering from the last. */
     send() { if (reduced || !sendOn || cool > 0 || phase === 'boot' || phase === 'rebuild') return false; cool = .8; capsuleOut(true); kick(); return true },
