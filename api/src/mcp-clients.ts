@@ -46,16 +46,16 @@ export function mcpSnippet(client: McpClient, url: string, auth: McpAuth): strin
  * workspaces: each call names one, else the default. */
 export function mcpClientSteps(client: McpClient, auth: 'key' | 'oauth'): string[] {
   const steps = clientSteps(client, auth);
-  return auth === 'oauth' ? [...steps, 'Its tools work in any of your workspaces: name one in your prompt, or it uses your default (ask it to list your workspaces).'] : steps;
+  return auth === 'oauth' ? [...steps, 'Its tools work in any of your workspaces: name one in your prompt, or it uses your default.'] : steps;
 }
 function clientSteps(client: McpClient, auth: 'key' | 'oauth'): string[] {
   const file = mcpClientFiles[client];
   if (client === 'opencode') return auth === 'key'
-    ? [`Merge this into your project or global ${file}, keeping your other servers.`, `OpenCode connects on save; /mcps shows ${mcpServerName} as connected.`]
-    : [`Merge this into your project or global ${file}, keeping your other servers.`, `In OpenCode, run /mcps, select ${mcpServerName} and choose Sign in.`, 'Approve the access in your browser. A dashboard session in that browser skips Google sign-in.'];
+    ? [`Merge this into your project or global ${file}.`, `OpenCode connects on save; /mcps shows ${mcpServerName} as connected.`]
+    : [`Merge this into your project or global ${file}.`, `In OpenCode, run /mcps, select ${mcpServerName} and choose Sign in.`, 'Approve the access in your browser.'];
   if (client === 'claude') return auth === 'key'
-    ? ['Merge this into the mcpServers of ~/.claude.json (your user settings), so the key stays out of your project and its history. A project’s .mcp.json works too if it is never committed.', `In Claude Code, run /mcp to check that ${mcpServerName} is connected.`]
-    : [`Run this in your project’s terminal. It adds ${mcpServerName} to the project’s .mcp.json.`, `In Claude Code, run /mcp, select ${mcpServerName} and choose Authenticate.`, 'Approve the access in your browser.'];
+    ? ['Merge this into the mcpServers of ~/.claude.json, so the key stays out of your project’s history.', `In Claude Code, run /mcp to check that ${mcpServerName} is connected.`]
+    : ['Run this in your project’s terminal.', `In Claude Code, run /mcp, select ${mcpServerName} and choose Authenticate.`, 'Approve the access in your browser.'];
   if (client === 'cursor') return auth === 'key'
     ? [`Merge this into ${file} in your project, or ~/.cursor/mcp.json for every project.`, `Cursor Settings → MCP shows ${mcpServerName} as connected.`]
     : [`Merge this into ${file} in your project, or ~/.cursor/mcp.json for every project.`, `In Cursor Settings → MCP, sign in to ${mcpServerName} and approve the access in your browser.`];

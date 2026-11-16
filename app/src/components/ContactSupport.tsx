@@ -4,7 +4,7 @@ import { ArrowUpRight } from 'lucide-react'
 import { supportApi, type SupportHandoff } from '../data/support'
 import { MutationError } from '../features/settings/shared'
 import { Button, Checkbox, CopyButton, Dialog, Field, Textarea } from './ui'
-import { productName } from '../../../api/src/brand'
+import { addresses } from '../../../api/src/brand'
 
 const MAX = 2000
 // Hosted only: from the workspace menu and Settings → Account. Sends the page and the last failed request IDs with the
@@ -24,18 +24,22 @@ export function ContactSupportDialog({ onClose }: { onClose: () => void }) {
     } catch { /* Shown in the form. */ }
   }
   const close = () => { if (!contact.isPending) onClose() }
+  // The reference and the way to use it: the support page that opened (again, if the browser blocked it), or an email
+  // that carries the reference in its subject.
   if (done) return <Dialog open onOpenChange={next => { if (!next) close() }} title={done.url ? 'Support opened in a new tab' : 'Support reference'}
-    description={done.url ? 'If it didn’t open, use the link below; mention this reference later.' : 'Mention it when you email us.'}
     footer={<Button key="done" variant="primary" autoFocus onClick={close}>Done</Button>}>
     <div className="stack">
       <div className="contact-support__reference"><code>{done.id}</code><CopyButton value={done.id} label="Copy support reference" /></div>
-      {done.url && <a className="contact-support__link" href={done.url} target="_blank" rel="noopener noreferrer">Open support<ArrowUpRight size={14} aria-hidden="true" /></a>}
+      {done.url
+        ? <a className="contact-support__link" href={done.url} target="_blank" rel="noopener noreferrer">Open support<ArrowUpRight size={14} aria-hidden="true" /></a>
+        : <a className="contact-support__link" href={`mailto:${addresses.support}?subject=${encodeURIComponent(`Support reference ${done.id}`)}`}>Email support<ArrowUpRight size={14} aria-hidden="true" /></a>}
     </div>
   </Dialog>
-  return <Dialog open onOpenChange={next => { if (!next) close() }} title="Contact support" description={`${productName} support gets your message, the page you’re on and any recent errors.`}
+  return <Dialog open onOpenChange={next => { if (!next) close() }} title="Contact support"
     footer={<><Button disabled={contact.isPending} onClick={close}>Cancel</Button><Button variant="primary" type="submit" form="contact-support" loading={contact.isPending}>Contact support</Button></>}>
     <form id="contact-support" className="stack" onSubmit={submit}>
-      <Field label="Message" htmlFor="contact-support-message" hint={`Optional. ${message.length.toLocaleString('en-US')} / ${MAX.toLocaleString('en-US')}`}>
+      {/* The box stops at MAX characters; reaching it says so. */}
+      <Field label="Message" htmlFor="contact-support-message" error={message.length >= MAX ? `${MAX.toLocaleString('en-US')} characters at most.` : undefined}>
         <Textarea id="contact-support-message" value={message} maxLength={MAX} onChange={event => setMessage(event.target.value)} disabled={contact.isPending} placeholder="What were you doing?" autoFocus />
       </Field>
       <div className="contact-support__share">

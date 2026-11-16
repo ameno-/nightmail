@@ -4,9 +4,9 @@ import { keepPreviousData, useInfiniteQuery, useQuery, useQueryClient } from '@t
 import { ChevronDown, ExternalLink } from 'lucide-react'
 import { Alert, Button, Checkbox, ConfirmDialog, CopyButton, SecretCode, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, Input, PageHeader, Select, StatusBadge, Tabs, Textarea, useToast, type Column, type MenuItem, type Tone } from '../../components/ui'
 import { useSession } from '../../data/context'
-import { noteKinds, noteSeverities, noteStatuses, resolved, statusLabel, uiNotesApi, uiNotesKey, type NoteKind, type NoteSeverity, type NoteStatus, type UiNote } from '../../data/ui-notes'
+import { noteKinds, noteSeverities, noteStatuses, statusLabel, uiNotesApi, uiNotesKey, type NoteKind, type NoteSeverity, type NoteStatus, type UiNote } from '../../data/ui-notes'
 import { relativeTime, shortDateTime } from '../../lib/format'
-import { notesModifierLabel, setUiNotesMode } from '../../lib/ui-notes-mode'
+import { setUiNotesMode, useUiNotesMode } from '../../lib/ui-notes-mode'
 import { NotesToolbar, noteColumnDefs, useOperatorTabs } from './skeletons'
 
 // Every UI note across the dashboard (staff's ⌘-click notes, features/ui-notes): filter by status, type and text, open
@@ -28,7 +28,7 @@ const Thumb = ({ note }: { note: UiNote }) => <span className="op-shot">{note.sc
 export function OperatorNotesPage() {
   // Only for the people the API allows (GET /v1/me uiNotes); the API answers 404 to everyone else.
   const identity = useSession()?.identity, role = identity?.uiNotes === true ? identity.operator ?? null : null, canAct = role === 'operator', tabs = useOperatorTabs()
-  const navigate = useNavigate(), client = useQueryClient(), toast = useToast()
+  const navigate = useNavigate(), client = useQueryClient(), toast = useToast(), notesOn = useUiNotesMode(Boolean(role))
   const [params, setParams] = useSearchParams()
   const status = params.get('status') ?? '', kind = params.get('kind') ?? ''
   const [search, setSearch] = useState(params.get('q') ?? '')
@@ -73,6 +73,7 @@ export function OperatorNotesPage() {
   const bulkItems: MenuItem[] = [...noteStatuses.map((value): MenuItem => ({ label: `Mark ${statusLabel[value].toLowerCase()}`, onSelect: () => void setStatus(value) })), { label: 'Delete…', destructive: true, onSelect: () => setBulkDelete(true) }]
   const bulkTrigger = <Button className="op-bulk" disabled={!canAct || !selected.size}>{selected.size ? `${selected.size} selected` : 'Select notes'} <ChevronDown size={14} aria-hidden="true" /></Button>
   const filtered = Boolean(q || kind || status)
+  const clearFilters = () => { setSearch(''); setParams(previous => { const next = new URLSearchParams(previous); for (const name of ['q', 'status', 'kind']) next.delete(name); return next }, { replace: true }) }
   return <>
     <PageHeader title="Operator" actions={canAct ? <Button onClick={() => setKeys(true)}>Agent keys</Button> : undefined} />
     <div className="op-page">
@@ -81,7 +82,7 @@ export function OperatorNotesPage() {
         actions={selected.size ? <DropdownMenu label="Selected notes" title={`${selected.size} selected`} trigger={bulkTrigger} items={bulkItems} /> : bulkTrigger} />
       {notes.isError && !notes.data ? <ErrorState error={notes.error} onRetry={() => void notes.refetch()} /> : <>
         <DataTable className="op-notes" loading={notes.isPending} skeletonRows={6} rows={rows} rowKey={row => row.id} onRowClick={row => setOpen(row.id)} columns={columns}
-          empty={<EmptyState title={filtered ? 'No notes match' : 'No open notes'} description={filtered ? 'Try another status, type or search.' : `Turn on UI notes (⇧N), then ${notesModifierLabel}-click anything to leave one.`} />} />
+          empty={<EmptyState title={filtered ? 'No notes match' : 'No open notes'} action={filtered ? <Button onClick={clearFilters}>Clear filters</Button> : notesOn ? undefined : <Button onClick={() => setUiNotesMode(true)}>Turn on UI notes</Button>} />} />
         {notes.hasNextPage && <Button className="op-more" loading={notes.isFetchingNextPage} onClick={() => void notes.fetchNextPage()}>Load more</Button>}
       </>}
     </div>
@@ -128,7 +129,7 @@ function NoteDialog({ noteId, initial, canAct, onClose, onChanged, onOpenOnPage 
         <Field label="Severity"><Select value={severity} onValueChange={setSeverity} disabled={!canAct} options={[{ value: '', label: 'None' }, ...noteSeverities.map(value => ({ value, label: kindLabel(value) }))]} /></Field>
       </div>
       <Field label="Fixing pull request"><Input type="url" inputMode="url" value={prUrl} onChange={event => setPrUrl(event.target.value)} placeholder="https://github.com/…/pull/…" disabled={!canAct} /></Field>
-      {(canAct || note.resolution) && <Field label="Resolution"><Textarea value={resolution} onChange={event => setResolution(event.target.value)} maxLength={2000} rows={2} placeholder={resolved(note.status) ? 'What changed, or why not' : 'Optional'} disabled={!canAct} /></Field>}
+      {(canAct || note.resolution) && <Field label="Resolution"><Textarea value={resolution} onChange={event => setResolution(event.target.value)} maxLength={2000} rows={2} placeholder="What changed, or why not" disabled={!canAct} /></Field>}
       <Facts rows={[
         ['Page', <Link to={note.page.path} onClick={() => onOpenOnPage(note)}>{note.page.path}</Link>],
         ['Route', <code>{note.page.route}</code>],
@@ -164,7 +165,6 @@ function KeysDialog({ onClose }: { onClose: () => void }) {
   const live = (keys.data ?? []).filter(key => !key.revokedAt && Date.parse(key.expiresAt) > Date.now())
   const origin = window.location.origin
   return <Dialog sensitive={Boolean(secret)} open onOpenChange={next => { if (!next) onClose() }} title="Agent keys" className="op-keys-dialog"
-    description="Lets a script or agent read UI notes and screenshots and set their status."
     footer={<Button onClick={onClose}>Done</Button>}>
     <div className="op-dialog-fields">
       {error && <Alert tone="danger">{error}</Alert>}
@@ -173,7 +173,7 @@ function KeysDialog({ onClose }: { onClose: () => void }) {
         <code className="op-key-usage">{`BANE_URL=${origin} BANE_UI_NOTES_KEY=${secret.slice(0, 15)}… node --import tsx api/scripts/ui-notes.ts list --status open --json --screenshots ./notes`}</code>
       </Alert> : <form className="op-key-form" onSubmit={create}>
         <Field label="Name" htmlFor="ui-note-key-name"><Input id="ui-note-key-name" value={name} maxLength={100} onChange={event => setName(event.target.value)} required /></Field>
-        <Field label="Expires" hint="It also stops if you lose the operator role."><Select value={days} onValueChange={setDays} options={[{ value: '7', label: 'In 7 days' }, { value: '30', label: 'In 30 days' }, { value: '90', label: 'In 90 days' }]} /></Field>
+        <Field label="Expires"><Select value={days} onValueChange={setDays} options={[{ value: '7', label: 'In 7 days' }, { value: '30', label: 'In 30 days' }, { value: '90', label: 'In 90 days' }]} /></Field>
         <Button type="submit" variant="primary" loading={busy} disabled={!name.trim()}>Create key</Button>
       </form>}
       <ul className="op-keys">{keys.isPending ? <li className="muted">Loading keys…</li> : keys.isError ? <li><span className="muted">Couldn’t load the keys.</span><Button size="sm" loading={keys.isFetching} onClick={() => void keys.refetch()}>Retry</Button></li> : !live.length ? <li className="muted">No active keys.</li> : live.map(key => <li key={key.id}>

@@ -39,6 +39,7 @@
 .op-more { align-self: flex-start; margin-top: var(--space-12); }
 .op-dialog-fields { display: flex; flex-direction: column; gap: var(--space-16); }
 .op-dialog-fields .ui-textarea { min-height: 88px; }
+.op-dialog-fields .op-add-date { align-self: flex-start; }
 
 /* UI notes: a 64 × 36 screenshot thumbnail fits the 53px row; the bulk menu keeps its width as the count changes. */
 .op-shot { display: block; width: 64px; height: 36px; overflow: hidden; border-radius: 4px; background: var(--color-layer-2); box-shadow: inset 0 0 0 .5px var(--color-border); }
