@@ -39,8 +39,8 @@ Measured with the cap height as 100:
 
 Where the app sets them:
 
-- **Dashboard sidebar, onboarding, legal pages:** `NightmailWordmark` at 13 px cap height, so 158 px across. In the sidebar its left edge is the content edge (`--sidebar-gutter`), the same x as the workspace picker's border and the navigation pills, and it leaves the row room for the theme button.
-- **A phone's top bar (under 640 px):** the tile alone at 24 px, since the bar also holds the workspace picker. From 640 px the bar carries the whole lockup.
+- **Onboarding and the legal pages:** `NightmailWordmark` at 13 px cap height, so 158 px across, at the head of the page.
+- **The dashboard's own shell carries no logo.** Its sidebar and a phone's top bar open with the workspace picker; the brand is in the browser's tab, and on the pages around the dashboard.
 - **Support chat:** `NightmailMark` at 18 px beside the agent's name.
 - **Homepage:** the header carries the tile alone (26 px, 24 on a phone). The wordmark stands in lit letters at the head of the sorting frame, exactly as wide as the price under it (`features/home/sorter/name.ts`), and again across the page's end as solids cut off by the page's edge (`features/home/end-band.tsx`). `og.png` sets the lockup beside the machine.
 
