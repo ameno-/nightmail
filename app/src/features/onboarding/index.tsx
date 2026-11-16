@@ -213,7 +213,8 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   </>
 }
 
-// Persists across steps, so its marks and connecting lines animate as setup moves forward.
+// Persists across steps, so its marks and connecting lines animate as setup moves forward. On a phone only the current
+// step keeps its label beside its mark.
 function StepIndicator({ steps, current }: { steps: string[]; current: number }) {
   return <ol className="onboarding-progress" aria-label="Setup progress">
     {steps.map((label, index) => {
@@ -224,7 +225,6 @@ function StepIndicator({ steps, current }: { steps: string[]; current: number })
         <span className="onboarding-progress-label" data-label={label}>{label}{state === 'done' && <span className="sr-only"> (done)</span>}</span>
       </li>
     })}
-    <li className="onboarding-progress-caption" aria-hidden="true">Step {current} of {steps.length} · {steps[current - 1]}</li>
   </ol>
 }
 
@@ -234,8 +234,7 @@ function AdminSetupRequired() {
   async function check() { setChecking(true); try { await client.refetchQueries({ queryKey: ['identity'], exact: true }) } finally { setChecking(false) } }
   return <div className="onboarding onboarding--narrow onboarding--center">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
-      <h1 className="onboarding-title">Sending isn’t set up yet</h1>
-      <p className="onboarding-lead">An admin must finish setting up this workspace first.</p>
+      <h1 className="onboarding-title">An admin must set up sending</h1>
     </div>
     <div className="onb-rise" style={rise(1)}><Button loading={checking} onClick={() => void check()}>Check again</Button></div>
   </div>
@@ -248,25 +247,23 @@ function connectionError(error: unknown) {
   return message(error)
 }
 
+// Each option is its name and the one fact that decides between them; the setup itself shows on the next step.
 function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) => void; error: unknown }) {
   // Fixed copy, so the choice never re-wraps when a request lands; the exact steps are in Settings → Plan & usage.
   return <div className="onboarding onboarding--choice">
     <div className="onboarding-intro onboarding-intro--center onb-rise" style={rise(0)}>
       <h1 className="onboarding-title">Where should your email send from?</h1>
-      <p className="onboarding-lead">Either way, mail comes from your own domain.</p>
     </div>
     <div className="onboarding-options">
       <button type="button" className="onboarding-option onb-rise" style={rise(1)} onClick={() => onChoose('shared')}>
         <span className="onboarding-option-icon" aria-hidden="true"><Send size={18} /></span>
         <span className="onboarding-option-title">Hosted mail</span>
-        <span className="onboarding-option-body">Send through {productName}’s Amazon SES; you only add a few DNS records.</span>
-        <span className="onboarding-option-foot"><span className="onboarding-option-price">Small daily limit that grows</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
+        <span className="onboarding-option-value"><strong>Daily limit that grows</strong><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
       <button type="button" className="onboarding-option onb-rise" style={rise(2)} onClick={() => onChoose('byo')}>
         <span className="onboarding-option-icon onboarding-option-icon--aws" aria-hidden="true"><AwsLogo /></span>
         <span className="onboarding-option-title">Your AWS account</span>
-        <span className="onboarding-option-body">Send through Amazon SES in your own AWS account; setup creates one CloudFormation stack.</span>
-        <span className="onboarding-option-foot"><span className="onboarding-option-price">You pay AWS directly</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
+        <span className="onboarding-option-value"><strong>You pay AWS directly</strong><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
     </div>
     {error ? <ChooseError error={error} /> : null}
@@ -298,12 +295,13 @@ function verifyError(error: unknown, region: string) {
   }
 }
 
-const connectStates: { key: ConnectionState | 'creating'; title: string; detail: string }[] = [
-  { key: 'creating', title: 'Preparing…', detail: 'Getting your AWS link ready.' },
-  { key: 'awaiting_role', title: 'Waiting for AWS…', detail: 'Create the stack in the AWS tab. This page updates on its own.' },
-  { key: 'provisioning', title: 'Setting up…', detail: 'Stack confirmed. Creating sending resources in your account.' },
-  { key: 'ready', title: 'Connected', detail: 'Your AWS account is ready. Taking you to the next step…' },
-  { key: 'failed', title: 'Setup didn’t finish', detail: 'Check the stack in AWS, then try again or enter your account ID below.' },
+// One line per state: the live status names what is happening; the buttons above and below are what to do about it.
+const connectStates: { key: ConnectionState | 'creating'; title: string }[] = [
+  { key: 'creating', title: 'Preparing your AWS link…' },
+  { key: 'awaiting_role', title: 'Waiting for the stack in AWS…' },
+  { key: 'provisioning', title: 'Creating sending resources…' },
+  { key: 'ready', title: 'Connected' },
+  { key: 'failed', title: 'Setup didn’t finish' },
 ]
 
 // BYO step 2: one task. Open AWS, watch the live status, leave any time.
@@ -316,7 +314,6 @@ function ConnectAwsStep({ state, connection, onBack, onHosted }: { state: Connec
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <button type="button" className="onboarding-back" onClick={onBack} disabled={connected}><ArrowLeft size={14} aria-hidden />Back</button>
       <h1 className="onboarding-title">Connect your AWS account</h1>
-      <p className="onboarding-lead">A CloudFormation stack gives {productName} a role; it takes about 2 minutes.</p>
     </div>
     <div className="onboarding-connect-actions onb-rise" style={rise(1)} inert={connected}>
       {link ? <a className="ui-button ui-button--primary ui-button--md" href={link} target="_blank" rel="noopener noreferrer">{createStack}<ArrowUpRight size={16} aria-hidden /></a>
@@ -327,7 +324,7 @@ function ConnectAwsStep({ state, connection, onBack, onHosted }: { state: Connec
     <div className="onboarding-connect-status onb-rise" style={rise(2)} data-state={state}>
       <span className="onboarding-connect-mark" aria-hidden="true"><span className="onboarding-connect-dot" /><Check size={14} strokeWidth={3} /><X size={14} strokeWidth={3} /></span>
       <div className="onboarding-slot">
-        {connectStates.map(item => <p key={item.key} data-active={item.key === state || undefined} aria-hidden={item.key !== state || undefined}><strong>{item.title}</strong><span>{item.key === 'ready' && connection?.awsAccountId ? `Account ${connection.awsAccountId} is ready. Taking you to the next step…` : item.detail}</span></p>)}
+        {connectStates.map(item => <p key={item.key} data-active={item.key === state || undefined} aria-hidden={item.key !== state || undefined}><strong>{item.key === 'ready' && connection?.awsAccountId ? `Account ${connection.awsAccountId} connected` : item.title}</strong></p>)}
       </div>
       <span className="sr-only" role="status">{active.title}</span>
     </div>
@@ -351,8 +348,8 @@ function VerifyAccount({ connection }: { connection: ProviderConnection | null }
     try { await verify.mutateAsync(id) } catch { /* Shown inline. */ }
   }
   return <form className="onboarding-inline-form" onSubmit={submit} noValidate>
-    <div className="onboarding-field onboarding-field--aws">
-      <Field label="AWS account ID" htmlFor="onboarding-aws-account" error={accountError || (verify.error ? verifyError(verify.error, connection?.region ?? 'your region') : undefined)} hint="After CREATE_COMPLETE. The 12 digits in the AWS console’s account menu.">
+    <div className="onboarding-field">
+      <Field label="AWS account ID" htmlFor="onboarding-aws-account" error={accountError || (verify.error ? verifyError(verify.error, connection?.region ?? 'your region') : undefined)}>
         <Input id="onboarding-aws-account" inputMode="numeric" autoComplete="off" autoFocus value={account} onChange={event => setAccount(event.target.value)} placeholder="123456789012" maxLength={14} disabled={verify.isPending} />
       </Field>
     </div>
@@ -369,8 +366,7 @@ function ImportedDomains({ count, onContinue, onAddAnother, fallback }: { count:
   const shown = Math.max(count, verified.length)
   return <div className="onboarding onboarding--narrow">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
-      <h1 className="onboarding-title">Your domains are ready</h1>
-      <p className="onboarding-lead">Imported {shown} verified {shown === 1 ? 'domain' : 'domains'} from your AWS account, ready to send.</p>
+      <h1 className="onboarding-title">{shown === 1 ? 'Your domain is ready' : `Your ${shown} domains are ready`}</h1>
     </div>
     <ul className="onboarding-imported onb-rise" style={rise(1)}>
       {verified.map(domain => <li key={domain.id}><code>{domain.name}</code><LiveStatus state="verified" plain /></li>)}
@@ -403,19 +399,18 @@ function AddDomain({ draft, onDraftChange, queued, onQueuedChange, ready, onAdde
     } catch { /* Shown inline. */ }
   }
   useEffect(() => { if (ready && queued) { onQueuedChange(false); void add() } }, [ready, queued]) // eslint-disable-line react-hooks/exhaustive-deps
+  // A domain queued while sending is set up keeps the button busy until it is added.
   return <div className="onboarding onboarding--narrow">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <h1 className="onboarding-title">Add your domain</h1>
-      <p className="onboarding-lead">Use a domain you own; next, you’ll add a few DNS records.</p>
     </div>
     <form className="onboarding-inline-form onb-rise" style={rise(2)} onSubmit={event => { event.preventDefault(); void add() }} noValidate>
-      <div className="onboarding-field onboarding-field--domain">
-        {/* The hint line is always there: the live preview, the queued note or an error take turns in it. */}
-        <Field label="Domain" htmlFor="onboarding-domain" error={invalid || (create.error ? <ErrorText error={create.error} /> : undefined)} hint={queued ? `${value} is added as soon as sending is ready.` : <>You’ll send as <code className="onboarding-preview">hello@{domainPattern.test(value) ? value : 'acme.com'}</code></>}>
+      <div className="onboarding-field">
+        <Field label="Domain" htmlFor="onboarding-domain" error={invalid || (create.error ? <ErrorText error={create.error} /> : undefined)}>
           <Input id="onboarding-domain" autoFocus autoComplete="off" autoCapitalize="none" spellCheck={false} value={draft} onChange={event => { setInvalid(''); onDraftChange(event.target.value); onQueuedChange(false) }} placeholder="acme.com" disabled={create.isPending} />
         </Field>
       </div>
-      <Button type="submit" variant="primary" loading={create.isPending}>Add domain<ArrowRight size={16} aria-hidden /></Button>
+      <Button type="submit" variant="primary" loading={create.isPending || queued}>Add domain<ArrowRight size={16} aria-hidden /></Button>
     </form>
     <div className="onb-rise onboarding-reserve" style={rise(3)} data-hidden={!ready || undefined} inert={!ready}><button type="button" className="onboarding-skip" disabled={create.isPending} onClick={onFinish}>Skip for now</button></div>
   </div>
@@ -433,26 +428,18 @@ function DomainSetup({ domainId, onContinue, onMissing }: { domainId: string; on
   if (domain.isPending || missing || (!domain.error && dns.pending)) return <BootLoader inline />
   if (domain.error) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
   const current = domain.data
+  const issue = !verified && current.status === 'issue'
+  // The title's status says where verification is; a verified domain runs Continue's timer down and moves on by itself.
   return <div className="onboarding onboarding--wide">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
-      <h1 className="onboarding-title onboarding-domain-title"><span>{current.name}</span><LiveStatus state={verified ? 'verified' : current.status === 'issue' ? 'failed' : 'pending'} /></h1>
-      {/* One slot for the lead, the failure note and the verified moment: each replaces the other in place. */}
-      <div className="onboarding-slot">
-        <p className="onboarding-lead" data-active={(!verified && current.status !== 'issue') || undefined} aria-hidden={verified || current.status === 'issue' || undefined}>Add these records at your DNS host; go on while we check them.</p>
-        <div data-active={(!verified && current.status === 'issue') || undefined} inert={verified || current.status !== 'issue'}><Alert tone="danger">Verification stopped. Fix the records below, then press Check now on the domain’s page.</Alert></div>
-        <div className="onboarding-verified" data-active={verified || undefined} aria-hidden={!verified || undefined}>
-          <span className="onboarding-verified-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="20" height="20"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span>
-          <p><strong>{current.name} is verified.</strong> You can send now. Taking you to the last step…</p>
-          <span className="onboarding-verified-timer" aria-hidden="true" />
-        </div>
-      </div>
+      <h1 className="onboarding-title onboarding-domain-title"><span>{current.name}</span><LiveStatus state={verified ? 'verified' : issue ? 'failed' : 'pending'} /></h1>
+      {issue && <Alert tone="danger">Verification stopped. Fix the records below, then press Check now on the domain’s page.</Alert>}
       <span className="sr-only" role="status">{verified ? `${current.name} is verified. Continuing to the last step.` : ''}</span>
     </div>
     <div className="onb-rise" style={rise(1)}><DomainRecords domain={current} guided setup={dns.setup} /></div>
     <div className="onb-rise" style={rise(2)}><DnsWaitNote domain={current} /></div>
     <div className="onboarding-actions">
-      <p className="muted">{verified ? 'All set.' : 'Checking automatically.'}</p>
-      <Button variant="primary" onClick={onContinue}>Continue<ArrowRight size={16} aria-hidden /></Button>
+      <Button variant="primary" className="onboarding-continue" data-timer={verified || undefined} onClick={onContinue}>Continue<ArrowRight size={16} aria-hidden /></Button>
     </div>
   </div>
 }
@@ -481,22 +468,20 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
   if (domain.isPending) return <BootLoader inline />
   if (domain.error && !missing) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
   const prompt = origin ? agentPrompt({ origin, domain: current, email: identity?.email ?? null, multiTenant: identity?.multiTenant === true }) : null
+  // The tab names the key's reach: an app's key sends from this domain only; a coding agent's manages the workspace.
   const scopes = [
     { value: 'send', label: current ? `Send only · ${current.name}` : 'Send only' },
     { value: 'manage', label: 'Full access' },
   ]
-  const scopeHint = scope === 'send' ? `Sends email and campaigns, with attachments, from ${current?.name ?? 'your domains'} only. Can’t read logs or contacts, or change keys, domains or settings. Best for an app.` : 'Sends, reads logs and manages domains, receiving, keys and settings. A coding agent needs it to set up receiving.'
   return <div className="onboarding onboarding--agent">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <h1 className="onboarding-title">Send your first email</h1>
-      <p className="onboarding-lead">Create a key, then send with cURL, the SDK or your coding agent.</p>
     </div>
     <div className="onboarding-agent-steps">
       <section className="section stack developer-section onb-rise" style={rise(1)} aria-label="API key">
         <SectionHeader title="API key" />
         <div className="onboarding-key-scope" inert={!!secret}>
           <Tabs label="Key access" value={scope} onValueChange={value => setScope(value as KeyScope)} items={scopes} />
-          <p className="muted developer-copy">{scopeHint}</p>
         </div>
         <p className={create.error ? 'developer-copy onboarding-error onboarding-key-copy' : 'muted developer-copy onboarding-key-copy'} role={create.error ? 'alert' : undefined}>{create.error ? <ErrorText error={create.error} /> : <>Store it as <code>{apiKeyEnv}</code> in your project’s environment. It’s shown once.</>}</p>
         {/* The key replaces the button in a slot sized for both, so the sections below never move. */}
@@ -511,7 +496,6 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
       <div className="onb-rise" style={rise(4)}><McpSetup /></div>
     </div>
     <div className="onboarding-actions">
-      <p className="muted">{current?.status === 'verified' ? 'Your domain is verified and ready to send.' : 'Your domain keeps verifying in the background.'}</p>
       <Button variant="primary" onClick={onFinish}>Go to dashboard<ArrowRight size={16} aria-hidden /></Button>
     </div>
   </div>
