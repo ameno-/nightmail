@@ -473,183 +473,25 @@
     "31: sending stops; receiving, inboxes and the dashboard still wo ⟨still work⟩"
    ]
   },
-  "app/src/features/settings/activity.tsx": {
-   "tagline": [
-    "93: changes to members, keys, domains, webhooks and settings app",
-    "122: … utc · via …"
-   ]
-  },
-  "app/src/features/settings/admin-only.tsx": {
-   "tagline": [
-    "12: only owners and admins can …: ask one, or ask to become an a"
-   ]
-  },
   "app/src/features/settings/billing.tsx": {
    "reassure": [
-    "66: nothing is charged yet. ⟨nothing is charged⟩",
-    "83: nothing is deleted. ⟨nothing is deleted⟩",
-    "84: billing starts soon: nothing is charged yet. credit you add  ⟨nothing is charged⟩",
-    "94: nothing is charged, and sending never pauses for a balance. ⟨nothing is charged⟩",
-    "114: brand stores new received mail but doesn’t deliver it to inb ⟨nothing is deleted⟩",
-    "115: then it’s held until you add credit. nothing is deleted. ⟨nothing is deleted⟩",
-    "344: checkout canceled. nothing was charged. ⟨nothing was charged⟩",
-    "350: …. nothing was charged. ⟨nothing was charged⟩",
-    "350: the payment didn’t finish. nothing was charged. ⟨nothing was charged⟩"
-   ],
-   "tagline": [
-    "94: nothing is charged, and sending never pauses for a balance.",
-    "238: credit added and hourly usage appear here.",
-    "242: card payments for credit appear here, with their invoices.",
-    "305: add $20 to $10,000 at a time."
-   ]
-  },
-  "app/src/features/settings/create-key.tsx": {
-   "caption": [
-    "21: sends, reads, and manages domains, keys and settings.",
-    "22: sends email from your app. can’t read logs or change setting",
-    "23: sends email and reads logs and events. can’t change settings",
-    "24: reads logs, events and settings. can’t send.",
-    "25: reads mail at the receiving addresses you choose. nothing el",
-    "26: reads one agent inbox. stops working when the inbox is delet",
-    "27: creates agent inboxes and reads only the ones it created.",
-    "31: for servers, scripts and agents, with the access you choose.",
-    "32: an agent such as opencode or claude code signs in as you ove",
-    "33: lets a mail app open a persistent inbox over imap or smtp.",
-    "207: also replies and starts conversations, from … only.…",
-    "207: lists and reads mail, events and attachments."
-   ],
-   "helper": [
-    "183: includes domains you add later.",
-    "185: · not verified yet",
-    "190: limited to domains, it can’t manage keys, inbound or setting",
-    "191: 50-domain limit reached.",
-    "211: marks read, archives, stars and labels.",
-    "253: reads and files the inbox’s mail.",
-    "254: sends mail from the inbox’s address."
-   ],
-   "tagline": [
-    "185: no domains yet: add one, or keep all domains.",
-    "198: no receiving addresses yet: create one, or choose every addr"
-   ]
-  },
-  "app/src/features/settings/domain-records.tsx": {
-   "tagline": [
-    "68: or add the records below yourself.",
-    "243: signs your mail and proves … is yours.",
-    "247: add these at your dns provider; brand keeps checking.",
-    "252: signs your mail and proves the domain is yours."
-   ]
-  },
-  "app/src/features/settings/domains.tsx": {
-   "helper": [
-    "227: a subdomain of … you don’t use yet."
-   ],
-   "tagline": [
-    "64: mail to addresses at … follows its routes.",
-    "111: add a domain to send and receive mail.",
-    "212: routes bounces through a subdomain you own for relaxed spf a",
-    "250: receive mail on …; its addresses and routes are in receiving",
-    "257: verify the domain before enabling receiving."
-   ]
-  },
-  "app/src/features/settings/hosted.tsx": {
-   "caption": [
-    "84: owners and admins can rename it",
-    "114: amazon ses in your aws account",
-    "114: sent through brand’s amazon ses",
-    "115: the aws region your mail is sent from",
-    "118: recipients in the last 24 hours",
-    "128: your sending health, 0–100",
-    "138: sending stops until you connect again",
-    "154: from your google account",
-    "156: owners and admins can change it",
-    "157: questions, problems or feedback",
-    "158: your other accounts stay signed in",
-    "161: disconnect a client from your anomaly account"
-   ]
-  },
-  "app/src/features/settings/keys.tsx": {
-   "tagline": [
-    "107: an api key lets your server, a script or an agent send email",
-    "108: connect opencode, claude code or cursor to work as you. it a",
-    "109: lets a mail app like apple mail open a persistent inbox over",
-    "110: create a key to send from your app, connect an agent or open"
-   ]
-  },
-  "app/src/features/settings/mcp-approval.tsx": {
-   "tagline": [
-    "39: the agent acts as the account it signed in with: approve tha",
-    "57: tool calls that name no workspace use this one, as your role"
-   ]
-  },
-  "app/src/features/settings/region-setup.tsx": {
-   "helper": [
-    "81: checks live aws without creating resources."
-   ],
-   "tagline": [
-    "122: enable this region to check or provision aws resources.",
-    "123: read permission required to check aws."
-   ]
-  },
-  "app/src/features/settings/reputation.tsx": {
-   "tagline": [
-    "13: historic rates ses calculates from a representative volume o",
-    "15: rates load on the next check, or select refresh.",
-    "48: no data in the last 14 days; ses publishes rates once you se"
-   ]
-  },
-  "app/src/features/settings/setup-checklist.tsx": {
-   "caption": [
-    "22: the topic is not owned by this installation.",
-    "22: the topic policy needs updating."
-   ],
-   "tagline": [
-    "30: last checked state."
-   ]
-  },
-  "app/src/features/settings/usage.tsx": {
-   "caption": [
-    "55: courtesy of anomaly",
-    "55: usage comes off it hourly",
-    "61: 1 gb free, then $0.25 per gb-month",
-    "62: since ……",
-    "62: this calendar month",
-    "63: at $0.20 per 1,000 emails",
-    "63: not charged: free plan",
-    "63: sent mail only",
-    "63: this month"
-   ],
-   "reassure": [
-    "55: nothing is charged yet ⟨nothing is charged⟩"
-   ],
-   "tagline": [
-    "45: healthy real email raises it; simulator sends don’t."
+    "76: nothing is deleted. ⟨nothing is deleted⟩",
+    "77: billing starts soon: nothing is charged yet. credit you add  ⟨nothing is charged⟩",
+    "106: brand stores new received mail but doesn’t deliver it to inb ⟨nothing is deleted⟩",
+    "107: then it’s held until you add credit. nothing is deleted. ⟨nothing is deleted⟩",
+    "339: checkout canceled. nothing was charged. ⟨nothing was charged⟩",
+    "345: …. nothing was charged. ⟨nothing was charged⟩",
+    "345: the payment didn’t finish. nothing was charged. ⟨nothing was charged⟩"
    ]
   },
   "app/src/features/settings/webhooks.tsx": {
    "grade": [
-    "34: remove the user name and password from the url; send credent"
-   ],
-   "helper": [
-    "49: leave blank to keep it.",
-    "51: includes future regions."
-   ],
-   "tagline": [
-    "67: signed calls to your url when email you send is delivered, b",
-    "68: for received mail, use inbound webhooks.",
-    "212: signatures arrive in the … header: verify them on your serve"
+    "33: remove the user name and password from the url; send credent"
    ]
   },
   "app/src/features/settings/workspace-members.tsx": {
-   "length/description": [
-    "114: share this link with them yourself; brand doesn’t email it. ",
-    "118: you get a link to share; brand doesn’t email it. they join b"
-   ],
    "tagline": [
-    "36: they can remove you; only another owner can undo this.",
-    "37: admins manage keys, domains, webhooks, sending and members, ",
-    "114: share this link with them yourself; brand doesn’t email it. ",
-    "118: you get a link to share; brand doesn’t email it. they join b"
+    "37: they can remove you; only another owner can undo this."
    ]
   },
   "app/src/features/support/SupportPanel.tsx": {
