@@ -8,14 +8,13 @@
   --srt-cta: oklch(0.975 0.02 92); --srt-cta-hover: oklch(0.995 0.012 92); --srt-cta-top: oklch(1 0 0); --srt-cta-side: oklch(0.78 0.03 92); --srt-on-cta: oklch(0.2 0.02 268); --srt-cta-edge: oklch(0.2 0.02 268 / 14%);
   --srt-paper: oklch(0.985 0.01 92); --srt-red: oklch(0.6 0.22 27); --srt-card: oklch(0.995 0.004 92); --srt-card-text: oklch(0.21 0.02 268); --srt-card-dim: oklch(0.45 0.02 268); --srt-card-edge: oklch(0.21 0.02 268 / 12%);
   --srt-ease: cubic-bezier(.22, 1, .36, 1); --srt-k: 17.17; --srt-header: 64px;
-  /* The brand's marks (marks.ts) are set in its ink on the pale page and its paper on the dark one, and in nothing else. */
-  --srt-name: #0A0B0F;
+  /* The brand's marks (lib/marks.ts) are set in its ink on the pale page and its paper on the dark one, and in nothing else. */
+  --srt-name: var(--color-logo);
   /* A phone's safe areas (its status bar, where the page runs under one; the sides of one held on its side; its home
      indicator), and the header with the first of them. */
   --srt-safe-t: env(safe-area-inset-top, 0px); --srt-safe-r: env(safe-area-inset-right, 0px); --srt-safe-b: env(safe-area-inset-bottom, 0px); --srt-safe-l: env(safe-area-inset-left, 0px); --srt-head: calc(var(--srt-header) + var(--srt-safe-t));
   display: flex; flex-direction: column; min-height: 100svh; overflow-x: clip; background: var(--srt-floor); color: var(--srt-text); }
 :root[data-theme='dark'] .srt-page {
-  --srt-name: #F4F2EC;
   --srt-floor: rgb(10 13 19); --srt-shade: rgb(4 6 10); --srt-text: oklch(0.968 0.004 268); --srt-text-2: oklch(0.74 0.014 268); --srt-text-3: oklch(0.63 0.016 268); --srt-hair: oklch(1 0 0 / 9%); --srt-hover: oklch(1 0 0 / 6%);
   --srt-screen-text: oklch(0.955 0.014 92); --srt-screen-dim: oklch(0.62 0.018 268); --srt-plate: oklch(0.66 0.016 268);
   --srt-cta: oklch(0.945 0.016 92); --srt-cta-hover: oklch(0.975 0.012 92); --srt-cta-top: oklch(1 0 0); --srt-cta-side: oklch(0.72 0.022 92); --srt-on-cta: oklch(0.2 0.02 268); --srt-cta-edge: oklch(0.2 0.02 268 / 14%);
@@ -28,7 +27,7 @@
 /* The header's mark is the monogram alone: the wordmark is on the machine, over the price. Its left edge is the page's
    margin, its middle the bar's (and so the middle of "API docs" and the theme button); the link is 44 px to press. */
 .srt-mark { display: flex; flex: none; align-items: center; height: 44px; border-radius: 4px; color: var(--srt-name); }
-.srt-mark svg { display: block; flex: none; width: 26px; height: 26px; fill: currentColor; }
+.srt-mark svg { width: 26px; height: 26px; }
 .srt-mark:focus-visible { outline: var(--focus-width) solid var(--color-focus); outline-offset: 4px; }
 .srt-nav { display: flex; align-items: center; gap: var(--space-4); }
 .srt-nav > a, .srt-nav .theme-toggle { height: 32px; border-radius: 8px; color: var(--srt-text-2); transition: color 150ms var(--srt-ease), background-color 150ms var(--srt-ease), transform 160ms var(--srt-ease); }

@@ -5,7 +5,7 @@
 import { COLS, PRICE } from './price'
 import { DX, DY, type Plan } from './plan'
 import { glass, tone, type Mat } from './tones'
-import { WORDMARK } from '../marks'
+import { WORDMARK } from '../../../lib/marks'
 
 export function drawStill(canvas: HTMLCanvasElement, p: Plan, over: number, dark: boolean) {
   const dpr = Math.min(window.devicePixelRatio || 1, 2), c = canvas.getContext('2d')!

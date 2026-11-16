@@ -115,7 +115,8 @@
   --color-border-strong: rgb(0 0 0 / 20%);
   --color-accent: #3B5CF6;
   --color-accent-hover: #3250DF;
-  --color-brand: #798ABA; /* the mark, oklch(0.638 0.075 269.2): 3.3:1 on deep, 3.0:1 on layer-2; docs/brand.md */
+  --color-brand: #798ABA; /* a periwinkle accent, oklch(0.638 0.075 269.2): 3.3:1 on deep, 3.0:1 on layer-2 */
+  --color-logo: #0A0B0F; /* the brand's ink: the wordmark and the monogram on a pale ground; docs/brand.md */
   --color-active-bg: #F2F2F2;
   --color-contrast: #242424;
   --color-contrast-hover: #3F3F3F;
@@ -222,6 +223,7 @@
   --color-accent: #A2BCFF;
   --color-accent-hover: #C3D4FD;
   --color-brand: #798ABA; /* the same colour as light: 5.9:1 on deep */
+  --color-logo: #F4F2EC; /* the brand's paper: the marks on a dark ground */
   --color-active-bg: #2E2E2E;
   --color-contrast: #EDEDED;
   --color-contrast-hover: #FFFFFF;

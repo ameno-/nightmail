@@ -183,7 +183,7 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   short ||= oy - cta.y > fold - inset.bottom
   // The wordmark, in lights at the head of the sorting frame: exactly as wide as the price, its two edges the
   // price's, and half way between the price and the frame's top. `x, y` is its left end on its baseline, `cap` its cap
-  // height (its width is 10.8 of them: marks.ts), `z` the plane its face is in, proud of the frame by `depth`.
+  // height (its width is 10.8 of them: lib/marks.ts), `z` the plane its face is in, proud of the frame by `depth`.
   const name = { x: -COLS * U / 2, y: yMan - over * V / 2 - COLS * U / 21.6, cap: COLS * U / 10.8, z: -.6 * U, depth: .6 * U }
   return { phone, routes, tight, short, name, W, H, fold, inset, ext, cannon, out: Math.round(out), room, widest, lean, ox, oy, sx, U, V, side, over, under, Xw, Xc, Xb, D, base, band, wall, manifold, slot, cavity, fascia, yBand, yWall, yMan, ySlot, yCav, yFas, yTop, P, lanes, label, lw, lh, cavD, zL, tubeR, tubes, post, zt, zProud, riser, fan, heads, drops, hung, front, lip, floor, zLip, zOver, zBack, slabX, hopper: hopperU * U, cta, consent, plate, facts, tally, readout, fromMax, subjectMax, gauge, lamps }
 }

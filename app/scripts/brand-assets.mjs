@@ -1,11 +1,17 @@
-// Builds the brand files in public/ from the outlined SVGs in public/brand/ (docs/brand.md): favicon.svg, favicon.ico (16,
-// 32 and 48 px), apple-touch-icon.png, the manifest icons (192, 512 and a maskable 512) and the 1200 × 630 link-preview card
-// og.png. Run from app/ after changing the mark: node scripts/brand-assets.mjs (BRAND_CHROME=<path> to pick Chrome).
+// Builds the brand files in public/ that are made from others (docs/brand.md):
+// - favicon.ico, packed from the two hand-cut tiles in public/brand/ (favicon-16.png and favicon-32.png);
+// - the manifest icons (192, 512 and a maskable 512), drawn from public/brand/nightmail-monogram.svg: the NM in the
+//   brand's paper on a full square of its ink, as apple-touch-icon.png has it (the maskable one at eight tenths, so
+//   the NM keeps inside the circle every launcher shows);
+// - the 1200 × 630 link-preview card og.png.
+// favicon.svg, favicon-dark.svg and apple-touch-icon.png are the final vector set's own files, copied in as they are.
+// Run from app/ after changing a mark: node scripts/brand-assets.mjs. It uses Playwright's own headless Chromium
+// (npx playwright-core install chromium-headless-shell), never the installed Chrome; BRAND_CHROME=<path> picks another build.
 //
 // og.png is the homepage itself: the built dashboard (bun run build first) is served from dist/ with the two requests a
 // signed-out visit makes answered here, the sorter runs until it has burst and come to rest, and the card is the part of
 // that frame with the wordmark in lights, the price and the line under it, the lockup set beside it from the page's own
-// outlines. BRAND_ONLY=og writes only the card.
+// outlines. BRAND_ONLY=og writes only the card, BRAND_ONLY=icons everything but the card (no build needed).
 import { createServer } from 'node:http';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, extname, join, resolve } from 'node:path';
@@ -13,13 +19,14 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 
 const publicDir = resolve(dirname(fileURLToPath(import.meta.url)), '../public');
-const svg = name => readFileSync(join(publicDir, 'brand', name), 'utf8');
-const inline = name => svg(name).replace(/ width="[^"]*" height="[^"]*"/, ' width="100%" height="100%"');
-const canvas = '#FAFAFA';
+const brand = name => join(publicDir, 'brand', name);
+const INK = '#0A0B0F', PAPER = '#F4F2EC';
 
-// The mark on a square: `scale` is its share of the side (the maskable icon keeps it inside the central safe circle).
-const tile = (size, scale, background) => `<body style="margin:0;width:${size}px;height:${size}px;display:grid;place-items:center;background:${background}">
-  <div style="width:${size * scale}px;height:${size * scale}px">${inline('bane-mark.svg')}</div></body>`;
+// The monogram's file is the tile with the NM cut out of it: its second outline is the NM alone. An icon is that NM in
+// paper on a square of ink, the tile's own proportions at `scale` 1 (the NM eight tenths of the side across).
+const nm = (() => { const d = readFileSync(brand('nightmail-monogram.svg'), 'utf8').match(/ d="([^"]+)"/)[1], cut = d.indexOf('Z') + 1; if (!cut || !d.startsWith('M', cut)) throw Error('nightmail-monogram.svg is not a tile and one outline cut from it'); return d.slice(cut) })();
+const icon = (size, scale) => `<body style="margin:0;width:${size}px;height:${size}px;display:grid;place-items:center;background:${INK}">
+  <svg viewBox="0 0 1000 1000" style="display:block;width:${size * scale}px;height:${size * scale}px"><path fill="${PAPER}" d="${nm}"/></svg></body>`;
 
 // The link-preview card. The page is laid out for a 1440 × 900 window at night; the card is 800 by 420 of its pixels,
 // photographed at one and a half times (so 1200 × 630 exactly), ending just right of the cabinet's riser and at the foot of the headline's band.
@@ -85,29 +92,17 @@ function ico(pngs) {
   return Buffer.concat([header, ...pngs.map(p => p.data)]);
 }
 
-const browser = await chromium.launch({ executablePath: process.env.BRAND_CHROME ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', args: ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'] });
+const browser = await chromium.launch({ headless: true, ...process.env.BRAND_CHROME && { executablePath: process.env.BRAND_CHROME }, args: ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'] });
 try {
-  writeFileSync(join(publicDir, 'og.png'), await sorterCard(browser));
+  if (process.env.BRAND_ONLY !== 'icons') writeFileSync(join(publicDir, 'og.png'), await sorterCard(browser));
   if (process.env.BRAND_ONLY !== 'og') {
-  const shot = async (html, width, height, omitBackground = false) => {
-    const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
-    await page.setContent(html); await page.evaluate(() => document.fonts.ready);
-    const data = await page.screenshot({ omitBackground }); await page.close(); return data;
-  };
-  // Favicon sizes snap the mark's four inner squares to whole pixels, so the frame and rings stay crisp at 16 px.
-  const snap = (mark, size) => mark.replace(/M(\d+(?:\.\d+)?) \1L(\d+(?:\.\d+)?) \1L\2 \2L\1 \2Z/g, (_, a) => {
-    const i = Math.round(Number(a) * size / 100) * 100 / size, o = 100 - i;
-    return `M${i} ${i}L${o} ${i}L${o} ${o}L${i} ${o}Z`;
-  });
-  // favicon.svg: the mark on the 16 px grid (also whole pixels at 32), switching colour with the system theme if the
-  // brand's dark colour differs.
-  const d = snap(svg('bane-mark.svg'), 16).match(/ d="([^"]+)"/)[1], dark = svg('bane-mark-dark.svg').match(/fill="([^"]+)"/)[1], light = svg('bane-mark.svg').match(/fill="([^"]+)"/)[1];
-  writeFileSync(join(publicDir, 'favicon.svg'), `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">\n  <style>path { fill: ${light}; }${dark === light ? '' : ` @media (prefers-color-scheme: dark) { path { fill: ${dark}; } }`}</style>\n  <path fill-rule="evenodd" d="${d}"/>\n</svg>\n`);
-  const favicon = async size => ({ size, data: await shot(`<body style="margin:0;background:transparent">${snap(inline('bane-mark.svg'), size).replace('<svg', `<svg style="display:block;width:${size}px;height:${size}px"`)}</body>`, size, size, true) });
-  writeFileSync(join(publicDir, 'favicon.ico'), ico(await Promise.all([16, 32, 48].map(favicon))));
-  writeFileSync(join(publicDir, 'apple-touch-icon.png'), await shot(tile(180, 0.6, canvas), 180, 180));
-  writeFileSync(join(publicDir, 'icon-192.png'), await shot(tile(192, 0.6, canvas), 192, 192));
-  writeFileSync(join(publicDir, 'icon-512.png'), await shot(tile(512, 0.6, canvas), 512, 512));
-  writeFileSync(join(publicDir, 'icon-maskable-512.png'), await shot(tile(512, 0.5, canvas), 512, 512));
+    const shot = async (html, size) => {
+      const page = await browser.newPage({ viewport: { width: size, height: size }, deviceScaleFactor: 1 });
+      await page.setContent(html); const data = await page.screenshot(); await page.close(); return data;
+    };
+    writeFileSync(join(publicDir, 'favicon.ico'), ico([16, 32].map(size => ({ size, data: readFileSync(brand(`favicon-${size}.png`)) }))));
+    writeFileSync(join(publicDir, 'icon-192.png'), await shot(icon(192, 1), 192));
+    writeFileSync(join(publicDir, 'icon-512.png'), await shot(icon(512, 1), 512));
+    writeFileSync(join(publicDir, 'icon-maskable-512.png'), await shot(icon(512, .8), 512));
   }
 } finally { await browser.close(); }

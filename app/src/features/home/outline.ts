@@ -1,4 +1,4 @@
-// A brand outline (marks.ts) as geometry, for where the homepage builds the wordmark into the machine's own renderer
+// A brand outline (lib/marks.ts) as geometry, for where the homepage builds the wordmark into the machine's own renderer
 // or stands it up as a solid. The outline is never changed: these only turn its path into points (y up, the baseline
 // at 0), triangles for a flat face, and the edges a solid's sides are raised from.
 export type Pt = [number, number]

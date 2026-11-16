@@ -21,7 +21,7 @@ const BASELINE = join(app, 'scripts/copy-baseline.json');
 
 // Content that isn't dashboard copy: the legal documents and docs (their own review), the signed-out home, demo and
 // seed data, the scripted support conversation, logos and the email preview's CSS.
-const SKIP = /^(features\/(legal|docs|home)\/|data\/(mock|seed)\.ts$|features\/support\/demo\.ts$|components\/(BaneLogo|AnomalyLogo|EmailPreview)\.tsx$)/;
+const SKIP = /^(features\/(legal|docs|home)\/|data\/(mock|seed)\.ts$|features\/support\/demo\.ts$|components\/(NightmailLogo|AnomalyLogo|EmailPreview)\.tsx$)/;
 
 // Words and sentences per element type. Sentences are counted on the whole string; words exclude code.
 const LIMITS = {
