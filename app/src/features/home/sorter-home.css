@@ -102,6 +102,27 @@
    same way once the machine runs (sorter-home.tsx: data-screen, from the phase). */
 .srt-page .srt-readout[data-screen='off'] { visibility: hidden; animation: none; }
 @media (prefers-reduced-motion: no-preference) { .srt-page .srt-readout[data-screen='on'] { animation: srt-come-on 480ms backwards; } }
+/* The burst puts the machine's lights out. What is lit on it (the sentence, the instruments' readings, the names on its
+   plates, the screen, the counter) goes dark with the blast, so nothing the page writes is left floating over the
+   letters flying in front of the machine; and once they are down (about three seconds on, the burst being slowed)
+   the lights come back unevenly, a piece at a time from the top down, each with a stutter, the screen last. One
+   animation from the blast to the end of the rebuild, so a press of the gauge in the middle of it changes nothing.
+   (The pieces inside what the smoke veils, so the two multiply. The button is the page's own and stays lit.) */
+@keyframes srt-lights-out { from { opacity: 1; } to { opacity: .05; } }
+@keyframes srt-lights-on { 0% { opacity: .05; animation-timing-function: steps(1, end); } 12% { opacity: .6; animation-timing-function: steps(1, end); } 19% { opacity: .1; animation-timing-function: steps(1, end); } 31% { opacity: .8; animation-timing-function: steps(1, end); } 37% { opacity: .35; animation-timing-function: ease-out; } 100% { opacity: 1; } }
+@keyframes srt-lights-on-slow { 0% { opacity: .05; animation-timing-function: steps(1, end); } 22% { opacity: .4; animation-timing-function: steps(1, end); } 30% { opacity: .08; animation-timing-function: ease-in; } 58% { opacity: .7; animation-timing-function: steps(1, end); } 64% { opacity: .4; animation-timing-function: ease-out; } 100% { opacity: 1; } }
+@media (prefers-reduced-motion: no-preference) {
+  .srt-page:is([data-phase='boom'], [data-phase='rest'], [data-phase='rebuild']) :is(.srt-line, .srt-fact-label, .srt-fact-value > span, .srt-lanes:not(.srt-mouths) li, .srt-readout-from, .srt-readout-subject, .srt-readout-route > span, .srt-tally) { animation: var(--srt-lights, srt-lights-on) 640ms var(--srt-lights-at, 3200ms) backwards, srt-lights-out 110ms cubic-bezier(.4, 0, 1, 1); }
+  .srt-lanes li:nth-child(3n + 1) { --srt-lights-at: 3330ms; }
+  .srt-lanes li:nth-child(3n + 2) { --srt-lights: srt-lights-on-slow; --srt-lights-at: 3200ms; }
+  .srt-lanes li:nth-child(3n) { --srt-lights-at: 3480ms; }
+  .srt-pods li:nth-child(odd) { --srt-lights-at: 3620ms; }
+  .srt-tally { --srt-lights: srt-lights-on-slow; --srt-lights-at: 3300ms; }
+  .srt-line { --srt-lights-at: 3450ms; }
+  .srt-fact:first-of-type > * { --srt-lights: srt-lights-on-slow; --srt-lights-at: 3640ms; }
+  .srt-fact:last-of-type > * { --srt-lights-at: 3820ms; }
+  .srt-readout > * { --srt-lights: srt-lights-on-slow; --srt-lights-at: 4050ms; }
+}
 /* A lane's plate is blank until its works are fitted; then its name, on a card, is pushed into the plate's holder from
    the left (only what is over the plate is seen). (The clip stands a little clear of the card, so a letter that
    reaches past a small plate's edge is never cut.) */
