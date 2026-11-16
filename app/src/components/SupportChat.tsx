@@ -5,8 +5,8 @@ import { chunk } from '../lib/preloadable'
 import { usePhone } from '../lib/media'
 import { IconButton } from './ui'
 
-// The support chat's Help button and the panel's host, in the dashboard shell (AppShell). The panel's code, the
-// conversation and its transport load on first use (hover, focus or press warms them).
+// The support chat's Help button and the panel's host, in the dashboard shell (AppShell). The panel's code loads once the
+// page is idle (hover, focus or press warms it sooner); the conversation and its transport start when Help opens.
 //
 // Where it runs: the demo dashboard and ?support=demo (kept for the browser session; ?support=off clears it) get the
 // scripted demo conversation. Hosted workspaces get the live support Worker by the build's VITE_SUPPORT_CHAT: "true" for
@@ -38,6 +38,14 @@ export function useSupportChat({ demoApi, hosted, staff }: { demoApi: boolean; h
   const [open, setOpen] = useState(Boolean(resume))
   const [used, setUsed] = useState(Boolean(resume))
   const [unread, setUnread] = useState(false)
+  // The panel's code loads when the page is idle, so Help opens at once even on a first tap (a touch has no hover).
+  useEffect(() => {
+    if (!mode) return
+    const load = () => { void panel.preload().catch(() => {}) }
+    if (typeof requestIdleCallback === 'function') { const idle = requestIdleCallback(load, { timeout: 5000 }); return () => cancelIdleCallback(idle) }
+    const timer = setTimeout(load, 2000)
+    return () => clearTimeout(timer)
+  }, [mode])
   return { mode, resume, open, used, unread, setUnread, preload: () => { void panel.preload().catch(() => {}) },
     setOpen: (next: boolean) => { if (next) setUsed(true); setOpen(next) } }
 }

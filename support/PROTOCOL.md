@@ -17,7 +17,7 @@ panel ── POST /chat/start { handoff } ────────────�
 panel ══ WebSocket socketUrl ══════════════════════════▶ support.bane.mx   (this protocol)
 ```
 
-1. **Handoff.** `POST https://bane.mx/v1/contact-support` with the signed-in session (any role), as today: `{ kind: "support", page, requestIds, shareContent }`. Leave `message` empty: the agent always speaks first (§3). Read `token` from the response (the support URL's `#handoff=` fragment carries the same value).
+1. **Handoff.** `POST https://bane.mx/v1/contact-support` with the signed-in session (any role), as today: `{ kind: "support", page, requestIds, shareContent }`. Leave `message` empty: the panel opens with its own line (§3). A non-empty `message` (an API client's) becomes the conversation's first message. Read `token` from the response (the support URL's `#handoff=` fragment carries the same value).
 2. **Start.** `POST {support}/chat/start`, `content-type: application/json`, body `{ "handoff": "<token>" }`. CORS allows the dashboard origin only; no cookies.
 
    | Status | Body | Meaning |
@@ -46,12 +46,10 @@ The handoff's user must be the conversation's user (`403 { error: { code: "NOT_Y
 ## 3. Message flow at a glance
 
 ```
+panel  : "What can we help you with?"  (its own fixed opening line, shown the moment it opens; no model call)
 server → hello                      (always first, on every connect)
 server → history                    (on reconnect; empty on a new conversation)
-server → message.start  kind=first  (new conversation only: the agent's greeting)
-server → text.delta …
-server → message.end
-client → user.message
+client → user.message               (the panel takes it at once and sends it after history; §5)
 server → message.start  kind=reply
 server → tool.start / tool.end …    (zero or more, interleaved with text)
 server → text.delta …
@@ -99,7 +97,7 @@ Every server message has `v: 1`, a `type` and a `seq`: a per-conversation counte
   "redacted": false }                  // true when the output gate replaced it (§6)
 ```
 
-- `kind: "first"` is the greeting the agent writes when the conversation opens, from the person's account (name, recent campaigns and sends, standing, open issues). The panel shows a typing state until it starts; it never sends a canned greeting of its own.
+- The server writes no greeting: the panel opens every conversation with its own fixed line, "What can we help you with?", and the customer writes first. `kind: "first"` appears only in the history of conversations opened before Nov 16, 2026, when the agent wrote a greeting.
 - `kind: "notice"` is a short line from the harness, not the model (for example "Account access renewed"). Render it smaller.
 - Text is **Markdown, restricted**: paragraphs, `**bold**`, `` `code` ``, fenced code, numbered and bulleted lists, links. Render links only to `https://bane.mx`, `https://dev.bane.mx`, `https://support.bane.mx`, `https://support.dev.bane.mx` and `https://github.com/anomalyco/nightmail`; show any other URL as plain text. Never render images or raw HTML.
 - Always use `message.end.text` as the stored text. When `redacted` is true, it is a replacement such as "I've sent this to the team to check".
@@ -113,7 +111,7 @@ Every server message has `v: 1`, a `type` and a `seq`: a per-conversation counte
   "ok": true, "label": "Checked your Gmail bounces" }   // ok:false → "Couldn't check …"; keep going
 ```
 
-Show `label` as a quiet progress line under the message. Labels are already written for people; `tool` is for tests and analytics only. The panel never sees tool arguments or results.
+While an answer is being worked on, the panel shows one status line in the message: the running step's `label` ("Checking your domain’s DNS…"), "Working on it…" before the first step and between steps, and the answer's text in its place once text arrives. Labels are fixed text written for people, never arguments or IDs; `tool` is for tests and analytics only. The panel never sees tool arguments or results.
 
 ```jsonc
 { "v": 1, "type": "consent.request", "seq": 6, "requestId": "cns_…",
@@ -173,6 +171,7 @@ Show a small card: "Passed to the Nightmail team as **tkt_…**. Someone will re
 - `clientMessageId` makes resends safe: the server ignores a `user.message` it has already accepted.
 - `attachments` are IDs from §5.1 that no earlier message used; an unknown or reused ID gets `BAD_MESSAGE`.
 - Messages sent while a turn is running are queued and answered in order.
+- The panel takes messages from the moment it opens. One typed before the socket is open waits in the panel and goes out once `history` has arrived (so `history` can't overwrite it).
 - The server answers `pong` to `ping`, and closes the socket with `1000` when the conversation ends. If the socket drops, reconnect with the same `socketUrl` until `expiresAt`, then renew through `/chat/resume`.
 
 ### 5.1 Screenshots
@@ -209,4 +208,4 @@ X-Filename: <URI-encoded file name, optional>
 
 ## 7. Testing without a model
 
-`support/test/fakes.ts` has the scripted model and the fake Nightmail the Worker's tests use. The model script decides its next move from the request: the greeting, a reply with a tool step (`bounce_reasons`), a consent card ("look at the content"), a ticket ("refund") and a gated answer ("leak please"). `bun run test` in `support/` drives the real bundle through these, so the frame sequences in §3 are exactly what the tests assert.
+`support/test/fakes.ts` has the scripted model and the fake Nightmail the Worker's tests use. The model script decides its next move from the request: a reply with a tool step (`bounce_reasons`), a consent card ("look at the content"), a ticket ("refund") and a gated answer ("leak please"). `bun run test` in `support/` drives the real bundle through these, so the frame sequences in §3 are exactly what the tests assert.

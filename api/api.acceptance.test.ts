@@ -4977,7 +4977,7 @@ describe('Hosted MCP OAuth and tools', () => {
 
       // Workers Logs, answered here: the grant's lines, and lines it must never see even when Cloudflare returns them.
       runtime.config.observability = { token: 'cf-observability-fixture-token', accountId: 'f'.repeat(32), script: 'bane-fixture' };
-      const minutes = (n: number) => Date.now() - n * 60_000, ids = Array.from({ length: 7 }, rid), domainIds = [rid(), rid()], failed = rid(), shared = rid();
+      const minutes = (n: number) => Date.now() - n * 60_000, ids = Array.from({ length: 7 }, rid), domainIds = [rid(), rid()], failed = rid(), shared = rid(), older = rid();
       const line = (minutesAgo: number, source: Json, script = 'bane-fixture') => ({ dataset: 'cloudflare-workers', timestamp: minutes(minutesAgo),
         $metadata: { id: randomUUID(), message: 'POST https://bane.mx/v1/emails?to=private@example.org', url: 'https://bane.mx/v1/emails?to=private@example.org', region: 'IAD' },
         $workers: { scriptName: script, eventType: 'fetch', outcome: 'ok' },
@@ -4991,6 +4991,8 @@ describe('Hosted MCP OAuth and tools', () => {
         line(30, { requestId: failed, status: 500, code: 'INTERNAL_ERROR', databaseCode: '57014', stack: 'at handler (src/emails.ts:1:1)' }),
         line(35, { requestId: rid(), method: 'GET', route: '/v1/contacts/someone@example.org', status: 404, code: 'NOT_FOUND' }),
         line(2, { requestId: shared, workspace: second, route: '/v1/campaigns', code: 'CAMPAIGN_NOT_READY' }),
+        // Two days old: outside the 24-hour list and the first 6 hours a trace looks at.
+        line(2880, { requestId: older }),
         // Never this grant's: another customer's workspace, the grant's own support reads, another Worker, a non-request line.
         line(3, { requestId: ids[0], workspace: other, route: '/v1/other-secret', code: 'OTHER_WORKSPACE_CODE' }),
         line(4, { requestId: rid(), workspace: other, status: 500, code: 'OTHER_WORKSPACE_CODE' }),
@@ -5008,7 +5010,9 @@ describe('Hosted MCP OAuth and tools', () => {
         if (url.hostname !== 'api.cloudflare.com') return previous(input, init);
         asked.push({ url: url.href, authorization: new Headers(init?.headers).get('authorization'), body: JSON.parse(String(init?.body)) });
         if (outage) return Response.json(outage.body, { status: outage.status });
-        return Response.json({ success: true, errors: [], messages: [], result: { run: { id: 'run' }, events: { count: events.length, events } } });
+        // The query's timeframe holds; every other filter is ignored, so the answer is checked again on our side.
+        const { from, to } = asked.at(-1)!.body.timeframe as { from: number; to: number }, inWindow = events.filter(e => e.timestamp >= from && e.timestamp <= to);
+        return Response.json({ success: true, errors: [], messages: [], result: { run: { id: 'run' }, events: { count: inWindow.length, events: inWindow } } });
       };
       console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); };
       try {
@@ -5062,12 +5066,17 @@ describe('Hosted MCP OAuth and tools', () => {
         error(await send('GET', '/v1/support/requests?route=/v1/emails?to=x', support), 422);
         assert.equal(asked.length, before, 'A refused read asks nothing.');
 
-        // One request: its lines in the grant's workspaces only (the stub also returns another workspace's line with that ID).
-        const traced = await get(`/v1/support/requests/${ids[0]}`);
+        // One request: its lines in the grant's workspaces only (the stub also returns another workspace's line with that ID),
+        // found in the last 6 hours with one query.
+        const tracing = asked.length, traced = await get(`/v1/support/requests/${ids[0]}`);
         assert.deepEqual(asked.at(-1)!.body.parameters.filters, [eq('$workers.scriptName', 'bane-fixture'), eq('event', 'request'), workspaceGroup([wid]), eq('requestId', ids[0])]);
-        assert.ok(asked.at(-1)!.body.timeframe.to - asked.at(-1)!.body.timeframe.from >= 3 * 86_400_000);
+        assert.deepEqual([asked.length - tracing, asked.at(-1)!.body.timeframe.to - asked.at(-1)!.body.timeframe.from], [1, 6 * 3_600_000 + 60_000]);
         assert.deepEqual([traced.found, traced.logsAvailable, traced.logs.length, traced.note], [true, true, 1, 'Logged, but it changed nothing Nightmail stores: see logs for its route, status and error code.']);
         assert.deepEqual(traced.logs[0], { at: new Date(events[0]!.timestamp).toISOString(), route: '/v1/emails', method: 'POST', status: 422, code: 'VALIDATION_FAILED', durationMs: 12.3, principal: 'apiKey', workspaceId: wid });
+        // Not in the last 6 hours: a second query over the whole retention window finds it.
+        const searching = asked.length, old = await get(`/v1/support/requests/${older}`);
+        assert.deepEqual([asked.length - searching, old.found, old.logs.map((l: Json) => l.at)], [2, true, [new Date(events.find(e => (e.source as Json).requestId === older)!.timestamp).toISOString()]]);
+        assert.ok(asked.at(-1)!.body.timeframe.to - asked.at(-1)!.body.timeframe.from >= 3 * 86_400_000);
         assert.deepEqual((await get(`/v1/support/requests/${shared}`)).logs, [], 'A line of a workspace outside the grant is never shown.');
         assert.equal((await get(`/v1/support/requests/${shared}`, bearer(both.token))).logs[0].workspaceId, second);
 

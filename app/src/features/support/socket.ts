@@ -9,16 +9,25 @@ import { hostedHosts, productName, supportHost } from '../../../../api/src/brand
 type Started = { conversationId: string; chatToken: string; socketUrl: string; expiresAt: string }
 class StartError extends Error { constructor(readonly status: number, readonly code: string, readonly retryAfter?: number) { super(code) } }
 
-// What a reload needs to rejoin the conversation (PROTOCOL.md §1): its ID, and the socket URL until it expires.
-type Saved = { conversationId: string; socketUrl?: string; expiresAt?: string }
+// What a reload needs to rejoin the conversation (PROTOCOL.md §1): its ID, the socket URL until it expires, and when it
+// last had a message. A conversation that ended (the server said so, or a day passed without a message: the support
+// Worker closes a chat after 24 hours idle) is forgotten here, so opening Help starts a new one at once instead of
+// asking /chat/resume for one that is gone.
+type Saved = { conversationId: string; socketUrl?: string; expiresAt?: string; activeAt?: number }
+const IDLE_CLOSE_MS = 24 * 3_600_000
 const storageKey = (workspaceId: string) => `bane.support.conversation.${workspaceId}`
 function load(key: string): Saved | null {
   let raw: string | null = null
   try { raw = sessionStorage.getItem(key) } catch { return null }
   if (!raw) return null
-  try { const saved = JSON.parse(raw) as Saved; return typeof saved?.conversationId === 'string' ? saved : null } catch { return null }
+  let saved: Saved | null = null
+  try { saved = JSON.parse(raw) as Saved } catch { /* Not ours: forgotten below. */ }
+  if (typeof saved?.conversationId !== 'string' || (saved.activeAt && Date.now() - saved.activeAt > IDLE_CLOSE_MS)) { save(key, null); return null }
+  return saved
 }
 const save = (key: string, value: Saved | null) => { try { if (value) sessionStorage.setItem(key, JSON.stringify(value)); else sessionStorage.removeItem(key) } catch { /* Session-only. */ } }
+/** A message in the conversation: it stays open for another day. */
+const touch = (key: string) => { const saved = load(key); if (saved) save(key, { ...saved, activeAt: Date.now() }) }
 const fresh = (expiresAt?: string) => Boolean(expiresAt && Date.parse(expiresAt) - Date.now() > 60_000)
 
 // A screenshot upload (§5.1) over XHR, which reports upload progress (fetch doesn't).
@@ -121,7 +130,8 @@ export function createSocketTransport({ origin, workspaceId, resume }: { origin:
       return
     }
     if (current !== generation || disposed) return
-    save(key, { conversationId: started.conversationId, socketUrl: started.socketUrl, expiresAt: started.expiresAt })
+    const previous = load(key)
+    save(key, { conversationId: started.conversationId, socketUrl: started.socketUrl, expiresAt: started.expiresAt, activeAt: previous?.conversationId === started.conversationId ? previous.activeAt : Date.now() })
     let opened = false
     const ws = socket = new WebSocket(started.socketUrl)
     ws.onopen = () => {
@@ -135,6 +145,8 @@ export function createSocketTransport({ origin, workspaceId, resume }: { origin:
       // GRANT_EXPIRED: account access ended; a fresh handoff renews it and the agent carries on.
       if (message.type === 'error' && message.code === 'GRANT_EXPIRED') { started = null; teardown(); state = 'idle'; void connect(); return }
       if (message.type === 'error' && message.code === 'BAD_MESSAGE') console.warn('[support] the server refused a message from the panel', message.message)
+      if (message.type === 'closed' || message.type === 'hello' && message.status === 'closed') save(key, null)
+      else if (message.type === 'message.end') touch(key)
       emit({ type: 'server', message })
     }
     ws.onclose = event => {
@@ -153,6 +165,7 @@ export function createSocketTransport({ origin, workspaceId, resume }: { origin:
   function send(message: ClientMessage) {
     if (!socket || socket.readyState !== WebSocket.OPEN) return false
     socket.send(JSON.stringify(message))
+    if (message.type === 'user.message') touch(key)
     return true
   }
   const online = () => { if (state === 'offline') { attempt = 0; void connect() } }

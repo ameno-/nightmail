@@ -66,8 +66,9 @@ export function modelFetch(env: Env): Fetch {
     if (!request.url.startsWith(`${root}/`)) return new Response('egress denied', { status: 403 });
     const key = env.CONSOLE_GATEWAY_KEY;
     if (!key) throw new MissingSecret('CONSOLE_GATEWAY_KEY');
+    let body: ModelRequest | undefined;
     if (request.method === 'POST') {
-      const body = await request.clone().json<{ model?: string; output_config?: { effort?: string } }>().catch(() => undefined);
+      body = await request.clone().json<ModelRequest>().catch(() => undefined);
       if (body?.model !== MODEL.model || body?.output_config?.effort !== MODEL.variant) {
         log('error', { event: 'model', code: 'MODEL_PIN_VIOLATED', model: body?.model ?? null, effort: body?.output_config?.effort ?? null });
         return Response.json({ type: 'error', error: { type: 'invalid_request_error', message: 'This Worker only sends the pinned model.' } }, { status: 400 });
@@ -76,9 +77,27 @@ export function modelFetch(env: Env): Fetch {
     const headers = new Headers(request.headers);
     headers.delete('x-api-key');
     headers.set('authorization', `Bearer ${key}`);
-    const send = new Request(request, { headers });
+    let send = new Request(request, { headers });
+    if (body && cacheForAnHour(body)) {
+      headers.delete('content-length');
+      send = new Request(request.url, { method: 'POST', headers, body: JSON.stringify(body), signal: request.signal });
+    }
     return env.MODEL_FAKE ? env.MODEL_FAKE.fetch(send) : fetch(send);
   };
+}
+
+type CacheControl = { type: string; ttl?: string };
+type ModelRequest = { model?: string; output_config?: { effort?: string }; tools?: { cache_control?: CacheControl }[]; system?: { text?: string; cache_control?: CacheControl }[] };
+/**
+ * The tools and the system prompt are the same for every conversation: their cache breakpoints (OpenCode's, on the last
+ * tool and on each system part) last an hour instead of five minutes, so a chat opened after a quiet spell doesn't
+ * prefill them again. The per-customer system part and the messages keep five minutes. Console's gateway honours `ttl`.
+ */
+function cacheForAnHour(body: ModelRequest): boolean {
+  const parts = [body.tools?.at(-1), body.system?.[0]?.text === systemPrompt() ? body.system[0] : undefined];
+  let changed = false;
+  for (const part of parts) if (part?.cache_control?.type === 'ephemeral' && part.cache_control.ttl !== '1h') { part.cache_control = { type: 'ephemeral', ttl: '1h' }; changed = true; }
+  return changed;
 }
 
 function jsonSchema(params: Record<string, Param>) {
