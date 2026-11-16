@@ -231,8 +231,9 @@
   .srt-nav .theme-toggle { width: 44px; height: 44px; box-shadow: none; }
   .srt-nav .theme-toggle::before { content: ''; position: absolute; inset: 5px; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--srt-hair); pointer-events: none; }
   @media (hover: hover) and (pointer: fine) { .srt-nav .theme-toggle:hover:not(:disabled) { background: none; } .srt-nav .theme-toggle:hover:not(:disabled)::before { background: var(--srt-hover); } }
-  /* (A link in a line of text: its hit area stands over and under the line.) */
-  .srt-consent a, .srt-end-consent a { padding-block: 15px; }
+  /* (A link in a line of text: its hit area stands over and under the line, and its focus ring keeps to the words.) */
+  .srt-consent a, .srt-end-consent a { position: relative; }
+  .srt-consent a::before, .srt-end-consent a::before { content: ''; position: absolute; inset: -14px 0; }
 }
 
 @media (prefers-reduced-motion: reduce) { .srt-cta::before, .srt-cta-label, .srt-cta-arrow, .srt-nav > a, .srt-nav .theme-toggle { transition: none; } .srt-card-body { animation: none; } }
