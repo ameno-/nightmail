@@ -51,7 +51,7 @@ export function DailyLimit({ report }: { report: SenderScore | undefined }) {
     </button>
     {notes.map(note => <p key={note.text} className="limit-row__note" data-tone={note.tone}>{note.tone && <span aria-hidden="true" />}{note.text}</p>)}
     <Dialog open={explaining} onOpenChange={setExplaining} title="How limits work" className="limits-dialog">
-      <SendingLimitsGuide />
+      <SendingLimitsGuide limit={report?.limit} compact />
       <Link className="limits-dialog__docs" to="/docs#sending-limits">Open in the docs</Link>
     </Dialog>
   </section>

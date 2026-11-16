@@ -1,3 +1,6 @@
+import { Fragment, type ReactNode } from 'react'
+import { Disclosure } from '../../components/ui'
+import type { SenderLimit } from '../../data/types'
 import { number } from '../../lib/format'
 import './limits.css'
 
@@ -5,9 +8,13 @@ import './limits.css'
 // each step) with what each step does, and the campaign list probe. The public docs (/docs#sending-limits) and
 // Overview's explainer render this one copy. Detection internals stay out.
 const perMinute = (limit: number) => Math.min(500, Math.max(50, Math.floor(limit / 20)))
-const bands: [score: string, grade: string, limit: number | string][] = [
-  ['Calibrating, first 100 sent', '–', 100], ['Under 65', 'D, F under 60', 100], ['65–69', 'D', 200], ['70–74', 'C', 500], ['75–79', 'C', 1_000],
-  ['80–84', 'B', 2_000], ['85–89', 'B', 5_000], ['90 and up', 'A, A+ from 95', 10_000], ['On request', '–', '25,000 · 50,000 · 100,000'],
+// The score and its grade in one cell; `source` and `band` pick out the row a workspace is on (SenderLimit).
+const bands: [score: string, limit: number | string, current: (limit: SenderLimit) => boolean][] = [
+  ['Calibrating, first 100 sent', 100, l => l.source === 'calibrating'], ['Under 65 · D, F under 60', 100, l => l.source === 'score' && l.band === 100],
+  ['65–69 · D', 200, l => l.source === 'score' && l.band === 200], ['70–74 · C', 500, l => l.source === 'score' && l.band === 500],
+  ['75–79 · C', 1_000, l => l.source === 'score' && l.band === 1_000], ['80–84 · B', 2_000, l => l.source === 'score' && l.band === 2_000],
+  ['85–89 · B', 5_000, l => l.source === 'score' && l.band === 5_000], ['90 and up · A, A+ from 95', 10_000, l => l.source === 'score' && l.band === 10_000],
+  ['On request', '25,000 · 50,000 · 100,000', () => false],
 ]
 // Each cell is the rate and the count that must both be reached; a dash where the step has no line for it.
 const lines: [what: string, warn: string, restrict: string, pause: string][] = [
@@ -19,29 +26,29 @@ const lines: [what: string, warn: string, restrict: string, pause: string][] = [
 // What each step does, then how it ends.
 const ladder: { step: string; mark: string; tone: string; does: string; recovery: string }[] = [
   { step: 'Notice', mark: '·', tone: 'neutral', does: 'A first complaint or a few bounces adds a dashboard note.', recovery: 'It clears by itself.' },
-  { step: 'Warn', mark: '1', tone: 'warning', does: 'The limit stops rising and owners and admins get an email; mail still sends.', recovery: 'Clears after 24 hours under 80% of the line.' },
-  { step: 'Restrict', mark: '2', tone: 'warning', does: 'Marketing is held, not receipts or resets.', recovery: 'Owners and admins can release it from Overview after 24 hours, once per 14 days: 50% for 48 hours.' },
-  { step: 'Pause', mark: '3', tone: 'danger', does: 'Sending stops; receiving, inboxes and the dashboard work. Queued mail is canceled after 72 hours.', recovery: 'Owners can resume a pause from transactional bounces alone once per 30 days, at 50% for 48 hours; others need a review.' },
+  { step: 'Warn', mark: '1', tone: 'warning', does: 'The limit stops rising and owners and admins get an email. Mail still sends.', recovery: 'Clears after 24 hours under 80% of the line.' },
+  { step: 'Restrict', mark: '2', tone: 'warning', does: 'Marketing is held; receipts and resets still send.', recovery: 'After 24 hours owners and admins can release it from Overview: 50% for 48 hours, once per 14 days.' },
+  { step: 'Pause', mark: '3', tone: 'danger', does: 'Sending stops; receiving, inboxes and the dashboard still work. Queued mail is canceled after 72 hours.', recovery: 'A pause from transactional bounces alone: owners can resume it at 50% for 48 hours, once per 30 days. Others need a review.' },
 ]
 
-export function SendingLimitsGuide({ headings = 'h3' }: { headings?: 'h2' | 'h3' }) {
+// `limit` marks the row the workspace is on. `compact` (Overview's dialog) leads with the limit table and opens the
+// warning lines and the campaign probe from their headings; the docs show every section open.
+export function SendingLimitsGuide({ headings = 'h3', limit, compact = false }: { headings?: 'h2' | 'h3'; limit?: SenderLimit | null; compact?: boolean }) {
   const H = headings
-  return <div className="limits-guide">
+  return <div className="limits-guide" data-compact={compact || undefined}>
     <section aria-label="Score and daily limit">
       <H>Score and daily limit</H>
       <p>Hosted only: recipients per rolling 24 hours, set by the sender score.</p>
       <div className="limits-table-scroll"><table className="limits-table">
-        <thead><tr><th scope="col">Score</th><th scope="col">Grade</th><th scope="col">Daily limit</th><th scope="col">Per minute</th></tr></thead>
-        <tbody>{bands.map(([score, grade, limit]) => <tr key={score}><td>{score}</td><td>{grade}</td><td>{typeof limit === 'number' ? number(limit) : limit.split(' · ').map((part, i, all) => <span key={part} className="limits-table__part">{part}{i < all.length - 1 && ' ·'} </span>)}</td><td>{typeof limit === 'number' ? number(perMinute(limit)) : number(500)}</td></tr>)}</tbody>
+        <thead><tr><th scope="col">Score</th><th scope="col">Daily limit</th><th scope="col">Per minute</th></tr></thead>
+        <tbody>{bands.map(([score, cap, current]) => <tr key={score} aria-current={limit && current(limit) ? 'true' : undefined}><td>{score}{limit && current(limit) && <span className="limits-table__now">Now</span>}</td><td>{typeof cap === 'number' ? number(cap) : cap.split(' · ').map((part, i, all) => <Fragment key={part}><span className="limits-table__part">{part}</span>{i < all.length - 1 && ' · '}</Fragment>)}</td><td>{typeof cap === 'number' ? number(perMinute(cap)) : number(500)}</td></tr>)}</tbody>
       </table></div>
       <ul className="limits-notes">
-        <li>Per minute: the limit ÷ 20, from 50 to 500.</li>
         <li>Marketing can use all but 100 or 10% (whichever is more), kept for receipts and resets.</li>
         <li>The score moves at most 5 up or 10 down a day. A band drops only 2 points under its floor.</li>
       </ul>
     </section>
-    <section aria-label="Warnings and holds">
-      <H>Warnings and holds</H>
+    <Part title="Warnings and holds" H={H} compact={compact}>
       <p>Checked every 10 minutes. A line needs its rate and its count; any one line is enough.</p>
       <div className="limits-table-scroll"><table className="limits-table limits-table--lines">
         <thead><tr><th scope="col"><span className="sr-only">Signal</span></th><th scope="col">Warn</th><th scope="col">Restrict</th><th scope="col">Pause</th></tr></thead>
@@ -49,16 +56,19 @@ export function SendingLimitsGuide({ headings = 'h3' }: { headings?: 'h2' | 'h3'
       </table></div>
       <ol className="limits-ladder">{ladder.map(step => <li key={step.step} className={`ui-tone--${step.tone}`}>
         <div className="limits-ladder__head"><span className="limits-ladder__mark" aria-hidden="true">{step.mark}</span><strong>{step.step}</strong></div>
-        <p>{step.does} <span className="muted">{step.recovery}</span></p>
+        <p>{step.does}</p><p className="muted">{step.recovery}</p>
       </li>)}</ol>
-    </section>
-    <section aria-label="Campaign list probe">
-      <H>Campaign list probe</H>
+    </Part>
+    <Part title="Campaign list probe" H={H} compact={compact}>
       <ul className="limits-notes limits-notes--plain">
         <li>Campaigns to over 100 recipients go to 10% first (100 to 500).</li>
         <li>Over 3% hard bounces or 2 complaints pause it and suppress the bounces.</li>
         <li>Clean the list and resume; a second quarantine needs a review.</li>
       </ul>
-    </section>
+    </Part>
   </div>
+}
+
+function Part({ title, H, compact, children }: { title: string; H: 'h2' | 'h3'; compact: boolean; children: ReactNode }) {
+  return compact ? <Disclosure title={title} headingAs={H}>{children}</Disclosure> : <section aria-label={title}><H>{title}</H>{children}</section>
 }

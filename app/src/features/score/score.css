@@ -117,7 +117,7 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
 .score-about__section ul { display: flex; flex-direction: column; gap: var(--space-4); margin: 0; padding-inline-start: var(--space-20); text-wrap: pretty; }
 .score-about__progress { grid-column: 1 / -1; position: relative; display: block; height: 4px; overflow: hidden; border-radius: 2px; background: var(--color-layer-2); }
 .score-about__progress > i { position: absolute; inset: 0 auto 0 0; width: var(--share); border-radius: inherit; background: var(--color-contrast); }
-.score-about__section { display: flex; flex-direction: column; gap: var(--space-4); font-size: var(--text-sm); line-height: var(--leading-sm); }
+.score-about__section { font-size: var(--text-sm); line-height: var(--leading-sm); }
 .score-about__section h3 { font-size: var(--text-sm); font-weight: var(--font-weight-bold); }
 .score-about__section code { font-size: .92em; }
 .score-about__factors { margin: 0; padding: 0; list-style: none; }

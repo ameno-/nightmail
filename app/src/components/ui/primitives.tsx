@@ -305,6 +305,10 @@ function BackLink({ to }: { to: string }) {
 export function PageHeader({ title, actions, backTo, subtitle }: { title: ReactNode; actions?: ReactNode; backTo?: string; subtitle?: ReactNode }) {
   return <header data-component="PageHeader" className="ui-page-header"><div className="cluster">{backTo && <BackLink to={backTo} />}{subtitle ? <div className="ui-page-header__text"><h1>{title}</h1>{subtitle}</div> : <h1>{title}</h1>}</div>{actions && <div className="cluster">{actions}</div>}</header>;
 }
+// Detail that opens from its heading (a native details element): the summary stays in view, the rest is one click away.
+export function Disclosure({ title, headingAs: Heading = 'h3', hint, className, children }: { title: ReactNode; headingAs?: 'h2' | 'h3' | 'h4'; hint?: ReactNode; className?: string; children: ReactNode }) {
+  return <details data-component="Disclosure" className={cx('ui-disclosure', className)}><summary><Heading>{title}</Heading>{hint && <span className="ui-disclosure__hint muted">{hint}</span>}<ChevronRight size={16} aria-hidden="true" /></summary><div className="ui-disclosure__body">{children}</div></details>;
+}
 export function SectionHeader({ title, actions }: { title: ReactNode; actions?: ReactNode }) {
   return <div data-component="SectionHeader" className="ui-section-header"><h2>{title}</h2>{actions && <div className="cluster">{actions}</div>}</div>;
 }

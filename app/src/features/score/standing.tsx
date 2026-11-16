@@ -30,7 +30,7 @@ export function StandingCard({ report }: { report: SenderScore }) {
     <div className="standing-card__part"><h3>How to fix it</h3>
       <ol className="standing-checklist">
         <li>Remove contacts that bounced or complained. <Link to="/audience">Audience</Link></li>
-        <li>Confirm every contact opted in; stop mailing bought or old lists.</li>
+        <li>Mail only subscribed contacts; stop mailing bought or old lists.</li>
         {step === 'warn' && <li>This clears by itself after 24 hours under 80% of the line.</li>}
       </ol>
     </div>
@@ -39,7 +39,7 @@ export function StandingCard({ report }: { report: SenderScore }) {
         : <p className="muted">Owners and admins can {releaseLabel[offer.action].toLowerCase()} once the checklist is done.</p>
         : <p className="muted">{offer.reason ?? 'This needs a review.'}{offer.availableAt ? ` Available from ${shortDateTime(offer.availableAt)} UTC.` : ''}</p>}
     </div>}
-    <Link className="standing-card__docs" to="/docs#sending-limits">How sending limits work</Link>
+    <Link className="standing-card__docs" to="/docs#sending-limits">How limits work</Link>
     {offer.action && canAdminister && <ReleaseDialog open={releasing} onOpenChange={setReleasing} action={offer.action} />}
   </section>
 }
@@ -51,8 +51,8 @@ function didExtra(standing: SenderStanding) {
 }
 
 const releaseCopy = {
-  release_marketing: { title: 'Release marketing?', description: 'Marketing resumes at 50% of its allowance for 48 hours. You can do this once every 14 days.', done: 'Marketing released' },
-  resume_sending: { title: 'Resume sending?', description: 'Sending resumes at 50% of the limit for 48 hours; marketing stays held for the first 24. You can do this once every 30 days.', done: 'Sending resumed' },
+  release_marketing: { title: 'Release marketing?', description: 'Marketing resumes at 50% for 48 hours, once per 14 days.', done: 'Marketing released' },
+  resume_sending: { title: 'Resume sending?', description: 'Sending resumes at 50% for 48 hours (marketing after 24), once per 30 days.', done: 'Sending resumed' },
 } as const
 // Both checklist items are required; the API re-checks the last 24 hours before it releases anything.
 function ReleaseDialog({ open, onOpenChange, action }: { open: boolean; onOpenChange: (open: boolean) => void; action: keyof typeof releaseCopy }) {
@@ -76,7 +76,7 @@ function ReleaseDialog({ open, onOpenChange, action }: { open: boolean; onOpenCh
     footer={<><Button disabled={release.isPending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" disabled={!removed || !confirmed} loading={release.isPending} onClick={() => release.mutate()}>{releaseLabel[action]}</Button></>}>
     <div className="standing-release">
       <Checkbox checked={removed} onCheckedChange={setRemoved} label="Contacts that bounced or complained are removed." />
-      <Checkbox checked={confirmed} onCheckedChange={setConfirmed} label="Every contact opted in; no bought or old lists." />
+      <Checkbox checked={confirmed} onCheckedChange={setConfirmed} label="Every contact subscribed; no bought or old lists." />
       {release.error && <Alert tone="danger">{release.error instanceof Error ? release.error.message : 'Couldn’t release. Try again.'}</Alert>}
     </div>
   </Dialog>
