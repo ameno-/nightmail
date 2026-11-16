@@ -60,10 +60,11 @@ float shadowAt(vec3 world, vec3 n) {
 // tone's shade the room gives, and how much of the rest the lamp: by night less of the one and more of the other.)
 float pool(vec3 p) { vec2 d = p.xz - uPool.xy; return mix(uLook.x, 1., exp(-dot(d * d, uPool.zw))) * uGain.y; }
 // How open to the room a point is. Ground beside something tall is closed in by it (the cabinet, the two headers);
-// an upright face is closed in near the ground it stands on (the slab, or the roof).
+// an upright face is closed in near the ground it stands on (the slab, or the roof). (A box that is not there, a
+// phone's headers, or that what is lit stands above, is passed over: it would take nothing.)
 float open(vec3 p, vec3 n) {
   float ao = 1.;
-  if (n.y > .5) { for (int i = 0; i < 3; i++) { vec2 d = max(max(uOcc[i].xy - p.xz, p.xz - uOcc[i].zw), 0.); ao *= 1. - .5 * exp(-length(d) * uOccK[i]) * step(p.y, .45 / uOccK[i]); } }
+  if (n.y > .5) { for (int i = 0; i < 3; i++) if (uOcc[i].x < 1e5 && p.y <= .45 / uOccK[i]) { vec2 d = max(max(uOcc[i].xy - p.xz, p.xz - uOcc[i].zw), 0.); ao *= 1. - .5 * exp(-length(d) * uOccK[i]); } }
   else if (n.y > -.5 && p.y > -1e-3) { float h = p.y > uGround.y + .5 && p.z > 1. ? (p.y - uGround.y) * 2.2 : p.y; ao *= mix(.66, 1., smoothstep(0., 5. * uGround.x, max(h, 0.))); }
   return ao;
 }
@@ -109,22 +110,23 @@ layout(location=0) in vec3 aPos; layout(location=1) in vec3 aNrm; layout(locatio
 uniform mat4 uProj, uModel; uniform vec3 uShift;
 out vec3 vWorld, vNrm; out float vMat; out vec4 vFace;
 void main() { vec4 w = uModel * vec4(aPos, 1.); w.xyz += uShift; vWorld = w.xyz; vNrm = mat3(uModel) * aNrm; vMat = aMat; vFace = aFace; gl_Position = uProj * w; }`
-// (`clip`: with the two planes a capsule slides out from behind. Only those parts are drawn with it: a shader that
-// may throw a pixel away costs a phone's GPU its sorting of what is hidden.)
-const meshFs = (clip: boolean) => `#version 300 es
+// Three of it: `solid` for what is opaque; `clip` the same with the two planes a capsule slides out from behind (only
+// those parts are drawn with it: a shader that may throw a pixel away costs a phone's GPU its sorting of what is
+// hidden); `glass` for glass and whatever is fading, over what is behind it. Each has only what it uses: the smaller a
+// shader, the more of it a GPU runs at once.
+const meshFs = (kind: 'solid' | 'clip' | 'glass') => `#version 300 es
 precision highp float; precision highp sampler2DShadow;
 in vec3 vWorld, vNrm; in float vMat; in vec4 vFace;
-uniform vec3 uFlashAt; uniform float uFlash, uFade, uSlab, uFlashR, uDepthOnly, uGlass; uniform vec4 uClipA, uClipB;
+uniform vec3 uFlashAt; uniform float uFlash, uFade, uSlab, uFlashR; uniform vec4 uClipA, uClipB;
 out vec4 o;
 ${LIGHTING}
 void main() {
-  ${clip ? 'if (dot(vWorld, uClipA.xyz) > uClipA.w || dot(vWorld, uClipB.xyz) > uClipB.w) discard;' : ''}
-  if (uDepthOnly > .5) { o = vec4(0.); return; }
+  ${kind === 'clip' ? 'if (dot(vWorld, uClipA.xyz) > uClipA.w || dot(vWorld, uClipB.xyz) > uClipB.w) discard;' : ''}
   vec3 n = normalize(vNrm); float nl = dot(n, uL);
   vec4 t0 = pal(vMat, 0), t1 = pal(vMat, 1), t2 = pal(vMat, 2), t3 = pal(vMat, 3);
-  float alpha = t0.a * uFade, rough = t1.a, shine = t2.a, own = t3.a * uLook.y;
-  vec3 c;
-  if (uGlass > .5 && t0.a < .995 && shine > 0.) {
+  float alpha = t0.a${kind === 'glass' ? ' * uFade' : ''}, rough = t1.a, shine = t2.a, own = t3.a * uLook.y;
+  vec3 c;${kind === 'glass' ? `
+  if (t0.a < .995 && shine > 0.) {
     // Glass: clear where it is looked straight through, denser and brighter towards its edges, and carrying the
     // room's lights (and the price's, beside it) as lines down its length.
     vec3 g = dot(n, VIEW) < 0. ? -n : n, r = reflect(-VIEW, g), shed = vec3(0.), mirrored = vec3(0.);
@@ -135,7 +137,7 @@ void main() {
     return;
   }
   // (What glass throws on the slab is laid there as a dark veil: soft at its edges, as the lamp's own shadows are.)
-  if (uGlass > .5 && t0.a < .995 && shine == 0. && abs(vFace.z) > 0.) { vec2 e = min(vFace.xy, vec2(abs(vFace.z), vFace.w) - vFace.xy) / (uLook.z * 3.); alpha *= smoothstep(0., 1., e.x) * smoothstep(0., 1., e.y) * pool(vWorld) / max(uGain.y, 1e-3); }
+  if (t0.a < .995 && shine == 0. && abs(vFace.z) > 0.) { vec2 e = min(vFace.xy, vec2(abs(vFace.z), vFace.w) - vFace.xy) / (uLook.z * 3.); alpha *= smoothstep(0., 1., e.x) * smoothstep(0., 1., e.y) * pool(vWorld) / max(uGain.y, 1e-3); }` : ''}
   if (t3.a > 0. && own > 0.) c = t1.rgb * (1. + own * 1.5);
   else {
     // (A material of one tone takes nothing from the lamp: its shadow need not be looked for.)
@@ -146,21 +148,26 @@ void main() {
     c *= 1. + ((texture(uNoise, q * .013).b - .5) * 1.2 + (texture(uNoise, q * vec2(.11, .012)).a - .5) * .8) * uLook.w * rough;
     // Its edges: a solid's are turned a little, so the one towards the lamp is a bright line and the one away a dark
     // one; what is let into a face is in its own rim's shadow at the top and the lit side, and lit along its sill.
-    float w = abs(vFace.z), rise = 0.; bool curved = dot(fwidth(vNrm), vec3(1.)) > 1e-6;
+    // (Only a pixel near one is turned: the rest of a face is as it was. A face with edges is flat; only one without
+    // can be round.)
+    float w = abs(vFace.z), rise = 0.; bool curved = false;
     if (w > 0.) {
       vec2 uv = vFace.xy, far = vec2(w, vFace.w) - uv, dux = dFdx(uv), duy = dFdy(uv), fw = abs(dux) + abs(duy);
       float det = dux.x * duy.y - dux.y * duy.x, let = step(vFace.z, 0.);
-      if (abs(det) > 1e-9) {
-        vec3 dpx = dFdx(vWorld), dpy = dFdy(vWorld), tu = normalize((dpx * duy.y - dpy * dux.y) / det), tv = normalize((dpy * dux.x - dpx * duy.x) / det);
-        vec2 wide = max(vec2(uLook.z * (1. + 1.4 * let)), .8 * fw), lo = 1. - smoothstep(wide * (.55 - .55 * let), wide * (1. + .5 * let), uv), hi = 1. - smoothstep(wide * (.55 - .55 * let), wide * (1. + .5 * let), far);
+      vec3 dpx = dFdx(vWorld), dpy = dFdy(vWorld);
+      vec2 wide = max(vec2(uLook.z * (1. + 1.4 * let)), .8 * fw), from = wide * (.55 - .55 * let), to = wide * (1. + .5 * let);
+      if (abs(det) > 1e-9 && any(lessThan(min(uv, far), to))) {
+        vec3 tu = normalize((dpx * duy.y - dpy * dux.y) / det), tv = normalize((dpy * dux.x - dpx * duy.x) / det);
+        vec2 lo = 1. - smoothstep(from, to, uv), hi = 1. - smoothstep(from, to, far);
         float turnedTo = dot(normalize(n + (1. - 2. * let) * ((hi.x - lo.x) * tu + (hi.y - lo.y) * tv)), uL);
         rise = (turnedTo - nl) * min(1., uLook.z / max(fw.x, fw.y) + .35);
         c *= 1. + clamp(rise, -.8, .6) * mix(.5, .7, let);
       }
-    }
-    // (Only what stands in front of the two lit rectangles takes their light; only what is round carries a highlight.)
+    } else curved = dot(fwidth(vNrm), vec3(1.)) > 1e-6;
+    // (Only what stands in front of the two lit rectangles takes their light, and only what shines mirrors them; only
+    // what is round carries a highlight.)
     vec3 r = reflect(-VIEW, n), shed = vec3(0.), mirrored = vec3(0.);
-    if (vWorld.z < uRectB[0].w) { lamp(uRectA[0], uRectB[0], vWorld, n, r, rough, shed, mirrored); lamp(uRectA[1], uRectB[1], vWorld, n, r, rough, shed, mirrored); }
+    if (vWorld.z < uRectB[0].w) { vec3 rr = shine > 0. ? r : vec3(0.); lamp(uRectA[0], uRectB[0], vWorld, n, rr, rough, shed, mirrored); lamp(uRectA[1], uRectB[1], vWorld, n, rr, rough, shed, mirrored); }
     c += t0.rgb * (shed * (.4 + .6 * ao) + works(vWorld, n));
     c += shine * (max(rise, 0.) * .2 * lamped + mirrored * (.05 + .95 * pow(1. - max(dot(n, VIEW), 0.), 5.)));
     if (curved) c += shine * glint(n, r, rough, lamped, .7);
@@ -181,21 +188,23 @@ void main() {
   vWorld = w; vNrm = rot(iQuat, aFace); vUV = aCorner.xy + .5; vFace = aFace.z; vA = iA; vSize = iSize.xy;
   gl_Position = uProj * vec4(w, 1.);
 }`
+// A burning letter is eaten from its middle out along a ragged line: what has gone is not drawn and throws no shadow.
+const BURN = `
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float noise(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3. - 2. * f); return mix(mix(hash(i), hash(i + vec2(1, 0)), f.x), mix(hash(i + vec2(0, 1)), hash(i + 1.), f.x), f.y); }
+float burnt(vec2 uv, float seed) { return length(uv - .5) * 1.1 + noise(uv * 7. + seed * 50.) * .45; }`
 // iA: x seed (0..1), y burn (0..1.2), z kind (0 letter, 1 scam, 2 lodged in the price wall, 3 capsule slip), w highlight.
 const LETTER_FS = `#version 300 es
 precision highp float; precision highp sampler2DShadow;
 in vec3 vWorld, vNrm; in vec2 vUV; in float vFace; in vec4 vA; in vec2 vSize;
-uniform float uFlash, uDepthOnly;
 uniform float uPaper, uInk, uStamp, uRed, uEmber, uChar, uDim;
 out vec4 o;
 ${LIGHTING}
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float noise(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3. - 2. * f); return mix(mix(hash(i), hash(i + vec2(1, 0)), f.x), mix(hash(i + vec2(0, 1)), hash(i + 1.), f.x), f.y); }
+${BURN}
 float seg(vec2 p, vec2 a, vec2 b) { vec2 d = b - a; return length(p - a - d * clamp(dot(p - a, d) / dot(d, d), 0., 1.)); }
 void main() {
   float burn = vA.y, r = 0.;
-  if (burn > 0.) { r = length(vUV - .5) * 1.1 + noise(vUV * 7. + vA.x * 50.) * .45; if (r < burn * 1.3 - .14) discard; }
-  if (uDepthOnly > .5) { o = vec4(0.); return; }
+  if (burn > 0.) { r = burnt(vUV, vA.x); if (r < burn * 1.3 - .14) discard; }
   vec3 n = normalize(vNrm); float nl = dot(n, uL);
   bool lodged = vA.z > 1.5 && vA.z < 2.5;
   float mat = vA.z > 2.5 ? uDim : uPaper;
@@ -249,15 +258,42 @@ void main() {
   o = vec4(seen(c, vWorld), 1.);
 }`
 
+// The shadow map's own: only where a thing is, so as little as can be is carried from the vertices to the pixels.
+const DEPTH_VS = `#version 300 es
+layout(location=0) in vec3 aPos;
+uniform mat4 uProj, uModel; uniform vec3 uShift;
+out vec3 vWorld;
+void main() { vec4 w = uModel * vec4(aPos, 1.); w.xyz += uShift; vWorld = w.xyz; gl_Position = uProj * w; }`
+const depthFs = (clip: boolean) => `#version 300 es
+precision highp float;
+${clip ? 'in vec3 vWorld; uniform vec4 uClipA, uClipB;' : ''}
+out vec4 o;
+void main() { ${clip ? 'if (dot(vWorld, uClipA.xyz) > uClipA.w || dot(vWorld, uClipB.xyz) > uClipB.w) discard;' : ''} o = vec4(0.); }`
+const LETTER_DEPTH_VS = `#version 300 es
+layout(location=0) in vec3 aCorner;
+layout(location=2) in vec3 iPos; layout(location=3) in vec4 iQuat; layout(location=4) in vec3 iSize; layout(location=5) in vec4 iA;
+uniform mat4 uProj;
+out vec2 vUV; out vec2 vBurn;
+vec3 rot(vec4 q, vec3 v) { return v + 2. * cross(q.xyz, cross(q.xyz, v) + q.w * v); }
+void main() { vec3 w = iPos + rot(iQuat, aCorner * iSize); vUV = aCorner.xy + .5; vBurn = iA.xy; gl_Position = uProj * vec4(w, 1.); }`
+const LETTER_DEPTH_FS = `#version 300 es
+precision highp float;
+in vec2 vUV; in vec2 vBurn;
+out vec4 o;
+${BURN}
+void main() { if (vBurn.y > 0. && burnt(vUV, vBurn.x) < vBurn.y * 1.3 - .14) discard; o = vec4(0.); }`
+
 // Puffs, sparks and light: quads that face the page. Shape 0 a flat disc, 1 a flat rectangle, 2 a soft light, 3 a beam.
 const FX_VS = `#version 300 es
 layout(location=0) in vec2 aQuad;
 layout(location=1) in vec3 iPos; layout(location=2) in vec3 iSize; layout(location=3) in vec4 iCol; layout(location=4) in float iShape;
-uniform mat4 uProj; uniform vec2 uView;
+uniform mat4 uProj; uniform vec2 uView; uniform float uFar;
 out vec2 vQ; out vec4 vCol; out float vShape; out vec2 vHalf;
 void main() {
   float c = cos(iSize.z), s = sin(iSize.z); vec2 q = aQuad * iSize.xy; q = vec2(q.x * c - q.y * s, q.x * s + q.y * c);
   gl_Position = uProj * vec4(iPos, 1.); gl_Position.xy += q * 2. / uView;
+  // (The air is put at the very back, behind all of the machine: it is only drawn where the page shows through.)
+  if (uFar > .5) gl_Position.z = gl_Position.w * .999;
   vQ = aQuad; vCol = iCol; vShape = iShape; vHalf = iSize.xy;
 }`
 const FX_FS = `#version 300 es
@@ -334,6 +370,8 @@ export type Part = { start: number; count: number; m: Float32Array; on: boolean;
 export const LETTER_FLOATS = 14, FX_FLOATS = 11, SMOKE_FLOATS = 10
 
 export type Renderer = ReturnType<typeof createRenderer>
+/** `shifts`: where each floor of the machine is, off its place (x, y, z to a floor: mesh.ts). */
+type Scene = { parts: Part[]; shifts: Float32Array; letters: Float32Array; letterCount: number; fx: Float32Array; fxCount: number; glow: Float32Array; glowCount: number; air: Float32Array; airCount: number; smoke: Float32Array; smokeCount: number; flash: number; flashAt: number[]; flashR: number; wallOn: boolean }
 
 export function createRenderer(canvas: HTMLCanvasElement) {
   const gl = canvas.getContext('webgl2', { antialias: true, alpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: false })
@@ -342,10 +380,15 @@ export function createRenderer(canvas: HTMLCanvasElement) {
     const make = (type: number, source: string) => { const s = gl.createShader(type)!; gl.shaderSource(s, source); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error('sorter shader', gl.getShaderInfoLog(s)); return s }
     const p = gl.createProgram()!; gl.attachShader(p, make(gl.VERTEX_SHADER, vs)); gl.attachShader(p, make(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(p)
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) console.error('sorter program', gl.getProgramInfoLog(p))
-    const uniforms: Record<string, WebGLUniformLocation | null> = {}
-    return { p, u: (name: string) => uniforms[name] ??= gl.getUniformLocation(p, name) }
+    const uniforms: Record<string, WebGLUniformLocation | null> = {}, u = (name: string) => uniforms[name] ??= gl.getUniformLocation(p, name)
+    // (And what it was last told: a uniform is only sent again when it has changed. `told` the look's version, `at` a
+    // floor's shift, then how faded a part is and the burst's light.)
+    return { p, u, model: u('uModel'), shift: u('uShift'), told: -1, at: [NaN, NaN, NaN], fade: NaN, flash: NaN }
   }
-  const mesh = program(MESH_VS, meshFs(false)), meshClip = program(MESH_VS, meshFs(true)), letter = program(LETTER_VS, LETTER_FS), fx = program(FX_VS, FX_FS), smoke = program(SMOKE_VS, SMOKE_FS), over = program(OVER_VS, OVER_FS)
+  type Program = ReturnType<typeof program>
+  const solid = program(MESH_VS, meshFs('solid')), solidClip = program(MESH_VS, meshFs('clip')), glassy = program(MESH_VS, meshFs('glass')), letter = program(LETTER_VS, LETTER_FS)
+  const depth = program(DEPTH_VS, depthFs(false)), depthClip = program(DEPTH_VS, depthFs(true)), depthLetter = program(LETTER_DEPTH_VS, LETTER_DEPTH_FS)
+  const fx = program(FX_VS, FX_FS), smoke = program(SMOKE_VS, SMOKE_FS), over = program(OVER_VS, OVER_FS)
 
   // The palette: a row of four tones for each material, read as linear light.
   const palette = gl.createTexture()!
@@ -452,11 +495,15 @@ export function createRenderer(canvas: HTMLCanvasElement) {
   }
   // (Its rows as the programs take them, made when the look is set and not every frame.)
   const rows = { rects: new Float32Array(8), lights: new Float32Array(8), boxes: new Float32Array(12) }
-  // What every lit program is told, once a frame.
-  const lit = (prog: ReturnType<typeof program>, depthOnly: boolean) => {
-    gl.uniformMatrix4fv(prog.u('uLight'), false, light); gl.uniform3fv(prog.u('uL'), LIGHT); gl.uniform1f(prog.u('uDepthOnly'), depthOnly ? 1 : 0)
+  // What a program is told of the scene's light and the page, sent again only when any of it has changed (the page's
+  // size, the look, the materials: each bumps `version`). The shadow map's programs only need the lamp's view.
+  let version = 0
+  const tell = (prog: Program) => {
+    if (prog.told === version) return
+    prog.told = version
+    if (prog === depth || prog === depthClip || prog === depthLetter) { gl.uniformMatrix4fv(prog.u('uProj'), false, light); return }
+    gl.uniformMatrix4fv(prog.u('uProj'), false, proj); gl.uniformMatrix4fv(prog.u('uLight'), false, light); gl.uniform3fv(prog.u('uL'), LIGHT)
     gl.uniform1i(prog.u('uPal'), 0); gl.uniform1i(prog.u('uShadow'), 1); gl.uniform1i(prog.u('uNoise'), 2); gl.uniform1i(prog.u('uShadowZ'), 4)
-    if (depthOnly) return
     gl.uniform3f(prog.u('uLs'), 1 / (4 * span[0] * span[0]), 1 / (4 * span[1] * span[1]), 1 / (4 * span[2] * span[2]))
     gl.uniform3f(prog.u('uSh'), look.soft, 1 / span[2], look.far)
     gl.uniform4f(prog.u('uPool'), look.pool[0], look.pool[1], 1 / (look.pool[2] * look.pool[2]), 1 / (look.pool[3] * look.pool[3]))
@@ -464,6 +511,60 @@ export function createRenderer(canvas: HTMLCanvasElement) {
     gl.uniform4f(prog.u('uLook'), look.dim, look.own, look.edge, look.grime); gl.uniform3f(prog.u('uGround'), look.unit, look.roof, look.bay[4]); gl.uniform3fv(prog.u('uEnv'), look.env)
     gl.uniform2fv(prog.u('uGain'), look.gain); gl.uniform4f(prog.u('uBay'), look.bay[0], look.bay[1], look.bay[2], 1 / (look.bay[3] * look.bay[3])); gl.uniform3fv(prog.u('uBayC'), look.bayLight)
     gl.uniform4fv(prog.u('uRectA'), rows.rects); gl.uniform4fv(prog.u('uRectB'), rows.lights); gl.uniform4fv(prog.u('uOcc'), rows.boxes); gl.uniform3fv(prog.u('uOccK'), look.reachK)
+    if (prog === letter) { gl.uniform1f(prog.u('uPaper'), mats.paper); gl.uniform1f(prog.u('uInk'), mats.ink); gl.uniform1f(prog.u('uStamp'), mats.stamp); gl.uniform1f(prog.u('uRed'), mats.red); gl.uniform1f(prog.u('uEmber'), mats.ember); gl.uniform1f(prog.u('uChar'), mats.char); gl.uniform1f(prog.u('uDim'), mats.dim) }
+    else gl.uniform1f(prog.u('uSlab'), mats.slab)
+  }
+  // The burst's light (only while there is any is where it is worth sending).
+  const flash = (prog: Program, scene: Scene) => {
+    if (scene.flash === 0 && prog.flash === 0) return
+    prog.flash = scene.flash; gl.uniform1f(prog.u('uFlash'), scene.flash)
+    if (scene.flash > 0) { gl.uniform3fv(prog.u('uFlashAt'), scene.flashAt); gl.uniform1f(prog.u('uFlashR'), scene.flashR) }
+  }
+  const shift = (prog: Program, shifts: Float32Array, floor = 0) => {
+    const k = 3 * floor, x = shifts[k], y = shifts[k + 1], z = shifts[k + 2], at = prog.at
+    if (x === at[0] && y === at[1] && z === at[2]) return
+    at[0] = x; at[1] = y; at[2] = z; gl.uniform3f(prog.shift, x, y, z)
+  }
+  // The machine's parts that one program draws: in the shadow map what throws a shadow, on the page what is opaque;
+  // those that have a clip, or those that have none. (It says how many it passed over that have one: if none, their
+  // program is not wanted this frame.)
+  const solids = (prog: Program, scene: Scene, clipped: boolean, shadow: boolean) => {
+    let passed = 0
+    for (let i = 0; i < scene.parts.length; i++) {
+      const part = scene.parts[i]
+      if (!part.on || part.glass || part.fade < 1 || !part.count || (shadow && part.plain)) continue
+      if (!part.clip !== !clipped) { passed++; continue }
+      shift(prog, scene.shifts, part.floor)
+      if (part.clip) { const c = part.clip; gl.uniform4f(prog.u('uClipA'), c[0], c[1], c[2], c[3]); gl.uniform4f(prog.u('uClipB'), c[4], c[5], c[6], c[7]) }
+      gl.uniformMatrix4fv(prog.model, false, part.m); gl.drawArrays(gl.TRIANGLES, part.start, part.count)
+    }
+    return passed
+  }
+  // Where on the page there is any smoke: the box round every billow (a billow's quad turns, so as far out as its
+  // corners reach), and a little more for the smoke's buffer, whose texels are larger than the page's and are read
+  // blended. Outside it the buffer is empty, so it need only be laid over the page within it: laid over all of it, it
+  // was a sixth of a frame on a wide page while smoke hung over the machine.
+  const box = new Int32Array(4)
+  const hazed = (scene: Scene) => {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+    for (let i = 0; i < scene.smokeCount; i++) {
+      const o = i * SMOKE_FLOATS, x = scene.smoke[o], y = scene.smoke[o + 1], z = scene.smoke[o + 2], r = scene.smoke[o + 3] * Math.SQRT2
+      const sx = proj[0] * x + proj[4] * y + proj[8] * z + proj[12], sy = proj[1] * x + proj[5] * y + proj[9] * z + proj[13], rx = r * 2 / W, ry = r * 2 / H
+      if (sx - rx < x0) x0 = sx - rx; if (sx + rx > x1) x1 = sx + rx; if (sy - ry < y0) y0 = sy - ry; if (sy + ry > y1) y1 = sy + ry
+    }
+    const cw = canvas.width, ch = canvas.height, pad = 2 * Math.ceil(cw / hazeW) + 1
+    box[0] = Math.max(0, Math.floor((x0 + 1) / 2 * cw) - pad); box[1] = Math.max(0, Math.floor((y0 + 1) / 2 * ch) - pad)
+    box[2] = Math.min(cw, Math.ceil((x1 + 1) / 2 * cw) + pad); box[3] = Math.min(ch, Math.ceil((y1 + 1) / 2 * ch) + pad)
+    return box[2] > box[0] && box[3] > box[1]
+  }
+  // Glass, and whatever is fading in or out, faces of one way round.
+  const panes = (scene: Scene) => {
+    for (let i = 0; i < scene.parts.length; i++) {
+      const part = scene.parts[i]
+      if (!part.on || !(part.glass || part.fade < 1) || part.fade <= 0 || !part.count) continue
+      if (part.fade !== glassy.fade) { glassy.fade = part.fade; gl.uniform1f(glassy.u('uFade'), part.fade) }
+      shift(glassy, scene.shifts, part.floor); gl.uniformMatrix4fv(glassy.model, false, part.m); gl.drawArrays(gl.TRIANGLES, part.start, part.count)
+    }
   }
 
   return {
@@ -486,51 +587,32 @@ export function createRenderer(canvas: HTMLCanvasElement) {
       light.set([r[0] * sx, u[0] * sy, f[0] * sz, 0, r[1] * sx, u[1] * sy, f[1] * sz, 0, r[2] * sx, u[2] * sy, f[2] * sz, 0, -(hi[0] + lo[0]) / (hi[0] - lo[0]), -(hi[1] + lo[1]) / (hi[1] - lo[1]), -(hi[2] + lo[2]) / (hi[2] - lo[2]), 1])
       const wanted = shadowWanted
       if (wanted !== shadowSize) { gl.deleteTexture(shadow); shadowSize = wanted; shadow = depthTexture(shadowSize); attach() }
+      version++
     },
     setPalette(rgba: Uint8Array) { gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, palette); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TONES, MATS, gl.RGBA, gl.UNSIGNED_BYTE, rgba) },
-    setMaterials(next: typeof mats) { Object.assign(mats, next) },
+    setMaterials(next: typeof mats) { Object.assign(mats, next); version++ },
     /** The page's own colour, behind everything. */
     setClear(r: number, g: number, b: number) { clear[0] = r; clear[1] = g; clear[2] = b },
     /** Steam's and smoke's lit and shaded colours, and what the fire lends smoke's dark side. */
     setSmoke(next: typeof smokeTones) { Object.assign(smokeTones, next) },
     setMesh(data: Float32Array) { gl.bindBuffer(gl.ARRAY_BUFFER, meshBuffer); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW); vertices = data.length / STRIDE },
-    setLook(next: Partial<typeof look>) { Object.assign(look, next); rows.rects.set(look.rects.flat()); rows.lights.set(look.lights.flat()); rows.boxes.set(look.boxes.flat()) },
+    setLook(next: Partial<typeof look>) { Object.assign(look, next); rows.rects.set(look.rects.flat()); rows.lights.set(look.lights.flat()); rows.boxes.set(look.boxes.flat()); version++ },
     setWall(data: Float32Array, count: number) { wall.upload(data, count); wallCount = count },
     get vertices() { return vertices },
-    /** `shifts`: where each floor of the machine is, off its place (x, y, z to a floor: mesh.ts). */
-    draw(scene: { parts: Part[]; shifts: Float32Array; letters: Float32Array; letterCount: number; fx: Float32Array; fxCount: number; glow: Float32Array; glowCount: number; air: Float32Array; airCount: number; smoke: Float32Array; smokeCount: number; flash: number; flashAt: number[]; flashR: number; wallOn: boolean }) {
-      const pass = (matrix: Float32Array, depthOnly: boolean) => {
-        // The machine: whatever has no clip first, then the few parts that have one (a capsule coming out of a block).
-        for (const prog of [mesh, meshClip]) {
-          const clipped = prog === meshClip
-          if (clipped && !scene.parts.some(part => part.on && part.clip && !part.glass && part.fade >= 1)) continue
-          gl.useProgram(prog.p); lit(prog, depthOnly)
-          gl.uniformMatrix4fv(prog.u('uProj'), false, matrix)
-          gl.uniform1f(prog.u('uFlash'), scene.flash); gl.uniform1f(prog.u('uFade'), 1); gl.uniform1f(prog.u('uGlass'), 0); gl.uniform1f(prog.u('uSlab'), mats.slab); gl.uniform3fv(prog.u('uFlashAt'), scene.flashAt); gl.uniform1f(prog.u('uFlashR'), scene.flashR)
-          gl.bindVertexArray(meshVao)
-          for (const part of scene.parts) if (part.on && !part.glass && part.fade >= 1 && !(depthOnly && part.plain) && !!part.clip === clipped) {
-            gl.uniform3fv(prog.u('uShift'), scene.shifts.subarray(3 * (part.floor ?? 0), 3 * (part.floor ?? 0) + 3))
-            if (part.clip) { gl.uniform4fv(prog.u('uClipA'), part.clip.subarray(0, 4)); gl.uniform4fv(prog.u('uClipB'), part.clip.subarray(4, 8)) }
-            gl.uniformMatrix4fv(prog.u('uModel'), false, part.m); gl.drawArrays(gl.TRIANGLES, part.start, part.count)
-          }
-        }
-        gl.useProgram(letter.p); lit(letter, depthOnly)
-        gl.uniformMatrix4fv(letter.u('uProj'), false, matrix)
-        gl.uniform1f(letter.u('uFlash'), scene.flash)
-        gl.uniform1f(letter.u('uPaper'), mats.paper); gl.uniform1f(letter.u('uInk'), mats.ink); gl.uniform1f(letter.u('uStamp'), mats.stamp); gl.uniform1f(letter.u('uRed'), mats.red); gl.uniform1f(letter.u('uEmber'), mats.ember); gl.uniform1f(letter.u('uChar'), mats.char); gl.uniform1f(letter.u('uDim'), mats.dim)
-        if (!depthOnly && wallCount && scene.wallOn) { gl.bindVertexArray(wall.vao); gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, wallCount) }
-        if (scene.letterCount) { gl.bindVertexArray(letters.vao); gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, scene.letterCount) }
-      }
+    draw(scene: Scene) {
       if (scene.letterCount) letters.upload(scene.letters, scene.letterCount)
       gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(true); gl.disable(gl.BLEND); gl.disable(gl.CULL_FACE)
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, palette)
       gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, noise)
-      // The shadow map first, reading a blank one meanwhile.
+      // The shadow map first, reading a blank one meanwhile: the machine (whatever has no clip first, then the few
+      // parts that have one, a capsule coming out of a block), then the letters.
       gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, blank)
       gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, blank)
       gl.bindFramebuffer(gl.FRAMEBUFFER, target); gl.viewport(0, 0, shadowSize, shadowSize); gl.clearDepth(1); gl.clear(gl.DEPTH_BUFFER_BIT)
       gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(2, 4)
-      pass(light, true)
+      gl.useProgram(depth.p); tell(depth); gl.bindVertexArray(meshVao)
+      if (solids(depth, scene, false, true)) { gl.useProgram(depthClip.p); tell(depthClip); solids(depthClip, scene, true, true) }
+      if (scene.letterCount) { gl.useProgram(depthLetter.p); tell(depthLetter); gl.bindVertexArray(letters.vao); gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, scene.letterCount) }
       gl.disable(gl.POLYGON_OFFSET_FILL)
       // Smoke, into its own small buffer (every pass that is not the page's own comes first: a phone's GPU pays to be
       // interrupted mid-frame).
@@ -547,27 +629,30 @@ export function createRenderer(canvas: HTMLCanvasElement) {
       gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, shadow)
       gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, shadow)
       gl.clearColor(clear[0], clear[1], clear[2], 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
-      // Behind everything: the air round the machine, where it catches the light.
+      // The machine, as for the shadow map; the price's lit windows, then the letters.
+      gl.useProgram(solid.p); tell(solid); flash(solid, scene); gl.bindVertexArray(meshVao)
+      if (solids(solid, scene, false, false)) { gl.useProgram(solidClip.p); tell(solidClip); flash(solidClip, scene); solids(solidClip, scene, true, false) }
+      gl.useProgram(letter.p); tell(letter)
+      if (wallCount && scene.wallOn) { gl.bindVertexArray(wall.vao); gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, wallCount) }
+      if (scene.letterCount) { gl.bindVertexArray(letters.vao); gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, scene.letterCount) }
+      // Behind everything: the air round the machine, where it catches the light. It is drawn now, at the back of the
+      // depth, so that only where the page shows through is it worked out at all: drawn first, under the machine, it
+      // was a tenth of a frame on a wide page for nothing that is seen.
       if (scene.airCount) {
-        gl.disable(gl.DEPTH_TEST); gl.depthMask(false); gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE)
-        gl.useProgram(fx.p); gl.uniformMatrix4fv(fx.u('uProj'), false, proj); gl.uniform2f(fx.u('uView'), W, H)
+        gl.depthMask(false); gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE)
+        gl.useProgram(fx.p); gl.uniformMatrix4fv(fx.u('uProj'), false, proj); gl.uniform2f(fx.u('uView'), W, H); gl.uniform1f(fx.u('uFar'), 1)
         gl.bindVertexArray(quads.vao); quads.upload(scene.air, scene.airCount); gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, scene.airCount)
-        gl.disable(gl.BLEND); gl.depthMask(true); gl.enable(gl.DEPTH_TEST)
+        gl.uniform1f(fx.u('uFar'), 0)
       }
-      pass(proj, false)
-      // Glass and anything fading in or out, over what is behind it.
+      // Glass and anything fading in or out, over what is behind it: a tube's far wall first, then its near one, the
+      // same glass whichever way a tube runs.
       gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false)
-      gl.useProgram(mesh.p); gl.uniform1f(mesh.u('uGlass'), 1); gl.bindVertexArray(meshVao)
-      // A tube's far wall first, then its near one: the same glass whichever way a tube runs.
-      gl.enable(gl.CULL_FACE)
-      for (const face of [gl.BACK, gl.FRONT]) {
-        gl.cullFace(face)
-        for (const part of scene.parts) if (part.on && (part.glass || part.fade < 1) && part.fade > 0) { gl.uniform1f(mesh.u('uFade'), part.fade); gl.uniform3fv(mesh.u('uShift'), scene.shifts.subarray(3 * (part.floor ?? 0), 3 * (part.floor ?? 0) + 3)); gl.uniformMatrix4fv(mesh.u('uModel'), false, part.m); gl.drawArrays(gl.TRIANGLES, part.start, part.count) }
-      }
-      gl.disable(gl.CULL_FACE)
-      if (scene.smokeCount) {
+      gl.useProgram(glassy.p); tell(glassy); flash(glassy, scene); gl.bindVertexArray(meshVao)
+      gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK); panes(scene); gl.cullFace(gl.FRONT); panes(scene); gl.disable(gl.CULL_FACE)
+      if (scene.smokeCount && hazed(scene)) {
+        gl.enable(gl.SCISSOR_TEST); gl.scissor(box[0], box[1], box[2] - box[0], box[3] - box[1])
         gl.disable(gl.DEPTH_TEST); gl.useProgram(over.p); gl.uniform1i(over.u('uSmoke'), 3); gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, haze)
-        gl.bindVertexArray(null); gl.drawArrays(gl.TRIANGLES, 0, 3); gl.enable(gl.DEPTH_TEST)
+        gl.bindVertexArray(null); gl.drawArrays(gl.TRIANGLES, 0, 3); gl.enable(gl.DEPTH_TEST); gl.disable(gl.SCISSOR_TEST)
       }
       gl.useProgram(fx.p); gl.uniformMatrix4fv(fx.u('uProj'), false, proj); gl.uniform2f(fx.u('uView'), W, H)
       gl.bindVertexArray(quads.vao)
