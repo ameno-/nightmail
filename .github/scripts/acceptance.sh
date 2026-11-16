@@ -73,6 +73,9 @@ shard() (
 )
 # Complementary filters: new suites run in the HTTP shard by default.
 pattern='^(SIMULATED SES:|Hosted account re-home:)'
+# The 500-copy campaign screen and full-ledger upgrade dominate simulated wall time. One positive filter and
+# its exact complement partition the original simulated selection; new tests still run by default.
+heavy='^(Hosted account re-home:|SIMULATED SES: .* (campaign screen:|hosted campaigns? |cold isolates ))'
 # Flake quarantine (docs/ci.md): a test whose name carries [flaky #N], N its open issue, never blocks a merge.
 # ACCEPTANCE_QUARANTINE: unset skips those tests (the required job), "only" runs just them (the non-blocking
 # quarantine job), "all" runs everything (nightly).
@@ -89,14 +92,21 @@ read -r api_port sim_port storage_port sim_storage_port <<< "${ACCEPTANCE_PORTS:
 rc=0
 case ${ACCEPTANCE_SHARD:-both} in
   integration) shard integration "$api_port" '' "$storage_port" "${integration_filter[@]}" & wait "$!" || rc=$? ;;
-  simulated) shard simulated "$sim_port" '' "$sim_storage_port" "${simulated_filter[@]}" & wait "$!" || rc=$? ;;
+  simulated) shard simulated "$sim_port" '' "$sim_storage_port" "${simulated_filter[@]}" --test-skip-pattern="$heavy" & wait "$!" || rc=$? ;;
+  simulated-heavy)
+    case ${ACCEPTANCE_QUARANTINE:-} in
+      all) filters=(--test-name-pattern="$heavy") ;;
+      only) filters=(--test-name-pattern="$heavy.*$flaky") ;;
+      '') filters=(--test-name-pattern="$heavy" --test-skip-pattern="$flaky") ;;
+    esac
+    shard simulated "$sim_port" '' "$sim_storage_port" "${filters[@]}" & wait "$!" || rc=$? ;;
   both)
     admin -c 'CREATE DATABASE fixture_sim OWNER fixture TEMPLATE fixture'
     shard integration "$api_port" '' "$storage_port" "${integration_filter[@]}" & integration=$!
     shard simulated "$sim_port" _sim "$sim_storage_port" "${simulated_filter[@]}" & simulated=$!
     wait "$integration" || rc=$?
     wait "$simulated" || rc=$? ;;
-  *) echo 'ACCEPTANCE_SHARD must be integration, simulated or both' >&2; exit 2 ;;
+  *) echo 'ACCEPTANCE_SHARD must be integration, simulated, simulated-heavy or both' >&2; exit 2 ;;
 esac
 
 # Deadlock guard: fail on any deadlock Postgres detected during the suite, including one a retry absorbed or a test
