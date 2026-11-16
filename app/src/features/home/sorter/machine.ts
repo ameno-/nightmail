@@ -280,8 +280,16 @@ export function buildMachine(p: Plan) {
     flange(kink[0], chestZ - px); strap(kink[0], (trunk.z1 + chestZ) / 2 + 1.2 * U); shade(kink[0], trunk.z1, chestZ - px)
   }
   for (const x of sockets) collar(x, yLow, zt, 2.6 * px, r + 1.4 * px)
-  // (A phone's three tubes: a collar where each comes up out of the slab, and one where it turns down over the lip.)
-  for (const pipe of p.hung) { const over = p.zLip - pipe.r - 3 * px, x = pipe.x - p.ox - DX * over; collar(x, 0, p.zLip + 2.6 * pipe.r, 2.2 * px, pipe.r + 1.8 * px, pipe.r); b.cyl([x, 0, over], 1, -p.lip * .5 - 1.4 * px, -p.lip * .5 + 1.4 * px, pipe.r + 1.2 * px, M.steel, 14, 3) }
+  // (A phone's three tubes come out of the slab through its lip: each through a plate bolted to the lip's front face,
+  // capped where it leaves the plate and banded at the plate's foot, and straight down the page from there.)
+  const hungAt = (pipe: { x: number; r: number }) => { const over = p.zLip - pipe.r - 2 * px; return { over, x: pipe.x - p.ox - DX * over, top: -1.2 * px, foot: -p.lip + 1.2 * px } }
+  for (const pipe of p.hung) {
+    const { over, x, top, foot } = hungAt(pipe), w = pipe.r + 3.4 * px
+    b.box(x - w, foot, p.zLip - 1.8 * px, x + w, top, p.zLip, M.steel)
+    for (const bx of [x - w + 1.5 * px, x + w - 1.5 * px]) for (const by of [foot + 1.5 * px, top - 1.5 * px]) b.cyl([bx, by, 0], 2, p.zLip - 2.8 * px, p.zLip - 1.8 * px, .9 * px, M.trim, 6, 1)
+    b.cyl([x, 0, over], 1, top - 1.6 * px, top + .8 * px, pipe.r + 1 * px, M.steel, 14, 3)
+    b.cyl([x, 0, over], 1, foot - .6 * px, foot + 1.4 * px, pipe.r + .8 * px, M.steel, 14, 3)
+  }
 
   // Two relief valves on the columns beside the works, of the kind a boiler has: a body on a flange, fed from the
   // manifold below, a nozzle up, and a weighted lever that the pressure lifts. Under the right one, the recess a
@@ -681,12 +689,8 @@ export function buildMachine(p: Plan) {
     const link = b.tube([[kink[0], yc, trunk.z1 - 2 * px], [kink[0], yc, chestZ - 4 * px]], r, M.tube, 12)
     lines.push([[...up, [portX, yc, trunk.z0 + 2 * r]], [[kink[0], yc, trunk.z1 - 2 * r], ...link, [kink[0], yc, chestZ + 2 * r]], feedRun])
   } else lines.push([feedRun])
-  // (A phone's three tubes come up out of the slab by its front edge, each through a collar, turn over the lip as the
-  // wide page's do, wearing a collar there too, and run on down the page.)
-  for (const pipe of p.hung) {
-    const over = p.zLip - pipe.r - 3 * px, x = pipe.x - p.ox - DX * over, back = p.zLip + 2.6 * pipe.r, lie = pipe.r + 1.5 * px
-    b.tube([[x, 0, back], [x, lie, back], [x, lie, over], [x, -(p.floor + 20) - DY * over, over]], pipe.r, M.tube, 12, pipe.r * 1.5)
-  }
+  // (A phone's three tubes, down the page from their plates on the lip.)
+  for (const pipe of p.hung) { const { over, x, top } = hungAt(pipe); b.tube([[x, top - px, over], [x, -(p.floor + 20) - DY * over, over]], pipe.r, M.tube, 12) }
   idx.bent = b.part('bent', [p.tubes[bentTube] ?? 0, p.fan.length ? bentY : yWall, zt], true)
   if (p.fan.length) b.tube([[p.tubes[bentTube], yMan - 3 * px, zt], [p.tubes[bentTube], bentY, zt]], r, M.tube, 12)
   // The lengths of bracket that go with it.

@@ -118,10 +118,12 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   // hopper on it, and one tube out (`B.core`: for how long). Then it is built up: the roof is drawn up on its cables,
   // the sorting floor is slid in under it from the page's left and the roof let down on that; then the console from
   // the right, the same way (`B.floor`: how long each takes; `floors`: how many are in; `floorT`: how far through the
-  // next is). `shifts`: where each floor now is, off its place (gl.ts moves all that belongs to a floor by it).
+  // next is; `SEAT`: how far through it the floor stops in its place). `shifts`: where each floor now is, off its
+  // place (gl.ts moves all that belongs to a floor by it).
   // (And the units a wide page's tower takes on its sides, one with each lane: `pod`, how far in each is.)
   const shifts = new Float32Array(3 * FLOORS), pod = new Float32Array(6), rests = new Float32Array(3)
   let floors = 0, floorT = -1, cableT = 0
+  const SEAT = .68
   // The fitting out. Once its floors are in, the machine has one lane and is given the rest a lane at a time
   // (plan.ts `fit`), as the product is: each lane's deck waits (in its side's magazine, or off the page's side), is
   // taken by its side's arm, carried round over the port and lowered in; inside it goes down to the roller line and
@@ -289,7 +291,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       // slid in under it, braking hard, running on a hair past its place and back; and the roof is let down on it,
       // gathering way and then at a steady rate, until the floor stops it dead.
       const next = floors + 1, u = floorT, up = ease(clamp(u / .26)), held = u - .26, bob = held > 0 ? .14 * U * Math.sin(held * 24) * Math.exp(-held * 10) : 0
-      const s = clamp((u - .18) / .5), q = clamp((s - .75) / .25), slide = far * (1 - s) ** 4 - .5 * U * Math.sin(Math.PI * q) * (1 - q)
+      const s = clamp((u - .18) / (SEAT - .18)), q = clamp((s - .75) / .25), slide = far * (1 - s) ** 4 - .5 * U * Math.sin(Math.PI * q) * (1 - q)
       const t = clamp((u - .74) / .24), down = t < .3 ? t * t / .51 : (t - .15) / .85
       lid = rests[floors] + (rests[next] + gap - rests[floors]) * up + bob - gap * down
       if (next === 1) sort = -slide; else desk = slide
@@ -317,9 +319,12 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       if (floorT < 0) { if (buildT > (floors ? B.between : B.core) && scanning === -1) { floorT = 0; swingV[0] -= .5; swingV[1] += .5 } }
       else {
         const before = floorT; floorT += dt / B.floor
+        // (The page is told a floor is in as it seats, at the end of its slide, not once the roof is back down on it:
+        // the console's screen comes on as the console stops. Its lanes' names wait for the roof, through `fit`.)
+        if (before < SEAT && floorT >= SEAT) hooks.floors(floors + 1, false)
         // (As the roof comes down on the new floor: dust along the join, the needle jumps, the hanging lasers swing.)
         if (before < .97 && floorT >= .97) { const y = p.yTop + rests[floors + 1]; for (let k = 0; k < 7; k++) { const x = (k / 6 - .5) * 2 * p.Xc; dust(x, y, -3 * px); if (k % 3 === 0) sparks(x, y, -4 * px, 2, 110) } needleV += 2.2; swingV[0] += 1.3; swingV[1] -= 1.1 }
-        if (floorT >= 1) { floors++; floorT = -1; buildT = 0; lighting(); hooks.floors(floors, false); hooks.fit(p.lanes.map((_, i) => deck[i].stage === FITTED)); spawnIn = Math.min(spawnIn, .3) }
+        if (floorT >= 1) { floors++; floorT = -1; buildT = 0; lighting(); hooks.fit(p.lanes.map((_, i) => deck[i].stage === FITTED)); spawnIn = Math.min(spawnIn, .3) }
       }
       stand()
     } else if (building && cableT < 1) { cableT = Math.min(1, cableT + dt); stand(); buildT = 0 }
