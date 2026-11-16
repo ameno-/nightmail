@@ -21,7 +21,7 @@
   },
   "app/src/components/EmailInsight.tsx": {
    "length/label": [
-    "205: can i email (opens in a new tab)"
+    "204: can i email (opens in a new tab)"
    ]
   },
   "app/src/components/LegalLinks.tsx": {
@@ -37,11 +37,6 @@
   "app/src/data/context.tsx": {
    "tagline": [
     "88: you were invited…. …"
-   ]
-  },
-  "app/src/data/types.ts": {
-   "reassure": [
-    "240: sending is paused while brand reviews this workspace…. recei ⟨still works⟩"
    ]
   },
   "app/src/features/audience/bulk.tsx": {
@@ -387,16 +382,6 @@
     "108: webhooks subscribed to message.received for it, or for every"
    ]
   },
-  "app/src/features/logs/email-detail.tsx": {
-   "reassure": [
-    "174: a template value couldn’t be filled in, so nothing was sent. ⟨nothing was sent⟩"
-   ]
-  },
-  "app/src/features/logs/index.tsx": {
-   "reassure": [
-    "141: ses flagged this message as spam or a virus. it’s stored, bu ⟨never⟩"
-   ]
-  },
   "app/src/features/onboarding/index.tsx": {
    "caption": [
     "227: step … of … · …",
@@ -460,11 +445,6 @@
     "84: try another status, type or search.",
     "84: turn on ui notes (⇧n), then …-click anything to leave one.",
     "167: lets a script or agent read ui notes and screenshots and set"
-   ]
-  },
-  "app/src/features/score/limits.tsx": {
-   "reassure": [
-    "31: sending stops; receiving, inboxes and the dashboard still wo ⟨still work⟩"
    ]
   },
   "app/src/features/support/SupportPanel.tsx": {

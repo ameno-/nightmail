@@ -26,9 +26,9 @@ const lines: [what: string, warn: string, restrict: string, pause: string][] = [
 // What each step does, then how it ends.
 const ladder: { step: string; mark: string; tone: string; does: string; recovery: string }[] = [
   { step: 'Notice', mark: '·', tone: 'neutral', does: 'A first complaint or a few bounces adds a dashboard note.', recovery: 'It clears by itself.' },
-  { step: 'Warn', mark: '1', tone: 'warning', does: 'The limit stops rising and owners and admins get an email. Mail still sends.', recovery: 'Clears after 24 hours under 80% of the line.' },
+  { step: 'Warn', mark: '1', tone: 'warning', does: 'The limit stops rising and owners and admins get an email.', recovery: 'Clears after 24 hours under 80% of the line.' },
   { step: 'Restrict', mark: '2', tone: 'warning', does: 'Marketing is held; receipts and resets still send.', recovery: 'After 24 hours owners and admins can release it from Overview: 50% for 48 hours, once per 14 days.' },
-  { step: 'Pause', mark: '3', tone: 'danger', does: 'Sending stops; receiving, inboxes and the dashboard still work. Queued mail is canceled after 72 hours.', recovery: 'A pause from transactional bounces alone: owners can resume it at 50% for 48 hours, once per 30 days. Others need a review.' },
+  { step: 'Pause', mark: '3', tone: 'danger', does: 'Sending stops. Queued mail is canceled after 72 hours.', recovery: 'A pause from transactional bounces alone: owners can resume it at 50% for 48 hours, once per 30 days. Others need a review.' },
 ]
 
 // `limit` marks the row the workspace is on. `compact` (Overview's dialog) leads with the limit table and opens the
