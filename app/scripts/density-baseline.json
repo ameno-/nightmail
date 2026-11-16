@@ -200,9 +200,10 @@
    "findings": []
   },
   "Receiving · agent inbox · desktop": {
-   "score": 43,
+   "score": 46,
    "findings": [
     "inert|create one with connect an agent. it com",
+    "inert|these api keys read only this inbox, ove",
     "long-block|after it expires, new mail is held for #"
    ]
   },
