@@ -8,6 +8,10 @@ export type PartDef = Part & { name: string; pivot: V3; lo: V3; hi: V3 }
 
 /** Which faces of a box to build: front (towards the viewer), top, left, right, back (k), bottom (b). What never moves shows only the first three. */
 export const SEEN = 'ftl', ALL = 'ftlrkb'
+/** Floats to a vertex: position, normal, material, and where it is on its face (across, up, the face's width and
+ *  height). The renderer turns a face's edges from that: a box's catch the light or lose it as a machined edge does, a
+ *  recess (a negative width) is shaded as one. A face with no width has plain edges. */
+export const STRIDE = 11
 
 export class Builder {
   data: number[] = []
@@ -16,34 +20,37 @@ export class Builder {
   constructor() { this.part('static') }
 
   part(name: string, pivot: V3 = [0, 0, 0], glass = false) {
-    if (this.current) this.current.count = this.data.length / 7 - this.current.start
-    this.current = { name, pivot, glass, start: this.data.length / 7, count: 0, on: true, fade: 1, m: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]), lo: [Infinity, Infinity, Infinity], hi: [-Infinity, -Infinity, -Infinity] }
+    if (this.current) this.current.count = this.data.length / STRIDE - this.current.start
+    this.current = { name, pivot, glass, start: this.data.length / STRIDE, count: 0, on: true, fade: 1, m: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]), lo: [Infinity, Infinity, Infinity], hi: [-Infinity, -Infinity, -Infinity] }
     this.parts.push(this.current)
     return this.parts.length - 1
   }
-  finish() { this.current.count = this.data.length / 7 - this.current.start; return new Float32Array(this.data) }
+  finish() { this.current.count = this.data.length / STRIDE - this.current.start; return new Float32Array(this.data) }
 
-  private v(p: V3, n: V3, mat: number) {
-    this.data.push(p[0], p[1], p[2], n[0], n[1], n[2], mat)
+  private v(p: V3, n: V3, mat: number, u = 0, w = 0, fw = 0, fh = 0) {
+    this.data.push(p[0], p[1], p[2], n[0], n[1], n[2], mat, u, w, fw, fh)
     const { lo, hi } = this.current
     for (let i = 0; i < 3; i++) { if (p[i] < lo[i]) lo[i] = p[i]; if (p[i] > hi[i]) hi[i] = p[i] }
   }
   tri(a: V3, b: V3, c: V3, n: V3, mat: number) { this.v(a, n, mat); this.v(b, n, mat); this.v(c, n, mat) }
-  /** A flat four-sided face; its normal is given, or taken from the corners. */
-  quad(a: V3, b: V3, c: V3, d: V3, mat: number, n?: V3) {
+  /** A flat four-sided face; its normal is given, or taken from the corners. `relief`: 1 a rectangle whose edges are a
+   *  solid's own (they are turned a little, as a machined edge is), -1 a rectangle let into the face it lies on. */
+  quad(a: V3, b: V3, c: V3, d: V3, mat: number, n?: V3, relief = 0) {
     if (!n) { const u = sub(b, a), w = sub(d, a); n = unit([u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]]) }
-    this.tri(a, b, c, n, mat); this.tri(a, c, d, n, mat)
+    if (!relief) { this.tri(a, b, c, n, mat); this.tri(a, c, d, n, mat); return }
+    const w = len(sub(b, a)), h = len(sub(d, a)), fw = w * relief
+    this.v(a, n, mat, 0, 0, fw, h); this.v(b, n, mat, w, 0, fw, h); this.v(c, n, mat, w, h, fw, h); this.v(a, n, mat, 0, 0, fw, h); this.v(c, n, mat, w, h, fw, h); this.v(d, n, mat, 0, h, fw, h)
   }
   box(x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, mat: number, faces = SEEN, top = mat) {
-    if (faces.includes('f')) this.quad([x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0], mat, [0, 0, -1])
-    if (faces.includes('t')) this.quad([x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1], top, [0, 1, 0])
-    if (faces.includes('l')) this.quad([x0, y0, z1], [x0, y0, z0], [x0, y1, z0], [x0, y1, z1], mat, [-1, 0, 0])
-    if (faces.includes('r')) this.quad([x1, y0, z0], [x1, y0, z1], [x1, y1, z1], [x1, y1, z0], mat, [1, 0, 0])
-    if (faces.includes('k')) this.quad([x1, y0, z1], [x0, y0, z1], [x0, y1, z1], [x1, y1, z1], mat, [0, 0, 1])
-    if (faces.includes('b')) this.quad([x0, y0, z1], [x1, y0, z1], [x1, y0, z0], [x0, y0, z0], mat, [0, -1, 0])
+    if (faces.includes('f')) this.quad([x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0], mat, [0, 0, -1], 1)
+    if (faces.includes('t')) this.quad([x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1], top, [0, 1, 0], 1)
+    if (faces.includes('l')) this.quad([x0, y0, z1], [x0, y0, z0], [x0, y1, z0], [x0, y1, z1], mat, [-1, 0, 0], 1)
+    if (faces.includes('r')) this.quad([x1, y0, z0], [x1, y0, z1], [x1, y1, z1], [x1, y1, z0], mat, [1, 0, 0], 1)
+    if (faces.includes('k')) this.quad([x1, y0, z1], [x0, y0, z1], [x0, y1, z1], [x1, y1, z1], mat, [0, 0, 1], 1)
+    if (faces.includes('b')) this.quad([x0, y0, z1], [x1, y0, z1], [x1, y0, z0], [x0, y0, z0], mat, [0, -1, 0], 1)
   }
-  /** A flat mark on a front face, a hair in front of it. */
-  mark(x0: number, y0: number, x1: number, y1: number, z: number, mat: number) { this.quad([x0, y0, z], [x1, y0, z], [x1, y1, z], [x0, y1, z], mat, [0, 0, -1]) }
+  /** A flat mark on a front face, a hair in front of it. `relief`: -1 let into the face (a pigeonhole, a screen), 1 a plate on it. */
+  mark(x0: number, y0: number, x1: number, y1: number, z: number, mat: number, relief = 0) { this.quad([x0, y0, z], [x1, y0, z], [x1, y1, z], [x0, y1, z], mat, [0, 0, -1], relief) }
   /** A cylinder round `axis` (0 x, 1 y, 2 z) from `a` to `b` along it, centred on the other two coordinates of `c`. Its wall is shaded round. */
   cyl(c: V3, axis: 0 | 1 | 2, a: number, b: number, r: number, mat: number, seg = 14, caps = 3, capMat = mat, r2 = r) {
     const u = (axis + 1) % 3, w = (axis + 2) % 3

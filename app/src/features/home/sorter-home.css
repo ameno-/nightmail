@@ -211,13 +211,15 @@
 /* A glass tube as the machine draws one (sorter-stations.tsx Tube), in two layers with the capsules between them:
    its far wall; then its near wall as veils (the wall, the lit top of a run across the page, the band in shade and
    its edge) and its steel collars. */
-.srt-tube-back, .srt-tube-wall, .srt-tube-shade, .srt-tube-edge, .srt-tube-shadows path { fill: none; }
+.srt-tube-back, .srt-tube-wall, .srt-tube-shade, .srt-tube-edge, .srt-tube-rim, .srt-tube-glint, .srt-tube-shadows path { fill: none; }
 .srt-tube-shadows path { stroke: var(--srt-shade); }
 .srt-tube-back { stroke: var(--srt-glass-back); }
 .srt-tube-wall { stroke: var(--srt-glass-1); }
 .srt-tube-lit { fill: var(--srt-glass-0); }
 .srt-tube-shade { stroke: var(--srt-glass-2); }
 .srt-tube-edge { stroke: var(--srt-glass-3); }
+.srt-tube-rim { stroke: var(--srt-glass-rim); }
+.srt-tube-glint { stroke: var(--srt-glass-glint); stroke-linecap: round; }
 .srt-ring { fill: var(--srt-steel); }
 .srt-ring-lit { fill: var(--srt-steel-top); }
 .srt-ring-shade { fill: var(--srt-steel-side); }

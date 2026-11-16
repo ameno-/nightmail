@@ -43,12 +43,12 @@ export function buildMachine(p: Plan) {
   for (const x of [c.x - pl * .5 - f * .5, c.x + c.w + pl * .5 + f * .5]) for (const y of [c.y - pl * .5 - f * .5, c.y + c.h + pl * .5 + f * .5]) b.cyl([x, y, 0], 2, -2.2 * px, -1.2 * px, 1.2 * px, M.steel, 8, 1)
   if (!p.phone) for (const w of p.facts) {
     const e = 1.5 * px
-    b.mark(w.x, w.y, w.x + w.w, w.y + w.h, -.3, M.screen)
+    b.mark(w.x, w.y, w.x + w.w, w.y + w.h, -.3, M.screen, -1)
     b.box(w.x - e, w.y + w.h, -1.4 * px, w.x + w.w + e, w.y + w.h + e, 0, M.trim); b.box(w.x - e, w.y - e, -1.4 * px, w.x + w.w + e, w.y, 0, M.trim)
     b.box(w.x - e, w.y, -1.4 * px, w.x, w.y + w.h, 0, M.trim); b.box(w.x + w.w, w.y, -1.4 * px, w.x + w.w + e, w.y + w.h, 0, M.trim)
   }
-  b.mark(c.x, c.y, c.x + c.w, c.y + c.h, -1.2 * px - .3, M.slot)
-  if (p.tally) { const t = p.tally, e = 1.2 * px; b.box(t.x - e, t.y - e, t.z - px, t.x + t.w + e, t.y + t.h + e, t.z, M.steel); b.mark(t.x, t.y, t.x + t.w, t.y + t.h, t.z - px - .1, M.screen) }
+  b.mark(c.x, c.y, c.x + c.w, c.y + c.h, -1.2 * px - .3, M.slot, -1)
+  if (p.tally) { const t = p.tally, e = 1.2 * px; b.box(t.x - e, t.y - e, t.z - px, t.x + t.w + e, t.y + t.h + e, t.z, M.steel); b.mark(t.x, t.y, t.x + t.w, t.y + t.h, t.z - px - .1, M.screen, -1) }
   b.box(c.x - f, c.y + c.h, -3.2 * px, c.x + c.w + f, c.y + c.h + f, 0, M.trim); b.box(c.x - f, c.y - f, -3.2 * px, c.x + c.w + f, c.y, 0, M.trim)
   b.box(c.x - f, c.y, -3.2 * px, c.x, c.y + c.h, 0, M.trim); b.box(c.x + c.w, c.y, -3.2 * px, c.x + c.w + f, c.y + c.h, 0, M.trim)
 
@@ -59,10 +59,10 @@ export function buildMachine(p: Plan) {
   for (let row = 0; row < wallRows; row++) for (let col = 0; col < COLS + 2 * p.side; col++) {
     const x = -Xw + col * U, y = yWall + (wallRows - 1 - row) * V
     if (PRICE[row - p.over]?.[col - p.side] === '#') wall.set([x + U / 2, y + V / 2, -.5, 0, 0, 0, 1, U - 2 * g, V - 2 * g, .4, (lit * .6180339887) % 1, 0, 2, 0], lit++ * LETTER_FLOATS)
-    else b.mark(x + g, y + g, x + U - g, y + V - g, -.2, (col * 7 + row * 13) % 5 === 0 ? M.cell2 : M.cell)
+    else b.mark(x + g, y + g, x + U - g, y + V - g, -.2, (col * 7 + row * 13) % 5 === 0 ? M.cell2 : M.cell, -1)
   }
   // At the frame's head, over the price and as wide as it: the wordmark, in lit letters proud of the pigeonholes.
-  nameOn(b, p.name, M.paper, M.rim)
+  nameOn(b, p.name, M.lit, M.rim)
 
   // Two manifolds, bolted on, with the tubes between them; the label rail; the fascia.
   const lower = phone(p) ? 0 : 1.7 * V, zBlock = p.zProud, lean = DX * zBlock
@@ -81,7 +81,7 @@ export function buildMachine(p: Plan) {
   }
   if (!lower) b.box(-Xc - px, yWall - 1.5 * px, -3 * px, Xc + px, yWall + 1.5 * px, 0, M.trim)
   b.mark(-Xc, ySlot, Xc, yCav, 0, M.body)
-  for (const x of lanes) b.mark(x - p.label / 2 * P, ySlot + .14 * p.slot, x + p.label / 2 * P, ySlot + .86 * p.slot, -.2, M.plinth)
+  for (const x of lanes) b.mark(x - p.label / 2 * P, ySlot + .14 * p.slot, x + p.label / 2 * P, ySlot + .86 * p.slot, -.2, M.plinth, 1)
   b.mark(-Xc, yCav, -Xb, yFas, 0, M.body); b.mark(Xb, yCav, Xc, yFas, 0, M.body); b.mark(-Xc, yFas, Xc, yTop, 0, M.body)
   // The works' bay: back wall, floor and the one side wall that is seen, with a frame round the opening.
   b.quad([-Xb, yCav, cavD], [Xb, yCav, cavD], [Xb, yFas, cavD], [-Xb, yFas, cavD], M.dark, [0, 0, -1])
@@ -98,7 +98,7 @@ export function buildMachine(p: Plan) {
 
   // The readout, set back in its bezel; the gauge with its ticks and red zone; three lamps; a vent; the fascia's screws.
   const ro = p.readout, ga = p.gauge
-  b.mark(ro.x, ro.y, ro.x + ro.w, ro.y + ro.h, -.2, M.screen)
+  b.mark(ro.x, ro.y, ro.x + ro.w, ro.y + ro.h, -.2, M.screen, -1)
   b.mark(ro.x, ro.y + ro.h - 2 * px, ro.x + ro.w, ro.y + ro.h, -.25, M.slot); b.mark(ro.x, ro.y, ro.x + 1.5 * px, ro.y + ro.h, -.25, M.slot)
   b.box(ro.x - 2 * px, ro.y + ro.h, -1.6 * px, ro.x + ro.w + 2 * px, ro.y + ro.h + 2 * px, 0, M.trim); b.box(ro.x - 2 * px, ro.y - 2 * px, -1.6 * px, ro.x + ro.w + 2 * px, ro.y, 0, M.trim)
   b.box(ro.x - 2 * px, ro.y, -1.6 * px, ro.x, ro.y + ro.h, 0, M.trim); b.box(ro.x + ro.w, ro.y, -1.6 * px, ro.x + ro.w + 2 * px, ro.y + ro.h, 0, M.trim)
@@ -114,7 +114,7 @@ export function buildMachine(p: Plan) {
   for (const { x, y } of p.lamps) { b.cyl([x, y, 0], 2, -2 * px, 0, lampR + 1.2 * px, M.trim, 14, 1); b.cyl([x, y, 0], 2, -2.4 * px, -2.1 * px, lampR, M.lampOff, 14, 1) }
   const ventX = (ro.x + ro.w + lampLeft) / 2, ventW = Math.min(4 * U, (lampLeft - ro.x - ro.w) * .5 - 1.4 * U), ventH = Math.min(2.6 * V, p.fascia * .3)
   if (ventW > 1.2 * U) {
-    b.mark(ventX - ventW, ga.y - ventH, ventX + ventW, ga.y + ventH, -.2, M.slot)
+    b.mark(ventX - ventW, ga.y - ventH, ventX + ventW, ga.y + ventH, -.2, M.slot, -1)
     for (let i = 0; i < 5; i++) b.box(ventX - ventW, ga.y - ventH + i * ventH * .4 + ventH * .08, -1.6 * px, ventX + ventW, ga.y - ventH + i * ventH * .4 + ventH * .29, 0, M.trim)
   }
   const screwX = Xc - (p.post ? p.post / 2 : .65 * U)
@@ -189,7 +189,8 @@ export function buildMachine(p: Plan) {
   // Where a tube turns down over the lip it wears a collar.
   const yc = r + 3.5 * px, seat = yc - r
   const strap = (x: number, z: number) => { const w = r + 1.3 * px, path: V3[] = [[x - w, 0, z], [x - w, yc, z]]; for (let i = 1; i < 8; i++) { const a = Math.PI - i / 8 * Math.PI; path.push([x + Math.cos(a) * w, yc + Math.sin(a) * w, z]) } path.push([x + w, yc, z], [x + w, 0, z]); b.tube(path, 1.1 * px, M.steel, 6, .5 * px) }
-  const shade = (x: number, z0: number, z1: number) => b.quad([x - r - .3 * (yc + r), .12, z0 + .69 * yc], [x + r - .3 * yc, .12, z0 + .69 * yc], [x + r - .3 * yc, .12, z1], [x - r - .3 * (yc + r), .12, z1], M.slab, [0, -1, 0])
+  const umbra: [V3, V3, V3, V3][] = []
+  const shade = (x: number, z0: number, z1: number) => { umbra.push([[x - r - .3 * (yc + r), .12, z0 + .69 * yc], [x + r - .3 * yc, .12, z0 + .69 * yc], [x + r - .3 * yc, .12, z1], [x - r - .3 * (yc + r), .12, z1]]) }
   const sleeperZ = p.heads.length ? (p.heads[0].z0 + p.zLip) / 2 - .6 * U : 0
   p.heads.forEach((head, side) => {
     const s = side ? 1 : -1
@@ -205,8 +206,6 @@ export function buildMachine(p: Plan) {
     for (let x = head.x0 + 1.6 * U; x < head.x1 - U; x += 3.2 * U) if (xs.every(at => Math.abs(at - x) > r + 4 * px) && (x < rx0 - U || x > rx0 + p.riser + U)) b.cyl([x, head.h - .9 * U, 0], 2, head.z0 - 1.1 * px, head.z0, 1.2 * px, M.steel, 8, 1)
     b.box(a - 1.9 * U, 0, sleeperZ - .8 * U, e + 1.9 * U, seat, sleeperZ + .8 * U, M.plinth); for (const x of xs) strap(x, sleeperZ)
     for (const x of xs) b.cyl([x, 0, p.zOver], 1, -p.lip * .5 - 1.4 * px, -p.lip * .5 + 1.4 * px, r + 1.2 * px, M.steel, 14, 3)
-    // (Glass throws no shadow in the renderer's map; what each tube throws on the slab is laid there: a strip in the
-    // slab's shade, to the left of the tube and behind it, as the light falls.)
     for (const x of xs) shade(x, p.zLip + 1, head.z0)
   })
 
@@ -246,7 +245,7 @@ export function buildMachine(p: Plan) {
     inlet(portX, trunk.z0)
     for (const f of [.3, .72]) { const x = outX + (portX - outX) * f; b.box(x - .8 * U, 0, zJ - r - 1.5 * px, x + .8 * U, seat, zJ + r + 1.5 * px, M.plinth); b.box(x - .25 * U, seat, zJ - r - 1.5 * px, x + .25 * U, yc + r + 1.2 * px, zJ - r - .2 * px, M.steel); b.box(x - .25 * U, seat, zJ + r + .2 * px, x + .25 * U, yc + r + 1.2 * px, zJ + r + 1.5 * px, M.steel); b.box(x - .25 * U, yc + r, zJ - r - 1.5 * px, x + .25 * U, yc + r + 1.2 * px, zJ + r + 1.5 * px, M.steel, ALL) }
     shade(outX, p.zLip + 1, zJ - r); shade(portX, zJ + r, trunk.z0)
-    b.quad([outX - .3 * yc, .12, zJ - r + .69 * yc], [portX - .3 * yc, .12, zJ - r + .69 * yc], [portX - .3 * yc, .12, zJ + r + .69 * yc], [outX - .3 * yc, .12, zJ + r + .69 * yc], M.slab, [0, -1, 0])
+    umbra.push([[outX - .3 * yc, .12, zJ - r + .69 * yc], [portX - .3 * yc, .12, zJ - r + .69 * yc], [portX - .3 * yc, .12, zJ + r + .69 * yc], [outX - .3 * yc, .12, zJ + r + .69 * yc]])
     flange(kink[0], chestZ - px); strap(kink[0], (trunk.z1 + chestZ) / 2 + 1.2 * U); shade(kink[0], trunk.z1, chestZ - px)
   }
   for (const x of sockets) collar(x, yLow, zt, 2.6 * px, r + 1.4 * px)
@@ -267,7 +266,7 @@ export function buildMachine(p: Plan) {
     b.cyl([v.x, 0, vz], 1, v.y + 1.9 * vs, v.y + 2.2 * vs, .56 * vs, M.trim, 12, 2, M.slot)
   }
   const panel = { x0: Xb + (p.phone ? .45 : .7) * U, x1: p.phone ? Xc - .45 * U : colX - 1.6 * vs, y0: yCav + p.cavity * .1, y1: yCav + p.cavity * .4 }, panelX = (panel.x0 + panel.x1) / 2
-  b.mark(panel.x0 + px, panel.y0 + px, panel.x1 - px, panel.y1 - px, -.15, M.slot)
+  b.mark(panel.x0 + px, panel.y0 + px, panel.x1 - px, panel.y1 - px, -.15, M.slot, -1)
   b.mark(panel.x0 + px, panel.y0 + px, panel.x1 - px, panel.y0 + 2.2 * px, -.2, M.bay)
 
   // ── Parts ──
@@ -420,6 +419,10 @@ export function buildMachine(p: Plan) {
   // its outlet in the header forward across the slab, over the lip and down. One of the front runs is its own part:
   // the burst bends it out of its socket.
   const lines: V3[][][] = [], drop = -(p.floor + 20) - DY * p.zOver
+  // (Glass throws no shadow in the renderer's map; what each tube throws on the slab is laid there: a strip of dark
+  // veil, to the left of the tube and behind it, as the light falls.)
+  b.part('umbra', [0, 0, 0], true)
+  for (const [a0, a1, a2, a3] of umbra) b.quad(a0, a1, a2, a3, M.umbra, [0, 1, 0], 1)
   idx.tubes = b.part('tubes', [0, 0, 0], true)
   p.tubes.forEach((x, t) => {
     const leg = p.fan[t]

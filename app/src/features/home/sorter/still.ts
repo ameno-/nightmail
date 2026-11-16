@@ -17,7 +17,7 @@ export function drawStill(canvas: HTMLCanvasElement, p: Plan, over: number, dark
   const front = (x0: number, y0: number, x1: number, y1: number) => c.fillRect(X(x0), Y(y1), x1 - x0, y1 - y0)
   const { Xc, Xw, Xb, D, U, V, yTop, yWall, yMan, ySlot, yCav, yFas } = p
   // The slab: its top, its lip.
-  fill('slab', 0); face([[-p.slabX, 0, p.zLip], [p.slabX, 0, p.zLip], [p.slabX, 0, p.zBack], [-p.slabX, 0, p.zBack]])
+  fill('slab', dark ? 1 : 0); face([[-p.slabX, 0, p.zLip], [p.slabX, 0, p.zLip], [p.slabX, 0, p.zBack], [-p.slabX, 0, p.zBack]])
   fill('slab', 1); face([[-p.slabX, 0, p.zLip], [p.slabX, 0, p.zLip], [p.slabX, -p.lip, p.zLip], [-p.slabX, -p.lip, p.zLip]])
   fill('body', 3); face([[-Xc, 0, 0], [-Xc, 0, D], [-Xc, yTop, D], [-Xc, yTop, 0]])
   fill('body', 0); face([[-Xc, yTop, 0], [Xc, yTop, 0], [Xc, yTop, D], [-Xc, yTop, D]])

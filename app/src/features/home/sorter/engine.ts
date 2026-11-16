@@ -54,10 +54,10 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   const L = bodies(MAX, true), kind = new Uint8Array(MAX), data = new Int32Array(MAX), seed = new Float32Array(MAX), burn = new Float32Array(MAX), burning = new Uint8Array(MAX), delay = new Float32Array(MAX), from = new Float32Array(MAX * 7)
   const scripts = new Map<number, Script>(), scale = new Float32Array(MAX).fill(1), tilt = new Float32Array(MAX)
   let Dn = bodies(0, false), debrisPart: number[] = [], debrisHome: V3[] = [], selfPosed = new Set<number>(), boltBody = 0, hatchBody = 0, panelBody = 0
-  const instances = new Float32Array(MAX * LETTER_FLOATS), fxData = new Float32Array(700 * FX_FLOATS), glowData = new Float32Array(64 * FX_FLOATS)
+  const instances = new Float32Array(MAX * LETTER_FLOATS), fxData = new Float32Array(700 * FX_FLOATS), glowData = new Float32Array(64 * FX_FLOATS), airData = new Float32Array(4 * FX_FLOATS)
   // Quality, chosen for the device and lowered if frames come slowly: the canvas's pixel ratio, the shadow map, the size
   // of the smoke's buffer against the page, how many billows may be in the air, how much of the burst's mail is thrown.
-  const LEVELS = [{ dpr: 1, shadow: 512, smoke: .25, puffs: 40, mail: .45 }, { dpr: 1.5, shadow: 1024, smoke: .3, puffs: 64, mail: .62 }, { dpr: 2, shadow: 1024, smoke: .4, puffs: 110, mail: .8 }, { dpr: 2, shadow: 4096, smoke: .5, puffs: 240, mail: 1 }]
+  const LEVELS = [{ dpr: 1, shadow: 512, smoke: .25, puffs: 40, mail: .45 }, { dpr: 1.5, shadow: 1024, smoke: .3, puffs: 64, mail: .62 }, { dpr: 2, shadow: 1024, smoke: .4, puffs: 110, mail: .8 }, { dpr: 2, shadow: 2048, smoke: .5, puffs: 240, mail: 1 }]
   const cores = navigator.hardwareConcurrency || 4, memory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 8
   let quality = options.plan.phone || matchMedia('(pointer: coarse)').matches ? (cores <= 4 || memory <= 4 ? 1 : 2) : cores <= 4 ? 2 : 3, pace = 16, strikes = 0
   // The ladder goes back up too: frames on time for a while, and the level it was built for is tried again. A climb
@@ -141,9 +141,29 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   }
   /** Nothing under pressure: the valves shut, the hatch down, no leaks. */
   function calm() { hatchHang = 0; popIn = 1; ventIn = [1.2, 2]; ventFor = [0, 0]; smokeLeft = 0; panelOff = false; leaks.length = 0; lever[0] = lever[1] = 0 }
-  function size() { const level = LEVELS[quality]; canvas.dataset.quality = String(quality); renderer!.resize(p.W, p.H + over + p.ext, Math.min(window.devicePixelRatio || 1, level.dpr), p.ox, oyc, { shadow: level.shadow, smoke: level.smoke }, { y0: -p.lip - 8, y1: p.yTop + 300 * (p.U / 9), z0: p.zLip - 50, z1: p.zBack + 50 }) }
+  function size() { const level = LEVELS[quality]; canvas.dataset.quality = String(quality); if (m) lighting(); renderer!.resize(p.W, p.H + over + p.ext, Math.min(window.devicePixelRatio || 1, level.dpr), p.ox, oyc, { shadow: level.shadow, smoke: level.smoke }, { y0: -p.lip - 8, y1: p.yTop + 300 * (p.U / 9), z0: p.zLip - 50, z1: p.zBack + 50 }) }
+  // How the place is lit (gl.ts), from the plan, the theme and what the device can afford. By night the lamp over the
+  // machine leaves the slab's ends in the dark, and the price's windows and the button are lights of their own; by
+  // day the room is bright and they are paper and paint. A soft shadow costs looks at the map: fewer on a phone, and
+  // a plain edge where frames are short.
+  function lighting() {
+    const U = p.U, lin = (v: number) => { const x = v / 255; return x <= .04045 ? x / 12.92 : ((x + .055) / 1.055) ** 2.4 }
+    const page = (dark ? oklch(.158, .014, 268) : oklch(.948, .01, 262)).map(lin), half = -p.name.x, y0 = p.yWall + p.under * p.V, y1 = p.name.y + p.name.cap
+    const far = [1e6, 1e6, 1e6, 1e6], heads = p.heads.map(h => [h.x0, h.z0, h.x1, h.z1])
+    renderer!.setLook({
+      taps: [[0, 0], [0, 5], [4, 8], [6, 10]][quality], soft: .1, reach: 3.4 * U,
+      pool: [0, p.D * .2, 2.5 * p.Xc, 1.3 * p.D - p.zLip], dim: dark ? .2 : .82,
+      fog: [p.D * .35, p.D * 1.5, dark ? .72 : .3], fogTo: page,
+      rects: [[0, (y0 + y1) / 2, half, (y1 - y0) / 2], [p.cta.x + p.cta.w / 2, p.cta.y + p.cta.h / 2, p.cta.w / 2, p.cta.h / 2]],
+      lights: dark ? [[2.3, 1.95, 1.4, -.5], [1.3, 1.2, .95, -1.2 * px]] : [[0, 0, 0, -1e6], [0, 0, 0, -1e6]],
+      boxes: [[-p.Xc, 0, p.Xc, p.D], heads[0] ?? far, heads[1] ?? far], reachK: [1 / (.15 * p.yTop), 1 / (1.3 * (p.heads[0]?.h ?? 1)), 1 / (1.3 * (p.heads[0]?.h ?? 1))],
+      unit: U, roof: p.yTop, own: dark ? 1 : 0, edge: .8 * px, grime: dark ? .24 : .1, grain: (dark ? 1.6 : 1) / 255, env: dark ? [1, .1, .32] : [.5, .25, .3],
+      gain: dark ? [.8, 1.45] : [1, 1], bay: [p.yFas - 2 * px, p.cavD * .1, p.Xb, p.cavity * .8], bayLight: dark ? [2.1, 2.35, 2.7] : [.25, .25, .25],
+    })
+  }
   function theme(next: boolean) {
     dark = next
+    lighting()
     renderer!.setPalette(paletteBytes(dark, MATS))
     const page = dark ? oklch(.158, .014, 268) : oklch(.948, .01, 262); renderer!.setClear(page[0] / 255, page[1] / 255, page[2] / 255)
     const set = (name: keyof typeof colour, l: number, c: number, h: number) => { colour[name] = oklch(l, c, h).map(v => v / 255) }
@@ -841,6 +861,12 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       if (bar) { target[o + 3] = f.size; target[o + 4] = f.len }
       target[o + 6] = f.r; target[o + 7] = f.g; target[o + 8] = f.b; target[o + 9] = f.a * (f.shape === 0 ? Math.min(1, u * 8) * (1 - u) ** 1.3 : bar ? 1 : f.shape === 2 ? Math.sqrt(1 - u) : Math.min(1, (1 - u) * 2.5)); target[o + 10] = bar ? 1 : f.shape
     }
+    // By night the price's windows and the button are bright enough to bloom a little in the eye: a faint warm
+    // halo over each, and nothing more.
+    if (dark) for (const [x, y, w, h, a] of [[0, p.yWall + p.wall * .5, -p.name.x * 1.5, p.wall * .78, .085], [p.cta.x + p.cta.w / 2, p.cta.y + p.cta.h / 2, p.cta.w * .95, p.cta.h * 1.7, .1]]) if (g < 64) glowData.set([x, y, -2, w, h, 0, 1, .86, .62, a, 2], g++ * FX_FLOATS)
+    // And the air behind the machine takes a little of their light, and of the lamp's: what the machine stands out against.
+    let air = 0
+    if (dark) for (const [x, y, w, h, r, gr, b, a] of [[0, p.yWall + p.wall * .4, p.Xc * 2.5, p.yTop * .8, .62, .68, 1, .05], [0, p.yTop * 1.02, p.Xc * 1.9, p.yTop * .5, .62, .68, 1, .035]]) airData.set([x, y, p.D * .5, w, h, 0, r, gr, b, a, 2], air++ * FX_FLOATS)
     // Billows, the oldest first: a new one comes out in front of what is already in the air.
     let sn = 0
     for (let k = Math.max(0, S.head - SM); k < S.head; k++) {
@@ -850,7 +876,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       smokeData[o] = S.pos[i * 3]; smokeData[o + 1] = S.pos[i * 3 + 1]; smokeData[o + 2] = S.pos[i * 3 + 2]; smokeData[o + 3] = S.size[i]; smokeData[o + 4] = S.rot[i]
       smokeData[o + 5] = S.age[i] / S.life[i]; smokeData[o + 6] = S.seed[i]; smokeData[o + 7] = dark || S.kind[i] > .5 ? S.dens[i] : S.dens[i] * clamp(1 - (Math.abs(S.pos[i * 3] + DX * S.pos[i * 3 + 2]) - p.Xc) / (70 * px)); smokeData[o + 8] = S.kind[i]; smokeData[o + 9] = S.heat[i]
     }
-    renderer!.draw({ parts, letters: instances, letterCount: n, fx: fxData, fxCount: a, glow: glowData, glowCount: g, smoke: smokeData, smokeCount: sn, flash, flashAt: [0, (p.yCav + p.yFas) / 2, 0], flashR: p.cavity * 1.25, wallOn: true })
+    renderer!.draw({ parts, letters: instances, letterCount: n, fx: fxData, fxCount: a, glow: glowData, glowCount: g, air: airData, airCount: air, smoke: smokeData, smokeCount: sn, flash, flashAt: [0, (p.yCav + p.yFas) / 2, 0], flashR: p.cavity * 1.25, wallOn: true })
   }
 
   // ── The pointer: read a letter, drag it, burn a scam ──

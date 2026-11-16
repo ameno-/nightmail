@@ -292,6 +292,9 @@ function Tube({ points, wide, bend, rings, layer }: { points: Pt[]; wide: number
     <path className="srt-tube-lit" d={`M ${top.join(' L ')} L ${under.join(' L ')} Z`} />
     <path className="srt-tube-shade" d={`M ${beside(s => -s.lit * (half - wide * .205)).join(' L ')}`} strokeWidth={wide * .19} />
     <path className="srt-tube-edge" d={`M ${beside(s => -s.lit * (half - wide * .055)).join(' L ')}`} strokeWidth={wide * .11} />
+    {/* (And as the renderer's glass has them: its other edge a little denser too, and the lamp as a line down it.) */}
+    <path className="srt-tube-rim" d={`M ${beside(s => s.lit * (half - wide * .06)).join(' L ')}`} strokeWidth={wide * .12} />
+    <path className="srt-tube-glint" d={`M ${beside(s => s.lit * wide * .24).join(' L ')}`} strokeWidth={Math.max(1, wide * .1)} />
     {rings.map(({ at, across, tall }, i) => across
       ? <g key={i}><rect className="srt-ring" x={at[0] - 2.5} y={at[1] - half - 2.5} width={5} height={wide + 5} rx={1} /><rect className="srt-ring-lit" x={at[0] - 2.5} y={at[1] - half - 2.5} width={5} height={2} rx={1} /></g>
       : tall && tall > 12 ? <Sleeve key={i} x={at[0]} y={at[1]} w={wide + 6} h={tall} />
