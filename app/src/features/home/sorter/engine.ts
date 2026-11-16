@@ -122,7 +122,8 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   // place (gl.ts moves all that belongs to a floor by it).
   // (And the units a wide page's tower takes on its sides, one with each lane: `pod`, how far in each is.)
   const shifts = new Float32Array(3 * FLOORS), pod = new Float32Array(6), rests = new Float32Array(3)
-  let floors = 0, floorT = -1, cableT = 0
+  // (`bayOn`: how far the works' lamp has come on, from the moment the roof lands on the sorting floor.)
+  let floors = 0, floorT = -1, cableT = 0, bayOn = 0
   const SEAT = .68
   // The fitting out. Once its floors are in, the machine has one lane and is given the rest a lane at a time
   // (plan.ts `fit`), as the product is: each lane's deck waits (in its side's magazine, or off the page's side), is
@@ -187,7 +188,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     recoil = 0; sendIn = 2.4; volley = 0
     // (A machine built again for a page of another size keeps what has been fitted; what was on its way is home.)
     if (!begun) { begun = true; p.lanes.forEach((_, i) => { deck[i].stage = reduced || i === p.fit[0] ? FITTED : AWAIT; deck[i].chute = deck[i].stage === FITTED ? 1 : 0 }); if (reduced) fitAll() }
-    else { if (floorT >= 0) { floors++; floorT = -1 } for (let k = 0; k < 6; k++) pod[k] = built || k < fitNext - 1 ? 1 : 0; const done = p.fit.slice(0, fitNext); p.lanes.forEach((_, i) => { const on = built || done.includes(i); deck[i].stage = on ? FITTED : AWAIT; deck[i].chute = on ? 1 : 0 }); for (const a of arm) { a.job = -1; a.cover = 0; a.grip = 0 } }
+    else { if (floorT >= 0) { floors++; floorT = -1 } bayOn = floors ? 1 : 0; for (let k = 0; k < 6; k++) pod[k] = built || k < fitNext - 1 ? 1 : 0; const done = p.fit.slice(0, fitNext); p.lanes.forEach((_, i) => { const on = built || done.includes(i); deck[i].stage = on ? FITTED : AWAIT; deck[i].chute = on ? 1 : 0 }); for (const a of arm) { a.job = -1; a.cover = 0; a.grip = 0 } }
     // (Each magazine has given as many decks as its side has had fitted.)
     m.arms.forEach((A, k) => { taken[k] = lift[k] = A.lanes.filter(i => deck[i].stage === FITTED).length; liftV[k] = 0 })
     hooks.fit(p.lanes.map((_, i) => floors > 0 && deck[i].stage === FITTED)); hooks.floors(floors, built)
@@ -221,7 +222,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       lights: dark ? [[2.3, 1.95, 1.4, -.5], [1.3, 1.2, .95, -1.2 * px]] : [[0, 0, 0, -1e6], [0, 0, 0, -1e6]],
       boxes: [[-p.Xc, 0, p.Xc, p.D], heads[0] ?? far, heads[1] ?? far], reachK: [1 / (.15 * p.yTop), 1 / (1.3 * (p.heads[0]?.h ?? 1)), 1 / (1.3 * (p.heads[0]?.h ?? 1))],
       unit: U, roof: p.yTop, own: dark ? 1 : 0, edge: .8 * px, grime: dark ? .24 : .1, grain: (dark ? 1.6 : 1) / 255, env: dark ? [1, .1, .32] : [.5, .25, .3],
-      gain: dark ? [.8, 1.45] : [1, 1], bay: [p.yFas - 2 * px, p.cavD * .1, p.Xb, p.cavity * .8, p.yCav], bayLight: (dark ? [2.1, 2.35, 2.7] : [.25, .25, .25]).map(v => floors ? v : 0),
+      gain: dark ? [.8, 1.45] : [1, 1], bay: [p.yFas - 2 * px, p.cavD * .1, p.Xb, p.cavity * .8, p.yCav], bayLight: (dark ? [2.1, 2.35, 2.7] : [.25, .25, .25]).map(v => v * ease(bayOn)),
     })
   }
   function theme(next: boolean) {
@@ -275,7 +276,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   function fitAll() {
     p.lanes.forEach((_, i) => { deck[i].stage = FITTED; deck[i].chute = 1 })
     for (const a of arm) { a.pop = 1; a.down = false; a.job = -1; a.cover = 0; a.grip = 0 }
-    fitNext = p.fit.length; built = screenOn = sendOn = true; rush = 1; floors = 2; floorT = -1; cableT = 1; pod.fill(1)
+    fitNext = p.fit.length; built = screenOn = sendOn = true; rush = 1; floors = 2; floorT = -1; cableT = 1; bayOn = 1; pod.fill(1)
     if (m) m.arms.forEach((A, k) => { taken[k] = lift[k] = A.count; liftV[k] = 0 })
     hooks.fit(p.lanes.map(() => true)); hooks.floors(2, true)
     if (m) stand()
@@ -303,8 +304,10 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       const u = clamp(pod[k]), push = clamp((u - .7) / .2), q = clamp((u - .9) / .1)
       shifts[3 * (4 + k)] = p.pods[k].s * (far * (1 - clamp(u / .6)) ** 4 + 1.2 * U * (1 - push * push) + .3 * U * Math.sin(Math.PI * q) * (1 - q))
     }
-    // (The cables are unhooked and drawn up out of the night's way once the roof stands on the console.)
-    parts[m.cables].on = cableT < 1; pose(parts[m.cables].m, ORIGIN, put(AT, 0, ease(clamp((cableT - .25) / .75)) * (p.oy + over + 80 * U), 0), NONE)
+    // (The cables are unhooked once the roof stands on the console: they go slack for a moment, then are drawn up,
+    // gathering way, out of the top of the page in about .4 s, and on out of the night's way.)
+    const dip = -(p.phone ? 4.8 : 3) * px * Math.sin(Math.PI * clamp((cableT - .1) / .3)), pull = cableT > .3 ? (p.oy - p.yTop + 20 * px) * ((cableT - .3) / .4) ** 2 : 0
+    parts[m.cables].on = cableT < 1; pose(parts[m.cables].m, ORIGIN, put(AT, 0, dip + pull, 0), NONE)
   }
   /** How far the roof now stands under where it will. */
   const lid = () => shifts[10]
@@ -313,6 +316,8 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     // (Pressed mid-build, the gauge hurries it: everything still to come comes faster, the fitters both at once.)
     const building = !built && (phase === 'run' || phase === 'overload')
     if (building) dt *= rush
+    // (The works' lamp comes on over .3 s as the roof lands on the sorting floor, not in one frame.)
+    if (floors && bayOn < 1) { bayOn = Math.min(1, bayOn + dt / .3); lighting() }
     if (building && floors < 2) {
       buildT += dt
       // (Not while a letter is in the throat or at the scanner: with the floor over it away it would hang in the air.)
