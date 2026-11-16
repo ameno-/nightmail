@@ -16,6 +16,8 @@ import { DX, DY, type Plan } from './plan'
 export type Letter = { subject: string; from: string; addr: string; snippet: string; route: number; scam: boolean }
 /** The lanes, left to right, by the dataset's route names; a scam's route is 7. */
 export const LANES = ['thread', 'webhook', 'agent', 'inbox', 'imap', 'ritual', 'campaign'] as const
+/** How many letters the page's name for each has (Threads, Endpoints, Agents, Inbox, IMAP, Rituals, Campaigns). */
+const NAMED = [7, 9, 6, 5, 4, 7, 9]
 export type Phase = 'boot' | 'run' | 'overload' | 'boom' | 'rest' | 'rebuild'
 export type Hooks = { scan: (letter: Letter | null, verdict: 'read' | 'junk' | 'jam' | 'idle') => void; count: (sorted: number, burnt: number) => void; phase: (phase: Phase) => void; hover: (letter: Letter | null, x: number, y: number) => void; veil: (zone: number, clear: number) => void }
 export type Sorter = ReturnType<typeof mountSorter>
@@ -38,8 +40,15 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   if (!renderer) return null
   const { hooks, reduced } = options
   // (A machine with fewer lanes is given only the letters it has a lane for: `routes` says which of the seven its lanes are.)
-  // And only those whose sender's name its readout holds whole (while that leaves it enough of them).
-  const routed = (letters: Letter[], plan: Plan) => { const fit = letters.filter(letter => letter.scam || plan.routes.includes(letter.route)), short = fit.filter(letter => letter.from.length <= plan.fromMax); return short.length >= 6 && short.some(letter => letter.scam) ? short : fit.length ? fit : letters }
+  // And only those whose sender's name and subject its readout holds whole (while that leaves it enough of them): a
+  // sender has as many letters more as the name of where it goes (LANES, or "Scam") is shorter than seven.
+  const routed = (letters: Letter[], plan: Plan) => {
+    const fit = letters.filter(letter => letter.scam || plan.routes.includes(letter.route)), room = (letter: Letter) => plan.fromMax + Math.floor((7 - (letter.scam ? 4 : NAMED[letter.route])) * .92)
+    // (A subject is set on two lines at most, broken between words.)
+    const lines = (text: string, most: number) => { let n = 1, at = 0; for (const word of text.split(' ')) { if (at && at + 1 + word.length > most) { n++; at = word.length } else at += (at ? 1 : 0) + word.length } return n }
+    const short = fit.filter(letter => letter.from.length <= room(letter) && lines(letter.subject, plan.subjectMax) <= 2)
+    return short.length >= 6 && short.some(letter => letter.scam) ? short : fit.length ? fit : letters
+  }
   let p = options.plan, over = options.over, dark = options.dark, all = options.letters, pool = routed(all, p), cursor = Math.floor(Math.random() * pool.length)
   let m!: Machine, parts!: Part[], px = 1, G = 1500, oyc = 0
   const L = bodies(MAX, true), kind = new Uint8Array(MAX), data = new Int32Array(MAX), seed = new Float32Array(MAX), burn = new Float32Array(MAX), burning = new Uint8Array(MAX), delay = new Float32Array(MAX), from = new Float32Array(MAX * 7)

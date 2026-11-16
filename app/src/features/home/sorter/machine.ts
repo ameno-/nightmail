@@ -140,7 +140,7 @@ export function buildMachine(p: Plan) {
     b.quad([e[0] - .54 * lw, yTop + 5 * px + .1, zL - 2 * px], [e[0] + .54 * lw, yTop + 5 * px + .1, zL - 2 * px], [e[0] + .54 * lw, yTop + 5 * px + .1, zL + 2 * px], [e[0] - .54 * lw, yTop + 5 * px + .1, zL + 2 * px], M.slot, [0, 1, 0])
   }
   // (A phone's stands clear of the right-hand laser, between it and the cannon.)
-  const beacon: V3 = [Xc - (p.phone ? 5.2 : 3) * U, yTop + 12 * px, D * .82]
+  const beacon: V3 = [Xc - (p.phone ? 4.5 : 3) * U, yTop + 12 * px, D * .82]
   b.cyl([beacon[0], 0, beacon[2]], 1, yTop, yTop + 8 * px, 1.2 * px, M.steel, 8, 0); b.cyl([beacon[0], 0, beacon[2]], 1, yTop + 8 * px, yTop + 9.5 * px, 3.6 * px, M.trim, 12, 2); b.cyl([beacon[0], 0, beacon[2]], 1, yTop + 9.5 * px, yTop + 14 * px, 2.8 * px, M.lampOff, 12, 2)
   // Each laser's cable runs back to a junction box by the kerb. (Not on a phone's roof: there is little enough of it.)
   if (!p.phone) turrets.forEach((t, k) => { const s = k ? 1 : -1, x = s * (Xc - 2.6 * U); b.tube([[x, yTop + 1.4 * px, 7 * px], [x, yTop + 1.4 * px, D * .52], [x - s * 2.2 * U, yTop + 1.4 * px, D * .52]], 1.3 * px, M.rubber, 6, 5 * px); b.box(x - s * 2.2 * U - 4 * px, yTop, D * .52 - 4 * px, x - s * 2.2 * U + 4 * px, yTop + 4 * px, D * .52 + 4 * px, M.plinth) })

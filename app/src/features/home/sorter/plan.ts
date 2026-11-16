@@ -165,12 +165,14 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   const gauge = { x: phone ? Xb - gaugeR - 3 : Xw - 4.2 * U, y: yFas + fascia / 2, r: gaugeR }
   const lamps = [0, 1, 2].map(i => phone ? { x: gauge.x - gaugeR - 14, y: gauge.y + (1 - i) * 12 } : { x: gauge.x - gaugeR - (2 + 1.7 * i) * U, y: gauge.y })
   const readout: Rect = set ? { x: -Xb, y: yFas + set.pad, w: lamps[2].x - 15 + Xb, h: fascia - 2 * set.pad } : { x: -Xw + 2.2 * U, y: yFas + (fascia - 8.4 * V) / 2, w: 27.5 * U, h: 8.4 * V }
-  // (A phone's readout is narrow: `fromMax` is how many letters of a sender's name it holds beside a lane's name, and
-  // the machine is given only the letters whose senders fit. The page sets the name at 12 px or a little more.)
-  const fromMax = set ? Math.floor((readout.w - 2 * Math.min(18, Math.max(12, 1.6 * U)) - 64) / (.6 * .96 * Math.min(15, Math.max(12.5, 1.5 * U)))) : Infinity
+  // (A phone's readout is narrow: `fromMax` is how many letters of a sender's name it holds beside a lane's name,
+  // `subjectMax` how many of a subject each of its two lines holds, and the machine is given only the letters that fit whole.
+  // The page sets them at 12.5 px or a little more, in a face six tenths of its size wide.)
+  const inside = readout.w - 2 * Math.min(18, Math.max(12, 1.6 * U)), wide1 = .6 * Math.min(15, Math.max(12.5, 1.5 * U))
+  const fromMax = set ? Math.floor((inside - 64) / (.96 * wide1)) : Infinity, subjectMax = set ? Math.floor(inside / wide1) - 1 : Infinity
   // (Whether the button is seen before any scrolling: where it is not, the header carries one.)
   short ||= oy - cta.y > fold - inset.bottom
-  return { phone, routes, tight, short, W, H, fold, inset, ext, cannon, out: Math.round(out), room, widest, lean, ox, oy, sx, U, V, side, over, under, Xw, Xc, Xb, D, base, band, wall, manifold, slot, cavity, fascia, yBand, yWall, yMan, ySlot, yCav, yFas, yTop, P, lanes, label, lw, lh, cavD, zL, tubeR, tubes, post, zt, zProud, riser, fan, heads, drops, hung, front, lip, floor, zLip, zOver, zBack, slabX, hopper: hopperU * U, cta, plate, facts, tally, readout, fromMax, gauge, lamps }
+  return { phone, routes, tight, short, W, H, fold, inset, ext, cannon, out: Math.round(out), room, widest, lean, ox, oy, sx, U, V, side, over, under, Xw, Xc, Xb, D, base, band, wall, manifold, slot, cavity, fascia, yBand, yWall, yMan, ySlot, yCav, yFas, yTop, P, lanes, label, lw, lh, cavD, zL, tubeR, tubes, post, zt, zProud, riser, fan, heads, drops, hung, front, lip, floor, zLip, zOver, zBack, slabX, hopper: hopperU * U, cta, plate, facts, tally, readout, fromMax, subjectMax, gauge, lamps }
 }
 
 /** A box on the machine's front, as the page places it: left and top in the scene, width and height. */
