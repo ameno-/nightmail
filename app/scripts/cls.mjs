@@ -28,6 +28,11 @@
 // greeting streams in to its end; in-app, the chat stays open on Overview while the sidebar link goes to Logs (on a
 // phone, where the chat is a sheet over the page, the tab bar's link closes it).
 //
+// The homepage's machine, running, takes every core software WebGL can have (12 on a laptop, in SwiftShader): beside
+// other pages on CI's 4-core runner, their page.goto ran past 60 s (Nov 16). Signed out measures it running `alone`,
+// after every other page, one at a time. Pages that only start from the homepage, or show it as Signed out does with
+// another button, see it `still` (reduced motion: the same layout, one frame drawn).
+//
 // Dialogs (`dialog`): once the page has settled, the control whose text starts with `dialog` opens its dialog (a bottom
 // sheet on a phone), and the measurement covers the load and the open dialog together.
 //
@@ -54,7 +59,7 @@ const workers = Number(process.env.CLS_WORKERS) || Math.min(32, availableParalle
 const began = Date.now();
 const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 
-// [name, path, { user, from, click, row, switchTo, support, notes, dialog }]. The in-app navigation starts on `from` and clicks the
+// [name, path, { user, from, click, row, switchTo, support, notes, dialog, still, alone }]. The in-app navigation starts on `from` and clicks the
 // control whose text starts with `click`, the table row containing `row`, picks the workspace `switchTo` in the account
 // switcher, or else a link to `path`; with none of those (pages reached from a dropdown menu) it pushes `path` through
 // the router's history. It must land on `path`. `support` opens the support chat first, `dialog` a dialog (see above).
@@ -67,8 +72,8 @@ const pages = ids => [
   // Switching the time range keeps the old figures up while the new ones load, then tweens, morphs and crossfades them.
   ['Overview · range', '/overview', { from: '/overview', click: '30d' }],
   // "/" is the homepage signed in too: its button opens Overview (cold, then in the app).
-  ['Homepage · signed in', '/', {}],
-  ['Overview · from the homepage', '/overview', { from: '/', click: 'Open dashboard' }],
+  ['Homepage · signed in', '/', { still: true }],
+  ['Overview · from the homepage', '/overview', { from: '/', click: 'Open dashboard', still: true }],
   ['Logs', '/logs', { from: '/overview' }],
   ['Logs · received', '/logs?view=received', { from: '/logs', click: 'Received' }],
   ['Sent email', `/logs/${ids.email}`, { from: '/logs?view=sent', row: 'Your receipt' }],
@@ -142,10 +147,10 @@ const pages = ids => [
   ['Onboarding', '/onboarding', { user: 'ona' }],
   // Two accounts in one browser: a cold load as the default (dana), then switching to nia's workspace from the switcher.
   ['Two accounts · switch', '/overview', { user: ['dana', 'nia'], from: '/overview', switchTo: 'Lumen Labs' }],
-  ['Signed out', '/', { user: null }],
+  ['Signed out', '/', { user: null, alone: true }],
   // The public legal pages: signed out from the homepage and between documents, and signed in from the sidebar.
   ['Legal', '/legal', { user: null, from: '/legal/terms', click: 'Overview' }],
-  ['Legal · terms', '/legal/terms', { user: null, from: '/' }],
+  ['Legal · terms', '/legal/terms', { user: null, from: '/', still: true }],
   ['Legal · terms, signed in', '/legal/terms', { from: '/settings' }],
   ['Legal · acceptable use', '/legal/acceptable-use', { user: null, from: '/legal/terms' }],
   ['Legal · privacy', '/legal/privacy', { user: null, from: '/legal' }],
@@ -320,7 +325,7 @@ async function masking(page, hover) {
 
 async function measure(browser, job, fx) {
   const origin = fx.origins[job.index % fx.origins.length];
-  const context = await browser.newContext({ ...devices[job.device], colorScheme: job.scheme });
+  const context = await browser.newContext({ ...devices[job.device], colorScheme: job.scheme, ...job.still && { reducedMotion: 'reduce' } });
   const result = { page: job.name, path: job.path, scheme: job.scheme, device: job.device, mode: job.mode, cls: null, entries: [], longTask: null, error: null };
   let page, net;
   const problems = [];
@@ -503,13 +508,13 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, notes, dialog }] of pages(ids)) {
+  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, notes, dialog, still, alone }] of pages(ids)) {
     if (only && !only.test(name) || device === 'phone' && !phonePages.has(name)) continue;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    const load = { name, path, user, scheme, device, support, live, notes, dialog, mode: 'load', slug: slug + '-load' };
+    const load = { name, path, user, scheme, device, support, live, notes, dialog, still, alone, mode: 'load', slug: slug + '-load' };
     if (densityOnly && !density.wanted(load)) continue;
     jobs.push(load);
-    if (from && !densityOnly) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
+    if (from && !densityOnly) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
   }
   // Multi-step jobs (Support chat, live rituals, Overview's full warm-up) start first so none trails alone at the end.
   const weight = job => (job.support ? 4 : 0) + (job.live ? 2 : 0) + (job.name === 'Overview' && job.mode === 'load' ? 3 : 0);
@@ -518,16 +523,16 @@ try {
   jobs.forEach((job, index) => { job.index = index; });
   const queue = [...jobs].sort((a, b) => weight(b) - weight(a)).filter((_, i) => i % +shard[2] === +shard[1] - 1);
   console.log(`${elapsed()} measuring ${queue.length} of ${jobs.length} page loads, ${workers} at a time`);
+  const run = async job => {
+    const r = await measure(browser, job, fx);
+    results[job.index] = r;
+    const flag = r.error || r.cls > LIMIT ? '✗' : '✓';
+    console.log(`${elapsed().padStart(6)} ${flag} ${(r.device === 'phone' ? 'phone' : r.scheme).padEnd(5)} ${r.mode.padEnd(6)} ${r.page.padEnd(26)} ${String(r.cls).padEnd(7)}${r.longTask !== null ? ` ${r.longTask} ms` : ''}${r.error ? `  ${r.error}` : ''}`);
+  };
+  const shared = queue.filter(job => !job.alone), alone = queue.filter(job => job.alone);
   let next = 0;
-  await Promise.all(Array.from({ length: Math.min(workers, queue.length) }, async () => {
-    while (next < queue.length) {
-      const job = queue[next++];
-      const r = await measure(browser, job, fx);
-      results[job.index] = r;
-      const flag = r.error || r.cls > LIMIT ? '✗' : '✓';
-      console.log(`${elapsed().padStart(6)} ${flag} ${(r.device === 'phone' ? 'phone' : r.scheme).padEnd(5)} ${r.mode.padEnd(6)} ${r.page.padEnd(26)} ${String(r.cls).padEnd(7)}${r.longTask !== null ? ` ${r.longTask} ms` : ''}${r.error ? `  ${r.error}` : ''}`);
-    }
-  }));
+  await Promise.all(Array.from({ length: Math.min(workers, shared.length) }, async () => { while (next < shared.length) await run(shared[next++]); }));
+  for (const job of alone) await run(job);
 } finally {
   await browserPromise.then(b => b.close(), () => {});
   writeFileSync(join(out, 'api.log'), fx.serverLog());
