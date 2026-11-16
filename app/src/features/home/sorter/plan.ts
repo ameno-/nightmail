@@ -205,9 +205,6 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   const consent: Rect | null = set && agree ? { x: cta.x, y: set.consentY, w: ctaW, h: set.consentH } : null
   // (Whether the button is seen before any scrolling: where it is not, the header carries one.)
   short ||= oy - cta.y > fold - inset.bottom
-  // The wordmark, in lights at the head of the sorting frame: exactly as wide as the price, its two edges the
-  // price's, and half way between the price and the frame's top. `x, y` is its left end on its baseline, `cap` its cap
-  // height (its width is 10.8 of them: lib/marks.ts), `z` the plane its face is in, proud of the frame by `depth`.
   // On a wide page each lane fitted after the first brings a unit of its own, plugged onto the tower's side beside
   // the price: three up each side in the order they come, each slid in from its own side of the page over the one
   // before (the left's: threads, inboxes, rituals; the right's: agents, IMAP, campaigns). `pods`: each one's lane and
@@ -218,8 +215,21 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
     const x = s < 0 ? -Xc - podW : Xc, plateH = Math.max(1.4 * U, 12)
     return { lane, s, x, y, z: 1.4 * U, w: podW, h: podH, d: 5.6 * U, plate: { x: x + .5 * U, y: y + .55 * U, w: podW - 2.2 * U, h: plateH } }
   })
+  // The roof hangs from two cables while the tower is built up under it (`hang`: across it, where its two eyes are,
+  // left and right, `hangZ` back from its front). On a wide page they are well out towards its ends. A phone's rise
+  // past the page's header, and each is clear of everything in it: the mark on the left and, from the right edge, a
+  // 16 px margin, the theme and sound buttons (44 px each) and "API docs" in a box about 78 wide, so the header is clear
+  // from x 48 to W - 190. The two are symmetrical about the machine where that leaves the right one clear of the
+  // header's links (a tablet's page); on a phone the pair is moved left, as far apart as before, until it is, the left
+  // one, where it would stand on the slot scams leave by, beyond it, and no nearer the mark than 16 px.
+  const hangZ = D * (phone ? .78 : .5), mid = ox + DX * hangZ, eyes = (phone ? .38 : .74) * Xc
+  const right = phone ? Math.min(eyes, W - 198 - mid) : eyes, slotL = -eject.x - .62 * lw, slotR = -eject.x + .62 * lw, off = 8 * U / 9, l0 = right - 2 * eyes
+  const left = phone ? Math.max(56 - mid, l0 > slotL - off && l0 < slotR + off ? slotL - off : l0) : -eyes, hang = [left, right] as const
+  // The wordmark, in lights at the head of the sorting frame: exactly as wide as the price, its two edges the
+  // price's, and half way between the price and the frame's top. `x, y` is its left end on its baseline, `cap` its cap
+  // height (its width is 10.8 of them: lib/marks.ts), `z` the plane its face is in, proud of the frame by `depth`.
   const name = { x: -COLS * U / 2, y: yMan - over * V / 2 - COLS * U / 21.6, cap: COLS * U / 10.8, z: -.6 * U, depth: .6 * U }
-  return { phone, routes, fit, pods, eject, tight, short, name, W, H, fold, inset, ext, cannon, out: Math.round(out), room, widest, lean, ox, oy, sx, U, V, side, over, under, Xw, Xc, Xb, D, base, band, wall, manifold, slot, cavity, fascia, yBand, yWall, yMan, ySlot, yCav, yFas, yTop, P, lanes, label, lw, lh, cavD, zL, tubeR, tubes, post, zt, zProud, riser, fan, heads, drops, mouthRoom, hung, front, lip, floor, zLip, zOver, zBack, slabX, hopper: hopperU * U, cta, consent, plate, facts, tally, readout, fromMax, subjectMax, gauge, lamps }
+  return { phone, routes, fit, pods, eject, tight, short, name, W, H, fold, inset, ext, cannon, out: Math.round(out), room, widest, lean, ox, oy, sx, U, V, side, over, under, Xw, Xc, Xb, D, base, band, wall, manifold, slot, cavity, fascia, yBand, yWall, yMan, ySlot, yCav, yFas, yTop, P, lanes, label, lw, lh, cavD, zL, hang, hangZ, tubeR, tubes, post, zt, zProud, riser, fan, heads, drops, mouthRoom, hung, front, lip, floor, zLip, zOver, zBack, slabX, hopper: hopperU * U, cta, consent, plate, facts, tally, readout, fromMax, subjectMax, gauge, lamps }
 }
 
 /** A box on the machine's front, as the page places it: left and top in the scene, width and height. */

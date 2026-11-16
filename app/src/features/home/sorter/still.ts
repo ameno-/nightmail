@@ -92,7 +92,7 @@ export function drawStill(canvas: HTMLCanvasElement, p: Plan, over: number, dark
     fill('red', 1); c.fillRect(22 * px - .7, -2.6 * px, 1.4, 5.2 * px); c.restore()
     if (s < 0 || !p.phone) box(s * p.eject.x - .62 * p.lw, yTop, p.eject.z - 6 * px, s * p.eject.x + .62 * p.lw, yTop + 5 * px, p.eject.z + 6 * px, 'steel')
     // (The eye each side, the hook on it, and the cable up out of sight. A whole machine has been unhooked.)
-    const ex = s * (p.phone ? .38 : .74) * Xc, ez = D * (p.phone ? .62 : .5), ep = (p.phone ? 1.6 : 1) * px
+    const ex = p.hang[s < 0 ? 0 : 1], ez = p.hangZ, ep = (p.phone ? 1.6 : 1) * px
     box(ex - 2.4 * ep, yTop, ez - 2.4 * ep, ex + 2.4 * ep, yTop + 1.6 * ep, ez + 2.4 * ep, 'trim'); fill('steel', 1); c.beginPath(); c.arc(X(ex, ez - .8 * ep), Y(yTop + 3.4 * ep, ez - .8 * ep), 1.9 * ep, 0, Math.PI * 2); c.fill(); fill('slot', 1); c.beginPath(); c.arc(X(ex, ez - .85 * ep), Y(yTop + 3.4 * ep, ez - .85 * ep), .9 * ep, 0, Math.PI * 2); c.fill()
     if (!whole) { box(ex - 1.5 * ep, yTop + 5.4 * ep, ez - 1.2 * ep, ex + 1.5 * ep, yTop + 9 * ep, ez + 1.2 * ep, 'trim'); fill('trim', 1); for (const x of [-1.3, 1.1]) c.fillRect(X(ex + x * ep, ez - 1.2 * ep), Y(yTop + 5.4 * ep, ez - 1.2 * ep), .2 * ep, 2 * ep); fill('steel', 1); c.fillRect(X(ex - .7 * ep, ez - .7 * ep), -drop, 1.4 * ep, Y(yTop + 9 * ep, ez - .7 * ep) + drop) }
   }

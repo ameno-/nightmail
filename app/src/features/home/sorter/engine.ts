@@ -268,8 +268,8 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     for (const A of m.arms) { raise(A.portX - A.hw - 1.4 * px, A.portX + A.hw + 1.4 * px, p.zL - A.pd - 1.4 * px, p.zL + A.pd + 1.4 * px, p.yTop + 2 * px); if (!A.crane) raise(A.shoulder[0] - A.wellX - 1.4 * px, A.shoulder[0] + A.wellX + 1.4 * px, A.wellZ[0] - 1.4 * px, A.wellZ[1] + 1.4 * px, p.yTop + 1.3 * px) }
     for (const e of p.phone ? m.ejects.slice(0, 1) : m.ejects) raise(e[0] - .62 * p.lw, e[0] + .62 * p.lw, e[2] - 6 * px, e[2] + 6 * px, p.yTop + 5 * px)
     for (const s of [-1, 1]) {
-      const in0 = s * (p.phone ? p.Xc - 4.2 * p.U : p.Xc - 1.6 * p.U), ex = s * .74 * p.Xc, ez = p.D * (p.phone ? .62 : .5)
-      raise(Math.min(in0, s * p.Xc), Math.max(in0, s * p.Xc), 0, 7 * px, p.yTop + 4.4 * px); raise(ex - 2.4 * px, ex + 2.4 * px, ez - 2.4 * px, ez + 2.4 * px, p.yTop + 5.3 * px)
+      const in0 = s * (p.phone ? p.Xc - 2.4 * p.U : p.Xc - 1.6 * p.U), ex = p.hang[s < 0 ? 0 : 1], ez = p.hangZ, ep = (p.phone ? 1.6 : 1) * px
+      raise(Math.min(in0, s * p.Xc), Math.max(in0, s * p.Xc), 0, 7 * px, p.yTop + 4.4 * px); raise(ex - 2.4 * ep, ex + 2.4 * ep, ez - 2.4 * ep, ez + 2.4 * ep, p.yTop + 5.3 * ep)
       if (!p.phone) { const x = s * (p.Xc - 2.6 * p.U), jx = x - s * 2.2 * p.U, jz = p.D * .52; raise(x - 1.3 * px, x + 1.3 * px, 7 * px, jz, p.yTop + 2.7 * px); raise(Math.min(jx, x), Math.max(jx, x), jz - 1.3 * px, jz + 1.3 * px, p.yTop + 2.7 * px); raise(jx - 4 * px, jx + 4 * px, jz - 4 * px, jz + 4 * px, p.yTop + 4 * px) }
     }
   }

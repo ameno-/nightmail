@@ -510,10 +510,10 @@ export function buildMachine(p: Plan) {
   })
   // The roof hangs from two cables while the floors under it are slid in: they come down out of the night to an eye
   // each side of it, a hook on the end of each, and are drawn up out of sight once it stands on the console.
-  // (On a phone they hang nearer the middle, between the hopper and the ports, so that where they rise past the
-  // header they are clear of its links; and their fittings are drawn larger, to be seen at a phone's size.)
+  // (Where they are across the roof is the plan's: on a phone, where they rise past the header clear of what is in it.
+  // A phone's fittings are drawn larger, to be seen at its size.)
   b.floor(ROOF)
-  const eyes: V3[] = [-1, 1].map(s => [s * (p.phone ? .38 : .74) * Xc, yTop, D * (p.phone ? .62 : .5)]), ep = (p.phone ? 1.6 : 1) * px
+  const eyes: V3[] = p.hang.map(x => [x, yTop, p.hangZ]), ep = (p.phone ? 1.6 : 1) * px
   b.part('static4')
   for (const e of eyes) { b.box(e[0] - 2.4 * ep, yTop, e[2] - 2.4 * ep, e[0] + 2.4 * ep, yTop + 1.6 * ep, e[2] + 2.4 * ep, M.trim); b.cyl([e[0], yTop + 3.4 * ep, 0], 2, e[2] - .8 * ep, e[2] + .8 * ep, 1.9 * ep, M.steel, 10, 3); b.cyl([e[0], yTop + 3.4 * ep, 0], 2, e[2] - .85 * ep, e[2] - .8 * ep, .9 * ep, M.slot, 8, 1) }
   const cables = b.part('cables')
