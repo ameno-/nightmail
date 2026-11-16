@@ -119,6 +119,7 @@ export const KEEP = [
   { why: 'billing', file: 'features/settings/billing.tsx', text: /^Charges your saved card when the balance runs low, up to a monthly limit\.$/ },
   { why: 'billing', file: 'features/settings/create-key.tsx', text: /^Billed by the day while the inbox has an app password\.$/ },
   { why: 'secret', file: 'features/settings/create-key.tsx', text: /^Shown once: copy it now/ },
+  { why: 'secret', file: 'features/inbound/shared.tsx', text: /^It won’t be shown again\.$/ },
   { why: 'secret', file: 'features/settings/webhooks.tsx', text: /^Keep it on your server: anyone with it can sign requests as …\.$|^Keep it on your server: anyone with it can sign requests as Nightmail\.$/ },
   { why: 'legal', file: 'components/ContactSupport.tsx', text: /^Lets support read email bodies in this workspace, for this request only\.$/ },
   { why: 'legal', file: 'features/audience/bulk.tsx', text: /^Confirm they (agreed before marking them subscribed|subscribed again)\.$/ },

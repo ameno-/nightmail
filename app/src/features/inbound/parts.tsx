@@ -1,6 +1,5 @@
 import { Archive, Asterisk, AtSign, Ban, Bot, Clock, Forward, Hash, Inbox, MessageSquare, Plus, ScrollText, Webhook } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { Link } from 'react-router'
 import { outcomes } from './concepts'
 import { PrivateAddress, useMasked } from '../../components/PrivateAddress'
 import { isMailbox } from '../../lib/private-address'
@@ -48,9 +47,4 @@ export function Targets({ to, ownId, max = 3, total = to.length }: { to: Target[
 export function Chain({ keys, empty }: { keys: string[]; empty?: ReactNode }) {
   if (!keys.length) return <>{empty ?? <span className="muted">—</span>}</>
   return <span className="rcv-chain">{keys.map((k, i) => <span key={k}>{i > 0 && <span className="rcv-chain__then" aria-hidden="true">→</span>}<code>{k}</code></span>)}</span>
-}
-
-/** One plain line about a concept, with an example in code type and a link to its guide. */
-export function ConceptLine({ line, example, guide }: { line: ReactNode; example?: string; guide?: string }) {
-  return <p className="rcv-concept"><span>{line}</span>{example && <code className="rcv-concept__example" title={example}>{example}</code>}{guide && <Link className="guide-link" to={guide}>Guide</Link>}</p>
 }

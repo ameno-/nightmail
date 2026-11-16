@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
-import { Alert, Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, SecretInput, PageHeader, Pagination, SectionHeader, Select, SkeletonText, StatusBadge, type Tone } from '../../components/ui'
+import { Alert, Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, IconButton, Input, SecretInput, PageHeader, Pagination, SectionHeader, Select, SkeletonText, StatusBadge, type Tone } from '../../components/ui'
 import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { inboundEventTypes, type InboundAddress, type InboundWebhook, type InboundWebhookInput, type MailboxEventType, type MailboxWebhookDelivery } from '../../data/types'
@@ -12,17 +12,9 @@ import '../settings/settings.css'
 import './inbound.css'
 import './receiving.css'
 import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
+import { X } from 'lucide-react'
 import { productName } from '../../../../api/src/brand'
 
-const eventInfo: Partial<Record<MailboxEventType, string>> = {
-  'message.junk': 'Received mail whose spam verdict isn’t PASS, when junk delivery is on',
-  'message.stored': 'Every new inbound message, including unrouted mail. Requires Every address.', 'message.sent': 'SES accepted an outgoing message',
-  'message.delivered': 'The recipient server accepted it', 'message.delayed': 'Delivery is being retried',
-  'message.complained': 'The recipient reported spam', 'message.failed': 'The message was rejected, suppressed or canceled',
-  'thread.updated': 'A conversation was archived, starred, trashed or relabeled', 'address.created': 'An address was created (including automatically)',
-  'inbox.created': 'An agent inbox was created', 'inbox.deleted': 'An agent inbox was erased', 'message.held': 'Mail was stored but held: over an inbox’s limits or after it expired',
-  'inbox.quota_exceeded': 'An agent inbox reached its message or byte limit',
-}
 // paused: held by a paused webhook until it resumes.
 const deliveryStatus: Record<MailboxWebhookDelivery['status'], { label: string; tone: Tone }> = { pending: { label: 'Retrying', tone: 'warning' }, delivered: { label: 'Delivered', tone: 'success' }, failed: { label: 'Failed', tone: 'danger' }, paused: { label: 'Held', tone: 'neutral' } }
 // routeOnly is form state: a webhook that subscribes to no events and only gets mail a route sends to it.
@@ -45,27 +37,32 @@ function validate(input: Draft, editing = false) {
 }
 const scopeText = (webhook: InboundWebhook, addresses?: InboundAddress[]) => !webhook.eventTypes.length ? 'Routed mail only' : webhook.addressIds ? <AddressList values={webhook.addressIds.map(id => addresses?.find(item => item.id === id)?.address ?? id)} /> : 'All addresses'
 
+// Editing never shows the saved URL: its field is Replace URL, with the saved one masked as its placeholder, and left
+// empty it keeps it. What each event and payload carries is in the API reference, not under each box.
 function WebhookFields({ input, urlHint, onChange, addresses, errors, apiError, disabled, headers }: { input: Draft; urlHint?: string; onChange: (input: Draft) => void; addresses?: InboundAddress[]; errors: Record<string, string>; apiError: unknown; disabled: boolean; headers: { current: InboundWebhook['headers']; draft: HeaderDraft; onChange: (draft: HeaderDraft) => void } }) {
+  // Events a scope or payload can't carry aren't offered: message.stored needs every address, inbound.new's payload
+  // only describes received mail. Changing either drops them from the selection too.
+  const events = inboundEventTypes.filter(type => !(type === 'message.stored' && input.addressIds !== null) && !(input.format === 'inbound' && !receivedOnly([type]).length))
   return <div className="stack">
     <div className="form-grid">
       <Field label="Description" htmlFor="mailbox-webhook-description"><Input id="mailbox-webhook-description" value={input.description} onChange={event => onChange({ ...input, description: event.target.value })} disabled={disabled} placeholder="Support agent runtime" /></Field>
-      <Field label="Endpoint URL" htmlFor="mailbox-webhook-url" error={errors.url || fieldError(apiError, 'url')} hint={urlHint ? 'Leave blank to keep the saved URL, or enter a replacement.' : 'A public HTTPS URL. Signed with Standard Webhooks headers.'}><SecretInput id="mailbox-webhook-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} disabled={disabled} placeholder={urlHint ?? 'https://agents.acme.com/hooks/mail'} /></Field>
+      <Field label={urlHint ? 'Replace URL' : 'HTTPS URL'} htmlFor="mailbox-webhook-url" error={errors.url || fieldError(apiError, 'url')}><SecretInput id="mailbox-webhook-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} disabled={disabled} placeholder={urlHint ?? 'https://agents.acme.com/hooks/mail'} /></Field>
     </div>
     <div className="form-grid">
-      <Field label="Addresses" htmlFor="mailbox-webhook-scope" error={errors.addressIds || fieldError(apiError, 'addressIds')} hint={input.routeOnly ? <>Send mail to it from an address’s <Link to="/receiving">Goes to</Link>.</> : input.addressIds === null ? 'Includes addresses created later.' : undefined}>
+      <Field label="Addresses" htmlFor="mailbox-webhook-scope" error={errors.addressIds || fieldError(apiError, 'addressIds')}>
         <Select id="mailbox-webhook-scope" value={input.routeOnly ? 'routed' : input.addressIds === null ? 'all' : 'selected'} disabled={disabled}
           onValueChange={value => onChange({ ...input, routeOnly: value === 'routed', addressIds: value === 'selected' ? [] : null, eventTypes: value === 'selected' ? input.eventTypes.filter(type => type !== 'message.stored') : input.eventTypes.length ? input.eventTypes : ['message.received'] })}
-          options={[{ value: 'all', label: 'Every address' }, { value: 'selected', label: 'Selected addresses' }, { value: 'routed', label: 'Only mail a route sends here' }]} />
+          options={[{ value: 'all', label: 'Every address, new ones too' }, { value: 'selected', label: 'Selected addresses' }, { value: 'routed', label: 'Only mail a route sends here' }]} />
       </Field>
-      <Field label="Payload" htmlFor="mailbox-webhook-format" hint={input.format === 'inbound' ? `inbound.new’s email.received, for receivers moved from inbound.new. Signed like ${productName} events too.` : `${productName}’s signed event. Read the message with its messageId.`}>
+      <Field label="Payload" htmlFor="mailbox-webhook-format">
         <Select id="mailbox-webhook-format" value={input.format ?? 'bane'} disabled={disabled} onValueChange={value => onChange({ ...input, format: value as Draft['format'], junk: undefined, eventTypes: value === 'inbound' ? receivedOnly(input.eventTypes).length ? receivedOnly(input.eventTypes) : ['message.received'] : input.eventTypes })} options={[{ value: 'bane', label: `${productName} event` }, { value: 'inbound', label: 'inbound.new email.received' }]} />
       </Field>
     </div>
-    <Checkbox disabled={disabled} checked={(input.junk ?? (input.format === 'inbound' ? 'include' : 'skip')) === 'include'} onCheckedChange={checked => onChange({ ...input, junk: checked ? 'include' : 'skip' })} label={<span className="settings-cell-stack"><span>Deliver junk mail too</span><span className="ui-field__hint">Mail whose spam verdict isn’t PASS, as message.junk or with spam.isJunk.</span></span>} />
+    <Checkbox disabled={disabled} checked={(input.junk ?? (input.format === 'inbound' ? 'include' : 'skip')) === 'include'} onCheckedChange={checked => onChange({ ...input, junk: checked ? 'include' : 'skip' })} label="Deliver junk mail too" />
     {!input.routeOnly && input.addressIds !== null && <div className="settings-choices" role="group" aria-label="Addresses">{!addresses?.length ? <p className="muted">No addresses yet.</p> : addresses.map(address => <Checkbox key={address.id} label={<PrivateAddress value={address.address} />} disabled={disabled} checked={input.addressIds!.includes(address.id)} onCheckedChange={checked => onChange({ ...input, addressIds: checked ? [...input.addressIds!, address.id] : input.addressIds!.filter(id => id !== address.id) })} />)}</div>}
     {!input.routeOnly && <fieldset className="mailbox-webhook-events" disabled={disabled}>
       <legend className="ui-field__label">Events</legend>
-      {inboundEventTypes.map(type => <Checkbox key={type} disabled={(type === 'message.stored' && input.addressIds !== null) || (input.format === 'inbound' && !receivedOnly([type]).length)} label={<span className="settings-cell-stack"><code>{type}</code>{eventInfo[type] && <span className="ui-field__hint">{eventInfo[type]}</span>}</span>} checked={input.eventTypes.includes(type)} onCheckedChange={checked => onChange({ ...input, eventTypes: checked ? [...input.eventTypes, type] : input.eventTypes.filter(value => value !== type) })} />)}
+      {events.map(type => <Checkbox key={type} label={<code>{type}</code>} checked={input.eventTypes.includes(type)} onCheckedChange={checked => onChange({ ...input, eventTypes: checked ? [...input.eventTypes, type] : input.eventTypes.filter(value => value !== type) })} />)}
       {(errors.eventTypes || fieldError(apiError, 'eventTypes')) && <p className="ui-field__error" role="alert">{errors.eventTypes || fieldError(apiError, 'eventTypes')}</p>}
     </fieldset>}
     <WebhookHeadersField current={headers.current} draft={headers.draft} onChange={headers.onChange} errors={errors} apiError={apiError} disabled={disabled} />
@@ -101,11 +98,12 @@ function WebhooksList() {
     try { const result = await create.mutateAsync({ ...payloadOf(input), headers: headerPayload(headers) }); setOpen(false); setSecret({ value: result.secret, id: result.webhook.id }) } catch { /* Shown in the form. */ }
   }
   return <div className="stack inbound-stack">
-    <PageHeader title="Inbound webhooks" backTo="/receiving?tab=endpoints" actions={<Button variant="primary" onClick={openCreate}>Add webhook</Button>} />
-    <p className="muted inbound-note rcv-note">POSTs for received mail and replies, or long-poll <code>GET /v1/inbound/events</code>; sent mail is in <Link to="/settings#webhooks">Settings</Link>.</p>
-    {addressId && <p className="muted inbound-note">Webhooks that get this address’s mail, active or paused · <Link to="/receiving/webhooks">Show all</Link></p>}
+    {/* Sent mail's webhooks live in Settings, one click away from here. */}
+    <PageHeader title="Inbound webhooks" backTo="/receiving?tab=endpoints" actions={<><Link className="ui-button ui-button--secondary ui-button--md" to="/settings#webhooks">Sent mail webhooks</Link><Button variant="primary" onClick={openCreate}>Add webhook</Button></>} />
+    {/* ?address= narrows the list to the webhooks that get that address's mail, active or paused; the chip clears it. */}
+    {addressId && <div className="cluster"><span className="rcv-filter-chip">{(a => a ? <PrivateAddress value={a} /> : 'One address')(addresses.data?.find(item => item.id === addressId)?.address)}<IconButton size="sm" label="Show every webhook" onClick={() => navigate('/receiving/webhooks')}><X size={14} aria-hidden="true" /></IconButton></span></div>}
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable loading={webhooks.isPending || (addresses.isPending && !addresses.error)} skeletonRows={2} minRows={2} rows={webhooks.data?.data ?? []} rowKey={row => row.id} rowHref={row => `/receiving/webhooks/${row.id}`}
-      empty={addressId ? <EmptyState title="No webhook gets this address’s mail" description="Webhooks subscribed to message.received for it, or for every address, show up here." /> : <EmptyState title="No inbound webhooks" description="Get a POST when mail arrives or a sent message is delivered." action={<Button onClick={openCreate}>Add webhook</Button>} />}
+      empty={addressId ? <EmptyState title="No webhook gets this address’s mail" /> : <EmptyState title="No inbound webhooks" action={<Button onClick={openCreate}>Add webhook</Button>} />}
       columns={[
         // A webhook's card: its name and status, its URL, then the addresses and events it gets.
         { key: 'endpoint', label: 'Endpoint', width: '34%', render: row => <div className="settings-cell-stack"><span>{webhookTitle(row)}</span>{webhookTitle(row) !== row.url && <span className="muted settings-break">{row.url}</span>}</div>, cardRender: webhookTitle },

@@ -104,12 +104,13 @@ function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, 
           : message.bodyTruncated && <Alert tone="info">This is a preview of a long message. <Button variant="ghost" size="sm" loading={pending && wanted === 'full'} onClick={() => setWanted('full')}>Show the full message</Button></Alert>}
         {formatted && loaded?.html && <ReceivedEmailPreview html={loaded.html} tooComplex={loaded.htmlTooComplex} title={`Message from ${nameOf(message.from)}`} className="mailbox-message__html" />}
         {(!formatted || !loaded?.html || loaded.htmlTooComplex) && <div className="mailbox-message__body">{(showQuoted ? text : replyText || text) || <span className="muted">(no text)</span>}</div>}
-        {loaded && wanted === 'formatted' && !loaded.html && <p className="mailbox-message__attachments-note muted">This message has no formatted version.</p>}
         <div className="cluster mailbox-message__toggles">
           <Button variant="ghost" size="sm" onClick={onReply} aria-pressed={isTarget}><Reply size={14} aria-hidden="true" />{isTarget ? 'Replying to this' : 'Reply to this message'}</Button>
           {hasQuote && !formatted && <Button variant="ghost" size="sm" onClick={() => setShowQuoted(value => !value)}>{showQuoted ? 'Hide quoted text' : 'Show quoted text'}</Button>}
+          {/* Asked for and not there, the button says so in its own place. */}
           {loaded?.html ? <Button variant="ghost" size="sm" onClick={() => setFormatted(value => !value)}>{formatted ? 'Show plain text' : 'Show formatted'}</Button>
-            : !loaded && <Button variant="ghost" size="sm" loading={pending && wanted === 'formatted'} onClick={() => setWanted('formatted')}>Show formatted</Button>}
+            : !loaded ? <Button variant="ghost" size="sm" loading={pending && wanted === 'formatted'} onClick={() => setWanted('formatted')}>Show formatted</Button>
+            : wanted === 'formatted' && <Button variant="ghost" size="sm" disabled>No formatted version</Button>}
         </div>
         {message.attachmentCount > 0 && (loaded ? loaded.attachments.length > 0 && <ul className="mailbox-attachments">{loaded.attachments.map(file => <li key={file.id}><button type="button" onClick={() => void download(file.id)}><Paperclip size={12} aria-hidden="true" />{file.filename}<span className="muted">{Math.max(1, Math.round(file.size / 1024))} KB</span></button></li>)}</ul>
           : <div className="mailbox-attachments"><Button variant="ghost" size="sm" loading={pending && wanted === 'attachments'} onClick={() => setWanted('attachments')}><Paperclip size={12} aria-hidden="true" />Show {message.attachmentCount} attachment{message.attachmentCount === 1 ? '' : 's'}</Button></div>)}
@@ -118,7 +119,7 @@ function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, 
   </li>
 }
 
-function Conversation({ thread, addressId, addresses, focusMessage, onBack }: { thread: InboundThreadDetail; addressId?: string; addresses: Addresses; focusMessage: string | null; onBack: () => void }) {
+function Conversation({ thread, addressId, addresses, focusMessage, onBack, onAddress }: { thread: InboundThreadDetail; addressId?: string; addresses: Addresses; focusMessage: string | null; onBack: () => void; onAddress: (id: string) => void }) {
   const api = useApi()
   const own = useMemo(() => ownAddresses(addresses), [addresses])
   // Older pages hang off the first page's oldest message; if a refetch moves that boundary, the cursors are stale.
@@ -166,14 +167,12 @@ function Conversation({ thread, addressId, addresses, focusMessage, onBack }: { 
     setTarget(current => current === message.id ? null : message.id)
     requestAnimationFrame(() => composer.current?.focus())
   }
-  const people = [...new Map(messages.filter(message => message.direction === 'inbound').map(message => [message.from.address, message.from])).values()]
   const replyTarget = messages.find(message => message.id === target) ?? messages.at(-1)!
   return <section className="mailbox-conversation" aria-label="Conversation">
     <header className="mailbox-conversation__header">
       <IconButton variant="ghost" className="mailbox-back" label="Back to conversations" onClick={onBack}><ArrowLeft size={16} /></IconButton>
       <div className="mailbox-conversation__title">
         <h2>{thread.subject || '(no subject)'}</h2>
-        <p className="muted">{thread.messageCount} message{thread.messageCount === 1 ? '' : 's'}{people.length > 0 && <> · with {people.map((person, i) => <span key={person.address}>{i > 0 && ', '}<Sender value={person} /></span>)}</>}</p>
         {(!addressId || (flags && flags.labels.length > 0)) && <span className="mailbox-labels">
           {!addressId && <AddressLabels ids={thread.addressIds} addresses={addresses} />}
           {flags?.labels.map(item => <span key={item} className="mailbox-label">{item}</span>)}
@@ -185,8 +184,10 @@ function Conversation({ thread, addressId, addresses, focusMessage, onBack }: { 
         <IconButton variant="ghost" label={flags.archived ? 'Move to inbox' : 'Archive'} onClick={() => act({ archived: !flags.archived })}>{flags.archived ? <Inbox size={16} /> : <Archive size={16} />}</IconButton>
         <IconButton variant="ghost" label={flags.trashed ? 'Restore' : 'Move to trash'} onClick={() => act({ trashed: !flags.trashed })}>{flags.trashed ? <Undo2 size={16} /> : <Trash2 size={16} />}</IconButton>
       </div>}
+      {/* Read, star, archive and trash belong to one address: with several in view, choosing one (the list's filter) brings them. */}
+      {!stateAddress && states.length > 1 && <Select className="address-select-trigger mailbox-conversation__scope" menuClassName="address-select" aria-label="Address to star, archive or mark read as" value="" placeholder="Star or archive as…" onValueChange={onAddress}
+        options={states.map(state => addressOption(state.addressId, addressName(addresses, state.addressId)))} />}
     </header>
-    {!stateAddress && states.length > 1 && <p className="muted inbound-scope-note">It reached several addresses: filter by one to star, archive or mark it read.</p>}
     {update.error && <Alert tone="danger">{update.error instanceof Error ? update.error.message : 'The conversation could not be updated.'}</Alert>}
     {olderCursor && <div className="inbound-older">{olderError ? <ErrorState error={olderError} onRetry={() => void loadOlder()} /> : <Button variant="ghost" size="sm" loading={loadingOlder} onClick={() => void loadOlder()}>Show earlier messages</Button>}</div>}
     <ol className="mailbox-messages">
@@ -243,7 +244,7 @@ function Composer({ thread, target, explicit, onClearTarget, addressId, addresse
       <label className="mailbox-composer__to" htmlFor="inbound-reply">{explicit ? `Replying to ${target.direction === 'outbound' ? 'your message' : `${nameOf(target.from)}’s message`} from ${when(target.receivedAt)}` : 'Replying to the newest message'}</label>
       {explicit && <IconButton variant="ghost" size="sm" label="Reply to the newest message instead" onClick={onClearTarget}><X size={14} /></IconButton>}
     </div>
-    {!fixed && <Field label="Send as" htmlFor="inbound-reply-sender" hint="It reached several of your addresses. Choose which one replies." error={fieldError(send.error, 'addressId')}>
+    {!fixed && <Field label="Send as" htmlFor="inbound-reply-sender" error={fieldError(send.error, 'addressId')}>
       <Select id="inbound-reply-sender" className="address-select-trigger" menuClassName="address-select" value={sender ?? ''} onValueChange={setChosen} disabled={send.isPending} placeholder="Choose an address" options={candidates.map(id => addressOption(id, addressName(addresses, id)))} />
     </Field>}
     <div className="inbound-recipients-review" aria-label="Reply recipients">
@@ -300,7 +301,7 @@ function NewThreadDialog({ open, onOpenChange, addresses, defaultAddress, onSent
       <Field label="Address" htmlFor="inbound-new-from" error={errors.addressId || fieldError(send.error, 'addressId')} hint={selected && sender && sender.address !== selected.address ? <>Sends as <NamedAddress name={sender.name} address={sender.address} />.</> : undefined}>
         <Select id="inbound-new-from" className="address-select-trigger" menuClassName="address-select" value={from} onValueChange={setFrom} disabled={send.isPending} placeholder="Choose an address" options={addresses.map(address => addressOption(address.id, address.address, address.displayName ?? undefined))} />
       </Field>
-      <Field label="To" htmlFor="inbound-new-to" error={errors.to || fieldError(send.error, 'to')} hint="Separate several recipients with commas."><Input id="inbound-new-to" value={to} onChange={event => setTo(event.target.value)} disabled={send.isPending} placeholder="name@example.com" autoComplete="off" /></Field>
+      <Field label="To" htmlFor="inbound-new-to" error={errors.to || fieldError(send.error, 'to')}><Input id="inbound-new-to" value={to} onChange={event => setTo(event.target.value)} disabled={send.isPending} placeholder="name@example.com, …" autoComplete="off" /></Field>
       <Field label="Subject" htmlFor="inbound-new-subject" error={errors.subject || fieldError(send.error, 'subject')}><Input id="inbound-new-subject" value={subject} onChange={event => setSubject(event.target.value)} disabled={send.isPending} /></Field>
       <Field label="Message" htmlFor="inbound-new-text" error={errors.text || fieldError(send.error, 'text')}><Textarea id="inbound-new-text" rows={8} value={text} onChange={event => setText(event.target.value)} disabled={send.isPending} /></Field>
     </form>
@@ -344,13 +345,13 @@ export function InboundPage() {
           : threads.data.length ? <>
             <ThreadList threads={threads.data} threadId={threadId} addresses={addresses} own={own} addressId={addressId} onSelect={id => change({ thread: id, message: null })} />
             {(pagination.page > 1 || threads.data.nextCursor) && <Pagination page={pagination.page} pageSize={50} nextCursor={threads.data.nextCursor} onPageChange={next => pagination.onPageChange(next, threads.data.nextCursor)} />}
-          </> : <EmptyState title={q ? 'No matching conversations' : `Nothing in ${views.find(item => item.value === view)!.label.toLowerCase()}`} description={!q && !addresses.size && !addressList.isPending ? 'Create an address to start receiving mail.' : undefined} action={!q && !addresses.size && !addressList.isPending ? <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving">Create an address</Link> : undefined} />}
+          </> : <EmptyState title={q ? 'No matching conversations' : `Nothing in ${views.find(item => item.value === view)!.label.toLowerCase()}`} action={!q && !addresses.size && !addressList.isPending ? <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving">Create an address</Link> : undefined} />}
       </aside>
       <div className="mailbox-reader">
         {!threadId ? <EmptyState title="Select a conversation" />
           : thread.error ? <ErrorState error={thread.error} onRetry={() => void thread.refetch()} />
           : thread.isPending || !thread.data ? <div className="mailbox-thread-skeleton"><SkeletonText width="50%" lineHeight={24} /><SkeletonText width="80%" /><SkeletonText width="70%" /></div>
-          : <Conversation thread={thread.data} addressId={addressId} addresses={addresses} focusMessage={params.get('message')} onBack={() => change({ thread: null, message: null })} />}
+          : <Conversation thread={thread.data} addressId={addressId} addresses={addresses} focusMessage={params.get('message')} onBack={() => change({ thread: null, message: null })} onAddress={id => { pagination.reset(); change({ address: id }) }} />}
       </div>
     </div>
     <NewThreadDialog open={composing} onOpenChange={setComposing} addresses={[...addresses.values()]} defaultAddress={addressId} onSent={id => change({ thread: id, message: null })} />

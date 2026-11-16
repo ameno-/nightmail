@@ -17,9 +17,8 @@ import { staleAfterWrite } from '../../data/invalidation'
 import { queries } from '../../data/queries'
 import { useLeaveGuard } from '../../lib/leave-guard'
 import { ritualRecipes, ritualTemplates, RITUALS_PER_ADDRESS } from '../../../../api/src/ritual-schema'
-import { concepts, guides } from './concepts'
+import { concepts } from './concepts'
 import { firstOverview, useOverview } from './overview'
-import { ConceptLine } from './parts'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { defaultChoice, EmailPicker, TraceView, traceInput, useDryRun, useRecentMail, type EmailChoice } from './trace'
 import './inbound.css'
@@ -28,7 +27,6 @@ import { useSingleFlight } from '../../lib/single-flight'
 import { actorText, changedLines, diffLines, useLiveVersion, type ChangeActor, type DiffLine, type LiveChange } from './live'
 import { addressOption } from './shared'
 import { maskedParts } from '../../lib/private-address'
-import { productName } from '../../../../api/src/brand'
 const runNext = 'Run the next one too'
 const savedMeanwhile = (version: number) => `Version ${version} was saved meanwhile: load theirs or keep yours.`
 
@@ -453,7 +451,7 @@ export function RitualsPage() {
   const swap = (b: Row, j: number | undefined, by: number) => { if (j === undefined) return; const a = [...bindings]; [a[b.i], a[j]] = [a[j]!, a[b.i]!]; void saveBindings(a, `Moved ${b.ritual} ${by < 0 ? 'up' : 'down'}`) }
   // On a phone each attachment is a card: the address, then its place, with the row's actions in a menu.
   const bindingColumns: Column<Row>[] = [
-    { key: 'target', label: 'Runs on mail to', card: 'title', render: b => <PrivateAddress value={targetName(b.target)} /> },
+    { key: 'target', label: 'Address', card: 'title', render: b => <PrivateAddress value={targetName(b.target)} /> },
     { key: 'order', label: 'Order', width: 120, card: 'line', render: b => b.of > 1 ? `${b.place} of ${b.of}` : 'Only ritual', cardRender: b => <>{b.of > 1 ? `Runs ${b.place} of ${b.of}` : 'Only ritual here'}{b.continue ? ', then the next one' : ''}</> },
     { key: 'continue', label: 'After it acts', width: 190, card: 'hide', render: b => <Checkbox checked={b.continue} disabled={binding} onCheckedChange={v => void saveBindings(bindings.map((x, i) => i === b.i ? { ...x, continue: v } : x), v ? `${b.ritual} now lets the next ritual run` : `${b.ritual} now stops the next ritual`)} label={runNext} /> },
     { key: 'actions', label: '', width: 132, align: 'right', card: 'end', cardRender: b => <DropdownMenu label={`Actions for ${b.ritual}`} title={<>{b.ritual} on <PrivateAddress value={targetName(b.target)} /></>} items={[
@@ -469,10 +467,17 @@ export function RitualsPage() {
   ]
   const recipients = (addresses.data ?? []).filter(a => !a.expiresAt).map(a => a.address)
   const attached = bindings.some(b => b.target === target && b.ritual === key)
-  const remoteStatus = !pending && saved && isSaved && !dirty && updatedBy?.version === saved.version ? `Updated by ${actorText(updatedBy.actor)} · version ${saved.version}` : null
-  const status = pending ? 'Saving…' : !saved ? '' : remoteStatus ?? (!isSaved ? `${key || 'This new ritual'} isn’t saved yet` : dirty ? 'Unsaved changes' : `All changes saved · version ${saved.version}`)
-  const changes = incoming && saved ? changesBetween(saved.config, incoming.config, key, scriptChanged ? source : null) : null
   const recipe = isSaved ? saved?.config.rituals.find(r => r.key === key)?.recipe : undefined, recipeName = recipe && ritualRecipes.find(r => r.id === recipe.id)?.name
+  const remoteStatus = !pending && saved && isSaved && !dirty && updatedBy?.version === saved.version ? `Updated by ${actorText(updatedBy.actor)} · version ${saved.version}` : null
+  // The save bar says what Save will do when it isn't plain: a renamed ritual saves as a new one (the old one stays), and
+  // a change to a form-made ritual makes it a script of your own.
+  const status = pending ? 'Saving…' : !saved ? '' : remoteStatus ?? (!isSaved ? (opened && key && key !== opened ? `Saves as a new ritual · ${opened} stays` : `${key || 'This new ritual'} isn’t saved yet`)
+    : dirty ? (recipeName && scriptChanged ? 'Unsaved · saving makes it your own script' : 'Unsaved changes') : `All changes saved · version ${saved.version}`)
+  const changes = incoming && saved ? changesBetween(saved.config, incoming.config, key, scriptChanged ? source : null) : null
+  // Attaching: an address takes up to RITUALS_PER_ADDRESS rituals, and one ritual once.
+  const onTarget = bindings.filter(b => b.target === target).length
+  const attachError = attached ? `${key} already runs on this address.` : target && onTarget >= RITUALS_PER_ADDRESS ? `This address already runs ${RITUALS_PER_ADDRESS} rituals, the most it takes.` : undefined
+  const templateApplied = ritualTemplates.find(t => t.id === template)
   return <div className="stack inbound-stack ritual-page">
     <PageHeader title={title} backTo="/receiving?tab=rituals" actions={<>
       {/* Always in the header, so the buttons beside it never move; hidden until there's a saved ritual to delete. It
@@ -484,14 +489,14 @@ export function RitualsPage() {
     </>} />
     {problems.length > 0 && <Alert tone="danger" title="Not saved. Fix these first:"><ul className="ritual-problems">{problems.map((p, i) => <li key={i}><code>{p.ritual ? `${p.ritual}:` : ''}{p.line}:{p.column}</code> {p.message}{p.hint ? <span className="muted"> {p.hint}</span> : null}</li>)}</ul></Alert>}
     {saved && <>
-      {/* With the config, so a recipe's note never arrives after the editor and pushes it down. */}
-      {recipeName ? <ConceptLine line={<>Made from <Link to={`/receiving/rituals/${encodeURIComponent(key)}`}>{recipeName}</Link>. Saving a change here makes it your own script.</>} />
-        : <ConceptLine line="A short script that runs on its addresses’ mail." guide={guides.rituals} />}
+      {/* With the config, so a form-made ritual's way back to its form never arrives after the editor and pushes it down. */}
+      {recipeName && <div className="cluster"><Link className="ui-button ui-button--secondary ui-button--sm" to={`/receiving/rituals/${encodeURIComponent(key)}`}>Edit as form</Link></div>}
       <div className="ritual-pickers">
-        <Field label="Key" error={key && !keyValid ? 'Use lowercase letters, digits and hyphens, like refund-triage.' : clash ? `A ritual named ${key} exists. Open it from Rituals, or pick another key.` : undefined} hint={isSaved ? 'Renaming saves it as a new ritual; this one stays until you delete it.' : 'How addresses and the API refer to it. Lowercase letters, digits and hyphens.'}>
+        <Field label="Key" error={key && !keyValid ? 'Use lowercase letters, digits and hyphens, like refund-triage.' : clash ? `A ritual named ${key} exists. Open it from Rituals, or pick another key.` : undefined}>
           <Input value={key} onChange={e => setKey(e.target.value.toLowerCase().replace(/[\s_]+/g, '-'))} placeholder="triage" aria-invalid={(!!key && !keyValid) || clash || undefined} />
         </Field>
-        <Field label="Start from a template" hint={(t => !t ? 'Replaces the script below.' : missing(t) ? <>Applied “{t.name}”. Its endpoint doesn’t exist yet: <Link to="/receiving?tab=endpoints">add a {endpointWord[t.needs!]} endpoint</Link>.</> : `Applied “${t.name}”. Not saved until you save.`)(ritualTemplates.find(t => t.id === template))}>
+        {/* Replacing a script asks first; an applied template is a draft like any edit, and the save bar says so. */}
+        <Field label="Start from a template" error={templateApplied && missing(templateApplied) ? <>Its endpoint doesn’t exist yet: <Link to="/receiving?tab=endpoints">add a {endpointWord[templateApplied.needs!]} endpoint</Link>.</> : undefined}>
           <Select value={template} onValueChange={id => { if (!id) return; if (source.trim() && source !== blank() && source !== origin) setConfirmTemplate(id); else applyTemplate(id) }}
             options={[{ label: 'Choose…', value: '' }, ...ritualTemplates.map(t => ({ label: missing(t) ? `${t.name} (needs a ${endpointWord[t.needs!]} endpoint)` : t.name, value: t.id }))]} />
         </Field>
@@ -507,8 +512,9 @@ export function RitualsPage() {
       {check !== null && recent.isFetched && <>
       {/* A dry run, one click away: opens from its heading, or already open when a link lands on #try. */}
       <section ref={tryRef} className="section ritual-try ritual-more" aria-label="Try it on an email">
-        <Disclosure id="try" title="Try it on an email" hint="Nothing is sent or saved" defaultOpen={routeLocation.hash === '#try'}>
-        <ConceptLine line={`Runs ${key || 'this ritual'} as if attached to the address the email went to. Omens use the answers you set.`} />
+        {/* Runs this ritual, unsaved, as if attached to the address the email went to; nothing is sent or saved, and omens
+            give the answers set here. */}
+        <Disclosure id="try" title="Try it on an email" defaultOpen={routeLocation.hash === '#try'}>
         <EmailPicker value={choice} onChange={next => { setChoice(next); dry.clear() }} addresses={recipients} />
         <div className="ritual-try__options">
           {choice.mode !== 'sample' && <Field label="As mail to" htmlFor="ritual-try-to"><Input id="ritual-try-to" className="private-field" list="trace-addresses" value={as} onChange={e => { setAs(e.target.value); dry.clear() }} placeholder={recipient || recipients[0] || 'support@acme.com'} autoComplete="off" /></Field>}
@@ -523,25 +529,27 @@ export function RitualsPage() {
       </section>
 
       <section id="attach" className="section section--bordered stack" aria-labelledby="ritual-attach">
+        {/* Rituals on an address run in order (the Order column); the first that acts stops the rest unless its After it
+            acts box lets the next one run. The limit per address shows when an attach would pass it. */}
         <SectionHeader title={<span id="ritual-attach">Runs on</span>} />
-        <ConceptLine line={`Up to ${RITUALS_PER_ADDRESS} per address, in order. The first that acts stops the rest unless “${runNext}” is on.`} />
         <DataTable columns={bindingColumns} rows={rows} rowKey={b => `${b.target}/${b.ritual}`}
-          empty={<EmptyState title="Not attached yet" description="Pick an address below. A ritual runs only on mail to its addresses." />} />
+          empty={<EmptyState title="Not attached yet" />} />
         <div className="ritual-attach">
-          <Field label={`Attach ${key || 'this ritual'} to`} hint={!isSaved && key ? `Saves ${key} with it.` : undefined}><Select className="address-select-trigger" menuClassName="address-select" value={target} onValueChange={setTarget} placeholder="Choose an address" options={[{ label: 'Choose an address', value: '' }, ...targets.map(t => addressOption(t.value, t.label))]} /></Field>
+          <Field label={`Attach ${key || 'this ritual'} to`} error={attachError}><Select className="address-select-trigger" menuClassName="address-select" value={target} onValueChange={setTarget} placeholder="Choose an address" options={[{ label: 'Choose an address', value: '' }, ...targets.map(t => addressOption(t.value, t.label))]} /></Field>
           <Checkbox checked={next} onCheckedChange={setNext} label={runNext} />
-          <Button loading={binding || (pending && !isSaved)} disabled={!target || !keyValid || clash || attached || binding || pending} onClick={() => void saveBindings([...bindings, { ritual: key, target, continue: next }], `Attached ${key}`)}>{isSaved ? 'Attach' : 'Save and attach'}</Button>
+          <Button loading={binding || (pending && !isSaved)} disabled={!target || !keyValid || clash || !!attachError || binding || pending} onClick={() => void saveBindings([...bindings, { ritual: key, target, continue: next }], `Attached ${key}`)}>{isSaved ? 'Attach' : 'Save and attach'}</Button>
         </div>
-        {attached && <p className="muted ritual-attach__note">{key} already runs on <PrivateAddress value={targetName(target)} />.</p>}
       </section>
 
-      <section className="section ritual-settings ritual-more" aria-label="Sender lists and omens">
-        <Disclosure title="Sender lists and omens" hint="Used by every ritual">
-        <Field label="Sender lists" hint={<>One per line: <code>vip: <PrivateAddress value="ceo@example.com" />, @partner.example</code>. Check with <code>lists.has("vip", email.from.address)</code>.</>}>
-          <Textarea className="ritual-lists private-field" rows={3} value={lists} onChange={e => setLists(e.target.value)} spellCheck={false} />
+      {/* Shared by every ritual, not just this one. A list is one per line (vip: an address, @partner.example); omens read
+          mail only at the hosts listed, and give their default answer everywhere else. The rituals guide has both. */}
+      <section className="section ritual-settings ritual-more" aria-label="Shared sender lists and omens">
+        <Disclosure title="Shared sender lists and omens">
+        <Field label="Sender lists, one per line">
+          <Textarea className="ritual-lists private-field" rows={3} value={lists} onChange={e => setLists(e.target.value)} spellCheck={false} placeholder="vip: @partner.example" />
         </Field>
-        <Field label="Omens can read mail at" hint={<>Receiving hosts, comma-separated. Elsewhere an omen gives its default answer and {productName}’s AI doesn’t read the mail. <Link to={guides.rituals}>How omens work</Link></>}>
-          <Input value={domains} onChange={e => setDomains(e.target.value)} placeholder={(overview.data?.domains ?? []).find(d => d.status === 'active')?.name ?? 'reply.example.com'} />
+        <Field label="Omens can read mail at">
+          <Input value={domains} onChange={e => setDomains(e.target.value)} placeholder={`${(overview.data?.domains ?? []).find(d => d.status === 'active')?.name ?? 'reply.example.com'}, …`} />
         </Field>
         </Disclosure>
       </section>

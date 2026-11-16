@@ -6,7 +6,6 @@ import { Link } from 'react-router'
 import { CopyAction } from '../../components/motion'
 import { builtins, ctxFields, emailFields, endpointPayloads, RITUALS_PER_ADDRESS, type Field } from '../../../../api/src/ritual-schema'
 import { webhookSignatureGuide } from '../../../../api/src/webhook-signature-guide'
-import { concepts } from '../inbound/concepts'
 import { McpSetup } from './agent-setup'
 import { credentials } from './credentials'
 import { usePublicOrigin } from '../../data/context'
@@ -50,6 +49,8 @@ const ritualExample = `export default function route(email, ctx) {
   }
 }`
 
+const endpointsLine = 'Named places mail can be sent: Slack, Discord, a webhook or a forward.'
+
 export const guides: Guide[] = [
   {
     id: 'receiving', title: 'Receiving', summary: 'How mail reaches your domain and where it goes: addresses, routes, rituals and endpoints.',
@@ -58,9 +59,9 @@ export const guides: Guide[] = [
         <p>Mail sent to one of your addresses arrives at {productName} through your domain’s receiving MX record. {productName} finds the address’s <strong>route</strong>, runs its <strong>rituals</strong>, then delivers it: to the address’s Inbox, and to any <strong>endpoints</strong> its route or rituals name. You read it in Receiving → Inbox, over the API or from an agent.</p>
         <Table head={['Word', 'What it is', 'Example']} rows={[
           ['Address', 'An email address that receives mail. It keeps its own threads in the Inbox.', <code key="e">support@acme.com</code>],
-          ['Route', concepts.routes.line, <code key="e">{concepts.routes.example}</code>],
-          ['Ritual', concepts.rituals.line, concepts.rituals.example],
-          ['Endpoint', concepts.endpoints.line, <code key="e">{concepts.endpoints.example}</code>],
+          ['Route', 'Every address that receives mail, and where its mail goes.', <code key="e">support@acme.com → triage → Inbox, Slack support</code>],
+          ['Ritual', 'What happens to an address’s mail: post, forward, junk or label it.', 'Post new mail to support in Slack'],
+          ['Endpoint', endpointsLine, <code key="e">endpoints.support({'{'} text: email.subject {'}'})</code>],
           ['Catch-all', 'What happens to mail for an address that doesn’t exist on the domain: store it, or create an address for it.', <code key="e">*@acme.com</code>],
           ['Agent inbox', 'An expiring address that an agent or a test creates and reads.', <Link key="e" to="/docs/inboxes">Agent inboxes</Link>],
         ]} />
@@ -108,7 +109,7 @@ export const guides: Guide[] = [
         <Table head={['Field', 'Meaning']} rows={[...fieldRows('email', emailFields), ...fieldRows('ctx', ctxFields)]} />
       </Section>
       <Section title={`Omens: questions for ${productName}’s AI`}>
-        <p>{concepts.omens.line} Ask with <code>omens(email, {'{'} name: "question" {'}'})</code>; each name comes back as a score you compare, like <code>asks.refund &gt;= 0.7</code>. One request per email answers every question in every ritual. In the API and its docs, that AI is called Jev.</p>
+        <p>Questions a ritual asks {productName}’s AI about an email, answered 0 to 1. Ask with <code>omens(email, {'{'} name: "question" {'}'})</code>; each name comes back as a score you compare, like <code>asks.refund &gt;= 0.7</code>. One request per email answers every question in every ritual. In the API and its docs, that AI is called Jev.</p>
         <p>{productName}’s AI only reads mail at the receiving hosts you list under <strong>Omens can read mail at</strong> in the ritual editor. Everywhere else, and in Try it and Trace, an omen gives its default answer instead; in Try it you set each answer with a slider to see what the ritual would do.</p>
       </Section>
       <Section title="Sender lists">
@@ -120,7 +121,7 @@ export const guides: Guide[] = [
     id: 'endpoints', title: 'Endpoints and routes', summary: 'Where mail can go besides the Inbox, and the difference between a route and a ritual.',
     body: () => <>
       <Section title="Endpoints">
-        <p>{concepts.endpoints.line} Create them in <Link to="/receiving?tab=endpoints">Receiving → Endpoints</Link>; each has a name rituals call it by. Send a test from its ⋯ menu.</p>
+        <p>{endpointsLine} Create them in <Link to="/receiving?tab=endpoints">Receiving → Endpoints</Link>; each has a name rituals call it by. Send a test from its ⋯ menu.</p>
         <Table head={['Type', 'Call it as', 'Notes']} rows={[
           ['Slack', <code key="c">{endpointPayloads.slack.signature('support')}</code>, 'An incoming webhook URL from Slack. Stored encrypted; mentions and link previews are off.'],
           ['Discord', <code key="c">{endpointPayloads.discord.signature('alerts')}</code>, 'A webhook URL from Discord. Stored encrypted; mentions are off.'],

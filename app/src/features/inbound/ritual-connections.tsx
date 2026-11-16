@@ -1,14 +1,14 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { Alert, Button, Checkbox, CopyButton, SecretCode, Dialog, Field, Input, SecretInput, Select, type Tone } from '../../components/ui'
+import { Alert, Button, Checkbox, CopyButton, Dialog, Field, Input, SecretInput, Select, type Tone } from '../../components/ui'
 import { request } from '../../data/live'
 import { ApiError } from '../../data/types'
 import { productName } from '../../../../api/src/brand'
 const errorText = (e: unknown): string => e instanceof ApiError ? e.text : (e as Error).message
 import { useApiDef } from '../../data/context'
 import { queries } from '../../data/queries'
-import { idempotencyFor } from './shared'
+import { idempotencyFor, SecretField } from './shared'
 import '../settings/settings.css'
 import './inbound.css'
 import { useSingleFlight } from '../../lib/single-flight'
@@ -20,8 +20,6 @@ const typeLabel: Record<EndpointType, string> = { slack: 'Slack', discord: 'Disc
 const statusTone: Record<EndpointStatus, Tone> = { ready: 'success', pending: 'warning', expired: 'warning', declined: 'danger', paused: 'neutral' }
 const statusLabel: Record<EndpointStatus, string> = { ready: 'Ready', pending: 'Awaiting recipient', expired: 'Link expired', declined: 'Declined', paused: 'Paused' }
 const targetLabel: Record<EndpointType, string> = { slack: 'Slack incoming webhook URL', discord: 'Discord webhook URL', webhook: 'HTTPS URL', forward: 'Recipient address' }
-const payloadOf: Record<EndpointType, string> = { slack: '({ text: … })', discord: '({ content: … })', webhook: '(payload?)', forward: '()' }
-const typeHint: Record<EndpointType, string> = { slack: 'Posts a message to a Slack channel.', discord: 'Posts a message to a Discord channel.', webhook: 'Posts signed JSON to your server. Routes can send whole messages here too.', forward: 'Forwards the email to another address, once its owner agrees.' }
 
 export const slackUrl = /^https:\/\/hooks\.slack\.com\//i, discordUrl = /^https:\/\/(?:\w+\.)?discord(?:app)?\.com\/api\/webhooks\//i
 /** What is wrong with an endpoint's URL or forward address, or '' when it will do. The recipe form checks with it too. */
@@ -31,14 +29,6 @@ export function targetProblem(type: EndpointType, value: string) {
   if (type === 'slack' && !slackUrl.test(value)) return 'Use Slack’s incoming webhook URL, starting https://hooks.slack.com/.'
   if (type === 'discord' && !discordUrl.test(value)) return 'Use Discord’s webhook URL, starting https://discord.com/api/webhooks/.'
   return ''
-}
-const hours = (iso: string | null) => iso ? Math.max(0, Math.round((Date.parse(iso) - Date.now()) / 3600000)) : 0
-/** The API's nextStep is written for agents; people get the same fact with the dashboard's own controls. */
-function humanStep(e: Endpoint) {
-  if (e.status === 'pending') return `Waiting for the recipient to confirm by email · link expires in ${hours(e.expiresAt)} h`
-  if (e.status === 'expired') return 'Confirmation link expired · resend it from the menu'
-  if (e.status === 'declined') return 'The recipient declined or stopped forwards'
-  return 'Paused · calls wait until you resume'
 }
 /** The endpoint as the edit form needs it: what it is and whether it's paused. Its URL is write-only and never here. */
 export type EditableEndpoint = { name: string; type: EndpointType; status: EndpointStatus; target: string }
@@ -103,31 +93,34 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
   // Editing: Slack and Discord switch between each other; webhooks and forwards keep their type.
   const typeOptions = editing ? (chat(editing.type) ? types.filter(chat) : [editing.type]) : types
   const formId = editing ? 'endpoint-edit' : 'endpoint-create'
-  const urlHint = editing
-    ? retyped ? `Required to switch: ${typeLabel[editing.type]} URLs don’t work with ${typeLabel[type]}.` : `Stored encrypted and never shown. Leave it empty to keep the current URL.${type === 'webhook' ? ' A new URL drops custom headers set over the API.' : ''}`
-    : type === 'slack' || type === 'discord' ? 'Stored encrypted and never shown again.' : type === 'forward' ? 'We email them a confirmation link. Nothing is forwarded until they confirm.' : `${productName} signs each event; the secret is shown once.`
+  // A stored URL is never shown: the field is Replace URL, empty keeps it. A webhook's new URL drops the custom headers
+  // set on it over the API, so that is said as soon as one is typed, before Save.
+  const dropsHeaders = !!editing && editing.type === 'webhook' && type === 'webhook' && !!value
+  // A new forward emails its recipient to confirm first, unless it's on a domain this workspace verified: Create says so.
+  const confirms = !editing && type === 'forward' && !preverify
   return <Dialog open={open} onOpenChange={next => { if (!busy) onOpenChange(next) }} title={editing ? `Edit ${editing.name}` : 'New endpoint'}
-    footer={<><Button disabled={busy} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form={formId} loading={busy}>{editing ? 'Save' : 'Create'}</Button></>}>
+    footer={<><Button disabled={busy} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form={formId} loading={busy}>{editing ? 'Save' : confirms ? 'Email them to confirm' : 'Create'}</Button></>}>
     <form id={formId} className="stack" onSubmit={submit} noValidate>
-      {typeOptions.length > 1 || editing ? <Field label="Type" hint={editing && typeOptions.length === 1 ? `${typeLabel[editing.type]} endpoints keep their type. Create a new endpoint for another kind.` : typeHint[type]}>
+      {typeOptions.length > 1 || editing ? <Field label="Type">
         <Select value={type} disabled={typeOptions.length === 1} onValueChange={v => { setType(v as EndpointType); setTarget(''); setTried(false); setError(null) }} options={typeOptions.map(value => ({ value, label: typeLabel[value] }))} />
       </Field> : null}
-      <Field label="Name" error={nameError || serverError('name') || undefined} hint={<>Rituals call it as <code>endpoints.{nameValid ? name : 'name'}{payloadOf[type]}</code></>}>
+      <Field label="Name" error={nameError || serverError('name') || undefined}>
         <Input value={name} onChange={e => { setName(e.target.value.toLowerCase().replace(/[\s_]+/g, '-')); if (serverError('name')) setError(null) }} placeholder={type === 'forward' ? 'team' : type === 'webhook' ? 'crm' : type === 'discord' ? 'alerts' : 'support'} autoComplete="off" aria-invalid={!!(nameError || serverError('name')) || undefined} />
       </Field>
       {editing?.type === 'forward'
-        ? <Field label="Recipient address" hint="Confirmed by its recipient, so it can’t change; create another forward instead."><p className="endpoint-recipient"><PrivateAddress value={editing.target} /></p></Field>
-        : <Field label={editing ? 'Replace URL' : targetLabel[type]} error={targetError || serverError('url') || undefined} hint={urlHint}>
+        ? <Field label="Recipient address"><p className="endpoint-recipient"><PrivateAddress value={editing.target} /></p></Field>
+        : <Field label={editing ? 'Replace URL' : targetLabel[type]} error={targetError || serverError('url') || undefined}>
           <SecretInput type={type === 'forward' ? 'email' : type === 'webhook' ? 'url' : 'password'} autoComplete="off" value={target} onChange={e => { setTarget(e.target.value); if (serverError('url')) setError(null) }}
             placeholder={type === 'forward' ? 'team@example.com' : editing && !retyped ? 'Keep the current URL' : 'https://'} aria-invalid={!!(targetError || serverError('url')) || undefined} />
         </Field>}
+      {dropsHeaders && <Alert tone="warning">A new URL drops the custom headers set on this webhook over the API.</Alert>}
       {!editing && type === 'forward' && <>
-        <Field label="Ask from" hint="The receiving address that sends the request and the forwards.">
+        <Field label="Forward from">
           <Select mask value={from} onValueChange={setFrom} options={[{ value: '', label: 'Oldest receiving address' }, ...(boxes.data ?? []).map(a => ({ value: a.id, label: a.address }))]} />
         </Field>
         <Checkbox checked={preverify} onCheckedChange={setPreverify} label="Skip the email: it’s on a domain you verified" />
       </>}
-      {editing && <Checkbox checked={enabled} onCheckedChange={setEnabled} label="Enabled: rituals and routes can deliver to it" />}
+      {editing && <Checkbox checked={enabled} onCheckedChange={setEnabled} label="Enabled" />}
       {(generalError || serverError('type') || serverError('paused')) && <Alert tone="danger">{generalError || serverError('type') || serverError('paused')}</Alert>}
     </form>
   </Dialog>
@@ -139,11 +132,10 @@ export function CreatedEndpointDialog({ created, onClose, writeRitual = true }: 
   return <Dialog sensitive={Boolean(created?.secret)} open={!!created} onOpenChange={next => { if (!next) onClose() }} title={created?.status === 'pending' ? 'Confirmation sent' : 'Endpoint created'}
     footer={<><Button onClick={onClose}>Done</Button>{writeRitual && created?.status !== 'pending' && <Link className="ui-button ui-button--primary ui-button--md" to="/receiving/rituals/new" onClick={onClose}>New ritual</Link>}</>}>
     {created && <div className="stack">
-      <Field label="Call it from a ritual" hint={created.type === 'webhook' ? 'The payload is optional; without one it gets the whole message event.' : undefined}><div className="settings-copy-cell"><code>{call}</code><CopyButton value={call} label="Copy call" /></div></Field>
-      {created.secret && <Field label="Signing secret" hint={`Copy it now; it won’t be shown again. Use it to verify requests come from ${productName}.`}><div className="settings-copy-cell"><SecretCode>{created.secret}</SecretCode><CopyButton value={created.secret} label="Copy secret" /></div></Field>}
-      {created.status === 'pending' && <p className="muted">{created.nextStep}</p>}
+      <Field label="Call it from a ritual"><div className="settings-copy-cell"><code>{call}</code><CopyButton value={call} label="Copy call" /></div></Field>
+      {created.secret && <SecretField label="Signing secret" value={created.secret} copyLabel="Copy secret" />}
     </div>}
   </Dialog>
 }
 export const endpointTypeLabel = typeLabel
-export { humanStep, statusLabel as endpointStatusLabel, statusTone as endpointStatusTone }
+export { statusLabel as endpointStatusLabel, statusTone as endpointStatusTone }
