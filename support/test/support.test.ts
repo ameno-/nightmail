@@ -160,7 +160,7 @@ describe('support Worker', () => {
     const firstRequest = recorded[before]!;
     assert.equal(firstRequest.headers.authorization, `Bearer ${GATEWAY_KEY}`);
     assert.equal(firstRequest.headers['x-api-key'], undefined);
-    assert.equal(firstRequest.body.model, 'claude-opus-5-5');
+    assert.equal(firstRequest.body.model, 'claude-sonnet-5-5');
     assert.deepEqual(firstRequest.body.output_config, { effort: 'medium' });
     assert.ok(firstRequest.url.startsWith('https://opencode.ai/inference/anthropic/v1/messages'));
     const tools = firstRequest.body.tools.map((t: any) => t.name).sort();
