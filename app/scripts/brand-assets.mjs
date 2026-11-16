@@ -4,7 +4,8 @@
 //
 // og.png is the homepage itself: the built dashboard (bun run build first) is served from dist/ with the two requests a
 // signed-out visit makes answered here, the sorter runs until it has burst and come to rest, and the card is the part of
-// that frame with the price and the line under it, the wordmark set beside it. BRAND_ONLY=og writes only the card.
+// that frame with the wordmark in lights, the price and the line under it, the lockup set beside it from the page's own
+// outlines. BRAND_ONLY=og writes only the card.
 import { createServer } from 'node:http';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, extname, join, resolve } from 'node:path';
@@ -22,7 +23,8 @@ const tile = (size, scale, background) => `<body style="margin:0;width:${size}px
 
 // The link-preview card. The page is laid out for a 1440 × 900 window at night; the card is 800 by 420 of its pixels,
 // photographed at one and a half times (so 1200 × 630 exactly), ending just right of the cabinet's riser and at the foot of the headline's band.
-// What is too small to read on a card (the lane plates) is hidden, and the wordmark stands in the space to the left.
+// What is too small to read on a card (the lane plates) is hidden, and the lockup stands in the space to the left: the
+// monogram's tile from the page's header and, one stem to its right, the wordmark as the page's last band draws it.
 async function sorterCard(browser) {
   const dist = resolve(publicDir, '../dist');
   if (!existsSync(join(dist, 'index.html'))) throw Error('og.png is photographed from the built dashboard: run `bun run build` in app/ first');
@@ -54,9 +56,11 @@ async function sorterCard(browser) {
       const style = document.createElement('style');
       style.textContent = '.srt-lanes, .srt-card, .srt-cannon { visibility: hidden !important }';
       document.head.append(style);
-      const mark = document.querySelector('.srt-header .bane-wordmark').cloneNode(true);
-      mark.style.cssText = `position: fixed; z-index: 99; left: ${x + 26}px; top: ${y + 26}px; gap: 9px; color: var(--srt-text); font-size: 24px; line-height: 26px`;
-      mark.querySelector('svg').style.cssText = 'width: 25px; height: 25px';
+      // (Cap height 15 px of the page, so 22.5 on the card: the lockup ends well short of the cabinet's front.)
+      const svg = 'http://www.w3.org/2000/svg', mark = document.createElementNS(svg, 'svg'), cap = 15;
+      mark.setAttribute('viewBox', '0 0 12120 1000');
+      mark.style.cssText = `position: fixed; z-index: 99; left: ${x + 26}px; top: ${y + 26}px; width: ${cap * 12.12}px; height: ${cap}px; fill: var(--srt-name)`;
+      for (const [from, dx] of [['.srt-mark path', 0], ['.srt-solid-face', 1320]]) { const path = document.createElementNS(svg, 'path'); path.setAttribute('d', document.querySelector(from).getAttribute('d')); path.setAttribute('transform', `translate(${dx} 0)`); mark.append(path) }
       document.querySelector('.srt-page').append(mark);
       return { x, y, width: across, height };
     }, across);
