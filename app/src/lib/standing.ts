@@ -9,9 +9,9 @@ export const stepAtLeast = (step: StandingStep | null | undefined, floor: Standi
 export type RaisedStep = 'warn' | 'restrict' | 'pause'
 export const standingTitle: Record<RaisedStep, string> = { warn: 'Your limit is frozen', restrict: 'Marketing is held', pause: 'Sending is paused' }
 export const standingDid: Record<RaisedStep, string> = {
-  warn: 'Your daily limit won’t rise until this clears. All mail still sends.',
+  warn: 'Your daily limit won’t rise until this clears.',
   restrict: 'Marketing is held; receipts and resets still send.',
-  pause: 'All sending is paused. Receiving, inboxes and the dashboard keep working. Queued mail is held for 72 hours, then canceled.',
+  pause: 'All sending is paused. Queued mail is held for 72 hours, then canceled.',
 }
 // When a step has no measured reason (an operator's hold, an AWS tenant pause).
 export const standingFallback: Record<RaisedStep, string> = { warn: 'Sending crossed a warning line.', restrict: `${productName} held marketing after a review.`, pause: `${productName} paused sending.` }
