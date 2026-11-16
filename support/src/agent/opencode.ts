@@ -14,11 +14,13 @@ import { log } from '../log.js';
 // retries and eviction recovery; we give it one custom agent, our tools as a plugin, and a fetch it must use for every
 // request. Upgrading means bumping @opencode/sdk and @opencode/plugin together (pinned, see package.json).
 //
-// Pinned model (owner decision): Claude Opus 5.5 at medium effort through Console's inference gateway, nothing else.
+// Pinned model (owner decision): Claude Sonnet 5.5 at medium effort through Console's inference gateway, nothing else.
 // The pin is enforced four ways: the config model, the agent model, the session model (without it OpenCode would fall
 // back to any available model) and a provider policy; and the fetch below refuses any request that isn't exactly it.
+// A conversation whose session was made under an earlier pin is switched to this one before its next turn.
 
-export const MODEL = { providerID: 'anthropic', model: 'claude-opus-5-5', variant: 'medium' } as const;
+export const MODEL = { providerID: 'anthropic', model: 'claude-sonnet-5-5', variant: 'medium' } as const;
+const PIN = `${MODEL.model}#${MODEL.variant}`;
 const MAX_STEPS = 25;
 const TOOL_NAMES = TOOLS.map(t => t.name);
 /** Session rules merge after every plugin's agent rules: this, not the agent's list, decides what the model can call. */
@@ -156,14 +158,20 @@ export async function createHarness(env: Env, storage: DurableObjectStorage): Pr
     log: { level: 'warn', emit: entry => log(entry.level === 'warn' ? 'warn' : 'error', { event: 'opencode', code: 'OPENCODE', note: String(entry.message).slice(0, 120), errorType: entry.cause === undefined ? undefined : errorTypeOf(entry.cause) }) },
   });
 
+  const model = { providerID: MODEL.providerID, id: MODEL.model, variant: MODEL.variant };
   async function session(): Promise<string> {
     const existing = await storage.get<string>('support:opencode-session');
-    if (existing) return existing;
-    const created = await opencode.sessions.create({
-      title: 'Support conversation', location: { directory: '/support' }, agent: 'support',
-      model: { providerID: MODEL.providerID, id: MODEL.model, variant: MODEL.variant }, permissions: PERMISSIONS,
-    } as never);
-    await storage.put('support:opencode-session', created.id);
+    if (existing) {
+      // A session keeps the model it was made with; one from before the current pin moves to it, or the fetch guard
+      // would refuse its next request.
+      if (await storage.get<string>('support:opencode-model') !== PIN) {
+        await opencode.sessions.switchModel({ sessionID: existing, model } as never);
+        await storage.put('support:opencode-model', PIN);
+      }
+      return existing;
+    }
+    const created = await opencode.sessions.create({ title: 'Support conversation', location: { directory: '/support' }, agent: 'support', model, permissions: PERMISSIONS } as never);
+    await storage.put({ 'support:opencode-session': created.id, 'support:opencode-model': PIN });
     return created.id;
   }
 
