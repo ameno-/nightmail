@@ -6,6 +6,7 @@ import { AlignCenter, AlignLeft, AlignRight, Bold, Box, ChevronDown, Columns2, H
 import { Alert, Button, DropdownMenu, IconButton, SkeletonText } from '../../components/ui'
 import { useApi } from '../../data/context'
 import type { Attachment, AttachmentApi } from '../../data/types'
+import { attachmentLimit, composerLoading, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS } from './copy'
 import { prepareLocalImage, inlineImageSources, inlineImageHash, replaceEditorImageSources, loadInlineAttachments, cidImageSources } from './composer-content'
 import { blockHtmlToDocument, documentToBlockHtml, isBlockDocumentEmpty, type EditorNode } from './block-content'
 import '@react-email/editor/themes/default.css'
@@ -166,7 +167,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     if (hydrating) throw new Error('Wait for inline images to finish loading before saving.')
     if (uploads.current) throw new Error('Wait for your image to finish loading before continuing.')
     const instance = editor.current
-    if (!instance?.editor) throw new Error('The composer is still loading. Try again in a moment.')
+    if (!instance?.editor) throw new Error(composerLoading)
     let document = instance.getJSON() as EditorNode
     if (isBlockDocumentEmpty(document)) return { html: '', inlineAttachmentIds: [] }
     const currentInline: string[] = []
@@ -178,7 +179,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
       if (cached && !allIds.has(cached.id)) { metadata.push(cached); allIds.add(cached.id) }
     }
     let totalSize = metadata.reduce((total, item) => total + item.size, 0)
-    if (allIds.size > 20 || totalSize > 8 * 1024 * 1024) throw new Error('Use at most 20 attachments with a combined size of 8 MiB.')
+    if (allIds.size > MAX_ATTACHMENTS || totalSize > MAX_ATTACHMENT_BYTES) throw new Error(attachmentLimit)
     const sources = new Map<string, string>()
     for (const source of inlineSources) {
       let cid = cidBySource.current.get(source)
@@ -186,7 +187,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
         const match = /^data:(image\/(?:png|jpeg|gif|webp|avif));base64,(.+)$/i.exec(source)
         if (!match) throw new Error('Unsupported inline image format.')
         const bytes = Uint8Array.from(atob(match[2]), character => character.charCodeAt(0))
-        if (allIds.size >= 20 || totalSize + bytes.length > 8 * 1024 * 1024) throw new Error('Use at most 20 attachments with a combined size of 8 MiB.')
+        if (allIds.size >= MAX_ATTACHMENTS || totalSize + bytes.length > MAX_ATTACHMENT_BYTES) throw new Error(attachmentLimit)
         const hash = await inlineImageHash(source)
         const contentId = `bane-${crypto.randomUUID()}`
         const extension = match[1].split('/')[1] === 'jpeg' ? 'jpg' : match[1].split('/')[1]
@@ -295,7 +296,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
           { label: 'Bullet list', icon: <List size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().toggleBulletList().run()) },
           { label: 'Divider', icon: <Minus size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().setHorizontalRule().run()) },
           { label: 'Styled section', icon: <Box size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().insertSection().run()) },
-          { label: 'Two columns', icon: <Columns2 size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().insertColumns(2).run()) },
+          { label: '2 columns', icon: <Columns2 size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().insertColumns(2).run()) },
           ...(personalize ? [['Contact’s name', 'name'], ['Contact’s first name', 'firstName'], ['Contact’s email', 'email']].map(([label, key]) => ({ label: `${label} {{${key}}}`, icon: <UserRound size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().insertContent(`{{${key}}}`).run()) })) : []),
         ]} />
         <div className="cluster"><IconButton size="sm" label="Bold" disabled={inactive} onClick={() => command(e => e.chain().focus().toggleBold().run())}><Bold size={16} /></IconButton><IconButton size="sm" label="Italic" disabled={inactive} onClick={() => command(e => e.chain().focus().toggleItalic().run())}><Italic size={16} /></IconButton></div>
@@ -310,13 +311,13 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     <div className="composer-visual">
       <div className="composer-canvas" onClickCapture={event => { if ((event.target as HTMLElement).closest('a')) event.preventDefault() }}>
         {!ready && <div className="composer-starting" role="status"><SkeletonText width="55%" lineHeight={36} /><SkeletonText /><SkeletonText width="80%" /><span className="sr-only">Loading visual composer</span></div>}
-        <EmailEditor key={generation} ref={editor} content={content as Record<string, unknown>} theme={theme} editable={!locked} placeholder="Write your email, or type / to insert a block…" onUploadImage={upload} className="composer-document" onReady={instance => { synchronizeEditor(instance); trackCaret(instance); setReady(!hydrating); if (!hydrating) { console.info(`[${productName} timing] campaign editor ready`, { navigationMs: Number(performance.now().toFixed(1)) }); onReady() } }} onUpdate={() => { changed.current = true; onDirty() }}>
+        <EmailEditor key={generation} ref={editor} content={content as Record<string, unknown>} theme={theme} editable={!locked} placeholder="Write, or type / for blocks…" onUploadImage={upload} className="composer-document" onReady={instance => { synchronizeEditor(instance); trackCaret(instance); setReady(!hydrating); if (!hydrating) { console.info(`[${productName} timing] campaign editor ready`, { navigationMs: Number(performance.now().toFixed(1)) }); onReady() } }} onUpdate={() => { changed.current = true; onDirty() }}>
           <Inspector.Root ref={inspector} className="composer-inspector" hidden={!inspectorOpen}>
             <div className="composer-inspector-header"><strong>Design</strong><IconButton size="sm" label="Close design panel" onClick={() => setInspectorOpen(false)}><X size={16} /></IconButton></div>
             <Inspector.Breadcrumb />
-            <Inspector.Document>{() => <p className="composer-inspector-hint">Select an image, button, section, column, heading, or paragraph to edit its design.</p>}</Inspector.Document>
+            <Inspector.Document>{() => <p className="composer-inspector-hint">Select a block to edit its design.</p>}</Inspector.Document>
             <Inspector.Node />
-            <Inspector.Text>{() => <p className="composer-inspector-hint">Choose the block name above to style the whole block, or use the toolbar for selected text.</p>}</Inspector.Text>
+            <Inspector.Text>{() => <p className="composer-inspector-hint">The block name above styles the block; the toolbar styles selected text.</p>}</Inspector.Text>
           </Inspector.Root>
         </EmailEditor>
       </div>

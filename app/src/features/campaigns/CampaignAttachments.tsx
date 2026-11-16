@@ -2,14 +2,15 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 're
 import { Paperclip, X } from 'lucide-react'
 import { IconButton, useToast } from '../../components/ui'
 import { useApi, useApiQuery } from '../../data/context'
-import type { Attachment, AttachmentApi } from '../../data/types'
+import { errorText, type Attachment, type AttachmentApi } from '../../data/types'
+import { attachmentLimit, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS } from './copy'
 import { number } from '../../lib/format'
 import './attachments.css'
 
 export type CampaignAttachmentsRef = { open: () => void }
 type Props = { ids: string[]; persisted: string[]; attachmentApi?: AttachmentApi; onChange: (ids: string[]) => void; onBusy: (busy: boolean) => void; disabled: boolean }
 const size = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
-const message = (error: unknown) => error instanceof Error ? error.message : 'Something went wrong. Please try again.'
+const message = errorText
 
 export const CampaignAttachments = forwardRef<CampaignAttachmentsRef, Props>(function CampaignAttachments({ ids, persisted, attachmentApi: providedAttachmentApi, onChange, onBusy, disabled }, ref) {
   const api = useApi()
@@ -34,7 +35,7 @@ export const CampaignAttachments = forwardRef<CampaignAttachmentsRef, Props>(fun
       if (metadata.isError) void metadata.refetch()
       return
     }
-    if (ids.length >= 20 || file.size + metadata.data.reduce((sum, item) => sum + item.size, 0) > 8 * 1024 * 1024) { toast('Use at most 20 attachments with a combined size of 8 MiB.', 'error'); return }
+    if (ids.length >= MAX_ATTACHMENTS || file.size + metadata.data.reduce((sum, item) => sum + item.size, 0) > MAX_ATTACHMENT_BYTES) { toast(attachmentLimit, 'error'); return }
     setBusy(true); onBusy(true)
     try {
       const item = await attachmentApi.upload(file)

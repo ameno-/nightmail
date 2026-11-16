@@ -232,11 +232,11 @@ function ToolLine({ label, state }: { label: string; state: 'running' | 'done' |
 function ConsentCard({ part, closed, onDecide }: { part: Extract<Part, { kind: 'consent' }>; closed: boolean; onDecide: (decision: 'allow' | 'deny') => void }) {
   const decided = part.state === 'allow' || part.state === 'deny'
   return <div className="support-card support-consent" data-state={part.state} role="group" aria-label="Allow access to email content">
-    <p className="support-card__title">Let {productName} support read the content of your emails in <strong>{part.request.workspace.name}</strong> for this conversation.</p>
+    <p className="support-card__title">Let support read emails in <strong>{part.request.workspace.name}</strong>?</p>
     <p className="support-card__body">{part.request.why}</p>
     <div className="support-card__actions">
       <div className="support-card__choice" data-active={!decided || undefined} aria-hidden={decided || undefined}>
-        <Button variant="primary" size="sm" loading={part.state === 'allowing'} disabled={decided || closed} tabIndex={decided ? -1 : undefined} onClick={() => onDecide('allow')}>Allow</Button>
+        <Button variant="primary" size="sm" loading={part.state === 'allowing'} disabled={decided || closed} tabIndex={decided ? -1 : undefined} onClick={() => onDecide('allow')}>Allow for this chat</Button>
         <Button size="sm" disabled={decided || closed || part.state === 'allowing'} tabIndex={decided ? -1 : undefined} onClick={() => onDecide('deny')}>Not now</Button>
       </div>
       <p className="support-card__resolved" data-active={decided || undefined} data-decision={decided ? part.state : undefined} aria-hidden={!decided || undefined}>

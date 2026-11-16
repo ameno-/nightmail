@@ -4,7 +4,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 import { Alert, Button, Checkbox, ControlSkeleton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, Input, PageHeader, SectionHeader, Select, SkeletonText, StatusBadge, Switch, Tabs, Textarea, useToast, type Column, type MenuItem, type Tone } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useSession } from '../../data/context'
-import { ApiError, type SenderScoreFactor, type StandingStep } from '../../data/types'
+import { ApiError, type SenderScoreFactor, type StandingReason, type StandingStep } from '../../data/types'
 import { isoTime, operatorApi, type OperatorAction, type OperatorCampaign, type OperatorDomain, type OperatorMember, type OperatorQueueItem, type OperatorTimelineItem, type OperatorWorkspace, type TimelineKind } from '../../data/operator'
 import { label, number, shortDateTime } from '../../lib/format'
 import { factorFormats } from '../score'
@@ -163,6 +163,7 @@ function WorkspaceBody({ data, canAct, onReleaseCampaign }: { data: OperatorWork
   ]
   const billing = useQuery({ queryKey: ['operator', 'billing', data.workspace.id], queryFn: ({ signal }) => operatorApi.billing(data.workspace.id, signal) })
   const [freeAction, setFreeAction] = useState<FreeAction | null>(null)
+  const [reason, setReason] = useState<StandingReason | null>(null)
   const personFree = (userId: string) => billing.data?.free.people.find(p => p.userId === userId)?.free ?? null
   const memberColumns: Column<OperatorMember>[] = [
     { ...def(memberColumnDefs, 'email'), render: m => <span className="op-email"><PrivateAddress value={m.email} /></span> },
@@ -186,7 +187,8 @@ function WorkspaceBody({ data, canAct, onReleaseCampaign }: { data: OperatorWork
     <dl className="op-facts">{facts.map(title => <div key={title}><dt>{title}</dt><dd>{factValues[title]}</dd></div>)}</dl>
     <div className="op-grid">
       <section className="op-section" aria-labelledby="op-standing"><SectionHeader title={<span id="op-standing">Standing and why</span>} />
-        {standing?.reasons.length ? <ul className="op-reasons">{standing.reasons.map(reason => <li key={reason.code}><span>{reason.message}</span><span className="muted">{reason.code}{reason.window ? ` · ${reason.window}` : ''} · {reason.step}</span></li>)}</ul> : null}
+        {/* Each reason opens its code, window and step: the ladder's detail stays one click away. */}
+        {standing?.reasons.length ? <ul className="op-reasons">{standing.reasons.map(reason => <li key={reason.code}><button type="button" className="op-reason" onClick={() => setReason(reason)}>{reason.message}</button></li>)}</ul> : null}
         <Rows rows={[
           ['Pause', connection?.paused ? `${standing?.pauseKind === 'bounce' ? 'Bounce-only' : 'Full'}${connection.pauseReason ? ` · ${connection.pauseReason}` : ''}` : 'Not paused'],
           ['SES tenants', !connection ? '—' : connection.resuming ? 'Enabling before sending resumes' : connection.tenants.length ? connection.tenants.map(t => `${t.region} ${t.applied === 'DISABLED' ? 'disabled' : t.applied === 'DISABLING' ? 'possibly disabled' : 'enabled'}`).join(' · ') : 'Enabled'],
@@ -214,7 +216,7 @@ function WorkspaceBody({ data, canAct, onReleaseCampaign }: { data: OperatorWork
     <section className="op-section"><SectionHeader title="Domains" /><DataTable className="op-table" rows={data.domains} rowKey={d => d.name} columns={domainColumns} empty={<EmptyState title="No domains" />} /></section>
     <section className="op-section" aria-labelledby="op-billing"><SectionHeader title={<span id="op-billing">Billing</span>} />
       {billing.isError && !billing.data ? <ErrorState error={billing.error} onRetry={() => void billing.refetch()} /> : <dl className="op-rows op-rows--single">
-        <div><dt>Billing</dt><dd title={billingState ?? undefined}>{billingState ?? <SkeletonText width={220} />}</dd></div>
+        <div><dt>Status</dt><dd title={billingState ?? undefined}>{billingState ?? <SkeletonText width={220} />}</dd></div>
         <div><dt>Free (not billed)</dt><dd className="op-free">{!free ? <ControlSkeleton width={36} /> : <>
           <span title={canAct ? undefined : 'Needs the operator role'}><Switch label={<span className="sr-only">Free (not billed)</span>} checked={Boolean(free.workspace && !free.workspace.expired)} disabled={!canAct}
             onCheckedChange={on => setFreeAction({ kind: 'workspace', on, key: crypto.randomUUID() })} /></span>
@@ -227,6 +229,7 @@ function WorkspaceBody({ data, canAct, onReleaseCampaign }: { data: OperatorWork
     <FreeDialog action={freeAction} workspaceId={data.workspace.id} onClose={() => setFreeAction(null)} />
     <section className="op-section"><SectionHeader title="Campaigns" /><DataTable className="op-table" rows={data.campaigns} rowKey={c => c.id} columns={campaignColumns} empty={<EmptyState title="No active or quarantined campaigns" />} /></section>
     <Timeline workspaceId={data.workspace.id} />
+    {reason && <DetailDialog title="Standing reason" onClose={() => setReason(null)} rows={[['Reason', reason.message], ['Code', <span className="op-muted-id">{reason.code}</span>], ['Window', reason.window ?? null], ['Step', <StepBadge step={reason.step} />]]} />}
   </div>
 }
 
@@ -272,7 +275,7 @@ function Timeline({ workspaceId }: { workspaceId: string }) {
 // ---------------------------------------------------------------- actions
 
 const actionCopy: Record<ActionKind, { title: string; description: string; confirm: string; done: string; danger?: boolean }> = {
-  pause: { title: 'Pause sending?', description: 'All sending stops and the SES tenants are disabled. Owners see a pause banner and are emailed.', confirm: 'Pause sending', done: 'Sending paused', danger: true },
+  pause: { title: 'Pause sending?', description: 'Stops all sending at SES; owners see a pause banner and get an email.', confirm: 'Pause sending', done: 'Sending paused', danger: true },
   resume: { title: 'Resume sending?', description: 'Sending resumes at the restore share you choose; a strike stays on record.', confirm: 'Resume sending', done: 'Sending resumed' },
   hold: { title: 'Hold marketing?', description: 'Campaigns pause and new marketing is refused; transactional mail keeps sending.', confirm: 'Hold marketing', done: 'Marketing held' },
   release: { title: 'Release marketing?', description: 'Campaigns can send again; the workspace stays at Warn until it clears.', confirm: 'Release marketing', done: 'Marketing released' },
@@ -282,6 +285,7 @@ const actionCopy: Record<ActionKind, { title: string; description: string; confi
 // Each opening has its own Idempotency-Key, and every submit sends If-Match with the standing version it was decided on.
 // Free (not billed): a workspace's own flag, or a person's (every workspace they own while they own it). Operators only;
 // the reason goes into the audit log. An end date is optional.
+const ticketHint = 'Optional: the support ticket ID or URL.'
 type FreeAction = { kind: 'workspace' | 'person'; on: boolean; userId?: string; key: string }
 function FreeDialog({ action, workspaceId, onClose }: { action: FreeAction | null; workspaceId: string; onClose: () => void }) {
   const last = useRef(action)
@@ -311,7 +315,7 @@ function FreeForm({ action, workspaceId, onClose }: { action: FreeAction; worksp
   return <form className="op-dialog-fields" onSubmit={submit} noValidate>
     {action.on && <Field label="Ends" hint="Optional. Empty means no end date." error={tried ? untilError : ''}><Input type="datetime-local" value={until} onChange={event => setUntil(event.target.value)} /></Field>}
     <Field label="Reason" hint="Goes into the audit log." error={tried ? reasonError : ''}><Textarea value={reason} maxLength={1000} onChange={event => setReason(event.target.value)} /></Field>
-    <Field label="Ticket" hint="Optional: the support ticket ID or URL."><Input value={ticket} maxLength={200} onChange={event => setTicket(event.target.value)} /></Field>
+    <Field label="Ticket" hint={ticketHint}><Input value={ticket} maxLength={200} onChange={event => setTicket(event.target.value)} /></Field>
     {mutation.error && <Alert tone="danger">{mutation.error instanceof Error ? mutation.error.message : 'Couldn’t complete the action.'}</Alert>}
     <div className="ui-dialog__footer"><Button disabled={mutation.isPending} onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" loading={mutation.isPending}>{action.on ? 'Make free' : 'Bill again'}</Button></div>
   </form>
@@ -363,7 +367,7 @@ function ActionForm({ action, workspace, onClose }: { action: PendingAction; wor
       <Field label="Expires" hint="Optional, at most a year ahead. Empty means no expiry."><Input type="datetime-local" value={expires} disabled={clear} onChange={event => setExpires(event.target.value)} /></Field>
     </>}
     <Field label="Reason" hint="Goes into the audit log and the workspace’s timeline." error={tried ? reasonError : ''}><Textarea value={reason} maxLength={1000} onChange={event => setReason(event.target.value)} /></Field>
-    <Field label="Ticket" hint="Optional: the support ticket ID or URL." error={tried ? ticketError : ''}><Input value={ticket} maxLength={200} onChange={event => setTicket(event.target.value)} /></Field>
+    <Field label="Ticket" hint={ticketHint} error={tried ? ticketError : ''}><Input value={ticket} maxLength={200} onChange={event => setTicket(event.target.value)} /></Field>
     {mutation.error && <Alert tone="danger">{mutation.error instanceof Error ? mutation.error.message : 'Couldn’t complete the action.'}</Alert>}
     <div className="ui-dialog__footer"><Button disabled={mutation.isPending} onClick={onClose}>Cancel</Button><Button type="submit" variant={copy.danger ? 'danger' : 'primary'} loading={mutation.isPending}>{copy.confirm}</Button></div>
   </form>

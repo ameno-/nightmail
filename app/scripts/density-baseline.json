@@ -22,7 +22,7 @@
    "findings": []
   },
   "Audience · import dialog · desktop": {
-   "score": 18,
+   "score": 15,
    "findings": []
   },
   "Audience · phone": {
@@ -30,7 +30,7 @@
    "findings": []
   },
   "Campaign editor · desktop": {
-   "score": 45,
+   "score": 41,
    "findings": []
   },
   "Campaign review · desktop": {
@@ -58,7 +58,7 @@
    "findings": []
   },
   "Contact · desktop": {
-   "score": 18,
+   "score": 15,
    "findings": []
   },
   "Domain · desktop": {
@@ -109,15 +109,15 @@
    "findings": []
   },
   "New campaign · desktop": {
-   "score": 24,
+   "score": 19,
    "findings": []
   },
   "Onboarding · desktop": {
-   "score": 17,
+   "score": 15,
    "findings": []
   },
   "Onboarding · phone": {
-   "score": 18,
+   "score": 16,
    "findings": []
   },
   "Operator · desktop": {
@@ -133,10 +133,8 @@
    "findings": []
   },
   "Operator · workspace · phone": {
-   "score": 31,
-   "findings": [
-    "inert|# of #,### accepted emails were marked a"
-   ]
+   "score": 28,
+   "findings": []
   },
   "Overview · desktop": {
    "score": 23,
@@ -313,7 +311,7 @@
    "findings": []
   },
   "Segment · desktop": {
-   "score": 23,
+   "score": 19,
    "findings": []
   },
   "Segments · desktop": {

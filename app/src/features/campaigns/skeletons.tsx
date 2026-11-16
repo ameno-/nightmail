@@ -4,6 +4,7 @@ import {
   Select, Skeleton, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn,
 } from '../../components/ui'
 import { CampaignsHeader } from './header'
+import { eligibleNote, templateIntro } from './copy'
 import { usePhone } from '../../lib/media'
 import './campaigns.css'
 
@@ -36,7 +37,7 @@ export function CampaignAudienceSkeleton() {
       <div className="campaign-summary-line muted"><span>Suppressed</span><SkeletonText width={35} /></div>
       <div className="campaign-summary-line muted"><span>Not subscribed</span><SkeletonText width={35} /></div>
     </div>
-    <p className="muted campaign-audience-note">Eligible means subscribed and not suppressed. Consent is checked again as each email sends.</p>
+    <p className="muted campaign-audience-note">{eligibleNote}</p>
     <Button disabled>Refresh count</Button>
   </LoadingRegion>
 }
@@ -72,7 +73,7 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
     <PageHeader title="Edit template" backTo="/campaigns/templates" actions={<><span className="campaign-sync-status"><span className="campaign-sync-dot" /></span>{phone ? <><Button variant="primary" disabled>Publish</Button><IconButton label="More actions" disabled><MoreHorizontal size={16} /></IconButton></> : <><Button variant="ghost" disabled>Preview</Button><Button variant="ghost" disabled>Archive</Button><Button variant="secondary" disabled>Use template</Button><Button variant="primary" disabled>Publish</Button></>}</>} />
     <LoadingRegion label="Loading template editor" className="campaign-compose-workspace">
       <div className="campaign-compose-scroll"><div className="campaign-compose-sheet">
-        <p className="template-compose-intro">Write example content. Add personalization, such as {'{{name}}'}, in each campaign.</p>
+        <p className="template-compose-intro">{templateIntro}</p>
         <div className="campaign-compose-metadata" aria-hidden="true">
           {['Name', 'Purpose', 'Subject', 'Inbox preview', 'From name', 'Reply to'].map(label => <div className="campaign-compose-row" key={label}><span className="muted">{label}</span><ControlSkeleton /></div>)}
         </div>

@@ -138,7 +138,7 @@ function CreateWorkspaceDialog({ onClose, onCreated }: { onClose: () => void; on
     event.preventDefault()
     try { const workspace = await create.mutateAsync(name.trim()); onClose(); onCreated(workspace.id) } catch { /* inline */ }
   }
-  return <Dialog open onOpenChange={open => { if (!open && !create.isPending) onClose() }} title="Create workspace" description="Each workspace has its own domains, keys and contacts. You’ll set up sending next."
+  return <Dialog open onOpenChange={open => { if (!open && !create.isPending) onClose() }} title="Create workspace" description="Its own domains, keys and contacts; you’ll set up sending next."
     footer={<><Button onClick={onClose} disabled={create.isPending}>Cancel</Button><Button type="submit" form="create-workspace" variant="primary" loading={create.isPending}>Create workspace</Button></>}>
     <form id="create-workspace" className="stack" onSubmit={submit}>
       <MutationError error={create.error} />

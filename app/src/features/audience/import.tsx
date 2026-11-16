@@ -4,7 +4,7 @@ import { useApiMutation } from '../../data/context'
 import type { ImportPreview } from '../../data/types'
 import { Alert, Button, Checkbox, DataTable, Dialog, Field, Input, Select } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { fieldError, ListPicker, MutationError, nameTitle, number } from './shared'
+import { evidenceRequired, fieldError, ListPicker, MutationError, nameTitle, number } from './shared'
 import { AddressText } from '../../components/AddressText'
 import { parseCsv } from './csv'
 
@@ -80,18 +80,18 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
   const unknownHref = listId ? `/audience/lists/${listId}?status=unknown` : '/audience?status=unknown'
   if (result) {
     const imported = result.imported, subscribed = result.subscribed ?? 0
-    return <Dialog open onOpenChange={open => { if (!open) onClose() }} title="Import complete" footer={<>{!consent && imported > 0 && <Link className="ui-button ui-button--secondary ui-button--md" to={unknownHref} onClick={onClose}>Review Unknown contacts</Link>}<Button variant="primary" onClick={onClose}>Done</Button></>}><div className="stack">
+    return <Dialog open onOpenChange={open => { if (!open) onClose() }} title="Import complete" footer={<>{!consent && imported > 0 && <Link className="ui-button ui-button--secondary ui-button--md" to={unknownHref} onClick={onClose}>Review unknown contacts</Link>}<Button variant="primary" onClick={onClose}>Done</Button></>}><div className="stack">
       <Alert tone="success">{plural(imported, 'contact')} imported{consent ? ` · ${number(subscribed)} marked subscribed` : ''}.</Alert>
-      {consent ? subscribed < imported && <p className="muted">{plural(imported - subscribed, 'contact')} already had a consent decision, which was kept: opt-outs and suppressions never change on import.</p>
-        : imported > 0 && <Alert tone="info">They can’t receive campaigns until they have consent. Once they agree, choose Review Unknown contacts, then Mark as subscribed.</Alert>}
+      {consent ? subscribed < imported && <p className="muted">{plural(imported - subscribed, 'contact')} kept their earlier consent; imports never change opt-outs or suppressions.</p>
+        : imported > 0 && <Alert tone="info">They can’t receive campaigns until they consent. Once they do, choose Review unknown contacts, then Mark as subscribed.</Alert>}
       {result.errors.length > 0 && <RejectedRows errors={result.errors} skipped />}
     </div></Dialog>
   }
   return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }} title="Import contacts" footer={<><Button disabled={busy} onClick={onClose}>Cancel</Button>{preview ? <Button variant="primary" loading={commit.isPending} disabled={busy || !preview.rows.length} onClick={() => void submitImport()}>{preview.rows.length ? `Import ${plural(preview.rows.length, 'contact')}` : 'Nothing to import'}</Button> : <Button variant="primary" loading={busy} disabled={!csv || !mapping.email} onClick={() => void submitPreview()}>Preview import</Button>}</>}>
     <div className="stack">
       <div className="stack audience-import-fields" hidden={Boolean(preview)}>
-        <Field label="Destination list" htmlFor="import-list" hint={listId ? undefined : 'Optional. Contacts are added to your audience either way.'}><ListPicker id="import-list" emptyLabel="No list" value={listId} disabled={locked} onChange={value => { setListId(value); resetPreview() }} /></Field>
-        <Field label="CSV file" htmlFor="import-file" hint={<>Columns: email (required); name, first name, last name, plan and country (optional). Up to {number(MAX_ROWS)} rows and 5 MiB. <a href={sampleHref} download="contacts-sample.csv">Download a sample CSV</a></>}><Input type="file" id="import-file" accept=".csv,text/csv" disabled={locked} onClick={event => { event.currentTarget.value = '' }} onChange={event => void readFile(event.target.files?.[0])} /></Field>
+        <Field label="Destination list" htmlFor="import-list" hint={listId ? undefined : 'Optional; contacts join your audience either way.'}><ListPicker id="import-list" emptyLabel="No list" value={listId} disabled={locked} onChange={value => { setListId(value); resetPreview() }} /></Field>
+        <Field label="CSV file" htmlFor="import-file" hint={<>An email column, plus optional name, plan and country. Up to {number(MAX_ROWS)} rows, 5 MiB. <a href={sampleHref} download="contacts-sample.csv">Sample CSV</a></>}><Input type="file" id="import-file" accept=".csv,text/csv" disabled={locked} onClick={event => { event.currentTarget.value = '' }} onChange={event => void readFile(event.target.files?.[0])} /></Field>
         {csv && <div className="form-grid">{targets.map(target => <Field key={target.value} label={target.label} htmlFor={`map-${target.value}`} error={fieldError(review.error, `mapping.${target.value}`)} hint={target.value === 'lastName' ? mapping.name === COMBINED ? 'Joined with First name into Full name.' : 'Used only when Full name is First + last name.' : target.value === 'name' && mapping.name === COMBINED ? 'Each contact’s first and last name, joined.' : undefined}>
           <Select id={`map-${target.value}`} disabled={locked} value={mapping[target.value] ?? ''} onValueChange={value => { setMapping({ ...mapping, [target.value]: value }); resetPreview() }} options={[{ value: '', label: 'Do not import' }, ...(target.value === 'name' && combinedAvailable ? [{ value: COMBINED, label: 'First + last name' }] : []), ...headers.map(header => ({ value: header, label: header }))]} />
         </Field>)}</div>}
@@ -104,8 +104,8 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
       </>}
       <div className="audience-consent">
         <Checkbox checked={consent} disabled={busy} onCheckedChange={value => { setConsent(value); setChecked(false) }} label="These people agreed to receive marketing email" />
-        <p className="ui-field__hint">{consent ? 'Contacts without a consent decision are marked subscribed. Opt-outs and suppressed addresses stay as they are.' : 'Without this, imported contacts can’t receive campaigns until they’re marked subscribed.'}</p>
-        {consent && <Field label="How did they agree?" htmlFor="import-evidence" error={checked && !evidence.trim() ? 'Say how they agreed, for example “Signed up on our website”.' : fieldError(commit.error, 'consent.evidence')} hint="Saved in each consent record, like “Signed up on our website”."><Input id="import-evidence" autoFocus maxLength={2000} disabled={busy} value={evidence} onChange={event => setEvidence(event.target.value)} /></Field>}
+        <p className="ui-field__hint">{consent ? 'Marks them subscribed; opt-outs and suppressed addresses stay.' : 'Otherwise they can’t receive campaigns until marked subscribed.'}</p>
+        {consent && <Field label="How did they agree?" htmlFor="import-evidence" error={checked && !evidence.trim() ? evidenceRequired : fieldError(commit.error, 'consent.evidence')} hint="Saved in each consent record, like “Signed up on our website”."><Input id="import-evidence" autoFocus maxLength={2000} disabled={busy} value={evidence} onChange={event => setEvidence(event.target.value)} /></Field>}
       </div>
       <MutationError error={error} />
     </div>

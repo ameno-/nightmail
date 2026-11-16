@@ -203,7 +203,7 @@ function IssueList({ issues }: { issues: PreviewIssue[] }) {
     <span className={`ei-dot ui-tone--${issue.severity === 'error' ? 'danger' : 'warning'}`} aria-hidden="true" />
     <span className="ei-issues__name">{featureName(issue.feature)}</span>
     <span className="muted">{issue.severity === 'error' ? 'Not supported' : 'Partly supported'}</span>
-    <a className="ei-issues__link" href={`https://www.caniemail.com/features/${encodeURIComponent(issue.feature)}/`} target="_blank" rel="noreferrer">Can I email<ExternalLink size={12} aria-hidden="true" /><span className="sr-only"> (opens in a new tab)</span></a>
+    <a className="ei-issues__link" href={`https://www.caniemail.com/features/${encodeURIComponent(issue.feature)}/`} target="_blank" rel="noreferrer">Can I email<ExternalLink size={12} aria-hidden="true" /></a>
   </li>)}</ul>
 }
 

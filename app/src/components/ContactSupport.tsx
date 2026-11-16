@@ -24,8 +24,8 @@ export function ContactSupportDialog({ onClose }: { onClose: () => void }) {
     } catch { /* Shown in the form. */ }
   }
   const close = () => { if (!contact.isPending) onClose() }
-  if (done) return <Dialog open onOpenChange={next => { if (!next) close() }} title={done.url ? 'Support is open in a new tab' : 'Support reference'}
-    description={done.url ? 'If the tab didn’t open, use the link below. Mention this reference if you write to support later.' : `Include this reference when you email ${productName} support.`}
+  if (done) return <Dialog open onOpenChange={next => { if (!next) close() }} title={done.url ? 'Support opened in a new tab' : 'Support reference'}
+    description={done.url ? 'If it didn’t open, use the link below; mention this reference later.' : 'Mention it when you email us.'}
     footer={<Button key="done" variant="primary" autoFocus onClick={close}>Done</Button>}>
     <div className="stack">
       <div className="contact-support__reference"><code>{done.id}</code><CopyButton value={done.id} label="Copy support reference" /></div>
@@ -36,7 +36,7 @@ export function ContactSupportDialog({ onClose }: { onClose: () => void }) {
     footer={<><Button disabled={contact.isPending} onClick={close}>Cancel</Button><Button variant="primary" type="submit" form="contact-support" loading={contact.isPending}>Contact support</Button></>}>
     <form id="contact-support" className="stack" onSubmit={submit}>
       <Field label="Message" htmlFor="contact-support-message" hint={`Optional. ${message.length.toLocaleString('en-US')} / ${MAX.toLocaleString('en-US')}`}>
-        <Textarea id="contact-support-message" value={message} maxLength={MAX} onChange={event => setMessage(event.target.value)} disabled={contact.isPending} placeholder="What were you trying to do?" autoFocus />
+        <Textarea id="contact-support-message" value={message} maxLength={MAX} onChange={event => setMessage(event.target.value)} disabled={contact.isPending} placeholder="What were you doing?" autoFocus />
       </Field>
       <div className="contact-support__share">
         <Checkbox label="Share message content with support for this request" checked={shareContent} onCheckedChange={setShareContent} disabled={contact.isPending} aria-describedby="contact-support-share-hint" />
