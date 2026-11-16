@@ -73,8 +73,7 @@ function BalanceDetails({ open, onOpenChange, balance, enforced }: { open: boole
       <li>Usage is taken from it every hour.</li>
       <li>At $0, sending pauses and received mail is accepted for 7 more days.</li>
       <li>Credit you add pays off a negative balance first.</li>
-      <li>Nothing is deleted.</li>
-    </> : <li>Billing starts soon: nothing is charged yet. Credit you add now is kept for when it starts.</li>}</ul>
+    </> : <li>Credit you add now is kept until billing starts.</li>}</ul>
     <p className="muted billing-add__terms">{TERMS}</p>
   </Dialog>
 }
@@ -96,15 +95,15 @@ function FreePlan({ summary: b, Row }: { summary: BillingSummary | undefined; Ro
   </>
 }
 
-/** Debt grace and a failed auto-recharge, said once, where the fix is. Which alert shows comes from the session's state;
- *  the amount and the date fill fixed-width slots when the summary arrives. */
+/** What the banner doesn't say, where the fix is: the date received mail starts being held, and why auto-recharge
+ *  turned off (the banner leaves that to this page). Held mail and paused sending are the banner's, on every page. Which
+ *  alert shows comes from the session's state; the date fills a fixed-width slot when the summary arrives. */
 function BillingAlerts({ state, summary: b }: { state: NonNullable<ReturnType<typeof useBillingState>>; summary: BillingSummary | undefined }) {
   if (state.enforcement !== 'enforce') return null
   // The date ends its line, so the text replacing the skeleton moves nothing.
   const slot = (ready: string | null | undefined, width: number) => ready ? <span>{ready}</span> : <span className="billing-slot"><Skeleton width={width} height={14} /></span>
   return <>
-    {state.receiving === 'held' ? <Alert tone="danger" title="Received mail is being held">{productName} stores new received mail but doesn’t deliver it to inboxes, webhooks or IMAP until you add credit. Nothing is deleted.</Alert>
-      : state.receiving === 'grace' ? <Alert tone="warning" title={<>Received mail is accepted until {slot(b?.grace.receiveHoldAt ? monthDay(b.grace.receiveHoldAt) : null, 44)}</>}>Then it’s held until you add credit. Nothing is deleted.</Alert> : null}
+    {state.receiving === 'grace' && <Alert tone="warning" title={<>Received mail is accepted until {slot(b?.grace.receiveHoldAt ? monthDay(b.grace.receiveHoldAt) : null, 44)}</>}>Then it’s held until you add credit.</Alert>}
     {state.autoRecharge === 'failed' && <Alert tone="warning" title="Auto-recharge is off">{['dispute', 'early_fraud_warning'].includes(b?.autoRecharge?.disabledReason ?? '') ? `Your card was blocked after a ${b?.autoRecharge?.disabledReason === 'dispute' ? 'dispute' : 'fraud warning'}. Add a different card, then turn auto-recharge back on.` : `${productName} couldn’t charge your card. Update the card, then turn auto-recharge back on.`}</Alert>}
   </>
 }
@@ -274,7 +273,7 @@ function AddCredit({ open, onOpenChange, summary: b }: { open: boolean; onOpenCh
   const charge = usePaymentPoll(charging, payment => {
     setCharging(null); setBusy(false); refresh()
     if (payment?.status === 'succeeded') { toast(added(payment.amountCents), 'success'); onOpenChange(false) }
-    else setError(new Error(payment?.failure ? `${declineText(payment.failure.code)}. Nothing was charged.` : 'The charge didn’t finish. Check Payments in a minute.'))
+    else setError(new Error(payment?.failure ? `${declineText(payment.failure.code)}.` : 'The charge didn’t finish. Check Payments in a minute.'))
   })
   async function pay() {
     if (invalid) return
@@ -283,7 +282,7 @@ function AddCredit({ open, onOpenChange, summary: b }: { open: boolean; onOpenCh
     try {
       const result = await billingApi.topUp({ amountCents: amount!, method })
       if (result.checkoutUrl) { window.location.assign(result.checkoutUrl); return }
-      if (result.status === 'succeeded' || result.status === 'failed') { setCharging(null); setBusy(false); refresh(); if (result.status === 'succeeded') { toast(added(amount!), 'success'); onOpenChange(false) } else setError(new Error('The card was declined. Nothing was charged.')); return }
+      if (result.status === 'succeeded' || result.status === 'failed') { setCharging(null); setBusy(false); refresh(); if (result.status === 'succeeded') { toast(added(amount!), 'success'); onOpenChange(false) } else setError(new Error('The card was declined.')); return }
       setCharging(result.attemptId)
     } catch (cause) { setError(cause); setBusy(false) }
   }
@@ -336,12 +335,12 @@ function useCheckoutReturn() {
   useEffect(() => {
     if (!outcome) return
     if (outcome === 'success' && attempt && /^[\w-]{1,100}$/.test(attempt)) { toast('Payment received; your credit appears in a few seconds.', 'info'); setWatching(attempt) }
-    else if (outcome === 'canceled') toast('Checkout canceled. Nothing was charged.', 'info')
+    else if (outcome === 'canceled') toast('Checkout canceled.', 'info')
     navigate({ pathname: '/settings', search: '', hash: '#billing' }, { replace: true })
   }, [outcome, attempt, navigate, toast])
   usePaymentPoll(watching, payment => {
     setWatching(null); refresh()
     if (payment?.status === 'succeeded') toast(payment.kind === 'setup' ? 'Card saved.' : added(payment.amountCents), 'success')
-    else if (payment) toast(payment.failure ? `${declineText(payment.failure.code)}. Nothing was charged.` : 'The payment didn’t finish. Nothing was charged.', 'error')
+    else if (payment) toast(payment.failure ? `${declineText(payment.failure.code)}.` : 'The payment didn’t go through.', 'error')
   })
 }

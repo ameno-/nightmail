@@ -9,12 +9,6 @@
     "141: its own domains, keys and contacts; you’ll set up sending ne"
    ]
   },
-  "app/src/components/BillingBanner.tsx": {
-   "reassure": [
-    "10: new mail is stored, not delivered to inboxes, webhooks or im ⟨nothing is deleted⟩",
-    "11: sends get 402 and campaigns wait; received mail is still acc ⟨nothing is deleted⟩"
-   ]
-  },
   "app/src/components/ContactSupport.tsx": {
    "helper": [
     "38: optional. … / …"
@@ -471,27 +465,6 @@
   "app/src/features/score/limits.tsx": {
    "reassure": [
     "31: sending stops; receiving, inboxes and the dashboard still wo ⟨still work⟩"
-   ]
-  },
-  "app/src/features/settings/billing.tsx": {
-   "reassure": [
-    "76: nothing is deleted. ⟨nothing is deleted⟩",
-    "77: billing starts soon: nothing is charged yet. credit you add  ⟨nothing is charged⟩",
-    "106: brand stores new received mail but doesn’t deliver it to inb ⟨nothing is deleted⟩",
-    "107: then it’s held until you add credit. nothing is deleted. ⟨nothing is deleted⟩",
-    "339: checkout canceled. nothing was charged. ⟨nothing was charged⟩",
-    "345: …. nothing was charged. ⟨nothing was charged⟩",
-    "345: the payment didn’t finish. nothing was charged. ⟨nothing was charged⟩"
-   ]
-  },
-  "app/src/features/settings/webhooks.tsx": {
-   "grade": [
-    "33: remove the user name and password from the url; send credent"
-   ]
-  },
-  "app/src/features/settings/workspace-members.tsx": {
-   "tagline": [
-    "37: they can remove you; only another owner can undo this."
    ]
   },
   "app/src/features/support/SupportPanel.tsx": {

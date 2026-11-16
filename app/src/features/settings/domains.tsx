@@ -67,7 +67,7 @@ function ReceivingSettings({ domainId, receiving }: { domainId: string; receivin
     <dl className="settings-facts domain-facts domain-receiving-facts">
       <div><dt>Receives at</dt><dd>{state.name}</dd></div>
       <div><dt>Addresses</dt><dd><Link to={`/receiving?domain=${encodeURIComponent(state.name)}`}>{state.addressCount.toLocaleString('en-US')}</Link></dd></div>
-      <div title={catchAllSetting.line}><dt>{catchAllSetting.title}</dt><dd><Select aria-label={`${catchAllSetting.title}: ${catchAllSetting.line}`} value={state.catchAll} onValueChange={value => void update.mutateAsync(value as MailboxDomain['catchAll']).catch(() => undefined)} disabled={update.isPending}
+      <div><dt>{catchAllSetting.title}</dt><dd><Select aria-label={catchAllSetting.title} value={state.catchAll} onValueChange={value => void update.mutateAsync(value as MailboxDomain['catchAll']).catch(() => undefined)} disabled={update.isPending}
         options={[{ value: 'store', label: catchAllSetting.options.store }, { value: 'create_address', label: catchAllSetting.options.create_address }]} /></dd></div>
     </dl>
   </section>
@@ -257,7 +257,7 @@ function MailboxReceiving({ domainId, domainName }: { domainId: string; domainNa
     {state && status && on && <>
       <dl className="settings-facts domain-facts">
         <div><dt>Status</dt><dd><StatusBadge status={status.label} tone={status.tone} /></dd></div>
-        <div title={catchAllSetting.line}><dt>{catchAllSetting.title}</dt><dd>{catchAllLabel[state.catchAll]}</dd></div>
+        <div><dt>{catchAllSetting.title}</dt><dd>{catchAllLabel[state.catchAll]}</dd></div>
         <div><dt>Addresses</dt><dd><Link to={`/receiving?domain=${encodeURIComponent(domainName)}`}>{state.addressCount.toLocaleString('en-US')}</Link></dd></div>
         <div><dt>Region</dt><dd>{state.region}</dd></div>
       </dl>

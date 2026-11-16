@@ -35,7 +35,7 @@ function roleChange(member: WorkspaceMember, role: WorkspaceRole) {
   const name = member.name || 'this member'
   const who = member.name || <PrivateAddress value={member.email} />
   if (role === 'owner') return { title: `Make ${name} an owner?`, description: 'They can remove you; only another owner can undo this.', confirm: 'Make owner', danger: true }
-  if (role === 'admin') return { title: `Make ${name} an admin?`, description: member.role === 'owner' ? <>{who} stops being an owner. They can still manage keys, domains, webhooks, sending and members.</> : 'They can manage keys, domains, webhooks, sending and members.', confirm: 'Make admin', danger: false }
+  if (role === 'admin') return { title: `Make ${name} an admin?`, description: member.role === 'owner' ? <>{who} stops being an owner.</> : 'They can manage keys, domains, webhooks, sending and members.', confirm: 'Make admin', danger: false }
   return { title: `Change ${name} to member?`, description: 'They lose access to keys, domains, webhooks, sending and members at once.', confirm: 'Change to member', danger: false }
 }
 

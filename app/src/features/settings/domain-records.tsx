@@ -200,7 +200,7 @@ export function DnsWaitNote({ domain }: { domain: Domain }) {
 function receivingWarning(domain: string, receiving: DnsRecord[]) {
   const host = receiving.find(record => record.type === 'MX')?.name ?? receiving[0]?.name
   return host === domain && !receiving.every(record => record.status === 'verified')
-    ? `This MX record sends all mail for ${domain} to ${productName}, including mailboxes hosted elsewhere today. To keep them, receive on a subdomain like reply.${domain}.`
+    ? `This MX record sends all mail for ${domain} to ${productName}, including mailboxes hosted elsewhere today.`
     : null
 }
 

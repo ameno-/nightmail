@@ -30,7 +30,7 @@ function validate(input: WebhookInput) {
     try {
       const url = new URL(input.url.trim())
       if (url.protocol !== 'https:') errors.url = 'Use an https:// URL. Webhooks are only delivered over HTTPS.'
-      else if (url.username || url.password) errors.url = 'Remove the user name and password from the URL; send credentials as a header below instead.'
+      else if (url.username || url.password) errors.url = 'Remove the user name and password from the URL. Send them as a header.'
       else if (!url.hostname) errors.url = FULL_URL
     } catch { errors.url = FULL_URL }
   }
