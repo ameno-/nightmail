@@ -20,7 +20,7 @@ Receiving is where mail that arrives at your domains is routed, filtered and sen
 | **Routes** | Every address that receives mail, and where its mail goes. | `support@acme.com → triage → Inbox, Slack support` |
 | **Rituals** | Short scripts that run on a route's mail: label it, filter it, or send it on. | If the subject mentions a refund, label it and post it to Slack. |
 | **Endpoints** | Named places mail can be sent: Slack, Discord, a webhook or a forward. | `endpoints.support({ text: email.subject })` |
-| **Trace** | Run an email through your routes and rituals to see what would happen. Nothing is sent or saved. | |
+| **Trace** | Dry-run an email through your routes and rituals; nothing is sent or saved. | |
 
 Rituals and endpoints are described in full in [rituals.md](rituals.md); agent inboxes in [inboxes.md](inboxes.md).
 
@@ -31,7 +31,7 @@ The Routes tab lists every kind in one table and filters by kind. Each row reads
 | Filter | What it shows | Example |
 |---|---|---|
 | All | Every address that receives mail, and where its mail goes. | `support@acme.com → triage → Inbox, Slack support` |
-| Addresses | An address keeps its own threads in the Inbox. A route can send its mail somewhere else instead. | `support@acme.com` |
+| Addresses | Each keeps its own threads in the Inbox; a route can send its mail elsewhere. | `support@acme.com` |
 | Patterns | A pattern catches many addresses with `*`. | `reply+*@acme.com` catches `reply+4821@acme.com` |
 | Catch-alls | What happens to mail for an address that doesn't exist. | `*@acme.com` |
 | Agent inboxes | Expiring addresses that agents and tests create and read over the API or MCP. | |

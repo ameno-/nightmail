@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { X } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { Alert, Button, ConfirmDialog, Dialog, ErrorState, Field, IconButton, Input, LoadingRegion, PageHeader, SectionHeader, Select, SkeletonText, useToast } from '../../components/ui'
+import { Alert, Button, ConfirmDialog, Dialog, Disclosure, ErrorState, Field, IconButton, Input, LoadingRegion, PageHeader, SectionHeader, Select, SkeletonText, useToast } from '../../components/ui'
 import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { date, number } from '../../lib/format'
@@ -20,6 +20,7 @@ import './receiving.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useSingleFlight } from '../../lib/single-flight'
 import { RITUALS_PER_ADDRESS } from '../../../../api/src/ritual-schema'
+const displayNameHint = 'Shown as the sender name on replies.'
 
 const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/
 const lifetimes = [{ value: '', label: 'Permanent' }, { value: '3600', label: '1 hour' }, { value: '86400', label: '1 day' }, { value: '604800', label: '7 days' }, { value: '2592000', label: '30 days' }]
@@ -50,21 +51,21 @@ export function CreateAddressDialog({ open, onOpenChange, domains }: { open: boo
     if (Object.keys(next).length) return
     try { const row = await create.mutateAsync({ address: value, displayName: displayName.trim() || null, ...(sender ? { publicAddress: sender } : {}), ...(lifetime ? { ttlSeconds: Number(lifetime) } : {}) }); onOpenChange(false); navigate(`/receiving/addresses/${row.id}`) } catch { /* Shown in the form. */ }
   }
-  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) onOpenChange(next) }} title="New address" description="Mail to it lands in the Inbox, where you, the API and agents can read it." footer={<><Button disabled={create.isPending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form="inbound-create-address" loading={create.isPending}>Create address</Button></>}>
+  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) onOpenChange(next) }} title="New address" description="Its mail lands in the Inbox, for you, the API and agents." footer={<><Button disabled={create.isPending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form="inbound-create-address" loading={create.isPending}>Create address</Button></>}>
     <form id="inbound-create-address" className="stack" onSubmit={submit} noValidate>
       <MutationError error={create.error} />
       <Field label="Address" htmlFor="inbound-address" error={errors.address || fieldError(create.error, 'address')} hint={receiving.length ? receiving.length > 1 ? `Receiving domains: ${receiving.map(domain => domain.name).join(', ')}` : undefined : 'Enable receiving on a domain first.'}>
         <Input id="inbound-address" type="email" value={address} onChange={event => setAddress(event.target.value)} disabled={create.isPending} placeholder={`support@${receiving[0]?.name ?? 'example.com'}`} autoFocus autoComplete="off" />
       </Field>
-      <Field label="Display name" htmlFor="inbound-address-name" error={fieldError(create.error, 'displayName')} hint="Shown as the sender name on replies."><Input id="inbound-address-name" value={displayName} onChange={event => setDisplayName(event.target.value)} disabled={create.isPending} placeholder="Support" /></Field>
+      <Field label="Display name" htmlFor="inbound-address-name" error={fieldError(create.error, 'displayName')} hint={displayNameHint}><Input id="inbound-address-name" value={displayName} onChange={event => setDisplayName(event.target.value)} disabled={create.isPending} placeholder="Support" /></Field>
       {/* Optional, and most people never need them: folded away, with what each does when opened. */}
       <details className="inbound-advanced" open={!!lifetime || !!publicAddress || !!errors.publicAddress || undefined}>
-        <summary>Advanced <span className="muted">· lifetime and reply-as address, optional</span></summary>
+        <summary>Lifetime and reply-as <span className="muted">· optional</span></summary>
         <div className="stack inbound-advanced__body">
-          <Field label="Lifetime" htmlFor="inbound-address-lifetime" error={fieldError(create.error, 'ttlSeconds')} hint={lifetime ? 'After it expires it stops receiving and sending. Its mail stays readable until you delete it.' : 'Permanent: receives until you delete it, including mail sent here before it existed.'}>
+          <Field label="Lifetime" htmlFor="inbound-address-lifetime" error={fieldError(create.error, 'ttlSeconds')} hint={lifetime ? 'Then it stops receiving and sending; its mail stays readable.' : 'Permanent. It also gets mail sent here before it existed.'}>
             <Select id="inbound-address-lifetime" value={lifetime} onValueChange={value => { setLifetime(value); if (value) setPublicAddress('') }} disabled={create.isPending} options={lifetimes} />
           </Field>
-          <Field label="Reply as" htmlFor="inbound-address-public" error={errors.publicAddress || fieldError(create.error, 'publicAddress')} hint={lifetime ? 'Only permanent addresses can reply as another address.' : 'Replies come from the same name on a parent domain you send from: mail to support@reply.acme.com is answered from support@acme.com.'}>
+          <Field label="Reply as" htmlFor="inbound-address-public" error={errors.publicAddress || fieldError(create.error, 'publicAddress')} hint={lifetime ? 'Only permanent addresses can reply as another address.' : 'Replies come from this name on a parent domain: support@reply.acme.com answers as support@acme.com.'}>
             <Input id="inbound-address-public" type="email" value={publicAddress} onChange={event => setPublicAddress(event.target.value)} disabled={create.isPending || !!lifetime} placeholder={address.includes('@') ? `${address.split('@')[0]}@${address.split('@')[1]!.split('.').slice(1).join('.') || 'example.com'}` : `support@${receiving[0] ? receiving[0].name.split('.').slice(receiving[0].name.split('.').length > 2 ? 1 : 0).join('.') : 'example.com'}`} autoComplete="off" />
           </Field>
         </div>
@@ -160,7 +161,7 @@ function PatternsField({ address, inputRef }: { address: InboundAddress; inputRe
 function RecentMail({ address, threads }: { address: InboundAddress; threads: ReturnType<typeof useAddressThreads> }) {
   if (threads.error) return <ErrorState error={threads.error} onRetry={() => void threads.refetch()} />
   if (!threads.data) return <div aria-hidden="true"><SkeletonText width="60%" /></div>
-  if (!threads.data.length) return <p className="muted">No mail yet. Mail sent to <PrivateAddress value={address.address} /> shows up here and in the Inbox within seconds.</p>
+  if (!threads.data.length) return <p className="muted">No mail yet; mail to <PrivateAddress value={address.address} /> shows up here within seconds.</p>
   return <ul className="addr-recent">{threads.data.slice(0, 5).map(t => <li key={t.id}><Link to={`/receiving/inbox?address=${address.id}&thread=${t.id}`}><span className="addr-recent__subject" title={t.subject || undefined}>{t.subject || '(no subject)'}</span><span className="addr-recent__snippet muted" title={t.snippet || undefined}>{t.snippet}</span><time>{when(t.lastMessageAt)}</time></Link></li>)}</ul>
 }
 
@@ -189,7 +190,7 @@ export function InboundAddressDetailPage() {
     event.preventDefault(); if (!input || !base) return
     // Text still in the alias box counts: add it, or stop on it so nothing invalid is sent.
     const aliases = commitAliases(input.aliases, { address: base.address, temporary: !!base.expiresAt })
-    if (!aliases.ok) { setInput({ ...input, aliases: { list: aliases.list, draft: aliases.draft, message: aliases.message } }); document.getElementById('inbound-address-aliases')?.focus(); return }
+    if (!aliases.ok) { setInput({ ...input, aliases: { list: aliases.list, draft: aliases.draft, message: aliases.message } }); focus(() => document.getElementById('inbound-address-aliases')); return }
     const patch: InboundAddressPatch = {}
     if (input.displayName.trim() !== (base.displayName ?? '')) patch.displayName = input.displayName.trim() || null
     if (!sameList(aliases.list, base.aliases)) patch.aliases = aliases.list
@@ -197,7 +198,8 @@ export function InboundAddressDetailPage() {
     setInput({ ...input, aliases: { list: aliases.list, draft: '', message: null } })
     try { setInput(formOf(await save.mutateAsync(patch))) } catch { /* Shown in the form. */ }
   }
-  const focus = (target: () => HTMLElement | null) => { const el = target(); el?.scrollIntoView({ block: 'center' }); el?.focus() }
+  // Opens the aliases and patterns first when the field is inside them.
+  const focus = (target: () => HTMLElement | null) => { const el = target(); el?.closest('details')?.setAttribute('open', ''); el?.scrollIntoView({ block: 'center' }); el?.focus() }
   return <div className="stack inbound-stack">
     {/* The actions hold their place while the address loads, as the same buttons disabled (their labels give their exact
         widths): on a phone they take a row of their own. */}
@@ -211,25 +213,27 @@ export function InboundAddressDetailPage() {
         <div><dt>Domain</dt><dd><Link to="/domains">{current.domain}</Link></dd></div>
         {current.publicAddress && current.publicAddress !== current.address && <div><dt>Sends as</dt><dd className="settings-break"><PrivateAddress value={current.publicAddress} /></dd></div>}
         <div><dt>Created</dt><dd>{current.origin === 'auto' ? 'By the catch-all, ' : ''}{date(current.createdAt)}</dd></div>
-        <div><dt>Threads</dt><dd>{number(current.stats.threads)}{current.stats.unreadThreads > 0 && <span className="muted"> · {number(current.stats.unreadThreads)} unread</span>}</dd></div>
-        <div><dt>Last message</dt><dd>{current.stats.lastMessageAt ? date(current.stats.lastMessageAt) : 'None yet'}</dd></div>
         {current.expiresAt && <div><dt>Expires</dt><dd>{date(current.expiresAt)}</dd></div>}
       </dl>
-      {current.expiresAt && Date.parse(current.expiresAt) <= Date.now() && <Alert tone="info">This temporary address expired. It no longer receives or sends; its history stays readable until you delete it.</Alert>}
+      {current.expiresAt && Date.parse(current.expiresAt) <= Date.now() && <Alert tone="info">This temporary address expired. It can’t receive or send, but its mail stays readable.</Alert>}
       {canAdminister && <AddressPath address={current} overview={overview} onAddAlias={() => focus(() => document.getElementById('inbound-address-aliases'))} onAddPattern={() => focus(() => patternInput.current)} />}
       <section className="section stack" aria-labelledby="address-recent">
-        <SectionHeader title={<span id="address-recent">Recent mail</span>} />
+        {/* The thread count heads the list; its newest row is the last message. */}
+        <SectionHeader title={<span id="address-recent">Recent mail{current.stats.threads > 0 && <span className="muted"> · {number(current.stats.threads)} {current.stats.threads === 1 ? 'thread' : 'threads'}{current.stats.unreadThreads > 0 && `, ${number(current.stats.unreadThreads)} unread`}</span>}</span>} />
         <RecentMail address={current} threads={threads} />
       </section>
       {canAdminister && <section className="section section--bordered stack">
         <SectionHeader title="Settings" />
         {input && <form className="stack inbound-settings-form" onSubmit={submit} noValidate>
           <MutationError error={save.error} />
-          <Field label="Display name" htmlFor="inbound-address-display" error={fieldError(save.error, 'displayName')} hint="Shown as the sender name on replies."><Input id="inbound-address-display" value={input.displayName} onChange={event => setInput({ ...input, displayName: event.target.value })} disabled={save.isPending} placeholder="Support" /></Field>
-          <AliasEditor id="inbound-address-aliases" address={current.address} temporary={!!current.expiresAt} saved={input.base.aliases} value={input.aliases} onChange={aliases => setInput({ ...input, aliases })} disabled={save.isPending} error={fieldError(save.error, 'aliases')} />
+          <Field label="Display name" htmlFor="inbound-address-display" error={fieldError(save.error, 'displayName')} hint={displayNameHint}><Input id="inbound-address-display" value={input.displayName} onChange={event => setInput({ ...input, displayName: event.target.value })} disabled={save.isPending} placeholder="Support" /></Field>
+          {/* The route above lists them; editing them is one click away (Add alias and Add pattern open it). */}
+          <Disclosure className="addr-more" title="Aliases and patterns" defaultOpen={!!fieldError(save.error, 'aliases')}>
+            <AliasEditor id="inbound-address-aliases" address={current.address} temporary={!!current.expiresAt} saved={input.base.aliases} value={input.aliases} onChange={aliases => setInput({ ...input, aliases })} disabled={save.isPending} error={fieldError(save.error, 'aliases')} />
+            <PatternsField key={current.updatedAt} address={current} inputRef={patternInput} />
+          </Disclosure>
           <div className="cluster form-actions"><Button variant="primary" type="submit" loading={save.isPending} disabled={!dirty}>Save changes</Button>{dirty && !save.isPending && <Button onClick={() => { setInput(null); save.reset() }}>Discard</Button>}</div>
         </form>}
-        <PatternsField key={current.updatedAt} address={current} inputRef={patternInput} />
       </section>}
     </div>}
     <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title="Delete this address?" description="Stored messages stay. The address and its aliases are released with their read, star and archive state; new mail to them follows the domain’s catch-all, and routes stop delivering here." confirmLabel="Delete address" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/receiving') }} />

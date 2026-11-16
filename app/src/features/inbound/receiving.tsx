@@ -157,7 +157,7 @@ function EndpointsTab({ overview, refresh }: { overview: Overview; refresh: () =
           { label: 'Delete', destructive: true, onSelect: () => { setDeleting(e); setDeleteOpen(true) } },
         ]} /> },
       ]} />
-    {overview.endpointsTruncated && <p className="muted rcv-truncated">Showing the first 100 endpoints and 100 inbound webhooks. <Link to="/receiving/webhooks">Event webhooks</Link> lists every inbound webhook.</p>}
+    {overview.endpointsTruncated && <p className="muted rcv-truncated">Showing the first 100 endpoints and 100 webhooks · <Link to="/receiving/webhooks">See every webhook</Link></p>}
     <EndpointDialog open={creating} onOpenChange={setCreating} onCreated={e => { setCreating(false); setCreated(e); refresh() }} />
     <EndpointDialog open={editOpen} editing={editing} onOpenChange={setEditOpen} onSaved={e => { setEditOpen(false); toast(`Saved ${e.name}.`, 'success'); refresh() }} />
     <CreatedEndpointDialog created={created} onClose={() => setCreated(null)} />

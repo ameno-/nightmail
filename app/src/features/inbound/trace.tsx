@@ -60,7 +60,7 @@ export function EmailPicker({ value, onChange, addresses, preferredTo }: { value
     <div className="trace-picker__body">
       {value.mode === 'recent' ? recent.error ? <ErrorState error={recent.error} onRetry={() => void recent.refetch()} />
         : !recent.data ? <div className="trace-recent" aria-hidden="true">{[0, 1, 2].map(i => <div key={i} className="trace-recent__row"><SkeletonText width="70%" /></div>)}</div>
-        : !recent.data.length ? <p className="muted trace-picker__empty">No mail received yet. Try the sample email, or paste a message.</p>
+        : !recent.data.length ? <p className="muted trace-picker__empty">No mail yet: try the sample email, or paste one.</p>
         : <ul className="trace-recent" role="radiogroup" aria-label="Recent mail">{recent.data.map(m => <li key={m.id}>
           <button type="button" role="radio" aria-checked={value.messageId === m.id} className="trace-recent__row" onClick={() => onChange({ mode: 'recent', messageId: m.id, to: arrivedAt(m) })}>
             <span className="trace-recent__from"><PrivateAddress value={m.from.address} /></span>
@@ -70,13 +70,13 @@ export function EmailPicker({ value, onChange, addresses, preferredTo }: { value
           </button></li>)}</ul>
         : value.mode === 'sample' ? <div className="trace-sample">
           <Field label="Send it to" htmlFor="trace-sample-to" hint="Any address on a receiving domain, including one that doesn’t exist yet.">
-            <Input id="trace-sample-to" list="trace-addresses" value={value.to} onChange={e => onChange({ mode: 'sample', to: e.target.value })} placeholder="support@acme.com" autoComplete="off" />
+            <Input id="trace-sample-to" className="private-field" list="trace-addresses" value={value.to} onChange={e => onChange({ mode: 'sample', to: e.target.value })} placeholder="support@acme.com" autoComplete="off" />
           </Field>
           <datalist id="trace-addresses">{addresses.map(a => <option key={a} value={a} />)}</datalist>
           <pre className="trace-sample__mime"><MaskedText text={sampleMime(value.to || 'support@acme.com').replace(/\r\n/g, '\n')} /></pre>
         </div>
         : <Field label="Message" htmlFor="trace-paste" hint="The full message with its headers. Its To and Cc addresses are traced."><Textarea id="trace-paste" rows={8} spellCheck={false} value={value.mime} onChange={e => onChange({ mode: 'paste', mime: e.target.value })} placeholder={'From: ana@example.org\nTo: support@acme.com\nSubject: Invoice\n\nHello'} /></Field>}
-      {none && value.mode === 'sample' && <p className="muted trace-picker__note">No mail yet, so a sample email stands in. Paste a message to trace your own.</p>}
+      {none && value.mode === 'sample' && <p className="muted trace-picker__note">No mail yet, so a sample stands in; paste one to trace it.</p>}
     </div>
   </div>
 }
@@ -243,7 +243,7 @@ export function TracePage() {
     <form className="trace-form" onSubmit={submit}>
       <EmailPicker value={choice} onChange={next => { setChoice(next); dry.clear() }} addresses={addresses} preferredTo={preferred} />
       {choice.mode !== 'sample' && <Field label="Trace it as mail to" htmlFor="trace-to" hint="Optional. Leave empty to use the message’s own recipients.">
-        <Input id="trace-to" list="trace-addresses" value={to} onChange={e => { setTo(e.target.value); dry.clear() }} placeholder="The message’s own recipients" autoComplete="off" />
+        <Input id="trace-to" className="private-field" list="trace-addresses" value={to} onChange={e => { setTo(e.target.value); dry.clear() }} placeholder="The message’s own recipients" autoComplete="off" />
       </Field>}
       <div className="cluster"><Button variant="primary" type="submit" loading={dry.pending} disabled={!input}>Trace</Button><span className="muted">Runs your rituals as saved. Omens (questions for {productName}’s AI) give their default answer; to set answers, try a ritual in its editor.</span></div>
     </form>
