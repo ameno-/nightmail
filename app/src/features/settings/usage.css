@@ -1,4 +1,4 @@
-/* Plan & usage: price rows like every settings row, then the daily limit's steps as a short numbered ladder. */
+/* Plan & usage: rows like every settings row; the daily limit's row opens its steps, a short numbered ladder. */
 .usage-note { max-width: 62ch; font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
 .hosted-settings__content > .usage-note { margin-top: calc(-1 * var(--space-12)); }
 .usage-meter { display: inline-flex; align-items: center; gap: var(--space-12); }
@@ -6,8 +6,14 @@
 .usage-meter__track { position: relative; display: block; width: 96px; height: 4px; overflow: hidden; border-radius: 2px; background: var(--color-layer-2); }
 .usage-meter__track > i { position: absolute; inset: 0; border-radius: inherit; background: var(--color-contrast); transform-origin: left; transition: transform 240ms var(--ease-out-strong); }
 .usage-meter__track[data-full] > i { background: var(--color-warning-marker); }
-.usage-steps-section { display: flex; flex-direction: column; gap: var(--space-12); }
-.usage-steps-section > .ui-section-header { margin-bottom: calc(-1 * var(--space-4)); }
+.usage-limit > summary { list-style: none; cursor: pointer; }
+.usage-limit > summary::-webkit-details-marker { display: none; }
+.usage-limit__title { display: inline-flex; align-items: center; gap: var(--space-4); }
+.usage-limit__title > svg { flex: none; color: var(--color-muted); transition: transform 180ms var(--ease-out-strong), color var(--motion-duration); }
+.usage-limit[open] .usage-limit__title > svg { transform: rotate(180deg); }
+@media (hover: hover) and (pointer: fine) { .usage-limit > summary:hover .usage-limit__title > svg { color: var(--color-text); } }
+.usage-limit > summary:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
+.usage-steps-section { display: flex; flex-direction: column; gap: var(--space-12); padding-top: var(--space-12); }
 .usage-steps-section > .usage-note { margin: 0; }
 .usage-steps { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--color-border-muted); }
 .usage-steps > li { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: var(--space-12); align-items: start; min-height: 80px; padding: var(--space-12) 0; border-bottom: 1px solid var(--color-border-muted); }
@@ -27,7 +33,10 @@
   .usage-rows .settings-row__control { justify-self: stretch; min-height: 48px; white-space: normal; }
   .usage-rows .settings-inline { flex-wrap: wrap; justify-content: flex-end; row-gap: var(--space-4); }
   .usage-meter__track { width: 48px; }
+  /* The limit's hint becomes “Custom, set by …” (two lines) when usage arrives: both lines are reserved from the start. */
+  .usage-limit .settings-row__label > .muted { min-height: calc(2 * var(--leading-xs)); }
 }
+@media (prefers-reduced-motion: reduce) { .usage-limit__title > svg { transition: none; } }
 @media (pointer: coarse), (max-width: 899px) {
   .usage-rows .settings-score { position: relative; }
   .usage-rows .settings-score::before { content: ''; position: absolute; inset: -12px -8px; }

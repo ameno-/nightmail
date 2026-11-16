@@ -14,9 +14,9 @@ export function KeysGuide() {
     setOpen(!open)
     try { if (open) localStorage.removeItem(guideKey); else localStorage.setItem(guideKey, 'open') } catch { /* Stays as chosen for this visit. */ }
   }
-  return <section className="keys-guide" aria-label="Which key do I need?" data-open={open || undefined}>
+  return <section className="keys-guide" aria-label="Which key to use" data-open={open || undefined}>
     <div className="keys-guide__line">
-      <button type="button" className="keys-guide__toggle" aria-expanded={open} aria-controls="keys-guide-panel" onClick={toggle}>Which key do I need?<ChevronDown size={14} aria-hidden="true" /></button>
+      <button type="button" className="keys-guide__toggle" aria-expanded={open} aria-controls="keys-guide-panel" onClick={toggle}>Which key to use<ChevronDown size={14} aria-hidden="true" /></button>
       <Link className="guide-link" to={guides.keys}>Guide</Link>
     </div>
     <div id="keys-guide-panel" className="keys-guide__panel" aria-hidden={!open} inert={!open}>

@@ -105,8 +105,8 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   const empty = failed.length ? <EmptyState title="Nothing else to show" />
     : cursor && keysShown ? <EmptyState title="No keys on this page" />
     : type === 'api' ? <EmptyState title={`No ${active}API keys`} description={showRevoked ? undefined : 'An API key lets your server, a script or an agent send email or read mail.'} />
-    : type === 'agent' ? <EmptyState title="No agents connected" description={`Connect an agent to let OpenCode, Claude Code or Cursor work with ${productName} as you. It shows up here once it signs in, with the tokens it makes.`} action={<Button onClick={() => setConnecting(true)}>Connect an agent</Button>} />
-    : type === 'app' ? <EmptyState title="No app passwords" description="An app password lets a mail app such as Apple Mail or Thunderbird open a persistent inbox over IMAP or SMTP." />
+    : type === 'agent' ? <EmptyState title="No agents connected" description="Connect OpenCode, Claude Code or Cursor to work as you. It and its tokens appear here." action={<Button onClick={() => setConnecting(true)}>Connect an agent</Button>} />
+    : type === 'app' ? <EmptyState title="No app passwords" description="Lets a mail app like Apple Mail open a persistent inbox over IMAP or SMTP." />
     : <EmptyState title={`No ${active}keys`} description={showRevoked ? undefined : 'Create a key to send from your app, connect an agent or open an inbox in a mail app.'} />
 
   const keyAccess = (key: ApiKey): { first: ReactNode; second: string } => {

@@ -40,7 +40,7 @@ export function useRegionDiscovery(entry: RegionCatalogEntry | undefined, option
     queryKey: regionDiscoveryKey(api, region),
     enabled: allowed && automatic && !active,
     queryFn: async ({ signal }) => {
-      if (!allowed) throw new ApiError('Enable this region and use an unrestricted read or management identity to inspect SES.', 'REGION_DISCOVERY_UNAVAILABLE')
+      if (!allowed) throw new ApiError('Enable this region, then check SES with full read or manage access.', 'REGION_DISCOVERY_UNAVAILABLE')
       const previous = cache.getQueryData<SesDiscovery>(regionDiscoveryKey(api, region))
       // A finished job is not readiness: SNS may still be confirming its HTTPS subscription.
       const refresh = !active && previous?.resources.topic.subscription === 'pending'

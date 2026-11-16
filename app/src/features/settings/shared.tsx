@@ -2,14 +2,15 @@ import type { ReactNode } from 'react'
 import { Alert, Dialog, Button, CopyButton, ErrorText, SecretCode } from '../../components/ui'
 import { ApiError } from '../../data/types'
 
+const SAVE_FAILED = 'Couldn’t save the change. Try again.'
 export function errorText(error: unknown) {
-  return error instanceof Error ? error.message : 'Couldn’t save the change. Try again.'
+  return error instanceof Error ? error.message : SAVE_FAILED
 }
 export function fieldError(error: unknown, field: string) {
   return error instanceof ApiError ? error.fields[field] : undefined
 }
 export function MutationError({ error }: { error: unknown }) {
-  return error ? <Alert tone="danger"><ErrorText error={error} fallback="Couldn’t save the change. Try again." /></Alert> : null
+  return error ? <Alert tone="danger"><ErrorText error={error} fallback={SAVE_FAILED} /></Alert> : null
 }
 export function SecretDialog({ secret, title, onClose, children, description = 'Shown once. Copy it now.' }: { secret: string | null; title: string; onClose: () => void; children?: ReactNode; description?: string }) {
   // Sensitive as a whole: the secret, and any example built from it (children), never reach a UI note.

@@ -67,7 +67,7 @@ export const cardBrand = (brand: string) => CARD_BRANDS[brand.toLowerCase()] ?? 
 const DECLINES: Record<string, string> = {
   card_declined: 'Your card was declined', generic_decline: 'Your card was declined', do_not_honor: 'Your card was declined', insufficient_funds: 'Your card has insufficient funds',
   expired_card: 'Your card has expired', authentication_required: 'Your bank asked to confirm the charge (3-D Secure)', incorrect_cvc: 'The card’s security code was wrong',
-  processing_error: 'The card processor had an error', dispute: 'A payment was disputed', early_fraud_warning: 'The card was flagged by the bank', payment_method_detached: 'The saved card was removed',
+  processing_error: 'The card processor had an error', dispute: 'A payment was disputed', early_fraud_warning: 'Your bank flagged the card', payment_method_detached: 'The saved card was removed',
 }
 export const declineText = (code: string) => DECLINES[code] ?? 'The last charge failed'
 

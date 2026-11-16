@@ -33,10 +33,10 @@ export function SetupChecklist({report, running, queued, bare}: {report?: SesDis
       return <li key={check.name} data-state={check.state}>
         <Icon size={16} aria-hidden="true" />
         <div className="settings-setup-step"><div className="settings-setup-step-heading"><span>{check.name}</span><span className="settings-setup-status">{labels[check.state]}</span></div>{check.detail && <p className="muted">{check.detail}</p>}
-          {check.name === 'HTTPS subscription' && pending && <div className="settings-setup-confirmation"><p>In SNS, choose <strong>Request confirmation</strong> for the pending subscription, then <strong>Check AWS</strong>. Provisioning does not resend confirmation.</p>{snsUrl && <a className="ui-button ui-button--secondary" href={snsUrl} target="_blank" rel="noopener noreferrer">Open SNS</a>}</div>}
+          {check.name === 'HTTPS subscription' && pending && <div className="settings-setup-confirmation"><p>In SNS, choose <strong>Request confirmation</strong> on the pending subscription, then <strong>Check AWS</strong>. Provisioning won’t send it again.</p>{snsUrl && <a className="ui-button ui-button--secondary" href={snsUrl} target="_blank" rel="noopener noreferrer">Open SNS</a>}</div>}
         </div>
       </li>
     })}</ul>
-    {report?.feedbackUrl && <div className="settings-setup-callback"><span className="muted">Callback</span><span>{report.feedbackUrl}</span></div>}
+    {report?.feedbackUrl && <div className="settings-setup-callback"><span className="muted">Feedback URL</span><span>{report.feedbackUrl}</span></div>}
   </div>
 }

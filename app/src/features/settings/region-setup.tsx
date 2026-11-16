@@ -9,7 +9,7 @@ import { regionCatalogKey, regionDiscoveryKey, useRegionAccess, useRegionCatalog
 import type { AutoValidationMode, RegionCatalog, RegionCatalogEntry, SesDiscovery, Stream } from '../../data/types'
 import { date, label, number } from '../../lib/format'
 import { fieldError, MutationError } from './shared'
-import { RegionDiscoverySkeleton, settingsColumns } from './skeletons'
+import { DEFAULT_REGION_HINT, RegionDiscoverySkeleton, settingsColumns } from './skeletons'
 import { awaitingConfirmationOnly, SetupChecklist } from './setup-checklist'
 import { ReputationSection } from './reputation'
 
@@ -65,7 +65,7 @@ export function RegionSetup() {
       <SectionHeader title="Regions" actions={<div className="cluster"><Button loading={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</Button><Button disabled={!canManage || configure.isPending} onClick={() => {configure.reset(); setNewRegion(''); setEnableOpen(true)}}>Add region</Button></div>} />
       <MutationError error={catalog.error} />
       {!enableOpen && !disableRegion && <MutationError error={configure.error} />}
-      <Field label="Default sending region" htmlFor="default-sending-region" hint="Used for API sends that omit a region.">
+      <Field label="Default sending region" htmlFor="default-sending-region" hint={DEFAULT_REGION_HINT}>
         <Select id="default-sending-region" className="settings-default-region" value={catalog.data?.defaultRegion ?? ''} options={(catalog.data?.data ?? []).filter(row => row.enabled).map(row => ({value: row.region, label: row.region}))} disabled={!canManage || configure.isPending || !catalog.data} onValueChange={region => configure.mutate({region, makeDefault: true})} />
       </Field>
       <DataTable loading={catalog.isPending} skeletonRows={2} rows={catalog.data?.data ?? []} rowKey={row => row.region} selectedId={entry?.region} empty={<EmptyState title="No regions configured" />} columns={[
@@ -126,7 +126,7 @@ function RegionDetail({entry, inspected}: {entry: RegionCatalogEntry; inspected:
     {!confirmOpen && <MutationError error={provision.error} />}
     {ready ? <details className="settings-provisioning-details"><summary>Provisioning details</summary><div className="stack">{actions}{checklist}</div></details> : checklist}
     {!report && (discovery.isFetching || discovering) ? <RegionDiscoverySkeleton /> : report ? <DiscoveryReport report={report} entry={entry} /> : null}
-    <ConfirmDialog open={confirmOpen} onOpenChange={setConfirmOpen} title={`Provision ${entry.region}?`} description={api.mode === 'demo' ? 'Simulates SES configuration sets and SNS feedback. No real AWS resources or email are changed.' : `Creates or repairs SES configuration sets and SNS feedback in AWS account ${report?.account?.id ?? '(not identified)'}, in ${entry.region}: real AWS changes, even in Test. It doesn’t send email, change DNS or grant production access.`} confirmLabel="Provision resources" pending={provision.isPending} onConfirm={() => provision.mutateAsync()} />
+    <ConfirmDialog open={confirmOpen} onOpenChange={setConfirmOpen} title={`Provision ${entry.region}?`} description={api.mode === 'demo' ? 'Simulates SES configuration sets and SNS feedback. No real AWS resources or email are changed.' : `Creates or repairs SES configuration sets and SNS feedback in ${entry.region} of AWS account ${report?.account?.id ?? '(not identified)'}: real changes, even in Test. Email, DNS and production access don’t change.`} confirmLabel="Provision resources" pending={provision.isPending} onConfirm={() => provision.mutateAsync()} />
   </section>
 }
 
@@ -143,7 +143,7 @@ function DiscoveryReport({report, entry}: {report: SesDiscovery; entry: RegionCa
     {report.warnings.length > 0 && <Alert tone="warning"><IssueList issues={report.warnings} /></Alert>}
     <div className="settings-report">
     <div className="stack settings-discovery-section"><h3>Account</h3><dl className="settings-facts settings-account-summary">
-      <div><dt>AWS account</dt><dd>{account?.id ?? 'Unknown'}</dd></div><div><dt>SES access</dt><dd>{flag(account?.productionAccess, 'Production', 'Sandbox')}</dd></div><div><dt>Sent / daily quota</dt><dd>{amount(account?.quota.sentLast24Hours)} / {amount(account?.quota.max24HourSend)}</dd></div><div><dt>Send rate</dt><dd>{amount(account?.quota.maxSendRate)}{account?.quota.maxSendRate != null ? ' / sec' : ''}</dd></div>
+      <div><dt>AWS account</dt><dd>{account?.id ?? 'Unknown'}</dd></div><div><dt>SES access</dt><dd>{flag(account?.productionAccess, 'Production', 'Sandbox')}</dd></div><div><dt>Sent / SES quota</dt><dd>{amount(account?.quota.sentLast24Hours)} / {amount(account?.quota.max24HourSend)}</dd></div><div><dt>Send rate</dt><dd>{amount(account?.quota.maxSendRate)}{account?.quota.maxSendRate != null ? ' / sec' : ''}</dd></div>
     </dl></div>
     <ReputationSection report={report} />
     {resources.transactional.owned && resources.marketing.owned && <EmailValidation report={report} />}

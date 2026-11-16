@@ -66,11 +66,8 @@
    "findings": []
   },
   "Domain · phone": {
-   "score": 53,
-   "findings": [
-    "dup-label|cname",
-    "dup-label|txt"
-   ]
+   "score": 37,
+   "findings": []
   },
   "Domains · add domain dialog · desktop": {
    "score": 3,
@@ -321,11 +318,11 @@
    "findings": []
   },
   "Settings · MCP connection · desktop": {
-   "score": 19,
+   "score": 16,
    "findings": []
   },
   "Settings · MCP connection · phone": {
-   "score": 19,
+   "score": 16,
    "findings": []
   },
   "Settings · account · desktop": {
@@ -333,11 +330,11 @@
    "findings": []
   },
   "Settings · activity · desktop": {
-   "score": 27,
+   "score": 5,
    "findings": []
   },
   "Settings · activity · phone": {
-   "score": 26,
+   "score": 4,
    "findings": []
   },
   "Settings · add credit dialog · desktop": {
@@ -349,38 +346,28 @@
    "findings": []
   },
   "Settings · billing · desktop": {
-   "score": 42,
-   "findings": [
-    "long-block|brand charges your saved card when t"
-   ]
-  },
-  "Settings · billing · free · desktop": {
    "score": 17,
    "findings": []
   },
+  "Settings · billing · free · desktop": {
+   "score": 14,
+   "findings": []
+  },
   "Settings · billing · free · phone": {
-   "score": 16,
+   "score": 14,
    "findings": []
   },
   "Settings · billing · owed · desktop": {
-   "score": 54,
-   "findings": [
-    "long-block|brand charges your saved card when t"
-   ]
+   "score": 27,
+   "findings": []
   },
   "Settings · billing · owed · phone": {
-   "score": 53,
-   "findings": [
-    "disclosure|balance|billing-balance__amount",
-    "long-block|brand charges your saved card when t"
-   ]
+   "score": 27,
+   "findings": []
   },
   "Settings · billing · phone": {
-   "score": 47,
-   "findings": [
-    "disclosure|balance|billing-balance__amount",
-    "long-block|brand charges your saved card when t"
-   ]
+   "score": 17,
+   "findings": []
   },
   "Settings · desktop": {
    "score": 6,
@@ -403,7 +390,7 @@
    "findings": []
   },
   "Settings · new webhook · desktop": {
-   "score": 23,
+   "score": 21,
    "findings": []
   },
   "Settings · phone": {
@@ -411,45 +398,28 @@
    "findings": []
   },
   "Settings · plan & usage · desktop": {
-   "score": 58,
-   "findings": [
-    "inert|# days after connecting sending, with at",
-    "inert|## days after connecting sending, with a",
-    "inert|new workspaces start small so one mistak",
-    "long-block|new workspaces start small so one mistak"
-   ]
+   "score": 17,
+   "findings": []
   },
   "Settings · plan & usage · phone": {
-   "score": 48,
-   "findings": [
-    "inert|# days after connecting sending, with at",
-    "inert|## days after connecting sending, with a",
-    "long-block|new workspaces start small so one mistak"
-   ]
+   "score": 17,
+   "findings": []
   },
   "Settings · sending · desktop": {
-   "score": 25,
-   "findings": [
-    "dup-fact|the sender score|sender score|sender score"
-   ]
+   "score": 16,
+   "findings": []
   },
   "Settings · webhook · desktop": {
-   "score": 43,
-   "findings": [
-    "long-block|brand signs every delivery with this"
-   ]
+   "score": 32,
+   "findings": []
   },
   "Settings · webhook · phone": {
-   "score": 35,
-   "findings": [
-    "long-block|brand signs every delivery with this"
-   ]
+   "score": 26,
+   "findings": []
   },
   "Settings · webhooks · desktop": {
-   "score": 17,
-   "findings": [
-    "long-block|brand calls your url when email you "
-   ]
+   "score": 10,
+   "findings": []
   },
   "Template · desktop": {
    "score": 18,

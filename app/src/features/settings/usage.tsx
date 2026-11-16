@@ -1,6 +1,6 @@
 import type { CSSProperties, ReactNode } from 'react'
 import { Link } from 'react-router'
-import { ArrowUpRight, Check } from 'lucide-react'
+import { ArrowUpRight, Check, ChevronDown } from 'lucide-react'
 import { ErrorState, SectionHeader, Skeleton, StatusBadge } from '../../components/ui'
 import { useApiDef, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
@@ -12,17 +12,17 @@ import { productName } from '../../../../api/src/brand'
 
 const money = (value: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: value > 0 && value < 0.01 ? 4 : 2 }).format(value)
 
-// Plan & usage (hosted): what billing charges and whether it does yet, the free sent and received allowances (separate)
-// used this month, this month's counts and cost, and the daily sending limit with the steps it grows through. Every member can read it; members see
-// sent mail only and no amounts (received mail includes messages they can't open), and the note says so before data
-// arrives. Each value has a skeleton of its own width in a 53px row, so nothing moves as the three reads land.
+// Plan & usage (hosted): the daily sending limit first (the steps it grows through open from it), then whether billing
+// charges yet, the free sent and received allowances (separate) used this month, and this month's counts and cost.
+// Every member can read it; members see sent mail only and no amounts (received mail includes messages they can't
+// open). Each value has a skeleton of its own width in a 53px row, so nothing moves as the three reads land.
 export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; hint?: ReactNode; children: ReactNode }) => ReactNode }) {
   const query = useApiDef(queries.usage(), { interval: 60_000 })
   const billing = useApiDef(queries.billing(), { interval: 60_000 })
   const { canAdminister } = useWorkspaceAccess()
   const omens = useApiDef(queries.billingMonth(), { enabled: canAdminister })
   const usage = query.data, b = billing.data
-  // From the session (GET /v1/me), so the note is final on the first frame.
+  // From the session (GET /v1/me), so the balance's hint is final on the first frame.
   const enforcement = useSession()?.identity?.billing?.enforcement ?? 'off', free = useSession()?.identity?.billing?.free === true
   if (query.isError && !usage) return <><SectionHeader title="Plan & usage" /><ErrorState error={query.error} onRetry={() => void query.refetch()} /></>
   const value = (ready: unknown, render: () => ReactNode, width = 120) => ready ? render() : <Skeleton width={width} height={20} />
@@ -31,32 +31,37 @@ export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; hint?
   const aged = b ? Number(BigInt(b.free.storage.agedBytes)) : 0
   // Three steps reserve their space while loading.
   const steps = usage ? usage.steps : [null, null, null]
+  const daily = usage?.daily
   return <>
     <SectionHeader title="Plan & usage" />
-    <p className="muted usage-note">{free ? 'Free plan, courtesy of Anomaly: nothing is charged. Usage is still measured.' : enforcement === 'enforce' ? 'Prepaid: usage is taken from your balance hourly.' : enforcement === 'shadow' ? 'Billing starts soon: nothing is charged yet.' : 'Billing isn’t on yet, so nothing is charged.'} Simulator sends count like any other send.{canAdminister ? '' : ' Received mail counts and amounts are shown to owners and admins.'}</p>
     <div className="settings-rows usage-rows">
-      <Row title="Balance" hint={free ? 'Courtesy of Anomaly' : enforced ? 'Usage comes off it hourly' : 'Nothing is charged yet'}>{value(b, () => <span className="cluster settings-inline">
+      {/* The limit and where it is now first; the steps it grows through open from it. */}
+      <details className="usage-limit">
+        <summary className="settings-row">
+          <span className="settings-row__label"><span className="usage-limit__title">Daily limit<ChevronDown size={14} aria-hidden="true" /></span><span className="muted">{daily?.cap != null && daily.step === null ? `Custom, set by the ${productName} team` : daily?.step != null ? `Recipients, last 24 h · step ${daily.step + 1} of ${steps.length}` : 'Recipients, last 24 hours'}</span></span>
+          <span className="settings-row__control">{value(usage, () => !daily ? <span className="muted">Connect sending first</span> : daily.cap === null ? 'No daily limit' : <DailyMeter used={daily.used} cap={daily.cap} resetAt={daily.resetAt} />, 160)}</span>
+        </summary>
+        <div className="usage-steps-section">
+          <p className="muted usage-note">Healthy real email raises it; simulator sends don’t.</p>
+          <ol className="usage-steps">{steps.map((step, index) => {
+            const current = daily?.step === index, done = daily?.step != null && index < daily.step
+            return <li key={index} data-current={current || undefined} data-done={done || undefined} style={{ '--i': index } as CSSProperties}>
+              <span className="usage-steps__mark" aria-hidden="true">{done ? <Check size={12} strokeWidth={2.75} /> : index + 1}</span>
+              {step ? <span className="usage-steps__body"><span><b>{number(step.cap)}</b> recipients a day{current && <span className="usage-steps__badge">You’re here</span>}</span><span className="muted">{step.requires}</span></span> : <span className="usage-steps__body"><Skeleton width={160} height={20} /><Skeleton width={280} height={16} /><Skeleton width={200} height={16} /></span>}
+            </li>
+          })}</ol>
+        </div>
+      </details>
+      <Row title="Balance" hint={free ? 'Courtesy of Anomaly' : enforcement === 'enforce' ? 'Usage comes off it hourly' : 'Nothing is charged yet'}>{value(b, () => <span className="cluster settings-inline">
         <StatusBadge status={enforced || free ? state!.label : 'Not charged yet'} tone={enforced || free ? state!.tone : 'neutral'} />
         {b!.balance && !free && <Link to="/settings#billing" replace className="settings-score"><span>{usd(total(b!.balance))}</span><ArrowUpRight size={14} aria-hidden="true" /></Link>}
       </span>, 160)}</Row>
       <Row title="Free sends">{value(b, () => <Meter used={b!.free.sent.used} cap={b!.free.sent.limit} label="Free sends used" />, 160)}</Row>
       <Row title="Free received">{value(b, () => b!.free.received ? <Meter used={b!.free.received.used} cap={b!.free.received.limit} label="Free received used" /> : <span className="muted">Owners and admins</span>, 160)}</Row>
       <Row title="Stored past 90 days" hint="1 GB free, then $0.25 per GB-month">{value(b, () => `${gigabytes(aged)} of ${gigabytes(b!.free.storage.limitBytes)}`, 140)}</Row>
-      <Row title="This month" hint={usage ? `Since ${date(usage.month.from, { month: 'short', day: 'numeric', timeZone: 'UTC' })}${usage.simulated ? ', simulated' : ''}` : 'This calendar month'}>{value(usage && (!canAdminister || omens.data || omens.isError), () => [`${number(usage!.month.sent)}\u00a0emails sent`, usage!.month.received === null ? null : `${number(usage!.month.received)}\u00a0received`, canAdminister && !omens.isError ? `${number(omenCount)}\u00a0Omens` : null].filter(Boolean).join(' · '), 200)}</Row>
+      <Row title="This month" hint={usage ? `Since ${date(usage.month.from, { month: 'short', day: 'numeric', timeZone: 'UTC' })}${usage.simulated ? ', simulated' : ', incl. simulator sends'}` : 'This calendar month'}>{value(usage && (!canAdminister || omens.data || omens.isError), () => [`${number(usage!.month.sent)}\u00a0emails sent`, usage!.month.received === null ? null : `${number(usage!.month.received)}\u00a0received`, canAdminister && !omens.isError ? `${number(omenCount)}\u00a0Omens` : null].filter(Boolean).join(' · '), 200)}</Row>
       <Row title="Estimated cost" hint={free ? 'Not charged: free plan' : b?.monthToDate ? 'At $0.20 per 1,000 emails' : usage?.month.received === null ? 'Sent mail only' : 'This month'}>{value(b && usage, () => b!.monthToDate ? usd(b!.monthToDate.cost) : money(monthEstimate(usage!)), 80)}</Row>
-      <Row title="Daily limit" hint={usage?.daily?.cap != null && usage.daily.step === null ? `Custom, set by the ${productName} team` : 'Recipients, last 24 hours'}>{value(usage, () => !usage!.daily ? <span className="muted">Connect sending first</span> : usage!.daily.cap === null ? 'No daily limit' : <DailyMeter used={usage!.daily.used} cap={usage!.daily.cap} resetAt={usage!.daily.resetAt} />, 160)}</Row>
     </div>
-    <section className="usage-steps-section" aria-labelledby="usage-steps-title">
-      <SectionHeader title={<span id="usage-steps-title">How the daily limit grows</span>} />
-      <p className="muted usage-note">New workspaces start small so one mistake can’t hurt everyone’s delivery. The limit rises as real email accepted by SES proves healthy; simulator sends use it but never raise it.</p>
-      <ol className="usage-steps">{steps.map((step, index) => {
-        const current = usage?.daily?.step === index, done = usage?.daily?.step != null && index < usage.daily.step
-        return <li key={index} data-current={current || undefined} data-done={done || undefined} style={{ '--i': index } as CSSProperties}>
-          <span className="usage-steps__mark" aria-hidden="true">{done ? <Check size={12} strokeWidth={2.75} /> : index + 1}</span>
-          {step ? <span className="usage-steps__body"><span><b>{number(step.cap)}</b> recipients a day{current && <span className="usage-steps__badge">You’re here</span>}</span><span className="muted">{step.requires}</span></span> : <span className="usage-steps__body"><Skeleton width={160} height={20} /><Skeleton width={280} height={16} /><Skeleton width={200} height={16} /></span>}
-        </li>
-      })}</ol>
-    </section>
   </>
 }
 

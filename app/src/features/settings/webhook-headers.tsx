@@ -8,7 +8,7 @@ export type HeaderRow = { key: string; name: string; value: string; shown?: bool
 /** null keeps the endpoint's current headers (never sent); a list replaces them all when saved. */
 export type HeaderDraft = HeaderRow[] | null
 
-export const HEADERS_HINT = 'Sent with every delivery, such as Authorization. Values are hidden once saved.'
+export const HEADERS_HINT = 'Sent with each delivery, like Authorization. Saved values stay hidden.'
 let nextKey = 0
 const row = (name = ''): HeaderRow => ({ key: `header-${++nextKey}`, name, value: '' })
 // A row left completely blank is ignored rather than blocking the save.

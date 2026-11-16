@@ -69,8 +69,9 @@ function Cell({ full, hint, className, children }: { full: string | null; hint?:
     else cell.removeAttribute('title')
   }}>{children}</span>
 }
+// How long ago; the exact time is in the row's details.
 function When({ at }: { at: string }) {
-  return <time dateTime={at} title={`${shortDateTime(at)} UTC`}>{ago(at) ?? '—'}</time>
+  return <time dateTime={at}>{ago(at) ?? '—'}</time>
 }
 
 export function ActivitySection() {

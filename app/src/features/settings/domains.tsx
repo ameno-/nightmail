@@ -224,8 +224,7 @@ function DomainDetail() {
     <Dialog open={mailFromOpen} onOpenChange={next => {if (!configureMailFrom.isPending) setMailFromOpen(next)}} title={current.mailFromDomain ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} footer={<><Button disabled={configureMailFrom.isPending} onClick={() => setMailFromOpen(false)}>Cancel</Button><Button variant="primary" loading={configureMailFrom.isPending} type="submit" form="configure-mail-from">Save</Button></>}>
       <form id="configure-mail-from" className="stack" onSubmit={submitMailFrom} noValidate>
         <MutationError error={configureMailFrom.error} />
-        <Field label="MAIL FROM domain" htmlFor="mail-from-domain" error={mailFromInvalid || fieldError(configureMailFrom.error, 'mailFromDomain')}><Input id="mail-from-domain" autoFocus required value={mailFromDomain} onChange={event => setMailFromDomain(event.target.value)} disabled={configureMailFrom.isPending} placeholder={`email.${current.name}`} /></Field>
-        <p className="muted">Use an unused subdomain of {current.name}.</p>
+        <Field label="MAIL FROM domain" htmlFor="mail-from-domain" hint={`A subdomain of ${current.name} you don’t use yet.`} error={mailFromInvalid || fieldError(configureMailFrom.error, 'mailFromDomain')}><Input id="mail-from-domain" autoFocus required value={mailFromDomain} onChange={event => setMailFromDomain(event.target.value)} disabled={configureMailFrom.isPending} placeholder={`email.${current.name}`} /></Field>
       </form>
     </Dialog>
   </div>
@@ -248,7 +247,7 @@ function MailboxReceiving({ domainId, domainName, verified }: { domainId: string
   const status = state ? receivingStatus[state.status] : null
   const records: DnsRecord[] = (state?.dns ?? []).map((record, index) => ({ id: `mx_${index}`, type: 'MX', name: record.name, value: `${record.priority} ${record.value}`, status: state?.mx?.state === 'active' ? 'verified' : 'pending' }))
   return <section className="section stack">
-    <div className="ui-section-header"><div className="domain-group-title"><h2>Receiving</h2><p className="muted">Receive mail on {domainName}. Its addresses and routes are in <Link to={`/receiving?domain=${encodeURIComponent(domainName)}`}>Receiving</Link>.</p></div>
+    <div className="ui-section-header"><div className="domain-group-title"><h2>Receiving</h2><p className="muted">Receive mail on {domainName}; its addresses and routes are in <Link to={`/receiving?domain=${encodeURIComponent(domainName)}`}>Receiving</Link>.</p></div>
       <div className="cluster">{on ? <>
         <Button loading={check.isPending} onClick={async () => { try { await check.mutateAsync() } catch { /* Shown inline. */ } }}>Check MX</Button>
         {state!.status !== 'disabling' && <Button onClick={() => setDisableOpen(true)}>Turn off</Button>}
@@ -264,7 +263,7 @@ function MailboxReceiving({ domainId, domainName, verified }: { domainId: string
         <div><dt>Region</dt><dd>{state.region}</dd></div>
       </dl>
       {state.lastError && <Alert tone="danger">{state.lastError}</Alert>}
-      {state.status === 'provisioning' && <Alert tone="info">Creating the S3 bucket, SNS topic and SES receipt rule, usually in under a minute.</Alert>}
+      {state.status === 'provisioning' && <Alert tone="info">Setting up S3, SNS and the SES receipt rule. This takes about a minute.</Alert>}
       {state.mx && state.status !== 'provisioning' && <Alert tone={mxTone(state.mx.state)}>{state.mx.message}</Alert>}
       <DnsRecordTable domain={domainName} records={records} />
     </>}
