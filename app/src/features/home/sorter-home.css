@@ -8,6 +8,8 @@
   --srt-cta: oklch(0.975 0.02 92); --srt-cta-hover: oklch(0.995 0.012 92); --srt-cta-top: oklch(1 0 0); --srt-cta-side: oklch(0.78 0.03 92); --srt-on-cta: oklch(0.2 0.02 268); --srt-cta-edge: oklch(0.2 0.02 268 / 14%);
   --srt-paper: oklch(0.985 0.01 92); --srt-red: oklch(0.6 0.22 27); --srt-card: oklch(0.995 0.004 92); --srt-card-text: oklch(0.21 0.02 268); --srt-card-dim: oklch(0.45 0.02 268); --srt-card-edge: oklch(0.21 0.02 268 / 12%);
   --srt-ease: cubic-bezier(.22, 1, .36, 1); --srt-k: 17.17; --srt-header: 64px;
+  /* One of the screen's own pixels: what is drawn a pixel or two deep is set on whole ones, so it stays sharp. */
+  --srt-dev: 1px;
   /* The brand's marks (lib/marks.ts) are set in its ink on the pale page and its paper on the dark one, and in nothing else. */
   --srt-name: var(--color-logo);
   /* A phone's safe areas (its status bar, where the page runs under one; the sides of one held on its side; its home
@@ -19,6 +21,9 @@
   --srt-screen-text: oklch(0.955 0.014 92); --srt-screen-dim: oklch(0.62 0.018 268); --srt-plate: oklch(0.66 0.016 268);
   --srt-cta: oklch(0.945 0.016 92); --srt-cta-hover: oklch(0.975 0.012 92); --srt-cta-top: oklch(1 0 0); --srt-cta-side: oklch(0.72 0.022 92); --srt-on-cta: oklch(0.2 0.02 268); --srt-cta-edge: oklch(0.2 0.02 268 / 14%);
   --srt-paper: oklch(0.955 0.014 92); --srt-red: oklch(0.68 0.2 27); --srt-card: oklch(0.955 0.014 92); --srt-card-text: oklch(0.2 0.02 268); --srt-card-dim: oklch(0.43 0.02 268); --srt-card-edge: oklch(0.2 0.02 268 / 14%); }
+
+@media (min-resolution: 2dppx), (-webkit-min-device-pixel-ratio: 2) { .srt-page { --srt-dev: .5px; } }
+@media (min-resolution: 3dppx), (-webkit-min-device-pixel-ratio: 3) { .srt-page { --srt-dev: calc(1px / 3); } }
 
 /* The header stands over the night: letters fall behind it. */
 .srt-header { position: relative; z-index: 4; display: flex; flex: none; align-items: center; justify-content: space-between; box-sizing: border-box; height: var(--srt-head); padding: var(--srt-safe-t) max(var(--space-32), var(--srt-safe-r)) 0 max(var(--space-32), var(--srt-safe-l)); pointer-events: none; }
@@ -69,10 +74,11 @@
 .srt-on > :is(button, a) { pointer-events: auto; }
 
 /* The readout: a small screen on the fascia. Who the letter under the scanner is from and where it goes, then its
-   subject in full, on two lines if it needs them. */
-.srt-readout { position: absolute; z-index: 2; display: grid; grid-template: 'from route' auto 'subject subject' 1fr / minmax(0, 1fr) auto; align-content: center; gap: 3px var(--space-8); padding: 0 clamp(7px, var(--srt-u) * 1.1, 11px); font-family: var(--font-mono); font-size: clamp(10px, var(--srt-u) * 1.3, 12px); line-height: 1.32; pointer-events: none; }
+   subject in full, on two lines if it needs them. (Its three lines are set as closely as the screen needs: a short
+   page's screen, 8.4 rows high, is too low for them at their ease.) */
+.srt-readout { --srt-lh: clamp(1.08em, calc((var(--srt-v) * 8.4 - 7px) / 3), 1.32em); position: absolute; z-index: 2; display: grid; grid-template: 'from route' auto 'subject subject' 1fr / minmax(0, 1fr) auto; align-content: center; gap: clamp(1px, calc(var(--srt-v) * 8.4 - 6px - 3 * var(--srt-lh)), 3px) var(--space-8); padding: 0 clamp(7px, var(--srt-u) * 1.1, 11px); font-family: var(--font-mono); font-size: clamp(10px, var(--srt-u) * 1.3, 12px); line-height: var(--srt-lh); pointer-events: none; }
 .srt-readout-from { grid-area: from; overflow: hidden; color: var(--srt-screen-dim); text-overflow: ellipsis; white-space: nowrap; }
-.srt-readout-subject { grid-area: subject; display: -webkit-box; height: 2.64em; overflow: hidden; color: var(--srt-screen-text); text-wrap: balance; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+.srt-readout-subject { grid-area: subject; display: -webkit-box; height: calc(2 * var(--srt-lh)); overflow: hidden; color: var(--srt-screen-text); text-wrap: balance; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
 /* (The route's own box is the element the page makes for each letter: sorter-home.tsx.) */
 .srt-readout-route { display: contents; color: var(--color-brand); letter-spacing: .04em; text-transform: uppercase; }
 .srt-readout-route > span { grid-area: route; white-space: nowrap; }
@@ -85,16 +91,19 @@
 .srt-cannon:focus-visible, .srt-hopper:focus-visible { outline: var(--focus-width) solid var(--color-focus); outline-offset: 2px; }
 
 .srt-lanes { margin: 0; padding: 0; list-style: none; }
-/* What is written on a floor of the tower is not there before the floor is (it comes up as the floor is let down
-   on), and nothing on the machine can be pressed until it is whole. */
-.srt-page:not([data-floors='2']) :is(.srt-readout, .srt-gauge) { visibility: hidden; }
-.srt-page:not([data-whole]) :is(.srt-hopper, .srt-cannon) { pointer-events: none; }
-@keyframes srt-come-up { from { opacity: 0; } }
-@media (prefers-reduced-motion: no-preference) { .srt-page[data-floors='2'] .srt-readout { animation: srt-come-up 360ms var(--srt-ease) backwards; } }
-/* A lane's plate is blank until its works are fitted; then its name comes up on it. */
-.srt-lanes li[data-off] { opacity: 0; }
-@media (prefers-reduced-motion: no-preference) { .srt-lanes li { transition: opacity 260ms var(--srt-ease); } }
-.srt-lanes li { position: absolute; z-index: 2; display: grid; place-items: center; color: var(--srt-text-2); font-family: var(--font-mono); font-size: clamp(10px, var(--srt-u) * 1.2, 11px); line-height: 1; letter-spacing: .02em; text-transform: uppercase; white-space: nowrap; pointer-events: none; }
+/* What is written on a floor of the tower is not there before the floor is, and nothing on the machine can be
+   pressed or reached from the keyboard until it is whole (the hopper's mouth is not where it will be while the roof
+   is being lifted on and off). */
+.srt-page:not([data-floors='2']) :is(.srt-readout, .srt-gauge), .srt-page:not([data-whole]) :is(.srt-hopper, .srt-cannon) { visibility: hidden; }
+/* The readout comes on as the console's floor is let down: as a screen does, unsteadily for a moment, then held. */
+@keyframes srt-come-on { 0% { opacity: 0; animation-timing-function: steps(1, end); } 14% { opacity: .7; animation-timing-function: steps(1, end); } 22% { opacity: .15; animation-timing-function: steps(1, end); } 34% { opacity: .85; animation-timing-function: steps(1, end); } 42% { opacity: .5; animation-timing-function: ease-out; } 100% { opacity: 1; } }
+@media (prefers-reduced-motion: no-preference) { .srt-page[data-floors='2'] .srt-readout { animation: srt-come-on 480ms backwards; } }
+/* A lane's plate is blank until its works are fitted; then its name, on a card, is pushed into the plate's holder from
+   the left (only what is over the plate is seen). (The clip stands a little clear of the card, so a letter that
+   reaches past a small plate's edge is never cut.) */
+.srt-lanes li { position: absolute; z-index: 2; display: grid; place-items: center; color: var(--srt-text-2); font-family: var(--font-mono); font-size: clamp(10px, var(--srt-u) * 1.2, 11px); line-height: 1; letter-spacing: .02em; text-transform: uppercase; white-space: nowrap; pointer-events: none; clip-path: inset(-.5em); }
+.srt-lanes li[data-off] { translate: -100% 0; clip-path: inset(-.5em -.5em -.5em 100%); }
+@media (prefers-reduced-motion: no-preference) { .srt-lanes li { transition: translate 440ms var(--srt-ease), clip-path 440ms var(--srt-ease); } }
 /* Where each tube goes over the slab's lip: the name of where it leads, on the lip. */
 /* (Whole names where a plate holds them at 10 px; the lanes' codes where it does not.) */
 .srt-lanes[data-names] li { font-size: 10px; letter-spacing: 0; }
@@ -110,8 +119,12 @@
    is: each stands a little proud of its board (its far side seen, up and to the left, as depth runs on this page) and
    by night sheds a little of its light on the board round it. By day they are dark letters on a pale board, with the
    lamp's shadow under them. And what an instrument shows is lit from behind its glass. */
-.srt-band { --srt-deep: calc(var(--srt-price) / 520); text-shadow: calc(var(--srt-deep) * -.5) calc(var(--srt-deep) * -.8) 0 var(--srt-rim), calc(var(--srt-deep) * -1) calc(var(--srt-deep) * -1.6) 0 var(--srt-rim), calc(var(--srt-deep) * -1) calc(var(--srt-deep) * 2.4) calc(var(--srt-deep) * 2.4) rgb(0 0 0 / 22%); }
-:root[data-theme='dark'] .srt-band { color: var(--srt-lit); text-shadow: calc(var(--srt-deep) * -.5) calc(var(--srt-deep) * -.8) 0 var(--srt-rim), calc(var(--srt-deep) * -1) calc(var(--srt-deep) * -1.6) 0 var(--srt-rim), 0 0 calc(var(--srt-price) / 30) rgb(255 232 190 / 26%); }
+/* (The side is three copies of the letters a third, two thirds and all of the depth back, each on the screen's own
+   pixels, at least one deep: a fraction of a pixel would only blur the letter's edge.) */
+.srt-band { --srt-deep: calc(var(--srt-price) / 520);
+  --srt-relief: round(calc(var(--srt-deep) * -1 / 3), var(--srt-dev)) round(calc(var(--srt-deep) * -1.6 / 3), var(--srt-dev)) 0 var(--srt-rim), round(calc(var(--srt-deep) * -2 / 3), var(--srt-dev)) round(calc(var(--srt-deep) * -3.2 / 3), var(--srt-dev)) 0 var(--srt-rim), min(-1 * var(--srt-dev), round(calc(var(--srt-deep) * -1), var(--srt-dev))) min(-1 * var(--srt-dev), round(calc(var(--srt-deep) * -1.6), var(--srt-dev))) 0 var(--srt-rim);
+  text-shadow: var(--srt-relief), calc(var(--srt-deep) * -1) calc(var(--srt-deep) * 2.4) calc(var(--srt-deep) * 2.4) rgb(0 0 0 / 22%); }
+:root[data-theme='dark'] .srt-band { color: var(--srt-lit); text-shadow: var(--srt-relief), 0 0 calc(var(--srt-price) / 40) rgb(255 232 190 / 14%); }
 .srt-page[data-phone] .srt-band { --srt-deep: calc(var(--srt-price) / 300); }
 .srt-readout, .srt-tally, .srt-page:not([data-phone]) .srt-fact { text-shadow: 0 0 .5em color-mix(in oklch, currentColor 42%, transparent); }
 .srt-line { display: flex; align-items: baseline; justify-content: space-between; width: 100%; translate: 0 -.02em; }
@@ -121,20 +134,24 @@
 
 /* The base: the button in the middle and, either side of it, a fact in two lines: what it measures, then the measure. */
 /* The two facts: displays in the base, in the readout's type. Three lines each on shared baselines: a legend, and
-   two of reading (the response time over its meter; what is free, sent and received). */
-.srt-fact { position: absolute; z-index: 2; display: grid; grid-template-rows: 10px 15px 15px; align-content: space-evenly; margin: 0; padding: 1px clamp(8px, var(--srt-u) * 1.2, 11px) 0; font-family: var(--font-mono); line-height: 1; white-space: nowrap; pointer-events: none; }
-.srt-fact-label { color: var(--srt-screen-dim); font-size: 10px; line-height: 1; letter-spacing: .08em; text-transform: uppercase; }
+   two of reading (the response time over its meter; what is free, sent and received). Where a short page's window
+   (--srt-room wide) is narrow for its longest line, sixteen letters of the legend at 10 px, the window's margins and
+   then the letters' spacing give way first, never their size. */
+.srt-fact { --srt-pad: clamp(5px, calc((var(--srt-room, 200px) - 110px) / 2), clamp(8px, var(--srt-u) * 1.2, 11px)); position: absolute; z-index: 2; display: grid; grid-template-rows: 10px 15px 15px; align-content: space-evenly; margin: 0; padding: 1px var(--srt-pad) 0; font-family: var(--font-mono); line-height: 1; white-space: nowrap; pointer-events: none; }
+.srt-fact-label { color: var(--srt-screen-dim); font-size: 10px; line-height: 1; letter-spacing: clamp(-.02em, calc((var(--srt-room, 200px) - 2 * var(--srt-pad) - 96px) / 16), .08em); text-transform: uppercase; }
 .srt-fact-value { display: contents; color: var(--srt-screen-text); font-size: clamp(13.5px, var(--srt-u) * 1.8, 15px); font-variant-numeric: tabular-nums; }
 .srt-fact-value > span { display: flex; align-items: baseline; height: 15px; line-height: 15px; }
 .srt-fact-value b { font-weight: 500; }
-.srt-fact-value i { margin-left: 6px; color: var(--srt-screen-dim); font-size: 10px; font-style: normal; letter-spacing: .06em; text-transform: uppercase; }
+.srt-fact-value i { margin-left: clamp(4px, calc((var(--srt-room, 200px) - 2 * var(--srt-pad) - 89px) / 2), 6px); color: var(--srt-screen-dim); font-size: 10px; font-style: normal; letter-spacing: clamp(0px, calc((var(--srt-room, 200px) - 2 * var(--srt-pad) - 95px) / 8), .06em); text-transform: uppercase; }
 /* The meter under the response time: a scale of 0 to 200 ms, its pointer on 100. */
 .srt-fact-value > .srt-scale { position: relative; align-self: center; height: 9px; max-width: 150px; background: repeating-linear-gradient(90deg, var(--srt-screen-dim) 0 1px, transparent 1px calc((100% - 1px) / 20)) bottom / 100% 4px no-repeat; }
 .srt-scale::before { content: ''; position: absolute; inset: 2px 0 0; border: solid var(--srt-screen-dim); border-width: 0 1px; }
 .srt-scale::after { content: ''; position: absolute; top: 0; bottom: 0; left: calc(50% - 1px); width: 2px; background: var(--srt-screen-text); }
 /* Stacked: the two facts are the page's own type under the button, a column each (what it measures, over the
-   measure), between the button's two edges; what is free on one line, its two halves parted by a point. */
+   measure), between the button's two edges; what is free on one line, its two halves parted by a point. (The one
+   stands at the left edge and the other ends at the right, so the plate they are on is filled evenly.) */
 .srt-page[data-phone] .srt-fact { grid-template-rows: 16px auto; align-content: start; row-gap: 4px; padding: 0; font-family: var(--font-body); }
+.srt-page[data-phone] .srt-fact:last-of-type { grid-template-columns: max-content; justify-content: end; }
 .srt-page[data-phone] .srt-fact-label { color: var(--srt-text-2); font-size: 12px; line-height: 16px; letter-spacing: 0; text-transform: none; }
 .srt-page[data-phone] .srt-fact-value { display: flex; align-items: baseline; color: var(--srt-text); font-size: 15px; letter-spacing: -.008em; }
 .srt-page[data-phone] .srt-fact-value > span { height: 18px; line-height: 18px; }
