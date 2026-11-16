@@ -72,8 +72,7 @@ const plural = (count: number, word: string) => `${count} ${word}${count === 1 ?
 export function SendabilityWarning({ report, action }: { report: SendabilityReport; action?: ReactNode }) {
   const fixes = topFixes(report)
   return <Alert tone="warning" title={`Sendability ${report.score} of 100 (${report.grade})`}>
-    <p>{fixes.length ? 'Fix these first. You can still send.' : 'You can still send.'}</p>
-    {fixes.length > 0 && <ol className="ei-warning-fixes">{fixes.map(finding => <li key={finding.ruleId}><AddressText text={finding.fix} /></li>)}</ol>}
+    {fixes.length > 0 && <><p>Fix these first.</p><ol className="ei-warning-fixes">{fixes.map(finding => <li key={finding.ruleId}><AddressText text={finding.fix} /></li>)}</ol></>}
     {action}
   </Alert>
 }
@@ -107,7 +106,7 @@ export function SendabilityDetails({ check, expanded = false, previewed = true, 
   const open = (ruleId: string | null) => { setFocus(ruleId); setAll(true) }
   return <section className="ss" aria-labelledby={titled ? id : undefined} aria-busy={checking || undefined} data-full={full || undefined}>
     {head(<><span className="ss__status muted" role="status">{checking ? 'Checking…' : ''}</span><Score report={report} /></>)}
-    {warnBelow !== undefined && report.score < warnBelow && fixes.length > 0 && <p className="ss__warn">Fix these before sending. You can still send.</p>}
+    {warnBelow !== undefined && report.score < warnBelow && fixes.length > 0 && <p className="ss__warn">Fix these before sending.</p>}
     {full ? <>
       <Categories report={report} />
       <Findings findings={ranked(report, findings)} focus={focus} />

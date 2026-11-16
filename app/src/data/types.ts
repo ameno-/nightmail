@@ -237,7 +237,7 @@ const friendlyErrors: Record<string, (detail: string) => string> = {
   OWNER_REQUIRED: () => 'Only a workspace owner can do this.',
   SES_NOT_CONFIGURED: () => 'Sending isn’t available on this server right now. Try again in a few minutes.',
   TENANT_NOT_READY: () => 'Your workspace is still being set up for sending. Try again in a minute.',
-  HOSTED_SENDING_PAUSED: detail => `Sending is paused while ${productName} reviews this workspace${detail ? ` (${detail.replace(/\.$/, '')})` : ''}. Receiving still works.`,
+  HOSTED_SENDING_PAUSED: detail => `Sending is paused while ${productName} reviews this workspace${detail ? ` (${detail.replace(/\.$/, '')})` : ''}.`,
   SENDER_DOMAIN_NOT_VERIFIED: () => 'This sender’s domain isn’t verified. Check its DNS records in Domains, then send once it shows Verified.',
   SEND_LIMIT_REACHED: detail => detail,
   BALANCE_EXHAUSTED: () => 'Sending is paused: your balance is empty. Add credit in Settings → Billing.',

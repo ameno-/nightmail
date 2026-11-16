@@ -85,16 +85,21 @@ function bestStep(report: SenderScore | undefined, domains: Domain[]) {
   return { key: 'score', ...target, meta: `+${whole(gain)} pts` }
 }
 export type NextItem = { key: string; text: string; meta?: string; to: string }
-// Domains, webhooks and invitations come from Overview's one setup read, shared with the setup steps.
+// Domains, webhooks and invitations come from Overview's one setup read, shared with the setup steps. Once a domain
+// receives, the receiving domains' address counts say whether the first address is still to make.
 export function useNextSteps(report: SenderScore | undefined): { items: NextItem[]; ready: boolean } {
   const { canAdminister } = useWorkspaceAccess()
   const setup = useApiDef(queries.overviewSetup(), { enabled: canAdminister })
+  const list = setup.data?.domains ?? []
+  const receiving = list.find(d => d.receiving === 'verified')
+  const inbound = useApiDef(queries.inboundDomains(), { enabled: canAdminister && !!receiving })
   if (!canAdminister) return { items: [], ready: true }
-  const ready = !setup.isPending
-  const list = setup.data?.domains ?? [], items: NextItem[] = []
+  const ready = !setup.isPending && !(receiving && inbound.isPending && !inbound.error)
+  const items: NextItem[] = []
   const step = bestStep(report, list); if (step) items.push(step)
   const candidate = list.find(d => d.status === 'verified')
-  if (candidate && !list.some(d => d.receiving === 'verified')) items.push({ key: 'receive', text: `Receive replies on ${candidate.name}`, to: `/domains/${candidate.id}` })
+  if (candidate && !receiving) items.push({ key: 'receive', text: `Receive replies on ${candidate.name}`, to: `/domains/${candidate.id}` })
+  else if (receiving && inbound.data && !inbound.data.some(domain => domain.addressCount > 0)) items.push({ key: 'address', text: `Create an address on ${(inbound.data.find(domain => domain.status === 'active') ?? receiving).name}`, to: '/receiving' })
   items.push({ key: 'agent', text: 'Connect an AI agent over MCP', to: '/api-keys?connect=1' })
   if (setup.data?.webhooks?.total === 0) items.push({ key: 'webhook', text: 'Get bounce events by webhook', to: '/settings/webhooks/new' })
   const pending = setup.data?.invitations?.pending ?? 0
