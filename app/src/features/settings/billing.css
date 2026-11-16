@@ -1,8 +1,12 @@
-/* Settings → Billing: the balance in large tabular figures, then rows like every settings row, the auto-recharge form
+/* Settings → Billing: the balance in large tabular figures, then rows like every settings row (auto-recharge among them)
    and the history table. Every block has a fixed height, so values arriving never move what is below them. */
 .billing-balance { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 20px 44px 20px; align-content: center; height: 120px; border-bottom: 1px solid var(--color-border-muted); }
 .billing-balance__label { display: flex; align-items: center; gap: var(--space-8); }
 .billing-balance__amount { display: flex; align-items: center; font-family: var(--font-mono); font-size: 36px; line-height: 44px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+/* The balance opens its details: the figure is the button, with a chevron that nudges on hover. */
+button.billing-balance__amount { justify-self: start; gap: var(--space-4); padding: 0; border: 0; border-radius: var(--radius-sm); background: none; color: var(--color-text); cursor: pointer; }
+button.billing-balance__amount > svg { flex: none; color: var(--color-muted); transition: transform 160ms var(--ease-out-strong), color var(--motion-duration); }
+@media (hover: hover) and (pointer: fine) { button.billing-balance__amount:hover > svg { color: var(--color-text); transform: translateX(2px); } }
 .billing-balance__amount--plan { font-family: var(--font-body); font-size: 30px; font-weight: var(--font-weight-bold); letter-spacing: -.01em; }
 .billing-balance__detail { display: flex; align-items: center; font-size: var(--text-xs); line-height: var(--leading-xs); font-variant-numeric: tabular-nums; }
 .billing-section { display: flex; flex-direction: column; gap: var(--space-12); }
@@ -12,14 +16,19 @@
 .billing-dollars { position: relative; display: inline-flex; align-items: center; width: 112px; }
 .billing-dollars > span { position: absolute; left: var(--space-8); color: var(--color-muted); pointer-events: none; }
 .billing-dollars .ui-input { padding-left: 20px; text-align: right; font-variant-numeric: tabular-nums; }
-.billing-save { transition: opacity 120ms ease-out; }
-.billing-section .ui-check-field { gap: 0; }
-.billing-needs { font-size: var(--text-sm); }
 /* Two tabs never scroll, so the focus ring isn't clipped by the tab list's overflow. */
 .billing-section .ui-tabs { overflow: visible; }
-.billing-save[data-hidden] { visibility: hidden; opacity: 0; }
 .billing-section > .ui-section-header { margin-bottom: calc(-1 * var(--space-4)); }
-.billing-section > .usage-note { margin: 0; }
+.billing-recharge { justify-content: flex-end; gap: var(--space-12); }
+
+/* Balance details and auto-recharge open as dialogs: the balance's parts as label and value lines, the amounts as rows. */
+.billing-about .ui-dialog__body, .billing-recharge-dialog .ui-dialog__body { display: flex; flex-direction: column; gap: var(--space-12); }
+.billing-rules { display: flex; flex-direction: column; gap: var(--space-4); margin: 0; padding-left: var(--space-16); text-wrap: pretty; }
+.billing-facts { display: flex; flex-direction: column; gap: var(--space-8); margin: 0; }
+.billing-facts > div { display: flex; justify-content: space-between; gap: var(--space-12); }
+.billing-facts dt { color: var(--color-muted); }
+.billing-facts dd { margin: 0; font-variant-numeric: tabular-nums; }
+.billing-recharge-dialog .settings-row { grid-template-columns: minmax(0, 1fr) auto; }
 
 .billing-amount { font-variant-numeric: tabular-nums; }
 .billing-amount[data-sign='in'] { color: var(--color-success); }
@@ -49,8 +58,8 @@
 .billing-add .billing-add__custom { width: 100%; }
 .billing-add__confirm { margin: 0; text-wrap: pretty; }
 .billing-add__terms { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
-.billing-add__terms a, .billing-section > .usage-note a { color: inherit; text-decoration-line: underline; text-decoration-thickness: from-font; text-underline-offset: .18em; transition: color var(--motion-duration); }
-@media (hover: hover) { .billing-add__terms a:hover, .billing-section > .usage-note a:hover { color: var(--color-text); } }
+.billing-add__terms a { color: inherit; text-decoration-line: underline; text-decoration-thickness: from-font; text-underline-offset: .18em; transition: color var(--motion-duration); }
+@media (hover: hover) { .billing-add__terms a:hover { color: var(--color-text); } }
 
 @media (max-width: 640px) {
   /* Values sit in a fixed column one control tall, so a skeleton and the value it becomes share one box; the label takes
@@ -69,4 +78,4 @@
   .billing-table .ui-card__title { overflow: visible; text-wrap: pretty; }
   .billing-table .billing-desc { display: block; -webkit-line-clamp: unset; overflow: visible; }
 }
-@media (prefers-reduced-motion: reduce) { .billing-choice__item, .billing-method, .billing-save { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .billing-choice__item, .billing-method, button.billing-balance__amount > svg { transition: none; } }

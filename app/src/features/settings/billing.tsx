@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { Link, useNavigate, useLocation } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
-import { ArrowUpRight, CreditCard } from 'lucide-react'
+import { ArrowUpRight, ChevronRight, CreditCard } from 'lucide-react'
 import { Alert, Button, ConfirmDialog, ControlSkeleton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Input, Pagination, SectionHeader, Skeleton, StatusBadge, Switch, Tabs, useToast, type Column } from '../../components/ui'
 import { useApiDef, useApiQuery, useSession } from '../../data/context'
 import { queries } from '../../data/queries'
@@ -26,37 +26,64 @@ function useBillingRefresh() {
   }
 }
 
-// Settings → Billing (owners and admins): the balance and Add credit, the saved card, auto-recharge and the history.
+// Settings → Billing (owners and admins): the balance and Add credit first, then the card, auto-recharge and the
+// history. How billing works and the balance's parts open from the balance; auto-recharge's amounts from its row.
 // Rows are 53px like every settings row and each value has a skeleton of its own width, so nothing moves as data arrives.
 export function BillingSection({ row: Row }: { row: (props: RowProps) => ReactNode }) {
   const query = useApiDef(queries.billing())
-  // The state comes with the session (GET /v1/me) on the first frame: the note and which alerts show are decided from
-  // it, so the balance arriving fills reserved space instead of inserting lines above the rows.
+  // The state comes with the session (GET /v1/me) on the first frame: the line under the balance and which alerts show
+  // are decided from it, so the balance arriving fills reserved space instead of inserting lines above the rows.
   const state = useSession()?.identity?.billing
   const [adding, setAdding] = useState(false)
+  const [about, setAbout] = useState(false)
   const b = query.data
   useCheckoutReturn()
   if (query.isError && !b) return <><SectionHeader title="Billing" /><ErrorState error={query.error} onRetry={() => void query.refetch()} /></>
   if (state?.free) return <FreePlan summary={b} Row={Row} />
-  const note = state?.enforcement === 'enforce' ? 'Prepaid: usage is taken from your balance hourly. Sending pauses at $0; received mail is accepted for 7 more days. Nothing is deleted.'
-    : 'Billing starts soon: nothing is charged yet. Credit you add now is kept for when it starts.'
   return <>
     <SectionHeader title="Billing" actions={<Button variant="primary" disabled={!b?.balance} onClick={() => setAdding(true)}>Add credit</Button>} />
-    <p className="muted usage-note">{note}</p>
     {state && <BillingAlerts state={state} summary={b} />}
     <div className="settings-rows billing-rows">
       <div className="billing-balance">
         <span className="billing-balance__label">Balance{b && <StatusBadge status={balanceState(b).label} tone={balanceState(b).tone} />}</span>
-        <span className="billing-balance__amount">{b?.balance ? usd(total(b.balance)) : <Skeleton width={136} height={36} />}</span>
-        <span className="muted billing-balance__detail">{b?.balance ? balanceDetail(b.balance) : <Skeleton width={220} height={16} />}</span>
+        {b?.balance ? <button type="button" className="billing-balance__amount" aria-haspopup="dialog" aria-label={`Balance ${usd(total(b.balance))}: details`} onClick={() => setAbout(true)}>{usd(total(b.balance))}<ChevronRight size={20} aria-hidden="true" /></button>
+          : <span className="billing-balance__amount"><Skeleton width={136} height={36} /></span>}
+        <span className="muted billing-balance__detail">{balanceLine(state)}</span>
       </div>
-      <Row title="This month" hint="Usage after the free emails">{b?.monthToDate ? usd(b.monthToDate.cost) : <Skeleton width={64} height={20} />}</Row>
-      <Row title="Payment method" hint="For auto-recharge and one-click top-ups"><CardControl summary={b} /></Row>
+      <Row title="This month" hint={MONTH_HINT}>{b?.monthToDate ? usd(b.monthToDate.cost) : <Skeleton width={64} height={20} />}</Row>
+      <Row title="Payment method"><CardControl summary={b} /></Row>
+      <AutoRecharge summary={b} Row={Row} />
     </div>
-    <AutoRecharge summary={b} Row={Row} />
     <History />
     {b && <AddCredit open={adding} onOpenChange={setAdding} summary={b} />}
+    {b?.balance && <BalanceDetails open={about} onOpenChange={setAbout} balance={b.balance} enforced={state?.enforcement === 'enforce'} />}
   </>
+}
+const MONTH_HINT = 'After the free emails'
+
+// One line under the balance: what it means now and what to do, from the session's state.
+function balanceLine(state: ReturnType<typeof useBillingState>) {
+  if (!state || state.enforcement !== 'enforce') return 'Nothing is charged yet.'
+  if (state.receiving === 'held') return 'Add credit to deliver held mail.'
+  if (state.sending === 'paused') return 'Add credit to resume sending.'
+  if (state.sending === 'low') return 'Add credit before it reaches $0.'
+  return 'Usage comes off it hourly.'
+}
+
+// The balance's parts and how billing works, opened from the balance.
+function BalanceDetails({ open, onOpenChange, balance, enforced }: { open: boolean; onOpenChange: (open: boolean) => void; balance: NonNullable<BillingSummary['balance']>; enforced: boolean }) {
+  const paid = BigInt(balance.paid)
+  const parts: [string, string][] = [paid < 0n ? ['Unpaid usage', usd(-paid)] : ['Paid credit', usd(paid)], ...BigInt(balance.promo) > 0n ? [['Promotional credit', usd(balance.promo)] as [string, string]] : [], ...BigInt(balance.unsettled) !== 0n ? [['Usage not yet settled', usd(balance.unsettled)] as [string, string]] : []]
+  return <Dialog open={open} onOpenChange={onOpenChange} title={`Balance ${usd(total(balance))}`} className="billing-about" footer={<Button onClick={() => onOpenChange(false)}>Close</Button>}>
+    <dl className="billing-facts">{parts.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
+    <ul className="billing-rules">{enforced ? <>
+      <li>Usage is taken from it every hour.</li>
+      <li>At $0, sending pauses and received mail is accepted for 7 more days.</li>
+      <li>Credit you add pays off a negative balance first.</li>
+      <li>Nothing is deleted.</li>
+    </> : <li>Billing starts soon: nothing is charged yet. Credit you add now is kept for when it starts.</li>}</ul>
+    <p className="muted billing-add__terms">{TERMS}</p>
+  </Dialog>
 }
 
 // A workspace Anomaly made free: the plan instead of a balance, no Add credit, card or auto-recharge, and what its usage
@@ -64,22 +91,17 @@ export function BillingSection({ row: Row }: { row: (props: RowProps) => ReactNo
 function FreePlan({ summary: b, Row }: { summary: BillingSummary | undefined; Row: (props: RowProps) => ReactNode }) {
   return <>
     <SectionHeader title="Billing" />
-    <p className="muted usage-note">Nothing is charged and sending never pauses for a balance. Usage is still measured, so you can see what it would cost.</p>
+    <p className="muted usage-note">Nothing is charged, and sending never pauses for a balance.</p>
     <div className="settings-rows billing-rows">
       <div className="billing-balance">
         <span className="billing-balance__label">Plan</span>
         <span className="billing-balance__amount billing-balance__amount--plan">Free plan</span>
         <span className="muted billing-balance__detail">{b ? `Courtesy of Anomaly · ${b.freePlan?.until ? `until ${fullDay(b.freePlan.until)}` : 'no end date'}` : <Skeleton width={220} height={16} />}</span>
       </div>
-      <Row title="This month" hint="Usage after the free emails">{b?.monthToDate ? <span>{usd(b.monthToDate.cost)} <span className="muted">not charged</span></span> : <Skeleton width={120} height={20} />}</Row>
+      <Row title="This month" hint={MONTH_HINT}>{b?.monthToDate ? <span>{usd(b.monthToDate.cost)} <span className="muted">not charged</span></span> : <Skeleton width={120} height={20} />}</Row>
     </div>
     <History />
   </>
-}
-
-function balanceDetail(balance: NonNullable<BillingSummary['balance']>) {
-  const parts = [BigInt(balance.promo) > 0n ? `incl. ${usd(balance.promo)} promotional credit` : 'Prepaid credit', BigInt(balance.unsettled) !== 0n ? `${usd(balance.unsettled)} of usage not yet settled` : null]
-  return parts.filter(Boolean).join(' · ')
 }
 
 /** Debt grace and a failed auto-recharge, said once, where the fix is. Which alert shows comes from the session's state;
@@ -90,7 +112,7 @@ function BillingAlerts({ state, summary: b }: { state: NonNullable<ReturnType<ty
   const slot = (ready: string | null | undefined, width: number) => ready ? <span>{ready}</span> : <span className="billing-slot"><Skeleton width={width} height={14} /></span>
   return <>
     {state.receiving === 'held' ? <Alert tone="danger" title="Received mail is being held">{productName} stores new received mail but doesn’t deliver it to inboxes, webhooks or IMAP until you add credit. Nothing is deleted.</Alert>
-      : state.receiving === 'grace' ? <Alert tone="warning" title={<>Received mail is accepted until {slot(b?.grace.receiveHoldAt ? monthDay(b.grace.receiveHoldAt) : null, 44)}</>}>Then it’s held until you add credit. The balance is below $0; a top-up settles it first. Nothing is deleted.</Alert> : null}
+      : state.receiving === 'grace' ? <Alert tone="warning" title={<>Received mail is accepted until {slot(b?.grace.receiveHoldAt ? monthDay(b.grace.receiveHoldAt) : null, 44)}</>}>Then it’s held until you add credit. Nothing is deleted.</Alert> : null}
     {state.autoRecharge === 'failed' && <Alert tone="warning" title="Auto-recharge is off">{['dispute', 'early_fraud_warning'].includes(b?.autoRecharge?.disabledReason ?? '') ? `Your card was blocked after a ${b?.autoRecharge?.disabledReason === 'dispute' ? 'dispute' : 'fraud warning'}. Add a different card, then turn auto-recharge back on.` : `${productName} couldn’t charge your card. Update the card, then turn auto-recharge back on.`}</Alert>}
   </>
 }
@@ -115,49 +137,67 @@ function CardControl({ summary: b }: { summary: BillingSummary | undefined }) {
   </span>
 }
 
-// Auto-recharge: the switch and Save in the section header, three amounts in dollars as rows. Without a card the switch
-// is off and says why. Save keeps its place whether or not it shows, so editing never moves anything.
 // Every way credit is added names the terms it is sold under: refunds and the 12-month expiry (Terms §5.7).
-const TERMS = <>By adding credit you agree to the <Link to="/legal/terms#refunds-and-credit-expiry">Terms (refund and expiry policy)</Link>.</>
-const RECHARGE_NOTE = <>{productName} charges your saved card when the balance falls below the threshold, up to the monthly limit. A failed charge turns it off. {TERMS}</>
-const RECHARGE_ROWS = [['threshold', 'When balance falls below', '$5 to $1,000'], ['amount', 'Add', '$20 to $1,000 each time'], ['cap', 'Monthly limit', '']] as const
+const TERMS = <>By adding credit you agree to the <Link to="/legal/terms#refunds-and-credit-expiry">refund and expiry terms</Link>.</>
+const added = (cents: number) => `${centsUsd(cents)} added to your balance`
+const dollars = (cents: number) => `$${(cents / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })}`
+
+// Auto-recharge: one row with what it does and its switch. The amounts, how it works and the terms open from Edit, and
+// from turning it on, which asks before the card is charged; turning it off is one click. Without a card the switch is
+// off and the row says why.
 function AutoRecharge({ summary: b, Row }: { summary: BillingSummary | undefined; Row: (props: RowProps) => ReactNode }) {
-  const settings = b?.autoRecharge
-  if (settings) return <RechargeForm key={JSON.stringify(settings)} settings={settings} hasCard={!!b?.paymentMethod} capped={b?.state.autoRecharge === 'capped'} Row={Row} />
-  return <section className="billing-section" aria-busy="true">
-    <SectionHeader title="Auto-recharge" actions={<ControlSkeleton width={36} />} />
-    <p className="muted usage-note">{RECHARGE_NOTE}</p>
-    <div className="settings-rows billing-rows">{RECHARGE_ROWS.map(([key, title, hint]) => <Row key={key} title={title} hint={hint || 'Added this month'}><span className="billing-dollars"><ControlSkeleton width={112} /></span></Row>)}</div>
-  </section>
-}
-function RechargeForm({ settings, hasCard, capped, Row }: { settings: NonNullable<BillingSummary['autoRecharge']>; hasCard: boolean; capped: boolean; Row: (props: RowProps) => ReactNode }) {
   const refresh = useBillingRefresh(), toast = useToast()
-  const initial = { enabled: settings.enabled, threshold: (settings.thresholdCents / 100).toString(), amount: (settings.amountCents / 100).toString(), cap: (settings.monthlyCapCents / 100).toString() }
+  const [editing, setEditing] = useState<'edit' | 'enable' | null>(null)
+  const [pending, setPending] = useState(false)
+  const settings = b?.autoRecharge
+  if (!b || !settings) return <Row title="Auto-recharge" hint={<Skeleton width={120} height={16} />}><ControlSkeleton width={104} /></Row>
+  const hasCard = !!b.paymentMethod
+  const hint = !hasCard ? 'Add a card first' : b.state.autoRecharge === 'capped' ? 'Monthly limit reached' : settings.pending ? 'Adding credit now' : `Adds ${dollars(settings.amountCents)} below ${dollars(settings.thresholdCents)}`
+  async function turnOff() {
+    setPending(true)
+    try { await billingApi.autoRecharge({ enabled: false, thresholdCents: settings!.thresholdCents, amountCents: settings!.amountCents, monthlyCapCents: settings!.monthlyCapCents }); refresh(); toast('Auto-recharge is off', 'success') }
+    catch (cause) { toast(errorText(cause), 'error') } finally { setPending(false) }
+  }
+  return <Row title="Auto-recharge" hint={hint}>
+    <span className="cluster settings-inline billing-recharge">
+      <Button size="sm" onClick={() => setEditing('edit')}>Edit</Button>
+      <Switch label={<span className="sr-only">Auto-recharge</span>} checked={settings.enabled} disabled={pending || !hasCard} onCheckedChange={on => { if (on) setEditing('enable'); else void turnOff() }} />
+    </span>
+    {editing && <RechargeDialog key={JSON.stringify(settings)} settings={settings} hasCard={hasCard} enable={editing === 'enable'} capped={b.state.autoRecharge === 'capped'} Row={Row} onClose={() => setEditing(null)} />}
+  </Row>
+}
+function RechargeDialog({ settings, hasCard, enable, capped, Row, onClose }: { settings: NonNullable<BillingSummary['autoRecharge']>; hasCard: boolean; enable: boolean; capped: boolean; Row: (props: RowProps) => ReactNode; onClose: () => void }) {
+  const refresh = useBillingRefresh(), toast = useToast()
+  const initial = { threshold: (settings.thresholdCents / 100).toString(), amount: (settings.amountCents / 100).toString(), cap: (settings.monthlyCapCents / 100).toString() }
   const [form, setForm] = useState(initial)
   const [pending, setPending] = useState(false)
+  const [error, setError] = useState<unknown>(null)
   const cents = { threshold: parseDollars(form.threshold), amount: parseDollars(form.amount), cap: parseDollars(form.cap) }
   const invalid = { threshold: cents.threshold === null || cents.threshold < 500 || cents.threshold > 100_000, amount: cents.amount === null || cents.amount < 2000 || cents.amount > 100_000,
     cap: cents.cap === null || cents.cap < (cents.amount ?? 0) || cents.cap > 1_000_000 }
   const valid = !invalid.threshold && !invalid.amount && !invalid.cap
   const changed = form.threshold !== initial.threshold || form.amount !== initial.amount || form.cap !== initial.cap
-  async function save(next = form) {
-    const input: AutoRechargeInput = { enabled: next.enabled, thresholdCents: parseDollars(next.threshold)!, amountCents: parseDollars(next.amount)!, monthlyCapCents: parseDollars(next.cap)! }
-    setPending(true)
-    try { await billingApi.autoRecharge(input); refresh(); toast(input.enabled === settings.enabled ? 'Auto-recharge saved' : input.enabled ? 'Auto-recharge is on' : 'Auto-recharge is off', 'success') }
-    catch (cause) { toast(errorText(cause), 'error'); setForm(initial) } finally { setPending(false) }
+  const rows = [['threshold', 'When balance falls below', '$5 to $1,000'], ['amount', 'Add', '$20 to $1,000 each time'],
+    ['cap', 'Monthly limit', invalid.cap ? '$20 to $10,000, at least the Add amount' : `${centsUsd(settings.monthTotalCents)} added this month${capped ? ' · limit reached' : settings.pending ? ' · adding credit now' : ''}`]] as const
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (!valid || !hasCard || (!enable && !changed)) return
+    const input: AutoRechargeInput = { enabled: enable || settings.enabled, thresholdCents: cents.threshold!, amountCents: cents.amount!, monthlyCapCents: cents.cap! }
+    setPending(true); setError(null)
+    try { await billingApi.autoRecharge(input); refresh(); toast(enable ? 'Auto-recharge is on' : 'Auto-recharge saved', 'success'); onClose() }
+    catch (cause) { setError(cause) } finally { setPending(false) }
   }
-  function submit(event: FormEvent) { event.preventDefault(); if (valid && changed) void save() }
-  return <form className="billing-section" onSubmit={submit} aria-label="Auto-recharge">
-    <SectionHeader title="Auto-recharge" actions={<>
-      {!hasCard && <span className="muted billing-needs">Add a card to turn this on</span>}
-      <Button type="submit" size="sm" variant="primary" loading={pending && changed} disabled={!changed || !valid || !hasCard} data-hidden={!changed || undefined} tabIndex={changed ? undefined : -1} aria-hidden={!changed || undefined} className="billing-save">Save</Button>
-      <span title={hasCard ? undefined : 'Save a card first'}><Switch label={<span className="sr-only">Auto-recharge</span>} checked={form.enabled} disabled={pending || !hasCard || !valid} onCheckedChange={enabled => { const next = { ...form, enabled }; setForm(next); void save(next) }} /></span>
-    </>} />
-    <p className="muted usage-note">{RECHARGE_NOTE}</p>
-    <div className="settings-rows billing-rows">{RECHARGE_ROWS.map(([key, title, range]) => <Row key={key} title={title} hint={key === 'cap' ? invalid.cap ? '$20 to $10,000, at least the Add amount' : `${centsUsd(settings.monthTotalCents)} added this month${capped ? ' · limit reached' : settings.pending ? ' · adding credit now' : ''}` : range}>
-      <span className="billing-dollars"><span aria-hidden="true">$</span><Input aria-label={`${title}, in dollars`} aria-invalid={invalid[key] || undefined} inputMode="decimal" value={form[key]} disabled={pending || !hasCard} onChange={event => setForm({ ...form, [key]: event.target.value })} /></span>
-    </Row>)}</div>
-  </form>
+  return <Dialog open onOpenChange={next => { if (!next && !pending) onClose() }} title={enable ? 'Turn on auto-recharge' : 'Auto-recharge'} className="billing-recharge-dialog"
+    description="Charges your saved card when the balance runs low, up to a monthly limit."
+    footer={<><Button disabled={pending} onClick={onClose}>Cancel</Button><Button variant="primary" type="submit" form="billing-recharge" loading={pending} disabled={!valid || !hasCard || (!enable && !changed)}>{enable ? 'Turn on' : 'Save'}</Button></>}>
+    <form id="billing-recharge" className="settings-rows billing-rows" onSubmit={submit} noValidate>
+      {rows.map(([key, title, hint]) => <Row key={key} title={title} hint={hint}>
+        <span className="billing-dollars"><span aria-hidden="true">$</span><Input aria-label={`${title}, in dollars`} aria-invalid={invalid[key] || undefined} inputMode="decimal" value={form[key]} disabled={pending || !hasCard} onChange={event => setForm({ ...form, [key]: event.target.value })} /></span>
+      </Row>)}
+    </form>
+    <p className="muted billing-add__terms">{hasCard ? 'A failed charge turns it off.' : 'Add a card to turn it on.'} {TERMS}</p>
+    {error ? <Alert tone="danger">{errorText(error)}</Alert> : null}
+  </Dialog>
 }
 
 // History: the balance's ledger and the card payments, a page at a time. Both are cursor lists with card slots on phones.
@@ -191,9 +231,11 @@ function History() {
     {view === 'ledger' ? <LedgerTable /> : <PaymentsTable />}
   </section>
 }
+// Ledger IDs are sequence numbers: prefixed, so no row shares a React key with a skeleton row (keyed 0–4) and takes over
+// its element, which the browser then counts as that row moving.
 function LedgerTable() {
   const pagination = useCursorPagination(), query = useApiDef(queries.billingLedger(pagination.cursorForPage(pagination.page)), { keepPrevious: true })
-  return <HistoryList query={query} pagination={pagination} columns={ledgerColumns} rowKey={e => e.id} empty={<EmptyState title="No balance changes yet" description="Top-ups and hourly usage appear here." />} />
+  return <HistoryList query={query} pagination={pagination} columns={ledgerColumns} rowKey={e => `entry-${e.id}`} empty={<EmptyState title="No balance changes yet" description="Credit added and hourly usage appear here." />} />
 }
 function PaymentsTable() {
   const pagination = useCursorPagination(), query = useApiDef(queries.billingPayments(pagination.cursorForPage(pagination.page)), { keepPrevious: true })
@@ -236,7 +278,7 @@ function AddCredit({ open, onOpenChange, summary: b }: { open: boolean; onOpenCh
   const invalid = amount === null || amount < 2000 || amount > 1_000_000
   const charge = usePaymentPoll(charging, payment => {
     setCharging(null); setBusy(false); refresh()
-    if (payment?.status === 'succeeded') { toast(`${centsUsd(payment.amountCents)} added to your balance`, 'success'); onOpenChange(false) }
+    if (payment?.status === 'succeeded') { toast(added(payment.amountCents), 'success'); onOpenChange(false) }
     else setError(new Error(payment?.failure ? `${declineText(payment.failure.code)}. Nothing was charged.` : 'The charge didn’t finish. Check Payments in a minute.'))
   })
   async function pay() {
@@ -246,13 +288,13 @@ function AddCredit({ open, onOpenChange, summary: b }: { open: boolean; onOpenCh
     try {
       const result = await billingApi.topUp({ amountCents: amount!, method })
       if (result.checkoutUrl) { window.location.assign(result.checkoutUrl); return }
-      if (result.status === 'succeeded' || result.status === 'failed') { setCharging(null); setBusy(false); refresh(); if (result.status === 'succeeded') { toast(`${centsUsd(amount!)} added to your balance`, 'success'); onOpenChange(false) } else setError(new Error('The card was declined. Nothing was charged.')); return }
+      if (result.status === 'succeeded' || result.status === 'failed') { setCharging(null); setBusy(false); refresh(); if (result.status === 'succeeded') { toast(added(amount!), 'success'); onOpenChange(false) } else setError(new Error('The card was declined. Nothing was charged.')); return }
       setCharging(result.attemptId)
     } catch (cause) { setError(cause); setBusy(false) }
   }
   const working = busy || charge.waiting
   return <Dialog open={open} onOpenChange={next => { if (!working) onOpenChange(next) }} title="Add credit" className="billing-add"
-    description="Credit pays for email you send and receive at $0.20 per 1,000. Prices exclude any tax."
+    description="Pays for email at $0.20 per 1,000 sent or received, plus any tax."
     footer={<><Button disabled={working} onClick={() => confirming ? setConfirming(false) : onOpenChange(false)}>{confirming ? 'Back' : 'Cancel'}</Button>
       <Button variant="primary" loading={working} disabled={invalid} onClick={() => void pay()}>{confirming ? `Add ${centsUsd(amount ?? 0)}` : method === 'checkout' ? 'Continue to Stripe' : `Charge ${amount !== null && !invalid ? centsUsd(amount) : ''}`.trim()}</Button></>}>
     {confirming ? <p className="billing-add__confirm">Add <b>{centsUsd(amount ?? 0)}</b> to this workspace’s balance? {method === 'saved_card' && card ? `${cardLabel(card)} is charged now.` : 'You pay in Stripe Checkout, where any tax is added.'}</p> : <>
@@ -304,7 +346,7 @@ function useCheckoutReturn() {
   }, [outcome, attempt, navigate, toast])
   usePaymentPoll(watching, payment => {
     setWatching(null); refresh()
-    if (payment?.status === 'succeeded') toast(payment.kind === 'setup' ? 'Card saved.' : `${centsUsd(payment.amountCents)} added to your balance.`, 'success')
+    if (payment?.status === 'succeeded') toast(payment.kind === 'setup' ? 'Card saved.' : added(payment.amountCents), 'success')
     else if (payment) toast(payment.failure ? `${declineText(payment.failure.code)}. Nothing was charged.` : 'The payment didn’t finish. Nothing was charged.', 'error')
   })
 }

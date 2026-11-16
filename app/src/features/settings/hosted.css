@@ -43,7 +43,7 @@
 .settings-score b { font-weight: var(--font-weight-bold); }
 .settings-score__grade { font-family: var(--font-mono); font-weight: 700; }
 .settings-score svg { align-self: center; color: var(--color-muted); transition: transform 160ms var(--ease-out-strong); }
-@media (hover: hover) and (pointer: fine) { .settings-score:hover svg { transform: translate(2px, -2px); } }
+@media (hover: hover) and (pointer: fine) { .settings-score:hover svg { transform: translate(2px, -2px); } .settings-score:hover svg.lucide-chevron-right { transform: translateX(2px); } }
 .settings-danger { margin-top: var(--space-24); }
 .settings-danger .settings-row__label > span:first-child { color: var(--color-danger); }
 

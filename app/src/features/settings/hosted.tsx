@@ -1,6 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useLocation } from 'react-router'
-import { ArrowUpRight, Info, Lock } from 'lucide-react'
+import { ArrowUpRight, ChevronRight, Lock } from 'lucide-react'
 import { Button, ConfirmDialog, CopyButton, ErrorState, Input, SectionHeader, Select, Skeleton, StatusBadge } from '../../components/ui'
 import { useApiDef, useApiMutation, useSession, useWorkspaceAccess } from '../../data/context'
 import { connectionApi, connectionKindLabel, useConnectionCache } from '../../data/connections'
@@ -11,6 +11,7 @@ import { label, number } from '../../lib/format'
 import { useSenderScore } from '../score'
 import { limitSummary, useSendingLimit } from '../overview/setup'
 import { openScoreAbout } from '../../lib/score-about'
+import { useCompactShell } from '../../lib/media'
 import { AdminOnly } from './admin-only'
 import { MutationError } from './shared'
 import { TeamSkeleton } from './skeletons'
@@ -119,10 +120,13 @@ function SendingRows() {
     <DisconnectRow kind={kind} />
   </>
 }
+// The sidebar shows the score beside every page, so on a desktop this row opens its breakdown instead of repeating
+// the figure. A compact shell has no sidebar: there the row shows the score itself.
 function ScoreRow() {
   const { data: report } = useSenderScore()
+  const compact = useCompactShell()
   return <Row title="Sender score" hint="Your sending health, 0–100">
-    {!report ? <Skeleton width={96} height={20} /> : <button type="button" onClick={() => openScoreAbout()} className="settings-score">{report.state === 'graded' ? <><b>{Math.round(report.score!)}</b><span className="settings-score__grade">{report.grade}</span></> : <><span>Not graded yet</span><span className="muted">{number(report.emails.firstEmails)} of {number(report.needed)} real emails</span></>}<Info size={14} aria-hidden="true" /></button>}
+    {!report ? <Skeleton width={96} height={20} /> : <button type="button" onClick={() => openScoreAbout()} className="settings-score">{report.state !== 'graded' ? <><span>Not graded yet</span><span className="muted">{number(report.emails.firstEmails)}/{number(report.needed)} real emails</span></> : compact ? <><b>{Math.round(report.score!)}</b><span className="settings-score__grade">{report.grade}</span></> : <span>Breakdown</span>}<ChevronRight size={14} aria-hidden="true" /></button>}
   </Row>
 }
 function DisconnectRow({ kind }: { kind: 'shared' | 'byo' | undefined }) {
@@ -151,7 +155,7 @@ function AccountRows() {
     <Row title="Email">{session.identity.email ? <PrivateAddress value={session.identity.email} /> : '—'}</Row>
     <Row title="Role" hint={access.role === 'member' ? 'Owners and admins can change it' : undefined}>{access.role ? roleLabel[access.role] : '—'}</Row>
     <Row title="Support" hint="Questions, problems or feedback"><Button onClick={() => setSupport(true)}>Contact support</Button></Row>
-    <Row title="Session" hint="Your other accounts stay signed in"><Button onClick={() => session.logout()}>Sign out of this account</Button></Row>
+    <Row title="Session" hint="Your other accounts stay signed in"><Button onClick={() => session.logout()}>Sign out</Button></Row>
     {/* An agent signs in to the account service, which lists and disconnects it everywhere. Nightmail lists each connected
         agent below: its default workspace, and Revoke, which ends its access here and everything it set up. */}
     {accountApps && <Row title="Connected apps" hint="Disconnect a client from your Anomaly account"><a href={accountApps}>Manage at Anomaly account</a></Row>}

@@ -45,7 +45,7 @@ function RateChart({ metric, title, series }: { metric: ReputationMetric; title:
   const limits = reputationThresholds[metric]
   const points = series.filter(point => point[metric] != null)
   const values = points.map(point => point[metric]!)
-  if (!values.length) return <p className="muted reputation-empty">No data in the last 14 days. SES publishes these rates once you send mail.</p>
+  if (!values.length) return <p className="muted reputation-empty">No data in the last 14 days; SES publishes rates once you send mail.</p>
   const R = width - 4
   const max = Math.max(limits.risk * 1.25, ...values.map(value => value * 1.1))
   const start = Date.parse(series[0].at), end = Date.parse(series[series.length - 1].at)

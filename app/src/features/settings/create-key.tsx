@@ -28,7 +28,7 @@ const purposes: { value: Purpose; label: string; hint: string }[] = [
 ]
 type Kind = 'api' | 'agent' | 'app'
 const kinds: { value: Kind; label: string; hint: string }[] = [
-  { value: 'api', label: 'API key', hint: 'For your server, a script or an agent: the whole workspace, sending only, or chosen addresses or one inbox.' },
+  { value: 'api', label: 'API key', hint: 'For servers, scripts and agents, with the access you choose.' },
   { value: 'agent', label: 'Agent token', hint: 'An agent such as OpenCode or Claude Code signs in as you over MCP.' },
   { value: 'app', label: 'App password', hint: 'Lets a mail app open a persistent inbox over IMAP or SMTP.' },
 ]
@@ -182,7 +182,7 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormP
         <legend className="ui-field__label">Domains it can send from</legend>
         <Checkbox label={<span className="settings-key-all-domains">All domains <span className="ui-field__hint">Includes domains you add later.</span></span>} checked={allDomains} onCheckedChange={checked => { setAllDomains(checked); setSelectedDomains([]); clearError('domains') }} disabled={pending} />
         <div className="settings-key-domain-options">
-          {domainOptions.isPending ? <p className="muted" role="status">Loading domains…</p> : domains.length === 0 && !domainOptions.isError ? <p className="muted">No domains yet. <Link to="/domains">Add one</Link>, or keep All domains.</p> : domains.map(domain => <Checkbox key={domain} label={<span>{domain}{options.get(domain) === false && <span className="ui-field__hint"> · not verified yet</span>}</span>} checked={!allDomains && selectedDomains.includes(domain)} onCheckedChange={checked => toggleDomain(domain, checked)} disabled={pending || !selectedDomains.includes(domain) && selectedDomains.length >= 50} />)}
+          {domainOptions.isPending ? <p className="muted" role="status">Loading domains…</p> : domains.length === 0 && !domainOptions.isError ? <p className="muted">No domains yet: <Link to="/domains">add one</Link>, or keep All domains.</p> : domains.map(domain => <Checkbox key={domain} label={<span>{domain}{options.get(domain) === false && <span className="ui-field__hint"> · not verified yet</span>}</span>} checked={!allDomains && selectedDomains.includes(domain)} onCheckedChange={checked => toggleDomain(domain, checked)} disabled={pending || !selectedDomains.includes(domain) && selectedDomains.length >= 50} />)}
         </div>
         {domainOptions.isError && <div className="stack"><MutationError error={domainOptions.error} /><Button onClick={() => { void (domainOptions.isFetchNextPageError ? domainOptions.fetchNextPage() : domainOptions.refetch()) }}>Retry loading domains</Button></div>}
         {domainOptions.hasNextPage && !domainOptions.isError && <Button variant="ghost" loading={domainOptions.isFetchingNextPage} onClick={() => void domainOptions.fetchNextPage()}>Load more domains</Button>}
@@ -195,7 +195,7 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormP
         <legend className="ui-field__label">Addresses</legend>
         <Checkbox label="Every address, including new ones" checked={allAddresses} onCheckedChange={checked => { setAllAddresses(checked); setAddressIds([]); clearError('addressIds') }} disabled={pending} />
         <div className="settings-key-domain-options">
-          {addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : !receiving.length ? <p className="muted">No receiving addresses yet. <Link to="/receiving">Create one</Link>, or choose Every address.</p>
+          {addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : !receiving.length ? <p className="muted">No receiving addresses yet: <Link to="/receiving">create one</Link>, or choose Every address.</p>
             : receiving.map(item => <Checkbox key={item.id} label={<PrivateAddress value={item.address} />} checked={!allAddresses && addressIds.includes(item.id)} disabled={pending} onCheckedChange={checked => toggleAddress(item.id, checked)} />)}
         </div>
         {addressError && <p id="key-address-error" className="ui-field__error" role="alert">{addressError}</p>}
@@ -203,7 +203,7 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormP
       {purpose === 'inbox' && <InboxChoice name="key-inbox" query={inboxes} value={chosenInbox} onChange={id => { setInboxId(id); clearError('inboxId') }} disabled={pending} error={inboxError}
         none={<>No active agent inboxes. <Link to="/receiving/inboxes" onClick={() => onOpenChange(false)}>Create one in Receiving</Link>.</>} />}
       {(purpose === 'addresses' || purpose === 'inbox') && <fieldset className="keys-purpose" disabled={pending}>
-        <legend className="ui-field__label">What it can do with the mail</legend>
+        <legend className="ui-field__label">What it can do</legend>
         {[{ value: false, label: 'Read', hint: 'Lists and reads mail, events and attachments.' }, { value: true, label: 'Read and reply', hint: `Also replies and starts conversations, from ${where} only.${purpose === 'inbox' ? ' Needs replies on for the inbox.' : ''}` }].map(item => <label key={item.label} className="keys-choice">
           <input type="radio" name="key-mail" checked={reply === item.value} onChange={() => setReply(item.value)} aria-describedby={`key-mail-${item.value}-hint`} />
           <span className="settings-cell-stack"><span>{item.label}</span><span id={`key-mail-${item.value}-hint`} className="ui-field__hint">{item.hint}</span></span>
@@ -238,7 +238,7 @@ function AppPasswordForm({ open, onOpenChange, onPending, onCreated }: FormProps
     try {
       const result = await create.mutateAsync({ inboxId: chosen, name: name.trim(), protocols })
       onOpenChange(false)
-      onCreated({ secret: result.password, title: 'App password created', description: 'Shown once. Copy it now and enter it as the password in your mail app.' })
+      onCreated({ secret: result.password, title: 'App password created', description: 'Shown once: copy it now and use it as your mail app’s password.' })
     } catch { /* Shown in the form. */ }
   }
   const protocolError = errors.protocols || fieldError(create.error, 'protocols')
@@ -252,7 +252,7 @@ function AppPasswordForm({ open, onOpenChange, onPending, onCreated }: FormProps
         <legend className="ui-field__label">What the mail app can do</legend>
         <Checkbox checked={protocols.includes('imap')} onCheckedChange={checked => toggle('imap', checked)} disabled={pending} label={<span className="settings-cell-stack"><span>IMAP</span><span className="ui-field__hint">Reads and files the inbox’s mail.</span></span>} />
         <Checkbox checked={protocols.includes('smtp')} onCheckedChange={checked => toggle('smtp', checked)} disabled={pending} label={<span className="settings-cell-stack"><span>SMTP</span><span className="ui-field__hint">Sends mail from the inbox’s address.</span></span>} />
-        {multiTenant && <p className="ui-field__hint">Mail app access is billed by the day while the inbox has an app password.</p>}
+        {multiTenant && <p className="ui-field__hint">Billed by the day while the inbox has an app password.</p>}
         {protocolError && <p className="ui-field__error" role="alert">{protocolError}</p>}
       </fieldset>
     </form>

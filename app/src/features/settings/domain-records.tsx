@@ -91,8 +91,8 @@ export function zoneLines(records: DnsRecord[]) {
   }).join('\n')
 }
 
-// On a phone each record is a card: name and value on one line each, and Copy in the row's action sheet. A copy
-// button inside a card's 20 px line would clip it and the wrapped value under it.
+// On a phone each record is a card: its type and name as the title (so no two cards share one), the value under it,
+// and Copy in the row's action sheet. A copy button inside a card's 20 px line would clip it and the wrapped value under it.
 export function DnsRecordTable({ domain, records, status }: { domain: string; records: DnsRecord[]; status?: string }) {
   const toast = useToast()
   const copy = async (value: string, what: string) => {
@@ -100,8 +100,8 @@ export function DnsRecordTable({ domain, records, status }: { domain: string; re
     catch { toast('Couldn’t copy to clipboard.', 'error') }
   }
   return <DataTable className="domain-records" rows={records} rowKey={record => record.id} columns={[
-    { ...settingsColumns.dns[0], render: record => record.type },
-    { ...settingsColumns.dns[1], width: '36%', render: record => <div className="settings-copy-cell"><code title={record.name}>{breakable(relativeHost(record.name, domain))}</code><CopyButton value={record.name} label={`Copy full ${record.type} name`} /></div>, cardRender: record => <code>{breakable(relativeHost(record.name, domain))}</code> },
+    { ...settingsColumns.dns[0], render: record => record.type, cardRender: record => <>{record.type} <code>{breakable(relativeHost(record.name, domain))}</code></> },
+    { ...settingsColumns.dns[1], width: '36%', render: record => <div className="settings-copy-cell"><code title={record.name}>{breakable(relativeHost(record.name, domain))}</code><CopyButton value={record.name} label={`Copy full ${record.type} name`} /></div> },
     { ...settingsColumns.dns[2], render: record => record.value ? <div className="settings-copy-cell"><code title={record.value}>{breakable(record.value)}</code><CopyButton value={record.value} label={`Copy ${record.type} value`} /></div> : '—', cardRender: record => record.value ? <code>{breakable(record.value)}</code> : '—' },
     { key: 'status', label: 'Status', width: 136, card: 'aside', render: record => <StatusBadge status={status ?? (record.status === 'verified' ? 'Verified' : 'Pending')} /> },
     { key: 'copy', label: '', card: 'end', table: false, render: record => <DropdownMenu label={`Copy ${record.type} record`} title={`${record.type} ${relativeHost(record.name, domain)}`} items={[
@@ -188,7 +188,7 @@ const hoursLeft = (at: string) => Math.max(0, Math.ceil((Date.parse(at) - Date.n
 export function DnsWaitNote({ domain }: { domain: Domain }) {
   if (domain.status === 'verified' || (domain.sending ?? 'pending') === 'verified') return null
   return <div className="dns-wait">
-    <p>New records usually appear within minutes, sometimes up to an hour. {productName} checks every 20 seconds while this page is open, and keeps checking after you leave.</p>
+    <p>New records usually show up within minutes, sometimes an hour. {productName} checks every 20 seconds, even after you leave.</p>
     {domain.releasesAt && <p>If the sending records aren’t found within 72 hours, {domain.name} is released and you’d add it again ({hoursLeft(domain.releasesAt)} h left).</p>}
     <p>One-click setup isn’t available yet, so add the records yourself.</p>
     <p className="dns-guides">Guides: {guides.map(([name, url], index) => <span key={name}>{index > 0 && <span className="dns-guides-dot" aria-hidden="true"> · </span>}<a href={url} target="_blank" rel="noreferrer">{name}</a></span>)}</p>
@@ -218,6 +218,7 @@ export function ReceivingIssueAlert({ issue }: { issue: ReceivingIssue }) {
   return <div className="dns-issue"><Alert tone={issue.blocking ? 'danger' : 'warning'} title={receivingIssueTitle(issue.code, issue.host)}>{issue.message}</Alert></div>
 }
 
+const NO_RECORDS = 'DNS records are not available yet.'
 // Sending and receiving records. MAIL FROM is optional and lives in the domain's Advanced section.
 export function DomainRecords({ domain, actions, guided = false, setup = null, receivingView }: { domain: Domain; actions?: ReactNode; guided?: boolean; setup?: DnsSetup | null; receivingView?: ReceivingView }) {
   const toast = useToast()
@@ -238,16 +239,16 @@ export function DomainRecords({ domain, actions, guided = false, setup = null, r
   if (guided) return <section className="dns-guided" aria-label="DNS records">
     {connect}
     <div className="dns-guided-bar"><h2>DNS records</h2>{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy sending records</Button>}</div>
-    {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || 'DNS records are not available yet.'}</p>}
+    {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || NO_RECORDS}</p>}
     {sending.length > 0 && <RecordRows title="Sending" description={`Signs your mail and proves ${domain.name} is yours.`} verified={sendingVerified} domain={domain.name} records={sending} />}
     {receiving.length > 0 && <RecordRows title="Receiving" optional description={receivingCopy} notes={notes} alert={alert} verified={receivingVerified} domain={domain.name} records={receiving} />}
   </section>
   return <section className="section stack">
-    <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><p className="muted">Add these at your DNS provider. {productName} keeps checking.</p></div>
+    <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><p className="muted">Add these at your DNS provider; {productName} keeps checking.</p></div>
       <div className="cluster">{actions}{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}</div>
     </div>
     {connect}
-    {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || 'DNS records are not available yet.'}</p>}
+    {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || NO_RECORDS}</p>}
     {sending.length > 0 && <RecordGroup title="Sending" description="Signs your mail and proves the domain is yours." domain={domain.name} records={sending} />}
     {receiving.length > 0 && <RecordGroup title="Receiving" optional description={receivingCopy} notes={notes} alert={alert} domain={domain.name} records={receiving} actions={receivingView?.actions} status={issue && receiving.some(record => record.name === issue.host) ? 'Attention' : undefined} />}
     <DmarcRecords domain={domain} />

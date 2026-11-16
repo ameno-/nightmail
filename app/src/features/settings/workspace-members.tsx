@@ -33,9 +33,9 @@ function RoleGuide({ owner }: { owner: boolean }) {
 function roleChange(member: WorkspaceMember, role: WorkspaceRole) {
   const name = member.name || 'this member'
   const who = member.name || <PrivateAddress value={member.email} />
-  if (role === 'owner') return { title: `Make ${name} an owner?`, description: `Owners can do everything, including changing your role or removing you. Only another owner can undo this.`, confirm: 'Make owner', danger: true }
+  if (role === 'owner') return { title: `Make ${name} an owner?`, description: 'They can remove you; only another owner can undo this.', confirm: 'Make owner', danger: true }
   if (role === 'admin') return { title: `Make ${name} an admin?`, description: member.role === 'owner' ? <>{who} stops being an owner. Admins manage keys, domains, webhooks, sending and members, but not owners.</> : 'Admins manage keys, domains, webhooks, sending and members, but not owners.', confirm: 'Make admin', danger: false }
-  return { title: `Change ${name} to member?`, description: 'They keep sending email and editing content, and lose access to keys, domains, webhooks, sending and members at once.', confirm: 'Change to member', danger: false }
+  return { title: `Change ${name} to member?`, description: 'They lose access to keys, domains, webhooks, sending and members at once.', confirm: 'Change to member', danger: false }
 }
 
 

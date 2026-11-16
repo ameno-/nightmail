@@ -107,8 +107,10 @@
   .ui-table-scroll.domain-records .settings-copy-cell > .ui-button { position: relative; }
   .ui-table-scroll.domain-records .settings-copy-cell > .ui-button::before { content: ''; position: absolute; inset: -8px; }
 }
-/* On a phone a record's name and value wrap under their labels at full length. */
+/* On a phone a record's type and name (its title) and its value wrap at full length. */
 .ui-cards.domain-records .ui-card { height: auto; min-height: var(--table-row-height); }
+.ui-cards.domain-records .ui-card__head { height: auto; min-height: 20px; align-items: flex-start; }
+.ui-cards.domain-records .ui-card__title { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
 .ui-cards.domain-records .ui-card__line { height: auto; overflow: visible; white-space: normal; }
 .ui-cards.domain-records .ui-card__segment { display: grid; grid-template-columns: 40px minmax(0, 1fr); column-gap: var(--space-6); overflow: visible; overflow-wrap: anywhere; }
 .ui-cards.domain-records .ui-card__label { margin-right: 0; }

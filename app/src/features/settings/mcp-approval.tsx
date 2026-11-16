@@ -36,7 +36,7 @@ export function McpApprovalPage() {
   return <div className="stack mcp-approval">
     <PageHeader title="Connected agent" backTo="/settings#account" />
     <SectionHeader title="Account" />
-    <p className="muted">The client acts as the account it signed in with at Anomaly account. Approve it as that account.</p>
+    <p className="muted">The agent acts as the account it signed in with: approve that one.</p>
     {browser.isError ? <ErrorState error={browser.error} onRetry={() => void browser.refetch()} /> : <div className="settings-rows" role="radiogroup" aria-label="Account">
       {/* One row while loading (the usual one account); further accounts and the last row are added below it, so
           nothing that is already shown moves. */}
@@ -54,7 +54,7 @@ export function McpApprovalPage() {
       : null)}
     {ready && <>
       <SectionHeader title="Default workspace" />
-      <p className="muted">Tool calls can name any of your workspaces, or default to this one. Your role in each decides what the client can do.</p>
+      <p className="muted">Tool calls that name no workspace use this one, as your role allows.</p>
       {connection.isError ? <ErrorState error={connection.error} onRetry={() => void connection.refetch()} />
         : !connection.data ? <div className="settings-rows"><div className="settings-row"><Skeleton width={200} height={20} /></div></div>
         : connection.data.status === 'active' ? <div className="settings-rows"><McpApproval key={`${connection.data.id}:${connection.data.workspaceId}`} app={connection.data} workspaces={identity?.workspaces ?? []} linked={false} onRevoke={() => revoke.mutate(connection.data!.id)} /></div>

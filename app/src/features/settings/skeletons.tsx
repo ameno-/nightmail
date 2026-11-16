@@ -6,6 +6,7 @@ import './api-keys.css'
 import { HEADERS_HINT } from './webhook-headers'
 import { KeysGuide } from './keys-guide'
 
+export const DEFAULT_REGION_HINT = 'Used for API sends that omit a region.'
 const twoLines = <div><SkeletonText width="74%" /><SkeletonText width="88%" /></div>
 /** The API keys page's type filter: every credential, or one of its three types. */
 export const keyTypes = [{ value: 'all', label: 'All' }, { value: 'api', label: 'API keys' }, { value: 'agent', label: 'Agent tokens' }, { value: 'app', label: 'App passwords' }] as const
@@ -33,7 +34,8 @@ export const settingsColumns = {
   ],
   dns: [
     { key: 'type', label: 'Type', width: 80 },
-    { key: 'name', label: 'Name', width: '30%', skeleton: <div className="settings-copy-cell"><SkeletonText width="75%" /><ControlSkeleton width={34} /></div> },
+    // A card shows the name in its title, beside the type.
+    { key: 'name', label: 'Name', width: '30%', card: 'hide', skeleton: <div className="settings-copy-cell"><SkeletonText width="75%" /><ControlSkeleton width={34} /></div> },
     { key: 'value', label: 'Value', skeleton: <div className="settings-copy-cell"><SkeletonText width="80%" /><ControlSkeleton width={34} /></div> },
   ],
   regions: [
@@ -104,14 +106,14 @@ export const deliveryColumns = (multiTenant: boolean): SkeletonColumn[] => multi
 
 export function RegionDiscoverySkeleton() {
   return <LoadingRegion label="Checking AWS" className="settings-loading-body">
-    <div className="settings-report"><div className="stack settings-discovery-section"><h3>Account</h3><dl className="settings-facts settings-account-summary">{['AWS account', 'SES access', 'Sent / daily quota', 'Send rate'].map(name => <div key={name}><dt>{name}</dt><dd><SkeletonText width={120} /></dd></div>)}</dl></div>
+    <div className="settings-report"><div className="stack settings-discovery-section"><h3>Account</h3><dl className="settings-facts settings-account-summary">{['AWS account', 'SES access', 'Sent / SES quota', 'Send rate'].map(name => <div key={name}><dt>{name}</dt><dd><SkeletonText width={120} /></dd></div>)}</dl></div>
     <div className="settings-aws-details"><SkeletonText width={90} /></div></div>
   </LoadingRegion>
 }
 
 export function SesSendingSkeleton({ regionId }: { regionId: string }) {
   return <LoadingRegion label="Loading sending regions" className="settings-loading-body">
-    <section id="sending" className="section stack settings-group"><SectionHeader title="Regions" actions={<div className="cluster"><ControlSkeleton width={88} /><ControlSkeleton width={114} /></div>} /><div className="ui-field"><span className="ui-field__label">Default sending region</span><ControlSkeleton width={320} /><span className="ui-field__hint">Used for API sends that omit a region.</span></div><TableSkeleton columns={settingsColumns.regions} rows={2} /></section>
+    <section id="sending" className="section stack settings-group"><SectionHeader title="Regions" actions={<div className="cluster"><ControlSkeleton width={88} /><ControlSkeleton width={114} /></div>} /><div className="ui-field"><span className="ui-field__label">Default sending region</span><ControlSkeleton width={320} /><span className="ui-field__hint">{DEFAULT_REGION_HINT}</span></div><TableSkeleton columns={settingsColumns.regions} rows={2} /></section>
     <section className="section stack settings-rule"><SectionHeader title={<span className="cluster">{regionId}<Skeleton width={64} /></span>} actions={<div className="cluster"><ControlSkeleton width={100} /><ControlSkeleton width={180} /></div>} /><div className="settings-setup-checklist"><h3>Provisioning</h3><ul className="settings-setup-steps">{['AWS account access', 'SES configuration sets', 'SNS topic and permissions', 'SES event destinations', 'HTTPS subscription'].map(name => <li key={name}><Skeleton width={16} /><div className="settings-setup-step-heading settings-setup-step"><span>{name}</span><SkeletonText width={100} /></div></li>)}</ul></div><RegionDiscoverySkeleton /></section>
   </LoadingRegion>
 }
