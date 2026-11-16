@@ -167,13 +167,15 @@ export function Stations({ plan: p, start }: { plan: Plan | null; start: HomeSta
   return <section className="srt-stations" ref={root} style={vars} data-phone={phone || undefined} aria-label="Where mail goes">
     {/* The tubes' far walls; over them the capsules; over those (further down) the tubes' near walls and their collars. */}
     <svg className="srt-pipes" aria-hidden="true">
-      {/* What each tube throws on the wall behind it, down and to the left as the machine's light falls. */}
-      <g className="srt-tube-shadows" transform="translate(-4 5)">{runs.map(run => <path key={run.key} d={line(run.points, bend)} strokeWidth={run.wide} />)}</g>
+      {/* What each appliance and the last plate throw on the wall behind them; then what each tube throws, down and to
+          the left as the machine's light falls. */}
+      <g className="srt-shades">{[...units.map(u => ({ key: u.station.kind, x: u.boxLeft, y: u.top + u.boxTop, w: u.w, h: u.station.h })), { key: 'plate', x: plateLeft, y: plate.top, w: plate.w, h: plate.h }].map(({ key, ...box }) => <Shade key={key} {...box} dx={dx} dy={dy} />)}</g>
+      <defs><linearGradient id="srt-shade-in" gradientUnits="userSpaceOnUse" x1="0" y1="30" x2="0" y2="170"><stop className="srt-shade-stop" offset="0" stopOpacity="0" /><stop className="srt-shade-stop" offset="1" /></linearGradient></defs>
+      <g className="srt-tube-shadows" transform="translate(-4 5)">{runs.map(run => <g key={run.key}><path d={line(run.points, bend)} strokeWidth={run.wide + 6} /><path d={line(run.points, bend)} strokeWidth={run.wide - 1} /></g>)}</g>
       {runs.map(run => <Tube key={run.key} layer="back" points={run.points} wide={run.wide} bend={bend} rings={run.rings} />)}
     </svg>
     <div className="srt-traffic" ref={traffic} aria-hidden="true" />
     {units.map(({ station, w, left, top, boxLeft, boxTop }, k) => <div key={station.kind} className="srt-unit" data-kind={station.kind} data-side={left ? 'l' : 'r'} style={{ top, '--srt-w': `${w}px`, '--srt-h': `${station.h}px` } as CSSProperties}>
-      <span className="srt-shadow" style={{ left: boxLeft, top: boxTop }} aria-hidden="true" />
       <div className="srt-caption" style={phone ? { left: boxLeft + 10, width: w - 10 } : { left: boxLeft - dx, width: w + dx }}>
         <h2>{station.name}</h2>
         <p>{station.line}</p>
@@ -201,7 +203,6 @@ export function Stations({ plan: p, start }: { plan: Plan | null; start: HomeSta
       })}
     </svg>
     {/* The last plate, in the machine's make: the price and the button on it, the outbound main coming out of its top. */}
-    <span className="srt-shadow" style={{ left: plateLeft, top: plate.top, '--srt-w': `${plate.w}px`, '--srt-h': `${plate.h}px` } as CSSProperties} aria-hidden="true" />
     <div className="srt-box srt-end-plate" style={{ left: plateLeft, top: plate.top, '--srt-w': `${plate.w}px`, '--srt-h': `${plate.h}px` } as CSSProperties}>
       <p className="srt-end-price"><span><b>$0.20</b> per 1,000 emails,</span> <span>sent or received.</span></p>
       <span className="srt-end-bay">
@@ -262,17 +263,18 @@ function rings(points: Pt[], bend: number, short: number, mount = false) {
   }
   return out
 }
-/** A glass tube as the machine draws one, lit from above and the right as the machine is: its wall in the tone of a
- * tube seen from the front; down the side away from the light a band in shade with a darker edge; and where it runs
- * across the page its lit top. Through a corner the lit top comes in gradually and the shade goes round with the
- * light (crossing the tube where the corner turns away from it). Steel collars lie across it. */
+/** A glass tube as the machine draws one (sorter/gl.ts), lit from above and the right as the machine is: clear where
+ * it is looked straight through, denser towards both its edges (the one away from the light darker, the one towards
+ * it with a broader band beside it), and the room's lights as two lines down it, the lamp's the brighter. Through a
+ * corner the light goes round with the tube (crossing it where the corner turns away from the light). Steel collars
+ * lie across it. */
 function Tube({ points, wide, bend, rings, layer }: { points: Pt[]; wide: number; bend: number; rings: Ring[]; layer: 'back' | 'front' }) {
   if (layer === 'back') return <path className="srt-tube-back" d={line(points, bend)} strokeWidth={wide} />
   const T = turns(points, bend), half = wide / 2
-  // Along the line: the point, the normal to its left hand, which side of that the light is on (1 or -1, or between
-  // while it crosses), how level the tube lies (0 down the page, 1 across), and which side is up.
-  const along: { p: Pt; n: Pt; lit: number; level: number; up: number }[] = []
-  const side = (d: Pt) => { const n: Pt = [d[1], -d[0]]; return { n, lit: Math.sign(n[0] - n[1]), level: Math.abs(d[0]), up: -Math.sign(n[1]) } }
+  // Along the line: the point, the normal to its left hand, and which side of that the light is on (1 or -1, or
+  // between while it crosses).
+  const along: { p: Pt; n: Pt; lit: number }[] = []
+  const side = (d: Pt) => { const n: Pt = [d[1], -d[0]]; return { n, lit: Math.sign(n[0] - n[1]) } }
   const put = (p: Pt, d: Pt) => along.push({ p, ...side(d) })
   points.forEach((v, i) => {
     const t = T[i]
@@ -280,21 +282,16 @@ function Tube({ points, wide, bend, rings, layer }: { points: Pt[]; wide: number
     const a = side(t.din), b = side(t.dout), cx = t.from[0] + t.dout[0] * t.r, cy = t.from[1] + t.dout[1] * t.r, a0 = Math.atan2(t.from[1] - cy, t.from[0] - cx), turn = (t.sweep ? 1 : -1) * Math.PI / 2
     for (let k = 0; k <= 10; k++) {
       const u = k / 10, e = u * u * (3 - 2 * u), angle = a0 + turn * u, d: Pt = [-Math.sin(angle) * (t.sweep ? 1 : -1), Math.cos(angle) * (t.sweep ? 1 : -1)]
-      along.push({ p: [cx + Math.cos(angle) * t.r, cy + Math.sin(angle) * t.r], n: [d[1], -d[0]], lit: a.lit + (b.lit - a.lit) * e, level: a.level + (b.level - a.level) * e, up: a.level ? a.up : b.up })
+      along.push({ p: [cx + Math.cos(angle) * t.r, cy + Math.sin(angle) * t.r], n: [d[1], -d[0]], lit: a.lit + (b.lit - a.lit) * e })
     }
   })
-  const beside = (offset: (s: typeof along[0]) => number) => along.map(s => { const o = offset(s); return `${(s.p[0] + s.n[0] * o).toFixed(2)} ${(s.p[1] + s.n[1] * o).toFixed(2)}` })
-  const top = beside(s => s.up * half), under = beside(s => s.up * (half - wide * .65 * s.level)).reverse()
-  // The near wall, in three strips side by side across the tube (its edge in shade, the band beside it, the rest),
-  // each a veil over what is inside.
+  // A strip down the tube: its middle `u` and its width `w` across it, in half the tube's width (1: the lit edge).
+  const strip = (className: string, u: number, w: number) => <path className={className} d={`M ${along.map(s => `${(s.p[0] + s.n[0] * s.lit * u * half).toFixed(2)} ${(s.p[1] + s.n[1] * s.lit * u * half).toFixed(2)}`).join(' L ')}`} strokeWidth={Math.max(.75, w * half)} />
+  // The near wall: veils over what is inside.
   return <g>
-    <path className="srt-tube-wall" d={`M ${beside(s => s.lit * wide * .15).join(' L ')}`} strokeWidth={wide * .7} />
-    <path className="srt-tube-lit" d={`M ${top.join(' L ')} L ${under.join(' L ')} Z`} />
-    <path className="srt-tube-shade" d={`M ${beside(s => -s.lit * (half - wide * .205)).join(' L ')}`} strokeWidth={wide * .19} />
-    <path className="srt-tube-edge" d={`M ${beside(s => -s.lit * (half - wide * .055)).join(' L ')}`} strokeWidth={wide * .11} />
-    {/* (And as the renderer's glass has them: its other edge a little denser too, and the lamp as a line down it.) */}
-    <path className="srt-tube-rim" d={`M ${beside(s => s.lit * (half - wide * .06)).join(' L ')}`} strokeWidth={wide * .12} />
-    <path className="srt-tube-glint" d={`M ${beside(s => s.lit * wide * .24).join(' L ')}`} strokeWidth={Math.max(1, wide * .1)} />
+    <path className="srt-tube-wall" d={line(points, bend)} strokeWidth={wide} />
+    {strip('srt-tube-shade', -.9, .2)}{strip('srt-tube-band', .74, .3)}{strip('srt-tube-rim', .95, .1)}
+    {strip('srt-tube-glint', .36, .14)}{strip('srt-tube-glint srt-tube-glint-2', -.58, .1)}
     {rings.map(({ at, across, tall }, i) => across
       ? <g key={i}><rect className="srt-ring" x={at[0] - 2.5} y={at[1] - half - 2.5} width={5} height={wide + 5} rx={1} /><rect className="srt-ring-lit" x={at[0] - 2.5} y={at[1] - half - 2.5} width={5} height={2} rx={1} /></g>
       : tall && tall > 12 ? <Sleeve key={i} x={at[0]} y={at[1]} w={wide + 6} h={tall} />
@@ -312,6 +309,16 @@ function Sleeve({ x, y, w, h }: { x: number; y: number; w: number; h: number }) 
     <path className="srt-ring-lit" d={`M ${x + rx * .34} ${top} L ${x + rx * .34} ${foot + ry * .94} A ${rx} ${ry} 0 0 0 ${x + rx * .78} ${foot + ry * .63} L ${x + rx * .78} ${top} Z`} />
     <ellipse className="srt-ring-lit" cx={x} cy={top} rx={rx} ry={ry} />
   </g>
+}
+
+/** What a box on the wall throws on it: its outline as it is seen (its front, and its top and side going back to the
+ * wall), moved down and to the left, soft at its edge as the renderer's shadows are. The softness is the outline five
+ * times, each further down and to the left, a little larger and as faint as the rest: darkest against the box, fading
+ * away from it, and never showing over it or to its right. Drawn once, with no filter to work out again whenever
+ * something over it changes. */
+function Shade({ x, y, w, h, dx, dy }: { x: number; y: number; w: number; h: number; dx: number; dy: number }) {
+  const outline = [[x - dx, y - dy], [x + w - dx, y - dy], [x + w, y], [x + w, y + h], [x, y + h], [x - dx, y + h - dy]]
+  return <g>{[0, 1, 2, 3, 4].map(i => <polygon key={i} points={outline.map(([px, py]) => `${(px - 3 - 2.2 * i).toFixed(1)},${(py + 3.5 + 2.5 * i).toFixed(1)}`).join(' ')} strokeWidth={3 * i} />)}</g>
 }
 
 /** A capsule's way along a tube's line, as points to animate through: where it is, which way it heads, how far it has come. */
