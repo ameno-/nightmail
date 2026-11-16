@@ -61,7 +61,7 @@ export function AudiencePreviewSkeleton() {
 }
 export function ContactDetailBodySkeleton() {
   return <><div className="audience-summary cluster"><SkeletonText width={240} /><SkeletonText width={94} /></div>
-    <div className="section form-grid audience-properties">{[{ title: 'Properties', labels: ['Full name', 'Country', 'Created', 'Last opened'], notes: false }, { title: 'Marketing consent', labels: ['Status', 'Suppression'], notes: true }].map(group => <section key={group.title}><SectionHeader title={group.title} /><dl>{group.labels.map(label => <Fragment key={label}><dt>{label}</dt><dd><SkeletonText width="65%" />{group.notes && <span className="audience-dd-note"><SkeletonText width="80%" /></span>}</dd></Fragment>)}</dl></section>)}</div>
+    <div className="section form-grid audience-properties">{[{ title: 'Properties', labels: ['Full name', 'Country', 'Created', 'Last opened'] }, { title: 'Marketing consent', labels: ['Status', 'Suppression'] }].map(group => <section key={group.title}><SectionHeader title={group.title} /><dl>{group.labels.map(label => <Fragment key={label}><dt>{label}</dt><dd><SkeletonText width="65%" /></dd></Fragment>)}</dl></section>)}</div>
     <section className="section"><SectionHeader title="Lists" actions={<ControlSkeleton width={111} />} /><SkeletonText width={170} /></section>
     <ConsentHistorySkeleton />
   </>

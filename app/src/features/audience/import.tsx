@@ -81,31 +81,31 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
   if (result) {
     const imported = result.imported, subscribed = result.subscribed ?? 0
     return <Dialog open onOpenChange={open => { if (!open) onClose() }} title="Import complete" footer={<>{!consent && imported > 0 && <Link className="ui-button ui-button--secondary ui-button--md" to={unknownHref} onClick={onClose}>Review unknown contacts</Link>}<Button variant="primary" onClick={onClose}>Done</Button></>}><div className="stack">
-      <Alert tone="success">{plural(imported, 'contact')} imported{consent ? ` · ${number(subscribed)} marked subscribed` : ''}.</Alert>
-      {consent ? subscribed < imported && <p className="muted">{plural(imported - subscribed, 'contact')} kept their earlier consent; imports never change opt-outs or suppressions.</p>
-        : imported > 0 && <Alert tone="info">They can’t receive campaigns until they consent. Once they do, choose Review unknown contacts, then Mark as subscribed.</Alert>}
+      <Alert tone="success">{plural(imported, 'contact')} imported{consent ? ` · ${number(subscribed)} marked subscribed${subscribed < imported ? ` · ${number(imported - subscribed)} kept their earlier consent` : ''}` : ''}.</Alert>
+      {!consent && imported > 0 && <Alert tone="info">They can’t receive campaigns until they consent. Once they do, choose Review unknown contacts, then Mark as subscribed.</Alert>}
       {result.errors.length > 0 && <RejectedRows errors={result.errors} skipped />}
     </div></Dialog>
   }
   return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }} title="Import contacts" footer={<><Button disabled={busy} onClick={onClose}>Cancel</Button>{preview ? <Button variant="primary" loading={commit.isPending} disabled={busy || !preview.rows.length} onClick={() => void submitImport()}>{preview.rows.length ? `Import ${plural(preview.rows.length, 'contact')}` : 'Nothing to import'}</Button> : <Button variant="primary" loading={busy} disabled={!csv || !mapping.email} onClick={() => void submitPreview()}>Preview import</Button>}</>}>
     <div className="stack">
       <div className="stack audience-import-fields" hidden={Boolean(preview)}>
-        <Field label="Destination list" htmlFor="import-list" hint={listId ? undefined : 'Optional; contacts join your audience either way.'}><ListPicker id="import-list" emptyLabel="No list" value={listId} disabled={locked} onChange={value => { setListId(value); resetPreview() }} /></Field>
-        <Field label="CSV file" htmlFor="import-file" hint={<>An email column, plus optional name, plan and country. Up to {number(MAX_ROWS)} rows, 5 MiB. <a href={sampleHref} download="contacts-sample.csv">Sample CSV</a></>}><Input type="file" id="import-file" accept=".csv,text/csv" disabled={locked} onClick={event => { event.currentTarget.value = '' }} onChange={event => void readFile(event.target.files?.[0])} /></Field>
-        {csv && <div className="form-grid">{targets.map(target => <Field key={target.value} label={target.label} htmlFor={`map-${target.value}`} error={fieldError(review.error, `mapping.${target.value}`)} hint={target.value === 'lastName' ? mapping.name === COMBINED ? 'Joined with First name into Full name.' : 'Used only when Full name is First + last name.' : target.value === 'name' && mapping.name === COMBINED ? 'Each contact’s first and last name, joined.' : undefined}>
+        {/* The columns are the mapping below once a file is read; the row and size limits are the file's errors. */}
+        <Field label="Add to list" htmlFor="import-list"><ListPicker id="import-list" emptyLabel="No list" value={listId} disabled={locked} onChange={value => { setListId(value); resetPreview() }} /></Field>
+        <Field label="CSV file" htmlFor="import-file"><div className="audience-import-file"><Input type="file" id="import-file" accept=".csv,text/csv" disabled={locked} onClick={event => { event.currentTarget.value = '' }} onChange={event => void readFile(event.target.files?.[0])} /><a className="ui-button ui-button--ghost ui-button--md" href={sampleHref} download="contacts-sample.csv">Sample CSV</a></div></Field>
+        {csv && <div className="form-grid">{targets.map(target => <Field key={target.value} label={target.label} htmlFor={`map-${target.value}`} error={fieldError(review.error, `mapping.${target.value}`)}>
           <Select id={`map-${target.value}`} disabled={locked} value={mapping[target.value] ?? ''} onValueChange={value => { setMapping({ ...mapping, [target.value]: value }); resetPreview() }} options={[{ value: '', label: 'Do not import' }, ...(target.value === 'name' && combinedAvailable ? [{ value: COMBINED, label: 'First + last name' }] : []), ...headers.map(header => ({ value: header, label: header }))]} />
         </Field>)}</div>}
       </div>
       {preview && <>
-        <div className="cluster audience-review-bar"><span className="muted">Check the rows, then import.</span><Button size="sm" disabled={busy} onClick={resetPreview}>Change mapping</Button></div>
-        {preview.rows.length > 0 && <><DataTable rows={preview.rows.slice(0, 10)} rowKey={row => String(row.row)} columns={[{ key: 'row', label: 'Row', width: '16%', card: 'aside', render: row => row.row, cardRender: row => `Row ${row.row}` }, { key: 'email', label: 'Email', width: '50%', card: 'title', render: row => <span className="audience-cell-text"><PrivateAddress value={row.email} /></span> }, { key: 'name', label: 'Full name', width: '34%', card: 'line', render: row => <span className="audience-cell-text" title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : '—'}</span> }]} />
-          <span className="muted">{plural(preview.rows.length, 'valid row')}{preview.rows.length > 10 ? ' · showing the first 10' : ''}</span></>}
+        {/* The first 10 rows; the import button counts them all. */}
+        <div className="cluster audience-review-bar"><Button size="sm" disabled={busy} onClick={resetPreview}>Change mapping</Button></div>
+        {preview.rows.length > 0 && <DataTable className="audience-import-preview" rows={preview.rows.slice(0, 10)} rowKey={row => String(row.row)} columns={[{ key: 'row', label: 'Row', width: '16%', card: 'aside', render: row => row.row, cardRender: row => `Row ${row.row}` }, { key: 'email', label: 'Email', width: '50%', card: 'title', render: row => <span className="audience-cell-text"><PrivateAddress value={row.email} /></span> }, { key: 'name', label: 'Full name', width: '34%', card: 'line', render: row => <span className="audience-cell-text" title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : '—'}</span> }]} />}
         {preview.errors.length > 0 && <RejectedRows errors={preview.errors} />}
       </>}
       <div className="audience-consent">
-        <Checkbox checked={consent} disabled={busy} onCheckedChange={value => { setConsent(value); setChecked(false) }} label="These people agreed to receive marketing email" />
-        <p className="ui-field__hint">{consent ? 'Marks them subscribed; opt-outs and suppressed addresses stay.' : 'Otherwise they can’t receive campaigns until marked subscribed.'}</p>
-        {consent && <Field label="How did they agree?" htmlFor="import-evidence" error={checked && !evidence.trim() ? evidenceRequired : fieldError(commit.error, 'consent.evidence')} hint="Saved in each consent record, like “Signed up on our website”."><Input id="import-evidence" autoFocus maxLength={2000} disabled={busy} value={evidence} onChange={event => setEvidence(event.target.value)} /></Field>}
+        {/* The consequence is in the label; opt-outs and suppressions stay, and the result says how many kept their consent. */}
+        <Checkbox checked={consent} disabled={busy} onCheckedChange={value => { setConsent(value); setChecked(false) }} label="Mark as subscribed: these people agreed to receive marketing email" />
+        {consent && <Field label="How did they agree?" htmlFor="import-evidence" error={checked && !evidence.trim() ? evidenceRequired : fieldError(commit.error, 'consent.evidence')}><Input id="import-evidence" autoFocus maxLength={2000} placeholder="Signed up on our website" disabled={busy} value={evidence} onChange={event => setEvidence(event.target.value)} /></Field>}
       </div>
       <MutationError error={error} />
     </div>
