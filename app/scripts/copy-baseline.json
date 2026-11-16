@@ -1,24 +1,6 @@
 {
  "about": "Copy lint findings accepted so far (app/scripts/copy-lint.mjs), as “line: text” per file and rule. Only new ones fail; fix one and the next local run removes it. Regenerate with: bun run copy-lint --update-baseline",
  "findings": {
-  "app/src/components/AccountSwitcher.tsx": {
-   "caption": [
-    "87: up to … accounts. sign out of one to add another."
-   ],
-   "tagline": [
-    "141: its own domains, keys and contacts; you’ll set up sending ne"
-   ]
-  },
-  "app/src/components/ContactSupport.tsx": {
-   "helper": [
-    "38: optional. … / …"
-   ],
-   "tagline": [
-    "28: if it didn’t open, use the link below; mention this referenc",
-    "28: mention it when you email us.",
-    "35: brand support gets your message, the page you’re on and any "
-   ]
-  },
   "app/src/components/EmailInsight.tsx": {
    "length/label": [
     "204: can i email (opens in a new tab)"
@@ -29,106 +11,9 @@
     "8: by continuing you agree to the terms of service and privacy "
    ]
   },
-  "app/src/components/PrivacyToggle.tsx": {
-   "helper": [
-    "9: blur email addresses"
-   ]
-  },
-  "app/src/data/context.tsx": {
-   "tagline": [
-    "88: you were invited…. …"
-   ]
-  },
   "app/src/features/inbound/trace.tsx": {
    "length/placeholder": [
     "76: from: ana@example.org to: support@acme.com subject: invoice "
-   ]
-  },
-  "app/src/features/onboarding/index.tsx": {
-   "caption": [
-    "227: step … of … · …",
-    "263: small daily limit that grows",
-    "269: you pay aws directly",
-    "302: getting your aws link ready.",
-    "303: create the stack in the aws tab. this page updates on its ow",
-    "304: stack confirmed. creating sending resources in your account.",
-    "305: your aws account is ready. taking you to the next step…",
-    "306: check the stack in aws, then try again or enter your account"
-   ],
-   "helper": [
-    "355: after create_complete. the 12 digits in the aws console’s ac",
-    "414: … is added as soon as sending is ready."
-   ],
-   "tagline": [
-    "238: an admin must finish setting up this workspace first.",
-    "256: either way, mail comes from your own domain.",
-    "262: send through brand’s amazon ses; you only add a few dns reco",
-    "268: send through amazon ses in your own aws account; setup creat",
-    "319: a cloudformation stack gives brand a role; it takes about 2 ",
-    "373: imported … verified … from your aws account, ready to send.",
-    "409: use a domain you own; next, you’ll add a few dns records.",
-    "441: add these records at your dns host; go on while we check the",
-    "492: create a key, then send with curl, the sdk or your coding ag"
-   ]
-  },
-  "app/src/features/operator/index.tsx": {
-   "helper": [
-    "316: optional. empty means no end date.",
-    "317: goes into the audit log.",
-    "366: recipients per rolling 24 hours. the score’s band is ….",
-    "367: optional, at most a year ahead. empty means no expiry.",
-    "369: goes into the audit log and the workspace’s timeline."
-   ],
-   "length/description": [
-    "282: replaces the score’s limit until it expires; clear it to go "
-   ],
-   "reassure": [
-    "296: it is never gated or charged; usage is still measured. the c ⟨never⟩"
-   ],
-   "tagline": [
-    "66: search by workspace id or name.",
-    "66: workspaces above good standing, watched ones and quarantined",
-    "278: stops all sending at ses; owners see a pause banner and get ",
-    "279: sending resumes at the restore share you choose; a strike st",
-    "280: campaigns pause and new marketing is refused; transactional ",
-    "281: campaigns can send again; the workspace stays at warn until ",
-    "282: replaces the score’s limit until it expires; clear it to go ",
-    "283: the quarantined campaign resumes where it stopped."
-   ]
-  },
-  "app/src/features/operator/notes.tsx": {
-   "caption": [
-    "131: optional"
-   ],
-   "helper": [
-    "176: it also stops if you lose the operator role."
-   ],
-   "tagline": [
-    "84: try another status, type or search.",
-    "84: turn on ui notes (⇧n), then …-click anything to leave one.",
-    "167: lets a script or agent read ui notes and screenshots and set"
-   ]
-  },
-  "app/src/features/support/SupportPanel.tsx": {
-   "caption": [
-    "258: … attached"
-   ],
-   "helper": [
-    "71: png, jpeg or webp, up to 5 mb"
-   ],
-   "tagline": [
-    "257: someone will reply by email to , …."
-   ]
-  },
-  "app/src/features/ui-notes/index.tsx": {
-   "caption": [
-    "214: severity (optional)",
-    "239: severity (optional)"
-   ],
-   "helper": [
-    "216: …↵ save · esc",
-    "249: …↵ save",
-    "343: …-click to add"
    ]
   }
  }
