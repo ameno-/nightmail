@@ -145,6 +145,9 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
  * methods over RPC. There is no token: only a Worker whose deployed config declares this binding can reach it. Every call
  * runs through the normal routes (validation, audit, budgets) as `service:bane-support`, on its own admission lane.
  */
+/** Connections per support platform call: support reads (the context summary, a request's trace) run their queries in
+ *  parallel. Within the six simultaneous outbound connections a Worker invocation may open (a trace also asks Workers Logs). */
+const SUPPORT_POOL = 4;
 export class SupportPlatform extends WorkerEntrypoint<Env> {
   private async platform(): Promise<SupportPlatformApi> {
     const [{ app, core }, { supportPlatform, SUPPORT_PLATFORM_CALLER }, { CONFIG_KEYS, loadConfig }] = await Promise.all([loadHttpDeps(), import('./support-platform.js'), import('./config.js')]);
@@ -152,7 +155,7 @@ export class SupportPlatform extends WorkerEntrypoint<Env> {
     const config = () => configFor(this.env, CONFIG_KEYS, loadConfig);
     return supportPlatform(async request => {
       if (!(await this.env.ADMISSION.limit({ key: 'bane:support-platform' })).success) return core.admissionDenied();
-      return withRuntime(this.env, async runtime => app.fetch(request, { ...runtime, platformCaller: SUPPORT_PLATFORM_CALLER }), 1, this.ctx);
+      return withRuntime(this.env, async runtime => app.fetch(request, { ...runtime, platformCaller: SUPPORT_PLATFORM_CALLER }), SUPPORT_POOL, this.ctx);
     }, config);
   }
   async verifyHandoff(token: string) { return (await this.platform()).verifyHandoff(token); }

@@ -447,13 +447,16 @@ export function registerSupport(app: App) {
   }).openapi('SupportContext');
   app.openapi(createRoute({ ...meta('getSupportContext', 'Start here: one compact summary of the customer for a support conversation: who they are, their workspaces and roles, sending setup and limits, domains and their verification, failures in the last 24 hours, open enforcement, the last 20 audit entries and request IDs to drill into.'), path: '/v1/support/context', request: { query: WorkspaceFilter }, responses: { 200: response(Context), ...errors } }), async c => {
     const { scope, ids: list, workspaces } = scoped(c), admin = workspaces.filter(w => w.role !== 'member').map(w => w.id), db = c.env.db;
-    const { rows: [user] } = await db.execute<{ id: string; name: string | null; email: string | null; created_at: string | null }>(sql`SELECT id, name, email, created_at::text FROM nightmail_users WHERE id = ${scope.userId}`);
-    const { rows: [handoff] } = await db.execute<{ id: string; page: string | null; request_ids: string[]; message: string | null; created_at: string }>(sql`SELECT h.id, h.page, h.request_ids, h.message, h.created_at::text
-      FROM support_grants g JOIN support_handoffs h ON h.id = g.handoff_id WHERE g.id = ${scope.grantId}`);
-    const [summaries, domains, recent, activity, stand] = [await workspaceSummaries(db, workspaces), await domainSummaries(db, list, 50), await failures(db, list), await customerTrail(db, admin, AuditFilters.parse({ limit: 20 })), await standings(db, list)];
-    const { rows: enforcement } = await db.execute<{ workspaceId: string; kind: string; since: string | null; reason: string | null }>(sql`SELECT workspace_id AS "workspaceId", 'sending_paused' AS kind, paused_at::text AS since,
-        left(to_jsonb(pc) ->> 'pause_reason', 300) AS reason FROM provider_connections pc WHERE workspace_id = ANY(${ids(list)}) AND paused_at IS NOT NULL
-      UNION ALL SELECT workspace_id, 'campaign_paused:' || id, paused_at::text, left(pause_reason::text, 300) FROM sending_campaigns WHERE workspace_id = ANY(${ids(list)}) AND state = 'paused' LIMIT 20`);
+    // Independent reads, in parallel (the support platform's runtime has a pool for this: src/worker.ts).
+    const [{ rows: [user] }, { rows: [handoff] }, summaries, domains, recent, activity, stand, { rows: enforcement }] = await Promise.all([
+      db.execute<{ id: string; name: string | null; email: string | null; created_at: string | null }>(sql`SELECT id, name, email, created_at::text FROM nightmail_users WHERE id = ${scope.userId}`),
+      db.execute<{ id: string; page: string | null; request_ids: string[]; message: string | null; created_at: string }>(sql`SELECT h.id, h.page, h.request_ids, h.message, h.created_at::text
+        FROM support_grants g JOIN support_handoffs h ON h.id = g.handoff_id WHERE g.id = ${scope.grantId}`),
+      workspaceSummaries(db, workspaces), domainSummaries(db, list, 50), failures(db, list), customerTrail(db, admin, AuditFilters.parse({ limit: 20 })), standings(db, list),
+      db.execute<{ workspaceId: string; kind: string; since: string | null; reason: string | null }>(sql`SELECT workspace_id AS "workspaceId", 'sending_paused' AS kind, paused_at::text AS since,
+          left(to_jsonb(pc) ->> 'pause_reason', 300) AS reason FROM provider_connections pc WHERE workspace_id = ANY(${ids(list)}) AND paused_at IS NOT NULL
+        UNION ALL SELECT workspace_id, 'campaign_paused:' || id, paused_at::text, left(pause_reason::text, 300) FROM sending_campaigns WHERE workspace_id = ANY(${ids(list)}) AND state = 'paused' LIMIT 20`),
+    ]);
     const requestIds = [...new Set([...(handoff?.request_ids ?? []), ...activity.data.map(e => e.requestId).filter((r): r is string => !!r)])].slice(0, 10);
     return c.json({ grant: { id: scope.grantId, ticketRef: scope.ticketRef, expiresAt: scope.expiresAt, contentShared: !!scope.contentWorkspaceId, contentWorkspaceId: scope.contentWorkspaceId },
       user: { id: scope.userId, name: user?.name ?? null, email: user?.email ?? null, createdAt: user?.created_at ? new Date(user.created_at).toISOString() : null },
@@ -590,7 +593,7 @@ export function registerSupport(app: App) {
     return c.json(await customerTrail(c.env.db, scoped(c, ['owner', 'admin']).ids, filters), 200);
   });
   // The customer's own requests, from this Worker's request lines in Workers Logs (src/support-logs.ts).
-  const DAY = 86_400_000, Retention = z.literal(`${LOG_RETENTION_DAYS} days`).describe('How long Workers Logs keep request lines.');
+  const DAY = 86_400_000, RECENT_REQUEST_HOURS = 6, Retention = z.literal(`${LOG_RETENTION_DAYS} days`).describe('How long Workers Logs keep request lines.');
   const Principal = z.string().describe('How the caller authenticated: dashboard, apiKey, mcp, agentToken, inboxKey…; never which key or user.');
   const RequestGroup = z.object({ route: z.string().describe('The route template (/v1/emails/:id), never a path.'), method: z.string(), status: z.number(), code: z.string().nullable().describe(`The error code ${productName} answered with.`),
     principal: Principal, count: z.number(), firstSeen: z.string(), lastSeen: z.string(),
@@ -637,16 +640,25 @@ export function registerSupport(app: App) {
   }).openapi('SupportRequestTrace');
   app.openapi(createRoute({ ...meta('getSupportRequest', `What ${productName} recorded for one API request (the x-request-id a customer quotes): its request line from Workers Logs (route, status, error code, duration; the last ${LOG_RETENTION_DAYS} days), the changes it made, campaign launches and routing versions.`), path: '/v1/support/requests/{requestId}', request: { query: WorkspaceFilter, params: z.object({ requestId: z.string().regex(/^req_[0-9a-f]{32}$/) }) }, responses: { 200: response(RequestTrace), ...errors } }), async c => {
     const { scope, ids: list } = scoped(c), requestId = c.req.valid('param').requestId, db = c.env.db, observability = c.env.config.observability;
-    let logs: z.infer<typeof RequestTrace>['logs'] = [], logsAvailable = false;
-    if (observability) try {
-      const now = Date.now(), { lines } = await cached(c, 'request', list, requestId, () => requestLines(observability, { workspaceIds: list, from: now - LOG_RETENTION_DAYS * DAY, to: now + 60_000, requestId, limit: 20 }));
-      logs = lines.map(({ requestId: _r, ...line }) => line); logsAvailable = true;
-    } catch (error) { if (!(error instanceof LogsUnavailable)) throw error; }
-    const auditEvents = (await customerTrail(db, list, AuditFilters.parse({ requestId, limit: 20 }))).data;
-    const { rows: campaigns } = list.length ? await db.execute<{ workspaceId: string; id: string; name: string; state: string; error: unknown }>(sql`SELECT workspace_id AS "workspaceId", id, coalesce(draft ->> 'name', id) AS name, state, error
-      FROM sending_campaigns WHERE request_id = ${requestId} AND workspace_id = ANY(${ids(list)}) LIMIT 20`) : { rows: [] };
-    const { rows: routing } = list.length ? await db.execute<{ workspaceId: string; version: number; resourceId: string; at: string }>(sql`SELECT workspace_id AS "workspaceId", version, resource_id AS "resourceId", created_at::text AS at
-      FROM mail_routing_audit WHERE request_id = ${requestId} AND workspace_id = ANY(${ids(list)}) LIMIT 50`) : { rows: [] };
+    // The request line is looked for in the last 6 hours first (most requests a customer quotes are recent, and a short
+    // window answers several times faster), then in the whole retention window. The database reads run meanwhile.
+    const logLines = async () => {
+      if (!observability) return { logs: [] as z.infer<typeof RequestTrace>['logs'], logsAvailable: false };
+      try {
+        const now = Date.now(), { lines } = await cached(c, 'request', list, requestId, async () => {
+          const recent = await requestLines(observability, { workspaceIds: list, from: now - RECENT_REQUEST_HOURS * 3_600_000, to: now + 60_000, requestId, limit: 20 });
+          return recent.lines.length ? recent : requestLines(observability, { workspaceIds: list, from: now - LOG_RETENTION_DAYS * DAY, to: now + 60_000, requestId, limit: 20 });
+        });
+        return { logs: lines.map(({ requestId: _r, ...line }) => line), logsAvailable: true };
+      } catch (error) { if (!(error instanceof LogsUnavailable)) throw error; return { logs: [], logsAvailable: false }; }
+    };
+    const [{ logs, logsAvailable }, { data: auditEvents }, { rows: campaigns }, { rows: routing }] = await Promise.all([
+      logLines(), customerTrail(db, list, AuditFilters.parse({ requestId, limit: 20 })),
+      list.length ? db.execute<{ workspaceId: string; id: string; name: string; state: string; error: unknown }>(sql`SELECT workspace_id AS "workspaceId", id, coalesce(draft ->> 'name', id) AS name, state, error
+        FROM sending_campaigns WHERE request_id = ${requestId} AND workspace_id = ANY(${ids(list)}) LIMIT 20`) : { rows: [] },
+      list.length ? db.execute<{ workspaceId: string; version: number; resourceId: string; at: string }>(sql`SELECT workspace_id AS "workspaceId", version, resource_id AS "resourceId", created_at::text AS at
+        FROM mail_routing_audit WHERE request_id = ${requestId} AND workspace_id = ANY(${ids(list)}) LIMIT 50`) : { rows: [] },
+    ]);
     const changed = !!(auditEvents.length || campaigns.length || routing.length), found = changed || logs.length > 0;
     return c.json({ requestId, found, logs, logsAvailable, auditEvents, campaigns, routingVersions: routing.map(r => ({ ...r, at: new Date(r.at).toISOString() })),
       note: changed ? 'Changes recorded for this request.' : found ? `Logged, but it changed nothing ${productName} stores: see logs for its route, status and error code.`
