@@ -152,6 +152,17 @@ export function SorterHome({ start, notice }: HomeProps) {
   const price = p ? { x: -COLS / 2 * p.U, w: COLS * p.U } : { x: 0, w: 0 }
   // Whole names where a lane's plate holds them; the lanes' codes where it does not.
   const named = !!p && p.label * p.P >= (p.phone ? 56 : 60), podNamed = !!p?.pods.length && p.pods[0].w - 2.2 * p.U >= 60
+  // Where each tube goes over the slab's lip (the eight, then the outbound main), the name of where it leads, on the lip
+  // beside it: a left-hand tube's to its right, the others' to its left. Whole names where every one has room between
+  // its own tube and the next tube that way, the codes where not, and nothing where not even a tube's code has room.
+  // (A name stands 7 or 9 px clear of its own tube and must end 5 px clear of the next, whose bend over the lip is a
+  // little wider than it; a letter of the lip's 11 px type is .62 em wide with its spacing.)
+  const mouths = p && !p.phone ? (() => {
+    const xs = [...p.drops, p.ox + p.out], names = [...TUBE_NAMES, 'Outbound'], codes = [...TUBE_CODES, 'Out'], wide = (s: string) => s.length * 11 * .62
+    const room = xs.map((x, t) => { const east = t < 4; return Math.min(...xs.map(o => east ? o - x : x - o).filter(d => d > 0)) - 2 * p.tubeR - (east ? 7 : 9) - 5 })
+    const whole = names.every((name, t) => wide(name) <= room[t])
+    return xs.map((x, t) => ({ x, east: t < 4, text: whole ? names[t] : wide(codes[t]) <= room[t] ? codes[t] : null }))
+  })() : []
   const cannonBox = (c: Plan['cannon'], q: Plan) => { const sx = DX * c.z, sy = DY * c.z, ce = Math.cos(c.el), se = Math.sin(c.el), x0 = c.x - c.back * ce - 2.4 * c.cs, x1 = c.x + c.fore * ce + c.r, top = c.y + c.pivot + c.fore * se + c.r, w = Math.max(44, x1 - x0 + 8), h = Math.max(44, top - c.y + 8)
     return { left: q.ox + (x0 + x1) / 2 + sx - w / 2, top: q.oy - top - sy - 4 - (h - (top - c.y + 8)), width: w, height: h } }
   // The hopper's mouth, as it is seen: wide enough to press.
@@ -188,7 +199,7 @@ export function SorterHome({ start, notice }: HomeProps) {
           {!reduced && <button type="button" className="srt-hopper" style={hopperBox(p)} aria-label="Hopper: pour in more mail" title="More mail" onMouseDown={event => event.preventDefault()} onClick={() => sorter.current?.rain()} />}
           {/* The send cannon: press it and it fires one. */}
           {!reduced && <button type="button" className="srt-cannon" style={cannonBox(p.cannon, p)} aria-label="Send cannon: fire a letter" title="Send one" onMouseDown={event => event.preventDefault()} onClick={() => sorter.current?.send()} />}
-          {!p.phone && <ol className="srt-lanes srt-mouths" aria-hidden="true">{p.drops.map((x, t) => <li key={t} data-side={t < 4 ? 'l' : 'r'} style={{ top: p.oy + p.front, height: p.lip, ...(t < 4 ? { left: x + p.tubeR + 7 } : { right: p.W - x + p.tubeR + 9 }) }}>{(Math.abs(p.fan[1].x - p.fan[0].x) < 84 ? TUBE_CODES : TUBE_NAMES)[t]}</li>)}<li data-side="r" style={{ top: p.oy + p.front, height: p.lip, right: p.W - p.ox - p.out + p.tubeR + 9 }}>{Math.abs(p.fan[1].x - p.fan[0].x) < 84 ? 'Out' : 'Outbound'}</li></ol>}
+          {mouths.length > 0 && <ol className="srt-lanes srt-mouths" aria-hidden="true">{mouths.map(({ x, east, text }, t) => text && <li key={t} data-side={east ? 'l' : 'r'} style={{ top: p.oy + p.front, height: p.lip, ...(east ? { left: x + p.tubeR + 7 } : { right: p.W - x + p.tubeR + 9 }) }}>{text}</li>)}</ol>}
           {/* Under the price, as wide as the price: what it buys. */}
           <h1 className="srt-band" ref={el => { veiled.current[2] = el }} style={at({ x: price.x, y: p.yBand, w: price.w, h: p.band })} aria-label="$0.20 per 1,000 emails, sent or received via API.">
             <span className="srt-line" aria-hidden="true">
