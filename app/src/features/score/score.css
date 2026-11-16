@@ -47,13 +47,9 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
 .gauge-card--compact:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 .gauge-stack { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
 .gauge-card--compact .gauge-eyebrow { font-size: 9px; line-height: 12px; letter-spacing: .14em; }
-/* One 24px line in every state: the graded number keeps a fixed slot before its grade; while calibrating, /100 follows
-   the count directly. */
+/* One 24px line in every state: the graded number keeps a fixed slot before its grade; ungraded or unread, a dash. */
 .gauge-readout { display: flex; align-items: baseline; gap: 8px; height: 24px; line-height: 24px; }
 .gauge-readout b { display: inline-block; min-width: 1.5em; font-size: 21px; line-height: 24px; font-weight: 600; letter-spacing: -.03em; }
-.gauge-readout b:has(+ small) { min-width: 0; }
-.gauge-readout small { margin-left: -7px; color: var(--color-muted); font-size: 11px; line-height: 1; }
-.gauge-readout small.gauge-readout__pending { margin-left: -2px; white-space: nowrap; }
 .gauge-readout .gauge-grade { font-size: 13px; letter-spacing: .04em; }
 
 /* Next steps: a short list of places to go; rows fade up in sequence. */
@@ -86,7 +82,6 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
 .ov-split__aside > .standing-card + * { border-top: 0; }
 .standing-card__head { display: flex; align-items: center; gap: var(--space-8); }
 .standing-card__head h2 { flex: 1; min-width: 0; color: var(--tone-ink); font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
-.standing-card__head .muted { font-size: var(--text-xs); white-space: nowrap; }
 .standing-card__dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--tone-marker); }
 .standing-card__part { display: flex; flex-direction: column; gap: var(--space-4); }
 .standing-card__part h3 { color: var(--color-muted); font-family: var(--font-mono); font-size: 10px; line-height: 14px; font-weight: 400; letter-spacing: .12em; text-transform: uppercase; }
@@ -113,7 +108,6 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
 .score-about__history > span { flex: 1; height: 100%; border-radius: 1px; background: var(--color-layer-3); transform-origin: bottom; }
 .score-about__history > span[data-last] { background: var(--color-contrast); }
 .score-about__limit { grid-column: 1 / -1; padding-top: var(--space-8); border-top: 1px solid var(--color-border-muted); font-size: var(--text-xs); line-height: var(--leading-xs); text-wrap: pretty; }
-.score-about__helps { padding: 0 var(--space-6); border-radius: var(--radius-sm); background: var(--color-layer-2); color: var(--color-text); font-size: var(--text-xs); font-weight: normal; line-height: var(--leading-xs); white-space: nowrap; }
 .score-about__section ul { display: flex; flex-direction: column; gap: var(--space-4); margin: 0; padding-inline-start: var(--space-20); text-wrap: pretty; }
 .score-about__progress { grid-column: 1 / -1; position: relative; display: block; height: 4px; overflow: hidden; border-radius: 2px; background: var(--color-layer-2); }
 .score-about__progress > i { position: absolute; inset: 0 auto 0 0; width: var(--share); border-radius: inherit; background: var(--color-contrast); }
@@ -123,7 +117,10 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
 .score-about__factors { margin: 0; padding: 0; list-style: none; }
 .score-about__factors > li { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--space-12); padding: var(--space-8) var(--focus-reach); margin: 0 calc(-1 * var(--focus-reach)); border-top: 1px solid var(--color-border-muted); border-radius: var(--radius-sm); font-size: var(--text-sm); line-height: var(--leading-sm); scroll-margin: var(--space-8); }
 .score-about__factors > li[data-focus] { background: var(--color-layer-2); }
-.score-about__factors > li > p { grid-column: 1 / -1; font-size: var(--text-xs); line-height: var(--leading-xs); }
+/* How it's graded: what each part measures, its name leading its definition. */
+.score-about__bases { display: flex; flex-direction: column; gap: var(--space-4); margin: 0; text-wrap: pretty; }
+.score-about__bases dt { display: inline; margin-right: var(--space-6); font-weight: var(--font-weight-bold); }
+.score-about__bases dd { display: inline; margin: 0; }
 .score-about__factor-name { display: flex; align-items: baseline; gap: var(--space-8); font-weight: var(--font-weight-bold); }
 .score-about__factor-name .muted { font-weight: normal; font-size: var(--text-xs); }
 .score-about__factor-now { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }

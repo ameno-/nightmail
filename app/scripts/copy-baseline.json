@@ -16,20 +16,8 @@
    ]
   },
   "app/src/components/EmailInsight.tsx": {
-   "caption": [
-    "220: · … in classic outlook",
-    "222: · images off",
-    "222: emulated",
-    "415: as sent, with its images",
-    "415: as sent: plain text only"
-   ],
    "length/label": [
-    "206: can i email (opens in a new tab)"
-   ],
-   "tagline": [
-    "229: it renders with word, so brand checks its support instead of",
-    "245: an offline emulation, not a screenshot: remote images don’t ",
-    "440: add content to see it in each email client."
+    "205: can i email (opens in a new tab)"
    ]
   },
   "app/src/components/LegalLinks.tsx": {
@@ -308,15 +296,6 @@
     "108: webhooks subscribed to message.received for it, or for every"
    ]
   },
-  "app/src/features/logs/index.tsx": {
-   "tagline": [
-    "97: each email appears here once it sends.",
-    "97: it is scheduled for … at … utc. each email appears here once",
-    "99: every email you send appears here.",
-    "99: every email you send or receive appears here.",
-    "99: mail sent to your receiving addresses appears here."
-   ]
-  },
   "app/src/features/onboarding/index.tsx": {
    "caption": [
     "227: step … of … · …",
@@ -369,46 +348,6 @@
     "84: try another status, type or search.",
     "84: turn on ui notes (⇧n), then …-click anything to leave one.",
     "167: lets a script or agent read ui notes and screenshots and set"
-   ]
-  },
-  "app/src/features/overview/setup.tsx": {
-   "caption": [
-    "94: … can send.",
-    "94: … is waiting for its dns records.",
-    "94: add your domain and publish its dns records.",
-    "94: your domain can send.",
-    "96: a send only key for … is enough.",
-    "96: a send only key restricted to your domain is enough.",
-    "96: your app or agent can authenticate.",
-    "98: it’s in logs.",
-    "98: possible once a domain is verified.",
-    "100: … can receive. create an address like support@.",
-    "100: add the receiving mx record from a domain’s page."
-   ],
-   "tagline": [
-    "114: … of … done"
-   ]
-  },
-  "app/src/features/score/about.tsx": {
-   "helper": [
-    "47: helps most"
-   ],
-   "tagline": [
-    "31: your sending’s health, 0–100: higher reaches more inboxes an"
-   ]
-  },
-  "app/src/features/score/index.tsx": {
-   "caption": [
-    "30: unavailable",
-    "42: not graded"
-   ]
-  },
-  "app/src/features/score/standing.tsx": {
-   "tagline": [
-    "25: since …",
-    "39: owners and admins can … once the checklist is done.",
-    "54: marketing resumes at 50% for 48 hours, once per 14 days.",
-    "55: sending resumes at 50% for 48 hours (marketing after 24), on"
    ]
   },
   "app/src/features/settings/activity.tsx": {

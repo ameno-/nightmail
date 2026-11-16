@@ -38,7 +38,8 @@ export function SendingLimitsGuide({ headings = 'h3', limit, compact = false }: 
   return <div className="limits-guide" data-compact={compact || undefined}>
     <section aria-label="Score and daily limit">
       <H>Score and daily limit</H>
-      <p>Hosted only: recipients per rolling 24 hours, set by the sender score.</p>
+      {/* Overview's dialog is Hosted's only; what the limit counts is in the docs it links to. */}
+      {!compact && <p>Hosted only: recipients per rolling 24 hours, set by the sender score.</p>}
       <div className="limits-table-scroll"><table className="limits-table">
         <thead><tr><th scope="col">Score</th><th scope="col">Daily limit</th><th scope="col">Per minute</th></tr></thead>
         <tbody>{bands.map(([score, cap, current]) => <tr key={score} aria-current={limit && current(limit) ? 'true' : undefined}><td>{score}{limit && current(limit) && <span className="limits-table__now">Now</span>}</td><td>{typeof cap === 'number' ? number(cap) : cap.split(' · ').map((part, i, all) => <Fragment key={part}><span className="limits-table__part">{part}</span>{i < all.length - 1 && ' · '}</Fragment>)}</td><td>{typeof cap === 'number' ? number(perMinute(cap)) : number(500)}</td></tr>)}</tbody>
