@@ -155,29 +155,20 @@
    "findings": []
   },
   "Overview · sender score dialog · desktop": {
-   "score": 44,
+   "score": 22,
    "findings": []
   },
   "Overview · sender score dialog · phone": {
-   "score": 43,
+   "score": 22,
    "findings": []
   },
   "Overview · sending limits dialog · desktop": {
-   "score": 65,
-   "findings": [
-    "inert|marketing is held, not receipts or reset",
-    "inert|sending stops; receiving, inboxes and th",
-    "inert|the limit stops rising and owners and ad",
-    "long-block|marketing is held, not receipts or reset",
-    "long-block|sending stops; receiving, inboxes and th"
-   ]
+   "score": 18,
+   "findings": []
   },
   "Overview · sending limits dialog · phone": {
-   "score": 56,
-   "findings": [
-    "long-block|marketing is held, not receipts or reset",
-    "long-block|sending stops; receiving, inboxes and th"
-   ]
+   "score": 18,
+   "findings": []
   },
   "Overview · setup · desktop": {
    "score": 26,
@@ -387,16 +378,15 @@
    "findings": []
   },
   "Settings · billing · owed · desktop": {
-   "score": 60,
+   "score": 54,
    "findings": [
     "long-block|brand charges your saved card when t"
    ]
   },
   "Settings · billing · owed · phone": {
-   "score": 62,
+   "score": 53,
    "findings": [
     "disclosure|balance|billing-balance__amount",
-    "inert|then it’s held until you add credit. the",
     "long-block|brand charges your saved card when t"
    ]
   },

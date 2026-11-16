@@ -1,6 +1,6 @@
 import { useEffect, useRef, type CSSProperties } from 'react'
 import { Link } from 'react-router'
-import { Button, Dialog, ErrorState, SkeletonText } from '../../components/ui'
+import { Button, Dialog, Disclosure, ErrorState, SkeletonText } from '../../components/ui'
 import type { SenderScore, SenderScoreFactor } from '../../data/types'
 import { closeScoreAbout, useScoreAbout } from '../../lib/score-about'
 import { number } from '../../lib/format'
@@ -48,8 +48,7 @@ export function ScoreAbout({ report, error, onRetry }: { report: SenderScore | u
         <span className="score-about__factor-now">{graded && factor.source === 'measured' ? <>{factorFormats[factor.key](factor.value!)}<span className="muted"> · {Math.round(factor.score!)}/100</span></> : <span className="muted">{graded ? 'No data, left out' : '—'}</span>}</span>
         <p className="muted">{factor.basis}</p>
       </li>)}</ul>
-      <section className="score-about__section" aria-labelledby="score-about-graded">
-        <h3 id="score-about-graded">How it’s graded</h3>
+      <Disclosure className="score-about__section" title="How it’s graded">
         <ul>
           <li>Each part scores 0–100. Parts with no data are left out and the rest count more.</li>
           <li>Recent days count most (30-day half-life). With little mail it stays near 60.</li>
@@ -57,7 +56,7 @@ export function ScoreAbout({ report, error, onRetry }: { report: SenderScore | u
           <li>Counts every email you send except simulated sends. Mail only to <code>…@simulator.amazonses.com</code> uses your daily limit but not the score.</li>
           <li>{grades}</li>
         </ul>
-      </section>
+      </Disclosure>
     </>}
   </Dialog>
 }
