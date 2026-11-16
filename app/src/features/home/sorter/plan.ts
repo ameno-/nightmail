@@ -209,10 +209,10 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   // price's, and half way between the price and the frame's top. `x, y` is its left end on its baseline, `cap` its cap
   // height (its width is 10.8 of them: lib/marks.ts), `z` the plane its face is in, proud of the frame by `depth`.
   // On a wide page each lane fitted after the first brings a unit of its own, plugged onto the tower's side beside
-  // the price: three up each side in the order they come, each lowered in from over the page on to the one before
-  // (the left's: threads, inboxes, rituals; the right's: agents, IMAP, campaigns). `pods`: each one's lane and side,
-  // its place (its left edge, its foot, how far back its front stands), its size, and the plate its name is on (its
-  // left edge, its foot, its size: never under 12 px tall).
+  // the price: three up each side in the order they come, each slid in from its own side of the page over the one
+  // before (the left's: threads, inboxes, rituals; the right's: agents, IMAP, campaigns). `pods`: each one's lane and
+  // side, its place (its left edge, its foot, how far back its front stands), its size, and the plate its name is on
+  // (its left edge, its foot, its size: never under 12 px tall).
   const podW = 9 * U, podH = 9.6 * U, pods = phone ? [] : fit.slice(1).map(lane => {
     const s = lanes[lane] < 0 ? -1 : 1, mine = fit.slice(1).filter(other => (lanes[other] < 0 ? -1 : 1) === s), n = mine.indexOf(lane), y = yMan - 1.5 * U - mine.length * podH - (mine.length - 1) * 2 * U + n * (podH + 2 * U)
     const x = s < 0 ? -Xc - podW : Xc, plateH = Math.max(1.4 * U, 12)

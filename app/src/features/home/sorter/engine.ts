@@ -19,7 +19,7 @@ export const LANES = ['thread', 'webhook', 'agent', 'inbox', 'imap', 'ritual', '
 /** How many letters the page's name for each has (Threads, Endpoints, Agents, Inbox, IMAP, Rituals, Campaigns). */
 const NAMED = [7, 9, 6, 5, 4, 7, 9]
 export type Phase = 'boot' | 'run' | 'overload' | 'boom' | 'rest' | 'rebuild'
-export type Hooks = { scan: (letter: Letter | null, verdict: 'read' | 'junk' | 'jam' | 'idle') => void; count: (sorted: number, burnt: number) => void; phase: (phase: Phase) => void; hover: (letter: Letter | null, x: number, y: number) => void; veil: (zone: number, clear: number) => void; fit: (lanes: boolean[]) => void; floors: (count: number, whole: boolean) => void }
+export type Hooks = { scan: (letter: Letter | null, verdict: 'read' | 'junk' | 'jam' | 'idle') => void; count: (sorted: number, burnt: number) => void; phase: (phase: Phase) => void; hover: (letter: Letter | null, x: number, y: number) => void; veil: (zone: number, clear: number) => void; fit: (lanes: boolean[]) => void; floors: (count: number, whole: boolean) => void; units?: (docked: boolean[]) => void }
 export type Sorter = ReturnType<typeof mountSorter>
 
 const MAX = 760, FREE = 0, SCRIPT = 1, DYN = 2, ASLEEP = 3, HELD = 4, HOME = 5
@@ -122,6 +122,8 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   // place (gl.ts moves all that belongs to a floor by it).
   // (And the units a wide page's tower takes on its sides, one with each lane: `pod`, how far in each is.)
   const shifts = new Float32Array(3 * FLOORS), pod = new Float32Array(6), rests = new Float32Array(3)
+  /** Which of the side units (in the order of `p.pods`) are seated on the tower, for the page's `units` hook. */
+  const docked = () => m.pods.map((_, k) => pod[k] >= 1)
   // (`bayOn`: how far the works' lamp has come on, from the moment the roof lands on the sorting floor.)
   let floors = 0, floorT = -1, cableT = 0, bayOn = 0
   const SEAT = .68
@@ -191,7 +193,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     else { if (floorT >= 0) { floors++; floorT = -1 } bayOn = floors ? 1 : 0; for (let k = 0; k < 6; k++) pod[k] = built || k < fitNext - 1 ? 1 : 0; const done = p.fit.slice(0, fitNext); p.lanes.forEach((_, i) => { const on = built || done.includes(i); deck[i].stage = on ? FITTED : AWAIT; deck[i].chute = on ? 1 : 0 }); for (const a of arm) { a.job = -1; a.cover = 0; a.grip = 0 } }
     // (Each magazine has given as many decks as its side has had fitted.)
     m.arms.forEach((A, k) => { taken[k] = lift[k] = A.lanes.filter(i => deck[i].stage === FITTED).length; liftV[k] = 0 })
-    hooks.fit(p.lanes.map((_, i) => floors > 0 && deck[i].stage === FITTED)); hooks.floors(floors, built)
+    hooks.fit(p.lanes.map((_, i) => floors > 0 && deck[i].stage === FITTED)); hooks.floors(floors, built); hooks.units?.(docked())
     stand()
     m.arms.forEach((A, k) => { arm[k].yaw = A.rest[0]; arm[k].r = A.rest[1]; arm[k].y = A.rest[2] })
     if (!screenOn) { turretAngle[0] = turretAim[0] = Math.PI + 1.35; turretAngle[1] = turretAim[1] = -1.35; swingV[0] = swingV[1] = 0 }
@@ -278,7 +280,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     for (const a of arm) { a.pop = 1; a.down = false; a.job = -1; a.cover = 0; a.grip = 0 }
     fitNext = p.fit.length; built = screenOn = sendOn = true; rush = 1; floors = 2; floorT = -1; cableT = 1; bayOn = 1; pod.fill(1)
     if (m) m.arms.forEach((A, k) => { taken[k] = lift[k] = A.count; liftV[k] = 0 })
-    hooks.fit(p.lanes.map(() => true)); hooks.floors(2, true)
+    hooks.fit(p.lanes.map(() => true)); hooks.floors(2, true); hooks.units?.(docked())
     if (m) stand()
   }
   /** Where the floors stand now: the sorting floor and the console off to the side until they are slid in, the roof
@@ -350,6 +352,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       for (let k = 0; k < m.pods.length; k++) if (pod[k] < 1 && p.fit.indexOf(m.pods[k].lane) < fitNext) {
         const before = pod[k]; pod[k] = Math.min(1, pod[k] + dt / (options.quick ? .9 : 1.25))
         if (before < .9 && pod[k] >= .9) { const at = p.pods[k], x = at.s < 0 ? at.x + at.w : at.x; sparks(x, at.y + at.h * .5, at.z - 2 * px, 6, 150); dust(x, at.y + at.h * .2, at.z - 2 * px) }
+        if (pod[k] >= 1) hooks.units?.(docked())
         stand()
       }
       // And once every lane is in: the lasers come up, the cannon is given something to send, and the day begins
