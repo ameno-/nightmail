@@ -2,11 +2,11 @@
  "about": "Density lint: each page’s score and findings accepted so far (app/scripts/density.mjs). A new finding or a score more than 5% higher fails; a local run lowers these as pages improve. Regenerate with: node scripts/density.mjs --update-baseline",
  "pages": {
   "API keys · create key dialog · desktop": {
-   "score": 13,
+   "score": 7,
    "findings": []
   },
   "API keys · create key dialog · phone": {
-   "score": 13,
+   "score": 7,
    "findings": []
   },
   "API keys · desktop": {
@@ -18,27 +18,27 @@
    "findings": []
   },
   "Audience · desktop": {
-   "score": 16,
-   "findings": []
-  },
-  "Audience · import dialog · desktop": {
-   "score": 15,
-   "findings": []
-  },
-  "Audience · phone": {
    "score": 13,
    "findings": []
   },
+  "Audience · import dialog · desktop": {
+   "score": 8,
+   "findings": []
+  },
+  "Audience · phone": {
+   "score": 12,
+   "findings": []
+  },
   "Campaign editor · desktop": {
-   "score": 41,
+   "score": 39,
    "findings": []
   },
   "Campaign review · desktop": {
-   "score": 20,
+   "score": 17,
    "findings": []
   },
   "Campaign review · phone": {
-   "score": 18,
+   "score": 16,
    "findings": []
   },
   "Campaigns · desktop": {
@@ -50,23 +50,23 @@
    "findings": []
   },
   "Campaigns · restricted · desktop": {
-   "score": 20,
-   "findings": []
-  },
-  "Campaigns · restricted · phone": {
    "score": 19,
    "findings": []
   },
+  "Campaigns · restricted · phone": {
+   "score": 18,
+   "findings": []
+  },
   "Contact · desktop": {
-   "score": 15,
+   "score": 11,
    "findings": []
   },
   "Domain · desktop": {
-   "score": 46,
+   "score": 27,
    "findings": []
   },
   "Domain · phone": {
-   "score": 37,
+   "score": 19,
    "findings": []
   },
   "Domains · add domain dialog · desktop": {
@@ -82,11 +82,11 @@
    "findings": []
   },
   "List · desktop": {
-   "score": 17,
+   "score": 14,
    "findings": []
   },
   "Lists · desktop": {
-   "score": 13,
+   "score": 11,
    "findings": []
   },
   "Lists · phone": {
@@ -106,15 +106,15 @@
    "findings": []
   },
   "New campaign · desktop": {
-   "score": 19,
+   "score": 18,
    "findings": []
   },
   "Onboarding · desktop": {
-   "score": 15,
+   "score": 7,
    "findings": []
   },
   "Onboarding · phone": {
-   "score": 16,
+   "score": 7,
    "findings": []
   },
   "Operator · desktop": {
@@ -126,11 +126,11 @@
    "findings": []
   },
   "Operator · workspace · desktop": {
-   "score": 30,
+   "score": 29,
    "findings": []
   },
   "Operator · workspace · phone": {
-   "score": 28,
+   "score": 27,
    "findings": []
   },
   "Overview · desktop": {
@@ -142,31 +142,31 @@
    "findings": []
   },
   "Overview · restricted · desktop": {
-   "score": 43,
+   "score": 41,
    "findings": []
   },
   "Overview · restricted · phone": {
-   "score": 44,
+   "score": 43,
    "findings": []
   },
   "Overview · sender score dialog · desktop": {
-   "score": 22,
+   "score": 16,
    "findings": []
   },
   "Overview · sender score dialog · phone": {
-   "score": 22,
+   "score": 16,
    "findings": []
   },
   "Overview · sending limits dialog · desktop": {
-   "score": 18,
+   "score": 15,
    "findings": []
   },
   "Overview · sending limits dialog · phone": {
-   "score": 18,
+   "score": 15,
    "findings": []
   },
   "Overview · setup · desktop": {
-   "score": 26,
+   "score": 18,
    "findings": []
   },
   "Received email · desktop": {
@@ -178,15 +178,15 @@
    "findings": []
   },
   "Receiving · address · desktop": {
-   "score": 47,
+   "score": 38,
    "findings": []
   },
   "Receiving · address · phone": {
-   "score": 35,
+   "score": 28,
    "findings": []
   },
   "Receiving · agent inbox · desktop": {
-   "score": 26,
+   "score": 18,
    "findings": []
   },
   "Receiving · agent inboxes · desktop": {
@@ -198,15 +198,15 @@
    "findings": []
   },
   "Receiving · ask your agent dialog · desktop": {
-   "score": 41,
+   "score": 26,
    "findings": []
   },
   "Receiving · desktop": {
-   "score": 20,
+   "score": 16,
    "findings": []
   },
   "Receiving · endpoints · desktop": {
-   "score": 17,
+   "score": 13,
    "findings": []
   },
   "Receiving · inbox · desktop": {
@@ -218,83 +218,83 @@
    "findings": []
   },
   "Receiving · new address dialog · desktop": {
-   "score": 11,
+   "score": 5,
    "findings": []
   },
   "Receiving · new address dialog · phone": {
-   "score": 11,
+   "score": 5,
    "findings": []
   },
   "Receiving · new agent inbox dialog · desktop": {
-   "score": 25,
+   "score": 12,
    "findings": []
   },
   "Receiving · new ritual · desktop": {
-   "score": 40,
+   "score": 17,
    "findings": []
   },
   "Receiving · new ritual · new workspace · desktop": {
-   "score": 40,
+   "score": 17,
    "findings": []
   },
   "Receiving · new ritual · phone": {
-   "score": 34,
+   "score": 16,
    "findings": []
   },
   "Receiving · phone": {
-   "score": 15,
+   "score": 11,
    "findings": []
   },
   "Receiving · recipe form · desktop": {
-   "score": 10,
+   "score": 7,
    "findings": []
   },
   "Receiving · recipe form · phone": {
-   "score": 9,
+   "score": 6,
    "findings": []
   },
   "Receiving · recipe ritual · desktop": {
-   "score": 14,
+   "score": 11,
    "findings": []
   },
   "Receiving · recipe ritual · phone": {
-   "score": 13,
+   "score": 10,
    "findings": []
   },
   "Receiving · ritual editor · desktop": {
-   "score": 33,
+   "score": 18,
    "findings": []
   },
   "Receiving · ritual editor · new script · desktop": {
-   "score": 33,
+   "score": 15,
    "findings": []
   },
   "Receiving · rituals · desktop": {
-   "score": 24,
+   "score": 18,
    "findings": []
   },
   "Receiving · rituals · phone": {
-   "score": 24,
+   "score": 18,
    "findings": []
   },
   "Receiving · trace · desktop": {
-   "score": 37,
+   "score": 19,
    "findings": []
   },
   "Receiving · webhook · desktop": {
-   "score": 29,
+   "score": 14,
    "findings": []
   },
   "Receiving · webhooks · desktop": {
-   "score": 7,
+   "score": 3,
    "findings": []
   },
   "Receiving · webhooks · phone": {
-   "score": 7,
+   "score": 3,
    "findings": []
   },
   "Segment · desktop": {
-   "score": 19,
+   "score": 15,
    "findings": []
   },
   "Segments · desktop": {
@@ -318,15 +318,15 @@
    "findings": []
   },
   "Settings · MCP connection · desktop": {
-   "score": 16,
+   "score": 8,
    "findings": []
   },
   "Settings · MCP connection · phone": {
-   "score": 16,
+   "score": 7,
    "findings": []
   },
   "Settings · account · desktop": {
-   "score": 14,
+   "score": 10,
    "findings": []
   },
   "Settings · activity · desktop": {
@@ -338,35 +338,35 @@
    "findings": []
   },
   "Settings · add credit dialog · desktop": {
-   "score": 15,
+   "score": 14,
    "findings": []
   },
   "Settings · add credit dialog · phone": {
-   "score": 15,
+   "score": 14,
    "findings": []
   },
   "Settings · billing · desktop": {
-   "score": 17,
+   "score": 16,
    "findings": []
   },
   "Settings · billing · free · desktop": {
-   "score": 14,
+   "score": 9,
    "findings": []
   },
   "Settings · billing · free · phone": {
-   "score": 14,
+   "score": 8,
    "findings": []
   },
   "Settings · billing · owed · desktop": {
-   "score": 27,
+   "score": 25,
    "findings": []
   },
   "Settings · billing · owed · phone": {
-   "score": 27,
+   "score": 25,
    "findings": []
   },
   "Settings · billing · phone": {
-   "score": 17,
+   "score": 16,
    "findings": []
   },
   "Settings · desktop": {
@@ -374,23 +374,23 @@
    "findings": []
   },
   "Settings · invite dialog · desktop": {
-   "score": 18,
+   "score": 7,
    "findings": []
   },
   "Settings · invite dialog · phone": {
-   "score": 17,
+   "score": 6,
    "findings": []
   },
   "Settings · members · desktop": {
-   "score": 15,
+   "score": 6,
    "findings": []
   },
   "Settings · members · phone": {
-   "score": 16,
+   "score": 8,
    "findings": []
   },
   "Settings · new webhook · desktop": {
-   "score": 21,
+   "score": 9,
    "findings": []
   },
   "Settings · phone": {
@@ -398,31 +398,31 @@
    "findings": []
   },
   "Settings · plan & usage · desktop": {
-   "score": 17,
+   "score": 13,
    "findings": []
   },
   "Settings · plan & usage · phone": {
-   "score": 17,
+   "score": 13,
    "findings": []
   },
   "Settings · sending · desktop": {
-   "score": 16,
-   "findings": []
-  },
-  "Settings · webhook · desktop": {
-   "score": 32,
-   "findings": []
-  },
-  "Settings · webhook · phone": {
-   "score": 26,
-   "findings": []
-  },
-  "Settings · webhooks · desktop": {
    "score": 10,
    "findings": []
   },
+  "Settings · webhook · desktop": {
+   "score": 15,
+   "findings": []
+  },
+  "Settings · webhook · phone": {
+   "score": 13,
+   "findings": []
+  },
+  "Settings · webhooks · desktop": {
+   "score": 6,
+   "findings": []
+  },
   "Template · desktop": {
-   "score": 18,
+   "score": 14,
    "findings": []
   },
   "Templates · desktop": {
