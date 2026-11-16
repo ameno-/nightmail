@@ -68,7 +68,13 @@ export function SorterHome({ start, notice }: HomeProps) {
       else { from.textContent = `${productName.toLowerCase()} sorter`; subject.textContent = 'Waiting for mail'; go('') }
     },
     count(sorted, burnt) { counts.current = [sorted, burnt]; if (tally.current) tally.current.textContent = String(sorted % 100000).padStart(5, '0') },
-    phase(next) { setPhase(next); if (next === 'boom') try { localStorage.setItem(SEEN, '1') } catch { /* private mode: the long version again next time */ } },
+    phase(next) {
+      setPhase(next); if (next === 'boom') try { localStorage.setItem(SEEN, '1') } catch { /* private mode: the long version again next time */ }
+      // (The screen is out while the machine is put back together, and comes on again when it runs: sorter-home.css.)
+      const box = readout.current
+      if (box && next === 'rebuild') box.dataset.screen = 'off'
+      else if (box?.dataset.screen === 'off') box.dataset.screen = 'on'
+    },
     // Smoke in front of what is written on the machine hides it, as it hides the machine.
     floors(count, whole) { setTower(now => now.floors === count && now.whole === whole ? now : { floors: count, whole }) },
     fit(lanes) { setFitted(now => now && now.length === lanes.length && now.every((on, i) => on === lanes[i]) ? now : lanes) },
@@ -147,9 +153,22 @@ export function SorterHome({ start, notice }: HomeProps) {
   }, [])
 
   const at = (r: Rect): CSSProperties => p ? onFront(p, r) : { display: 'none' }
+  // (A fact's window, and how wide it is: its type gives way to a narrow one.)
+  const pane = (r: Rect) => ({ ...at(r), '--srt-room': `${r.w}px` }) as CSSProperties
   const price = p ? { x: -COLS / 2 * p.U, w: COLS * p.U } : { x: 0, w: 0 }
   // Whole names where a lane's plate holds them; the lanes' codes where it does not.
-  const named = !!p && p.label * p.P >= (p.phone ? 56 : 60)
+  const named = !!p && p.label * p.P >= (p.phone ? 56 : 60), podNamed = !!p?.pods.length && p.pods[0].w - 2.2 * p.U >= 60
+  // Where each tube goes over the slab's lip (the eight, then the outbound main), the name of where it leads, on the lip
+  // beside it: a left-hand tube's to its right, the others' to its left. Whole names where every one has room between
+  // its own tube and the next tube that way, the codes where not, and nothing where not even a tube's code has room.
+  // (A name stands 7 or 9 px clear of its own tube and must end 5 px clear of the next, whose bend over the lip is a
+  // little wider than it; a letter of the lip's 11 px type is .62 em wide with its spacing.)
+  const mouths = p && !p.phone ? (() => {
+    const xs = [...p.drops, p.ox + p.out], names = [...TUBE_NAMES, 'Outbound'], codes = [...TUBE_CODES, 'Out'], wide = (s: string) => s.length * 11 * .62
+    const room = xs.map((x, t) => { const east = t < 4; return Math.min(...xs.map(o => east ? o - x : x - o).filter(d => d > 0)) - 2 * p.tubeR - (east ? 7 : 9) - 5 })
+    const whole = names.every((name, t) => wide(name) <= room[t])
+    return xs.map((x, t) => ({ x, east: t < 4, text: whole ? names[t] : wide(codes[t]) <= room[t] ? codes[t] : null }))
+  })() : []
   const cannonBox = (c: Plan['cannon'], q: Plan) => { const sx = DX * c.z, sy = DY * c.z, ce = Math.cos(c.el), se = Math.sin(c.el), x0 = c.x - c.back * ce - 2.4 * c.cs, x1 = c.x + c.fore * ce + c.r, top = c.y + c.pivot + c.fore * se + c.r, w = Math.max(44, x1 - x0 + 8), h = Math.max(44, top - c.y + 8)
     return { left: q.ox + (x0 + x1) / 2 + sx - w / 2, top: q.oy - top - sy - 4 - (h - (top - c.y + 8)), width: w, height: h } }
   // The hopper's mouth, as it is seen: wide enough to press.
@@ -180,12 +199,13 @@ export function SorterHome({ start, notice }: HomeProps) {
           <button type="button" className="srt-gauge" style={at({ x: p.gauge.x - p.gauge.r - 5, y: p.gauge.y - p.gauge.r - 5, w: 2 * p.gauge.r + 10, h: 2 * p.gauge.r + 10 })} aria-label={phase === 'rest' ? 'Put the sorter back together' : 'Pressure gauge'} title={phase === 'rest' ? 'Put it back together' : 'Pressure'} onClick={() => sorter.current?.gauge()} />
           <ol className="srt-lanes" data-names={!p.phone && named || undefined} ref={el => { veiled.current[1] = el }} aria-hidden="true">{p.lanes.map((x, i) => <li key={i} data-off={!(fitted && fitted.length === p.lanes.length ? fitted[i] : reduced) || undefined} style={at({ x: x - p.label / 2 * p.P, y: p.ySlot + .14 * p.slot, w: p.label * p.P, h: .72 * p.slot })}>{(named ? LANE_NAMES : LANE_CODES)[p.routes[i]]}</li>)}</ol>
           {/* On a wide page, the name on each unit plugged onto the tower's side: there once its lane is. */}
-          {p.pods.length > 0 && <ol className="srt-lanes srt-pods" aria-hidden="true">{p.pods.map((pod, k) => <li key={k} data-off={!(fitted && fitted.length === p.lanes.length ? fitted[pod.lane] : reduced) || undefined} style={{ left: p.ox + pod.x + .5 * p.U + DX * pod.z, top: p.oy - pod.y - 2.3 * p.U - DY * pod.z, width: pod.w - 2.2 * p.U, height: 1.4 * p.U }}>{(pod.w - 2.2 * p.U >= 57 ? LANE_NAMES : LANE_CODES)[p.routes[pod.lane]]}</li>)}</ol>}
+          {/* (Whole names where the plate holds the longest, nine letters at 10 px, with a little room either side.) */}
+          {p.pods.length > 0 && <ol className="srt-lanes srt-pods" data-names={podNamed || undefined} aria-hidden="true">{p.pods.map((pod, k) => <li key={k} data-off={!(fitted && fitted.length === p.lanes.length ? fitted[pod.lane] : reduced) || undefined} style={{ left: p.ox + pod.x + .5 * p.U + DX * pod.z, top: p.oy - pod.y - 2.3 * p.U - DY * pod.z, width: pod.w - 2.2 * p.U, height: 1.4 * p.U }}>{(podNamed ? LANE_NAMES : LANE_CODES)[p.routes[pod.lane]]}</li>)}</ol>}
           {/* The hopper: press it and more mail comes down (what the old code does from a keyboard). */}
           {!reduced && <button type="button" className="srt-hopper" style={hopperBox(p)} aria-label="Hopper: pour in more mail" title="More mail" onMouseDown={event => event.preventDefault()} onClick={() => sorter.current?.rain()} />}
           {/* The send cannon: press it and it fires one. */}
           {!reduced && <button type="button" className="srt-cannon" style={cannonBox(p.cannon, p)} aria-label="Send cannon: fire a letter" title="Send one" onMouseDown={event => event.preventDefault()} onClick={() => sorter.current?.send()} />}
-          {!p.phone && <ol className="srt-lanes srt-mouths" aria-hidden="true">{p.drops.map((x, t) => <li key={t} data-side={t < 4 ? 'l' : 'r'} style={{ top: p.oy + p.front, height: p.lip, ...(t < 4 ? { left: x + p.tubeR + 7 } : { right: p.W - x + p.tubeR + 9 }) }}>{(Math.abs(p.fan[1].x - p.fan[0].x) < 84 ? TUBE_CODES : TUBE_NAMES)[t]}</li>)}<li data-side="r" style={{ top: p.oy + p.front, height: p.lip, right: p.W - p.ox - p.out + p.tubeR + 9 }}>{Math.abs(p.fan[1].x - p.fan[0].x) < 84 ? 'Out' : 'Outbound'}</li></ol>}
+          {mouths.length > 0 && <ol className="srt-lanes srt-mouths" aria-hidden="true">{mouths.map(({ x, east, text }, t) => text && <li key={t} data-side={east ? 'l' : 'r'} style={{ top: p.oy + p.front, height: p.lip, ...(east ? { left: x + p.tubeR + 7 } : { right: p.W - x + p.tubeR + 9 }) }}>{text}</li>)}</ol>}
           {/* Under the price, as wide as the price: what it buys. */}
           <h1 className="srt-band" ref={el => { veiled.current[2] = el }} style={at({ x: price.x, y: p.yBand, w: price.w, h: p.band })} aria-label="$0.20 per 1,000 emails, sent or received via API.">
             <span className="srt-line" aria-hidden="true">
@@ -195,8 +215,8 @@ export function SorterHome({ start, notice }: HomeProps) {
           </h1>
           {p.tally && <span className="srt-tally" ref={tally} style={{ left: p.ox + p.tally.x + DX * p.tally.z, top: p.oy - p.tally.y - p.tally.h - DY * p.tally.z, width: p.tally.w, height: p.tally.h }} aria-hidden="true">00000</span>}
           {/* The two facts: instruments in the base, a legend over a window each. */}
-          <p className="srt-fact" ref={el => { veiled.current[3] = el }} style={at(p.facts[0])}><span className="srt-fact-label">Responds in</span><span className="srt-fact-value"><span><b>~100</b><i>ms</i></span><span className="srt-scale" aria-hidden="true" /></span></p>
-          <p className="srt-fact" ref={el => { veiled.current[4] = el }} style={at(p.facts[1])}><span className="srt-fact-label">Free every month</span><span className="srt-fact-value"><span><b>3,000</b><i>sent</i></span><span><b>3,000</b><i>received</i></span></span></p>
+          <p className="srt-fact" ref={el => { veiled.current[3] = el }} style={pane(p.facts[0])}><span className="srt-fact-label">Responds in</span><span className="srt-fact-value"><span><b>~100</b><i>ms</i></span><span className="srt-scale" aria-hidden="true" /></span></p>
+          <p className="srt-fact" ref={el => { veiled.current[4] = el }} style={pane(p.facts[1])}><span className="srt-fact-label">Free every month</span><span className="srt-fact-value"><span><b>3,000</b><i>sent</i></span><span><b>3,000</b><i>received</i></span></span></p>
           <StartButton start={start} className="srt-cta" ref={cta} style={at(p.cta)} />
           {/* What signing in agrees to, directly under a phone's button (a wide page has it under the slab's lip). */}
           {p.consent && <div className="srt-consent-on" style={at(p.consent)}><SignInConsent className="srt-consent" /></div>}
