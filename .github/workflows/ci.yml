@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
       contents: read
@@ -111,7 +111,7 @@ jobs:
           node api/scripts/check-api-contract.mjs "$RUNNER_TEMP/base.json" "$RUNNER_TEMP/head.json" "${args[@]}"
 
   audit:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -135,7 +135,7 @@ jobs:
           done
 
   gateway:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     defaults:
       run:
@@ -156,7 +156,7 @@ jobs:
         run: cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
 
   acceptance:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     services:
       postgres:
@@ -190,7 +190,7 @@ jobs:
   # apply and end with the same schema; then wrangler dev (workerd) serves wrangler.dev.jsonc's assets and routing on
   # the upgraded database with simulated SES, and every API route asked anonymously must be answered by the Worker.
   preview:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     services:
       postgres:
@@ -232,7 +232,7 @@ jobs:
   # Fails above CLS 0.001 on any page; the longest task per in-app navigation is reported. Locally: cd app && bun run cls.
   # The same run reads each page's text density (app/scripts/density.mjs), a ratchet against density-baseline.json.
   cls:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     services:
       postgres:
@@ -298,7 +298,7 @@ jobs:
   # The support Worker (support/, the AI support agent's backend): types, the deployable bundle, and its tests, which
   # drive that bundle in Miniflare with a fake Bane and a scripted model (no network, no model calls). Not required yet.
   support:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
