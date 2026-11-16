@@ -1,14 +1,14 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { Alert, Button, Checkbox, CopyButton, SecretCode, Dialog, Field, Input, SecretInput, Select, type Tone } from '../../components/ui'
+import { Alert, Button, Checkbox, CopyButton, Dialog, Field, Input, SecretInput, Select, type Tone } from '../../components/ui'
 import { request } from '../../data/live'
 import { ApiError } from '../../data/types'
 import { productName } from '../../../../api/src/brand'
 const errorText = (e: unknown): string => e instanceof ApiError ? e.text : (e as Error).message
 import { useApiDef } from '../../data/context'
 import { queries } from '../../data/queries'
-import { idempotencyFor, shownOnce } from './shared'
+import { idempotencyFor, SecretField } from './shared'
 import '../settings/settings.css'
 import './inbound.css'
 import { useSingleFlight } from '../../lib/single-flight'
@@ -29,14 +29,6 @@ export function targetProblem(type: EndpointType, value: string) {
   if (type === 'slack' && !slackUrl.test(value)) return 'Use Slack’s incoming webhook URL, starting https://hooks.slack.com/.'
   if (type === 'discord' && !discordUrl.test(value)) return 'Use Discord’s webhook URL, starting https://discord.com/api/webhooks/.'
   return ''
-}
-const hours = (iso: string | null) => iso ? Math.max(0, Math.round((Date.parse(iso) - Date.now()) / 3600000)) : 0
-/** The API's nextStep is written for agents; people get the same fact with the dashboard's own controls. */
-function humanStep(e: Endpoint) {
-  if (e.status === 'pending') return `Waiting for the recipient to confirm by email · link expires in ${hours(e.expiresAt)} h`
-  if (e.status === 'expired') return 'Confirmation link expired · resend it from the menu'
-  if (e.status === 'declined') return 'The recipient declined or stopped forwards'
-  return 'Paused · calls wait until you resume'
 }
 /** The endpoint as the edit form needs it: what it is and whether it's paused. Its URL is write-only and never here. */
 export type EditableEndpoint = { name: string; type: EndpointType; status: EndpointStatus; target: string }
@@ -141,10 +133,9 @@ export function CreatedEndpointDialog({ created, onClose, writeRitual = true }: 
     footer={<><Button onClick={onClose}>Done</Button>{writeRitual && created?.status !== 'pending' && <Link className="ui-button ui-button--primary ui-button--md" to="/receiving/rituals/new" onClick={onClose}>New ritual</Link>}</>}>
     {created && <div className="stack">
       <Field label="Call it from a ritual"><div className="settings-copy-cell"><code>{call}</code><CopyButton value={call} label="Copy call" /></div></Field>
-      {created.secret && <Field label="Signing secret" hint={shownOnce}><div className="settings-copy-cell"><SecretCode>{created.secret}</SecretCode><CopyButton value={created.secret} label="Copy secret" /></div></Field>}
-      {created.status === 'pending' && <p className="muted">{humanStep(created)}</p>}
+      {created.secret && <SecretField label="Signing secret" value={created.secret} copyLabel="Copy secret" />}
     </div>}
   </Dialog>
 }
 export const endpointTypeLabel = typeLabel
-export { humanStep, statusLabel as endpointStatusLabel, statusTone as endpointStatusTone }
+export { statusLabel as endpointStatusLabel, statusTone as endpointStatusTone }

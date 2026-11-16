@@ -52,7 +52,8 @@ export function commitAliases(state: AliasState, { address, temporary }: Rules, 
   return { list, draft: rest.join(', '), message, ok: !reason, added }
 }
 
-export function AliasEditor({ id, address, temporary, saved, value, onChange, disabled, error }: Rules & { id: string; saved: string[]; value: AliasState; onChange: (next: AliasState) => void; disabled?: boolean; error?: string }) {
+/** A permanent address's aliases (a temporary one can't have any, so it gets no editor). */
+export function AliasEditor({ id, address, saved, value, onChange, disabled, error }: { id: string; address: string; saved: string[]; value: AliasState; onChange: (next: AliasState) => void; disabled?: boolean; error?: string }) {
   const domain = domainOf(address)
   const input = useRef<HTMLInputElement>(null)
   const removers = useRef(new Map<string, HTMLButtonElement>())
@@ -60,14 +61,14 @@ export function AliasEditor({ id, address, temporary, saved, value, onChange, di
   const [announcement, setAnnouncement] = useState('')
   const labelId = useId(), suffixId = useId(), messageId = useId()
   const full = value.list.length >= MAX_ALIASES
-  const locked = disabled || temporary || full
+  const locked = disabled || full
   useEffect(() => {
     if (focusAfterRemove === null) return
     ;(removers.current.get(focusAfterRemove) ?? input.current)?.focus()
     setFocusAfterRemove(null)
   }, [focusAfterRemove])
   function add(draft = value.draft, pasted = false) {
-    const next = commitAliases({ ...value, draft }, { address, temporary }, pasted)
+    const next = commitAliases({ ...value, draft }, { address, temporary: false }, pasted)
     onChange({ list: next.list, draft: next.draft, message: next.message })
     if (next.added.length) setAnnouncement(next.added.length === 1 ? `Added ${next.added[0]}` : `Added ${next.added.length} aliases`)
     if (next.list.length >= MAX_ALIASES && !next.draft) requestAnimationFrame(() => removers.current.get(next.list.at(-1)!)?.focus())
@@ -91,7 +92,7 @@ export function AliasEditor({ id, address, temporary, saved, value, onChange, di
   }
   const shown = value.message ?? (error ? { tone: 'error' as const, text: error } : null)
   // A line under the field only when there is something to say: what went wrong, or why it can't take more.
-  const note = shown?.text ?? (temporary ? 'Temporary addresses cannot have aliases.' : full ? `This address has the maximum of ${MAX_ALIASES} aliases.` : '')
+  const note = shown?.text ?? (full ? `This address has the maximum of ${MAX_ALIASES} aliases.` : '')
   const typedDomain = value.draft.includes('@')
   return <div className="ui-field alias-editor">
     <label className="ui-field__label" id={labelId} htmlFor={id}>Aliases</label>

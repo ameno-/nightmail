@@ -58,12 +58,12 @@ function AgentSetup({ address }: { address: string | null }) {
   // Connected but not able to edit rituals here: read or send access only, or a member of this workspace.
   const limited = !connected ? active[0] ?? null : null
   const status = apps.isPending ? 'Looking for a connected agent…'
-    : connected ? <>Connected as <strong>{connectionTitle(connected)}</strong>. Its saves show up here live.</>
+    : connected ? <>Connected as <strong>{connectionTitle(connected)}</strong>.</>
     : limited ? <><strong>{connectionTitle(limited)}</strong> is connected but can’t change rituals in this workspace yet.</>
     : 'No agent is connected yet.'
   return <div className="stack ritual-agent__content">
     <p className="ritual-agent__status muted"><span className="ritual-agent__mark" data-connected={connected ? true : undefined} aria-hidden="true" />{status}</p>
-    {limited && <p className="ritual-agent__note">{admin ? <>Rituals need full access. Connect the client again and approve full access, or <Link to={`/settings/mcp/${encodeURIComponent(limited.id)}`}>revoke it in Settings</Link> first.</> : 'Rituals need an owner or admin of this workspace.'}</p>}
+    {limited && <p className="ritual-agent__note">{admin ? <>Connect it again and approve full access, or <Link to={`/settings/mcp/${encodeURIComponent(limited.id)}`}>revoke it in Settings</Link> first.</> : 'Rituals need an owner or admin of this workspace.'}</p>}
     {/* The setup opens from its heading, so the prompts stay in view under it. */}
     {!connected && <Disclosure className="ritual-agent__setup" title="Connect it, with full access">
       <McpClientSetup client={client} onClient={setClient} url={url} auth={{ scope }} />

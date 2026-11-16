@@ -3,14 +3,14 @@ import type { McpClient } from '../../../../api/src/mcp-clients'
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { request } from '../../data/live'
-import { Alert, Button, Checkbox, ConfirmDialog, DropdownMenu, CopyButton, SecretCode, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge, type Tone } from '../../components/ui'
+import { Alert, Button, Checkbox, ConfirmDialog, DropdownMenu, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge, type Tone } from '../../components/ui'
 import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { ApiKey, CreatedInbox, Inbox, InboxInput, InboxMessage, InboxStatus, MailboxDomain } from '../../data/types'
 import { date, number } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { fieldError, MutationError } from '../settings/shared'
-import { shownOnce, when, Sender } from './shared'
+import { SecretField, when, Sender } from './shared'
 import { nameParts } from '../../lib/private-address'
 import '../settings/settings.css'
 import './inbound.css'
@@ -67,11 +67,9 @@ export function NewInboxDialog({ open, onOpenChange }: { open: boolean; onOpenCh
     <Dialog sensitive={Boolean(created.credential)} open={open && !connecting} onOpenChange={next => { if (!next) close() }} title="Agent inbox created" className="connect-agent-dialog" footer={<><Button onClick={close}>Done</Button>{!created.credential && <Button onClick={() => setConnecting(true)}>Connect an agent</Button>}<Button variant="primary" onClick={() => { close(); navigate(`${route}/${created.id}`) }}>Open inbox</Button></>}>
       <div className="stack">
         <Field label="Address"><div className="settings-copy-cell"><code><PrivateAddress value={created.address} /></code><CopyButton value={created.address} label="Copy address" /></div></Field>
-        <dl className="settings-facts"><div><dt>Receives until</dt><dd>{date(created.expiresAt)}</dd></div>{created.type === 'sandbox' && <div><dt>Type</dt><dd>Sandbox · test mail only</dd></div>}</dl>
+        <dl className="settings-facts"><div><dt>Receives until</dt><dd>{date(created.expiresAt)}</dd></div></dl>
         {created.credential && <>
-          <Field label="API key for this inbox" hint={shownOnce}>
-            <div className="settings-copy-cell"><SecretCode>{created.credential.secret}</SecretCode><CopyButton value={created.credential.secret} label="Copy API key" /></div>
-          </Field>
+          <SecretField label="API key" value={created.credential.secret} copyLabel="Copy API key" />
           <div className="stack"><strong className="connect-agent__title">Use it with an agent</strong><McpClientSetup client={client} onClient={setClient} url={url} auth={{ bearer: created.credential.secret }} label="Agent" /></div>
         </>}
       </div>

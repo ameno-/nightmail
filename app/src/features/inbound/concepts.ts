@@ -52,6 +52,5 @@ export const steps = {
 
 export const catchAllSetting = {
   title: 'Catch-all',
-  line: 'What happens to mail for an address that doesn’t exist on this domain.',
   options: { store: 'Store it, no inbox', create_address: 'Create an address' },
 } as const

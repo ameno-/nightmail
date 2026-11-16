@@ -231,13 +231,13 @@ export function InboundAddressDetailPage() {
           {/* The route above lists them; editing them is one click away (Add alias and Add pattern open it). A temporary
               address can have neither, so it has no editor for them. */}
           {!current.expiresAt && <Disclosure className="addr-more" title="Aliases and patterns" defaultOpen={!!fieldError(save.error, 'aliases')}>
-            <AliasEditor id="inbound-address-aliases" address={current.address} temporary={false} saved={input.base.aliases} value={input.aliases} onChange={aliases => setInput({ ...input, aliases })} disabled={save.isPending} error={fieldError(save.error, 'aliases')} />
+            <AliasEditor id="inbound-address-aliases" address={current.address} saved={input.base.aliases} value={input.aliases} onChange={aliases => setInput({ ...input, aliases })} disabled={save.isPending} error={fieldError(save.error, 'aliases')} />
             <PatternsField key={current.updatedAt} address={current} inputRef={patternInput} />
           </Disclosure>}
           <div className="cluster form-actions"><Button variant="primary" type="submit" loading={save.isPending} disabled={!dirty}>Save changes</Button>{dirty && !save.isPending && <Button onClick={() => { setInput(null); save.reset() }}>Discard</Button>}</div>
         </form>}
       </section>}
     </div>}
-    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title="Delete this address?" description="Stored messages stay. The address and its aliases are released with their read, star and archive state; new mail to them follows the domain’s catch-all, and routes stop delivering here." confirmLabel="Delete address" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/receiving') }} />
+    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title="Delete this address?" description="Stored messages stay, without their read, star and archive state. New mail to it and its aliases follows the domain’s catch-all, and routes stop delivering here." confirmLabel="Delete address" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/receiving') }} />
   </div>
 }
