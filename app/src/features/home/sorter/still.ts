@@ -34,11 +34,15 @@ export function drawStill(canvas: HTMLCanvasElement, p: Plan, over: number, dark
   // The board the sentence stands on, in its frame; a wide page's rail over the base; a phone's plate the two facts
   // are on, riveted to the base.
   { const e = 1.2 * U / 9, half = COLS * U / 2 + 1.3 * U, right = half + (p.phone ? 0 : .017 * COLS * U), y0 = p.yBand + (p.phone ? .09 : .15) * p.band, y1 = p.yBand + (p.phone ? .91 : .85) * p.band
-    fill('plinth', 2); front(-half, y0, right, y1); fill('trim', 1); front(-half - e, y1, right + e, y1 + e); front(-half - e, y0 - e, right + e, y0); front(-half - e, y0, -half, y1); front(right, y0, right + e, y1)
+    fill('plinth', dark ? 2 : 1); front(-half, y0, right, y1); fill('trim', 1); front(-half - e, y1, right + e, y1 + e); front(-half - e, y0 - e, right + e, y0); front(-half - e, y0, -half, y1); front(right, y0, right + e, y1)
     if (!p.phone) { fill('trim', 1); front(-Xc, p.yBand - U / 9, Xc, p.yBand + U / 9) }
     else { const f = p.facts, xa = f[0].x - 1.3 * U, xb = f[1].x + f[1].w + 1.3 * U, ya = f[0].y - 10, yb = f[0].y + f[0].h + 9; fill('plinth', 0); front(xa, ya, xb, yb); fill('trim', 1); for (const x of [xa + .8 * U, xb - .8 * U]) for (const y of [ya + .8 * U, yb - .8 * U]) { c.beginPath(); c.arc(X(x), Y(y), .26 * U, 0, Math.PI * 2); c.fill() } } }
   fill('body', 1); front(p.cta.x - p.plate, p.cta.y - p.plate, p.cta.x + p.cta.w + p.plate, p.cta.y + p.cta.h + p.plate)
-  fill('slot', 1); front(p.cta.x, p.cta.y, p.cta.x + p.cta.w, p.cta.y + p.cta.h)
+  // (The button's frame and the faceplate's four bolts; under the page's button, its own face, so no dark edge of the
+  // bay shows round it.)
+  { const c0 = p.cta, f = 2.5 * U / 9, pl = p.plate; fill('trim', 1); front(c0.x - f, c0.y + c0.h, c0.x + c0.w + f, c0.y + c0.h + f); front(c0.x - f, c0.y - f, c0.x + c0.w + f, c0.y); front(c0.x - f, c0.y, c0.x, c0.y + c0.h); front(c0.x + c0.w, c0.y, c0.x + c0.w + f, c0.y + c0.h)
+    fill('steel', 1); for (const x of [c0.x - pl * .5 - f * .5, c0.x + c0.w + pl * .5 + f * .5]) for (const y of [c0.y - pl * .5 - f * .5, c0.y + c0.h + pl * .5 + f * .5]) { c.beginPath(); c.arc(X(x), Y(y), 1.2 * U / 9, 0, Math.PI * 2); c.fill() } }
+  fill('lit', 1); front(p.cta.x, p.cta.y, p.cta.x + p.cta.w, p.cta.y + p.cta.h)
   if (!p.phone) { fill('screen', 1); for (const w of p.facts) front(w.x, w.y, w.x + w.w, w.y + w.h) }
   if (whole) { fill('screen', 1); front(p.readout.x, p.readout.y, p.readout.x + p.readout.w, p.readout.y + p.readout.h) }
   // The tubes' channels down the front, and the gauge's face.
@@ -93,9 +97,10 @@ export function drawStill(canvas: HTMLCanvasElement, p: Plan, over: number, dark
   }
   const hh = p.hopper * .82, ht = p.lw * 1.3, hb = p.lw * .62, hd = p.lw * .36
   box(-hb - 3 * px, yTop, zL - hd - 3 * px, hb + 3 * px, yTop + 2.4 * px, zL + hd + 3 * px, 'plinth')
-  fill('trim', 1); face([[-hb, yTop, zL + hd], [hb, yTop, zL + hd], [ht, yTop + hh, zL + hd], [-ht, yTop + hh, zL + hd]])
-  fill('trim', 2); for (const s of [-1, 1]) face([[s * hb, yTop, zL - hd], [s * hb, yTop, zL + hd], [s * ht, yTop + hh, zL + hd], [s * ht, yTop + hh, zL - hd]])
-  fill('steel', 1); face([[-hb, yTop, zL - hd], [hb, yTop, zL - hd], [hb + (ht - hb) * .62, yTop + hh * .62, zL - hd], [-hb - (ht - hb) * .62, yTop + hh * .62, zL - hd]])
+  // (By day the renderer's lamp leaves the hopper's plates nearly white.)
+  fill('trim', dark ? 1 : 0); face([[-hb, yTop, zL + hd], [hb, yTop, zL + hd], [ht, yTop + hh, zL + hd], [-ht, yTop + hh, zL + hd]])
+  fill('trim', dark ? 2 : 1); for (const s of [-1, 1]) face([[s * hb, yTop, zL - hd], [s * hb, yTop, zL + hd], [s * ht, yTop + hh, zL + hd], [s * ht, yTop + hh, zL - hd]])
+  fill('steel', dark ? 1 : 0); face([[-hb, yTop, zL - hd], [hb, yTop, zL - hd], [hb + (ht - hb) * .62, yTop + hh * .62, zL - hd], [-hb - (ht - hb) * .62, yTop + hh * .62, zL - hd]])
   })
   // In the bay: its floor, each lane's chute, the roller line (fifty-six rollers, seen end on and from above).
   const yR = yCav + p.cavity * .4, rr = p.P / 8 * .4, z0 = zL - 12 * px, z1 = zL + 12 * px

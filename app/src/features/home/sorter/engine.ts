@@ -313,7 +313,8 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     if (building) dt *= rush
     if (building && floors < 2) {
       buildT += dt
-      if (floorT < 0) { if (buildT > (floors ? B.between : B.core) && (scanning === -1 || scripts.get(scanning)?.stage !== 10)) { floorT = 0; swingV[0] -= .5; swingV[1] += .5 } }
+      // (Not while a letter is in the throat or at the scanner: with the floor over it away it would hang in the air.)
+      if (floorT < 0) { if (buildT > (floors ? B.between : B.core) && scanning === -1) { floorT = 0; swingV[0] -= .5; swingV[1] += .5 } }
       else {
         const before = floorT; floorT += dt / B.floor
         // (As the roof comes down on the new floor: dust along the join, the needle jumps, the hanging lasers swing.)
@@ -452,17 +453,18 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
         else loose(i, rnd(-1, 1) * 170 * px, rnd(140, 320) * px, rnd(-60, 150) * px, 5)
       }
     } else if (s.stage === 1) {
-      // In the hopper, in line: the next to go lowest, the rest stacked over it, each a little askew.
-      // (It rides with the roof as the roof is drawn up or let down.)
-      const j = queue.indexOf(i), k = Math.min(1, dt * 16), lean = j ? (j % 2 ? .2 : -.16) : 0
-      P[o] += ((j % 2 ? 1 : -1) * Math.min(j, 1) * p.lw * .09 - P[o]) * k; P[o + 1] += lidMoved; P[o + 1] += (p.yTop + lid() + p.hopper * .34 + j * p.lh * .34 - P[o + 1]) * k
-      setQuat(i, 0, 0, 1, lean)
+      // In the hopper, in a heap: each lying back against the funnel's back wall, the next to go lowest and nearest,
+      // the rest over and behind it, each a little askew; settling into its place as it lands. (It rides with the
+      // roof as the roof is drawn up or let down.)
+      const j = queue.indexOf(i), k = Math.min(1, dt * 16), roll = j ? (j % 2 ? .22 : -.18) : .06, back = (.95 + .1 * j) * ease(clamp(s.t / .2))
+      P[o] += ((j % 2 ? 1 : -1) * Math.min(j, 1) * p.lw * .08 - P[o]) * k; P[o + 1] += lidMoved; P[o + 1] += (p.yTop + lid() + p.hopper * (.3 + .09 * j) - P[o + 1]) * k; P[o + 2] += (p.zL + (j - 1) * p.lh * .09 - P[o + 2]) * k
+      setQuat(i, 1, 0, roll, back); s.ax = back; s.az = roll
       // (While the roof is drawn up off the tower the line waits: down its throat now would be out of its underside.)
       if (j === 0 && scanning === -1 && floorT < 0 && s.t > .1 / rate) { queue.shift(); scanning = i; s.stage = 10; s.t = 0; s.y0 = P[o + 1] }
     } else if (s.stage === 10) {
       // Down the throat and out of sight.
       const u = clamp(s.t / (.16 / rate))
-      P[o] *= 1 - u; P[o + 1] = s.y0 + (p.yTop + lid() - p.lh - s.y0) * u * u; setQuat(i, 0, 0, 1, 0)
+      P[o] *= 1 - u; P[o + 1] = s.y0 + (p.yTop + lid() - p.lh - s.y0) * u * u; P[o + 2] += (p.zL - P[o + 2]) * Math.min(1, dt * 20); setQuat(i, 1, 0, s.az, s.ax * (1 - ease(clamp(u * 2))))
       // (Before there is a sorting floor the tower does one thing: what goes in at the top leaves by the one tube.)
       if (u >= 1 && !floors) { scripts.delete(i); L.state[i] = FREE; scanning = -1; sorted++; hooks.count(sorted, burnt); launch(tubeOf(p.fit[0])); launch(7) }
       else if (u >= 1) { s.stage = 2; s.t = 0; s.y0 = Math.min(p.yFas + p.lh * .6, p.yTop + lid() - p.lh) }
@@ -623,16 +625,20 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     if (touching && ledge) { vel[o] = ledge * 170 * px; vel[o + 2] = Math.min(vel[o + 2], -40 * px); touching = 0; pos[o + 1] += cy }
     // Nor up against the cabinet's front, where it would stand over what is written on the base: it is moved forward.
     if (touching && pos[o + 1] < p.base && Math.abs(pos[o]) < p.Xc + hx && pos[o + 2] < 0 && pos[o + 2] > -(Math.hypot(hx, hy) + 10 * px)) { vel[o + 2] = Math.min(vel[o + 2], -150 * px); touching = 0; pos[o + 1] += cy }
-    // Nor half off the side of the page, cut by its edge: it is moved in.
-    if (touching) { const sx = pos[o] + DX * pos[o + 2], reach = Math.hypot(hx, hy); if (Math.abs(sx) > p.W / 2 - reach - 2 * px && Math.abs(sx) < p.W / 2 + reach) { vel[o] = -Math.sign(sx) * 150 * px; touching = 0; pos[o + 1] += cy } }
-    // Nor on the slab's front edge, where it would hang over the lip edge on: it goes over.
-    if (touching && pos[o + 1] < p.lh && pos[o + 1] > -2 && pos[o + 2] < p.zLip + 22 * px + Math.hypot(hx, hy) * .8) { vel[o + 2] = Math.min(vel[o + 2], -170 * px); touching = 0; pos[o + 1] += cy }
+    // Nor half off the side of the page, cut by its edge: it is moved in. (The page's edges as the plan has them: a
+    // phone's machine need not stand in its middle.)
+    if (touching) { const sx = pos[o] + DX * pos[o + 2], reach = Math.hypot(hx, hy), side = sx < (p.W / 2 - p.ox) ? -1 : 1, edge = side < 0 ? -p.ox : p.W - p.ox; if (side * (sx - edge) > -reach - 2 * px && side * (sx - edge) < reach) { vel[o] = -side * 150 * px; touching = 0; pos[o + 1] += cy } }
+    // Nor on the slab's front edge, where it would hang over the lip: it is moved back on to the slab. (Nothing goes
+    // over the lip into the page below, to be cut off where the canvas ends.)
+    if (touching && pos[o + 1] < p.lh && pos[o + 1] > -2 && pos[o + 2] < p.zLip + 22 * px + Math.hypot(hx, hy) * .8) { vel[o + 2] = Math.max(vel[o + 2], 170 * px); touching = 0; pos[o + 1] += cy }
+    // (And what comes at the lip low, sliding or skimming, is turned back by it, as by a kerb.)
+    if (pos[o + 2] < p.zLip + Math.hypot(hx, hy) * .5 && pos[o + 1] < 26 * px && pos[o + 1] > -2 && vel[o + 2] < 0) { vel[o + 2] *= -.3; pos[o + 2] = p.zLip + Math.hypot(hx, hy) * .5 }
     if (touching) for (const zone of keepClear) if (pos[o + 1] > zone.y - 2 && pos[o + 1] < zone.y + 70 * px) { const dx = pos[o] - zone.x, dz = pos[o + 2] - zone.z, d = Math.hypot(dx, dz); if (d < Math.hypot(hx, hy) + zone.r) { const k = 170 * px / (d || 1); vel[o] = dx * k || 170 * px; vel[o + 2] = dz * k; touching = 0; pos[o + 1] += cy; break } }
     if (touching) {
       pos[o] += cx / touching; pos[o + 1] += cy / touching; pos[o + 2] += cz / touching
       const slow = Math.hypot(vel[o], vel[o + 1], vel[o + 2]) < 26 * px && Math.hypot(ang[o], ang[o + 1], ang[o + 2]) < 1.1
       B.still[i] = slow ? B.still[i] + dt : 0
-      if (slow && B.thin && tilt[i] < 1.6) { matrix(quat, i * 4); const ny = R[5]; if (Math.abs(ny) < .86) { const side = ny < 0 ? -1 : 1, k = 30 * dt; tilt[i] += dt; ang[o] -= R[8] * side * k; ang[o + 2] += R[2] * side * k; B.still[i] = 0 } }
+      if (slow && B.thin && tilt[i] < 1.6) { matrix(quat, i * 4); const ny = R[5]; if (Math.abs(ny) < .985) { const side = ny < 0 ? -1 : 1, k = 30 * dt; tilt[i] += dt; ang[o] -= R[8] * side * k; ang[o + 2] += R[2] * side * k; B.still[i] = 0 } }
       if (slow) { const d = 1 - 6 * dt; vel[o] *= d; vel[o + 2] *= d; ang[o] *= d; ang[o + 1] *= d; ang[o + 2] *= d }
       if (B.still[i] > .3) sleep(B, i)
     } else B.still[i] = 0
@@ -647,8 +653,17 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     matrix(B.quat, i * 4)
     // (So does one that stops on a ledge half way up the machine: a riser's top, a block, a bracket.)
     // And one that has stopped half off the side of the page.
-    const sx = Math.abs(B.pos[o] + DX * B.pos[o + 2])
-    if (Math.abs(R[5]) < .8 || (B.pos[o + 1] > (p.heads.length ? p.heads[0].h : 0) + 46 * px && B.pos[o + 1] < p.yTop - 6) || (sx > p.W / 2 - p.lw * .5 && sx < p.W / 2 + p.lw * .7)) { fading.push(i); return }
+    const sx = B.pos[o] + DX * B.pos[o + 2], reach = Math.hypot(B.half[o], B.half[o + 1]), off = Math.min(Math.abs(sx + p.ox), Math.abs(sx - p.W + p.ox))
+    if (Math.abs(R[5]) < .8 || (B.pos[o + 1] > (p.heads.length ? p.heads[0].h : 0) + 46 * px && B.pos[o + 1] < p.yTop - 6) || off < reach) { fading.push(i); return }
+    // (One that lies all but flat is laid flat, its face as it was, turned as it was, on whatever is under it.)
+    if (Math.abs(R[5]) > .984) {
+      const up = R[5] > 0 ? -1 : 1, yaw = Math.atan2(R[6], R[0]), qy = Math.sin(-yaw / 2), qw = Math.cos(-yaw / 2), fx = up * Math.SQRT1_2, fw = Math.SQRT1_2, q = i * 4
+      B.quat[q] = qw * fx; B.quat[q + 1] = qy * fw; B.quat[q + 2] = -qy * fx; B.quat[q + 3] = qw * fw
+      matrix(B.quat, q)
+      let floor = -Infinity
+      for (let a = -1; a <= 1; a += .5) for (let b = -1; b <= 1; b += .5) { const lx = a * B.half[o], ly = b * B.half[o + 1], c = cell(B.pos[o] + R[0] * lx + R[1] * ly, B.pos[o + 2] + R[6] * lx + R[7] * ly); if (c >= 0 && heights[c] > floor && heights[c] < B.pos[o + 1] + 4) floor = heights[c] }
+      if (floor > VOID) B.pos[o + 1] = floor + .8
+    }
     for (let a = -1; a <= 1; a += .4) for (let b = -1; b <= 1; b += .5) {
       const lx = a * B.half[o], ly = b * B.half[o + 1], c = cell(B.pos[o] + R[0] * lx + R[1] * ly, B.pos[o + 2] + R[6] * lx + R[7] * ly), y = B.pos[o + 1] + R[3] * lx + R[4] * ly + 1.5
       if (c >= 0 && heights[c] > VOID && y > heights[c] && y < heights[c] + 30) heights[c] = y
@@ -756,7 +771,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       if (where < .26) { tx = side * (p.Xc + 14 * px + rnd(0, 1) ** 1.8 * 150 * px); tz = rnd(-30 * px, p.D * .95) }
       else if (where < .44) { tx = rnd(-1, 1) * (p.Xc + 50 * px); tz = rnd(zA + 22 * px, -48 * px) }
       else if (where < .8) { tx = side * rnd(Math.min(p.Xc + 30 * px, seen), seen); tz = zA + (zB - zA) * rnd(0, 1) ** 1.25 }
-      else if (where < .9) { tx = rnd(-1, 1) * seen; tz = p.zLip - rnd(40, 260) * px }
+      else if (where < .9) { tx = rnd(-1, 1) * seen; tz = zA + rnd(0, 40) * px }
       else { tx = side * (seen + rnd(40, 320)); tz = rnd(zA, zB + 200) }
       const T = rnd(.75, 1.3), k = .46, far = k / (1 - Math.exp(-k * T))
       loose(i, (tx - L.pos[o]) * far, G * T / 2 * 1.06 - L.pos[o + 1] / T, (tz - L.pos[o + 2]) * far, 10)
@@ -780,7 +795,9 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       Dn.state[i] = DYN; Dn.still[i] = 0; Dn.pos.set(home, o); Dn.quat.set([0, 0, 0, 1], i * 4); parts[index].on = true
       if (i === hatchBody) { const c = Math.cos(hatch), sn = Math.sin(hatch), y = home[1] - m.hatchHinge[1], z = home[2] - m.hatchHinge[2]; Dn.pos[o + 1] = m.hatchHinge[1] + y * c - z * sn; Dn.pos[o + 2] = m.hatchHinge[2] + y * sn + z * c; Dn.quat.set([Math.sin(hatch / 2), 0, 0, Math.cos(hatch / 2)], i * 4) }
       if (roof) { const side = home[0] === 0 ? (Math.random() < .5 ? -1 : 1) : Math.sign(home[0]); Dn.vel[o] = side * rnd(160, 420) * px; Dn.vel[o + 1] = rnd(620, 900) * px; Dn.vel[o + 2] = -rnd(60, 260) * px - home[2] * .9 }
-      else { Dn.pos[o + 2] = -5 * px; Dn.vel[o] = (home[0] / p.Xw + rnd(-.5, .5)) * (pane ? 380 : 600) * px; Dn.vel[o + 1] = rnd(120, pane ? 520 : 740) * px; Dn.vel[o + 2] = -rnd(160, pane ? 420 : 600) * px }
+      else { Dn.pos[o + 2] = -5 * px; Dn.vel[o] = (home[0] / p.Xw + rnd(-.5, .5)) * (pane ? 380 : 600) * px; Dn.vel[o + 1] = rnd(120, pane ? 520 : 740) * px; Dn.vel[o + 2] = -rnd(160, pane ? 420 : 600) * px
+        // (Thrown no further forward than it comes down on the slab: it lands short of the lip.)
+        const vy = Dn.vel[o + 1], fall = (vy + Math.sqrt(vy * vy + 2 * G * home[1])) / G; Dn.vel[o + 2] = Math.max(Dn.vel[o + 2], (p.zLip + 40 * px + 5 * px) / fall) }
       const spin = roof ? 5 : pane ? 6 : 12
       Dn.ang[o] = rnd(-spin, spin); Dn.ang[o + 1] = rnd(-spin, spin); Dn.ang[o + 2] = rnd(-spin, spin)
     })
@@ -805,10 +822,10 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     setPhase('rebuild'); hooks.scan(null, 'idle')
     for (let i = 0; i < MAX; i++) if (L.state[i] !== FREE) {
       const o = i * 3, d = Math.hypot(L.pos[o], L.pos[o + 2])
-      L.state[i] = HOME; scripts.delete(i); delay[i] = .05 + d * .00055 / px + rnd(0, .25); from.set([L.pos[o], L.pos[o + 1], L.pos[o + 2], L.quat[i * 4], L.quat[i * 4 + 1], L.quat[i * 4 + 2], L.quat[i * 4 + 3]], i * 7); L.still[i] = 0
+      L.state[i] = HOME; scripts.delete(i); delay[i] = .05 + d * .00075 / px + rnd(0, .3); from.set([L.pos[o], L.pos[o + 1], L.pos[o + 2], L.quat[i * 4], L.quat[i * 4 + 1], L.quat[i * 4 + 2], L.quat[i * 4 + 3]], i * 7); L.still[i] = 0
     }
     // (Only what was blown off flies home: the hatch hangs on its hinge and swings back down by itself.)
-    debrisPart.forEach((_, i) => { if (Dn.state[i] === FREE) return; Dn.state[i] = HOME; Dn.still[i] = -(.5 + i * .01); for (let k = 0; k < 3; k++) away0[i * 3 + k] = Dn.pos[i * 3 + k]; const sg = Dn.quat[i * 4 + 3] < 0 ? -1 : 1; for (let k = 0; k < 4; k++) away0[Dn.cap * 3 + i * 4 + k] = sg * Dn.quat[i * 4 + k] })
+    debrisPart.forEach((index, i) => { if (Dn.state[i] === FREE) return; Dn.state[i] = HOME; Dn.still[i] = -(i >= paneBody && i < paneBody + m.idx.panes.length ? .25 + (i - paneBody) * .05 : i >= boltBody ? 1.1 + (i - boltBody) * .03 : index === m.idx.hopper || m.idx.vents.includes(index) ? 1.5 + i * .05 : index === m.idx.panel ? 1.2 : .6 + i * .006) * 1.1; for (let k = 0; k < 3; k++) away0[i * 3 + k] = Dn.pos[i * 3 + k]; const sg = Dn.quat[i * 4 + 3] < 0 ? -1 : 1; for (let k = 0; k < 4; k++) away0[Dn.cap * 3 + i * 4 + k] = sg * Dn.quat[i * 4 + k] })
     for (let i = 0; i < SM; i++) if (S.age[i] < S.life[i]) S.life[i] = Math.min(S.life[i], S.age[i] + rnd(.3, .8))
     calm(); resetHeights(true); pointer.held = -1; setHover(-1); volley = 0; sendIn = 2.4; keepClear.length = base
   }
@@ -925,7 +942,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     cool = Math.max(0, cool - dt); recoil += (0 - recoil) * Math.min(1, dt * 6.5); if (recoil < .004) recoil = 0
 
     scriptDt = dt; scripts.forEach(runScript)
-    if (rainLeft > 0) { const n = Math.min(rainLeft, Math.ceil(dt * 140)); rainLeft -= n; for (let k = 0; k < n; k++) { const i = alloc(); nextLetter(i); place(i, rnd(-.5, .5) * p.W * 1.1 - DX * 600, oyc + rnd(20, 500), rnd(-150, (oyc - 120) / DY)); setQuat(i, rnd(-1, 1), rnd(-1, 1), rnd(-1, 1), rnd(0, 6)); loose(i, rnd(-60, 60), -rnd(200, 500), rnd(-40, 40), 6) } }
+    if (rainLeft > 0) { const n = Math.min(rainLeft, Math.ceil(dt * 140)); rainLeft -= n; for (let k = 0; k < n; k++) { const i = alloc(); nextLetter(i); place(i, rnd(-.5, .5) * p.W * 1.1 - DX * 600, oyc + rnd(20, 500), rnd(p.zLip + 30 * px, (oyc - 120) / DY)); setQuat(i, rnd(-1, 1), rnd(-1, 1), rnd(-1, 1), rnd(0, 6)); loose(i, rnd(-60, 60), -rnd(200, 500), rnd(-40, 40), 6) } }
     // Rigid bodies, in steps of a 120th of a second or less: two a frame at full rate, more when frames come slowly.
     const passes = Math.max(2, Math.ceil(dt * 120)), h = dt / passes
     for (let pass = 0; pass < passes; pass++) {
@@ -946,7 +963,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       for (let i = 0; i < MAX; i++) if (L.state[i] === HOME) {
         left++; delay[i] -= dt
         if (delay[i] > 0) continue
-        L.still[i] += dt / .55
+        L.still[i] += dt / .7
         // Up first, then across over the roof, then down into the hopper: never through the cabinet. (One lying beside
         // the tower, under what hangs on its sides, first slides out from under it.)
         const u = clamp(L.still[i]), e = ease(u), o = i * 3, f = i * 7, over = m.hopperTop + p.lh * 2.2, under = from[f + 2] > -p.lw && from[f + 1] < sides && Math.abs(from[f]) > p.Xc - p.lw && Math.abs(from[f]) < clearX
@@ -958,12 +975,13 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       }
       let away = 0
       for (let i = 0; i < Dn.cap; i++) if (Dn.state[i] === HOME) {
-        Dn.still[i] += dt / .42
+        Dn.still[i] += dt / .55
         // (Out in front of the machine first, from under whatever hangs on the tower's side, and over the roof if it
         // belongs on it; then in to its place: never through the cabinet.)
         const u = clamp(Dn.still[i]), o = i * 3, q = i * 4
         if (u > 0) {
-          const t = ease(u), s = 1 - t, b0 = s * s * s, b1 = 3 * t * s * s, b2 = 3 * t * t * s, b3 = t * t * t, h = debrisHome[i], fx = away0[o], fy = away0[o + 1], fz = away0[o + 2]
+          // (It runs a little past its place as it seats, and settles back.)
+          const t = 1 + 2 * (ease(u) - 1) ** 3 + 1 * (ease(u) - 1) ** 2, s = 1 - t, b0 = s * s * s, b1 = 3 * t * s * s, b2 = 3 * t * t * s, b3 = t * t * t, h = debrisHome[i], fx = away0[o], fy = away0[o + 1], fz = away0[o + 2]
           const roof = h[1] > p.yTop - 1, under = fz > -p.lw && fy < sides && Math.abs(fx) > p.Xc - p.lw && Math.abs(fx) < clearX, up = Math.max(fy, h[1]) + (roof ? 3 * p.lh : 0), zf = Math.min(fz, -1.2 * p.lw)
           Dn.pos[o] = b0 * fx + b1 * (under ? Math.sign(fx) * clearX : fx) + (b2 + b3) * h[0]; Dn.pos[o + 1] = b0 * fy + b1 * up + b2 * (roof ? up : h[1]) + b3 * h[1]; Dn.pos[o + 2] = b0 * fz + (b1 + b2) * zf + b3 * h[2]
           let l = 0; for (let k = 0; k < 4; k++) { Dn.quat[q + k] = away0[Dn.cap * 3 + q + k] * s + (k === 3 ? t : 0); l += Dn.quat[q + k] ** 2 } l = 1 / Math.sqrt(l); for (let k = 0; k < 4; k++) Dn.quat[q + k] *= l
@@ -972,8 +990,8 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       }
       needleV += ((0 - needle) * 40 - needleV * 8) * dt; needle += needleV * dt
       const glass = parts[m.idx.glass]
-      if (clock > .9) { glass.on = true; glass.fade = clamp((clock - .9) / .3); parts[m.idx.soot].fade = parts[m.idx.shards].fade = 1 - glass.fade; parts[m.idx.hole].on = glass.fade < .5; bend = 1 - glass.fade }
-      if (!left && !away && clock > 1.3) { glass.fade = 1; bend = 0; parts[m.idx.soot].on = parts[m.idx.shards].on = parts[m.idx.hole].on = false; parts[m.idx.soot].fade = parts[m.idx.shards].fade = 1; spawned = 0; sorted = 0; burnt = 0; hooks.count(0, 0); heat = 0; runT = 0; spawnIn = .2; setPhase('run') }
+      if (clock > .75) { glass.on = true; glass.fade = clamp((clock - .75) / .35); parts[m.idx.soot].fade = parts[m.idx.shards].fade = 1 - glass.fade; parts[m.idx.hole].on = glass.fade < .5; bend = 1 - glass.fade }
+      if (!left && !away && clock > 1.5) { glass.fade = 1; bend = 0; parts[m.idx.soot].on = parts[m.idx.shards].on = parts[m.idx.hole].on = false; parts[m.idx.soot].fade = parts[m.idx.shards].fade = 1; spawned = 0; sorted = 0; burnt = 0; hooks.count(0, 0); heat = 0; runT = 0; spawnIn = .2; setPhase('run') }
     }
     // After the burst: at rest once all but a few letters lie still; whatever has not settled a little later is made to
     // (or, if it has nothing under it, removed).
@@ -1134,7 +1152,8 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   }
 
   /** What falls past the slab dwindles over the last of the canvas, so nothing is cut off where the canvas ends. */
-  const dwindle = (y: number, z: number) => clamp((p.floor + p.ext + y + DY * z - 30) / (p.ext * .5))
+  // (And anything that does go over the lip, in front of it and below the slab, is gone within a short fall.)
+  const dwindle = (y: number, z: number) => Math.min(clamp((p.floor + p.ext + y + DY * z - 30) / (p.ext * .5)), z < p.zLip ? clamp(1 + (y + p.lip) / (40 * px)) : 1)
   // (What is drawn, handed to the renderer in the same object every frame.)
   const scene = { parts: [] as Part[], letters: instances, letterCount: 0, fx: fxData, fxCount: 0, shifts, glow: glowData, glowCount: 0, air: airData, airCount: 0, smoke: smokeData, smokeCount: 0, flash: 0, flashAt: [0, 0, 0], flashR: 0, wallOn: true }
   function render() {
@@ -1248,14 +1267,15 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     // The burst is seen slowed: the blast at its own speed, then a second and a half in which everything it threw hangs
     // in the air at a quarter speed, and the fall let go again.
     const since = time - boomAt, slow = phase !== 'boom' && phase !== 'rest' ? 1 : since < .07 ? 1 : since < .46 ? .26 : since < 1.2 ? .26 + .74 * ease((since - .46) / .74) : 1
-    advance(dt * slow); render()
     // Frames coming slowly for most of a second: one level of quality down (fewer pixels, a smaller shadow map, a
-    // smaller buffer for smoke and less of it). Frames on time for some seconds: one level back up.
+    // smaller buffer for smoke and less of it). Frames on time for some seconds: one level back up. (Before the frame
+    // is drawn: resizing the canvas clears it, and one resized after drawing is shown empty.)
     if (gap > 0 && gap < 250) {
       pace = pace * .9 + gap * .1; strikes = pace > 21 ? strikes + 1 : Math.max(0, strikes - 2); steady = pace < 17.6 ? steady + 1 : 0
       if (strikes > 40 && quality > 0) { quality--; strikes = steady = 0; pace = 16; if (now - climbedAt < 8000) climbAfter = Math.min(climbAfter * 2, 4800); size() }
       else if (steady > climbAfter && quality < best) { quality++; strikes = steady = 0; climbedAt = now; size() }
     }
+    advance(dt * slow); render()
     if (visible && !document.hidden && busy()) raf = requestAnimationFrame(frame)
   }
   function kick() { if (!raf && !dead && visible && !document.hidden && !reduced) { last = performance.now(); raf = requestAnimationFrame(frame) } }
@@ -1275,9 +1295,9 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     freeze(1, i => { L.pos[i * 3] = seven ? p.lanes[1] + p.P * .7 : p.lanes[0] + p.P * .3; L.pos[i * 3 + 1] = m.rideY })
     freeze(5, i => { L.pos[i * 3] = seven ? p.lanes[5] - p.P * .4 : p.lanes[p.lanes.length - 1] - p.P * .25; L.pos[i * 3 + 1] = m.rideY })
     freeze(2, i => { L.pos[i * 3 + 1] = p.yTop + p.hopper * .34 })
-    freeze(0, i => { L.pos[i * 3] = p.lw * .5; L.pos[i * 3 + 1] = m.hopperTop + p.lh * 2; setQuat(i, .3, .2, 1, .5) })
+    freeze(0, i => { L.pos[i * 3] = p.lw * .5; L.pos[i * 3 + 1] = m.hopperTop + p.lh * (p.phone ? 1.1 : 2); setQuat(i, .3, .2, 1, .5) })
     // (A scam in the air: on a phone over the left of the roof, clear of the cannon on its right.)
-    freeze(7, i => { const k = p.phone ? 0 : 1, side = k ? 1 : -1; L.pos[i * 3] = m.ejects[k][0] + side * p.lw * .9; L.pos[i * 3 + 1] = m.ejects[k][1] + p.lh * 2.2; setQuat(i, .2, .1, 1, -.6 * side) })
+    freeze(7, i => { const k = p.phone ? 0 : 1, side = k ? 1 : -1; L.pos[i * 3] = m.ejects[k][0] + side * p.lw * .9; L.pos[i * 3 + 1] = m.ejects[k][1] + p.lh * (p.phone ? 1.3 : 2.2); setQuat(i, .2, .1, 1, -.6 * side) })
     parts[m.idx.lamps[1]].on = parts[m.idx.lamps[2]].on = true
     if (p.tubes.length) [[0, 0, .5], [6, 0, .3], [2, m.lines[2].length - 1, .35], [5, m.lines[5].length - 1, .6]].forEach(([tube, run, at], k) => { const cap = caps[k]; cap.on = true; cap.tube = tube; cap.run = run; cap.wait = 0; cap.s = runLength[tube][run].at(-1)! * at })
     scripts.clear(); advance(0); render()
