@@ -13,7 +13,7 @@ import { campaignDisplayStatus, campaignPollInterval } from './CampaignProgress'
 import { CampaignsHeader } from './header'
 import './campaigns.css'
 
-// Simulated sends count as delivered, as on the campaign's review page. Demo campaigns carry only `delivered`.
+// Simulated sends count as delivered here (the review page lists them apart). Demo campaigns carry only `delivered`.
 const delivered = (campaign: Campaign) => campaign.counts ? (campaign.counts.byStatus.delivered ?? 0) + (campaign.counts.byStatus.simulated ?? 0) : campaign.delivered
 const campaignPath = (campaign: Campaign) => `/campaigns/${encodeURIComponent(campaign.id)}/${!campaign.archivedAt && campaignEditable(campaign) ? 'edit' : 'review'}`
 

@@ -22,12 +22,13 @@ type Props = { attachmentIds?: string[]; attachmentApi?: AttachmentApi; initialH
 const linkForms = '[data-re-link-selector-form], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form]'
 
 // The library's slash menu reads this shared list and has no image entry, although the
-// editor supports images. Route "/image" to the mounted composer's file picker.
+// editor supports images. Route "/image" to the mounted composer's file picker. The menu
+// shows titles only; a description would only feed its search, which searchTerms covers.
 let pickImage: (() => void) | null = null
 if (!defaultSlashCommands.some(item => item.title === 'Image')) {
   const divider = defaultSlashCommands.findIndex(item => item.title === 'Divider')
   defaultSlashCommands.splice(divider < 0 ? defaultSlashCommands.length : divider, 0, {
-    title: 'Image', description: 'Upload an image', icon: <ImagePlus size={20} />, category: 'Media', searchTerms: ['img', 'picture', 'photo', 'upload'],
+    title: 'Image', description: '', icon: <ImagePlus size={20} />, category: 'Media', searchTerms: ['img', 'picture', 'photo', 'upload'],
     command: ({ editor: value, range }) => { value.chain().focus().deleteRange(range).run(); pickImage?.() },
   })
 }
@@ -315,9 +316,10 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
           <Inspector.Root ref={inspector} className="composer-inspector" hidden={!inspectorOpen}>
             <div className="composer-inspector-header"><strong>Design</strong><IconButton size="sm" label="Close design panel" onClick={() => setInspectorOpen(false)}><X size={16} /></IconButton></div>
             <Inspector.Breadcrumb />
-            <Inspector.Document>{() => <p className="composer-inspector-hint">Select a block to edit its design.</p>}</Inspector.Document>
+            {/* Styles are per block (block-style.ts): no document-wide controls, and a text selection offers its block's. */}
+            <Inspector.Document>{() => <p className="composer-inspector-hint">No block selected</p>}</Inspector.Document>
             <Inspector.Node />
-            <Inspector.Text>{() => <p className="composer-inspector-hint">The block name above styles the block; the toolbar styles selected text.</p>}</Inspector.Text>
+            <Inspector.Text>{() => <Inspector.Breadcrumb>{segments => { const block = segments.at(-1); return block && block.node.nodeType !== 'body' ? <Button size="sm" variant="secondary" className="composer-inspector-action" onClick={block.focus}>Style this block</Button> : null }}</Inspector.Breadcrumb>}</Inspector.Text>
           </Inspector.Root>
         </EmailEditor>
       </div>

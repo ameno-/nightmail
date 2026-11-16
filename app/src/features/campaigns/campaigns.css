@@ -58,7 +58,7 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-audience-line__text { overflow: clip; color: var(--color-muted); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
 .campaign-audience-line__text a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
 .campaign-personalize { margin-top: var(--space-24); padding-top: var(--space-16); border-top: 1px solid var(--color-border); }
-.campaign-personalize__lead { margin: 0 0 var(--space-4); font-size: var(--text-xs); line-height: 18px; }
+.campaign-personalize__lead { margin: 0 0 var(--space-4); font-size: var(--text-xs); line-height: 18px; font-weight: var(--font-weight-bold); }
 .campaign-personalize .campaign-compose-row > :first-child { font-family: 'OpenTUI Mono', monospace; letter-spacing: normal; }
 .campaign-compose-metadata > .ui-alert { margin-block: var(--space-8); }
 @media (prefers-reduced-motion: reduce) { .campaign-compose-preview, .campaign-pacing-toggle svg { transition: none; } }
@@ -87,7 +87,6 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-audience-summary { display: flex; flex-direction: column; gap: var(--space-12); }
 .campaign-summary-line { display: flex; justify-content: space-between; gap: var(--space-16); }
 .campaign-audience-source { min-height: 20px; margin: 0; overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
-.campaign-audience-note { margin: 0; font-size: var(--text-xs); line-height: 18px; }
 .campaign-message-details { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: var(--space-16); row-gap: var(--space-8); margin: 0; }
 .campaign-message-details dt { color: var(--color-muted); }
 .campaign-message-details dd { margin: 0; overflow-wrap: anywhere; }
@@ -147,7 +146,6 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-pacing-summary { min-width: 0; overflow: clip; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-xs); }
 .campaign-pacing-fields { display: flex; flex-direction: column; gap: var(--space-12); }
 .campaign-pacing-options .ui-field .ui-input { max-width: 240px; }
-.template-compose-intro { margin: 0 0 var(--space-8); color: var(--color-muted); font-size: var(--text-xs); line-height: 18px; }
 .template-picker-dialog { width: min(560px, calc(100vw - 32px)); }
 .template-picker { display: flex; flex-direction: column; max-height: min(424px, 60vh); overflow: auto; border-top: 1px solid var(--color-border-muted); }
 .template-picker__row { display: flex; flex-direction: column; justify-content: center; gap: var(--space-4); min-height: 53px; padding: var(--space-8) var(--space-4); border: 0; border-bottom: 1px solid var(--color-border-muted); background: transparent; color: var(--color-text); font: inherit; text-align: left; cursor: pointer; transition: background-color 120ms ease; }

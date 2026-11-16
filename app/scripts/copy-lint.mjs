@@ -122,6 +122,8 @@ export const KEEP = [
   { why: 'secret', file: 'features/settings/webhooks.tsx', text: /^Keep it on your server: anyone with it can sign requests as …\.$|^Keep it on your server: anyone with it can sign requests as Nightmail\.$/ },
   { why: 'legal', file: 'components/ContactSupport.tsx', text: /^Lets support read email bodies in this workspace, for this request only\.$/ },
   { why: 'legal', file: 'features/audience/bulk.tsx', text: /^Confirm they (agreed before marking them subscribed|subscribed again)\.$/ },
+  { why: 'legal', file: 'features/audience/contacts.tsx', text: /^Records that they agreed to marketing email\.$/ },
+  { why: 'legal', file: 'features/audience/contacts.tsx', text: /^Transactional email still sends\.$/ },
   { why: 'safety', file: 'lib/leave-guard.tsx', text: /^You haven’t saved …; leaving discards them\.$/ },
   { why: 'safety', file: 'App.tsx', text: /^Unsaved changes may be lost\.$/ },
   { why: 'safety', file: 'components/AppShell.tsx', text: /^Unsaved changes on it may be lost\.$/ },

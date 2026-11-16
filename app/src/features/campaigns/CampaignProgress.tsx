@@ -52,7 +52,6 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
   const queued = byStatus.queued ?? 0
   const processing = byStatus.attempting ?? 0
   const processed = Math.min(total, Math.max(0, materialized - queued - processing + canceledBeforeQueue))
-  const interval = campaignPollInterval(campaign)
   const outcomes = [
     ['Delivered', byStatus.delivered], ['Bounced', byStatus.bounced],
     ['Complaints', byStatus.complained], ['Rejected', byStatus.rejected],
@@ -67,9 +66,7 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
     {awaitingQueue > 0 && <div className="campaign-summary-line"><span>Awaiting queue</span><span>{number(awaitingQueue)}</span></div>}
     <div className="campaign-summary-line"><span>Queued</span><span>{number(queued)}</span></div>
     <div className="campaign-summary-line"><span>Processing</span><span>{number(processing)}</span></div>
-    <p className="muted">Processed includes failed and canceled emails, not only delivered ones.</p>
     {outcomes.filter(([, count]) => count && count > 0).map(([label, count]) => <div className="campaign-summary-line" key={label}><span>{label}</span><span>{number(count)}</span></div>)}
-    {interval === liveInterval ? <p className="muted">Updates every 3 seconds.</p> : interval !== false && sendingHeld(campaign) && <p className="muted">Updates every minute while sending is held.</p>}
   </div>
 }
 
