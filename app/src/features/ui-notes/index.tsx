@@ -6,7 +6,7 @@ import { ExternalLink, X } from 'lucide-react'
 import { Button, IconButton, Sheet, Textarea, useToast } from '../../components/ui'
 import { usePhone } from '../../lib/media'
 import { relativeTime } from '../../lib/format'
-import { notesModifier, notesModifierLabel, setUiNotesMode } from '../../lib/ui-notes-mode'
+import { isMac, notesModifier, notesModifierLabel, setUiNotesMode } from '../../lib/ui-notes-mode'
 import { noteKinds, noteSeverities, noteStatuses, resolved, statusLabel, uiNotesApi, uiNotesKey, type NoteKind, type NoteSeverity, type NoteStatus, type UiNote } from '../../data/ui-notes'
 import { describe, locate, ownElement, routeOf, screenshot, sensitiveElement } from './capture'
 import './notes.css'
@@ -191,6 +191,8 @@ function Chips<T extends string>({ label, values, value, onChange, format, optio
   return <div className="uin-chips" role="group" aria-label={label}>{values.map(item =>
     <button key={item} type="button" className="uin-chip" aria-pressed={value === item} onClick={() => onChange(optional && value === item ? null : item)}>{format(item)}</button>)}</div>
 }
+// ⌘↵ (Ctrl↵ off a Mac) saves, Esc cancels: announced on the buttons, not printed beside them.
+const saveKeys = isMac ? 'Meta+Enter' : 'Control+Enter'
 const submitKeys = (event: ReactKeyboardEvent, submit: () => void) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); submit() } }
 
 function Composer({ draft, onClose, onSaved }: { draft: Draft; onClose: () => void; onSaved: (note: UiNote, shot: Promise<Shot>) => void }) {
@@ -211,9 +213,9 @@ function Composer({ draft, onClose, onSaved }: { draft: Draft; onClose: () => vo
     <div className="uin-head"><span className="uin-where" title={draft.info.element.selector}>{where}</span><span className="uin-route">{draft.info.route}</span></div>
     <Textarea ref={field} className="uin-text" rows={3} maxLength={4000} value={body} onChange={event => setBody(event.target.value)} placeholder="What’s off here?" aria-label="Note" />
     <Chips label="Type" values={noteKinds} value={kind} onChange={value => setKind(value ?? 'other')} format={kindLabel} />
-    <Chips label="Severity (optional)" values={noteSeverities} value={severity} onChange={setSeverity} format={kindLabel} optional />
+    <Chips label="Severity" values={noteSeverities} value={severity} onChange={setSeverity} format={kindLabel} optional />
     {error && <p className="uin-error" role="alert">{error}</p>}
-    <div className="uin-foot"><span className="uin-hint">{notesModifierLabel}↵ save · Esc</span><Button size="sm" variant="ghost" onClick={onClose}>Cancel</Button><Button size="sm" type="submit" variant="primary" loading={busy} disabled={!body.trim()}>Save note</Button></div>
+    <div className="uin-foot"><Button size="sm" variant="ghost" aria-keyshortcuts="Escape" onClick={onClose}>Cancel</Button><Button size="sm" type="submit" variant="primary" aria-keyshortcuts={saveKeys} loading={busy} disabled={!body.trim()}>Save note</Button></div>
   </form>
 }
 
@@ -236,7 +238,7 @@ function Viewer({ note, number, moved, onChange, onDelete, onClose }: { note: Ui
     {editing ? <>
       <Textarea className="uin-text" rows={3} maxLength={4000} value={body} onChange={event => setBody(event.target.value)} aria-label="Note" autoFocus />
       <Chips label="Type" values={noteKinds} value={kind} onChange={value => setKind(value ?? 'other')} format={kindLabel} />
-      <Chips label="Severity (optional)" values={noteSeverities} value={severity} onChange={setSeverity} format={kindLabel} optional />
+      <Chips label="Severity" values={noteSeverities} value={severity} onChange={setSeverity} format={kindLabel} optional />
     </> : <p className="uin-body">{note.body}</p>}
     {moved && <p className="uin-moved">Element moved: its selector finds nothing here.{!here && <> <Link to={note.page.path}>Open its page</Link></>}</p>}
     <p className="uin-meta">{note.author?.name ?? 'Someone'} · {relativeTime(note.createdAt)}{note.prUrl && <> · <a href={note.prUrl} target="_blank" rel="noreferrer">PR <ExternalLink size={11} aria-hidden="true" /></a></>}</p>
@@ -246,7 +248,7 @@ function Viewer({ note, number, moved, onChange, onDelete, onClose }: { note: Ui
       {confirm
         ? <><span className="uin-confirm">Delete this note?</span><Button size="sm" variant="ghost" onClick={() => setConfirm(false)}>Keep</Button><Button size="sm" variant="danger" loading={busy === 'delete'} onClick={() => void run('delete', async () => { await uiNotesApi.remove(note.id); onDelete() })}>Delete</Button></>
         : editing
-          ? <><span className="uin-hint">{notesModifierLabel}↵ save</span><Button size="sm" variant="ghost" onClick={() => { setEditing(false); setBody(note.body); setKind(note.kind); setSeverity(note.severity) }}>Cancel</Button><Button size="sm" variant="primary" loading={busy === 'save'} disabled={!body.trim()} onClick={() => void patch('save', { body: body.trim(), kind, severity })}>Save</Button></>
+          ? <><Button size="sm" variant="ghost" onClick={() => { setEditing(false); setBody(note.body); setKind(note.kind); setSeverity(note.severity) }}>Cancel</Button><Button size="sm" variant="primary" aria-keyshortcuts={saveKeys} loading={busy === 'save'} disabled={!body.trim()} onClick={() => void patch('save', { body: body.trim(), kind, severity })}>Save</Button></>
           : <><Button size="sm" variant="ghost" className="uin-delete" onClick={() => setConfirm(true)}>Delete</Button><Button size="sm" onClick={() => setEditing(true)}>Edit</Button>{!resolved(note.status) && <Button size="sm" variant="primary" loading={busy === 'status'} onClick={() => void patch('status', { status: 'fixed' })}>Resolve</Button>}</>}
     </div>
   </div>
@@ -340,7 +342,7 @@ function Tray({ open, onOpenChange, notes, number, moved, loading, onPick, onFoc
       <div className="uin-tray__foot"><Link to="/operator/notes" onClick={() => onOpenChange(false)}>All notes</Link><Button size="sm" variant="ghost" onClick={() => setUiNotesMode(false)}>Turn off</Button></div>
     </div>}
     <button type="button" className="uin-pill" aria-expanded={open} onClick={() => onOpenChange(!open)}>
-      <span className="uin-pill__dot" aria-hidden="true" />Notes<span className="uin-pill__count">{loading ? '–' : unresolved.length}</span><span className="uin-pill__hint">{notesModifierLabel}-click to add</span>
+      <span className="uin-pill__dot" aria-hidden="true" />Notes<span className="uin-pill__count">{loading ? '–' : unresolved.length}</span>
     </button>
   </div>
 }
