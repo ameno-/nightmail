@@ -151,14 +151,14 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     const page = (dark ? oklch(.158, .014, 268) : oklch(.948, .01, 262)).map(lin), half = -p.name.x, y0 = p.yWall + p.under * p.V, y1 = p.name.y + p.name.cap
     const far = [1e6, 1e6, 1e6, 1e6], heads = p.heads.map(h => [h.x0, h.z0, h.x1, h.z1])
     renderer!.setLook({
-      taps: [[0, 0], [0, 5], [4, 8], [6, 10]][quality], soft: .1, reach: 3.4 * U,
+      soft: [0, 1.5, 2, 2.5][quality], far: 7 * U,
       pool: [0, p.D * .2, 2.5 * p.Xc, 1.3 * p.D - p.zLip], dim: dark ? .2 : .82,
       fog: [p.D * .35, p.D * 1.5, dark ? .72 : .3], fogTo: page,
       rects: [[0, (y0 + y1) / 2, half, (y1 - y0) / 2], [p.cta.x + p.cta.w / 2, p.cta.y + p.cta.h / 2, p.cta.w / 2, p.cta.h / 2]],
       lights: dark ? [[2.3, 1.95, 1.4, -.5], [1.3, 1.2, .95, -1.2 * px]] : [[0, 0, 0, -1e6], [0, 0, 0, -1e6]],
       boxes: [[-p.Xc, 0, p.Xc, p.D], heads[0] ?? far, heads[1] ?? far], reachK: [1 / (.15 * p.yTop), 1 / (1.3 * (p.heads[0]?.h ?? 1)), 1 / (1.3 * (p.heads[0]?.h ?? 1))],
       unit: U, roof: p.yTop, own: dark ? 1 : 0, edge: .8 * px, grime: dark ? .24 : .1, grain: (dark ? 1.6 : 1) / 255, env: dark ? [1, .1, .32] : [.5, .25, .3],
-      gain: dark ? [.8, 1.45] : [1, 1], bay: [p.yFas - 2 * px, p.cavD * .1, p.Xb, p.cavity * .8], bayLight: dark ? [2.1, 2.35, 2.7] : [.25, .25, .25],
+      gain: dark ? [.8, 1.45] : [1, 1], bay: [p.yFas - 2 * px, p.cavD * .1, p.Xb, p.cavity * .8, p.yCav], bayLight: dark ? [2.1, 2.35, 2.7] : [.25, .25, .25],
     })
   }
   function theme(next: boolean) {
@@ -861,12 +861,10 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       if (bar) { target[o + 3] = f.size; target[o + 4] = f.len }
       target[o + 6] = f.r; target[o + 7] = f.g; target[o + 8] = f.b; target[o + 9] = f.a * (f.shape === 0 ? Math.min(1, u * 8) * (1 - u) ** 1.3 : bar ? 1 : f.shape === 2 ? Math.sqrt(1 - u) : Math.min(1, (1 - u) * 2.5)); target[o + 10] = bar ? 1 : f.shape
     }
-    // By night the price's windows and the button are bright enough to bloom a little in the eye: a faint warm
-    // halo over each, and nothing more.
-    if (dark) for (const [x, y, w, h, a] of [[0, p.yWall + p.wall * .5, -p.name.x * 1.5, p.wall * .78, .085], [p.cta.x + p.cta.w / 2, p.cta.y + p.cta.h / 2, p.cta.w * .95, p.cta.h * 1.7, .1]]) if (g < 64) glowData.set([x, y, -2, w, h, 0, 1, .86, .62, a, 2], g++ * FX_FLOATS)
-    // And the air behind the machine takes a little of their light, and of the lamp's: what the machine stands out against.
+    // By night, where the page is wide enough to show it, the air behind the machine takes a little of the lamp's
+    // light: what the machine stands out against. (One faint slope of light, drawn first, behind everything.)
     let air = 0
-    if (dark) for (const [x, y, w, h, r, gr, b, a] of [[0, p.yWall + p.wall * .4, p.Xc * 2.5, p.yTop * .8, .62, .68, 1, .05], [0, p.yTop * 1.02, p.Xc * 1.9, p.yTop * .5, .62, .68, 1, .035]]) airData.set([x, y, p.D * .5, w, h, 0, r, gr, b, a, 2], air++ * FX_FLOATS)
+    if (dark && !p.phone) for (const [x, y, w, h, r, gr, b, a] of [[0, p.yTop * .62, p.Xc * 2.4, p.yTop * .9, .62, .68, 1, .07]]) airData.set([x, y, p.D * .5, w, h, 0, r, gr, b, a, 2], air++ * FX_FLOATS)
     // Billows, the oldest first: a new one comes out in front of what is already in the air.
     let sn = 0
     for (let k = Math.max(0, S.head - SM); k < S.head; k++) {

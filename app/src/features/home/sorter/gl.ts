@@ -17,17 +17,13 @@ export const TONES = 4, MATS = 48
 
 function norm(v: number[]) { const l = Math.hypot(v[0], v[1], v[2]); return [v[0] / l, v[1] / l, v[2] / l] }
 const glsl = (v: number[]) => v.map(x => x.toFixed(5)).join(', ')
-// Sixteen points over a disc, any first few of them spread evenly: where a soft shadow is sampled.
-const DISK = Array.from({ length: 16 }, (_, i) => { const r = Math.sqrt((.5 + (i + 1) * .7548776662) % 1), a = ((.5 + (i + 1) * .569840291) % 1) * Math.PI * 2; return `vec2(${glsl([r * Math.cos(a), r * Math.sin(a)])})` }).join(', ')
-
 // What every solid thing shares: the palette (linear light; a tone's fourth number is, in turn, the material's alpha,
 // its roughness, its shine and its own light), the lamp and its shadow, the pool, the two lit rectangles, the dark.
 const LIGHTING = `
 uniform sampler2D uPal, uNoise, uShadowZ; uniform sampler2DShadow uShadow;
-uniform mat4 uLight; uniform vec3 uL, uLs, uFogC, uOccK, uEnv, uGround, uBayC; uniform vec4 uSh, uPool, uFog, uLook, uBay, uRectA[2], uRectB[2], uOcc[3]; uniform vec2 uGain; uniform ivec2 uTaps;
+uniform mat4 uLight; uniform vec3 uL, uLs, uFogC, uOccK, uEnv, uGround, uBayC; uniform vec4 uPool, uFog, uLook, uBay, uRectA[2], uRectB[2], uOcc[3]; uniform vec3 uSh; uniform vec2 uGain;
 // Towards the eye: the one direction everything is seen from.
 const vec3 VIEW = vec3(${glsl(norm([DX, DY, -1]))});
-const vec2 DISK[16] = vec2[16](${DISK});
 vec4 pal(float mat, int tone) { return texelFetch(uPal, ivec2(tone, int(mat + .5)), 0); }
 float ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(.06711056, .00583715)))); }
 // A material's tone for a facing, passing smoothly through its four: shade (turned away), grazing, front, lit.
@@ -35,39 +31,30 @@ vec3 ramp(vec3 t0, vec3 t1, vec3 t2, vec3 t3, float nl) {
   vec3 c = mix(t3, t2, clamp(nl / .24, 0., 1.)); c = mix(c, t1, clamp((nl - .24) / .31, 0., 1.));
   return mix(c, t0, clamp((nl - .55) / .25, 0., 1.));
 }
-// How much of the lamp reaches a point. The lamp is wide, so a shadow's edge is soft, and the softer the further the
-// shadow has fallen from what throws it: first how far off whatever stands between is (uTaps.x looks), then that much
-// of the map averaged (uTaps.y looks). The surface's own slope in the map goes with every look, so however wide the
-// average, a surface is never taken for its own shadow.
+// How much of the lamp reaches a point: nine looks at the map, uSh.x texels apart, each the card's own blend of four,
+// so a shadow's edge is a slope some texels wide and not a line. The surface's own slope in the map goes with every
+// look, so a surface is never taken for its own shadow. And where the point is itself in shadow, how far off what
+// throws it is (one plain look: uSh.y turns the map's depth into distance) sets how steep that slope is: crisp where
+// a thing stands on its shadow, at its softest uSh.z away from it. (uSh.x of nothing: the plain edge, in four looks.)
 float shadowAt(vec3 world, vec3 n) {
   vec4 s = uLight * vec4(world + n * 1.4, 1.);
   vec3 p = s.xyz * .5 + .5;
   if (p.x < 0. || p.x > 1. || p.y < 0. || p.y > 1. || p.z > 1.) return 1.;
-  if (uTaps.y == 0) {
-    vec2 t = 1.1 / vec2(textureSize(uShadow, 0)); float z = p.z - .0009;
+  vec2 t = 1. / vec2(textureSize(uShadow, 0));
+  if (uSh.x <= 0.) {
+    t *= 1.1; float z = p.z - .0009;
     float lit = texture(uShadow, vec3(p.xy + vec2(-t.x, -t.y), z)) + texture(uShadow, vec3(p.xy + vec2(t.x, -t.y), z)) + texture(uShadow, vec3(p.xy + vec2(-t.x, t.y), z)) + texture(uShadow, vec3(p.xy + t, z));
     return smoothstep(.2, .8, lit * .25);
   }
+  t *= uSh.x;
   vec3 m = (mat3(uLight) * n) * uLs;
-  vec2 slope = clamp(-m.xy / min(m.z, -1e-5), -4., 4.);
-  float a = ign(gl_FragCoord.xy) * 6.2831853, ca = cos(a), sa = sin(a), bias = .0006, sum = 0., hits = 0.;
-  mat2 turn = mat2(ca, sa, -sa, ca);
-  if (uTaps.x == 0) {
-    // (Where there are too few looks to spare for the first question, every edge is as soft as every other.)
-    vec2 r = uSh.xy * uLook.z * 2.6; float lit = 0.;
-    for (int i = 0; i < uTaps.y; i++) { vec2 o = turn * DISK[i] * r; lit += texture(uShadow, vec3(p.xy + o, p.z + dot(o, slope) - bias)); }
-    return lit / float(uTaps.y);
-  }
-  for (int i = 0; i < uTaps.x; i++) {
-    vec2 o = turn * DISK[i] * uSh.xy * uSh.w; float z = texture(uShadowZ, p.xy + o).r;
-    if (z < p.z + dot(o, slope) - bias) { sum += z; hits += 1.; }
-  }
-  if (hits < .5) return 1.;
-  if (hits > float(uTaps.x) - .5) return 0.;
-  vec2 r = uSh.xy * clamp((p.z - sum / hits) * uSh.z, uLook.z * 1.2, uSh.w);
-  float lit = 0.;
-  for (int i = 0; i < uTaps.y; i++) { vec2 o = turn * DISK[i] * r; lit += texture(uShadow, vec3(p.xy + o, p.z + dot(o, slope) - bias)); }
-  return lit / float(uTaps.y);
+  vec2 g = clamp(-m.xy / min(m.z, -1e-5), -4., 4.) * t;
+  float z = p.z - .0006, lit = 0.;
+  for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) lit += texture(uShadow, vec3(p.xy + vec2(i, j) * t, z + float(i) * g.x + float(j) * g.y));
+  lit /= 9.;
+  if (lit <= 0. || lit >= 1.) return lit;
+  float off = (z - texture(uShadowZ, p.xy).r) * uSh.y, w = off > 0. ? clamp(off / uSh.z, .14, .5) : .5;
+  return smoothstep(.5 - w, .5 + w, lit);
 }
 // The lamp's pool: full under it, dying away across the slab to what the room itself gives. (uGain: how much of a
 // tone's shade the room gives, and how much of the rest the lamp: by night less of the one and more of the other.)
@@ -97,8 +84,9 @@ void lamp(vec4 at, vec4 light, vec3 p, vec3 n, vec3 r, float rough, inout vec3 s
 // wall from the top down and lights whatever rides the rollers. (uBay: its height and depth, half its length, and one
 // over the square of how far it carries.)
 vec3 works(vec3 p, vec3 n) {
-  vec2 d = uBay.xy - p.yz; vec3 l = normalize(vec3(0., d));
-  return uBayC * step(abs(p.x), uBay.z) * step(0., d.x) * step(-1., p.z) * max(dot(n, l) * .75 + .25, 0.) / (1. + dot(d, d) * uBay.w);
+  if (p.z < -1. || abs(p.x) > uBay.z || p.y > uBay.x || p.y < uGround.z) return vec3(0.);
+  vec2 d = uBay.xy - p.yz; float r2 = dot(d, d);
+  return uBayC * max(dot(n.yz, d) * inversesqrt(r2) * .75 + .25, 0.) / (1. + r2 * uBay.w);
 }
 // Round steel and glass: the lamp itself, the room over it, and a tall light off to each side of the viewer (what
 // puts a line down an upright pipe: the one on the lamp's side bright, the other a part as bright).
@@ -111,7 +99,7 @@ vec3 glint(vec3 n, vec3 r, float rough, float lit, float second) {
 // and the rest is exactly the tones as they are written; a grain's worth of noise keeps the dark from banding.
 vec3 seen(vec3 c, vec3 p) {
   c = mix(c, uFogC, uFog.z * (1. - exp(-max(p.z - uFog.x, 0.) * uFog.y)));
-  c = mix(c, .8 + .2 * (1. - exp(-(c - .8) * 5.)), step(.8, c));
+  if (max(c.r, max(c.g, c.b)) > .8) c = mix(c, .8 + .2 * (1. - exp(-(c - .8) * 5.)), step(.8, c));
   c = mix(c * 12.92, 1.055 * pow(max(c, 1e-5), vec3(1. / 2.4)) - .055, step(.0031308, c));
   return c + (ign(gl_FragCoord.xy + 31.7) - .5) * uFog.w;
 }`
@@ -158,7 +146,7 @@ void main() {
     c *= 1. + ((texture(uNoise, q * .013).b - .5) * 1.2 + (texture(uNoise, q * vec2(.11, .012)).a - .5) * .8) * uLook.w * rough;
     // Its edges: a solid's are turned a little, so the one towards the lamp is a bright line and the one away a dark
     // one; what is let into a face is in its own rim's shadow at the top and the lit side, and lit along its sill.
-    float w = abs(vFace.z), rise = 0.;
+    float w = abs(vFace.z), rise = 0.; bool curved = dot(fwidth(vNrm), vec3(1.)) > 1e-6;
     if (w > 0.) {
       vec2 uv = vFace.xy, far = vec2(w, vFace.w) - uv, dux = dFdx(uv), duy = dFdy(uv), fw = abs(dux) + abs(duy);
       float det = dux.x * duy.y - dux.y * duy.x, let = step(vFace.z, 0.);
@@ -170,10 +158,12 @@ void main() {
         c *= 1. + clamp(rise, -.8, .6) * mix(.5, .7, let);
       }
     }
+    // (Only what stands in front of the two lit rectangles takes their light; only what is round carries a highlight.)
     vec3 r = reflect(-VIEW, n), shed = vec3(0.), mirrored = vec3(0.);
-    lamp(uRectA[0], uRectB[0], vWorld, n, r, rough, shed, mirrored); lamp(uRectA[1], uRectB[1], vWorld, n, r, rough, shed, mirrored);
+    if (vWorld.z < uRectB[0].w) { lamp(uRectA[0], uRectB[0], vWorld, n, r, rough, shed, mirrored); lamp(uRectA[1], uRectB[1], vWorld, n, r, rough, shed, mirrored); }
     c += t0.rgb * (shed * (.4 + .6 * ao) + works(vWorld, n));
-    c += shine * (glint(n, r, rough, lamped, .7) + max(rise, 0.) * .2 * lamped + mirrored * (.05 + .95 * pow(1. - max(dot(n, VIEW), 0.), 5.)));
+    c += shine * (max(rise, 0.) * .2 * lamped + mirrored * (.05 + .95 * pow(1. - max(dot(n, VIEW), 0.), 5.)));
+    if (curved) c += shine * glint(n, r, rough, lamped, .7);
   }
   // The burst's light, on the machine's own faces: strongest round the window, gone a little way off (sooner below it).
   if (uFlash > 0. && abs(vMat - uSlab) > .5) { vec3 d = vWorld - uFlashAt; if (d.y < 0.) d.y *= 1.9; float far = length(d) / uFlashR; c = mix(c, vec3(1., .85, .57), uFlash * (.2 + .5 * max(nl, 0.)) * exp(-far * far)); }
@@ -219,7 +209,7 @@ void main() {
     float lit = nl > 0. ? shadowAt(vWorld, n) : 0., ao = open(vWorld, n);
     c = t3.rgb * ao * uGain.x + (ramp(t0.rgb, t1.rgb, t2.rgb, t3.rgb, nl) - t3.rgb) * lit * pool(vWorld) * (.55 + .45 * ao);
     vec3 shed = vec3(0.), mirrored = vec3(0.);
-    lamp(uRectA[0], uRectB[0], vWorld, n, n, 1., shed, mirrored); lamp(uRectA[1], uRectB[1], vWorld, n, n, 1., shed, mirrored);
+    if (vWorld.z < uRectB[0].w) { lamp(uRectA[0], uRectB[0], vWorld, n, vec3(0.), 1., shed, mirrored); lamp(uRectA[1], uRectB[1], vWorld, n, vec3(0.), 1., shed, mirrored); }
     c += t0.rgb * (shed + works(vWorld, n) * .12);
   }
   // Lengths on the face in pixels: p is the position from the bottom left, s the face's size.
@@ -438,10 +428,9 @@ export function createRenderer(canvas: HTMLCanvasElement) {
   const span = [1, 1, 1]
   // How the scene is lit beyond the lamp and its tones (engine.ts sets it from the plan and the theme).
   const look = {
-    /** How many looks a soft shadow takes: for what throws it, then at the map. None: a plain edge. */
-    taps: [0, 0],
-    /** How wide the lamp is (the tangent of half of it), and how far a shadow's edge may spread. */
-    soft: .1, reach: 30,
+    /** A shadow's edge: how many texels apart the nine looks at the map are (0: a plain edge, in four), and how far
+     *  from what throws it a shadow is at its softest. */
+    soft: 0, far: 60,
     /** The pool: its middle on the floor (x, z), how far across and how far back it reaches, and what is left outside it. */
     pool: [0, 0, 500, 300], dim: .3,
     /** The dark: where it begins (z), over how far it gathers, how much of it at most, and its colour. */
@@ -458,8 +447,8 @@ export function createRenderer(canvas: HTMLCanvasElement) {
     env: [1, .2, .4],
     /** How much of a tone's shade the room gives, and how much of the rest of it the lamp. */
     gain: [1, 1],
-    /** The works' own lamp: its height and depth, half its length, how far it carries, its colour. */
-    bay: [0, 0, 1, 100], bayLight: [0, 0, 0],
+    /** The works' own lamp: its height and depth, half its length, how far it carries, the bay's floor; its colour. */
+    bay: [0, 0, 1, 100, 0], bayLight: [0, 0, 0],
   }
   // (Its rows as the programs take them, made when the look is set and not every frame.)
   const rows = { rects: new Float32Array(8), lights: new Float32Array(8), boxes: new Float32Array(12) }
@@ -469,10 +458,10 @@ export function createRenderer(canvas: HTMLCanvasElement) {
     gl.uniform1i(prog.u('uPal'), 0); gl.uniform1i(prog.u('uShadow'), 1); gl.uniform1i(prog.u('uNoise'), 2); gl.uniform1i(prog.u('uShadowZ'), 4)
     if (depthOnly) return
     gl.uniform3f(prog.u('uLs'), 1 / (4 * span[0] * span[0]), 1 / (4 * span[1] * span[1]), 1 / (4 * span[2] * span[2]))
-    gl.uniform4f(prog.u('uSh'), span[0], span[1], look.soft / span[2], look.reach); gl.uniform2i(prog.u('uTaps'), look.taps[0], look.taps[1])
+    gl.uniform3f(prog.u('uSh'), look.soft, 1 / span[2], look.far)
     gl.uniform4f(prog.u('uPool'), look.pool[0], look.pool[1], 1 / (look.pool[2] * look.pool[2]), 1 / (look.pool[3] * look.pool[3]))
     gl.uniform4f(prog.u('uFog'), look.fog[0], 1 / look.fog[1], look.fog[2], look.grain); gl.uniform3fv(prog.u('uFogC'), look.fogTo)
-    gl.uniform4f(prog.u('uLook'), look.dim, look.own, look.edge, look.grime); gl.uniform3f(prog.u('uGround'), look.unit, look.roof, 0); gl.uniform3fv(prog.u('uEnv'), look.env)
+    gl.uniform4f(prog.u('uLook'), look.dim, look.own, look.edge, look.grime); gl.uniform3f(prog.u('uGround'), look.unit, look.roof, look.bay[4]); gl.uniform3fv(prog.u('uEnv'), look.env)
     gl.uniform2fv(prog.u('uGain'), look.gain); gl.uniform4f(prog.u('uBay'), look.bay[0], look.bay[1], look.bay[2], 1 / (look.bay[3] * look.bay[3])); gl.uniform3fv(prog.u('uBayC'), look.bayLight)
     gl.uniform4fv(prog.u('uRectA'), rows.rects); gl.uniform4fv(prog.u('uRectB'), rows.lights); gl.uniform4fv(prog.u('uOcc'), rows.boxes); gl.uniform3fv(prog.u('uOccK'), look.reachK)
   }
