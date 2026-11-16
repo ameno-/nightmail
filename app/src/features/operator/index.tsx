@@ -275,13 +275,13 @@ function Timeline({ workspaceId }: { workspaceId: string }) {
 
 // ---------------------------------------------------------------- actions
 
-// A consequential action says what it does before it is taken (pause, resume, hold, release); setting a limit or
-// releasing one campaign is said by its title and fields.
+// A consequential action says, in one sentence, the consequence its title doesn't (pause, resume, hold, release);
+// setting a limit or releasing one campaign is said by its title and fields.
 const actionCopy: Record<ActionKind, { title: string; description?: string; confirm: string; done: string; danger?: boolean }> = {
-  pause: { title: 'Pause sending?', description: 'Stops all sending at SES; owners see a pause banner and get an email.', confirm: 'Pause sending', done: 'Sending paused', danger: true },
-  resume: { title: 'Resume sending?', description: 'Sending resumes at the restore share you choose; a strike stays on record.', confirm: 'Resume sending', done: 'Sending resumed' },
-  hold: { title: 'Hold marketing?', description: 'Campaigns pause and new marketing is refused; transactional mail keeps sending.', confirm: 'Hold marketing', done: 'Marketing held' },
-  release: { title: 'Release marketing?', description: 'Campaigns can send again; the workspace stays at Warn until it clears.', confirm: 'Release marketing', done: 'Marketing released' },
+  pause: { title: 'Pause sending?', description: 'Owners see a pause banner and get an email.', confirm: 'Pause sending', done: 'Sending paused', danger: true },
+  resume: { title: 'Resume sending?', description: 'A strike stays on record.', confirm: 'Resume sending', done: 'Sending resumed' },
+  hold: { title: 'Hold marketing?', description: 'Campaigns pause and new marketing is refused.', confirm: 'Hold marketing', done: 'Marketing held' },
+  release: { title: 'Release marketing?', description: 'The workspace moves to Warn until it clears.', confirm: 'Release marketing', done: 'Marketing released' },
   limit: { title: 'Set the daily limit', confirm: 'Save limit', done: 'Limit saved' },
   campaign: { title: 'Release this campaign?', confirm: 'Release campaign', done: 'Campaign released' },
 }

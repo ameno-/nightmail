@@ -72,20 +72,22 @@ function downloadText(name: string, text: string) {
   Object.assign(document.createElement('a'), { href: `data:text/plain;charset=utf-8,${encodeURIComponent(text + '\n')}`, download: name }).click()
 }
 
-// A null prompt is still loading: the section keeps its place and its actions stay hidden.
-export function AgentPrompt({ prompt }: { prompt: string | null }) {
+// A null prompt is still loading: the section keeps its place and its actions stay hidden. `compact` (onboarding) is the
+// prompt and its actions without the docs' paragraph on how to use it.
+export function AgentPrompt({ prompt, compact = false }: { prompt: string | null; compact?: boolean }) {
   return <section id="agent-prompt" className="section stack developer-section" aria-label="Agent prompt" aria-busy={prompt === null || undefined}>
     <SectionHeader title="Agent prompt" actions={<span className="developer-icon-actions" data-pending={prompt === null || undefined} inert={prompt === null}>
       <button type="button" className="ui-button ui-button--ghost ui-button--sm developer-copy-icon" aria-label="Download agent prompt as .txt" title="Download as .txt" onClick={() => downloadText(`${productSlug}-agent-prompt.txt`, prompt ?? '')}><Download size={14} aria-hidden="true" /></button>
       <CopyAction value={prompt ?? ''} label="Copy agent prompt" variant="ghost" size="sm" compact className="developer-copy-icon" />
     </span>} />
-    <p className="muted developer-copy">Paste this into your coding agent, or download it as a .txt file for it to read. It has this workspace’s real values; the API key stays in your environment.</p>
+    {!compact && <p className="muted developer-copy">Paste this into your coding agent, or download it as a .txt file for it to read. It has this workspace’s real values; the API key stays in your environment.</p>}
     <pre className="developer-code developer-code--prompt" tabIndex={0} aria-label="Agent prompt"><code><MaskedText text={prompt ?? ''} /></code></pre>
   </section>
 }
 
 // The hosted MCP server, set up with OAuth: the same snippets as Connect an agent in the dashboard (connect-agent.tsx).
-export function McpSetup({ chooseAccess = false }: { chooseAccess?: boolean }) {
+// `compact` (onboarding) is the URL, the client tabs and their steps, without the docs' paragraph on the two sign-ins.
+export function McpSetup({ chooseAccess = false, compact = false }: { chooseAccess?: boolean; compact?: boolean }) {
   const [client, setClient] = useState<McpClient>('opencode')
   const [access, setAccess] = useState<McpAccess>(chooseAccess ? 'read' : 'manage')
   const selected = mcpAccess.find(option => option.value === access)!, scope = useMcpScope(access)
@@ -93,7 +95,7 @@ export function McpSetup({ chooseAccess = false }: { chooseAccess?: boolean }) {
   return <section id="mcp" className="section stack developer-section" aria-label="MCP server">
     <SectionHeader title="MCP server" />
     <div className="developer-url"><code>{serverUrl ?? ''}</code>{serverUrl && <CopyAction value={serverUrl} label="Copy MCP URL" variant="ghost" size="sm" compact className="developer-copy-icon" />}</div>
-    <p className="muted developer-copy">Add this URL as a remote (HTTP) server in your MCP client. There are two ways to sign in. <strong>As you</strong>: the client opens your browser, you sign in with your Anomaly account (Google) and approve what it may do; no key to copy. <strong>One agent inbox</strong>: an API key for that inbox in the config limits the agent to it; create it in the dashboard with Connect an agent (API keys, or any agent inbox).</p>
+    {!compact && <p className="muted developer-copy">Add this URL as a remote (HTTP) server in your MCP client. There are two ways to sign in. <strong>As you</strong>: the client opens your browser, you sign in with your Anomaly account (Google) and approve what it may do; no key to copy. <strong>One agent inbox</strong>: an API key for that inbox in the config limits the agent to it; create it in the dashboard with Connect an agent (API keys, or any agent inbox).</p>}
     {chooseAccess && <div className="developer-access">
       <Field label="Access it asks for" htmlFor="developer-mcp-access" hint={client === 'opencode' ? selected.hint : `${mcpClientNames[client]} asks for read access; you can approve more in the browser.`}>
         <Select id="developer-mcp-access" value={access} onValueChange={value => setAccess(value as McpAccess)} disabled={client !== 'opencode'} options={mcpAccess.map(({ value, label }) => ({ value, label }))} />

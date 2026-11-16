@@ -4,7 +4,7 @@ import { Link, useLocation } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ExternalLink, X } from 'lucide-react'
 import { Button, IconButton, Sheet, Textarea, useToast } from '../../components/ui'
-import { usePhone } from '../../lib/media'
+import { usePhone, useTouch } from '../../lib/media'
 import { relativeTime } from '../../lib/format'
 import { isMac, notesModifier, notesModifierLabel, setUiNotesMode } from '../../lib/ui-notes-mode'
 import { noteKinds, noteSeverities, noteStatuses, resolved, statusLabel, uiNotesApi, uiNotesKey, type NoteKind, type NoteSeverity, type NoteStatus, type UiNote } from '../../data/ui-notes'
@@ -328,7 +328,7 @@ function Pins({ notes, number, focus, fresh, onMoved, onOpen, onFocus }: { notes
 
 function Tray({ open, onOpenChange, notes, number, moved, loading, onPick, onFocus }: { open: boolean; onOpenChange: (open: boolean) => void; notes: UiNote[]; number: Map<string, number>; moved: ReadonlySet<string>; loading: boolean; onPick: (note: UiNote, row: HTMLElement) => void; onFocus: (id: string | null) => void }) {
   const unresolved = notes.filter(note => !resolved(note.status)), done = notes.filter(note => resolved(note.status))
-  const panel = useRef<HTMLDivElement>(null)
+  const panel = useRef<HTMLDivElement>(null), touch = useTouch()
   useDismiss(panel, open, () => onOpenChange(false))
   const row = (note: UiNote) => <li key={note.id}><button type="button" className="uin-row" data-resolved={resolved(note.status) || undefined} onClick={event => onPick(note, event.currentTarget)}
     onPointerEnter={() => onFocus(note.id)} onPointerLeave={() => onFocus(null)}>
@@ -338,7 +338,7 @@ function Tray({ open, onOpenChange, notes, number, moved, loading, onPick, onFoc
   </button></li>
   return <div ref={panel} className="uin-tray">
     {open && <div className="uin-tray__panel" role="dialog" aria-label="Notes on this page">
-      {loading ? <p className="uin-tray__empty">Loading notes…</p> : !notes.length ? <p className="uin-tray__empty">No notes on this page yet. {notesModifierLabel}-click anything to leave one.</p> : <ul className="uin-list">{unresolved.map(row)}{done.map(row)}</ul>}
+      {loading ? <p className="uin-tray__empty">Loading notes…</p> : !notes.length ? <p className="uin-tray__empty">No notes on this page yet. {touch ? 'Long-press' : `${notesModifierLabel}-click`} anything to leave one.</p> : <ul className="uin-list">{unresolved.map(row)}{done.map(row)}</ul>}
       <div className="uin-tray__foot"><Link to="/operator/notes" onClick={() => onOpenChange(false)}>All notes</Link><Button size="sm" variant="ghost" onClick={() => setUiNotesMode(false)}>Turn off</Button></div>
     </div>}
     <button type="button" className="uin-pill" aria-expanded={open} onClick={() => onOpenChange(!open)}>

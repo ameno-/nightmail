@@ -491,9 +491,9 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
         </div>
         <span className="sr-only" role="status">{secret ? 'API key created. It is shown once.' : ''}</span>
       </section>
-      <div className="onb-rise" style={rise(2)}><FirstSend domain={current} apiKey={secret} title="Send with cURL or the SDK" /></div>
-      <div className="onb-rise" style={rise(3)}><AgentPrompt prompt={prompt} /></div>
-      <div className="onb-rise" style={rise(4)}><McpSetup /></div>
+      <div className="onb-rise" style={rise(2)}><FirstSend domain={current} apiKey={secret} title="Send with cURL or the SDK" compact /></div>
+      <div className="onb-rise" style={rise(3)}><AgentPrompt prompt={prompt} compact /></div>
+      <div className="onb-rise" style={rise(4)}><McpSetup compact /></div>
     </div>
     <div className="onboarding-actions">
       <Button variant="primary" onClick={onFinish}>Go to dashboard<ArrowRight size={16} aria-hidden /></Button>
