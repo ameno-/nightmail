@@ -1197,14 +1197,20 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     // light: what the machine stands out against. (One faint slope of light, drawn first, behind everything.)
     let air = 0
     if (dark && !p.phone) { airData[0] = 0; airData[1] = p.yTop * .62; airData[2] = p.D * .5; airData[3] = p.Xc * 2.4; airData[4] = p.yTop * .9; airData[5] = 0; airData[6] = .62; airData[7] = .68; airData[8] = 1; airData[9] = .07; airData[10] = 2; air = 1 }
-    // Billows, the oldest first: a new one comes out in front of what is already in the air.
+    // Billows, the oldest first: a new one comes out in front of what is already in the air. (Each thins out as it
+    // rises towards the page's header, gone before it reaches its controls; and after the burst what hangs over the
+    // readout thins away from it, between about 1.9 and 2.9 s of the page's time (the burst's slowed time runs .6 to
+    // 1.2 s then), before the readout's instruction comes back.)
     let sn = 0
+    const R = zones[0], told = phase === 'boom' || phase === 'rest' ? clamp((time - boomAt - .6) / .6) : 0
     for (let k = Math.max(0, S.head - SM); k < S.head; k++) {
       const i = k % SM
       if (S.age[i] >= S.life[i]) continue
-      const o = sn++ * SMOKE_FLOATS
-      smokeData[o] = S.pos[i * 3]; smokeData[o + 1] = S.pos[i * 3 + 1]; smokeData[o + 2] = S.pos[i * 3 + 2]; smokeData[o + 3] = S.size[i]; smokeData[o + 4] = S.rot[i]
-      smokeData[o + 5] = S.age[i] / S.life[i]; smokeData[o + 6] = S.seed[i]; smokeData[o + 7] = dark || S.kind[i] > .5 ? S.dens[i] : S.dens[i] * clamp(1 - (Math.abs(S.pos[i * 3] + DX * S.pos[i * 3 + 2]) - p.Xc) / (70 * px)); smokeData[o + 8] = S.kind[i]; smokeData[o + 9] = S.heat[i]
+      const o = sn++ * SMOKE_FLOATS, sx = S.pos[i * 3] + DX * S.pos[i * 3 + 2], sy = S.pos[i * 3 + 1] + DY * S.pos[i * 3 + 2], size = S.size[i]
+      let thin = clamp((p.oy - sy - .7 * size - 56) / 60)
+      if (told > 0) { const d = Math.hypot(Math.max(0, Math.abs(sx - R[0]) - R[2]), Math.max(0, Math.abs(sy - R[1]) - R[3])); thin *= 1 - .9 * told * (1 - clamp(d / (size + 10 * px)) ** 2) }
+      smokeData[o] = S.pos[i * 3]; smokeData[o + 1] = S.pos[i * 3 + 1]; smokeData[o + 2] = S.pos[i * 3 + 2]; smokeData[o + 3] = size; smokeData[o + 4] = S.rot[i]
+      smokeData[o + 5] = S.age[i] / S.life[i]; smokeData[o + 6] = S.seed[i]; smokeData[o + 7] = thin * (dark || S.kind[i] > .5 ? S.dens[i] : S.dens[i] * clamp(1 - (Math.abs(sx) - p.Xc) / (70 * px))); smokeData[o + 8] = S.kind[i]; smokeData[o + 9] = S.heat[i]
     }
     scene.parts = parts; scene.letterCount = n; scene.fxCount = a; scene.glowCount = g; scene.airCount = air; scene.smokeCount = sn; scene.flash = flash; scene.flashAt[1] = (p.yCav + p.yFas) / 2; scene.flashR = p.cavity * 1.25
     renderer!.draw(scene)
