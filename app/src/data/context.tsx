@@ -25,7 +25,7 @@ type Session = { identity: Identity | null; logout: () => Promise<void>; switchW
   notice: string | null; dismissNotice: () => void }
 const homeChunk = chunk(() => import('../features/home'))
 export const loadHome = homeChunk.preload
-const HomePage = homeChunk.page(m => m.HomePage)
+export const HomePage = homeChunk.page(m => m.HomePage)
 const ApiContext = createContext<BaneApi | null>(null)
 const SessionContext = createContext<Session | null>(null)
 export const useSession = () => useContext(SessionContext)
@@ -143,7 +143,8 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
   const join = useGuardedMutation({
     mutationFn: async (pending: WorkspaceInvitationPreview) => {
       const { workspaceId } = await workspaceApi.acceptInvitation(pending.id)
-      await switchWorkspace(workspaceId)
+      // Joined from the homepage (an invitation link from before it moved to /overview): open the dashboard.
+      await switchWorkspace(workspaceId, window.location.pathname === '/' ? '/overview' : undefined)
       clearInvitation()
       toast(`Joined ${pending.workspaceName}`, 'success')
     },
@@ -214,7 +215,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     if (id) announce({ type: 'signed-out', accounts: [id] })
     if (id && id !== selectedAccount()) { void cache.invalidateQueries({ queryKey: accountsKey }); return }
     rememberDashboardReady(selectedWorkspace(), false)
-    if (result.active) { await enter(result.active, { path: '/' }); toast('Signed out of that account', 'success'); return }
+    if (result.active) { await enter(result.active, { path: '/overview' }); toast('Signed out of that account', 'success'); return }
     selectAccount(null); selectWorkspace(null); cache.clear(); await identity.refetch()
   }
   async function signOutAll() {
@@ -296,9 +297,10 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
   // used by that click only; a pointer down that never becomes a click is dropped after a few seconds.
   const signIn = useRef<{ at: number; url: Promise<string> } | null>(null)
   function accountUrl() {
-    // Assign path components rather than resolving an untrusted redirect parameter.
+    // Assign path components rather than resolving an untrusted redirect parameter. Signing in from the homepage opens
+    // the dashboard.
     const callback = new URL(window.location.origin)
-    callback.pathname = window.location.pathname
+    callback.pathname = window.location.pathname === '/' ? '/overview' : window.location.pathname
     callback.search = window.location.search
     callback.hash = window.location.hash
     callback.searchParams.delete('auth')
@@ -323,7 +325,8 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
   }
   const signedOut = identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED'
   const unconfigured = identity.error instanceof ApiError && identity.error.code === 'AUTH_NOT_CONFIGURED'
-  // Multi-tenant installations greet signed-out visitors at "/" with the public homepage; /health says which this is.
+  // Multi-tenant installations greet everyone at "/" with the public homepage (signed in, it is App's index route);
+  // /health says which this is.
   // Start alongside /v1/me when no ready dashboard session is remembered so signed-out visitors avoid a second round trip.
   const checkHome = client.mode !== 'demo' && window.location.pathname === '/' && (signedOut || (!invitation && !dashboardLikelyReady(selectedWorkspace())))
   const home = useQuery({ queryKey: ['public-home'], enabled: checkHome, staleTime: Infinity, retry: false, queryFn: async ({signal}) => {
@@ -344,7 +347,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
   const reviewing = !publicRoute && client.mode !== 'demo' && invitation !== null && ((identity.data && !identity.isError) || invitee || (signedOut && review.isFetching))
   return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, notice, dismissNotice: () => setNotice(null)}}>
     {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
-    : publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage onSignIn={login} onSignInIntent={prepareLogin} busy={busy} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title={productName} /><div className="stack" style={{maxWidth: 520}}>
+    : publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage start={{ signedIn: false, onSignIn: login, onSignInIntent: prepareLogin, busy }} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title={productName} /><div className="stack" style={{maxWidth: 520}}>
       {signedOut ? <>
         <h2>Sign in to {productName}</h2>
         {authNotice}

@@ -372,7 +372,8 @@ export async function accountBrowserRoute(c: Ctx) {
       log('warn', { code: 'SIGN_IN_DENIED', reason: issue?.reason ?? (error instanceof ApiError ? error.code : 'error'), errorType: failure?.name,
         issuerError: typeof failure?.error === 'string' ? failure.error.slice(0, 80) : undefined, issuerStatus: typeof failure?.status === 'number' ? failure.status : undefined,
         detail: error instanceof ApiError || error instanceof AccountLimit ? undefined : String(failure?.message ?? '').slice(0, 200) });
-      // An account added in a popup reports back to the page that opened it; every other failure lands on the dashboard.
+      // An account added in a popup reports back to the page that opened it; every other failure lands on the homepage,
+      // where a visitor's sign-in starts, with what went wrong.
       const back = started && new URL(started).pathname === POPUP_PATH ? new URL(started) : new URL(`${origin}/`);
       back.searchParams.set('auth', issue?.reason ?? 'error');
       return c.redirect(back.href,303);

@@ -122,7 +122,7 @@ function changeMember(c: Ctx, memberId: string, newRole?: Role) {
 }
 type InviteRow = { id: string; workspaceId: string; email: string; role: Role; expiresAt: Date };
 function invitationView(c: Ctx, row: InviteRow) {
-  return { ...row, expiresAt: new Date(row.expiresAt).toISOString(), acceptUrl: `${c.env.config.publicUrl}/?invitation=${encodeURIComponent(row.id)}` };
+  return { ...row, expiresAt: new Date(row.expiresAt).toISOString(), acceptUrl: `${c.env.config.publicUrl.replace(/\/$/, '')}/overview?invitation=${encodeURIComponent(row.id)}` };
 }
 async function invite(c: Ctx, input: z.infer<typeof Invite>) {
   return administer(c, async (db, wid, uid, role) => {

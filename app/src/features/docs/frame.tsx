@@ -23,7 +23,7 @@ export function useDocsAudience(): DocsAudience | null {
 
 export function DocsStandalone() {
   return <div className="docs-page">
-    <header className="docs-header"><Link className="docs-brand" to="/"><strong>{productName}</strong><span>Docs</span></Link><nav aria-label="Documentation links"><Link to="/docs/mcp">Connect an agent</Link><a href="/docs.md">Markdown</a><a href="/openapi.json">OpenAPI</a><a href={`https://www.npmjs.com/package/${sdkPackage}`}>TypeScript SDK</a><Link to="/">Dashboard</Link></nav></header>
+    <header className="docs-header"><Link className="docs-brand" to="/"><strong>{productName}</strong><span>Docs</span></Link><nav aria-label="Documentation links"><Link to="/docs/mcp">Connect an agent</Link><a href="/docs.md">Markdown</a><a href="/openapi.json">OpenAPI</a><a href={`https://www.npmjs.com/package/${sdkPackage}`}>TypeScript SDK</a><Link to="/overview">Dashboard</Link></nav></header>
     <ChunkFallback.Provider value={<DocsSkeleton />}><Outlet /></ChunkFallback.Provider>
   </div>
 }

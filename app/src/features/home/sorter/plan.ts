@@ -15,8 +15,9 @@ export type Inset = { left: number; right: number; bottom: number }
 
 const mix = (a: number, b: number, t: number) => a + (b - a) * t
 
-/** `fold` is how much of the page is seen under the header before any scrolling. */
-export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0, bottom: 0 }) {
+/** `fold` is how much of the page is seen under the header before any scrolling; `agree`, whether the visitor has yet to
+ *  sign in (someone signed in has nothing to agree to: no consent under the button). */
+export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0, bottom: 0 }, agree = true) {
   // Below 900 px there is no room beside the machine for the headers and their tubes: the page is a phone's (or a
   // tablet's), and the machine is composed for it: four lanes whose names fit their plates (`routes`: which of the
   // seven), no tubes down its front (its mail goes down through the slab, and the tubes begin at its lip), a cabinet
@@ -50,11 +51,11 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
     // (The headline's two lines stand as far under the price as over the button's bay: no rail parts them from it.)
     const fascia = mix(96, 80, t) * Math.min(k, 1.1), pad = mix(10, 7, t) * Math.min(k, 1.1), cavity = mix(3.5, 3, t) * lh, slot = mix(30, 26, t) * Math.min(k, 1.2), manifold = 2 * V, band = 2.32 * COLS * U / 11 + 2 * mix(19, 13, t) * k
     // The base, from the floor up: the two facts; what signing in agrees to (one line where the button is wide enough
-    // for it, two where it is not); and directly over that the button in its bay. (On a narrow phone what is free
+    // for it, two where it is not; none signed in); and directly over that the button in its bay. (On a narrow phone what is free
     // takes two lines.) `sky` is more room over the roof, `apart` more between the consent and the facts, `slab` more
     // slab in front of the machine.
     const ctaW = COLS * U, ctaH = U > 8 ? 60 : Math.round(mix(54, 50, t)), plate = 6, tight = ctaW - 88 < 192, factsH = tight ? 56 : 38, factsY = mix(34, 26, t)
-    const consentH = ctaW < 392 ? 32 : 16, consentY = factsY + factsH + Math.max(apart, mix(22, 18, t)), ctaY = consentY + consentH + mix(12, 8, t) + plate
+    const consentH = !agree ? 0 : ctaW < 392 ? 32 : 16, consentY = factsY + factsH + Math.max(apart, mix(22, 18, t)), ctaY = consentY + consentH + mix(12, 8, t) + plate
     const base = ctaY + ctaH + plate, below = Math.max(3.6 * U, 24), front = frontU * U + slab
     const top = sky + mix(30, 10, t) + Math.max(gun(U, lw, lh, .42 * U).rise, (depth * DY + hopperU) * U), over = top + fascia + cavity + slot + manifold + wallRows * V + band
     // (`toConsent`, `toFacts`: how far down the hero the consent ends, and the facts.)
@@ -178,7 +179,7 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   const inside = readout.w - 2 * Math.min(18, Math.max(12, 1.6 * U)), wide1 = .6 * Math.min(15, Math.max(12.5, 1.5 * U))
   const fromMax = set ? Math.floor((inside - 64) / (.96 * wide1)) : Infinity, subjectMax = set ? Math.floor(inside / wide1) - 1 : Infinity
   // What signing in agrees to, directly under a phone's button, between its two edges. (A wide page has it under the slab's lip.)
-  const consent: Rect | null = set ? { x: cta.x, y: set.consentY, w: ctaW, h: set.consentH } : null
+  const consent: Rect | null = set && agree ? { x: cta.x, y: set.consentY, w: ctaW, h: set.consentH } : null
   // (Whether the button is seen before any scrolling: where it is not, the header carries one.)
   short ||= oy - cta.y > fold - inset.bottom
   // The wordmark, in lights at the head of the sorting frame: exactly as wide as the price, its two edges the

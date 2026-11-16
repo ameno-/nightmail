@@ -1,5 +1,4 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
-import { ArrowRight, LoaderCircle } from 'lucide-react'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { SignInConsent } from '../../components/LegalLinks'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -7,6 +6,7 @@ import { NightmailMark } from '../../components/NightmailLogo'
 import { useTheme } from '../../lib/theme'
 import { productName } from '../../../../api/src/brand'
 import type { HomeProps } from '.'
+import { DashboardLink, StartButton } from './start'
 import { DX, DY, onFront, plan, type Plan, type Rect } from './sorter/plan'
 import { drawStill } from './sorter/still'
 import { toneVars } from './sorter/tones'
@@ -17,7 +17,7 @@ import './sorter-home.css'
 
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches
 
-// The signed-out homepage: the page is a mail-sorting machine. Letters fall into its hopper, are read, and leave by the
+// The homepage: the page is a mail-sorting machine. Letters fall into its hopper, are read, and leave by the
 // tube for wherever they are routed; the price of a thousand of them is spelt by the thousand letters filed in its
 // sorting frame. It runs faster and faster until it bursts, and the letters settle where they fall. Below it the tubes
 // run on down the page to each place mail can go. The price is api/src/billing/money.ts's rate, the response time the
@@ -32,11 +32,13 @@ const TUBE_NAMES = ['Inbox', 'Agents', 'Endpoints', 'Threads', 'IMAP', 'Rituals'
 const TUBE_CODES = ['Inb', 'Agt', 'End', 'Thr', 'IMAP', 'Rit', 'Cmp', 'Logs'] as const
 const KONAMI = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'b', 'a']
 
-export function SorterHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps) {
+export function SorterHome({ start, notice }: HomeProps) {
+  // Signed in, there is nothing to agree to: no consent under the buttons.
+  const visitor = start.signedIn ? null : start
   const dark = useTheme().theme === 'dark'
   const scene = useRef<HTMLElement>(null), still = useRef<HTMLCanvasElement>(null), gl = useRef<HTMLCanvasElement>(null), sorter = useRef<Sorter | null>(null)
   const head = useRef<HTMLElement>(null), probe = useRef<HTMLDivElement>(null)
-  const veiled = useRef<(HTMLElement | null)[]>([]), tally = useRef<HTMLSpanElement>(null), cta = useRef<HTMLButtonElement>(null)
+  const veiled = useRef<(HTMLElement | null)[]>([]), tally = useRef<HTMLSpanElement>(null), cta = useRef<HTMLElement>(null)
   const readout = useRef<HTMLDivElement>(null), cardBox = useRef<HTMLDivElement>(null), counts = useRef([0, 0]), shown = useRef<Letter | null>(null)
   // `over`: how far the canvases reach up behind the header (its height, with a phone's status bar where the page runs under one).
   const [p, setP] = useState<Plan | null>(null), [over, setOver] = useState(64)
@@ -86,7 +88,7 @@ export function SorterHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps
     // (The probe is as tall as the page is under the header before any scrolling, by the small viewport: a phone's
     // toolbars coming and going do not change it. Its padding is the page's safe areas.)
     const measure = () => {
-      const fold = probe.current!, safe = getComputedStyle(fold), next = plan(scene.current!.clientWidth, fold.offsetHeight, { left: parseFloat(safe.paddingLeft) || 0, right: parseFloat(safe.paddingRight) || 0, bottom: parseFloat(safe.paddingBottom) || 0 })
+      const fold = probe.current!, safe = getComputedStyle(fold), next = plan(scene.current!.clientWidth, fold.offsetHeight, { left: parseFloat(safe.paddingLeft) || 0, right: parseFloat(safe.paddingRight) || 0, bottom: parseFloat(safe.paddingBottom) || 0 }, !start.signedIn)
       setP(now => now && now.W === next.W && now.H === next.H && now.fold === next.fold && now.ox === next.ox ? now : next); setOver(head.current!.offsetHeight)
     }
     measure()
@@ -149,8 +151,9 @@ export function SorterHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps
       <a className="srt-mark" href="/" aria-label={`${productName.toLowerCase()} home`}><NightmailMark /></a>
       <nav className="srt-nav" aria-label="Site">
         <a href="/docs">API docs</a>
-        {/* Where the page is too short for the machine's own button to be seen before scrolling. */}
-        {p?.short && <button type="button" className="srt-head-cta" disabled={busy} aria-busy={busy || undefined} onClick={onSignIn} onPointerDown={onSignInIntent}>Get started</button>}
+        {/* Signed in, the way into the dashboard; signed out, where the page is too short for the machine's own button to
+            be seen before scrolling, the button. */}
+        {visitor ? p?.short && <button type="button" className="srt-head-cta" disabled={visitor.busy} aria-busy={visitor.busy || undefined} onClick={visitor.onSignIn} onPointerDown={visitor.onSignInIntent}>Get started</button> : <DashboardLink>Dashboard</DashboardLink>}
         <ThemeToggle />
       </nav>
     </header>
@@ -183,16 +186,14 @@ export function SorterHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps
           {/* The two facts: instruments in the base, a legend over a window each. */}
           <p className="srt-fact" ref={el => { veiled.current[3] = el }} style={at(p.facts[0])}><span className="srt-fact-label">Responds in</span><span className="srt-fact-value"><span><b>~100</b><i>ms</i></span><span className="srt-scale" aria-hidden="true" /></span></p>
           <p className="srt-fact" ref={el => { veiled.current[4] = el }} style={at(p.facts[1])}><span className="srt-fact-label">Free every month</span><span className="srt-fact-value"><span><b>3,000</b><i>sent</i></span><span><b>3,000</b><i>received</i></span></span></p>
-          <button type="button" className="srt-cta" ref={cta} style={at(p.cta)} disabled={busy} aria-busy={busy || undefined} data-busy={busy || undefined} onClick={onSignIn} onPointerDown={onSignInIntent}>
-            <span className="srt-cta-label">Get started{busy ? <LoaderCircle className="ui-spinner" size={16} aria-hidden="true" /> : <ArrowRight className="srt-cta-arrow" size={16} strokeWidth={2} aria-hidden="true" />}</span>
-          </button>
+          <StartButton start={start} className="srt-cta" ref={cta} style={at(p.cta)} />
           {/* What signing in agrees to, directly under a phone's button (a wide page has it under the slab's lip). */}
           {p.consent && <div className="srt-consent-on" style={at(p.consent)}><SignInConsent className="srt-consent" /></div>}
         </div>}
         {p && <>
-          {!p.consent && <SignInConsent className="srt-consent" />}
+          {visitor && !p.consent && <SignInConsent className="srt-consent" />}
           {/* And under the header's button, where the header carries one. */}
-          {p.short && <SignInConsent className="srt-consent srt-consent-head" />}
+          {visitor && p.short && <SignInConsent className="srt-consent srt-consent-head" />}
           {/* The letter under the pointer, opened. */}
           <div className="srt-card" ref={cardBox} data-open={card ? '' : undefined} aria-hidden="true">
             {card && <div className="srt-card-body" data-scam={card.scam || undefined}>
@@ -205,7 +206,7 @@ export function SorterHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps
         </>}
         {notice && <div className="srt-notice">{notice}</div>}
       </section>
-      <Stations plan={p} onSignIn={onSignIn} onSignInIntent={onSignInIntent} busy={busy} />
+      <Stations plan={p} start={start} />
     </main>
   </div>
 }

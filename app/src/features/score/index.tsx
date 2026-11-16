@@ -42,7 +42,7 @@ export function SidebarScore() {
       <span className="gauge-readout">{graded ? <><b>{whole(shown)}</b><span className="gauge-grade">{report.grade}</span></> : <><b>—</b><small className="gauge-readout__pending">not graded</small></>}</span>
     </span>
   </>
-  return raised ? <Link to="/#standing" className="gauge-card gauge-card--compact" aria-label={label}>{inner}</Link>
+  return raised ? <Link to="/overview#standing" className="gauge-card gauge-card--compact" aria-label={label}>{inner}</Link>
     : <button type="button" onClick={() => openScoreAbout()} className="gauge-card gauge-card--compact" aria-label={label} title={graded ? undefined : `Not graded yet: ${progressLabel(report)}`}>{inner}</button>
 }
 /** The explainer, mounted once by the shell: the same cached score as every other view of it. */

@@ -10,7 +10,7 @@ import { latestRowCount } from '../features/overview/latest'
 
 // A warmed result stays fresh this long, so repeated hovers and the idle sweep never refetch it.
 const FRESH = 30_000
-export const sidebarPaths = ['/', '/logs', '/receiving', '/campaigns', '/audience', '/domains', '/api-keys', '/settings'] as const
+export const sidebarPaths = ['/overview', '/logs', '/receiving', '/campaigns', '/audience', '/domains', '/api-keys', '/settings'] as const
 // Filled by App.tsx with each route's chunk preload.
 export const routeChunks: Record<string, () => Promise<unknown>> = {}
 
@@ -19,7 +19,7 @@ type Scope = { regionId: string; multiTenant: boolean; canAdminister: boolean }
 function firstScreen(path: string, { regionId, multiTenant, canAdminister }: Scope): QueryDef<unknown>[] {
   const scoped = multiTenant || Boolean(regionId)
   switch (path) {
-    case '/': return scoped ? [queries.overview(regionId, '24h', 'all'), queries.senderScore(), queries.logs({ regionId, direction: 'all', page: 1, pageSize: latestRowCount() }), ...(canAdminister ? [queries.overviewSetup()] : [])] : []
+    case '/overview': return scoped ? [queries.overview(regionId, '24h', 'all'), queries.senderScore(), queries.logs({ regionId, direction: 'all', page: 1, pageSize: latestRowCount() }), ...(canAdminister ? [queries.overviewSetup()] : [])] : []
     case '/logs': { const pageSize = rememberedPageSize('logs'); return scoped && pageSize ? [queries.logs({ regionId, direction: 'all', search: '', status: undefined, stream: undefined, page: 1, pageSize })] : [] }
     // Receiving is one read: routes, counts, rituals, endpoints and domains.
     case '/receiving': return [overviewQuery(firstOverview) as QueryDef<unknown>]
