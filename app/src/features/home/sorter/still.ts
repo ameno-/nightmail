@@ -1,10 +1,11 @@
-// The machine before its engine has loaded: its cabinet, the sorting frame and the price in it, the works' bay and its
-// roller line, the hopper and chimneys, the manifolds, tubes and headers, drawn flat on a 2D canvas in the same places
-// and tones the renderer will use (machine.ts is the measure of every number here). It is on the page from the first
-// paint; the renderer's first frame is laid over it and comes up through it.
+// The machine before its engine has loaded: its cabinet, the sorting frame with the price in it and the wordmark at
+// its head, the works' bay and its roller line, the hopper and chimneys, the manifolds, tubes and headers, drawn flat
+// on a 2D canvas in the same places and tones the renderer will use (machine.ts is the measure of every number here).
+// It is on the page from the first paint; the renderer's first frame is laid over it and comes up through it.
 import { COLS, PRICE } from './price'
 import { DX, DY, type Plan } from './plan'
 import { glass, tone, type Mat } from './tones'
+import { WORDMARK } from '../marks'
 
 export function drawStill(canvas: HTMLCanvasElement, p: Plan, over: number, dark: boolean) {
   const dpr = Math.min(window.devicePixelRatio || 1, 2), c = canvas.getContext('2d')!
@@ -123,4 +124,7 @@ export function drawStill(canvas: HTMLCanvasElement, p: Plan, over: number, dark
     if (lit) fill('paper', 1); else fill((col * 7 + r * 13) % 5 === 0 ? 'cell2' : 'cell', 1)
     c.fillRect(X(-Xw + col * U + g), Y(yWall + (rows - r) * V - g), U - 2 * g, V - 2 * g)
   }
+  // The wordmark at the frame's head, where the renderer has it (sorter/name.ts): its faces, flat.
+  const n = p.name, k = n.cap / WORDMARK.h
+  c.save(); c.translate(X(n.x, n.z), Y(n.y + n.cap, n.z)); c.scale(k, k); fill('paper', 1); c.fill(new Path2D(WORDMARK.d)); c.restore()
 }

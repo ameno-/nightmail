@@ -5,6 +5,7 @@ import { SignInConsent } from '../../components/LegalLinks'
 import { AnomalyLogo } from '../../components/AnomalyLogo'
 import type { HomeProps } from '.'
 import { DX, DY, type Plan } from './sorter/plan'
+import { EndBand, endBand } from './end-band'
 
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches
 
@@ -111,8 +112,10 @@ export function Stations({ plan: p, onSignIn, onSignInIntent, busy }: { plan: Pl
   })
   // Under the last appliance, the plate the last button is on; the outbound main comes out of its top.
   const plate = { w: phone ? widest : Math.min(540, room + 60), h: phone ? 164 : 138, top: top + dy + 8 }, plateLeft = Math.round(sx - plate.w / 2 + dx / 2), mainX = sx + p.out
-  // (Under the plate: what signing in agrees to and the last links, clear of a phone's home indicator.)
-  const height = plate.top + plate.h + (phone ? 164 : 132) + p.inset.bottom
+  // (Under the plate: what signing in agrees to and the last links; and under those, where the page ends, the wordmark
+  // across it (end-band.tsx), which stands clear of a phone's home indicator on a sill.)
+  const band = endBand(p.W, phone, p.inset), under = band.h + p.inset.bottom
+  const height = plate.top + plate.h + (phone ? 172 : 140) + under
   // The tubes. A wide page: each side's four start where they left the slab's lip; after each appliance on that side
   // the tubes that are left step in one place towards the column (the inner ones first, so none crosses another),
   // and the innermost then bends in to the next appliance: into a flange on its side wall, at half its depth (an
@@ -160,7 +163,7 @@ export function Stations({ plan: p, onSignIn, onSignInIntent, busy }: { plan: Pl
   runs.push({ key: 'main', points: main, wide, rings: mainRings })
   // Every capsule's way: down each tube from under its sleeve into its appliance; up the main from each that sends.
   flows.current = [...ways.map((points, k) => ({ points: [[points[0][0], phone ? points[0][1] + 4 : 16] as Pt, ...points.slice(1, -1), [units[k].left ? units[k].end - dx / 2 - 2 : units[k].end - 2, points.at(-1)![1]] as Pt], bend, speed: phone ? 150 : 230, unit: k, wide: phone })), ...outWays.map(points => ({ points, bend: wide * 1.5, speed: phone ? 130 : 200, unit: undefined, wide: false }))]
-  const vars = { ...phone && { '--srt-feed': `${feed}px` }, '--srt-r': `${pw / 2}px`, '--srt-pipe': `${pw}px`, '--srt-dx': `${dx}px`, '--srt-dy': `${dy}px`, '--srt-slope': dy / dx, '--srt-over': phone ? '4px' : '7px', height } as CSSProperties
+  const vars = { ...phone && { '--srt-feed': `${feed}px` }, '--srt-r': `${pw / 2}px`, '--srt-pipe': `${pw}px`, '--srt-dx': `${dx}px`, '--srt-dy': `${dy}px`, '--srt-slope': dy / dx, '--srt-over': phone ? '4px' : '7px', '--srt-band-end': `${under}px`, height } as CSSProperties
   return <section className="srt-stations" ref={root} style={vars} data-phone={phone || undefined} aria-label="Where mail goes">
     {/* The tubes' far walls; over them the capsules; over those (further down) the tubes' near walls and their collars. */}
     <svg className="srt-pipes" aria-hidden="true">
@@ -216,6 +219,7 @@ export function Stations({ plan: p, onSignIn, onSignInIntent, busy }: { plan: Pl
       <SignInConsent className="srt-end-consent" />
       <nav aria-label="Site links"><a className="srt-by" href="https://anoma.ly" target="_blank" rel="noopener" title="Anomaly (opens in a new tab)">by <AnomalyLogo height={18} /></a><a href="/docs">API docs</a><Link to="/legal/terms">Terms</Link><Link to="/legal/privacy">Privacy</Link></nav>
     </footer>
+    <EndBand W={p.W} phone={phone} inset={p.inset} />
   </section>
 }
 

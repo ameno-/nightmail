@@ -3,7 +3,6 @@ import { ArrowRight, LoaderCircle } from 'lucide-react'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { SignInConsent } from '../../components/LegalLinks'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { BaneWordmark } from '../../components/BaneLogo'
 import { useTheme } from '../../lib/theme'
 import { productName } from '../../../../api/src/brand'
 import type { HomeProps } from '.'
@@ -11,6 +10,7 @@ import { DX, DY, onFront, plan, type Plan, type Rect } from './sorter/plan'
 import { drawStill } from './sorter/still'
 import { toneVars } from './sorter/tones'
 import { COLS } from './sorter/price'
+import { MONOGRAM } from './marks'
 import { Stations } from './sorter-stations'
 import type { Hooks, Letter, Phase, Sorter } from './sorter/engine'
 import './sorter-home.css'
@@ -145,7 +145,8 @@ export function SorterHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps
   const hopperBox = (q: Plan) => { const w = Math.max(48, 2.6 * q.lw), h = Math.max(44, q.hopper * .82 + 12), x = DX * q.zL, y = DY * q.zL; return { left: q.ox + x - w / 2, top: q.oy - q.yTop - y - h, width: w, height: h } }
   return <div className="srt-page" data-phase={phase} data-live={live || undefined} data-phone={p?.phone || undefined} data-tight={p?.tight || undefined} style={{ ...toneVars(dark), ...p && { '--srt-u': `${p.U}px`, '--srt-v': `${p.V}px`, '--srt-price': `${price.w}px`, '--srt-below': `${p.floor - p.front - p.lip}px`, '--srt-ext': `${p.ext}px`, '--srt-ox': `${p.ox}px`, '--srt-plate': `${p.label * p.P}px` } } as CSSProperties}>
     <header className="srt-header" ref={head}>
-      <a className="wordmark" href="/" aria-label={`${productName.toLowerCase()} home`}><BaneWordmark /></a>
+      {/* The monogram alone: the wordmark is in lights on the machine, over the price (sorter/name.ts). */}
+      <a className="srt-mark" href="/" aria-label={`${productName.toLowerCase()} home`}><svg viewBox={`0 0 ${MONOGRAM.w} ${MONOGRAM.h}`} aria-hidden="true"><path d={MONOGRAM.d} /></svg></a>
       <nav className="srt-nav" aria-label="Site">
         <a href="/docs">API docs</a>
         {/* Where the page is too short for the machine's own button to be seen before scrolling. */}

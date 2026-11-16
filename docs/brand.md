@@ -1,6 +1,16 @@
 # Brand
 
-The logo is the **Stamp** mark next to the product name, **nightmail**. The word is always lowercase. Until the new lockup lands, the dashboard (`BaneWordmark`, which `og.png` photographs) sets the word as text in the style below, and the lockup SVGs in `app/public/brand/` still spell bane.
+The logo is the **Stamp** mark next to the product name, **nightmail**. The word is always lowercase. Until the new lockup lands there, the dashboard (`BaneWordmark`) sets the word as text in the style below, and the lockup SVGs in `app/public/brand/` still spell bane.
+
+## The new marks (the homepage, for now)
+
+The signed-out homepage carries the new identity: the **NIGHTMAIL** wordmark in wide, squared-off capitals, and the **NM** monogram on a tile. The favicon, the app icons and the dashboard still use the Stamp until they are switched.
+
+- **Outlines:** `app/src/features/home/marks.ts`, copied from the final vector set (`wordmark.svg`, `monogram.svg`). Cap height is 1000 units; the wordmark is 10.8 cap heights wide.
+- **Lockup:** the tile, exactly as tall as the caps, one stem (0.32 of the cap height) left of the wordmark.
+- **Colour:** ink `#0A0B0F` on a pale ground, paper `#F4F2EC` on a dark one, and nothing else.
+- **On the homepage:** the header carries the monogram alone. The wordmark stands in lit letters at the head of the sorting frame, exactly as wide as the price under it (`sorter/name.ts`), and again across the page's end as solids cut off by the page's edge (`end-band.tsx`). `og.png` sets the lockup beside the machine.
+- **Don't** stretch, respace, redraw or recolour them. Where the wordmark is given depth (the frame's lit letters, the end band's solids), its face stays the outline itself and the sides take a darker tone.
 
 ## Files
 

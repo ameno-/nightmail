@@ -24,8 +24,8 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   const phone = W < 900
   const routes = phone ? [0, 2, 3, 5] : [0, 1, 2, 3, 4, 5, 6], count = routes.length, per = phone ? 0 : 4
   // In cells: the unlit columns and rows round the price, the strip the tubes run down (a phone: the cabinet's stile),
-  // and each floor of the machine.
-  const side = 2, over = 2, under = 2, strip = phone ? .6 : 9.8
+  // and each floor of the machine. (Over the price the frame is ten rows high, not two: the wordmark stands in them.)
+  const side = 2, over = 10, under = 2, strip = phone ? .6 : 9.8
   const rows = { base: 14, band: 7.5, manifold: 2, slot: 3.4, cavity: 19, fascia: 11 }
   // The slab in front of the machine, its lip, and the page under the lip.
   const depth = phone ? 8 : 20, hopperU = 4.2, skyU = 1.5, frontU = phone ? 4.6 : 5.75, lipU = phone ? 1.6 : 2, belowU = 7.6
@@ -87,10 +87,10 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
         break search
       }
       // Too short a page for the button to be seen on the machine at any size worth having: the machine is as it
-      // would be on a tall page (on a phone held on its side, small enough that half the price is seen), and the
-      // header carries a button of its own.
+      // would be on a tall page (on a phone held on its side, small enough that the wordmark and half the price under
+      // it are seen), and the header carries a button of its own.
       // (Under the header's button, at the hero's top, stands what signing in agrees to: the sky is higher by it.)
-      short = true; U = Math.min(most, Math.max(5.6, fold / 60)); set = stack(U, fold < 520 ? 1 : .5, W < 700 ? 40 : 0)
+      short = true; U = Math.min(most, Math.max(4.9, fold / 68)); set = stack(U, fold < 520 ? 1 : .5, W < 700 ? 40 : 0)
     }
     H = Math.ceil(Math.max(fold, set.tall))
   } else {
@@ -181,7 +181,11 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   const consent: Rect | null = set ? { x: cta.x, y: set.consentY, w: ctaW, h: set.consentH } : null
   // (Whether the button is seen before any scrolling: where it is not, the header carries one.)
   short ||= oy - cta.y > fold - inset.bottom
-  return { phone, routes, tight, short, W, H, fold, inset, ext, cannon, out: Math.round(out), room, widest, lean, ox, oy, sx, U, V, side, over, under, Xw, Xc, Xb, D, base, band, wall, manifold, slot, cavity, fascia, yBand, yWall, yMan, ySlot, yCav, yFas, yTop, P, lanes, label, lw, lh, cavD, zL, tubeR, tubes, post, zt, zProud, riser, fan, heads, drops, hung, front, lip, floor, zLip, zOver, zBack, slabX, hopper: hopperU * U, cta, consent, plate, facts, tally, readout, fromMax, subjectMax, gauge, lamps }
+  // The wordmark, in lights at the head of the sorting frame: exactly as wide as the price, its two edges the
+  // price's, and half way between the price and the frame's top. `x, y` is its left end on its baseline, `cap` its cap
+  // height (its width is 10.8 of them: marks.ts), `z` the plane its face is in, proud of the frame by `depth`.
+  const name = { x: -COLS * U / 2, y: yMan - over * V / 2 - COLS * U / 21.6, cap: COLS * U / 10.8, z: -.6 * U, depth: .6 * U }
+  return { phone, routes, tight, short, name, W, H, fold, inset, ext, cannon, out: Math.round(out), room, widest, lean, ox, oy, sx, U, V, side, over, under, Xw, Xc, Xb, D, base, band, wall, manifold, slot, cavity, fascia, yBand, yWall, yMan, ySlot, yCav, yFas, yTop, P, lanes, label, lw, lh, cavD, zL, tubeR, tubes, post, zt, zProud, riser, fan, heads, drops, hung, front, lip, floor, zLip, zOver, zBack, slabX, hopper: hopperU * U, cta, consent, plate, facts, tally, readout, fromMax, subjectMax, gauge, lamps }
 }
 
 /** A box on the machine's front, as the page places it: left and top in the scene, width and height. */

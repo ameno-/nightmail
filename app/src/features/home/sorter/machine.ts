@@ -1,15 +1,17 @@
-// The sorting machine, built once from the plan as solids. It stands on a slab with a lip along its front. Its cabinet's
-// front is, from the floor up: the base (the page's button stands in it), the band with the sentence, the sorting frame
-// whose thousand filled pigeonholes spell the price between two manifolds and eight glass tubes, the label rail, the
-// works behind glass (a line of rollers with a drop gate and a chute for each lane, a scanner over the middle) and a
-// fascia with the readout and the pressure gauge. On the roof: the hopper letters fall into; either side of it a slot
-// scams are thrown out of, and at each end a laser on a pedestal to burn them; two chimneys, a hatch and a beacon. The tubes leave the cabinet at the floor,
-// cross the slab and go over its lip. Everything that moves or can be blown off is a part.
+// The sorting machine, built once from the plan as solids. It stands on a slab with a lip along its front. Its
+// cabinet's front is, from the floor up: the base (the page's button stands in it), the band with the sentence, the
+// sorting frame whose thousand filled pigeonholes spell the price between two manifolds and eight glass tubes, with the
+// wordmark in lights at its head, the label rail, the works behind glass (a line of rollers with a drop gate and a
+// chute for each lane, a scanner over the middle) and a fascia with the readout and the pressure gauge. On the roof:
+// the hopper letters fall into; either side of it a slot scams are thrown out of, and at each end a laser on a pedestal
+// to burn them; two chimneys, a hatch and a beacon. The tubes leave the cabinet at the floor, cross the slab and go
+// over its lip. Everything that moves or can be blown off is a part.
 import { ALL, Builder, unit, type V3 } from './mesh'
 import { MAT as M } from './tones'
 import { COLS, PRICE } from './price'
 import { DX, DY, type Plan } from './plan'
 import { LETTER_FLOATS } from './gl'
+import { nameOn } from './name'
 
 export type Machine = ReturnType<typeof buildMachine>
 
@@ -59,6 +61,8 @@ export function buildMachine(p: Plan) {
     if (PRICE[row - p.over]?.[col - p.side] === '#') wall.set([x + U / 2, y + V / 2, -.5, 0, 0, 0, 1, U - 2 * g, V - 2 * g, .4, (lit * .6180339887) % 1, 0, 2, 0], lit++ * LETTER_FLOATS)
     else b.mark(x + g, y + g, x + U - g, y + V - g, -.2, (col * 7 + row * 13) % 5 === 0 ? M.cell2 : M.cell)
   }
+  // At the frame's head, over the price and as wide as it: the wordmark, in lit letters proud of the pigeonholes.
+  nameOn(b, p.name, M.paper, M.rim)
 
   // Two manifolds, bolted on, with the tubes between them; the label rail; the fascia.
   const lower = phone(p) ? 0 : 1.7 * V, zBlock = p.zProud, lean = DX * zBlock

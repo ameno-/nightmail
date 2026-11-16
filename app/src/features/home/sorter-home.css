@@ -8,11 +8,14 @@
   --srt-cta: oklch(0.975 0.02 92); --srt-cta-hover: oklch(0.995 0.012 92); --srt-cta-top: oklch(1 0 0); --srt-cta-side: oklch(0.78 0.03 92); --srt-on-cta: oklch(0.2 0.02 268); --srt-cta-edge: oklch(0.2 0.02 268 / 14%);
   --srt-paper: oklch(0.985 0.01 92); --srt-red: oklch(0.6 0.22 27); --srt-card: oklch(0.995 0.004 92); --srt-card-text: oklch(0.21 0.02 268); --srt-card-dim: oklch(0.45 0.02 268); --srt-card-edge: oklch(0.21 0.02 268 / 12%);
   --srt-ease: cubic-bezier(.22, 1, .36, 1); --srt-k: 17.17; --srt-header: 64px;
+  /* The brand's marks (marks.ts) are set in its ink on the pale page and its paper on the dark one, and in nothing else. */
+  --srt-name: #0A0B0F;
   /* A phone's safe areas (its status bar, where the page runs under one; the sides of one held on its side; its home
      indicator), and the header with the first of them. */
   --srt-safe-t: env(safe-area-inset-top, 0px); --srt-safe-r: env(safe-area-inset-right, 0px); --srt-safe-b: env(safe-area-inset-bottom, 0px); --srt-safe-l: env(safe-area-inset-left, 0px); --srt-head: calc(var(--srt-header) + var(--srt-safe-t));
   display: flex; flex-direction: column; min-height: 100svh; overflow-x: clip; background: var(--srt-floor); color: var(--srt-text); }
 :root[data-theme='dark'] .srt-page {
+  --srt-name: #F4F2EC;
   --srt-floor: rgb(10 13 19); --srt-shade: rgb(4 6 10); --srt-text: oklch(0.968 0.004 268); --srt-text-2: oklch(0.74 0.014 268); --srt-text-3: oklch(0.63 0.016 268); --srt-hair: oklch(1 0 0 / 9%); --srt-hover: oklch(1 0 0 / 6%);
   --srt-screen-text: oklch(0.955 0.014 92); --srt-screen-dim: oklch(0.62 0.018 268); --srt-plate: oklch(0.66 0.016 268);
   --srt-cta: oklch(0.945 0.016 92); --srt-cta-hover: oklch(0.975 0.012 92); --srt-cta-top: oklch(1 0 0); --srt-cta-side: oklch(0.72 0.022 92); --srt-on-cta: oklch(0.2 0.02 268); --srt-cta-edge: oklch(0.2 0.02 268 / 14%);
@@ -21,10 +24,12 @@
 /* The header stands over the night: letters fall behind it. */
 .srt-header { position: relative; z-index: 4; display: flex; flex: none; align-items: center; justify-content: space-between; box-sizing: border-box; height: var(--srt-head); padding: var(--srt-safe-t) max(var(--space-32), var(--srt-safe-r)) 0 max(var(--space-32), var(--srt-safe-l)); pointer-events: none; }
 .srt-header > * { pointer-events: auto; }
-.srt-header .wordmark, .srt-header .theme-toggle { position: relative; inset: auto; }
-.srt-header .wordmark { height: 32px; color: var(--srt-text); }
-.srt-header .bane-wordmark { gap: var(--space-8); font-size: 17.5px; line-height: 24px; }
-.srt-header .bane-wordmark svg { width: 20px; height: 20px; }
+.srt-header .theme-toggle { position: relative; inset: auto; }
+/* The header's mark is the monogram alone: the wordmark is on the machine, over the price. Its left edge is the page's
+   margin, its middle the bar's (and so the middle of "API docs" and the theme button); the link is 44 px to press. */
+.srt-mark { display: flex; flex: none; align-items: center; height: 44px; border-radius: 4px; color: var(--srt-name); }
+.srt-mark svg { display: block; flex: none; width: 26px; height: 26px; fill: currentColor; }
+.srt-mark:focus-visible { outline: var(--focus-width) solid var(--color-focus); outline-offset: 4px; }
 .srt-nav { display: flex; align-items: center; gap: var(--space-4); }
 .srt-nav > a, .srt-nav .theme-toggle { height: 32px; border-radius: 8px; color: var(--srt-text-2); transition: color 150ms var(--srt-ease), background-color 150ms var(--srt-ease), transform 160ms var(--srt-ease); }
 .srt-nav > a { display: inline-flex; align-items: center; padding-inline: var(--space-12); font-size: var(--text-sm); font-weight: 510; letter-spacing: -.005em; text-decoration: none; }
@@ -183,11 +188,10 @@
 @media (max-width: 899px) {
   .srt-page { --srt-header: 56px; }
   .srt-header { padding-inline: max(var(--space-16), var(--srt-safe-l) + var(--space-8)) max(var(--space-12), var(--srt-safe-r) + var(--space-8)); }
-  .srt-header .bane-wordmark { gap: 7px; font-size: 15.75px; }
-  .srt-header .bane-wordmark svg { width: 18px; height: 18px; }
+  .srt-mark svg { width: 24px; height: 24px; }
   .srt-card-body { width: 232px; }
   /* Everything in the header is 44 px to press: the links by their own height, the switch by a ring drawn inside it. */
-  .srt-header .wordmark, .srt-nav > a { height: 44px; }
+  .srt-nav > a { height: 44px; }
   .srt-nav { gap: 0; }
   .srt-nav .theme-toggle { width: 44px; height: 44px; box-shadow: none; }
   .srt-nav .theme-toggle::before { content: ''; position: absolute; inset: 5px; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--srt-hair); pointer-events: none; }
@@ -434,11 +438,26 @@
 .srt-end-bay { display: block; padding: 9px; background: var(--srt-plinth); box-shadow: inset 0 1.5px 0 var(--srt-body-top), inset 1.5px 0 0 var(--srt-body-side); }
 .srt-end-cta { position: relative; display: flex; width: 208px; height: 50px; background: var(--srt-slot); box-shadow: 0 0 0 2.5px var(--srt-trim); font-size: 17px; }
 .srt-screw { position: absolute; width: 5px; height: 5px; border-radius: 50%; background: var(--srt-steel); box-shadow: inset 0 1.5px 0 var(--srt-steel-top); }
-.srt-end { position: absolute; right: 0; bottom: 0; left: 0; display: grid; justify-items: center; row-gap: 20px; padding: 0 max(var(--space-24), var(--srt-safe-r)) calc(var(--space-32) + var(--srt-safe-b)) max(var(--space-24), var(--srt-safe-l)); }
+.srt-end { position: absolute; right: 0; bottom: var(--srt-band-end, 0px); left: 0; display: grid; justify-items: center; row-gap: 20px; padding: 0 max(var(--space-24), var(--srt-safe-r)) var(--space-40) max(var(--space-24), var(--srt-safe-l)); }
 .srt-end-consent { margin: 0; color: var(--srt-text-3); font-size: 12px; line-height: 16px; text-align: center; text-wrap: balance; }
 .srt-end-consent a:hover { color: var(--srt-text); }
 .srt-by { display: inline-flex; align-items: center; gap: var(--space-6); }
 .srt-by svg { flex: none; }
+/* The wordmark across the page's end (end-band.tsx), cut off by the page's edge: nine solids, their faces the brand's
+   ink or paper, their tops and sides the machine's own tones (the tone between its front and its shade for what
+   grazes the light), the machine's letters at rest on top. */
+.srt-band-end { position: absolute; left: 0; display: block; overflow: visible; }
+.srt-solid-face { fill: var(--srt-name); }
+.srt-solid { stroke-width: .5; stroke-linejoin: round; }
+.srt-solid-0 { fill: var(--srt-body-top); stroke: var(--srt-body-top); }
+.srt-solid-1 { fill: var(--srt-body); stroke: var(--srt-body); }
+.srt-solid-2 { fill: color-mix(in srgb, var(--srt-body), var(--srt-body-side)); stroke: color-mix(in srgb, var(--srt-body), var(--srt-body-side)); }
+.srt-solid-3 { fill: var(--srt-body-side); stroke: var(--srt-body-side); }
+.srt-rest rect { fill: var(--srt-paper); }
+.srt-rest path { fill: none; stroke: color-mix(in srgb, var(--srt-paper), black 30%); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.srt-rest .srt-rest-shade { fill: var(--srt-body-side); }
+.srt-rest .srt-rest-stamp { fill: var(--color-brand); }
+.srt-band-sill { position: absolute; right: 0; bottom: 0; left: 0; background: var(--srt-plinth); box-shadow: inset 0 2px 0 var(--srt-trim); }
 .srt-end nav { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: var(--space-8) var(--space-20); margin-top: var(--space-24); color: var(--srt-text-3); font-size: var(--text-xs); }
 .srt-end nav a { color: inherit; text-decoration: none; transition: color 150ms var(--srt-ease); }
 @media (hover: hover) and (pointer: fine) { .srt-end nav a:hover { color: var(--srt-text); } }
