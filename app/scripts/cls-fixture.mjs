@@ -398,12 +398,6 @@ export async function seed(fx) {
   await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, created_at)
     VALUES ($1,'ws_northwind','${REGION}','fixture','deals@mail.northwind.example','["customer@example.net"]','[]','[]',$2,$3::jsonb,false,'delivered','provider-'||$1,3,now()-interval '1 minute')`,
     [junkEmail, JUNK_SUBJECT, JSON.stringify({ kind: 'marketing', region: REGION, subject: JUNK_SUBJECT, html: JUNK_HTML, attachments: [] })]);
-  // The signed-out homepage's figures, as the minute job publishes them.
-  const hourly = Array.from({ length: 24 }, (_, i) => 1200 + (i * 7919) % 900);
-  await db.query('INSERT INTO public_stats (singleton, stats, generated_at) VALUES (true, $1::jsonb, now())', [JSON.stringify({
-    generatedAt: new Date(Math.floor(Date.now() / 3600_000) * 3600_000).toISOString(), available: true, acceptedLast30Days: 1_200_000, acceptedLastHour: hourly[23],
-    acceptedHourly: hourly, deliveryRate: 0.991, medianSendLatencyMs: 140, regions: [REGION] })]);
-
   // Receiving: addresses with aliases, routes, endpoints, rituals, webhooks, agent inboxes and threads.
   const make = input => dana.api('POST', '/v1/inbound/addresses', input, 201);
   const A = {
