@@ -45,6 +45,8 @@ const TABLE = {
   // The sides of the wordmark's lit letters at the head of the frame (sorter/name.ts): never as pale as their faces,
   // by night or by day, so a letter's face stays the outline's own shape.
   rim:     [[.5, .39, .33, .27, .02, 268, 1], [.63, .52, .46, .39, .03, 262, 1]],
+  // The fitters' arms: a paler enamel than the machine's own, so they are seen at work against it and against the dark.
+  arm:     [[.8, .66, .56, .44, .016, 85, 1], [.97, .88, .79, .69, .02, 85, 1]],
   // What a glass tube throws on the slab under it: a veil of the dark.
   umbra:   [flat(.1, .014, 268, .34), flat(.5, .02, 262, .2)],
   // The wordmark's faces: by night lit from within, as the price's windows are; by day the letters' own paper.
@@ -56,7 +58,7 @@ export type Mat = keyof typeof TABLE
 const SURFACE: Partial<Record<Mat, [number, number, number]>> = {
   slab: [.4, .55, 0], body: [.5, .3, 0], plinth: [.5, .3, 0], wall: [.6, .15, 0], trim: [.36, .5, 0], steel: [.24, 1, 0], dark: [.6, .1, 0], bay: [.55, .15, 0], rubber: [.8, .08, 0],
   cell: [.7, .1, 0], cell2: [.7, .1, 0], brand: [.45, .3, 0], red: [.3, 0, 1], redzone: [.6, .1, 0], ember: [1, 0, 1], glass: [.08, .5, 0], sheen: [.08, .8, 0], pane: [.1, .8, 0], crack: [.3, 0, .3],
-  tube: [.1, 1, 0], lampOff: [.25, .7, 0], lampOn: [.3, 0, 1], dial: [.5, .25, 0], slot: [.3, .3, 0], screen: [.2, .5, 0], rim: [.5, .25, 0], lit: [.9, 0, 1],
+  tube: [.1, 1, 0], lampOff: [.25, .7, 0], lampOn: [.3, 0, 1], dial: [.5, .25, 0], slot: [.3, .3, 0], screen: [.2, .5, 0], rim: [.5, .25, 0], lit: [.9, 0, 1], arm: [.4, .5, 0],
 }
 export const MAT = Object.fromEntries(Object.keys(TABLE).map((name, index) => [name, index])) as Record<Mat, number>
 
@@ -106,6 +108,7 @@ export function toneVars(dark: boolean): Record<string, string> {
     '--srt-steel': tone('steel', 1, dark), '--srt-steel-top': tone('steel', 0, dark), '--srt-steel-graze': tone('steel', 2, dark), '--srt-steel-side': tone('steel', 3, dark), '--srt-paper-dim': tone('dim', 2, dark), '--srt-bay': tone('bay', 0, dark), '--srt-bay-side': tone('bay', 3, dark), '--srt-screen': tone('screen', 1, dark), '--srt-slot': tone('slot', 0, dark), '--srt-lamp-off': tone('lampOff', 1, dark),
     '--srt-tube-0': glass(0, dark), '--srt-tube-1': glass(1, dark), '--srt-tube-2': glass(2, dark), '--srt-tube-3': glass(3, dark),
     '--srt-glass-back': glassBack(dark), '--srt-glass-0': glassVeil(0, dark, .7), '--srt-glass-1': glassVeil(1, dark, .6), '--srt-glass-2': glassVeil(2, dark), '--srt-glass-3': glassVeil(3, dark),
+    '--srt-lit': tone('lit', 1, dark), '--srt-rim': tone('rim', dark ? 1 : 2, dark),
     '--srt-glass-rim': glassVeil(0, dark, 1.3), '--srt-glass-glint': dark ? 'rgb(255 255 255 / 46%)' : 'rgb(255 255 255 / 90%)',
   }
 }

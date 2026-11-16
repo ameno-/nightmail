@@ -85,6 +85,15 @@
 .srt-cannon:focus-visible, .srt-hopper:focus-visible { outline: var(--focus-width) solid var(--color-focus); outline-offset: 2px; }
 
 .srt-lanes { margin: 0; padding: 0; list-style: none; }
+/* What is written on a floor of the tower is not there before the floor is (it comes up as the floor is let down
+   on), and nothing on the machine can be pressed until it is whole. */
+.srt-page:not([data-floors='2']) :is(.srt-readout, .srt-gauge) { visibility: hidden; }
+.srt-page:not([data-whole]) :is(.srt-hopper, .srt-cannon) { pointer-events: none; }
+@keyframes srt-come-up { from { opacity: 0; } }
+@media (prefers-reduced-motion: no-preference) { .srt-page[data-floors='2'] .srt-readout { animation: srt-come-up 360ms var(--srt-ease) backwards; } }
+/* A lane's plate is blank until its works are fitted; then its name comes up on it. */
+.srt-lanes li[data-off] { opacity: 0; }
+@media (prefers-reduced-motion: no-preference) { .srt-lanes li { transition: opacity 260ms var(--srt-ease); } }
 .srt-lanes li { position: absolute; z-index: 2; display: grid; place-items: center; color: var(--srt-text-2); font-family: var(--font-mono); font-size: clamp(10px, var(--srt-u) * 1.2, 11px); line-height: 1; letter-spacing: .02em; text-transform: uppercase; white-space: nowrap; pointer-events: none; }
 /* Where each tube goes over the slab's lip: the name of where it leads, on the lip. */
 /* (Whole names where a plate holds them at 10 px; the lanes' codes where it does not.) */
@@ -97,6 +106,14 @@
 /* The sentence: exactly as wide as the price above it, its words spread to the same two edges, its full stop hung
    outside the right one. --srt-k is its width in ems (without the stop) at the display optical size. */
 .srt-band { position: absolute; z-index: 2; display: flex; align-items: center; margin: 0; color: var(--srt-text); font-size: calc(var(--srt-price) / var(--srt-k)); font-weight: 500; font-variant-numeric: proportional-nums; font-variation-settings: 'opsz' 32; line-height: 1; letter-spacing: -.022em; white-space: nowrap; pointer-events: none; }
+/* What is written on the tower belongs to it. The sentence under the price is letters in lights, as the name over it
+   is: each stands a little proud of its board (its far side seen, up and to the left, as depth runs on this page) and
+   by night sheds a little of its light on the board round it. By day they are dark letters on a pale board, with the
+   lamp's shadow under them. And what an instrument shows is lit from behind its glass. */
+.srt-band { --srt-deep: calc(var(--srt-price) / 520); text-shadow: calc(var(--srt-deep) * -.5) calc(var(--srt-deep) * -.8) 0 var(--srt-rim), calc(var(--srt-deep) * -1) calc(var(--srt-deep) * -1.6) 0 var(--srt-rim), calc(var(--srt-deep) * -1) calc(var(--srt-deep) * 2.4) calc(var(--srt-deep) * 2.4) rgb(0 0 0 / 22%); }
+:root[data-theme='dark'] .srt-band { color: var(--srt-lit); text-shadow: calc(var(--srt-deep) * -.5) calc(var(--srt-deep) * -.8) 0 var(--srt-rim), calc(var(--srt-deep) * -1) calc(var(--srt-deep) * -1.6) 0 var(--srt-rim), 0 0 calc(var(--srt-price) / 30) rgb(255 232 190 / 26%); }
+.srt-page[data-phone] .srt-band { --srt-deep: calc(var(--srt-price) / 300); }
+.srt-readout, .srt-tally, .srt-page:not([data-phone]) .srt-fact { text-shadow: 0 0 .5em color-mix(in oklch, currentColor 42%, transparent); }
 .srt-line { display: flex; align-items: baseline; justify-content: space-between; width: 100%; translate: 0 -.02em; }
 .srt-row { display: contents; }
 .srt-last { position: relative; }

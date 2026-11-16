@@ -46,6 +46,13 @@ export function SorterHome({ start, notice }: HomeProps) {
   // Whoever has watched it burst once gets there sooner the next time.
   const [quick] = useState(() => { try { return localStorage.getItem(SEEN) === '1' } catch { return false } })
   const [phase, setPhase] = useState<Phase>('boot'), [live, setLive] = useState(false), [card, setCard] = useState<Letter | null>(null)
+  // Which lanes the machine has so far: it begins with one and is fitted with the rest (sorter/plan.ts `fit`). A
+  // lane's plate carries its name once its works are in.
+  const [fitted, setFitted] = useState<boolean[] | null>(null)
+  // And how much of the tower stands: it begins as its foot and the price's frame with the roof on them, and the
+  // sorting floor and the console are slid in under the roof (sorter/engine.ts). What the page writes on a floor is
+  // not there before the floor is; `whole`: fitted out, with everything on it that can be pressed.
+  const [tower, setTower] = useState(() => ({ floors: reduced ? 2 : 0, whole: reduced }))
 
   // What the machine tells the page: the letter under the scanner, the tally, where it is in its day, the letter under the pointer.
   const [hooks] = useState<Hooks>(() => ({
@@ -63,6 +70,8 @@ export function SorterHome({ start, notice }: HomeProps) {
     count(sorted, burnt) { counts.current = [sorted, burnt]; if (tally.current) tally.current.textContent = String(sorted % 100000).padStart(5, '0') },
     phase(next) { setPhase(next); if (next === 'boom') try { localStorage.setItem(SEEN, '1') } catch { /* private mode: the long version again next time */ } },
     // Smoke in front of what is written on the machine hides it, as it hides the machine.
+    floors(count, whole) { setTower(now => now.floors === count && now.whole === whole ? now : { floors: count, whole }) },
+    fit(lanes) { setFitted(now => now && now.length === lanes.length && now.every((on, i) => on === lanes[i]) ? now : lanes) },
     veil(zone, clear) { const el = zone === 0 ? readout.current : veiled.current[zone]; if (el) el.style.opacity = clear >= 1 ? '' : String(clear) },
     hover(letter, x, y) {
       if (letter !== shown.current) { shown.current = letter; setCard(letter) }
@@ -96,7 +105,7 @@ export function SorterHome({ start, notice }: HomeProps) {
     observer.observe(scene.current!); observer.observe(probe.current!); observer.observe(head.current!)
     return () => observer.disconnect()
   }, [])
-  useLayoutEffect(() => { if (p) drawStill(still.current!, p, over, dark) }, [p, over, dark])
+  useLayoutEffect(() => { if (p) drawStill(still.current!, p, over, dark, reduced) }, [p, over, dark, reduced])
 
   // After the first paint: fetch the engine and start it; then the letters.
   useEffect(() => {
@@ -145,7 +154,7 @@ export function SorterHome({ start, notice }: HomeProps) {
     return { left: q.ox + (x0 + x1) / 2 + sx - w / 2, top: q.oy - top - sy - 4 - (h - (top - c.y + 8)), width: w, height: h } }
   // The hopper's mouth, as it is seen: wide enough to press.
   const hopperBox = (q: Plan) => { const w = Math.max(48, 2.6 * q.lw), h = Math.max(44, q.hopper * .82 + 12), x = DX * q.zL, y = DY * q.zL; return { left: q.ox + x - w / 2, top: q.oy - q.yTop - y - h, width: w, height: h } }
-  return <div className="srt-page" data-phase={phase} data-live={live || undefined} data-phone={p?.phone || undefined} data-tight={p?.tight || undefined} style={{ ...toneVars(dark), ...p && { '--srt-u': `${p.U}px`, '--srt-v': `${p.V}px`, '--srt-price': `${price.w}px`, '--srt-below': `${p.floor - p.front - p.lip}px`, '--srt-ext': `${p.ext}px`, '--srt-ox': `${p.ox}px`, '--srt-plate': `${p.label * p.P}px` } } as CSSProperties}>
+  return <div className="srt-page" data-phase={phase} data-live={live || undefined} data-phone={p?.phone || undefined} data-tight={p?.tight || undefined} data-floors={tower.floors} data-whole={tower.whole || undefined} style={{ ...toneVars(dark), ...p && { '--srt-u': `${p.U}px`, '--srt-v': `${p.V}px`, '--srt-price': `${price.w}px`, '--srt-below': `${p.floor - p.front - p.lip}px`, '--srt-ext': `${p.ext}px`, '--srt-ox': `${p.ox}px`, '--srt-plate': `${p.label * p.P}px` } } as CSSProperties}>
     <header className="srt-header" ref={head}>
       {/* The monogram alone: the wordmark is in lights on the machine, over the price (sorter/name.ts). */}
       <a className="srt-mark" href="/" aria-label={`${productName.toLowerCase()} home`}><NightmailMark /></a>
@@ -169,7 +178,9 @@ export function SorterHome({ start, notice }: HomeProps) {
             <span className="srt-readout-from">{productName.toLowerCase()} sorter</span><span className="srt-readout-subject">Waiting for mail</span><span className="srt-readout-route" />
           </div>
           <button type="button" className="srt-gauge" style={at({ x: p.gauge.x - p.gauge.r - 5, y: p.gauge.y - p.gauge.r - 5, w: 2 * p.gauge.r + 10, h: 2 * p.gauge.r + 10 })} aria-label={phase === 'rest' ? 'Put the sorter back together' : 'Pressure gauge'} title={phase === 'rest' ? 'Put it back together' : 'Pressure'} onClick={() => sorter.current?.gauge()} />
-          <ol className="srt-lanes" data-names={!p.phone && named || undefined} ref={el => { veiled.current[1] = el }} aria-hidden="true">{p.lanes.map((x, i) => <li key={i} style={at({ x: x - p.label / 2 * p.P, y: p.ySlot + .14 * p.slot, w: p.label * p.P, h: .72 * p.slot })}>{(named ? LANE_NAMES : LANE_CODES)[p.routes[i]]}</li>)}</ol>
+          <ol className="srt-lanes" data-names={!p.phone && named || undefined} ref={el => { veiled.current[1] = el }} aria-hidden="true">{p.lanes.map((x, i) => <li key={i} data-off={!(fitted && fitted.length === p.lanes.length ? fitted[i] : reduced) || undefined} style={at({ x: x - p.label / 2 * p.P, y: p.ySlot + .14 * p.slot, w: p.label * p.P, h: .72 * p.slot })}>{(named ? LANE_NAMES : LANE_CODES)[p.routes[i]]}</li>)}</ol>
+          {/* On a wide page, the name on each unit plugged onto the tower's side: there once its lane is. */}
+          {p.pods.length > 0 && <ol className="srt-lanes srt-pods" aria-hidden="true">{p.pods.map((pod, k) => <li key={k} data-off={!(fitted && fitted.length === p.lanes.length ? fitted[pod.lane] : reduced) || undefined} style={{ left: p.ox + pod.x + .5 * p.U + DX * pod.z, top: p.oy - pod.y - 2.3 * p.U - DY * pod.z, width: pod.w - 2.2 * p.U, height: 1.4 * p.U }}>{(pod.w - 2.2 * p.U >= 57 ? LANE_NAMES : LANE_CODES)[p.routes[pod.lane]]}</li>)}</ol>}
           {/* The hopper: press it and more mail comes down (what the old code does from a keyboard). */}
           {!reduced && <button type="button" className="srt-hopper" style={hopperBox(p)} aria-label="Hopper: pour in more mail" title="More mail" onMouseDown={event => event.preventDefault()} onClick={() => sorter.current?.rain()} />}
           {/* The send cannon: press it and it fires one. */}

@@ -5,6 +5,10 @@ import type { Part } from './gl'
 
 export type V3 = [number, number, number]
 export type PartDef = Part & { name: string; pivot: V3; lo: V3; hi: V3 }
+/** The machine is put together a floor at a time: what never moves within the machine still belongs to one of them
+ *  (0 the tower's foot and the price's frame, 1 the sorting floor, 2 the console, 3 the roof and all that stands on
+ *  it; then one to each unit plugged onto its sides), and a floor is carried into place whole (gl.ts shifts each part by its floor's shift). */
+export const FLOORS = 10
 
 /** Which faces of a box to build: front (towards the viewer), top, left, right, back (k), bottom (b). What never moves shows only the first three. */
 export const SEEN = 'ftl', ALL = 'ftlrkb'
@@ -17,17 +21,27 @@ export class Builder {
   data: number[] = []
   parts: PartDef[] = []
   private current!: PartDef
+  private level = 0
+  // (What is built into the part that never moves is kept by floor, and becomes a part to each floor at the end.)
+  private fixed: number[][] = Array.from({ length: FLOORS }, () => [])
   constructor() { this.part('static') }
+  /** Whatever is built from here on is this floor's. */
+  floor(level: number) { this.level = level }
 
   part(name: string, pivot: V3 = [0, 0, 0], glass = false) {
     if (this.current) this.current.count = this.data.length / STRIDE - this.current.start
-    this.current = { name, pivot, glass, start: this.data.length / STRIDE, count: 0, on: true, fade: 1, m: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]), lo: [Infinity, Infinity, Infinity], hi: [-Infinity, -Infinity, -Infinity] }
+    this.current = { name, pivot, glass, floor: this.level, start: this.data.length / STRIDE, count: 0, on: true, fade: 1, m: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]), lo: [Infinity, Infinity, Infinity], hi: [-Infinity, -Infinity, -Infinity] }
     this.parts.push(this.current)
     return this.parts.length - 1
   }
-  finish() { this.current.count = this.data.length / STRIDE - this.current.start; return new Float32Array(this.data) }
+  finish() {
+    this.current.count = this.data.length / STRIDE - this.current.start
+    this.fixed.forEach((data, level) => { if (!data.length) return; this.level = level; this.part(`floor${level}`); for (const x of data) this.data.push(x); this.current.count = data.length / STRIDE })
+    return new Float32Array(this.data)
+  }
 
   private v(p: V3, n: V3, mat: number, u = 0, w = 0, fw = 0, fh = 0) {
+    if (this.current.name.startsWith('static')) { this.fixed[this.level].push(p[0], p[1], p[2], n[0], n[1], n[2], mat, u, w, fw, fh); return }
     this.data.push(p[0], p[1], p[2], n[0], n[1], n[2], mat, u, w, fw, fh)
     const { lo, hi } = this.current
     for (let i = 0; i < 3; i++) { if (p[i] < lo[i]) lo[i] = p[i]; if (p[i] > hi[i]) hi[i] = p[i] }

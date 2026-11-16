@@ -23,7 +23,11 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   // seven), no tubes down its front (its mail goes down through the slab, and the tubes begin at its lip), a cabinet
   // as wide as the page less a gutter each side, and everything on its front between the price's own two edges.
   const phone = W < 900
-  const routes = phone ? [0, 2, 3, 5] : [0, 1, 2, 3, 4, 5, 6], count = routes.length, per = phone ? 0 : 4
+  // The machine is built up as the product is, a part at a time: it begins with one lane, the middle one (a phone's:
+  // the nearer the middle on the left), and the others are fitted outwards from it in turn, left then right (`fit`:
+  // the lanes in that order). So the lanes stand, left to right, in the order that fitting them from the middle brings
+  // the product's own: endpoints first, then threads, agents, inboxes, IMAP, rituals, campaigns.
+  const routes = phone ? [3, 0, 2, 5] : [5, 3, 0, 1, 2, 4, 6], fit = phone ? [1, 2, 0, 3] : [3, 2, 4, 1, 5, 0, 6], count = routes.length, per = phone ? 0 : 4
   // In cells: the unlit columns and rows round the price, the strip the tubes run down (a phone: the cabinet's stile),
   // and each floor of the machine. (Over the price the frame is ten rows high, not two: the wordmark stands in them.)
   const side = 2, over = 10, under = 2, strip = phone ? .6 : 9.8
@@ -39,7 +43,7 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   const gun = (U: number, lw: number, lh: number, tubeR: number) => {
     const cs = phone ? .8 * U : 1.3 * U, el = .54, part = phone ? .42 : .8, shot = { w: lw * part, h: lh * part }, bore = shot.h / 2 + .2 * cs, r = bore + .22 * cs, long = (phone ? 2.7 : 2.9) * shot.w, back = .31 * long
     // (On a wide page it stands on a chest the mail comes into along the slab; stacked, it is fed up through the roof.)
-    const z = phone ? depth * U * .7 : 15 * U, chest = phone ? .5 * cs : 2 * tubeR + .6 * cs, pivot = chest + back * Math.sin(el) + r * Math.cos(el) + cs
+    const z = phone ? depth * U * .76 : 15 * U, chest = phone ? .5 * cs : 2 * tubeR + .6 * cs, pivot = chest + back * Math.sin(el) + r * Math.cos(el) + cs
     return { z, pivot, chest, el, cs, shot, bore, r, back, fore: long - back, rise: pivot + (long - back) * Math.sin(el) + r + z * DY }
   }
   // A cell is 18 wide for every 13 high, the shape of an envelope; as large as the page allows.
@@ -110,6 +114,10 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   /** How much of a lane its name's plate is across. */
   const label = phone ? .96 : .92
   const cavD = (phone ? 5.2 : 6.6) * U, zL = cavD / 2
+  // On the roof: the slot scams are thrown out of, each side of the hopper (a phone's one, on the left, stands back
+  // of the works: the roof's front is the ports'); and over the outermost lane each side a port, with a fitter's arm
+  // beyond it at the roof's end, that lowers each new lane's deck in (machine.ts).
+  const eject = { x: (phone ? .6 : .5) * Xw, z: phone ? zL + 3.3 * U : zL }
   // Eight tubes, four each side of the price, the nearest the price first: inbox, agent inbox, endpoint, thread;
   // mailbox, ritual, campaign, logs. They run down the front between two manifolds, into a block at each end of the
   // lower one. On a wide page that block goes on round the cabinet's corner, a riser comes down from it to a header on
@@ -185,8 +193,16 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   // The wordmark, in lights at the head of the sorting frame: exactly as wide as the price, its two edges the
   // price's, and half way between the price and the frame's top. `x, y` is its left end on its baseline, `cap` its cap
   // height (its width is 10.8 of them: lib/marks.ts), `z` the plane its face is in, proud of the frame by `depth`.
+  // On a wide page each lane fitted after the first brings a unit of its own, plugged onto the tower's side beside
+  // the price: three down each side in the order they come (the left's: threads, inboxes, rituals; the right's:
+  // agents, IMAP, campaigns). `pods`: each one's lane and side, its place (its left edge, its foot, how far back its
+  // front stands) and its size.
+  const podW = 9 * U, podH = 9.6 * U, pods = phone ? [] : fit.slice(1).map(lane => {
+    const s = lanes[lane] < 0 ? -1 : 1, n = fit.slice(1, fit.indexOf(lane)).filter(other => (lanes[other] < 0 ? -1 : 1) === s).length
+    return { lane, s, x: s < 0 ? -Xc - podW : Xc, y: yMan - 1.5 * U - (n + 1) * podH - n * 2 * U, z: 1.4 * U, w: podW, h: podH, d: 5.6 * U }
+  })
   const name = { x: -COLS * U / 2, y: yMan - over * V / 2 - COLS * U / 21.6, cap: COLS * U / 10.8, z: -.6 * U, depth: .6 * U }
-  return { phone, routes, tight, short, name, W, H, fold, inset, ext, cannon, out: Math.round(out), room, widest, lean, ox, oy, sx, U, V, side, over, under, Xw, Xc, Xb, D, base, band, wall, manifold, slot, cavity, fascia, yBand, yWall, yMan, ySlot, yCav, yFas, yTop, P, lanes, label, lw, lh, cavD, zL, tubeR, tubes, post, zt, zProud, riser, fan, heads, drops, hung, front, lip, floor, zLip, zOver, zBack, slabX, hopper: hopperU * U, cta, consent, plate, facts, tally, readout, fromMax, subjectMax, gauge, lamps }
+  return { phone, routes, fit, pods, eject, tight, short, name, W, H, fold, inset, ext, cannon, out: Math.round(out), room, widest, lean, ox, oy, sx, U, V, side, over, under, Xw, Xc, Xb, D, base, band, wall, manifold, slot, cavity, fascia, yBand, yWall, yMan, ySlot, yCav, yFas, yTop, P, lanes, label, lw, lh, cavD, zL, tubeR, tubes, post, zt, zProud, riser, fan, heads, drops, hung, front, lip, floor, zLip, zOver, zBack, slabX, hopper: hopperU * U, cta, consent, plate, facts, tally, readout, fromMax, subjectMax, gauge, lamps }
 }
 
 /** A box on the machine's front, as the page places it: left and top in the scene, width and height. */

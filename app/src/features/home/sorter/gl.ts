@@ -106,9 +106,9 @@ vec3 seen(vec3 c, vec3 p) {
 
 const MESH_VS = `#version 300 es
 layout(location=0) in vec3 aPos; layout(location=1) in vec3 aNrm; layout(location=2) in float aMat; layout(location=3) in vec4 aFace;
-uniform mat4 uProj, uModel;
+uniform mat4 uProj, uModel; uniform vec3 uShift;
 out vec3 vWorld, vNrm; out float vMat; out vec4 vFace;
-void main() { vec4 w = uModel * vec4(aPos, 1.); vWorld = w.xyz; vNrm = mat3(uModel) * aNrm; vMat = aMat; vFace = aFace; gl_Position = uProj * w; }`
+void main() { vec4 w = uModel * vec4(aPos, 1.); w.xyz += uShift; vWorld = w.xyz; vNrm = mat3(uModel) * aNrm; vMat = aMat; vFace = aFace; gl_Position = uProj * w; }`
 // (`clip`: with the two planes a capsule slides out from behind. Only those parts are drawn with it: a shader that
 // may throw a pixel away costs a phone's GPU its sorting of what is hidden.)
 const meshFs = (clip: boolean) => `#version 300 es
@@ -329,7 +329,7 @@ function noiseTile(size: number) {
 }
 
 /** `plain`: too small a thing to throw a shadow worth drawing (a roller in the works: fifty-six scallops along one edge). */
-export type Part = { start: number; count: number; m: Float32Array; on: boolean; glass: boolean; fade: number; plain?: boolean; clip?: Float32Array }
+export type Part = { start: number; count: number; m: Float32Array; on: boolean; glass: boolean; fade: number; plain?: boolean; clip?: Float32Array; floor?: number }
 /** `clip`: two planes (normal, distance); nothing of the part is drawn beyond either (a capsule sliding out of a block). */
 export const LETTER_FLOATS = 14, FX_FLOATS = 11, SMOKE_FLOATS = 10
 
@@ -497,7 +497,8 @@ export function createRenderer(canvas: HTMLCanvasElement) {
     setLook(next: Partial<typeof look>) { Object.assign(look, next); rows.rects.set(look.rects.flat()); rows.lights.set(look.lights.flat()); rows.boxes.set(look.boxes.flat()) },
     setWall(data: Float32Array, count: number) { wall.upload(data, count); wallCount = count },
     get vertices() { return vertices },
-    draw(scene: { parts: Part[]; letters: Float32Array; letterCount: number; fx: Float32Array; fxCount: number; glow: Float32Array; glowCount: number; air: Float32Array; airCount: number; smoke: Float32Array; smokeCount: number; flash: number; flashAt: number[]; flashR: number; wallOn: boolean }) {
+    /** `shifts`: where each floor of the machine is, off its place (x, y, z to a floor: mesh.ts). */
+    draw(scene: { parts: Part[]; shifts: Float32Array; letters: Float32Array; letterCount: number; fx: Float32Array; fxCount: number; glow: Float32Array; glowCount: number; air: Float32Array; airCount: number; smoke: Float32Array; smokeCount: number; flash: number; flashAt: number[]; flashR: number; wallOn: boolean }) {
       const pass = (matrix: Float32Array, depthOnly: boolean) => {
         // The machine: whatever has no clip first, then the few parts that have one (a capsule coming out of a block).
         for (const prog of [mesh, meshClip]) {
@@ -508,6 +509,7 @@ export function createRenderer(canvas: HTMLCanvasElement) {
           gl.uniform1f(prog.u('uFlash'), scene.flash); gl.uniform1f(prog.u('uFade'), 1); gl.uniform1f(prog.u('uGlass'), 0); gl.uniform1f(prog.u('uSlab'), mats.slab); gl.uniform3fv(prog.u('uFlashAt'), scene.flashAt); gl.uniform1f(prog.u('uFlashR'), scene.flashR)
           gl.bindVertexArray(meshVao)
           for (const part of scene.parts) if (part.on && !part.glass && part.fade >= 1 && !(depthOnly && part.plain) && !!part.clip === clipped) {
+            gl.uniform3fv(prog.u('uShift'), scene.shifts.subarray(3 * (part.floor ?? 0), 3 * (part.floor ?? 0) + 3))
             if (part.clip) { gl.uniform4fv(prog.u('uClipA'), part.clip.subarray(0, 4)); gl.uniform4fv(prog.u('uClipB'), part.clip.subarray(4, 8)) }
             gl.uniformMatrix4fv(prog.u('uModel'), false, part.m); gl.drawArrays(gl.TRIANGLES, part.start, part.count)
           }
@@ -560,7 +562,7 @@ export function createRenderer(canvas: HTMLCanvasElement) {
       gl.enable(gl.CULL_FACE)
       for (const face of [gl.BACK, gl.FRONT]) {
         gl.cullFace(face)
-        for (const part of scene.parts) if (part.on && (part.glass || part.fade < 1) && part.fade > 0) { gl.uniform1f(mesh.u('uFade'), part.fade); gl.uniformMatrix4fv(mesh.u('uModel'), false, part.m); gl.drawArrays(gl.TRIANGLES, part.start, part.count) }
+        for (const part of scene.parts) if (part.on && (part.glass || part.fade < 1) && part.fade > 0) { gl.uniform1f(mesh.u('uFade'), part.fade); gl.uniform3fv(mesh.u('uShift'), scene.shifts.subarray(3 * (part.floor ?? 0), 3 * (part.floor ?? 0) + 3)); gl.uniformMatrix4fv(mesh.u('uModel'), false, part.m); gl.drawArrays(gl.TRIANGLES, part.start, part.count) }
       }
       gl.disable(gl.CULL_FACE)
       if (scene.smokeCount) {
