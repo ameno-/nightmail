@@ -71,7 +71,7 @@ Run these from `support/` with the stage's Cloudflare account. Ryan's work profi
    - `SUPPORT_ROOT_SECRET`: 32+ random bytes as hex (`openssl rand -hex 32`). It's the root for the chat-token and confirm-link keys.
    - `BANE_INBOUND_WEBHOOK_SECRET` and `BANE_SUPPORT_INBOX_KEY`, from step 4.
    - `BANE_INTAKE_WEBHOOK_SECRET` and `BANE_INTAKE_INBOX_KEY`, from step 5.
-7. **Deploy.** CI deploys after Nightmail (below) once the repository variable `SUPPORT_DEPLOY` is `true`. By hand: `wrangler deploy --config wrangler.<stage>.jsonc`. Deploy Nightmail first: the binding needs Nightmail's `SupportPlatform` entrypoint.
+7. **Deploy.** With `SUPPORT_DEPLOY=true`, CI prepares support alongside Nightmail and waits for this attempt's healthy Nightmail Worker before migrating D1 or deploying support. By hand: `wrangler deploy --config wrangler.<stage>.jsonc`. Deploy Nightmail first: the binding needs Nightmail's `SupportPlatform` entrypoint.
 8. **Point the dashboard at it:** set Nightmail's `BANE_SUPPORT_URL` to `https://support.bane.mx/chat` (dev: `support.dev.bane.mx`).
 
 ## Staff ticket page

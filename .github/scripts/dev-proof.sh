@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage: dev-proof.sh <sha>. Require this SHA's live dev E2E plus CI on its queue tree or its exact dev push.
 set -euo pipefail
-sha=$1 repo="repos/$GITHUB_REPOSITORY" wait=${CI_WAIT_SECONDS:-1500} poll=${CI_POLL_SECONDS:-20}
+sha=$1 repo="repos/$GITHUB_REPOSITORY" wait=${CI_WAIT_SECONDS:-1500} poll=${CI_POLL_SECONDS:-5}
 [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "usage: $0 <sha>" >&2; exit 2; }
 
 # The dev deploy job's name comes from the same pinned output as its checkout, so its E2E step proves this commit.

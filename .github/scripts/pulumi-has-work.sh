@@ -28,16 +28,26 @@ fi
 # A stack settings file is only read by the selected stack. Shared changes since
 # the actual deployed base still count, not merely changes introduced by the PR.
 other=dev; [[ $stage == dev ]] && other=production
-inputs=$(grep -E '^(infra/(pulumi|aws-shared)/|api/src/mail-controls\.ts$|\.github/scripts/receiving-rule-set\.sh$)' <<< "$changed" | grep -v '\.md$' | grep -Fxv "infra/pulumi/Pulumi.$other.yaml" || true)
+inputs=$(grep -E '^(infra/|api/src/mail-controls\.ts$|\.github/scripts/(check-gateway-plan\.py|copy-pulumi-backend\.py|receiving-rule-set\.sh)$|\.github/actions/cloudflare-token/)' <<< "$changed" | grep -v '\.md$' | grep -Fxv "infra/pulumi/Pulumi.$other.yaml" || true)
 
 # The Pulumi job itself, aliases expanded and Require guards removed: a guard only stops a run, never changes what
 # Pulumi applies. A change anywhere else in deploy.yml (the Worker deploy, the E2E) is not Pulumi's.
 if grep -qx '.github/workflows/deploy.yml' <<< "$changed"; then
-  job() { git show "$1:.github/workflows/deploy.yml" | yq -o=json 'explode(.) | .jobs.pulumi | del(.steps[] | select((.name // "") | test("^Require ")))' -; }
+  # Compare resolved job definitions. Only the known runner labels and the exact download-cache step are
+  # immaterial; a different program, cache source/path, plugin version, command, or unknown runner still applies.
+  job() {
+    git show "$1:.github/workflows/deploy.yml" | yq -o=json 'explode(.) | .jobs.pulumi | del(.steps[] | select((.name // "") | test("^Require ")))' - |
+      jq -ecS 'select(type=="object" and (.steps|length)>0)
+        | if (.["runs-on"]|IN("ubuntu-latest","blacksmith-4vcpu-ubuntu-2404")) then del(.["runs-on"]) else . end
+        | .steps |= map(select((.uses == "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830" and
+          .with.path == "~/.pulumi/plugins\n~/.bun/install/cache\n" and (.with|keys) == ["key","path"]) | not))'
+  }
   if ! before=$(job "$base") || ! after=$(job "$sha") || [[ $before != "$after" ]]; then
     tenant_status=true
     decide true "The Pulumi job in deploy.yml changed since $base."
   fi
 fi
-[[ -z $inputs && $tenant_status == false ]] || decide true "Pulumi inputs changed since $base."
+[[ -z $inputs ]] || decide true "Pulumi inputs changed since $base."
+# A verifier or scope-script edit still requires the live tenant check; it does not change the desired stack.
+# deploy.yml runs that verification before migration when there is no Pulumi job to run it.
 decide false "No Pulumi input changed since the deployed commit $base; skipping Pulumi."

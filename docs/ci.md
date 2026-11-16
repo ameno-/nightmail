@@ -4,28 +4,28 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 
 ## Merging into `dev`: the merge queue
 
-`gh pr merge <n>` enqueues a PR. The queue is enabled on the **classic `dev` branch protection**, not the disabled `dev merge queue` ruleset. It merges onto the latest `dev` and the entries ahead of it only after the required `merge_group` checks (`build`, `acceptance`) pass. Only accounts allowed to push `dev` can enqueue.
+`gh pr merge <n>` enqueues a PR. The queue is enabled on the **classic `dev` branch protection**, not the disabled `dev merge queue` ruleset. It merges onto the latest `dev` and the entries ahead of it only after the required `merge_group` checks (`build`, `acceptance`, `cls`, `preview`, `gateway`, `support`) pass. Only accounts allowed to push `dev` can enqueue.
 
 - **Why:** with "require branches to be up to date", parallel PRs went BEHIND after every merge and re-ran CI each time; without it, two PRs that pass alone could break `dev` together (a migration number both picked, a route one added and the other's check missed). The queue removes both.
-- **Cost:** each PR's required checks run twice, once on the PR and once in the queue (about 3 minutes of latency between enqueue and merge). The queue builds up to five entries at once, so a burst of PRs doesn't wait in series.
+- **Cost:** each PR's required checks run twice, once on the PR and once in the queue. The queue builds up to five entries at once, so a burst of PRs doesn't wait in series.
 - **Failures:** a PR that fails in the queue is removed from it with the failing check linked; the entries behind it are rebuilt without it. Fix and re-add.
 - **Deploys:** the queue pushes `dev` as `github-merge-queue[bot]`. The dev deploy accepts that push when the PR merged at exactly that commit was merged (enqueued) by thdxr or R44VC0RP; anything else still fails "Only thdxr and R44VC0RP may deploy".
 - **Breaking API changes:** the `api-breaking` label on the PR still allows them; in the queue, the compatibility check compares just that PR's step.
 
 ## What runs where
 
-| When | Job | What it proves | Time |
-| --- | --- | --- | --- |
-| Every PR, `dev` push | `build` | Types, SDK and docs regenerate cleanly, both Workers bundle, the public API stays compatible, and the **pre-merge invariants** below | ~1–2 min |
-| Every PR, `dev` push | `acceptance` | The API's acceptance suite on Node against an isolated Postgres and S3 fixture, in two shards, plus the **deadlock guard** | ~2–3 min |
-| Every PR, `dev` push | `preview` | The real Worker under `wrangler dev` (workerd) with dev's wrangler config, on a database upgraded from `dev`'s schema; see **Preview stack** | ~2 min |
-| Every PR, `dev` push | `audit`, `gateway`, `cls` | Dependency advisories, the Rust mail gateway, layout shift and text density on every dashboard page | ~3 min, in parallel |
-| `dev` push, alongside CI | Deploy dev | Migrate, deploy, health, live dev E2E | ~2–3 min, plus ~1 min when Pulumi has work |
-| Daily 07:17 UTC, or by hand | Nightly | The acceptance suite (quarantined tests included) and the CLS gate, ten runs each in parallel, reported in one issue | ~6 min |
-| Push to `production` | Deploy production | Requires a passing live dev E2E and CI proof (see **Releasing to production**) | ~2 min, plus ~1 min when Pulumi has work |
-| Daily 03:00 ET, on Ryan's Mac | Nightly report | The last 24 hours of production and dev logs against the previous week; files `nightly` issues and starts a self-improve session (below) | ~2 min, plus the session |
+| When | Job | What it proves |
+| --- | --- | --- |
+| PR, merge group, `dev` push | `build` | Types, SDK and docs regenerate cleanly, both Workers bundle, the public API stays compatible, and the **pre-merge invariants** below |
+| PR, merge group, `dev` push | `acceptance` | Three isolated Postgres/S3 shards (integration, simulated, simulated-heavy), each with the **deadlock guard** |
+| PR, merge group, `dev` push | `preview` | The real Worker under `wrangler dev` on a database upgraded from `dev`'s schema; see **Preview stack** |
+| PR, merge group, `dev` push | `audit`, `gateway`, `cls`, `support` | Dependency advisories, the Rust mail gateway, four shards of layout shift and density measurements, and the support Worker tests |
+| `dev` push, alongside CI | Deploy dev | Migrate, deploy, health and live dev E2E. Support prepares alongside the main Worker but waits for its health check before changing D1 or its service binding. |
+| Daily 07:17 UTC, or by hand | Nightly | The acceptance suite (quarantined tests included) and the CLS gate, ten repetitions each by default, reported in one issue |
+| Production push or dispatch | Deploy production | Requires a passing live dev E2E and CI proof (see **Releasing to production**) |
+| Daily 03:00 ET, on Ryan's Mac | Nightly report | The last 24 hours of production and dev logs against the previous week; files `nightly` issues and starts a self-improve session (below) |
 
-`build` and `acceptance` are required on `dev`.
+CI, nightly and deploy use Blacksmith Ubuntu 24.04 (4 vCPUs for builds, tests and deploys; 2 for lightweight checks). `release.yml` stays on GitHub-hosted runners for npm trusted publishing. Blacksmith routes `actions/cache` to its local cache. Postgres runs on tmpfs; the CLS cache holds the locked Playwright browser and an exact-SHA Vite build, never a deploy artifact. Each protected suite check requires every matrix job to succeed. [Measured PR CI: 93 seconds](https://github.com/anomalyco/nightmail/actions/runs/43788887814), including queue time.
 
 ## Releasing to production
 
@@ -37,11 +37,11 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 
 **Pulumi only runs when it has work.** `.github/scripts/pulumi-has-work.sh` compares the commit being deployed with the commit of the stage's newest successful Deploy job (read from the job's name, so a rollback counts as the commit it deployed). Pulumi runs when one of these changed in that range:
 
-- `infra/pulumi/` or `infra/aws-shared/`, except Markdown;
-- `api/src/mail-controls.ts` or `.github/scripts/receiving-rule-set.sh`;
-- the `pulumi` job in `deploy.yml`, compared with `yq` after expanding anchors and dropping its `Require …` guard steps.
+- `infra/`, except Markdown and the other stage's stack settings;
+- `api/src/mail-controls.ts`, the token action, or a script that checks the receiving set, copies the backend or checks the gateway plan;
+- the `pulumi` job in `deploy.yml`, including its CLI version, after expanding anchors and ignoring its `Require …` guard steps, the equivalent Ubuntu runner labels and the download-cache step.
 
-An edit elsewhere in `deploy.yml` (the Worker deploy or the E2E) no longer runs Pulumi; on Nov 12 that alone ran it four times. Pulumi also runs when no deployed commit is an ancestor, and on every `workflow_dispatch`.
+An edit to the verifier or scope script alone still runs the live tenant-routing check, before the main Worker migrates. A missing or non-ancestor base, unknown job change or explicit manual dispatch requires Pulumi; automatic production dispatch uses the same deployed-base comparison as dev. No token is shared between jobs: each Cloudflare caller mints and uses its own IP-bound token.
 
 ## When the dev E2E fails
 

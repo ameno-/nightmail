@@ -4,3 +4,8 @@ paths:
   .github/workflows/deploy-*.yml:
     ignore:
       - '^unexpected key "queue" for "concurrency" section'
+
+self-hosted-runner:
+  labels:
+    - blacksmith-2vcpu-ubuntu-2404
+    - blacksmith-4vcpu-ubuntu-2404
