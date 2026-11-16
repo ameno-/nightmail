@@ -12,7 +12,7 @@ import { NotesToolbar, noteColumnDefs, useOperatorTabs } from './skeletons'
 // Every UI note across the dashboard (staff's ⌘-click notes, features/ui-notes): filter by status, type and text, open
 // one for its screenshot and everything captured with it, change status in bulk, and make the key an agent uses to fetch
 // and resolve them (api/scripts/ui-notes.ts). operator:read sees them; the operator role changes them.
-const NotFound = () => <EmptyState headingAs="h1" title="Page not found" action={<Link to="/">Return to overview</Link>} />
+const NotFound = () => <EmptyState headingAs="h1" title="Page not found" action={<Link to="/overview">Return to overview</Link>} />
 const def = (key: string) => noteColumnDefs.find(column => column.key === key)!
 const kindLabel = (kind: string) => kind[0]!.toUpperCase() + kind.slice(1)
 const statusTone: Record<NoteStatus, Tone> = { open: 'warning', in_progress: 'info', fixed: 'success', wontfix: 'neutral' }

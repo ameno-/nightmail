@@ -62,17 +62,20 @@ const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 // still onboarding, rae a restricted one that also owes $12.40 (the standing and billing banners on every page).
 // A list of users is one browser signed in to each of them (one session cookie per account, the first the default).
 const pages = ids => [
-  ['Overview', '/', { from: '/logs' }],
-  ['Overview · setup', '/', { user: 'nia' }],
+  ['Overview', '/overview', { from: '/logs' }],
+  ['Overview · setup', '/overview', { user: 'nia' }],
   // Switching the time range keeps the old figures up while the new ones load, then tweens, morphs and crossfades them.
-  ['Overview · range', '/', { from: '/', click: '30d' }],
-  ['Logs', '/logs', { from: '/' }],
+  ['Overview · range', '/overview', { from: '/overview', click: '30d' }],
+  // "/" is the homepage signed in too: its button opens Overview (cold, then in the app).
+  ['Homepage · signed in', '/', {}],
+  ['Overview · from the homepage', '/overview', { from: '/', click: 'Open dashboard' }],
+  ['Logs', '/logs', { from: '/overview' }],
   ['Logs · received', '/logs?view=received', { from: '/logs', click: 'Received' }],
   ['Sent email', `/logs/${ids.email}`, { from: '/logs?view=sent', row: 'Your receipt' }],
   // A junk-like message: EmailInsight's low score, findings and client issues.
   ['Sent email · junk-like', `/logs/${ids.junkEmail}`, { from: '/logs?view=sent', row: 'FINAL NOTICE' }],
   ['Received email', `/logs/${ids.receivedEmail}`, { from: '/logs?view=received', row: 'Invoice for October' }],
-  ['Receiving', '/receiving', { from: '/' }],
+  ['Receiving', '/receiving', { from: '/overview' }],
   ['Receiving · endpoints', '/receiving?tab=endpoints', { from: '/receiving', click: 'Endpoints' }],
   ['Receiving · address', `/receiving/addresses/${ids.address}`, { from: '/receiving' }],
   ['Receiving · inbox', '/receiving/inbox', { from: '/receiving' }],
@@ -91,22 +94,22 @@ const pages = ids => [
   ['Receiving · agent inbox', `/receiving/inboxes/${ids.inbox}`, { from: '/receiving/inboxes' }],
   ['Receiving · webhooks', '/receiving/webhooks', { from: '/receiving' }],
   ['Receiving · webhook', `/receiving/webhooks/${ids.inboundWebhook}`, { from: '/receiving/webhooks' }],
-  ['Campaigns', '/campaigns', { from: '/' }],
+  ['Campaigns', '/campaigns', { from: '/overview' }],
   ['Campaign editor', `/campaigns/${ids.campaign}/edit`, { from: '/campaigns' }],
   ['New campaign', '/campaigns/new', { from: '/campaigns', click: 'Create campaign' }],
   ['Campaign review', `/campaigns/${ids.campaign}/review`, { from: '/campaigns' }],
   ['Templates', '/campaigns/templates', { from: '/campaigns' }],
   ['Template', `/campaigns/templates/${ids.template}`, { from: '/campaigns/templates', row: 'Receipt' }],
-  ['Audience', '/audience', { from: '/' }],
+  ['Audience', '/audience', { from: '/overview' }],
   ['Contact', `/audience/contacts/${ids.contact}`, { from: '/audience' }],
   ['Lists', '/audience/lists', { from: '/audience' }],
   ['List', `/audience/lists/${ids.list}`, { from: '/audience/lists' }],
   ['Segments', '/audience/segments', { from: '/audience' }],
   ['Segment', `/audience/segments/${ids.segment}`, { from: '/audience/segments', row: 'Pro plan' }],
-  ['Domains', '/domains', { from: '/' }],
+  ['Domains', '/domains', { from: '/overview' }],
   ['Domain', `/domains/${ids.domain}`, { from: '/domains' }],
-  ['API keys', '/api-keys', { from: '/' }],
-  ['Settings', '/settings', { from: '/' }],
+  ['API keys', '/api-keys', { from: '/overview' }],
+  ['Settings', '/settings', { from: '/overview' }],
   ['Settings · members', '/settings#members', { from: '/settings' }],
   ['Settings · sending', '/settings#sending', { from: '/settings' }],
   ['Settings · webhooks', '/settings#webhooks', { from: '/settings' }],
@@ -114,31 +117,31 @@ const pages = ids => [
   ['Settings · account', '/settings#account', { from: '/settings' }],
   ['Settings · plan & usage', '/settings#usage', { from: '/settings' }],
   ['Settings · billing', '/settings#billing', { from: '/settings' }],
-  ['Settings · billing · owed', '/settings#billing', { user: 'rae', from: '/' }],
-  ['Settings · billing · free', '/settings#billing', { user: 'nia', from: '/' }],
+  ['Settings · billing · owed', '/settings#billing', { user: 'rae', from: '/overview' }],
+  ['Settings · billing · free', '/settings#billing', { user: 'nia', from: '/overview' }],
   ['Settings · webhook', `/settings/webhooks/${ids.webhook}`, { from: '/settings#webhooks', row: 'Delivery events' }],
   ['Settings · MCP connection', `/settings/mcp/${ids.mcp}`, { from: '/settings#account' }],
-  ['Docs', '/docs', { from: '/' }],
-  ['Operator', '/operator', { from: '/' }],
+  ['Docs', '/docs', { from: '/overview' }],
+  ['Operator', '/operator', { from: '/overview' }],
   ['Operator · workspace', `/operator/workspaces/${ids.restricted}`, { from: '/operator', row: 'Harbor Supply' }],
   ['Operator · UI notes', '/operator/notes', { from: '/operator', click: 'UI notes' }],
   // UI notes mode on (a staff overlay): its pins, tray and lazy code load over the page without moving anything.
-  ['Overview · UI notes mode', '/', { from: '/logs', notes: true }],
+  ['Overview · UI notes mode', '/overview', { from: '/logs', notes: true }],
   // An operator outside UI_NOTES_SUBJECTS with the mode forced on: no tab, toggle, pill or pins, and the API says 404.
-  ['Operator · without UI notes', '/operator', { user: 'rae', from: '/', notes: true }],
-  ['Overview · restricted', '/', { user: 'rae', from: '/logs' }],
-  ['Campaigns · restricted', '/campaigns', { user: 'rae', from: '/' }],
+  ['Operator · without UI notes', '/operator', { user: 'rae', from: '/overview', notes: true }],
+  ['Overview · restricted', '/overview', { user: 'rae', from: '/logs' }],
+  ['Campaigns · restricted', '/campaigns', { user: 'rae', from: '/overview' }],
   // The docs: inside the dashboard signed in (a guide from the contents, an operation, a deep-linked overview section),
   // in their own layout signed out.
   ['Docs · guide', '/docs/rituals', { from: '/docs', click: 'Rituals and omens' }],
-  ['Docs · MCP guide', '/docs/mcp', { from: '/' }],
+  ['Docs · MCP guide', '/docs/mcp', { from: '/overview' }],
   ['Docs · operation', '/docs/api/sendEmail', { from: '/docs/receiving' }],
   ['Docs · section', '/docs#sending-limits', { from: '/api-keys' }],
   ['Docs · signed out', '/docs', { user: null }],
   ['Docs · signed out guide', '/docs/receiving', { user: null, from: '/docs', click: 'Receiving' }],
   ['Onboarding', '/onboarding', { user: 'ona' }],
   // Two accounts in one browser: a cold load as the default (dana), then switching to nia's workspace from the switcher.
-  ['Two accounts · switch', '/', { user: ['dana', 'nia'], from: '/', switchTo: 'Lumen Labs' }],
+  ['Two accounts · switch', '/overview', { user: ['dana', 'nia'], from: '/overview', switchTo: 'Lumen Labs' }],
   ['Signed out', '/', { user: null }],
   // The public legal pages: signed out from the homepage and between documents, and signed in from the sidebar.
   ['Legal', '/legal', { user: null, from: '/legal/terms', click: 'Overview' }],
@@ -147,9 +150,9 @@ const pages = ids => [
   ['Legal · acceptable use', '/legal/acceptable-use', { user: null, from: '/legal/terms' }],
   ['Legal · privacy', '/legal/privacy', { user: null, from: '/legal' }],
   ['Legal · subprocessors', '/legal/subprocessors', { user: null, from: '/legal/privacy' }],
-  ['Support chat', '/logs', { from: '/', support: true }],
-  ['Overview · sending limits dialog', '/', { dialog: 'Daily limit' }],
-  ['Overview · sender score dialog', '/', { dialog: 'Sender score' }],
+  ['Support chat', '/logs', { from: '/overview', support: true }],
+  ['Overview · sending limits dialog', '/overview', { dialog: 'Daily limit' }],
+  ['Overview · sender score dialog', '/overview', { dialog: 'Sender score' }],
   ['Domains · add domain dialog', '/domains', { dialog: 'Add domain' }],
   ['API keys · create key dialog', '/api-keys', { dialog: 'Create key' }],
   ['Receiving · new address dialog', '/receiving', { dialog: 'New address' }],
@@ -162,7 +165,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Overview · range', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Receiving', 'Receiving · rituals', 'Receiving · new ritual', 'Receiving · recipe form', 'Receiving · recipe ritual', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'API keys · create key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
+const phonePages = new Set(['Overview', 'Overview · range', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Receiving', 'Receiving · rituals', 'Receiving · new ritual', 'Receiving · recipe form', 'Receiving · recipe ritual', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'API keys · create key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -427,7 +430,7 @@ async function measure(browser, job, fx) {
     // Overview's latest emails reserve as many 34px rows as reach the card's bottom inset (features/overview/latest.ts):
     // the list must end less than a row above that inset (the card's top padding: Help's taller bottom padding only
     // applies in one column) and never past it.
-    if (job.device === 'desktop' && job.path === '/') {
+    if (job.device === 'desktop' && job.path === '/overview') {
       const gap = await page.evaluate(() => {
         const list = document.querySelector('.ov-latest'), surface = document.querySelector('.page-surface');
         if (!list || !surface) return null;

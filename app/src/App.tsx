@@ -3,7 +3,7 @@ import { Navigate, Route, Routes, Link, useLocation, useParams, type Params } fr
 import { AppShell } from './components/AppShell'
 import { BootLoader } from './components/BootLoader'
 import { Button, EmptyState } from './components/ui'
-import { loadHome, useOnboardingStage, useSession } from './data/context'
+import { HomePage, loadHome, useApi, useOnboardingStage, useSession } from './data/context'
 import { selectedWorkspace } from './data/live'
 import { dashboardLikelyReady, rememberDashboardReady } from './data/onboarding'
 import { routeChunks } from './data/prefetch'
@@ -30,7 +30,7 @@ const loadDocs = docs.preload
 const loadInbound = inbound.preload
 const loadOperator = operator.preload
 const loadLegal = legal.preload
-Object.assign(routeChunks, { '/': loadOverview, '/logs': loadLogs, '/receiving': loadInbound, '/campaigns': loadCampaigns, '/audience': loadAudience, '/domains': loadSettings, '/api-keys': loadSettings, '/settings': loadSettings, '/docs': loadDocs, '/operator': loadOperator, '/legal': loadLegal })
+Object.assign(routeChunks, { '/overview': loadOverview, '/logs': loadLogs, '/receiving': loadInbound, '/campaigns': loadCampaigns, '/audience': loadAudience, '/domains': loadSettings, '/api-keys': loadSettings, '/settings': loadSettings, '/docs': loadDocs, '/operator': loadOperator, '/legal': loadLegal })
 const LogsPage = logs.page(m => m.LogsPage)
 const LogDetailPage = logs.page(m => m.LogDetailPage)
 const CampaignsPage = campaigns.page(m => m.CampaignsPage)
@@ -82,8 +82,11 @@ if (initialPath === '/legal' || initialPath.startsWith('/legal/')) loadLegal().c
 else if (initialPath === '/onboarding') loadOnboarding().catch(noop)
 // The docs are public: signed out or in, their code loads alongside /v1/me.
 else if (['/docs', '/developer'].some(path => initialPath.startsWith(path))) loadDocs().catch(noop)
-else if (!dashboardLikelyReady(selectedWorkspace())) { if (initialPath === '/') loadHome().catch(noop) /* /v1/me decides between onboarding and the dashboard; the homepage is the signed-out answer. */ }
-else if (initialPath === '/') loadOverview().catch(noop)
+// "/" is the homepage, signed in or out, on a hosted installation: a remembered workspace means one, and so does a first
+// visit. A self-hosted installation remembered as ready has no homepage: "/" opens Overview there.
+else if (initialPath === '/') { if (selectedWorkspace() || !dashboardLikelyReady(null)) loadHome().catch(noop); else loadOverview().catch(noop) }
+else if (!dashboardLikelyReady(selectedWorkspace())) { /* /v1/me decides between onboarding and the dashboard. */ }
+else if (initialPath === '/overview') loadOverview().catch(noop)
 else if (initialPath.startsWith('/logs')) loadLogs().catch(noop)
 else if (['/campaigns', '/templates'].some(path => initialPath.startsWith(path))) {
   loadCampaigns().catch(noop)
@@ -113,7 +116,17 @@ function DashboardGate() {
 }
 function OnboardingRoute() {
   const stage = useOnboardingStage()
-  return stage ? <ChunkFallback.Provider value={<BootLoader />}><Suspense fallback={<BootLoader />}><OnboardingPage stage={stage} /></Suspense></ChunkFallback.Provider> : <Navigate to="/" replace />
+  return stage ? <ChunkFallback.Provider value={<BootLoader />}><Suspense fallback={<BootLoader />}><OnboardingPage stage={stage} /></Suspense></ChunkFallback.Provider> : <Navigate to="/overview" replace />
+}
+// "/" is the public homepage for everyone on a hosted installation; signed out, ApiProvider shows it before any route.
+// Signed in, it is this route, which loads none of the dashboard: its button opens Overview. A self-hosted installation
+// (and the demo) has no homepage, so "/" opens Overview, as old links to it expect.
+function RootPage() {
+  const demo = useApi().mode === 'demo'
+  const hosted = useSession()?.identity?.multiTenant === true
+  const location = useLocation()
+  if (demo || !hosted) return <Navigate replace to={{ pathname: '/overview', search: location.search, hash: location.hash }} />
+  return <ChunkFallback.Provider value={<BootLoader />}><HomePage start={{ signedIn: true }} /></ChunkFallback.Provider>
 }
 // Former sections that were folded into another page keep their links working, query and anchor included.
 function Moved({ to }: { to: (params: Readonly<Params>) => string }) {
@@ -129,8 +142,8 @@ function useRememberDashboardReady() {
 }
 export function App() {
   useRememberDashboardReady()
-  return <AppErrorBoundary><Routes><Route path="legal/:doc?" element={<ChunkFallback.Provider value={<BootLoader />}><Suspense fallback={<BootLoader />}><LegalPage /></Suspense></ChunkFallback.Provider>} /><Route path="onboarding" element={<OnboardingRoute />} /><Route element={<DashboardGate />}>
-    <Route index element={<OverviewPage />} />
+  return <AppErrorBoundary><Routes><Route path="legal/:doc?" element={<ChunkFallback.Provider value={<BootLoader />}><Suspense fallback={<BootLoader />}><LegalPage /></Suspense></ChunkFallback.Provider>} /><Route path="onboarding" element={<OnboardingRoute />} /><Route index element={<RootPage />} /><Route element={<DashboardGate />}>
+    <Route path="overview" element={<OverviewPage />} />
     <Route path="logs" element={<LogsPage />} /><Route path="logs/received/:id" element={<Moved to={params => `/logs/${encodeURIComponent(params.id ?? '')}`} />} /><Route path="logs/:id" element={<LogDetailPage />} />
     <Route path="receiving/endpoints" element={<Navigate replace to="/receiving?tab=endpoints" />}/><Route path="receiving/rituals" element={<RitualsRedirect />} /><Route path="receiving/rituals/new" element={<NewRitualPage />} /><Route path="receiving/rituals/new/script" element={<RitualsPage />} /><Route path="receiving/rituals/new/:recipe" element={<NewRecipeRoute />} /><Route path="receiving/rituals/:key" element={<RitualRoute />} /><Route path="receiving/rituals/:key/code" element={<RitualsPage />} /><Route path="receiving/routing" element={<Navigate replace to="/receiving" />} /><Route path="receiving/trace" element={<TracePage />} /><Route path="receiving" element={<ReceivingPage />} /><Route path="receiving/inbox" element={<InboundPage />} /><Route path="receiving/addresses/:id" element={<InboundAddressDetailPage />} /><Route path="receiving/webhooks" element={<InboundWebhooksPage />} /><Route path="receiving/webhooks/:id" element={<InboundWebhookDetailPage />} />
     <Route path="receiving/addresses" element={<Moved to={() => '/receiving'} />} /><Route path="inbound" element={<Moved to={() => '/receiving/inbox'} />} /><Route path="inbound/addresses" element={<Moved to={() => '/receiving'} />} /><Route path="inbound/addresses/:id" element={<Moved to={params => `/receiving/addresses/${id(params)}`} />} /><Route path="inbound/webhooks" element={<Moved to={() => '/receiving/webhooks'} />} /><Route path="inbound/webhooks/:id" element={<Moved to={params => `/receiving/webhooks/${id(params)}`} />} />
@@ -150,6 +163,6 @@ export function App() {
     <Route path="settings/webhooks" element={<Moved to={() => '/settings#webhooks'} />} /><Route path="settings/workspace" element={<Moved to={() => '/settings#workspace'} />} /><Route path="settings/account" element={<Moved to={() => '/settings#account'} />} />
     <Route path="docs/*" element={<DocsPage />} /><Route path="developer" element={<Moved to={() => '/docs'} />} />
     <Route path="operator" element={<OperatorPage />} /><Route path="operator/notes" element={<OperatorNotesPage />} /><Route path="operator/workspaces/:id" element={<OperatorWorkspacePage />} />
-    <Route path="*" element={<EmptyState headingAs="h1" title="Page not found" action={<Link to="/">Return to overview</Link>} />} />
+    <Route path="*" element={<EmptyState headingAs="h1" title="Page not found" action={<Link to="/overview">Return to overview</Link>} />} />
   </Route></Routes></AppErrorBoundary>
 }

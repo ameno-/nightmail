@@ -33,15 +33,15 @@ const UiNotesLayer = chunk(() => import('../features/ui-notes')).page(module => 
 // Members can't manage sending infrastructure; the API enforces this too.
 const adminOnly = new Set(['/api-keys', '/domains'])
 type NavItem = readonly [path: string, title: string]
-const navigation: readonly NavItem[] = [['/', 'Overview'], ['/logs', 'Logs'], ['/receiving', 'Receiving'], ['/campaigns', 'Campaigns'], ['/audience', 'Audience'], ['/domains', 'Domains'], ['/api-keys', 'API keys'], ['/docs', 'Docs'], ['/settings', 'Settings']]
+const navigation: readonly NavItem[] = [['/overview', 'Overview'], ['/logs', 'Logs'], ['/receiving', 'Receiving'], ['/campaigns', 'Campaigns'], ['/audience', 'Audience'], ['/domains', 'Domains'], ['/api-keys', 'API keys'], ['/docs', 'Docs'], ['/settings', 'Settings']]
 // Nightmail staff (a platform operator role in GET /v1/me) also get the operator console, last.
 const operatorLink: NavItem = ['/operator', 'Operator']
 // Below 900 px the sidebar becomes a top bar (workspace, theme) and a bottom tab bar: the four areas used most, one
 // thumb-tap away and always in view, and More, a sheet with the rest. A drawer would hide every destination behind a
 // button; the tab bar keeps the main ones visible and says where you are.
-const tabs = ['/', '/logs', '/receiving', '/campaigns']
-const icons: Record<string, ReactNode> = { '/': <LayoutGrid />, '/logs': <ScrollText />, '/receiving': <Inbox />, '/campaigns': <Send />, '/audience': <Users />, '/domains': <Globe />, '/api-keys': <KeyRound />, '/docs': <BookOpen />, '/settings': <Settings />, '/operator': <ShieldCheck /> }
-const current = (path: string, pathname: string) => path === '/' ? pathname === '/' : pathname === path || pathname.startsWith(`${path}/`)
+const tabs = ['/overview', '/logs', '/receiving', '/campaigns']
+const icons: Record<string, ReactNode> = { '/overview': <LayoutGrid />, '/logs': <ScrollText />, '/receiving': <Inbox />, '/campaigns': <Send />, '/audience': <Users />, '/domains': <Globe />, '/api-keys': <KeyRound />, '/docs': <BookOpen />, '/settings': <Settings />, '/operator': <ShieldCheck /> }
+const current = (path: string, pathname: string) => pathname === path || pathname.startsWith(`${path}/`)
 export function AppShell() {
   const api = useApi()
   const { regionId, setRegionId } = useRegion()
@@ -60,7 +60,7 @@ export function AppShell() {
   useUiNotesShortcut(canNote, useCallback((on: boolean) => toast(on ? `UI notes on. ${notesModifierLabel}-click anything to leave a note.` : 'UI notes off.'), [toast]))
   useEffect(() => { if (scoreAbout.open) setScoreAboutMounted(true) }, [scoreAbout.open])
   // Hosted workspaces view every region at once, so no page waits on a selected region.
-  const needsRegion = !access.multiTenant && (location.pathname === '/' || ['/logs', '/domains'].some(path => location.pathname.startsWith(path)))
+  const needsRegion = !access.multiTenant && ['/overview', '/logs', '/domains'].some(path => location.pathname.startsWith(path))
   // Hosted workspaces view every region at once and never read the SES region catalog.
   const regions = useRegionCatalog({ enabled: !access.multiTenant })
   const enabled = regions.data?.data.filter(region => region.enabled) ?? []
@@ -109,7 +109,7 @@ export function AppShell() {
         await idle()
         const { pathname, canAdminister, prefetchRoute } = latest.current
         if (stopped) return
-        if ((path === '/' ? pathname === '/' : pathname.startsWith(path)) || (!canAdminister && adminOnly.has(path))) continue
+        if (pathname.startsWith(path) || (!canAdminister && adminOnly.has(path))) continue
         await prefetchRoute(path)
       }
     })()
@@ -152,7 +152,7 @@ export function AppShell() {
     if (!access.multiTenant && regions.data && !current && enabled.length) setRegionId(enabled.find(region => region.region === preferred)?.region ?? enabled[0].region)
   }, [access.multiTenant, regions.data, current, enabled, setRegionId])
   // Docs pages name themselves (features/docs).
-  useEffect(() => { if (location.pathname === '/docs' || location.pathname.startsWith('/docs/')) return; document.title = `${[...navigation, operatorLink].find(([path]) => path === '/' ? location.pathname === '/' : location.pathname.startsWith(path))?.[1] ?? productName.toLowerCase()} · ${productName.toLowerCase()}` }, [location.pathname])
+  useEffect(() => { if (location.pathname === '/docs' || location.pathname.startsWith('/docs/')) return; document.title = `${[...navigation, operatorLink].find(([path]) => location.pathname.startsWith(path))?.[1] ?? productName.toLowerCase()} · ${productName.toLowerCase()}` }, [location.pathname])
   // "/" jumps to the page's search box, as in most list-heavy tools, unless you are already typing somewhere.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -240,7 +240,7 @@ export function AppShell() {
       <div className="sidebar-context">{context}</div>
       <ThemeToggle />
       {/* Members see every page: owner and admin ones carry a lock and explain who can use them. */}
-      <nav className="main-navigation" aria-label="Main navigation">{links.map(([path, title]) => <NavLink key={path} to={path} end={path === '/'} {...locked(path) ? lockedProps : intent(path)}>{title}{locked(path) && <Lock size={12} aria-label="Owners and admins only" />}</NavLink>)}</nav>
+      <nav className="main-navigation" aria-label="Main navigation">{links.map(([path, title]) => <NavLink key={path} to={path} {...locked(path) ? lockedProps : intent(path)}>{title}{locked(path) && <Lock size={12} aria-label="Owners and admins only" />}</NavLink>)}</nav>
       <div className="sidebar-footer">{footer}</div>
     </aside>
     {scoreHost}
@@ -258,7 +258,7 @@ class PageErrorBoundary extends Component<{ resetKey: string; children: ReactNod
   componentDidUpdate(previous: { resetKey: string }) { if (this.state.failed && previous.resetKey !== this.props.resetKey) this.setState({ failed: false }) }
   render() {
     if (!this.state.failed) return this.props.children
-    return <EmptyState headingAs="h1" title="This page couldn’t load" description="Unsaved changes on it may be lost." action={<div className="cluster"><Button onClick={() => this.setState({ failed: false })}>Try again</Button><Link to="/">Return to overview</Link></div>} />
+    return <EmptyState headingAs="h1" title="This page couldn’t load" description="Unsaved changes on it may be lost." action={<div className="cluster"><Button onClick={() => this.setState({ failed: false })}>Try again</Button><Link to="/overview">Return to overview</Link></div>} />
   }
 }
 
@@ -277,7 +277,7 @@ function TabBar({ links, intent, footer, locked }: { links: readonly NavItem[]; 
   const close = () => { if (open) navigate(-1) }
   return <>
     <nav className="tab-bar" aria-label="Main navigation">
-      {links.filter(([path]) => tabs.includes(path)).map(([path, title]) => <NavLink key={path} className="tab-bar__item" to={path} end={path === '/'} {...intent(path)}><span className="tab-bar__icon" aria-hidden="true">{icons[path]}</span><span className="tab-bar__label">{title}</span></NavLink>)}
+      {links.filter(([path]) => tabs.includes(path)).map(([path, title]) => <NavLink key={path} className="tab-bar__item" to={path} {...intent(path)}><span className="tab-bar__icon" aria-hidden="true">{icons[path]}</span><span className="tab-bar__label">{title}</span></NavLink>)}
       <button ref={moreButton} type="button" className="tab-bar__item" aria-haspopup="dialog" aria-expanded={open} aria-current={inMore ? 'page' : undefined} data-active={inMore || open || undefined} onClick={show}><span className="tab-bar__icon" aria-hidden="true"><Ellipsis /></span><span className="tab-bar__label">More</span></button>
     </nav>
     <Sheet open={open} onOpenChange={next => { if (!next) close() }} title="More" hideTitle className="more-sheet" returnFocus={moreButton}>

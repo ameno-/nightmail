@@ -410,7 +410,7 @@ export class SupportConversation extends DurableObject<Env> {
         const workspace = meta.workspaces.find(w => w.id === workspaceId) ?? meta.workspace;
         if (!workspace) throw new ToolFailure('Choose a workspace first.');
         if (meta.channel === 'email') {
-          return `Email can’t grant content access. In your reply, explain in one sentence why reading the content would help, and give this link to continue in the dashboard, where they can allow it: ${this.env.BANE_ORIGIN}/?support=${meta.conversationId}&share=1`;
+          return `Email can’t grant content access. In your reply, explain in one sentence why reading the content would help, and give this link to continue in the dashboard, where they can allow it: ${this.env.BANE_ORIGIN}/overview?support=${meta.conversationId}&share=1`;
         }
         const id = newId('cns');
         this.sql.exec('INSERT INTO support_consent (id, workspace_id, workspace_name, why, created_at) VALUES (?, ?, ?, ?, ?)', id, workspace.id, workspace.name, why.slice(0, 240), Date.now());

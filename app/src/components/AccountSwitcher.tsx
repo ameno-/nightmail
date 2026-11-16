@@ -95,7 +95,7 @@ export function AccountSwitcher() {
   </button>
   const refocus = () => requestAnimationFrame(() => document.getElementById('sidebar-workspace')?.focus())
   const create = <>
-    {creating && <CreateWorkspaceDialog onClose={() => { setCreating(false); refocus() }} onCreated={id => void run(() => session!.switchWorkspace(id, '/'), 'Couldn’t switch workspace.')} />}
+    {creating && <CreateWorkspaceDialog onClose={() => { setCreating(false); refocus() }} onCreated={id => void run(() => session!.switchWorkspace(id, '/overview'), 'Couldn’t switch workspace.')} />}
     {support && <ContactSupportDialog onClose={() => { setSupport(false); refocus() }} />}
   </>
   // A phone gets a sheet: full-width rows at the bottom of the screen, in thumb reach, and Cancel.

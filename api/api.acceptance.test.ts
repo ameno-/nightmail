@@ -1981,6 +1981,8 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
       const ownerEmail=address(), otherEmail=address(), guestEmail=address();
       const a=await workspaceFixture(ownerEmail,true), b=await workspaceFixture(otherEmail,true), guest=(await workspaceFixture(guestEmail,false)).cookie;
       const invitation=ok(await local('POST',`${base}/invitations`,{email:guestEmail,role:'member'},a.cookie),201);
+      // The link opens the dashboard's review of it, not the homepage at the site's root.
+      assert.equal(new URL(invitation.acceptUrl).pathname+new URL(invitation.acceptUrl).search,`/overview?invitation=${encodeURIComponent(invitation.id)}`);
       error(await local('GET','/v1/me',undefined,guest),401);
       assert.equal(ok(await local('POST',`/v1/workspaces/invitations/${invitation.id}/accept`,undefined,guest)).workspaceId,a.org.id);
       const me=ok(await local('GET','/v1/me',undefined,guest));assert.equal(me.role,'member');
@@ -15384,7 +15386,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'system' }, kind: 'step', step: 'ok', reasons: [] }));
       await runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'system' }, kind: 'step', step: 'warn', reasons }));
       assert.equal((await db.query(`SELECT count(*)::int AS n FROM jobs WHERE workspace_id=$1 AND type='standing.notify'`, [wid])).rows[0].n, 1);
-      assert.match(noticeText({ workspace: 'W', step: 'pause', reasons, quarantine: null, dashboard: 'https://bane.example', marketingHeld: false }).text, /Queued mail is held for 72 hours/);
+      const paused = noticeText({ workspace: 'W', step: 'pause', reasons, quarantine: null, origin: 'https://bane.example/', marketingHeld: false }).text;
+      assert.match(paused, /Queued mail is held for 72 hours/);
+      // The dashboard opens at /overview: the site's root is the public homepage.
+      assert.match(paused, /\nOpen the dashboard: https:\/\/bane\.example\/overview\nThe thresholds are published at https:\/\/bane\.example\/docs#sending-limits\n/);
     });
   });
 

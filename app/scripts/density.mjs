@@ -37,9 +37,9 @@ const TOLERANCE = score => Math.max(3, Math.round(score * 0.05));
 // Lower is easier to take in. Words count once, again when above the fold; each finding costs what reading past it does.
 export const SCORE = { word: 0.1, foldWord: 0.1, longBlock: 4, paragraph: 1, control: 0.5, tip: 1, duplicate: 8, inert: 3, disclosure: 6, empty: 2 };
 
-// Content pages (legal, docs, the signed-out home), the support chat's scripted conversation, and staff overlays and
-// live-edit states that repeat another page, are not measured.
-const SKIP = /^(Legal|Docs|Signed out|Support chat)|UI notes|without UI notes|live (update|conflict)|Two accounts|Overview · range/;
+// Content pages (legal, docs, the homepage signed out and in), the support chat's scripted conversation, and staff
+// overlays, live-edit states and ways in that repeat another page, are not measured.
+const SKIP = /^(Legal|Docs|Signed out|Homepage|Support chat)|UI notes|without UI notes|live (update|conflict)|Two accounts|Overview · range|from the homepage/;
 export const wanted = job => job.mode === 'load' && (job.device === 'phone' || job.scheme === 'light') && !SKIP.test(job.name ?? job.page);
 
 // ---------------------------------------------------------------- in the page

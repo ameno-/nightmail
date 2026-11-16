@@ -36,8 +36,8 @@ for (const route of unique) {
   else if (!id) failures.push(`${method} ${route.path}: HTTP ${response.status} ${type || '(no content type)'} without x-request-id: the Worker did not answer (an uncaught error? see the wrangler log).`);
   else if (response.status >= 500 && !(response.status === 503 && code && notReady.has(code))) failures.push(`${method} ${route.path}: HTTP ${response.status} ${code ?? ''} (${id}) from the Worker on an anonymous request; see this request ID in the wrangler log.`);
 }
-// The dashboard itself still comes from assets.
-for (const path of ['/', '/logs', '/settings']) {
+// The homepage and the dashboard still come from assets.
+for (const path of ['/', '/overview', '/logs', '/settings']) {
   const response = await fetch(origin + path, { signal: AbortSignal.timeout(20_000) });
   const html = await response.text();
   if (response.status !== 200 || !html.includes('<div id="root"')) failures.push(`GET ${path}: expected the dashboard HTML from assets, got HTTP ${response.status}.`);

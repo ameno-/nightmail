@@ -480,8 +480,8 @@ export async function seed(fx) {
     VALUES($1,'user_dana','user_dana',$2,$3,NULL,$4,$5,$6,$6,$7::jsonb,$8::jsonb,$9::timestamptz,CASE WHEN $4 IN ('fixed','wontfix') THEN now() END)`, [id, body, kind, status, `${fx.origin}${path}`, path,
     JSON.stringify({ viewport: { width: 1440, height: 900 }, dpr: 2, theme: 'light', device: 'desktop', pointer: 'fine', build: 'cls' }),
     JSON.stringify({ selector, alternatives: [], testId: null, component: 'PageHeader', components: ['PageHeader'], tag: 'h1', role: 'heading', label: null, text: null, box: { x: 0, y: 0, width: 120, height: 24, scrollX: 0, scrollY: 0 }, styles: {} }), ago(minutes)]);
-  await note('uin_' + '1'.repeat(32), 'Title sits 2px below the period tabs.', 'alignment', 'open', '/', '#main-content > header.ui-page-header > div.cluster:nth-of-type(1) > h1', 50);
-  await note('uin_' + '2'.repeat(32), 'Empty state copy is too long.', 'copy', 'open', '/', '#main-content .cls-element-that-moved', 40);
+  await note('uin_' + '1'.repeat(32), 'Title sits 2px below the period tabs.', 'alignment', 'open', '/overview', '#main-content > header.ui-page-header > div.cluster:nth-of-type(1) > h1', 50);
+  await note('uin_' + '2'.repeat(32), 'Empty state copy is too long.', 'copy', 'open', '/overview', '#main-content .cls-element-that-moved', 40);
   await note('uin_' + '3'.repeat(32), 'Filters wrap at 1280 px.', 'spacing', 'in_progress', '/logs', '#main-content > header.ui-page-header > div.cluster:nth-of-type(1) > h1', 30);
   await note('uin_' + '4'.repeat(32), 'Members table jumps on load.', 'bug', 'fixed', '/settings', '#main-content h2', 20);
 

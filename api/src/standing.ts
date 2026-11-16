@@ -361,16 +361,17 @@ export async function ingestTenantStatus(runtime: Runtime, event: NonNullable<Re
 
 // ---------- owner emails ----------
 const stepWords: Record<Step, string> = { ok: 'in good standing', notice: 'noted', warn: 'warned', restrict: 'restricted: marketing is held', pause: 'paused' };
-export function noticeText(o: { workspace: string; step: Step; reasons: Reason[]; quarantine?: { campaign: string; message: string } | null; dashboard: string; marketingHeld: boolean }) {
+export function noticeText(o: { workspace: string; step: Step; reasons: Reason[]; quarantine?: { campaign: string; message: string } | null; origin: string; marketingHeld: boolean }) {
   const did = o.quarantine ? `${productName} paused the campaign "${o.quarantine.campaign}". Your other mail is unaffected.`
     : o.step === 'pause' ? `${productName} paused all sending from this workspace. Receiving, inboxes, reads and the dashboard keep working. Queued mail is held for 72 hours, then canceled.`
     : o.step === 'restrict' ? `${productName} holds marketing (campaigns and marketing sends). Receipts, password resets and other transactional mail still send.`
     : 'Nothing is held yet. Your daily limit stays where it is (it will not rise) until this clears.';
   const fix = o.quarantine ? ['Remove the contacts that bounced and any you have not mailed before.', 'Check where the list came from and that every contact opted in.', 'Resume the campaign from its page, or ask for a review.']
     : ['Find the campaign or domain named above and stop sending to the addresses that bounced or complained.', 'Remove contacts you cannot show opted in, and old or bought lists.', o.step === 'warn' ? 'Keep sending as usual: the warning clears by itself after 24 hours under the line.' : 'Open the dashboard to follow the checklist, release it when allowed, or ask for a review.'];
+  const base = o.origin.replace(/\/$/, '')
   const what = o.quarantine ? o.quarantine.message : o.reasons.filter(r => r.step !== 'notice').map(r => `- ${r.message}`).join('\n') || '- Sending standing changed.';
   return { subject: o.quarantine ? `${productName} paused a campaign in ${o.workspace}` : `${productName}: ${o.workspace} is ${stepWords[o.step]}`,
-    text: `What happened\n${what}\n\nWhat ${productName} did\n${did}\n\nHow to fix it\n${fix.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n\nOpen the dashboard: ${o.dashboard}\nThe thresholds are published at ${o.dashboard.replace(/\/$/, '')}/docs#sending-limits\n` };
+    text: `What happened\n${what}\n\nWhat ${productName} did\n${did}\n\nHow to fix it\n${fix.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n\nOpen the dashboard: ${base}/overview\nThe thresholds are published at ${base}/docs#sending-limits\n` };
 }
 /**
  * Emails the workspace's owners and admins about a standing change, through the platform workspace's own sending
@@ -387,7 +388,7 @@ export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
   // Workspace and campaign names are the customer's: one line, bounded, so the subject is always a valid header.
   const oneLine = (v: string) => v.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 100) || 'your workspace';
   if (quarantine) quarantine.campaign = oneLine(quarantine.campaign);
-  const notice = noticeText({ workspace: oneLine(event.name), step: event.to_step, reasons: event.reasons, quarantine, dashboard: runtime.config.publicUrl, marketingHeld: event.to_step === 'restrict' });
+  const notice = noticeText({ workspace: oneLine(event.name), step: event.to_step, reasons: event.reasons, quarantine, origin: runtime.config.publicUrl, marketingHeld: event.to_step === 'restrict' });
   const { sendSystemEmail } = await import('./sending.js');
   await sendSystemEmail(runtime, sender, { from, to: event.recipients, subject: notice.subject, text: notice.text, idempotencyKey: `standing:${String(payload.eventId)}`, standingEvent: String(payload.eventId) });
   log('info', { code: 'STANDING_NOTIFIED', workspaceId: job.workspaceId, step: event.to_step, recipients: event.recipients.length, simulated: isSimulatedSes(runtime) });

@@ -1,9 +1,9 @@
 import { useEffect, useRef, type CSSProperties, type ReactNode } from 'react'
-import { ArrowRight, LoaderCircle } from 'lucide-react'
 import { Link } from 'react-router'
 import { SignInConsent } from '../../components/LegalLinks'
 import { AnomalyLogo } from '../../components/AnomalyLogo'
-import type { HomeProps } from '.'
+import type { HomeStart } from '.'
+import { StartButton } from './start'
 import { DX, DY, type Plan } from './sorter/plan'
 import { EndBand, endBand } from './end-band'
 
@@ -40,7 +40,7 @@ const STATIONS: Station[] = [
 /** A window of a unit's progress: the element's own --t runs 0 to 1 while --v goes from `from` to `to`. */
 const step = (from: number, to: number, extra?: CSSProperties) => ({ '--from': from, '--to': to, ...extra }) as CSSProperties
 
-export function Stations({ plan: p, onSignIn, onSignInIntent, busy }: { plan: Plan | null } & Pick<HomeProps, 'onSignIn' | 'onSignInIntent' | 'busy'>) {
+export function Stations({ plan: p, start }: { plan: Plan | null; start: HomeStart }) {
   const root = useRef<HTMLElement>(null), traffic = useRef<HTMLDivElement>(null), flows = useRef<Flow[]>([])
   // One pass per frame while scrolling: how far each unit has come up the page.
   useEffect(() => {
@@ -205,9 +205,7 @@ export function Stations({ plan: p, onSignIn, onSignInIntent, busy }: { plan: Pl
     <div className="srt-box srt-end-plate" style={{ left: plateLeft, top: plate.top, '--srt-w': `${plate.w}px`, '--srt-h': `${plate.h}px` } as CSSProperties}>
       <p className="srt-end-price"><span><b>$0.20</b> per 1,000 emails,</span> <span>sent or received.</span></p>
       <span className="srt-end-bay">
-        <button type="button" className="srt-cta srt-end-cta" disabled={busy} aria-busy={busy || undefined} onClick={onSignIn} onPointerDown={onSignInIntent}>
-          <span className="srt-cta-label">Get started{busy ? <LoaderCircle className="ui-spinner" size={16} aria-hidden="true" /> : <ArrowRight className="srt-cta-arrow" size={16} strokeWidth={2} aria-hidden="true" />}</span>
-        </button>
+        <StartButton start={start} className="srt-cta srt-end-cta" />
       </span>
       {[0, 1, 2, 3].map(k => <i key={k} className="srt-screw" style={{ [k % 2 ? 'right' : 'left']: 10, [k < 2 ? 'top' : 'bottom']: 10 }} aria-hidden="true" />)}
     </div>
@@ -216,7 +214,7 @@ export function Stations({ plan: p, onSignIn, onSignInIntent, busy }: { plan: Pl
       <Tube layer="front" points={[[mainX, plate.top - dy - 6], [mainX, plate.top - dy * .5]]} wide={wide} bend={bend} rings={[{ at: [mainX, plate.top - dy * .5 - 2.5], across: false }]} />
     </svg>
     <footer className="srt-end">
-      <SignInConsent className="srt-end-consent" />
+      {!start.signedIn && <SignInConsent className="srt-end-consent" />}
       <nav aria-label="Site links"><a className="srt-by" href="https://anoma.ly" target="_blank" rel="noopener" title="Anomaly (opens in a new tab)">by <AnomalyLogo height={18} /></a><a href="/docs">API docs</a><Link to="/legal/terms">Terms</Link><Link to="/legal/privacy">Privacy</Link></nav>
     </footer>
     <EndBand W={p.W} phone={phone} inset={p.inset} />

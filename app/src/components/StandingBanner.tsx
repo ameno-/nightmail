@@ -25,6 +25,6 @@ export function StandingBanner() {
       <p className="standing-banner__did">{standingDid[step]}</p>
     </div>
     {/* On Overview the hash change scrolls to the card; elsewhere the link opens Overview there. */}
-    <Link className="ui-button ui-button--secondary ui-button--sm standing-banner__fix" to="/#standing" replace={pathname === '/'}>Fix checklist</Link>
+    <Link className="ui-button ui-button--secondary ui-button--sm standing-banner__fix" to="/overview#standing" replace={pathname === '/overview'}>Fix checklist</Link>
   </div>
 }

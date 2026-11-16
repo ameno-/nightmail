@@ -16,7 +16,7 @@ import { actionColumnDefs, ActionsTrigger, campaignColumnDefs, domainColumnDefs,
 // UI notes (/operator/notes) live in ./notes and load with this chunk.
 export { OperatorNotesPage } from './notes'
 const useOperatorRole = () => useSession()?.identity?.operator ?? null
-const NotFound = () => <EmptyState headingAs="h1" title="Page not found" action={<Link to="/">Return to overview</Link>} />
+const NotFound = () => <EmptyState headingAs="h1" title="Page not found" action={<Link to="/overview">Return to overview</Link>} />
 const def = (defs: typeof queueColumnDefs, key: string) => defs.find(column => column.key === key)!
 const when = (value: string | null | undefined) => value ? `${shortDateTime(isoTime(value))} UTC` : '—'
 const At = ({ value }: { value: string | null | undefined }) => <span className="nowrap">{when(value)}</span>
