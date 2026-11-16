@@ -281,11 +281,13 @@ void main() { if (vBurn.y > 0. && burnt(vUV, vBurn.x) < vBurn.y * 1.3 - .14) dis
 const FX_VS = `#version 300 es
 layout(location=0) in vec2 aQuad;
 layout(location=1) in vec3 iPos; layout(location=2) in vec3 iSize; layout(location=3) in vec4 iCol; layout(location=4) in float iShape;
-uniform mat4 uProj; uniform vec2 uView;
+uniform mat4 uProj; uniform vec2 uView; uniform float uFar;
 out vec2 vQ; out vec4 vCol; out float vShape; out vec2 vHalf;
 void main() {
   float c = cos(iSize.z), s = sin(iSize.z); vec2 q = aQuad * iSize.xy; q = vec2(q.x * c - q.y * s, q.x * s + q.y * c);
   gl_Position = uProj * vec4(iPos, 1.); gl_Position.xy += q * 2. / uView;
+  // (The air is put at the very back, behind all of the machine: it is only drawn where the page shows through.)
+  if (uFar > .5) gl_Position.z = gl_Position.w * .999;
   vQ = aQuad; vCol = iCol; vShape = iShape; vHalf = iSize.xy;
 }`
 const FX_FS = `#version 300 es
@@ -532,6 +534,23 @@ export function createRenderer(canvas: HTMLCanvasElement) {
     }
     return passed
   }
+  // Where on the page there is any smoke: the box round every billow (a billow's quad turns, so as far out as its
+  // corners reach), and a little more for the smoke's buffer, whose texels are larger than the page's and are read
+  // blended. Outside it the buffer is empty, so it need only be laid over the page within it: laid over all of it, it
+  // was a sixth of a frame on a wide page while smoke hung over the machine.
+  const box = new Int32Array(4)
+  const hazed = (scene: Scene) => {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+    for (let i = 0; i < scene.smokeCount; i++) {
+      const o = i * SMOKE_FLOATS, x = scene.smoke[o], y = scene.smoke[o + 1], z = scene.smoke[o + 2], r = scene.smoke[o + 3] * Math.SQRT2
+      const sx = proj[0] * x + proj[4] * y + proj[8] * z + proj[12], sy = proj[1] * x + proj[5] * y + proj[9] * z + proj[13], rx = r * 2 / W, ry = r * 2 / H
+      if (sx - rx < x0) x0 = sx - rx; if (sx + rx > x1) x1 = sx + rx; if (sy - ry < y0) y0 = sy - ry; if (sy + ry > y1) y1 = sy + ry
+    }
+    const cw = canvas.width, ch = canvas.height, pad = 2 * Math.ceil(cw / hazeW) + 1
+    box[0] = Math.max(0, Math.floor((x0 + 1) / 2 * cw) - pad); box[1] = Math.max(0, Math.floor((y0 + 1) / 2 * ch) - pad)
+    box[2] = Math.min(cw, Math.ceil((x1 + 1) / 2 * cw) + pad); box[3] = Math.min(ch, Math.ceil((y1 + 1) / 2 * ch) + pad)
+    return box[2] > box[0] && box[3] > box[1]
+  }
   // Glass, and whatever is fading in or out, faces of one way round.
   const panes = (scene: Scene) => {
     for (let i = 0; i < scene.parts.length; i++) {
@@ -604,27 +623,30 @@ export function createRenderer(canvas: HTMLCanvasElement) {
       gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, shadow)
       gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, shadow)
       gl.clearColor(clear[0], clear[1], clear[2], 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
-      // Behind everything: the air round the machine, where it catches the light.
-      if (scene.airCount) {
-        gl.disable(gl.DEPTH_TEST); gl.depthMask(false); gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE)
-        gl.useProgram(fx.p); gl.uniformMatrix4fv(fx.u('uProj'), false, proj); gl.uniform2f(fx.u('uView'), W, H)
-        gl.bindVertexArray(quads.vao); quads.upload(scene.air, scene.airCount); gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, scene.airCount)
-        gl.disable(gl.BLEND); gl.depthMask(true); gl.enable(gl.DEPTH_TEST)
-      }
       // The machine, as for the shadow map; the price's lit windows, then the letters.
       gl.useProgram(solid.p); tell(solid); flash(solid, scene); gl.bindVertexArray(meshVao)
       if (solids(solid, scene, false, false)) { gl.useProgram(solidClip.p); tell(solidClip); flash(solidClip, scene); solids(solidClip, scene, true, false) }
       gl.useProgram(letter.p); tell(letter)
       if (wallCount && scene.wallOn) { gl.bindVertexArray(wall.vao); gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, wallCount) }
       if (scene.letterCount) { gl.bindVertexArray(letters.vao); gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, scene.letterCount) }
+      // Behind everything: the air round the machine, where it catches the light. It is drawn now, at the back of the
+      // depth, so that only where the page shows through is it worked out at all: drawn first, under the machine, it
+      // was a tenth of a frame on a wide page for nothing that is seen.
+      if (scene.airCount) {
+        gl.depthMask(false); gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE)
+        gl.useProgram(fx.p); gl.uniformMatrix4fv(fx.u('uProj'), false, proj); gl.uniform2f(fx.u('uView'), W, H); gl.uniform1f(fx.u('uFar'), 1)
+        gl.bindVertexArray(quads.vao); quads.upload(scene.air, scene.airCount); gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, scene.airCount)
+        gl.uniform1f(fx.u('uFar'), 0)
+      }
       // Glass and anything fading in or out, over what is behind it: a tube's far wall first, then its near one, the
       // same glass whichever way a tube runs.
       gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false)
       gl.useProgram(glassy.p); tell(glassy); flash(glassy, scene); gl.bindVertexArray(meshVao)
       gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK); panes(scene); gl.cullFace(gl.FRONT); panes(scene); gl.disable(gl.CULL_FACE)
-      if (scene.smokeCount) {
+      if (scene.smokeCount && hazed(scene)) {
+        gl.enable(gl.SCISSOR_TEST); gl.scissor(box[0], box[1], box[2] - box[0], box[3] - box[1])
         gl.disable(gl.DEPTH_TEST); gl.useProgram(over.p); gl.uniform1i(over.u('uSmoke'), 3); gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, haze)
-        gl.bindVertexArray(null); gl.drawArrays(gl.TRIANGLES, 0, 3); gl.enable(gl.DEPTH_TEST)
+        gl.bindVertexArray(null); gl.drawArrays(gl.TRIANGLES, 0, 3); gl.enable(gl.DEPTH_TEST); gl.disable(gl.SCISSOR_TEST)
       }
       gl.useProgram(fx.p); gl.uniformMatrix4fv(fx.u('uProj'), false, proj); gl.uniform2f(fx.u('uView'), W, H)
       gl.bindVertexArray(quads.vao)
