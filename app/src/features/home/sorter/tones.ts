@@ -87,8 +87,9 @@ export function paletteBytes(dark: boolean, rows: number) {
 }
 /** A glass tube over the page, as the page draws it below the machine: the renderer draws a tube's far wall (in
  * shade) and then its near wall (in the tone its facing gives), each at the tube's alpha, over what is behind. */
-export function glass(index: 0 | 1 | 2 | 3, dark: boolean) {
-  const t = TABLE.tube[dark ? 0 : 1], f = TABLE.floor[dark ? 0 : 1], near = oklch(t[index], t[4], t[5]), far = oklch(t[3], t[4], t[5]), under = oklch(f[0], f[4], f[5]), a = t[6]
+export function glass(index: 0 | 1 | 2 | 3, dark: boolean, behind: Mat = 'floor') {
+  // (`behind`: what the tube is seen against, the page's floor unless it is a channel in the machine's front by day.)
+  const t = TABLE.tube[dark ? 0 : 1], f = TABLE[behind][dark ? 0 : 1], near = oklch(t[index], t[4], t[5]), far = oklch(t[3], t[4], t[5]), under = oklch(f[behind === 'floor' ? 0 : 1], f[4], f[5]), a = t[6]
   return `rgb(${near.map((v, i) => Math.round(v * a + (far[i] * a + under[i] * (1 - a)) * (1 - a))).join(' ')})`
 }
 /** The same glass in two layers, for a tube the page draws with a capsule in it: its far wall over the page, and its

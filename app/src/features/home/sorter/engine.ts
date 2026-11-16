@@ -870,9 +870,14 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     }
     if (over && !panelOff && clock > T.over * .55) {
       panelOff = true
-      const k = panelBody, home = debrisHome[k]
-      Dn.state[k] = DYN; Dn.pos.set(home, k * 3); Dn.quat.set([0, 0, 0, 1], k * 4); Dn.vel.set([rnd(30, 120) * px, rnd(180, 300) * px, -rnd(380, 520) * px], k * 3); Dn.ang.set([rnd(4, 9), rnd(-5, 5), rnd(-6, 6)], k * 3)
-      sparks(home[0], home[1], -4, 10, 220); jet(home[0], home[1], -4 * px, .1, .6, 260, 5, 1.4); leaks.push([home[0], home[1] - (m.panel.y1 - m.panel.y0) * .2, -2 * px], [home[0], home[1] + (m.panel.y1 - m.panel.y0) * .2, -2 * px])
+      const k = panelBody, home = debrisHome[k], h = m.panel.y1 - m.panel.y0
+      // (A phone's panel is a strip too narrow to read once it is off, only a dark slot beside the pipe: it holds,
+      // and the steam blows out at its top and its foot instead.)
+      if (p.phone) { sparks(home[0], home[1] + h / 2, -4, 5, 160); jet(home[0], home[1] + h / 2, -2 * px, .1, .9, 200, 3, 1.1); leaks.push([home[0], home[1] + h * .5, -1.6 * px], [home[0], home[1] - h * .5, -1.6 * px]) }
+      else {
+        Dn.state[k] = DYN; Dn.pos.set(home, k * 3); Dn.quat.set([0, 0, 0, 1], k * 4); Dn.vel.set([rnd(30, 120) * px, rnd(180, 300) * px, -rnd(380, 520) * px], k * 3); Dn.ang.set([rnd(4, 9), rnd(-5, 5), rnd(-6, 6)], k * 3)
+        sparks(home[0], home[1], -4, 10, 220); jet(home[0], home[1], -4 * px, .1, .6, 260, 5, 1.4); leaks.push([home[0], home[1] - h * .2, -2 * px], [home[0], home[1] + h * .2, -2 * px])
+      }
     }
     if (leaks.length) { jetIn[4] -= dt * 9 * rate * leaks.length; while (jetIn[4] < 0) { jetIn[4] += 1; const at = leaks[Math.floor(rnd(0, leaks.length))]; jet(at[0], at[1], at[2], rnd(-.35, .35), .94, 100, 1, .62) } }
   }

@@ -36,7 +36,7 @@ export function drawStill(canvas: HTMLCanvasElement, p: Plan, over: number, dark
   { const e = 1.2 * U / 9, half = COLS * U / 2 + 1.3 * U, right = half + (p.phone ? 0 : .017 * COLS * U), y0 = p.yBand + (p.phone ? .09 : .15) * p.band, y1 = p.yBand + (p.phone ? .91 : .85) * p.band
     fill('plinth', dark ? 2 : 1); front(-half, y0, right, y1); fill('trim', 1); front(-half - e, y1, right + e, y1 + e); front(-half - e, y0 - e, right + e, y0); front(-half - e, y0, -half, y1); front(right, y0, right + e, y1)
     if (!p.phone) { fill('trim', 1); front(-Xc, p.yBand - U / 9, Xc, p.yBand + U / 9) }
-    else { const f = p.facts, xa = f[0].x - 1.3 * U, xb = f[1].x + f[1].w + 1.3 * U, ya = f[0].y - 10, yb = f[0].y + f[0].h + 9; fill('plinth', 0); front(xa, ya, xb, yb); fill('trim', 1); for (const x of [xa + .8 * U, xb - .8 * U]) for (const y of [ya + .8 * U, yb - .8 * U]) { c.beginPath(); c.arc(X(x), Y(y), .26 * U, 0, Math.PI * 2); c.fill() } } }
+    else { const f = p.facts, xa = f[0].x - 1.3 * U, xb = f[1].x + f[1].w + 1.3 * U, ya = f[0].y - 10, yb = f[0].y + f[0].h + 9; fill('plinth', dark ? 2 : 1); front(xa, ya, xb, yb); fill('plinth', 0); front(xa, yb - e, xb, yb); fill('trim', 1); for (const x of [xa + .8 * U, xb - .8 * U]) for (const y of [ya + .8 * U, yb - .8 * U]) { c.beginPath(); c.arc(X(x), Y(y), .26 * U, 0, Math.PI * 2); c.fill() } } }
   fill('body', 1); front(p.cta.x - p.plate, p.cta.y - p.plate, p.cta.x + p.cta.w + p.plate, p.cta.y + p.cta.h + p.plate)
   // (The button's frame and the faceplate's four bolts; under the page's button, its own face, so no dark edge of the
   // bay shows round it.)
@@ -133,7 +133,7 @@ export function drawStill(canvas: HTMLCanvasElement, p: Plan, over: number, dark
   box(-Xc - px, yMan, -5 * px, Xc + px, ySlot, 0, 'trim')
   if (lower) box(-Xc - px, yWall - .3 * V, -5 * px, Xc + px, yWall + lower, 0, 'trim')
   if (p.tubes.length) for (const s of [-1, 1]) { const [a, e] = ends(s, false); box(a, yMan, zBlock, e, ySlot, 0, 'trim') }
-  for (const x of p.tubes) { c.fillStyle = glass(1, dark); c.fillRect(X(x - r, zt), Y(yMan, zt), 2 * r, yMan - yLow); c.fillStyle = glass(2, dark); c.fillRect(X(x - r, zt), Y(yMan, zt), r * .5, yMan - yLow) }
+  for (const x of p.tubes) { c.fillStyle = glass(1, dark, dark ? 'floor' : 'dark'); c.fillRect(X(x - r, zt), Y(yMan, zt), 2 * r, yMan - yLow); c.fillStyle = glass(2, dark, dark ? 'floor' : 'dark'); c.fillRect(X(x - r, zt), Y(yMan, zt), r * .5, yMan - yLow) }
   if (lower) {
     const reach = r + 1.5 * px, zB = zt - r - 1.2 * px, ahead = DX * (zB - zt)
     for (const first of [0, 4]) { const a = Math.min(p.tubes[first], p.tubes[first + 3]) - reach - ahead, e = Math.max(p.tubes[first], p.tubes[first + 3]) + reach - ahead; for (let i = 1; i <= 3; i++) { const y = yLow + (yMan - yLow) * i / 4; box(a, y - 1.5 * px, zB, e, y + 1.5 * px, 0, 'trim') } }
