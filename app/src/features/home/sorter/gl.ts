@@ -60,10 +60,11 @@ float shadowAt(vec3 world, vec3 n) {
 // tone's shade the room gives, and how much of the rest the lamp: by night less of the one and more of the other.)
 float pool(vec3 p) { vec2 d = p.xz - uPool.xy; return mix(uLook.x, 1., exp(-dot(d * d, uPool.zw))) * uGain.y; }
 // How open to the room a point is. Ground beside something tall is closed in by it (the cabinet, the two headers);
-// an upright face is closed in near the ground it stands on (the slab, or the roof).
+// an upright face is closed in near the ground it stands on (the slab, or the roof). (A box that is not there, a
+// phone's headers, or that what is lit stands above, is passed over: it would take nothing.)
 float open(vec3 p, vec3 n) {
   float ao = 1.;
-  if (n.y > .5) { for (int i = 0; i < 3; i++) { vec2 d = max(max(uOcc[i].xy - p.xz, p.xz - uOcc[i].zw), 0.); ao *= 1. - .5 * exp(-length(d) * uOccK[i]) * step(p.y, .45 / uOccK[i]); } }
+  if (n.y > .5) { for (int i = 0; i < 3; i++) if (uOcc[i].x < 1e5 && p.y <= .45 / uOccK[i]) { vec2 d = max(max(uOcc[i].xy - p.xz, p.xz - uOcc[i].zw), 0.); ao *= 1. - .5 * exp(-length(d) * uOccK[i]); } }
   else if (n.y > -.5 && p.y > -1e-3) { float h = p.y > uGround.y + .5 && p.z > 1. ? (p.y - uGround.y) * 2.2 : p.y; ao *= mix(.66, 1., smoothstep(0., 5. * uGround.x, max(h, 0.))); }
   return ao;
 }
@@ -147,21 +148,26 @@ void main() {
     c *= 1. + ((texture(uNoise, q * .013).b - .5) * 1.2 + (texture(uNoise, q * vec2(.11, .012)).a - .5) * .8) * uLook.w * rough;
     // Its edges: a solid's are turned a little, so the one towards the lamp is a bright line and the one away a dark
     // one; what is let into a face is in its own rim's shadow at the top and the lit side, and lit along its sill.
-    float w = abs(vFace.z), rise = 0.; bool curved = dot(fwidth(vNrm), vec3(1.)) > 1e-6;
+    // (Only a pixel near one is turned: the rest of a face is as it was. A face with edges is flat; only one without
+    // can be round.)
+    float w = abs(vFace.z), rise = 0.; bool curved = false;
     if (w > 0.) {
       vec2 uv = vFace.xy, far = vec2(w, vFace.w) - uv, dux = dFdx(uv), duy = dFdy(uv), fw = abs(dux) + abs(duy);
       float det = dux.x * duy.y - dux.y * duy.x, let = step(vFace.z, 0.);
-      if (abs(det) > 1e-9) {
-        vec3 dpx = dFdx(vWorld), dpy = dFdy(vWorld), tu = normalize((dpx * duy.y - dpy * dux.y) / det), tv = normalize((dpy * dux.x - dpx * duy.x) / det);
-        vec2 wide = max(vec2(uLook.z * (1. + 1.4 * let)), .8 * fw), lo = 1. - smoothstep(wide * (.55 - .55 * let), wide * (1. + .5 * let), uv), hi = 1. - smoothstep(wide * (.55 - .55 * let), wide * (1. + .5 * let), far);
+      vec3 dpx = dFdx(vWorld), dpy = dFdy(vWorld);
+      vec2 wide = max(vec2(uLook.z * (1. + 1.4 * let)), .8 * fw), from = wide * (.55 - .55 * let), to = wide * (1. + .5 * let);
+      if (abs(det) > 1e-9 && any(lessThan(min(uv, far), to))) {
+        vec3 tu = normalize((dpx * duy.y - dpy * dux.y) / det), tv = normalize((dpy * dux.x - dpx * duy.x) / det);
+        vec2 lo = 1. - smoothstep(from, to, uv), hi = 1. - smoothstep(from, to, far);
         float turnedTo = dot(normalize(n + (1. - 2. * let) * ((hi.x - lo.x) * tu + (hi.y - lo.y) * tv)), uL);
         rise = (turnedTo - nl) * min(1., uLook.z / max(fw.x, fw.y) + .35);
         c *= 1. + clamp(rise, -.8, .6) * mix(.5, .7, let);
       }
-    }
-    // (Only what stands in front of the two lit rectangles takes their light; only what is round carries a highlight.)
+    } else curved = dot(fwidth(vNrm), vec3(1.)) > 1e-6;
+    // (Only what stands in front of the two lit rectangles takes their light, and only what shines mirrors them; only
+    // what is round carries a highlight.)
     vec3 r = reflect(-VIEW, n), shed = vec3(0.), mirrored = vec3(0.);
-    if (vWorld.z < uRectB[0].w) { lamp(uRectA[0], uRectB[0], vWorld, n, r, rough, shed, mirrored); lamp(uRectA[1], uRectB[1], vWorld, n, r, rough, shed, mirrored); }
+    if (vWorld.z < uRectB[0].w) { vec3 rr = shine > 0. ? r : vec3(0.); lamp(uRectA[0], uRectB[0], vWorld, n, rr, rough, shed, mirrored); lamp(uRectA[1], uRectB[1], vWorld, n, rr, rough, shed, mirrored); }
     c += t0.rgb * (shed * (.4 + .6 * ao) + works(vWorld, n));
     c += shine * (max(rise, 0.) * .2 * lamped + mirrored * (.05 + .95 * pow(1. - max(dot(n, VIEW), 0.), 5.)));
     if (curved) c += shine * glint(n, r, rough, lamped, .7);
