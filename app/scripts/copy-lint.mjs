@@ -128,6 +128,7 @@ export const KEEP = [
   { why: 'safety', file: 'features/settings/workspace-members.tsx', text: /^They lose access to keys, domains, webhooks, sending and members at once\.$/ },
   { why: 'safety', file: 'features/score/standing.tsx', text: /^Marketing resumes at 50% for 48 hours, once per 14 days\.$/ },
   { why: 'safety', file: 'features/score/standing.tsx', text: /^Sending resumes at 50% for 48 hours \(marketing after 24\), once per 30 days\.$/ },
+  { why: 'safety', file: 'features/settings/workspace-members.tsx', text: /^They can manage keys, domains, webhooks, sending and members\.$/ },
 ];
 for (const k of KEEP) if (!KEEP_WHY[k.why]) throw new Error(`copy-lint KEEP: “${k.why}” is not a kept category (${Object.keys(KEEP_WHY).join(', ')})`);
 // State, not explanation: a loading line, or a short “No … yet” where a list or value would be.

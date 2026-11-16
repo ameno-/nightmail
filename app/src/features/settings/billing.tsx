@@ -12,7 +12,7 @@ import { date } from '../../lib/format'
 import './billing.css'
 import { productName } from '../../../../api/src/brand'
 
-type RowProps = { title: ReactNode; hint?: ReactNode; children: ReactNode }
+type RowProps = { title: ReactNode; error?: ReactNode; children: ReactNode }
 const errorText = (error: unknown) => error instanceof ApiError ? error.text : error instanceof Error ? error.message : 'Something went wrong. Try again.'
 const cardLabel = (card: { brand: string; last4: string }) => `${cardBrand(card.brand)}\u00a0••••\u00a0${card.last4}`
 const final = (payment: Payment | undefined) => !!payment && !['created', 'pending', 'requires_action'].includes(payment.status)
@@ -27,12 +27,14 @@ function useBillingRefresh() {
 }
 
 // Settings → Billing (owners and admins): the balance and Add credit first, then the card, auto-recharge and the
-// history. How billing works and the balance's parts open from the balance; auto-recharge's amounts from its row.
-// Rows are 53px like every settings row and each value has a skeleton of its own width, so nothing moves as data arrives.
+// history. How billing works and the balance's parts open from the balance; auto-recharge's amounts from its row; the
+// free allowances and prices behind this month's usage from Plan & usage. Rows are 53px like every settings row and
+// each value has a skeleton of its own width, so nothing moves as data arrives.
 export function BillingSection({ row: Row }: { row: (props: RowProps) => ReactNode }) {
   const query = useApiDef(queries.billing())
-  // The state comes with the session (GET /v1/me) on the first frame: the line under the balance and which alerts show
-  // are decided from it, so the balance arriving fills reserved space instead of inserting lines above the rows.
+  // The state comes with the session (GET /v1/me) on the first frame: which alerts show is decided from it, so the
+  // balance arriving fills reserved space instead of inserting lines above the rows. The banner says what an empty
+  // balance stops; the badge says where it stands.
   const state = useSession()?.identity?.billing
   const [adding, setAdding] = useState(false)
   const [about, setAbout] = useState(false)
@@ -45,12 +47,11 @@ export function BillingSection({ row: Row }: { row: (props: RowProps) => ReactNo
     {state && <BillingAlerts state={state} summary={b} />}
     <div className="settings-rows billing-rows">
       <div className="billing-balance">
-        <span className="billing-balance__label">Balance{b && <StatusBadge status={balanceState(b).label} tone={balanceState(b).tone} />}</span>
+        <span className="billing-balance__label">Balance{b && <StatusBadge status={state?.enforcement === 'enforce' ? balanceState(b).label : 'Not charged yet'} tone={state?.enforcement === 'enforce' ? balanceState(b).tone : 'neutral'} />}</span>
         {b?.balance ? <button type="button" className="billing-balance__amount" aria-haspopup="dialog" aria-label={`Balance ${usd(total(b.balance))}: details`} onClick={() => setAbout(true)}>{usd(total(b.balance))}<ChevronRight size={20} aria-hidden="true" /></button>
           : <span className="billing-balance__amount"><Skeleton width={136} height={36} /></span>}
-        <span className="muted billing-balance__detail">{balanceLine(state)}</span>
       </div>
-      <Row title="This month" hint={MONTH_HINT}>{b?.monthToDate ? usd(b.monthToDate.cost) : <Skeleton width={64} height={20} />}</Row>
+      <Row title="Usage this month">{b?.monthToDate ? <MonthLink>{usd(b.monthToDate.cost)}</MonthLink> : <Skeleton width={80} height={20} />}</Row>
       <Row title="Payment method"><CardControl summary={b} /></Row>
       <AutoRecharge summary={b} Row={Row} />
     </div>
@@ -59,16 +60,8 @@ export function BillingSection({ row: Row }: { row: (props: RowProps) => ReactNo
     {b?.balance && <BalanceDetails open={about} onOpenChange={setAbout} balance={b.balance} enforced={state?.enforcement === 'enforce'} />}
   </>
 }
-const MONTH_HINT = 'After the free emails'
-
-// One line under the balance: what it means now and what to do, from the session's state.
-function balanceLine(state: ReturnType<typeof useBillingState>) {
-  if (!state || state.enforcement !== 'enforce') return 'Nothing is charged yet.'
-  if (state.receiving === 'held') return 'Add credit to deliver held mail.'
-  if (state.sending === 'paused') return 'Add credit to resume sending.'
-  if (state.sending === 'low') return 'Add credit before it reaches $0.'
-  return 'Usage comes off it hourly.'
-}
+// This month's cost opens Plan & usage, where the free allowances it comes after and the prices are.
+const MonthLink = ({ children }: { children: ReactNode }) => <Link to="/settings#usage" replace className="settings-score"><span>{children}</span><ArrowUpRight size={14} aria-hidden="true" /></Link>
 
 // The balance's parts and how billing works, opened from the balance.
 function BalanceDetails({ open, onOpenChange, balance, enforced }: { open: boolean; onOpenChange: (open: boolean) => void; balance: NonNullable<BillingSummary['balance']>; enforced: boolean }) {
@@ -91,14 +84,13 @@ function BalanceDetails({ open, onOpenChange, balance, enforced }: { open: boole
 function FreePlan({ summary: b, Row }: { summary: BillingSummary | undefined; Row: (props: RowProps) => ReactNode }) {
   return <>
     <SectionHeader title="Billing" />
-    <p className="muted usage-note">Nothing is charged, and sending never pauses for a balance.</p>
     <div className="settings-rows billing-rows">
       <div className="billing-balance">
         <span className="billing-balance__label">Plan</span>
         <span className="billing-balance__amount billing-balance__amount--plan">Free plan</span>
-        <span className="muted billing-balance__detail">{b ? `Courtesy of Anomaly · ${b.freePlan?.until ? `until ${fullDay(b.freePlan.until)}` : 'no end date'}` : <Skeleton width={220} height={16} />}</span>
       </div>
-      <Row title="This month" hint={MONTH_HINT}>{b?.monthToDate ? <span>{usd(b.monthToDate.cost)} <span className="muted">not charged</span></span> : <Skeleton width={120} height={20} />}</Row>
+      <Row title="Until">{b ? b.freePlan?.until ? fullDay(b.freePlan.until) : 'No end date' : <Skeleton width={96} height={20} />}</Row>
+      <Row title="Usage this month">{b?.monthToDate ? <MonthLink>{usd(b.monthToDate.cost)}</MonthLink> : <Skeleton width={80} height={20} />}</Row>
     </div>
     <History />
   </>
@@ -142,24 +134,26 @@ const TERMS = <>By adding credit you agree to the <Link to="/legal/terms#refunds
 const added = (cents: number) => `${centsUsd(cents)} added to your balance`
 const dollars = (cents: number) => `$${(cents / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })}`
 
-// Auto-recharge: one row with what it does and its switch. The amounts, how it works and the terms open from Edit, and
-// from turning it on, which asks before the card is charged; turning it off is one click. Without a card the switch is
-// off and the row says why.
+// Auto-recharge: one row with its setting as the value ("$25 below $10", or where it stands) and its switch. The amounts,
+// how it works and the terms open from Edit, and from turning it on, which asks before the card is charged; turning it
+// off is one click. Without a card the switch is off: the card row above it has Add a card.
 function AutoRecharge({ summary: b, Row }: { summary: BillingSummary | undefined; Row: (props: RowProps) => ReactNode }) {
   const refresh = useBillingRefresh(), toast = useToast()
   const [editing, setEditing] = useState<'edit' | 'enable' | null>(null)
   const [pending, setPending] = useState(false)
   const settings = b?.autoRecharge
-  if (!b || !settings) return <Row title="Auto-recharge" hint={<Skeleton width={120} height={16} />}><ControlSkeleton width={104} /></Row>
+  if (!b || !settings) return <Row title="Auto-recharge"><Skeleton width={96} height={20} /><ControlSkeleton width={104} /></Row>
   const hasCard = !!b.paymentMethod
-  const hint = !hasCard ? 'Add a card first' : b.state.autoRecharge === 'capped' ? 'Monthly limit reached' : settings.pending ? 'Adding credit now' : `Adds ${dollars(settings.amountCents)} below ${dollars(settings.thresholdCents)}`
+  const status = b.state.autoRecharge === 'capped' ? <StatusBadge status="Limit reached" tone="warning" /> : settings.pending ? <StatusBadge status="Adding credit" tone="info" />
+    : <span className="billing-recharge__amounts">{dollars(settings.amountCents)} below {dollars(settings.thresholdCents)}</span>
   async function turnOff() {
     setPending(true)
     try { await billingApi.autoRecharge({ enabled: false, thresholdCents: settings!.thresholdCents, amountCents: settings!.amountCents, monthlyCapCents: settings!.monthlyCapCents }); refresh(); toast('Auto-recharge is off', 'success') }
     catch (cause) { toast(errorText(cause), 'error') } finally { setPending(false) }
   }
-  return <Row title="Auto-recharge" hint={hint}>
+  return <Row title="Auto-recharge">
     <span className="cluster settings-inline billing-recharge">
+      {status}
       <Button size="sm" onClick={() => setEditing('edit')}>Edit</Button>
       <Switch label={<span className="sr-only">Auto-recharge</span>} checked={settings.enabled} disabled={pending || !hasCard} onCheckedChange={on => { if (on) setEditing('enable'); else void turnOff() }} />
     </span>
@@ -177,8 +171,8 @@ function RechargeDialog({ settings, hasCard, enable, capped, Row, onClose }: { s
     cap: cents.cap === null || cents.cap < (cents.amount ?? 0) || cents.cap > 1_000_000 }
   const valid = !invalid.threshold && !invalid.amount && !invalid.cap
   const changed = form.threshold !== initial.threshold || form.amount !== initial.amount || form.cap !== initial.cap
-  const rows = [['threshold', 'When balance falls below', '$5 to $1,000'], ['amount', 'Add', '$20 to $1,000 each time'],
-    ['cap', 'Monthly limit', invalid.cap ? '$20 to $10,000, at least the Add amount' : `${centsUsd(settings.monthTotalCents)} added this month${capped ? ' · limit reached' : settings.pending ? ' · adding credit now' : ''}`]] as const
+  // Each amount's range shows once the value is outside it.
+  const rows = [['threshold', 'When balance falls below', '$5 to $1,000'], ['amount', 'Add', '$20 to $1,000 each time'], ['cap', 'Monthly limit', '$20 to $10,000, at least the Add amount']] as const
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (!valid || !hasCard || (!enable && !changed)) return
@@ -191,10 +185,11 @@ function RechargeDialog({ settings, hasCard, enable, capped, Row, onClose }: { s
     description="Charges your saved card when the balance runs low, up to a monthly limit."
     footer={<><Button disabled={pending} onClick={onClose}>Cancel</Button><Button variant="primary" type="submit" form="billing-recharge" loading={pending} disabled={!valid || !hasCard || (!enable && !changed)}>{enable ? 'Turn on' : 'Save'}</Button></>}>
     <form id="billing-recharge" className="settings-rows billing-rows" onSubmit={submit} noValidate>
-      {rows.map(([key, title, hint]) => <Row key={key} title={title} hint={hint}>
+      {rows.map(([key, title, range]) => <Row key={key} title={title} error={invalid[key] ? range : undefined}>
         <span className="billing-dollars"><span aria-hidden="true">$</span><Input aria-label={`${title}, in dollars`} aria-invalid={invalid[key] || undefined} inputMode="decimal" value={form[key]} disabled={pending || !hasCard} onChange={event => setForm({ ...form, [key]: event.target.value })} /></span>
       </Row>)}
     </form>
+    <dl className="billing-facts"><div><dt>Added this month</dt><dd>{centsUsd(settings.monthTotalCents)}{capped ? ' · limit reached' : settings.pending ? ' · adding credit now' : ''}</dd></div></dl>
     <p className="muted billing-add__terms">{hasCard ? 'A failed charge turns it off.' : 'Add a card to turn it on.'} {TERMS}</p>
     {error ? <Alert tone="danger">{errorText(error)}</Alert> : null}
   </Dialog>
@@ -235,11 +230,11 @@ function History() {
 // its element, which the browser then counts as that row moving.
 function LedgerTable() {
   const pagination = useCursorPagination(), query = useApiDef(queries.billingLedger(pagination.cursorForPage(pagination.page)), { keepPrevious: true })
-  return <HistoryList query={query} pagination={pagination} columns={ledgerColumns} rowKey={e => `entry-${e.id}`} empty={<EmptyState title="No balance changes yet" description="Credit added and hourly usage appear here." />} />
+  return <HistoryList query={query} pagination={pagination} columns={ledgerColumns} rowKey={e => `entry-${e.id}`} empty={<EmptyState title="No balance changes yet" />} />
 }
 function PaymentsTable() {
   const pagination = useCursorPagination(), query = useApiDef(queries.billingPayments(pagination.cursorForPage(pagination.page)), { keepPrevious: true })
-  return <HistoryList query={query} pagination={pagination} columns={paymentColumns} rowKey={p => p.id} empty={<EmptyState title="No payments yet" description="Card payments for credit appear here, with their invoices." />} />
+  return <HistoryList query={query} pagination={pagination} columns={paymentColumns} rowKey={p => p.id} empty={<EmptyState title="No payments yet" />} />
 }
 type PageQuery<T> = { data?: { data: T[]; nextCursor: string | null }; isPending: boolean; isError: boolean; error: unknown; refetch: () => unknown }
 function HistoryList<T>({ query, pagination, columns, rowKey, empty }: { query: PageQuery<T>; pagination: ReturnType<typeof useCursorPagination>; columns: Column<T>[]; rowKey: (row: T) => string; empty: ReactNode }) {
@@ -302,7 +297,7 @@ function AddCredit({ open, onOpenChange, summary: b }: { open: boolean; onOpenCh
         {[...PRESETS, 'custom' as const].map(value => <button key={value} type="button" role="radio" aria-checked={preset === value} tabIndex={preset === value ? 0 : -1} className="billing-choice__item" disabled={working} onClick={() => setPreset(value)}>{value === 'custom' ? 'Custom' : centsUsd(value).replace('.00', '')}</button>)}
       </div>
       {preset === 'custom' && <span className="billing-dollars billing-add__custom"><span aria-hidden="true">$</span><Input autoFocus aria-label="Amount in dollars, $20 to $10,000" inputMode="decimal" placeholder="75" value={custom} disabled={working} onChange={event => setCustom(event.target.value)} /></span>}
-      {preset === 'custom' && custom && invalid && <p className="muted">Add $20 to $10,000 at a time.</p>}
+      {preset === 'custom' && custom && invalid && <p className="ui-field__error" role="alert">Add $20 to $10,000 at a time.</p>}
       <div className="billing-methods" role="radiogroup" aria-label="Pay with" onKeyDown={working ? undefined : radioKeys<typeof method>(card ? ['saved_card', 'checkout'] : ['checkout'], method, setMethod)}>
         {card && <button type="button" role="radio" aria-checked={method === 'saved_card'} tabIndex={method === 'saved_card' ? 0 : -1} className="billing-method" disabled={working} onClick={() => setMethod('saved_card')}><CreditCard size={16} aria-hidden="true" /><span>Charge {cardLabel(card)}</span></button>}
         <button type="button" role="radio" aria-checked={method === 'checkout'} tabIndex={method === 'checkout' ? 0 : -1} className="billing-method" disabled={working} onClick={() => setMethod('checkout')}><ArrowUpRight size={16} aria-hidden="true" /><span>Pay with Stripe Checkout</span></button>

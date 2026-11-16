@@ -52,7 +52,7 @@ function ReceivingCell({ domain, receiving, unknown = false, card = false }: { d
   return <StatusDot tone={status.tone} note={receiving.status !== 'active' ? status.label : card ? `${receiving.addressCount.toLocaleString('en-US')} ${receiving.addressCount === 1 ? 'address' : 'addresses'}` : undefined} title={[`${status.label} at ${receiving.name}`, detail].filter(Boolean).join('. ')}>{receiving.name}</StatusDot>
 }
 
-/** Hosted: where the domain receives, its addresses and catch-all. Only once receiving is on: while it is off the Receiving records below say how to turn it on, and the status is in the page's facts. */
+/** Hosted: where the domain receives, its addresses (which open its routes in Receiving) and catch-all. Only once receiving is on: while it is off the Receiving records below say how to turn it on, and the status is in the page's facts. */
 /** The page reads the receiving domain before it shows (so this section arrives at its final height) and passes it in. */
 function ReceivingSettings({ domainId, receiving }: { domainId: string; receiving: { data?: MailboxDomain; error: unknown; refetch: () => unknown } }) {
   const check = useApiMutation((api, _: void) => api.mailboxes.checkDomain(domainId), 'MX records checked', false, true, domainId)
@@ -61,7 +61,7 @@ function ReceivingSettings({ domainId, receiving }: { domainId: string; receivin
   if (!state) return receiving.error ? <section className="section stack"><SectionHeader title="Receiving" /><ErrorState error={receiving.error as Error} onRetry={() => void receiving.refetch()} /></section> : null
   if (['off', 'disabled'].includes(state.status)) return null
   return <section className="section stack" aria-labelledby="domain-receiving">
-    <div className="ui-section-header"><div className="domain-group-title"><h2 id="domain-receiving">Receiving</h2><p className="muted">Mail to addresses at {state.name} follows its <Link to={`/receiving?domain=${encodeURIComponent(state.name)}`}>routes</Link>.</p></div>
+    <div className="ui-section-header"><div className="domain-group-title"><h2 id="domain-receiving">Receiving</h2></div>
       {state.status !== 'active' && <div className="cluster"><Button loading={check.isPending} onClick={() => void check.mutateAsync().catch(() => undefined)}>Check MX now</Button></div>}</div>
     <MutationError error={update.error ?? check.error} />
     <dl className="settings-facts domain-facts domain-receiving-facts">
@@ -70,12 +70,11 @@ function ReceivingSettings({ domainId, receiving }: { domainId: string; receivin
       <div title={catchAllSetting.line}><dt>{catchAllSetting.title}</dt><dd><Select aria-label={`${catchAllSetting.title}: ${catchAllSetting.line}`} value={state.catchAll} onValueChange={value => void update.mutateAsync(value as MailboxDomain['catchAll']).catch(() => undefined)} disabled={update.isPending}
         options={[{ value: 'store', label: catchAllSetting.options.store }, { value: 'create_address', label: catchAllSetting.options.create_address }]} /></dd></div>
     </dl>
-    <p className="muted domain-receiving-note">{catchAllSetting.line}</p>
   </section>
 }
 
 export function DomainsPage() {
-  return useWorkspaceAccess().canAdminister ? <DomainsList /> : <AdminOnlyPage title="Domains" button="Add domain" action="add domains, see their DNS records and turn on receiving" />
+  return useWorkspaceAccess().canAdminister ? <DomainsList /> : <AdminOnlyPage title="Domains" button="Add domain" />
 }
 function DomainsList() {
   const { regionId } = useRegion()
@@ -108,7 +107,7 @@ function DomainsList() {
   return <div className="stack">
     <PageHeader title="Domains" actions={<Button variant="primary" onClick={openCreate}>Add domain</Button>} />
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
-      <DataTable className="domains-table" loading={domains.isPending || (inbound.isPending && !inbound.error)} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} rowHref={row => `/domains/${row.id}`} onRowIntent={row => void warm([queries.domain(row.id)])} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} description="Add a domain to send and receive mail." action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
+      <DataTable className="domains-table" loading={domains.isPending || (inbound.isPending && !inbound.error)} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} rowHref={row => `/domains/${row.id}`} onRowIntent={row => void warm([queries.domain(row.id)])} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
         { ...columns[0], render: row => <span className="domain-name" title={row.name}>{row.name}</span> },
         { ...columns[1], render: row => <SendingCell domain={row} />, cardRender: row => <SendingCell domain={row} short /> },
         { ...columns[2], render: row => <ReceivingCell domain={row} receiving={receivingOf(row.id)} unknown={!!inbound.error} />, cardRender: row => <ReceivingCell domain={row} receiving={receivingOf(row.id)} unknown={!!inbound.error} card /> },
@@ -129,7 +128,7 @@ function DomainsList() {
 }
 
 export function DomainDetailPage() {
-  return useWorkspaceAccess().canAdminister ? <DomainDetail /> : <AdminOnlyPage title="Domain" backTo="/domains" action="add domains, see their DNS records and turn on receiving" />
+  return useWorkspaceAccess().canAdminister ? <DomainDetail /> : <AdminOnlyPage title="Domain" backTo="/domains" />
 }
 function DomainDetail() {
   const { id = '' } = useParams()
@@ -204,18 +203,18 @@ function DomainDetail() {
     </dl>
     {multiTenant && <ReceivingSettings domainId={id} receiving={receiving} />}
     <div className="domain-sections">
-      <DomainRecords domain={current} setup={dns.setup} receivingView={multiTenant ? { actions: receivingActions } : undefined} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
+      <DomainRecords domain={current} setup={dns.setup} receivingView={multiTenant ? { actions: receivingActions } : undefined} onAlignSpf={openMailFrom} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
       <DnsWaitNote domain={current} />
       <details className="domain-advanced">
         <summary>Advanced</summary>
         <div className="domain-advanced-body">
-          <div className="ui-section-header"><div className="domain-group-title"><h3>Custom MAIL FROM{mailFromName && <span className="muted"> · {mailFromName}</span>}</h3><p className="muted">Routes bounces through a subdomain you own for relaxed SPF alignment.</p></div>
+          <div className="ui-section-header"><div className="domain-group-title"><h3>Custom MAIL FROM{mailFromName && <span className="muted"> · {mailFromName}</span>}</h3></div>
             <div className="cluster">{mailFromName && <StatusBadge status={label(current.mailFromStatus)} />}<Button aria-label={mailFromName ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} onClick={openMailFrom}>{mailFromName ? 'Change' : 'Add'}</Button></div>
           </div>
           {mailFromRecords.length > 0 && <DnsRecordTable domain={current.name} records={mailFromRecords} />}
         </div>
       </details>
-      {!multiTenant && <MailboxReceiving domainId={id} domainName={current.name} verified={current.status === 'verified'} />}
+      {!multiTenant && <MailboxReceiving domainId={id} domainName={current.name} />}
     </div>
     <ConfirmDialog open={!!moveMail} onOpenChange={open => { if (!open) setMoveMail(null) }} title={`Move mail for ${moveMail?.host ?? current.name}?`}
       description={`${moveMail?.message ?? ''} Mail stops arriving there once the MX record changes.`} confirmLabel={`Use ${moveMail?.host ?? current.name} anyway`} danger
@@ -224,13 +223,14 @@ function DomainDetail() {
     <Dialog open={mailFromOpen} onOpenChange={next => {if (!configureMailFrom.isPending) setMailFromOpen(next)}} title={current.mailFromDomain ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} footer={<><Button disabled={configureMailFrom.isPending} onClick={() => setMailFromOpen(false)}>Cancel</Button><Button variant="primary" loading={configureMailFrom.isPending} type="submit" form="configure-mail-from">Save</Button></>}>
       <form id="configure-mail-from" className="stack" onSubmit={submitMailFrom} noValidate>
         <MutationError error={configureMailFrom.error} />
-        <Field label="MAIL FROM domain" htmlFor="mail-from-domain" hint={`A subdomain of ${current.name} you don’t use yet.`} error={mailFromInvalid || fieldError(configureMailFrom.error, 'mailFromDomain')}><Input id="mail-from-domain" autoFocus required value={mailFromDomain} onChange={event => setMailFromDomain(event.target.value)} disabled={configureMailFrom.isPending} placeholder={`email.${current.name}`} /></Field>
+        <Field label="MAIL FROM domain" htmlFor="mail-from-domain" error={mailFromInvalid || fieldError(configureMailFrom.error, 'mailFromDomain')}><Input id="mail-from-domain" autoFocus required value={mailFromDomain} onChange={event => setMailFromDomain(event.target.value)} disabled={configureMailFrom.isPending} placeholder={`email.${current.name}`} /></Field>
       </form>
     </Dialog>
   </div>
 }
 
-function MailboxReceiving({ domainId, domainName, verified }: { domainId: string; domainName: string; verified: boolean }) {
+// Self-hosted receiving. Enabling it on a domain that isn't verified yet is refused by the API, which says so inline.
+function MailboxReceiving({ domainId, domainName }: { domainId: string; domainName: string }) {
   const receiving = useApiQuery(['mailbox-domain', domainId], (api, signal) => api.mailboxes.domain(domainId, signal), { interval: state => state && ['provisioning', 'waiting_for_mx', 'disabling'].includes(state.status) ? 30_000 : false })
   const enable = useApiMutation((api, force: boolean) => api.mailboxes.enableDomain(domainId, { force }), 'Receiving setup started', false, true, domainId)
   const disable = useApiMutation((api, _: void) => api.mailboxes.disableDomain(domainId), 'Receiving turned off', false, true, domainId)
@@ -247,14 +247,13 @@ function MailboxReceiving({ domainId, domainName, verified }: { domainId: string
   const status = state ? receivingStatus[state.status] : null
   const records: DnsRecord[] = (state?.dns ?? []).map((record, index) => ({ id: `mx_${index}`, type: 'MX', name: record.name, value: `${record.priority} ${record.value}`, status: state?.mx?.state === 'active' ? 'verified' : 'pending' }))
   return <section className="section stack">
-    <div className="ui-section-header"><div className="domain-group-title"><h2>Receiving</h2><p className="muted">Receive mail on {domainName}; its addresses and routes are in <Link to={`/receiving?domain=${encodeURIComponent(domainName)}`}>Receiving</Link>.</p></div>
+    <div className="ui-section-header"><div className="domain-group-title"><h2>Receiving</h2></div>
       <div className="cluster">{on ? <>
         <Button loading={check.isPending} onClick={async () => { try { await check.mutateAsync() } catch { /* Shown inline. */ } }}>Check MX</Button>
         {state!.status !== 'disabling' && <Button onClick={() => setDisableOpen(true)}>Turn off</Button>}
-      </> : <Button variant="primary" disabled={!verified || !state} loading={enable.isPending} onClick={start}>Enable receiving</Button>}</div>
+      </> : <Button variant="primary" disabled={!state} loading={enable.isPending} onClick={start}>Enable receiving</Button>}</div>
     </div>
     <MutationError error={enable.error ?? disable.error ?? check.error} />
-    {!verified && !on && <p className="muted">Verify the domain before enabling receiving.</p>}
     {state && status && on && <>
       <dl className="settings-facts domain-facts">
         <div><dt>Status</dt><dd><StatusBadge status={status.label} tone={status.tone} /></dd></div>

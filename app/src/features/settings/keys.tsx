@@ -47,7 +47,7 @@ export function ApiKeysPage() {
   // /api-keys?connect=1 (from Overview and Docs) opens Connect an agent. Members connect one as themselves too, so
   // their locked page keeps the button.
   const [connectLink] = useState(() => new URLSearchParams(window.location.search).has('connect'))
-  return useWorkspaceAccess().canAdminister ? <ApiKeys connectLink={connectLink} /> : <AdminOnlyPage title="API keys" button="Create key" action="create, list and revoke API keys, agent tokens and app passwords" actions={<ConnectAgentButton initiallyOpen={connectLink} />} />
+  return useWorkspaceAccess().canAdminister ? <ApiKeys connectLink={connectLink} /> : <AdminOnlyPage title="API keys" button="Create key" actions={<ConnectAgentButton initiallyOpen={connectLink} />} />
 }
 function ApiKeys({ connectLink }: { connectLink: boolean }) {
   const toast = useToast()
@@ -104,10 +104,10 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   const active = showRevoked ? '' : 'active '
   const empty = failed.length ? <EmptyState title="Nothing else to show" />
     : cursor && keysShown ? <EmptyState title="No keys on this page" />
-    : type === 'api' ? <EmptyState title={`No ${active}API keys`} description={showRevoked ? undefined : 'An API key lets your server, a script or an agent send email or read mail.'} />
-    : type === 'agent' ? <EmptyState title="No agents connected" description="Connect OpenCode, Claude Code or Cursor to work as you. It and its tokens appear here." action={<Button onClick={() => setConnecting(true)}>Connect an agent</Button>} />
-    : type === 'app' ? <EmptyState title="No app passwords" description="Lets a mail app like Apple Mail open a persistent inbox over IMAP or SMTP." />
-    : <EmptyState title={`No ${active}keys`} description={showRevoked ? undefined : 'Create a key to send from your app, connect an agent or open an inbox in a mail app.'} />
+    : type === 'api' ? <EmptyState title={`No ${active}API keys`} />
+    : type === 'agent' ? <EmptyState title="No agents connected" action={<Button onClick={() => setConnecting(true)}>Connect an agent</Button>} />
+    : type === 'app' ? <EmptyState title="No app passwords" />
+    : <EmptyState title={`No ${active}keys`} />
 
   const keyAccess = (key: ApiKey): { first: ReactNode; second: string } => {
     const { access } = key

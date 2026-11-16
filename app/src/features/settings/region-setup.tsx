@@ -9,7 +9,7 @@ import { regionCatalogKey, regionDiscoveryKey, useRegionAccess, useRegionCatalog
 import type { AutoValidationMode, RegionCatalog, RegionCatalogEntry, SesDiscovery, Stream } from '../../data/types'
 import { date, label, number } from '../../lib/format'
 import { fieldError, MutationError } from './shared'
-import { DEFAULT_REGION_HINT, RegionDiscoverySkeleton, settingsColumns } from './skeletons'
+import { RegionDiscoverySkeleton, settingsColumns } from './skeletons'
 import { awaitingConfirmationOnly, SetupChecklist } from './setup-checklist'
 import { ReputationSection } from './reputation'
 
@@ -65,7 +65,7 @@ export function RegionSetup() {
       <SectionHeader title="Regions" actions={<div className="cluster"><Button loading={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</Button><Button disabled={!canManage || configure.isPending} onClick={() => {configure.reset(); setNewRegion(''); setEnableOpen(true)}}>Add region</Button></div>} />
       <MutationError error={catalog.error} />
       {!enableOpen && !disableRegion && <MutationError error={configure.error} />}
-      <Field label="Default sending region" htmlFor="default-sending-region" hint={DEFAULT_REGION_HINT}>
+      <Field label="Default sending region" htmlFor="default-sending-region">
         <Select id="default-sending-region" className="settings-default-region" value={catalog.data?.defaultRegion ?? ''} options={(catalog.data?.data ?? []).filter(row => row.enabled).map(row => ({value: row.region, label: row.region}))} disabled={!canManage || configure.isPending || !catalog.data} onValueChange={region => configure.mutate({region, makeDefault: true})} />
       </Field>
       <DataTable loading={catalog.isPending} skeletonRows={2} rows={catalog.data?.data ?? []} rowKey={row => row.region} selectedId={entry?.region} empty={<EmptyState title="No regions configured" />} columns={[
@@ -78,7 +78,7 @@ export function RegionSetup() {
     <Dialog open={enableOpen} onOpenChange={open => {if (!configure.isPending) setEnableOpen(open)}} title="Add region" footer={<><Button disabled={configure.isPending} onClick={() => setEnableOpen(false)}>Cancel</Button><Button variant="primary" loading={configure.isPending} type="submit" form="enable-ses-region">Add region</Button></>}>
       <form id="enable-ses-region" className="stack" onSubmit={submitEnable}>
         <MutationError error={configure.error} />
-        <Field label="AWS region" htmlFor="ses-region" error={fieldError(configure.error, 'region')} hint="Checks live AWS without creating resources."><Input id="ses-region" value={newRegion} onChange={event => setNewRegion(event.target.value)} placeholder="us-east-1" maxLength={32} pattern="[a-z]{2}(-[a-z]+)+-[0-9]" required autoFocus disabled={configure.isPending} /></Field>
+        <Field label="AWS region" htmlFor="ses-region" error={fieldError(configure.error, 'region')}><Input id="ses-region" value={newRegion} onChange={event => setNewRegion(event.target.value)} placeholder="us-east-1" maxLength={32} pattern="[a-z]{2}(-[a-z]+)+-[0-9]" required autoFocus disabled={configure.isPending} /></Field>
       </form>
     </Dialog>
     <ConfirmDialog open={disableRegion !== null} onOpenChange={open => {if (!open) setDisableRegion(null)}} title={`Disable ${disableRegion?.region ?? 'region'}?`} description="Stops new sends in this region in Live and Test. Keeps AWS resources and mail history." confirmLabel="Disable" danger pending={configure.isPending} onConfirm={async () => {if (disableRegion) await configure.mutateAsync({region: disableRegion.region, enabled: false})}} />
@@ -119,8 +119,6 @@ function RegionDetail({entry, inspected}: {entry: RegionCatalogEntry; inspected:
   const checklist = <SetupChecklist report={report} running={running} queued={entry.provisionStatus === 'pending'} bare={ready} />
   return <section id="ses-region-detail" className="section stack settings-rule" aria-label={`${entry.region} setup`}>
     <SectionHeader title={<span className="cluster">{entry.region}{status !== regionStatus(entry) && <StatusBadge status={status} tone={ready ? 'success' : entry.provisionStatus === 'failed' ? 'danger' : report?.status === 'blocked' && !running ? 'warning' : 'neutral'} />}</span>} actions={ready ? undefined : actions} />
-    {!entry.enabled && <p className="muted">Enable this region to check or provision AWS resources.</p>}
-    {!canDiscover && <p className="muted">Read permission required to check AWS.</p>}
     {entry.provisionError && !ready && <Alert tone="danger">{setupError(entry.provisionError)}</Alert>}
     <MutationError error={discovery.error || refresh.error} />
     {!confirmOpen && <MutationError error={provision.error} />}

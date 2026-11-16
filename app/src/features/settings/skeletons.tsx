@@ -3,10 +3,8 @@ import { useRegion, useWorkspaceAccess } from '../../data/context'
 import './settings.css'
 import './domain-records.css'
 import './api-keys.css'
-import { HEADERS_HINT } from './webhook-headers'
 import { KeysGuide } from './keys-guide'
 
-export const DEFAULT_REGION_HINT = 'Used for API sends that omit a region.'
 const twoLines = <div><SkeletonText width="74%" /><SkeletonText width="88%" /></div>
 /** The API keys page's type filter: every credential, or one of its three types. */
 export const keyTypes = [{ value: 'all', label: 'All' }, { value: 'api', label: 'API keys' }, { value: 'agent', label: 'Agent tokens' }, { value: 'app', label: 'App passwords' }] as const
@@ -113,7 +111,7 @@ export function RegionDiscoverySkeleton() {
 
 export function SesSendingSkeleton({ regionId }: { regionId: string }) {
   return <LoadingRegion label="Loading sending regions" className="settings-loading-body">
-    <section id="sending" className="section stack settings-group"><SectionHeader title="Regions" actions={<div className="cluster"><ControlSkeleton width={88} /><ControlSkeleton width={114} /></div>} /><div className="ui-field"><span className="ui-field__label">Default sending region</span><ControlSkeleton width={320} /><span className="ui-field__hint">{DEFAULT_REGION_HINT}</span></div><TableSkeleton columns={settingsColumns.regions} rows={2} /></section>
+    <section id="sending" className="section stack settings-group"><SectionHeader title="Regions" actions={<div className="cluster"><ControlSkeleton width={88} /><ControlSkeleton width={114} /></div>} /><div className="ui-field"><span className="ui-field__label">Default sending region</span><ControlSkeleton width={320} /></div><TableSkeleton columns={settingsColumns.regions} rows={2} /></section>
     <section className="section stack settings-rule"><SectionHeader title={<span className="cluster">{regionId}<Skeleton width={64} /></span>} actions={<div className="cluster"><ControlSkeleton width={100} /><ControlSkeleton width={180} /></div>} /><div className="settings-setup-checklist"><h3>Provisioning</h3><ul className="settings-setup-steps">{['AWS account access', 'SES configuration sets', 'SNS topic and permissions', 'SES event destinations', 'HTTPS subscription'].map(name => <li key={name}><Skeleton width={16} /><div className="settings-setup-step-heading settings-setup-step"><span>{name}</span><SkeletonText width={100} /></div></li>)}</ul></div><RegionDiscoverySkeleton /></section>
   </LoadingRegion>
 }
@@ -136,10 +134,10 @@ export function EndpointFieldsSkeleton({ isNew = false, selectedRegions = false 
   const { multiTenant } = useWorkspaceAccess()
   return <div className="stack">
     <div className="form-grid"><FieldSkeleton label="Name" /><FieldSkeleton label="Endpoint URL" /></div>
-    {!multiTenant && <div className="stack settings-region-scope"><div className="ui-field"><span className="ui-field__label">Region scope</span><ControlSkeleton />{!selectedRegions && <div className="ui-field__hint">{isNew ? 'Includes future regions.' : <SkeletonText width={350} lineHeight={18} />}</div>}</div>
+    {!multiTenant && <div className="stack settings-region-scope"><div className="ui-field"><span className="ui-field__label">Region scope</span><ControlSkeleton /></div>
     {selectedRegions && <div className="settings-choices"><ControlSkeleton width={135} /><ControlSkeleton width={135} /></div>}</div>}
-    <div className="stack"><div>Events</div><div className="settings-choices settings-choices--events">{['Sent', 'Delivered', 'Bounced', 'Complained', 'Rejected', 'Rendering failed', 'Delivery delayed', 'Opened', 'Clicked', 'Contact subscription changed', 'Sending standing changed'].map(event => <div className="ui-check-field" key={event} aria-hidden="true"><Skeleton width={14} height={14} /><span className="settings-cell-stack"><span>{event}</span><span className="ui-field__hint">&nbsp;</span></span></div>)}</div></div>
-    <div className="ui-field webhook-headers"><span className="ui-field__label">Headers</span><div className="ui-field__hint">{HEADERS_HINT}</div><div className="webhook-headers__actions"><Skeleton width={isNew ? 100 : 124} height={24} /></div></div>
+    <div className="stack"><div>Events</div><div className="settings-choices settings-choices--events">{['Sent', 'Delivered', 'Bounced', 'Complained', 'Rejected', 'Rendering failed', 'Delivery delayed', 'Opened', 'Clicked', 'Contact subscription changed', 'Sending standing changed'].map(event => <div className="ui-check-field" key={event} aria-hidden="true"><Skeleton width={14} height={14} /><span>{event}</span></div>)}</div></div>
+    <div className="ui-field webhook-headers"><span className="ui-field__label">Headers</span><div className="webhook-headers__actions"><Skeleton width={isNew ? 100 : 124} height={24} /></div></div>
   </div>
 }
 
@@ -148,7 +146,7 @@ export function WebhookBodySkeleton({ isNew = false, selectedRegions = false }: 
   return <LoadingRegion label={isNew ? 'Loading webhook form' : 'Loading webhook endpoint'} className="settings-loading-body">
     {isNew ? <div className="stack"><EndpointFieldsSkeleton isNew /><div className="cluster"><ControlSkeleton width={76} /><ControlSkeleton width={128} /></div></div> : <>
       <EndpointFieldsSkeleton selectedRegions={selectedRegions} />
-      <section className="section stack settings-rule"><SectionHeader title="Signing secret" actions={<><ControlSkeleton width={76} /><ControlSkeleton width={138} /></>} /><SkeletonText width={250} /></section>
+      <section className="section stack settings-rule"><SectionHeader title={<span className="settings-guide-title">Signing secret<span className="guide-link">Guide</span></span>} actions={<><ControlSkeleton width={76} /><ControlSkeleton width={138} /></>} /></section>
       <section className="section stack settings-rule"><SectionHeader title="Delivery history" /><TableSkeleton columns={deliveryColumns(multiTenant)} rows={2} /></section>
       <div><ControlSkeleton width={146} /></div>
     </>}
@@ -160,7 +158,7 @@ export function DomainDetailSkeleton() {
   return <LoadingRegion className="stack" label="Loading domain">
     <PageHeader title={<SkeletonText width={260} lineHeight={28} />} backTo="/domains" actions={<><ControlSkeleton width={112} /><ControlSkeleton width={124} /></>} />
     <dl className="settings-facts domain-facts">{(multiTenant ? ['Sending', 'Receiving'] : ['Sending', 'Region']).map(term => <div key={term}><dt>{term}</dt><dd><Skeleton width={90} /></dd></div>)}</dl>
-    <div className="domain-sections"><section className="section stack"><div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><SkeletonText width={420} /></div><ControlSkeleton width={120} /></div><div className="stack domain-group"><div className="ui-section-header"><div className="domain-group-title"><h3>Sending</h3><SkeletonText width={220} /></div></div><TableSkeleton columns={settingsColumns.dns} rows={3} /></div></section></div>
+    <div className="domain-sections"><section className="section stack"><div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2></div><ControlSkeleton width={120} /></div><div className="stack domain-group"><div className="ui-section-header"><div className="domain-group-title"><h3>Sending</h3></div></div><TableSkeleton columns={settingsColumns.dns} rows={3} /></div></section></div>
   </LoadingRegion>
 }
 
