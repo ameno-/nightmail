@@ -1,31 +1,70 @@
 // Builds the brand files in public/ from the outlined SVGs in public/brand/ (docs/brand.md): favicon.svg, favicon.ico (16,
 // 32 and 48 px), apple-touch-icon.png, the manifest icons (192, 512 and a maskable 512) and the 1200 × 630 link-preview card
 // og.png. Run from app/ after changing the mark: node scripts/brand-assets.mjs (BRAND_CHROME=<path> to pick Chrome).
-import { readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+//
+// og.png is the homepage itself: the built dashboard (bun run build first) is served from dist/ with the two requests a
+// signed-out visit makes answered here, the sorter runs until it has burst and come to rest, and the card is the part of
+// that frame with the price and the line under it, the wordmark set beside it. BRAND_ONLY=og writes only the card.
+import { createServer } from 'node:http';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
-import { productName } from '../../api/src/brand.ts';
 
 const publicDir = resolve(dirname(fileURLToPath(import.meta.url)), '../public');
 const svg = name => readFileSync(join(publicDir, 'brand', name), 'utf8');
 const inline = name => svg(name).replace(/ width="[^"]*" height="[^"]*"/, ' width="100%" height="100%"');
-const font = name => `data:font/woff2;base64,${readFileSync(join(publicDir, 'fonts', name)).toString('base64')}`;
-const canvas = '#FAFAFA', text = '#161616', muted = '#5C5C5C';
+const canvas = '#FAFAFA';
 
 // The mark on a square: `scale` is its share of the side (the maskable icon keeps it inside the central safe circle).
 const tile = (size, scale, background) => `<body style="margin:0;width:${size}px;height:${size}px;display:grid;place-items:center;background:${background}">
   <div style="width:${size * scale}px;height:${size * scale}px">${inline('bane-mark.svg')}</div></body>`;
-const card = `<style>
-  @font-face { font-family: 'OpenTUI Mono'; src: url('${font('opentui-regular.woff2')}') format('woff2'); }
-  @font-face { font-family: Inter; src: url('${font('inter-latin.woff2')}') format('woff2'); font-weight: 100 900; }
-  body { margin: 0; width: 1200px; height: 630px; background: ${canvas}; color: ${text}; box-sizing: border-box; padding: 96px 104px; display: flex; flex-direction: column; justify-content: space-between; -webkit-font-smoothing: antialiased; }
-  h1 { margin: 0; font: 400 72px/1.1 'OpenTUI Mono', monospace; letter-spacing: -.02em; max-width: 21ch; text-wrap: balance; }
-  p { margin: 20px 0 0; font: 440 28px/1.3 Inter, sans-serif; color: ${muted}; }
-  .lockup { height: 72px; margin-top: -10px; display: flex; align-items: baseline; gap: 18px; font: 600 92px/1 Inter, sans-serif; letter-spacing: -.02em; }
-  .lockup svg { flex: none; width: 50px; height: 50px; }
-</style><body><div class="lockup">${inline('bane-mark.svg')}<span>${productName.toLowerCase()}</span></div>
-  <div><h1>Email infrastructure done right.</h1><p>One API on Amazon SES.</p></div></body>`;
+
+// The link-preview card. The page is laid out for a 1440 × 900 window at night; the card is 800 by 420 of its pixels,
+// photographed at one and a half times (so 1200 × 630 exactly), ending just right of the cabinet's riser and at the foot of the headline's band.
+// What is too small to read on a card (the lane plates) is hidden, and the wordmark stands in the space to the left.
+async function sorterCard(browser) {
+  const dist = resolve(publicDir, '../dist');
+  if (!existsSync(join(dist, 'index.html'))) throw Error('og.png is photographed from the built dashboard: run `bun run build` in app/ first');
+  const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.webmanifest': 'application/manifest+json' };
+  const server = createServer((request, response) => {
+    const path = new URL(request.url, 'http://localhost').pathname, file = join(dist, path);
+    // (The two requests a signed-out visit makes: who is this, and does this installation have a public homepage.)
+    if (path === '/v1/me') { response.writeHead(401, { 'content-type': 'application/json' }); response.end(JSON.stringify({ error: { code: 'AUTH_REQUIRED', message: 'Sign in.' } })); return }
+    if (path === '/health') { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ multiTenant: true })); return }
+    const found = file.startsWith(dist) && extname(path) && existsSync(file) ? file : path.startsWith('/v1/') || path.startsWith('/api/') || extname(path) ? null : join(dist, 'index.html');
+    if (!found) { response.writeHead(404); response.end(); return }
+    response.writeHead(200, { 'content-type': types[extname(found)] ?? 'application/octet-stream' }); response.end(readFileSync(found));
+  });
+  await new Promise(done => server.listen(0, '127.0.0.1', done));
+  const across = 800, scale = 1200 / across;
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: scale, colorScheme: 'dark' });
+  try {
+    // Night, and the shorter day of a returning visitor.
+    await context.addInitScript(() => { localStorage.setItem('bane.theme', 'dark'); localStorage.setItem('sorter.seen', '1') });
+    const page = await context.newPage();
+    await page.goto(`http://127.0.0.1:${server.address().port}/`);
+    await page.waitForFunction(() => document.querySelector('.srt-page')?.dataset.phase === 'rest', null, { timeout: 90_000 });
+    // The smoke clears and the last letters settle.
+    await page.waitForTimeout(7000);
+    const clip = await page.evaluate(across => {
+      const band = document.querySelector('.srt-band').getBoundingClientRect(), u = band.width / 48, height = across * 630 / 1200;
+      // (The cabinet's riser ends 38.4 cells right of the page's middle; the headline's band ends the card.)
+      const x = Math.round(band.left + band.width / 2 + 39.4 * u - across), y = Math.round(band.bottom + 2 - height);
+      const style = document.createElement('style');
+      style.textContent = '.srt-lanes, .srt-card, .srt-cannon { visibility: hidden !important }';
+      document.head.append(style);
+      const mark = document.querySelector('.srt-header .bane-wordmark').cloneNode(true);
+      mark.style.cssText = `position: fixed; z-index: 99; left: ${x + 26}px; top: ${y + 26}px; gap: 9px; color: var(--srt-text); font-size: 24px; line-height: 26px`;
+      mark.querySelector('svg').style.cssText = 'width: 25px; height: 25px';
+      document.querySelector('.srt-page').append(mark);
+      return { x, y, width: across, height };
+    }, across);
+    const data = await page.screenshot({ clip });
+    if (data.readUInt32BE(16) !== 1200 || data.readUInt32BE(20) !== 630) throw Error(`og.png came out ${data.readUInt32BE(16)} × ${data.readUInt32BE(20)}, not 1200 × 630`);
+    return data;
+  } finally { await context.close(); server.close(); }
+}
 
 // ICO with PNG entries (read by every current browser and Windows since Vista).
 function ico(pngs) {
@@ -42,8 +81,10 @@ function ico(pngs) {
   return Buffer.concat([header, ...pngs.map(p => p.data)]);
 }
 
-const browser = await chromium.launch({ executablePath: process.env.BRAND_CHROME ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' });
+const browser = await chromium.launch({ executablePath: process.env.BRAND_CHROME ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', args: ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'] });
 try {
+  writeFileSync(join(publicDir, 'og.png'), await sorterCard(browser));
+  if (process.env.BRAND_ONLY !== 'og') {
   const shot = async (html, width, height, omitBackground = false) => {
     const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
     await page.setContent(html); await page.evaluate(() => document.fonts.ready);
@@ -64,5 +105,5 @@ try {
   writeFileSync(join(publicDir, 'icon-192.png'), await shot(tile(192, 0.6, canvas), 192, 192));
   writeFileSync(join(publicDir, 'icon-512.png'), await shot(tile(512, 0.6, canvas), 512, 512));
   writeFileSync(join(publicDir, 'icon-maskable-512.png'), await shot(tile(512, 0.5, canvas), 512, 512));
-  writeFileSync(join(publicDir, 'og.png'), await shot(card, 1200, 630));
+  }
 } finally { await browser.close(); }

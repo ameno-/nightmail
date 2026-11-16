@@ -1,7 +1,7 @@
 {
   "name": "nightmail",
   "short_name": "nightmail",
-  "description": "Email infrastructure done right. One API on Amazon SES.",
+  "description": "$0.20 per 1,000 emails, sent or received via API. Free every month: 3,000 sent and 3,000 received.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

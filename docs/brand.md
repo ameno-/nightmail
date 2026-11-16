@@ -1,6 +1,6 @@
 # Brand
 
-The logo is the **Stamp** mark next to the product name, **nightmail**. The word is always lowercase. Until the new lockup lands, the dashboard (`BaneWordmark`) and `og.png` set the word as text in the style below, and the lockup SVGs in `app/public/brand/` still spell bane.
+The logo is the **Stamp** mark next to the product name, **nightmail**. The word is always lowercase. Until the new lockup lands, the dashboard (`BaneWordmark`, which `og.png` photographs) sets the word as text in the style below, and the lockup SVGs in `app/public/brand/` still spell bane.
 
 ## Files
 
@@ -9,7 +9,7 @@ The logo is the **Stamp** mark next to the product name, **nightmail**. The word
 | `app/public/brand/bane-lockup-light.svg`, `bane-lockup-dark.svg` | mark and word, for light and dark backgrounds |
 | `app/public/brand/bane-mark.svg`, `bane-mark-dark.svg` | mark alone |
 | `app/src/components/BaneLogo.tsx` | the same paths in the dashboard: `BaneWordmark` (lockup) and `BaneMark`. They follow the theme. |
-| `app/public/favicon.svg`, `favicon.ico`, `apple-touch-icon.png`, `icon-*.png`, `og.png` | browser icons and the link-preview card. `node scripts/brand-assets.mjs` in `app/` rebuilds the PNG and ICO files from the SVGs. |
+| `app/public/favicon.svg`, `favicon.ico`, `apple-touch-icon.png`, `icon-*.png`, `og.png` | browser icons and the link-preview card. `node scripts/brand-assets.mjs` in `app/` rebuilds the icon PNG and ICO files from the SVGs, and photographs `og.png` from the built homepage (`bun run build` first; `BRAND_ONLY=og` for the card alone). |
 
 Everything is outlined, so no font is needed to render the files. Use the PNGs in email, because many mail clients don't show SVG.
 
