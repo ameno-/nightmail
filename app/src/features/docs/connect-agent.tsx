@@ -12,13 +12,13 @@ import { ApiError } from '../../data/types'
 import { mcpClientNames, mcpClients, mcpClientSteps, mcpServerUrl, mcpSnippet, type McpClient } from '../../../../api/src/mcp-clients'
 import './developer.css'
 import { useSingleFlight } from '../../lib/single-flight'
-import { productName } from '../../../../api/src/brand'
 
-/** What an agent signed in with OAuth asks for. Only OpenCode lets the config choose; other clients ask for read. */
+/** What an agent signed in with OAuth asks for. Only OpenCode lets the config choose; other clients ask for read. The
+ *  docs explain each level (agent-setup.tsx); in the dashboard the labels say it. */
 export const mcpAccess = [
-  { value: 'read', label: 'Read only', grants: 1, hint: 'Reads mail, logs and settings. Can’t send or change anything.' },
-  { value: 'send', label: 'Read and send', grants: 2, hint: 'Also sends email, which may reach real recipients.' },
-  { value: 'manage', label: 'Full access', grants: 3, hint: 'Also changes configuration: domains, routes, rituals and keys.' },
+  { value: 'read', label: 'Read only', grants: 1 },
+  { value: 'send', label: 'Read and send', grants: 2 },
+  { value: 'manage', label: 'Full access', grants: 3 },
 ] as const
 export type McpAccess = typeof mcpAccess[number]['value']
 /** The scope OpenCode asks for: this installation's scope names (read, send, manage) up to the chosen access. */
@@ -91,41 +91,32 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
     } catch (e) { setError(errorText(e)) }
     finally { setBusy(false) }
   }, chosen)
-  const selected = mcpAccess.find(option => option.value === access)!, scope = useMcpScope(access)
-  // The API names the key after the inbox (its name, or else its address) and the client it was made for.
-  const box = active.find(item => item.id === chosen)
-  const keyName = box?.name ? `${box.name} · ${mcpClientNames[result?.client ?? client]}` : null
+  const scope = useMcpScope(access)
   const close = () => { if (!busy) onOpenChange(false) }
+  // The options say what the agent gets; a client other than OpenCode asks for read, so its access shows Read only.
   return <Dialog open={open} onOpenChange={next => { if (!next) close() }} title="Connect an agent" className="connect-agent-dialog"
-    description={`Let an AI agent such as OpenCode, Claude Code or Cursor work with ${productName} over MCP.`}
     footer={mode === 'key' && !result ? <><Button disabled={busy} onClick={close}>Cancel</Button><Button variant="primary" loading={busy} disabled={!chosen} onClick={() => void create()}>Create API key</Button></> : <Button variant="primary" onClick={close}>Done</Button>}>
     <div className="stack">
       {!result && <>
-        <Field label="What it can reach" hint={mode === 'oauth' ? 'It signs in as you and gets the access you approve in the browser. On that screen you can also limit it to chosen agent inboxes.' : 'An API key that reads one agent inbox and nothing else in the workspace. It stops working when the inbox is deleted.'}>
-          <Select value={mode} onValueChange={value => { setMode(value as typeof mode); setError('') }} options={[{ value: 'oauth', label: 'Sign in as me (OAuth)' }, ...(canAdminister ? [{ value: 'key', label: 'One agent inbox (API key for this inbox)' }] : [])]} />
+        <Field label="What it can reach">
+          <Select value={mode} onValueChange={value => { setMode(value as typeof mode); setError('') }} options={[{ value: 'oauth', label: 'Sign in as me' }, ...(canAdminister ? [{ value: 'key', label: 'One agent inbox, with its own key' }] : [])]} />
         </Field>
-        {mode === 'oauth' ? <Field label="Access it asks for" hint={client === 'opencode' ? selected.hint : `${mcpClientNames[client]} asks for read access; you can approve more in the browser.`}>
-          <Select value={access} onValueChange={value => setAccess(value as McpAccess)} disabled={client !== 'opencode'} options={mcpAccess.map(({ value, label }) => ({ value, label }))} />
+        {mode === 'oauth' ? <Field label="Access it asks for">
+          <Select value={client === 'opencode' ? access : 'read'} onValueChange={value => setAccess(value as McpAccess)} disabled={client !== 'opencode'} options={mcpAccess.map(({ value, label }) => ({ value, label }))} />
         </Field> : <>
-          <Field label="Inbox" hint={inboxes.isPending ? 'Loading inboxes…' : !active.length ? undefined : 'Agent inboxes are expiring addresses for agents and tests.'}>
-            {inboxes.isPending || active.length ? <Select mask value={chosen} onValueChange={setInbox} disabled={inboxes.isPending} options={active.map(box => ({ value: box.id, label: label(box) }))} />
-              : <p className="muted connect-agent__empty">No active agent inboxes. <Link to="/receiving/inboxes" onClick={close}>Create one in Receiving</Link>, then connect it here.</p>}
-          </Field>
-          <Checkbox checked={reply} onCheckedChange={setReply} label="Also let it reply to people who wrote to the inbox (needs replies on for the inbox)" />
+          {inboxes.isPending || active.length ? <Field label="Inbox">
+            <Select mask value={chosen} onValueChange={setInbox} disabled={inboxes.isPending} placeholder="Loading inboxes…" options={active.map(box => ({ value: box.id, label: label(box) }))} />
+          </Field> : <div className="connect-agent__empty"><span>No active agent inboxes</span><Link className="ui-button ui-button--secondary ui-button--sm" to="/receiving/inboxes" onClick={close}>Create an agent inbox</Link></div>}
+          <Checkbox checked={reply} onCheckedChange={setReply} label="Let it reply to senders (the inbox needs replies on)" />
+          {/* Before the key exists: only the client, so the config made with the key is for the right one. */}
+          <Field label="MCP client"><Select value={client} onValueChange={value => setClient(value as McpClient)} options={clientTabs} /></Field>
         </>}
       </>}
-      {result && <Alert tone="success" title="API key created">Copy the setup now: the key is shown only once. You’ll find it in API keys and on the inbox’s page{keyName ? <>, named “{keyName}”</> : null}.</Alert>}
+      {result && <Alert tone="success" title="API key created">Copy the setup now: the key is shown only once.</Alert>}
       {error && <Alert tone="danger">{error}</Alert>}
       {(mode === 'oauth' || result) && <McpClientSetup client={client} onClient={setClient} url={url} auth={result?.key ? { bearer: result.key } : { scope }} />}
-      {mode === 'key' && !result && <McpClientPreview client={client} onClient={setClient} />}
     </div>
   </Dialog>
-}
-
-/** Before the key exists: just the client choice, so the created config is for the right one. */
-function McpClientPreview({ client, onClient }: { client: McpClient; onClient: (client: McpClient) => void }) {
-  return <div className="stack"><Tabs label="MCP client" value={client} onValueChange={value => onClient(value as McpClient)} items={clientTabs} />
-    <p className="muted developer-copy">The setup for {mcpClientNames[client]}, with the key in it, appears here once you create the key.</p></div>
 }
 
 /** The button that opens it, wherever an agent might be connected from. */

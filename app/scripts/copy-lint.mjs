@@ -20,8 +20,9 @@ const app = resolve(dirname(fileURLToPath(import.meta.url)), '..'), src = join(a
 const BASELINE = join(app, 'scripts/copy-baseline.json');
 
 // Content that isn't dashboard copy: the legal documents and docs (their own review), the signed-out home, demo and
-// seed data, the scripted support conversation, logos and the email preview's CSS.
-const SKIP = /^(features\/(legal|docs|home)\/|data\/(mock|seed)\.ts$|features\/support\/demo\.ts$|components\/(NightmailLogo|AnomalyLogo|EmailPreview)\.tsx$)/;
+// seed data, the scripted support conversation, logos and the email preview's CSS. Connect an agent lives in docs/ but
+// is only a dashboard dialog, so it is linted; the docs files it shares embeds with pass `compact` in the dashboard.
+const SKIP = /^(features\/(legal|home)\/|features\/docs\/(?!connect-agent\.tsx$)|data\/(mock|seed)\.ts$|features\/support\/demo\.ts$|components\/(NightmailLogo|AnomalyLogo|EmailPreview)\.tsx$)/;
 
 // Words and sentences per element type. Sentences are counted on the whole string; words exclude code.
 const LIMITS = {

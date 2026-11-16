@@ -85,19 +85,26 @@ export function AgentPrompt({ prompt, compact = false }: { prompt: string | null
   </section>
 }
 
+// What each access level lets an agent do, for the docs page's access choice (the dashboard's labels stand alone).
+const accessHints: Record<McpAccess, string> = {
+  read: 'Reads mail, logs and settings. Can’t send or change anything.',
+  send: 'Also sends email, which may reach real recipients.',
+  manage: 'Also changes configuration: domains, routes, rituals and keys.',
+}
+
 // The hosted MCP server, set up with OAuth: the same snippets as Connect an agent in the dashboard (connect-agent.tsx).
 // `compact` (onboarding) is the URL, the client tabs and their steps, without the docs' paragraph on the two sign-ins.
 export function McpSetup({ chooseAccess = false, compact = false }: { chooseAccess?: boolean; compact?: boolean }) {
   const [client, setClient] = useState<McpClient>('opencode')
   const [access, setAccess] = useState<McpAccess>(chooseAccess ? 'read' : 'manage')
-  const selected = mcpAccess.find(option => option.value === access)!, scope = useMcpScope(access)
+  const scope = useMcpScope(access)
   const serverUrl = useMcpUrl()
   return <section id="mcp" className="section stack developer-section" aria-label="MCP server">
     <SectionHeader title="MCP server" />
     <div className="developer-url"><code>{serverUrl ?? ''}</code>{serverUrl && <CopyAction value={serverUrl} label="Copy MCP URL" variant="ghost" size="sm" compact className="developer-copy-icon" />}</div>
     {!compact && <p className="muted developer-copy">Add this URL as a remote (HTTP) server in your MCP client. There are two ways to sign in. <strong>As you</strong>: the client opens your browser, you sign in with your Anomaly account (Google) and approve what it may do; no key to copy. <strong>One agent inbox</strong>: an API key for that inbox in the config limits the agent to it; create it in the dashboard with Connect an agent (API keys, or any agent inbox).</p>}
     {chooseAccess && <div className="developer-access">
-      <Field label="Access it asks for" htmlFor="developer-mcp-access" hint={client === 'opencode' ? selected.hint : `${mcpClientNames[client]} asks for read access; you can approve more in the browser.`}>
+      <Field label="Access it asks for" htmlFor="developer-mcp-access" hint={client === 'opencode' ? accessHints[access] : `${mcpClientNames[client]} asks for read access; you can approve more in the browser.`}>
         <Select id="developer-mcp-access" value={access} onValueChange={value => setAccess(value as McpAccess)} disabled={client !== 'opencode'} options={mcpAccess.map(({ value, label }) => ({ value, label }))} />
       </Field>
     </div>}

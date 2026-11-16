@@ -48,7 +48,7 @@ export function TestSend({ domain, onSent }: { domain: Domain; onSent?: (id: str
 }
 
 /** Copyable curl and SDK examples plus a test send from the dashboard. Sending needs a verified domain. `compact`
- *  (onboarding) leaves out the simulator tip, which is a reference for testing, not a step. */
+ *  (onboarding, the key-created dialog) leaves out the simulator tip, which is a reference for testing, not a step. */
 export function FirstSend({ domain, apiKey = null, title = 'Send your first email', testButton = true, compact = false }: { domain: Domain | null; apiKey?: string | null; title?: string; testButton?: boolean; compact?: boolean }) {
   const origin = usePublicOrigin()
   const identity = useSession()?.identity
@@ -70,9 +70,10 @@ export function FirstSend({ domain, apiKey = null, title = 'Send your first emai
   </section>
 }
 
-// Shown with a newly created API key: the same examples with that key and the workspace's first verified domain.
+// Shown with a newly created API key (a dashboard dialog, so compact): the same examples with that key and the
+// workspace's first verified domain.
 export function KeySendExample({ apiKey }: { apiKey: string }) {
   const domains = useApiQuery(['domains', 'key-example'], (api, signal) => api.domains.list({ page: 1, pageSize: 10, refresh: false }, signal))
   const items = domains.data?.items ?? []
-  return <FirstSend domain={items.find(domain => domain.status === 'verified') ?? items[0] ?? null} apiKey={apiKey} title="Send with this key" testButton={false} />
+  return <FirstSend domain={items.find(domain => domain.status === 'verified') ?? items[0] ?? null} apiKey={apiKey} title="Send with this key" testButton={false} compact />
 }
