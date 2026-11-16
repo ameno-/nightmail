@@ -81,6 +81,8 @@ const pages = ids => [
   ['Sent email · junk-like', `/logs/${ids.junkEmail}`, { from: '/logs?view=sent', row: 'FINAL NOTICE' }],
   ['Received email', `/logs/${ids.receivedEmail}`, { from: '/logs?view=received', row: 'Invoice for October' }],
   ['Receiving', '/receiving', { from: '/overview' }],
+  // A workspace with no receiving domain yet: the three steps that start it.
+  ['Receiving · new workspace', '/receiving', { user: 'nia' }],
   ['Receiving · endpoints', '/receiving?tab=endpoints', { from: '/receiving', click: 'Endpoints' }],
   ['Receiving · address', `/receiving/addresses/${ids.address}`, { from: '/receiving' }],
   ['Receiving · inbox', '/receiving/inbox', { from: '/receiving' }],
