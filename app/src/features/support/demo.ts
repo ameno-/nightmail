@@ -2,7 +2,7 @@ import type { ClientMessage, ServerMessage, SupportTransport, TransportEvent } f
 import { productName } from '../../../../api/src/brand'
 
 // The demo transport: a scripted conversation over the same protocol messages as the support Worker, with no network.
-// A greeting; a deliverability investigation (Outlook bounces after an import → advice → a consent card, which ends the
+// The panel opens with its own line; then a deliverability investigation (Outlook bounces after an import → advice → a consent card, which ends the
 // answer as the protocol does → a content tip and a ticket offer); then the person drops a screenshot of the failing
 // re-import, the agent reads it and files a bug report with it. Whatever the person types moves the script on. The
 // timings are the point: the panel is reviewed and screenshotted against them, so steps take a beat and text streams in
@@ -16,9 +16,6 @@ type Step =
   | { consent: string; allow: Step[]; deny: Step[] }
   | { ticket: string; category?: string }
   | { pause: number }
-
-// Clicks, not opens: Apple Mail Privacy Protection opens every email it delivers, so open rates say little.
-const greeting = (name: string) => `Hi ${name}, I see you sent **November product update** yesterday with a 6.1% click rate. What are we working on today?`
 
 const investigate: Step[] = [
   { pause: 300 },
@@ -103,7 +100,7 @@ export function createDemoTransport({ firstName, workspace }: { firstName: strin
     }
     return text.trim()
   }
-  async function answer(pick: () => Step[], kind: 'first' | 'reply' | 'notice') {
+  async function answer(pick: () => Step[], kind: 'reply' | 'notice') {
     const id = conversation
     busy = true; cancelled = false
     server({ type: 'status', busy: true })
@@ -137,12 +134,8 @@ export function createDemoTransport({ firstName, workspace }: { firstName: strin
     await wait(450)
     if (id !== conversation) return
     emit({ type: 'connection', state: 'open' })
-    server({ type: 'hello', conversationId: `conv_demo${id}`, channel: 'chat', status: 'open', agent: { name: `${productName} support`, ai: true }, customer: { firstName }, workspace, contentAccess: false, busy: true })
+    server({ type: 'hello', conversationId: `conv_demo${id}`, channel: 'chat', status: 'open', agent: { name: `${productName} support`, ai: true }, customer: { firstName }, workspace, contentAccess: false, busy: false })
     server({ type: 'history', messages: [], pending: { consent: null, ticket: null } })
-    // The agent reads the account before it writes the greeting: a typing state, then the greeting.
-    await wait(900)
-    if (id !== conversation) return
-    void answer(() => [{ say: greeting(firstName) }], 'first')
   }
 
   const transport: SupportTransport = {

@@ -13,7 +13,9 @@ export type Part =
   | { kind: 'ticket'; ticket: TicketFiled; screenshots: number }
 /** A screenshot in a sent message: its local preview, or none after a reload (the server never sends images back). */
 export interface ChatImage { url: string | null; name: string }
-export interface ChatMessage { id: string; role: 'assistant' | 'user'; kind: MessageKind; parts: Part[]; streaming: boolean; restored: boolean; failed?: string; images?: ChatImage[] }
+/** `local`: only in this panel so far: a message waiting for the connection, or the reply being prepared for it (until
+ *  the server's message.start adopts it; `key` keeps it the same element when it does). */
+export interface ChatMessage { id: string; key?: string; role: 'assistant' | 'user'; kind: MessageKind; parts: Part[]; streaming: boolean; restored: boolean; local?: boolean; failed?: string; images?: ChatImage[] }
 /** A screenshot in the message box: uploading as soon as it is added, sent with the next message. */
 export interface Attachment { key: string; name: string; url: string; state: 'uploading' | 'ready' | 'failed'; progress: number; attachmentId?: string; error?: string }
 type Hello = Extract<ServerMessage, { type: 'hello' }>
@@ -46,6 +48,8 @@ const textOf = (message: ChatMessage) => message.parts.flatMap(part => part.kind
 // What a screen reader should say: the answer without its Markdown markers.
 const spoken = (text: string) => text.replace(/\[([^\]\n]+)\]\([^)\s]+\)/g, '$1').replace(/\*\*([^*\n]+?)\*\*/g, '$1').replace(/`([^`\n]+)`/g, '$1').replace(/^\s*```.*$/gm, '').replace(/^\s{0,3}[-*•]\s+/gm, '')
 const id = () => `c_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+/** The reply to a message, before the server starts it: its status line shows at once. */
+const placeholder = (after: string): ChatMessage => ({ id: `pending_${after}`, key: `pending_${after}`, role: 'assistant', kind: 'reply', parts: [], streaming: true, restored: false, local: true })
 export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 /** What a ticket is, in a few words, from its type and topic: a report the team works on ("Bug report filed"), or a
  *  request passed to the team ("Billing question passed to the Nightmail team"). Older servers send only the category. */
@@ -65,6 +69,10 @@ export class SupportStore {
   private listeners = new Set<() => void>()
   private visible = false
   private lastUserMessage: { clientMessageId: string; text: string; attachments?: string[] } | null = null
+  /** Messages sent before the conversation was connected, in order: they go out as soon as it is. */
+  private outbox: { clientMessageId: string; text: string; attachments?: string[] }[] = []
+  /** This connection's history has arrived, so a message sent now can't be overwritten by it. */
+  private synced = false
   private uploads = new Map<string, AbortController>()
   /** Local previews of sent screenshots by attachment ID, so history after a reconnect still shows them. */
   private previews = new Map<string, string>()
@@ -90,24 +98,52 @@ export class SupportStore {
     else this.set(state => ({ messages: [...state.messages, { id: `local_${state.messages.length}`, role: 'assistant', kind: 'reply', parts: [part], streaming: false, restored: false }] }))
   }
 
+  /** Makes the reply placeholder the server's message `messageId` (for a frame of a message this panel hasn't seen). */
+  private adopt(messageId: string, kind?: MessageKind) {
+    if (this.state.messages.some(item => item.id === messageId)) return false
+    const pending = this.state.messages.find(item => item.local && item.role === 'assistant')
+    if (!pending) return false
+    this.update(pending.id, item => ({ ...item, id: messageId, kind: kind ?? item.kind, local: false }))
+    return true
+  }
+
   setVisible(visible: boolean) { this.visible = visible; if (visible && this.state.unread) this.set({ unread: false }) }
   start() { if (this.state.connection === 'idle' && !this.state.hello) this.transport.connect() }
   reconnect() { this.transport.connect() }
   setDraft(draft: string) { this.set({ draft: draft.slice(0, MAX_MESSAGE) }) }
   /** Whether the message box can be sent: something to send, and every screenshot uploaded. */
   sendable() { const { draft, attachments } = this.state; return (draft.trim() !== '' || attachments.length > 0) && attachments.every(item => item.state === 'ready') }
+  /** Sends the message box. It goes in the log at once, with the reply's status line under it; before the conversation
+   *  is connected (the panel takes messages from the moment it opens) it waits in the outbox and goes out on connect. */
   send() {
     if (!this.sendable()) return false
     const text = this.state.draft.trim(), attached = this.state.attachments
     const ids = attached.map(item => item.attachmentId!), clientMessageId = id()
-    // In the log before it goes out: an answer can start the moment the server has it.
-    const before = this.state
-    this.set(state => ({ draft: '', attachments: [], attachError: null, imagesSent: state.imagesSent + ids.length,
-      messages: [...state.messages, { id: clientMessageId, role: 'user', kind: 'reply', parts: text ? [{ kind: 'text', text }] : [], images: attached.map(({ url, name }) => ({ url, name })), streaming: false, restored: false }] }))
-    if (!this.transport.send({ type: 'user.message', clientMessageId, text, ...ids.length ? { attachments: ids } : {} })) { this.set({ draft: before.draft, attachments: before.attachments, imagesSent: before.imagesSent, messages: before.messages }); return false }
-    this.lastUserMessage = { clientMessageId, text, ...ids.length ? { attachments: ids } : {} }
+    const message = { clientMessageId, text, ...ids.length ? { attachments: ids } : {} }
+    const sent = this.synced && this.transport.send({ type: 'user.message', ...message })
+    if (!sent) this.outbox.push(message)
+    else this.lastUserMessage = message
     attached.forEach(item => this.previews.set(item.attachmentId!, item.url))
+    this.set(state => ({ draft: '', attachments: [], attachError: null, imagesSent: state.imagesSent + ids.length,
+      messages: [...state.messages, { id: clientMessageId, role: 'user', kind: 'reply', parts: text ? [{ kind: 'text', text }] : [], images: attached.map(({ url, name }) => ({ url, name })), streaming: false, restored: false, local: !sent },
+        ...state.messages.some(item => item.local && item.role === 'assistant') ? [] : [placeholder(clientMessageId)]] }))
     return true
+  }
+  /** The outbox, once the conversation is connected (after its history). */
+  private flush() {
+    while (this.outbox.length) {
+      const next = this.outbox[0]
+      if (!this.transport.send({ type: 'user.message', ...next })) return
+      this.outbox.shift()
+      this.lastUserMessage = next
+      this.set(state => ({ messages: [...state.messages.map(message => message.id === next.clientMessageId ? { ...message, local: false, failed: undefined } : message),
+        ...state.messages.some(message => message.streaming && message.role === 'assistant') ? [] : [placeholder(next.clientMessageId)]] }))
+    }
+  }
+  /** Drops the reply placeholder: no answer is coming for it (a refusal, an error, the end of the conversation). */
+  private settle(failed?: string) {
+    this.set(state => ({ messages: state.messages.filter(item => !(item.local && item.role === 'assistant')).map(item => item.streaming ? { ...item, streaming: false }
+      : failed && item.local && item.role === 'user' ? { ...item, failed } : item) }))
   }
   /** Screenshots pasted, dropped or picked: checked by type (from the bytes), size and the per-conversation limit, then
    *  uploaded at once while the person writes. */
@@ -143,11 +179,14 @@ export class SupportStore {
     this.set(state => ({ attachments: state.attachments.filter(entry => entry.key !== key) }))
   }
   clearAttachError() { if (this.state.attachError) this.set({ attachError: null }) }
-  /** TURN_FAILED: resend the same message (the server ignores a clientMessageId it already accepted). */
+  /** TURN_FAILED: resend the same message (the server ignores a clientMessageId it already accepted); messages that never
+   *  went out go once the conversation is connected again. */
   retry() {
+    if (this.outbox.length) { this.transport.connect(); return }
     const last = this.lastUserMessage
     if (!last || !this.transport.send({ type: 'user.message', ...last })) return
-    this.update(last.clientMessageId, message => ({ ...message, failed: undefined }))
+    this.set(state => ({ messages: [...state.messages.map(message => message.id === last.clientMessageId ? { ...message, failed: undefined } : message),
+      ...state.messages.some(message => message.local && message.role === 'assistant') ? [] : [placeholder(last.clientMessageId)]] }))
   }
   consent(requestId: string, decision: 'allow' | 'deny') {
     this.setConsent(requestId, decision === 'allow' ? 'allowing' : 'deny')
@@ -161,11 +200,16 @@ export class SupportStore {
   cancel() { this.transport.send({ type: 'cancel' }) }
   requestHuman() { if (this.transport.send({ type: 'human.request' })) this.set({ humanRequested: true }) }
   end() { this.transport.send({ type: 'end' }) }
-  restart() { this.lastUserMessage = null; this.set({ ...initial(), draft: this.state.draft }); this.transport.restart() }
+  restart() { this.lastUserMessage = null; this.outbox = []; this.set({ ...initial(), draft: this.state.draft }); this.transport.restart() }
   dispose() { for (const controller of this.uploads.values()) controller.abort(); this.unsubscribe(); this.transport.dispose(); this.listeners.clear() }
 
   private handle(event: TransportEvent) {
-    if (event.type === 'connection') { this.set({ connection: event.state, retryAt: event.retryAt ?? null, reason: event.reason ?? null }); return }
+    if (event.type === 'connection') {
+      if (event.state !== 'open') this.synced = false
+      this.set({ connection: event.state, retryAt: event.retryAt ?? null, reason: event.reason ?? null })
+      if (event.state === 'unavailable') this.settle('Not sent: support chat isn’t available.')
+      return
+    }
     const message = event.message
     switch (message.type) {
       case 'hello':
@@ -178,17 +222,26 @@ export class SupportStore {
           images: item.attachments?.map(attachment => ({ url: this.previews.get(attachment.id) ?? null, name: attachment.name || 'Screenshot' })),
           parts: [...(item.tools ?? []).map(tool => ({ kind: 'tool' as const, id: tool.id, label: tool.label, state: tool.ok ? 'done' as const : 'failed' as const })), ...item.text ? [{ kind: 'text' as const, text: item.text }] : []] }))
         const imagesSent = message.messages.reduce((sum, item) => sum + (item.attachments?.length ?? 0), 0)
-        this.set({ messages, imagesSent })
+        // What the server doesn't have yet stays after its history: messages waiting to go out, and the reply placeholder
+        // (one is made for an answer already under way on a reconnect).
+        const local = this.state.messages.filter(item => item.local)
+        const answering = this.state.busy && messages.at(-1)?.role === 'user' && !local.some(item => item.role === 'assistant')
+        this.set({ messages: [...messages, ...local, ...answering ? [placeholder(messages.at(-1)!.id)] : []], imagesSent: imagesSent + this.outbox.reduce((sum, item) => sum + (item.attachments?.length ?? 0), 0) })
         if (message.pending.consent) this.append({ kind: 'consent', request: message.pending.consent, state: 'open' })
         if (message.pending.ticket) this.append({ kind: 'ticket', ticket: message.pending.ticket, screenshots: imagesSent })
+        this.synced = true
+        this.flush()
         break
       }
       case 'status': this.set({ busy: message.busy }); break
       case 'message.start':
         if (this.state.messages.some(item => item.id === message.messageId)) break
+        // The reply's placeholder becomes this message (same element, its status line carries on); else a new one.
+        if (this.adopt(message.messageId, message.kind)) break
         this.set(state => ({ messages: [...state.messages, { id: message.messageId, role: 'assistant', kind: message.kind, parts: [], streaming: true, restored: false }] }))
         break
       case 'text.delta':
+        this.adopt(message.messageId)
         this.update(message.messageId, item => {
           const last = item.parts.at(-1)
           return { ...item, parts: last?.kind === 'text' ? [...item.parts.slice(0, -1), { kind: 'text', text: last.text + message.delta }] : [...item.parts, { kind: 'text', text: message.delta.replace(/^\n+/, '') }] }
@@ -197,6 +250,7 @@ export class SupportStore {
       case 'message.end': {
         // The final text is what counts: when the output gate replaced it, or it differs from what streamed, it replaces
         // the streamed text (tool steps and cards stay where they were).
+        this.adopt(message.messageId)
         const item = this.state.messages.find(entry => entry.id === message.messageId)
         if (!item) break
         const replace = message.redacted || flat(textOf(item)) !== flat(message.text)
@@ -207,7 +261,7 @@ export class SupportStore {
         this.set({ announcement: `${this.state.hello?.agent.name ?? `${productName} support`}: ${spoken(message.text)}`, unread: this.state.unread || !this.visible })
         break
       }
-      case 'tool.start': this.append({ kind: 'tool', id: message.toolCallId, label: message.label, state: 'running' }, message.messageId); break
+      case 'tool.start': this.adopt(message.messageId); this.append({ kind: 'tool', id: message.toolCallId, label: message.label, state: 'running' }, message.messageId); break
       case 'tool.end':
         this.set(state => ({ messages: state.messages.map(item => item.parts.some(part => part.kind === 'tool' && part.id === message.toolCallId)
           ? { ...item, parts: item.parts.map(part => part.kind === 'tool' && part.id === message.toolCallId ? { ...part, label: message.label, state: message.ok ? 'done' : 'failed' } : part) } : item) }))
@@ -228,12 +282,14 @@ export class SupportStore {
         if (message.code === 'TURN_FAILED') {
           const last = this.lastUserMessage
           if (last) this.update(last.clientMessageId, item => ({ ...item, failed: message.message || 'Couldn’t answer that.' }))
-          this.set(state => ({ busy: false, messages: state.messages.map(item => item.streaming ? { ...item, streaming: false } : item) }))
-        } else if (message.code === 'RATE_LIMITED') this.set({ limit: { code: message.code, message: message.message, until: Date.now() + (message.retryAfter ?? 60) * 1000 } })
-        else if (message.code === 'BUDGET_EXHAUSTED') this.set({ limit: { code: message.code, message: message.message, until: null } })
+          this.settle()
+          this.set({ busy: false })
+        } else if (message.code === 'RATE_LIMITED') { this.settle(); this.set({ limit: { code: message.code, message: message.message, until: Date.now() + (message.retryAfter ?? 60) * 1000 } }) }
+        else if (message.code === 'BUDGET_EXHAUSTED') { this.settle(); this.set({ limit: { code: message.code, message: message.message, until: null } }) }
         break
       case 'closed':
-        this.set(state => ({ closed: message.reason, status: 'closed', busy: false, messages: state.messages.map(item => item.streaming ? { ...item, streaming: false } : item) }))
+        this.settle()
+        this.set({ closed: message.reason, status: 'closed', busy: false })
         break
     }
   }
