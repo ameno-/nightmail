@@ -80,15 +80,16 @@ function invitationError(error: unknown) {
   return `Couldn’t open the invitation. ${error instanceof Error ? error.message : 'Try the link again.'}`
 }
 const expiry = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
-// Shown before anything changes. The slug tells apart workspaces that share a name. An account whose
-// only way in is this invitation has no workspace yet (M9): cancelling signs it out instead.
+// Shown before anything changes: the question, its facts and the two answers. The slug tells apart workspaces that
+// share a name. An account whose only way in is this invitation has no workspace yet (M9): cancelling signs it out
+// instead, and its button says so.
 function InvitationReview({ invitation, email, firstWorkspace, joining, error, onJoin, onCancel }: { invitation: WorkspaceInvitationPreview; email: string | null; firstWorkspace: boolean; joining: boolean; error: unknown; onJoin: () => void; onCancel: () => void }) {
   return <main className="page-surface"><PageHeader title={productName} /><div className="stack" style={{maxWidth: 520}}>
     <h2>Join {invitation.workspaceName}?</h2>
-    <p>You were invited{email ? <> as <bdi><PrivateAddress value={email} /></bdi></> : null}. {firstWorkspace ? 'Your account has no workspace yet. Nothing changes until you join; cancelling signs you out.' : 'Nothing changes until you join; you stay in your current workspace if you cancel.'}</p>
     <dl className="invitation-facts">
       <dt>Workspace</dt><dd><bdi>{invitation.workspaceName}</bdi> <code>{invitation.workspaceSlug}</code></dd>
       <dt>Invited by</dt><dd><bdi>{invitation.inviterName}</bdi> <code><PrivateAddress value={invitation.inviterEmail} /></code></dd>
+      {email ? <><dt>Invited as</dt><dd><bdi><PrivateAddress value={email} /></bdi></dd></> : null}
       <dt>Role</dt><dd>{roleLabel[invitation.role]}</dd>
       <dt>Expires</dt><dd>{expiry.format(new Date(invitation.expiresAt))}</dd>
     </dl>

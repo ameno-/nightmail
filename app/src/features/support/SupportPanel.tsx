@@ -73,7 +73,7 @@ export function SupportPanel({ mode, open, onClose, onUnread, resume }: { mode: 
       <Header state={state} store={store} workspaceName={workspaceName} onClose={close} />
       <Conversation state={state} store={store} open={open} />
       <Composer state={state} store={store} input={input} busy={busy} canAttach={canAttach} />
-      <div className="support-drop" data-active={dragging || undefined} aria-hidden="true"><ImagePlus size={20} /><span>Drop a screenshot to attach</span><span className="support-drop__hint">PNG, JPEG or WebP, up to 5 MB</span></div>
+      <div className="support-drop" data-active={dragging || undefined} aria-hidden="true"><ImagePlus size={20} /><span>Drop a screenshot to attach</span></div>
       <div className="sr-only" role="status" aria-live="polite">{state.announcement}</div>
     </section>
   </>
@@ -249,16 +249,19 @@ function ConsentCard({ part, closed, onDecide }: { part: Extract<Part, { kind: '
   </div>
 }
 
-// What the ticket is ("Bug report filed", "Billing question passed to …"), its ID, who replies where, and the
-// screenshots that went with it.
+// What the ticket is ("Bug report filed", "Billing question passed to …") and its ID, then its facts: where the reply
+// goes, when, and the screenshots that went with it.
 function TicketCard({ part }: { part: Extract<Part, { kind: 'ticket' }> }) {
   const { ticket, screenshots } = part
   return <div className="support-card support-ticket" role="group" aria-label="Ticket">
     <span className="support-ticket__mark" aria-hidden="true"><Check size={12} strokeWidth={2.75} /></span>
     <div className="support-ticket__text">
       <p className="support-ticket__title"><span>{ticketTitle(ticket)}</span><code>{ticket.ticketId}</code></p>
-      <p className="support-card__body">Someone will reply by email to <MaskedAddress value={ticket.replyTo} />, {ticket.expect}.</p>
-      {screenshots > 0 && <p className="support-ticket__meta"><ImageIcon size={13} aria-hidden="true" />{plural(screenshots, 'screenshot')} attached</p>}
+      <dl className="support-ticket__facts">
+        <div><dt>Reply to</dt><dd><MaskedAddress value={ticket.replyTo} /></dd></div>
+        <div><dt>When</dt><dd>{ticket.expect}</dd></div>
+        {screenshots > 0 && <div><dt>Screenshots</dt><dd>{screenshots}</dd></div>}
+      </dl>
     </div>
   </div>
 }

@@ -15,7 +15,7 @@ import { toggleUiNotesMode, useUiNotesMode } from '../lib/ui-notes-mode'
 // One menu for who and where: the accounts this browser connected, each with its workspaces, then Add account,
 // Contact support and sign-out. Picking a workspace of another account switches account and workspace together. Multi-tenant only; shown
 // in the dashboard sidebar, the phone's top bar (as a sheet) and the onboarding header.
-type Entry = { key: string; label: ReactNode; text: string; hint?: ReactNode; icon?: ReactNode; checked?: boolean; disabled?: boolean; destructive?: boolean; heading?: boolean; onSelect: () => void }
+type Entry = { key: string; label: ReactNode; text: string; icon?: ReactNode; checked?: boolean; disabled?: boolean; destructive?: boolean; heading?: boolean; onSelect: () => void }
 export function AccountAvatar({ name, email }: { name: string | null | undefined; email?: string | null }) {
   return <span className="account-avatar account-avatar--md" aria-hidden="true">{initials(name, email)}</span>
 }
@@ -84,7 +84,8 @@ export function AccountSwitcher() {
     ...identity.uiNotes === true ? [{ key: 'ui-notes', text: `UI notes ${notesOn ? 'on' : 'off'}`, icon: <StickyNote />, onSelect: () => { setOpen(false); toggleUiNotesMode() },
       label: <span className="account-menu__toggle">UI notes<span className="account-menu__toggle-state">{notesOn ? 'On' : 'Off'}{!phone && <kbd>⇧N</kbd>}</span></span> }] : [],
     { key: 'support', text: 'Contact support…', label: 'Contact support…', icon: <LifeBuoy />, onSelect: () => { setOpen(false); setSupport(true) } },
-    { key: 'add', text: 'Add account', label: 'Add account', icon: <UserPlus />, disabled: full, hint: full ? `Up to ${limit} accounts. Sign out of one to add another.` : undefined, onSelect: () => { setOpen(false); session!.addAccount() } },
+    // At the limit, Add account says why it can't, only when it is chosen.
+    { key: 'add', text: 'Add account', label: 'Add account', icon: <UserPlus />, onSelect: () => { setOpen(false); if (full) toast(`Up to ${limit} accounts. Sign out of one first.`, 'error'); else session!.addAccount() } },
     { key: 'sign-out', text: 'Sign out of this account', label: 'Sign out of this account', icon: <LogOut />, onSelect: () => void run(() => session!.signOutAccount(self.id), 'Couldn’t sign out.') },
     ...accounts.length > 1 ? [{ key: 'sign-out-all', text: 'Sign out of all accounts', label: 'Sign out of all accounts', icon: <LogOut />, destructive: true, onSelect: () => void run(() => session!.signOutAll(), 'Couldn’t sign out.') }] : [],
   ])
@@ -107,7 +108,7 @@ export function AccountSwitcher() {
           className={['ui-action-sheet__item', entry.heading && 'account-sheet__account', entry.destructive && 'ui-action-sheet__item--danger', !entry.heading && !entry.icon && 'account-sheet__workspace'].filter(Boolean).join(' ')}
           onClick={() => { if (entry.disabled) return; setOpen(false); setTimeout(entry.onSelect, 0) }}>
           {entry.icon && <span className="ui-menu-icon">{entry.icon}</span>}
-          {entry.icon ? <span className="ui-action-sheet__label">{entry.label}{entry.hint && <span className="ui-action-sheet__hint">{entry.hint}</span>}</span> : entry.label}
+          {entry.icon ? <span className="ui-action-sheet__label">{entry.label}</span> : entry.label}
           {entry.checked && <Check className="account-menu__check" size={16} aria-label="Current workspace" />}
         </button>)}</div>)}
       <button type="button" className="ui-action-sheet__item ui-action-sheet__cancel" onClick={() => setOpen(false)}>Cancel</button>
@@ -120,7 +121,7 @@ export function AccountSwitcher() {
       <DropdownPrimitive.Portal><DropdownPrimitive.Content align="start" sideOffset={4} className="ui-popover ui-menu account-menu" aria-label="Accounts and workspaces"><div className="ui-popover-scroll">
         {sections.map((section, index) => <DropdownPrimitive.Group key={index} className="account-menu__group">{section.map(entry => entry.heading && entry.disabled
           ? <DropdownPrimitive.Label key={entry.key} className="ui-menu-item account-menu__account" aria-current="true">{entry.label}</DropdownPrimitive.Label>
-          : <DropdownPrimitive.Item key={entry.key} disabled={entry.disabled} onSelect={entry.onSelect} title={typeof entry.hint === 'string' ? entry.hint : undefined}
+          : <DropdownPrimitive.Item key={entry.key} disabled={entry.disabled} onSelect={entry.onSelect}
             className={['ui-menu-item', entry.heading ? 'account-menu__account' : entry.icon ? 'account-menu__action' : 'account-menu__workspace', entry.destructive && 'ui-menu-item--danger'].filter(Boolean).join(' ')}>
             {entry.icon && <span className="ui-menu-icon">{entry.icon}</span>}{entry.label}{entry.checked && <Check className="account-menu__check" size={14} aria-label="Current workspace" />}
           </DropdownPrimitive.Item>)}</DropdownPrimitive.Group>)}
@@ -138,7 +139,7 @@ function CreateWorkspaceDialog({ onClose, onCreated }: { onClose: () => void; on
     event.preventDefault()
     try { const workspace = await create.mutateAsync(name.trim()); onClose(); onCreated(workspace.id) } catch { /* inline */ }
   }
-  return <Dialog open onOpenChange={open => { if (!open && !create.isPending) onClose() }} title="Create workspace" description="Its own domains, keys and contacts; you’ll set up sending next."
+  return <Dialog open onOpenChange={open => { if (!open && !create.isPending) onClose() }} title="Create workspace"
     footer={<><Button onClick={onClose} disabled={create.isPending}>Cancel</Button><Button type="submit" form="create-workspace" variant="primary" loading={create.isPending}>Create workspace</Button></>}>
     <form id="create-workspace" className="stack" onSubmit={submit}>
       <MutationError error={create.error} />
