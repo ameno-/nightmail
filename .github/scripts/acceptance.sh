@@ -27,7 +27,6 @@ export SIMULATED_SES_LATENCY_MS=0 SIMULATED_SES_DELIVERY_DELAY_MS=0
 # Migrate once; isolate global auth fixtures, row locks, storage and prototype
 # mocks between the two processes. Never parallelize tests inside one database.
 node --import tsx src/migrate.ts
-admin -c 'CREATE DATABASE fixture_sim OWNER fixture TEMPLATE fixture'
 shard() (
   export HOME="$HOME/$1" PORT="$2" DATABASE_URL="$DATABASE_URL$3" S3_ENDPOINT="http://127.0.0.1:$4"
   export PUBLIC_URL="http://127.0.0.1:$PORT" API_BASE_URL="http://127.0.0.1:$PORT"
@@ -87,11 +86,18 @@ esac
 if [[ -n ${ACCEPTANCE_JUNIT:-} ]]; then mkdir -p "$ACCEPTANCE_JUNIT"; fi
 # Two API ports, then two object-storage ports. Override them when another checkout's suite is running on this machine.
 read -r api_port sim_port storage_port sim_storage_port <<< "${ACCEPTANCE_PORTS:-8787 8788 4569 4570}"
-shard integration "$api_port" '' "$storage_port" "${integration_filter[@]}" & integration=$!
-shard simulated "$sim_port" _sim "$sim_storage_port" "${simulated_filter[@]}" & simulated=$!
 rc=0
-wait "$integration" || rc=$?
-wait "$simulated" || rc=$?
+case ${ACCEPTANCE_SHARD:-both} in
+  integration) shard integration "$api_port" '' "$storage_port" "${integration_filter[@]}" & wait "$!" || rc=$? ;;
+  simulated) shard simulated "$sim_port" '' "$sim_storage_port" "${simulated_filter[@]}" & wait "$!" || rc=$? ;;
+  both)
+    admin -c 'CREATE DATABASE fixture_sim OWNER fixture TEMPLATE fixture'
+    shard integration "$api_port" '' "$storage_port" "${integration_filter[@]}" & integration=$!
+    shard simulated "$sim_port" _sim "$sim_storage_port" "${simulated_filter[@]}" & simulated=$!
+    wait "$integration" || rc=$?
+    wait "$simulated" || rc=$? ;;
+  *) echo 'ACCEPTANCE_SHARD must be integration, simulated or both' >&2; exit 2 ;;
+esac
 
 # Deadlock guard: fail on any deadlock Postgres detected during the suite, including one a retry absorbed or a test
 # never asserted on. A backend reports its counters when it exits, so wait for the shards' connections to close.

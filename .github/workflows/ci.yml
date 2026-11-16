@@ -4,7 +4,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled, edited]
   # The merge queue on dev tests each pull request merged onto the latest dev and the entries ahead of it, and merges
-  # only if the required checks (build, acceptance) pass there (docs/ci.md).
+  # only if all six required checks pass there (docs/ci.md).
   merge_group:
     types: [checks_requested]
   push:
@@ -136,6 +136,8 @@ jobs:
 
   gateway:
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    env:
+      RUSTUP_TOOLCHAIN: 1.99.0
     timeout-minutes: 20
     defaults:
       run:
@@ -152,10 +154,22 @@ jobs:
             gateway/target
           key: cargo-${{ runner.os }}-${{ hashFiles('gateway/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
       - name: Format, lint and unit tests
         run: cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
 
   acceptance:
+    needs: acceptance-shard
+    if: always()
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - run: test "${{ needs.acceptance-shard.result }}" = success
+
+  acceptance-shard:
+    strategy:
+      fail-fast: false
+      matrix:
+        fixture: [integration, simulated]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     services:
@@ -164,7 +178,7 @@ jobs:
         env:
           POSTGRES_PASSWORD: fixture-admin
         ports: ['5432:5432']
-        options: --health-cmd "pg_isready -h 127.0.0.1 -U postgres" --health-interval 2s --health-timeout 3s --health-retries 15
+        options: &pg-options --tmpfs /var/lib/postgresql/data --health-cmd "pg_isready -h 127.0.0.1 -U postgres" --health-interval 2s --health-timeout 3s --health-retries 15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -185,6 +199,7 @@ jobs:
         working-directory: api
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
+          ACCEPTANCE_SHARD: ${{ matrix.fixture }}
 
   # The real Worker before merge (docs/ci.md): dev's migrations then this change's, and this change's alone, must
   # apply and end with the same schema; then wrangler dev (workerd) serves wrangler.dev.jsonc's assets and routing on
@@ -198,7 +213,7 @@ jobs:
         env:
           POSTGRES_PASSWORD: fixture-admin
         ports: ['5432:5432']
-        options: --health-cmd "pg_isready -h 127.0.0.1 -U postgres" --health-interval 2s --health-timeout 3s --health-retries 15
+        options: *pg-options
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -232,6 +247,17 @@ jobs:
   # Fails above CLS 0.001 on any page; the longest task per in-app navigation is reported. Locally: cd app && bun run cls.
   # The same run reads each page's text density (app/scripts/density.mjs), a ratchet against density-baseline.json.
   cls:
+    needs: cls-shard
+    if: always()
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - run: test "${{ needs.cls-shard.result }}" = success
+
+  cls-shard:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     services:
@@ -240,7 +266,7 @@ jobs:
         env:
           POSTGRES_PASSWORD: fixture-admin
         ports: ['5432:5432']
-        options: --health-cmd "pg_isready -h 127.0.0.1 -U postgres" --health-interval 2s --health-timeout 3s --health-retries 15
+        options: *pg-options
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -251,7 +277,7 @@ jobs:
       - name: Check for dashboard or API changes
         id: changes
         run: |
-          if [[ $GITHUB_EVENT_NAME == push ]] || ! git diff --quiet HEAD^1 HEAD -- app api .github/workflows/ci.yml; then
+          if [[ $GITHUB_EVENT_NAME == push ]] || ! git diff --quiet HEAD^1 HEAD -- app api .github/workflows/ci.yml .github/actions/cls-build; then
             echo 'run=true' >> "$GITHUB_OUTPUT"
           else
             echo 'No app/, api/ or CI changes: nothing to measure.' >> "$GITHUB_STEP_SUMMARY"
@@ -272,13 +298,16 @@ jobs:
       - if: steps.changes.outputs.run == 'true'
         run: for pkg in api app; do (cd "$pkg" && bun install --frozen-lockfile); done
       # Builds the dashboard (build already type-checked it), then measures it with Chrome against Postgres.
+      - if: steps.changes.outputs.run == 'true'
+        uses: ./.github/actions/cls-build
       - name: Measure layout shift on every page
         if: steps.changes.outputs.run == 'true'
         working-directory: app
         env:
           CLS_PG_URL: postgresql://postgres:fixture-admin@127.0.0.1:5432/postgres
           CLS_DENSITY: '1'
-        run: ./node_modules/.bin/vite build && node scripts/cls.mjs
+          CLS_SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
+        run: node scripts/cls.mjs
       # Scores the density readings the CLS run took (no second server): fails on a new finding or a denser page.
       - name: Check text density on every page
         if: always() && steps.changes.outputs.run == 'true' && hashFiles('app/.cls/density.json') != ''
@@ -288,7 +317,7 @@ jobs:
         if: failure() && steps.changes.outputs.run == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: cls-shift-sources
+          name: cls-shift-sources-${{ matrix.shard }}
           path: |
             app/.cls/
             app/.density/
@@ -296,7 +325,7 @@ jobs:
           retention-days: 14
 
   # The support Worker (support/, the AI support agent's backend): types, the deployable bundle, and its tests, which
-  # drive that bundle in Miniflare with a fake Bane and a scripted model (no network, no model calls). Not required yet.
+  # drive that bundle in Miniflare with a fake Bane and a scripted model (no network, no model calls).
   support:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15

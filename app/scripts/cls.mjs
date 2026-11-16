@@ -521,11 +521,13 @@ try {
     jobs.push(load);
     if (from && !densityOnly) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
   }
-  jobs.forEach((job, index) => { job.index = index; });
   // Multi-step jobs (Support chat, live rituals, Overview's full warm-up) start first so none trails alone at the end.
   const weight = job => (job.support ? 4 : 0) + (job.live ? 2 : 0) + (job.name === 'Overview' && job.mode === 'load' ? 3 : 0);
-  const queue = [...jobs].sort((a, b) => weight(b) - weight(a));
-  console.log(`${elapsed()} measuring ${jobs.length} page loads, ${workers} at a time`);
+  const shard = /^(\d+)\/(\d+)$/.exec(process.env.CLS_SHARD ?? '1/1');
+  if (!shard || +shard[1] < 1 || +shard[1] > +shard[2] || +shard[2] > jobs.length) throw Error('Invalid CLS_SHARD: expected index/count within the measurement set');
+  jobs.forEach((job, index) => { job.index = index; });
+  const queue = [...jobs].sort((a, b) => weight(b) - weight(a)).filter((_, i) => i % +shard[2] === +shard[1] - 1);
+  console.log(`${elapsed()} measuring ${queue.length} of ${jobs.length} page loads, ${workers} at a time`);
   let next = 0;
   await Promise.all(Array.from({ length: Math.min(workers, queue.length) }, async () => {
     while (next < queue.length) {
