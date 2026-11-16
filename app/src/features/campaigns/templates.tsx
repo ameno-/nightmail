@@ -187,7 +187,7 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
         {archived && <Button variant="danger" onClick={() => setDeleteOpen(true)}>Delete</Button>}
         <Button variant="ghost" disabled={saving} onClick={() => void archive()}>{archived ? 'Restore' : 'Archive'}</Button>
         <Button variant="secondary" title={published ? 'Start a new campaign draft from the published version' : publishFirst} disabled={!published || starting !== null || unavailable} loading={starting !== null} onClick={() => void start({ id: template.id, name: template.published?.name ?? template.draft.name })}>Use template</Button>
-        <Button variant="primary" title={upToDate ? 'New campaigns use this version' : 'New campaigns use the published version; campaigns already made from it never change'} disabled={archived || saving || !ready || upToDate} onClick={() => void publish()}>{upToDate ? 'Published' : 'Publish'}</Button>
+        <Button variant="primary" title={upToDate ? 'New campaigns use this version' : 'New campaigns use the published version'} disabled={archived || saving || !ready || upToDate} onClick={() => void publish()}>{upToDate ? 'Published' : 'Publish'}</Button>
       </>}
     </>} />
     <section className="campaign-compose-workspace" aria-label="Template composer"><div className="campaign-compose-scroll"><div className="campaign-compose-sheet">

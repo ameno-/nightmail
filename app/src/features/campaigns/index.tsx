@@ -229,7 +229,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   const syncLabel = autosaving || preparing || saveMutation.isPending ? 'Saving…' : remote ? 'Update available' : autosavePaused ? 'Save failed' : error ? 'Check draft' : unavailable ? 'Unavailable' : readOnly ? 'Read only' : sync.connection === 'offline' ? 'Sync interrupted' : dirty ? form.name.trim() ? 'Unsaved changes' : 'Name required' : accepted ? 'Saved' : 'New draft'
   const syncActionable = Boolean(remote || error || autosavePaused || sync.connection === 'offline')
   const syncState = error || autosavePaused || sync.connection === 'offline' ? 'offline' : remote || dirty || autosaving ? 'changed' : sync.connection
-  const syncTitle = error || sync.error?.message || (remote ? 'A newer version is available. Your unsaved changes are safe.' : autosavePaused ? 'Autosave paused. Retry saving your changes.' : readOnly ? 'This campaign is no longer editable.' : 'Changes save automatically and sync with MCP and the API.')
+  const syncTitle = error || sync.error?.message || (remote ? 'A newer version is available.' : autosavePaused ? 'Autosave paused. Retry saving your changes.' : readOnly ? 'This campaign is no longer editable.' : 'Changes save automatically and sync with MCP and the API.')
   function syncAction() { if (remote) setReviewUpdate(true); else if (autosavePaused) void save('edit'); else if (error) toast(error, 'error'); else sync.checkNow() }
   function reportError(value: string) { setError(value); toast(value, 'error') }
   async function save(next: 'auto' | 'edit' | 'review' | 'test') {
@@ -324,7 +324,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
           ]} />
         </> : <>
           {!accepted && <Button variant="ghost" disabled={pending} onClick={() => setTemplatesOpen(true)}>Use a template</Button>}
-          <Button variant="ghost" disabled={!accepted || saveDisabled || pending || autosavePaused} title={!accepted ? 'Name the campaign first; it saves automatically' : undefined} onClick={() => save('test')}>Send test</Button>
+          <Button variant="ghost" disabled={!accepted || saveDisabled || pending || autosavePaused} title={!accepted ? 'Name the campaign first' : undefined} onClick={() => save('test')}>Send test</Button>
           <Button variant="primary" disabled={saveDisabled || pending || autosavePaused} loading={preparing} onClick={() => save('review')}>Continue to review</Button>
         </>}
       </div>
@@ -482,12 +482,12 @@ function ScheduledBanner({ campaign }: { campaign: Campaign }) {
   return <>
     <Alert tone="info" title={`Scheduled for ${utcLabel(at)}`}>
       <div className="campaign-pacing-banner">
-        <span>{localLabel(at)} · {number(total)} {total === 1 ? 'recipient' : 'recipients'} · Nothing has been sent yet.</span>
+        <span>{localLabel(at)} · {number(total)} {total === 1 ? 'recipient' : 'recipients'}</span>
         <div className="cluster"><Button size="sm" disabled={!canAdminister} title={blocked} onClick={() => setDialog('reschedule')}>Reschedule</Button><Button size="sm" disabled={!canAdminister} title={blocked ?? 'Unschedules it so you can edit; schedule it again afterwards'} onClick={() => setDialog('edit')}>Edit</Button><Button size="sm" variant="ghost" disabled={!canAdminister} title={blocked} onClick={() => setDialog('unschedule')}>Unschedule</Button></div>
       </div>
     </Alert>
-    <ConfirmDialog open={dialog === 'edit'} onOpenChange={open => setDialog(open ? 'edit' : null)} title="Edit this campaign?" description="Editing turns it back into a draft. Nobody has been emailed. Schedule it again when you’re done." confirmLabel="Unschedule and edit" onConfirm={() => unschedule(true)} />
-    <ConfirmDialog open={dialog === 'unschedule'} onOpenChange={open => setDialog(open ? 'unschedule' : null)} title="Unschedule this campaign?" description="It becomes a draft again and won’t send. Nobody has been emailed." confirmLabel="Unschedule" onConfirm={() => unschedule(false)} />
+    <ConfirmDialog open={dialog === 'edit'} onOpenChange={open => setDialog(open ? 'edit' : null)} title="Edit this campaign?" description="Editing turns it back into a draft. Schedule it again when you’re done." confirmLabel="Unschedule and edit" onConfirm={() => unschedule(true)} />
+    <ConfirmDialog open={dialog === 'unschedule'} onOpenChange={open => setDialog(open ? 'unschedule' : null)} title="Unschedule this campaign?" description="It becomes a draft again and won’t send." confirmLabel="Unschedule" onConfirm={() => unschedule(false)} />
     {dialog === 'reschedule' && <RescheduleDialog campaign={campaign} onClose={() => setDialog(null)} />}
   </>
 }
@@ -548,7 +548,7 @@ function CampaignResults({ campaign }: { campaign: Campaign }) {
   // Simulated sends get their own row, as while sending (CampaignProgress), only when there are some.
   const rows: [string, number, string][] = [
     ['Delivered', byStatus.delivered ?? 0, 'Accepted by the recipient’s mail server'],
-    ...((byStatus.simulated ?? 0) > 0 ? [['Simulated', byStatus.simulated ?? 0, 'Simulation mode: no real email was sent'] as [string, number, string]] : []),
+    ...((byStatus.simulated ?? 0) > 0 ? [['Simulated', byStatus.simulated ?? 0, ''] as [string, number, string]] : []),
     ['Bounced', byStatus.bounced ?? 0, `Rejected by the recipient’s mail server; ${productName} stops emailing these addresses`],
     ['Complaints', byStatus.complained ?? 0, `Marked as spam; ${productName} stops emailing these addresses`],
     ['Failed', (byStatus.rejected ?? 0) + (byStatus.rendering_failed ?? 0), 'Couldn’t be sent'],
@@ -557,7 +557,7 @@ function CampaignResults({ campaign }: { campaign: Campaign }) {
   ]
   return <div className="campaign-audience-summary">
     <div className="campaign-summary-line"><strong>Recipients</strong><span>{number(total)}</span></div>
-    {rows.map(([label, count, hint]) => <div className="campaign-summary-line" key={label} title={hint}><span>{label}</span><span>{number(count)}</span></div>)}
+    {rows.map(([label, count, hint]) => <div className="campaign-summary-line" key={label} title={hint || undefined}><span>{label}</span><span>{number(count)}</span></div>)}
   </div>
 }
 
@@ -653,7 +653,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
           <div className="campaign-audience-summary">
             <div className="campaign-summary-line"><strong>Eligible recipients</strong><strong>{number(audience.data.eligible)}</strong></div>
             <div className="campaign-summary-line"><span>Matched contacts</span><span>{number(audience.data.matched)}</span></div>
-            <div className="campaign-summary-line muted" title="Bounced, complained or blocked addresses are never emailed"><span>Suppressed</span><span>{audience.data.suppressed ? `−${number(audience.data.suppressed)}` : '0'}</span></div>
+            <div className="campaign-summary-line muted"><span>Suppressed</span><span>{audience.data.suppressed ? `−${number(audience.data.suppressed)}` : '0'}</span></div>
             <div className="campaign-summary-line muted"><span>Not subscribed{audience.data.unsubscribed > 0 && <> · <Link to={`/audience/lists/${encodeURIComponent(campaign.listId)}?status=unknown`}>Fix</Link></>}</span><span>{audience.data.unsubscribed ? `−${number(audience.data.unsubscribed)}` : '0'}</span></div>
           </div>
           <Button disabled={sendMutation.isPending || audience.isFetching} onClick={() => void audience.refetch()}>Refresh count</Button>

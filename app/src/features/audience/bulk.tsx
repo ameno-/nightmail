@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useApiMutation, useApiQuery } from '../../data/context'
 import { Button, Checkbox, Dialog, Field, Input, LoadingRegion, SkeletonText, Alert, useToast } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { aqlString, evidenceRequired, MutationError, number, subscribeDescription } from './shared'
+import { aqlString, evidenceRequired, MutationError, number } from './shared'
 
 // "Mark as subscribed…" for contacts with no consent decision (Unknown), on one list or in the whole audience. AudienceQL
 // plans the change first (count, sample, warnings); the person attests consent and says how it was given; apply then
@@ -35,7 +35,7 @@ export function BulkSubscribeDialog({ listId, listName, searchIgnored = false, o
   // The count line says the whole scope: the contacts with unknown consent on the list or in the audience ("All" when a
   // search narrowed the table behind the dialog, which doesn't apply here). Opt-outs and suppressions aren't in it.
   const scope = listId ? <> on <strong>{name ?? 'this list'}</strong></> : ' in your audience'
-  return <Dialog open onOpenChange={open => { if (!open && !apply.isPending) onClose() }} title="Mark as subscribed" description={subscribeDescription} footer={<><Button disabled={apply.isPending} onClick={onClose}>Cancel</Button><Button variant="primary" type="submit" form="bulk-subscribe" loading={apply.isPending} disabled={!ready || plan.isPending}>Mark as subscribed</Button></>}>
+  return <Dialog open onOpenChange={open => { if (!open && !apply.isPending) onClose() }} title="Mark as subscribed" footer={<><Button disabled={apply.isPending} onClick={onClose}>Cancel</Button><Button variant="primary" type="submit" form="bulk-subscribe" loading={apply.isPending} disabled={!ready || plan.isPending}>Mark as subscribed</Button></>}>
     <form id="bulk-subscribe" className="stack" onSubmit={event => { event.preventDefault(); void submit() }}>
       <div className="audience-plan" aria-live="polite">
         {plan.isPending || plan.isIdle ? <LoadingRegion label="Counting contacts"><SkeletonText width={260} />{[78, 64, 72].map(width => <SkeletonText key={width} width={`${width}%`} />)}</LoadingRegion>

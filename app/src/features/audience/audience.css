@@ -91,8 +91,10 @@
   .ui-card__title .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .audience-summary > .private-address { max-width: 100%; }
   .audience-summary > .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
-  /* The legend's toggle is a 44 px touch row; the terms open as four lines. */
+  /* The legend's toggle is a 44 px touch row; the terms open as four lines. The row starts inside the toolbar's empty
+     bottom padding, so its text sits as close to the filters as it does on a desktop. */
   .audience-legend__toggle { min-height: 44px; }
+  .data-toolbar + .audience-legend { margin-top: calc(-1 * var(--space-12)); }
   .audience-legend__terms { flex-direction: column; margin-top: 0; padding-bottom: var(--space-8); }
   .audience-page > .data-toolbar > .cluster { min-width: 0; max-width: 100%; }
   /* Search, then the consent and list filters side by side, then the list finder: fixed cells, so nothing moves as

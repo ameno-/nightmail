@@ -46,7 +46,7 @@ export function ListDetailPage() {
   return <div className="audience-page"><PageHeader title={query.isPending ? <SkeletonText width={96} lineHeight={24} /> : query.data?.name || 'List'} backTo="/audience/lists" actions={query.isPending ? <><ControlSkeleton width={85} /><ControlSkeleton width={120} /></> : query.data && <><Button variant="danger" onClick={() => {remove.reset(); setConfirmDelete(true)}}>Delete list</Button><Button variant="primary" onClick={() => setImporting(true)}>Import contacts</Button></>} />
     {query.isPending ? <ListDetailBodySkeleton /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <ListMembers key={id} list={query.data} onImport={() => setImporting(true)} />}
     {importing && <ImportContactsDialog listId={id} onClose={() => setImporting(false)} />}
-    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={`Delete ${query.data?.name ?? 'list'}?`} description="Deletes the list, not its contacts; their consent, suppressions, campaigns and email history stay." confirmLabel="Delete list" danger pending={remove.isPending} onConfirm={deleteList} />
+    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={`Delete ${query.data?.name ?? 'list'}?`} description="Deletes the list, not its contacts." confirmLabel="Delete list" danger pending={remove.isPending} onConfirm={deleteList} />
   </div>
 }
 // The consent tab and search are in the URL (status, q): campaign review links straight to /audience/lists/<id>?status=unknown.
