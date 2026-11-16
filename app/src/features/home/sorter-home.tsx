@@ -48,7 +48,7 @@ export function SorterHome({ start, notice }: HomeProps) {
   const [phase, setPhase] = useState<Phase>('boot'), [live, setLive] = useState(false), [card, setCard] = useState<Letter | null>(null)
   // Which lanes the machine has so far: it begins with one and is fitted with the rest (sorter/plan.ts `fit`). A
   // lane's plate carries its name once its works are in.
-  const [fitted, setFitted] = useState<boolean[] | null>(null)
+  const [fitted, setFitted] = useState<boolean[] | null>(null), [docked, setDocked] = useState<boolean[] | null>(null)
   // And how much of the tower stands: it begins as its foot and the price's frame with the roof on them, and the
   // sorting floor and the console are slid in under the roof (sorter/engine.ts). What the page writes on a floor is
   // not there before the floor is; `whole`: fitted out, with everything on it that can be pressed.
@@ -77,6 +77,8 @@ export function SorterHome({ start, notice }: HomeProps) {
     },
     // Smoke in front of what is written on the machine hides it, as it hides the machine.
     floors(count, whole) { setTower(now => now.floors === count && now.whole === whole ? now : { floors: count, whole }) },
+    // (A side unit's name comes on as the unit seats on the tower, with its lamp.)
+    units(seated) { setDocked(now => now && now.length === seated.length && now.every((on, i) => on === seated[i]) ? now : seated) },
     fit(lanes) { setFitted(now => now && now.length === lanes.length && now.every((on, i) => on === lanes[i]) ? now : lanes) },
     veil(zone, clear) { const el = zone === 0 ? readout.current : veiled.current[zone]; if (el) el.style.opacity = clear >= 1 ? '' : String(clear) },
     hover(letter, x, y) {
@@ -157,7 +159,7 @@ export function SorterHome({ start, notice }: HomeProps) {
   const pane = (r: Rect) => ({ ...at(r), '--srt-room': `${r.w}px` }) as CSSProperties
   const price = p ? { x: -COLS / 2 * p.U, w: COLS * p.U } : { x: 0, w: 0 }
   // Whole names where a lane's plate holds them; the lanes' codes where it does not.
-  const named = !!p && p.label * p.P >= (p.phone ? 56 : 60), podNamed = !!p?.pods.length && p.pods[0].w - 2.2 * p.U >= 60
+  const named = !!p && p.label * p.P >= (p.phone ? 56 : 60), podNamed = !!p?.pods.length && p.pods[0].plate.w >= 60
   // Where each tube goes over the slab's lip (the eight, then the outbound main), the name of where it leads, on the lip
   // beside it: a left-hand tube's to its right, the others' to its left. Whole names where every one has room between
   // its own tube and the next tube that way, the codes where not, and nothing where not even a tube's code has room.
@@ -200,7 +202,7 @@ export function SorterHome({ start, notice }: HomeProps) {
           <ol className="srt-lanes" data-names={!p.phone && named || undefined} ref={el => { veiled.current[1] = el }} aria-hidden="true">{p.lanes.map((x, i) => <li key={i} data-off={!(fitted && fitted.length === p.lanes.length ? fitted[i] : reduced) || undefined} style={at({ x: x - p.label / 2 * p.P, y: p.ySlot + .14 * p.slot, w: p.label * p.P, h: .72 * p.slot })}>{(named ? LANE_NAMES : LANE_CODES)[p.routes[i]]}</li>)}</ol>
           {/* On a wide page, the name on each unit plugged onto the tower's side: there once its lane is. */}
           {/* (Whole names where the plate holds the longest, nine letters at 10 px, with a little room either side.) */}
-          {p.pods.length > 0 && <ol className="srt-lanes srt-pods" data-names={podNamed || undefined} aria-hidden="true">{p.pods.map((pod, k) => <li key={k} data-off={!(fitted && fitted.length === p.lanes.length ? fitted[pod.lane] : reduced) || undefined} style={{ left: p.ox + pod.x + .5 * p.U + DX * pod.z, top: p.oy - pod.y - 2.3 * p.U - DY * pod.z, width: pod.w - 2.2 * p.U, height: 1.4 * p.U }}>{(podNamed ? LANE_NAMES : LANE_CODES)[p.routes[pod.lane]]}</li>)}</ol>}
+          {p.pods.length > 0 && <ol className="srt-lanes srt-pods" data-names={podNamed || undefined} aria-hidden="true">{p.pods.map((pod, k) => <li key={k} data-off={!(docked && docked.length === p.pods.length ? docked[k] : reduced) || undefined} style={{ left: p.ox + pod.plate.x + DX * pod.z, top: p.oy - pod.plate.y - pod.plate.h - DY * pod.z, width: pod.plate.w, height: pod.plate.h }}>{(podNamed ? LANE_NAMES : LANE_CODES)[p.routes[pod.lane]]}</li>)}</ol>}
           {/* The hopper: press it and more mail comes down (what the old code does from a keyboard). */}
           {!reduced && <button type="button" className="srt-hopper" style={hopperBox(p)} aria-label="Hopper: pour in more mail" title="More mail" onMouseDown={event => event.preventDefault()} onClick={() => sorter.current?.rain()} />}
           {/* The send cannon: press it and it fires one. */}
