@@ -8,6 +8,9 @@
   --srt-cta: oklch(0.975 0.02 92); --srt-cta-hover: oklch(0.995 0.012 92); --srt-cta-top: oklch(1 0 0); --srt-cta-side: oklch(0.78 0.03 92); --srt-on-cta: oklch(0.2 0.02 268); --srt-cta-edge: oklch(0.2 0.02 268 / 14%);
   --srt-paper: oklch(0.985 0.01 92); --srt-red: oklch(0.6 0.22 27); --srt-card: oklch(0.995 0.004 92); --srt-card-text: oklch(0.21 0.02 268); --srt-card-dim: oklch(0.45 0.02 268); --srt-card-edge: oklch(0.21 0.02 268 / 12%);
   --srt-ease: cubic-bezier(.22, 1, .36, 1); --srt-k: 17.17; --srt-header: 64px;
+  /* A phone's safe areas (its status bar, where the page runs under one; the sides of one held on its side; its home
+     indicator), and the header with the first of them. */
+  --srt-safe-t: env(safe-area-inset-top, 0px); --srt-safe-r: env(safe-area-inset-right, 0px); --srt-safe-b: env(safe-area-inset-bottom, 0px); --srt-safe-l: env(safe-area-inset-left, 0px); --srt-head: calc(var(--srt-header) + var(--srt-safe-t));
   display: flex; flex-direction: column; min-height: 100svh; overflow-x: clip; background: var(--srt-floor); color: var(--srt-text); }
 :root[data-theme='dark'] .srt-page {
   --srt-floor: rgb(10 13 19); --srt-shade: rgb(4 6 10); --srt-text: oklch(0.968 0.004 268); --srt-text-2: oklch(0.74 0.014 268); --srt-text-3: oklch(0.63 0.016 268); --srt-hair: oklch(1 0 0 / 9%); --srt-hover: oklch(1 0 0 / 6%);
@@ -16,7 +19,7 @@
   --srt-paper: oklch(0.955 0.014 92); --srt-red: oklch(0.68 0.2 27); --srt-card: oklch(0.955 0.014 92); --srt-card-text: oklch(0.2 0.02 268); --srt-card-dim: oklch(0.43 0.02 268); --srt-card-edge: oklch(0.2 0.02 268 / 14%); }
 
 /* The header stands over the night: letters fall behind it. */
-.srt-header { position: relative; z-index: 4; display: flex; flex: none; align-items: center; justify-content: space-between; height: var(--srt-header); padding-inline: var(--space-32); pointer-events: none; }
+.srt-header { position: relative; z-index: 4; display: flex; flex: none; align-items: center; justify-content: space-between; box-sizing: border-box; height: var(--srt-head); padding: var(--srt-safe-t) max(var(--space-32), var(--srt-safe-r)) 0 max(var(--space-32), var(--srt-safe-l)); pointer-events: none; }
 .srt-header > * { pointer-events: auto; }
 .srt-header .wordmark, .srt-header .theme-toggle { position: relative; inset: auto; }
 .srt-header .wordmark { height: 32px; color: var(--srt-text); }
@@ -29,13 +32,25 @@
 @media (hover: hover) and (pointer: fine) { .srt-nav > a:hover, .srt-nav .theme-toggle:hover:not(:disabled) { background: var(--srt-hover); color: var(--srt-text); } }
 .srt-nav > a:active, .srt-nav .theme-toggle:active { transform: scale(.96); }
 .srt-nav > a:focus-visible { outline: var(--focus-width) solid var(--color-focus); outline-offset: 1px; }
+/* The header's own button, where the page is too short for the machine's to be seen before scrolling: the same lit
+   key, small. (Tall enough to press: its hit area stands over and under it.) */
+.srt-head-cta { position: relative; height: 32px; margin-inline: var(--space-4); padding: 1px 14px 0; border: 0; border-radius: 0; background: var(--srt-cta); box-shadow: 0 -2px 0 var(--srt-cta-top), -1px 0 0 var(--srt-cta-side), -1px -2px 0 var(--srt-cta-side); color: var(--srt-on-cta); font-family: var(--font-body); font-size: 14px; font-weight: 600; line-height: 1; letter-spacing: -.01em; white-space: nowrap; cursor: pointer; transition: background-color 150ms var(--srt-ease), translate 90ms var(--srt-ease), box-shadow 90ms var(--srt-ease); }
+.srt-head-cta::after { content: ''; position: absolute; inset: -7px 0; }
+@media (hover: hover) and (pointer: fine) { .srt-head-cta:hover:not(:disabled) { background: var(--srt-cta-hover); } }
+.srt-head-cta:active:not(:disabled) { box-shadow: 0 0 0 var(--srt-cta-top), 0 0 0 var(--srt-cta-side), 0 0 0 var(--srt-cta-side); translate: -1px -2px; }
+.srt-head-cta:disabled { opacity: 1; cursor: progress; }
+.srt-head-cta:focus-visible { outline: var(--focus-width) solid var(--color-focus); outline-offset: 4px; }
 
 .srt-page > main { display: flex; flex: 1; flex-direction: column; }
-.srt-hero { position: relative; flex: none; height: calc(100svh - var(--srt-header)); min-height: 600px; }
+.srt-hero { position: relative; flex: none; height: calc(100svh - var(--srt-head)); min-height: 600px; }
+/* How much of the page is seen under the header before any scrolling: measured by the small viewport, so a phone's
+   toolbars coming and going change nothing. sorter/plan.ts lays the machine out for it, and gives the hero its height
+   (a phone's machine may run on under it: the button is always over it). Its padding is the safe areas. */
+.srt-fold { position: absolute; top: 0; left: 0; box-sizing: border-box; width: 0; height: calc(100svh - var(--srt-head)); padding: 0 var(--srt-safe-r) var(--srt-safe-b) var(--srt-safe-l); visibility: hidden; pointer-events: none; }
 /* The canvases reach up behind the header, so a letter is never cut off where the hero begins. */
-.srt-canvas { position: absolute; top: calc(-1 * var(--srt-header)); left: 0; display: block; width: 100%; height: calc(100% + var(--srt-header)); pointer-events: none; }
+.srt-canvas { position: absolute; top: calc(-1 * var(--srt-head)); left: 0; display: block; width: 100%; height: calc(100% + var(--srt-head)); pointer-events: none; }
 /* The renderer's first frame comes up through the still it is laid over. */
-.srt-gl { height: calc(100% + var(--srt-header) + var(--srt-ext, 0px)); opacity: 0; touch-action: pan-y; transition: opacity 260ms var(--srt-ease); }
+.srt-gl { height: calc(100% + var(--srt-head) + var(--srt-ext, 0px)); opacity: 0; touch-action: pan-y; transition: opacity 260ms var(--srt-ease); }
 .srt-page[data-live] .srt-gl { opacity: 1; pointer-events: auto; }
 @media (prefers-reduced-motion: reduce) { .srt-gl { transition: none; } }
 /* Everything the page writes on the machine: one layer over the canvas. */
@@ -44,8 +59,9 @@
 /* What is written on the machine in light on dark is only ever lighter than what is behind it. A letter that flies
    in front of it is paler than any of it, so it hides the writing, as a letter in front of it would; over the machine
    itself nothing changes. (By day the headline and the lane plates are dark on pale and cannot be hidden this way.)
-   The button is not blended: it is the page's own and always on top, whatever flies past it. */
-.srt-readout, .srt-fact, .srt-tally, :root[data-theme='dark'] .srt-band, :root[data-theme='dark'] .srt-lanes li { mix-blend-mode: lighten; }
+   The button is not blended: it is the page's own and always on top, whatever flies past it. (Stacked, the two facts
+   are the page's type on the base, as the headline is: dark on pale by day.) */
+.srt-readout, .srt-page:not([data-phone]) .srt-fact, .srt-tally, :root[data-theme='dark'] .srt-fact, :root[data-theme='dark'] .srt-band, :root[data-theme='dark'] .srt-lanes li { mix-blend-mode: lighten; }
 .srt-on > :is(button, a) { pointer-events: auto; }
 
 /* The readout: a small screen on the fascia. Who the letter under the scanner is from and where it goes, then its
@@ -53,14 +69,16 @@
 .srt-readout { position: absolute; z-index: 2; display: grid; grid-template: 'from route' auto 'subject subject' 1fr / minmax(0, 1fr) auto; align-content: center; gap: 3px var(--space-8); padding: 0 clamp(7px, var(--srt-u) * 1.1, 11px); font-family: var(--font-mono); font-size: clamp(10px, var(--srt-u) * 1.3, 12px); line-height: 1.32; pointer-events: none; }
 .srt-readout-from { grid-area: from; overflow: hidden; color: var(--srt-screen-dim); text-overflow: ellipsis; white-space: nowrap; }
 .srt-readout-subject { grid-area: subject; display: -webkit-box; height: 2.64em; overflow: hidden; color: var(--srt-screen-text); text-wrap: balance; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
-.srt-readout-route { grid-area: route; color: var(--color-brand); letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
+/* (The route's own box is the element the page makes for each letter: sorter-home.tsx.) */
+.srt-readout-route { display: contents; color: var(--color-brand); letter-spacing: .04em; text-transform: uppercase; }
+.srt-readout-route > span { grid-area: route; white-space: nowrap; }
 .srt-readout[data-verdict='junk'] .srt-readout-route, .srt-readout[data-verdict='jam'] .srt-readout-subject { color: var(--srt-red); }
 
 /* The gauge is drawn by the machine; this is its hit area and its focus ring. */
 .srt-gauge { position: absolute; z-index: 3; padding: 0; border: 0; border-radius: 50%; background: none; cursor: pointer; }
 .srt-gauge:focus-visible { outline: var(--focus-width) solid var(--color-focus); outline-offset: 2px; }
-.srt-cannon { position: absolute; z-index: 3; padding: 0; border: 0; border-radius: 0; background: none; cursor: pointer; }
-.srt-cannon:focus-visible { outline: var(--focus-width) solid var(--color-focus); outline-offset: 2px; }
+.srt-cannon, .srt-hopper { position: absolute; z-index: 3; padding: 0; border: 0; border-radius: 0; background: none; cursor: pointer; }
+.srt-cannon:focus-visible, .srt-hopper:focus-visible { outline: var(--focus-width) solid var(--color-focus); outline-offset: 2px; }
 
 .srt-lanes { margin: 0; padding: 0; list-style: none; }
 .srt-lanes li { position: absolute; z-index: 2; display: grid; place-items: center; color: var(--srt-text-2); font-family: var(--font-mono); font-size: clamp(10px, var(--srt-u) * 1.2, 11px); line-height: 1; letter-spacing: .02em; text-transform: uppercase; white-space: nowrap; pointer-events: none; }
@@ -93,17 +111,19 @@
 .srt-fact-value > .srt-scale { position: relative; align-self: center; height: 9px; max-width: 150px; background: repeating-linear-gradient(90deg, var(--srt-screen-dim) 0 1px, transparent 1px calc((100% - 1px) / 20)) bottom / 100% 4px no-repeat; }
 .srt-scale::before { content: ''; position: absolute; inset: 2px 0 0; border: solid var(--srt-screen-dim); border-width: 0 1px; }
 .srt-scale::after { content: ''; position: absolute; top: 0; bottom: 0; left: calc(50% - 1px); width: 2px; background: var(--srt-screen-text); }
-/* A phone: a window each, its legend over it, what is free on one line. */
-.srt-page[data-phone] .srt-fact { display: flex; align-items: center; padding: 0 6px; }
-.srt-page[data-phone] .srt-fact-label { position: absolute; bottom: calc(100% + 6px); left: 0; color: var(--srt-text-2); letter-spacing: .04em; }
-.srt-page[data-phone] .srt-fact-value { display: flex; align-items: center; justify-content: space-between; width: 100%; font-size: clamp(12px, var(--srt-u) * 2.15, 14px); }
-.srt-page[data-phone] .srt-fact-value i { margin-left: 4px; letter-spacing: 0; }
-.srt-page[data-phone] .srt-fact-value > span + span:not(.srt-scale)::before { content: ''; align-self: stretch; width: 1px; margin: -8px 6px -8px 0; background: var(--srt-screen-dim); opacity: .5; }
+/* Stacked: the two facts are the page's own type under the button, a column each (what it measures, over the
+   measure), between the button's two edges; what is free on one line, its two halves parted by a point. */
+.srt-page[data-phone] .srt-fact { grid-template-rows: 16px auto; align-content: start; row-gap: 4px; padding: 0; font-family: var(--font-body); }
+.srt-page[data-phone] .srt-fact-label { color: var(--srt-text-2); font-size: 12px; line-height: 16px; letter-spacing: 0; text-transform: none; }
+.srt-page[data-phone] .srt-fact-value { display: flex; align-items: baseline; color: var(--srt-text); font-size: 15px; letter-spacing: -.008em; }
+.srt-page[data-phone] .srt-fact-value > span { height: 18px; line-height: 18px; }
+.srt-page[data-phone] .srt-fact-value b { font-weight: 550; }
+.srt-page[data-phone] .srt-fact-value i { margin-left: 4px; color: var(--srt-text-2); font-size: 13px; letter-spacing: 0; text-transform: none; }
+.srt-page[data-phone] .srt-fact-value > span + span:not(.srt-scale)::before { content: '·'; margin-inline: 7px; color: var(--srt-text-3); }
 .srt-page[data-phone] .srt-scale { display: none; }
 /* (A narrow phone: what is free on two lines.) */
-.srt-page[data-phone][data-tight] .srt-fact:last-of-type .srt-fact-value { flex-direction: column; align-items: flex-start; justify-content: center; row-gap: 5px; }
+.srt-page[data-phone][data-tight] .srt-fact:last-of-type .srt-fact-value { flex-direction: column; align-items: flex-start; }
 .srt-page[data-phone][data-tight] .srt-fact-value > span + span:not(.srt-scale)::before { display: none; }
-.srt-page[data-phone][data-tight] .srt-fact-value > span { height: 12px; line-height: 12px; }
 
 /* The button: a lit key in the faceplate's bay, the one lit thing on the base. It stands proud of the bay, so (seen
    from above and the right, as everything here is) its top and its left side show; pressed, it goes in flush. */
@@ -121,7 +141,7 @@
 .srt-cta:focus-visible::after { content: ''; position: absolute; inset: -7px; border: var(--focus-width) solid var(--color-focus); pointer-events: none; }
 
 /* Under the slab's lip, off the machine: what signing in agrees to. */
-.srt-consent { position: absolute; z-index: 2; bottom: calc(var(--srt-below) * .47); left: 50%; width: max-content; max-width: calc(100% - 2 * var(--space-16)); margin: 0; color: var(--srt-text-2); font-size: 12px; line-height: 16px; text-align: center; text-wrap: balance; translate: -50% 50%; }
+.srt-consent { position: absolute; z-index: 2; bottom: calc(var(--srt-below) * .47); left: var(--srt-ox, 50%); width: max-content; max-width: calc(100% - 2 * var(--space-16)); margin: 0; color: var(--srt-text-2); font-size: 12px; line-height: 16px; text-align: center; text-wrap: balance; translate: -50% 50%; }
 .srt-consent a:hover { color: var(--srt-text); }
 
 /* A letter, opened, over the one the pointer is on. */
@@ -142,17 +162,32 @@
 .srt-notice { position: absolute; z-index: 4; top: var(--space-8); left: 50%; width: min(520px, 100% - 2 * var(--space-16)); translate: -50% 0; }
 
 .srt-page[data-phone] { --srt-k: 11; }
-.srt-page[data-phone] .srt-hero { min-height: 580px; }
 .srt-page[data-phone] .srt-band { line-height: 1.16; letter-spacing: -.02em; }
 .srt-page[data-phone] .srt-line { display: block; }
 .srt-page[data-phone] .srt-row { display: flex; column-gap: .22em; align-items: baseline; }
-.srt-page[data-phone] .srt-cta { font-size: 16px; }
+.srt-page[data-phone] .srt-cta { font-size: clamp(17px, var(--srt-u) * 2.4, 19px); }
+/* Stacked, nothing the page writes is smaller than 11 px: the readout is set larger and more openly, the lanes' plates
+   hold their names. */
+.srt-page[data-phone] .srt-readout { grid-template-rows: auto auto; gap: 4px var(--space-8); padding: 0 clamp(12px, var(--srt-u) * 1.6, 18px); font-size: clamp(12.5px, var(--srt-u) * 1.5, 15px); line-height: 1.3; }
+.srt-page[data-phone] .srt-readout-from { font-size: .96em; }
+.srt-page[data-phone] .srt-readout-route { font-size: max(11px, .88em); }
+.srt-page[data-phone] .srt-readout-subject { height: 2.6em; }
+.srt-page[data-phone] .srt-lanes li { font-size: clamp(11px, var(--srt-plate) / 5.4, 13px); letter-spacing: .02em; }
+.srt-page[data-phone] .srt-card-route { font-size: 11px; }
 @media (max-width: 899px) {
   .srt-page { --srt-header: 56px; }
-  .srt-header { padding-inline: var(--space-16); }
+  .srt-header { padding-inline: max(var(--space-16), var(--srt-safe-l) + var(--space-8)) max(var(--space-12), var(--srt-safe-r) + var(--space-8)); }
   .srt-header .bane-wordmark { gap: 7px; font-size: 15.75px; }
   .srt-header .bane-wordmark svg { width: 18px; height: 18px; }
   .srt-card-body { width: 232px; }
+  /* Everything in the header is 44 px to press: the links by their own height, the switch by a ring drawn inside it. */
+  .srt-header .wordmark, .srt-nav > a { height: 44px; }
+  .srt-nav { gap: 0; }
+  .srt-nav .theme-toggle { width: 44px; height: 44px; box-shadow: none; }
+  .srt-nav .theme-toggle::before { content: ''; position: absolute; inset: 5px; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--srt-hair); pointer-events: none; }
+  @media (hover: hover) and (pointer: fine) { .srt-nav .theme-toggle:hover:not(:disabled) { background: none; } .srt-nav .theme-toggle:hover:not(:disabled)::before { background: var(--srt-hover); } }
+  /* (A link in a line of text: its hit area stands over and under the line.) */
+  .srt-consent a, .srt-end-consent a { padding-block: 15px; }
 }
 
 @media (prefers-reduced-motion: reduce) { .srt-cta::before, .srt-cta-label, .srt-cta-arrow, .srt-nav > a, .srt-nav .theme-toggle { transition: none; } .srt-card-body { animation: none; } }
@@ -320,6 +355,7 @@
 .srt-v-ritual { padding-top: 12px; }
 .srt-v-ritual pre { display: grid; font-family: var(--font-mono); font-size: 10.5px; line-height: 20px; white-space: pre; }
 .srt-v-ritual pre > span { padding-inline: 13px; color: var(--dim); }
+.srt-line-narrow { display: none; }
 .srt-run { color: color-mix(in oklch, var(--dim), var(--srt-screen-text) calc(var(--t) * 100%)) !important; box-shadow: inset 2px 0 0 color-mix(in oklch, transparent, var(--color-brand) calc(var(--t) * 100%)); }
 .srt-v-endpoint { display: grid; align-content: start; row-gap: 8px; padding: 13px 13px 0; font-family: var(--font-mono); font-size: 10.5px; line-height: 15px; }
 .srt-v-endpoint p { white-space: nowrap; }
@@ -392,7 +428,7 @@
 .srt-end-bay { display: block; padding: 9px; background: var(--srt-plinth); box-shadow: inset 0 1.5px 0 var(--srt-body-top), inset 1.5px 0 0 var(--srt-body-side); }
 .srt-end-cta { position: relative; display: flex; width: 208px; height: 50px; background: var(--srt-slot); box-shadow: 0 0 0 2.5px var(--srt-trim); font-size: 17px; }
 .srt-screw { position: absolute; width: 5px; height: 5px; border-radius: 50%; background: var(--srt-steel); box-shadow: inset 0 1.5px 0 var(--srt-steel-top); }
-.srt-end { position: absolute; right: 0; bottom: 0; left: 0; display: grid; justify-items: center; row-gap: 20px; padding: 0 var(--space-24) var(--space-32); }
+.srt-end { position: absolute; right: 0; bottom: 0; left: 0; display: grid; justify-items: center; row-gap: 20px; padding: 0 max(var(--space-24), var(--srt-safe-r)) calc(var(--space-32) + var(--srt-safe-b)) max(var(--space-24), var(--srt-safe-l)); }
 .srt-end-consent { margin: 0; color: var(--srt-text-3); font-size: 12px; line-height: 16px; text-align: center; text-wrap: balance; }
 .srt-end-consent a:hover { color: var(--srt-text); }
 .srt-by { display: inline-flex; align-items: center; gap: var(--space-6); }
@@ -428,22 +464,34 @@
 .srt-stations[data-phone] .srt-plate { bottom: 10px; left: 10px; }
 .srt-stations[data-phone] .srt-lamp { right: 12px; bottom: 14px; }
 .srt-stations[data-phone] .srt-keys, .srt-stations[data-phone] .srt-counter { inset: 10px 10px 40px; }
-.srt-stations[data-phone] .srt-feed { --feed: 232px; right: 18px; left: calc(18px - var(--srt-dx) * .45); height: 232px; }
-.srt-stations[data-phone] .srt-feed-down { --feed: 272px; --pitch: 44px; right: 26px; left: 20px; height: 272px; }
-.srt-stations[data-phone] .srt-paper { padding-inline: 10px; font-size: 9.6px; }
+.srt-stations[data-phone] .srt-feed { --feed: var(--srt-feed, 232px); right: 18px; left: calc(18px - var(--srt-dx) * .45); height: var(--feed); }
+/* (The ledger's tape is as wide as the window over it: each line's status, then what it was, on one line or two.) */
+.srt-stations[data-phone] .srt-feed-down { --feed: 272px; --pitch: 44px; right: 10px; left: 10px; height: 272px; }
+.srt-stations[data-phone] .srt-paper { padding-inline: 10px; font-size: 11px; }
 .srt-stations[data-phone] .srt-feed-down .srt-paper { padding-inline: 0; }
-.srt-stations[data-phone] .srt-paper p { padding-left: calc(34px + 1ch); text-indent: calc(-34px - 1ch); }
-.srt-stations[data-phone] .srt-paper i { width: 34px; }
-.srt-stations[data-phone] .srt-paper .srt-quote { margin-left: 34px; padding-left: 9px; text-indent: 0; }
-.srt-stations[data-phone] .srt-paper .srt-log { grid-template-columns: 58px minmax(0, 1fr); padding: 0 8px; font-size: 11px; text-indent: 0; }
+.srt-stations[data-phone] .srt-paper p { padding-left: calc(38px + 1ch); text-indent: calc(-38px - 1ch); }
+.srt-stations[data-phone] .srt-paper i { width: 38px; }
+.srt-stations[data-phone] .srt-paper .srt-quote { margin-left: 38px; padding-left: 9px; text-indent: 0; }
+.srt-stations[data-phone] .srt-paper .srt-log { grid-template-columns: 62px minmax(0, 1fr); column-gap: 10px; padding: 0 12px; font-size: 11.5px; text-indent: 0; }
+.srt-stations[data-phone] .srt-log span { font-size: 11px; letter-spacing: 0; }
+.srt-stations[data-phone] .srt-log b { line-height: 14px; text-wrap: balance; }
 .srt-stations[data-phone] .srt-unit[data-kind='ritual'] .srt-screen { right: 10px; bottom: 74px; }
 .srt-stations[data-phone] .srt-unit[data-kind='endpoint'] .srt-screen { right: 10px; bottom: 92px; }
-.srt-stations[data-phone] .srt-panel { top: auto; right: 44px; bottom: 44px; left: 10px; grid-auto-flow: column; align-content: center; justify-content: start; column-gap: 14px; width: auto; height: 24px; padding: 0; font-size: 9.5px; }
+.srt-stations[data-phone] .srt-panel { top: auto; right: 44px; bottom: 44px; left: 10px; grid-auto-flow: column; align-content: center; justify-content: start; column-gap: 14px; width: auto; height: 24px; padding: 0; font-size: 11px; letter-spacing: .01em; }
 .srt-stations[data-phone] .srt-jacks { grid-auto-flow: row; grid-template-columns: repeat(2, max-content); gap: 9px 18px; height: 42px; }
-.srt-stations[data-phone] .srt-v-ritual pre { font-size: 9.1px; line-height: 18px; }
-.srt-stations[data-phone] .srt-v-endpoint, .srt-stations[data-phone] .srt-v-endpoint pre { font-size: 9.6px; }
-.srt-stations[data-phone] .srt-v-ritual pre > span { padding-inline: 7px; }
+/* (Nothing on an appliance is set smaller than 11 px. The ritual's longest line is forty characters: where the screen
+   is narrower than that, its letters stand a little closer, never its size smaller.) */
+.srt-stations[data-phone] .srt-v-ritual { container-type: inline-size; }
+.srt-stations[data-phone] .srt-v-ritual pre { --pad: clamp(7px, calc((100cqw - 40 * .6 * 11px) / 2), 13px); font-size: 11px; line-height: 18px; letter-spacing: clamp(-.8px, calc((100cqw - 2 * var(--pad) - 40 * .6 * 11px) / 40), 0px); }
+.srt-stations[data-phone] .srt-line-wide { display: none; }
+.srt-stations[data-phone] .srt-line-narrow { display: block; }
+.srt-stations[data-phone] .srt-v-endpoint, .srt-stations[data-phone] .srt-v-endpoint pre { font-size: 11px; }
+.srt-stations[data-phone] .srt-v-endpoint pre { padding-inline: 8px; }
+.srt-stations[data-phone] .srt-v-ritual pre > span { padding-inline: var(--pad); }
 .srt-stations[data-phone] .srt-unit[data-kind='thread'] .srt-a { --rim: 23px; --pa: calc(11px + 7px * (1 - var(--v))); --pb: calc(11px + 7px * var(--v)); }
 .srt-stations[data-phone] .srt-shelf, .srt-stations[data-phone] .srt-out { display: none; }
 .srt-stations[data-phone] .srt-foot { width: 140px; margin-left: -70px; }
+/* (The last links, each 44 px to press.) */
+.srt-stations[data-phone] .srt-end nav { gap: 0 var(--space-4); margin-top: var(--space-12); }
+.srt-stations[data-phone] .srt-end nav a { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; padding-inline: var(--space-8); }
 @media (prefers-reduced-motion: reduce) { .srt-unit { --q: 1 !important; } }

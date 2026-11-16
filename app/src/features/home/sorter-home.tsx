@@ -22,12 +22,12 @@ const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').match
 // sorting frame. It runs faster and faster until it bursts, and the letters settle where they fall. Below it the tubes
 // run on down the page to each place mail can go. The price is api/src/billing/money.ts's rate, the response time the
 // API's acceptance time as measured on 2026-11-15.
-const SEEN = 'sorter.seen', HEADER = { desktop: 64, phone: 56 }
-/** The lanes of the works, left to right, by the names the product uses; a scam's route is the laser. */
+const SEEN = 'sorter.seen'
+/** The seven routes by the names the product uses (a phone's machine has a lane for four of them: sorter/plan.ts); a scam's route is the laser. */
 export const LANE_NAMES = ['Threads', 'Endpoints', 'Agents', 'Inbox', 'IMAP', 'Rituals', 'Campaigns'] as const
-/** Where each of the eight tubes leads, in the tubes' own order (sorter/plan.ts). */
-/** The same on a phone, where a lane is forty pixels wide. */
+/** The same where a lane's plate is too narrow for its name. */
 const LANE_CODES = ['Thr', 'End', 'Agt', 'Inb', 'IMAP', 'Rit', 'Cmp'] as const
+/** Where each of the eight tubes leads, in the tubes' own order (sorter/plan.ts). */
 const TUBE_NAMES = ['Inbox', 'Agents', 'Endpoints', 'Threads', 'IMAP', 'Rituals', 'Campaigns', 'Logs'] as const
 const TUBE_CODES = ['Inb', 'Agt', 'End', 'Thr', 'IMAP', 'Rit', 'Cmp', 'Logs'] as const
 const KONAMI = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'b', 'a']
@@ -35,25 +35,28 @@ const KONAMI = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'Ar
 export function SorterHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps) {
   const dark = useTheme().theme === 'dark'
   const scene = useRef<HTMLElement>(null), still = useRef<HTMLCanvasElement>(null), gl = useRef<HTMLCanvasElement>(null), sorter = useRef<Sorter | null>(null)
+  const head = useRef<HTMLElement>(null), probe = useRef<HTMLDivElement>(null)
   const veiled = useRef<(HTMLElement | null)[]>([]), tally = useRef<HTMLSpanElement>(null), cta = useRef<HTMLButtonElement>(null)
   const readout = useRef<HTMLDivElement>(null), cardBox = useRef<HTMLDivElement>(null), counts = useRef([0, 0]), shown = useRef<Letter | null>(null)
-  const [p, setP] = useState<Plan | null>(null)
+  // `over`: how far the canvases reach up behind the header (its height, with a phone's status bar where the page runs under one).
+  const [p, setP] = useState<Plan | null>(null), [over, setOver] = useState(64)
   const [reduced] = useState(reducedMotion)
   // Whoever has watched it burst once gets there sooner the next time.
   const [quick] = useState(() => { try { return localStorage.getItem(SEEN) === '1' } catch { return false } })
   const [phase, setPhase] = useState<Phase>('boot'), [live, setLive] = useState(false), [card, setCard] = useState<Letter | null>(null)
-  const over = p?.phone ? HEADER.phone : HEADER.desktop
 
   // What the machine tells the page: the letter under the scanner, the tally, where it is in its day, the letter under the pointer.
   const [hooks] = useState<Hooks>(() => ({
     scan(letter, verdict) {
       const box = readout.current
       if (!box) return
-      const [from, subject, route] = box.children as unknown as HTMLElement[]
+      // (Where the letter goes is set at the readout's right, so a new name begins somewhere else: it is a new
+      // element each time, not one that moves.)
+      const [from, subject, route] = box.children as unknown as HTMLElement[], go = (text: string) => { const tag = document.createElement('span'); tag.textContent = text; route.replaceChildren(...text ? [tag] : []) }
       box.dataset.verdict = verdict
-      if (letter) { from.textContent = letter.from; subject.textContent = letter.subject; route.textContent = letter.scam ? 'Scam' : LANE_NAMES[letter.route] }
-      else if (verdict === 'jam') { from.textContent = `${counts.current[0]} sorted, ${counts.current[1]} burnt`; subject.textContent = 'Jammed. Press the gauge.'; route.textContent = '' }
-      else { from.textContent = `${productName.toLowerCase()} sorter`; subject.textContent = 'Waiting for mail'; route.textContent = '' }
+      if (letter) { from.textContent = letter.from; subject.textContent = letter.subject; go(letter.scam ? 'Scam' : LANE_NAMES[letter.route]) }
+      else if (verdict === 'jam') { from.textContent = `${counts.current[0]} sorted, ${counts.current[1]} burnt`; subject.textContent = 'Jammed. Press the gauge.'; go('') }
+      else { from.textContent = `${productName.toLowerCase()} sorter`; subject.textContent = 'Waiting for mail'; go('') }
     },
     count(sorted, burnt) { counts.current = [sorted, burnt]; if (tally.current) tally.current.textContent = String(sorted % 100000).padStart(5, '0') },
     phase(next) { setPhase(next); if (next === 'boom') try { localStorage.setItem(SEEN, '1') } catch { /* private mode: the long version again next time */ } },
@@ -80,10 +83,15 @@ export function SorterHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps
 
   // Before the first paint: measure the page and place the machine, so nothing moves afterwards.
   useLayoutEffect(() => {
-    const measure = () => { const box = scene.current!, next = plan(box.clientWidth, box.clientHeight); setP(now => now && now.W === next.W && now.H === next.H ? now : next) }
+    // (The probe is as tall as the page is under the header before any scrolling, by the small viewport: a phone's
+    // toolbars coming and going do not change it. Its padding is the page's safe areas.)
+    const measure = () => {
+      const fold = probe.current!, safe = getComputedStyle(fold), next = plan(scene.current!.clientWidth, fold.offsetHeight, { left: parseFloat(safe.paddingLeft) || 0, right: parseFloat(safe.paddingRight) || 0, bottom: parseFloat(safe.paddingBottom) || 0 })
+      setP(now => now && now.W === next.W && now.H === next.H && now.fold === next.fold && now.ox === next.ox ? now : next); setOver(head.current!.offsetHeight)
+    }
     measure()
     const observer = new ResizeObserver(measure)
-    observer.observe(scene.current!)
+    observer.observe(scene.current!); observer.observe(probe.current!); observer.observe(head.current!)
     return () => observer.disconnect()
   }, [])
   useLayoutEffect(() => { if (p) drawStill(still.current!, p, over, dark) }, [p, over, dark])
@@ -129,17 +137,26 @@ export function SorterHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps
 
   const at = (r: Rect): CSSProperties => p ? onFront(p, r) : { display: 'none' }
   const price = p ? { x: -COLS / 2 * p.U, w: COLS * p.U } : { x: 0, w: 0 }
-  return <div className="srt-page" data-phase={phase} data-live={live || undefined} data-phone={p?.phone || undefined} data-tight={p?.tight || undefined} style={{ ...toneVars(dark), ...p && { '--srt-u': `${p.U}px`, '--srt-v': `${p.V}px`, '--srt-price': `${price.w}px`, '--srt-below': `${p.floor - p.front - p.lip}px`, '--srt-ext': `${p.ext}px` } } as CSSProperties}>
-    <header className="srt-header">
+  // Whole names where a lane's plate holds them; the lanes' codes where it does not.
+  const named = !!p && p.label * p.P >= (p.phone ? 56 : 60)
+  const cannonBox = (c: Plan['cannon'], q: Plan) => { const sx = DX * c.z, sy = DY * c.z, ce = Math.cos(c.el), se = Math.sin(c.el), x0 = c.x - c.back * ce - 2.4 * c.cs, x1 = c.x + c.fore * ce + c.r, top = c.y + c.pivot + c.fore * se + c.r, w = Math.max(44, x1 - x0 + 8), h = Math.max(44, top - c.y + 8)
+    return { left: q.ox + (x0 + x1) / 2 + sx - w / 2, top: q.oy - top - sy - 4 - (h - (top - c.y + 8)), width: w, height: h } }
+  // The hopper's mouth, as it is seen: wide enough to press.
+  const hopperBox = (q: Plan) => { const w = Math.max(48, 2.6 * q.lw), h = Math.max(44, q.hopper * .82 + 12), x = DX * q.zL, y = DY * q.zL; return { left: q.ox + x - w / 2, top: q.oy - q.yTop - y - h, width: w, height: h } }
+  return <div className="srt-page" data-phase={phase} data-live={live || undefined} data-phone={p?.phone || undefined} data-tight={p?.tight || undefined} style={{ ...toneVars(dark), ...p && { '--srt-u': `${p.U}px`, '--srt-v': `${p.V}px`, '--srt-price': `${price.w}px`, '--srt-below': `${p.floor - p.front - p.lip}px`, '--srt-ext': `${p.ext}px`, '--srt-ox': `${p.ox}px`, '--srt-plate': `${p.label * p.P}px` } } as CSSProperties}>
+    <header className="srt-header" ref={head}>
       <a className="wordmark" href="/" aria-label={`${productName.toLowerCase()} home`}><BaneWordmark /></a>
       <nav className="srt-nav" aria-label="Site">
         <a href="/docs">API docs</a>
+        {/* Where the page is too short for the machine's own button to be seen before scrolling. */}
+        {p?.short && <button type="button" className="srt-head-cta" disabled={busy} aria-busy={busy || undefined} onClick={onSignIn} onPointerDown={onSignInIntent}>Get started</button>}
         <ThemeToggle />
       </nav>
     </header>
 
     <main>
-      <section className="srt-hero" ref={scene} aria-label="Pricing">
+      <section className="srt-hero" ref={scene} style={p ? { height: p.H } : undefined} aria-label="Pricing">
+        <div className="srt-fold" ref={probe} aria-hidden="true" />
         <canvas ref={still} className="srt-canvas" aria-hidden="true" />
         <canvas ref={gl} className="srt-canvas srt-gl" aria-hidden="true" />
         {p && <div className="srt-on">
@@ -148,10 +165,11 @@ export function SorterHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps
             <span className="srt-readout-from">{productName.toLowerCase()} sorter</span><span className="srt-readout-subject">Waiting for mail</span><span className="srt-readout-route" />
           </div>
           <button type="button" className="srt-gauge" style={at({ x: p.gauge.x - p.gauge.r - 5, y: p.gauge.y - p.gauge.r - 5, w: 2 * p.gauge.r + 10, h: 2 * p.gauge.r + 10 })} aria-label={phase === 'rest' ? 'Put the sorter back together' : 'Pressure gauge'} title={phase === 'rest' ? 'Put it back together' : 'Pressure'} onClick={() => sorter.current?.gauge()} />
-          <ol className="srt-lanes" data-names={!p.phone && .92 * p.P >= 60 || undefined} ref={el => { veiled.current[1] = el }} aria-hidden="true">{p.lanes.map((x, i) => <li key={i} style={at({ x: x - .46 * p.P, y: p.ySlot + .14 * p.slot, w: .92 * p.P, h: .72 * p.slot })}>{p.phone || .92 * p.P < 60 ? LANE_CODES[i] : LANE_NAMES[i]}</li>)}</ol>
+          <ol className="srt-lanes" data-names={!p.phone && named || undefined} ref={el => { veiled.current[1] = el }} aria-hidden="true">{p.lanes.map((x, i) => <li key={i} style={at({ x: x - p.label / 2 * p.P, y: p.ySlot + .14 * p.slot, w: p.label * p.P, h: .72 * p.slot })}>{(named ? LANE_NAMES : LANE_CODES)[p.routes[i]]}</li>)}</ol>
+          {/* The hopper: press it and more mail comes down (what the old code does from a keyboard). */}
+          {!reduced && <button type="button" className="srt-hopper" style={hopperBox(p)} aria-label="Hopper: pour in more mail" title="More mail" onMouseDown={event => event.preventDefault()} onClick={() => sorter.current?.rain()} />}
           {/* The send cannon: press it and it fires one. */}
-          {!reduced && <button type="button" className="srt-cannon" style={(() => { const c = p.cannon, sx = DX * c.z, sy = DY * c.z, ce = Math.cos(c.el), se = Math.sin(c.el), x0 = c.x - c.back * ce - 2.4 * c.cs, x1 = c.x + c.fore * ce + c.r, top = c.y + c.pivot + c.fore * se + c.r
-            return { left: p.ox + x0 + sx - 4, top: p.oy - top - sy - 4, width: x1 - x0 + 8, height: top - c.y + 8 } })()} aria-label="Send cannon: fire a letter" title="Send one" onMouseDown={event => event.preventDefault()} onClick={() => sorter.current?.send()} />}
+          {!reduced && <button type="button" className="srt-cannon" style={cannonBox(p.cannon, p)} aria-label="Send cannon: fire a letter" title="Send one" onMouseDown={event => event.preventDefault()} onClick={() => sorter.current?.send()} />}
           {!p.phone && <ol className="srt-lanes srt-mouths" aria-hidden="true">{p.drops.map((x, t) => <li key={t} data-side={t < 4 ? 'l' : 'r'} style={{ top: p.oy + p.front, height: p.lip, ...(t < 4 ? { left: x + p.tubeR + 7 } : { right: p.W - x + p.tubeR + 9 }) }}>{(Math.abs(p.fan[1].x - p.fan[0].x) < 84 ? TUBE_CODES : TUBE_NAMES)[t]}</li>)}<li data-side="r" style={{ top: p.oy + p.front, height: p.lip, right: p.W - p.ox - p.out + p.tubeR + 9 }}>{Math.abs(p.fan[1].x - p.fan[0].x) < 84 ? 'Out' : 'Outbound'}</li></ol>}
           {/* Under the price, as wide as the price: what it buys. */}
           <h1 className="srt-band" ref={el => { veiled.current[2] = el }} style={at({ x: price.x, y: p.yBand, w: price.w, h: p.band })} aria-label="$0.20 per 1,000 emails, sent or received via API.">
