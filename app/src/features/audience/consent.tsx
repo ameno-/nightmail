@@ -8,13 +8,16 @@ export const consentHelp: Record<string, string> = {
   unsubscribed: 'Opted out, so campaigns skip them.',
   suppressed: 'Bounced, complained or was blocked, so it is never emailed.',
 }
+// Said where consent is recorded: one contact, a bulk change or an import.
+export const subscribeDescription = 'Records that they agreed to marketing email, so campaigns can send to them.'
+export const evidenceRequired = 'Say how they agreed, e.g. “Signed up on our website”.'
 const legend: Record<string, string> = { subscribed: 'can receive campaigns', unknown: 'no recorded consent; campaigns skip them', unsubscribed: 'opted out', suppressed: 'bounced, complained or blocked; never emailed' }
 export const consentTitle = (status: string) => `${statusOptions.find(option => option.value === status)?.label ?? status}: ${legend[status] ?? ''}`
 // One line under the filters; on a phone it sits behind a button instead of taking four lines of every list.
 export function ConsentLegend() {
   const [open, setOpen] = useState(false), id = useId()
   return <div className="audience-legend" data-open={open || undefined}>
-    <button type="button" className="audience-legend__toggle" aria-expanded={open} aria-controls={id} onClick={() => setOpen(value => !value)}>What do these states mean?</button>
+    <button type="button" className="audience-legend__toggle" aria-expanded={open} aria-controls={id} onClick={() => setOpen(value => !value)}>What each state means</button>
     <p id={id} className="audience-legend__terms">{statusOptions.map(option => <span key={option.value}><span className="audience-legend__term">{option.label}</span> {legend[option.value]}</span>)}</p>
   </div>
 }

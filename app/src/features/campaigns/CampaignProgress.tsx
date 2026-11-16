@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useApi, useApiMutation, useWorkspaceAccess } from '../../data/context'
-import { campaignResumable, type Campaign, type CampaignPacingInput } from '../../data/types'
+import { campaignResumable, errorText, type Campaign, type CampaignPacingInput } from '../../data/types'
 import { Alert, Button, Checkbox, Input } from '../../components/ui'
 import { date, number, relativeTime, time } from '../../lib/format'
 import { isDuplicateSubmission } from '../../lib/single-flight'
@@ -67,13 +67,13 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
     {awaitingQueue > 0 && <div className="campaign-summary-line"><span>Awaiting queue</span><span>{number(awaitingQueue)}</span></div>}
     <div className="campaign-summary-line"><span>Queued</span><span>{number(queued)}</span></div>
     <div className="campaign-summary-line"><span>Processing</span><span>{number(processing)}</span></div>
-    <p className="muted">Processed means done processing, including failed and canceled emails; not necessarily delivered.</p>
+    <p className="muted">Processed includes failed and canceled emails, not only delivered ones.</p>
     {outcomes.filter(([, count]) => count && count > 0).map(([label, count]) => <div className="campaign-summary-line" key={label}><span>{label}</span><span>{number(count)}</span></div>)}
     {interval === liveInterval ? <p className="muted">Updates every 3 seconds.</p> : interval !== false && sendingHeld(campaign) && <p className="muted">Updates every minute while sending is held.</p>}
   </div>
 }
 
-const message = (error: unknown) => error instanceof Error ? error.message : 'Something went wrong. Please try again.'
+const message = errorText
 
 // Pause, resume, and daily-limit controls for a send that is still releasing recipients.
 export function CampaignPacing({ campaign }: { campaign: Campaign }) {

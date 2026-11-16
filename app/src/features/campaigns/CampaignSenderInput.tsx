@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { Input } from '../../components/ui'
 import { NamedAddress } from '../../components/PrivateAddress'
+import { invalidSender } from './copy'
 import './sender-input.css'
 
 type Sender = { name: string; email: string }
@@ -72,7 +73,7 @@ export function CampaignSenderInput({ name, email, domains, disabled = false, on
   const error = draftName(draft).length > 200 ? 'Sender name: 200 characters maximum.'
     : !validName(draftName(draft)) ? 'Remove control characters from the name.'
     : parsed && !allowed(parsed) ? 'Choose an address on a verified domain.'
-    : candidates.length ? 'Choose a sender address.' : 'Enter a valid sender email address.'
+    : candidates.length ? 'Choose a sender address.' : invalidSender
   const showError = touched && (!parsed || !allowed(parsed))
   // A complete address is shown as PrivateAddress (masked until hovered, in full with privacy mode off, like every address in the dashboard) until the field is focused or clicked; the input stays mounted, hidden, so focus moves into it without a blur.
   const masked = !editing && !!parsed

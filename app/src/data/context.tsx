@@ -334,7 +334,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
   const authResult = new URLSearchParams(window.location.search).get('auth')
   // not_approved: a verified OIDC account outside the invite list. The API has already saved it as an access request.
   const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert>
-    : authResult === 'not_approved' ? <Alert tone="info" title={`${productName} is invite-only right now`}>{home.data ? 'We saved your request for access. If you were invited, open the invitation link and sign in again.' : 'This account isn’t approved here. Ask an administrator to add it.'}</Alert>
+    : authResult === 'not_approved' ? <Alert tone="info" title={`${productName} is invite-only right now`}>{home.data ? 'We saved your request for access. If you were invited, open the invitation link and sign in again.' : 'This account isn’t approved here. Ask an owner or admin to add it.'}</Alert>
     : authResult && authMessages[authResult] ? <Alert tone={authResult === 'interaction_required' ? 'info' : 'danger'}>{authMessages[authResult]}</Alert>
     : notice ? <Alert tone="danger">{notice}</Alert>
     : invitation && <Alert tone="info" title="You have a workspace invitation">Sign in with the invited account to review it. You join only after you confirm.</Alert>

@@ -68,11 +68,11 @@ export function ContactDetailBodySkeleton() {
 }
 // Consent history renders before Matching emails; Matching emails waits until the history's height is known.
 export function ConsentHistorySkeleton() {
-  return <section className="section"><SectionHeader title="Consent history" /><p className="muted">Every consent change, and how it was given or withdrawn.</p><TableSkeleton columns={consentColumns} rows={1} /></section>
+  return <section className="section"><SectionHeader title="Consent history" /><TableSkeleton columns={consentColumns} rows={1} /></section>
 }
 export function SegmentEditorBodySkeleton() {
   return <div className="stack audience-editor"><div className="audience-name"><FieldSkeleton label="Segment name" /></div>
-    <section className="section stack"><SectionHeader title="Conditions" actions={<ControlSkeleton width={104} />} /><p className="muted">A segment narrows a campaign’s list to the people who match these conditions.</p><div className="cluster"><span>Match</span><ControlSkeleton width={220} /></div><div className="audience-rules"><div className="audience-rule audience-rule--head" aria-hidden="true"><span>Field</span><span>Condition</span><span>Value</span><span /></div><div className="audience-rule"><ControlSkeleton /><ControlSkeleton /><ControlSkeleton /><ControlSkeleton width={34} /></div></div><div className="cluster"><ControlSkeleton width={133} /></div></section>
+    <section className="section stack"><SectionHeader title="Conditions" actions={<ControlSkeleton width={104} />} /><div className="cluster"><span>Match</span><ControlSkeleton width={220} /></div><div className="audience-rules"><div className="audience-rule audience-rule--head" aria-hidden="true"><span>Field</span><span>Condition</span><span>Value</span><span /></div><div className="audience-rule"><ControlSkeleton /><ControlSkeleton /><ControlSkeleton /><ControlSkeleton width={34} /></div></div><div className="cluster"><ControlSkeleton width={133} /></div></section>
     <section className="section stack"><SectionHeader title="Matching contacts" actions={<ControlSkeleton width={220} />} /><AudienceSummarySkeleton /></section></div>
 }
 export function AudienceRouteSkeleton({ kind, isNew = false }: { kind: 'contacts' | 'contact' | 'lists' | 'list' | 'segments' | 'segment'; isNew?: boolean }) {

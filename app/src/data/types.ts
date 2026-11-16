@@ -236,7 +236,7 @@ const friendlyErrors: Record<string, (detail: string) => string> = {
   ADMIN_REQUIRED: () => ownersOnly,
   OWNER_REQUIRED: () => 'Only a workspace owner can do this.',
   SES_NOT_CONFIGURED: () => 'Sending isn’t available on this server right now. Try again in a few minutes.',
-  TENANT_NOT_READY: () => 'Your workspace is still being set up for sending. Try again in a minute or two.',
+  TENANT_NOT_READY: () => 'Your workspace is still being set up for sending. Try again in a minute.',
   HOSTED_SENDING_PAUSED: detail => `Sending is paused while ${productName} reviews this workspace${detail ? ` (${detail.replace(/\.$/, '')})` : ''}. Receiving still works.`,
   SENDER_DOMAIN_NOT_VERIFIED: () => 'This sender’s domain isn’t verified. Check its DNS records in Domains, then send once it shows Verified.',
   SEND_LIMIT_REACHED: detail => detail,
@@ -267,6 +267,10 @@ export class ApiError extends Error {
     this.reference = `${code}${requestId ? ` · Request ${requestId}` : ''}`
   }
 }
+/** The generic retry line for an error without its own text. */
+export const tryAgain = 'Something went wrong. Try again.'
+/** What to show for an error: an ApiError's plain-language text, another error's message, or the retry line. */
+export const errorText = (error: unknown) => error instanceof ApiError ? error.text : error instanceof Error ? error.message : tryAgain
 
 // The UI depends on this boundary, never on fixture data or a transport implementation.
 // Dates cross the boundary as ISO-8601 strings; rates are ratios, not formatted percentages.

@@ -51,7 +51,7 @@ export function UiNotesLayer() {
   const open = useCallback((node: Element) => {
     const target = noteTarget(node)
     // A secret-bearing screen (data-sensitive) never becomes a note: nothing of it is recorded.
-    if (sensitiveElement(target)) { toast('That shows a secret, so it can’t have a note. Note what’s around it instead.', 'error'); return }
+    if (sensitiveElement(target)) { toast('That shows a secret; note what’s around it.', 'error'); return }
     setViewing(null); setTray(false)
     // The screenshot starts now, before the composer exists, so it shows the page as it was clicked.
     setDraft({ target, info: describe(target), shot: screenshot(target) })
@@ -238,7 +238,7 @@ function Viewer({ note, number, moved, onChange, onDelete, onClose }: { note: Ui
       <Chips label="Type" values={noteKinds} value={kind} onChange={value => setKind(value ?? 'other')} format={kindLabel} />
       <Chips label="Severity (optional)" values={noteSeverities} value={severity} onChange={setSeverity} format={kindLabel} optional />
     </> : <p className="uin-body">{note.body}</p>}
-    {moved && <p className="uin-moved">Element moved: its selector finds nothing here.{!here && <> <Link to={note.page.path}>Open where it was left</Link></>}</p>}
+    {moved && <p className="uin-moved">Element moved: its selector finds nothing here.{!here && <> <Link to={note.page.path}>Open its page</Link></>}</p>}
     <p className="uin-meta">{note.author?.name ?? 'Someone'} · {relativeTime(note.createdAt)}{note.prUrl && <> · <a href={note.prUrl} target="_blank" rel="noreferrer">PR <ExternalLink size={11} aria-hidden="true" /></a></>}</p>
     <Chips label="Status" values={noteStatuses} value={note.status} onChange={value => { if (value && value !== note.status) void patch('status', { status: value as NoteStatus }) }} format={value => statusLabel[value]} />
     {error && <p className="uin-error" role="alert">{error}</p>}

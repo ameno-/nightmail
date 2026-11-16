@@ -35,7 +35,7 @@ export function useLeaveGuard(dirty: boolean, { what = 'your changes', save }: {
     setSaving(true)
     try { if (await save()) leave(target) } finally { setSaving(false) }
   }
-  return <Dialog open={target !== null} onOpenChange={open => { if (!open && !saving) setTarget(null) }} title="Leave without saving?" description={`You haven’t saved ${what}. Leaving now discards them.`}
+  return <Dialog open={target !== null} onOpenChange={open => { if (!open && !saving) setTarget(null) }} title="Leave without saving?" description={`You haven’t saved ${what}; leaving discards them.`}
     footer={<><Button disabled={saving} onClick={() => setTarget(null)}>Stay</Button><Button variant="danger" disabled={saving} onClick={() => target && leave(target)}>Discard and leave</Button>{save && <Button variant="primary" loading={saving} onClick={() => void saveAndLeave()}>Save and leave</Button>}</>}>
     <span className="sr-only">Stay on this page to keep editing.</span>
   </Dialog>

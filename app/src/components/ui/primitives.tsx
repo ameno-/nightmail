@@ -7,7 +7,7 @@ import * as SwitchPrimitive from '@radix-ui/react-switch';
 import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, LoaderCircle, MoreHorizontal, Search, X } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { label as formatLabel } from '../../lib/format';
-import { permissionCodes } from '../../data/types';
+import { permissionCodes, tryAgain } from '../../data/types';
 import { PrivateAddress } from '../PrivateAddress';
 import { TOUCH, matches, usePhone, useTouch } from '../../lib/media';
 import { SkeletonText, PaginationSkeleton, ControlSkeleton } from './skeleton';
@@ -150,6 +150,7 @@ export function Dialog({ open, onOpenChange, title, description, children, foote
   // Native input autofocus can precede Radix's callback; retain the external opener, not the mounted input.
   return <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}><DialogPrimitive.Portal><DialogPrimitive.Overlay className="ui-dialog-overlay" /><DialogPrimitive.Content data-component="Dialog" data-sensitive={sensitive || undefined} {...drag} onEscapeKeyDown={dismissible ? undefined : event => event.preventDefault()} onInteractOutside={dismissible ? undefined : event => event.preventDefault()} className={cx('ui-dialog', sheet && 'ui-dialog--sheet', className)} aria-describedby={description ? descriptionId : undefined} onFocusCapture={event => { const previous = event.relatedTarget; if (previous instanceof HTMLElement && previous !== document.body && !event.currentTarget.contains(previous)) returnFocus.current = previous; }} onOpenAutoFocus={event => { const focused = document.activeElement; const dialog = event.target; if (focused instanceof HTMLElement && (!(dialog instanceof HTMLElement) || !dialog.contains(focused))) returnFocus.current = focused; if (dialog instanceof HTMLElement && !dialog.contains(focused)) { event.preventDefault(); (matches(TOUCH) ? null : dialog.querySelector<HTMLElement>(DIALOG_FIELD))?.focus(); if (!dialog.contains(document.activeElement)) dialog.focus(); } }} onCloseAutoFocus={event => { if (returnFocus.current?.isConnected) { event.preventDefault(); returnFocus.current.focus(); } }}>{sheet && <><SheetOpenEffects /><div className="ui-sheet__grab" aria-hidden="true"><span /></div></>}<div className="ui-dialog__header"><DialogPrimitive.Title className="ui-dialog__title">{title}</DialogPrimitive.Title><DialogPrimitive.Close asChild><IconButton label="Close dialog"><X size={16} /></IconButton></DialogPrimitive.Close></div>{description && <DialogPrimitive.Description id={descriptionId} className="ui-dialog__description">{description}</DialogPrimitive.Description>}<div className="ui-dialog__body">{children}</div>{footer && <div className="ui-dialog__footer">{footer}</div>}</DialogPrimitive.Content></DialogPrimitive.Portal></DialogPrimitive.Root>;
 }
+const actionFailed = 'Couldn’t complete the action. Try again.';
 export function ConfirmDialog({ open, onOpenChange, title, description, confirmLabel = 'Confirm', onConfirm, pending, danger = false }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; description: ReactNode; confirmLabel?: string; onConfirm: () => void | Promise<unknown>; pending?: boolean; danger?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -158,8 +159,8 @@ export function ConfirmDialog({ open, onOpenChange, title, description, confirmL
   // One confirm at a time: a second press before the first answers (busy disables the button a render later) is ignored,
   // and a write the mutation guard drops (lib/single-flight.ts) isn't shown as an error; the first one closes the dialog.
   const confirming = useRef(false);
-  async function confirm() { if (confirming.current) return; confirming.current = true; setBusy(true); setError(null); try { await onConfirm(); onOpenChange(false); } catch (cause) { if (isDuplicateSubmission(cause)) return; setError(cause ?? new Error('Couldn’t complete the action. Try again.')); } finally { confirming.current = false; setBusy(false); } }
-  return <Dialog open={open} onOpenChange={next => { if (!working) onOpenChange(next); }} title={title} description={description} footer={<><Button disabled={working} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant={danger ? 'danger' : 'primary'} loading={working} onClick={confirm}>{confirmLabel}</Button></>}>{error ? <Alert tone="danger"><ErrorText error={error} fallback="Couldn’t complete the action. Try again." /></Alert> : null}</Dialog>;
+  async function confirm() { if (confirming.current) return; confirming.current = true; setBusy(true); setError(null); try { await onConfirm(); onOpenChange(false); } catch (cause) { if (isDuplicateSubmission(cause)) return; setError(cause ?? new Error(actionFailed)); } finally { confirming.current = false; setBusy(false); } }
+  return <Dialog open={open} onOpenChange={next => { if (!working) onOpenChange(next); }} title={title} description={description} footer={<><Button disabled={working} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant={danger ? 'danger' : 'primary'} loading={working} onClick={confirm}>{confirmLabel}</Button></>}>{error ? <Alert tone="danger"><ErrorText error={error} fallback={actionFailed} /></Alert> : null}</Dialog>;
 }
 export type MenuItem = { label: string; onSelect: () => void; icon?: ReactNode; destructive?: boolean; disabled?: boolean; hint?: ReactNode };
 export function DropdownMenu({ items, label = 'More actions', trigger, title, align = 'end' }: { items: MenuItem[]; label?: string; trigger?: ReactNode; title?: ReactNode; align?: 'start' | 'end' }) {
@@ -340,7 +341,7 @@ export function LoadingState({ rows = 5 }: { rows?: number }) {
   return <div className="ui-loading" role="status" aria-label="Loading"><span className="sr-only">Loading…</span>{Array.from({ length: rows }, (_, index) => <div key={index} className="ui-skeleton-row" aria-hidden="true"><span className="ui-skeleton" /><span className="ui-skeleton" /><span className="ui-skeleton" /></div>)}</div>;
 }
 // API errors carry plain-language `text` and a `reference` (code and request ID) shown as secondary detail.
-export function ErrorText({ error, fallback = 'Something went wrong. Please try again.' }: { error: unknown; fallback?: string }) {
+export function ErrorText({ error, fallback = tryAgain }: { error: unknown; fallback?: string }) {
   if (error instanceof Error && 'text' in error && 'reference' in error) return <><span>{String(error.text)}</span><span className="ui-error-reference">{String(error.reference)}</span></>;
   return <>{error instanceof Error ? error.message : typeof error === 'string' ? error : fallback}</>;
 }

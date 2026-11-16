@@ -128,7 +128,7 @@ function NoteDialog({ noteId, initial, canAct, onClose, onChanged, onOpenOnPage 
         <Field label="Severity"><Select value={severity} onValueChange={setSeverity} disabled={!canAct} options={[{ value: '', label: 'None' }, ...noteSeverities.map(value => ({ value, label: kindLabel(value) }))]} /></Field>
       </div>
       <Field label="Fixing pull request"><Input type="url" inputMode="url" value={prUrl} onChange={event => setPrUrl(event.target.value)} placeholder="https://github.com/…/pull/…" disabled={!canAct} /></Field>
-      {(canAct || note.resolution) && <Field label="Resolution"><Textarea value={resolution} onChange={event => setResolution(event.target.value)} maxLength={2000} rows={2} placeholder={resolved(note.status) ? 'What was done, or why not' : 'Optional'} disabled={!canAct} /></Field>}
+      {(canAct || note.resolution) && <Field label="Resolution"><Textarea value={resolution} onChange={event => setResolution(event.target.value)} maxLength={2000} rows={2} placeholder={resolved(note.status) ? 'What changed, or why not' : 'Optional'} disabled={!canAct} /></Field>}
       <Facts rows={[
         ['Page', <Link to={note.page.path} onClick={() => onOpenOnPage(note)}>{note.page.path}</Link>],
         ['Route', <code>{note.page.route}</code>],
@@ -164,16 +164,16 @@ function KeysDialog({ onClose }: { onClose: () => void }) {
   const live = (keys.data ?? []).filter(key => !key.revokedAt && Date.parse(key.expiresAt) > Date.now())
   const origin = window.location.origin
   return <Dialog sensitive={Boolean(secret)} open onOpenChange={next => { if (!next) onClose() }} title="Agent keys" className="op-keys-dialog"
-    description="A key lets a script or agent list UI notes, download their screenshots and set their status as you. It does nothing else, and stops working if you lose the operator role."
+    description="Lets a script or agent read UI notes and screenshots and set their status."
     footer={<Button onClick={onClose}>Done</Button>}>
     <div className="op-dialog-fields">
       {error && <Alert tone="danger">{error}</Alert>}
-      {secret ? <Alert tone="success" title="Copy the key now. It isn’t shown again.">
+      {secret ? <Alert tone="success" title="Shown once: copy it now">
         <span className="op-key-secret"><SecretCode>{secret}</SecretCode><CopyButton value={secret} label="Copy key" /></span>
         <code className="op-key-usage">{`BANE_URL=${origin} BANE_UI_NOTES_KEY=${secret.slice(0, 15)}… node --import tsx api/scripts/ui-notes.ts list --status open --json --screenshots ./notes`}</code>
       </Alert> : <form className="op-key-form" onSubmit={create}>
         <Field label="Name" htmlFor="ui-note-key-name"><Input id="ui-note-key-name" value={name} maxLength={100} onChange={event => setName(event.target.value)} required /></Field>
-        <Field label="Expires"><Select value={days} onValueChange={setDays} options={[{ value: '7', label: 'In 7 days' }, { value: '30', label: 'In 30 days' }, { value: '90', label: 'In 90 days' }]} /></Field>
+        <Field label="Expires" hint="It also stops if you lose the operator role."><Select value={days} onValueChange={setDays} options={[{ value: '7', label: 'In 7 days' }, { value: '30', label: 'In 30 days' }, { value: '90', label: 'In 90 days' }]} /></Field>
         <Button type="submit" variant="primary" loading={busy} disabled={!name.trim()}>Create key</Button>
       </form>}
       <ul className="op-keys">{keys.isPending ? <li className="muted">Loading keys…</li> : keys.isError ? <li><span className="muted">Couldn’t load the keys.</span><Button size="sm" loading={keys.isFetching} onClick={() => void keys.refetch()}>Retry</Button></li> : !live.length ? <li className="muted">No active keys.</li> : live.map(key => <li key={key.id}>

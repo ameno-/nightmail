@@ -14,7 +14,7 @@ import { DnsWaitNote, DomainRecords, useDnsSetup, useDomain } from '../settings/
 import { AgentPrompt, McpSetup, agentPrompt } from '../docs/agent-setup'
 import { FirstSend } from '../docs/first-send'
 import { domainPattern, normalizeDomain } from '../../lib/domain'
-import { ApiError, type ConnectionKind, type ConnectionState, type ProviderConnection } from '../../data/types'
+import { ApiError, errorText, type ConnectionKind, type ConnectionState, type ProviderConnection } from '../../data/types'
 import './onboarding.css'
 import { NightmailWordmark } from '../../components/NightmailLogo'
 import { apiKeyEnv, productName, secretPrefixes } from '../../../../api/src/brand'
@@ -30,8 +30,9 @@ async function retrying<T>(run: () => Promise<T>) {
     }
   }
 }
+const createStack = 'Create stack in AWS'
 const code = (error: unknown) => error instanceof ApiError ? error.code : undefined
-const message = (error: unknown) => error instanceof ApiError ? error.text : error instanceof Error ? error.message : 'Something went wrong. Try again.'
+const message = errorText
 
 // The connection cache keeps only a short summary on the identity; a fresh /v1/me brings back the rest (the daily
 // limit, standing, domain counts) that Overview reads.
@@ -155,7 +156,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
     setAwsPhase('idle')
     shared.reset(); byo.reset()
     setPicked(next)
-    if (pending?.state === 'provisioning' || pending?.state === 'failed') toast(`If you created the ${productName} stack in AWS, you can delete it there.`, 'info')
+    if (pending?.state === 'provisioning' || pending?.state === 'failed') toast(`If you made the ${productName} stack, delete it in AWS.`, 'info')
     void client.cancelQueries({ queryKey: ['bane', api.mode, 'connection'] })
     void (async () => {
       try { if (pending) await connectionApi.remove() }
@@ -258,13 +259,13 @@ function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) =
       <button type="button" className="onboarding-option onb-rise" style={rise(1)} onClick={() => onChoose('shared')}>
         <span className="onboarding-option-icon" aria-hidden="true"><Send size={18} /></span>
         <span className="onboarding-option-title">Hosted mail</span>
-        <span className="onboarding-option-body">Send through {productName}’s Amazon SES account. No AWS account needed, just a few DNS records. The daily limit rises as your mail proves healthy.</span>
-        <span className="onboarding-option-foot"><span className="onboarding-option-price">Small daily limit to start</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
+        <span className="onboarding-option-body">Send through {productName}’s Amazon SES; you only add a few DNS records.</span>
+        <span className="onboarding-option-foot"><span className="onboarding-option-price">Small daily limit that grows</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
       <button type="button" className="onboarding-option onb-rise" style={rise(2)} onClick={() => onChoose('byo')}>
         <span className="onboarding-option-icon onboarding-option-icon--aws" aria-hidden="true"><AwsLogo /></span>
         <span className="onboarding-option-title">Your AWS account</span>
-        <span className="onboarding-option-body">Send through Amazon SES in your own AWS account. Setup creates one CloudFormation stack.</span>
+        <span className="onboarding-option-body">Send through Amazon SES in your own AWS account; setup creates one CloudFormation stack.</span>
         <span className="onboarding-option-foot"><span className="onboarding-option-price">You pay AWS directly</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
     </div>
@@ -315,11 +316,11 @@ function ConnectAwsStep({ state, connection, onBack, onHosted }: { state: Connec
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <button type="button" className="onboarding-back" onClick={onBack} disabled={connected}><ArrowLeft size={14} aria-hidden />Back</button>
       <h1 className="onboarding-title">Connect your AWS account</h1>
-      <p className="onboarding-lead">A CloudFormation stack gives {productName} a role in your account. It takes about two minutes; this page continues on its own.</p>
+      <p className="onboarding-lead">A CloudFormation stack gives {productName} a role; it takes about 2 minutes.</p>
     </div>
     <div className="onboarding-connect-actions onb-rise" style={rise(1)} inert={connected}>
-      {link ? <a className="ui-button ui-button--primary ui-button--md" href={link} target="_blank" rel="noopener noreferrer">Open AWS to create the stack<ArrowUpRight size={16} aria-hidden /></a>
-        : <Button variant="primary" loading>Open AWS to create the stack<ArrowUpRight size={16} aria-hidden /></Button>}
+      {link ? <a className="ui-button ui-button--primary ui-button--md" href={link} target="_blank" rel="noopener noreferrer">{createStack}<ArrowUpRight size={16} aria-hidden /></a>
+        : <Button variant="primary" loading>{createStack}<ArrowUpRight size={16} aria-hidden /></Button>}
       <Button variant="ghost" onClick={onHosted}>Use Hosted mail instead</Button>
     </div>
     {/* Every status is laid out in one cell, so moving from Waiting to Connected never changes the height. */}
@@ -331,7 +332,7 @@ function ConnectAwsStep({ state, connection, onBack, onHosted }: { state: Connec
       <span className="sr-only" role="status">{active.title}</span>
     </div>
     <div className="onboarding-trouble onb-rise" style={rise(3)} inert={connected}>
-      <button type="button" className="onboarding-disclosure" aria-expanded={trouble} aria-controls="onboarding-aws-trouble" onClick={() => setTrouble(open => !open)}><ChevronRight size={14} aria-hidden />Having trouble? Enter your AWS account ID</button>
+      <button type="button" className="onboarding-disclosure" aria-expanded={trouble} aria-controls="onboarding-aws-trouble" onClick={() => setTrouble(open => !open)}><ChevronRight size={14} aria-hidden />Stuck? Enter account ID</button>
       {trouble && !connected && <div id="onboarding-aws-trouble" className="onboarding-trouble-body"><VerifyAccount connection={connection} /></div>}
     </div>
   </div>
@@ -405,7 +406,7 @@ function AddDomain({ draft, onDraftChange, queued, onQueuedChange, ready, onAdde
   return <div className="onboarding onboarding--narrow">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <h1 className="onboarding-title">Add your domain</h1>
-      <p className="onboarding-lead">Use a domain you own. Next, you’ll add a few DNS records.</p>
+      <p className="onboarding-lead">Use a domain you own; next, you’ll add a few DNS records.</p>
     </div>
     <form className="onboarding-inline-form onb-rise" style={rise(2)} onSubmit={event => { event.preventDefault(); void add() }} noValidate>
       <div className="onboarding-field onboarding-field--domain">
@@ -437,7 +438,7 @@ function DomainSetup({ domainId, onContinue, onMissing }: { domainId: string; on
       <h1 className="onboarding-title onboarding-domain-title"><span>{current.name}</span><LiveStatus state={verified ? 'verified' : current.status === 'issue' ? 'failed' : 'pending'} /></h1>
       {/* One slot for the lead, the failure note and the verified moment: each replaces the other in place. */}
       <div className="onboarding-slot">
-        <p className="onboarding-lead" data-active={(!verified && current.status !== 'issue') || undefined} aria-hidden={verified || current.status === 'issue' || undefined}>Add these records at your DNS provider. You can continue while we verify them.</p>
+        <p className="onboarding-lead" data-active={(!verified && current.status !== 'issue') || undefined} aria-hidden={verified || current.status === 'issue' || undefined}>Add these records at your DNS host; go on while we check them.</p>
         <div data-active={(!verified && current.status === 'issue') || undefined} inert={verified || current.status !== 'issue'}><Alert tone="danger">Verification stopped. Fix the records below, then press Check now on the domain’s page.</Alert></div>
         <div className="onboarding-verified" data-active={verified || undefined} aria-hidden={!verified || undefined}>
           <span className="onboarding-verified-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="20" height="20"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span>
@@ -488,7 +489,7 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
   return <div className="onboarding onboarding--agent">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <h1 className="onboarding-title">Send your first email</h1>
-      <p className="onboarding-lead">Create a key, then send with cURL, the SDK or your coding agent. All of this is also in Docs.</p>
+      <p className="onboarding-lead">Create a key, then send with cURL, the SDK or your coding agent.</p>
     </div>
     <div className="onboarding-agent-steps">
       <section className="section stack developer-section onb-rise" style={rise(1)} aria-label="API key">

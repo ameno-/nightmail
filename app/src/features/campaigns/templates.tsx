@@ -3,7 +3,7 @@ import { MoreHorizontal } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useApi, useApiDef, useApiMutation, useApiQuery, useRegion, useWorkspaceAccess } from '../../data/context'
-import { ApiError, type CampaignTemplate, type CampaignTemplateDraft, type CampaignTemplateSummary } from '../../data/types'
+import { errorText, type CampaignTemplate, type CampaignTemplateDraft, type CampaignTemplateSummary } from '../../data/types'
 import { SearchField, Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, Pagination, PaginationSkeleton, Select, SkeletonText, StatusBadge, useToast } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
 import { date, shortDateTime, time } from '../../lib/format'
@@ -15,11 +15,12 @@ import { usePrefetchQueries } from '../../data/prefetch'
 import { ChunkFallback } from '../../lib/preloadable'
 import { CampaignRouteSkeleton, ComposerSkeleton, templateColumns } from './skeletons'
 import { CampaignsHeader } from './header'
+import { publishFirst, templateIntro } from './copy'
 import './campaigns.css'
 import { useSingleFlight } from '../../lib/single-flight'
 import { usePhone } from '../../lib/media'
 
-const errorMessage = (error: unknown) => error instanceof ApiError ? error.text : error instanceof Error ? error.message : 'Something went wrong. Please try again.'
+const errorMessage = errorText
 // Templates hold concrete example content; personalization belongs to the campaign made from them.
 const placeholder = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/
 const placeholderHint = (value: string | undefined) => { const match = value ? placeholder.exec(value) : null; return match ? `Templates use example text, not {{${match[1]}}}. Write an example here; add personalization in the campaign.` : '' }
@@ -83,11 +84,11 @@ export function TemplatesPage() {
         {...templateColumns[1], render: row => <StatusBadge status={row.published ? 'Published' : 'Draft'} />},
         {...templateColumns[2], render: row => row.description || row.subject || 'No subject yet'},
         {...templateColumns[3], render: row => <span className="muted campaign-activity" title={`${date(row.updatedAt)} · ${time(row.updatedAt)} UTC`}>{shortDateTime(row.updatedAt)}</span>, cardRender: row => `Updated ${date(row.updatedAt, { month: 'short', day: 'numeric', timeZone: 'UTC' })}`},
-        {...templateColumns[4], render: row => archived ? null : <Button size="sm" variant="secondary" title={row.published ? 'Start a new campaign draft from this template' : 'Publish this template to start campaigns from it'} disabled={!row.published || pending !== null || unavailable} loading={pending === row.id} onClick={event => { event.stopPropagation(); void start(row) }}>Use template</Button>},
+        {...templateColumns[4], render: row => archived ? null : <Button size="sm" variant="secondary" title={row.published ? 'Start a new campaign draft from this template' : publishFirst} disabled={!row.published || pending !== null || unavailable} loading={pending === row.id} onClick={event => { event.stopPropagation(); void start(row) }}>Use template</Button>},
       ]} />
       {query.isPending ? <PaginationSkeleton /> : <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} count={query.data.items.length} onPageChange={page => setParams(previous => { const next = new URLSearchParams(previous); next.set('page', String(page)); return next })} />}
     </>}
-    <Dialog open={createOpen} onOpenChange={setCreateOpen} title="Create template" description="A reusable starting point for campaigns. You can change everything later." footer={<><Button onClick={() => setCreateOpen(false)}>Cancel</Button><Button variant="primary" loading={create.isPending} disabled={!name.trim()} onClick={() => void createTemplate()}>Create</Button></>}><Field label="Name"><Input autoFocus placeholder="Monthly newsletter" value={name} onChange={event => setName(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void createTemplate() }} /></Field></Dialog>
+    <Dialog open={createOpen} onOpenChange={setCreateOpen} title="Create template" description="A reusable starting point for campaigns; change anything later." footer={<><Button onClick={() => setCreateOpen(false)}>Cancel</Button><Button variant="primary" loading={create.isPending} disabled={!name.trim()} onClick={() => void createTemplate()}>Create</Button></>}><Field label="Name"><Input autoFocus placeholder="Monthly newsletter" value={name} onChange={event => setName(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void createTemplate() }} /></Field></Dialog>
   </>
 }
 
@@ -184,12 +185,12 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
         <Button variant="ghost" disabled={saving || dirty || !draft.html} onClick={() => setPreviewOpen(true)}>Preview</Button>
         {archived && <Button variant="danger" onClick={() => setDeleteOpen(true)}>Delete</Button>}
         <Button variant="ghost" disabled={saving} onClick={() => void archive()}>{archived ? 'Restore' : 'Archive'}</Button>
-        <Button variant="secondary" title={published ? 'Start a new campaign draft from the published version' : 'Publish this template to start campaigns from it'} disabled={!published || starting !== null || unavailable} loading={starting !== null} onClick={() => void start({ id: template.id, name: template.published?.name ?? template.draft.name })}>Use template</Button>
+        <Button variant="secondary" title={published ? 'Start a new campaign draft from the published version' : publishFirst} disabled={!published || starting !== null || unavailable} loading={starting !== null} onClick={() => void start({ id: template.id, name: template.published?.name ?? template.draft.name })}>Use template</Button>
         <Button variant="primary" title={upToDate ? 'New campaigns use this version' : 'New campaigns use the published version; campaigns already made from it never change'} disabled={archived || saving || !ready || upToDate} onClick={() => void publish()}>{upToDate ? 'Published' : 'Publish'}</Button>
       </>}
     </>} />
     <section className="campaign-compose-workspace" aria-label="Template composer"><div className="campaign-compose-scroll"><div className="campaign-compose-sheet">
-      <p className="template-compose-intro">Write example content. Add personalization, such as {'{{name}}'}, in each campaign.</p>
+      <p className="template-compose-intro">{templateIntro}</p>
       <div className="campaign-compose-metadata">
         <div className="campaign-compose-row"><label htmlFor="template-name">Name</label><Input id="template-name" placeholder="Template name" value={draft.name} disabled={archived} aria-invalid={!draft.name.trim() || undefined} onChange={event => change('name', event.target.value)} /></div>
         <div className="campaign-compose-row"><label htmlFor="template-description">Purpose</label><Input id="template-description" placeholder="When to use it" value={draft.description} disabled={archived} onChange={event => change('description', event.target.value)} /></div>

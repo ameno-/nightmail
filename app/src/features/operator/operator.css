@@ -33,7 +33,8 @@
 .op-rows--single dd.op-free { display: flex; align-items: center; gap: var(--space-12); overflow: visible; }
 .op-reasons { display: flex; flex-direction: column; gap: var(--space-8); margin: 0 0 var(--space-12); padding: 0; list-style: none; font-size: var(--text-sm); line-height: var(--leading-sm); }
 .op-reasons li { display: flex; flex-direction: column; gap: 2px; }
-.op-reasons .muted { font-family: var(--font-mono); font-size: var(--text-xs); }
+.op-reason { margin: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; text-decoration: underline; text-decoration-color: var(--color-border); text-underline-offset: 3px; cursor: pointer; }
+@media (hover: hover) { .op-reason:hover { text-decoration-color: currentColor; } }
 .op-siblings { display: flex; flex-wrap: wrap; gap: var(--space-8) var(--space-16); margin: 0; padding: 0; list-style: none; font-size: var(--text-sm); }
 .op-more { align-self: flex-start; margin-top: var(--space-12); }
 .op-dialog-fields { display: flex; flex-direction: column; gap: var(--space-16); }

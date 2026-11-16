@@ -1,25 +1,6 @@
 {
  "about": "Copy lint findings accepted so far (app/scripts/copy-lint.mjs), as “line: text” per file and rule. Only new ones fail; fix one and the next local run removes it. Regenerate with: bun run copy-lint --update-baseline",
  "findings": {
-  "app/src/components/AccountSwitcher.tsx": {
-   "length/description": [
-    "141: each workspace has its own domains, keys and contacts. you’l"
-   ]
-  },
-  "app/src/components/ContactSupport.tsx": {
-   "length/description": [
-    "28: if the tab didn’t open, use the link below. mention this ref"
-   ],
-   "length/heading": [
-    "27: support is open in a new tab"
-   ],
-   "length/placeholder": [
-    "39: what were you trying to do?"
-   ],
-   "restate": [
-    "28: include this reference when you email brand support. ⟨support reference⟩"
-   ]
-  },
   "app/src/components/EmailInsight.tsx": {
    "length/label": [
     "206: can i email (opens in a new tab)"
@@ -30,198 +11,14 @@
     "8: by continuing you agree to the terms of service and privacy "
    ]
   },
-  "app/src/components/ui/primitives.tsx": {
-   "duplicate": [
-    "162: couldn’t complete the action. try again. ⟨dup⟩"
-   ],
-   "filler": [
-    "343: something went wrong. please try again. ⟨please⟩"
-   ]
-  },
   "app/src/data/billing.ts": {
    "passive": [
     "70: the card was flagged by the bank ⟨was flagged by the⟩"
    ]
   },
-  "app/src/data/context.tsx": {
-   "glossary": [
-    "337: this account isn’t approved here. ask an administrator to ad ⟨administrator⟩"
-   ]
-  },
   "app/src/data/regions.ts": {
    "grade": [
     "43: enable this region and use an unrestricted read or managemen"
-   ]
-  },
-  "app/src/data/types.ts": {
-   "numerals": [
-    "239: your workspace is still being set up for sending. try again  ⟨two⟩"
-   ]
-  },
-  "app/src/features/audience/bulk.tsx": {
-   "glossary": [
-    "49: confirm the people who opted out opted in again. ⟨opted in⟩",
-    "49: some of them opted out before. they opted in again. ⟨opted in⟩"
-   ],
-   "length/description": [
-    "37: changes every contact with unknown consent …. people who opt",
-    "41: no one …has unknown consent. nothing to change."
-   ]
-  },
-  "app/src/features/audience/consent.tsx": {
-   "length/label": [
-    "17: what do these states mean?"
-   ]
-  },
-  "app/src/features/audience/contacts.tsx": {
-   "duplicate": [
-    "105: records that they agreed to marketing email, so campaigns ca ⟨dup⟩"
-   ],
-   "glossary": [
-    "108: this person opted out before and has opted in again. ⟨opted in⟩"
-   ]
-  },
-  "app/src/features/audience/import.tsx": {
-   "duplicate": [
-    "108: say how they agreed, for example “signed up on our website”. ⟨dup⟩"
-   ],
-   "grade": [
-    "85: … already had a consent decision, which was kept: opt-outs a"
-   ],
-   "length/description": [
-    "85: … already had a consent decision, which was kept: opt-outs a"
-   ],
-   "sentence-case": [
-    "83: review unknown contacts ⟨unknown⟩"
-   ]
-  },
-  "app/src/features/audience/lists.tsx": {
-   "grade": [
-    "49: removes this list and its memberships. contacts, consent, su"
-   ],
-   "length/label": [
-    "66: mark … unknown as subscribed…"
-   ],
-   "sentence-case": [
-    "66: mark … unknown as subscribed… ⟨unknown⟩",
-    "68: no one with unknown consent ⟨unknown⟩"
-   ]
-  },
-  "app/src/features/audience/segments-live.tsx": {
-   "length/description": [
-    "162: more than 1,000 contacts match, the most a preview counts. p"
-   ],
-   "length/empty": [
-    "15: a segment is a saved filter, like “plan is pro” or “opened a"
-   ]
-  },
-  "app/src/features/audience/skeletons.tsx": {
-   "duplicate": [
-    "71: every consent change, and how it was given or withdrawn. ⟨dup⟩",
-    "75: a segment narrows a campaign’s list to the people who match  ⟨dup⟩"
-   ]
-  },
-  "app/src/features/campaigns/CampaignAttachments.tsx": {
-   "filler": [
-    "12: something went wrong. please try again. ⟨please⟩"
-   ],
-   "length/toast": [
-    "37: use at most 20 attachments with a combined size of 8 mib."
-   ]
-  },
-  "app/src/features/campaigns/CampaignProgress.tsx": {
-   "duplicate": [
-    "76: something went wrong. please try again. ⟨dup⟩"
-   ],
-   "filler": [
-    "76: something went wrong. please try again. ⟨please⟩"
-   ],
-   "grade": [
-    "70: processed means done processing, including failed and cancel"
-   ]
-  },
-  "app/src/features/campaigns/EmailComposer.tsx": {
-   "duplicate": [
-    "181: use at most 20 attachments with a combined size of 8 mib. ⟨dup⟩",
-    "189: use at most 20 attachments with a combined size of 8 mib. ⟨dup⟩"
-   ],
-   "grade": [
-    "317: select an image, button, section, column, heading, or paragr"
-   ],
-   "length/helper": [
-    "319: choose the block name above to style the whole block, or use"
-   ],
-   "length/placeholder": [
-    "313: write your email, or type / to insert a block…"
-   ],
-   "numerals": [
-    "298: two columns ⟨two⟩"
-   ]
-  },
-  "app/src/features/campaigns/index.tsx": {
-   "duplicate": [
-    "39: something went wrong. please try again. ⟨dup⟩",
-    "244: enter a valid sender email address. ⟨dup⟩",
-    "264: the composer is still loading. try again in a moment. ⟨dup⟩",
-    "349: text shown after the subject in the inbox ⟨dup⟩"
-   ],
-   "filler": [
-    "39: something went wrong. please try again. ⟨please⟩",
-    "405: the test email was not accepted. please try again. ⟨please⟩"
-   ],
-   "glossary": [
-    "691: sending also stays within your daily sending limit. ⟨sending limit⟩"
-   ],
-   "grade": [
-    "701: send “…”… to …… on … (…).……… you can reschedule or unschedul"
-   ],
-   "length/alert": [
-    "643: … … no fallback. a contact without a value stops the send. a"
-   ],
-   "length/description": [
-    "410: sends the saved draft to one address. tests don’t count as a",
-    "515: the audience and message stay as they are. to change them, u",
-    "657: eligible means subscribed and not suppressed. consent is che"
-   ],
-   "length/helper": [
-    "416: only for this test. add a fallback in the editor for contact"
-   ],
-   "length/label": [
-    "698: see every finding in the editor"
-   ],
-   "length/option": [
-    "345: no segments yet. a segment is a saved filter, made in audien"
-   ],
-   "length/placeholder": [
-    "349: text shown after the subject in the inbox",
-    "357: used when a contact has no …",
-    "361: name the campaign to check it. drafts save automatically."
-   ],
-   "numerals": [
-    "448: date and time: schedule within one year. ⟨one year⟩"
-   ]
-  },
-  "app/src/features/campaigns/skeletons.tsx": {
-   "duplicate": [
-    "39: eligible means subscribed and not suppressed. consent is che ⟨dup⟩"
-   ],
-   "length/description": [
-    "39: eligible means subscribed and not suppressed. consent is che",
-    "75: write example content. add personalization, such as {{name}}"
-   ]
-  },
-  "app/src/features/campaigns/templates.tsx": {
-   "duplicate": [
-    "22: something went wrong. please try again. ⟨dup⟩",
-    "187: publish this template to start campaigns from it ⟨dup⟩",
-    "192: write example content. add personalization, such as {{name}} ⟨dup⟩"
-   ],
-   "filler": [
-    "22: something went wrong. please try again. ⟨please⟩"
-   ],
-   "length/description": [
-    "90: a reusable starting point for campaigns. you can change ever",
-    "192: write example content. add personalization, such as {{name}}"
    ]
   },
   "app/src/features/inbound/addresses.tsx": {
@@ -348,58 +145,6 @@
    ],
    "length/heading": [
     "77: only owners and admins can manage webhooks"
-   ]
-  },
-  "app/src/features/onboarding/index.tsx": {
-   "duplicate": [
-    "322: open aws to create the stack ⟨dup⟩"
-   ],
-   "filler": [
-    "261: send through brand’s amazon ses account. no aws account need ⟨just⟩"
-   ],
-   "length/description": [
-    "261: send through brand’s amazon ses account. no aws account need",
-    "267: send through amazon ses in your own aws account. setup creat",
-    "318: a cloudformation stack gives brand a role in your account. i",
-    "408: use a domain you own. next, you’ll add a few dns records.",
-    "440: add these records at your dns provider. you can continue whi",
-    "491: create a key, then send with curl, the sdk or your coding ag"
-   ],
-   "length/label": [
-    "321: open aws to create the stack",
-    "322: open aws to create the stack",
-    "334: having trouble? enter your aws account id"
-   ],
-   "length/toast": [
-    "158: if you created the brand stack in aws, you can delete it the"
-   ],
-   "numerals": [
-    "318: a cloudformation stack gives brand a role in your account. i ⟨two⟩"
-   ]
-  },
-  "app/src/features/operator/index.tsx": {
-   "duplicate": [
-    "366: optional: the support ticket id or url. ⟨dup⟩"
-   ],
-   "glossary": [
-    "275: all sending stops and the ses tenants are disabled. owners s ⟨tenants⟩"
-   ],
-   "length/description": [
-    "275: all sending stops and the ses tenants are disabled. owners s"
-   ],
-   "restate": [
-    "217: billing ⟨billing⟩"
-   ]
-  },
-  "app/src/features/operator/notes.tsx": {
-   "length/description": [
-    "167: a key lets a script or agent list ui notes, download their s"
-   ],
-   "length/heading": [
-    "171: copy the key now. it isn’t shown again."
-   ],
-   "length/placeholder": [
-    "131: what was done, or why not"
    ]
   },
   "app/src/features/settings/admin-only.tsx": {
@@ -560,24 +305,6 @@
    "length/description": [
     "36: owners can do everything, including changing your role or re",
     "38: they keep sending email and editing content, and lose access"
-   ]
-  },
-  "app/src/features/support/SupportPanel.tsx": {
-   "length/heading": [
-    "235: let brand support read the content of your emails in … for t"
-   ]
-  },
-  "app/src/features/ui-notes/index.tsx": {
-   "length/label": [
-    "241: open where it was left"
-   ],
-   "length/toast": [
-    "54: that shows a secret, so it can’t have a note. note what’s ar"
-   ]
-  },
-  "app/src/lib/leave-guard.tsx": {
-   "length/description": [
-    "38: you haven’t saved …. leaving now discards them."
    ]
   }
  }

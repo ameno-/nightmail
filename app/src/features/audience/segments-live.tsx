@@ -12,7 +12,7 @@ import { AudienceHeader } from './header'
 // Teaches what a segment is where there are none yet; the demo and the live list share it.
 export function SegmentsEmpty({ search, onClear }: { search: string; onClear: () => void }) {
   return search ? <EmptyState title="No matching segments" action={<Button onClick={onClear}>Clear search</Button>} />
-    : <EmptyState title="No segments yet" description="A segment is a saved filter, like “Plan is pro” or “Opened an email in the last 30 days”. Campaigns use it to send only to matching people on their list." action={<Link className="ui-button ui-button--secondary ui-button--md" to="/audience/segments/new">Create segment</Link>} />
+    : <EmptyState title="No segments yet" description="A saved filter, like “Plan is pro”. Campaigns use it to reach only matching people." action={<Link className="ui-button ui-button--secondary ui-button--md" to="/audience/segments/new">Create segment</Link>} />
 }
 
 export function LiveSegmentsPage() {
@@ -129,8 +129,7 @@ function LiveSegmentEditor({ initial, onCreated }: { initial: Segment | null; on
     <form id="segment-editor" className="stack audience-editor" noValidate onSubmit={event => { event.preventDefault(); void submit() }}>
       <div className="audience-name"><Field label="Segment name" htmlFor="segment-name" error={checked && !name.trim() ? 'Name this segment, for example “Engaged customers”.' : fieldError(save.error, 'name')}><Input id="segment-name" maxLength={200} value={name} onChange={event => { setName(event.target.value); save.reset() }} /></Field></div>
       <section className="section stack"><SectionHeader title="Conditions" actions={<Button variant="ghost" size="sm" onClick={toggleJson}>{json === null ? <><Braces size={14} aria-hidden="true" />Edit as JSON</> : <><ListFilter size={14} aria-hidden="true" />Use the rule builder</>}</Button>} />
-        <p className="muted">A segment narrows a campaign’s list to the people who match these conditions.</p>
-        {json === null ? <>
+                {json === null ? <>
           <div className="cluster"><span>Match</span><Select className="audience-match" aria-label="Match conditions" value={builder.match} onValueChange={value => update({ ...builder, match: value as Builder['match'] })} options={[{ value: 'all', label: 'all of these conditions' }, { value: 'any', label: 'any of these conditions' }]} /></div>
           <div className="audience-conditions" role="group" aria-label="Conditions">
             <div className="audience-condition audience-condition--head" aria-hidden="true"><span>Field</span><span>Condition</span><span>Value</span><span /></div>
@@ -146,7 +145,7 @@ function LiveSegmentEditor({ initial, onCreated }: { initial: Segment | null; on
               {error && <div className="ui-field__hint ui-field__error" role="alert">Condition {n}: {error}</div>}
             </Fragment> })}
           </div>
-          <div className="cluster"><Button disabled={builder.rows.length >= MAX_ROWS} onClick={() => update({ ...builder, rows: [...builder.rows, newRow()] })}><Plus size={16} />Add condition</Button><span className="ui-field__hint">{builder.rows.length >= MAX_ROWS ? 'A group holds 10 conditions. Edit as JSON to nest groups.' : 'Is and is not match exact text; contains ignores case. Opened and clicked count tracked campaign email.'}</span></div>
+          <div className="cluster"><Button disabled={builder.rows.length >= MAX_ROWS} onClick={() => update({ ...builder, rows: [...builder.rows, newRow()] })}><Plus size={16} />Add condition</Button><span className="ui-field__hint">{builder.rows.length >= MAX_ROWS ? 'A group holds 10 conditions. Edit as JSON to nest groups.' : '“Is” matches exact text; “contains” ignores case. Opens and clicks count tracked campaign email.'}</span></div>
         </> : <Field label="Rule JSON" htmlFor="segment-rule" error={jsonError || (serverField.startsWith('rule') && save.error instanceof ApiError ? save.error.fields[serverField] : undefined)} hint={<>A condition is {'{"field", "operator", "value"}'} (email, firstName, plan, country with eq, neq or contains) or {'{"field", "operator", "days"}'} (lastOpenAt, lastClickAt with within or inactive, 1–730 days). Group them with {'{"operator": "and" | "or", "rules": […]}'}: 10 rules a group, 3 levels, 50 in all.</>}><Textarea id="segment-rule" className="audience-json" rows={14} spellCheck={false} value={json} onChange={event => { setJson(event.target.value); setJsonError(''); save.reset() }} /></Field>}
         <MutationError error={save.error} />
       </section>
@@ -159,6 +158,6 @@ function LiveSegmentEditor({ initial, onCreated }: { initial: Segment | null; on
 function SegmentCounts({ id, at, listId, stale }: { id: string; at: string; listId: string; stale: boolean }) {
   const query = useApiQuery(['segments', 'preview', id, at, listId], (api, signal) => api.segments.preview({ id, name: '', match: 'all', rules: [], listId: listId || undefined }, signal))
   if (query.isPending) return <LoadingRegion label="Counting matching contacts"><AudienceSummarySkeleton /></LoadingRegion>
-  if (query.isError) return query.error instanceof ApiError && query.error.code === 'AUDIENCE_LIMIT_EXCEEDED' ? <p className="audience-summary muted">More than 1,000 contacts match, the most a preview counts. Pick a list to count within it.</p> : <ErrorState error={query.error} onRetry={() => query.refetch()} />
+  if (query.isError) return query.error instanceof ApiError && query.error.code === 'AUDIENCE_LIMIT_EXCEEDED' ? <p className="audience-summary muted">Over 1,000 match, too many to preview; pick a list to count within it.</p> : <ErrorState error={query.error} onRetry={() => query.refetch()} />
   return <div className="audience-summary cluster"><span><strong>{number(query.data.matched)}</strong> match</span><span>{number(query.data.eligible)} can receive campaigns</span><span className="muted">{number(query.data.unsubscribed)} not subscribed</span><span className="muted">{number(query.data.suppressed)} suppressed</span>{stale && <span className="muted">Counts are for the saved conditions. Save to update them.</span>}</div>
 }

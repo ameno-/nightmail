@@ -122,9 +122,9 @@ Show `label` as a quiet progress line under the message. Labels are already writ
 { "v": 1, "type": "consent.resolved", "seq": 7, "requestId": "cns_…", "decision": "allow" }  // or "deny"
 ```
 
-Render a card: "Let Nightmail support read the content of your emails in **Acme Prod** for this conversation." with the `why` and two buttons, **Allow** and **Not now**.
+Render a card: "Let support read emails in **Acme Prod**?" with the `why` and two buttons, **Allow for this chat** and **Not now**.
 
-- **Allow:** call `POST /v1/contact-support` with `shareContent: true` (the dashboard must be on the card's workspace), then send `consent.respond` with the handoff (§5). If the call fails, send `decision: "deny"`.
+- **Allow for this chat:** call `POST /v1/contact-support` with `shareContent: true` (the dashboard must be on the card's workspace), then send `consent.respond` with the handoff (§5). If the call fails, send `decision: "deny"`.
 - **Not now:** send `consent.respond` with `decision: "deny"`.
 
 The agent finishes its current answer by saying it has asked, and continues on its own once the person decides: after `consent.resolved` a new `message.start` follows. A card whose request was resolved elsewhere (another tab) closes.
