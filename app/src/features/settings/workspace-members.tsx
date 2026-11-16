@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { Share } from 'lucide-react'
-import { Button, ConfirmDialog, CopyButton, SecretCode, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, Input, SectionHeader, Select, useToast } from '../../components/ui'
+import { Button, ConfirmDialog, CopyButton, SecretCode, DataTable, Dialog, Disclosure, DropdownMenu, EmptyState, ErrorState, Field, Input, SectionHeader, Select, useToast } from '../../components/ui'
 import { useApiMutation, useApiDef, useSession } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { WorkspaceInvitation, WorkspaceMember, WorkspaceRole } from '../../data/types'
@@ -20,21 +20,22 @@ async function copyLink(url: string, toast: ReturnType<typeof useToast>) {
   try { await navigator.clipboard.writeText(url); toast('Invitation link copied', 'success') } catch { toast('Couldn’t copy to clipboard.', 'error') }
 }
 const roleOptions = (owner: boolean) => (owner ? ['owner', 'admin', 'member'] as const : ['admin', 'member'] as const).map(role => ({ value: role, label: roleLabel[role] }))
-// One line per role, wherever a role is chosen.
+// One line per role, behind "What each role can do" where a role is chosen for someone new (the invitation); a change
+// of role says what it does in its confirmation.
 const roleHint: Record<WorkspaceRole, string> = {
   owner: 'Everything, including adding and removing other owners.',
   admin: 'Everything except owners: keys, domains, webhooks, sending and members.',
   member: 'Sends email, reads logs and edits content. Can’t manage keys, domains, webhooks or teammates.',
 }
 function RoleGuide({ owner }: { owner: boolean }) {
-  return <dl className="settings-role-guide">{(owner ? ['owner', 'admin', 'member'] as const : ['admin', 'member'] as const).map(role => <div key={role}><dt>{roleLabel[role]}</dt><dd className="muted">{roleHint[role]}</dd></div>)}</dl>
+  return <Disclosure title="What each role can do"><dl className="settings-role-guide">{(owner ? ['owner', 'admin', 'member'] as const : ['admin', 'member'] as const).map(role => <div key={role}><dt>{roleLabel[role]}</dt><dd className="muted">{roleHint[role]}</dd></div>)}</dl></Disclosure>
 }
 // What a role change does, said before it happens. A promotion to owner can't be taken back by the person granting it.
 function roleChange(member: WorkspaceMember, role: WorkspaceRole) {
   const name = member.name || 'this member'
   const who = member.name || <PrivateAddress value={member.email} />
   if (role === 'owner') return { title: `Make ${name} an owner?`, description: 'They can remove you; only another owner can undo this.', confirm: 'Make owner', danger: true }
-  if (role === 'admin') return { title: `Make ${name} an admin?`, description: member.role === 'owner' ? <>{who} stops being an owner. Admins manage keys, domains, webhooks, sending and members, but not owners.</> : 'Admins manage keys, domains, webhooks, sending and members, but not owners.', confirm: 'Make admin', danger: false }
+  if (role === 'admin') return { title: `Make ${name} an admin?`, description: member.role === 'owner' ? <>{who} stops being an owner.</> : 'They can manage keys, domains, webhooks, sending and members.', confirm: 'Make admin', danger: false }
   return { title: `Change ${name} to member?`, description: 'They lose access to keys, domains, webhooks, sending and members at once.', confirm: 'Change to member', danger: false }
 }
 
@@ -63,11 +64,10 @@ export function Members({ owner, onInvite }: { owner: boolean; onInvite: () => v
       // A phone puts the role and Remove in the row's action sheet.
       { ...memberActions, render: member => manageable(member) && !lastOwner(member) ? <Button variant="danger" onClick={() => setRemoving(member)}>Remove</Button> : null,
         cardRender: member => manageable(member) && !lastOwner(member) ? <DropdownMenu label={`Actions for ${member.name || 'this member'}`} title={member.name || <PrivateAddress value={member.email} />} items={[
-          ...roleOptions(owner).filter(option => option.value !== member.role).map(option => ({ label: `Make ${option.label.toLowerCase()}`, hint: roleHint[option.value], disabled: update.isPending, onSelect: () => setChanging({ member, role: option.value }) })),
+          ...roleOptions(owner).filter(option => option.value !== member.role).map(option => ({ label: `Make ${option.label.toLowerCase()}`, disabled: update.isPending, onSelect: () => setChanging({ member, role: option.value }) })),
           { label: 'Remove from workspace', destructive: true, onSelect: () => setRemoving(member) },
         ]} /> : <span className="settings-card-end" /> },
     ]} />}
-    <RoleGuide owner={owner} />
     <ConfirmDialog open={changing !== null} onOpenChange={open => { if (!open) setChanging(null) }} title={change?.title ?? ''} description={change?.description ?? ''} confirmLabel={change?.confirm} danger={change?.danger} pending={update.isPending} onConfirm={async () => { if (changing) await update.mutateAsync({ id: changing.member.id, role: changing.role }) }} />
     <ConfirmDialog open={removing !== null} onOpenChange={open => { if (!open) setRemoving(null) }} title={`Remove ${removing?.name || 'this member'}?`} description={removing && !removing.name ? <><PrivateAddress value={removing.email} /> loses access to this workspace immediately. You can invite them again later.</> : 'They lose access to this workspace immediately. You can invite them again later.'} confirmLabel="Remove member" danger pending={remove.isPending} onConfirm={async () => { if (removing) await remove.mutateAsync(removing.id) }} />
   </section>
@@ -111,14 +111,16 @@ export function InviteDialog({ open, owner, onOpenChange }: { open: boolean; own
     try { setCreated(await create.mutateAsync({ email: value, role })) } catch { /* The mutation error is shown in the form. */ }
   }
   function close() { onOpenChange(false); setCreated(null); setEmail(''); setRole('member'); setEmailError(''); create.reset() }
-  if (created) return <Dialog sensitive open={open} onOpenChange={next => { if (!next) close() }} title="Invitation link" description={`Share this link with them yourself; ${productName} doesn’t email it. It works only for that address, until ${date(created.expiresAt)}.`} footer={<Button variant="primary" onClick={close}>Done</Button>}>
+  // The link works only for the invited address; its expiry is in Invitations, where it can be copied again.
+  if (created) return <Dialog sensitive open={open} onOpenChange={next => { if (!next) close() }} title="Share this invitation link" footer={<Button variant="primary" onClick={close}>Done</Button>}>
     <div className="settings-secret"><SecretCode>{created.acceptUrl}</SecretCode><CopyButton value={created.acceptUrl} label="Copy invitation link" /></div>
     {canShare() && <Button className="settings-share" onClick={() => void shareLink(created.acceptUrl, toast)}><Share size={16} />Share link</Button>}
   </Dialog>
-  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) { if (next) onOpenChange(true); else close() } }} title="Invite teammate" description={`You get a link to share; ${productName} doesn’t email it. They join by signing in with this address.`} footer={<><Button disabled={create.isPending} onClick={close}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="invite-member">Create invitation link</Button></>}>
+  // Nothing is emailed: the button says it makes a link, and the next step shows it to share.
+  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) { if (next) onOpenChange(true); else close() } }} title="Invite teammate" footer={<><Button disabled={create.isPending} onClick={close}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="invite-member">Create invitation link</Button></>}>
     <form id="invite-member" className="stack" onSubmit={submit} noValidate>
       <MutationError error={create.error} />
-      <Field label="Email" htmlFor="invite-email" error={emailError || fieldError(create.error, 'email')}><Input id="invite-email" type="email" value={email} onChange={event => { setEmail(event.target.value); if (emailError) setEmailError(''); if (create.error) create.reset() }} autoFocus required disabled={create.isPending} placeholder="name@company.com" /></Field>
+      <Field label="Their sign-in email" htmlFor="invite-email" error={emailError || fieldError(create.error, 'email')}><Input id="invite-email" type="email" value={email} onChange={event => { setEmail(event.target.value); if (emailError) setEmailError(''); if (create.error) create.reset() }} autoFocus required disabled={create.isPending} placeholder="name@company.com" /></Field>
       <Field label="Role" htmlFor="invite-role"><Select id="invite-role" value={role} onValueChange={value => setRole(value as WorkspaceRole)} disabled={create.isPending} options={roleOptions(owner)} /></Field>
       <RoleGuide owner={owner} />
     </form>

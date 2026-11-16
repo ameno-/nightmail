@@ -65,7 +65,6 @@ export function useDnsSetup(domain: Domain | undefined) {
 function DnsConnect({ setup, open }: { setup: DnsSetup; open: boolean }) {
   return <div className="dns-connect" data-hidden={!open || undefined} inert={!open}>
     <a className="ui-button ui-button--primary ui-button--md" href={setup.applyUrl!} rel="noopener" onClick={expectAccount}>Configure DNS with {setup.provider!.name}<ArrowRight size={16} aria-hidden /></a>
-    <p className="muted">Or add the records below yourself.</p>
   </div>
 }
 
@@ -111,14 +110,9 @@ export function DnsRecordTable({ domain, records, status }: { domain: string; re
   ]} />
 }
 
-// What the two alignments mean together: DMARC passes when either one aligns, so one "not aligned" is often fine.
-function dmarcVerdict(dkim: boolean, spf: boolean) {
-  if (dkim && spf) return 'Both align, so mail from this domain passes DMARC. Nothing to do.'
-  if (dkim) return 'DMARC passes through DKIM. To align SPF too, set a custom MAIL FROM domain under Advanced.'
-  if (spf) return 'DMARC passes through SPF. Publish the DKIM records above to align DKIM too.'
-  return 'Neither aligns, so DMARC fails: publish the DKIM records above, then check again.'
-}
-function DmarcRecords({ domain }: { domain: Domain }) {
+// DMARC passes when either alignment does, so one "not aligned" is often fine: only a failure says so, and SPF that
+// doesn't align offers the custom MAIL FROM that aligns it.
+function DmarcRecords({ domain, onAlignSpf }: { domain: Domain; onAlignSpf?: () => void }) {
   const policy = domain.dmarc, recommendation = recordsFor(domain, 'dmarc')[0]
   if (!policy && !recommendation) return null // Nothing to show until the first background check.
   const mode = (value: 's' | 'r') => value === 's' ? 'strict' : 'relaxed'
@@ -128,15 +122,18 @@ function DmarcRecords({ domain }: { domain: Domain }) {
   const row: DnsRecord = recommendation ?? { id: 'policy', type: 'TXT', name: `_dmarc.${policy?.source ?? domain.name}`, value: policy?.record ?? '', status: 'not_checked' }
   return <div className="stack domain-group">
     <div className="ui-section-header"><div className="domain-group-title"><h3>DMARC <span className="muted">· {policy?.status ?? 'not checked'}</span></h3>
-      <p className="muted dmarc-alignment"><span title={policy ? `${mode(policy.adkim)}: ${policy.adkim === 's' ? 'only this exact domain counts' : 'subdomains of this domain count too'}` : undefined}>DKIM {policy ? `${alignment(policy.alignment.dkim)} (${mode(policy.adkim)})` : 'not checked'}</span> <span title={policy ? `${mode(policy.aspf)}: ${policy.aspf === 's' ? 'only this exact domain counts' : 'subdomains of this domain count too'}` : undefined}>SPF {policy ? `${alignment(policy.alignment.spf)} (${mode(policy.aspf)})` : 'not checked'}</span></p>
-      {policy && <p className="muted">{dmarcVerdict(policy.alignment.dkim, policy.alignment.spf)}</p>}</div></div>
+      <p className="muted dmarc-alignment"><span title={policy ? `${mode(policy.adkim)}: ${policy.adkim === 's' ? 'only this exact domain counts' : 'subdomains of this domain count too'}` : undefined}>DKIM {policy ? `${alignment(policy.alignment.dkim)} (${mode(policy.adkim)})` : 'not checked'}</span> <span title={policy ? `${mode(policy.aspf)}: ${policy.aspf === 's' ? 'only this exact domain counts' : 'subdomains of this domain count too'}` : undefined}>SPF {policy ? `${alignment(policy.alignment.spf)} (${mode(policy.aspf)})` : 'not checked'}</span></p></div>
+      {policy && !policy.alignment.spf && !domain.mailFromDomain && onAlignSpf && <div className="cluster"><Button onClick={onAlignSpf}>Align SPF</Button></div>}</div>
+    {policy && !policy.alignment.dkim && !policy.alignment.spf && <Alert tone="warning">DMARC fails: publish the DKIM records above, then check again.</Alert>}
     <DnsRecordTable domain={domain.name} records={[row]} status={recommendation ? 'Recommended' : !policy ? 'Not checked' : policy.status === 'invalid' ? 'Invalid' : policy.source && policy.source !== domain.name ? 'Inherited' : policy.record ? 'Published' : 'Missing'} />
   </div>
 }
 
-function RecordGroup({ title, optional = false, description, notes = [], alert, domain, records, actions, status }: { title: string; optional?: boolean; description: string; notes?: string[]; alert?: ReactNode; domain: string; records: DnsRecord[]; actions?: ReactNode; status?: string }) {
+// A group is its heading (what the records are for, and where for receiving) and its records. `warning` is said only
+// where publishing the records would move mail that goes elsewhere today.
+function RecordGroup({ title, optional = false, warning, notes = [], alert, domain, records, actions, status }: { title: string; optional?: boolean; warning?: string | null; notes?: string[]; alert?: ReactNode; domain: string; records: DnsRecord[]; actions?: ReactNode; status?: string }) {
   return <div className="stack domain-group">
-    <div className="ui-section-header"><div className="domain-group-title"><h3>{title}{optional && <span className="muted"> · optional</span>}</h3><p className="muted">{description}</p>{notes.map(note => <p key={note}>{note}</p>)}</div>{actions && <div className="cluster">{actions}</div>}</div>
+    <div className="ui-section-header"><div className="domain-group-title"><h3>{title}{optional && <span className="muted"> · optional</span>}</h3>{warning && <p className="muted">{warning}</p>}{notes.map(note => <p key={note}>{note}</p>)}</div>{actions && <div className="cluster">{actions}</div>}</div>
     {alert}
     <DnsRecordTable domain={domain} records={records} status={status} />
   </div>
@@ -155,13 +152,13 @@ function CopyText({ label, display, value, copyLabel }: { label: string; display
 }
 
 // Guided layout (onboarding): a heading with one quiet status per group, then plain hairline rows.
-function RecordRows({ title, optional = false, description, notes = [], alert, verified, domain, records }: { title: string; optional?: boolean; description: string; notes?: string[]; alert?: ReactNode; verified: boolean; domain: string; records: DnsRecord[] }) {
+function RecordRows({ title, optional = false, warning, notes = [], alert, verified, domain, records }: { title: string; optional?: boolean; warning?: string | null; notes?: string[]; alert?: ReactNode; verified: boolean; domain: string; records: DnsRecord[] }) {
   return <div className="dns-group" data-state={liveState(verified)}>
     <div className="dns-group-head">
       <h3>{title}{optional && <span className="muted"> · optional</span>}</h3>
       <LiveStatus state={liveState(verified)} plain />
     </div>
-    <p className="dns-group-copy muted">{description}</p>
+    {warning && <p className="dns-group-copy muted">{warning}</p>}
     {notes.map(note => <p key={note} className="dns-group-copy muted">{note}</p>)}
     {alert}
     <div className="dns-columns" aria-hidden="true"><span>Type</span><span>Name</span><span>Value</span><span /></div>
@@ -184,29 +181,27 @@ const guides = [
 ] as const
 const hoursLeft = (at: string) => Math.max(0, Math.ceil((Date.parse(at) - Date.now()) / 3_600_000))
 
-// While records are pending: how long DNS usually takes, that Nightmail keeps checking, when an unproven domain is released, and where to add records.
+// While records are pending: when an unproven domain is released, and where to add records. The records' own status
+// says that Nightmail is still checking.
 export function DnsWaitNote({ domain }: { domain: Domain }) {
   if (domain.status === 'verified' || (domain.sending ?? 'pending') === 'verified') return null
   return <div className="dns-wait">
-    <p>New records usually show up within minutes, sometimes an hour. {productName} checks every 20 seconds, even after you leave.</p>
     {domain.releasesAt && <p>If the sending records aren’t found within 72 hours, {domain.name} is released and you’d add it again ({hoursLeft(domain.releasesAt)} h left).</p>}
-    <p>One-click setup isn’t available yet, so add the records yourself.</p>
     <p className="dns-guides">Guides: {guides.map(([name, url], index) => <span key={name}>{index > 0 && <span className="dns-guides-dot" aria-hidden="true"> · </span>}<a href={url} target="_blank" rel="noreferrer">{name}</a></span>)}</p>
   </div>
 }
 
 /**
- * Where the domain receives and why, from the receiving MX record the API chose (onboarding and the domain page say
- * the same thing). Nightmail receives on a free subdomain such as reply.<domain> unless the domain's own MX already points
- * to Nightmail, so publishing the record never moves mail that goes elsewhere today, unless someone chose the root.
+ * Where the domain receives is the receiving MX record's name, which the API chose (onboarding and the domain page show
+ * the same records). Nightmail receives on a free subdomain such as reply.<domain> unless the domain's own MX already
+ * points to Nightmail, so publishing the record never moves mail that goes elsewhere today, unless someone chose the
+ * root: only then is there a warning, before the record is published.
  */
-export function receivingHostCopy(domain: string, receiving: DnsRecord[]) {
+function receivingWarning(domain: string, receiving: DnsRecord[]) {
   const host = receiving.find(record => record.type === 'MX')?.name ?? receiving[0]?.name
-  if (!host) return `Receive mail at ${domain}.`
-  if (host !== domain) return `Mail to addresses on ${host} comes to ${productName}. Mail to ${domain} itself is unchanged, so your current mailboxes keep working.`
-  return receiving.every(record => record.status === 'verified')
-    ? `Every address at ${domain} receives here: its MX record already points to ${productName}.`
-    : `This MX record sends all mail for ${domain} to ${productName}, including mailboxes hosted elsewhere today. To keep them, receive on a subdomain like reply.${domain}.`
+  return host === domain && !receiving.every(record => record.status === 'verified')
+    ? `This MX record sends all mail for ${domain} to ${productName}, including mailboxes hosted elsewhere today.`
+    : null
 }
 
 // The domain page adds its receiving actions (choose the root or a subdomain, Check MX now) to the receiving group.
@@ -220,14 +215,14 @@ export function ReceivingIssueAlert({ issue }: { issue: ReceivingIssue }) {
 
 const NO_RECORDS = 'DNS records are not available yet.'
 // Sending and receiving records. MAIL FROM is optional and lives in the domain's Advanced section.
-export function DomainRecords({ domain, actions, guided = false, setup = null, receivingView }: { domain: Domain; actions?: ReactNode; guided?: boolean; setup?: DnsSetup | null; receivingView?: ReceivingView }) {
+export function DomainRecords({ domain, actions, guided = false, setup = null, receivingView, onAlignSpf }: { domain: Domain; actions?: ReactNode; guided?: boolean; setup?: DnsSetup | null; receivingView?: ReceivingView; onAlignSpf?: () => void }) {
   const toast = useToast()
   const sending = recordsFor(domain, 'sending'), receiving = recordsFor(domain, 'receiving'), issue = domain.receivingIssue ?? null
   // Onboarding copies only what sending needs; receiving is optional and copied on its own.
   const all = guided ? sending : [...sending, ...receiving]
   const notes = [...new Set(receiving.flatMap(record => record.note && record.note !== issue?.message ? [record.note] : []))]
   const alert = issue && <ReceivingIssueAlert issue={issue} />
-  const receivingCopy = receivingHostCopy(domain.name, receiving)
+  const warning = receivingWarning(domain.name, receiving)
   async function copyAll() {
     try { await navigator.clipboard.writeText(`${zoneLines(all)}\n`); toast(`Copied ${all.length} ${guided ? 'sending ' : ''}records`, 'success') }
     catch { toast('Couldn’t copy to clipboard.', 'error') }
@@ -240,17 +235,17 @@ export function DomainRecords({ domain, actions, guided = false, setup = null, r
     {connect}
     <div className="dns-guided-bar"><h2>DNS records</h2>{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy sending records</Button>}</div>
     {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || NO_RECORDS}</p>}
-    {sending.length > 0 && <RecordRows title="Sending" description={`Signs your mail and proves ${domain.name} is yours.`} verified={sendingVerified} domain={domain.name} records={sending} />}
-    {receiving.length > 0 && <RecordRows title="Receiving" optional description={receivingCopy} notes={notes} alert={alert} verified={receivingVerified} domain={domain.name} records={receiving} />}
+    {sending.length > 0 && <RecordRows title="Sending" verified={sendingVerified} domain={domain.name} records={sending} />}
+    {receiving.length > 0 && <RecordRows title="Receiving" optional warning={warning} notes={notes} alert={alert} verified={receivingVerified} domain={domain.name} records={receiving} />}
   </section>
   return <section className="section stack">
-    <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><p className="muted">Add these at your DNS provider; {productName} keeps checking.</p></div>
+    <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2></div>
       <div className="cluster">{actions}{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}</div>
     </div>
     {connect}
     {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || NO_RECORDS}</p>}
-    {sending.length > 0 && <RecordGroup title="Sending" description="Signs your mail and proves the domain is yours." domain={domain.name} records={sending} />}
-    {receiving.length > 0 && <RecordGroup title="Receiving" optional description={receivingCopy} notes={notes} alert={alert} domain={domain.name} records={receiving} actions={receivingView?.actions} status={issue && receiving.some(record => record.name === issue.host) ? 'Attention' : undefined} />}
-    <DmarcRecords domain={domain} />
+    {sending.length > 0 && <RecordGroup title="Sending" domain={domain.name} records={sending} />}
+    {receiving.length > 0 && <RecordGroup title="Receiving" optional warning={warning} notes={notes} alert={alert} domain={domain.name} records={receiving} actions={receivingView?.actions} status={issue && receiving.some(record => record.name === issue.host) ? 'Attention' : undefined} />}
+    <DmarcRecords domain={domain} onAlignSpf={onAlignSpf} />
   </section>
 }

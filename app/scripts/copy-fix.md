@@ -3,6 +3,29 @@
 Goal: every page as easy as possible to understand. Short, plain copy; nothing said twice; no figure shown twice.
 Shorten, never hide: numbers, limits, prices and consequences stay.
 
+## First: should it exist? (the clean-copy ladder)
+
+Most bad copy isn't badly written; it shouldn't be on the screen. Before rewording any string, read it next to what is
+on screen around it (the label, the value, the button) and walk it down these rungs. Stop at the first that fires.
+
+1. **Does it need to surface at all?** If nobody would have wondered about it unprompted, it plants a question instead
+   of answering one.
+2. **Does the label need to exist?** A caption earns its place only when the value is meaningless without it. “Retry
+   limit” needs no “how many times we retry”; a bare “30” does need “seconds”.
+3. **Does it pre-empt something the reader would never have considered?** The tell: copy that rules out a failure
+   instead of describing a behaviour: scar tissue from a fixed bug (“never wipes the folder like the old cancel did”),
+   a design decision defended, a hedge about something that works (“may look slow”). The fix is the fix, not a caption
+   about it.
+4. **Rewrite to remove the offending part; if nothing is left, delete the element.** An empty `hint` comes off the
+   component; an explanatory `<p>` is deleted, not shortened to a stub. Cut whole clauses, not words.
+
+What survives: a real consequence at the moment of choosing (one sentence, the permission slip cut), a scope or
+compatibility fact the reader can't see, what a blank state means and the next step, and units, scale or format on a
+bare value. A string that matters only in a rare state belongs in that state, not on the page.
+
+In a PR, report each cut as `file:line` “current string” → the rewrite or `cut`, and the rung it failed. Don't rewrite
+copy that passes.
+
 ## Loop
 
 1. **Measure.** From `app/`: `bun run copy-lint --all` (every string finding, worst files first) and
@@ -44,13 +67,15 @@ Shorten, never hide: numbers, limits, prices and consequences stay.
 ## Secondary text: cut it, fix the layout
 
 Ryan’s rule for every dashboard screen: “Cut taglines, helper text and secondary labels. If a screen needs them to make
-sense, fix the layout.” `copy-lint` finds them; the baseline for these three rules is zero, so any new one fails.
+sense, fix the layout.” `copy-lint` finds them; the baseline for these rules ends at zero, so any new one fails.
 
 | Id | Finds | Fix |
 | --- | --- | --- |
 | `tagline` | A line under a heading: a page, section, dialog or sheet description, a muted intro, an empty state’s description | Cut it. If the screen needs it: a clearer heading, grouping and order, an empty state that is just its action |
 | `helper` | Helper text under a form field (`Field hint`, `.hint`/`.help` lines) | A clearer label, a unit inside the input, a sensible default, validation that shows only when something is wrong |
 | `caption` | Any other secondary line: a row’s, option’s or menu item’s hint, a meta line, a `small`, “Optional” | Cut it, or put the detail behind a click on its summary (a `Disclosure`, a dialog) |
+| `reassure` | The ladder’s third rung: copy that rules out a failure or answers a worry nobody had (“never”, “don’t worry”, “may look”, “like the old”, “nothing is lost”, “still works”) | Cut the clause; if nothing is left, the element. A real consequence at the moment of choosing stays, in a confirmation or `KEEP` |
+| `restate` | A hint or caption that repeats its own field label’s or heading’s words | Cut it |
 
 Never hide what someone needs to operate safely: move it behind its summary instead of deleting it. Kept on purpose,
 and only these (`KEEP` in `copy-lint.mjs`, one entry per string): legal and consent text, what a destructive action

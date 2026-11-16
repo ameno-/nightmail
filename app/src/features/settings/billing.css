@@ -1,6 +1,6 @@
 /* Settings → Billing: the balance in large tabular figures, then rows like every settings row (auto-recharge among them)
    and the history table. Every block has a fixed height, so values arriving never move what is below them. */
-.billing-balance { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 20px 44px 20px; align-content: center; height: 120px; border-bottom: 1px solid var(--color-border-muted); }
+.billing-balance { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 20px 44px; row-gap: var(--space-4); align-content: center; height: 104px; border-bottom: 1px solid var(--color-border-muted); }
 .billing-balance__label { display: flex; align-items: center; gap: var(--space-8); }
 .billing-balance__amount { display: flex; align-items: center; font-family: var(--font-mono); font-size: 36px; line-height: 44px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
 /* The balance opens its details: the figure is the button, with a chevron that nudges on hover. */
@@ -8,7 +8,6 @@ button.billing-balance__amount { justify-self: start; gap: var(--space-4); paddi
 button.billing-balance__amount > svg { flex: none; color: var(--color-muted); transition: transform 160ms var(--ease-out-strong), color var(--motion-duration); }
 @media (hover: hover) and (pointer: fine) { button.billing-balance__amount:hover > svg { color: var(--color-text); transform: translateX(2px); } }
 .billing-balance__amount--plan { font-family: var(--font-body); font-size: 30px; font-weight: var(--font-weight-bold); letter-spacing: -.01em; }
-.billing-balance__detail { display: flex; align-items: center; font-size: var(--text-xs); line-height: var(--leading-xs); font-variant-numeric: tabular-nums; }
 .billing-section { display: flex; flex-direction: column; gap: var(--space-12); }
 .billing-slot { display: inline-flex; vertical-align: middle; }
 
@@ -20,6 +19,7 @@ button.billing-balance__amount > svg { flex: none; color: var(--color-muted); tr
 .billing-section .ui-tabs { overflow: visible; }
 .billing-section > .ui-section-header { margin-bottom: calc(-1 * var(--space-4)); }
 .billing-recharge { justify-content: flex-end; gap: var(--space-12); }
+.billing-recharge__amounts { font-variant-numeric: tabular-nums; }
 
 /* Balance details and auto-recharge open as dialogs: the balance's parts as label and value lines, the amounts as rows. */
 .billing-about .ui-dialog__body, .billing-recharge-dialog .ui-dialog__body { display: flex; flex-direction: column; gap: var(--space-12); }
@@ -63,12 +63,13 @@ button.billing-balance__amount > svg { flex: none; color: var(--color-muted); tr
 
 @media (max-width: 640px) {
   /* Values sit in a fixed column one control tall, so a skeleton and the value it becomes share one box; the label takes
-     the rest and wraps, so no title or hint is cut off. Rows with a field keep a narrow column; the others two lines of hint. */
-  .billing-rows .settings-row { grid-template-columns: minmax(0, 1fr) 200px; min-height: 68px; }
+     the rest and wraps, so no title or range is cut off. Rows with a field keep a narrow column. */
+  .billing-rows .settings-row { grid-template-columns: minmax(0, 1fr) 208px; }
   .billing-rows .settings-row:has(.billing-dollars) { grid-template-columns: minmax(0, 1fr) 112px; min-height: 60px; }
+  .billing-recharge { gap: var(--space-8); }
   .billing-rows .settings-row__label > span { overflow: visible; white-space: normal; text-wrap: pretty; }
   .billing-rows .settings-row__control { justify-self: stretch; height: var(--control-height); }
-  .billing-balance { height: 112px; }
+  .billing-balance { height: 96px; }
   .billing-balance__amount { font-size: 32px; }
   .billing-dollars { width: 104px; }
   .billing-choice { grid-template-columns: repeat(3, minmax(0, 1fr)); }

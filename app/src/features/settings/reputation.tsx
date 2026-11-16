@@ -10,9 +10,8 @@ export function ReputationSection({ report }: { report: SesDiscovery }) {
   return <div className="stack settings-discovery-section">
     <div className="reputation-heading">
       <div className="reputation-title"><h3 className="cluster">Reputation <StatusBadge status={status.label} tone={status.tone} /></h3>{reputation?.available && <span className="reputation-legend"><span><i className="reputation-key--warning" />Warning</span><span><i className="reputation-key--risk" />At risk</span></span>}</div>
-      <p className="muted">Historic rates SES calculates from a representative volume of your mail.</p>
     </div>
-    {reputation == null ? <p className="muted">Rates load on the next check, or select Refresh.</p>
+    {reputation == null ? <p className="muted">No rates yet.</p>
       : !reputation.available ? <p className="muted">{reputation.reason ?? 'Reputation rates are unavailable.'}</p>
       : <div className="reputation-panels">
         <RatePanel metric="bounceRate" title="Bounce rate" reputation={reputation} />
@@ -45,7 +44,7 @@ function RateChart({ metric, title, series }: { metric: ReputationMetric; title:
   const limits = reputationThresholds[metric]
   const points = series.filter(point => point[metric] != null)
   const values = points.map(point => point[metric]!)
-  if (!values.length) return <p className="muted reputation-empty">No data in the last 14 days; SES publishes rates once you send mail.</p>
+  if (!values.length) return <p className="muted reputation-empty">No rates in the last 14 days.</p>
   const R = width - 4
   const max = Math.max(limits.risk * 1.25, ...values.map(value => value * 1.1))
   const start = Date.parse(series[0].at), end = Date.parse(series[series.length - 1].at)

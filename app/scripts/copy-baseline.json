@@ -4,6 +4,9 @@
   "app/src/components/AccountSwitcher.tsx": {
    "caption": [
     "87: up to … accounts. sign out of one to add another."
+   ],
+   "tagline": [
+    "141: its own domains, keys and contacts; you’ll set up sending ne"
    ]
   },
   "app/src/components/ContactSupport.tsx": {
@@ -11,6 +14,7 @@
     "38: optional. … / …"
    ],
    "tagline": [
+    "28: if it didn’t open, use the link below; mention this referenc",
     "28: mention it when you email us.",
     "35: brand support gets your message, the page you’re on and any "
    ]
@@ -35,6 +39,11 @@
     "88: you were invited…. …"
    ]
   },
+  "app/src/data/types.ts": {
+   "reassure": [
+    "240: sending is paused while brand reviews this workspace…. recei ⟨still works⟩"
+   ]
+  },
   "app/src/features/audience/bulk.tsx": {
    "helper": [
     "47: saved in each consent record, like “ticked the newsletter bo"
@@ -43,6 +52,11 @@
     "37: marks each contact with unknown consent …; opt-outs and supp",
     "41: no one …has unknown consent.",
     "44: and … more"
+   ]
+  },
+  "app/src/features/audience/consent.tsx": {
+   "reassure": [
+    "9: bounced, complained or was blocked, so it is never emailed. ⟨never⟩"
    ]
   },
   "app/src/features/audience/contacts.tsx": {
@@ -54,25 +68,39 @@
     "61: two-letter country code, e.g. us.",
     "107: saved in this contact’s consent history, for example “…”."
    ],
+   "length/description": [
+    "105: records that this person opted out. campaigns skip them; tra"
+   ],
+   "reassure": [
+    "98: suppressed addresses are never emailed, so consent can’t be  ⟨never⟩"
+   ],
    "tagline": [
     "41: everyone here has a consent decision.",
     "41: the people you email. import a csv or add them one by one.",
+    "105: records that this person opted out. campaigns skip them; tra",
     "119: emails in …",
     "125: changes appear here when this person subscribes, opts out or"
    ]
   },
   "app/src/features/audience/import.tsx": {
    "helper": [
+    "93: optional; contacts join your audience either way.",
     "95: each contact’s first and last name, joined.",
     "95: joined with first name into full name.",
     "95: used only when full name is first + last name.",
     "108: saved in each consent record, like “signed up on our website"
+   ],
+   "reassure": [
+    "85: … kept their earlier consent; imports never change opt-outs  ⟨never⟩"
    ],
    "tagline": [
     "85: … kept their earlier consent; imports never change opt-outs "
    ]
   },
   "app/src/features/audience/lists.tsx": {
+   "grade": [
+    "49: deletes the list, not its contacts; their consent, suppressi"
+   ],
    "tagline": [
     "27: a list is a group of contacts you send campaigns to. create ",
     "36: a list is a group of contacts you send a campaign to.",
@@ -110,13 +138,30 @@
   },
   "app/src/features/campaigns/index.tsx": {
    "caption": [
+    "323: name the campaign first; it saves automatically",
     "339: optional reply@example.com"
    ],
+   "duplicate": [
+    "327: name the campaign first; it saves automatically ⟨dup⟩"
+   ],
+   "grade": [
+    "689: share of your sending speed this campaign may use; the rest "
+   ],
    "helper": [
-    "688: about … … for … eligible recipients."
+    "416: only for this test; set a fallback in the editor.",
+    "688: about … … for … eligible recipients.",
+    "689: share of your sending speed this campaign may use; the rest "
+   ],
+   "length/helper": [
+    "689: share of your sending speed this campaign may use; the rest "
+   ],
+   "reassure": [
+    "654: bounced, complained or blocked addresses are never emailed ⟨never⟩"
    ],
    "tagline": [
     "73: choose a default sending region in settings to create a camp",
+    "410: sends the saved draft to one address; it isn’t a campaign se",
+    "515: only the send time changes; the audience and message stay.",
     "559: … delivered in simulation mode: no real email was sent.",
     "649: choose a list in the editor to see who receives this campaig",
     "650: eligible recipients",
@@ -135,9 +180,17 @@
     "180: restore it first",
     "202: optional reply@example.com"
    ],
+   "length/description": [
+    "50: copies a published template into a new draft; editing the dr"
+   ],
+   "reassure": [
+    "189: new campaigns use the published version; campaigns already m ⟨never⟩"
+   ],
    "tagline": [
+    "50: copies a published template into a new draft; editing the dr",
     "54: a template is a reusable email design. publish one under tem",
-    "82: a template is a reusable email design. publish one, then sta"
+    "82: a template is a reusable email design. publish one, then sta",
+    "91: a reusable starting point for campaigns; change anything lat"
    ]
   },
   "app/src/features/inbound/addresses.tsx": {
@@ -148,8 +201,12 @@
     "57: enable receiving on a domain first.",
     "57: receiving domains: …",
     "65: permanent. it also gets mail sent here before it existed.",
+    "65: then it stops receiving and sending; its mail stays readable",
     "68: only permanent addresses can reply as another address.",
     "68: replies come from this name on a parent domain: support@repl"
+   ],
+   "sentence-length": [
+    "239: stored messages stay. the address and its aliases are releas"
    ],
    "tagline": [
     "54: its mail lands in the inbox, for you, the api and agents.",
@@ -157,11 +214,19 @@
    ]
   },
   "app/src/features/inbound/concepts.ts": {
+   "length/description": [
+    "47: each keeps its own threads in the inbox; a route can send it"
+   ],
+   "reassure": [
+    "24: dry-run an email through your routes and rituals; nothing is ⟨nothing is sent⟩"
+   ],
    "tagline": [
     "8: every address that receives mail, and where its mail goes.",
     "13: what happens to an address’s mail: post, forward, junk or la",
     "19: named places mail can be sent: slack, discord, a webhook or ",
+    "24: dry-run an email through your routes and rituals; nothing is",
     "29: questions a ritual asks brand’s ai about an email, answered ",
+    "47: each keeps its own threads in the inbox; a route can send it",
     "48: a pattern catches many addresses with *.",
     "49: what happens to mail for an address that doesn’t exist.",
     "50: expiring addresses that agents and tests create and read ove",
@@ -175,6 +240,8 @@
   "app/src/features/inbound/inboxes.tsx": {
    "helper": [
     "64: receives until …. …",
+    "66: copy it now; it won’t be shown again. it reads and manages o",
+    "79: a made-up .invalid address; only test mail you send reaches ",
     "79: a random address on this domain that nobody can guess.",
     "83: optional. shown in lists and as the sender name on replies.",
     "86: then mail is held 1 day, and the inbox and its mail are dele",
@@ -184,6 +251,15 @@
     "179: it never expires.",
     "179: it receives until ….",
     "179: it will receive until …, then be deleted a day later."
+   ],
+   "length/helper": [
+    "66: copy it now; it won’t be shown again. it reads and manages o"
+   ],
+   "reassure": [
+    "179: it never expires. ⟨never⟩"
+   ],
+   "restate": [
+    "179: it expired on …. keep it longer to receive again. ⟨keep it longer⟩"
    ],
    "tagline": [
     "75: an expiring address where an agent or test receives mail, li",
@@ -207,6 +283,7 @@
     "211: from slack’s incoming webhooks app.",
     "212: channel settings, integrations, webhooks.",
     "213: an incoming webhook url from either one.",
+    "214: brand posts signed json; the secret shows once.",
     "215: they agree by email first, unless it’s your domain."
    ],
    "helper": [
@@ -229,7 +306,17 @@
   "app/src/features/inbound/ritual-connections.tsx": {
    "helper": [
     "112: … endpoints keep their type. create a new endpoint for anoth",
-    "125: the receiving address that sends the request and the forward"
+    "119: confirmed by its recipient, so it can’t change; create anoth",
+    "125: the receiving address that sends the request and the forward",
+    "142: the payload is optional; without one it gets the whole messa",
+    "143: copy it now; it won’t be shown again. use it to verify reque"
+   ],
+   "length/helper": [
+    "143: copy it now; it won’t be shown again. use it to verify reque"
+   ],
+   "reassure": [
+    "107: stored encrypted and never shown. leave it empty to keep the ⟨never⟩",
+    "108: stored encrypted and never shown again. ⟨never⟩"
    ]
   },
   "app/src/features/inbound/rituals.tsx": {
@@ -238,7 +325,11 @@
    ],
    "helper": [
     "491: how addresses and the api refer to it. lowercase letters, di",
+    "491: renaming saves it as a new ritual; this one stays until you ",
     "531: saves … with it."
+   ],
+   "reassure": [
+    "510: nothing is sent or saved ⟨nothing is sent⟩"
    ],
    "tagline": [
     "529: pick an address below. a ritual runs only on mail to its add",
@@ -296,6 +387,16 @@
     "108: webhooks subscribed to message.received for it, or for every"
    ]
   },
+  "app/src/features/logs/email-detail.tsx": {
+   "reassure": [
+    "174: a template value couldn’t be filled in, so nothing was sent. ⟨nothing was sent⟩"
+   ]
+  },
+  "app/src/features/logs/index.tsx": {
+   "reassure": [
+    "141: ses flagged this message as spam or a virus. it’s stored, bu ⟨never⟩"
+   ]
+  },
   "app/src/features/onboarding/index.tsx": {
    "caption": [
     "227: step … of … · …",
@@ -331,9 +432,20 @@
     "367: optional, at most a year ahead. empty means no expiry.",
     "369: goes into the audit log and the workspace’s timeline."
    ],
+   "length/description": [
+    "282: replaces the score’s limit until it expires; clear it to go "
+   ],
+   "reassure": [
+    "296: it is never gated or charged; usage is still measured. the c ⟨never⟩"
+   ],
    "tagline": [
     "66: search by workspace id or name.",
     "66: workspaces above good standing, watched ones and quarantined",
+    "278: stops all sending at ses; owners see a pause banner and get ",
+    "279: sending resumes at the restore share you choose; a strike st",
+    "280: campaigns pause and new marketing is refused; transactional ",
+    "281: campaigns can send again; the workspace stays at warn until ",
+    "282: replaces the score’s limit until it expires; clear it to go ",
     "283: the quarantined campaign resumes where it stopped."
    ]
   },
@@ -350,159 +462,9 @@
     "167: lets a script or agent read ui notes and screenshots and set"
    ]
   },
-  "app/src/features/settings/activity.tsx": {
-   "tagline": [
-    "93: changes to members, keys, domains, webhooks and settings app",
-    "122: … utc · via …"
-   ]
-  },
-  "app/src/features/settings/admin-only.tsx": {
-   "tagline": [
-    "12: only owners and admins can …: ask one, or ask to become an a"
-   ]
-  },
-  "app/src/features/settings/billing.tsx": {
-   "tagline": [
-    "94: nothing is charged, and sending never pauses for a balance.",
-    "238: credit added and hourly usage appear here.",
-    "242: card payments for credit appear here, with their invoices.",
-    "305: add $20 to $10,000 at a time."
-   ]
-  },
-  "app/src/features/settings/create-key.tsx": {
-   "caption": [
-    "21: sends, reads, and manages domains, keys and settings.",
-    "22: sends email from your app. can’t read logs or change setting",
-    "23: sends email and reads logs and events. can’t change settings",
-    "24: reads logs, events and settings. can’t send.",
-    "25: reads mail at the receiving addresses you choose. nothing el",
-    "26: reads one agent inbox. stops working when the inbox is delet",
-    "27: creates agent inboxes and reads only the ones it created.",
-    "31: for servers, scripts and agents, with the access you choose.",
-    "32: an agent such as opencode or claude code signs in as you ove",
-    "33: lets a mail app open a persistent inbox over imap or smtp.",
-    "207: also replies and starts conversations, from … only.…",
-    "207: lists and reads mail, events and attachments."
-   ],
-   "helper": [
-    "183: includes domains you add later.",
-    "185: · not verified yet",
-    "190: limited to domains, it can’t manage keys, inbound or setting",
-    "191: 50-domain limit reached.",
-    "211: marks read, archives, stars and labels.",
-    "253: reads and files the inbox’s mail.",
-    "254: sends mail from the inbox’s address."
-   ],
-   "tagline": [
-    "185: no domains yet: add one, or keep all domains.",
-    "198: no receiving addresses yet: create one, or choose every addr"
-   ]
-  },
-  "app/src/features/settings/domain-records.tsx": {
-   "tagline": [
-    "68: or add the records below yourself.",
-    "243: signs your mail and proves … is yours.",
-    "247: add these at your dns provider; brand keeps checking.",
-    "252: signs your mail and proves the domain is yours."
-   ]
-  },
-  "app/src/features/settings/domains.tsx": {
-   "helper": [
-    "227: a subdomain of … you don’t use yet."
-   ],
-   "tagline": [
-    "64: mail to addresses at … follows its routes.",
-    "111: add a domain to send and receive mail.",
-    "212: routes bounces through a subdomain you own for relaxed spf a",
-    "250: receive mail on …; its addresses and routes are in receiving",
-    "257: verify the domain before enabling receiving."
-   ]
-  },
-  "app/src/features/settings/hosted.tsx": {
-   "caption": [
-    "84: owners and admins can rename it",
-    "114: amazon ses in your aws account",
-    "114: sent through brand’s amazon ses",
-    "115: the aws region your mail is sent from",
-    "118: recipients in the last 24 hours",
-    "128: your sending health, 0–100",
-    "138: sending stops until you connect again",
-    "154: from your google account",
-    "156: owners and admins can change it",
-    "157: questions, problems or feedback",
-    "158: your other accounts stay signed in",
-    "161: disconnect a client from your anomaly account"
-   ]
-  },
-  "app/src/features/settings/keys.tsx": {
-   "tagline": [
-    "107: an api key lets your server, a script or an agent send email",
-    "108: connect opencode, claude code or cursor to work as you. it a",
-    "109: lets a mail app like apple mail open a persistent inbox over",
-    "110: create a key to send from your app, connect an agent or open"
-   ]
-  },
-  "app/src/features/settings/mcp-approval.tsx": {
-   "tagline": [
-    "39: the agent acts as the account it signed in with: approve tha",
-    "57: tool calls that name no workspace use this one, as your role"
-   ]
-  },
-  "app/src/features/settings/region-setup.tsx": {
-   "helper": [
-    "81: checks live aws without creating resources."
-   ],
-   "tagline": [
-    "122: enable this region to check or provision aws resources.",
-    "123: read permission required to check aws."
-   ]
-  },
-  "app/src/features/settings/reputation.tsx": {
-   "tagline": [
-    "13: historic rates ses calculates from a representative volume o",
-    "15: rates load on the next check, or select refresh.",
-    "48: no data in the last 14 days; ses publishes rates once you se"
-   ]
-  },
-  "app/src/features/settings/setup-checklist.tsx": {
-   "caption": [
-    "22: the topic is not owned by this installation.",
-    "22: the topic policy needs updating."
-   ],
-   "tagline": [
-    "30: last checked state."
-   ]
-  },
-  "app/src/features/settings/usage.tsx": {
-   "caption": [
-    "55: courtesy of anomaly",
-    "55: usage comes off it hourly",
-    "61: 1 gb free, then $0.25 per gb-month",
-    "62: since ……",
-    "62: this calendar month",
-    "63: at $0.20 per 1,000 emails",
-    "63: not charged: free plan",
-    "63: sent mail only",
-    "63: this month"
-   ],
-   "tagline": [
-    "45: healthy real email raises it; simulator sends don’t."
-   ]
-  },
-  "app/src/features/settings/webhooks.tsx": {
-   "helper": [
-    "49: leave blank to keep it.",
-    "51: includes future regions."
-   ],
-   "tagline": [
-    "67: signed calls to your url when email you send is delivered, b",
-    "68: for received mail, use inbound webhooks.",
-    "212: signatures arrive in the … header: verify them on your serve"
-   ]
-  },
-  "app/src/features/settings/workspace-members.tsx": {
-   "tagline": [
-    "37: admins manage keys, domains, webhooks, sending and members, "
+  "app/src/features/score/limits.tsx": {
+   "reassure": [
+    "31: sending stops; receiving, inboxes and the dashboard still wo ⟨still work⟩"
    ]
   },
   "app/src/features/support/SupportPanel.tsx": {

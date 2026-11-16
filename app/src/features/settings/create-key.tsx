@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import { ChevronRight } from 'lucide-react'
-import { Button, Checkbox, Dialog, Field, Input } from '../../components/ui'
+import { Button, Checkbox, Dialog, Disclosure, Field, Input } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApi, useApiDef, useApiMutation, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
@@ -17,20 +17,23 @@ export type Purpose = 'manage' | 'send' | 'read_send' | 'read' | 'addresses' | '
 type WorkspacePurpose = Extract<Purpose, 'manage' | 'send' | 'read_send' | 'read'>
 const workspacePermissions: Record<WorkspacePurpose, KeyPermission[]> = { manage: ['read', 'send', 'manage'], send: ['send'], read_send: ['read', 'send'], read: ['read'] }
 const isWorkspace = (purpose: Purpose): purpose is WorkspacePurpose => purpose in workspacePermissions
-const purposes: { value: Purpose; label: string; hint: string }[] = [
-  { value: 'manage', label: 'Full access', hint: 'Sends, reads, and manages domains, keys and settings.' },
-  { value: 'send', label: 'Sending only', hint: 'Sends email from your app. Can’t read logs or change settings.' },
-  { value: 'read_send', label: 'Send and read', hint: 'Sends email and reads logs and events. Can’t change settings.' },
-  { value: 'read', label: 'Read only', hint: 'Reads logs, events and settings. Can’t send.' },
-  { value: 'addresses', label: 'Chosen addresses', hint: 'Reads mail at the receiving addresses you choose. Nothing else.' },
-  { value: 'inbox', label: 'One inbox', hint: 'Reads one agent inbox. Stops working when the inbox is deleted.' },
-  { value: 'create', label: 'Create inboxes', hint: 'Creates agent inboxes and reads only the ones it created.' },
+// Each choice is named for what it reaches; what it can and can't do is in "What this key can do", which opens under
+// the form and follows the choices.
+const purposes: { value: Purpose; label: string; does: string }[] = [
+  { value: 'manage', label: 'Full access', does: 'Sends, reads, and manages domains, keys and settings.' },
+  { value: 'send', label: 'Sending only', does: 'Sends email from your app. Can’t read logs or change settings.' },
+  { value: 'read_send', label: 'Send and read', does: 'Sends email and reads logs and events. Can’t change settings.' },
+  { value: 'read', label: 'Read only', does: 'Reads logs, events and settings. Can’t send.' },
+  { value: 'addresses', label: 'Mail at chosen addresses', does: 'Reads mail at the receiving addresses you choose. Nothing else.' },
+  { value: 'inbox', label: 'One agent inbox', does: 'Reads one agent inbox. Stops working when the inbox is deleted.' },
+  { value: 'create', label: 'Creates agent inboxes', does: 'Creates agent inboxes and reads only the ones it created.' },
 ]
 type Kind = 'api' | 'agent' | 'app'
-const kinds: { value: Kind; label: string; hint: string }[] = [
-  { value: 'api', label: 'API key', hint: 'For servers, scripts and agents, with the access you choose.' },
-  { value: 'agent', label: 'Agent token', hint: 'An agent such as OpenCode or Claude Code signs in as you over MCP.' },
-  { value: 'app', label: 'App password', hint: 'Lets a mail app open a persistent inbox over IMAP or SMTP.' },
+// The type's name says who uses it; the page's "Which key to use" compares them.
+const kinds: { value: Kind; label: string }[] = [
+  { value: 'api', label: 'API key for your app or script' },
+  { value: 'agent', label: 'Connect an agent over MCP' },
+  { value: 'app', label: 'App password for a mail app' },
 ]
 export type CreatedSecret = { secret: string; title: string; description?: string; sendExample?: boolean }
 
@@ -49,8 +52,8 @@ export function CreateKeyDialog({ open, onOpenChange, onCreated, onConnectAgent,
       : kind === 'app' ? <AppPasswordForm open={open} onOpenChange={onOpenChange} onPending={setPending} onCreated={onCreated} />
       : <ul className="keys-types" aria-label="What kind of key?">
         {kinds.map(item => <li key={item.value}>
-          <button type="button" className="keys-type" aria-describedby={`key-kind-${item.value}-hint`} onClick={() => { if (item.value === 'agent') { onOpenChange(false); onConnectAgent() } else setKind(item.value) }}>
-            <span className="settings-cell-stack"><span className="keys-type__label">{item.label}</span><span id={`key-kind-${item.value}-hint`} className="ui-field__hint">{item.hint}</span></span>
+          <button type="button" className="keys-type" onClick={() => { if (item.value === 'agent') { onOpenChange(false); onConnectAgent() } else setKind(item.value) }}>
+            <span className="keys-type__label">{item.label}</span>
             <ChevronRight size={16} aria-hidden="true" />
           </button>
         </li>)}
@@ -73,12 +76,13 @@ function useInboxOptions(key: string, filter: { type?: Inbox['type'] }, enabled:
 }
 const activeInboxes = (query: ReturnType<typeof useInboxOptions>) => (query.data?.pages.flat() ?? []).filter(box => box.status === 'active')
 
-/** Which inbox: a radio list, because a select would show the address unmasked. */
+/** Which inbox: a radio list, because a select would show the address unmasked. With none to choose, its place is the
+ *  link to make one. */
 function InboxChoice({ name, query, value, onChange, disabled, error, none }: { name: string; query: ReturnType<typeof useInboxOptions>; value: string; onChange: (id: string) => void; disabled: boolean; error?: string; none: ReactNode }) {
   const inboxes = activeInboxes(query)
   return <fieldset className="settings-key-domains" disabled={disabled} aria-describedby={error ? `${name}-error` : undefined}>
     <legend className="ui-field__label">Inbox</legend>
-    {query.isPending && !query.isError ? <p className="muted" role="status">Loading inboxes…</p> : !inboxes.length && !query.isError ? <p className="muted keys-form-note">{none}</p>
+    {query.isPending && !query.isError ? <p className="muted" role="status">Loading inboxes…</p> : !inboxes.length && !query.isError ? <div className="keys-form-note">{none}</div>
       : <div className="settings-key-domain-options">{inboxes.map(box => <label key={box.id} className="keys-choice">
         <input type="radio" name={name} value={box.id} checked={value === box.id} onChange={() => onChange(box.id)} />
         <span>{box.name ? <>{box.name} · </> : null}<PrivateAddress value={box.address} /></span>
@@ -118,8 +122,8 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormP
     retry: false,
   })
   const inboxes = useInboxOptions('key-options', {}, open && purpose === 'inbox')
-  const options = new Map((domainOptions.data?.pages.flatMap(page => page.items) ?? []).map(domain => [domain.name.toLowerCase(), domain.status === 'verified']))
-  const domains = [...new Set([...options.keys(), ...selectedDomains])].sort()
+  const options = (domainOptions.data?.pages.flatMap(page => page.items) ?? []).map(domain => domain.name.toLowerCase())
+  const domains = [...new Set([...options, ...selectedDomains])].sort()
   // Inboxes have their own choice; this list is the receiving addresses.
   const receiving = (addresses.data ?? []).filter(item => item.kind !== 'inbox')
   const chosenInbox = inboxId || activeInboxes(inboxes)[0]?.id || ''
@@ -166,6 +170,12 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormP
   const example = selectedDomains[0] ?? domains[0]
   const placeholder = workspace ? 'Order notifications' : purpose === 'create' ? 'End-to-end tests' : purpose === 'inbox' ? 'Sign-up test' : 'Support agent'
   const where = purpose === 'inbox' ? 'this inbox' : 'these addresses'
+  // What the choices above add up to, in plain lines: the detail behind "What this key can do".
+  const can = [
+    purposes.find(item => item.value === purpose)!.does,
+    ...workspace && !allDomains ? [`Sends and email logs are limited to the chosen domains and their subdomains${example ? `: ${example} also covers mail from news.${example}` : ''}.`, 'Contacts, lists, templates and campaigns stay workspace-wide.', ...purpose === 'manage' ? ['Limited to domains, it can’t manage keys, inbound or settings.'] : []] : [],
+    ...purpose === 'addresses' || purpose === 'inbox' ? ['Lists and reads mail, events and attachments.', ...reply ? [`Replies and starts conversations, from ${where} only.${purpose === 'inbox' ? ' Needs replies on for the inbox.' : ''}`] : [], ...organize ? ['Marks read, archives, stars and labels.'] : []] : [],
+  ]
 
   return <>
     <form id="create-key" className="stack" onSubmit={submit} noValidate>
@@ -174,43 +184,41 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormP
       <fieldset className="keys-purpose" disabled={pending}>
         <legend className="ui-field__label">What it can reach</legend>
         {purposes.map(item => <label key={item.value} className="keys-choice">
-          <input type="radio" name="key-purpose" value={item.value} checked={purpose === item.value} onChange={() => { setPurpose(item.value); setErrors({}); create.reset() }} aria-labelledby={`key-purpose-${item.value}`} aria-describedby={`key-purpose-${item.value}-hint`} />
-          <span className="settings-cell-stack"><span id={`key-purpose-${item.value}`}>{item.label}</span><span id={`key-purpose-${item.value}-hint`} className="ui-field__hint">{item.hint}</span></span>
+          <input type="radio" name="key-purpose" value={item.value} checked={purpose === item.value} onChange={() => { setPurpose(item.value); setErrors({}); create.reset() }} />
+          <span>{item.label}</span>
         </label>)}
       </fieldset>
-      {workspace && <fieldset className="settings-key-domains" disabled={pending} aria-describedby={domainError ? 'key-domain-error' : 'key-domain-hint'}>
+      {workspace && <fieldset className="settings-key-domains" disabled={pending} aria-describedby={domainError ? 'key-domain-error' : undefined}>
         <legend className="ui-field__label">Domains it can send from</legend>
-        <Checkbox label={<span className="settings-key-all-domains">All domains <span className="ui-field__hint">Includes domains you add later.</span></span>} checked={allDomains} onCheckedChange={checked => { setAllDomains(checked); setSelectedDomains([]); clearError('domains') }} disabled={pending} />
+        <Checkbox label="All domains, including new ones" checked={allDomains} onCheckedChange={checked => { setAllDomains(checked); setSelectedDomains([]); clearError('domains') }} disabled={pending} />
         <div className="settings-key-domain-options">
-          {domainOptions.isPending ? <p className="muted" role="status">Loading domains…</p> : domains.length === 0 && !domainOptions.isError ? <p className="muted">No domains yet: <Link to="/domains">add one</Link>, or keep All domains.</p> : domains.map(domain => <Checkbox key={domain} label={<span>{domain}{options.get(domain) === false && <span className="ui-field__hint"> · not verified yet</span>}</span>} checked={!allDomains && selectedDomains.includes(domain)} onCheckedChange={checked => toggleDomain(domain, checked)} disabled={pending || !selectedDomains.includes(domain) && selectedDomains.length >= 50} />)}
+          {domainOptions.isPending ? <p className="muted" role="status">Loading domains…</p> : domains.length === 0 && !domainOptions.isError ? <Link className="keys-form-note" to="/domains" onClick={() => onOpenChange(false)}>Add a domain</Link> : domains.map(domain => <Checkbox key={domain} label={domain} checked={!allDomains && selectedDomains.includes(domain)} onCheckedChange={checked => toggleDomain(domain, checked)} disabled={pending} />)}
         </div>
         {domainOptions.isError && <div className="stack"><MutationError error={domainOptions.error} /><Button onClick={() => { void (domainOptions.isFetchNextPageError ? domainOptions.fetchNextPage() : domainOptions.refetch()) }}>Retry loading domains</Button></div>}
         {domainOptions.hasNextPage && !domainOptions.isError && <Button variant="ghost" loading={domainOptions.isFetchingNextPage} onClick={() => void domainOptions.fetchNextPage()}>Load more domains</Button>}
-        <p id="key-domain-hint" className="ui-field__hint">{allDomains ? 'Sends from any domain in this workspace.' : `Sends and email logs are limited to these domains and their subdomains${example ? `: ${example} also covers mail from news.${example}` : ''}. Contacts, lists, templates and campaigns stay workspace-wide.`}</p>
-        {purpose === 'manage' && !allDomains && <p className="ui-field__hint">Limited to domains, it can’t manage keys, inbound or settings.</p>}
-        {!allDomains && selectedDomains.length >= 50 && <p className="ui-field__hint">50-domain limit reached.</p>}
         {domainError && <p id="key-domain-error" className="ui-field__error" role="alert">{domainError}</p>}
       </fieldset>}
       {purpose === 'addresses' && <fieldset className="settings-key-domains" disabled={pending} aria-describedby={addressError ? 'key-address-error' : undefined}>
         <legend className="ui-field__label">Addresses</legend>
         <Checkbox label="Every address, including new ones" checked={allAddresses} onCheckedChange={checked => { setAllAddresses(checked); setAddressIds([]); clearError('addressIds') }} disabled={pending} />
         <div className="settings-key-domain-options">
-          {addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : !receiving.length ? <p className="muted">No receiving addresses yet: <Link to="/receiving">create one</Link>, or choose Every address.</p>
+          {addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : !receiving.length ? <Link className="keys-form-note" to="/receiving" onClick={() => onOpenChange(false)}>Create an address</Link>
             : receiving.map(item => <Checkbox key={item.id} label={<PrivateAddress value={item.address} />} checked={!allAddresses && addressIds.includes(item.id)} disabled={pending} onCheckedChange={checked => toggleAddress(item.id, checked)} />)}
         </div>
         {addressError && <p id="key-address-error" className="ui-field__error" role="alert">{addressError}</p>}
       </fieldset>}
       {purpose === 'inbox' && <InboxChoice name="key-inbox" query={inboxes} value={chosenInbox} onChange={id => { setInboxId(id); clearError('inboxId') }} disabled={pending} error={inboxError}
-        none={<>No active agent inboxes. <Link to="/receiving/inboxes" onClick={() => onOpenChange(false)}>Create one in Receiving</Link>.</>} />}
+        none={<Link to="/receiving/inboxes" onClick={() => onOpenChange(false)}>Create an agent inbox</Link>} />}
       {(purpose === 'addresses' || purpose === 'inbox') && <fieldset className="keys-purpose" disabled={pending}>
         <legend className="ui-field__label">What it can do</legend>
-        {[{ value: false, label: 'Read', hint: 'Lists and reads mail, events and attachments.' }, { value: true, label: 'Read and reply', hint: `Also replies and starts conversations, from ${where} only.${purpose === 'inbox' ? ' Needs replies on for the inbox.' : ''}` }].map(item => <label key={item.label} className="keys-choice">
-          <input type="radio" name="key-mail" checked={reply === item.value} onChange={() => setReply(item.value)} aria-describedby={`key-mail-${item.value}-hint`} />
-          <span className="settings-cell-stack"><span>{item.label}</span><span id={`key-mail-${item.value}-hint`} className="ui-field__hint">{item.hint}</span></span>
+        {[{ value: false, label: 'Read' }, { value: true, label: 'Read and reply' }].map(item => <label key={item.label} className="keys-choice">
+          <input type="radio" name="key-mail" checked={reply === item.value} onChange={() => setReply(item.value)} />
+          <span>{item.label}</span>
         </label>)}
-        <Checkbox checked={organize} onCheckedChange={setOrganize} disabled={pending} label={<span className="settings-cell-stack"><span>Organize</span><span className="ui-field__hint">Marks read, archives, stars and labels.</span></span>} />
+        <Checkbox checked={organize} onCheckedChange={setOrganize} disabled={pending} label="Organize mail" />
         {mailError && <p className="ui-field__error" role="alert">{mailError}</p>}
       </fieldset>}
+      <Disclosure className="keys-can" title="What this key can do"><ul>{can.map(line => <li key={line}>{line}</li>)}</ul></Disclosure>
     </form>
   </>
 }
@@ -245,13 +253,14 @@ function AppPasswordForm({ open, onOpenChange, onPending, onCreated }: FormProps
   return <>
     <form id="create-app-password" className="stack" onSubmit={submit} noValidate>
       <MutationError error={create.error} />
+      {/* A mail app opens only an inbox that keeps its mail; those are made over the API, so its place links the guide. */}
       <InboxChoice name="app-password-inbox" query={inboxes} value={chosen} onChange={setInboxId} disabled={pending} error={errors.inboxId}
-        none="No persistent inboxes yet. A mail app can only open an inbox that keeps its mail; create a persistent one over the API." />
+        none={<Link to="/docs/inboxes" onClick={() => onOpenChange(false)}>Create a persistent inbox</Link>} />
       <Field label="Name" htmlFor="app-password-name" error={errors.name || fieldError(create.error, 'name')}><Input id="app-password-name" value={name} maxLength={100} onChange={event => setName(event.target.value)} autoFocus required disabled={pending} placeholder="Apple Mail" autoComplete="off" /></Field>
       <fieldset className="keys-purpose" disabled={pending}>
         <legend className="ui-field__label">What the mail app can do</legend>
-        <Checkbox checked={protocols.includes('imap')} onCheckedChange={checked => toggle('imap', checked)} disabled={pending} label={<span className="settings-cell-stack"><span>IMAP</span><span className="ui-field__hint">Reads and files the inbox’s mail.</span></span>} />
-        <Checkbox checked={protocols.includes('smtp')} onCheckedChange={checked => toggle('smtp', checked)} disabled={pending} label={<span className="settings-cell-stack"><span>SMTP</span><span className="ui-field__hint">Sends mail from the inbox’s address.</span></span>} />
+        <Checkbox checked={protocols.includes('imap')} onCheckedChange={checked => toggle('imap', checked)} disabled={pending} label="Read and file its mail (IMAP)" />
+        <Checkbox checked={protocols.includes('smtp')} onCheckedChange={checked => toggle('smtp', checked)} disabled={pending} label="Send from its address (SMTP)" />
         {multiTenant && <p className="ui-field__hint">Billed by the day while the inbox has an app password.</p>}
         {protocolError && <p className="ui-field__error" role="alert">{protocolError}</p>}
       </fieldset>

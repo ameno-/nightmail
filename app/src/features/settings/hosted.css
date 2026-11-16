@@ -39,7 +39,10 @@
 .settings-mcp__workspace { width: 200px; }
 .settings-name-error { position: absolute; top: calc(100% + 6px); right: 0; z-index: 2; width: min(360px, 100%); text-align: left; white-space: normal; }
 .settings-score { display: inline-flex; align-items: baseline; gap: var(--space-8); padding: 0; border: 0; background: none; color: var(--color-text); font: inherit; text-decoration: none; cursor: pointer; }
-.settings-readonly { overflow: hidden; text-overflow: ellipsis; }
+.settings-readonly { min-width: 0; }
+.settings-readonly > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.settings-readonly > svg { flex: none; color: var(--color-muted); }
+.settings-row__error { color: var(--color-danger); font-size: var(--text-xs); line-height: var(--leading-xs); }
 .settings-score b { font-weight: var(--font-weight-bold); }
 .settings-score__grade { font-family: var(--font-mono); font-weight: 700; }
 .settings-score svg { align-self: center; color: var(--color-muted); transition: transform 160ms var(--ease-out-strong); }

@@ -8,7 +8,6 @@ export type HeaderRow = { key: string; name: string; value: string; shown?: bool
 /** null keeps the endpoint's current headers (never sent); a list replaces them all when saved. */
 export type HeaderDraft = HeaderRow[] | null
 
-export const HEADERS_HINT = 'Sent with each delivery, like Authorization. Saved values stay hidden.'
 let nextKey = 0
 const row = (name = ''): HeaderRow => ({ key: `header-${++nextKey}`, name, value: '' })
 // A row left completely blank is ignored rather than blocking the save.
@@ -58,8 +57,9 @@ export function WebhookHeadersField({ current, draft, onChange, errors, apiError
   const replacing = draft !== null && current.length > 0
   const rows = draft ?? []
   const general = errors.headers || listError(apiError)
-  const hint = !replacing ? HEADERS_HINT
-    : rows.length ? 'Saving replaces every header. Enter each value again.' : 'Saving removes every header.'
+  // Said only while replacing: what saving then does to the current headers. Saved values are never shown, so the
+  // current list masks them, and a new row's name shows an example (Authorization).
+  const hint = !replacing ? null : rows.length ? 'Saving replaces every header. Enter each value again.' : 'Saving removes every header.'
   const update = (key: string, patch: Partial<HeaderRow>) => onChange(rows.map(item => item.key === key ? { ...item, ...patch } : item))
   function add() { const next = row(); onChange([...rows, next]); setFocus(`${next.key}:name`) }
   function remove(index: number) {
@@ -74,9 +74,9 @@ export function WebhookHeadersField({ current, draft, onChange, errors, apiError
     if (next[0]) setFocus(`${next[0].key}:value`)
   }
 
-  return <div className="ui-field webhook-headers" role="group" aria-labelledby={labelId} aria-describedby={general ? `${hintId} ${errorId}` : hintId}>
+  return <div className="ui-field webhook-headers" role="group" aria-labelledby={labelId} aria-describedby={[hint && hintId, general && errorId].filter(Boolean).join(' ') || undefined}>
     <div id={labelId} className="ui-field__label">Headers</div>
-    <div id={hintId} className="ui-field__hint">{hint}</div>
+    {hint && <div id={hintId} className="ui-field__hint">{hint}</div>}
     {draft === null && current.length > 0 && <ul className="webhook-headers__current" aria-label="Current headers">
       {current.map(header => <li key={header.name}><code>{header.name}</code><code className="muted" aria-hidden="true">{header.hint ?? '••••'}</code><span className="sr-only">{header.hint && header.hint.length > 4 ? `value ends in ${header.hint.slice(4)}` : 'value hidden'}</span></li>)}
     </ul>}

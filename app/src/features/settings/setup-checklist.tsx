@@ -2,7 +2,9 @@ import { Check, Circle, CircleAlert, Clock3 } from 'lucide-react'
 import type { SesDiscovery } from '../../data/types'
 
 type CheckState = 'complete' | 'missing' | 'unknown' | 'blocked' | 'waiting'
-type SetupCheck = { name: string; state: CheckState; detail?: string }
+// A check's status is its state's word, or a more exact one (`status`) when the state alone doesn't say what's wrong.
+// `detail` names each configuration set's part, only while one isn't ready.
+type SetupCheck = { name: string; state: CheckState; status?: string; detail?: string }
 const labels: Record<CheckState, string> = { complete: 'Ready', missing: 'Needs setup', unknown: 'Not checked', blocked: 'Needs attention', waiting: 'Awaiting confirmation' }
 
 export function awaitingConfirmationOnly(report: SesDiscovery | undefined) {
@@ -18,8 +20,8 @@ export function SetupChecklist({report, running, queued, bare}: {report?: SesDis
   const topic = report?.resources.topic
   const checks: SetupCheck[] = [
     { name: 'AWS account access', state: report?.account ? 'complete' : report?.blockers.some(issue => issue.code.startsWith('AWS_')) ? 'blocked' : 'unknown' },
-    { name: 'SES configuration sets', state: !report ? 'unknown' : sets.some(set => set.exists === true && (set.owned === false || set.sendingEnabled === false)) ? 'blocked' : sets.some(set => set.exists === false) ? 'missing' : sets.every(set => set.exists === true && set.owned === true && set.sendingEnabled === true) ? 'complete' : 'unknown', detail: report ? sets.map((set, index) => `${index === 0 ? 'Transactional' : 'Marketing'}: ${set.exists === false ? 'not created' : set.owned === false ? 'ownership conflict' : set.sendingEnabled === false ? 'sending disabled' : set.exists === true && set.owned === true && set.sendingEnabled === true ? 'ready' : 'not checked'}`).join(' · ') : undefined },
-    { name: 'SNS topic and permissions', state: topic?.exists === false ? 'missing' : topic?.owned === false ? 'blocked' : topic?.exists === true && topic.owned === true && topic.policyReady === true ? 'complete' : topic?.policyReady === false ? 'missing' : 'unknown', detail: topic?.owned === false && topic.exists === true ? 'The topic is not owned by this installation.' : topic?.exists === true && topic.policyReady === false ? 'The topic policy needs updating.' : undefined },
+    { name: 'SES configuration sets', state: !report ? 'unknown' : sets.some(set => set.exists === true && (set.owned === false || set.sendingEnabled === false)) ? 'blocked' : sets.some(set => set.exists === false) ? 'missing' : sets.every(set => set.exists === true && set.owned === true && set.sendingEnabled === true) ? 'complete' : 'unknown', detail: report && !sets.every(set => set.exists === true && set.owned === true && set.sendingEnabled === true) ? sets.map((set, index) => `${index === 0 ? 'Transactional' : 'Marketing'}: ${set.exists === false ? 'not created' : set.owned === false ? 'ownership conflict' : set.sendingEnabled === false ? 'sending disabled' : set.exists === true && set.owned === true && set.sendingEnabled === true ? 'ready' : 'not checked'}`).join(' · ') : undefined },
+    { name: 'SNS topic and permissions', state: topic?.exists === false ? 'missing' : topic?.owned === false ? 'blocked' : topic?.exists === true && topic.owned === true && topic.policyReady === true ? 'complete' : topic?.policyReady === false ? 'missing' : 'unknown', status: topic?.owned === false && topic.exists === true ? 'Owned elsewhere' : topic?.exists === true && topic.policyReady === false ? 'Policy out of date' : undefined },
     { name: 'SES event destinations', state: !report ? 'unknown' : sets.every(set => set.eventWired === true) ? 'complete' : sets.some(set => set.eventWired === false || set.exists === false) ? 'missing' : 'unknown', detail: report && !sets.every(set => set.eventWired === true) ? sets.map((set, index) => `${index === 0 ? 'Transactional' : 'Marketing'}: ${set.eventWired === true ? 'connected' : set.eventWired === false || set.exists === false ? 'not connected' : 'not checked'}`).join(' · ') : undefined },
     { name: 'HTTPS subscription', state: topic?.subscription === 'pending' ? 'waiting' : topic?.subscription === 'confirmed' && topic.rawMessageDelivery === false && !topic.subscriptionsTruncated && !report?.blockers.some(issue => issue.code === 'SNS_SUBSCRIPTION_FILTERED') ? 'complete' : topic?.subscription === 'missing' || topic?.exists === false ? 'missing' : topic?.subscription === 'confirmed' ? 'blocked' : 'unknown' },
   ]
@@ -27,12 +29,11 @@ export function SetupChecklist({report, running, queued, bare}: {report?: SesDis
   const snsUrl = report && topic?.arn ? `https://${report.region}.console.aws.amazon.com/sns/v3/home?region=${report.region}#/topic/${encodeURIComponent(topic.arn)}` : undefined
   return <div className="settings-setup-checklist" aria-label="Provisioning checklist">
     {!bare && <div className="settings-setup-heading"><h3>Provisioning</h3>{running && <span role="status">{queued ? 'Queued' : 'In progress'}</span>}</div>}
-    {running && report && <p className="muted">Last checked state.</p>}
     <ul className="settings-setup-steps">{checks.map(check => {
       const Icon = check.state === 'complete' ? Check : check.state === 'waiting' ? Clock3 : check.state === 'blocked' ? CircleAlert : Circle
       return <li key={check.name} data-state={check.state}>
         <Icon size={16} aria-hidden="true" />
-        <div className="settings-setup-step"><div className="settings-setup-step-heading"><span>{check.name}</span><span className="settings-setup-status">{labels[check.state]}</span></div>{check.detail && <p className="muted">{check.detail}</p>}
+        <div className="settings-setup-step"><div className="settings-setup-step-heading"><span>{check.name}</span><span className="settings-setup-status">{check.status ?? labels[check.state]}</span></div>{check.detail && <p className="muted">{check.detail}</p>}
           {check.name === 'HTTPS subscription' && pending && <div className="settings-setup-confirmation"><p>In SNS, choose <strong>Request confirmation</strong> on the pending subscription, then <strong>Check AWS</strong>. Provisioning won’t send it again.</p>{snsUrl && <a className="ui-button ui-button--secondary" href={snsUrl} target="_blank" rel="noopener noreferrer">Open SNS</a>}</div>}
         </div>
       </li>
