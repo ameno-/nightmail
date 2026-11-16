@@ -184,7 +184,7 @@
   --row-height-lg: 56px;
   --sidebar-width: 232px;
   /* The sidebar's edge padding, and the inset of content inside its boxes (workspace picker, navigation links). The
-     picker's name and the navigation labels share one left edge: gutter + inset. */
+     wordmark, the picker's name and the navigation labels share one left edge: gutter + inset. */
   --sidebar-gutter: var(--space-12);
   --sidebar-inset: var(--space-12);
   --page-inset: 8px;

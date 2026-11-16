@@ -14,7 +14,7 @@ The logo is the **NIGHTMAIL** wordmark, in wide squared-off capitals, and the **
 | `app/public/favicon.svg`, `favicon-dark.svg` | the 32 px drawing as a vector: ink for a browser's pale theme, paper for its dark one |
 | `app/public/favicon.ico`, `apple-touch-icon.png`, `icon-192.png`, `icon-512.png`, `icon-maskable-512.png`, `og.png` | browser and home-screen icons, and the link-preview card |
 | `app/src/lib/marks.ts` | the wordmark's and the monogram's outlines, as the app draws them |
-| `app/src/components/NightmailLogo.tsx` | `NightmailWordmark` (the lockup) and `NightmailMark` (the tile), each one inline SVG that follows the theme |
+| `app/src/components/NightmailLogo.tsx` | `NightmailWordmark` (the wordmark alone) and `NightmailMark` (the tile), each one inline SVG that follows the theme |
 
 The SVGs in `app/public/brand/`, `favicon.svg`, `favicon-dark.svg` and `apple-touch-icon.png` are the final vector set's own files, copied in unchanged. `node scripts/brand-assets.mjs` in `app/` builds the rest: it packs `favicon.ico`, draws the three manifest icons from `nightmail-monogram.svg`, and photographs `og.png` from the built homepage (`bun run build` first; `BRAND_ONLY=og` for the card alone, `BRAND_ONLY=icons` for everything but the card).
 
@@ -39,15 +39,17 @@ Measured with the cap height as 100:
 
 Where the app sets them:
 
-- **Onboarding and the legal pages:** `NightmailWordmark` at 13 px cap height, so 158 px across, at the head of the page.
-- **The dashboard's own shell carries no logo.** Its sidebar and a phone's top bar open with the workspace picker; the brand is in the browser's tab, and on the pages around the dashboard.
+- **In the app, the wordmark stands alone.** The tile is kept for places that need a square mark: the browser's tab, the app icons, the support chat's avatar and the homepage's header.
+- **Dashboard sidebar:** `NightmailWordmark` at 13 px cap height, so 140 px across, at the top with the theme button beside it and the workspace picker under it. Its first stem stands on the text's left edge, the same x as the picker's name and the navigation labels (`--sidebar-gutter` + `--sidebar-inset`). In the narrower sidebar (900 to 1100 px wide) it is 11 px, so it clears the theme button.
+- **A phone's top bar (under 640 px):** 11 px, as tall as the caps of the workspace picker's name beside it; 10 px under 380 px. From 640 px the bar carries it at 13 px.
+- **Onboarding and the legal pages:** 13 px, at the head of the page.
 - **Support chat:** `NightmailMark` at 18 px beside the agent's name.
 - **Homepage:** the header carries the tile alone (26 px, 24 on a phone). The wordmark stands in lit letters at the head of the sorting frame, exactly as wide as the price under it (`features/home/sorter/name.ts`), and again across the page's end as solids cut off by the page's edge (`features/home/end-band.tsx`). `og.png` sets the lockup beside the machine.
 
 ## Clear space and size
 
 - **Clear space:** keep at least half the cap height clear on every side of the lockup, and half the tile's side round the tile alone.
-- **Minimum size:** the lockup at 12 px cap height. The tile alone at 18 px as a vector; at 16 and 32 px use the hand-drawn tiles, whose stems are whole pixels.
+- **Minimum size:** the wordmark alone at 10 px cap height, the lockup at 12 px. The tile alone at 18 px as a vector; at 16 and 32 px use the hand-drawn tiles, whose stems are whole pixels.
 
 ## Favicon and app icons
 

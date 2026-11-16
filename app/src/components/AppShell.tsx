@@ -17,6 +17,7 @@ import { StandingBanner } from './StandingBanner'
 import { BillingBanner } from './BillingBanner'
 import { LegalFooterLinks } from './LegalLinks'
 import { PrivacyToggle } from './PrivacyToggle'
+import { NightmailWordmark } from './NightmailLogo'
 import { togglePrivacy } from '../lib/privacy'
 import { SupportHost, SupportTrigger, useSupportChat } from './SupportChat'
 import { notesModifierLabel, useUiNotesMode, useUiNotesShortcut } from '../lib/ui-notes-mode'
@@ -225,6 +226,7 @@ export function AppShell() {
   if (compact) return <div className="app-shell app-shell--compact">
     <a className="skip-link" href="#main-content">Skip to content</a>
     <header className="mobile-bar">
+      <NavLink className="wordmark" to="/overview" aria-label={`${productName.toLowerCase()} overview`}><NightmailWordmark /></NavLink>
       <div className="mobile-bar__context">{context}</div>
       {support.mode && <SupportTrigger chat={support} />}
       <ThemeToggle />
@@ -237,8 +239,9 @@ export function AppShell() {
   return <div className={support.mode ? 'app-shell app-shell--support' : 'app-shell'}>
     <a className="skip-link" href="#main-content">Skip to content</a>
     <aside className="sidebar">
-      <div className="sidebar-context">{context}</div>
+      <NavLink className="wordmark" to="/overview" aria-label={`${productName.toLowerCase()} overview`}><NightmailWordmark /></NavLink>
       <ThemeToggle />
+      <div className="sidebar-context">{context}</div>
       {/* Members see every page: owner and admin ones carry a lock and explain who can use them. */}
       <nav className="main-navigation" aria-label="Main navigation">{links.map(([path, title]) => <NavLink key={path} to={path} {...locked(path) ? lockedProps : intent(path)}>{title}{locked(path) && <Lock size={12} aria-label="Owners and admins only" />}</NavLink>)}</nav>
       <div className="sidebar-footer">{footer}</div>

@@ -2,22 +2,21 @@ body { font-variant-numeric: tabular-nums; }
 code, pre, .identifier { font-family: var(--font-mono); font-size: inherit; }
 button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); stroke-width: 1.5; }
 .app-shell { display: flow-root; height: 100dvh; overflow: hidden; background: var(--color-deep); }
-/* The sidebar opens with the workspace picker, as far from the top as from the side. It carries no logo: the brand is
-   on the homepage, onboarding, the legal pages and the browser's tab. */
-.sidebar { position: fixed; inset: 0 auto 0 0; width: var(--sidebar-width); background: var(--color-deep); z-index: 20; display: flex; flex-direction: column; gap: var(--space-16); padding: var(--sidebar-gutter) var(--sidebar-gutter) var(--page-inset); overflow-y: auto; }
-/* The logo's link in a page's header (onboarding, the legal pages). */
+/* The sidebar opens with the wordmark and, beside it, the theme button: one 24 px row, 16 px from the top. The
+   workspace picker follows under it. */
+.sidebar { position: fixed; inset: 0 auto 0 0; width: var(--sidebar-width); background: var(--color-deep); z-index: 20; display: flex; flex-direction: column; gap: var(--space-16); padding: 56px var(--sidebar-gutter) var(--page-inset); overflow-y: auto; }
+/* The wordmark's link: in the sidebar, in a phone's top bar, and in a page's header (onboarding, the legal pages). */
 .wordmark { height: var(--space-24); display: flex; align-items: center; color: var(--color-text); text-decoration: none; }
-/* The brand's marks (components/NightmailLogo.tsx): the brand's ink on a pale theme, its paper on a dark one. The lockup
-   is sized by its cap height, 13 px: 158 px across. */
+/* In the sidebar its first stem stands on the text's left edge: the picker's name and the navigation labels (gutter +
+   inset). */
+.sidebar .wordmark { position: absolute; top: var(--space-16); left: calc(var(--sidebar-gutter) + var(--sidebar-inset)); }
+/* The brand's marks (components/NightmailLogo.tsx): the brand's ink on a pale theme, its paper on a dark one. The
+   wordmark is sized by its cap height, 13 px: 140 px across, which leaves the sidebar's row room for the theme button. */
 .nightmail-logo { display: block; flex: none; color: var(--color-logo); fill: currentColor; }
-.nightmail-wordmark { --logo-cap: 13px; width: calc(var(--logo-cap) * 12.12); height: var(--logo-cap); }
-/* The theme button stands beside the workspace picker, as tall as it; the picker leaves it its 28 px and a gap. The
-   row keeps the button's height where there is no picker (a member of a single-workspace install), so the navigation
-   starts at one height for everyone. */
-.theme-toggle { position: absolute; top: var(--sidebar-gutter); right: var(--sidebar-gutter); }
-.sidebar .theme-toggle { height: var(--control-height); }
-.sidebar-context { flex-shrink: 0; display: flex; flex-direction: column; gap: var(--space-6); min-height: var(--control-height); }
-.sidebar-context > :first-child { max-width: calc(100% - 28px - var(--space-8)); }
+.nightmail-wordmark { --logo-cap: 13px; width: calc(var(--logo-cap) * 10.8); height: var(--logo-cap); }
+/* The same top and height as the wordmark's row, so the button is centred on it. */
+.theme-toggle { position: absolute; top: var(--space-16); right: var(--sidebar-gutter); }
+.sidebar-context { flex-shrink: 0; display: flex; flex-direction: column; gap: var(--space-6); }
 /* The picker's name starts on the navigation labels' left edge. */
 .sidebar-context > :is(.ui-select-trigger, select) { padding-inline: var(--sidebar-inset); }
 .demo-indicator { align-self: flex-start; padding-inline: var(--sidebar-inset); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); cursor: help; }
@@ -218,6 +217,8 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 /* A small laptop or a landscape tablet: a narrower sidebar leaves the page room for its tables. */
 @media (max-width: 1100px) and (min-width: 900px) {
   :root { --sidebar-width: 200px; }
+  /* (The wordmark at 11 px caps, 119 px across, clears the theme button in the narrower row.) */
+  .sidebar .nightmail-wordmark { --logo-cap: 11px; }
 }
 @media (max-width: 850px) {
   .metrics-grid { grid-template-columns: repeat(2, 1fr); }
@@ -244,10 +245,13 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
    offset is set on it here rather than inherited from .app-shell--compact. */
 body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 .mobile-bar { display: flex; align-items: center; gap: var(--space-8); height: calc(var(--mobile-bar-height) + env(safe-area-inset-top)); padding: env(safe-area-inset-top) max(var(--space-8), env(safe-area-inset-right)) 0 max(var(--space-16), env(safe-area-inset-left)); background: var(--color-deep); }
-/* The bar opens with the workspace picker, as the sidebar does, and ends with the theme button. The picker's name
-   starts on the page's own left edge: its box is drawn out by its padding. */
-.mobile-bar__context { display: flex; flex: 1; align-items: center; gap: var(--space-8); min-width: 0; }
-.mobile-bar__context > :is(.ui-select-trigger, select):first-child { margin-left: calc(-1 * var(--space-8)); }
+/* The bar opens with the wordmark, on the page's own left edge; the workspace picker and the buttons keep to the right.
+   On a phone the wordmark's caps are as tall as the picker's name beside it (11 px, 119 px across), and a step smaller
+   on the narrowest phones, where the bar also holds the Help button. */
+.mobile-bar .wordmark { flex: none; height: 44px; }
+@media (max-width: 639px) { .mobile-bar .nightmail-wordmark { --logo-cap: 11px; } }
+@media (max-width: 379px) { .mobile-bar .nightmail-wordmark { --logo-cap: 10px; } }
+.mobile-bar__context { display: flex; flex: 1; align-items: center; justify-content: flex-end; gap: var(--space-8); min-width: 0; }
 .mobile-bar__context > :is(.ui-select-trigger, select) { width: auto; max-width: 100%; }
 .mobile-bar__context .demo-indicator { padding: 0; }
 /* Positioned (not static), so a touch screen's enlarged hit area (ui.css, .ui-button--sm::after) stays on the button
