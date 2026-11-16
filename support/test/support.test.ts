@@ -121,6 +121,12 @@ describe('support Worker', () => {
     const preflight = await mf.dispatchFetch(`${SUPPORT}/chat/start`, { method: 'OPTIONS', headers: { origin: ORIGIN } });
     assert.equal(preflight.headers.get('access-control-allow-origin'), ORIGIN);
     assert.equal((await mf.dispatchFetch(`${SUPPORT}/agents/support-conversation/x`)).status, 404, 'No client-named route to a Durable Object.');
+    // The tab icon of this Worker's own pages: the brand's tile, by the browser's theme.
+    for (const [path, fill] of [['/favicon.svg', '#0A0B0F'], ['/favicon-dark.svg', '#F4F2EC']]) {
+      const icon = await mf.dispatchFetch(`${SUPPORT}${path}`);
+      assert.deepEqual([icon.status, icon.headers.get('content-type')], [200, 'image/svg+xml']);
+      assert.ok((await icon.text()).includes(`fill="${fill}"`));
+    }
   });
 
   test('a chat: the agent greets first, answers with a tool, and the grant never leaves the Durable Object', async () => {

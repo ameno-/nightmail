@@ -20,7 +20,7 @@ import { PrivacyToggle } from './PrivacyToggle'
 import { togglePrivacy } from '../lib/privacy'
 import { SupportHost, SupportTrigger, useSupportChat } from './SupportChat'
 import { notesModifierLabel, useUiNotesMode, useUiNotesShortcut } from '../lib/ui-notes-mode'
-import { BaneWordmark } from './BaneLogo'
+import { NightmailWordmark } from './NightmailLogo'
 import { productName } from '../../../api/src/brand'
 
 // The sender score card (hosted): its code and data load with the shell, into a slot that already has its final size.
@@ -226,7 +226,7 @@ export function AppShell() {
   if (compact) return <div className="app-shell app-shell--compact">
     <a className="skip-link" href="#main-content">Skip to content</a>
     <header className="mobile-bar">
-      <NavLink className="wordmark" to="/" aria-label={`${productName.toLowerCase()} overview`}><BaneWordmark /></NavLink>
+      <NavLink className="wordmark" to="/" aria-label={`${productName.toLowerCase()} overview`}><NightmailWordmark /></NavLink>
       <div className="mobile-bar__context">{context}</div>
       {support.mode && <SupportTrigger chat={support} />}
       <ThemeToggle />
@@ -239,7 +239,7 @@ export function AppShell() {
   return <div className={support.mode ? 'app-shell app-shell--support' : 'app-shell'}>
     <a className="skip-link" href="#main-content">Skip to content</a>
     <aside className="sidebar">
-      <NavLink className="wordmark" to="/" aria-label={`${productName.toLowerCase()} overview`}><BaneWordmark /></NavLink>
+      <NavLink className="wordmark" to="/" aria-label={`${productName.toLowerCase()} overview`}><NightmailWordmark /></NavLink>
       <ThemeToggle />
       <div className="sidebar-context">{context}</div>
       {/* Members see every page: owner and admin ones carry a lock and explain who can use them. */}

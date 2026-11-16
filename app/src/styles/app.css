@@ -5,8 +5,10 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .sidebar { position: fixed; inset: 0 auto 0 0; width: var(--sidebar-width); background: var(--color-deep); z-index: 20; display: flex; flex-direction: column; gap: var(--space-16); padding: 56px var(--sidebar-gutter) var(--page-inset); overflow-y: auto; }
 .wordmark { position: absolute; top: var(--space-16); left: var(--sidebar-gutter); height: var(--space-24); display: flex; align-items: center; color: var(--color-text); text-decoration: none; }
 /* The logo starts on the sidebar's content edge: the same x as the workspace picker's border and the navigation pills. */
-.bane-wordmark { display: flex; align-items: center; gap: var(--space-6); font-size: var(--text-md); font-weight: 600; line-height: var(--leading-sm); letter-spacing: -.01em; white-space: nowrap; }
-.bane-wordmark svg { display: block; flex: none; }
+/* The brand's marks (components/NightmailLogo.tsx): the brand's ink on a pale theme, its paper on a dark one. The lockup
+   is sized by its cap height, 13 px: 158 px across, which leaves the sidebar's row room for the theme button. */
+.nightmail-logo { display: block; flex: none; color: var(--color-logo); fill: currentColor; }
+.nightmail-wordmark { --logo-cap: 13px; width: calc(var(--logo-cap) * 12.12); height: var(--logo-cap); }
 /* The same top and height as the logo row, so the toggle is centred on it. */
 .theme-toggle { position: absolute; top: var(--space-16); right: var(--sidebar-gutter); }
 .sidebar-context { flex-shrink: 0; display: flex; flex-direction: column; gap: var(--space-6); }
@@ -231,6 +233,9 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 .mobile-bar { display: flex; align-items: center; gap: var(--space-8); height: calc(var(--mobile-bar-height) + env(safe-area-inset-top)); padding: env(safe-area-inset-top) max(var(--space-8), env(safe-area-inset-right)) 0 max(var(--space-16), env(safe-area-inset-left)); background: var(--color-deep); }
 .mobile-bar .wordmark { position: static; flex: none; height: 44px; margin-right: auto; }
+/* A phone's bar has the workspace picker to hold: the logo there is the monogram's tile alone, 24 px (the lockup's own
+   left end: NightmailLogo.tsx). From 640 px the bar has room for the whole lockup. */
+@media (max-width: 639px) { .mobile-bar .nightmail-wordmark { --logo-cap: 24px; width: var(--logo-cap); } }
 .mobile-bar__context { display: flex; flex: 1; align-items: center; justify-content: flex-end; gap: var(--space-8); min-width: 0; }
 .mobile-bar__context > :is(.ui-select-trigger, select) { width: auto; max-width: 100%; }
 .mobile-bar__context .demo-indicator { padding: 0; }

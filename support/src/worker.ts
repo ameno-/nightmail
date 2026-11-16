@@ -6,6 +6,7 @@ import { MAX_IMAGE_BYTES } from './image.js';
 import { staff } from './staff.js';
 import { daily } from './limits.js';
 import { log, logError } from './log.js';
+import { FAVICON_LINKS, favicon } from './favicon.js';
 import { addresses, productName } from '../../api/src/brand.js';
 export { SupportConversation } from './conversation.js';
 export { SupportIntake, INTAKE, type Mailbox } from './intake.js';
@@ -202,9 +203,9 @@ async function intake(request: Request, env: Env): Promise<Response> {
   });
 }
 
-const page = (title: string, body: string, status = 200) => new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${title}</title>
+const page = (title: string, body: string, status = 200) => new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${title}</title>${FAVICON_LINKS}
 <style>body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:15vh auto;padding:0 1.25rem;color:#111}button{font:inherit;padding:.6rem 1.1rem;border-radius:.5rem;border:1px solid #111;background:#111;color:#fff;cursor:pointer}p.muted{color:#666;font-size:.9rem}</style></head><body>${body}</body></html>`,
-  { status, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'", 'referrer-policy': 'no-referrer', 'x-frame-options': 'DENY' } });
+  { status, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; frame-ancestors 'none'", 'referrer-policy': 'no-referrer', 'x-frame-options': 'DENY' } });
 const escape = (s: string) => s.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 
 /** "Confirm it's me": GET shows a button (mail scanners prefetch links, so GET never confirms); POST confirms once. */
@@ -235,6 +236,9 @@ function staffRoute(path: string) {
 async function route(request: Request, env: Env, url: URL, at: { route: string }): Promise<Response> {
   const path = url.pathname, name = (route: string) => { at.route = route; };
   if (path === '/health') { name('/health'); return json({ status: 'ok', service: 'bane-support', stage: env.STAGE }); }
+  // (The brand's tile, for the tabs of this Worker's own pages.)
+  const icon = request.method === 'GET' ? favicon(path) : null;
+  if (icon) { name('/favicon'); return icon; }
   if (request.method === 'OPTIONS' && (path.startsWith('/chat/') || /^\/c\/conv_[a-z2-7]{26}\/attachments$/.test(path))) {
     name(path.startsWith('/chat/') ? '/chat/*' : '/c/:conversationId/attachments');
     return new Response(null, { status: allowedOrigin(env, request) ? 204 : 403, headers: cors(env, request) });

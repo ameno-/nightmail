@@ -16,7 +16,7 @@ import { FirstSend } from '../docs/first-send'
 import { domainPattern, normalizeDomain } from '../../lib/domain'
 import { ApiError, type ConnectionKind, type ConnectionState, type ProviderConnection } from '../../data/types'
 import './onboarding.css'
-import { BaneWordmark } from '../../components/BaneLogo'
+import { NightmailWordmark } from '../../components/NightmailLogo'
 import { apiKeyEnv, productName, secretPrefixes } from '../../../../api/src/brand'
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
@@ -67,7 +67,7 @@ export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> 
   return <div className="onboarding-shell">
     <a className="skip-link" href="#main-content">Skip to content</a>
     <header className="onboarding-header">
-      <span className="wordmark"><BaneWordmark title={productName.toLowerCase()} /></span>
+      <span className="wordmark"><NightmailWordmark title={productName.toLowerCase()} /></span>
       <div className="onboarding-header-actions">
         <div className="onboarding-workspace"><AccountSwitcher /></div>
         <ThemeToggle />

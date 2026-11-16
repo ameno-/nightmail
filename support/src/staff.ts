@@ -4,6 +4,7 @@ import { purposeKey, sign, verify } from './tokens.js';
 import { TICKET_TYPES } from './agent/tools.js';
 import { TYPE_LABEL } from './tickets.js';
 import { log } from './log.js';
+import { FAVICON_LINKS } from './favicon.js';
 import { productName } from '../../api/src/brand.js';
 
 // The internal ticket list (support.<host>/staff). Staff identity is Nightmail's operator check, never a password here:
@@ -31,7 +32,7 @@ async function session(env: Env, request: Request): Promise<Staff | null> {
 }
 const csrf = async (env: Env, staff: Staff) => sign(await key(env), `csrf.${staff.userId}.${staff.exp}`);
 
-const page = (title: string, body: string, status = 200, headers: HeadersInit = {}) => new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${esc(title)}</title>
+const page = (title: string, body: string, status = 200, headers: HeadersInit = {}) => new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${esc(title)}</title>${FAVICON_LINKS}
 <style>body{font:14px/1.45 system-ui,sans-serif;margin:2rem auto;max-width:72rem;padding:0 1rem;color:#111}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ddd;padding:.45rem;text-align:left;vertical-align:top}th{font-weight:600}
 details pre{white-space:pre-wrap;background:#f6f6f6;padding:.6rem;border-radius:.4rem}.pill{display:inline-block;padding:0 .45rem;border-radius:1rem;background:#eee}.P1{background:#fdd}.P2{background:#fed}form.inline{display:inline}img{max-width:16rem;max-height:10rem;border:1px solid #ddd;margin:.2rem}
 nav a{margin-right:.6rem}button,select,input{font:inherit}</style></head><body>${body}</body></html>`,

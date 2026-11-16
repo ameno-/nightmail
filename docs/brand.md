@@ -1,25 +1,22 @@
 # Brand
 
-The logo is the **Stamp** mark next to the product name, **nightmail**. The word is always lowercase. Until the new lockup lands there, the dashboard (`BaneWordmark`) sets the word as text in the style below, and the lockup SVGs in `app/public/brand/` still spell bane.
-
-## The new marks (the homepage, for now)
-
-The signed-out homepage carries the new identity: the **NIGHTMAIL** wordmark in wide, squared-off capitals, and the **NM** monogram on a tile. The favicon, the app icons and the dashboard still use the Stamp until they are switched.
-
-- **Outlines:** `app/src/features/home/marks.ts`, copied from the final vector set (`wordmark.svg`, `monogram.svg`). Cap height is 1000 units; the wordmark is 10.8 cap heights wide.
-- **Lockup:** the tile, exactly as tall as the caps, one stem (0.32 of the cap height) left of the wordmark.
-- **Colour:** ink `#0A0B0F` on a pale ground, paper `#F4F2EC` on a dark one, and nothing else.
-- **On the homepage:** the header carries the monogram alone. The wordmark stands in lit letters at the head of the sorting frame, exactly as wide as the price under it (`sorter/name.ts`), and again across the page's end as solids cut off by the page's edge (`end-band.tsx`). `og.png` sets the lockup beside the machine.
-- **Don't** stretch, respace, redraw or recolour them. Where the wordmark is given depth (the frame's lit letters, the end band's solids), its face stays the outline itself and the sides take a darker tone.
+The logo is the **NIGHTMAIL** wordmark, in wide squared-off capitals, and the **NM** monogram on a square tile. The **lockup** is the tile with the wordmark beside it. In running text the product's name stays lowercase: nightmail.
 
 ## Files
 
 | file | use |
 | --- | --- |
-| `app/public/brand/bane-lockup-light.svg`, `bane-lockup-dark.svg` | mark and word, for light and dark backgrounds |
-| `app/public/brand/bane-mark.svg`, `bane-mark-dark.svg` | mark alone |
-| `app/src/components/BaneLogo.tsx` | the same paths in the dashboard: `BaneWordmark` (lockup) and `BaneMark`. They follow the theme. |
-| `app/public/favicon.svg`, `favicon.ico`, `apple-touch-icon.png`, `icon-*.png`, `og.png` | browser icons and the link-preview card. `node scripts/brand-assets.mjs` in `app/` rebuilds the icon PNG and ICO files from the SVGs, and photographs `og.png` from the built homepage (`bun run build` first; `BRAND_ONLY=og` for the card alone). |
+| `app/public/brand/nightmail-lockup.svg`, `nightmail-lockup-reversed.svg` | tile and wordmark on one line: ink for a pale background, paper (reversed) for a dark one |
+| `app/public/brand/nightmail-lockup-stacked.svg`, `nightmail-lockup-stacked-reversed.svg` | the tile centred over the wordmark |
+| `app/public/brand/nightmail-wordmark.svg` | the wordmark alone |
+| `app/public/brand/nightmail-monogram.svg`, `nightmail-monogram-reversed.svg` | the tile alone |
+| `app/public/brand/favicon-16.png`, `favicon-32.png`, `favicon-16.svg` | the tile drawn by hand for 16 and 32 px: `favicon.ico` is packed from the two PNGs |
+| `app/public/favicon.svg`, `favicon-dark.svg` | the 32 px drawing as a vector: ink for a browser's pale theme, paper for its dark one |
+| `app/public/favicon.ico`, `apple-touch-icon.png`, `icon-192.png`, `icon-512.png`, `icon-maskable-512.png`, `og.png` | browser and home-screen icons, and the link-preview card |
+| `app/src/lib/marks.ts` | the wordmark's and the monogram's outlines, as the app draws them |
+| `app/src/components/NightmailLogo.tsx` | `NightmailWordmark` (the lockup) and `NightmailMark` (the tile), each one inline SVG that follows the theme |
+
+The SVGs in `app/public/brand/`, `favicon.svg`, `favicon-dark.svg` and `apple-touch-icon.png` are the final vector set's own files, copied in unchanged. `node scripts/brand-assets.mjs` in `app/` builds the rest: it packs `favicon.ico`, draws the three manifest icons from `nightmail-monogram.svg`, and photographs `og.png` from the built homepage (`bun run build` first; `BRAND_ONLY=og` for the card alone, `BRAND_ONLY=icons` for everything but the card).
 
 Everything is outlined, so no font is needed to render the files. Use the PNGs in email, because many mail clients don't show SVG.
 
@@ -27,28 +24,40 @@ Everything is outlined, so no font is needed to render the files. Use the PNGs i
 
 | token | light | dark | used for |
 | --- | --- | --- | --- |
-| `--color-brand` | `#798ABA` · `oklch(0.638 0.075 269.2)` | the same | the mark |
-| `--color-text` | `#161616` | `#FAFAFA` | the word |
+| `--color-logo` | ink `#0A0B0F` | paper `#F4F2EC` | the wordmark and the monogram |
 
-The mark is a muted periwinkle in both themes. It meets the 3:1 floor for graphics on every background layer the logo sits on: 3.3:1 on light `--color-deep` (`#FAFAFA`), 3.4:1 on white and 3.05:1 on `--color-layer-2` (`#F2F2F2`). In dark mode it is 5.9:1 on `--color-deep` and 4.0:1 on `--color-layer-2`. Don't place it on anything darker than `#F2F2F2` in light mode. On a photo or a coloured background, use the one-colour mark in `--color-text`.
+The marks are set in the brand's ink on a pale ground and its paper on a dark one, and in nothing else. The app icons are the paper NM on a full square of ink. The periwinkle `--color-brand` (`#798ABA`) is an accent on the homepage's machine, not a logo colour.
 
 ## Construction
 
-- **Type:** Inter 600 at its display optical size (32), tracked −2%.
-- **Mark:** as tall as the x-height, sitting on the baseline, so it reads with the lowercase “ane” rather than towering to the ascender. Inter's x-height is 75% of its cap height.
-- **Gap:** 0.35× the mark's width, measured to the stem of the “b”.
-- **Mark weight:** the outer frame is 17% of the mark's height, the heaviest it can be before its white gaps close. The inner ring, centre square and perforations follow the original Stamp design.
-- **In the dashboard:** `BaneWordmark` sets “bane” as live Inter 600 text at 14 px with the 16 px mark beside it, 6 px apart, the mark centred on the word. The mark's left edge sits on the sidebar's content edge (`--sidebar-gutter`), the same x as the workspace picker's border and the navigation pills. The outlined files in `app/public/brand/` are for use outside the app.
+Measured with the cap height as 100:
+
+- **Wordmark:** 1080 wide; stems 32; corners rounded by 4.
+- **Tile:** a square exactly as tall as the caps, corner radius 12, with the NM cut out of it. The NM's stems are 11.9 and it stands 10 in from the tile's left and right edges.
+- **Lockup:** the tile one stem (32) left of the wordmark, on the same baseline: 1212 wide in all.
+- **Stacked lockup:** the tile at 240, centred over the wordmark, 96 above it.
+
+Where the app sets them:
+
+- **Dashboard sidebar, onboarding, legal pages:** `NightmailWordmark` at 13 px cap height, so 158 px across. In the sidebar its left edge is the content edge (`--sidebar-gutter`), the same x as the workspace picker's border and the navigation pills, and it leaves the row room for the theme button.
+- **A phone's top bar (under 640 px):** the tile alone at 24 px, since the bar also holds the workspace picker. From 640 px the bar carries the whole lockup.
+- **Support chat:** `NightmailMark` at 18 px beside the agent's name.
+- **Homepage:** the header carries the tile alone (26 px, 24 on a phone). The wordmark stands in lit letters at the head of the sorting frame, exactly as wide as the price under it (`features/home/sorter/name.ts`), and again across the page's end as solids cut off by the page's edge (`features/home/end-band.tsx`). `og.png` sets the lockup beside the machine.
 
 ## Clear space and size
 
-- **Clear space:** keep at least half the mark's height clear on every side.
-- **Minimum size:** the mark at 16 px tall, whether alone or in the lockup. Below that the perforations fill in.
-- **Favicon:** the mark alone, with its inner squares snapped to whole pixels at 16, 32 and 48 px (`favicon.svg` is on the 16 px grid), so the frame and rings stay sharp in a browser tab.
+- **Clear space:** keep at least half the cap height clear on every side of the lockup, and half the tile's side round the tile alone.
+- **Minimum size:** the lockup at 12 px cap height. The tile alone at 18 px as a vector; at 16 and 32 px use the hand-drawn tiles, whose stems are whole pixels.
+
+## Favicon and app icons
+
+- **Browser tab:** `favicon.ico` holds the hand-drawn 16 and 32 px tiles (ink tile, paper NM). Browsers that take a vector get `favicon.svg` on a pale theme and `favicon-dark.svg` on a dark one:
+  `<link rel="icon" href="/favicon.ico" sizes="32x32">`, then `<link rel="icon" type="image/svg+xml" href="/favicon.svg" media="(prefers-color-scheme: light)">` and the same for `/favicon-dark.svg` with `dark`. Keep `sizes="32x32"` on the `.ico`: with `16x16` listed too, Chrome takes the `.ico` over the vectors and a dark tab strip shows the ink tile. `app/index.html` and `app/public/signed-in/index.html` carry the links; the support Worker serves the two vectors for its own pages (`support/src/favicon.ts`: keep them the same drawing).
+- **Home screen:** `apple-touch-icon.png` (180) is a full square of ink with the paper NM, eight tenths of the side across; iOS rounds it. `icon-192.png` and `icon-512.png` are the same drawing. `icon-maskable-512.png` has the NM at eight tenths of that, inside the circle a launcher may crop to.
 
 ## Don't
 
-- Change the gap, the alignment or the tracking, or reset the word in another typeface.
-- Recolour the mark outside `--color-brand` and `--color-text`, or give the word the brand colour.
-- Add gradients, outlines, shadows or glows, or put the mark in a container shape. The square app icons are the one exception.
-- Stretch, rotate or crop the mark, or write the word in capitals.
+- Stretch, respace, redraw or rotate the marks, or set the wordmark in another typeface or in lowercase.
+- Recolour them outside ink and paper, or add gradients, outlines, shadows or glows.
+- Take the NM off its tile, or put the wordmark on a tile. The app icons, where the NM stands on a full square, are the one exception.
+- Crop the wordmark. The homepage's end band, cut off by the page's edge as a poster's is, is the one exception; there and in the sorting frame, where the wordmark is given depth, its face stays the outline itself and its sides take a darker tone.

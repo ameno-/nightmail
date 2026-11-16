@@ -1,10 +1,10 @@
 // The wordmark at the head of the sorting frame: lit letters as wide as the price, built into the machine so its
 // light, its shadows and whatever flies in front of them treat them as one more of its parts. A letter's face is the
-// brand's outline itself (marks.ts), flat and in the letters' own paper; it stands a little proud of the frame, and the
+// brand's outline itself (lib/marks.ts), flat and in the letters' own paper; it stands a little proud of the frame, and the
 // sides that are seen are in a second, darker material, so the face keeps the outline's exact shape by night and by day.
 import type { Builder, V3 } from './mesh'
 import { DX, DY, type Plan } from './plan'
-import { WORDMARK } from '../marks'
+import { WORDMARK } from '../../../lib/marks'
 import { contours, edges, triangles } from '../outline'
 
 export function nameOn(b: Builder, at: Plan['name'], face: number, side: number) {
