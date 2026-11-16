@@ -158,6 +158,6 @@ function LiveSegmentEditor({ initial, onCreated }: { initial: Segment | null; on
 function SegmentCounts({ id, at, listId, stale }: { id: string; at: string; listId: string; stale: boolean }) {
   const query = useApiQuery(['segments', 'preview', id, at, listId], (api, signal) => api.segments.preview({ id, name: '', match: 'all', rules: [], listId: listId || undefined }, signal))
   if (query.isPending) return <LoadingRegion label="Counting matching contacts"><AudienceSummarySkeleton /></LoadingRegion>
-  if (query.isError) return query.error instanceof ApiError && query.error.code === 'AUDIENCE_LIMIT_EXCEEDED' ? <p className="audience-summary muted">Over 1,000 contacts match, more than a preview counts; pick a list.</p> : <ErrorState error={query.error} onRetry={() => query.refetch()} />
+  if (query.isError) return query.error instanceof ApiError && query.error.code === 'AUDIENCE_LIMIT_EXCEEDED' ? <p className="audience-summary muted">Over 1,000 match, too many to preview; pick a list to count within it.</p> : <ErrorState error={query.error} onRetry={() => query.refetch()} />
   return <div className="audience-summary cluster"><span><strong>{number(query.data.matched)}</strong> match</span><span>{number(query.data.eligible)} can receive campaigns</span><span className="muted">{number(query.data.unsubscribed)} not subscribed</span><span className="muted">{number(query.data.suppressed)} suppressed</span>{stale && <span className="muted">Counts are for the saved conditions. Save to update them.</span>}</div>
 }
