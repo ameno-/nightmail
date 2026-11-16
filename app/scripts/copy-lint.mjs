@@ -98,7 +98,54 @@ export const RULES = {
   restate: 'A description that repeats its own heading or label tells the reader nothing new.',
   duplicate: 'The same sentence in two places of one feature drifts apart; say it once (a shared constant) or cut one.',
   typography: 'Curly quotes and apostrophes, and the single ellipsis character.',
+  tagline: 'A line under a heading (a page, section, dialog or empty state’s description) says what the heading and layout should: cut it, and fix the layout if the screen needs it.',
+  helper: 'Helper text under a form field: use a clearer label, a unit inside the input, a sensible default, or validation that shows only when something is wrong.',
+  caption: 'A secondary label (a caption, a sublabel, a meta line, “Optional”): cut it, or put the detail behind a click on its summary.',
 };
+
+// Ryan’s rule for every dashboard screen: “Cut taglines, helper text and secondary labels. If a screen needs them to make
+// sense, fix the layout.” The tagline, helper and caption rules find them (secondary below). What stays is listed here,
+// one entry per string, and only in these categories; errors, alerts, confirmations and accessibility text are never
+// secondary. `text` matches the start of the string as the linter reads it (code and variables as “…”).
+const KEEP_WHY = {
+  legal: 'legally required: terms a person accepts, consent to email them',
+  safety: 'what a destructive or irreversible action does, before it is taken',
+  billing: 'billing terms, before a charge',
+  secret: 'a secret shown once: save it now or lose it',
+};
+export const KEEP = [
+  { why: 'billing', file: 'features/settings/billing.tsx', text: /^Pays for email at \$0\.20 per 1,000 sent or received, plus any tax\.$/ },
+  { why: 'billing', file: 'features/settings/billing.tsx', text: /^Charges your saved card when the balance runs low, up to a monthly limit\.$/ },
+  { why: 'billing', file: 'features/settings/create-key.tsx', text: /^Billed by the day while the inbox has an app password\.$/ },
+  { why: 'secret', file: 'features/settings/create-key.tsx', text: /^Shown once: copy it now/ },
+  { why: 'secret', file: 'features/settings/webhooks.tsx', text: /^Keep it on your server: anyone with it can sign requests as …\.$|^Keep it on your server: anyone with it can sign requests as Nightmail\.$/ },
+  { why: 'legal', file: 'components/ContactSupport.tsx', text: /^Lets support read email bodies in this workspace, for this request only\.$/ },
+  { why: 'legal', file: 'features/audience/bulk.tsx', text: /^Confirm they (agreed before marking them subscribed|subscribed again)\.$/ },
+  { why: 'safety', file: 'App.tsx', text: /^Unsaved changes may be lost\.$/ },
+  { why: 'safety', file: 'components/AppShell.tsx', text: /^Unsaved changes on it may be lost\.$/ },
+  { why: 'safety', file: 'features/settings/workspace-members.tsx', text: /^They lose access to keys, domains, webhooks, sending and members at once\.$/ },
+];
+for (const k of KEEP) if (!KEEP_WHY[k.why]) throw new Error(`copy-lint KEEP: “${k.why}” is not a kept category (${Object.keys(KEEP_WHY).join(', ')})`);
+// State, not explanation: a loading line, or a short “No … yet” where a list or value would be.
+const STATE = /^(Loading\b.*…$|(No|Nothing)\b(?!\s*one\b)[^.:;]{0,32}\.?$)/;
+const HEADING_TAG = /^(h[1-6]|legend|PageHeader|SectionHeader)$/;
+const isHeadingEl = el => HEADING_TAG.test(tagName(el)) || /__title\b|-title\b/.test(classOf(el));
+// Which secondary rule a string breaks, if any.
+function secondary(item) {
+  if (item.srOnly || item.role === 'alert' || item.role === 'status' || STATE.test(item.text)) return null;
+  if (KEEP.some(k => k.file === item.file && k.text.test(item.text))) return null;
+  const { kind, prop, tag = '', cls = '' } = item;
+  if (['field', 'label', 'option', 'placeholder'].includes(kind) && /(^|\(|\s)optional\b/i.test(item.text)) return ['caption', '“Optional” is a secondary label: leave the field empty by default, or move it out of the required path'];
+  if (kind === 'description') return ['tagline', `a description${tag ? ` on ${tag}` : ''}: let the heading and layout say it`];
+  if (kind === 'empty' && tag) return ['tagline', 'an empty state’s description: the empty state is its heading and its action'];
+  if (kind === 'helper') {
+    if (prop === 'subtitle') return ['tagline', 'a subtitle under a page heading'];
+    if (tag === 'Field' && /^(hint|help|note)$/.test(prop ?? '') || !prop && /hint|help/.test(cls)) return ['helper', 'helper text under a field: fix the label, the control or its default instead'];
+    return ['caption', `a secondary line${prop ? ` (${prop})` : ''}: cut it, or open the detail from its summary`];
+  }
+  if (item.underHeading && ['body', 'description'].includes(kind)) return ['tagline', 'a line right under a heading: let the heading and layout say it'];
+  return null;
+}
 
 // ---------------------------------------------------------------- extraction
 const require = createRequire(join(app, 'package.json'));
@@ -183,7 +230,11 @@ function textKind(el, hint) {
 export function extract(file, code) {
   let ast;
   try { ast = parse(code, { sourceType: 'module', plugins: ['jsx', 'typescript'], errorRecovery: true }); } catch (error) { return [{ file, line: 1, kind: 'error', text: '', parseError: error.message }]; }
-  const items = [], seen = new Set(), consumed = new Set();
+  const items = [], seen = new Set(), consumed = new Set(), underHeading = new Set();
+  // The elements a JSX element renders as its children, through fragments and `cond && <p/>` or `a ? <p/> : <q/>`.
+  const rendered = e => !e ? [] : e.type === 'JSXElement' ? [e] : e.type === 'JSXFragment' ? e.children.flatMap(rendered)
+    : e.type === 'JSXExpressionContainer' || e.type === 'ParenthesizedExpression' ? rendered(e.expression)
+    : e.type === 'LogicalExpression' ? rendered(e.right) : e.type === 'ConditionalExpression' ? [...rendered(e.consequent), ...rendered(e.alternate)] : [];
   const emit = (node, kind, text, extra = {}) => {
     if (seen.has(node)) return; seen.add(node);
     text = clean(text);
@@ -210,7 +261,11 @@ export function extract(file, code) {
         const name = tagName(node);
         if (CODE.has(name) || name === 'style' || name === 'svg' || name === 'script') return;
         // An element with text of its own is one run, inline children included; without, each child speaks for itself.
-        if (!consumed.has(node) && kids(node).some(isText)) emit(node, textKind(node, hint), flatten(node.children, consumed), { tag: name, element: owner });
+        // A child right after a heading child (its subtitle or intro, if it is text).
+        const children = node.children.filter(c => c.type !== 'JSXText' || c.value.trim());
+        children.forEach((c, i) => { if (i && rendered(children[i - 1]).some(isHeadingEl)) for (const e of rendered(c)) if (!isHeadingEl(e)) underHeading.add(e); });
+        const cls = classOf(node);
+        if (!consumed.has(node) && kids(node).some(isText)) emit(node, textKind(node, hint), flatten(node.children, consumed), { tag: name, element: owner, cls, role: attr(node, 'role')?.value?.value, srOnly: /\bsr-only\b/.test(cls), underHeading: underHeading.has(node) });
         for (const a of node.openingElement.attributes) {
           if (a.type !== 'JSXAttribute' || !a.value) continue;
           const kindFor = PROP_KIND[a.name.name];
@@ -363,7 +418,11 @@ export function lint() {
     if (SKIP.test(file)) continue;
     const list = extract(file, readFileSync(path, 'utf8'));
     items.push(...list);
-    for (const item of list) for (const f of check(item)) findings.push({ ...f, item });
+    for (const item of list) {
+      for (const f of check(item)) findings.push({ ...f, item });
+      const s = secondary(item);
+      if (s) findings.push({ rule: s[0], message: s[1], item });
+    }
     findings.push(...relations(list));
   }
   findings.push(...duplicates(items));
