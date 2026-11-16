@@ -62,7 +62,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   let m!: Machine, parts!: Part[], px = 1, G = 1500, oyc = 0
   const L = bodies(MAX, true), kind = new Uint8Array(MAX), data = new Int32Array(MAX), seed = new Float32Array(MAX), burn = new Float32Array(MAX), burning = new Uint8Array(MAX), delay = new Float32Array(MAX), from = new Float32Array(MAX * 7)
   const scripts = new Map<number, Script>(), scale = new Float32Array(MAX).fill(1), tilt = new Float32Array(MAX)
-  let Dn = bodies(0, false), debrisPart: number[] = [], debrisHome: V3[] = [], selfPosed = new Set<number>(), boltBody = 0, hatchBody = 0, panelBody = 0, paneBody = 0, deckHome: V3[] = []
+  let Dn = bodies(0, false), debrisPart: number[] = [], debrisHome: V3[] = [], selfPosed = new Set<number>(), boltBody = 0, hatchBody = 0, panelBody = 0, paneBody = 0, deckHome: V3[] = [], away0 = new Float32Array(0), sides = -Infinity, clearX = 0
   const instances = new Float32Array(MAX * LETTER_FLOATS), fxData = new Float32Array(700 * FX_FLOATS), glowData = new Float32Array(64 * FX_FLOATS), airData = new Float32Array(4 * FX_FLOATS)
   // Quality, chosen for the device and lowered if frames come slowly: the canvas's pixel ratio, the shadow map, the size
   // of the smoke's buffer against the page, how many billows may be in the air, how much of the burst's mail is thrown.
@@ -158,7 +158,9 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     debrisPart = [m.idx.hopper, ...m.idx.vents, ...(m.idx.hatch < 0 ? [] : [m.idx.hatch]), m.idx.panel, ...m.idx.panes, ...m.idx.rollers, ...m.idx.flaps, ...m.idx.bolts]
     selfPosed = new Set([m.idx.hatch, ...m.idx.rollers, ...m.idx.flaps]); boltBody = debrisPart.length - m.idx.bolts.length; hatchBody = debrisPart.indexOf(m.idx.hatch); panelBody = debrisPart.indexOf(m.idx.panel); paneBody = debrisPart.indexOf(m.idx.panes[0])
     deckHome = p.lanes.map(x => [x, m.yR, p.zL] as V3); podOf.fill(-1); m.pods.forEach((unit, k) => { podOf[unit.lane] = k })
-    Dn = bodies(debrisPart.length, false)
+    // (How high what hangs on the tower's sides reaches, and how far out: what flies home from under it goes out first.)
+    sides = Math.max(-Infinity, ...p.pods.map(at => at.y + at.h), ...m.arms.filter(A => A.parts.lift >= 0).map(A => A.top[1] + m.rr + .3 * p.U)); clearX = p.Xc + Math.max(9.3 * p.U, p.P + 1.5 * p.U) + .7 * p.lw
+    Dn = bodies(debrisPart.length, false); away0 = new Float32Array(Dn.cap * 7)
     debrisHome = debrisPart.map((index, i) => {
       const part = m.parts[index], c: V3 = [(part.lo[0] + part.hi[0]) / 2, (part.lo[1] + part.hi[1]) / 2, (part.lo[2] + part.hi[2]) / 2]
       for (let k = 0; k < 3; k++) Dn.half[i * 3 + k] = Math.max(1, (part.hi[k] - part.lo[k]) / 2)
@@ -649,9 +651,13 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   function wake(i: number) { if (L.state[i] === ASLEEP) { L.state[i] = DYN; L.still[i] = 0 } }
 
   // ── Effects ──
-  function add(o: Partial<Fx> & { x: number; y: number; z: number }) {
+  // (One is taken from those that have gone out, and made only when there are none: a frame makes nothing.)
+  const spent: Fx[] = []
+  function add(x: number, y: number, z: number, vx: number, vy: number, vz: number, max: number, size: number, len: number, rot: number, c: number[], shape: number, gravity = 0, drag = 0, glow = false) {
     if (fx.length > 620) return
-    fx.push({ vx: 0, vy: 0, vz: 0, life: 0, max: 1, size: 4, grow: 0, rot: 0, spin: 0, r: 1, g: 1, b: 1, a: 1, shape: 0, gravity: 0, drag: 0, glow: false, len: 0, ...o })
+    const f = spent.pop() ?? { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, life: 0, max: 1, size: 4, grow: 0, rot: 0, spin: 0, r: 1, g: 1, b: 1, a: 1, shape: 0, gravity: 0, drag: 0, glow: false, len: 0 }
+    f.x = x; f.y = y; f.z = z; f.vx = vx; f.vy = vy; f.vz = vz; f.life = 0; f.max = max; f.size = size; f.grow = 0; f.rot = rot; f.spin = 0; f.r = c[0]; f.g = c[1]; f.b = c[2]; f.a = 1; f.shape = shape; f.gravity = gravity; f.drag = drag; f.glow = glow; f.len = len
+    fx.push(f)
   }
   // Steam and smoke. A billow is thrown with a velocity, slows in the air, rises by its own heat, swells and thins;
   // the renderer gives it its body (gl.ts). When the air holds all it may, the oldest gives way.
@@ -671,7 +677,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   /** Dust knocked up where something heavy lands. */
   function dust(x: number, y: number, z: number) { if (room()) for (let k = 0; k < 2; k++) emit(x, y + 2 * px, z, rnd(-70, 70) * px, rnd(8, 36) * px, rnd(-20, 20) * px, .6, rnd(2.5, 4) * px, rnd(18, 26) * px, rnd(.6, 1), .3, 0, 3.2, 6 * px) }
   function sparks(x: number, y: number, z: number, n: number, power = 240, c = colour.spark) {
-    for (let i = 0; i < n; i++) { const a = rnd(0, Math.PI * 2), s = rnd(.3, 1) * power * px; add({ x, y, z: z - 2, vx: Math.cos(a) * s, vy: Math.sin(a) * s + power * .3 * px, vz: rnd(-40, 40), max: rnd(.25, .6), size: 1.1 * px, len: rnd(3, 7) * px, r: c[0], g: c[1], b: c[2], shape: 1, gravity: 1, drag: 1.5 }) }
+    for (let i = 0; i < n; i++) { const a = rnd(0, Math.PI * 2), s = rnd(.3, 1) * power * px; add(x, y, z - 2, Math.cos(a) * s, Math.sin(a) * s + power * .3 * px, rnd(-40, 40), rnd(.25, .6), 1.1 * px, rnd(3, 7) * px, 0, c, 1, 1, 1.5) }
   }
   // The laser on the letter's side of the page turns to it and holds a beam on it for a quarter of a second (two flat
   // bars, red and a paler core, redrawn each frame from the muzzle to wherever the letter now is); the letter burns.
@@ -691,8 +697,8 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     const bx = from[0] + Math.cos(angle) * tip, by = from[1] + Math.sin(angle) * tip, length = Math.hypot(sx, sy) - tip, thin = Math.min(1, (b.until - time) / .09)
     // Drawn in the laser's own plane of depth, towards the page: a beam is never behind what it crosses.
     const mx = (bx + tx + DX * (tz - from[2])) / 2, my = (by + ty + DY * (tz - from[2])) / 2
-    add({ x: mx, y: my, z: from[2], max: .02, size: length / 2, len: 2.3 * thin, rot: angle, ...rgb(colour.red), shape: 4 })
-    add({ x: mx, y: my, z: from[2] - 1, max: .02, size: length / 2, len: 1.05 * thin, rot: angle, ...rgb(colour.spark), shape: 4 })
+    add(mx, my, from[2], 0, 0, 0, .02, length / 2, 2.3 * thin, angle, colour.red, 4)
+    add(mx, my, from[2] - 1, 0, 0, 0, .02, length / 2, 1.05 * thin, angle, colour.spark, 4)
     if (Math.random() < .3) sparks(tx, ty, tz, 1, 160, colour.ember)
   }
   /** The tube a lane's mail leaves by (plan.ts has the eight in their own order: inbox, agents, endpoints, threads; IMAP, rituals, campaigns, logs). */
@@ -730,7 +736,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     const cx = 0, cy = (p.yCav + p.yFas) / 2
     resetHeights()
     // Light, as an effect and only here: a hot core for two frames. The page behind is never lightened.
-    add({ x: cx, y: cy, z: -10, max: .075, size: 88 * px, ...rgb(colour.spark), a: 1, shape: 2, glow: true })
+    add(cx, cy, -10, 0, 0, 0, .075, 88 * px, 0, 0, colour.spark, 2, 0, 0, true)
     // Every letter in the works, and the hundreds the machine had swallowed, out through the front and the roof.
     for (const [i, s] of scripts) if (s.stage < 30) { L.pos[i * 3 + 2] = -6 * px; if (L.pos[i * 3 + 1] > p.yFas) L.pos[i * 3 + 1] = p.yTop + p.lh }
     // Each is thrown at a place: most onto the slab (heaped by the machine's sides, thinning out towards the slab's
@@ -786,7 +792,6 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
         Math.cos(a) * out * (roof ? .45 : 1), Math.abs(Math.sin(a)) * out * .45 + rnd(60, 230) * px, -rnd(0, 60) * px, i % 3 === 1 ? .3 : 1, rnd(9, 17) * px, rnd(22, 40) * px, rnd(2.4, 4.6), rnd(.72, .92), 1, 2.6, (roof ? 150 : 70) * px)
     }
   }
-  const rgb = (c: number[]) => ({ r: c[0], g: c[1], b: c[2] })
 
   // Back together: the letters are drawn up into the hopper, the parts fly home, the gauge falls to zero.
   function rebuild() {
@@ -796,7 +801,8 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       const o = i * 3, d = Math.hypot(L.pos[o], L.pos[o + 2])
       L.state[i] = HOME; scripts.delete(i); delay[i] = .05 + d * .00055 / px + rnd(0, .25); from.set([L.pos[o], L.pos[o + 1], L.pos[o + 2], L.quat[i * 4], L.quat[i * 4 + 1], L.quat[i * 4 + 2], L.quat[i * 4 + 3]], i * 7); L.still[i] = 0
     }
-    debrisPart.forEach((_, i) => { Dn.state[i] = HOME; Dn.still[i] = -(.5 + i * .01) })
+    // (Only what was blown off flies home: the hatch hangs on its hinge and swings back down by itself.)
+    debrisPart.forEach((_, i) => { if (Dn.state[i] === FREE) return; Dn.state[i] = HOME; Dn.still[i] = -(.5 + i * .01); for (let k = 0; k < 3; k++) away0[i * 3 + k] = Dn.pos[i * 3 + k]; const sg = Dn.quat[i * 4 + 3] < 0 ? -1 : 1; for (let k = 0; k < 4; k++) away0[Dn.cap * 3 + i * 4 + k] = sg * Dn.quat[i * 4 + k] })
     for (let i = 0; i < SM; i++) if (S.age[i] < S.life[i]) S.life[i] = Math.min(S.life[i], S.age[i] + rnd(.3, .8))
     calm(); resetHeights(true); pointer.held = -1; setHover(-1); volley = 0; sendIn = 2.4; keepClear.length = base
   }
@@ -924,7 +930,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     for (let k = beams.length - 1; k >= 0; k--) { if (time >= beams[k].until || L.state[beams[k].id] === FREE) beams.splice(k, 1); else beam(beams[k]) }
     for (let i = 0; i < MAX; i++) if (burning[i] && L.state[i] !== FREE) {
       burn[i] += dt * 1.3
-      if (Math.random() < dt * 12) add({ x: L.pos[i * 3] + rnd(-1, 1) * p.lw * .4, y: L.pos[i * 3 + 1], z: L.pos[i * 3 + 2] - 1, vx: rnd(-30, 30) * px, vy: rnd(20, 110) * px, max: rnd(.3, .8), size: rnd(.8, 1.6) * px, len: rnd(.8, 1.6) * px, ...rgb(colour.ember), shape: 1, gravity: -.12, drag: 1 })
+      if (Math.random() < dt * 12) add(L.pos[i * 3] + rnd(-1, 1) * p.lw * .4, L.pos[i * 3 + 1], L.pos[i * 3 + 2] - 1, rnd(-30, 30) * px, rnd(20, 110) * px, 0, rnd(.3, .8), rnd(.8, 1.6) * px, rnd(.8, 1.6) * px, 0, colour.ember, 1, -.12, 1)
       if (burn[i] > .25 && Math.random() < dt * 5) wisp(L.pos[i * 3], L.pos[i * 3 + 1] + p.lh * .3, L.pos[i * 3 + 2], 1, 9, .26)
       if (burn[i] >= 1.1) { for (let k = 0; k < 2; k++) wisp(L.pos[i * 3], L.pos[i * 3 + 1], L.pos[i * 3 + 2], 1, 11, .3); L.state[i] = FREE; burning[i] = 0; scripts.delete(i); burnt++; hooks.count(sorted, burnt); if (pointer.hover === i) setHover(-1) }
     }
@@ -935,9 +941,11 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
         left++; delay[i] -= dt
         if (delay[i] > 0) continue
         L.still[i] += dt / .55
-        // Up first, then across over the roof, then down into the hopper: never through the cabinet.
-        const u = clamp(L.still[i]), e = ease(u), o = i * 3, f = i * 7, over = m.hopperTop + p.lh * 2.2, rise = out(clamp(u / .5)), across = ease(clamp((u - .3) / .55)), down = ease(clamp((u - .78) / .22))
-        L.pos[o] = from[f] * (1 - across); L.pos[o + 1] = from[f + 1] + (Math.max(over, from[f + 1]) - from[f + 1]) * rise + (m.hopperTop + p.lh - Math.max(over, from[f + 1])) * down; L.pos[o + 2] = from[f + 2] + (p.zL - from[f + 2]) * across
+        // Up first, then across over the roof, then down into the hopper: never through the cabinet. (One lying beside
+        // the tower, under what hangs on its sides, first slides out from under it.)
+        const u = clamp(L.still[i]), e = ease(u), o = i * 3, f = i * 7, over = m.hopperTop + p.lh * 2.2, under = from[f + 2] > -p.lw && from[f + 1] < sides && Math.abs(from[f]) > p.Xc - p.lw && Math.abs(from[f]) < clearX
+        const rise = out(clamp((u - (under ? .14 : 0)) / .5)), across = ease(clamp((u - .3) / .55)), down = ease(clamp((u - .78) / .22)), x0 = under ? from[f] + (Math.sign(from[f]) * clearX - from[f]) * ease(clamp(u / .22)) : from[f]
+        L.pos[o] = x0 * (1 - across); L.pos[o + 1] = from[f + 1] + (Math.max(over, from[f + 1]) - from[f + 1]) * rise + (m.hopperTop + p.lh - Math.max(over, from[f + 1])) * down; L.pos[o + 2] = from[f + 2] + (p.zL - from[f + 2]) * across
         for (let k = 0; k < 4; k++) L.quat[i * 4 + k] = from[f + 3 + k] * (1 - e) + (k === 3 ? e : 0)
         const ql = 1 / Math.hypot(L.quat[i * 4], L.quat[i * 4 + 1], L.quat[i * 4 + 2], L.quat[i * 4 + 3]); for (let k = 0; k < 4; k++) L.quat[i * 4 + k] *= ql
         if (u >= 1) L.state[i] = FREE
@@ -945,8 +953,15 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       let away = 0
       for (let i = 0; i < Dn.cap; i++) if (Dn.state[i] === HOME) {
         Dn.still[i] += dt / .42
-        const u = clamp(Dn.still[i]), e = out(u), o = i * 3
-        if (u > 0) { for (let k = 0; k < 3; k++) Dn.pos[o + k] += (debrisHome[i][k] - Dn.pos[o + k]) * Math.min(1, e * .35 + dt * 6); for (let k = 0; k < 4; k++) Dn.quat[i * 4 + k] += ((k === 3 ? 1 : 0) - Dn.quat[i * 4 + k]) * Math.min(1, e * .4 + dt * 6); const ql = 1 / Math.hypot(Dn.quat[i * 4], Dn.quat[i * 4 + 1], Dn.quat[i * 4 + 2], Dn.quat[i * 4 + 3]); for (let k = 0; k < 4; k++) Dn.quat[i * 4 + k] *= ql }
+        // (Out in front of the machine first, from under whatever hangs on the tower's side, and over the roof if it
+        // belongs on it; then in to its place: never through the cabinet.)
+        const u = clamp(Dn.still[i]), o = i * 3, q = i * 4
+        if (u > 0) {
+          const t = ease(u), s = 1 - t, b0 = s * s * s, b1 = 3 * t * s * s, b2 = 3 * t * t * s, b3 = t * t * t, h = debrisHome[i], fx = away0[o], fy = away0[o + 1], fz = away0[o + 2]
+          const roof = h[1] > p.yTop - 1, under = fz > -p.lw && fy < sides && Math.abs(fx) > p.Xc - p.lw && Math.abs(fx) < clearX, up = Math.max(fy, h[1]) + (roof ? 3 * p.lh : 0), zf = Math.min(fz, -1.2 * p.lw)
+          Dn.pos[o] = b0 * fx + b1 * (under ? Math.sign(fx) * clearX : fx) + (b2 + b3) * h[0]; Dn.pos[o + 1] = b0 * fy + b1 * up + b2 * (roof ? up : h[1]) + b3 * h[1]; Dn.pos[o + 2] = b0 * fz + (b1 + b2) * zf + b3 * h[2]
+          let l = 0; for (let k = 0; k < 4; k++) { Dn.quat[q + k] = away0[Dn.cap * 3 + q + k] * s + (k === 3 ? t : 0); l += Dn.quat[q + k] ** 2 } l = 1 / Math.sqrt(l); for (let k = 0; k < 4; k++) Dn.quat[q + k] *= l
+        }
         if (u >= 1) Dn.state[i] = FREE; else away++
       }
       needleV += ((0 - needle) * 40 - needleV * 8) * dt; needle += needleV * dt
@@ -1060,7 +1075,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     // Effects.
     for (let k = fx.length - 1; k >= 0; k--) {
       const f = fx[k]; f.life += dt
-      if (f.life >= f.max) { fx[k] = fx[fx.length - 1]; fx.pop(); continue }
+      if (f.life >= f.max) { spent.push(f); fx[k] = fx[fx.length - 1]; fx.pop(); continue }
       f.vy -= G * f.gravity * dt; const d = 1 - f.drag * dt; f.vx *= d; f.vy *= d; f.vz *= d
       f.x += f.vx * dt; f.y += f.vy * dt; f.z += f.vz * dt; f.size += f.grow * dt; f.rot += f.spin * dt
       if (f.gravity > 0 && f.y < 1 && f.z < 0) { f.y = 1; f.vy *= -.3; f.vx *= .5 }
@@ -1107,6 +1122,8 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
 
   /** What falls past the slab dwindles over the last of the canvas, so nothing is cut off where the canvas ends. */
   const dwindle = (y: number, z: number) => clamp((p.floor + p.ext + y + DY * z - 30) / (p.ext * .5))
+  // (What is drawn, handed to the renderer in the same object every frame.)
+  const scene = { parts: [] as Part[], letters: instances, letterCount: 0, fx: fxData, fxCount: 0, shifts, glow: glowData, glowCount: 0, air: airData, airCount: 0, smoke: smokeData, smokeCount: 0, flash: 0, flashAt: [0, 0, 0], flashR: 0, wallOn: true }
   function render() {
     let n = 0
     for (let i = 0; i < MAX; i++) if (L.state[i] !== FREE) {
@@ -1133,7 +1150,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     // By night, where the page is wide enough to show it, the air behind the machine takes a little of the lamp's
     // light: what the machine stands out against. (One faint slope of light, drawn first, behind everything.)
     let air = 0
-    if (dark && !p.phone) for (const [x, y, w, h, r, gr, b, a] of [[0, p.yTop * .62, p.Xc * 2.4, p.yTop * .9, .62, .68, 1, .07]]) airData.set([x, y, p.D * .5, w, h, 0, r, gr, b, a, 2], air++ * FX_FLOATS)
+    if (dark && !p.phone) { airData[0] = 0; airData[1] = p.yTop * .62; airData[2] = p.D * .5; airData[3] = p.Xc * 2.4; airData[4] = p.yTop * .9; airData[5] = 0; airData[6] = .62; airData[7] = .68; airData[8] = 1; airData[9] = .07; airData[10] = 2; air = 1 }
     // Billows, the oldest first: a new one comes out in front of what is already in the air.
     let sn = 0
     for (let k = Math.max(0, S.head - SM); k < S.head; k++) {
@@ -1143,7 +1160,8 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       smokeData[o] = S.pos[i * 3]; smokeData[o + 1] = S.pos[i * 3 + 1]; smokeData[o + 2] = S.pos[i * 3 + 2]; smokeData[o + 3] = S.size[i]; smokeData[o + 4] = S.rot[i]
       smokeData[o + 5] = S.age[i] / S.life[i]; smokeData[o + 6] = S.seed[i]; smokeData[o + 7] = dark || S.kind[i] > .5 ? S.dens[i] : S.dens[i] * clamp(1 - (Math.abs(S.pos[i * 3] + DX * S.pos[i * 3 + 2]) - p.Xc) / (70 * px)); smokeData[o + 8] = S.kind[i]; smokeData[o + 9] = S.heat[i]
     }
-    renderer!.draw({ parts, letters: instances, letterCount: n, fx: fxData, fxCount: a, shifts, glow: glowData, glowCount: g, air: airData, airCount: air, smoke: smokeData, smokeCount: sn, flash, flashAt: [0, (p.yCav + p.yFas) / 2, 0], flashR: p.cavity * 1.25, wallOn: true })
+    scene.parts = parts; scene.letterCount = n; scene.fxCount = a; scene.glowCount = g; scene.airCount = air; scene.smokeCount = sn; scene.flash = flash; scene.flashAt[1] = (p.yCav + p.yFas) / 2; scene.flashR = p.cavity * 1.25
+    renderer!.draw(scene)
   }
 
   // ── The pointer: read a letter, drag it, burn a scam ──
