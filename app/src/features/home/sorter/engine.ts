@@ -1220,7 +1220,10 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       smokeData[o] = S.pos[i * 3]; smokeData[o + 1] = S.pos[i * 3 + 1]; smokeData[o + 2] = S.pos[i * 3 + 2]; smokeData[o + 3] = size; smokeData[o + 4] = S.rot[i]
       smokeData[o + 5] = S.age[i] / S.life[i]; smokeData[o + 6] = S.seed[i]; smokeData[o + 7] = thin * (dark || S.kind[i] > .5 ? S.dens[i] : S.dens[i] * clamp(1 - (Math.abs(sx) - p.Xc) / (70 * px))); smokeData[o + 8] = S.kind[i]; smokeData[o + 9] = S.heat[i]
     }
-    scene.parts = parts; scene.letterCount = n; scene.fxCount = a; scene.glowCount = g; scene.airCount = air; scene.smokeCount = sn; scene.flash = flash; scene.flashAt[1] = (p.yCav + p.yFas) / 2; scene.flashR = p.cavity * 1.25
+    // (The burst's light reaches as far as the works' window is big; a phone's window is small, and so much light in
+    // so little room lit the readout's screen alone in a pool with the console dark round it: there it reaches across
+    // the tower's whole face.)
+    scene.parts = parts; scene.letterCount = n; scene.fxCount = a; scene.glowCount = g; scene.airCount = air; scene.smokeCount = sn; scene.flash = flash; scene.flashAt[1] = (p.yCav + p.yFas) / 2; scene.flashR = p.phone ? Math.max(p.cavity * 1.25, .85 * p.Xc) : p.cavity * 1.25
     renderer!.draw(scene)
   }
 
