@@ -313,6 +313,15 @@ jobs:
         if: always() && steps.changes.outputs.run == 'true' && hashFiles('app/.cls/density.json') != ''
         working-directory: app
         run: node scripts/density.mjs --from .cls/density.json
+      - name: Save density measurements for baseline updates
+        if: success() && steps.changes.outputs.run == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: density-${{ matrix.shard }}
+          path: app/.cls/density.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
       - name: Upload the shift sources and density report
         if: failure() && steps.changes.outputs.run == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
