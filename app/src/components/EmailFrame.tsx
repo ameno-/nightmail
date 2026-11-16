@@ -9,7 +9,9 @@ import { useEffect, useState, useSyncExternalStore } from 'react'
 // cropped to that span (the empty margins around a 600 px email in an 800 px window) and scaled to fit its column.
 export const FRAME_WIDTH = { desktop: 800, mobile: 390 } as const
 export type FrameDevice = keyof typeof FRAME_WIDTH
-const GUARD = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; form-action 'none'; base-uri 'none'"><meta name="referrer" content="no-referrer"><style>html{scrollbar-width:none}html::-webkit-scrollbar{display:none}</style>`
+// An emulation drops remote images' src (the API's previewEmail): their boxes show as flat placeholders, so a missing
+// image reads as one not loaded, not as the email's design.
+const GUARD = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; form-action 'none'; base-uri 'none'"><meta name="referrer" content="no-referrer"><style>html{scrollbar-width:none}html::-webkit-scrollbar{display:none}img:not([src]){background:rgba(128,128,128,.22)}</style>`
 /** An emulated client's HTML (the API's previewEmail) as a frame document, with the guard first in its head. */
 export const frameDocument = (html: string) => /<head\b[^>]*>/i.test(html) ? html.replace(/<head\b[^>]*>/i, head => head + GUARD) : GUARD + html
 

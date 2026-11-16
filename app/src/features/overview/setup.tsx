@@ -1,7 +1,7 @@
 import { useState, type CSSProperties, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router'
-import { Check, Info } from 'lucide-react'
+import { ArrowUpRight, Check, Info } from 'lucide-react'
 import { useApi, useApiDef, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { request } from '../../data/live'
@@ -57,9 +57,11 @@ export function DailyLimit({ report }: { report: SenderScore | undefined }) {
   </section>
 }
 
-export type SetupStep = { key: string; done: boolean; title: string; detail: ReactNode; action?: ReactNode; optional?: boolean }
+// A step is its title and, while open, its action; `note` is only the test email's confirmation.
+export type SetupStep = { key: string; done: boolean; title: string; action?: ReactNode; note?: ReactNode }
 
-// Hosted admins until the first email is sent: each step read from server state, not from this browser.
+// Hosted admins until the first email is sent: each step read from server state, not from this browser. Receiving is
+// not a step: once these are done, the next steps offer it (score/index.tsx).
 // `loading` is true until the setup read (shared with the next steps) settles, so the page can hold its layout until it knows.
 export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; current?: SetupStep; open?: SetupStep[] } {
   const { multiTenant, canAdminister } = useWorkspaceAccess()
@@ -67,9 +69,6 @@ export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; 
   const client = useQueryClient()
   const enabled = multiTenant && canAdminister && identity?.connection?.state === 'ready'
   const setup = useApiDef(queries.overviewSetup(), { enabled })
-  // Receiving counts as set up once an address exists, not merely once the MX record resolves.
-  const receivingVerified = setup.data?.domains?.some(domain => domain.receiving === 'verified') ?? false
-  const inbound = useApiDef(queries.inboundDomains(), { enabled: enabled && receivingVerified })
   // A test sent from the steps keeps them up, with its result, until the next visit.
   const [testId, setTestId] = useState<string | null>(null)
   // The new email shows in Latest emails, the facts and the next steps without a reload.
@@ -78,46 +77,43 @@ export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; 
     void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && ['overview', 'overview-setup', 'logs', 'emails', 'sender-score', 'sending-limit'].includes(String(query.queryKey[2])) }).catch(() => {})
   }
   if (!enabled) return { loading: false, steps: null }
-  if (setup.isPending || (receivingVerified && inbound.isPending && !inbound.error)) return { loading: true, steps: null }
+  if (setup.isPending) return { loading: true, steps: null }
   if (setup.error || !setup.data.domains || !setup.data.apiKeys) return { loading: false, steps: null }
   const items = setup.data.domains, keyed = setup.data.apiKeys.active > 0
   const verified = items.find(domain => domain.status === 'verified')
   // The setup read carries the ten newest domains; an older verified one still counts (the session's domain summary).
   const domainDone = !!verified || (identity?.connection?.domains?.verified ?? 0) > 0
   const pending = items.find(domain => domain.status !== 'verified')
-  const receiving = items.find(domain => domain.receiving === 'verified')
-  const addresses = inbound.data?.reduce((sum, domain) => sum + domain.addressCount, 0) ?? 0
   const sent = setup.data.emails.any || !!testId
   if (domainDone && keyed && sent && !testId) return { loading: false, steps: null }
   const steps: SetupStep[] = [
     { key: 'domain', done: domainDone, title: 'Verify a domain',
-      detail: verified ? `${verified.name} can send.` : domainDone ? 'Your domain can send.' : pending ? `${pending.name} is waiting for its DNS records.` : 'Add your domain and publish its DNS records.',
       action: !domainDone && <Link className="ui-button ui-button--secondary ui-button--md" to={pending ? `/domains/${pending.id}` : '/domains'}>{pending ? 'View records' : 'Add domain'}</Link> },
-    { key: 'key', done: keyed, title: 'Create an API key', detail: keyed ? 'Your app or agent can authenticate.' : verified ? `A Send only key for ${verified.name} is enough.` : 'A Send only key restricted to your domain is enough.',
+    { key: 'key', done: keyed, title: 'Create an API key',
       action: !keyed && <Link className="ui-button ui-button--secondary ui-button--md" to={verified ? `/api-keys?create=send&domain=${encodeURIComponent(verified.name)}` : '/api-keys?create=send'}>Create key</Link> },
-    { key: 'send', done: sent, title: 'Send your first email', detail: testId ? <>Test email queued to {identity?.email && <PrivateAddress value={identity.email} />}. <Link to={`/logs/${encodeURIComponent(testId)}`}>View in Logs</Link></> : sent ? 'It’s in Logs.' : verified ? <>Send a test to yourself, or use the examples in <Link to="/docs#quickstart">Docs</Link>.</> : domainDone ? <>Use the examples in <Link to="/docs#quickstart">Docs</Link>.</> : 'Possible once a domain is verified.',
-      action: !sent && verified && <TestSend domain={verified} onSent={sentTest} /> },
-    { key: 'receive', done: !!receiving && addresses > 0, optional: true, title: 'Receive email', detail: receiving ? `${receiving.name} can receive. Create an address like support@.` : 'Add the receiving MX record from a domain’s page.',
-      action: receiving ? addresses === 0 && <Link className="ui-button ui-button--ghost ui-button--md" to="/receiving">Create address</Link> : (verified ?? pending) && <Link className="ui-button ui-button--ghost ui-button--md" to={`/domains/${(verified ?? pending)!.id}`}>Set up</Link> },
+    // The test send names its from and to addresses itself; with no verified domain in this read to test from, the code examples.
+    { key: 'send', done: sent, title: 'Send your first email',
+      note: testId ? <>Test email queued to {identity?.email && <PrivateAddress value={identity.email} />}. <Link to={`/logs/${encodeURIComponent(testId)}`}>View in Logs</Link></> : undefined,
+      action: !sent && (verified ? <TestSend domain={verified} onSent={sentTest} /> : <Link className="ui-button ui-button--secondary ui-button--md" to="/docs#quickstart">Code examples</Link>) },
   ]
   // Sending a test needs only a verified domain (it uses this session, not a key), so its step opens beside the key step.
-  const current = steps.find(step => !step.done && !step.optional) ?? steps.find(step => !step.done)
+  const current = steps.find(step => !step.done)
   // The first email's step stays open once sent, so its confirmation and the link to Logs are seen.
   const open = steps.filter(step => step === current || (step.key === 'send' && (!!testId || (!step.done && domainDone))))
   return { loading: false, steps, current, open }
 }
 
-// Numbered steps in Overview's detail column; only the current step is open. A finished step's number turns into a check.
+// Numbered steps in Overview's detail column; only the current step is open, with its action. A finished step's number
+// turns into a check, so the marks are the progress. Docs, for the code examples, sits on the title row.
 export function SetupRail({ steps, current, open: opened = current ? [current] : [] }: { steps: SetupStep[]; current?: SetupStep; open?: SetupStep[] }) {
-  const required = steps.filter(step => !step.optional)
   return <section className="setup-rail" aria-label="Get started">
-    <div className="setup-rail__head"><h2>Get started</h2><span className="muted">{required.filter(step => step.done).length} of {required.length} done</span></div>
+    <div className="setup-rail__head"><h2>Get started</h2><Link className="ui-button ui-button--ghost ui-button--sm" to="/docs#quickstart">Docs <ArrowUpRight size={16} /></Link></div>
     <ol>{steps.map((step, index) => {
       const open = opened.includes(step)
       return <li key={step.key} data-done={step.done || undefined} data-open={open || undefined} style={{ '--i': index } as CSSProperties}>
         <span className="setup-rail__mark" aria-hidden="true"><span>{index + 1}</span><Check size={12} strokeWidth={2.75} /></span>
-        <div className="setup-rail__body"><span>{step.title}{step.optional && <span className="muted"> · optional</span>}{step.done && <span className="sr-only"> (done)</span>}</span>
-          {open && <><span className="muted">{step.detail}</span>{step.action && <div className="setup-rail__action">{step.action}</div>}</>}
+        <div className="setup-rail__body"><span>{step.title}{step.done && <span className="sr-only"> (done)</span>}</span>
+          {open && <>{step.note && <span className="muted">{step.note}</span>}{step.action && <div className="setup-rail__action">{step.action}</div>}</>}
         </div>
       </li>
     })}</ol>

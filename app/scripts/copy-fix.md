@@ -41,6 +41,22 @@ Shorten, never hide: numbers, limits, prices and consequences stay.
 | `long-block` | A text block over 25 words | Cut it, or move it to the docs |
 | `inert` | An explanation of 15+ words with nothing to act on near it | Put it next to its control, or cut it |
 
+## Secondary text: cut it, fix the layout
+
+Ryan’s rule for every dashboard screen: “Cut taglines, helper text and secondary labels. If a screen needs them to make
+sense, fix the layout.” `copy-lint` finds them; the baseline for these three rules is zero, so any new one fails.
+
+| Id | Finds | Fix |
+| --- | --- | --- |
+| `tagline` | A line under a heading: a page, section, dialog or sheet description, a muted intro, an empty state’s description | Cut it. If the screen needs it: a clearer heading, grouping and order, an empty state that is just its action |
+| `helper` | Helper text under a form field (`Field hint`, `.hint`/`.help` lines) | A clearer label, a unit inside the input, a sensible default, validation that shows only when something is wrong |
+| `caption` | Any other secondary line: a row’s, option’s or menu item’s hint, a meta line, a `small`, “Optional” | Cut it, or put the detail behind a click on its summary (a `Disclosure`, a dialog) |
+
+Never hide what someone needs to operate safely: move it behind its summary instead of deleting it. Kept on purpose,
+and only these (`KEEP` in `copy-lint.mjs`, one entry per string): legal and consent text, what a destructive action
+does before it is taken, billing terms before a charge, and a secret shown once. Errors, alerts, confirmations,
+loading lines and accessibility text are never secondary.
+
 ## Glossary: one name per concept
 
 | Use | Not |

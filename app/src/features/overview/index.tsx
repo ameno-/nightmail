@@ -136,7 +136,7 @@ function Spark({ values: target, tone }: { values: number[]; tone: string }) {
 
 function Chart({ data, range, live, stale }: { data: Overview; range: TimeRange; live: boolean; stale: boolean }) {
   return <section className="ov-chart" aria-label="Sending activity" data-stale={stale || undefined}>
-    <div className="ov-chart__head"><h2>Activity</h2><div className="chart-legend"><span><i className="legend-sent" />Emails</span><span><i className="legend-bounces" />Bounces</span><span><i className="legend-complaints" />Complaints</span></div></div>
+    <div className="ov-chart__head"><h2>Activity</h2></div>
     <Crossfade id={data.sent ? buckets(data.points) : 'empty'} className="ov-chart__plot">{data.sent ? <ActivityChart points={data.points} createdOnly={live} range={range} /> : <EmptyState title="No emails in this period" />}</Crossfade>
   </section>
 }
@@ -229,8 +229,10 @@ export function ActivityChart({ points: target, range, createdOnly = false }: { 
   // Up to six ticks after the first, fewer when the plot is too narrow for their labels.
   const tickSteps = Math.max(1, Math.min(6, Math.floor((right - left) / 72)))
   const tickIndices = [...new Set([0, ...Array.from({ length: tickSteps }, (_, i) => Math.round((i + 1) * (points.length - 1) / tickSteps))])]
-  return <div ref={container} className="activity-chart" onMouseLeave={() => setActive(null)}><svg viewBox={`0 0 ${width} ${height}`} role="group" aria-label={createdOnly ? `Emails created per ${hourly ? 'hour' : 'day'} on the left scale; outcomes for those emails on the right scale.` : `Email activity per ${hourly ? 'hour' : 'day'}. Sends use the left scale; bounces and complaints use the right scale.`}>
-    <text x={0} y={12} className="chart-label">Emails</text>{hasOutcomes && <text x={width - 2} y={12} textAnchor="end" className="chart-label">Bounces and complaints</text>}
+  // The legend is the scales' titles: Emails over the left scale, bounces and complaints over the right one.
+  return <div ref={container} className="activity-chart" onMouseLeave={() => setActive(null)}>
+    <div className="activity-chart__keys"><span className="chart-legend"><span><i className="legend-sent" />Emails</span></span>{hasOutcomes && <span className="chart-legend"><span><i className="legend-bounces" />Bounces</span><span><i className="legend-complaints" />Complaints</span></span>}</div>
+    <svg viewBox={`0 0 ${width} ${height}`} role="group" aria-label={createdOnly ? `Emails created per ${hourly ? 'hour' : 'day'} on the left scale; outcomes for those emails on the right scale.` : `Email activity per ${hourly ? 'hour' : 'day'}. Sends use the left scale; bounces and complaints use the right scale.`}>
     {[0, 1, 2, 3].map(i => <line key={i} x1={left} x2={right} y1={top + i * (bottom - top) / 3} y2={top + i * (bottom - top) / 3} className="chart-grid" />)}
     <Crossfade as="g" id={`${maxSent}:${hasOutcomes ? maxException : ''}`}>{[0, 1, 2, 3].map(i => <g key={i}><text x={0} y={top + i * (bottom - top) / 3 + 4} className="chart-label">{number(Math.round(maxSent * (1 - i / 3)))}</text>{hasOutcomes && <text x={width - 2} y={top + i * (bottom - top) / 3 + 4} textAnchor="end" className="chart-label">{number(Math.round(maxException * (1 - i / 3)))}</text>}</g>)}</Crossfade>
     {points.map((p, i) => p.sent > 0 && <rect key={p.at} x={x(i) - barWidth / 2} y={y(p.sent, sentScale)} width={barWidth} height={bottom - y(p.sent, sentScale)} rx={Math.min(2, barWidth / 2)} className={`chart-bar${active === i ? ' chart-bar--active' : ''}`} />)}{hasOutcomes && <><path d={line('bounced', exceptionScale)} className="chart-line chart-line--bounces" /><path d={line('complaints', exceptionScale)} className="chart-line chart-line--complaints" /></>}

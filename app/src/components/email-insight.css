@@ -139,8 +139,7 @@
 .ev-column { container-type: inline-size; display: flex; flex: none; flex-direction: column; min-width: 0; }
 .ev-placeholder { width: min(100%, 600px); height: 480px; margin-inline: auto; border-radius: var(--radius-sm); background: var(--color-layer-2); animation: ui-pulse 1.2s ease-in-out infinite alternate; }
 .ev[data-fill] .ev-placeholder { height: 100%; background: var(--color-layer-1); }
-/* A caption: what the column shows; for a client, its issue count (opening the list over its frame) and a note that it
-   is an emulation without remote images, shortened in a narrow column. */
+/* A caption: what the column shows; for a client, its issue count (opening the list over its frame). */
 .ev-caption { container-type: inline-size; display: flex; flex: none; align-items: center; justify-content: space-between; gap: var(--space-12); max-width: 100%; min-height: var(--control-height); }
 .ev-caption:not([style]) { flex: 1 1 auto; }
 .ev-caption__label { min-width: 0; overflow: hidden; color: var(--color-muted); text-overflow: ellipsis; white-space: nowrap; }
@@ -150,11 +149,7 @@
 .ev-caption__issues .ei-dot { margin-top: 0; }
 .ev-caption__issues > svg { flex: none; width: 14px; height: 14px; color: var(--color-faint); transition: transform 200ms var(--ease-out-strong); }
 .ev-caption__issues[aria-expanded='true'] > svg { transform: rotate(90deg); }
-.ev-caption__classic { margin-left: -4px; color: var(--color-muted); }
 .ev-caption__clear { display: inline-flex; flex: none; align-items: center; gap: var(--space-6); color: var(--color-success); white-space: nowrap; }
-.ev-caption__note { flex: none; border-radius: 2px; color: var(--color-faint); font-size: var(--text-xs); white-space: nowrap; cursor: default; }
-@container (max-width: 600px) { .ev-caption__more { display: none; } }
-@container (max-width: 440px) { .ev-caption__classic { display: none; } }
 .ev-issues > div { display: flex; flex-direction: column; gap: var(--space-8); min-height: 0; overflow: clip; }
 .ev-issues > div > :last-child { margin-bottom: var(--space-12); }
 .ei-issues { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--color-border-muted); }

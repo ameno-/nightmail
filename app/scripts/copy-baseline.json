@@ -1,9 +1,23 @@
 {
  "about": "Copy lint findings accepted so far (app/scripts/copy-lint.mjs), as “line: text” per file and rule. Only new ones fail; fix one and the next local run removes it. Regenerate with: bun run copy-lint --update-baseline",
  "findings": {
+  "app/src/components/AccountSwitcher.tsx": {
+   "caption": [
+    "87: up to … accounts. sign out of one to add another."
+   ]
+  },
+  "app/src/components/ContactSupport.tsx": {
+   "helper": [
+    "38: optional. … / …"
+   ],
+   "tagline": [
+    "28: mention it when you email us.",
+    "35: brand support gets your message, the page you’re on and any "
+   ]
+  },
   "app/src/components/EmailInsight.tsx": {
    "length/label": [
-    "206: can i email (opens in a new tab)"
+    "205: can i email (opens in a new tab)"
    ]
   },
   "app/src/components/LegalLinks.tsx": {
@@ -11,9 +25,506 @@
     "8: by continuing you agree to the terms of service and privacy "
    ]
   },
+  "app/src/components/PrivacyToggle.tsx": {
+   "helper": [
+    "9: blur email addresses"
+   ]
+  },
+  "app/src/data/context.tsx": {
+   "tagline": [
+    "88: you were invited…. …"
+   ]
+  },
+  "app/src/features/audience/bulk.tsx": {
+   "helper": [
+    "47: saved in each consent record, like “ticked the newsletter bo"
+   ],
+   "tagline": [
+    "37: marks each contact with unknown consent …; opt-outs and supp",
+    "41: no one …has unknown consent.",
+    "44: and … more"
+   ]
+  },
+  "app/src/features/audience/contacts.tsx": {
+   "caption": [
+    "107: how did they agree? (optional)",
+    "107: how did they opt out? (optional)"
+   ],
+   "helper": [
+    "61: two-letter country code, e.g. us.",
+    "107: saved in this contact’s consent history, for example “…”."
+   ],
+   "tagline": [
+    "41: everyone here has a consent decision.",
+    "41: the people you email. import a csv or add them one by one.",
+    "119: emails in …",
+    "125: changes appear here when this person subscribes, opts out or"
+   ]
+  },
+  "app/src/features/audience/import.tsx": {
+   "helper": [
+    "95: each contact’s first and last name, joined.",
+    "95: joined with first name into full name.",
+    "95: used only when full name is first + last name.",
+    "108: saved in each consent record, like “signed up on our website"
+   ],
+   "tagline": [
+    "85: … kept their earlier consent; imports never change opt-outs "
+   ]
+  },
+  "app/src/features/audience/lists.tsx": {
+   "tagline": [
+    "27: a list is a group of contacts you send campaigns to. create ",
+    "36: a list is a group of contacts you send a campaign to.",
+    "68: everyone on this list has subscribed, opted out or is suppre",
+    "68: import contacts, or add one from its contact page."
+   ]
+  },
+  "app/src/features/audience/segments-live.tsx": {
+   "tagline": [
+    "15: a saved filter, like “plan is pro”. campaigns use it to reac",
+    "153: save the segment to count who matches.",
+    "161: over 1,000 match, too many to preview; pick a list to count "
+   ]
+  },
+  "app/src/features/audience/segments.tsx": {
+   "helper": [
+    "59: two-letter code, e.g. us."
+   ]
+  },
+  "app/src/features/campaigns/CampaignProgress.tsx": {
+   "tagline": [
+    "70: processed includes failed and canceled emails, not only deli",
+    "72: updates every 3 seconds.",
+    "72: updates every minute while sending is held."
+   ]
+  },
+  "app/src/features/campaigns/EmailComposer.tsx": {
+   "helper": [
+    "318: select a block to edit its design.",
+    "320: the block name above styles the block; the toolbar styles se"
+   ],
+   "tagline": [
+    "30: upload an image"
+   ]
+  },
+  "app/src/features/campaigns/index.tsx": {
+   "caption": [
+    "339: optional reply@example.com"
+   ],
+   "helper": [
+    "688: about … … for … eligible recipients."
+   ],
+   "tagline": [
+    "73: choose a default sending region in settings to create a camp",
+    "559: … delivered in simulation mode: no real email was sent.",
+    "649: choose a list in the editor to see who receives this campaig",
+    "650: eligible recipients",
+    "675: shown with fallback or sample values; each contact sees thei",
+    "691: sending also stays within your daily limit."
+   ]
+  },
+  "app/src/features/campaigns/skeletons.tsx": {
+   "tagline": [
+    "33: eligible recipients"
+   ]
+  },
+  "app/src/features/campaigns/templates.tsx": {
+   "caption": [
+    "180: publish this template first",
+    "180: restore it first",
+    "202: optional reply@example.com"
+   ],
+   "tagline": [
+    "54: a template is a reusable email design. publish one under tem",
+    "82: a template is a reusable email design. publish one, then sta"
+   ]
+  },
+  "app/src/features/inbound/addresses.tsx": {
+   "caption": [
+    "63: lifetime and reply-as · optional"
+   ],
+   "helper": [
+    "57: enable receiving on a domain first.",
+    "57: receiving domains: …",
+    "65: permanent. it also gets mail sent here before it existed.",
+    "68: only permanent addresses can reply as another address.",
+    "68: replies come from this name on a parent domain: support@repl"
+   ],
+   "tagline": [
+    "54: its mail lands in the inbox, for you, the api and agents.",
+    "164: no mail yet; mail to shows up here within seconds."
+   ]
+  },
+  "app/src/features/inbound/concepts.ts": {
+   "tagline": [
+    "8: every address that receives mail, and where its mail goes.",
+    "13: what happens to an address’s mail: post, forward, junk or la",
+    "19: named places mail can be sent: slack, discord, a webhook or ",
+    "29: questions a ritual asks brand’s ai about an email, answered ",
+    "48: a pattern catches many addresses with *.",
+    "49: what happens to mail for an address that doesn’t exist.",
+    "50: expiring addresses that agents and tests create and read ove",
+    "51: addresses a catch-all created for new recipients.",
+    "71: mail sent to these addresses.",
+    "72: run in order on every message.",
+    "73: where the mail ends up.",
+    "78: what happens to mail for an address that doesn’t exist on th"
+   ]
+  },
+  "app/src/features/inbound/inboxes.tsx": {
+   "helper": [
+    "64: receives until …. …",
+    "79: a random address on this domain that nobody can guess.",
+    "83: optional. shown in lists and as the sender name on replies.",
+    "86: then mail is held 1 day, and the inbox and its mail are dele",
+    "178: shown in lists and as the sender name on replies.",
+    "179: …: 30 days from creation (…).",
+    "179: it expired on …. keep it longer to receive again.",
+    "179: it never expires.",
+    "179: it receives until ….",
+    "179: it will receive until …, then be deleted a day later."
+   ],
+   "tagline": [
+    "75: an expiring address where an agent or test receives mail, li",
+    "110: expiring addresses for agents and tests. create one, or let ",
+    "238: mail after it expires or over a limit is held: stored, not d",
+    "244: mail sent to this inbox shows up here within seconds.",
+    "258: they read only this inbox and stop working when it’s deleted",
+    "260: connect an agent to create one.",
+    "270: only the first 1,000 active keys were checked; api keys list"
+   ]
+  },
+  "app/src/features/inbound/receiving.tsx": {
+   "tagline": [
+    "83: addresses you can read show up here.",
+    "160: showing the first 100 endpoints and 100 webhooks · see every"
+   ]
+  },
+  "app/src/features/inbound/recipes.tsx": {
+   "caption": [
+    "146: · $… per 1,000 emails checked",
+    "211: from slack’s incoming webhooks app.",
+    "212: channel settings, integrations, webhooks.",
+    "213: an incoming webhook url from either one.",
+    "215: they agree by email first, unless it’s your domain."
+   ],
+   "helper": [
+    "351: … saved as endpoint …."
+   ],
+   "tagline": [
+    "35: the full ritual language, checked as you type.",
+    "102: post new mail to slack, forward it, or keep out junk."
+   ]
+  },
+  "app/src/features/inbound/ritual-agent.tsx": {
+   "helper": [
+    "76: then run … , pick brand and approve full access. name this w",
+    "89: merge it into … , then sign in to brand from the client."
+   ],
+   "tagline": [
+    "42: it writes and saves rituals here over mcp."
+   ]
+  },
+  "app/src/features/inbound/ritual-connections.tsx": {
+   "helper": [
+    "112: … endpoints keep their type. create a new endpoint for anoth",
+    "125: the receiving address that sends the request and the forward"
+   ]
+  },
+  "app/src/features/inbound/rituals.tsx": {
+   "caption": [
+    "539: used by every ritual"
+   ],
+   "helper": [
+    "491: how addresses and the api refer to it. lowercase letters, di",
+    "531: saves … with it."
+   ],
+   "tagline": [
+    "529: pick an address below. a ritual runs only on mail to its add",
+    "535: … already runs on ."
+   ]
+  },
+  "app/src/features/inbound/routing.tsx": {
+   "tagline": [
+    "75: where an address’s mail goes: its inbox, other inboxes, webh",
+    "92: slack, discord and forwards need a ritual; webhooks it calls",
+    "94: stored and readable over the api by message id, but in no in"
+   ]
+  },
+  "app/src/features/inbound/threads.tsx": {
+   "helper": [
+    "246: it reached several of your addresses. choose which one repli",
+    "303: separate several recipients with commas."
+   ],
+   "tagline": [
+    "107: this message has no formatted version.",
+    "176: … message……",
+    "189: it reached several addresses: filter by one to star, archive",
+    "347: create an address to start receiving mail."
+   ]
+  },
   "app/src/features/inbound/trace.tsx": {
+   "helper": [
+    "72: any address on a receiving domain, including one that doesn’",
+    "78: the full message with its headers. its to and cc addresses a",
+    "245: optional. leave empty to use the message’s own recipients."
+   ],
    "length/placeholder": [
     "78: from: ana@example.org to: support@acme.com subject: invoice "
+   ],
+   "tagline": [
+    "63: no mail yet: try the sample email, or paste one.",
+    "79: no mail yet, so a sample stands in; paste one to trace it.",
+    "159: source not available.",
+    "253: see which route it takes, which ritual conditions are true o"
+   ]
+  },
+  "app/src/features/inbound/webhooks.tsx": {
+   "helper": [
+    "52: a public https url. signed with standard webhooks headers.",
+    "52: leave blank to keep the saved url, or enter a replacement.",
+    "55: includes addresses created later.",
+    "60: brand’s signed event. read the message with its messageid.",
+    "60: inbound.new’s email.received, for receivers moved from inbou",
+    "64: mail whose spam verdict isn’t pass, as message.junk or with "
+   ],
+   "tagline": [
+    "105: posts for received mail and replies, or long-poll … ; sent m",
+    "106: webhooks that get this address’s mail, active or paused · sh",
+    "108: get a post when mail arrives or a sent message is delivered.",
+    "108: webhooks subscribed to message.received for it, or for every"
+   ]
+  },
+  "app/src/features/onboarding/index.tsx": {
+   "caption": [
+    "227: step … of … · …",
+    "263: small daily limit that grows",
+    "269: you pay aws directly",
+    "302: getting your aws link ready.",
+    "303: create the stack in the aws tab. this page updates on its ow",
+    "304: stack confirmed. creating sending resources in your account.",
+    "305: your aws account is ready. taking you to the next step…",
+    "306: check the stack in aws, then try again or enter your account"
+   ],
+   "helper": [
+    "355: after create_complete. the 12 digits in the aws console’s ac",
+    "414: … is added as soon as sending is ready."
+   ],
+   "tagline": [
+    "238: an admin must finish setting up this workspace first.",
+    "256: either way, mail comes from your own domain.",
+    "262: send through brand’s amazon ses; you only add a few dns reco",
+    "268: send through amazon ses in your own aws account; setup creat",
+    "319: a cloudformation stack gives brand a role; it takes about 2 ",
+    "373: imported … verified … from your aws account, ready to send.",
+    "409: use a domain you own; next, you’ll add a few dns records.",
+    "441: add these records at your dns host; go on while we check the",
+    "492: create a key, then send with curl, the sdk or your coding ag"
+   ]
+  },
+  "app/src/features/operator/index.tsx": {
+   "helper": [
+    "316: optional. empty means no end date.",
+    "317: goes into the audit log.",
+    "366: recipients per rolling 24 hours. the score’s band is ….",
+    "367: optional, at most a year ahead. empty means no expiry.",
+    "369: goes into the audit log and the workspace’s timeline."
+   ],
+   "tagline": [
+    "66: search by workspace id or name.",
+    "66: workspaces above good standing, watched ones and quarantined",
+    "283: the quarantined campaign resumes where it stopped."
+   ]
+  },
+  "app/src/features/operator/notes.tsx": {
+   "caption": [
+    "131: optional"
+   ],
+   "helper": [
+    "176: it also stops if you lose the operator role."
+   ],
+   "tagline": [
+    "84: try another status, type or search.",
+    "84: turn on ui notes (⇧n), then …-click anything to leave one.",
+    "167: lets a script or agent read ui notes and screenshots and set"
+   ]
+  },
+  "app/src/features/settings/activity.tsx": {
+   "tagline": [
+    "93: changes to members, keys, domains, webhooks and settings app",
+    "122: … utc · via …"
+   ]
+  },
+  "app/src/features/settings/admin-only.tsx": {
+   "tagline": [
+    "12: only owners and admins can …: ask one, or ask to become an a"
+   ]
+  },
+  "app/src/features/settings/billing.tsx": {
+   "tagline": [
+    "94: nothing is charged, and sending never pauses for a balance.",
+    "238: credit added and hourly usage appear here.",
+    "242: card payments for credit appear here, with their invoices.",
+    "305: add $20 to $10,000 at a time."
+   ]
+  },
+  "app/src/features/settings/create-key.tsx": {
+   "caption": [
+    "21: sends, reads, and manages domains, keys and settings.",
+    "22: sends email from your app. can’t read logs or change setting",
+    "23: sends email and reads logs and events. can’t change settings",
+    "24: reads logs, events and settings. can’t send.",
+    "25: reads mail at the receiving addresses you choose. nothing el",
+    "26: reads one agent inbox. stops working when the inbox is delet",
+    "27: creates agent inboxes and reads only the ones it created.",
+    "31: for servers, scripts and agents, with the access you choose.",
+    "32: an agent such as opencode or claude code signs in as you ove",
+    "33: lets a mail app open a persistent inbox over imap or smtp.",
+    "207: also replies and starts conversations, from … only.…",
+    "207: lists and reads mail, events and attachments."
+   ],
+   "helper": [
+    "183: includes domains you add later.",
+    "185: · not verified yet",
+    "190: limited to domains, it can’t manage keys, inbound or setting",
+    "191: 50-domain limit reached.",
+    "211: marks read, archives, stars and labels.",
+    "253: reads and files the inbox’s mail.",
+    "254: sends mail from the inbox’s address."
+   ],
+   "tagline": [
+    "185: no domains yet: add one, or keep all domains.",
+    "198: no receiving addresses yet: create one, or choose every addr"
+   ]
+  },
+  "app/src/features/settings/domain-records.tsx": {
+   "tagline": [
+    "68: or add the records below yourself.",
+    "243: signs your mail and proves … is yours.",
+    "247: add these at your dns provider; brand keeps checking.",
+    "252: signs your mail and proves the domain is yours."
+   ]
+  },
+  "app/src/features/settings/domains.tsx": {
+   "helper": [
+    "227: a subdomain of … you don’t use yet."
+   ],
+   "tagline": [
+    "64: mail to addresses at … follows its routes.",
+    "111: add a domain to send and receive mail.",
+    "212: routes bounces through a subdomain you own for relaxed spf a",
+    "250: receive mail on …; its addresses and routes are in receiving",
+    "257: verify the domain before enabling receiving."
+   ]
+  },
+  "app/src/features/settings/hosted.tsx": {
+   "caption": [
+    "84: owners and admins can rename it",
+    "114: amazon ses in your aws account",
+    "114: sent through brand’s amazon ses",
+    "115: the aws region your mail is sent from",
+    "118: recipients in the last 24 hours",
+    "128: your sending health, 0–100",
+    "138: sending stops until you connect again",
+    "154: from your google account",
+    "156: owners and admins can change it",
+    "157: questions, problems or feedback",
+    "158: your other accounts stay signed in",
+    "161: disconnect a client from your anomaly account"
+   ]
+  },
+  "app/src/features/settings/keys.tsx": {
+   "tagline": [
+    "107: an api key lets your server, a script or an agent send email",
+    "108: connect opencode, claude code or cursor to work as you. it a",
+    "109: lets a mail app like apple mail open a persistent inbox over",
+    "110: create a key to send from your app, connect an agent or open"
+   ]
+  },
+  "app/src/features/settings/mcp-approval.tsx": {
+   "tagline": [
+    "39: the agent acts as the account it signed in with: approve tha",
+    "57: tool calls that name no workspace use this one, as your role"
+   ]
+  },
+  "app/src/features/settings/region-setup.tsx": {
+   "helper": [
+    "81: checks live aws without creating resources."
+   ],
+   "tagline": [
+    "122: enable this region to check or provision aws resources.",
+    "123: read permission required to check aws."
+   ]
+  },
+  "app/src/features/settings/reputation.tsx": {
+   "tagline": [
+    "13: historic rates ses calculates from a representative volume o",
+    "15: rates load on the next check, or select refresh.",
+    "48: no data in the last 14 days; ses publishes rates once you se"
+   ]
+  },
+  "app/src/features/settings/setup-checklist.tsx": {
+   "caption": [
+    "22: the topic is not owned by this installation.",
+    "22: the topic policy needs updating."
+   ],
+   "tagline": [
+    "30: last checked state."
+   ]
+  },
+  "app/src/features/settings/usage.tsx": {
+   "caption": [
+    "55: courtesy of anomaly",
+    "55: usage comes off it hourly",
+    "61: 1 gb free, then $0.25 per gb-month",
+    "62: since ……",
+    "62: this calendar month",
+    "63: at $0.20 per 1,000 emails",
+    "63: not charged: free plan",
+    "63: sent mail only",
+    "63: this month"
+   ],
+   "tagline": [
+    "45: healthy real email raises it; simulator sends don’t."
+   ]
+  },
+  "app/src/features/settings/webhooks.tsx": {
+   "helper": [
+    "49: leave blank to keep it.",
+    "51: includes future regions."
+   ],
+   "tagline": [
+    "67: signed calls to your url when email you send is delivered, b",
+    "68: for received mail, use inbound webhooks.",
+    "212: signatures arrive in the … header: verify them on your serve"
+   ]
+  },
+  "app/src/features/settings/workspace-members.tsx": {
+   "tagline": [
+    "37: admins manage keys, domains, webhooks, sending and members, "
+   ]
+  },
+  "app/src/features/support/SupportPanel.tsx": {
+   "caption": [
+    "258: … attached"
+   ],
+   "helper": [
+    "71: png, jpeg or webp, up to 5 mb"
+   ],
+   "tagline": [
+    "257: someone will reply by email to , …."
+   ]
+  },
+  "app/src/features/ui-notes/index.tsx": {
+   "caption": [
+    "214: severity (optional)",
+    "239: severity (optional)"
+   ],
+   "helper": [
+    "216: …↵ save · esc",
+    "249: …↵ save",
+    "343: …-click to add"
    ]
   }
  }

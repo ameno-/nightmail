@@ -20,14 +20,14 @@ export { StandingCard } from './standing'
 // explainer (./about.tsx): the breakdown, the trend, the limit the score sets and how it is graded.
 export function useSenderScore() { return useApiDef(queries.senderScore(), { interval: 60_000 }) }
 const whole = (value: number) => Math.round(value)
-// Before the first grade there is no score to show: a dash and "not graded", never a 0 that reads as a bad grade.
+// Before the first grade there is no score to show: a dash beside the dial's progress, never a 0 that reads as a bad grade.
 const progressLabel = (report: SenderScore) => `${number(report.emails.firstEmails)} of ${number(report.needed)} real emails`
 
 export function SidebarScore() {
   const { data: report, isError } = useSenderScore()
   const shown = useTween(!report ? undefined : report.state === 'graded' ? report.score ?? 0 : 0)
-  // A failed read keeps the card's frame and says so, instead of an empty box.
-  if (!report && isError) return <button type="button" onClick={() => openScoreAbout()} className="gauge-card gauge-card--compact" aria-label="Sender score unavailable. About the sender score"><Texture /><span className="gauge-stack"><span className="gauge-eyebrow">Sender score</span><span className="gauge-readout"><b>—</b><small>&nbsp;unavailable</small></span></span></button>
+  // A failed read keeps the card's frame with a dash, instead of an empty box; the explainer it opens has the error and Retry.
+  if (!report && isError) return <button type="button" onClick={() => openScoreAbout()} className="gauge-card gauge-card--compact" aria-label="Sender score unavailable. About the sender score"><Texture /><span className="gauge-stack"><span className="gauge-eyebrow">Sender score</span><span className="gauge-readout"><b>—</b></span></span></button>
   if (!report) return <div className="gauge-card gauge-card--compact" aria-hidden="true"><span className="gauge-skeleton" /></div>
   const graded = report.state === 'graded'
   // A dot from Warn up, and the card then goes to Overview's standing card; otherwise it opens the explainer.
@@ -39,7 +39,7 @@ export function SidebarScore() {
     <Dial report={report} />
     <span className="gauge-stack">
       <span className="gauge-eyebrow">Sender score</span>
-      <span className="gauge-readout">{graded ? <><b>{whole(shown)}</b><span className="gauge-grade">{report.grade}</span></> : <><b>—</b><small className="gauge-readout__pending">not graded</small></>}</span>
+      <span className="gauge-readout">{graded ? <><b>{whole(shown)}</b><span className="gauge-grade">{report.grade}</span></> : <b>—</b>}</span>
     </span>
   </>
   return raised ? <Link to="/overview#standing" className="gauge-card gauge-card--compact" aria-label={label}>{inner}</Link>
