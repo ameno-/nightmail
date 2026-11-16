@@ -13,6 +13,13 @@ const dirs = readdirSync(root).filter(name => statSync(join(root, name)).isDirec
 const runs = dirs.filter(name => !name.startsWith('nightly-cls-')), clsRuns = dirs.filter(name => name.startsWith('nightly-cls-'));
 const tests = new Map(); // name -> { passed, failed, errors: string[] }
 const suiteFailures = [];
+// Each repetition now has multiple artifacts. Missing uploads must not turn a broken shard into a clean night.
+const repetitions = JSON.parse(process.env.NIGHTLY_RUNS ?? 'null');
+if (repetitions) for (const run of repetitions) {
+  for (const fixture of ['integration', 'simulated', 'simulated-heavy']) if (!runs.includes(`nightly-acceptance-${run}-${fixture}`)) suiteFailures.push(`run ${run}: missing ${fixture} acceptance artifact`);
+  for (const shard of [1, 2, 3, 4]) if (!clsRuns.includes(`nightly-cls-${run}-${shard}`)) suiteFailures.push(`CLS run ${run}: missing shard ${shard}`);
+}
+const acceptanceCount = repetitions?.length ?? runs.length, clsCount = repetitions?.length ?? clsRuns.length;
 for (const run of runs) {
   let outcome = { outcome: 'unknown', deadlocks: 0 };
   try { outcome = JSON.parse(readFileSync(join(root, run, 'outcome.json'), 'utf8')); } catch {}
@@ -57,11 +64,11 @@ const shifting = [...shifts].filter(([, r]) => r.failed > 0).sort((a, b) => b[1]
 
 const flaky = /\[flaky #(\d+)\]/;
 const failing = [...tests].filter(([, r]) => r.failed > 0).sort((a, b) => b[1].failed - a[1].failed);
-const stable = [...tests].filter(([name, r]) => flaky.test(name) && r.failed === 0 && r.passed === runs.length);
+const stable = [...tests].filter(([name, r]) => flaky.test(name) && r.failed === 0 && r.passed === acceptanceCount);
 const cell = s => s.replaceAll('|', '\\|').replace(/[\r\n]+/g, ' ');
 const date = new Date().toISOString().slice(0, 10);
 const lines = [
-  `## Nightly ${date}: ${runs.length} acceptance runs (${tests.size} tests), ${clsRuns.length} CLS runs (${shifts.size} measurements)`, '',
+  `## Nightly ${date}: ${acceptanceCount} acceptance runs (${tests.size} tests), ${clsCount} CLS runs (${shifts.size} measurements)`, '',
   failing.length || shifting.length || suiteFailures.length ? `${failing.length} test(s) and ${shifting.length} CLS measurement(s) failed at least once. [Run](${process.env.RUN_URL})` : `Everything passed in every run. [Run](${process.env.RUN_URL})`, '',
   ...(failing.length ? ['| Test | Failed | First error |', '| --- | ---: | --- |', ...failing.map(([name, r]) => `| ${cell(name)} | ${r.failed}/${r.failed + r.passed} | ${cell(r.errors[0] ?? '')} |`), ''] : []),
   ...(shifting.length ? ['| CLS measurement | Failed | Worst CLS or error |', '| --- | ---: | --- |', ...shifting.map(([name, r]) => `| ${cell(name)} | ${r.failed}/${r.total} | ${cell(r.error || r.worst.toFixed(4))} |`), ''] : []),
@@ -85,5 +92,5 @@ if (repo && process.env.GH_TOKEN) {
     gh('issue', 'edit', open, '-R', repo, '--body', body);
     gh('issue', 'comment', open, '-R', repo, '--body', `${date}: ${failing.length} failing test(s), ${shifting.length} failing CLS measurement(s), ${suiteFailures.length} run-level failure(s). ${process.env.RUN_URL}`);
   } else if (dirty) gh('issue', 'create', '-R', repo, '--title', title, '--label', label, '--body', body);
-  else if (open) gh('issue', 'close', open, '-R', repo, '--comment', `${date}: everything passed in all ${runs.length} acceptance and ${clsRuns.length} CLS runs. ${process.env.RUN_URL}`);
+  else if (open) gh('issue', 'close', open, '-R', repo, '--comment', `${date}: everything passed in all ${acceptanceCount} acceptance and ${clsCount} CLS runs. ${process.env.RUN_URL}`);
 }

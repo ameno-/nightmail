@@ -539,6 +539,10 @@ jobs:
             STRIPE_WEBHOOK_SECRET,nightmail/${{ env.STAGE }}/STRIPE_WEBHOOK_SECRET
           parse-json-secrets: false
 
+      - name: Verify tenant status routing when only the verifier changed
+        if: needs.authorize.outputs.tenant_status == 'true' && needs.pulumi.result == 'skipped'
+        run: bash .github/scripts/tenant-status-verify.sh
+
       # Only dev runs a live E2E, so only dev has an E2E key to read.
       - name: Fetch the dev E2E API key
         if: needs.authorize.outputs.stage == 'dev'
