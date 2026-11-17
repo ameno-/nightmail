@@ -248,12 +248,15 @@ export function actor(c: Ctx, action: Permission | 'editContent' = 'read'): Acto
 /**
  * The one rule for changes that outlive the credential making them: API keys, sending and receiving webhooks, endpoints,
  * routes, rituals, inbound keys, mail client passwords and inbox connections. A temporary agent token lasts at most a
- * day, so it reads and tests these but never creates, changes or removes them. Every such write calls this.
+ * day, so it reads and tests these but never creates, changes or removes them. Every such write calls this; the MCP
+ * listing asks lastingRefusal of the same routes (keyAdminRoute, receivingAdminRoute, lastingRoute).
  */
 export function lasting(c: Ctx, what: string) {
-  if (c.get('actor')?.credential === 'agentToken')
-    throw new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', `Temporary agent tokens cannot ${what}. Use the dashboard, an API key or the MCP approval itself.`);
+  const refusal = lastingRefusal(c.get('actor'), what);
+  if (refusal) throw refusal;
 }
+export const lastingRefusal = (a: Actor | undefined, what: string) => a?.credential === 'agentToken'
+  ? new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', `Temporary agent tokens cannot ${what}. Use the dashboard, an API key or the MCP approval itself.`) : null;
 /** What `lasting` refuses, for the areas that share a wording (sending and receiving webhooks; API keys and inbound keys). */
 export const WEBHOOK_CHANGE = 'create, change or delete webhooks or read their signing secrets', KEY_CHANGE = 'create, list or revoke API keys';
 /**
@@ -262,15 +265,32 @@ export const WEBHOOK_CHANGE = 'create, change or delete webhooks or read their s
  * read. A change (`change` says what, for the error) needs manage, receiving consent and a lasting credential.
  */
 export function receivingAdmin(c: Ctx, change?: string): Actor {
-  const a = actor(c, !change && c.get('actor')?.receivingConsent ? 'read' : 'manage');
-  if (a.domains.length || a.role === 'member')
-    throw new ApiError(403, 'ADMIN_REQUIRED', 'Receiving configuration covers every address in the workspace. Use an owner or admin session, or an API key with manage permission on all domains.');
-  if (change) {
-    if (a.grantId && !a.receivingConsent) throw new ApiError(403, 'ADMIN_REQUIRED', 'Reconnect with explicit receiving consent to change receiving configuration.');
-    lasting(c, change);
-  }
-  return a;
+  const refusal = receivingAdminRefusal(c.get('actor'), change);
+  if (refusal) throw refusal;
+  return c.get('actor');
 }
+/** Why receivingAdmin refuses this actor, or null. The MCP listing asks the same of receivingAdminRoute's operations. */
+export function receivingAdminRefusal(a: Actor | undefined, change?: string): ApiError | null {
+  const permission = !change && a?.receivingConsent ? 'read' : 'manage';
+  if (!a || (!a.permissions.includes('manage') && !a.permissions.includes(permission))) return new ApiError(403, 'PERMISSION_DENIED', `This operation requires ${permission} permission.`);
+  if (a.domains.length || a.role === 'member')
+    return new ApiError(403, 'ADMIN_REQUIRED', 'Receiving configuration covers every address in the workspace. Use an owner or admin session, or an API key with manage permission on all domains.');
+  if (!change) return null;
+  if (a.grantId && !a.receivingConsent) return new ApiError(403, 'ADMIN_REQUIRED', 'Reconnect with explicit receiving consent to change receiving configuration.');
+  return lastingRefusal(a, change);
+}
+/** Key administration (auth.ts manageKeys, and the deprecated inbound key routes): why it refuses this actor, or null.
+ *  It takes unrestricted manage and a lasting credential. */
+export function keyAdminRefusal(a: Actor): ApiError | null {
+  if (!a.permissions.includes('manage')) return new ApiError(403, 'PERMISSION_DENIED', 'This operation requires manage permission.');
+  const temporary = lastingRefusal(a, KEY_CHANGE);
+  if (temporary) return temporary;
+  if (a.domains.length) return new ApiError(403, 'PERMISSION_DENIED', 'Key administration requires unrestricted management access.');
+  return null;
+}
+/** createAgentToken: only an MCP approval delegates a temporary token. Why it refuses this actor, or null. */
+export const agentTokenMintRefusal = (a: Actor) => a.credential === 'mcp' && a.keyId.startsWith('mcp_') ? null
+  : new ApiError(403, 'MCP_AUTHORIZATION_REQUIRED', 'Temporary agent tokens can only be delegated directly from an MCP OAuth approval.');
 // ---------- route guards shared by REST and the MCP listing ----------
 // Each takes a concrete request path or an OpenAPI template ({id} segments). The middleware that
 // enforces a guard and the MCP listing that must agree with it call the same predicate.
@@ -286,6 +306,24 @@ export const ownerRoute = (method: string, path: string) => {
   return appPasswordRoute(path) || /^\/v1\/(?:domains|webhooks|agent-tokens)(?:\/|$)|^\/v1\/regions\/|^\/v1\/settings\/ses$/.test(path) || (path === '/v1/regions' && verb !== 'GET')
     || (verb === 'POST' && /^\/v1\/campaigns\/[^/]+\/(?:send|schedule|unschedule|reschedule|pause|resume|pacing|cancel)$/.test(path));
 };
+/** UNRESTRICTED_KEY_REQUIRED (app.ts): a sender-domain credential is refused these workspace-wide areas. Audience records
+ *  have no sender domain, and a campaign's audience and delivery act on the workspace audience (a draft stays editable). */
+export const unrestrictedRoute = (path: string) => /^\/v1\/(?:contacts|lists|segments|contact-imports|audience-query|settings|webhooks|metrics|sender-score|usage|billing|regions)(?:\/|$)/.test(path)
+  || !['state', 'preview', 'preview-image', 'archive', undefined].includes(/^\/v1\/campaigns\/[^/]+\/([^/]+)$/.exec(path)?.[1]);
+// The routes of the guards above that handlers call, for the MCP listing (each verified against REST's answers for reads).
+/** receivingAdmin's routes: routing, rituals, endpoints and inbox connections. */
+export const receivingAdminRoute = (path: string) => /^\/v1\/(?:routing|rituals|endpoints|inbox-connections)(?:\/|$)/.test(path);
+/** keyAdminRefusal's routes: API keys, listing and revoking agent tokens, and the deprecated inbound key aliases. */
+export const keyAdminRoute = (method: string, path: string) => /^\/v1\/(?:api-keys|agent-tokens|inbound\/keys)(?:\/|$)/.test(path) && !agentTokenMintRoute(method, path);
+/** agentTokenMintRefusal's route: createAgentToken. */
+export const agentTokenMintRoute = (method: string, path: string) => method.toUpperCase() === 'POST' && path === '/v1/agent-tokens';
+/** lasting's other routes: setting up sending and receiving webhooks and reading their secrets, and mail client passwords.
+ *  Testing a webhook and retrying a delivery stay a temporary token's. */
+export function lastingRoute(method: string, path: string) {
+  const verb = method.toUpperCase();
+  return (verb === 'POST' && /^\/v1\/(?:inbound\/)?webhooks$/.test(path)) || ((verb === 'PATCH' || verb === 'DELETE') && /^\/v1\/(?:inbound\/)?webhooks\/[^/]+$/.test(path))
+    || /^\/v1\/(?:inbound\/)?webhooks\/[^/]+\/(?:rotate-secret|secret)$/.test(path) || (verb !== 'GET' && /^\/v1\/inboxes\/[^/]+\/app-passwords(?:\/[^/]+)?$/.test(path));
+}
 /** notMember (app.ts): whether REST refuses this actor the route because it is a workspace member. */
 export const memberRefused = (actor: Pick<Actor, 'role'> | undefined, method: string, path: string) => actor?.role === 'member' && ownerRoute(method, path);
 /** Hosted workspace administration: a signed-in dashboard session, and with `manage` an owner or admin. Not found when self-hosted. */
@@ -311,6 +349,17 @@ export function actorMailAccess(actor: Actor): MailboxAccess | null {
   if (actor.role === 'member' && actor.credential === 'dashboard') return { keyId: actor.keyId, workspaceId: actor.workspaceId, admin: false, mailboxIds: null, permissions: ['read', 'send'] };
   if (!actor.permissions.includes('manage')) return null;
   return { keyId: actor.keyId, workspaceId: actor.workspaceId, admin: true, mailboxIds: null, permissions: ['read', 'send', 'modify'] };
+}
+/**
+ * What mail a workspace credential reaches on a mailbox path (mailboxAuth), or why it reaches none. The MCP listing
+ * asks the same question. A sender-domain credential never reaches mail; an unrestricted read API key reads inbound
+ * webhook settings, not mail or delivery history.
+ */
+export function workspaceMailAccess(actor: Actor, method: string, path: string): MailboxAccess | 'UNRESTRICTED_KEY_REQUIRED' | 'ADMIN_REQUIRED' {
+  if (actor.domains.length) return 'UNRESTRICTED_KEY_REQUIRED';
+  if (!actor.permissions.includes('manage') && actor.credential === 'apiKey' && actor.permissions.includes('read') && method.toUpperCase() === 'GET' && /^\/v1\/inbound\/webhooks(?:\/[^/]+)?$/.test(path))
+    return { keyId: actor.keyId, workspaceId: actor.workspaceId, admin: false, mailboxIds: null, permissions: [] };
+  return actorMailAccess(actor) ?? 'ADMIN_REQUIRED';
 }
 export function senderDomainAllowed(allowed: readonly string[], candidate: string) {
   const domain = candidate.toLowerCase();

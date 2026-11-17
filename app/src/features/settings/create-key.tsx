@@ -34,7 +34,8 @@ const kinds: { value: Kind; label: string }[] = [
   { value: 'agent', label: 'Connect an agent over MCP' },
   { value: 'app', label: 'App password for a mail app' },
 ]
-export type CreatedSecret = { secret: string; title: string; description?: string; sendExample?: boolean }
+/** sendExample: a workspace key's first send. agent: an API key, which also connects an agent over MCP. */
+export type CreatedSecret = { secret: string; title: string; description?: string; sendExample?: boolean; agent?: boolean }
 
 /** Create key: the type first (API key, agent token, app password), then what it can reach. An agent token is the
  *  Connect an agent flow, so choosing it hands over to that dialog. `initial` opens straight on an API key's form, as
@@ -161,7 +162,7 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormP
     try {
       const result = await create.mutateAsync(input)
       onOpenChange(false)
-      onCreated({ secret: result.secret, title: 'API key created', sendExample: workspace })
+      onCreated({ secret: result.secret, title: 'API key created', sendExample: workspace, agent: true })
     } catch { /* Shown in the form. */ }
   }
 

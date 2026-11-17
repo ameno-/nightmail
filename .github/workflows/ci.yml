@@ -40,9 +40,9 @@ jobs:
         with:
           path: ~/.bun/install/cache
           key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('*/bun.lock', '.github/s3-fixture/bun.lock') }}
-      - run: for pkg in api sdk app mcp; do (cd "$pkg" && bun install --frozen-lockfile); done
-      # docs:check compiles the regenerated SDK; the MCP build already checks its types.
-      - run: (cd api && bun run check) && (cd mcp && bun run build)
+      - run: for pkg in api sdk app; do (cd "$pkg" && bun install --frozen-lockfile); done
+      # docs:check compiles the regenerated SDK.
+      - run: cd api && bun run check
       - name: Type-check the live SDK CLI probe
         working-directory: api
         run: ./node_modules/.bin/tsc --ignoreConfig --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --lib ES2023,DOM,DOM.Iterable --types node scripts/e2e-upload-cli.ts
@@ -70,8 +70,8 @@ jobs:
       - name: Regenerate and verify public docs, spec and SDK
         run: |
           (cd api && bun run docs:check)
-          git diff --exit-code -- api/openapi.json sdk/src mcp/src/brand.ts
-          test -z "$(git ls-files --others --exclude-standard -- sdk/src mcp/src/brand.ts)"
+          git diff --exit-code -- api/openapi.json sdk/src
+          test -z "$(git ls-files --others --exclude-standard -- sdk/src)"
       - name: Public API compatibility
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -128,7 +128,7 @@ jobs:
           set -euo pipefail
           # app: happy-dom is the Node entry of @tiptap/html; the dashboard bundle resolves its browser
           # entry (no happy-dom in app/dist). @tiptap/html's peer range ^20 excludes the fixed 21.0.4.
-          for pkg in api app sdk mcp; do
+          for pkg in api app sdk; do
             args=(--audit-level=high)
             case $pkg in app) args+=(--ignore=GHSA-834v-8h66-3h79 --ignore=GHSA-c8p4-j97h-3vg8);; esac
             echo "::group::bun audit $pkg"; (cd "$pkg" && bun audit "${args[@]}"); echo '::endgroup::'
@@ -190,8 +190,7 @@ jobs:
         with:
           bun-version: 1.3.14
       - *bun-cache
-      # The stdio MCP acceptance test starts ../mcp/src/server.ts, which needs the MCP package's dependencies.
-      - run: for pkg in api mcp .github/s3-fixture; do (cd "$pkg" && bun install --frozen-lockfile); done
+      - run: for pkg in api .github/s3-fixture; do (cd "$pkg" && bun install --frozen-lockfile); done
       # Also the deadlock guard: Postgres detects lock cycles after 50 ms and logs lock waits, and the job fails on
       # any deadlock it counted, printing each cycle from the service's log (docs/ci.md).
       - name: Run all acceptance tests with isolated database and object storage

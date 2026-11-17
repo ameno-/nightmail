@@ -3660,6 +3660,117 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  // One MCP server for every credential: /mcp also takes workspace API keys and agent tokens. A key's listing is the one
+  // access policy (mcp.ts authorized) applied to the actor REST authenticates the key as, and each call is a REST request
+  // made with that key, so MCP offers and reaches nothing the key can't do over HTTP, and only in the key's workspace.
+  test('MCP with an API key or agent token: what REST allows that credential, in its own workspace, checked on every call', async t => {
+    await simulatedSesFixture(t, async ({ db, request, runtime }) => {
+      const [{ resourceInventory }, { buildMcpCatalog }, { createOpenApiApp }, { createAgentToken }] = await Promise.all([import('./src/mcp-resources.js'), import('./src/mcp-catalog.js'), import('./src/app.js'), import('./src/agent-token.js')]);
+      const actions = new Map(resourceInventory().map(x => [`${x.name}.${x.action}`, x.operation]));
+      const own = runtime.config.workspaceId;
+      // Hosted, so every route answers as it does there (billing is hosted only).
+      runtime.config.multiTenant = true;
+      cleanup(t, async () => { runtime.config.multiTenant = false; });
+      const send = (bearer: string, method: string, params: Json = {}, path = '/mcp?codemode=false') => request('POST', path, bearer, { jsonrpc: '2.0', id: 1, method, params }, rpcHeaders);
+      const listed = async (bearer: string, codemode = true) => {
+        const tools = ok(await send(bearer, 'tools/list', {}, codemode ? '/mcp?codemode=false' : '/mcp')).result.tools as Json[];
+        const actionsOf = (tool: Json) => (tool.inputSchema?.properties?.action?.enum ?? tool.inputSchema?.oneOf?.map((branch: Json) => branch.properties.action.const) ?? []) as string[];
+        return { tools, ops: new Set(codemode ? tools.map(x => x.name as string) : tools.flatMap(x => actionsOf(x).map(a => actions.get(`${x.name}.${a}`)!).filter(Boolean))) };
+      };
+      const call = async (bearer: string, name: string, args: Json = {}) => ok(await send(bearer, 'tools/call', { name, arguments: args })).result;
+      const failure = (result: Json) => [result.isError, result.structuredContent?.error?.code, result._meta?.status];
+      const key = async (body: Json) => { const made = ok(await request('POST', '/v1/api-keys', MANAGER, { name: unique('mcp-key'), ...body }), 201); secrets.add(made.secret); return made as Json; };
+      const full = await key({ permissions: ['read', 'send', 'manage'] }), reader = await key({ permissions: ['read'] }), sender = await key({ permissions: ['read', 'send'], domains: ['example.com'] });
+      const grant = await oauthGrant(t, db, writableScope, request);
+      const mint = async (permissions: string[]) => {
+        const made = await call(grant.token, 'createAgentToken', { confirm: true, body: { permissions, expiresInSeconds: 600, domains: [], purpose: unique('mcp-agent-token') } });
+        assert.equal(made.isError, false, redact(made)); secrets.add(made.structuredContent.token); return made.structuredContent as Json;
+      };
+      const agent = await mint(['read', 'send', 'manage']), readAgent = await mint(['read']);
+      const credentials: [string, string][] = [['manage key', full.secret], ['read key', reader.secret], ['sender-domain key', sender.secret], ['manage agent token', agent.token], ['read agent token', readAgent.token]];
+
+      // Listings: the key's workspace only (no workspaces tool, no workspace argument), and every read is listed exactly when
+      // REST, asked with the same credential, does not refuse it.
+      const api = await createOpenApiApp(), spec = api.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'Nightmail API', version: '0' } }) as Json;
+      const dummy = (schema: Json | undefined) => schema?.enum?.[0] ?? (schema?.format === 'email' ? 'tear@example.com' : [schema?.type].flat().includes('integer') ? '1' : String(schema?.pattern ?? '').includes('\\d') ? 'us-east-1' : 'tear-missing');
+      const listings = new Map<string, Set<string>>(), mismatches: string[] = [];
+      for (const [label, bearer] of credentials) {
+        const init = ok(await send(bearer, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } })).result;
+        assert.equal(init.serverInfo.name, 'nightmail', label);
+        const { tools, ops } = await listed(bearer), grouped = await listed(bearer, false);
+        listings.set(label, ops);
+        assert.ok(!ops.has('workspaces') && !ops.has('setDefaultWorkspace') && tools.every(tool => !tool.inputSchema.properties?.workspace), label);
+        assert.ok(!grouped.tools.some(tool => tool.name === 'workspaces' || tool.inputSchema.properties?.workspace), label);
+        for (const op of grouped.ops) assert.ok(ops.has(op), `${label}: grouped ${op} is in the operation listing`);
+        let gets = 0;
+        for (const [name, op] of buildMcpCatalog(api)) {
+          if (op.method !== 'get') continue; gets++;
+          const path = op.path.replace(/\{([^}]+)\}/g, (_, field: string) => encodeURIComponent(dummy((spec.paths[op.path].get.parameters ?? []).find((p: Json) => p.in === 'path' && p.name === field)?.schema)));
+          const reply = await request('GET', path, bearer);
+          if (ops.has(name) !== (reply.status !== 401 && reply.status !== 403)) mismatches.push(`${label} ${name}: listed=${ops.has(name)}, REST ${reply.status} ${reply.body?.error?.code}`);
+        }
+        assert.ok(gets >= 80, String(gets));
+      }
+      assert.deepEqual(mismatches, []);
+      // What each credential may write follows its permissions and REST's guards: an agent token never administers keys and
+      // only an approval mints agent tokens.
+      const has = (label: string, op: string) => listings.get(label)!.has(op);
+      assert.deepEqual(['createInbox', 'createApiKey', 'createContactList', 'sendEmail', 'applyRouting', 'createAgentToken'].map(op => has('manage key', op)), [true, true, true, true, true, false]);
+      assert.deepEqual(['createInbox', 'createApiKey', 'createContactList', 'sendEmail', 'getRouting', 'listContacts'].map(op => has('read key', op)), [false, false, false, false, false, true]);
+      assert.deepEqual(['listContacts', 'createContactList', 'sendEmail', 'listInboxes', 'listWebhooks'].map(op => has('sender-domain key', op)), [false, false, true, false, false]);
+      assert.deepEqual(['createInbox', 'createContactList', 'createApiKey', 'listApiKeys', 'createAgentToken', 'createWebhook', 'applyRouting', 'getRouting'].map(op => has('manage agent token', op)), [true, true, false, false, false, false, false, true]);
+
+      // Calls go through REST as the credential, and the audit trail names it.
+      for (const [label, bearer, actorType, actorId] of [['manage key', full.secret, 'api_key', full.id], ['manage agent token', agent.token, 'agent_token', agent.id]] as const) {
+        const name = unique('mcp-key-workspace'), renamed = await call(bearer, 'updateWorkspaceSettings', { confirm: true, body: { name } });
+        assert.deepEqual([renamed.isError, renamed.structuredContent.name], [false, name], `${label}: ${redact(renamed)}`);
+        const { rows } = await db.query("SELECT workspace_id, actor_type, actor_id, via FROM audit_events WHERE action='settings.update' AND summary->'after'->>'name'=$1", [name]);
+        assert.deepEqual(rows, [{ workspace_id: own, actor_type: actorType, actor_id: actorId, via: 'api' }], label);
+        assert.deepEqual(failure(await call(bearer, 'createAgentToken', { confirm: true, body: { permissions: ['read'], expiresInSeconds: 60, domains: [], purpose: 'refused' } })), [true, 'TOOL_UNAVAILABLE', null], label);
+      }
+      for (const [bearer, name, args] of [[reader.secret, 'createContactList', { confirm: true, body: { name: 'refused' } }], [sender.secret, 'listContacts', {}], [agent.token, 'createApiKey', { confirm: true, body: { name: 'refused' } }],
+        [agent.token, 'createWebhook', { confirm: true, body: { url: 'https://example.com/mcp-agent-token', paused: true } }], [readAgent.token, 'sendEmail', { confirm: true, body: mail() }]] as const)
+        assert.deepEqual(failure(await call(bearer, name, args)), [true, 'TOOL_UNAVAILABLE', null], name);
+
+      // Its own workspace only: naming it is allowed, any other is refused, and another workspace's objects are not found.
+      const identity = await call(full.secret, 'getCurrentIdentity', { workspace: own });
+      assert.equal(identity.structuredContent.workspaceId, own, redact(identity));
+      const foreign = `mcp-key-foreign-${randomUUID().slice(0, 8)}`;
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [foreign]);
+      await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'owner')", [randomUUID(), manager!.userId, foreign]);
+      const theirs = await call(grant.token, 'createContactList', { workspace: foreign, confirm: true, body: { name: unique('mcp-foreign-list') } });
+      assert.equal(theirs.isError, false, redact(theirs));
+      for (const [, bearer] of credentials.filter(([label]) => label.startsWith('manage'))) {
+        assert.deepEqual(failure(await call(bearer, 'getCurrentIdentity', { workspace: foreign })), [true, 'WORKSPACE_ACCESS_DENIED', 403]);
+        assert.deepEqual(failure(await call(bearer, 'getContactList', { listId: theirs.structuredContent.id })), [true, 'NOT_FOUND', 404]);
+      }
+
+      // Its minute budget, as over HTTP: an exhausted key is refused at /mcp before anything runs.
+      let limited: Reply | undefined;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const seeded = await db.query(`INSERT INTO api_request_budgets(workspace_id,key_id,window_start,used) VALUES ($1,$2,date_trunc('minute',now()),$3)
+          ON CONFLICT (workspace_id,key_id) DO UPDATE SET window_start=excluded.window_start,used=excluded.used RETURNING window_start`, [own, reader.id, runtime.config.apiRateLimitPerMinute]);
+        limited = await send(reader.secret, 'tools/list');
+        if (limited.status === 429) break;
+        const current = await db.query('SELECT window_start FROM api_request_budgets WHERE workspace_id=$1 AND key_id=$2', [own, reader.id]);
+        if (new Date(current.rows[0].window_start).getTime() === new Date(seeded.rows[0].window_start).getTime()) break;
+      }
+      error(limited!, 429, 'REQUEST_RATE_LIMITED'); assert.equal(limited!.headers.get('retry-after'), '60');
+
+      // Revoked or expired, a credential is refused at /mcp, as over HTTP.
+      ok(await request('POST', `/v1/api-keys/${full.id}/revoke`, MANAGER));
+      ok(await request('POST', `/v1/agent-tokens/${agent.id}/revoke`, MANAGER));
+      const payload = JSON.parse(Buffer.from(readAgent.token.slice('nm_agent_'.length).split('.')[0], 'base64url').toString());
+      const expired = await createAgentToken(runtime.config, { id: payload.id, grant: payload.grant, permissions: payload.permissions, domains: payload.domains, expiresAt: new Date(Date.now() - 1000).toISOString() });
+      secrets.add(expired);
+      for (const bearer of [full.secret, agent.token, expired]) error(await send(bearer, 'tools/list'), 401, 'AUTH_INVALID');
+      // An agent token ends with its approval.
+      ok(await send(readAgent.token, 'tools/list'));
+      ok(await request('POST', `/v1/agents/${payload.grant}/revoke`, MANAGER));
+      error(await send(readAgent.token, 'tools/list'), 401, 'AUTH_INVALID');
+    });
+  });
+
   // PR #55 review P2 (both): the overview was missing from receivingConsentRoute, so credentials minted by a management
   // approval without receiving consent could read it over REST; and a read grant with consent was offered a tool REST
   // refuses. It is now gated by core.ts's shared predicates (mailboxRoute, receivingConsentRoute), which REST and both MCP
@@ -5587,8 +5698,9 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.match(revoked.headers.get('www-authenticate') ?? '', /resource_metadata=/);
     assert.equal((await http('GET', '/v1/me', delegated.token)).status, 401, 'A delegated token dies with its approval.');
     const key = await keyFixture(t);
-    const fallback = await http('POST', '/mcp', key.secret, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, rpcHeaders);
-    assert.equal(fallback.status, 401, 'Hosted MCP must not fall back to API-key authentication.');
+    // An API key is a credential of its own at /mcp: it lists the key's tools in its workspace, never the revoked approval's.
+    const own = ok(await http('POST', '/mcp', key.secret, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, rpcHeaders));
+    assert.ok(own.result.tools.length && !own.result.tools.some((tool: Json) => tool.name === 'workspaces'), redact(own));
   });
 });
 
@@ -10934,14 +11046,6 @@ test('reply quotes of crafted received HTML stay within time and memory bounds a
   }
 });
 
-test('stdio MCP connects with legacy env, key, health and API title',async()=>{
-  const {spawnSync}=await import('node:child_process');
-  const fixture=`globalThis.fetch=async url=>{switch(url.href){case 'http://127.0.0.1/health':return Response.json({status:'ok',service:'opensend'});case 'http://127.0.0.1/openapi.json':return Response.json({openapi:'3.1.0',info:{title:'OpenSend API',version:'0.1.0'},paths:{'/v1/inbound/threads':{get:{operationId:'listInboundThreads',security:[{bearerAuth:[]}],responses:{200:{description:'OK'}}}}}});default:throw Error('unexpected request')}}`;
-  const input=JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'fixture',version:'1'}}})+'\n';
-  const env={PATH:process.env.PATH,OPENSEND_API_URL:'http://127.0.0.1',OPENSEND_API_KEY:'os_mbx_'+'1'.repeat(64)};
-  const result=spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(fixture),'--import','tsx','../mcp/src/server.ts'],{env:env as unknown as NodeJS.ProcessEnv,input,encoding:'utf8',timeout:10000});
-  assert.equal(result.status,0,result.stderr);assert.ok(JSON.parse(result.stdout).result.capabilities.tools);
-});
 // Decision (platform-14): the public bane names are now nightmail. Only the new names are emitted; each earlier one is
 // still accepted, and every such alias is registered in brand.ts's legacy section so the domain cutover removes them.
 test('Rename: only the nightmail names are emitted; their earlier names in brand.ts still work', async t => {
@@ -11002,48 +11106,22 @@ test('Brand: internal names are nightmail_* tables, NIGHTMAIL_* settings and nig
   assert.ok(!hasTags([{Key:'nightmail:owner',Value:'nightmail'},{Key:'nightmail:domain-claim',Value:'other'}],want));
   assert.ok(!hasTags([{Key:'opensend:owner',Value:'bane'},{Key:'bane:domain-claim',Value:'token'}],want));
 });
-test('Brand: the hosted support hosts, docs examples and stdio MCP identity come from src/brand.ts, old names still accepted',async()=>{
-  const brand=await import('./src/brand.js'),{spawnSync}=await import('node:child_process'),{readFile}=await import('node:fs/promises');
-  for(const copy of ['../sdk/src/brand.ts','../mcp/src/brand.ts']) assert.equal(await readFile(copy,'utf8'),await readFile('./src/brand.ts','utf8'),`${copy} is bun run sdk's copy of src/brand.ts`);
+test('Brand: the hosted support hosts and docs examples come from src/brand.ts',async()=>{
+  const brand=await import('./src/brand.js'),{readFile}=await import('node:fs/promises');
+  assert.equal(await readFile('../sdk/src/brand.ts','utf8'),await readFile('./src/brand.ts','utf8'),"../sdk/src/brand.ts is bun run sdk's copy of src/brand.ts");
   const csp=(await fetch(BASE+'/health')).headers.get('content-security-policy')??'';
   for(const host of brand.hostedHosts) assert.ok(csp.includes(` https://support.${host} wss://support.${host}`),`connect-src names support.${host}`);
   const llms=await (await fetch(BASE+'/llms.txt')).text();
   assert.ok(llms.includes(`${brand.publicOrigin}/v1/emails/send`) && llms.includes(`$${brand.apiKeyEnv}`) && llms.includes(brand.sdkPackage));
-  const connect=(service:string,title:string,key='bane_'+'1'.repeat(64))=>{
-    const fixture=`globalThis.fetch=async url=>{switch(url.href){case 'http://127.0.0.1/health':return Response.json({status:'ok',service:${JSON.stringify(service)}});case 'http://127.0.0.1/openapi.json':return Response.json({openapi:'3.1.0',info:{title:${JSON.stringify(title)},version:'0.1.0'},paths:{'/v1/inbound/threads':{get:{operationId:'listInboundThreads',security:[{bearerAuth:[]}],responses:{200:{description:'OK'}}}}}});default:throw Error('unexpected request')}}`;
-    const input=JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'fixture',version:'1'}}})+'\n';
-    return spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(fixture),'--import','tsx','../mcp/src/server.ts'],{env:{PATH:process.env.PATH,NIGHTMAIL_API_URL:'http://127.0.0.1',NIGHTMAIL_API_KEY:key} as unknown as NodeJS.ProcessEnv,input,encoding:'utf8',timeout:10000});
-  };
-  for(const [service,title] of [[brand.productSlug,`${brand.productName} API`],['bane','Bane API'],['opensend','OpenSend API']]) {
-    const result=connect(service,title);
-    assert.equal(result.status,0,`${service}: ${result.stderr}`);assert.ok(JSON.parse(result.stdout).result.capabilities.tools);
-    assert.equal(JSON.parse(result.stdout).result.serverInfo.name,brand.mcpServerName);
-  }
-  assert.notEqual(connect('elsewhere','Elsewhere API').status,0);
-  for(const key of ['nm_'+'1'.repeat(64),'nm_mbx_'+'1'.repeat(64),'bane_mbx_'+'1'.repeat(64)]) assert.equal(connect(brand.productSlug,`${brand.productName} API`,key).status,0,key);
-  assert.notEqual(connect(brand.productSlug,`${brand.productName} API`,'nm_live_'+'1'.repeat(64)).status,0);
 });
 
 // PR #55 recheck P2: the overview's recovery path (listInboundWebhooks, paged) must exist wherever the overview does.
-test('inbound webhooks over MCP: hosted and stdio catalogs page by cursor and filter by address; stdio inbox keys are not offered it', async () => {
-  const [{ spawnSync }, { mkdtemp, writeFile }, { tmpdir }, { join }, { createOpenApiApp }, { buildMcpCatalog }] = await Promise.all([import('node:child_process'), import('node:fs/promises'), import('node:os'), import('node:path'), import('./src/app.js'), import('./src/mcp-catalog.js')]);
-  const app = await createOpenApiApp(), spec = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'Bane API', version: '0.1.0' } });
+test('inbound webhooks over MCP: the catalog pages by cursor and filters by address', async () => {
+  const [{ createOpenApiApp }, { buildMcpCatalog }] = await Promise.all([import('./src/app.js'), import('./src/mcp-catalog.js')]);
   const fields = (schema: unknown): string[] => !schema || typeof schema !== 'object' ? [] : Object.entries(schema as Json).flatMap(([k, v]) => k === 'properties' ? [...Object.keys(v as Json), ...Object.values(v as Json).flatMap(fields)] : fields(v));
-  const hosted = buildMcpCatalog(app).get('listInboundWebhooks')!;
+  const hosted = buildMcpCatalog(await createOpenApiApp()).get('listInboundWebhooks')!;
   for (const name of ['cursor', 'limit', 'addressId', 'eventType']) assert.ok(fields(hosted.tool.inputSchema).includes(name), `hosted input ${name}`);
   assert.ok(fields(hosted.tool.outputSchema).includes('nextCursor'), 'hosted output nextCursor');
-  const file = join(await mkdtemp(join(tmpdir(), 'bane-stdio-')), 'openapi.json'); await writeFile(file, JSON.stringify(spec));
-  const fixture = `import {readFileSync} from 'node:fs';globalThis.fetch=async url=>{if(url.href==='http://127.0.0.1/health')return Response.json({status:'ok',service:'bane'});if(url.href==='http://127.0.0.1/openapi.json')return Response.json(JSON.parse(readFileSync(process.env.SPEC_FILE,'utf8')));throw Error('unexpected request')}`;
-  const tools = (key: string) => {
-    const input = [{ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'fixture', version: '1' } } }, { jsonrpc: '2.0', method: 'notifications/initialized' }, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }].map(m => JSON.stringify(m)).join('\n') + '\n';
-    const result = spawnSync(process.execPath, ['--import', 'data:text/javascript,' + encodeURIComponent(fixture), '--import', 'tsx', '../mcp/src/server.ts'], { env: { PATH: process.env.PATH, BANE_API_URL: 'http://127.0.0.1', BANE_API_KEY: key, SPEC_FILE: file } as unknown as NodeJS.ProcessEnv, input, encoding: 'utf8', timeout: 20000 });
-    assert.equal(result.status, 0, result.stderr);
-    return new Map<string, Json>(result.stdout.trim().split('\n').map(line => JSON.parse(line)).find(m => m.id === 2).result.tools.map((t: Json) => [t.name, t]));
-  };
-  const workspace = tools('bane_' + '1'.repeat(64)), inbox = tools('bane_mbx_' + '1'.repeat(64));
-  assert.ok(workspace.has('getInboundOverview') && workspace.has('getInboundWebhook'));
-  for (const name of ['cursor', 'limit', 'addressId', 'eventType']) assert.ok(fields(workspace.get('listInboundWebhooks')?.inputSchema).includes(name), `stdio input ${name}`);
-  assert.deepEqual([inbox.has('listInboundWebhooks'), inbox.has('getInboundWebhook'), inbox.has('getInboundOverview')], [false, false, true], 'REST refuses inbox keys webhook administration');
 });
 
 test('Hosted account re-home: drained legacy Ohio installation',async t=>{
@@ -11742,7 +11820,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const rpc = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'log-fixture', version: '1' } } };
       const mcpHeaders = { accept: 'application/json, text/event-stream' };
       await seen(await request('POST', '/mcp', undefined, rpc, mcpHeaders), { route: '/mcp', status: 401, code: 'MCP_AUTH_REQUIRED', principal: 'anonymous' });
-      await seen(await request('POST', '/mcp', forged, rpc, mcpHeaders), { route: '/mcp', status: 401, code: 'MCP_AUTH_REQUIRED' });
+      // A key-shaped bearer is authenticated as an API key, as REST authenticates it.
+      await seen(await request('POST', '/mcp', forged, rpc, mcpHeaders), { route: '/mcp', status: 401, code: 'AUTH_INVALID' });
       await seen(await request('POST', '/mcp', undefined, rpc, { ...mcpHeaders, origin: 'https://elsewhere.example' }), { route: '/mcp', status: 403, code: 'ORIGIN_NOT_ALLOWED' });
       // A caller that does pass caller data still cannot log an address or a credential.
       const { log } = await import('./src/core.js');

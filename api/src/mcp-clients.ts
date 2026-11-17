@@ -19,7 +19,8 @@ export const mcpClientFiles: Record<McpClient, string> = { opencode: 'opencode.j
 /** The hosted MCP endpoint. Plain /mcp works for every client and grant; no query parameters to explain. */
 export const mcpServerUrl = (publicUrl: string) => new URL('/mcp', publicUrl).href;
 
-/** A bearer key (an inbox key) or OAuth, where the person approves in the browser; scope is what OpenCode asks for. */
+/** A bearer credential (an API key of any access, or an agent token) or OAuth, where the person approves in the browser;
+ *  scope is what OpenCode asks for. */
 export type McpAuth = { bearer: string } | { scope?: string };
 
 export function mcpClientConfig(client: McpClient, url: string, auth: McpAuth): Record<string, unknown> {

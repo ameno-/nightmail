@@ -1,5 +1,4 @@
-import { ConnectAgentButton, ConnectAgentDialog, McpClientSetup, useMcpUrl } from '../docs/connect-agent'
-import type { McpClient } from '../../../../api/src/mcp-clients'
+import { ConnectAgentButton, ConnectAgentDialog, McpKeySetup } from '../docs/connect-agent'
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { request } from '../../data/live'
@@ -44,15 +43,13 @@ export function NewInboxDialog({ open, onOpenChange }: { open: boolean; onOpenCh
   const [lifetime, setLifetime] = useState('86400')
   const [withKey, setWithKey] = useState(true)
   const [replies, setReplies] = useState(false)
-  const [client, setClient] = useState<McpClient>('opencode')
   const [connecting, setConnecting] = useState(false)
-  const url = useMcpUrl()
   const [now, setNow] = useState(() => Date.now())
   // No toast: the dialog itself turns into "Agent inbox created".
   const create = useApiMutation((api, input: InboxInput) => api.inboxes.create(input))
   const created: CreatedInbox | undefined = create.data
   const noHost = !domains.isPending && !hosts.length
-  useEffect(() => { if (open) { create.reset(); setHost(''); setName(''); setLifetime('86400'); setWithKey(true); setReplies(false); setClient('opencode'); setNow(Date.now()) } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (open) { create.reset(); setHost(''); setName(''); setLifetime('86400'); setWithKey(true); setReplies(false); setNow(Date.now()) } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   // Without an active receiving host the only inbox that works is a sandbox.
   useEffect(() => { if (open) setType(noHost ? 'sandbox' : 'ephemeral') }, [open, noHost])
   async function submit(event: FormEvent) {
@@ -68,7 +65,7 @@ export function NewInboxDialog({ open, onOpenChange }: { open: boolean; onOpenCh
         <dl className="settings-facts"><div><dt>Receives until</dt><dd>{date(created.expiresAt)}</dd></div></dl>
         {created.credential && <>
           <SecretField label="API key" value={created.credential.secret} copyLabel="Copy API key" />
-          <div className="stack"><strong className="connect-agent__title">Use it with an agent</strong><McpClientSetup client={client} onClient={setClient} url={url} auth={{ bearer: created.credential.secret }} label="Agent" /></div>
+          <McpKeySetup bearer={created.credential.secret} />
         </>}
       </div>
     </Dialog>

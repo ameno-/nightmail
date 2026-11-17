@@ -71,7 +71,7 @@ console.log(extract.codes[0], extract.links[0]?.href);
 - **Lifetime.** 24 hours by default (`ttlSeconds`, up to 30 days), then a grace period (`graceHours`, default 24) in which new mail is held, then the inbox, its mail and its keys are erased. `deleteInbox` ends it now. Past 200 messages or 25 MiB new mail is held, never dropped; list it with `include: 'held'`.
 - **No domain yet?** `createInbox` answers `RECEIVING_DOMAIN_REQUIRED` with the steps. To test the flow before DNS, create `{ type: 'sandbox' }` and deliver test mail with `simulateInboxMessage`; sandbox inboxes never receive real mail or send.
 
-Agents can do the same over hosted MCP with an API key limited to their inboxes: see [Agent inboxes](../mcp/README.md#agent-inboxes).
+Agents can do the same over hosted MCP with an API key limited to their inboxes: see [Agent inboxes](../docs/mcp.md#agent-inboxes).
 
 ## A support inbox with tracked replies
 

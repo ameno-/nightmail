@@ -51,19 +51,26 @@ export function McpClientSetup({ client, onClient, url, auth, label = 'MCP clien
   </div>
 }
 
+/** A key just shown once (an API key of any access), already set up for each MCP client: no second secret to mint. */
+export function McpKeySetup({ bearer }: { bearer: string }) {
+  const [client, setClient] = useState<McpClient>('opencode')
+  return <div className="stack"><strong className="connect-agent__title">Use it with an agent</strong><McpClientSetup client={client} onClient={setClient} url={useMcpUrl()} auth={{ bearer }} label="Agent" /></div>
+}
+
 type Inbox = { id: string; address: string; name: string | null; status: string; type: 'ephemeral' | 'sandbox' }
 type Connection = { id: string | null; config: object; nextStep: string; key: string | null; client: McpClient }
 
 /**
  * Connect an agent: as you over OAuth (it gets the access you approve in the browser, and you can narrow it to chosen
- * inboxes there), or to one agent inbox with an API key for that inbox that can't reach anything else. Opened from an
- * inbox, that inbox is chosen. Every open starts fresh.
+ * inboxes there), with a workspace API key (exactly that key's access, no browser), or to one agent inbox with an API
+ * key for that inbox that can't reach anything else. Opened from an inbox, that inbox is chosen. Every open starts
+ * fresh. `onCreateKey` opens Create key in place (the API keys page); elsewhere the option links there.
  */
-export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: boolean; onOpenChange: (open: boolean) => void; inboxId?: string }) {
+export function ConnectAgentDialog({ open, onOpenChange, inboxId, onCreateKey }: { open: boolean; onOpenChange: (open: boolean) => void; inboxId?: string; onCreateKey?: () => void }) {
   const { canAdminister } = useWorkspaceAccess()
   const url = useMcpUrl()
   const [client, setClient] = useState<McpClient>('opencode')
-  const [mode, setMode] = useState<'oauth' | 'key'>('oauth')
+  const [mode, setMode] = useState<'oauth' | 'apiKey' | 'key'>('oauth')
   const [access, setAccess] = useState<McpAccess>('read')
   const [inbox, setInbox] = useState('')
   const [reply, setReply] = useState(false)
@@ -94,13 +101,15 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
   const close = () => { if (!busy) onOpenChange(false) }
   // The options say what the agent gets; a client other than OpenCode asks for read, so its access shows Read only.
   return <Dialog open={open} onOpenChange={next => { if (!next) close() }} title="Connect an agent" className="connect-agent-dialog"
-    footer={mode === 'key' && !result ? <><Button disabled={busy} onClick={close}>Cancel</Button><Button variant="primary" loading={busy} disabled={!chosen} onClick={() => void create()}>Create API key</Button></> : <Button variant="primary" onClick={close}>Done</Button>}>
+    footer={mode === 'key' && !result ? <><Button disabled={busy} onClick={close}>Cancel</Button><Button variant="primary" loading={busy} disabled={!chosen} onClick={() => void create()}>Create API key</Button></>
+      : mode === 'apiKey' ? <><Button onClick={close}>Cancel</Button>{onCreateKey ? <Button variant="primary" onClick={() => { onOpenChange(false); onCreateKey() }}>Create API key</Button>
+        : <Link className="ui-button ui-button--primary ui-button--md" to="/api-keys?create=read_send" onClick={close}>Create API key</Link>}</> : <Button variant="primary" onClick={close}>Done</Button>}>
     <div className="stack">
       {!result && <>
         <Field label="What it can reach">
-          <Select value={mode} onValueChange={value => { setMode(value as typeof mode); setError('') }} options={[{ value: 'oauth', label: 'Sign in as me' }, ...(canAdminister ? [{ value: 'key', label: 'One agent inbox, with its own key' }] : [])]} />
+          <Select value={mode} onValueChange={value => { setMode(value as typeof mode); setError('') }} options={[{ value: 'oauth', label: 'Sign in as me' }, ...(canAdminister ? [{ value: 'apiKey', label: 'This workspace, with an API key' }, { value: 'key', label: 'One agent inbox, with its own key' }] : [])]} />
         </Field>
-        {mode === 'oauth' ? <Field label="Access it asks for">
+        {mode === 'apiKey' ? null : mode === 'oauth' ? <Field label="Access it asks for">
           <Select value={client === 'opencode' ? access : 'read'} onValueChange={value => setAccess(value as McpAccess)} disabled={client !== 'opencode'} options={mcpAccess.map(({ value, label }) => ({ value, label }))} />
         </Field> : <>
           {inboxes.isPending || active.length ? <Field label="Inbox">

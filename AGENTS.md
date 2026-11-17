@@ -11,9 +11,8 @@ This codebase is yours: what it's for and how it's built are your call, and you'
 - `app/` — React/Vite dashboard. `app/index.html` loads `src/main.tsx`; `src/App.tsx` defines routes. Screens live in `src/features/`, shared UI in `src/components/`, API adapters in `src/data/`, and design tokens/styles in `src/styles/`.
 - `api/` — Hono API with Zod/OpenAPI schemas. `src/app.ts` assembles routes; `src/server.ts` runs on Node and `src/worker.ts` runs on Cloudflare. `src/runner.ts` runs the Node job worker. PostgreSQL schemas are in `src/db/`, migrations in `migrations/`, and platform/database/storage adapters in `src/adapters/`.
 - `sdk/` — Generated TypeScript client, published on npm as `@nightmail/sdk`. Usage is in `sdk/README.md`.
-- `mcp/` — MCP integration and client connection documentation. See `mcp/README.md`.
 - `support/` — The AI support agent's Worker (`bane-support`, `bane-support-dev`): OpenCode in a Durable Object per conversation, reaching Bane through the `SupportPlatform` service binding. Setup and tests are in `support/README.md`, and the Help panel's WebSocket contract is in `support/PROTOCOL.md`.
-- `docs/` — Public demo screenshots, SES research, and `dispatch-scaling.md` (measured throughput ceilings, dispatcher design rationale, and the scaling playbook by SES quota). Prefer `api/README.md` over older research notes for current setup instructions.
+- `docs/` — Public demo screenshots, SES research, `mcp.md` (connecting an MCP client to the API's `/mcp`, the only MCP server), and `dispatch-scaling.md` (measured throughput ceilings, dispatcher design rationale, and the scaling playbook by SES quota). Prefer `api/README.md` over older research notes for current setup instructions.
 
 The dashboard builds to `app/dist/`. Cloudflare serves that directory; Docker copies it into the API image's `public/` directory. There is no root HTML entry point or root package.json: each package installs its own dependencies with `bun install`.
 
@@ -27,7 +26,6 @@ Run commands from the directory shown; install that package's dependencies first
 | `app/` | `bun run build` | Type-check and build the dashboard |
 | `api/` | `bun run dev` / `bun run worker` | Node API / background job worker |
 | `api/` | `bun run check` / `bun run sdk` | Type-check API / regenerate OpenAPI and SDK |
-| `mcp/` | `bun run check` / `bun run build` | Type-check / compile the MCP adapter |
 
 Docker, Cloudflare, and local development have separate setup instructions in `api/README.md`; do not mix their URLs or configuration.
 

@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, gt, isNull, sql, type SQL } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
-import { ApiError, actor, digest, errors, hasSessionCookie, id, IdParams, isoTime, json, KEY_CHANGE, lasting, PageQuery, page, randomSecret, response, security, senderDomainAllowed, timed, withOuterRequest, wrapModuleLoad } from './core.js';
+import { ApiError, actor, agentTokenMintRefusal, digest, errors, hasSessionCookie, id, IdParams, isoTime, json, keyAdminRefusal, PageQuery, page, randomSecret, response, security, senderDomainAllowed, timed, withOuterRequest, wrapModuleLoad } from './core.js';
 import type { Actor, App, AppEnv, Ctx, MailboxAccess, RequestOrigin, Runtime } from './core.js';
 import { agentTokens, apiKeys } from './db/core.js';
 import { mailboxKeys } from './db/mailbox.js';
@@ -73,6 +73,56 @@ export const requireReceivingConsent: MiddlewareHandler<AppEnv> = async (c,next)
   await next();
 };
 
+// bane_/os_: remove after rename cleanup.
+const AGENT_TOKEN = /^(?:nm|bane|os)_agent_/;
+const API_KEY = /^(?:nm_|bane_|os_(?:live_)?)[0-9a-f]{64}$/i;
+/** A workspace API key or agent token (not an inbox key, not an account-service token): what bearerActor takes. */
+export const workspaceBearer = (token: string) => /^(?:nm|bane|os)_(?!mbx_)/.test(token);
+const apiKeyRow = (c: Ctx, hash: string) => sql`
+  SELECT k.id, k.workspace_id, k.id AS key_id, k.permissions, k.domains, g.grant_id,
+    ${c.env.config.apiRateLimitPerMinute}::int AS max_requests
+  FROM api_keys k LEFT JOIN mail_grant_objects g ON g.workspace_id=k.workspace_id AND g.kind='api_key' AND g.resource=k.id
+  WHERE k.hash = ${hash} AND k.revoked_at IS NULL`;
+
+/**
+ * The actor a workspace API key or agent token acts as, checked now: revoked, expired and over-budget credentials and
+ * ones whose originating MCP approval ended are refused. Each call counts against the credential's minute budget. REST
+ * authenticates every bearer request with this, and /mcp its key and agent-token connections, so both see one actor.
+ */
+export async function bearerActor(c: Ctx, token: string): Promise<Actor> {
+  if (token.length > 16 * 1024) throw new ApiError(401, 'AUTH_INVALID', 'The API token is invalid or has been revoked.');
+  if (AGENT_TOKEN.test(token)) {
+    const [{ verifyAgentToken }, { getMcpGrantActor }] = await wrapModuleLoad(() => Promise.all([import('./agent-token.js'), import('./mcp-auth.js')]));
+    const temporary = await verifyAgentToken(c.env.config, token);
+    // The approval acts in the workspace the token was minted in (a call names it; the token keeps it).
+    const minted = temporary && (await c.env.db.execute<{ workspace_id: string }>(sql`SELECT workspace_id FROM agent_tokens WHERE id = ${temporary.id} AND grant_id = ${temporary.grant}`)).rows[0];
+    const grant = temporary && minted && await getMcpGrantActor(c.env, temporary.grant, minted.workspace_id);
+    const invalid = () => new ApiError(401, 'AUTH_INVALID', 'The temporary API token is invalid, expired, or its originating approval was revoked.');
+    if (!temporary || !grant || temporary.permissions.some(permission => !grant.permissions.includes('manage') && !grant.permissions.includes(permission))) throw invalid();
+    const limit = c.env.config.apiRateLimitPerMinute;
+    const tracked = await timed(c, 'budget-db', () => chargeCredential(c, agentTokens, sql`
+      SELECT id, workspace_id, grant_id AS key_id, ${limit}::int AS max_requests FROM agent_tokens
+      WHERE id = ${temporary.id} AND revoked_at IS NULL AND workspace_id = ${grant.workspaceId} AND grant_id = ${temporary.grant}
+        AND date_trunc('milliseconds', expires_at) = ${new Date(temporary.exp).toISOString()}::timestamptz
+        AND permissions = ${JSON.stringify(temporary.permissions)}::jsonb AND domains = ${JSON.stringify(temporary.domains)}::jsonb`));
+    if (!tracked) throw invalid();
+    return { ...grant, permissions: temporary.permissions, domains: temporary.domains, credential: 'agentToken', tokenId: temporary.id };
+  }
+  if (!API_KEY.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
+  const hash = await digest(token);
+  // A send's duplicate that reaches another isolate (a cold fingerprint) must not wait on the budget row either.
+  const idem = c.req.method==='POST' && ['/v1/emails/send','/v1/emails/batch'].includes(c.req.path) ? c.req.header('Idempotency-Key') : undefined;
+  const key = await timed(c, 'budget-db', () => chargeCredential<Pick<Actor, 'permissions' | 'domains'> & { id: string; workspace_id: string; grant_id:string|null }>(c, apiKeys, apiKeyRow(c, hash), idem!==undefined && validIdempotencyKey(idem) ? idempotencyGate(c.req.path,idem) : undefined));
+  if (!key) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
+  let grant:Actor|null=null;
+  if (key.grant_id) {
+    const {getMcpGrantActor}=await wrapModuleLoad(()=>import('./mcp-auth.js'));
+    grant=await getMcpGrantActor(c.env,'mcp_'+key.grant_id,key.workspace_id);
+    if (grant?.workspaceId!==key.workspace_id || !grant.permissions.includes('manage')) throw new ApiError(401,'AUTH_INVALID','The originating management approval is no longer active.');
+  } else rememberFingerprint(hash);
+  return { grantId:grant?.grantId, receivingConsent:grant?.receivingConsent, userId:grant?.userId, keyId: key.id, workspaceId: key.workspace_id, permissions: key.permissions, domains: key.domains, credential: 'apiKey' };
+}
+
 export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
   const delegated = (c.env as DelegatedRuntime)[delegatedActor];
   const authorization = c.req.header('authorization');
@@ -83,48 +133,16 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
   } else if (authorization !== undefined) {
     const token = authorization.match(/^Bearer (.+)$/i)?.[1];
     if (!token || token.length > 16 * 1024) throw new ApiError(401, 'AUTH_INVALID', 'The API token is invalid or has been revoked.');
-    if (/^(?:nm|bane|os)_agent_/.test(token)) { // bane_/os_: remove after rename cleanup
-      const [{ verifyAgentToken }, { getMcpGrantActor }] = await wrapModuleLoad(() => Promise.all([import('./agent-token.js'), import('./mcp-auth.js')]));
-      const temporary = await verifyAgentToken(c.env.config, token);
-      // The approval acts in the workspace the token was minted in (a call names it; the token keeps it).
-      const minted = temporary && (await c.env.db.execute<{ workspace_id: string }>(sql`SELECT workspace_id FROM agent_tokens WHERE id = ${temporary.id} AND grant_id = ${temporary.grant}`)).rows[0];
-      const grant = temporary && minted && await getMcpGrantActor(c.env, temporary.grant, minted.workspace_id);
-      const invalid = () => new ApiError(401, 'AUTH_INVALID', 'The temporary API token is invalid, expired, or its originating approval was revoked.');
-      if (!temporary || !grant || temporary.permissions.some(permission => !grant.permissions.includes('manage') && !grant.permissions.includes(permission))) throw invalid();
-      const limit = c.env.config.apiRateLimitPerMinute;
-      const tracked = await timed(c, 'budget-db', () => chargeCredential(c, agentTokens, sql`
-        SELECT id, workspace_id, grant_id AS key_id, ${limit}::int AS max_requests FROM agent_tokens
-        WHERE id = ${temporary.id} AND revoked_at IS NULL AND workspace_id = ${grant.workspaceId} AND grant_id = ${temporary.grant}
-          AND date_trunc('milliseconds', expires_at) = ${new Date(temporary.exp).toISOString()}::timestamptz
-          AND permissions = ${JSON.stringify(temporary.permissions)}::jsonb AND domains = ${JSON.stringify(temporary.domains)}::jsonb`));
-      if (!tracked) throw invalid();
-      c.set('actor', { ...grant, permissions: temporary.permissions, domains: temporary.domains, credential: 'agentToken',tokenId:temporary.id });
-    } else {
-      if (!/^(?:nm_|bane_|os_(?:live_)?)[0-9a-f]{64}$/i.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.'); // bane_/os_: remove after rename cleanup
+    // A send with a key this isolate verified a minute ago admits the request in one statement (sending.ts).
+    if (API_KEY.test(token) && c.env.config.multiTenant && c.req.method==='POST' && ['/v1/emails/send','/v1/emails/batch'].includes(c.req.path)) {
       const hash = await digest(token);
-      const limit = c.env.config.apiRateLimitPerMinute;
-      const credential = sql`
-        SELECT k.id, k.workspace_id, k.id AS key_id, k.permissions, k.domains, g.grant_id,
-          ${limit}::int AS max_requests
-        FROM api_keys k LEFT JOIN mail_grant_objects g ON g.workspace_id=k.workspace_id AND g.kind='api_key' AND g.resource=k.id
-        WHERE k.hash = ${hash} AND k.revoked_at IS NULL`;
-      if((verifiedFingerprints.get(hash)??0)>Date.now() && c.env.config.multiTenant && c.req.method==='POST' && ['/v1/emails/send','/v1/emails/batch'].includes(c.req.path)) {
+      if((verifiedFingerprints.get(hash)??0)>Date.now()) {
         const {tryAtomicKeyAdmission}=await wrapModuleLoad(()=>import('./sending.js'));
-        const response=await tryAtomicKeyAdmission(c,charge=>credentialCtes(apiKeys,sql`${credential} AND g.grant_id IS NULL`,charge));
+        const response=await tryAtomicKeyAdmission(c,charge=>credentialCtes(apiKeys,sql`${apiKeyRow(c, hash)} AND g.grant_id IS NULL`,charge));
         if(response){rememberFingerprint(hash);return response;}
       }
-      // A send's duplicate that reaches another isolate (a cold fingerprint) must not wait on the budget row either.
-      const idem = c.req.method==='POST' && ['/v1/emails/send','/v1/emails/batch'].includes(c.req.path) ? c.req.header('Idempotency-Key') : undefined;
-      const key = await timed(c, 'budget-db', () => chargeCredential<Pick<Actor, 'permissions' | 'domains'> & { id: string; workspace_id: string; grant_id:string|null }>(c, apiKeys,credential,idem!==undefined && validIdempotencyKey(idem) ? idempotencyGate(c.req.path,idem) : undefined));
-      if (!key) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
-      let grant:Actor|null=null;
-      if (key.grant_id) {
-        const {getMcpGrantActor}=await wrapModuleLoad(()=>import('./mcp-auth.js'));
-        grant=await getMcpGrantActor(c.env,'mcp_'+key.grant_id,key.workspace_id);
-        if (grant?.workspaceId!==key.workspace_id || !grant.permissions.includes('manage')) throw new ApiError(401,'AUTH_INVALID','The originating management approval is no longer active.');
-      } else rememberFingerprint(hash);
-      c.set('actor', { grantId:grant?.grantId, receivingConsent:grant?.receivingConsent, userId:grant?.userId, keyId: key.id, workspaceId: key.workspace_id, permissions: key.permissions, domains: key.domains, credential: 'apiKey' });
     }
+    c.set('actor', await bearerActor(c, token));
   } else {
     if (!c.env.config.accountClient) {
       throw new ApiError(503, 'AUTH_NOT_CONFIGURED', 'Dashboard sign-in is not configured for this deployment.');
@@ -164,10 +182,10 @@ const KeyInput = z.object({ name: z.string().trim().min(1).max(100),
   domains: z.array(z.string().trim().toLowerCase().regex(/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/)).max(50).optional().describe('Workspace keys: sender domains it is limited to, including their subdomains. Defaults to all.'),
   access: KeyAccessInput.optional().describe('What the key is limited to. Defaults to the workspace. A key for addresses or an inbox takes its permissions in access.mail and can never send from other addresses, read other mail or manage the workspace.'),
 }).strict().openapi('CreateApiKey');
+/** Key administration's actor (core.ts keyAdminRefusal). */
 export function manageKeys(c: Parameters<typeof actor>[0]) {
-  const value = actor(c, 'manage');
-  lasting(c, KEY_CHANGE);
-  if (value.domains.length) throw new ApiError(403, 'PERMISSION_DENIED', 'Key administration requires unrestricted management access.');
+  const value = actor(c, 'manage'), refusal = keyAdminRefusal(value);
+  if (refusal) throw refusal;
   return value;
 }
 const workspaceAccess = { type: 'workspace' as const, addressIds: null, inboxId: null, mail: [] };
@@ -182,7 +200,8 @@ export function registerAuth(app: App) {
     purpose: z.string().trim().min(1).max(200),
   }).strict()) }, responses: { 201: response(z.object({ id: z.string(), token: z.string(), expiresAt: z.string(), permissions: z.array(z.enum(['read', 'send', 'manage'])), domains: z.array(z.string()), purpose: z.string() }).openapi('AgentToken')), ...errors } }), async c => {
     const input = c.req.valid('json'); const identity = actor(c, input.permissions.includes('manage') ? 'manage' : input.permissions.includes('send') ? 'send' : 'read');
-    if (identity.credential !== 'mcp' || !identity.keyId.startsWith('mcp_')) throw new ApiError(403, 'MCP_AUTHORIZATION_REQUIRED', 'Temporary agent tokens can only be delegated directly from an MCP OAuth approval.');
+    const refusal = agentTokenMintRefusal(identity);
+    if (refusal) throw refusal;
     if (input.permissions.some(permission => !identity.permissions.includes('manage') && !identity.permissions.includes(permission))) throw new ApiError(403, 'PERMISSION_DENIED', 'The MCP approval does not include every requested permission.');
     if (identity.domains.length && (!input.domains.length || input.domains.some(domain => !senderDomainAllowed(identity.domains, domain)))) throw new ApiError(403, 'SENDER_DOMAIN_FORBIDDEN', 'The temporary token must remain restricted to the approved sender domains or their subdomains.', 'domains');
     const expiresAt = new Date(Date.now() + input.expiresInSeconds * 1000).toISOString();

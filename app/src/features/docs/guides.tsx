@@ -158,14 +158,15 @@ export const guides: Guide[] = [
     </>,
   },
   {
-    id: 'mcp', title: 'Connect an agent (MCP)', summary: `Let OpenCode, Claude Code or Cursor work with ${productName}, as you or with one inbox.`,
+    id: 'mcp', title: 'Connect an agent (MCP)', summary: `Let OpenCode, Claude Code or Cursor work with ${productName}: as you, with an API key, or with one inbox.`,
     body: () => <>
-      <Section title="Two ways to connect">
+      <Section title="Three ways to connect">
         <Table head={['Connect', 'What the agent can reach', 'Set up']} rows={[
           [<strong key="a">Sign in as you</strong>, 'What you approve in the browser: read, send or full access. It signs in with your Anomaly account (Google); choose its workspace and receiving tools in Settings → Account.', 'The config below, then sign in from your client.'],
+          [<strong key="k">With an API key</strong>, 'Exactly what the key can do, in this workspace only. No browser sign-in: the key goes in the config’s Authorization header. An agent token works the same way.', <Link key="l" to="/api-keys?create=read_send">Create key</Link>],
           [<strong key="b">One agent inbox</strong>, 'Only that inbox, with an API key for it: read its mail and, if allowed, reply. Nothing else in the workspace.', <Link key="c" to="/api-keys?connect=1">Connect an agent</Link>],
         ]} />
-        <p>Both are listed in <Link to="/api-keys">API keys</Link>: an agent signed in as you as an <strong>agent token</strong>, with the short-lived tokens it made, and an inbox’s key as an <strong>API key</strong>. Revoke either there, or an inbox’s key from its page.</p>
+        <p>Each is listed in <Link to="/api-keys">API keys</Link>: an agent signed in as you as an <strong>agent token</strong>, with the short-lived tokens it made, and a key as an <strong>API key</strong>. Revoke any of them there, or an inbox’s key from its page.</p>
       </Section>
       <McpSetup chooseAccess />
     </>,
