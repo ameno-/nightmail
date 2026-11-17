@@ -10,14 +10,14 @@ import { settingsColumns } from './skeletons'
 import { relativeHost } from './domain-records'
 
 const hostStatus: Record<ReceivingHost['status'], { label: string; tone: Tone }> = {
-  pending: { label: 'Waiting for MX', tone: 'warning' }, active: { label: 'Receiving', tone: 'success' }, mixed: { label: 'Receiving, MX shared', tone: 'warning' },
+  pending: { label: 'Waiting for MX', tone: 'warning' }, provisioning: { label: 'Setting up', tone: 'warning' }, active: { label: 'Receiving', tone: 'success' }, mixed: { label: 'Receiving, MX shared', tone: 'warning' },
   lost: { label: 'MX missing', tone: 'danger' }, failed: { label: 'Failed', tone: 'danger' }, removed: { label: 'Removed', tone: 'neutral' },
 }
 const path = (domainId: string, hostId?: string) => `/v1/inbound/domains/${encodeURIComponent(domainId)}/hosts${hostId ? `/${encodeURIComponent(hostId)}` : ''}`
 
 /** The hosts the domain receives on, read with the page so the section arrives at its final height. */
-export function useReceivingHosts(domainId: string, enabled: boolean) {
-  return useApiQuery(['mailbox-domain', domainId, 'hosts'], (_api, signal) => request<{ data: ReceivingHost[] }>(path(domainId), { signal }).then(page => page.data.filter(host => host.status !== 'removed')), { enabled })
+export function useReceivingHosts(domainId: string, enabled: boolean, interval: number | false = false) {
+  return useApiQuery(['mailbox-domain', domainId, 'hosts'], (_api, signal) => request<{ data: ReceivingHost[] }>(path(domainId), { signal }).then(page => page.data.filter(host => host.status !== 'removed')), { enabled, interval: () => interval })
 }
 
 /** A domain receives on any set of hosts at once: the domain itself and any of its subdomains, each added and removed on its own. */

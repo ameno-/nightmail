@@ -4210,7 +4210,7 @@ export const checkInboundDomain = <ThrowOnError extends boolean = false>(options
 /**
  * Enable receiving for a verified domain
  *
- * Checks that the domain is verified in SES and that its MX records will not take mail from another provider, then queues setup: a Nightmail S3 bucket, SNS topic and a catch-all SES receipt rule for the domain. Publish the returned MX record to start receiving. Use force=true to take over a domain whose mail another provider receives today.
+ * Checks that the domain is verified in SES and that its MX records will not take mail from another provider, then queues setup: a Nightmail S3 bucket, SNS topic and a catch-all SES receipt rule for the domain. Publish the returned MX record to start receiving. Use force=true to take over a domain whose mail another provider receives today. Hosted, receiving follows verified DNS: this queues the domain’s check now, and the domain reads provisioning until that check routes it (active), finds no MX yet (waiting_for_mx) or fails (failed, with lastError).
  */
 export const enableInboundDomain = <ThrowOnError extends boolean = false>(options: Options<EnableInboundDomainData, ThrowOnError>): RequestResult<EnableInboundDomainResponses, EnableInboundDomainErrors, ThrowOnError> => (options.client ?? client).post<EnableInboundDomainResponses, EnableInboundDomainErrors, ThrowOnError>({
     security: [

@@ -11,7 +11,7 @@ import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
 import { actor, ApiError, assertSesConfigured, chargeBudget, assertSharedAccount, isSimulatedSes, digest, errors, getSes, id, IdParams, json, lazyModule, log, logError, ModuleLoadError, notFound, PageQuery, preloadSesTransport, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, wrapModuleLoad, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
 import { chargeManualDelivery, claimedWithWebhooks, enqueue, JobDeferred, WEBHOOK_ATTEMPTS, retryDatabaseFailures, webhookClaimCtes } from './jobs.js';
-import { applyClaim, connectionReady, domainHosts, hostGraceStart, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type HostEvidence, type HostStatus, type HostWrite, type IdentityFacts, type TenantState, PROOF_LABELS, proofRecordName, type ProofLabel } from './states.js';
+import { applyClaim, connectionReady, domainHosts, receivingSetup, type ReceivingSetup, hostGraceStart, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type HostEvidence, type HostStatus, type HostWrite, type IdentityFacts, type TenantState, PROOF_LABELS, proofRecordName, type ProofLabel } from './states.js';
 import { jobs } from './db/core.js';
 import { contacts, mergeSuppression } from './db/audience.js';
 import { lasting, RECEIVING_HOST_CHANGE, SuppressionEventData, WEBHOOK_CHANGE, webhookUrlHint, WebhookUrlHint, readCursor, nextCursor } from './core.js';
@@ -71,7 +71,7 @@ export const receivingIssueSchema = z.object({
   host: z.string(), blocking: z.boolean().describe('True when receiving there cannot work until DNS or the choice changes.'), message: z.string(),
   provider: z.string().nullable().optional(), target: z.string().nullable().optional().describe('The existing CNAME target.'), suggestion: z.string().nullable().optional().describe('A free subdomain to use instead.'),
 }).openapi('ReceivingIssue');
-const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.string(), verificationStatus: z.string(), verified: z.boolean(), dkimStatus: z.string(), dmarc:dmarcSchema, ready: z.boolean(), sending:dnsState, receiving:dnsState, mailFromDomain: z.string().nullable(), mailFromStatus: z.string().nullable(), dnsStatus: z.enum(['available', 'unavailable']), dnsUnavailableReason: z.string().nullable(), dns: z.array(dnsRecord),
+const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.string(), verificationStatus: z.string(), verified: z.boolean(), dkimStatus: z.string(), dmarc:dmarcSchema, ready: z.boolean(), sending:dnsState, receiving:z.enum(['pending','provisioning','verified']).describe('provisioning (hosted): receiving was enabled and its check is still running; it ends verified, or pending until the MX record is published.'), mailFromDomain: z.string().nullable(), mailFromStatus: z.string().nullable(), dnsStatus: z.enum(['available', 'unavailable']), dnsUnavailableReason: z.string().nullable(), dns: z.array(dnsRecord),
   releasesAt: z.string().nullable().optional().describe('Hosted only: when this domain is released if its records are still unproven (72 hours after it was added). Null once ownership has been proven.'),
   receivingIssue: receivingIssueSchema.nullable().optional().describe('Hosted only: receiving needs attention. Set by the DNS checks that run when a receiving host is suggested or chosen, on Check now and in the hourly recheck. Null when the receiving record is clear.') }).openapi('DomainReadiness');
 const accountSchema = z.object({ region: z.string(), productionAccess: z.boolean(), sendingEnabled: z.boolean(), enforcementStatus: z.string(), quota: z.object({ max24HourSend: z.number(), maxSendRate: z.number(), sentLast24Hours: z.number() }) }).openapi('SesAccount');
@@ -277,13 +277,13 @@ const claimTag = tagKey('domain-claim');
 type Readiness = z.infer<typeof domainSchema>;
 type DomainRef = Pick<Readiness,'id'|'name'|'region'>;
 type ProofTimes={receiving_proved_at?:Date|string|null;receiving_identity_at?:Date|string|null;receiving_proof_missed_at?:Date|string|null};
-export type HostedDomain = DomainRef & ClaimState & ProofTimes & { connection: ReadyConnection & { tenant_state: TenantState;legacy?:boolean }; token: string; proof_label: ProofLabel; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean; dns_first:boolean; hosts: ReceivingHostRow[] };
+export type HostedDomain = DomainRef & ClaimState & ProofTimes & { connection: ReadyConnection & { tenant_state: TenantState;legacy?:boolean }; token: string; proof_label: ProofLabel; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; receiving_setup:ReceivingSetup|null; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean; dns_first:boolean; hosts: ReceivingHostRow[] };
 /** The domain's receiving hosts, its own row first: what every hosted read of a claim carries. `d` is operation_domains. */
 const unavailableDomain = () => new ApiError(409, 'DOMAIN_UNAVAILABLE', 'This SES identity is unavailable for this domain claim.');
 const ownsIdentity = (identity: GetEmailIdentityCommandOutput, token: string) => hasTags(identity.Tags, [{ Key: claimTag, Value: token }]);
 function hostedDomainSelect(wid:string, domainId:string, lock:SQL=sql``) {
   return sql`SELECT d.id,d.name,d.region,to_jsonb(pc) AS connection,dc.token,dc.proof_label,dc.claim_scope,dc.sending_state,dc.receiving_state,dc.receiving_host,dc.lost_since,dc.receiving_lost_since,dc.identity,
-    dc.receiving_proved_at,dc.receiving_identity_at,dc.receiving_proof_missed_at,dc.created_at,dc.ever_proven,dc.dns_first,domain_claim_expired(dc) AS expired,dc.created_at <= now()-interval '1 hour' AS check_txt,${domainHosts()} AS hosts,
+    dc.receiving_proved_at,dc.receiving_identity_at,dc.receiving_proof_missed_at,dc.created_at,dc.ever_proven,dc.dns_first,domain_claim_expired(dc) AS expired,dc.created_at <= now()-interval '1 hour' AS check_txt,${domainHosts()} AS hosts,${receivingSetup()} AS receiving_setup,
     EXISTS(SELECT 1 FROM provider_pool_regions p WHERE p.region=pc.region AND p.aws_account_id=pc.aws_account_id AND ${poolReceives()}) AS pool_receiving
     FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id
     JOIN domain_sending_bindings b ON b.domain_id=d.id AND b.connection_id=dc.connection_id AND b.region=d.region
@@ -366,14 +366,14 @@ async function domainReadiness(runtime: Runtime, row: DomainRef, identity?: GetE
 const platformClaim = (config:Config,wid:string,row:{name:string;identity:IdentityFacts|null;connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean}}) =>
   !!row.identity?.adopted && row.connection.kind==='shared' && row.connection.legacy!==false && platformDomainOwner(config,wid) && platformHosts(config).includes(row.name);
 const claimProof = (row: {connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean};token:string;proof_label:ProofLabel;identity?:IdentityFacts|null;claim_scope?:string}, proven=false) => ({ token:row.token,label:row.proof_label,shared:row.connection.kind==='shared',regional:row.connection.legacy===false,proven,imported:row.connection.kind==='byo' && row.identity?.imported===true,txtOwned:row.claim_scope==='txt' });
-type ClaimRow = DomainRef & ClaimState & ProofTimes & { token:string; proof_label:ProofLabel; identity:IdentityFacts|null; connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean}; created_at?:string|Date; ever_proven?:boolean; dns_first?:boolean; hosts?:ReceivingHostRow[] };
+type ClaimRow = DomainRef & ClaimState & ProofTimes & { token:string; proof_label:ProofLabel; identity:IdentityFacts|null; connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean}; created_at?:string|Date; ever_proven?:boolean; dns_first?:boolean; hosts?:ReceivingHostRow[]; receiving_setup?:ReceivingSetup|null };
 const hour=3600_000;
 const proofTime=(at:Date|string|null|undefined)=>at?new Date(at).getTime():0;
 const proofUntil=(row:ProofTimes)=>Math.min(proofTime(row.receiving_proved_at)+72*hour,row.receiving_proof_missed_at?proofTime(row.receiving_proof_missed_at)+48*hour:Infinity);
 const observeProof=(positive:boolean)=>sql`receiving_proved_at=CASE WHEN ${positive} THEN now() ELSE receiving_proved_at END,receiving_proof_missed_at=CASE WHEN NOT ${positive} THEN coalesce(receiving_proof_missed_at,now()) END`;
 const sends = (row: Pick<ClaimState,'sending_state'>) => row.sending_state==='verified' || row.sending_state==='lost';
 /** The readiness document is derived: SES/DNS facts give the records, the explicit states give every boolean. */
-function derivedReadiness(row: ClaimRow): Readiness {
+export function derivedReadiness(row: ClaimRow): Readiness {
   const facts=row.identity, held=sends(row);
   const report=readiness(row,facts?.ses ?? {VerificationStatus:'PENDING'},claimProof(row,(facts?.proven ?? false) || held),facts?.mx,facts?.note,facts?.dmarc);
   if(row.dns_first && !row.ever_proven){
@@ -383,7 +383,7 @@ function derivedReadiness(row: ClaimRow): Readiness {
   report.verified=held; report.ready=held; report.sending=state(held);
   if (row.sending_state==='failed') report.verificationStatus='FAILED';
   else if (!held && report.verificationStatus==='SUCCESS') report.verificationStatus='PENDING';
-  report.receiving=state(row.receiving_state==='active' || row.receiving_state==='lost');
+  report.receiving=row.receiving_state==='active' || row.receiving_state==='lost' ? 'verified' : row.receiving_setup?.status==='provisioning' ? 'provisioning' : 'pending';
   // Receiving: one MX record per host, the domain's own row first. That row's host floats with the suggestion until it
   // routes: never the root unless it already routes here or the owner chose it (an MX pasted at the root would take the
   // domain's existing mail), and never one of Nightmail's own names. DNS checks refine this to a free host. Every other
@@ -832,7 +832,7 @@ export async function domainPage(c: Ctx, a: Actor, q: DomainQuery): Promise<z.in
   const allowed = a.domains.length ? or(...a.domains.map(parent => or(eq(domains.name, parent), like(domains.name, `%.${parent}`)))) : undefined;
   const where = and(scoped(domains, a), allowed, q.region ? eq(domains.region, region(c.env, q.region)) : c.env.config.multiTenant ? undefined : inArray(domains.region, c.env.config.regions), q.cursor ? lt(domains.id, q.cursor) : undefined);
   if (c.env.config.multiTenant) {
-    const rows=await c.env.db.select({row:domains,hosts:sql<ReceivingHostRow[]>`${domainHosts(sql`${domains}`)}`,token:domainClaims.token,proof_label:domainClaims.proofLabel,claim_scope:domainClaims.claimScope,sending_state:domainClaims.sendingState,receiving_state:domainClaims.receivingState,receiving_host:domainClaims.receivingHost,receiving_proved_at:sql<string>`domain_claims.receiving_proved_at`,receiving_identity_at:sql<string>`domain_claims.receiving_identity_at`,receiving_proof_missed_at:sql<string>`domain_claims.receiving_proof_missed_at`,lost_since:domainClaims.lostSince,receiving_lost_since:domainClaims.receivingLostSince,identity:domainClaims.identity,created_at:domainClaims.createdAt,ever_proven:domainClaims.everProven,kind:sql<'shared'|'byo'>`pc.kind`,legacy:sql<boolean>`pc.legacy`}).from(domains)
+    const rows=await c.env.db.select({row:domains,hosts:sql<ReceivingHostRow[]>`${domainHosts(sql`${domains}`)}`,token:domainClaims.token,proof_label:domainClaims.proofLabel,claim_scope:domainClaims.claimScope,sending_state:domainClaims.sendingState,receiving_state:domainClaims.receivingState,receiving_host:domainClaims.receivingHost,receiving_proved_at:sql<string>`domain_claims.receiving_proved_at`,receiving_identity_at:sql<string>`domain_claims.receiving_identity_at`,receiving_proof_missed_at:sql<string>`domain_claims.receiving_proof_missed_at`,lost_since:domainClaims.lostSince,receiving_lost_since:domainClaims.receivingLostSince,identity:domainClaims.identity,created_at:domainClaims.createdAt,ever_proven:domainClaims.everProven,receiving_setup:sql<ReceivingSetup|null>`${receivingSetup(sql`domain_claims`)}`,kind:sql<'shared'|'byo'>`pc.kind`,legacy:sql<boolean>`pc.legacy`}).from(domains)
       .innerJoin(domainClaims,and(eq(domainClaims.name,domains.name),eq(domainClaims.workspaceId,domains.workspaceId)))
       .innerJoin(sql`regional_connections pc`,sql`pc.id=${domainClaims.connectionId} AND pc.workspace_id=${domains.workspaceId} AND pc.region=${domains.region} AND ${connectionReady()}`)
       .where(where).orderBy(desc(domains.id)).limit(q.limit+1);

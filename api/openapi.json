@@ -5392,8 +5392,10 @@
             "type": "string",
             "enum": [
               "pending",
+              "provisioning",
               "verified"
-            ]
+            ],
+            "description": "provisioning (hosted): receiving was enabled and its check is still running; it ends verified, or pending until the MX record is published."
           },
           "mailFromDomain": {
             "type": [
@@ -10865,13 +10867,14 @@
             "type": "string",
             "enum": [
               "pending",
+              "provisioning",
               "active",
               "mixed",
               "lost",
               "failed",
               "removed"
             ],
-            "description": "pending: its MX record isn’t seen yet. active: it receives. mixed: it receives, and another provider’s MX record shares its mail (a backup MX, or one with a better priority while mail moves over). lost: its MX record disappeared; it keeps receiving for two hours. failed: receiving setup failed (self-hosted). removed: it no longer receives; its addresses and mail are kept, and adding it again restores it."
+            "description": "pending: its MX record isn’t seen yet. provisioning: receiving is being set up (enableInboundDomain); it ends active, pending or failed. active: it receives. mixed: it receives, and another provider’s MX record shares its mail (a backup MX, or one with a better priority while mail moves over). lost: its MX record disappeared; it keeps receiving for two hours. failed: receiving setup failed. removed: it no longer receives; its addresses and mail are kept, and adding it again restores it."
           },
           "catchAll": {
             "type": "string",
@@ -54987,7 +54990,7 @@
         ],
         "operationId": "enableInboundDomain",
         "summary": "Enable receiving for a verified domain",
-        "description": "Checks that the domain is verified in SES and that its MX records will not take mail from another provider, then queues setup: a Nightmail S3 bucket, SNS topic and a catch-all SES receipt rule for the domain. Publish the returned MX record to start receiving. Use force=true to take over a domain whose mail another provider receives today.",
+        "description": "Checks that the domain is verified in SES and that its MX records will not take mail from another provider, then queues setup: a Nightmail S3 bucket, SNS topic and a catch-all SES receipt rule for the domain. Publish the returned MX record to start receiving. Use force=true to take over a domain whose mail another provider receives today. Hosted, receiving follows verified DNS: this queues the domain’s check now, and the domain reads provisioning until that check routes it (active), finds no MX yet (waiting_for_mx) or fails (failed, with lastError).",
         "parameters": [
           {
             "schema": {
