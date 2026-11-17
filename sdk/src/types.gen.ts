@@ -4249,6 +4249,13 @@ export type WorkspaceMember = {
     role: 'owner' | 'admin' | 'member';
 };
 
+export type CreatedWorkspaceInvitation = WorkspaceInvitation & {
+    /**
+     * What to do next, for people and agents: no email is sent, so share acceptUrl with the invitee.
+     */
+    nextStep: string;
+};
+
 export type WorkspaceInvitation = {
     id: string;
     workspaceId: string;
@@ -22376,7 +22383,7 @@ export type InviteWorkspaceMemberResponses = {
     /**
      * Success
      */
-    201: WorkspaceInvitation;
+    201: CreatedWorkspaceInvitation;
 };
 
 export type InviteWorkspaceMemberResponse = InviteWorkspaceMemberResponses[keyof InviteWorkspaceMemberResponses];
@@ -22566,7 +22573,7 @@ export type CreateWorkspaceInvitationResponses = {
     /**
      * Success
      */
-    201: WorkspaceInvitation;
+    201: CreatedWorkspaceInvitation;
 };
 
 export type CreateWorkspaceInvitationResponse = CreateWorkspaceInvitationResponses[keyof CreateWorkspaceInvitationResponses];

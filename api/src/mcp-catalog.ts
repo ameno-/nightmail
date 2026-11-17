@@ -1,6 +1,6 @@
 import { Validator, type Schema } from '@cfworker/json-schema';
 import type { Tool } from '@modelcontextprotocol/server';
-import { agentTokenMintRoute, keyAdminRoute, lastingRoute, mailboxRoute, ownerRoute, receivingAdminRoute, receivingConsentRoute, unrestrictedRoute, type App } from './core.js';
+import { agentTokenMintRoute, keyAdminRoute, lastingRoute, mailboxRoute, memberAdminRoute, ownerRoute, receivingAdminRoute, receivingConsentRoute, unrestrictedRoute, type App } from './core.js';
 import { resourceInventory } from './mcp-resources.js';
 import { productName } from './brand.js';
 
@@ -44,6 +44,8 @@ export interface McpOperation {
   readonly lasting: boolean;
   /** Only a signed-in dashboard session may call it; never listed to an MCP connection. */
   readonly dashboardOnly: boolean;
+  /** Members and invitations (memberAdminRoute): an owner's or admin's own sign-in, never a key or agent token. */
+  readonly memberAdmin: boolean;
 }
 // Provider-signed notifications are never agent calls, and REST refuses revealWebhookSecret to every delegated credential
 // (an approval, the API keys it makes, agent tokens). Everything else with bearer auth becomes a tool.
@@ -206,7 +208,7 @@ const TAG_TOOLSET: Record<string, Toolset> = {
   'Agent inboxes': 'inboxes', 'Inbound addresses': 'inboxes', 'Inbound threads': 'inboxes', 'Inbound events': 'inboxes',
   Routing: 'routing', Rituals: 'rituals', Endpoints: 'endpoints', 'Inbound webhooks': 'endpoints',
   Emails: 'sending', Campaigns: 'sending', Templates: 'sending', Audience: 'sending', Consent: 'sending', Attachments: 'admin', Metrics: 'sending',
-  Auth: 'admin', ApiKeys: 'admin', Settings: 'admin', Billing: 'admin', Domains: 'admin', Regions: 'admin', Webhooks: 'admin', 'Inbound domains': 'admin', 'Inbound keys': 'admin',
+  Auth: 'admin', ApiKeys: 'admin', Settings: 'admin', Workspaces: 'admin', Billing: 'admin', Domains: 'admin', Regions: 'admin', Webhooks: 'admin', 'Inbound domains': 'admin', 'Inbound keys': 'admin',
 };
 const UNTRUSTED_READS = new Set(['listEmails', 'getEmail', 'getEmailDetail', 'getEmailContent', 'previewEmail', 'listLogs', 'testRouting', 'testRituals', 'getInboxMessage', 'listInboxMessages', 'getInboxAttachment', 'getInboundMessage', 'listInboundMessages', 'getInboundThread', 'listInboundThreads', 'getInboundAttachment', 'listInboundEvents']);
 const INBOX_PERMISSIONS: Record<string, McpOperation['inbox']> = {
@@ -243,6 +245,7 @@ const DESCRIPTIONS: Record<string, string> = {
   createInboxConnection: 'Create a least-privilege MCP connection limited to chosen inboxes. auth=key returns a bearer key once inside a ready config (OpenCode, Claude Code, Cursor or generic); auth=oauth returns the config plus the human step: the person approves and selects the inboxes on the consent screen.',
   createBillingTopUpLink: 'Returns a Stripe Checkout link for a person to open and pay; agents cannot pay. Share the link with an owner or admin. Amount in whole cents, $20 to $10,000, excluding tax; the link expires in 23 hours and credit appears once Stripe confirms the payment.',
   createApiKey: 'Create a long-lived API key: for the workspace (permissions, sender domains), or with access limited to receiving addresses or one agent inbox. Created over MCP, it is tied to this approval and revoked with it. The secret is returned once. Prefer createAgentToken for short scripts.',
+  createWorkspaceInvitation: 'Invite an email address to this workspace as admin or member (an owner invitation is made in the dashboard). No email is sent: share the returned acceptUrl with the invitee yourself. They join after signing in with that verified address; it expires in 7 days.',
   createWebhook: 'Subscribe a public HTTPS URL to sending events. Set up over MCP, it is tied to this approval: it delivers while the approval is active and is paused when the approval is removed, resuming only with its URL and a new signing secret.',
 };
 const PATH_IDS: Record<string, string> = {
@@ -339,7 +342,7 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
       const ownerOnly = receiving || ownerRoute(method, path);
       operations.set(name, Object.freeze({ tool, method, path, queryParameters, write, confirm, apiArgs, pollPage, toolset, receiving, inbound: receiving || toolset === 'inboxes', inbox: INBOX_PERMISSIONS[name], untrustedContent: UNTRUSTED_READS.has(name), permission, ownerOnly, mailbox,
         receivingConsent: receivingConsentRoute(path), unrestricted: unrestrictedRoute(path), keyAdmin: keyAdminRoute(method, path), agentTokenMint: agentTokenMintRoute(method, path),
-        receivingAdmin: receivingAdminRoute(path), lasting: lastingRoute(method, path), dashboardOnly: DASHBOARD_ONLY.has(name), validate: validator(input), validateOutput }));
+        receivingAdmin: receivingAdminRoute(path), lasting: lastingRoute(method, path), dashboardOnly: DASHBOARD_ONLY.has(name), memberAdmin: memberAdminRoute(method, path), validate: validator(input), validateOutput }));
     }
   }
   // The sole non-REST primitive is a constrained long poll of the inbox message operation.
@@ -370,12 +373,14 @@ export const HUMAN_STEPS: Record<string, string> = {
   deleteBillingPaymentMethod: 'Human step: a signed-in owner or admin removes the saved card in the dashboard.',
   releaseSenderStanding: 'Human step: an owner or admin confirms the fix checklist in the dashboard. Agents read the standing with getSenderScore.',
   getRitualVersion: 'Dashboard step: the rituals page’s long poll, so a person sees an agent’s saves live. Agents read the version from rituals · config (getRituals).',
+  inviteWorkspaceMember: 'The dashboard’s older name for createWorkspaceInvitation, which agents use (members · invite).',
   revealWebhookSecret: 'Human step: a signing secret is read back only in the dashboard or with an API key a person made, and every read is recorded. Agents can rotate it (webhooks · rotateSecret).',
 };
 /** Internal routes (Nightmail operators and support grants): never tools, and not listed in the customer coverage document. */
 export const INTERNAL_PATH = /^\/v1\/(?:support|operator)(?:\/|$)/;
-/** Account administration that the API keeps to signed-in people (members, invitations, workspaces, BYO AWS). */
-export const ACCOUNT_STEPS = /^(?:listWorkspaces|createWorkspace|renameCurrentWorkspace|listWorkspaceMembers|inviteWorkspaceMember|createWorkspaceInvitation|listWorkspaceInvitations|revokeWorkspaceInvitation|updateWorkspaceMember|removeWorkspaceMember|getWorkspaceInvitation|acceptWorkspaceInvitation|getConnection|createConnection|deleteConnection|listConnectionRegions|refreshConnectionScan|importConnectionDomains|getConnectionRegionStatus|verifyConnection)$/;
+/** Account administration that the API keeps to signed-in people (members, invitations, workspaces, BYO AWS). Owners
+ *  and admins also list members and invitations, invite and revoke over their own MCP sign-in (memberAdminRoute). */
+export const ACCOUNT_STEPS = /^(?:listWorkspaces|createWorkspace|renameCurrentWorkspace|updateWorkspaceMember|removeWorkspaceMember|getWorkspaceInvitation|acceptWorkspaceInvitation|getConnection|createConnection|deleteConnection|listConnectionRegions|refreshConnectionScan|importConnectionDomains|getConnectionRegionStatus|verifyConnection)$/;
 /** docs/mcp-coverage.md, generated from the catalog so the document cannot drift from the code. */
 export function coverageMarkdown(catalog: ReadonlyMap<string, McpOperation>, spec: ObjectValue): string {
   const byOperation = new Map<string, string>();

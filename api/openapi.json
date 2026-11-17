@@ -14266,6 +14266,25 @@
           "role"
         ]
       },
+      "CreatedWorkspaceInvitation": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/WorkspaceInvitation"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "nextStep": {
+                "type": "string",
+                "description": "What to do next, for people and agents: no email is sent, so share acceptUrl with the invitee."
+              }
+            },
+            "required": [
+              "nextStep"
+            ]
+          }
+        ]
+      },
       "WorkspaceInvitation": {
         "type": "object",
         "properties": {
@@ -62749,12 +62768,16 @@
         ],
         "security": [
           {
+            "bearerAuth": []
+          },
+          {
             "dashboardSession": []
           },
           {
             "secureDashboardSession": []
           }
         ],
+        "description": "List the workspace's members and their roles. Owners and admins, in the dashboard or over their own MCP sign-in; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED.",
         "responses": {
           "200": {
             "description": "Success",
@@ -62893,7 +62916,7 @@
       },
       "post": {
         "operationId": "inviteWorkspaceMember",
-        "description": "Invite an email address. Membership starts only after acceptance by the verified address. Share the returned URL; no email is sent.",
+        "description": "Invite an email address. Membership starts only after acceptance by the verified address. Share the returned URL; no email is sent. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard.",
         "tags": [
           "Workspaces"
         ],
@@ -62921,7 +62944,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/WorkspaceInvitation"
+                  "$ref": "#/components/schemas/CreatedWorkspaceInvitation"
                 }
               }
             }
@@ -63044,11 +63067,14 @@
     "/v1/workspaces/current/invitations": {
       "post": {
         "operationId": "createWorkspaceInvitation",
-        "description": "Invite an email address. Membership starts only after acceptance by the verified address. Share the returned URL; no email is sent.",
+        "description": "Invite an email address. Membership starts only after acceptance by the verified address. Share the returned URL; no email is sent. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard. Owners and admins, in the dashboard or over their own MCP sign-in; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED.",
         "tags": [
           "Workspaces"
         ],
         "security": [
+          {
+            "bearerAuth": []
+          },
           {
             "dashboardSession": []
           },
@@ -63072,7 +63098,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/WorkspaceInvitation"
+                  "$ref": "#/components/schemas/CreatedWorkspaceInvitation"
                 }
               }
             }
@@ -63198,13 +63224,16 @@
         ],
         "security": [
           {
+            "bearerAuth": []
+          },
+          {
             "dashboardSession": []
           },
           {
             "secureDashboardSession": []
           }
         ],
-        "description": "List pending, unexpired workspace invitations.",
+        "description": "List pending, unexpired workspace invitations. Owners and admins, in the dashboard or over their own MCP sign-in; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED.",
         "responses": {
           "200": {
             "description": "Success",
@@ -63348,12 +63377,16 @@
         ],
         "security": [
           {
+            "bearerAuth": []
+          },
+          {
             "dashboardSession": []
           },
           {
             "secureDashboardSession": []
           }
         ],
+        "description": "Revoke a pending invitation; its link stops working. Only an owner revokes an owner invitation. Owners and admins, in the dashboard or over their own MCP sign-in; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED.",
         "parameters": [
           {
             "schema": {

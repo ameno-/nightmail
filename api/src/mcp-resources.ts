@@ -82,6 +82,9 @@ const resources: Record<string, { label: string; actions: Record<string, string>
   settings: { label: 'Workspace settings', actions: {
     identity: 'getCurrentIdentity', setup: 'getOverviewSetup', get: 'getWorkspaceSettings', update: 'updateWorkspaceSettings', ses: 'getSesSettings', inboundPolicy: 'getInboundScanPolicy', updateInboundPolicy: 'updateInboundScanPolicy',
   } },
+  members: { label: 'Workspace members and invitations', actions: {
+    list: 'listWorkspaceMembers', invitations: 'listWorkspaceInvitations', invite: 'createWorkspaceInvitation', revokeInvitation: 'revokeWorkspaceInvitation',
+  } },
   connections: { label: 'Connected agents (MCP sign-ins) and inbox connections', actions: {
     list: 'listMcpConnections', revoke: 'revokeMcpConnection', bind: 'bindMcpConnection', createInbox: 'createInboxConnection', agents: 'listAgents', revokeAgent: 'revokeAgent',
   } },

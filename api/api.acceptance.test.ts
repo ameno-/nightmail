@@ -602,7 +602,7 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   assert.deepEqual(resourceInventory().map(x=>x.operation).sort(), [...catalog.keys()].sort());
   const plain = resourceTools(catalog), bytes = Buffer.byteLength(JSON.stringify({jsonrpc:'2.0',id:1,result:{tools:plain}}));
   // Budget the full-grant JSON-RPC response, including discovery, not just an ordinary manage grant.
-  assert.equal(plain.length, 30); assert.ok(bytes <= 50_000, `${bytes} bytes`);
+  assert.equal(plain.length, 31); assert.ok(bytes <= 50_000, `${bytes} bytes`);
   for (const {name,action,operation} of resourceInventory()) {
     const schema = plain.find(t=>t.name===name)!.inputSchema as Json;
     const branch = schema.oneOf.find((v:Json)=>v.properties.action.const===action);
@@ -4787,6 +4787,107 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(ok(await request('PATCH', `/v1/webhooks/${hook.id}`, MANAGER, { url: 'https://example.com/hooks/rotation-race', paused: false })).paused, false);
     const current = ok(await request('GET', `/v1/webhooks/${hook.id}/secret`, MANAGER)).secret as string; secrets.add(current);
     assert.notEqual(current, rotated);
+  });
+
+  test('Hosted MCP members and invitations: an owner\'s or admin\'s own sign-in lists, invites below owner and revokes; keys, agent tokens, members and other workspaces are refused', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, request, local }) => {
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
+      const wid = runtime.config.workspaceId, base = '/v1/workspaces/current', { mintResourceToken } = await import('./scripts/fixture-issuer.js');
+      const admin = await sessionFixture(t), member = await sessionFixture(t), guest = await sessionFixture(t), other = unique('other-ws');
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [other]);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'admin'),($4,$2,$5,'member'),($6,$7,$5,'owner')`, [unique('mem'), wid, admin.userId, unique('mem'), member.userId, unique('mem'), other]);
+      await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[admin.userId, member.userId, guest.userId]]);
+      // Each person's own sign-in: an approval for a new client, made by its first /mcp request.
+      const signIn = async (userId: string, scope = writableScope) => {
+        const issued = mintResourceToken(resourceUrl, userId, scope);
+        ok(await request('POST', '/mcp', issued.token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders));
+        return issued;
+      };
+      const mcp = async (token: string, method: string, params: Json, path = '/mcp?codemode=true') => ok(await request('POST', path, token, { jsonrpc: '2.0', id: 1, method, params }, rpcHeaders)).result;
+      const listed = async (token: string) => (await mcp(token, 'tools/list', {})).tools.map((tool: Json) => tool.name as string);
+      // Every call names this workspace unless it names another: a sign-in may belong to several.
+      const call = async (token: string, name: string, args: Json = {}) => mcp(token, 'tools/call', { name, arguments: { workspace: wid, ...args } });
+      const done = (result: Json, status = 200) => { assert.equal(result.isError, false, redact(result)); assert.equal(result._meta.status, status, redact(result)); return result.structuredContent; };
+      // A refusal before any API request (confirmation, an unlisted tool) has no HTTP status.
+      const refused = (result: Json, status: number | null, code: string) => { assert.equal(result.isError, true, redact(result)); assert.equal(result._meta.status, status, redact(result)); assert.equal(result.structuredContent.error.code, code, redact(result)); return result.structuredContent.error; };
+      const tools = ['listWorkspaceMembers', 'listWorkspaceInvitations', 'createWorkspaceInvitation', 'revokeWorkspaceInvitation'];
+      const owner = await signIn(manager!.userId), adminSignIn = await signIn(admin.userId), reader = await signIn(admin.userId, 'bane:read offline_access'), memberSignIn = await signIn(member.userId);
+
+      // An owner's sign-in: the four tools, never role changes or removal, in Code Mode and as the plain members resource.
+      const ownerTools = await listed(owner.token);
+      for (const name of tools) assert.ok(ownerTools.includes(name), name);
+      for (const name of ['inviteWorkspaceMember', 'updateWorkspaceMember', 'removeWorkspaceMember', 'acceptWorkspaceInvitation']) assert.ok(!ownerTools.includes(name), name);
+      const plain = (await mcp(owner.token, 'tools/list', {}, '/mcp')).tools.find((tool: Json) => tool.name === 'members');
+      assert.deepEqual(plain?.inputSchema.properties.action.enum, ['list', 'invitations', 'invite', 'revokeInvitation']);
+      const people = done(await call(owner.token, 'listWorkspaceMembers')).data;
+      assert.deepEqual(people.map((m: Json) => [m.userId, m.role]).sort(), [[admin.userId, 'admin'], [manager!.userId, 'owner'], [member.userId, 'member']].sort());
+      refused(await call(owner.token, 'createWorkspaceInvitation', { body: { email: `${unique('unconfirmed')}@example.com`, role: 'member' } }), null, 'CONFIRMATION_REQUIRED');
+      // No email is sent: the result says so and carries the link to share.
+      const invited = done(await call(owner.token, 'createWorkspaceInvitation', { body: { email: guest.email, role: 'admin' }, confirm: true }), 201);
+      assert.equal(invited.role, 'admin'); assert.equal(invited.workspaceId, wid);
+      assert.match(invited.nextStep, /^No email was sent\. Share acceptUrl with .+ yourself/);
+      assert.equal(invited.acceptUrl, `${PUBLIC_ORIGIN}/overview?invitation=${invited.id}`);
+      // Owners are made in the dashboard, even by an owner's sign-in, and nothing is recorded for the refusal.
+      const ownerInvite = refused(await call(owner.token, 'createWorkspaceInvitation', { body: { email: `${unique('owner-invite')}@example.com`, role: 'owner' }, confirm: true }), 403, 'DASHBOARD_AUTH_REQUIRED');
+      assert.match(ownerInvite.message, /\/settings#members/);
+      assert.deepEqual(done(await call(owner.token, 'listWorkspaceInvitations')).data.map((i: Json) => i.id), [invited.id]);
+      done(await call(owner.token, 'revokeWorkspaceInvitation', { id: invited.id, confirm: true }));
+      assert.deepEqual(done(await call(owner.token, 'listWorkspaceInvitations')).data, []);
+
+      // An admin's sign-in invites up to admin; the invitation names them, and the invitee joins through the shared link.
+      const asMember = done(await call(adminSignIn.token, 'createWorkspaceInvitation', { body: { email: guest.email, role: 'member' }, confirm: true }), 201);
+      assert.equal((await db.query('SELECT inviter_id FROM workspace_invitations WHERE id=$1', [asMember.id])).rows[0].inviter_id, admin.userId);
+      done(await call(adminSignIn.token, 'createWorkspaceInvitation', { body: { email: `${unique('peer')}@example.com`, role: 'admin' }, confirm: true }), 201);
+      refused(await call(adminSignIn.token, 'createWorkspaceInvitation', { body: { email: `${unique('above')}@example.com`, role: 'owner' }, confirm: true }), 403, 'DASHBOARD_AUTH_REQUIRED');
+      // An owner invitation made in the dashboard: an admin's sign-in can't revoke it, the owner's can.
+      const dashboardOwner = ok(await local('POST', `${base}/invitations`, { email: `${unique('dashboard-owner')}@example.com`, role: 'owner' }), 201);
+      refused(await call(adminSignIn.token, 'revokeWorkspaceInvitation', { id: dashboardOwner.id, confirm: true }), 404, 'NOT_FOUND');
+      // A read-only sign-in lists but never invites or revokes.
+      assert.equal(done(await call(reader.token, 'listWorkspaceInvitations')).data.length, 3);
+      const readerTools = await listed(reader.token);
+      assert.ok(readerTools.includes('listWorkspaceMembers') && !readerTools.includes('createWorkspaceInvitation') && !readerTools.includes('revokeWorkspaceInvitation'));
+      refused(await call(reader.token, 'createWorkspaceInvitation', { body: { email: `${unique('read-only')}@example.com`, role: 'member' }, confirm: true }), null, 'TOOL_UNAVAILABLE');
+      done(await call(owner.token, 'revokeWorkspaceInvitation', { id: dashboardOwner.id, confirm: true }));
+      assert.equal(ok(await local('POST', `/v1/workspaces/invitations/${asMember.id}/accept`, undefined, 'live', { cookie: guest.cookie })).workspaceId, wid);
+      assert.equal((await db.query('SELECT role FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [wid, guest.userId])).rows[0].role, 'member');
+
+      // A member's sign-in acts only where its person administers: refused here, and in their own workspace it sees and
+      // revokes nothing of this one. An admin's sign-in can't name a workspace they don't belong to.
+      for (const name of ['listWorkspaceMembers', 'listWorkspaceInvitations']) refused(await call(memberSignIn.token, name, { workspace: wid }), 403, 'PERMISSION_DENIED');
+      refused(await call(memberSignIn.token, 'createWorkspaceInvitation', { workspace: wid, body: { email: `${unique('by-member')}@example.com`, role: 'member' }, confirm: true }), 403, 'PERMISSION_DENIED');
+      const pending = done(await call(owner.token, 'listWorkspaceInvitations')).data;
+      assert.equal(pending.length, 1);
+      assert.deepEqual(done(await call(memberSignIn.token, 'listWorkspaceMembers', { workspace: other })).data.map((m: Json) => m.userId), [member.userId]);
+      assert.deepEqual(done(await call(memberSignIn.token, 'listWorkspaceInvitations', { workspace: other })).data, []);
+      refused(await call(memberSignIn.token, 'revokeWorkspaceInvitation', { workspace: other, id: pending[0].id, confirm: true }), 404, 'NOT_FOUND');
+      refused(await call(adminSignIn.token, 'listWorkspaceMembers', { workspace: other }), 403, 'WORKSPACE_ACCESS_DENIED');
+
+      // API keys (a person's, and one the owner's approval made) and agent tokens: refused over REST, never listed over MCP.
+      const personKey = ok(await local('POST', '/v1/api-keys', { name: unique('members-key'), permissions: ['read', 'send', 'manage'] }), 201).secret as string;
+      const approvalKey = done(await call(owner.token, 'createApiKey', { body: { name: unique('approval-key'), permissions: ['read', 'send', 'manage'] }, confirm: true }), 201).secret as string;
+      const agentToken = done(await call(owner.token, 'createAgentToken', { body: { permissions: ['read', 'send', 'manage'], expiresInSeconds: 600, purpose: 'members fixture' }, confirm: true }), 201).token as string;
+      for (const secret of [personKey, approvalKey, agentToken]) {
+        secrets.add(secret);
+        error(await request('GET', `${base}/members`, secret), 403, 'DASHBOARD_AUTH_REQUIRED');
+        error(await request('GET', `${base}/invitations`, secret), 403, 'DASHBOARD_AUTH_REQUIRED');
+        error(await request('POST', `${base}/invitations`, secret, { email: `${unique('by-key')}@example.com`, role: 'member' }), 403, 'DASHBOARD_AUTH_REQUIRED');
+        error(await request('DELETE', `${base}/invitations?id=${pending[0].id}`, secret), 403, 'DASHBOARD_AUTH_REQUIRED');
+        const keyTools = await listed(secret);
+        assert.ok(keyTools.length > 10 && tools.every(name => !keyTools.includes(name)), 'A key or agent token is never offered member administration.');
+        refused(await call(secret, 'createWorkspaceInvitation', { body: { email: `${unique('by-key-mcp')}@example.com`, role: 'member' }, confirm: true }), null, 'TOOL_UNAVAILABLE');
+      }
+      assert.equal(done(await call(owner.token, 'listWorkspaceInvitations')).data.length, 1, 'Refused calls invited no one and revoked nothing.');
+
+      // Every change is on the trail as the sign-in that made it, over MCP; refusals and the dashboard's own write as theirs.
+      const trail = (await db.query("SELECT action, actor_type, actor_id, via, target_id, summary FROM audit_events WHERE workspace_id=$1 AND action LIKE 'member.invite%' ORDER BY id", [wid])).rows;
+      const ownerGrant = `mcp_${owner.consentId}`, adminGrant = `mcp_${adminSignIn.consentId}`;
+      assert.deepEqual(trail.map(r => [r.action, r.actor_type, r.actor_id, r.via, r.target_id]), [
+        ['member.invite', 'mcp_grant', ownerGrant, 'mcp', invited.id], ['member.invite_revoke', 'mcp_grant', ownerGrant, 'mcp', invited.id],
+        ['member.invite', 'mcp_grant', adminGrant, 'mcp', asMember.id], ['member.invite', 'mcp_grant', adminGrant, 'mcp', pending[0].id],
+        ['member.invite', 'member', manager!.userId, 'dashboard', dashboardOwner.id], ['member.invite_revoke', 'mcp_grant', ownerGrant, 'mcp', dashboardOwner.id],
+      ]);
+      assert.deepEqual(trail[0].summary, { after: { email: guest.email, role: 'admin' } });
+    });
   });
 
   test('Support and operator routes: customers get 403 everywhere; operators read the audited trail; a support grant reads only its customer', async t => {

@@ -1,7 +1,7 @@
 import { createMcpHandler, Server, type CallToolResult, type Tool } from '@modelcontextprotocol/server';
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/server/validators/cf-worker';
 import { bearerActor, dispatchAsActor, dispatchAsMailboxAccess, workspaceBearer } from './auth.js';
-import { agentTokenMintRefusal, keyAdminRefusal, lastingRefusal, ModuleLoadError, receivingAdminRefusal, requestOrigin, withOuterRequest, workspaceMailAccess, type Actor, type MailboxAccess, type App, type RequestOrigin, type Runtime } from './core.js';
+import { agentTokenMintRefusal, keyAdminRefusal, lastingRefusal, memberAdminRefusal, ModuleLoadError, receivingAdminRefusal, requestOrigin, withOuterRequest, workspaceMailAccess, type Actor, type MailboxAccess, type App, type RequestOrigin, type Runtime } from './core.js';
 import { getMcpGrantActor, withMcpAuthorization } from './mcp-auth.js';
 import { chooseWorkspace, setDefaultWorkspace, WorkspaceChoice, type McpConnection } from './oidc-resource.js';
 import { buildMcpCatalog, TOOLSETS, EMAIL_SEND_CONFIRMATION, EMAIL_SEND_ROUTING, type McpOperation } from './mcp-catalog.js';
@@ -108,10 +108,10 @@ type Principal = { connection: McpConnection } | { key: Actor; bearer: string } 
 /**
  * The one access policy of every workspace credential, for listings and calls: the operations REST authorizes for
  * that actor, using REST's own guards (core.ts: mailboxAuth's workspaceMailAccess, requireReceivingConsent, notMember,
- * the unrestricted-credential areas, receivingAdmin, key administration, agent-token minting and `lasting`, the changes
- * a temporary agent token never makes), the operation's REST permission (not its HTTP method) and dashboard-only
- * administration. An approval's listing is what it may do in some workspace of the
- * person's (connection.listing), and each call is checked again as the actor of its own workspace. A key's or agent
+ * the unrestricted-credential areas, receivingAdmin, key administration, agent-token minting, `lasting`, the changes
+ * a temporary agent token never makes, and members and invitations, an owner's or admin's own sign-in), the operation's
+ * REST permission (not its HTTP method) and dashboard-only administration. An approval's listing is what it may do in
+ * some workspace of the person's (connection.listing), and each call is checked again as the actor of its own workspace. A key's or agent
  * token's actor is the one REST authenticates it as, and each of its calls is a REST request made with it, so it never
  * gets more over MCP than over HTTP.
  */
@@ -121,7 +121,7 @@ const authorized = (op: McpOperation, actor: Actor) => !op.dashboardOnly
   && (!op.receivingConsent || !actor.grantId || !!actor.receivingConsent) && !(op.ownerOnly && actor.role === 'member')
   && !(op.unrestricted && actor.domains.length) && !(op.keyAdmin && keyAdminRefusal(actor)) && !(op.agentTokenMint && agentTokenMintRefusal(actor))
   && !(op.receivingAdmin && receivingAdminRefusal(actor, op.write ? 'change receiving configuration' : undefined))
-  && !(op.lasting && lastingRefusal(actor, 'make lasting changes')) && permits(actor, op.permission);
+  && !(op.lasting && lastingRefusal(actor, 'make lasting changes')) && !(op.memberAdmin && memberAdminRefusal(actor, op.write)) && permits(actor, op.permission);
 
 async function serve(app: App, request: Request, runtime: Runtime, principal: Principal, catalog: ReadonlyMap<string, McpOperation>, origin: RequestOrigin): Promise<Response> {
   const base = new URL(runtime.config.publicUrl);
@@ -130,7 +130,8 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
   const key = 'key' in principal ? principal : null;
   const credential = request.headers.get('authorization')?.match(/^(?:Bearer|DPoP)\s+(.+)$/i)?.[1];
   const redact = (text: string) => credential ? text.split(credential).join('[REDACTED]') : text;
-  const operations = new Map([...catalog].filter(([, op]) => inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : authorized(op, connection ? connection.listing : key!.key)));
+  // Members and invitations are Hosted workspace administration; a self-hosted installation answers them 404.
+  const operations = new Map([...catalog].filter(([, op]) => inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : (!op.memberAdmin || runtime.config.multiTenant) && authorized(op, connection ? connection.listing : key!.key)));
   const params = new URL(request.url).searchParams;
   const requested = (params.get('toolsets') ?? '').split(',').map(x => x.trim());
   // One tool per operation for clients that run Code Mode or tool search themselves. OpenCode adds ?codemode=false to a

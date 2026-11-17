@@ -329,6 +329,23 @@ export function lastingRoute(method: string, path: string) {
     || /^\/v1\/(?:inbound\/)?webhooks\/[^/]+\/(?:rotate-secret|secret)$/.test(path) || (verb !== 'GET' && /^\/v1\/inboxes\/[^/]+\/app-passwords(?:\/[^/]+)?$/.test(path))
     || (verb !== 'GET' && /^\/v1\/inbound\/domains\/[^/]+(?:\/(?:enable|disable|hosts(?:\/[^/]+)?|subdomains(?:\/[^/]+)?))?$/.test(path)) || (verb === 'POST' && /^\/v1\/domains\/[^/]+\/receiving-host$/.test(path));
 }
+/**
+ * Members and invitations (listing members, and listing, creating and revoking invitations): an owner or admin in
+ * person. That is a signed-in dashboard session, or their own MCP sign-in (a person's approval, checked against their
+ * role now) with read to list and manage to change. Never an API key, a key an approval made or a temporary agent
+ * token: a membership outlasts every one of them. Why it refuses this actor, or null; the MCP listing asks the same of
+ * memberAdminRoute's operations. Changing a member's role and removing a member stay with the dashboard (dashboardSession).
+ */
+export function memberAdminRefusal(a: Actor | undefined, change: boolean): ApiError | null {
+  const signIn = a?.credential === 'mcp' && a.keyId.startsWith('mcp_');
+  if (!a || (a.credential !== 'dashboard' && !signIn)) return new ApiError(403, 'DASHBOARD_AUTH_REQUIRED', 'Members and invitations are managed by an owner or admin in person: a signed-in dashboard session or their own MCP sign-in. API keys and agent tokens cannot.');
+  if (a.role !== 'owner' && a.role !== 'admin') return new ApiError(403, 'PERMISSION_DENIED', 'Workspace administration requires an owner or admin.');
+  const permission = change ? 'manage' : 'read';
+  if (signIn && !a.permissions.includes('manage') && !a.permissions.includes(permission)) return new ApiError(403, 'PERMISSION_DENIED', `This operation requires ${permission} permission.`);
+  return null;
+}
+/** memberAdminRefusal's routes: listing members, and listing, creating and revoking invitations. */
+export const memberAdminRoute = (method: string, path: string) => path === '/v1/workspaces/current/invitations' || (method.toUpperCase() === 'GET' && path === '/v1/workspaces/current/members');
 /** notMember (app.ts): whether REST refuses this actor the route because it is a workspace member. */
 export const memberRefused = (actor: Pick<Actor, 'role'> | undefined, method: string, path: string) => actor?.role === 'member' && ownerRoute(method, path);
 /** Hosted workspace administration: a signed-in dashboard session, and with `manage` an owner or admin. Not found when self-hosted. */
