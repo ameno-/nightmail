@@ -7,13 +7,13 @@ import { Alert, Button, Checkbox, ConfirmDialog, DropdownMenu, CopyButton, DataT
 import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { ApiKey, CreatedInbox, Inbox, InboxInput, InboxMessage, InboxStatus, MailboxDomain } from '../../data/types'
-import { date, number } from '../../lib/format'
+import { date, fileSize, number } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
-import { SecretField, when, Sender } from './shared'
+import { SecretField, when } from './shared'
 import { nameParts } from '../../lib/private-address'
 import '../settings/settings.css'
 import './inbound.css'
-import { PrivateAddress } from '../../components/PrivateAddress'
+import { PrivateAddress, Sender } from '../../components/PrivateAddress'
 import { productName } from '../../../../api/src/brand'
 
 const route = '/receiving/inboxes'
@@ -24,7 +24,6 @@ const day = (ms: number) => date(new Date(ms).toISOString(), { month: 'short', d
 const lifetimes = (now: number) => [['3600', '1 hour'], ['86400', '24 hours'], ['604800', '7 days'], ['2592000', '30 days']].map(([value, label]) => ({ value: value!, label: `${label}, deleted ${day(now + Number(value) * 1000 + DAY)}` }))
 const statusTone: Record<InboxStatus, Tone> = { active: 'success', expired: 'warning', deleting: 'neutral' }
 const statusLabel: Record<InboxStatus, string> = { active: 'Active', expired: 'Expired', deleting: 'Deleting' }
-const size = (bytes: number) => bytes < 1024 ? `${number(bytes)} B` : bytes < 1048576 ? `${(bytes / 1024).toFixed(1)} KiB` : `${(bytes / 1048576).toFixed(1)} MiB`
 // The MX record's host is the receiving host: reply.example.com on hosted Nightmail, the domain itself otherwise.
 const receivingHosts = (domains: MailboxDomain[] = []) => domains.filter(domain => domain.status === 'active').map(domain => domain.dns[0]?.name ?? domain.name)
 
@@ -135,7 +134,7 @@ function MessageDialog({ inboxId, messageId, onClose }: { inboxId: string; messa
   return <Dialog open onOpenChange={open => { if (!open) onClose() }} title={m ? m.subject || '(no subject)' : <SkeletonText width={240} />} footer={<Button onClick={onClose}>Close</Button>}>
     {message.error ? <ErrorState error={message.error} onRetry={() => void message.refetch()} /> : !m ? <SkeletonText width={320} /> : <div className="stack">
       <div className="settings-cell-stack">
-        <div className="mailbox-message__from"><span><Sender value={m.from} /></span>{nameParts(m.from.name, m.from.address) && <span className="muted"><PrivateAddress value={m.from.address} /></span>}</div>
+        <div className="mailbox-message__from"><span><Sender name={m.from.name} address={m.from.address} nameOnly /></span>{nameParts(m.from.name, m.from.address) && <span className="muted"><PrivateAddress value={m.from.address} /></span>}</div>
         <span className="muted">{date(m.receivedAt, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
       </div>
       <div className="cluster" aria-label="Sender checks">{m.simulated ? <StatusBadge status="Simulated: no sender checks" tone="info" /> : <>{verdict('SPF', m.auth.spf)}{verdict('DKIM', m.auth.dkim)}{verdict('DMARC', m.auth.dmarc)}</>}</div>
@@ -146,7 +145,7 @@ function MessageDialog({ inboxId, messageId, onClose }: { inboxId: string; messa
         {m.extract.links.length > 0 && <div><dt>Links</dt><dd className="stack">{m.extract.links.slice(0, 5).map(link => <span key={link.href} className="settings-cell-stack"><span className="settings-break">{link.text || link.href}</span><span className="muted settings-break">{new URL(link.href).host}{link.mismatch && ' · text names another site'}</span></span>)}</dd></div>}
       </dl>}
       <div className="mailbox-message__body">{m.text || <span className="muted">No text.</span>}</div>
-      {m.attachments.length > 0 && <ul className="mailbox-attachments">{m.attachments.map(file => <li key={file.id}>{file.url ? <a className="ui-button ui-button--secondary ui-button--sm" href={file.url} rel="noreferrer">{file.filename} <span className="muted">{size(file.size)}</span></a> : <span className="muted">{file.filename} · not scanned</span>}</li>)}</ul>}
+      {m.attachments.length > 0 && <ul className="mailbox-attachments">{m.attachments.map(file => <li key={file.id}>{file.url ? <a className="ui-button ui-button--secondary ui-button--sm" href={file.url} rel="noreferrer">{file.filename} <span className="muted">{fileSize(file.size)}</span></a> : <span className="muted">{file.filename} · not scanned</span>}</li>)}</ul>}
     </div>}
   </Dialog>
 }
@@ -236,7 +235,7 @@ function InboxDetail({ id }: { id: string }) {
         <div><dt>{b.status === 'active' || !b.expiresAt ? 'Expires' : 'Expired'}</dt><dd>{b.expiresAt ? date(b.expiresAt) : 'Never'}</dd></div>
         <div><dt>Deleted after</dt><dd>{b.deleteAfter ? date(b.deleteAfter) : 'Never'}</dd></div>
         <div><dt>Delivered</dt><dd>{number(b.usage.messages - b.usage.held)} of {number(b.limits.messages)}{b.usage.unread > 0 && <span className="muted"> · {number(b.usage.unread)} unread</span>}</dd></div>
-        <div><dt>Stored</dt><dd>{size(b.usage.bytes)} of {size(b.limits.bytes)}</dd></div>
+        <div><dt>Stored</dt><dd>{fileSize(b.usage.bytes)} of {fileSize(b.limits.bytes)}</dd></div>
         <div><dt>Replies</dt><dd>{b.type === 'sandbox' ? 'Never (sandbox)' : b.send.enabled ? `To senders only, ${number(b.send.perDay)} a day` : 'Off'}</dd></div>
         <div><dt>Name</dt><dd className="settings-break">{b.name || <span className="muted">—</span>}</dd></div>
         {b.type === 'sandbox' && <div><dt>Type</dt><dd>Sandbox · test mail only</dd></div>}
@@ -253,7 +252,7 @@ function InboxDetail({ id }: { id: string }) {
           empty={<EmptyState title="No mail yet" action={b?.type === 'sandbox' && b.status === 'active' && canAdminister ? <Button loading={simulate.isPending} onClick={() => void simulate.mutateAsync().catch(() => undefined)}>Send test mail</Button> : undefined} />}
           columns={[
             // A message's card: its subject and status, then the sender and any code it carries.
-            { key: 'from', label: 'From', width: '24%', card: 'line', render: row => <span className="inbox-clip"><Sender value={row.from} /></span> },
+            { key: 'from', label: 'From', width: '24%', card: 'line', render: row => <span className="inbox-clip"><Sender name={row.from.name} address={row.from.address} nameOnly /></span> },
             { key: 'subject', label: 'Subject', width: '40%', card: 'title', render: row => <span className="inbox-clip" title={row.snippet ? `${row.subject || '(no subject)'}: ${row.snippet}` : undefined}>{row.subject || '(no subject)'}{row.snippet && <span className="muted"> · {row.snippet}</span>}</span>, cardRender: row => row.subject || '(no subject)' },
             { key: 'code', label: <span title={`A one-time code ${productName} found in the message, such as a sign-up code`}>Code found</span>, card: 'inline', render: row => row.extract.codes[0] ? <code>{row.extract.codes[0]}</code> : <span className="muted">—</span>, cardRender: row => row.extract.codes[0] ? <>Code <code>{row.extract.codes[0]}</code></> : 'No code' },
             { key: 'state', label: 'Status', card: 'aside', render: row => { const state = messageState(row); return <StatusBadge status={state.label} tone={state.tone} /> } },

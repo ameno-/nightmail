@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { ArrowRight, Copy } from 'lucide-react'
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import { Alert, Button, CopyButton, DataTable, DropdownMenu, StatusBadge, useToast } from '../../components/ui'
+import { Alert, Button, CopyButton, DataTable, DropdownMenu, StatusBadge, useCopy } from '../../components/ui'
 import { CopyAction, LiveStatus, type LiveState } from '../../components/motion'
 import { useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
@@ -20,7 +20,7 @@ export function useDomain(id: string, recheckUntil = 0) {
   const api = useApi()
   const { multiTenant } = useWorkspaceAccess()
   const query = useQuery({
-    queryKey: ['bane', api.mode, ...queries.domain(id).key],
+    queryKey: ['bane', ...queries.domain(id).key],
     queryFn: ({ signal }) => queries.domain(id).read(api, signal),
     refetchInterval: query => query.state.status === 'error' ? false : query.state.data?.status === 'pending' || query.state.data?.mailFromStatus === 'pending' || (multiTenant && Date.now() < recheckUntil) ? multiTenant ? 3000 : 60_000 : false,
     refetchIntervalInBackground: false,
@@ -40,12 +40,11 @@ const oneClickDns = false
 // to about three seconds), and the answer is fixed at reveal, so the button never appears above
 // records that are already on screen.
 export function useDnsSetup(domain: Domain | undefined) {
-  const api = useApi()
   const { multiTenant, canAdminister } = useWorkspaceAccess()
   const needed = !!domain && domain.records.some(record => record.purpose !== 'dmarc' && record.status !== 'verified')
-  const enabled = oneClickDns && api.mode !== 'demo' && multiTenant && canAdminister && needed
+  const enabled = oneClickDns && multiTenant && canAdminister && needed
   const query = useQuery({
-    queryKey: ['bane', api.mode, 'domain', domain?.id, 'dns-setup'],
+    queryKey: ['bane', 'domain', domain?.id, 'dns-setup'],
     queryFn: ({ signal }) => request<DnsSetup>(`/v1/domains/${encodeURIComponent(domain!.id)}/dns-setup`, { signal }),
     // gcTime 0: each page asks afresh, since pending groups change between onboarding and the domain page.
     enabled, retry: false, staleTime: Infinity, gcTime: 0, refetchOnWindowFocus: false,
@@ -93,19 +92,15 @@ export function zoneLines(records: DnsRecord[]) {
 // On a phone each record is a card: its type and name as the title (so no two cards share one), the value under it,
 // and Copy in the row's action sheet. A copy button inside a card's 20 px line would clip it and the wrapped value under it.
 export function DnsRecordTable({ domain, records, status }: { domain: string; records: DnsRecord[]; status?: string }) {
-  const toast = useToast()
-  const copy = async (value: string, what: string) => {
-    try { await navigator.clipboard.writeText(value); toast(`Copied ${what}`, 'success') }
-    catch { toast('Couldn’t copy to clipboard.', 'error') }
-  }
+  const { copy } = useCopy()
   return <DataTable className="domain-records" rows={records} rowKey={record => record.id} columns={[
     { ...settingsColumns.dns[0], render: record => record.type, cardRender: record => <>{record.type} <code>{breakable(relativeHost(record.name, domain))}</code></> },
     { ...settingsColumns.dns[1], width: '36%', render: record => <div className="settings-copy-cell"><code title={record.name}>{breakable(relativeHost(record.name, domain))}</code><CopyButton value={record.name} label={`Copy full ${record.type} name`} /></div> },
     { ...settingsColumns.dns[2], render: record => record.value ? <div className="settings-copy-cell"><code title={record.value}>{breakable(record.value)}</code><CopyButton value={record.value} label={`Copy ${record.type} value`} /></div> : '—', cardRender: record => record.value ? <code>{breakable(record.value)}</code> : '—' },
     { key: 'status', label: 'Status', width: 136, card: 'aside', render: record => <StatusBadge status={status ?? (record.status === 'verified' ? 'Verified' : 'Pending')} /> },
     { key: 'copy', label: '', card: 'end', table: false, render: record => <DropdownMenu label={`Copy ${record.type} record`} title={`${record.type} ${relativeHost(record.name, domain)}`} items={[
-      { label: 'Copy full name', icon: <Copy size={16} />, onSelect: () => void copy(record.name, 'name') },
-      { label: 'Copy value', icon: <Copy size={16} />, disabled: !record.value, onSelect: () => void copy(record.value, 'value') },
+      { label: 'Copy full name', icon: <Copy size={16} />, onSelect: () => void copy(record.name, 'Copied name') },
+      { label: 'Copy value', icon: <Copy size={16} />, disabled: !record.value, onSelect: () => void copy(record.value, 'Copied value') },
     ]} /> },
   ]} />
 }
@@ -216,17 +211,14 @@ export function ReceivingIssueAlert({ issue }: { issue: ReceivingIssue }) {
 const NO_RECORDS = 'DNS records are not available yet.'
 // Sending and receiving records. MAIL FROM is optional and lives in the domain's Advanced section.
 export function DomainRecords({ domain, actions, guided = false, setup = null, receivingView, onAlignSpf }: { domain: Domain; actions?: ReactNode; guided?: boolean; setup?: DnsSetup | null; receivingView?: ReceivingView; onAlignSpf?: () => void }) {
-  const toast = useToast()
   const sending = recordsFor(domain, 'sending'), receiving = recordsFor(domain, 'receiving'), issue = domain.receivingIssue ?? null
   // Onboarding copies only what sending needs; receiving is optional and copied on its own.
   const all = guided ? sending : [...sending, ...receiving]
   const notes = [...new Set(receiving.flatMap(record => record.note && record.note !== issue?.message ? [record.note] : []))]
   const alert = issue && <ReceivingIssueAlert issue={issue} />
   const warning = receivingWarning(domain.name, receiving)
-  async function copyAll() {
-    try { await navigator.clipboard.writeText(`${zoneLines(all)}\n`); toast(`Copied ${all.length} ${guided ? 'sending ' : ''}records`, 'success') }
-    catch { toast('Couldn’t copy to clipboard.', 'error') }
-  }
+  const { copy } = useCopy()
+  const copyAll = () => copy(`${zoneLines(all)}\n`, `Copied ${all.length} ${guided ? 'sending ' : ''}records`)
   const sendingVerified = (domain.sending ?? (domain.status === 'verified' ? 'verified' : 'pending')) === 'verified'
   const receivingVerified = (domain.receiving ?? (allVerified(receiving) ? 'verified' : 'pending')) === 'verified'
   // Stays in place (invisible) once every record verifies, so nothing below moves.

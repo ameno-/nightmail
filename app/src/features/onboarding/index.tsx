@@ -7,7 +7,7 @@ import { CopyAction, LiveStatus } from '../../components/motion'
 import { BootLoader } from '../../components/BootLoader'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { AccountSwitcher } from '../../components/AccountSwitcher'
-import { useApi, useApiMutation, useApiQuery, usePublicOrigin, useSession } from '../../data/context'
+import { useApiMutation, useApiQuery, usePublicOrigin, useSession } from '../../data/context'
 import { connectionApi, retryableConnectionErrors, useConnectionCache } from '../../data/connections'
 import { agentStep, finishedStep, setDomainStep, type OnboardingStage } from '../../data/onboarding'
 import { DnsWaitNote, DomainRecords, useDnsSetup, useDomain } from '../settings/domain-records'
@@ -18,6 +18,7 @@ import { ApiError, errorText, type ConnectionKind, type ConnectionState, type Pr
 import './onboarding.css'
 import { NightmailWordmark } from '../../components/NightmailLogo'
 import { apiKeyEnv, productName, secretPrefixes } from '../../../../api/src/brand'
+import { resourceOf } from '../../data/invalidation'
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 // Bring-your-own verification is resumable; keep retrying while AWS confirms the feedback subscription.
@@ -55,7 +56,7 @@ function useConnectionMutation<T>(write: (input: T) => Promise<ProviderConnectio
       if (connection?.state !== 'ready') return
       refreshIdentity()
       // Regions, discovery and limits now come from the new connection.
-      void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && query.queryKey[2] !== 'connection' }).catch(() => {})
+      void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && resourceOf(query.queryKey) !== 'connection' }).catch(() => {})
     },
   })
 }
@@ -102,7 +103,6 @@ const CONNECTED_HOLD_MS = 1400
 
 // One component owns every step, so the domain form keeps its input from the choice through a ready connection.
 function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
-  const api = useApi()
   const client = useQueryClient()
   const toast = useToast()
   const identity = useSession()?.identity
@@ -123,7 +123,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   const [queued, setQueued] = useState(false)
   // Polls every 3 s while a BYO setup waits on AWS (only while the page is visible) and on focus.
   const connection = useQuery({
-    queryKey: ['bane', api.mode, 'connection'],
+    queryKey: ['bane', 'connection'],
     queryFn: ({ signal }) => connectionApi.get(signal),
     enabled: sending || choosingDomain,
     // /v1/me already says there is no connection yet, so the choice shows without another request.
@@ -156,7 +156,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
     shared.reset(); byo.reset()
     setPicked(next)
     if (pending?.state === 'provisioning' || pending?.state === 'failed') toast(`If you made the ${productName} stack, delete it in AWS.`, 'info')
-    void client.cancelQueries({ queryKey: ['bane', api.mode, 'connection'] })
+    void client.cancelQueries({ queryKey: ['bane', 'connection'] })
     void (async () => {
       try { if (pending) await connectionApi.remove() }
       catch (error) { if (!(error instanceof ApiError && error.status === 404)) { toast(errorText(error), 'error'); setDropped(null); setPicked(pending ? 'byo' : null); return } }
@@ -380,7 +380,6 @@ function ImportedDomains({ count, onContinue, onAddAnother, fallback }: { count:
 type AddDomainProps = { draft: string; onDraftChange: (value: string) => void; queued: boolean; onQueuedChange: (queued: boolean) => void; ready: boolean; onAdded: (id: string) => void; onFinish: () => void }
 // Before the connection is ready, a valid domain waits and is added as soon as it is.
 function AddDomain({ draft, onDraftChange, queued, onQueuedChange, ready, onAdded, onFinish }: AddDomainProps) {
-  const api = useApi()
   const client = useQueryClient()
   const create = useApiMutation((api, name: string) => api.domains.create({ regionId: '', name }), undefined, true)
   const [invalid, setInvalid] = useState('')
@@ -393,7 +392,7 @@ function AddDomain({ draft, onDraftChange, queued, onQueuedChange, ready, onAdde
     if (!ready) { onQueuedChange(true); return }
     try {
       const domain = await create.mutateAsync(value)
-      client.setQueryData(['bane', api.mode, 'domain', domain.id], domain)
+      client.setQueryData(['bane', 'domain', domain.id], domain)
       onAdded(domain.id)
     } catch { /* Shown inline. */ }
   }

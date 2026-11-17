@@ -337,9 +337,6 @@ export function Alert({ tone = 'neutral', title, children, onDismiss, timer, ...
 export function EmptyState({ title, description, action, headingAs: Heading = 'h3' }: { title: string; description?: string; action?: ReactNode; headingAs?: 'h1' | 'h3' }) {
   return <div data-component="EmptyState" className="ui-empty-state"><Heading>{title}</Heading>{description && <p className="muted">{description}</p>}{action && <div>{action}</div>}</div>;
 }
-export function LoadingState({ rows = 5 }: { rows?: number }) {
-  return <div className="ui-loading" role="status" aria-label="Loading"><span className="sr-only">Loading…</span>{Array.from({ length: rows }, (_, index) => <div key={index} className="ui-skeleton-row" aria-hidden="true"><span className="ui-skeleton" /><span className="ui-skeleton" /><span className="ui-skeleton" /></div>)}</div>;
-}
 // An API error's message is plain language; its `reference` (code and request ID) follows as secondary detail for support.
 export function ErrorText({ error, fallback = tryAgain }: { error: unknown; fallback?: string }) {
   if (error instanceof ApiError) return <><span>{error.message}</span><span className="ui-error-reference">{error.reference}</span></>;
@@ -408,11 +405,27 @@ export function SecretDialog({ secret, title, onClose, children, description = '
     {children}
   </Dialog>;
 }
-export function CopyButton({ value, label = 'Copy' }: { value: string; label?: string }) {
-  const [copied, setCopied] = useState(false);
-  const [error, setError] = useState(false);
-  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+/**
+ * Copies text to the clipboard, for every copy control. `copied` holds for 1.8 s after a copy, for a button's check;
+ * `done`, when given, is toasted instead, for a copy from a menu or action sheet. A failure says so in a toast.
+ */
+export function useCopy() {
   const toast = useContext(ToastContext);
+  const [copied, setCopied] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);
-  return <span className="cluster"><IconButton label={copied ? 'Copied' : label} onClick={async () => { try { await navigator.clipboard.writeText(value); setCopied(true); setError(false); clearTimeout(timer.current); timer.current = setTimeout(() => setCopied(false), 1800); } catch { setError(true); toast?.('Couldn’t copy to clipboard.', 'error'); } }}>{copied ? <Check size={14} /> : <Copy size={14} />}</IconButton><span className="sr-only" role="status">{copied ? 'Copied to clipboard' : error ? 'Couldn’t copy to clipboard' : ''}</span></span>;
+  const copy = useCallback(async (value: string, done?: string) => {
+    try { await navigator.clipboard.writeText(value); } catch { setFailed(true); toast?.('Couldn’t copy to clipboard.', 'error'); return false; }
+    if (done) toast?.(done, 'success');
+    setCopied(true); setFailed(false);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setCopied(false), 1800);
+    return true;
+  }, [toast]);
+  return { copy, copied, failed };
+}
+export function CopyButton({ value, label = 'Copy' }: { value: string; label?: string }) {
+  const { copy, copied, failed } = useCopy();
+  return <span className="cluster"><IconButton label={copied ? 'Copied' : label} onClick={() => void copy(value)}>{copied ? <Check size={14} /> : <Copy size={14} />}</IconButton><span className="sr-only" role="status">{copied ? 'Copied to clipboard' : failed ? 'Couldn’t copy to clipboard' : ''}</span></span>;
 }

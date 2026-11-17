@@ -316,11 +316,10 @@ test('review PR #84 P2: examples use the server’s canonical origin, never the 
   // P2: the dashboard's origin comes from /v1/me or /health (PUBLIC_URL). A page served under another Host is flagged
   // (Docs then shows no examples), and an unknown origin is null (callers wait) rather than the page's own address.
   const { canonicalOrigin, originOf } = await import('../app/src/lib/public-origin.js');
-  assert.deepEqual(canonicalOrigin({ identity: null, instance: 'https://bane.mx', demo: false, page: 'https://attacker.example' }), { origin: 'https://bane.mx', foreign: true });
-  assert.deepEqual(canonicalOrigin({ identity: 'https://bane.mx', instance: 'https://attacker.example', demo: false, page: 'https://bane.mx' }), { origin: 'https://bane.mx', foreign: false });
-  assert.deepEqual(canonicalOrigin({ identity: null, instance: null, demo: false, page: 'https://attacker.example' }), { origin: null, foreign: false });
-  assert.deepEqual(canonicalOrigin({ identity: null, instance: 'javascript:alert(1)', demo: false, page: 'https://bane.mx' }), { origin: null, foreign: false });
-  assert.deepEqual(canonicalOrigin({ identity: null, instance: null, demo: true, page: 'http://127.0.0.1:5173' }), { origin: 'http://127.0.0.1:5173', foreign: false });
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: 'https://bane.mx', page: 'https://attacker.example' }), { origin: 'https://bane.mx', foreign: true });
+  assert.deepEqual(canonicalOrigin({ identity: 'https://bane.mx', instance: 'https://attacker.example', page: 'https://bane.mx' }), { origin: 'https://bane.mx', foreign: false });
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: null, page: 'https://attacker.example' }), { origin: null, foreign: false });
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: 'javascript:alert(1)', page: 'https://bane.mx' }), { origin: null, foreign: false });
   assert.equal(originOf('https://bane.mx/'), 'https://bane.mx');
 });
 test('review PR #84 P3: an inbox key never goes on a command line; with a key every MCP client gets a JSON config', async () => {
@@ -7700,8 +7699,6 @@ describe('Dashboard API capabilities', () => {
   });
 
   test('campaign content is block HTML: the guide, validation errors, preview rendering and text alternative are observable', async t => {
-    const [{ sanitizeBlockStyle: serverStyle }, { sanitizeBlockStyle: composerStyle }] = await Promise.all([import('./src/block-style.js'), import('../app/src/features/campaigns/block-style.js')]);
-    for (const value of ['color:#3156c7; padding:24px; border-radius:8px', 'font-size:32px;line-height:1.2;', 'position:absolute', 'background-image:url(https://example.com/x.png)', 'padding:200px']) assert.equal(composerStyle(value), serverStyle(value), `Composer and renderer style sanitizers disagree for ${value}`);
     const key = await keyFixture(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('block-content') });
     const guide = ok(await http('GET', '/v1/campaign-content-guide', key.secret));

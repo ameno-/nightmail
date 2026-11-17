@@ -1,6 +1,6 @@
 import { ChevronRight, MoreHorizontal } from 'lucide-react'
 import {
-  Button, ControlSkeleton, IconButton, Input, LoadingRegion, PageHeader, SearchField, SectionHeader,
+  Button, ControlSkeleton, IconButton, LoadingRegion, PageHeader, SearchField, SectionHeader,
   Select, Skeleton, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn,
 } from '../../components/ui'
 import { CampaignsHeader } from './header'

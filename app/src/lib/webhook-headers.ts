@@ -1,5 +1,5 @@
 import { productName } from '../../../api/src/brand'
-// Mirrors the API's webhook header rules so the form and demo reject the same lists the server does.
+// Mirrors the API's webhook header rules so the form rejects the same lists the server does.
 export const MAX_WEBHOOK_HEADERS = 10
 const TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
 const FIELD_VALUE = /^[\t\x20-\x7e\x80-\xff]*$/
@@ -33,5 +33,3 @@ export function webhookHeaderErrors(headers: { name: string; value: string }[], 
   return errors
 }
 
-/** The API's masked hint: the last four characters of values longer than eight, otherwise fully masked. */
-export const webhookHeaderHint = (value: string) => '••••' + (value.length > 8 ? value.slice(-4) : '')

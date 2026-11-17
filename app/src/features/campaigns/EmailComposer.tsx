@@ -317,7 +317,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
           <Inspector.Root ref={inspector} className="composer-inspector" hidden={!inspectorOpen}>
             <div className="composer-inspector-header"><strong>Design</strong><IconButton size="sm" label="Close design panel" onClick={() => setInspectorOpen(false)}><X size={16} /></IconButton></div>
             <Inspector.Breadcrumb />
-            {/* Styles are per block (block-style.ts): no document-wide controls, and a text selection offers its block's. */}
+            {/* Styles are per block (api/src/block-style.ts): no document-wide controls, and a text selection offers its block's. */}
             <Inspector.Document>{() => <p className="composer-inspector-hint">No block selected</p>}</Inspector.Document>
             <Inspector.Node />
             <Inspector.Text>{() => <Inspector.Breadcrumb>{segments => { const block = segments.at(-1); return block && block.node.nodeType !== 'body' ? <Button size="sm" variant="secondary" className="composer-inspector-action" onClick={block.focus}>Style this block</Button> : null }}</Inspector.Breadcrumb>}</Inspector.Text>

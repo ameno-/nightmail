@@ -1,7 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { keepPreviousData, useInfiniteQuery } from '@tanstack/react-query'
 import { Button, CopyButton, DataTable, Dialog, EmptyState, ErrorState, SectionHeader, Select, StatusBadge } from '../../components/ui'
-import { useApi } from '../../data/context'
 import { actionLabel, activityApi, activityAreas, type AuditEntry } from '../../data/activity'
 import { ago, shortDateTime } from '../../lib/format'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -75,11 +74,10 @@ function When({ at }: { at: string }) {
 }
 
 export function ActivitySection() {
-  const api = useApi()
   const [area, setArea] = useState('')
   const [open, setOpen] = useState<AuditEntry | null>(null)
   const activity = useInfiniteQuery({
-    queryKey: ['bane', api.mode, 'activity', area],
+    queryKey: ['bane', 'activity', area],
     queryFn: ({ pageParam, signal }) => activityApi.list({ action: area || undefined, cursor: pageParam }, signal),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: page => page.nextCursor ?? undefined,

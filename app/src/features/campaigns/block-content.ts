@@ -3,7 +3,7 @@
 // the same vocabulary. Import is lenient so drafts written before the vocabulary or
 // pasted from elsewhere still open; export is strict so saved content always validates.
 import { isRasterDataUrl } from './composer-content'
-import { sanitizeBlockStyle } from './block-style'
+import { sanitizeBlockStyle } from '../../../../api/src/block-style'
 
 export type EditorNode = { type: string; attrs?: Record<string, unknown>; content?: EditorNode[]; text?: string; marks?: { type: string; attrs?: Record<string, unknown> }[] }
 type Mark = NonNullable<EditorNode['marks']>[number]

@@ -7,6 +7,7 @@ import type { SenderScore, SenderStanding } from '../../data/types'
 import { shortDateTime } from '../../lib/format'
 import { releaseLabel, standingDid, standingFallback, standingTitle, standingTone, stepAtLeast, type RaisedStep } from '../../lib/standing'
 import { productName } from '../../../../api/src/brand'
+import { resourceOf } from '../../data/invalidation'
 
 // Overview's standing card, from Warn up: what happened (each reason, with its numbers), what Nightmail did, and the fix
 // checklist. Owners and admins release a restrict or a bounce-only pause here once the API offers it; members read it.
@@ -62,9 +63,9 @@ function ReleaseDialog({ open, onOpenChange, action }: { open: boolean; onOpenCh
     mutationFn: () => api.senderScore.release({ checklist: { bouncedRemoved: true, listSourceConfirmed: true } }),
     onSuccess: report => {
       // The response is the new score and standing: show it now, then reread the session's summary (the banner).
-      client.setQueryData(['bane', api.mode, 'sender-score'], report)
+      client.setQueryData(['bane', 'sender-score'], report)
       void client.invalidateQueries({ queryKey: ['identity'] })
-      void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && ['sending-limit', 'campaigns'].includes(String(query.queryKey[2])) })
+      void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && ['sending-limit', 'campaigns'].includes(resourceOf(query.queryKey)) })
       toast(releaseCopy[action].done, 'success')
       onOpenChange(false)
     },

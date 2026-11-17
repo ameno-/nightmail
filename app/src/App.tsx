@@ -3,7 +3,7 @@ import { Navigate, Route, Routes, Link, useLocation, useParams, type Params } fr
 import { AppShell } from './components/AppShell'
 import { BootLoader } from './components/BootLoader'
 import { Button, EmptyState } from './components/ui'
-import { HomePage, loadHome, useApi, useOnboardingStage, useSession } from './data/context'
+import { HomePage, loadHome, useOnboardingStage, useSession } from './data/context'
 import { selectedWorkspace } from './data/live'
 import { dashboardLikelyReady, rememberDashboardReady } from './data/onboarding'
 import { routeChunks } from './data/prefetch'
@@ -120,12 +120,11 @@ function OnboardingRoute() {
 }
 // "/" is the public homepage for everyone on a hosted installation; signed out, ApiProvider shows it before any route.
 // Signed in, it is this route, which loads none of the dashboard: its button opens Overview. A self-hosted installation
-// (and the demo) has no homepage, so "/" opens Overview, as old links to it expect.
+// has no homepage, so "/" opens Overview, as old links to it expect.
 function RootPage() {
-  const demo = useApi().mode === 'demo'
   const hosted = useSession()?.identity?.multiTenant === true
   const location = useLocation()
-  if (demo || !hosted) return <Navigate replace to={{ pathname: '/overview', search: location.search, hash: location.hash }} />
+  if (!hosted) return <Navigate replace to={{ pathname: '/overview', search: location.search, hash: location.hash }} />
   return <ChunkFallback.Provider value={<BootLoader />}><HomePage start={{ signedIn: true }} /></ChunkFallback.Provider>
 }
 // Former sections that were folded into another page keep their links working, query and anchor included.
