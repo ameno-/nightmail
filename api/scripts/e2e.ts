@@ -16,6 +16,7 @@ type Op = keyof typeof sdk;
 const dashboard = 'Requires a signed-in dashboard session, not an API key.';
 const shared = 'Would change shared domain, routing, provider or workspace configuration.';
 const subdomain = 'Hosted receiving follows exact verified DNS; no wildcard/subdomain fixture.';
+const hostChange = 'Would add, change or remove a receiving host of the shared fixture domain.';
 const byoV2 = 'Regional BYO setup requires a dashboard owner and a customer AWS account, not the Hosted fixture.';
 // Deliberately enumerate IDs (not paths, tags or prefixes): a new endpoint must never auto-skip.
 const safeModeSkips: Partial<Record<Op, string>> = {
@@ -39,6 +40,7 @@ const safeModeSkips: Partial<Record<Op, string>> = {
   disableInboundDomain: 'Hosted receiving cannot be disabled via API; removing the shared MX would break delivery.',
   createInboundSubdomain: subdomain, updateInboundSubdomain: subdomain, removeInboundSubdomain: subdomain,
   getInboundSubdomain: subdomain,
+  addReceivingHost: hostChange, updateReceivingHost: hostChange, removeReceivingHost: hostChange,
   refreshConnectionScan: byoV2, importConnectionDomains: byoV2, getConnectionRegionStatus: byoV2,
 };
 const destructive = process.env.BANE_E2E_ALLOW_DESTRUCTIVE === '1';
@@ -321,7 +323,12 @@ async function devBoundaries() {
   await denied('configureRegion',{path:{region},body:{enabled:true}},409,'CONNECTION_MANAGED_REGION');
   await denied('getInboundSubdomain',{path:child},404,'NOT_FOUND');
   await denied('updateInboundSubdomain',{path:child,body:{metadata:{test:prefix}}},404,'NOT_FOUND');
-  await denied('removeInboundSubdomain',{path:child},409,'HOSTED_RECEIVING_MANAGED');
+  await denied('removeInboundSubdomain',{path:child},404,'NOT_FOUND');
+  // Receiving hosts: refused before any DNS read, so the shared fixture never gains or loses a host.
+  const host = {...path, hostId:prefix};
+  await denied('addReceivingHost',{path,body:{name:'_invalid',confirm:false}},422,'RECEIVING_HOST_INVALID');
+  await denied('updateReceivingHost',{path:host,body:{catchAll:'store'}},404,'NOT_FOUND');
+  await denied('removeReceivingHost',{path:host},404,'NOT_FOUND');
   const row = await api('getInboundDomain',{path});
   check(row.status === 'active','refusing to enable an inactive shared fixture');
   await denied('updateInboundDomain',{path,body:{acceptSubdomains:row.subdomains.enabled}},409,'HOSTED_RECEIVING_MANAGED');
@@ -795,6 +802,8 @@ async function inbound() {
   }
   const sender = await address(from), receiver = await address(inbox);
   const addressId = receiver.id;
+  const hosts = await api('listReceivingHosts', { path: d });
+  check(hosts.data.some(h => h.name === domain && h.domainId === domainId && h.status !== 'removed'), 'receiving host list misses the domain itself');
   const children = await api('listInboundSubdomains', { path: d, query: { limit: 1 } });
   check(Array.isArray(children.data) && children.data.every(r => r.parentDomainId === domainId), 'subdomain page includes another parent');
   await api('updateInboundAddress', { path: { addressId }, body: { displayName: prefix } });

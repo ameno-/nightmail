@@ -327,7 +327,7 @@ export function lastingRoute(method: string, path: string) {
   const verb = method.toUpperCase();
   return (verb === 'POST' && /^\/v1\/(?:inbound\/)?webhooks$/.test(path)) || ((verb === 'PATCH' || verb === 'DELETE') && /^\/v1\/(?:inbound\/)?webhooks\/[^/]+$/.test(path))
     || /^\/v1\/(?:inbound\/)?webhooks\/[^/]+\/(?:rotate-secret|secret)$/.test(path) || (verb !== 'GET' && /^\/v1\/inboxes\/[^/]+\/app-passwords(?:\/[^/]+)?$/.test(path))
-    || (verb !== 'GET' && /^\/v1\/inbound\/domains\/[^/]+(?:\/(?:enable|disable|subdomains(?:\/[^/]+)?))?$/.test(path)) || (verb === 'POST' && /^\/v1\/domains\/[^/]+\/receiving-host$/.test(path));
+    || (verb !== 'GET' && /^\/v1\/inbound\/domains\/[^/]+(?:\/(?:enable|disable|hosts(?:\/[^/]+)?|subdomains(?:\/[^/]+)?))?$/.test(path)) || (verb === 'POST' && /^\/v1\/domains\/[^/]+\/receiving-host$/.test(path));
 }
 /** notMember (app.ts): whether REST refuses this actor the route because it is a workspace member. */
 export const memberRefused = (actor: Pick<Actor, 'role'> | undefined, method: string, path: string) => actor?.role === 'member' && ownerRoute(method, path);

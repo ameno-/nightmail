@@ -3501,9 +3501,10 @@ describe('Hosted MCP OAuth and tools', () => {
           ['DELETE', `/v1/inbound/webhooks/${hook.id}`], ['POST', `/v1/inbound/webhooks/${hook.id}/rotate-secret`],
           ['POST', '/v1/inbound/keys', { name: 'agent fixture' }], ['GET', '/v1/inbound/keys'], ['POST', '/v1/inbound/keys/mbk_fixture/revoke'],
           ['DELETE', '/v1/inboxes/fixture/app-passwords/fixture'], ['POST', '/v1/inbox-connections', { inboxes: ['fixture'], client: 'generic', auth: 'key' }],
-          // Receiving hosts: choosing one, its subdomains, turning receiving on or off and its catch-all.
-          ['POST', '/v1/inbound/domains/dom_fixture/subdomains', { name: 'acme' }], ['PATCH', '/v1/inbound/domains/dom_fixture/subdomains/mdom_fixture', { catchAll: 'store' }],
-          ['DELETE', '/v1/inbound/domains/dom_fixture/subdomains/mdom_fixture'],
+          // Receiving hosts: adding, changing or removing one (and its subdomain aliases), choosing one, turning receiving on or off.
+          ['POST', '/v1/inbound/domains/dom_fixture/hosts', { name: 'acme' }], ['PATCH', '/v1/inbound/domains/dom_fixture/hosts/mdom_fixture', { catchAll: 'store' }],
+          ['DELETE', '/v1/inbound/domains/dom_fixture/hosts/mdom_fixture'], ['POST', '/v1/inbound/domains/dom_fixture/subdomains', { name: 'acme' }],
+          ['PATCH', '/v1/inbound/domains/dom_fixture/subdomains/mdom_fixture', { catchAll: 'store' }], ['DELETE', '/v1/inbound/domains/dom_fixture/subdomains/mdom_fixture'],
           ['POST', '/v1/domains/dom_fixture/receiving-host', { host: 'reply.example.com' }], ['PATCH', '/v1/inbound/domains/dom_fixture', { catchAll: 'store' }],
           ['POST', '/v1/inbound/domains/dom_fixture/enable', {}], ['POST', '/v1/inbound/domains/dom_fixture/disable'],
         ];
@@ -3519,12 +3520,14 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.ok(Array.isArray(ok(await http('POST', '/v1/routing/test', agent.token, { envelope: { to: ['fixture@example.com'] } })).recipients));
         // Reading a domain's subdomains stays allowed: an unknown domain is not found, not refused.
         error(await http('GET', '/v1/inbound/domains/dom_fixture/subdomains', agent.token), 404, 'NOT_FOUND');
+        // Reading a domain's hosts stays allowed: an unknown domain is not found, not refused.
+        error(await http('GET', '/v1/inbound/domains/dom_fixture/hosts', agent.token), 404, 'NOT_FOUND');
         // MCP discovery asks the same predicate (lastingRoute), so it hides exactly these writes from a temporary token.
         const { lastingRoute } = await import('./src/core.js'), spec = JSON.parse(await readFile(new URL('./openapi.json', import.meta.url), 'utf8'));
         const hostRoutes = Object.entries(spec.paths as Record<string, Json>).filter(([path]) => /^\/v1\/inbound\/domains|^\/v1\/domains\/\{id\}\/receiving-host$/.test(path))
           .flatMap(([path, ops]) => Object.keys(ops).map(method => [method.toUpperCase(), path, ops[method].operationId] as const));
-        assert.deepEqual(hostRoutes.filter(([method, path]) => lastingRoute(method, path)).map(([, , op]) => op).sort(), ['chooseReceivingHost', 'createInboundSubdomain', 'disableInboundDomain',
-          'enableInboundDomain', 'removeInboundSubdomain', 'updateInboundDomain', 'updateInboundSubdomain']);
+        assert.deepEqual(hostRoutes.filter(([method, path]) => lastingRoute(method, path)).map(([, , op]) => op).sort(), ['addReceivingHost', 'chooseReceivingHost', 'createInboundSubdomain', 'disableInboundDomain',
+          'enableInboundDomain', 'removeInboundSubdomain', 'removeReceivingHost', 'updateInboundDomain', 'updateInboundSubdomain', 'updateReceivingHost']);
       } finally {
         ok(await http('DELETE', `/v1/inbound/webhooks/${hook.id}`, MANAGER));
         ok(await http('POST', `/v1/agent-tokens/${agent.id}/revoke`, MANAGER, undefined, { 'x-bane-environment': 'live' }));
@@ -13561,16 +13564,198 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await recheck(d); current = await read(d); assert.equal(current.receivingIssue, null); assert.equal(current.receiving, 'verified');
         // MAIL FROM can't take the receiving host: refused before any SES call.
         assert.match(error(await local('POST', `/v1/domains/${d.id}/mail-from`, { mailFromDomain: `reply.${d.name}` }), 409, 'MAIL_FROM_RECEIVING_CONFLICT').message, /needs its own MX to feedback-smtp/);
-        // One host per domain until every Worker understands several: the hosts operations come with the next release.
-        error(await choose(d, `inbound.${d.name}`), 409, 'RECEIVING_HOST_ACTIVE');
-        error(await local('POST', `/v1/inbound/domains/${d.id}/subdomains`, { name: 'acme' }), 409, 'HOSTED_RECEIVING_MANAGED');
-        assert.equal((await local('POST', `/v1/inbound/domains/${d.id}/hosts`, { name: 'acme' })).status, 404);
+        // Choosing another host once reply. receives adds it beside reply., which keeps receiving: nothing that routes moves.
+        const beside = ok(await choose(d, `inbound.${d.name}`));
+        assert.deepEqual(beside.dns.filter((r: Json) => r.purpose === 'receiving').map((r: Json) => [r.name, r.status]), [[`reply.${d.name}`, 'verified'], [`inbound.${d.name}`, 'pending']]);
+        assert.equal(beside.receiving, 'verified');
       });
 
-      // The next release adds and removes hosts beside a domain's own; this one never does, but it runs on what that release
-      // writes (while the two overlap, and after a rollback to this one). That state, then this release's own MX check and
-      // receipt router: every host routes on its own row, a removed host stays removed, and a recovered grace clears.
-      await t.test('state the next release writes: each host routes on its own row, a removed host stays removed, a recovered grace clears', async () => {
+      await t.test('a domain receives on its root and any number of subdomains at once; each host is added and removed on its own', async () => {
+        const [{ S3Client }, { acceptInboundNotification, mailboxIngestJobs }] = await Promise.all([import('@aws-sdk/client-s3'), import('./src/mailbox-ingest.js')]);
+        const topicArn = `arn:aws:sns:${REGION}:${account}:hosts-inbound`, bucket = `hosts-${account}-mail`, aws = runtime.config.aws;
+        runtime.config.aws = { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' }; t.after(() => { runtime.config.aws = aws; });
+        await db.query('UPDATE provider_pool_regions SET inbound_topic_arn=$2,inbound_bucket=$3 WHERE region=$1', [REGION, topicArn, bucket]);
+        const staged = new Map<string, string>();
+        t.mock.method(S3Client.prototype, 'send', async (cmd: any) => {
+          const body = staged.get(cmd.input.Key ?? '') ?? staged.get(String(cmd.input.CopySource ?? '').split('/').slice(1).join('/')) ?? '';
+          if (cmd.constructor.name === 'HeadObjectCommand') return { ContentLength: Buffer.byteLength(body), ETag: '"fixture"' };
+          if (cmd.constructor.name === 'GetObjectCommand') return { Body: { transformToByteArray: async () => Buffer.from(body) } };
+          return {};
+        });
+        // SNS hands over one received message: how many workspaces it was routed to, and which of its recipients each got.
+        const deliver = async (...recipients: string[]) => {
+          const mid = unique('hosts');
+          staged.set(`staging/${mid}`, `From: sender@example.org\r\nTo: ${recipients.join(', ')}\r\nSubject: Hosts\r\nMessage-ID: <${mid}@example.org>\r\n\r\nHello.`);
+          const routed = await acceptInboundNotification(runtime, { topicArn, region: REGION, message: { notificationType: 'Received', mail: { messageId: mid, source: 'sender@example.org' },
+            receipt: { ...cleanScans, timestamp: new Date().toISOString(), recipients, action: { type: 'S3', bucketName: bucket, topicArn, objectKey: `staging/${mid}` } } } });
+          return { mid, routed, recipients: (await db.query('SELECT recipients FROM mail_receipts WHERE ses_message_id=$1', [mid])).rows[0]?.recipients ?? [] };
+        };
+        const name = `${unique('rx-many')}.example`, d = await claim(name, { receivingHost: `reply.${name}` });
+        // The real case: reply. receives; the root's mail is with another provider today.
+        zone.set(`reply.${name}`, { mx: [ses] }); zone.set(name, { mx: ['5 mx.other.example.'] }); zone.set(`inbox.${name}`, { mx: [ses] });
+        await recheck(d);
+        const hostsPath = `/v1/inbound/domains/${d.id}/hosts`, hosts = async () => ok(await local('GET', hostsPath)).data as Json[];
+        const states = async () => Object.fromEntries((await hosts()).map(h => [h.name, h.status]));
+        const claimHost = async () => (await db.query('SELECT receiving_state,receiving_host FROM domain_claims WHERE name=$1', [name])).rows[0];
+        assert.deepEqual(await states(), { [`reply.${name}`]: 'active' });
+        const reply = ok(await local('POST', '/v1/inbound/addresses', { address: `support@reply.${name}` }), 201);
+        assert.deepEqual((await deliver(reply.address)).recipients, [reply.address]);
+
+        // Adding the root while reply. receives: another provider has its mail, so it asks first; reply. never stops.
+        assert.match(error(await local('POST', hostsPath, { name }), 409, 'RECEIVING_HOST_IN_USE').message, /^Move mail for rx-many-.*\? mx\.other\.example receives mail for /);
+        const root = ok(await local('POST', hostsPath, { name, confirm: true }), 201);
+        assert.deepEqual([root.name, root.status, root.dns[0].name, root.issue.code], [name, 'pending', name, 'foreign_mx']);
+        assert.deepEqual(ok(await local('POST', hostsPath, { name, confirm: true })).id, root.id, 'Adding a host the domain already receives on returns it.');
+        assert.deepEqual((await deliver(reply.address)).recipients, [reply.address], 'reply. keeps receiving while the root is added.');
+        assert.deepEqual(await claimHost(), { receiving_state: 'active', receiving_host: `reply.${name}` });
+        const inbox = ok(await local('POST', hostsPath, { name: 'inbox', catchAll: 'store' }), 201);
+        assert.equal(inbox.name, `inbox.${name}`);
+
+        // Nightmail's MX goes on the root at a lower priority first, beside the provider's (backup-MX staging): it receives
+        // whatever mail reaches it, and says how the mail is split.
+        zone.set(name, { mx: ['5 mx.other.example.', ses] });
+        await recheck(d);
+        assert.deepEqual(await states(), { [`reply.${name}`]: 'active', [name]: 'mixed', [`inbox.${name}`]: 'active' });
+        const mixed = (await hosts()).find(h => h.name === name)!;
+        assert.deepEqual([mixed.issue.code, mixed.mx.state], ['split', 'mixed']);
+        const domain = await read(d);
+        assert.deepEqual(domain.dns.filter((r: Json) => r.purpose === 'receiving').map((r: Json) => [r.name, r.status]), [[`reply.${name}`, 'verified'], [name, 'verified'], [`inbox.${name}`, 'verified']]);
+        assert.equal(domain.receiving, 'verified');
+
+        // Three hosts at once: one message to an address on each reaches every one of them.
+        const hello = ok(await local('POST', '/v1/inbound/addresses', { address: `hello@${name}` }), 201), team = ok(await local('POST', '/v1/inbound/addresses', { address: `team@inbox.${name}` }), 201);
+        const all = await deliver(hello.address, reply.address, team.address);
+        assert.equal(all.routed, 1); assert.deepEqual(all.recipients, [hello.address, reply.address, team.address].sort());
+        await mailboxIngestJobs['mailbox.ingest']!(runtime, { sesMessageId: all.mid }, { id: unique('job'), workspaceId: wid, attempts: 1 });
+        const boxes = (await db.query('SELECT b.mailbox_id FROM mailbox_messages b JOIN mail_messages m ON m.id=b.message_id WHERE m.ses_message_id=$1 ORDER BY 1', [all.mid])).rows.map(r => r.mailbox_id);
+        assert.deepEqual(boxes, [hello.id, reply.id, team.id].sort());
+
+        // Removing reply. stops it alone; its address and mail stay, and adding it back restores both.
+        const replyHost = (await hosts()).find(h => h.name === `reply.${name}`)!;
+        assert.equal(ok(await local('DELETE', `${hostsPath}/${replyHost.id}`)).status, 'removed');
+        assert.deepEqual((await deliver(hello.address, reply.address, team.address)).recipients, [hello.address, team.address].sort());
+        assert.deepEqual(await claimHost(), { receiving_state: 'active', receiving_host: name });
+        assert.deepEqual(await states(), { [`reply.${name}`]: 'removed', [name]: 'mixed', [`inbox.${name}`]: 'active' });
+        assert.ok(!(await read(d)).dns.some((r: Json) => r.purpose === 'receiving' && r.name === `reply.${name}`), 'A removed host has no record to publish.');
+        error(await local('POST', '/v1/inbound/addresses', { address: `late@reply.${name}` }), 409, 'MAILBOX_DOMAIN_NOT_ENABLED');
+        await recheck(d);
+        assert.equal((await states())[`reply.${name}`], 'removed', 'A check never brings a removed host back.');
+        const back = ok(await local('POST', hostsPath, { name: `reply.${name}` }), 201);
+        assert.deepEqual([back.id, back.status, back.addressCount], [replyHost.id, 'pending', 1]);
+        await recheck(d);
+        assert.deepEqual((await deliver(reply.address)).recipients, [reply.address]);
+
+        // The subdomain operations are the same hosts.
+        const subdomains = ok(await local('GET', `/v1/inbound/domains/${d.id}/subdomains?status=all`)).data;
+        assert.deepEqual(subdomains.map((s: Json) => [s.name, s.status, s.dns[0].name]).sort(), [[name, 'active', name], [`inbox.${name}`, 'active', `inbox.${name}`]].sort());
+        const acme = ok(await local('POST', `/v1/inbound/domains/${d.id}/subdomains`, { name: 'acme' }), 201);
+        assert.equal((await hosts()).find(h => h.id === acme.id)?.name, `acme.${name}`);
+        ok(await local('DELETE', `/v1/inbound/domains/${d.id}/subdomains/${acme.id}`));
+        assert.equal((await states())[`acme.${name}`], 'removed');
+
+        // Another workspace's names and hosts stay theirs.
+        const other = unique('rx-many-other');
+        await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [other]);
+        await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [other, REGION, account]);
+        await db.query("INSERT INTO domain_claims(name,workspace_id,claim_scope) VALUES ($1,$2,'account')", [`shop.${name}`, other]);
+        assert.match(error(await local('POST', hostsPath, { name: 'shop' }), 409, 'RECEIVING_HOST_CLAIMED').message, /is claimed by another Nightmail workspace/);
+        // A host another workspace routes (SQL stands in: the database refuses proven overlapping claims) is refused here,
+        // and two workspaces never route one host at once.
+        const routedElsewhere = async (host: string) => {
+          const id = unique('dom');
+          await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id,receiving_state,receiving_host) VALUES ($1,$2,$2,'pending',$1)", [host, other]);
+          await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4)', [id, other, host, REGION]);
+          await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,receiving_host,status) VALUES ($1,$2,$1,$3,$4,$3,'active')", [id, other, host, REGION]);
+        };
+        await routedElsewhere(`desk.${name}`); zone.set(`desk.${name}`, { mx: [ses] });
+        assert.match(error(await local('POST', hostsPath, { name: 'desk' }), 409, 'RECEIVING_HOST_TAKEN').message, /already receives mail in another Nightmail workspace/);
+        await db.query('SAVEPOINT duplicate_routing_host');
+        await assert.rejects(db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,receiving_host,status) VALUES ($1,$2,$3,$1,$4,$5,'active')", [unique('mdom'), wid, unique('dom'), REGION, `desk.${name}`]),
+          (e: Json) => e.code === '23505' && e.constraint === 'mailbox_domains_routing_host');
+        await db.query('ROLLBACK TO SAVEPOINT duplicate_routing_host');
+        // A host added here, then routed by another workspace before its MX was checked: it stays pending, flagged, and
+        // this domain never takes its mail.
+        zone.set(`race.${name}`, { mx: [ses] });
+        ok(await local('POST', hostsPath, { name: 'race' }), 201);
+        await routedElsewhere(`race.${name}`);
+        await recheck(d);
+        const race = (await hosts()).find(h => h.name === `race.${name}`)!;
+        assert.deepEqual([race.status, race.issue?.code], ['pending', 'host_taken']);
+        assert.equal((await deliver(`x@race.${name}`)).routed, 0);
+      });
+
+      // What a rollback runs on what this release writes. The MX check, receipt router and BYO reconciler are the previous
+      // release's, unchanged (it shipped them first so that it is this release's safe rollback), so each case below is that
+      // release on state this release's hosts operations made: a removed host, a recovered grace, the original host removed.
+      await t.test('the previous release on hosts this one adds and removes: removed stays removed, a recovered grace routes, removing the original checks cleanly', async () => {
+        const { acceptInboundNotification } = await import('./src/mailbox-ingest.js');
+        const topicArn = `arn:aws:sns:${REGION}:${account}:rollback-inbound`, bucket = `rollback-${account}-mail`;
+        await db.query('UPDATE provider_pool_regions SET inbound_topic_arn=$2,inbound_bucket=$3 WHERE region=$1', [REGION, topicArn, bucket]);
+        const deliver = async (...recipients: string[]) => { const mid = unique('rollback');
+          await acceptInboundNotification(runtime, { topicArn, region: REGION, message: { notificationType: 'Received', mail: { messageId: mid, source: 'sender@example.org' },
+            receipt: { ...cleanScans, timestamp: new Date().toISOString(), recipients, action: { type: 'S3', bucketName: bucket, topicArn, objectKey: `staging/${mid}` } } } });
+          return (await db.query('SELECT recipients FROM mail_receipts WHERE ses_message_id=$1', [mid])).rows[0]?.recipients ?? [];
+        };
+        const setup = async (label: string) => {
+          const name = `${unique(label)}.example`, d = await claim(name, { receivingHost: `reply.${name}` });
+          zone.set(`reply.${name}`, { mx: [ses] }); await recheck(d);
+          const path = `/v1/inbound/domains/${d.id}/hosts`, hosts = async () => ok(await local('GET', path)).data as Json[];
+          const states = async () => Object.fromEntries((await hosts()).map(h => [h.name, h.status]));
+          const claimRow = async () => (await db.query('SELECT receiving_state,receiving_host,receiving_lost_since IS NOT NULL AS lost FROM domain_claims WHERE name=$1', [name])).rows[0];
+          return { name, d, path, hosts, states, claimRow };
+        };
+
+        // 1. The sole host removed while its MX stays published: checks leave it removed, and it routes nothing.
+        const sole = await setup('rx-sole');
+        const only = (await sole.hosts())[0]!;
+        assert.equal(ok(await local('DELETE', `${sole.path}/${only.id}`)).status, 'removed');
+        await recheck(sole.d); await recheck(sole.d);
+        assert.deepEqual(await sole.states(), { [`reply.${sole.name}`]: 'removed' });
+        assert.deepEqual(await sole.claimRow(), { receiving_state: 'pending', receiving_host: null, lost: false });
+        assert.deepEqual(await deliver(`x@reply.${sole.name}`), []);
+
+        // 2. A host's MX grace started by a check, past two hours, then its MX back: the next check clears it and it routes.
+        //    The root alone (its grace on its row), reply. alone (the root routes, so it is the claim's host meanwhile), then
+        //    both (reply., the domain's primary host, keeps its grace on the claim).
+        const graced = await setup('rx-grace'), both = { [`reply.${graced.name}`]: 'active', [graced.name]: 'active' };
+        zone.set(graced.name, { mx: [ses] });
+        ok(await local('POST', graced.path, { name: graced.name }), 201);
+        await recheck(graced.d);
+        assert.deepEqual(await graced.states(), both);
+        for (const gone of [[graced.name], [`reply.${graced.name}`], [`reply.${graced.name}`, graced.name]]) {
+          const to = gone.map(host => `x@${host}`).sort();
+          for (const host of gone) zone.delete(host);
+          await recheck(graced.d);
+          assert.deepEqual(await graced.states(), { ...both, ...Object.fromEntries(gone.map(host => [host, 'lost'])) }, `${gone} in its grace`);
+          assert.deepEqual(await deliver(...to), to, 'A host keeps routing through its grace.');
+          await db.query("UPDATE mailbox_domains SET lost_since=lost_since-interval '3 hours' WHERE domain_id=$1 AND lost_since IS NOT NULL", [graced.d.id]);
+          await db.query("UPDATE domain_claims SET receiving_lost_since=receiving_lost_since-interval '3 hours' WHERE name=$1 AND receiving_lost_since IS NOT NULL", [graced.name]);
+          assert.deepEqual(await deliver(...to), [], `${gone}: an expired grace holds its mail.`);
+          for (const host of gone) zone.set(host, { mx: [ses] });
+          await recheck(graced.d);
+          assert.deepEqual(await graced.states(), both);
+          assert.deepEqual(await graced.claimRow(), { receiving_state: 'active', receiving_host: `reply.${graced.name}`, lost: false });
+          assert.deepEqual(await deliver(...to), to);
+        }
+
+        // 3. The original host removed while the root lives: the next host is the claim's, and every check runs cleanly.
+        const moved = await setup('rx-moved');
+        zone.set(moved.name, { mx: [ses] });
+        ok(await local('POST', moved.path, { name: moved.name }), 201);
+        await recheck(moved.d);
+        const original = (await moved.hosts()).find(h => h.name === `reply.${moved.name}`)!;
+        assert.equal(ok(await local('DELETE', `${moved.path}/${original.id}`)).status, 'removed');
+        assert.deepEqual(await moved.claimRow(), { receiving_state: 'active', receiving_host: moved.name, lost: false });
+        for (let pass = 0; pass < 2; pass++) await recheck(moved.d);
+        assert.deepEqual(await moved.states(), { [`reply.${moved.name}`]: 'removed', [moved.name]: 'active' });
+        assert.deepEqual(await moved.claimRow(), { receiving_state: 'active', receiving_host: moved.name, lost: false });
+        assert.deepEqual(await deliver(`x@reply.${moved.name}`, `y@${moved.name}`), [`y@${moved.name}`]);
+      });
+
+      // What the hosts operations write, built row by row, then the MX check and receipt router (the same modules as the
+      // release before, which shipped them first and is this release's rollback): every host routes on its own row, a
+      // removed host stays removed, and a recovered grace clears.
+      await t.test('hosts as the hosts operations leave them: each routes on its own row, a removed host stays removed, a recovered grace clears', async () => {
         const { acceptInboundNotification } = await import('./src/mailbox-ingest.js');
         const topicArn = `arn:aws:sns:${REGION}:${account}:hosts-inbound`, bucket = `hosts-${account}-mail`;
         await db.query('UPDATE provider_pool_regions SET inbound_topic_arn=$2,inbound_bucket=$3 WHERE region=$1', [REGION, topicArn, bucket]);
@@ -13595,10 +13780,6 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.deepEqual(await rows(), [{ host: `reply.${name}`, status: 'active', lost: false }, { host: name, status: 'active', lost: false }, { host: `inbox.${name}`, status: 'active', lost: false }]);
         assert.deepEqual(await deliver(`a@reply.${name}`, `b@${name}`, `c@inbox.${name}`), [`a@reply.${name}`, `b@${name}`, `c@inbox.${name}`].sort());
         assert.deepEqual(await claimRow(), { receiving_state: 'active', receiving_host: `reply.${name}`, lost: false }, 'The claim mirrors the first host, as a claim with one host always read.');
-        // Choosing a host here never moves or adds one beside those: the hosts stay as the next release left them.
-        const choice = async () => (await db.query("SELECT identity->'receivingChoice' AS choice FROM domain_claims WHERE name=$1", [name])).rows[0].choice;
-        error(await choose(d, `more.${name}`), 409, 'RECEIVING_HOST_ACTIVE');
-        error(await choose(d, `reply.${name}`), 409, 'DOMAIN_CHANGED');
         // A host whose MX went missing over two hours ago is held; once its MX answers again it routes, its grace cleared.
         zone.delete(`inbox.${name}`); await recheck(d);
         assert.deepEqual((await rows())[2], { host: `inbox.${name}`, status: 'active', lost: true });
@@ -13613,15 +13794,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await recheck(d); await recheck(d);
         assert.deepEqual((await rows()).map(r => r.status), ['disabled', 'active', 'active']);
         assert.deepEqual(await claimRow(), { receiving_state: 'active', receiving_host: name, lost: false });
-        error(await choose(d, name), 409, 'RECEIVING_HOST_ACTIVE'); error(await choose(d, null), 409, 'DOMAIN_CHANGED');
         assert.deepEqual(await deliver(`a@reply.${name}`, `b@${name}`), [`b@${name}`]);
         // Every host removed: nothing routes, and a check brings none back.
         await db.query("UPDATE mailbox_domains SET status='disabled' WHERE domain_id=$1", [d.id]);
         await recheck(d);
         assert.deepEqual((await rows()).map(r => r.status), ['disabled', 'disabled', 'disabled']);
         assert.deepEqual(await claimRow(), { receiving_state: 'pending', receiving_host: null, lost: false });
-        error(await choose(d, `more.${name}`), 409, 'DOMAIN_CHANGED');
-        assert.equal(await choice(), null, 'No refused choice was saved.');
         assert.deepEqual(await deliver(`a@reply.${name}`, `b@${name}`, `c@inbox.${name}`), []);
       });
 
@@ -13660,20 +13838,28 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const check = () => operationJobs['domain.mx']!(br, { domainId: bd, token: btoken }, { id: unique('mx'), attempts: 1, workspaceId: bw });
         const recipients = () => rules.flatMap(r => r.Recipients ?? []).sort();
         const rows = async () => (await db.query('SELECT receiving_host AS host,status FROM mailbox_domains WHERE domain_id=$1 ORDER BY parent_id IS NOT NULL,created_at', [bd])).rows;
+        // The BYO workspace's owner adds and removes its hosts through the API.
+        await db.query("INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner')", [unique('mem'), bw, manager!.userId]);
+        const byo = (method: string, path: string, body?: Json) => local(method, path, body, 'live', { 'x-bane-workspace': bw });
         zone.set(`reply.${bname}`, { mx: [ses] }); await check(); await reconcileRegion(br, REGION, bw);
         assert.deepEqual([recipients(), await rows()], [[`reply.${bname}`], [{ host: `reply.${bname}`, status: 'active' }]]);
-        // The root beside it, as the next release adds it: listed once its MX is seen, and routing once the rule lists it.
-        const own = (await db.query('SELECT id FROM mailbox_domains WHERE domain_id=$1 AND parent_id IS NULL', [bd])).rows[0].id;
-        await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,parent_id,name,region,receiving_host,status,created_at) VALUES ($1,$2,$3,$4,$1,$5,$6,'waiting_for_mx',clock_timestamp())", [unique('mdom'), bw, bd, own, REGION, bname]);
-        zone.set(bname, { mx: [ses] }); await check();
+        // The root beside it: listed once its MX is seen, and routing once the rule lists it. reply. never leaves the rule.
+        zone.set(bname, { mx: [ses] });
+        const root = ok(await byo('POST', `/v1/inbound/domains/${bd}/hosts`, { name: bname }), 201);
+        assert.deepEqual([recipients(), (await rows()).map(r => r.status)], [[`reply.${bname}`], ['active', 'waiting_for_mx']]);
+        await check();
         assert.deepEqual((await rows())[1], { host: bname, status: 'provisioning' });
         await reconcileRegion(br, REGION, bw);
         assert.deepEqual([recipients(), (await rows()).map(r => r.status)], [[bname, `reply.${bname}`].sort(), ['active', 'active']]);
-        // reply. removed: the rule drops it and keeps the root.
-        await db.query("UPDATE mailbox_domains SET status='disabled' WHERE id=$1", [own]);
-        await db.query('UPDATE domain_claims SET receiving_host=$2 WHERE name=$1', [bname, bname]);
-        await reconcileRegion(br, REGION, bw); await check();
+        // Every later reconcile and check keeps both (the previous release's reconciler is this one: it lists every live host).
+        await reconcileRegion(br, REGION, bw); await check(); await reconcileRegion(br, REGION, bw);
+        assert.deepEqual([recipients(), (await rows()).map(r => r.status)], [[bname, `reply.${bname}`].sort(), ['active', 'active']]);
+        // reply. removed: the rule drops it and keeps the root, and nothing brings it back.
+        const reply = ok(await byo('GET', `/v1/inbound/domains/${bd}/hosts`)).data.find((h: Json) => h.name === `reply.${bname}`);
+        assert.equal(ok(await byo('DELETE', `/v1/inbound/domains/${bd}/hosts/${reply.id}`)).status, 'removed');
+        await reconcileRegion(br, REGION, bw); await check(); await reconcileRegion(br, REGION, bw);
         assert.deepEqual([recipients(), (await rows()).map(r => r.status)], [[bname], ['disabled', 'active']]);
+        assert.equal(ok(await byo('GET', `/v1/inbound/domains/${bd}/hosts`)).data.find((h: Json) => h.id === root.id).status, 'active');
 
         // Each host activates on its own: a new host the rule lists routes while the domain's other host is in its MX grace
         // (the claim `lost`, mirroring it), and the claim then mirrors the new host.
@@ -13688,7 +13874,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const states = async () => (await db.query('SELECT status,lost_since IS NOT NULL AS lost FROM mailbox_domains WHERE domain_id=$1 ORDER BY parent_id IS NOT NULL,created_at', [bd])).rows.map(r => `${r.status}${r.lost ? '+grace' : ''}`);
         zone.delete(bname); await check();
         assert.deepEqual([await claimRow(), await states()], [{ receiving_state: 'lost', receiving_host: bname, lost: true }, ['disabled', 'active+grace']]);
-        const added = async (host: string) => db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,parent_id,name,region,receiving_host,status,created_at) VALUES ($1,$2,$3,$4,$1,$5,$6,'waiting_for_mx',clock_timestamp())", [unique('mdom'), bw, bd, own, REGION, host]);
+        // Each new host is added through the hosts API, as the owner adds it.
+        const added = async (host: string) => ok(await byo('POST', `/v1/inbound/domains/${bd}/hosts`, { name: host }), 201);
         await added(`new.${bname}`); zone.set(`new.${bname}`, { mx: [ses] }); await check();
         assert.deepEqual((await states())[2], 'provisioning');
         await reconcileRegion(br, REGION, bw);

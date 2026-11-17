@@ -857,9 +857,6 @@ export async function domainPage(c: Ctx, a: Actor, q: DomainQuery): Promise<z.in
   return { data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.row.id : null };
 }
 
-/** Hosts beside the domain's own, or its own removed: state only the next release's hosts operations make. */
-const severalHosts=(row:{hosts:ReceivingHostRow[]})=>row.hosts.some(h=>h.own===(h.status==='disabled' || h.status==='disabling'));
-const changedHosts=()=>new ApiError(409,'DOMAIN_CHANGED','The receiving hosts of this domain changed. Reload it and try again.',undefined,true);
 export function registerOperations(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/workspace', operationId: 'getWorkspaceSettings', tags: ['Settings'], security, responses: { 200: response(settingsSchema), ...errors } }), async c => {
     const a = workspaceActor(c); const [row] = c.env.config.multiTenant
@@ -968,7 +965,7 @@ export function registerOperations(app: App) {
     return c.json(await domainReadiness(c.env, row), 200);
   });
   app.openapi(createRoute({method:'post',path:'/v1/domains/{id}/receiving-host',operationId:'chooseReceivingHost',tags:['Domains'],security,
-    description:`Hosted only. Choose where this domain receives mail, its root or one of its subdomains, instead of the automatic suggestion (the first of reply., inbound., mail. and so on with no MX and no CNAME); null returns to the suggestion. Public DNS is checked first. A CNAME (RFC 1034), one of ${productName}’s own names (custom MAIL FROM, ownership TXT, DKIM), a host another claim receives on (in any workspace), a name another workspace has claimed (send-only included) or a delegated zone (its own NS records) is refused with a free subdomain to use instead. A host whose mail another provider receives, or whose MX is split, needs confirm: true, because publishing ${productName}’s MX moves that mail. A wildcard (*.domain) answer only flags receivingIssue. Read-only: nothing changes in DNS or SES.`,
+    description:`Hosted only. Choose a host for this domain to receive on, its root or one of its subdomains. Until the domain receives anywhere, the choice replaces the automatic suggestion (the first of reply., inbound., mail. and so on with no MX and no CNAME), and null returns to it. Once it receives, the chosen host is added beside the hosts it already receives on, as POST /v1/inbound/domains/{id}/hosts does: nothing that receives is moved or stopped. Public DNS is checked first. A CNAME (RFC 1034), one of ${productName}’s own names (custom MAIL FROM, ownership TXT, DKIM), a host another domain receives on (in any workspace), a name another workspace has claimed (send-only included) or a delegated zone (its own NS records) is refused with a free subdomain to use instead. A host whose mail another provider receives, or whose MX is split, needs confirm: true, because publishing ${productName}’s MX moves that mail. A wildcard (*.domain) answer only flags receivingIssue. Nothing changes in DNS or SES.`,
     request:{params:IdParams,body:json(z.object({host:domainName.nullable(),confirm:z.boolean().default(false)}).strict().openapi('ChooseReceivingHost'))},
     responses:{200:response(domainSchema),...errors}}),async c=>{
     const a=actor(c,'manage'); lasting(c,RECEIVING_HOST_CHANGE); if (!c.env.config.multiTenant) return notFound('Endpoint');
@@ -977,11 +974,15 @@ export function registerOperations(app: App) {
     const row=await hostedDomain(c.env.db,a.workspaceId,domainId) ?? notFound('Domain'); allowedDomain(a,row.name);
     if (host!==null && host!==row.name && !host.endsWith(`.${row.name}`)) throw new ApiError(422,'RECEIVING_HOST_INVALID',`Use ${row.name} or one of its subdomains.`,'host');
     if (host!==null && reservedPlatformName(host,c.env.config)) throw new ApiError(409,'RECEIVING_HOST_RESERVED',`${host} is one of ${productName}’s own hosts, so it can’t receive mail for ${row.name}.`,'host');
-    // One host per domain until every Worker understands several: the next release adds hosts beside the domain's own
-    // and removes them. A domain it left with other hosts, or with its own host removed, keeps them as they are here.
-    const established=establishedHost(row), receives=established ?? row.hosts.find(h=>!h.own && (h.status==='active' || h.status==='provisioning'))?.host;
-    if (receives && host!==established) throw new ApiError(409,'RECEIVING_HOST_ACTIVE',`${receives} already receives mail for ${row.name}. Remove its MX record first; you can choose another host once it stops resolving.`,'host');
-    if (severalHosts(row)) throw changedHosts();
+    // Once the domain receives somewhere (or the owner removed its own host), a chosen host goes beside the others.
+    const established=establishedHost(row), own=row.hosts.find(h=>h.own);
+    if (established || own?.status==='disabled' || (host!==null && row.hosts.some(h=>h.host===host && h.status!=='disabled'))) {
+      if (host!==null && host!==established) await (await wrapModuleLoad(() => import('./receiving-hosts.js'))).addChosenHost(c,a.workspaceId,row,host,confirm).catch((e:unknown)=>{
+        if (e instanceof ApiError && e.field==='name') throw new ApiError(e.status,e.code,e.message,'host',e.retryable);
+        throw e;
+      });
+      return c.json(derivedReadiness(await hostedDomain(c.env.db,a.workspaceId,domainId) ?? notFound('Domain')),200);
+    }
     let facts:Partial<IdentityFacts>={receivingChoice:null,issue:null};
     if (host!==null) {
       const {mx,issue}=await inspectReceivingHost(c.env.db,row,a.workspaceId,host,dnsUnavailable);
@@ -996,10 +997,8 @@ export function registerOperations(app: App) {
     }
     const saved=await c.env.db.transaction(async db=>{
       const current=await hostedDomain(db,a.workspaceId,domainId,true);
-      const now=current && establishedHost(current);
-      if (!current || current.token!==row.token || (now && host!==now)) throw new ApiError(409,'DOMAIN_CHANGED','The domain changed while its DNS was checked. Try again.',undefined,true);
-      if (severalHosts(current)) throw changedHosts();
-      const identity:IdentityFacts={...(current.identity ?? identityOnly({VerificationStatus:'PENDING'})),...facts,...(host===null ? {mx:current.identity?.mx?.expected.name===now ? current.identity?.mx ?? null : null} : {})};
+      if (!current || current.token!==row.token || establishedHost(current)!==null) throw new ApiError(409,'DOMAIN_CHANGED','The domain changed while its DNS was checked. Try again.',undefined,true);
+      const identity:IdentityFacts={...(current.identity ?? identityOnly({VerificationStatus:'PENDING'})),...facts,...(host===null ? {mx:null} : {})};
       await db.execute(sql`UPDATE domain_claims SET identity=${JSON.stringify(identity)}::jsonb WHERE workspace_id=${a.workspaceId} AND name=${current.name} AND token=${current.token}`);
       await recordAudit(db,c,{action:'domain.receiving_host',workspaceId:a.workspaceId,target:{type:'domain',id:domainId},before:{receivingChoice:current.identity?.receivingChoice ?? null},after:{name:current.name,receivingChoice:host}});
       return derivedReadiness({...current,identity});
