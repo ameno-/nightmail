@@ -57,8 +57,8 @@ const rolePermissions = (role: string): Permission[] => role === 'owner' || role
  * whenever a credential or object the approval created is used in that workspace.
  */
 export async function externalMcpGrant(runtime: Runtime, keyId: string, workspaceId: string, db: DbExecutor = runtime.db): Promise<Actor | null> {
-  const { rows: [grant] } = await db.execute<{role: string; permissions: Permission[]}>(sql`
-    SELECT m.role, g.permissions FROM nightmail_resource_grants g
+  const { rows: [grant] } = await db.execute<{role: string; permissions: Permission[]; user_id: string}>(sql`
+    SELECT m.role, g.permissions, i.user_id FROM nightmail_resource_grants g
     JOIN nightmail_oidc_identities i ON (g.issuer, g.subject, g.user_id) = (i.issuer, i.subject, i.user_id)
     JOIN nightmail_users u ON u.id=i.user_id
     JOIN workspace_members m ON m.workspace_id = ${workspaceId} AND m.user_id = i.user_id
@@ -67,7 +67,7 @@ export async function externalMcpGrant(runtime: Runtime, keyId: string, workspac
       AND (${runtime.config.multiTenant} OR (m.role IN ('owner','admin') AND ${JSON.stringify(runtime.config.allowedSubjects)}::jsonb ? i.subject)) FOR SHARE OF g, i, m, u`);
   if (!grant) return null;
   const allowed = grant.permissions.filter(p => rolePermissions(grant.role).includes(p));
-  return allowed.length ? { keyId, grantId: keyId.slice(4), receivingConsent: grant.role !== 'member', workspaceId, role: grant.role, permissions: allowed, domains: [], credential: 'mcp' } : null;
+  return allowed.length ? { keyId, grantId: keyId.slice(4), userId: grant.user_id, receivingConsent: grant.role !== 'member', workspaceId, role: grant.role, permissions: allowed, domains: [], credential: 'mcp' } : null;
 }
 
 export type McpWorkspace = { id: string; name: string; slug: string; role: 'owner' | 'admin' | 'member'; permissions: Permission[] };

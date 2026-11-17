@@ -1,8 +1,8 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, gt, isNull, sql, type SQL } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
-import { ApiError, actor, digest, errors, hasSessionCookie, id, IdParams, isoTime, json, KEY_CHANGE, lasting, PageQuery, page, randomSecret, response, security, senderDomainAllowed, timed, wrapModuleLoad } from './core.js';
-import type { Actor, App, AppEnv, Ctx, Runtime } from './core.js';
+import { ApiError, actor, digest, errors, hasSessionCookie, id, IdParams, isoTime, json, KEY_CHANGE, lasting, PageQuery, page, randomSecret, response, security, senderDomainAllowed, timed, withOuterRequest, wrapModuleLoad } from './core.js';
+import type { Actor, App, AppEnv, Ctx, MailboxAccess, RequestOrigin, Runtime } from './core.js';
 import { agentTokens, apiKeys } from './db/core.js';
 import { mailboxKeys } from './db/mailbox.js';
 import { auditContext, auditInsert, recordAudit } from './audit.js';
@@ -20,14 +20,15 @@ function rememberFingerprint(hash:string) {
   if(verifiedFingerprints.size>1024)verifiedFingerprints.delete(verifiedFingerprints.keys().next().value!);
 }
 const delegatedMailbox=Symbol('mcpInbox');
-export const delegatedInbox=(runtime:Runtime)=>(runtime as Runtime & {[delegatedMailbox]?:import('./core.js').MailboxAccess})[delegatedMailbox];
-export function dispatchAsMailboxAccess(app:Pick<App,'fetch'>,request:Request,runtime:Runtime,access:import('./core.js').MailboxAccess){
-  const delegated={...runtime,[delegatedMailbox]:access}; return app.fetch(request,delegated);
+export const delegatedInbox=(runtime:Runtime)=>(runtime as Runtime & {[delegatedMailbox]?:MailboxAccess})[delegatedMailbox];
+// Both dispatches run inside `origin`'s request: the inner call keeps its request ID, client network and user agent.
+export function dispatchAsMailboxAccess(app:Pick<App,'fetch'>,request:Request,runtime:Runtime,access:MailboxAccess,origin:RequestOrigin){
+  const delegated={...withOuterRequest(runtime,origin),[delegatedMailbox]:access}; return app.fetch(request,delegated);
 }
 type DelegatedRuntime = Runtime & { [delegatedActor]?: Actor };
-export async function dispatchAsActor(app: Pick<App, 'fetch'>, request: Request, runtime: Runtime, identity: Actor): Promise<Response> {
+export async function dispatchAsActor(app: Pick<App, 'fetch'>, request: Request, runtime: Runtime, identity: Actor, origin: RequestOrigin): Promise<Response> {
   if (identity.credential !== 'mcp' || !identity.keyId.startsWith('mcp_')) throw new ApiError(403, 'PERMISSION_DENIED', 'Invalid delegated API principal.');
-  const delegatedRuntime: DelegatedRuntime = { ...runtime, [delegatedActor]: identity };
+  const delegatedRuntime: DelegatedRuntime = { ...withOuterRequest(runtime, origin), [delegatedActor]: identity };
   return await app.fetch(request, delegatedRuntime);
 }
 
@@ -122,7 +123,7 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
         grant=await getMcpGrantActor(c.env,'mcp_'+key.grant_id,key.workspace_id);
         if (grant?.workspaceId!==key.workspace_id || !grant.permissions.includes('manage')) throw new ApiError(401,'AUTH_INVALID','The originating management approval is no longer active.');
       } else rememberFingerprint(hash);
-      c.set('actor', { grantId:grant?.grantId, receivingConsent:grant?.receivingConsent, keyId: key.id, workspaceId: key.workspace_id, permissions: key.permissions, domains: key.domains, credential: 'apiKey' });
+      c.set('actor', { grantId:grant?.grantId, receivingConsent:grant?.receivingConsent, userId:grant?.userId, keyId: key.id, workspaceId: key.workspace_id, permissions: key.permissions, domains: key.domains, credential: 'apiKey' });
     }
   } else {
     if (!c.env.config.accountClient) {
