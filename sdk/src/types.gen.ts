@@ -3193,7 +3193,7 @@ export type InboundHost = {
      */
     name: string;
     /**
-     * pending: its MX record isn’t seen yet. active: it receives. mixed: it receives, and another provider’s MX record shares its mail (a backup MX, or one with a better priority while mail moves over). lost: its MX record disappeared; it keeps receiving for two hours. failed: receiving setup failed (self-hosted). removed: it no longer receives; its addresses and mail are kept, and adding it again restores it.
+     * pending: its MX record isn’t seen yet. active: it receives. mixed: it receives, and another provider’s MX record shares its mail (a backup MX, or one with a better priority while mail moves over). lost: its MX record disappeared; it keeps receiving for two hours. failed: receiving setup failed. removed: it no longer receives; its addresses and mail are kept, and adding it again restores it.
      */
     status: 'pending' | 'active' | 'mixed' | 'lost' | 'failed' | 'removed';
     catchAll: 'create_address' | 'store';

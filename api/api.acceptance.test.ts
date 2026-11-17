@@ -14087,6 +14087,73 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal((await db.query('SELECT status FROM mailbox_domains WHERE id=$1', [stray])).rows[0].status, 'waiting_for_mx');
         await db.query('ROLLBACK TO SAVEPOINT legacy_duplicate');
       });
+
+      // Hosted receiving follows DNS, so enabling it queues the domain's check. Every read says provisioning from the 202
+      // on, until that check routes the domain (or gives up, with its error), instead of off until the check runs.
+      await t.test('enabling receiving reads as provisioning until its check settles: active, or failed with an error', async st => {
+        const [{ SESv2Client }, { processJobs }, { tagKey }] = await Promise.all([import('@aws-sdk/client-sesv2'), import('./src/jobs.js'), import('./src/resource-tags.js')]);
+        // The check reads SES (mocked below), so it needs SES on: synthetic credentials, no network.
+        const { aws, liveEnabled } = runtime.config; Object.assign(runtime.config, { aws: { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' }, liveEnabled: true });
+        st.after(() => { Object.assign(runtime.config, { aws, liveEnabled }); });
+        const claims = new Map<string, Claim>(); let denied = false;
+        // An earlier case selected the BYO workspace for this user: name this one.
+        const api = (method: string, path: string, body?: Json) => local(method, path, body, 'live', { 'x-bane-workspace': wid });
+        st.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
+          assert.equal(cmd.constructor.name, 'GetEmailIdentityCommand');
+          if (denied) throw Object.assign(new Error('fixture: denied'), { name: 'AccessDeniedException', $metadata: { httpStatusCode: 403 } });
+          return { VerificationStatus: 'SUCCESS', VerifiedForSendingStatus: true, Tags: [{ Key: tagKey('domain-claim'), Value: claims.get(cmd.input.EmailIdentity)!.token }],
+            DkimAttributes: { SigningEnabled: true, Status: 'SUCCESS', Tokens: tokens, SigningAttributesOrigin: 'AWS_SES', SigningHostedZone: 'dkim.amazonses.com' } };
+        });
+        // The job runner, on this domain's check alone (earlier cases left checks of their own queued).
+        const job = (d: Claim) => `domain.verify:${d.token}`;
+        const runCheck = async (d: Claim) => {
+          await db.query("UPDATE jobs SET available_at=now()+interval '1 day' WHERE status='pending' AND id<>$1", [job(d)]);
+          await db.query("DELETE FROM job_schedule WHERE workspace_id='domain.verify:platform'");
+          await processJobs(runtime, async type => operationJobs[type], 1);
+        };
+        const views = async (d: Claim) => {
+          const one = ok(await api('GET', `/v1/inbound/domains/${d.id}`)), listed = ok(await api('GET', '/v1/inbound/domains')).data.find((x: Json) => x.id === d.id);
+          const hosts = ok(await api('GET', `/v1/inbound/domains/${d.id}/hosts`)).data;
+          let page: Json | undefined, cursor = '';
+          do { const body = ok(await api('GET', `/v1/domains?limit=10${cursor && `&cursor=${cursor}`}`)); page = body.data.find((x: Json) => x.id === d.id); cursor = body.nextCursor ?? ''; } while (!page && cursor);
+          return { status: one.status, listed: listed.status, lastError: one.lastError, hosts: hosts.map((h: Json) => [h.name, h.status]), receiving: ok(await api('GET', `/v1/domains/${d.id}`)).receiving, listedReceiving: page!.receiving };
+        };
+        const enable = async (d: Claim) => ok(await api('POST', `/v1/inbound/domains/${d.id}/enable`, {}), 202);
+
+        // 1. The check finds the MX: provisioning, then active.
+        const name = `${unique('rx-enable')}.example`, d = await claim(name), host = `reply.${name}`; claims.set(name, d);
+        zone.set(host, { mx: [ses] });
+        assert.equal(ok(await api('GET', `/v1/inbound/domains/${d.id}`)).status, 'off');
+        const enabled = await enable(d);
+        assert.deepEqual([enabled.status, enabled.name, enabled.lastError], ['provisioning', host, null]);
+        // The host and the domain's DNS readiness keep their existing pending (its MX not yet seen) meanwhile.
+        const provisioning = { status: 'provisioning', listed: 'provisioning', lastError: null, hosts: [[host, 'pending']], receiving: 'pending', listedReceiving: 'pending' };
+        assert.deepEqual(await views(d), provisioning);
+        // Enabling again while it runs is the same request: one check, unchanged, and nothing else written.
+        const queued = async () => (await db.query('SELECT status,available_at,payload,attempts FROM jobs WHERE id=$1', [job(d)])).rows;
+        const audits = async () => (await db.query("SELECT count(*)::int AS n FROM audit_events WHERE action='inbound_domain.enable' AND target_id=$1", [d.id])).rows[0].n;
+        const [before, auditsBefore] = [await queued(), await audits()];
+        assert.equal(before.length, 1); assert.equal(auditsBefore, 1);
+        assert.equal((await enable(d)).status, 'provisioning');
+        assert.deepEqual([await queued(), await audits()], [before, auditsBefore]);
+        assert.deepEqual(await views(d), provisioning);
+        await runCheck(d);
+        assert.deepEqual(await views(d), { status: 'active', listed: 'active', lastError: null, hosts: [[host, 'active']], receiving: 'verified', listedReceiving: 'verified' });
+        assert.equal((await db.query("SELECT identity ? 'receivingRequested' AS requested FROM domain_claims WHERE name=$1", [name])).rows[0].requested, false, 'The check that observed the domain ends the request.');
+        assert.equal((await enable(d)).status, 'active', 'A domain that receives stays as it is.');
+
+        // 2. The check fails for good: failed, with its error, on every read. Enabling again retries.
+        const other = `${unique('rx-enable-fail')}.example`, f = await claim(other), otherHost = `reply.${other}`; claims.set(other, f);
+        assert.equal((await enable(f)).status, 'provisioning');
+        denied = true; await runCheck(f);
+        assert.equal((await db.query('SELECT status,last_error FROM jobs WHERE id=$1', [job(f)])).rows[0].status, 'failed');
+        const message = 'Receiving setup failed (SES_ACCESS_DENIED). Enable receiving again to retry.';
+        assert.deepEqual(await views(f), { status: 'failed', listed: 'failed', lastError: message, hosts: [[otherHost, 'failed']], receiving: 'pending', listedReceiving: 'pending' });
+        denied = false; zone.set(otherHost, { mx: [ses] });
+        assert.equal((await enable(f)).status, 'provisioning');
+        await runCheck(f);
+        assert.deepEqual((await views(f)).hosts, [[otherHost, 'active']]);
+      });
     });
   });
 
