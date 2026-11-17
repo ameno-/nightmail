@@ -13854,6 +13854,34 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     } finally { await db.query('ROLLBACK'); }
   });
 
+  // Contract step for #365: 330 drops the per-workspace routing-host index that 327's global one replaced.
+  test('receiving hosts contract: 330 drops mailbox_domains_receiving_host online, and the global index still refuses a host one workspace routes twice', async t => {
+    const db = await fixtureDatabase(t), source = await readFile(new URL('./migrations/330_drop_host_index.sql', import.meta.url), 'utf8');
+    const indexes = async () => (await db.query(`SELECT c.relname AS name, i.indisvalid AS valid, pg_get_expr(i.indpred, i.indrelid) AS predicate FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+      WHERE i.indrelid = 'mailbox_domains'::regclass AND c.relname IN ('mailbox_domains_receiving_host', 'mailbox_domains_routing_host') ORDER BY 1`)).rows;
+    const routing = { name: 'mailbox_domains_routing_host', valid: true, predicate: "((receiving_host IS NOT NULL) AND (status = ANY (ARRAY['active'::text, 'provisioning'::text])))" };
+    assert.deepEqual(await indexes(), [routing], 'The fixture database applied 330.');
+    // As migrate.ts applies a marked file: one online statement per line, outside a transaction.
+    const apply = async () => { for (const line of source.split('\n').map(s => s.trim()).filter(s => s && !s.startsWith('--'))) await db.query(line); };
+    assert.match(source, /^-- bane:no-transaction\n/);
+    // A database upgraded from the previous release has both indexes, on the same rows.
+    await db.query(`CREATE UNIQUE INDEX mailbox_domains_receiving_host ON mailbox_domains(workspace_id, receiving_host) WHERE receiving_host IS NOT NULL AND status IN ('active','provisioning')`);
+    await apply();
+    assert.deepEqual(await indexes(), [routing]);
+    await apply(); // Applying it again changes nothing.
+    assert.deepEqual(await indexes(), [routing]);
+    // What the dropped index refused, the global one refuses: two routing rows for one host in one workspace.
+    const ws = unique('host-index'), host = `${unique('mx')}.example`;
+    await db.query('BEGIN');
+    try {
+      await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [ws]);
+      const row = (status: string) => db.query(`INSERT INTO mailbox_domains(id, workspace_id, domain_id, name, region, status, receiving_host) VALUES ($1, $2, $1, $1, $3, $4, $5)`, [unique('mdom'), ws, REGION, status, host]);
+      await row('active');
+      await row('waiting_for_mx'); // Waiting rows never conflict.
+      await assert.rejects(row('provisioning'), (e: Json) => e.code === '23505' && e.constraint === 'mailbox_domains_routing_host');
+    } finally { await db.query('ROLLBACK'); }
+  });
+
   test('MX receiving hosts: DNS conflicts are checked when a host is suggested or chosen and in the hourly recheck', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const [{ operationJobs }, { baneRecordUse, receivingCandidates }] = await Promise.all([import('./src/operations.js'), import('./src/receiving-host.js')]);
