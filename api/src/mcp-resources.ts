@@ -79,8 +79,9 @@ const resources: Record<string, { label: string; actions: Record<string, string>
     get: 'getBilling', usage: 'getBillingUsage', ledger: 'listBillingLedger', payments: 'listBillingPayments', payment: 'getBillingPayment', topUpLink: 'createBillingTopUpLink',
   } },
   usage: { label: 'Sending and engagement metrics, plan and limits', actions: { metrics: 'getMetrics', senderScore: 'getSenderScore', plan: 'getUsage' } },
-  settings: { label: 'Workspace settings', actions: {
+  settings: { label: 'Workspace settings and members', actions: {
     identity: 'getCurrentIdentity', setup: 'getOverviewSetup', get: 'getWorkspaceSettings', update: 'updateWorkspaceSettings', ses: 'getSesSettings', inboundPolicy: 'getInboundScanPolicy', updateInboundPolicy: 'updateInboundScanPolicy',
+    members: 'listWorkspaceMembers', invitations: 'listWorkspaceInvitations', invite: 'createWorkspaceInvitation', revokeInvitation: 'revokeWorkspaceInvitation',
   } },
   connections: { label: 'Connected agents (MCP sign-ins) and inbox connections', actions: {
     list: 'listMcpConnections', revoke: 'revokeMcpConnection', bind: 'bindMcpConnection', createInbox: 'createInboxConnection', agents: 'listAgents', revokeAgent: 'revokeAgent',
@@ -170,6 +171,17 @@ export function resourceTools(operations: ReadonlyMap<string, McpOperation>): To
     return [{ name, description, inputSchema: { type: 'object' as const, properties: { action: { enum: visible.map(x => x.action) },...shared }, required: ['action'], oneOf },
       annotations: { readOnlyHint: visible.every(x => x.op.tool.annotations?.readOnlyHint), destructiveHint: visible.some(x => x.op.tool.annotations?.destructiveHint), openWorldHint: true } }];
   }).concat([describeTool]);
+}
+
+// MCP 2025-11-25 ToolAnnotations: readOnlyHint, idempotentHint default false and openWorldHint true; destructiveHint stays explicit.
+const DEFAULT_HINTS: Record<string, boolean> = { readOnlyHint: false, idempotentHint: false, openWorldHint: true };
+/** A tool as tools/list sends it: without the hints that equal the spec's defaults, which saves about 2 KB per listing.
+ *  destructiveHint is kept wherever it is set, for clients that don't apply the defaults. */
+export function listedTool(tool: Tool): Tool {
+  if (!tool.annotations) return tool;
+  const { annotations, ...rest } = tool;
+  const hints = Object.fromEntries(Object.entries(annotations).filter(([key, value]) => !Object.hasOwn(DEFAULT_HINTS, key) || DEFAULT_HINTS[key] !== value));
+  return Object.keys(hints).length ? { ...rest, annotations: hints } : rest;
 }
 
 export function resourceInventory() {

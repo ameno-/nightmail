@@ -12,9 +12,9 @@ function fixture() {
 }
 // Mirrors the account service: access tokens carry the sign-in's authentication context, and their jti names the
 // consent (grant) they were issued under: <consent>.<random>. A new consent is a new sign-in of the client.
-export function mintResourceToken(resource:string,subject:string,scope:string,{clientId='fixture-'+randomUUID(),consent=randomUUID()}:{clientId?:string;consent?:string}={}) {
+export function mintResourceToken(resource:string,subject:string,scope:string,{clientId='fixture-'+randomUUID(),consent=randomUUID(),ttl=300}:{clientId?:string;consent?:string;ttl?:number}={}) {
   const {issuer,key}=fixture(), jti=consent+'.'+randomUUID(), now=Math.floor(Date.now()/1000);
-  const parts=[{typ:'at+jwt',alg:'ES256',kid:'fixture'},{iss:issuer,aud:resource,sub:subject,client_id:clientId,jti,scope,iat:now,exp:now+300,acr:'urn:anomaly:acr:google'}];
+  const parts=[{typ:'at+jwt',alg:'ES256',kid:'fixture'},{iss:issuer,aud:resource,sub:subject,client_id:clientId,jti,scope,iat:now,exp:now+ttl,acr:'urn:anomaly:acr:google'}];
   const body=parts.map(p=>Buffer.from(JSON.stringify(p)).toString('base64url')).join('.');
   const token=body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key,dsaEncoding:'ieee-p1363'})).toString('base64url');
   return {token,clientId,consent,consentId:'at_'+createHash('sha256').update(JSON.stringify([subject,clientId])).digest('hex')};

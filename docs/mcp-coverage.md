@@ -249,11 +249,11 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `listWorkspaces` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `createWorkspace` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `renameCurrentWorkspace` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
-| `listWorkspaceMembers` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
-| `inviteWorkspaceMember` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
-| `createWorkspaceInvitation` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
-| `listWorkspaceInvitations` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
-| `revokeWorkspaceInvitation` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
+| `listWorkspaceMembers` | `settings` · `members` · admin |
+| `inviteWorkspaceMember` | The dashboard’s older name for createWorkspaceInvitation, which agents use (settings · invite). |
+| `createWorkspaceInvitation` | `settings` · `invite` · admin |
+| `listWorkspaceInvitations` | `settings` · `invitations` · admin |
+| `revokeWorkspaceInvitation` | `settings` · `revokeInvitation` · admin |
 | `updateWorkspaceMember` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `removeWorkspaceMember` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `getWorkspaceInvitation` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |

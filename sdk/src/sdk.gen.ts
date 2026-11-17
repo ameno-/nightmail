@@ -5255,6 +5255,9 @@ export const renameCurrentWorkspace = <ThrowOnError extends boolean = false>(opt
     }
 });
 
+/**
+ * List the workspace's members and their roles. Owners and admins, in the dashboard or over their own MCP sign-in; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED.
+ */
 export const listWorkspaceMembers = <ThrowOnError extends boolean = false>(options?: Options<ListWorkspaceMembersData, ThrowOnError>): RequestResult<ListWorkspaceMembersResponses, ListWorkspaceMembersErrors, ThrowOnError> => (options?.client ?? client).get<ListWorkspaceMembersResponses, ListWorkspaceMembersErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
@@ -5270,7 +5273,7 @@ export const listWorkspaceMembers = <ThrowOnError extends boolean = false>(optio
 });
 
 /**
- * Invite an email address. Membership starts only after acceptance by the verified address. Share the returned URL; no email is sent.
+ * Invite an email address. Membership starts only after acceptance by the verified address. Share the returned URL; no email is sent. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard.
  */
 export const inviteWorkspaceMember = <ThrowOnError extends boolean = false>(options: Options<InviteWorkspaceMemberData, ThrowOnError>): RequestResult<InviteWorkspaceMemberResponses, InviteWorkspaceMemberErrors, ThrowOnError> => (options.client ?? client).post<InviteWorkspaceMemberResponses, InviteWorkspaceMemberErrors, ThrowOnError>({
     security: [{
@@ -5290,6 +5293,9 @@ export const inviteWorkspaceMember = <ThrowOnError extends boolean = false>(opti
     }
 });
 
+/**
+ * Revoke a pending invitation; its link stops working. Only an owner revokes an owner invitation. Owners and admins, in the dashboard or over their own MCP sign-in; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED.
+ */
 export const revokeWorkspaceInvitation = <ThrowOnError extends boolean = false>(options: Options<RevokeWorkspaceInvitationData, ThrowOnError>): RequestResult<RevokeWorkspaceInvitationResponses, RevokeWorkspaceInvitationErrors, ThrowOnError> => (options.client ?? client).delete<RevokeWorkspaceInvitationResponses, RevokeWorkspaceInvitationErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
@@ -5305,7 +5311,7 @@ export const revokeWorkspaceInvitation = <ThrowOnError extends boolean = false>(
 });
 
 /**
- * List pending, unexpired workspace invitations.
+ * List pending, unexpired workspace invitations. Owners and admins, in the dashboard or over their own MCP sign-in; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED.
  */
 export const listWorkspaceInvitations = <ThrowOnError extends boolean = false>(options?: Options<ListWorkspaceInvitationsData, ThrowOnError>): RequestResult<ListWorkspaceInvitationsResponses, ListWorkspaceInvitationsErrors, ThrowOnError> => (options?.client ?? client).get<ListWorkspaceInvitationsResponses, ListWorkspaceInvitationsErrors, ThrowOnError>({
     security: [{
@@ -5322,7 +5328,7 @@ export const listWorkspaceInvitations = <ThrowOnError extends boolean = false>(o
 });
 
 /**
- * Invite an email address. Membership starts only after acceptance by the verified address. Share the returned URL; no email is sent.
+ * Invite an email address. Membership starts only after acceptance by the verified address. Share the returned URL; no email is sent. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard. Owners and admins, in the dashboard or over their own MCP sign-in; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED.
  */
 export const createWorkspaceInvitation = <ThrowOnError extends boolean = false>(options: Options<CreateWorkspaceInvitationData, ThrowOnError>): RequestResult<CreateWorkspaceInvitationResponses, CreateWorkspaceInvitationErrors, ThrowOnError> => (options.client ?? client).post<CreateWorkspaceInvitationResponses, CreateWorkspaceInvitationErrors, ThrowOnError>({
     security: [{
