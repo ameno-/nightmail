@@ -13537,10 +13537,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.deepEqual([recipients(), (await rows()).map(r => r.status)], [[bname], ['disabled', 'active']]);
       });
 
-      // Migrations 323 and 324 run before this release replaces the Worker before it, which keeps writing the claim's one
+      // Migrations 324 and 325 run before this release replaces the Worker before it, which keeps writing the claim's one
       // receiving host and the domain's own row (by name) until it is gone, and is what a rollback runs. With one host per
       // domain both read and write the same claim; a host's MX grace lives on the claim for that host. Its statements, verbatim.
-      await t.test('rollout (migrations 323-324): the replaced Worker and this release overlap and roll back on the migrated schema', async () => {
+      await t.test('rollout (migrations 324-325): the replaced Worker and this release overlap and roll back on the migrated schema', async () => {
         const { acceptInboundNotification } = await import('./src/mailbox-ingest.js');
         const topicArn = `arn:aws:sns:${REGION}:${account}:rollout-inbound`, bucket = `rollout-${account}-mail`;
         await db.query('UPDATE provider_pool_regions SET inbound_topic_arn=$2,inbound_bucket=$3 WHERE region=$1', [REGION, topicArn, bucket]);
@@ -13593,9 +13593,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.deepEqual(await state(), [{ receiving_state: 'active', receiving_lost_since: null, status: 'active', lost_since: null }]);
         assert.deepEqual(await deliver(`x@${reply}`), [`x@${reply}`]);
 
-        // 4. Migration 323 again: a host two rows route (only possible before 324's index) goes back to waiting where its
+        // 4. Migration 324 again: a host two rows route (only possible before 325's index) goes back to waiting where its
         //    claim doesn't route it; run twice, it changes nothing more.
-        const migration = await readFile(new URL('./migrations/323_receiving_hosts.sql', import.meta.url), 'utf8');
+        const migration = await readFile(new URL('./migrations/324_receiving_hosts.sql', import.meta.url), 'utf8');
         await db.query('SAVEPOINT legacy_duplicate');
         await db.query('DROP INDEX mailbox_domains_routing_host');
         const stray = unique('mdom');
