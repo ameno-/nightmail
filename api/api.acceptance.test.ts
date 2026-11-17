@@ -3274,7 +3274,20 @@ describe('Hosted MCP OAuth and tools', () => {
     const initialized = await rpc(token, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } });
     assert.equal(initialized.protocolVersion, '2025-11-25');
     assert.equal(initialized.serverInfo.name, 'nightmail');
+    // A legacy session carries the catalog it started on: same catalog, it keeps working; a release that changed the
+    // tools answers it 404, which tells the client to initialize again and list the new tools.
+    const init = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } } };
+    const sessionId = (await http('POST', '/mcp', token, init, rpcHeaders)).headers.get('mcp-session-id');
+    assert.match(sessionId ?? '', /^[0-9a-f]{16}\.[0-9a-f]{32}$/);
+    const listed = (session: string) => http('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, { ...rpcHeaders, 'mcp-session-id': session });
+    const current = await listed(sessionId!);
+    assert.equal(current.status, 200, diagnostic(current));
+    const earlierCatalog = sessionId!.startsWith('0') ? '1' + sessionId!.slice(1) : '0' + sessionId!.slice(1);
+    const ended = await listed(earlierCatalog);
+    assert.equal(ended.status, 404, diagnostic(ended));
+    assert.equal((ended.body as Json).error.code, -32001);
     const catalog = await rpc(token, 'tools/list');
+    assert.deepEqual(ok(current).result.tools, catalog.tools);
     const defaults=ok(await http('POST','/mcp',token,{jsonrpc:'2.0',id:17,method:'tools/list',params:{}},rpcHeaders)).result.tools;
     // OpenCode adds ?codemode=false to a remote URL: one tool per operation, the same catalog as the legacy ?codemode=true.
     assert.deepEqual((await rpc(token, 'tools/list', {}, '/mcp?codemode=false')).tools, catalog.tools);

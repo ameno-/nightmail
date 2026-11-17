@@ -1,7 +1,7 @@
 import { createMcpHandler, Server, type CallToolResult, type Tool } from '@modelcontextprotocol/server';
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/server/validators/cf-worker';
 import { bearerActor, dispatchAsActor, dispatchAsMailboxAccess, workspaceBearer } from './auth.js';
-import { agentTokenMintRefusal, keyAdminRefusal, lastingRefusal, ModuleLoadError, receivingAdminRefusal, requestOrigin, withOuterRequest, workspaceMailAccess, type Actor, type MailboxAccess, type App, type RequestOrigin, type Runtime } from './core.js';
+import { agentTokenMintRefusal, digest, keyAdminRefusal, lastingRefusal, ModuleLoadError, receivingAdminRefusal, requestOrigin, withOuterRequest, workspaceMailAccess, type Actor, type MailboxAccess, type App, type RequestOrigin, type Runtime } from './core.js';
 import { getMcpGrantActor, withMcpAuthorization } from './mcp-auth.js';
 import { chooseWorkspace, setDefaultWorkspace, WorkspaceChoice, type McpConnection } from './oidc-resource.js';
 import { buildMcpCatalog, TOOLSETS, EMAIL_SEND_CONFIRMATION, EMAIL_SEND_ROUTING, type McpOperation } from './mcp-catalog.js';
@@ -123,7 +123,22 @@ const authorized = (op: McpOperation, actor: Actor) => !op.dashboardOnly
   && !(op.receivingAdmin && receivingAdminRefusal(actor, op.write ? 'change receiving configuration' : undefined))
   && !(op.lasting && lastingRefusal(actor, 'make lasting changes')) && permits(actor, op.permission);
 
-async function serve(app: App, request: Request, runtime: Runtime, principal: Principal, catalog: ReadonlyMap<string, McpOperation>, origin: RequestOrigin): Promise<Response> {
+/**
+ * A hash of every tool this build can list, in both listings. /mcp keeps no session state, so it cannot push
+ * tools/list_changed; instead each legacy session ID carries the catalog it started on, and a release that changes the
+ * catalog answers older sessions with 404, which a client must meet by initializing again (and listing the tools anew).
+ */
+async function catalogVersion(catalog: ReadonlyMap<string, McpOperation>): Promise<string> {
+  const tools = [...workspaceTools, workspaceResource, ...[...catalog.values()].map(op => op.tool), ...resourceTools(catalog)];
+  return (await digest(JSON.stringify(tools))).slice(0, 16);
+}
+
+async function serve(app: App, request: Request, runtime: Runtime, principal: Principal, catalog: ReadonlyMap<string, McpOperation>, version: string, origin: RequestOrigin): Promise<Response> {
+  const session = request.headers.get('mcp-session-id');
+  if (session !== null && !session.startsWith(`${version}.`)) {
+    await request.body?.cancel();
+    return rpcError(404, -32001, 'Session not found: the tool catalog changed. Initialize a new session and list the tools again.');
+  }
   const base = new URL(runtime.config.publicUrl);
   const inbox = 'inbox' in principal ? principal.inbox : null;
   const connection = 'connection' in principal ? principal.connection : null;
@@ -330,7 +345,15 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
     if (response.status === 405) headers.set('Allow', 'POST, OPTIONS');
     if (!response.body) return new Response(null, { status: response.status, headers });
     const text = await boundedText(response, WIRE_LIMIT);
-    if (headers.get('content-type')?.split(';')[0]?.trim() !== 'text/event-stream') return new Response(redact(text), { status: response.status, headers });
+    // A legacy session starts on this catalog (catalogVersion). Requests without a session ID still work.
+    const started = (message: unknown) => {
+      if (session === null && object(parsedBody) && parsedBody.method === 'initialize' && object(message) && Object.hasOwn(message, 'result'))
+        headers.set('Mcp-Session-Id', `${version}.${crypto.randomUUID().replaceAll('-', '')}`);
+    };
+    if (headers.get('content-type')?.split(';')[0]?.trim() !== 'text/event-stream') {
+      if (object(parsedBody) && parsedBody.method === 'initialize') { try { started(JSON.parse(text)); } catch { /* not a result */ } }
+      return new Response(redact(text), { status: response.status, headers });
+    }
     // SDK2's legacy stateless leg emits SSE even for a single result. Drain it
     // completely and return its terminal JSON-RPC message, not an open DB-backed stream.
     let terminal: ObjectValue | undefined;
@@ -341,6 +364,7 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
       if (object(message) && message.jsonrpc === '2.0' && Object.hasOwn(message, 'id') && (Object.hasOwn(message, 'result') || Object.hasOwn(message, 'error'))) terminal = message;
     }
     if (!terminal) return rpcError(500, -32603, 'MCP exchange ended without a result. Reconcile an uncertain write before retrying.', requestId);
+    started(terminal);
     headers.set('Content-Type', 'application/json');
     return new Response(redact(JSON.stringify(terminal)), { status: response.status, headers });
   } catch {
@@ -359,6 +383,7 @@ export function registerMcp(app: App): void {
   // This app-local cache contains only immutable schemas/validators, never actors,
   // bearer credentials, runtimes, database pools or active protocol servers.
   let catalog: ReadonlyMap<string, McpOperation> | undefined;
+  let version: Promise<string> | undefined;
   app.all('/mcp', async c => {
     const origin = c.req.header('origin');
     const canonicalOrigin = new URL(c.env.config.publicUrl).origin;
@@ -371,7 +396,8 @@ export function registerMcp(app: App): void {
       c.set('principal', 'connection' in principal ? { type: 'mcp', workspace: principal.connection.defaultWorkspace?.id }
         : 'key' in principal ? { type: principal.key.credential!, workspace: principal.key.workspaceId } : { type: 'inboxKey', workspace: principal.inbox.workspaceId });
       catalog ??= buildMcpCatalog(app);
-      return serve(app, c.req.raw, c.env, principal, catalog, requestOrigin(c));
+      version ??= catalogVersion(catalog);
+      return serve(app, c.req.raw, c.env, principal, catalog, await version, requestOrigin(c));
     };
     // Three kinds of bearer: a key limited to addresses or an inbox, a workspace API key or agent token (authenticated
     // exactly as REST authenticates it: the /mcp request counts against its minute budget, and so does each tool call,
