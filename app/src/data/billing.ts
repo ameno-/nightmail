@@ -8,7 +8,7 @@ export type BillingState = { sending: 'ok' | 'low' | 'paused'; receiving: 'ok' |
 export interface FreeAllowance { limit: number; used: number; left: number }
 export interface BillingSummary {
   enforcement: Enforcement
-  mode: 'prepaid' | 'invoiced' | 'exempt'
+  mode: 'prepaid' | 'exempt'
   state: BillingState
   balance: { paid: string; promo: string; unsettled: string; available: string } | null
   /** One allowance per direction, counted separately; emails repeats sent for older clients. received is null unless the

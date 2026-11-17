@@ -176,7 +176,7 @@ function WorkspaceBody({ data, canAct, onReleaseCampaign }: { data: OperatorWork
       : { label: 'Make account free…', onSelect: () => setFreeAction({ kind: 'person', on: true, userId: m.userId, key: crypto.randomUUID() }) }]} /> : null },
   ]
   const free = billing.data?.free
-  const billingState = !free ? null : free.free ? `Free (not billed) · ${free.via === 'workspace' ? 'workspace flag' : 'an owner’s free account'}${free.until ? ` · until ${when(free.until)}` : ''}` : `Billed · ${label(billing.data?.account?.paid_mode ?? 'prepaid')}`
+  const billingState = !free ? null : free.free ? `Free (not billed) · ${free.via === 'workspace' ? 'workspace flag' : 'an owner’s free account'}${free.until ? ` · until ${when(free.until)}` : ''}` : 'Billed · Prepaid'
   const campaignColumns: Column<OperatorCampaign>[] = [
     { ...def(campaignColumnDefs, 'name'), render: c => <span className="op-cell">{c.name}</span> },
     { ...def(campaignColumnDefs, 'state'), render: c => <StatusBadge status={c.state} /> },

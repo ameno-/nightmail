@@ -5641,7 +5641,10 @@ export type BillingSummary = {
      * off: nothing is metered for billing. shadow: usage is recorded and priced but nothing is charged. enforce: usage is taken from the balance hourly.
      */
     enforcement: 'off' | 'shadow' | 'enforce';
-    mode: 'prepaid' | 'invoiced' | 'exempt';
+    /**
+     * prepaid: usage is taken from the balance. exempt: the workspace is free (see freePlan).
+     */
+    mode: 'prepaid' | 'exempt';
     state: {
         /**
          * paused: sends get 402 BALANCE_EXHAUSTED until credit is added.
