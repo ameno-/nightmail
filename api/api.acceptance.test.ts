@@ -6560,7 +6560,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       let first: Promise<Reply> | undefined;
       try {
         first = send();
-        for (let i = 0; !(await db.query(`SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query ~* 'idempotency|key_admission_decision|api_request_budgets'`, [holder])).rowCount; i++) {
+        for (let i = 0; !(await db.query(`SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query ~* 'idempotency|key_admission_decision|send_admission|api_request_budgets'`, [holder])).rowCount; i++) {
           assert.ok(i < 250, 'The first send never reached the admission lock.'); await new Promise(resolve => setTimeout(resolve, 20));
         }
         // Before this change the duplicate waited on the first request's unique insert (or its API key's budget row) until it committed.
@@ -17176,11 +17176,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const receipts=(await g.query('SELECT ses_message_id,recipients FROM mail_receipts WHERE workspace_id=$1 ORDER BY 1',[w])).rows;
     assert.deepEqual(receipts.map(r=>[r.ses_message_id,r.recipients]),[['a-new',to('a')],['z-known',to('a','b','c')]]);
   });
+  // A send's sender decision under its send locks (send_admission), as direct, campaign and mailbox sends make it.
+  const senderRoute=async(runtime:import('./src/core.js').Runtime,tx:import('./src/core.js').DbExecutor,held:import('./src/send-scope.js').SendScope,actor:import('./src/core.js').Actor,from:string,marketing=false)=>{
+    const [{admission,actorJson,admitted},{sql}]=await Promise.all([import('./src/admission.js'),import('drizzle-orm')]);
+    const decision=await admission(runtime,actor.workspaceId,actorJson(actor),{stage:'send',locks:held,mails:[{host:from.split('@')[1]!.toLowerCase(),kind:marketing?'marketing':'transactional',attachments:[],bodyBytes:0}]});
+    const route=admitted(runtime,(await tx.execute<{s:import('./src/admission.js').Admitted}>(sql`SELECT ${decision} AS s`)).rows[0]!.s,actor.workspaceId).mails[0]!;
+    return {region:route.region,binding:route.binding};
+  };
   // Dev E2E, Nov 12 (40P01, 500 after ~8 s): POST /v1/domains (reserve_placed_claim) locks the settings row, then the
   // claim. A send's region lookup locked the closest claim inside regional_sender before its FOR SHARE OF the settings
   // row, so a reply from a domain deadlocked with a re-add of that domain (and with domain.verify queued on the claim).
   test('regional sender: a send waits on the settings row before it locks the claim a domain re-add needs',async t=>{
-    const {nodeRuntime}=await import('./src/adapters/node.js'),{sendingRegion}=await import('./src/sending.js'),{lockSendScope}=await import('./src/send-scope.js');
+    const {nodeRuntime}=await import('./src/adapters/node.js'),{lockSendScope}=await import('./src/send-scope.js');
     const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
     Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:false});
     const g=await fixtureDatabase(t),w=unique('sdead'),host=w+'.invalid',region='us-east-2';
@@ -17196,7 +17203,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     let send:Promise<unknown>|undefined,readd:string|undefined;
     try {
       await g.query('SELECT FROM ses_installation_settings WHERE workspace_id=$1 FOR NO KEY UPDATE',[w]);
-      send=runtime.db.transaction(async tx=>sendingRegion(runtime,tx,await lockSendScope(tx,w),actor,`reply@${host}`));send.catch(()=>{});
+      send=runtime.db.transaction(async tx=>senderRoute(runtime,tx,await lockSendScope(tx,w),actor,`reply@${host}`));send.catch(()=>{});
       for(let i=0;i<400&&!(await g.query('SELECT FROM pg_stat_activity WHERE pg_backend_pid()=ANY(pg_blocking_pids(pid))')).rowCount;i++)await new Promise(r=>setTimeout(r,5));
       // Then it locks the claim. Before the fix the waiting send already held it FOR SHARE: 40P01 after deadlock_timeout.
       const started=Date.now();
@@ -17255,7 +17262,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   // and ungated, many times, so a new lock-order inversion between them fails here, not on dev. Add a pair here once its
   // own fix lands; CI also fails the job on any deadlock Postgres counts during the suite (.github/scripts/acceptance.sh).
   test('lock order: concurrent domain re-adds, sends and mailbox replies on one domain never deadlock',async t=>{
-    const {nodeRuntime}=await import('./src/adapters/node.js'),{sendingRegion}=await import('./src/sending.js'),{sendFromMailbox}=await import('./src/mailbox-send.js'),{createMailbox}=await import('./src/mailbox-store.js'),{lockSendScope}=await import('./src/send-scope.js');
+    const {nodeRuntime}=await import('./src/adapters/node.js'),{sendFromMailbox}=await import('./src/mailbox-send.js'),{createMailbox}=await import('./src/mailbox-store.js'),{lockSendScope}=await import('./src/send-scope.js');
     const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
     Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:false});
     const g=await fixtureDatabase(t),w=unique('ldead'),host=w+'.invalid',region='us-fixture-'+w.slice(-8),account=String(Date.now()).slice(-12).padStart(12,'6');
@@ -17283,7 +17290,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     for(let round=0;round<60;round++){
       const work=[
         ...Array.from({length:4},()=>readds.query('SELECT id FROM reserve_placed_claim($1,$2,NULL,$3)',[w,host,unique('dom')]).then(r=>assert.equal(r.rows[0].id,w,'A re-add returns the existing domain.'))),
-        ...Array.from({length:4},(_,i)=>runtime.db.transaction(async tx=>sendingRegion(runtime,tx,await lockSendScope(tx,w),actor,`reply@${host}`,undefined,i%2===1))),
+        ...Array.from({length:4},(_,i)=>runtime.db.transaction(async tx=>senderRoute(runtime,tx,await lockSendScope(tx,w),actor,`reply@${host}`,i%2===1))),
         ...Array.from({length:2},reply),
       ];
       for(const r of await Promise.allSettled(work))if(r.status==='rejected')note(r.reason);
@@ -21410,6 +21417,35 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('query budget: every kind of send is admitted by one statement after authentication',async t=>{
+    await simulatedSesFixture(t,async({db,runtime,local})=>{
+      const wid=runtime.config.workspaceId,acct='112223330044';
+      const meter=await queryBudget(t,db),budgets:Record<string,number>={};
+      const send=async(label:string,max:number,path:string,body:Json,headers:Record<string,string>={})=>{budgets[label]=max;return meter(label,async()=>ok(await local('POST',path,body,'live',headers),202),max);};
+      const key=ok(await local('POST','/v1/api-keys',{name:'budget',permissions:['send','read','manage']}),201),auth={authorization:`Bearer ${key.secret}`};
+      ok(await local('GET','/v1/emails',undefined,'live',auth)); // A warm key: its fingerprint is known.
+      // Self-hosted: the key's budget charge, then one admission statement.
+      await send('self-hosted-send',2,'/v1/emails/send',mail(),{...auth,'Idempotency-Key':'budget-self'});
+      await send('self-hosted-batch-100',2,'/v1/emails/batch',{emails:Array.from({length:100},()=>mail())},{...auth,'Idempotency-Key':'budget-self-batch'});
+      await send('self-hosted-session',2,'/v1/emails/send',mail());
+      const draft=ok(await local('POST','/v1/campaigns',{name:'budget',from:'sender@example.com',subject:'Budget',html:'<p>Budget</p>'},'live',auth),201);
+      // A campaign test reads the draft, renders it, then admits it in one statement.
+      await send('self-hosted-campaign-test',3,`/v1/campaigns/${draft.id}/test`,{to:address()},auth);
+      // Hosted.
+      runtime.config.multiTenant=true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[REGION,acct,`arn:aws:sns:${REGION}:${acct}:fixture`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`,[wid,REGION,acct]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('budget.invalid',$1,$1,'verified')`,[wid]);
+      const hosted=()=>({from:'a@budget.invalid',to:address(),subject:'Budget',text:'Budget'});
+      const cold=ok(await local('POST','/v1/api-keys',{name:'budget-cold',permissions:['send','read']}),201),bearer={authorization:`Bearer ${cold.secret}`};
+      await send('hosted-cold-key',2,'/v1/emails/send',hosted(),{...bearer,'Idempotency-Key':'budget-cold'});
+      await send('hosted-warm-key',1,'/v1/emails/send',hosted(),{...bearer,'Idempotency-Key':'budget-warm'});
+      await send('hosted-session',2,'/v1/emails/send',hosted());
+      const hostedDraft=ok(await local('POST','/v1/campaigns',{name:'budget-hosted',from:'a@budget.invalid',subject:'Budget',html:'<p>Budget</p>'},'live',auth),201);
+      await send('hosted-campaign-test',3,`/v1/campaigns/${hostedDraft.id}/test`,{to:address()},auth);
+      t.diagnostic(`ADMISSION-BUDGETS ${JSON.stringify(budgets)}`);
+    });
+  });
   test('query budget: immutable campaign preparation, release, dispatch and storage per recipient',async t=>{
     await simulatedSesFixture(t,async({runtime,db,local})=>{
       const {jobHandlers}=await import('./src/sending.js'),{JobDeferred}=await import('./src/jobs.js'),{dispatchDue}=await import('./src/dispatcher.js');

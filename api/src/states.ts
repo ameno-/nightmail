@@ -1,6 +1,6 @@
 import { sql, type SQL } from 'drizzle-orm';
 import type { GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
-import { ApiError, id, type DbExecutor } from './core.js';
+import { id, type DbExecutor } from './core.js';
 import type { MxReport } from './db/mailbox.js';
 import { legacySlugs, productName, productSlug } from './brand.js';
 
@@ -103,10 +103,6 @@ export const claimReceives = (dc: SQL = sql`dc`) => sql`${dc}.receiving_state IN
 export const claimReceivable = (dc: SQL = sql`dc`) => sql`${dc}.receiving_state<>'off'`;
 export const connectionReady = (pc: SQL = sql`pc`) => sql`${pc}.state='ready'`;
 /** Hosted sends (and anything that queues one) stop here until the SES tenant exists; BYO connections are always ready. */
-export function assertTenantReady(connection: { kind: 'shared' | 'byo'; tenant_state: TenantState } | null | undefined, simulated: boolean) {
-  if (simulated || connection?.kind !== 'shared' || connection.tenant_state === 'ready') return;
-  throw new ApiError(409, 'TENANT_NOT_READY', connection.tenant_state === 'failed' ? 'Hosted sending setup failed and is being retried. Check the connection status before sending again.' : 'Hosted sending is still being set up for this workspace. Retry shortly.', undefined, true);
-}
 export const poolSends = (p: SQL = sql`p`) => sql`${p}.sending_state='ready'`;
 export const poolReceives = (p: SQL = sql`p`) => sql`${p}.receiving_state='ready'`;
 
