@@ -4769,7 +4769,7 @@ describe('Hosted MCP OAuth and tools', () => {
           (SELECT string_agg(to_jsonb(h)::text, ',' ORDER BY id) FROM mailbox_webhooks h),
           (SELECT string_agg(to_jsonb(d)::text, ',' ORDER BY workspace_id, ref) FROM mail_endpoints d),
           (SELECT string_agg(to_jsonb(p)::text, ',' ORDER BY workspace_id, hook_id) FROM mail_action_policies p),
-          (SELECT string_agg(c.relname || '.' || t.tgname || ':' || t.tgenabled::text, ',' ORDER BY 1) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid WHERE c.relnamespace = $1::regnamespace AND NOT t.tgisinternal),
+          (SELECT string_agg(c.relname || '.' || t.tgname || ':' || t.tgenabled::text, ',' ORDER BY c.relname, t.tgname) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid WHERE c.relnamespace = $1::regnamespace AND NOT t.tgisinternal),
           (SELECT string_agg(proname, ',' ORDER BY proname) FROM pg_proc WHERE pronamespace = $1::regnamespace),
           (SELECT string_agg(relname, ',' ORDER BY relname) FROM pg_class WHERE relnamespace = $1::regnamespace))) AS f`, [schema])).rows[0].f as string;
       const migrate = () => inTransaction(async () => { await db.query(migration); });
@@ -4811,7 +4811,7 @@ describe('Hosted MCP OAuth and tools', () => {
       // Each field 322 moved, one at a time, null-safely (a value where the endpoint row has none, and the reverse).
       // ids.created also carries the hand-edited created_at: only the field that differs is named.
       const endpointCases: [string, string, string, unknown][] = [
-        ['type', ids.slack!, 'ref', `discord:old-${ids.slack!.split('_').at(-1)}`], ['key', ids.discord!, 'ref', 'discord:other-name'],
+        ['ref', ids.slack!, 'ref', `discord:old-${ids.slack!.split('_').at(-1)}`], ['ref', ids.discord!, 'ref', 'discord:other-name'],
         ['encrypted_target', ids.paused!, 'encrypted_value', 'enc-stale'], ['verified', ids.confirmed!, 'verified', false],
         ['proof_hash', ids.confirmed!, 'proof_hash', 'proof-stale'], ['proof_hash', ids.pending!, 'proof_hash', null],
         ['expires_at', ids.pending!, 'expires_at', hour(9)], ['requested_at', ids.declined!, 'requested_at', null],
@@ -4830,7 +4830,50 @@ describe('Hosted MCP OAuth and tools', () => {
         await refused(column, { endpoints: [], policies: [{ workspace_id: w, hook_id: hook, differs: column }] });
         await uncopied('mail_action_policies', () => db.query(`UPDATE mail_action_policies SET ${column}=$2 WHERE hook_id=$1`, [hook, was]));
       }
+      // Review round 2: a legacy ref with text after the name, which the old schema allows. 322's trigger copies its first
+      // two parts, so the endpoint row's type and name match; the full ref differs, so 331 refuses instead of dropping it.
+      const ref = (await db.query('SELECT ref FROM mail_endpoints WHERE hook_id=$1', [ids.confirmed])).rows[0].ref as string;
+      await db.query('UPDATE mail_endpoints SET ref=$2 WHERE hook_id=$1', [ids.confirmed, `${ref}:legacy-suffix`]);
+      assert.deepEqual((await db.query('SELECT type,key FROM mailbox_webhooks WHERE id=$1', [ids.confirmed])).rows, [{ type: 'forward', key: ref.split(':')[1] }]);
+      await refused('ref with a suffix', { endpoints: [{ workspace_id: w, hook_id: ids.confirmed, differs: 'ref' }], policies: [] });
+      await db.query('UPDATE mail_endpoints SET ref=$2 WHERE hook_id=$1', [ids.confirmed, ref]);
       assert.equal(await state(), upgraded, 'Every difference was undone.');
+
+      // The 5 s bound (statement_timeout). A row-security policy makes each check slow: it sleeps 0.5 s on every legacy
+      // endpoint row read (19 rows, about 10 s a scan), first on every read, then only once 331 holds its exclusive locks.
+      const [watch, writer] = [await fixtureDatabase(t), await fixtureDatabase(t)];
+      await writer.query(`SET search_path TO ${schema}, public; SET statement_timeout='20s'`);
+      const migrator = (await db.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
+      const bounded = async (label: string, when: string, locked: boolean) => {
+        const before = await state();
+        await db.query(`ALTER TABLE mail_endpoints ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY; CREATE POLICY slow ON mail_endpoints USING (CASE WHEN ${when} THEN pg_sleep(0.5) IS NOT NULL ELSE true END)`);
+        let failure: Json | undefined, elapsed = 0, waited = 0;
+        try {
+          const start = performance.now();
+          const running = migrate().then(() => assert.fail(`${label}: 331 finished.`), (e: Json) => { failure = e; elapsed = performance.now() - start; });
+          // Once 331 is in the slow check (holding its exclusive locks or not), an endpoint writer writes.
+          for (let i = 0; ; i++) {
+            const r = (await watch.query(`SELECT a.wait_event, EXISTS (SELECT FROM pg_locks l WHERE l.pid = a.pid AND l.granted AND l.mode = 'AccessExclusiveLock'
+              AND l.relation = $2::regclass) AS locked FROM pg_stat_activity a WHERE a.pid = $1`, [migrator, `${schema}.mailbox_webhooks`])).rows[0];
+            if (r?.wait_event === 'PgSleep' && r.locked === locked) break;
+            assert.ok(i < 250, `${label}: 331 never reached its check.`); await new Promise(resolve => setTimeout(resolve, 20));
+          }
+          const writing = performance.now();
+          await writer.query('UPDATE mailbox_webhooks SET paused=paused WHERE id=$1', [ids.webhook]);
+          waited = performance.now() - writing;
+          await running;
+        } finally { await db.query('DROP POLICY slow ON mail_endpoints; ALTER TABLE mail_endpoints NO FORCE ROW LEVEL SECURITY, DISABLE ROW LEVEL SECURITY'); }
+        assert.equal(failure?.code, '57014', `${label}: ${failure?.message}`);
+        assert.ok(elapsed > 4900 && elapsed < 6000, `${label}: 331 stopped after ${Math.round(elapsed)} ms.`);
+        assert.equal(await state(), before, `${label}: the timeout changed nothing.`);
+        t.diagnostic(`331-BOUND ${label}: stopped after ${Math.round(elapsed)} ms, writer waited ${Math.round(waited)} ms`);
+        return waited;
+      };
+      // Before its locks, a slow check blocks no writer and stops at the bound.
+      assert.ok(await bounded('slow check before the locks', 'true', false) < 1000);
+      // Under its locks, a writer waits for 331 to stop: no longer than the bound (plus the rollback's round trip).
+      const waited = await bounded('slow check under the locks', `EXISTS (SELECT FROM pg_locks l WHERE l.pid = pg_backend_pid() AND l.relation = 'mail_endpoints'::regclass AND l.mode = 'AccessExclusiveLock')`, true);
+      assert.ok(waited > 1000 && waited < 5200, `The writer waited ${Math.round(waited)} ms.`);
 
       // As migrate.ts applies it: dropped, and every endpoint row exactly as it was (the hand-edited created_at is not
       // copied over the endpoint row's own).
