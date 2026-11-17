@@ -18572,9 +18572,9 @@
             "type": "string",
             "enum": [
               "prepaid",
-              "invoiced",
               "exempt"
-            ]
+            ],
+            "description": "prepaid: usage is taken from the balance. exempt: the workspace is free (see freePlan)."
           },
           "state": {
             "type": "object",

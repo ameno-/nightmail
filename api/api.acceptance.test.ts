@@ -6228,7 +6228,7 @@ describe('Billing: metering, gate and settlement', () => {
       refunds=u.refunds||jsonb_build_object(extract(epoch FROM $5::timestamptz)::bigint::text,coalesce((u.refunds->>extract(epoch FROM $5::timestamptz)::bigint::text)::bigint,0)+excluded.quantity)`, [wid, hour, meter, q, origin]);
   const captureLogs = (t: TestContext) => { const logs: Json[] = []; for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} }); return logs; };
 
-  test('the gate lives in the one admission statement: off and shadow allow, enforce gives 402, exempt, invoiced and the platform pass, debt blocks free sends', async t => {
+  test('the gate lives in the one admission statement: off and shadow allow, enforce gives 402, exempt and the platform pass, debt blocks free sends', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const f = await billingFixture(runtime, db, local, request), meter = await queryBudget(t, db);
       // Billing launches enforced (300); a workspace created since is prepaid. Off, the kill-switch: sends are metered
@@ -6255,8 +6255,12 @@ describe('Billing: metering, gate and settlement', () => {
       const results = await Promise.all(Array.from({ length: 20 }, () => f.send()));
       assert.deepEqual([results.filter(r => r.status === 202).length, results.filter(r => r.status === 402 && r.body.error.code === 'BALANCE_EXHAUSTED').length], [10, 10]);
       assert.equal((await f.position()).availableUc, '0');
-      // Exempt and invoiced accounts are never gated; neither is the platform's own workspace.
-      for (const mode of ['exempt', 'invoiced']) { await db.query('UPDATE billing_accounts SET mode=$2 WHERE workspace_id=$1', [f.wid, mode]); ok(await f.send(), 202); }
+      // Exempt accounts are never gated; neither is the platform's own workspace. There is no invoiced mode (315): an
+      // account is prepaid or exempt.
+      await db.query(`UPDATE billing_accounts SET mode='exempt' WHERE workspace_id=$1`, [f.wid]); ok(await f.send(), 202);
+      await db.query('SAVEPOINT invoiced');
+      await assert.rejects(db.query(`UPDATE billing_accounts SET mode='invoiced' WHERE workspace_id=$1`, [f.wid]), { code: '23514', constraint: 'billing_accounts_mode_check' });
+      await db.query('ROLLBACK TO SAVEPOINT invoiced');
       await db.query(`UPDATE billing_accounts SET mode='prepaid' WHERE workspace_id=$1`, [f.wid]);
       error(await f.send(), 402, 'BALANCE_EXHAUSTED');
       runtime.config.platformDomainWorkspace = f.wid;
@@ -7174,6 +7178,33 @@ describe('Billing: metering, gate and settlement', () => {
         }
       } finally { await b.query('ROLLBACK').catch(() => {}); await a.query('ROLLBACK').catch(() => {}); }
     }
+  });
+
+  test('migration 315 stops on an invoiced account instead of converting it; without one, accounts are prepaid or exempt with no paid_mode', { skip: DATABASE_FIXTURE_SKIP }, async t => {
+    // billing_accounts as 314 left it, in a schema of its own inside a transaction that rolls back.
+    const db = await fixtureDatabase(t), schema = 'billing315_' + randomUUID().replaceAll('-', '');
+    const migration = await readFile(new URL('./migrations/315_billing_drop_invoiced.sql', import.meta.url), 'utf8');
+    const accounts = async () => (await db.query('SELECT * FROM billing_accounts ORDER BY workspace_id')).rows;
+    await db.query('BEGIN');
+    try {
+      await db.query(`CREATE SCHEMA ${schema}; SET LOCAL search_path TO ${schema};
+        CREATE TABLE billing_accounts (workspace_id text PRIMARY KEY, mode text NOT NULL DEFAULT 'prepaid' CHECK (mode IN ('prepaid','invoiced','exempt')),
+          paid_mode text NOT NULL DEFAULT 'prepaid' CHECK (paid_mode IN ('prepaid','invoiced')));
+        INSERT INTO billing_accounts VALUES ('w-exempt','exempt','prepaid'),('w-prepaid','prepaid','prepaid')`);
+      // An invoiced account, and a free one that would turn invoiced when its flag ends: neither is converted.
+      for (const [mode, paid] of [['invoiced', 'invoiced'], ['exempt', 'invoiced']]) {
+        await db.query(`INSERT INTO billing_accounts VALUES ('w-invoiced',$1,$2)`, [mode, paid]);
+        const before = await accounts();
+        await db.query('SAVEPOINT migrate');
+        await assert.rejects(db.query(migration), { code: 'P0001', message: '1 billing account(s) are invoiced', hint: /scripts\/set-billing-mode\.ts/ });
+        await db.query('ROLLBACK TO SAVEPOINT migrate');
+        assert.deepEqual(await accounts(), before, `${mode}/${paid} is left as it was.`);
+        await db.query(`DELETE FROM billing_accounts WHERE workspace_id='w-invoiced'`);
+      }
+      await db.query(migration);
+      assert.deepEqual(await accounts(), [{ workspace_id: 'w-exempt', mode: 'exempt' }, { workspace_id: 'w-prepaid', mode: 'prepaid' }]);
+      await assert.rejects(db.query(`INSERT INTO billing_accounts VALUES ('w-new','invoiced')`), { code: '23514', constraint: 'billing_accounts_mode_check' });
+    } finally { await db.query('ROLLBACK'); }
   });
 
   test('a write-off takes only the debt left when it runs: a top-up landing during the daily scan is collected, not forgiven', { skip: DATABASE_FIXTURE_SKIP }, async t => {
@@ -9717,8 +9748,13 @@ describe('Billing: API, MCP and notices', () => {
       const before = (await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE workspace_id=$1`, [wid])).rows[0].n;
       error(await local('POST', `${base}/write-off`, { reason: 'Customer closed the account' }, 'live', once('write-off-2')), 409, 'NOTHING_OWED');
       assert.equal((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE workspace_id=$1`, [wid])).rows[0].n, before, 'A refused change leaves no audit row.');
+      // A workspace is prepaid or exempt; invoiced is refused before anything changes, and the account has no paid_mode.
+      assert.equal(error(await local('PUT', `${base}/mode`, { mode: 'invoiced', reason: 'Enterprise contract, invoiced monthly' }), 422, 'VALIDATION_FAILED').field, 'mode');
       const mode = ok(await local('PUT', `${base}/mode`, { mode: 'exempt', reason: 'Anomaly’s own workspace' }));
       assert.equal(mode.account.mode, 'exempt');
+      assert.ok(!('paid_mode' in mode.account) && !('paid_mode' in ok(await local('GET', base)).account), 'paid_mode is gone (315).');
+      assert.equal(ok(await local('PUT', `${base}/mode`, { mode: 'prepaid', reason: 'Back to paying as it goes' })).account.mode, 'prepaid');
+      assert.equal(ok(await local('GET', '/v1/billing')).mode, 'prepaid');
       assert.deepEqual(ok(await local('GET', base)).ledger.map((l: Json) => l.kind), ['write_off', 'adjustment', 'adjustment', 'grant']);
       error(await local('GET', '/v1/operator/billing/no-such-workspace'), 404, 'NOT_FOUND');
     });
@@ -9815,6 +9851,11 @@ describe('Billing: API, MCP and notices', () => {
       const wid = await hostedBilling(runtime, db);
       const [{ setBillingMode }, { setBillingEnforcement }] = await Promise.all([import('./scripts/set-billing-mode.js'), import('./scripts/set-billing-enforcement.js')]);
       await assert.rejects(setBillingMode(db, [wid, 'free', '--reason', 'Anomaly workspace exemption']), /Usage/);
+      // invoiced is gone (315): the script refuses it, and so does billing_set_mode for any other caller.
+      await assert.rejects(setBillingMode(db, [wid, 'invoiced', '--reason', 'Enterprise contract, invoiced monthly']), /Usage: set-billing-mode\.ts WORKSPACE_ID prepaid\|exempt /);
+      await db.query('SAVEPOINT invoiced');
+      await assert.rejects(db.query(`SELECT billing_set_mode($1,'invoiced','Enterprise contract, invoiced monthly','script')`, [wid]), { code: '22023', message: 'unknown billing mode invoiced' });
+      await db.query('ROLLBACK TO SAVEPOINT invoiced');
       await assert.rejects(setBillingMode(db, ['no-such-workspace', 'exempt', '--reason', 'Anomaly workspace exemption']), /No workspace/);
       assert.deepEqual(await setBillingMode(db, [wid, 'exempt', '--reason', 'Anomaly workspace exemption']), { old: 'prepaid', new: 'exempt', reason: 'Anomaly workspace exemption', via: 'script' });
       assert.equal((await db.query('SELECT mode FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0].mode, 'exempt');
