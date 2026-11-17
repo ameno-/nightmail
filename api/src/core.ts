@@ -7,6 +7,7 @@ import { sql } from 'drizzle-orm';
 import { errorCodeOf, errorTypeOf, log, logFallback, stackFrames } from './log.js';
 import type { ReadyConnection } from './provider-credentials.js';
 import { SECURITY_HEADERS } from './security-headers.js';
+import { clientIpHeader } from './brand.js';
 
 export type Database = NodePgDatabase;
 export const SuppressionReason = z.string().describe('Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.');
@@ -171,7 +172,7 @@ const outerOf = (runtime: Runtime | undefined) => (runtime as (Runtime & { [oute
 /** A new request's ID: the outer request's for an in-process call. */
 export const newRequestId = (runtime: Runtime | undefined) => outerOf(runtime)?.requestId ?? `req_${crypto.randomUUID().replaceAll('-', '')}`;
 export const requestOrigin = (c: Ctx): RequestOrigin => outerOf(c.env)
-  ?? { requestId: c.get('requestId'), clientIp: c.req.header('x-bane-client-ip') ?? null, userAgent: c.req.header('user-agent') ?? null };
+  ?? { requestId: c.get('requestId'), clientIp: c.req.header(clientIpHeader) ?? null, userAgent: c.req.header('user-agent') ?? null };
 export type ClaimedWebhook = { routed?:boolean;format?:string;name?:string;include?:string[];timeout_seconds?:number;retry_attempts?:number; delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null; owned?: boolean };
 export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, job: { id: string; attempts: number; workspaceId: string;
   /** The claim's lease (lease_until as claimed): the job is still this runner's while it matches. Absent when a handler is called directly. */

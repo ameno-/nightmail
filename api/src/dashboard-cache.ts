@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { ApiError, chargeBudget, digest, type Ctx, type Runtime } from './core.js';
+import { headerPrefix, requestHeader } from './brand.js';
 
 const TTL_SECONDS = 60;
 /** Expensive Overview reads (Metrics, Sender score, Usage) one dashboard session may compute in a minute. */
@@ -65,7 +66,7 @@ export async function cachedDashboardRead<T>(origin: string, scope: string, comp
   };
   if (cache) {
     const hit = await cache.match(request).catch(() => undefined);
-    const stored = hit && live({ expires: Number(hit.headers.get('x-bane-expires') ?? hit.headers.get('x-opensend-expires')), revision: hit.headers.get('x-bane-revision') ?? '', value: undefined });
+    const stored = hit && live({ expires: Number(requestHeader(hit.headers, 'expires')), revision: requestHeader(hit.headers, 'revision') ?? '', value: undefined });
     if (hit && stored && (stored.revision === revision || !held)) {
       held = { ...stored, value: await hit.json() }; remember(held);
       if (held.revision === revision) return { value: held.value as T, hit: true };
@@ -81,7 +82,7 @@ export async function cachedDashboardRead<T>(origin: string, scope: string, comp
     const value = await work;
     const expires = Date.now() + ttlSeconds * 1000;
     remember({ expires, revision, value });
-    if (cache) await cache.put(request, new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${ttlSeconds}`, 'x-bane-expires': String(expires), 'x-bane-revision': revision } })).catch(() => undefined);
+    if (cache) await cache.put(request, new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${ttlSeconds}`, [`${headerPrefix}Expires`]: String(expires), [`${headerPrefix}Revision`]: revision } })).catch(() => undefined);
     return { value, hit: false };
   } finally { if (!cache) inflight.delete(flight); }
 }

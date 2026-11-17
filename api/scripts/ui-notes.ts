@@ -1,13 +1,14 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { parseArgs } from 'node:util';
+import { envNames, publicOrigin } from '../src/brand.js';
 
 // UI notes for agents: the notes Bane staff leave on the dashboard (⌘-click in notes mode), their screenshots, and
 // their status as they are fixed. It talks to the deployment's API with a UI notes key, which an operator makes on
 // /operator/notes (Agent keys) for themself: it reads notes and sets status, PR link and resolution, nothing else, and
 // stops working when it expires (at most 90 days), is revoked, or its operator loses the operator role.
 //
-//   BANE_URL=https://bane.mx BANE_UI_NOTES_KEY=nm_notes_… node --import tsx scripts/ui-notes.ts <command>
+//   NIGHTMAIL_URL=https://bane.mx NIGHTMAIL_UI_NOTES_KEY=nm_notes_… node --import tsx scripts/ui-notes.ts <command>
 //
 //   list [--status open,in_progress] [--kind bug,spacing] [--route /campaigns/:id/edit] [--json] [--screenshots DIR]
 //       Every matching note, newest first. --screenshots saves each note's screenshot as DIR/<id>.<ext> and adds its
@@ -15,7 +16,7 @@ import { parseArgs } from 'node:util';
 //   get <id> [--json] [--screenshot PATH]
 //   set-status <id> open|in_progress|fixed|wontfix [--pr URL] [--resolution TEXT]
 //
-// BANE_URL defaults to https://bane.mx; use https://dev.bane.mx (and a key made there) for dev.
+// NIGHTMAIL_URL defaults to https://bane.mx (BANE_URL and BANE_UI_NOTES_KEY still work); use https://dev.bane.mx (and a key made there) for dev.
 type Note = { id: string; body: string; kind: string; severity: string | null; status: string; prUrl: string | null; resolution: string | null;
   page: { url: string; path: string; route: string }; element: { selector: string; component: string | null; text: string | null };
   screenshot: { url: string; contentType: string } | null; createdAt: string; [key: string]: unknown };
@@ -23,9 +24,10 @@ const STATUSES = ['open', 'in_progress', 'fixed', 'wontfix'];
 const usage = 'Usage: ui-notes.ts list [--status S,…] [--kind K,…] [--route R] [--json] [--screenshots DIR] | get <id> [--json] [--screenshot PATH] | set-status <id> open|in_progress|fixed|wontfix [--pr URL] [--resolution TEXT]';
 
 export async function uiNotes(args: string[], env: Record<string, string | undefined> = process.env, out: (line: string) => void = line => console.log(line)) {
-  const base = (env.BANE_URL ?? 'https://bane.mx').replace(/\/$/, ''), key = env.BANE_UI_NOTES_KEY;
-  if (!key || !/^(?:nm|bane)_notes_[0-9a-f]{64}$/.test(key)) throw new Error('Set BANE_UI_NOTES_KEY to a UI notes key (make one on /operator/notes → Agent keys).');
-  if (!/^https?:\/\/[^/]+$/.test(base)) throw new Error('Set BANE_URL to the deployment origin, such as https://bane.mx.');
+  const read = (name: string) => envNames(name).map(key => env[key]).find(value => value !== undefined);
+  const base = (read('URL') ?? publicOrigin).replace(/\/$/, ''), key = read('UI_NOTES_KEY');
+  if (!key || !/^(?:nm|bane)_notes_[0-9a-f]{64}$/.test(key)) throw new Error('Set NIGHTMAIL_UI_NOTES_KEY to a UI notes key (make one on /operator/notes → Agent keys).');
+  if (!/^https?:\/\/[^/]+$/.test(base)) throw new Error('Set NIGHTMAIL_URL to the deployment origin, such as https://bane.mx.');
   const api = async <T>(method: string, path: string, body?: unknown): Promise<T> => {
     const response = await fetch(base + path, { method, headers: { authorization: `Bearer ${key}`, accept: 'application/json', ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined, redirect: 'error' });
     const data = await response.json().catch(() => null) as { error?: { code: string; message: string; requestId?: string } } | null;

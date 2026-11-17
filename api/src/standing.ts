@@ -375,7 +375,7 @@ export function noticeText(o: { workspace: string; step: Step; reasons: Reason[]
 }
 /**
  * Emails the workspace's owners and admins about a standing change, through the platform workspace's own sending
- * (BANE_NOTIFY_FROM on the platform domain). Without that configuration the dashboard and webhook still carry it.
+ * (NIGHTMAIL_NOTIFY_FROM on the platform domain). Without that configuration the dashboard and webhook still carry it.
  */
 export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, payload, job) => {
   const from = runtime.config.notifyFrom, sender = runtime.config.platformDomainWorkspace;
@@ -383,7 +383,7 @@ export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
       ARRAY(SELECT u.email FROM workspace_members m JOIN nightmail_users u ON u.id=m.user_id WHERE m.workspace_id=e.workspace_id AND m.role IN ('owner','admin') AND u.email_verified ORDER BY u.email LIMIT 20) AS recipients
     FROM standing_events e JOIN workspaces w ON w.id=e.workspace_id WHERE e.id=${String(payload.eventId)} AND e.workspace_id=${job.workspaceId}`)).rows;
   if (!event || !event.recipients.length) return;
-  if (!from || !sender || !runtime.config.multiTenant) { log('info', { code: 'STANDING_NOTIFY_SKIPPED', workspaceId: job.workspaceId, step: event.to_step, reason: 'BANE_NOTIFY_FROM or the platform workspace is not configured' }); return; }
+  if (!from || !sender || !runtime.config.multiTenant) { log('info', { code: 'STANDING_NOTIFY_SKIPPED', workspaceId: job.workspaceId, step: event.to_step, reason: 'NIGHTMAIL_NOTIFY_FROM or the platform workspace is not configured' }); return; }
   const quarantine = event.kind === 'quarantine' ? { campaign: String(event.details.campaignName ?? 'campaign'), message: String(event.details.message ?? '') } : null;
   // Workspace and campaign names are the customer's: one line, bounded, so the subject is always a valid header.
   const oneLine = (v: string) => v.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 100) || 'your workspace';

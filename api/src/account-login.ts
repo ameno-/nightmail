@@ -5,7 +5,7 @@ import { ApiError, digest, log, type Actor, type Ctx, type DbExecutor, type Runt
 import { setCookie } from 'hono/cookie';
 import { onboardNewUser, pendingInvitation } from './workspaces.js';
 import { isStaffSignIn, PROVIDER_IDENTITY_CLAIM, providerIdentity, type ProviderIdentity } from './account-policy.js';
-import { productName, requestHeader } from './brand.js';
+import { clientIpHeader, productName, requestHeader } from './brand.js';
 
 const verifiedEmail = z.email().max(320);
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
@@ -345,7 +345,7 @@ export async function accountBrowserRoute(c: Ctx) {
     if (!input.success) throw new ApiError(422,'AUTH_INPUT_INVALID','Supply the dashboard return URL.');
     // A sixth account is refused before the account service is asked, on every sign-in; the callback checks again.
     if ((await connectedAccounts(runtime, await jar())).accounts.length >= MAX_ACCOUNTS) throw new ApiError(409,'ACCOUNT_LIMIT',`A browser can connect at most ${MAX_ACCOUNTS} accounts. Sign out of one to add another.`);
-    const start = await beginAccountLogin(runtime,new URL(input.data.callbackURL),c.req.header('x-bane-client-ip') ?? 'unknown',input.data.prompt).catch(error=>{
+    const start = await beginAccountLogin(runtime,new URL(input.data.callbackURL),c.req.header(clientIpHeader) ?? 'unknown',input.data.prompt).catch(error=>{
       const issue = loginIssue(error, runtime.config.accountClient?.requiredAcr);
       if (issue) throw new ApiError(403,'SIGN_IN_DENIED',issue.message);
       throw error;

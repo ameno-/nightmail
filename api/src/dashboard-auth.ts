@@ -4,10 +4,10 @@ import {ApiError,digest,errors,isSimulatedSes,response,security,type App,type Ru
 import {accountBrowserRoute,accountSessionActor,accountSessionUser,migrateLegacyCookies,settleDefaultAccount} from './account-login.js';
 import {Workspace,WorkspaceRole,sessionMemberships} from './workspaces.js';
 import {ConnectionSummary,connectionSummary} from './provider-connections.js';
-import { productName, requestedScopes } from './brand.js';
+import { clientIpHeader, productName, requestedScopes } from './brand.js';
 
 export async function reserveSignIn(runtime:Runtime,headers:Headers) {
-  const peer=await digest(headers.get('x-bane-client-ip') ?? 'unknown');
+  const peer=await digest(headers.get(clientIpHeader) ?? 'unknown');
   const result=await runtime.db.execute(sql`SELECT reserve_auth_state(${peer}) AS ok`);
   if (!result.rows[0]?.ok) throw new ApiError(429,'AUTH_STATE_LIMIT','Too many pending sign-ins. Try again later.');
 }

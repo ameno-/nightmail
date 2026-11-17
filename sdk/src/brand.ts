@@ -49,8 +49,22 @@ export const addresses = {
 export const sdkPackage = '@nightmail/sdk';
 export const apiKeyEnv = 'NIGHTMAIL_API_KEY';
 export const mcpServerName = 'nightmail';
-/** Environment variable names: NIGHTMAIL_<name>, else the earlier BANE_<name> (remove after rename cleanup). */
-export const envNames = (name: string) => [`NIGHTMAIL_${name}`, `BANE_${name}`];
+/** /health names the service by its slug. */
+export const healthService = productSlug;
+/** The native inbound webhook format (thin signed events), as requests name it and responses show it. */
+export const webhookFormat = productSlug;
+/** The client's address as the entry point (server.ts, worker.ts) saw it, on the request the API handles. The entry
+ *  point overwrites any value the request carried. */
+export const clientIpHeader = `x-${productSlug}-client-ip`;
+/** Environment variable names, current first: NIGHTMAIL_<name>, then its earlier names (legacyEnvPrefixes). */
+export const envNames = (name: string) => [`NIGHTMAIL_${name}`, ...legacyEnvPrefixes.map(prefix => prefix + name)];
+/** The names of a server setting (config.ts and the operator scripts): NIGHTMAIL_<name>, then legacySettingPrefixes. */
+export const settingNames = (name: string) => [`NIGHTMAIL_${name}`, ...legacySettingPrefixes.map(prefix => prefix + name)];
+/** A setting's value under the first of its names the environment sets. */
+export const setting = (env: object, name: string): string | undefined => {
+  for (const key of settingNames(name)) { const value = (env as Record<string, unknown>)[key]; if (typeof value === 'string') return value; }
+  return undefined;
+};
 
 /** OAuth scope prefixes the MCP server accepts (nightmail:read, …). Which one it asks for is OAUTH_SCOPE_PREFIX
  * (config.ts): bane until account.anoma.ly supports nightmail:*. bane: remove after rename cleanup. */
@@ -88,3 +102,20 @@ export const loopHeaderNames = requestHeaderNames('loop');
 
 /** The Domain Connect provider ID registered with DNS providers (domain-connect/bane.mx.mail.json). Never follows the brand. */
 export const domainConnectProviderId = 'bane.mx';
+
+// ---------- Earlier public names, accepted until the domain cutover (remove after rename cleanup) ----------
+// Only the names above are emitted. Each one here is still accepted where a customer, a stored row or a deployment
+// may use it. The cutover deletes this section (and the other "remove after rename cleanup" sites) and fixes each site
+// the compiler then names.
+
+/** Environment variable prefixes before NIGHTMAIL_, newest first. The server's own settings also took MX_. */
+export const legacyEnvPrefixes = ['BANE_'] as const, legacySettingPrefixes = ['BANE_', 'MX_'] as const;
+/** /health services a probe accepts: this one, and the earlier names a deployment from before the rename answers with. */
+export const healthServices = [healthService, ...legacySlugs] as const;
+/** The native webhook format's earlier name. Requests may still name it, and stored webhooks still hold it (the database
+ *  constrains and compares the stored value), so every existing webhook delivers exactly as before. */
+export const legacyWebhookFormat = 'bane';
+/** The SDK's NightmailUploadError, also exported under these earlier names (deprecated). */
+export const legacySdkErrors = ['BaneUploadError', 'OpenSendUploadError'] as const;
+/** Earlier names of clientIpHeader. Never read: the entry point removes them from every request it receives. */
+export const legacyClientIpHeaders = ['x-bane-client-ip', 'x-opensend-client-ip'] as const;

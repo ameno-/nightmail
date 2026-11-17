@@ -13,7 +13,7 @@ const header = (headers: WebhookHeaders, name: string) => {
 const base64 = (value: string) => Uint8Array.from(atob(value), (c) => c.charCodeAt(0));
 
 /**
- * Verifies a Bane webhook delivery, in either format, before you parse it: the Standard Webhooks
+ * Verifies a Nightmail webhook delivery, in either format, before you parse it: the Standard Webhooks
  * HMAC-SHA256 signature over the exact request body, and a timestamp within five minutes.
  * Pass the unparsed body, the request headers and the `whsec_…` secret returned when the webhook
  * was created or rotated. Returns false instead of throwing. Deduplicate deliveries by `Webhook-Id`.
@@ -69,7 +69,7 @@ export interface InboundAttachment {
 }
 /**
  * The body of an `inbound`-format webhook: inbound.new's `email.received`, so receivers written
- * for it keep working. Bane also sends its Standard Webhooks headers; verify those with
+ * for it keep working. Nightmail also sends its Standard Webhooks headers; verify those with
  * `verifyWebhook` rather than relying on `X-Webhook-Verification-Token`.
  */
 export interface InboundWebhookPayload {
@@ -77,7 +77,7 @@ export interface InboundWebhookPayload {
   timestamp: string;
   endpoint: { id: string; name: string; type: 'webhook' };
   email: {
-    /** Bane's message ID (msg_…). */
+    /** Nightmail's message ID (msg_…). */
     id: string;
     messageId: string;
     from: InboundAddressGroup;

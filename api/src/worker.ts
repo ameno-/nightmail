@@ -5,7 +5,7 @@ import type { Config, FeedbackItem, Runtime } from './core.js';
 import { DispatcherShard, dispatcherName, shardCount } from './dispatcher-do.js';
 import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
-import { requestHeaderNames } from './brand.js';
+import { clientIpHeader, healthService, legacyClientIpHeaders, requestHeaderNames, setting } from './brand.js';
 export { DispatcherShard };
 
 // Keep top-level evaluation empty so cold-started isolates answer /health without
@@ -104,7 +104,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
   const nudges: ((runtime: Runtime) => Promise<void>)[] = [];
   try {
     const notify = workWake(env.WAKE_QUEUE, concurrency);
-    return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, mailR2: env.MAIL && { bucket:env.MAIL,name:env.BANE_MAIL_BUCKET,write:String(env.BANE_MAIL_STORE)==='r2' }, jwksCacheScope: env.HYPERDRIVE,
+    return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, mailR2: env.MAIL && { bucket:env.MAIL,name:setting(env,'MAIL_BUCKET')!,write:setting(env,'MAIL_STORE')==='r2' }, jwksCacheScope: env.HYPERDRIVE,
       allowSnsCertMiss: async peer => (await env.SNS_CERT_MISSES.limit({key: `bane:sns-miss:${await core.digest(peer)}`})).success,
       allowMalformedSns: async peer => (await env.ADMISSION.limit({key:`bane:sns-malformed:${await core.digest(peer)}`})).success,
       // 6,000 units of 16 KiB a minute per workspace in each location: about 94 MiB of preview memory, eight previews at the limit.
@@ -181,7 +181,7 @@ export default {
       const multiTenant = ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true';
       // The installation's canonical origin (PUBLIC_URL), never the request's Host; omitted if PUBLIC_URL isn't a URL.
       let origin: string | undefined; try { origin = new URL(String((env as { PUBLIC_URL?: unknown }).PUBLIC_URL)).origin; if (origin === 'null') origin = undefined; } catch { origin = undefined; }
-      return fastSecure(new Response(request.method==='HEAD'?null:JSON.stringify({status:'ok',service:'bane',multiTenant,...(origin ? { origin } : {})}), { headers: { 'content-type': 'application/json; charset=UTF-8', 'cache-control': 'no-store', 'x-request-id': requestId } }));
+      return fastSecure(new Response(request.method==='HEAD'?null:JSON.stringify({status:'ok',service:healthService,multiTenant,...(origin ? { origin } : {})}), { headers: { 'content-type': 'application/json; charset=UTF-8', 'cache-control': 'no-store', 'x-request-id': requestId } }));
     }
     const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/') || pathname.startsWith('/docs/tags/'));
     const assets = (env as unknown as { ASSETS?: Fetcher }).ASSETS;
@@ -205,8 +205,8 @@ export default {
       if (!feedbackIngress && !(await env.ADMISSION.limit({ key: lane ?? `bane:default:${peer}` })).success) return core.admissionDenied();
       const admissionMs = performance.now() - admissionStarted;
       const headers = new Headers(request.headers);
-      headers.delete('x-opensend-client-ip');
-      headers.set('x-bane-client-ip', address);
+      for (const name of legacyClientIpHeaders) headers.delete(name);
+      headers.set(clientIpHeader, address);
       const runtimeStarted = performance.now();
       const response = staticDoc
         ? await app.fetch(new Request(request, { headers }), {} as Runtime)

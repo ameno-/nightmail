@@ -96,8 +96,8 @@ function curlSample(document: Json, path: string, method: string, pathItem: Json
   if (operation.operationId === 'sendEmailBatch') body.emails = body.emails.map(completeEmail);
   const lines = [`curl --request ${method.toUpperCase()} \\`, `  --url '${publicOrigin}${target}' \\`, `  --header "Authorization: Bearer $${apiKeyEnv}"`];
   if (operation.tags?.includes('Workspaces')) {
-    lines[1] = `  --url "\${BANE_ORIGIN}${target}" \\`;
-    lines[2] = `  --header "Origin: $BANE_ORIGIN" \\\n  --cookie "$BANE_COOKIE_JAR"`;
+    lines[1] = `  --url "\${NIGHTMAIL_ORIGIN}${target}" \\`;
+    lines[2] = `  --header "Origin: $NIGHTMAIL_ORIGIN" \\\n  --cookie "$NIGHTMAIL_COOKIE_JAR"`;
   }
   if (bodySchema) { lines[lines.length - 1] += ' \\'; lines.push(`  --header 'Content-Type: application/json' \\`, `  --data '${JSON.stringify(body, null, 2)}'`); }
   return lines.join('\n');

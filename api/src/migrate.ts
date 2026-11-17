@@ -2,13 +2,14 @@ import { Client } from 'pg';
 import { readdir, readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { log } from './core.js';
+import { envNames, setting } from './brand.js';
 import { postgresConnection } from './adapters/node.js';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { deriveEncryptionKey, loadConfig, migrationSettings } from './config.js';
 import { decrypt, reencryptWebhookSecrets } from './operations.js';
 import { ensureRegionSettings } from './ses-region-state.js';
 
-const rotation = process.env.PREVIOUS_BANE_ROOT_SECRET || process.env.ENCRYPTION_KEY ? loadConfig(process.env) : null;
+const rotation = envNames('ROOT_SECRET').some(name => process.env[`PREVIOUS_${name}`]) || process.env.ENCRYPTION_KEY ? loadConfig(process.env) : null;
 const config = rotation ?? migrationSettings(process.env);
 
 const client = new Client(postgresConnection(process.env.DATABASE_URL));
@@ -31,7 +32,7 @@ try {
     if (foreign.rowCount) throw new Error('LEGACY_WORKSPACE_MIGRATION_REQUIRED: non-default workspace data requires an explicit migration plan before this upgrade. No data was modified.');
   }
   // Fresh databases have neither table. Older schemas still include environment in the binding.
-  const rootSecret = process.env.NIGHTMAIL_ROOT_SECRET ?? process.env.BANE_ROOT_SECRET;
+  const rootSecret = setting(process.env, 'ROOT_SECRET');
   if (!rotation && rootSecret !== undefined) {
     for (const table of ['operation_webhooks','mailbox_webhooks']) {
       if (!(await client.query('SELECT to_regclass($1) AS t',[table])).rows[0].t) continue;
@@ -39,7 +40,7 @@ try {
       if (!sample) continue;
       const binding=`${sample.workspace_id}:${sample.env}:${table==='mailbox_webhooks'?'mailbox:':''}${sample.id}`;
       try { await decrypt({config:{encryptionKey:deriveEncryptionKey(rootSecret)}},sample.encrypted_secret,binding); }
-      catch { throw new Error('KEY_ROTATION_REQUIRED: BANE_ROOT_SECRET differs from the secret that encrypted the stored webhooks. Restore it or configure explicit rotation. No data was modified.'); }
+      catch { throw new Error('KEY_ROTATION_REQUIRED: NIGHTMAIL_ROOT_SECRET differs from the secret that encrypted the stored webhooks. Restore it or configure explicit rotation. No data was modified.'); }
       log('info', {code:'STORED_WEBHOOK_SECRET_DECRYPT_VERIFIED'});
       break;
     }

@@ -2,15 +2,16 @@ import { createPrivateKey, hkdfSync } from 'node:crypto';
 import { z } from 'zod';
 import { ApiError } from './core.js';
 import type { Config } from './core.js';
+import { envNames, settingNames } from './brand.js';
 
 const optional = <T extends z.ZodType>(schema: T) => z.preprocess(v => v === '' ? undefined : v, schema.optional());
 const accountId = z.string().regex(/^\d{12}$/);
 export const GOOGLE_ACR = 'urn:anomaly:acr:google';
 const REMOVED_ALLOWLISTS = ['AUTH_ALLOWED_EMAILS', 'AUTH_ALLOWED_DOMAINS']; // Refused at startup when self-hosted, never read. premerge-identity: allowed
 const values = z.object({
-  BANE_ROOT_SECRET: z.string().min(32),
+  NIGHTMAIL_ROOT_SECRET: z.string().min(32),
   MAILGW_API_TOKEN: optional(z.string().min(32)),
-  PREVIOUS_BANE_ROOT_SECRET: optional(z.string().min(32)),
+  PREVIOUS_NIGHTMAIL_ROOT_SECRET: optional(z.string().min(32)),
   ACCOUNT_ISSUER: optional(z.url({ protocol: /^https$/ })),
   ACCOUNT_CLIENT_ID: optional(z.string().min(1)),
   ACCOUNT_CLIENT_PRIVATE_KEY: optional(z.string().min(1)),
@@ -36,38 +37,38 @@ const values = z.object({
   // hold the operator role. Empty turns the feature off: its routes answer 404 and the dashboard shows none of it.
   UI_NOTES_SUBJECTS: z.string().default(''),
   MULTI_TENANT: z.enum(['true', 'false']).default('false'),
-  BANE_PLATFORM_AWS_ACCOUNT: optional(accountId),
+  NIGHTMAIL_PLATFORM_AWS_ACCOUNT: optional(accountId),
   // Hosted only: the one workspace allowed to own PUBLIC_URL's own domain (see scripts/adopt-platform-domain.ts).
-  BANE_PLATFORM_DOMAIN_WORKSPACE: optional(z.string().regex(/^ws_[0-9a-f]{32}$/)),
+  NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE: optional(z.string().regex(/^ws_[0-9a-f]{32}$/)),
   // Hosted only: From for owner notices about sender standing (warn, restrict, pause, quarantine). Sent through the
   // platform workspace above; unset means notices appear only in the dashboard and the account.standing.changed webhook.
-  BANE_NOTIFY_FROM: optional(z.email().max(254)),
+  NIGHTMAIL_NOTIFY_FROM: optional(z.email().max(254)),
   // Hosted only, support integration (api/README.md "Support integration"): where "Contact support" sends a member, and
   // the Ed25519 private JWK (with "x") that signs the handoff it carries. Treat the key as a secret. The support
   // platform itself has no credential here: it calls the SupportPlatform service-binding entrypoint (src/worker.ts).
-  BANE_SUPPORT_URL: optional(z.url({ protocol: /^https$/ }).max(500)),
-  BANE_SUPPORT_SIGNING_KEY: optional(z.string().max(2000)),
+  NIGHTMAIL_SUPPORT_URL: optional(z.url({ protocol: /^https$/ }).max(500)),
+  NIGHTMAIL_SUPPORT_SIGNING_KEY: optional(z.string().max(2000)),
   // Hosted only: a support grant's view of its customer's failed requests (GET /v1/support/requests) reads this Worker's
   // request lines from Workers Logs with a Cloudflare API token that can read Workers Observability on the account (a
   // secret), the account ID and this Worker's script name. Unless all three are set, those reads answer available: false.
   CF_OBSERVABILITY_TOKEN: optional(z.string().min(20).max(500)),
   CF_OBSERVABILITY_ACCOUNT_ID: optional(z.string().regex(/^[0-9a-f]{32}$/)),
   CF_OBSERVABILITY_SCRIPT: optional(z.string().regex(/^[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$/)),
-  BANE_REGIONAL_SENDING: z.enum(['true','false']).default('false'),
-  BANE_TRUSTED_POOL: z.enum(['true','false']).default('false'),
-  BANE_RECEIVING_REDRIVE: z.enum(['true','false']).default('false'),
+  NIGHTMAIL_REGIONAL_SENDING: z.enum(['true','false']).default('false'),
+  NIGHTMAIL_TRUSTED_POOL: z.enum(['true','false']).default('false'),
+  NIGHTMAIL_RECEIVING_REDRIVE: z.enum(['true','false']).default('false'),
   // Development installations only: let Hosted pools become ready while the AWS account is still in the SES sandbox.
-  BANE_ALLOW_SES_SANDBOX: z.enum(['true','false']).default('false'),
-  BANE_REQUIRE_DMARC_FOR_BULK: z.enum(['true','false']).optional(),
-  BANE_HOSTED_SCREEN: z.enum(['true','false']).default('true'),
+  NIGHTMAIL_ALLOW_SES_SANDBOX: z.enum(['true','false']).default('false'),
+  NIGHTMAIL_REQUIRE_DMARC_FOR_BULK: z.enum(['true','false']).optional(),
+  NIGHTMAIL_HOSTED_SCREEN: z.enum(['true','false']).default('true'),
   STRIPE_SECRET_KEY: optional(z.string().regex(/^(?:sk|rk)_(?:test|live)_[A-Za-z0-9_]+$/)),
   STRIPE_WEBHOOK_SECRET: optional(z.string().regex(/^whsec_[A-Za-z0-9_]+$/)),
   STRIPE_AUTOMATIC_TAX: z.enum(['true','false']).default('false'),
   STRIPE_API_BASE: z.url().default('https://api.stripe.com'),
-  BANE_PLACEMENT_SHADOW: z.enum(['true','false']).default('true'),
+  NIGHTMAIL_PLACEMENT_SHADOW: z.enum(['true','false']).default('true'),
   // Licensed DBL-compatible DNS zone (may contain a subscription key). Never log it.
-  BANE_PLACEMENT_DBL_ZONE: optional(z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
-  BANE_BYO_V2: z.enum(['true','false']).default('false'),
+  NIGHTMAIL_PLACEMENT_DBL_ZONE: optional(z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
+  NIGHTMAIL_BYO_V2: z.enum(['true','false']).default('false'),
   BYO_V5_TEMPLATE_URL: optional(z.url({ protocol: /^https$/ })),
   BYO_TEMPLATE_URL: optional(z.url({ protocol: /^https$/ })),
   DOMAIN_CONNECT_PRIVATE_KEY: optional(z.string().min(1)),
@@ -110,16 +111,18 @@ const values = z.object({
   JEV_MESSAGE_LIMIT_BYTES: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().int().min(4096).max(256 * 1024).default(24 * 1024)),
   JEV_CAMPAIGN_LIMIT_BYTES: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().int().min(4096).max(256 * 1024).default(48 * 1024)),
 });
-const baneKeys = Object.keys(values.shape).filter(key => key.startsWith('BANE_'));
-// Each BANE_<x> setting is also read as NIGHTMAIL_<x>, which wins, and as the older MX_<x>. BANE_ and MX_: remove after rename cleanup.
-const legacyKey = (key: string) => `MX_${key.slice(5)}`, nightmailKey = (key: string) => `NIGHTMAIL_${key.slice(5)}`;
-export const CONFIG_KEYS = [...Object.keys(values.shape), ...baneKeys.map(legacyKey), ...baneKeys.map(nightmailKey)];
+// Each NIGHTMAIL_<x> setting is also read under its earlier names (brand.ts settingNames: BANE_<x>, then MX_<x>), and
+// PREVIOUS_NIGHTMAIL_ROOT_SECRET as PREVIOUS_BANE_ROOT_SECRET. The NIGHTMAIL_ name wins. Remove after rename cleanup.
+const PREVIOUS = 'PREVIOUS_';
+const settingKeys = Object.keys(values.shape).filter(key => key.replace(PREVIOUS, '').startsWith('NIGHTMAIL_'));
+const namesOf = (key: string) => key.startsWith(PREVIOUS) ? envNames(key.slice(PREVIOUS.length + 'NIGHTMAIL_'.length)).map(name => PREVIOUS + name) : settingNames(key.slice('NIGHTMAIL_'.length));
+export const CONFIG_KEYS = [...new Set([...Object.keys(values.shape), ...settingKeys.flatMap(namesOf)])];
 export function migrationSettings(input: Record<string, unknown>) {
   return {workspaceId: 'default', regions: [values.shape.DEFAULT_SES_REGION.parse(input.DEFAULT_SES_REGION)]};
 }
 export function requirePlatformAccount(account: Config['platformAccount']): string {
-  if (!account || !accountId.safeParse(account).success) throw new ApiError(503,'CONFIG_INVALID','Set BANE_PLATFORM_AWS_ACCOUNT to the 12-digit platform AWS account ID.');
-  if (account==='438095551154') throw new ApiError(503,'PLATFORM_ACCOUNT_RETIRED','This release cannot use the retired Hosted AWS account. Switch the runtime key and BANE_PLATFORM_AWS_ACCOUNT together.');
+  if (!account || !accountId.safeParse(account).success) throw new ApiError(503,'CONFIG_INVALID','Set NIGHTMAIL_PLATFORM_AWS_ACCOUNT to the 12-digit platform AWS account ID.');
+  if (account==='438095551154') throw new ApiError(503,'PLATFORM_ACCOUNT_RETIRED','This release cannot use the retired Hosted AWS account. Switch the runtime key and NIGHTMAIL_PLATFORM_AWS_ACCOUNT together.');
   return account;
 }
 const list = (value: string) => [...new Set(value.split(',').map(v => v.trim()).filter(Boolean))];
@@ -128,7 +131,7 @@ export function deriveEncryptionKey(secret: string): string {
   return Buffer.from(hkdfSync('sha256', secret, 'opensend:keys:v1', 'webhook-encryption', 32)).toString('hex');
 }
 export function loadConfig(input: Record<string, unknown>): Config {
-  const parsed = values.safeParse({...input, ...Object.fromEntries(baneKeys.map(key => [key, input[nightmailKey(key)] ?? input[key] ?? input[legacyKey(key)]]))});
+  const parsed = values.safeParse({...input, ...Object.fromEntries(settingKeys.map(key => [key, namesOf(key).map(name => input[name]).find(value => value !== undefined && value !== null)]))});
   if (!parsed.success) throw new ApiError(503, 'CONFIG_INVALID', `Missing or invalid server configuration: ${parsed.error.issues.map(i => i.path.join('.')).join(', ')}.`);
   const v = parsed.data;
   if (Boolean(v.ACCOUNT_CLIENT_ID) !== Boolean(v.ACCOUNT_CLIENT_PRIVATE_KEY)) throw new ApiError(503,'CONFIG_INVALID','Set both ACCOUNT_CLIENT_ID and ACCOUNT_CLIENT_PRIVATE_KEY.');
@@ -141,9 +144,9 @@ export function loadConfig(input: Record<string, unknown>): Config {
     try { aws = z.object({accessKeyId:z.string().min(1), secretAccessKey:z.string().min(1)}).strict().parse(JSON.parse(v.AWS_RUNTIME_CREDENTIALS)); }
     catch { throw new ApiError(503,'CONFIG_INVALID','AWS_RUNTIME_CREDENTIALS must contain a complete runtime key pair.'); }
   }
-  if (v.MULTI_TENANT==='true' && v.ENABLE_LIVE_SES==='true' && v.BANE_HOSTED_SCREEN==='true' && !v.TYPESAFE_API_KEY)
+  if (v.MULTI_TENANT==='true' && v.ENABLE_LIVE_SES==='true' && v.NIGHTMAIL_HOSTED_SCREEN==='true' && !v.TYPESAFE_API_KEY)
     throw new ApiError(503,'CONFIG_INVALID','Hosted live screening requires TYPESAFE_API_KEY.');
-  if (v.MULTI_TENANT==='true' && (v.BANE_PLATFORM_AWS_ACCOUNT || [v.BANE_REGIONAL_SENDING,v.BANE_TRUSTED_POOL,v.BANE_BYO_V2].includes('true'))) requirePlatformAccount(v.BANE_PLATFORM_AWS_ACCOUNT);
+  if (v.MULTI_TENANT==='true' && (v.NIGHTMAIL_PLATFORM_AWS_ACCOUNT || [v.NIGHTMAIL_REGIONAL_SENDING,v.NIGHTMAIL_TRUSTED_POOL,v.NIGHTMAIL_BYO_V2].includes('true'))) requirePlatformAccount(v.NIGHTMAIL_PLATFORM_AWS_ACCOUNT);
   if (Boolean(v.DOMAIN_CONNECT_PRIVATE_KEY) !== Boolean(v.DOMAIN_CONNECT_KEY_ID)) throw new ApiError(503,'CONFIG_INVALID','Set both DOMAIN_CONNECT_PRIVATE_KEY and DOMAIN_CONNECT_KEY_ID, or neither.');
   let domainConnect: Config['domainConnect'];
   if (v.DOMAIN_CONNECT_PRIVATE_KEY && v.DOMAIN_CONNECT_KEY_ID) {
@@ -153,7 +156,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
       domainConnect={privateKey,keyId:v.DOMAIN_CONNECT_KEY_ID};
     } catch { throw new ApiError(503,'CONFIG_INVALID','DOMAIN_CONNECT_PRIVATE_KEY must be an RSA-2048 private key in PEM format.'); }
   }
-  if (v.PREVIOUS_BANE_ROOT_SECRET && v.ENCRYPTION_KEY) throw new ApiError(503, 'CONFIG_INVALID', 'Finish the legacy ENCRYPTION_KEY upgrade before configuring PREVIOUS_BANE_ROOT_SECRET.');
+  if (v.PREVIOUS_NIGHTMAIL_ROOT_SECRET && v.ENCRYPTION_KEY) throw new ApiError(503, 'CONFIG_INVALID', 'Finish the legacy ENCRYPTION_KEY upgrade before configuring PREVIOUS_NIGHTMAIL_ROOT_SECRET.');
   // Email allowlists were removed: an issuer can assert a verified address its sign-in method never vouched for.
   // A self-hosted installation that still sets one would silently lose its access policy, so refuse to start.
   if (v.MULTI_TENANT !== 'true' && REMOVED_ALLOWLISTS.some(key => typeof input[key] === 'string' && (input[key] as string).trim()))
@@ -172,9 +175,9 @@ export function loadConfig(input: Record<string, unknown>): Config {
   const sharedRegions = list(v.SHARED_SENDING_REGIONS);
   if (!sharedRegions.length || sharedRegions.some(r => !/^[a-z]{2}(?:-[a-z]+)+-\d$/.test(r))) throw new ApiError(503, 'CONFIG_INVALID', 'Set SHARED_SENDING_REGIONS to comma-separated AWS regions.');
   let supportSigningKey: NonNullable<Config['support']>['signingKey'];
-  if (v.BANE_SUPPORT_SIGNING_KEY) {
-    const jwk = (() => { try { return JSON.parse(v.BANE_SUPPORT_SIGNING_KEY!) as Record<string, unknown>; } catch { return null; } })();
-    if (!jwk || jwk.kty !== 'OKP' || jwk.crv !== 'Ed25519' || typeof jwk.d !== 'string' || typeof jwk.x !== 'string') throw new ApiError(503, 'CONFIG_INVALID', 'Set BANE_SUPPORT_SIGNING_KEY to an Ed25519 private JWK with d and x.');
+  if (v.NIGHTMAIL_SUPPORT_SIGNING_KEY) {
+    const jwk = (() => { try { return JSON.parse(v.NIGHTMAIL_SUPPORT_SIGNING_KEY!) as Record<string, unknown>; } catch { return null; } })();
+    if (!jwk || jwk.kty !== 'OKP' || jwk.crv !== 'Ed25519' || typeof jwk.d !== 'string' || typeof jwk.x !== 'string') throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_SUPPORT_SIGNING_KEY to an Ed25519 private JWK with d and x.');
     supportSigningKey = { kty: 'OKP', crv: 'Ed25519', d: jwk.d, x: jwk.x };
   }
   const url = new URL(v.PUBLIC_URL);
@@ -183,25 +186,25 @@ export function loadConfig(input: Record<string, unknown>): Config {
   if (url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must be a canonical origin without credentials, a path, query or fragment.');
   return {
     // Retained internal storage namespace, not an installation setting or browser-provided tenant ID.
-    workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.BANE_ROOT_SECRET, previousAuthSecret: v.PREVIOUS_BANE_ROOT_SECRET,mailGatewayToken:v.MAILGW_API_TOKEN,
-    platformAccount: v.BANE_PLATFORM_AWS_ACCOUNT, platformDomainWorkspace: v.MULTI_TENANT==='true' ? v.BANE_PLATFORM_DOMAIN_WORKSPACE : undefined, notifyFrom: v.MULTI_TENANT==='true' ? v.BANE_NOTIFY_FROM : undefined,
-    support: v.MULTI_TENANT==='true' ? { url: v.BANE_SUPPORT_URL, signingKey: supportSigningKey } : undefined,
+    workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.NIGHTMAIL_ROOT_SECRET, previousAuthSecret: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET,mailGatewayToken:v.MAILGW_API_TOKEN,
+    platformAccount: v.NIGHTMAIL_PLATFORM_AWS_ACCOUNT, platformDomainWorkspace: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE : undefined, notifyFrom: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_NOTIFY_FROM : undefined,
+    support: v.MULTI_TENANT==='true' ? { url: v.NIGHTMAIL_SUPPORT_URL, signingKey: supportSigningKey } : undefined,
     observability: v.MULTI_TENANT==='true' && v.CF_OBSERVABILITY_TOKEN && v.CF_OBSERVABILITY_ACCOUNT_ID && v.CF_OBSERVABILITY_SCRIPT
-      ? { token: v.CF_OBSERVABILITY_TOKEN, accountId: v.CF_OBSERVABILITY_ACCOUNT_ID, script: v.CF_OBSERVABILITY_SCRIPT } : undefined, receivingRedrive:v.BANE_RECEIVING_REDRIVE==='true',byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions, regionalSending: v.MULTI_TENANT === 'true' && v.BANE_REGIONAL_SENDING === 'true',
-    trustedPool: v.MULTI_TENANT==='true' && v.BANE_REGIONAL_SENDING==='true' && v.BANE_TRUSTED_POOL==='true',
-    allowSesSandbox: v.MULTI_TENANT==='true' && v.BANE_ALLOW_SES_SANDBOX==='true',
-    requireDmarcForBulk: v.MULTI_TENANT === 'true' && (v.BANE_REQUIRE_DMARC_FOR_BULK ?? v.ENABLE_LIVE_SES) === 'true',
-    hostedScreen: v.MULTI_TENANT==='true' && v.BANE_HOSTED_SCREEN==='true',
+      ? { token: v.CF_OBSERVABILITY_TOKEN, accountId: v.CF_OBSERVABILITY_ACCOUNT_ID, script: v.CF_OBSERVABILITY_SCRIPT } : undefined, receivingRedrive:v.NIGHTMAIL_RECEIVING_REDRIVE==='true',byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions, regionalSending: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_REGIONAL_SENDING === 'true',
+    trustedPool: v.MULTI_TENANT==='true' && v.NIGHTMAIL_REGIONAL_SENDING==='true' && v.NIGHTMAIL_TRUSTED_POOL==='true',
+    allowSesSandbox: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ALLOW_SES_SANDBOX==='true',
+    requireDmarcForBulk: v.MULTI_TENANT === 'true' && (v.NIGHTMAIL_REQUIRE_DMARC_FOR_BULK ?? v.ENABLE_LIVE_SES) === 'true',
+    hostedScreen: v.MULTI_TENANT==='true' && v.NIGHTMAIL_HOSTED_SCREEN==='true',
     billing: v.MULTI_TENANT==='true' ? { stripe: v.STRIPE_SECRET_KEY && v.STRIPE_WEBHOOK_SECRET ? { secretKey: v.STRIPE_SECRET_KEY, webhookSecret: v.STRIPE_WEBHOOK_SECRET, automaticTax: v.STRIPE_AUTOMATIC_TAX === 'true', apiBase: v.STRIPE_API_BASE.replace(/\/$/, '') } : undefined } : undefined,
-    placementShadow: v.MULTI_TENANT === 'true' && v.BANE_PLACEMENT_SHADOW === 'true', placementDblZone: v.BANE_PLACEMENT_DBL_ZONE,
-    byoV2: v.MULTI_TENANT === 'true' && v.BANE_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL,
+    placementShadow: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_PLACEMENT_SHADOW === 'true', placementDblZone: v.NIGHTMAIL_PLACEMENT_DBL_ZONE,
+    byoV2: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL,
     hostedSendCaps: { firstWeek: v.HOSTED_SEND_CAP_FIRST_WEEK, secondWeek: v.HOSTED_SEND_CAP_SECOND_WEEK, mature: v.HOSTED_SEND_CAP_MATURE },
     domainConnect,
     allowedSubjects, staffGoogleDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr, uiNotesSubjects,
     accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly', oauthScopePrefix: v.OAUTH_SCOPE_PREFIX, previousOrigins, byoStackPrefix: v.BYO_STACK_PREFIX,
     accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG, requiredAcr } : undefined,
-    encryptionKey: deriveEncryptionKey(v.BANE_ROOT_SECRET),
-    previousEncryptionKey: v.PREVIOUS_BANE_ROOT_SECRET ? deriveEncryptionKey(v.PREVIOUS_BANE_ROOT_SECRET) : v.ENCRYPTION_KEY,
+    encryptionKey: deriveEncryptionKey(v.NIGHTMAIL_ROOT_SECRET),
+    previousEncryptionKey: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET ? deriveEncryptionKey(v.PREVIOUS_NIGHTMAIL_ROOT_SECRET) : v.ENCRYPTION_KEY,
     publicUrl: url.origin, sesFeedbackUrl: v.SES_FEEDBACK_URL, regions, liveEnabled: v.ENABLE_LIVE_SES === 'true',
     simulatedSes: { latencyMs: v.SIMULATED_SES_LATENCY_MS, maxSendRate: v.SIMULATED_SES_RATE, deliveryDelayMs: v.SIMULATED_SES_DELIVERY_DELAY_MS },
     dispatch: { rateFactor: v.DISPATCH_RATE_FACTOR, targetRate: v.DISPATCH_TARGET_RATE, dailyHeadroomPercent: v.DISPATCH_DAILY_HEADROOM_PERCENT },

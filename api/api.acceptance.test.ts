@@ -626,7 +626,7 @@ const AUTH_DOMAIN = 'example.com';
 // Do not send credentials to an unrelated service occupying the configured port.
 const probe = await fetch(`${BASE}/health`, { redirect: 'manual', signal: AbortSignal.timeout(5000) });
 const identity = await probe.json().catch(() => null) as { service?: string } | null;
-if (!probe.ok || identity?.service !== 'bane' || !probe.headers.get('x-request-id')) throw new Error('API_TARGET_MISMATCH: API_BASE_URL is not a Bane API. No authenticated scenarios were run.');
+if (!probe.ok || identity?.service !== 'nightmail' || !probe.headers.get('x-request-id')) throw new Error('API_TARGET_MISMATCH: API_BASE_URL is not a Nightmail API. No authenticated scenarios were run.');
 const secrets = new Set<string>([AUTH_SECRET]);
 const unique = (prefix: string) => `${prefix}-${randomUUID().replaceAll('-', '')}`;
 const snsCertName = () => `SimpleNotificationService-${randomUUID().replaceAll('-', '')}.pem`;
@@ -865,9 +865,9 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
       default: throw Error('unexpected issuer endpoint');
     }
   });
-  const request = (path:string, method:string, cookie='', body?:object) => app.fetch(new Request(origin+path,{method,headers:{origin,cookie,'content-type':'application/json','x-bane-client-ip':`192.0.2.${peer}`},body:body?JSON.stringify(body):undefined}),runtime);
+  const request = (path:string, method:string, cookie='', body?:object) => app.fetch(new Request(origin+path,{method,headers:{origin,cookie,'content-type':'application/json','x-nightmail-client-ip':`192.0.2.${peer}`},body:body?JSON.stringify(body):undefined}),runtime);
   // The account service sends the browser back with response_mode=query: a cross-site top-level GET, without Origin.
-  const navigate = (path:string, cookie='') => app.fetch(new Request(origin+path,{method:'GET',headers:{cookie,referer:issuer+'/','sec-fetch-site':'cross-site','sec-fetch-mode':'navigate','x-bane-client-ip':`192.0.2.${peer}`}}),runtime);
+  const navigate = (path:string, cookie='') => app.fetch(new Request(origin+path,{method:'GET',headers:{cookie,referer:issuer+'/','sec-fetch-site':'cross-site','sec-fetch-mode':'navigate','x-nightmail-client-ip':`192.0.2.${peer}`}}),runtime);
   async function login(authorizationError?:string) {
     peer++; pushed=undefined;
     const start=await request('/api/auth/sign-in/account','POST','',{callbackURL:origin+'/'});
@@ -1017,7 +1017,7 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
   const store = (response: Response) => { for (const line of response.headers.getSetCookie()) { const [pair] = line.split(';'), name = pair!.slice(0,pair!.indexOf('=')), value = pair!.slice(name.length+1); if (!value || /max-age=0/i.test(line)) jar.delete(name); else jar.set(name,value); } return response; };
   const cookie = () => [...jar].map(([name,value])=>`${name}=${value}`).join('; ');
   const request = (path: string, method = 'GET', body?: object, headers: Record<string,string> = {}) => app.fetch(new Request(origin+path,{method,
-    headers:{origin,cookie:cookie(),'content-type':'application/json','x-bane-client-ip':`192.0.2.${peer}`,...headers},body:body?JSON.stringify(body):undefined}),runtime);
+    headers:{origin,cookie:cookie(),'content-type':'application/json','x-nightmail-client-ip':`192.0.2.${peer}`,...headers},body:body?JSON.stringify(body):undefined}),runtime);
   const as = (p: Person, extra: Record<string,string> = {}) => ({'x-bane-account':p.id!,...extra});
   const code = async (response: Response) => ((await response.json()) as {error?:{code:string}}).error?.code;
   // A sign-in in two halves: started here, finished when the account service redirects back (a cross-site GET).
@@ -1714,7 +1714,7 @@ describe('Public contract and authentication', () => {
     const healthReply = await http('GET', '/health');
     const health = ok(healthReply);
     assert.equal(health.status, 'ok');
-    assert.equal(health.service, 'bane');
+    assert.equal(health.service, 'nightmail');
     assert.match(healthReply.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/);
     assert.equal(healthReply.headers.get('x-frame-options'), 'DENY');
     assert.equal(healthReply.headers.get('x-content-type-options'), 'nosniff');
@@ -3203,7 +3203,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const { token, consentId } = await oauthGrant(t, db);
     const initialized = await rpc(token, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } });
     assert.equal(initialized.protocolVersion, '2025-11-25');
-    assert.equal(initialized.serverInfo.name, 'bane');
+    assert.equal(initialized.serverInfo.name, 'nightmail');
     const catalog = await rpc(token, 'tools/list');
     const defaults=ok(await http('POST','/mcp',token,{jsonrpc:'2.0',id:17,method:'tools/list',params:{}},rpcHeaders)).result.tools;
     // OpenCode adds ?codemode=false to a remote URL: one tool per operation, the same catalog as the legacy ?codemode=true.
@@ -4481,7 +4481,7 @@ describe('Hosted MCP OAuth and tools', () => {
       // An MCP tool call, a key the approval made and an agent token act for the person who approved the connection: each
       // row names them with the client's network and user agent (a tool call: the /mcp request's, and its request ID), and
       // the operator's per-user trail lists them.
-      const client = { 'x-bane-client-ip': '198.51.100.23', 'user-agent': 'acceptance-agent/2.1 (synthetic)' }, requestOf = (reply: Reply) => reply.headers.get('x-request-id')!;
+      const client = { 'x-nightmail-client-ip': '198.51.100.23', 'user-agent': 'acceptance-agent/2.1 (synthetic)' }, requestOf = (reply: Reply) => reply.headers.get('x-request-id')!;
       const viaMcp = await send('POST', '/mcp?codemode=true', { ...rpcHeaders, ...bearer(mcpToken), ...client },
         { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'createApiKey', arguments: { body: { name: 'made over MCP', permissions: ['read', 'send', 'manage'] }, confirm: true } } });
       const mcpKey = ok(viaMcp).result; assert.equal(mcpKey.isError, false, redact(mcpKey)); secrets.add(mcpKey.structuredContent.secret);
@@ -10506,7 +10506,7 @@ describe('Operational configuration and public event boundaries', () => {
       });
       const wire=t.mock.method(db,'query');
       const envelope={Type:'Notification',MessageId:'fixture',TopicArn:`arn:aws:sns:${REGION}:111122223333:fixture`,Message:'{}',Timestamp:new Date().toISOString(),SignatureVersion:'2',Signature:Buffer.alloc(256).toString('base64')};
-      const check=(name:string,peer='2001:db8:123::1')=>local('POST','/v1/events/ses',{...envelope,SigningCertURL:host+name},'live',{'x-bane-client-ip':admissionPeer(peer)});
+      const check=(name:string,peer='2001:db8:123::1')=>local('POST','/v1/events/ses',{...envelope,SigningCertURL:host+name},'live',{'x-nightmail-client-ip':admissionPeer(peer)});
       for (const name of ['SimpleNotificationService-fixture.pem',positive+'?',positive+'#','other/../'+positive]) error(await check(name),403,'SNS_UNTRUSTED_URL');
       assert.equal(transport.mock.callCount(),0);
       error(await check(positive),403,'SNS_INVALID_SIGNATURE');
@@ -10889,7 +10889,7 @@ test('cached dashboard responses accept the old expiry header and write only the
   try {
     assert.deepEqual(await cachedDashboardRead(PUBLIC_ORIGIN,unique('old-cache'),async()=>2),{value:1,hit:true});
     hit=undefined;assert.deepEqual(await cachedDashboardRead(PUBLIC_ORIGIN,unique('new-cache'),async()=>3),{value:3,hit:false});
-    assert.ok(written);assert.ok(written.headers.has('x-bane-expires'));assert.equal(written.headers.has('x-opensend-expires'),false);
+    assert.ok(written);assert.ok(written.headers.has('x-nightmail-expires'));assert.deepEqual(['x-bane-expires','x-opensend-expires'].map(name=>written!.headers.has(name)),[false,false]);
   } finally {if(previous)Object.defineProperty(globalThis,'caches',previous);else Reflect.deleteProperty(globalThis,'caches');}
 });
 
@@ -10932,6 +10932,45 @@ test('stdio MCP connects with legacy env, key, health and API title',async()=>{
   const env={PATH:process.env.PATH,OPENSEND_API_URL:'http://127.0.0.1',OPENSEND_API_KEY:'os_mbx_'+'1'.repeat(64)};
   const result=spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(fixture),'--import','tsx','../mcp/src/server.ts'],{env:env as unknown as NodeJS.ProcessEnv,input,encoding:'utf8',timeout:10000});
   assert.equal(result.status,0,result.stderr);assert.ok(JSON.parse(result.stdout).result.capabilities.tools);
+});
+// Decision (platform-14): the public bane names are now nightmail. Only the new names are emitted; each earlier one is
+// still accepted, and every such alias is registered in brand.ts's legacy section so the domain cutover removes them.
+test('Rename: only the nightmail names are emitted; their earlier names in brand.ts still work', async t => {
+  const brand = await import('./src/brand.js'), db = await fixtureDatabase(t);
+  // Settings: NIGHTMAIL_<x> wins over BANE_<x>, which wins over MX_<x>; the rotation secret too. A missing one is asked for by its new name.
+  const { loadConfig, CONFIG_KEYS } = await import('./src/config.js'), url = { PUBLIC_URL: 'https://example.org' }, secret = (c: string) => c.repeat(40);
+  assert.equal(loadConfig({ ...url, MX_ROOT_SECRET: secret('m') }).authSecret, secret('m'));
+  assert.equal(loadConfig({ ...url, MX_ROOT_SECRET: secret('m'), BANE_ROOT_SECRET: secret('b') }).authSecret, secret('b'));
+  assert.equal(loadConfig({ ...url, BANE_ROOT_SECRET: secret('b'), NIGHTMAIL_ROOT_SECRET: secret('n') }).authSecret, secret('n'));
+  assert.equal(loadConfig({ ...url, NIGHTMAIL_ROOT_SECRET: secret('n'), PREVIOUS_BANE_ROOT_SECRET: secret('p') }).previousAuthSecret, secret('p'));
+  assert.equal(loadConfig({ ...url, NIGHTMAIL_ROOT_SECRET: secret('n'), PREVIOUS_BANE_ROOT_SECRET: secret('p'), PREVIOUS_NIGHTMAIL_ROOT_SECRET: secret('q') }).previousAuthSecret, secret('q'));
+  assert.throws(() => loadConfig(url), (error: Error) => error.message.includes('NIGHTMAIL_ROOT_SECRET') && !error.message.includes('BANE_'));
+  for (const key of ['NIGHTMAIL_TRUSTED_POOL', 'BANE_TRUSTED_POOL', 'MX_TRUSTED_POOL', 'PREVIOUS_NIGHTMAIL_ROOT_SECRET', 'PREVIOUS_BANE_ROOT_SECRET']) assert.ok(CONFIG_KEYS.includes(key), key);
+  assert.equal(brand.setting({ BANE_MAIL_BUCKET: 'old', NIGHTMAIL_MAIL_BUCKET: 'new' }, 'MAIL_BUCKET'), 'new');
+  assert.equal(brand.setting({ MX_MAIL_BUCKET: 'oldest' }, 'MAIL_BUCKET'), 'oldest');
+  // The SDK's upload error, and its earlier names as deprecated aliases of the same class.
+  const upload = await import('../sdk/src/upload.js') as Json;
+  assert.equal(new upload.NightmailUploadError('x', 'CODE', 400).name, 'NightmailUploadError');
+  for (const name of brand.legacySdkErrors) assert.equal(upload[name], upload.NightmailUploadError, name);
+  // The native webhook format: requests may name it nightmail or bane, responses say nightmail, and the stored value stays
+  // bane, so existing webhooks deliver exactly as before.
+  const path = '/v1/inbound/webhooks', headers = { 'x-nightmail-environment': 'live' }, stored = async (id: string) => (await db.query('SELECT format FROM mailbox_webhooks WHERE id=$1', [id])).rows[0].format;
+  for (const format of [brand.webhookFormat, brand.legacyWebhookFormat, undefined]) {
+    const hook = ok(await http('POST', path, MANAGER, { url: `https://example.com/${unique('rename-format')}`, paused: true, ...(format ? { format } : {}) }, headers), 201);
+    cleanup(t, async () => { ok(await http('DELETE', `${path}/${hook.id}`, MANAGER, undefined, headers), [200, 404]); });
+    assert.deepEqual([hook.format, ok(await http('GET', `${path}/${hook.id}`, MANAGER, undefined, headers)).format, await stored(hook.id)], ['nightmail', 'nightmail', 'bane'], String(format));
+    assert.equal(ok(await http('PATCH', `${path}/${hook.id}`, MANAGER, { format: 'inbound' }, headers)).format, 'inbound');
+    assert.equal(ok(await http('PATCH', `${path}/${hook.id}`, MANAGER, { format: format ?? 'nightmail' }, headers)).format, 'nightmail');
+    assert.equal(await stored(hook.id), 'bane');
+  }
+  error(await http('POST', path, MANAGER, { url: 'https://example.com/rename-format', format: 'opensend' }, headers), 422, 'VALIDATION_FAILED');
+  // The client's address: the entry point sets clientIpHeader from the connection, over anything the request sent under it
+  // or an earlier name.
+  const key = ok(await http('POST', '/v1/api-keys', MANAGER, { name: unique('rename-client-ip'), permissions: ['read'] },
+    { [brand.clientIpHeader]: '203.0.113.7', ...Object.fromEntries(brand.legacyClientIpHeaders.map(name => [name, '203.0.113.8'])) }), 201);
+  cleanup(t, async () => { ok(await http('POST', `/v1/api-keys/${key.id}/revoke`, MANAGER), [200, 204]); });
+  const { rows: [audit] } = await db.query("SELECT ip_network FROM audit_events WHERE action='api_key.create' AND target_id=$1", [key.id]);
+  assert.ok(audit && audit.ip_network !== '203.0.113.0/24', JSON.stringify(audit));
 });
 test('Brand: internal names are nightmail_* tables, NIGHTMAIL_* settings and nightmail:*-or-bane:* tag checks; the old names still work until cutover',async t=>{
   const db=await fixtureDatabase(t);
@@ -11058,7 +11097,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
       await db.query('DROP TABLE nightmail_migrations');
     });
     await mt.test('wrong webhook root fails before ledger rename or migration writes',async()=>{
-      migrate({BANE_ROOT_SECRET:randomUUID()},/KEY_ROTATION_REQUIRED: BANE_ROOT_SECRET differs/);
+      migrate({BANE_ROOT_SECRET:randomUUID()},/KEY_ROTATION_REQUIRED: NIGHTMAIL_ROOT_SECRET differs/);
       assert.equal(await read(),encrypted);assert.equal((await db.query("SELECT to_regclass('nightmail_migrations') AS t")).rows[0].t,null);
       assert.equal((await db.query("SELECT FROM opensend_migrations WHERE name='092_bane_scopes.sql'")).rowCount,0);
       assert.equal((await db.query("SELECT reference_id FROM oauth_consent WHERE id='legacy'")).rows[0].reference_id,reference);
@@ -12166,8 +12205,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const operator=`arn:aws:sts::${acct}:assumed-role/platform-operator/fixture`,op=new SESv2Client({region:oh,credentials:runtime.config.aws!});cleanup(t,async()=>op.destroy());
     const {adoptionFacts,adoptionFingerprint}=await import('./src/adopted-identity.js'),reviewed=adoptionFingerprint(adoptionFacts(identity as any));
     const adopt=(apply:boolean,overrides:Record<string,string|undefined>={},who=operator,fingerprint=reviewed)=>adoptPlatformDomain(db,op,owner,who,apply?{apply,fingerprint,reason:'Synthetic platform adoption'}:{},{...env,...overrides});
-    await assert.rejects(adopt(true,{BANE_PLATFORM_DOMAIN_WORKSPACE:undefined}),/BANE_PLATFORM_DOMAIN_WORKSPACE/);
-    await assert.rejects(adoptPlatformDomain(db,op,other,operator,{apply:true,fingerprint:reviewed,reason:'Synthetic platform adoption'},env),/BANE_PLATFORM_DOMAIN_WORKSPACE/);
+    await assert.rejects(adopt(true,{BANE_PLATFORM_DOMAIN_WORKSPACE:undefined}),/NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE/);
+    await assert.rejects(adoptPlatformDomain(db,op,other,operator,{apply:true,fingerprint:reviewed,reason:'Synthetic platform adoption'},env),/NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE/);
     await assert.rejects(adopt(true,{},`arn:aws:iam::${acct}:user/bane-runtime`),/operator role/);
     identity.Tags=[{Key:'bane:domain-claim',Value:randomUUID()}];await assert.rejects(adopt(false),/domain claim created/);identity.Tags=[];
     identity.Policies={delegate:'{"Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::999999999999:root"},"Action":"ses:SendEmail"}]}'};
@@ -15712,7 +15751,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     for(const path of ['/mcp/login','/mcp/consent']) assert.equal((await guardPublicRequest(path,new Headers(),peer,work)).status,429);
     assert.equal(reads,40);
     await simulatedSesFixture(t,async({runtime,db})=>{
-      const {reserveSignIn}=await import('./src/dashboard-auth.js'),headers=new Headers({'x-bane-client-ip':'192.0.2.255'});
+      const {reserveSignIn}=await import('./src/dashboard-auth.js'),headers=new Headers({'x-nightmail-client-ip':'192.0.2.255'});
       for(let i=0;i<8;i++) await reserveSignIn(runtime,headers);
       await assert.rejects(reserveSignIn(runtime,headers),{code:'AUTH_STATE_LIMIT'});
       const {digest}=await import('./src/core.js'); await db.query('UPDATE auth_state_slots SET expires_at=now() WHERE peer=$1',[await digest('192.0.2.255')]);
@@ -22460,7 +22499,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           // 1) Encoded /health fast path must answer before loading src/app.ts and must not hit ASSETS.
           const healthRes = await worker.fetch(new Request('https://dev.bane.mx/%68ealth'), {...env,ENABLE_LIVE_SES:'true',get HYPERDRIVE(){throw Error('liveness opened DB')}});
           assert.equal(healthRes.status, 200);
-          assert.equal((await healthRes.json()).service, 'bane');
+          assert.equal((await healthRes.json()).service, 'nightmail');
           // Review PR #84 P2: the zero-dependency path also answers with PUBLIC_URL's origin, not the request's host.
           assert.equal((await (await worker.fetch(new Request('https://attacker.example/health'), env)).json()).origin, 'https://dev.bane.mx');
           assert.equal([...loadedModules].some(u => /\\/src\\/app\\.[jt]s$/.test(u)), false, 'Encoded /health must take the zero-dep fast path.');

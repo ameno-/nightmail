@@ -18,10 +18,10 @@ import { productName } from '../../../../api/src/brand'
 const deliveryStatus: Record<MailboxWebhookDelivery['status'], { label: string; tone: Tone }> = { pending: { label: 'Retrying', tone: 'warning' }, delivered: { label: 'Delivered', tone: 'success' }, failed: { label: 'Failed', tone: 'danger' }, paused: { label: 'Held', tone: 'neutral' } }
 // routeOnly is form state: a webhook that subscribes to no events and only gets mail a route sends to it.
 type Draft = InboundWebhookInput & { routeOnly: boolean }
-const blank: Draft = { url: '', description: '', eventTypes: ['message.received'], addressIds: null, format: 'bane', routeOnly: false }
+const blank: Draft = { url: '', description: '', eventTypes: ['message.received'], addressIds: null, format: 'nightmail', routeOnly: false }
 // A webhook a ritual endpoint created has no description: its endpoint name says what it is, not its masked URL.
 const webhookTitle = (webhook: InboundWebhook) => webhook.description || (webhook.name ? `endpoints.${webhook.name}` : webhook.url)
-const draftOf = (webhook: InboundWebhook): Draft => ({ url: '', description: webhook.description, eventTypes: [...webhook.eventTypes].sort(), addressIds: webhook.addressIds, format: webhook.format ?? 'bane', junk: webhook.junk, routeOnly: !webhook.eventTypes.length })
+const draftOf = (webhook: InboundWebhook): Draft => ({ url: '', description: webhook.description, eventTypes: [...webhook.eventTypes].sort(), addressIds: webhook.addressIds, format: webhook.format ?? 'nightmail', junk: webhook.junk, routeOnly: !webhook.eventTypes.length })
 const payloadOf = ({ routeOnly, ...input }: Draft): InboundWebhookInput => ({ ...input, url: input.url.trim(), description: input.description.trim(), eventTypes: routeOnly ? [] : input.eventTypes })
 // The inbound.new payload describes received mail only.
 const receivedOnly = (types: MailboxEventType[]) => types.filter(type => type === 'message.received' || type === 'message.junk')
@@ -54,7 +54,7 @@ function WebhookFields({ input, urlHint, onChange, addresses, errors, apiError, 
           options={[{ value: 'all', label: 'Every address, new ones too' }, { value: 'selected', label: 'Selected addresses' }, { value: 'routed', label: 'Only mail a route sends here' }]} />
       </Field>
       <Field label="Payload" htmlFor="mailbox-webhook-format">
-        <Select id="mailbox-webhook-format" value={input.format ?? 'bane'} disabled={disabled} onValueChange={value => onChange({ ...input, format: value as Draft['format'], junk: undefined, eventTypes: value === 'inbound' ? receivedOnly(input.eventTypes).length ? receivedOnly(input.eventTypes) : ['message.received'] : input.eventTypes })} options={[{ value: 'bane', label: `${productName} event` }, { value: 'inbound', label: 'inbound.new email.received' }]} />
+        <Select id="mailbox-webhook-format" value={input.format ?? 'nightmail'} disabled={disabled} onValueChange={value => onChange({ ...input, format: value as Draft['format'], junk: undefined, eventTypes: value === 'inbound' ? receivedOnly(input.eventTypes).length ? receivedOnly(input.eventTypes) : ['message.received'] : input.eventTypes })} options={[{ value: 'nightmail', label: `${productName} event` }, { value: 'inbound', label: 'inbound.new email.received' }]} />
       </Field>
     </div>
     <Checkbox disabled={disabled} checked={(input.junk ?? (input.format === 'inbound' ? 'include' : 'skip')) === 'include'} onCheckedChange={checked => onChange({ ...input, junk: checked ? 'include' : 'skip' })} label="Deliver junk mail too" />
