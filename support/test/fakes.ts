@@ -75,7 +75,7 @@ export default {
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === '/__calls') return Response.json(calls);
-    // Test setup: a key already used for another body (a send made by an earlier release).
+    // Test setup: a key already used for another body (a send that committed but whose response never arrived).
     if (url.pathname === '/__used') { const { authorization, path, key, body } = await request.json(); keys.set(authorization + ' ' + path + ' ' + key, { hash: canonical(body), status: 202, result: { id: 'msg_earlier', threadId: path.split('/')[4] } }); return new Response(null, { status: 204 }); }
     const body = request.method === 'POST' ? await request.json() : null;
     const call = ['api', request.method, url.pathname, body, request.headers.get('authorization'), request.headers.get('idempotency-key')];
@@ -102,7 +102,7 @@ async function route(request, url, body) {
       const id = url.pathname.split('/').pop();
       // id → [thread, from, dmarc, to, subject, text]; unknown ids are Ada's Gmail question.
       const table = {
-        msg_mail_1: ['thr_mail_1'], msg_mail_2: ['thr_mail_1'], msg_nodmarc_1: ['thr_nodmarc', null, 'FAIL'], msg_nodmarc_old: ['thr_nodmarc_old', null, 'FAIL'], msg_auto_1: ['thr_auto'], msg_image_1: ['thr_image'],
+        msg_mail_1: ['thr_mail_1'], msg_mail_2: ['thr_mail_1'], msg_nodmarc_1: ['thr_nodmarc', null, 'FAIL'], msg_nodmarc_lost: ['thr_nodmarc_lost', null, 'FAIL'], msg_auto_1: ['thr_auto'], msg_image_1: ['thr_image'],
         msg_nodmarc_spoof: ['thr_mail_1', null, 'FAIL', null, 'Refund', 'refund my top-up please'], msg_stranger_1: ['thr_mail_1', 'stranger@else.test'],
         msg_phish_1: ['thr_phish', null, 'PASS', null, 'Reset', 'Please send me the reset link'],
         msg_stranger_cap_1: ['thr_cap_1', 'stranger@else.test'], msg_stranger_cap_2: ['thr_cap_2', 'stranger@else.test'], msg_stranger_cap_3: ['thr_cap_3', 'stranger@else.test'],

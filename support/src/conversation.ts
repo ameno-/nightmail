@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { baneApi, BaneError, senderOf, type BaneApi, type Handoff, type InboundMessage, type PlatformReply } from './bane.js';
+import { baneApi, BaneError, senderOf, type Handoff, type InboundMessage, type PlatformReply } from './bane.js';
 import type { Env } from './env.js';
 import { gate, LINK_ORIGINS, plainText } from './gate.js';
 import { expectation, fileTicket, notifyTeam, openFollowUp, type TicketContext } from './tickets.js';
@@ -610,26 +610,9 @@ export class SupportConversation extends DurableObject<Env> {
       no_account: `Hi,\n\nThanks for writing to ${productName} support. I couldn’t find a ${productName} account for this email address, so I can’t look anything up. Please write from the address you sign in to ${productName} with, or sign in and press Help.\n\n${productName} support (AI)`,
       busy: `Hi,\n\nThanks for writing to ${productName} support. I can’t answer automatically right now. The ${productName} team has your message and will reply here.\n\n${productName} support (AI)`,
     }[kind];
-    const threadId = message.threadId ?? this.meta()!.threadId!, reply = { replyToMessageId: messageId, text, to: sender, subject: `Re: your message to ${productName} support` };
     // The confirm link has its own key: the answer once the sender confirms is another send for the same message.
-    if (kind === 'confirm') await baneApi(this.env).reply(threadId, reply, `confirm-${messageId}`);
-    else await this.answer(threadId, reply, messageId);
+    await baneApi(this.env).reply(message.threadId ?? this.meta()!.threadId!, { replyToMessageId: messageId, text, to: sender, subject: `Re: your message to ${productName} support` }, kind === 'confirm' ? `confirm-${messageId}` : `reply-${messageId}`);
     this.record({ id: newId('msg'), role: 'assistant', kind: 'notice', text: `[fixed reply: ${kind}]`, at: new Date().toISOString(), tools: [] });
-  }
-
-  /** The one answer to a message (the agent's reply or a fixed one), keyed `reply-<messageId>`. */
-  private async answer(threadId: string, reply: Parameters<BaneApi['reply']>[1], messageId: string) {
-    try { await baneApi(this.env).reply(threadId, reply, `reply-${messageId}`); }
-    catch (error) {
-      // Before confirm links had their own key they were sent as `reply-<messageId>`, so the answer to a message
-      // confirmed through such a link conflicts with it. Only a message that waited for a confirmation can be in that
-      // state; it is answered under `answer-<messageId>` instead. Remove once no link from before that change can still
-      // be confirmed (links last 24 hours).
-      const confirmed = this.sql.exec<{ state: string }>('SELECT state FROM _support_inbox WHERE message_id = ?', messageId).toArray()[0]?.state === 'confirmed';
-      if (!(error instanceof BaneError) || error.status !== 409 || error.code !== 'IDEMPOTENCY_CONFLICT' || !confirmed) throw error;
-      log('warn', { event: 'email', code: 'ANSWER_KEY_FALLBACK', messageId });
-      await baneApi(this.env).reply(threadId, reply, `answer-${messageId}`);
-    }
   }
 
   private async ticketCtx(meta: Meta, dmarc: string | null = null): Promise<TicketContext> {
@@ -729,7 +712,7 @@ export class SupportConversation extends DurableObject<Env> {
       reply = `Thanks for writing. I’ve passed this to the ${productName} team to check, and someone will reply here, usually within one business day.\n\n${productName} support (AI)`;
     }
     // Only ever to the verified address that wrote; Reply-To and Cc are ignored.
-    await this.answer(message.threadId ?? meta.threadId!, { replyToMessageId: messageId, text: reply, to: sender }, messageId);
+    await baneApi(this.env).reply(message.threadId ?? meta.threadId!, { replyToMessageId: messageId, text: reply, to: sender }, `reply-${messageId}`);
     this.sql.exec("UPDATE _support_inbox SET state = 'answered' WHERE message_id = ?", messageId);
     this.record({ id: newId('msg'), role: 'user', kind: null, text: body, at: new Date().toISOString(), tools: [] });
     this.record({ id: newId('msg'), role: 'assistant', kind: 'reply', text: reply, at: new Date().toISOString(), tools: [] });
