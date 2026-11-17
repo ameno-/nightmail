@@ -610,7 +610,8 @@ export class SupportConversation extends DurableObject<Env> {
       no_account: `Hi,\n\nThanks for writing to ${productName} support. I couldn’t find a ${productName} account for this email address, so I can’t look anything up. Please write from the address you sign in to ${productName} with, or sign in and press Help.\n\n${productName} support (AI)`,
       busy: `Hi,\n\nThanks for writing to ${productName} support. I can’t answer automatically right now. The ${productName} team has your message and will reply here.\n\n${productName} support (AI)`,
     }[kind];
-    await baneApi(this.env).reply(message.threadId ?? this.meta()!.threadId!, { replyToMessageId: messageId, text, to: sender, subject: `Re: your message to ${productName} support` }, `reply-${messageId}`);
+    // The confirm link has its own key: the answer once the sender confirms is another send for the same message.
+    await baneApi(this.env).reply(message.threadId ?? this.meta()!.threadId!, { replyToMessageId: messageId, text, to: sender, subject: `Re: your message to ${productName} support` }, kind === 'confirm' ? `confirm-${messageId}` : `reply-${messageId}`);
     this.record({ id: newId('msg'), role: 'assistant', kind: 'notice', text: `[fixed reply: ${kind}]`, at: new Date().toISOString(), tools: [] });
   }
 

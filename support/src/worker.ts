@@ -13,7 +13,7 @@ export { SupportIntake, INTAKE, type Mailbox } from './intake.js';
 import { INTAKE, type Mailbox } from './intake.js';
 
 // The support Worker (support/README.md): chat starts and resumes, the conversation WebSocket, Nightmail's inbound webhook
-// for support@bane.mx, and the "Confirm it's me" page. Every conversation is one SupportConversation Durable Object,
+// for support@nightmail.dev, and the "Confirm it's me" page. Every conversation is one SupportConversation Durable Object,
 // reached only by ID from this router, never through a client-named route.
 
 const CONVERSATIONS_PER_DAY = 10;
@@ -161,7 +161,7 @@ async function handled(env: Env, deliveryId: string, work: () => Promise<Respons
   return response;
 }
 
-/** Nightmail's signed webhook for mail received at support@bane.mx (route → webhook:support-agent, bane format, include message). */
+/** Nightmail's signed webhook for mail received at support@nightmail.dev (route → webhook:support-agent, bane format, include message). */
 async function inbound(request: Request, env: Env): Promise<Response> {
   const got = await delivery(request, env, env.BANE_INBOUND_WEBHOOK_SECRET, 'BANE_INBOUND_WEBHOOK_SECRET');
   if (got instanceof Response) return got;
@@ -195,10 +195,11 @@ async function intake(request: Request, env: Env): Promise<Response> {
     if (event.type !== 'message.received' || !messageId || message?.direction === 'outbound') return new Response(null, { status: 200 });
     // The envelope recipients Nightmail matched (so Bcc counts), else the To header.
     const recipients = (event.data?.recipients?.length ? event.data.recipients : [JSON.stringify(message?.to ?? '')]).join(' ').toLowerCase();
-    const mailbox = env.INTAKE_ADDRESSES.split(',').map(a => a.trim().toLowerCase()).filter(a => a && recipients.includes(a)).map(a => a.split('@')[0] as Mailbox).find(m => m in INTAKE);
-    if (!mailbox) return new Response(null, { status: 200 });
+    // The intake address it was sent to: the acknowledgement names that one.
+    const address = env.INTAKE_ADDRESSES.split(',').map(a => a.trim().toLowerCase()).find(a => a && recipients.includes(a) && a.split('@')[0]! in INTAKE);
+    if (!address) return new Response(null, { status: 200 });
     const threadId = message?.threadId ?? messageId;
-    await env.INTAKE.get(env.INTAKE.idFromName(threadId)).enqueue({ threadId, messageId, mailbox });
+    await env.INTAKE.get(env.INTAKE.idFromName(threadId)).enqueue({ threadId, messageId, mailbox: address.split('@')[0] as Mailbox, address });
     return new Response(null, { status: 200 });
   });
 }
