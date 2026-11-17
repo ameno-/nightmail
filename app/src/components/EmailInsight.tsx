@@ -2,8 +2,10 @@ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useSta
 import type { UseQueryResult } from '@tanstack/react-query'
 import { Check, ChevronDown, ChevronRight, ExternalLink, Monitor, Moon, MoreHorizontal, Smartphone, Sun } from 'lucide-react'
 import { useApiQuery } from '../data/context'
-import type { ClientPreview, PreviewClient, PreviewIssue, SendabilityCategory, SendabilityFinding, SendabilityReport, SenderGrade } from '../data/types'
+import type { ClientPreview, PreviewClient, PreviewIssue, SendabilityCategory, SendabilityFinding, SendabilityReport } from '../data/types'
 import { usePhone } from '../lib/media'
+import { gradeKey } from '../lib/standing'
+import { gradeOf } from '../../../api/src/standing-model'
 import { AddressText } from './AddressText'
 import { EmailFrame, FRAME_WIDTH, frameDocument, frameKey, frameSize, shownWidth, useFrameSizes, type FrameDevice } from './EmailFrame'
 import { Alert, Button, DropdownMenu, ErrorText, Sheet, Skeleton, SkeletonText, Tooltip } from './ui'
@@ -30,8 +32,6 @@ const severityRank = { error: 0, warning: 1, info: 2 } as const
 const severityTone = { error: 'danger', warning: 'warning', info: 'neutral' } as const
 const severityLabel = { error: 'Error', warning: 'Warning', info: 'Note' } as const
 const categoryLabel: Record<SendabilityCategory, string> = { authentication: 'Authentication', content: 'Content', headers: 'Headers', size: 'Size', rendering: 'Rendering', reputation: 'Reputation' }
-const gradeFor = (score: number): SenderGrade => score >= 95 ? 'A+' : score >= 90 ? 'A' : score >= 80 ? 'B' : score >= 70 ? 'C' : score >= 60 ? 'D' : 'F'
-const gradeKey = (grade: SenderGrade) => grade === 'A+' ? 'aplus' : grade.toLowerCase()
 const SCORE_NOTE = 'A high score means few problems found, not guaranteed inbox placement.'
 // Errors, then warnings, then notes; within each, the categories that weigh most in this report's score first.
 const ranked = (report: SendabilityReport, findings = report.findings) => {
@@ -147,7 +147,7 @@ export function SendabilityTitle({ check }: { check: Check }) {
 }
 
 function Categories({ report }: { report: SendabilityReport }) {
-  return <ul className="ei-categories" aria-label="Scores by category">{report.categories.map(category => <li key={category.id} data-grade={category.weight ? gradeKey(gradeFor(category.score)) : undefined}>
+  return <ul className="ei-categories" aria-label="Scores by category">{report.categories.map(category => <li key={category.id} data-grade={category.weight ? gradeKey(gradeOf(category.score)) : undefined}>
     <span className="ei-categories__label">{categoryLabel[category.id]}</span>
     <span className="ei-categories__value">{category.weight ? category.score : <Tooltip content="Not scored: no evidence yet, so it doesn’t count."><span tabIndex={0} aria-label="Not scored">—</span></Tooltip>}</span>
     <span className="ei-bar" aria-hidden="true"><span style={{ transform: `scaleX(${category.weight ? category.score / 100 : 0})` }} /></span>

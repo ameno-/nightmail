@@ -1,11 +1,13 @@
 import type { CSSProperties } from 'react'
-import type { SenderGrade, SenderScore } from '../../data/types'
+import type { SenderScore } from '../../data/types'
+import { gradeKey } from '../../lib/standing'
+import { GRADE_BANDS } from '../../../../api/src/standing-model'
 
 // The sender score as an instrument: the six grade bands on a 40–100 scale and a needle that sweeps in once.
 // `Dial`: the arc in the score card (56px tall).
 const MIN = 40
-const BANDS: { grade: SenderGrade; from: number; to: number }[] = [{ grade: 'F', from: 40, to: 60 }, { grade: 'D', from: 60, to: 70 }, { grade: 'C', from: 70, to: 80 }, { grade: 'B', from: 80, to: 90 }, { grade: 'A', from: 90, to: 95 }, { grade: 'A+', from: 95, to: 100 }]
-export const gradeKey = (grade: SenderGrade) => grade === 'A+' ? 'aplus' : grade.toLowerCase()
+// The published grade bands (api/src/standing-model.ts), each from its floor to the next one's, cut at the scale's start.
+const BANDS = GRADE_BANDS.map((band, i) => ({ grade: band.grade, from: Math.max(MIN, band.min), to: i ? GRADE_BANDS[i - 1].min : 100 })).reverse()
 const clampValue = (value: number) => Math.min(100, Math.max(MIN, value))
 const share = (value: number) => (clampValue(value) - MIN) / (100 - MIN)
 const angle = (value: number) => Math.PI * (1 - share(value))

@@ -4,7 +4,7 @@ import { ChevronRight, MoreHorizontal } from 'lucide-react'
 import { Link, Navigate, useNavigate, useParams } from 'react-router'
 import { useApiDef, useApiMutation, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
-import { total, usd } from '../../data/billing'
+import { priceUc, total, usd } from '../../data/billing'
 import { useRefreshListsOnChange } from '../../data/invalidation'
 import { useRegionCatalog } from '../../data/regions'
 import { campaignEditable, errorText, campaignResumable, type Campaign, type CampaignInput, type SendCampaignInput } from '../../data/types'
@@ -597,7 +597,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   // Hosted and enforced: what the send costs beyond the free allowance, against the balance, read while the page opens.
   const billing = useApiDef(queries.billing(), { enabled: draft && multiTenant && canAdminister }).data
   const cost = billing && billing.enforcement === 'enforce' && billing.mode === 'prepaid' && billing.balance && audience.data ? (() => {
-    const beyond = Math.max(0, audience.data.eligible - billing.free.sent.left), uc = BigInt(beyond) * 20_000n
+    const beyond = Math.max(0, audience.data.eligible - billing.free.sent.left), uc = BigInt(beyond) * priceUc(billing.prices.emailPerThousand) / 1000n
     return ` Estimated cost ${usd(uc)} (${number(beyond)} ${beyond === 1 ? 'recipient' : 'recipients'} beyond your free sends). Balance ${usd(total(billing.balance))}.${BigInt(billing.balance.available) < uc ? ' The campaign pauses when the balance runs out and resumes after you add credit.' : ''}`
   })() : ''
   function requestConfirmation() {

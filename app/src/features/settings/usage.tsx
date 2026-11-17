@@ -5,7 +5,7 @@ import { ErrorState, SectionHeader, Skeleton, StatusBadge } from '../../componen
 import { useApiDef, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { monthEstimate } from '../../data/usage'
-import { balanceState, total, usd } from '../../data/billing'
+import { balanceState, priceUc, total, usd } from '../../data/billing'
 import { date, number } from '../../lib/format'
 import './usage.css'
 
@@ -71,7 +71,7 @@ export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; child
           <dl>
             <div><dt>Email</dt><dd>{pricing ? `${money(pricing.perThousand)} per 1,000, sent or received` : <Skeleton width={200} height={16} />}</dd></div>
             <div><dt>Free each month</dt><dd>{pricing ? `${number(pricing.freeSentEmails)} sent, ${number(pricing.freeReceivedEmails)} received` : <Skeleton width={160} height={16} />}</dd></div>
-            <div><dt>Stored past 90 days</dt><dd>{pricing ? `${gigabytes(pricing.freeStorageBytes)} free, then $0.25 per GB-month` : <Skeleton width={220} height={16} />}</dd></div>
+            <div><dt>Stored past 90 days</dt><dd>{pricing && b ? `${gigabytes(pricing.freeStorageBytes)} free, then ${usd(priceUc(b.prices.storagePerGbMonth))} per GB-month` : <Skeleton width={220} height={16} />}</dd></div>
           </dl>
           <Link to="/legal/terms#prices">All prices</Link>
         </div>

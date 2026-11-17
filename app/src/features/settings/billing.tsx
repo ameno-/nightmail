@@ -6,7 +6,7 @@ import { Alert, Button, ConfirmDialog, ControlSkeleton, DataTable, Dialog, Dropd
 import { useApiDef, useApiQuery, useSession } from '../../data/context'
 import { queries } from '../../data/queries'
 import { ApiError, errorText } from '../../data/types'
-import { balanceState, billingApi, cardBrand, centsUsd, declineText, fullDay, monthDay, parseDollars, total, usd, type AutoRechargeInput, type BillingSummary, type LedgerEntry, type Payment } from '../../data/billing'
+import { balanceState, billingApi, cardBrand, centsUsd, declineText, fullDay, monthDay, parseDollars, priceUc, total, usd, type AutoRechargeInput, type BillingSummary, type LedgerEntry, type Payment } from '../../data/billing'
 import { useCursorPagination } from '../../lib/pagination'
 import { date } from '../../lib/format'
 import './billing.css'
@@ -288,7 +288,7 @@ function AddCredit({ open, onOpenChange, summary: b }: { open: boolean; onOpenCh
   }
   const working = busy || charge.waiting
   return <Dialog open={open} onOpenChange={next => { if (!working) onOpenChange(next) }} title="Add credit" className="billing-add"
-    description="Pays for email at $0.20 per 1,000 sent or received, plus any tax."
+    description={`Pays for email at ${usd(priceUc(b.prices.emailPerThousand))} per 1,000 sent or received, plus any tax.`}
     footer={<><Button disabled={working} onClick={() => confirming ? setConfirming(false) : onOpenChange(false)}>{confirming ? 'Back' : 'Cancel'}</Button>
       <Button variant="primary" loading={working} disabled={invalid} onClick={() => void pay()}>{confirming ? `Add ${centsUsd(amount ?? 0)}` : method === 'checkout' ? 'Continue to Stripe' : `Charge ${amount !== null && !invalid ? centsUsd(amount) : ''}`.trim()}</Button></>}>
     {confirming ? <p className="billing-add__confirm">Add <b>{centsUsd(amount ?? 0)}</b> to this workspace’s balance? {method === 'saved_card' && card ? `${cardLabel(card)} is charged now.` : 'You pay in Stripe Checkout, where any tax is added.'}</p> : <>

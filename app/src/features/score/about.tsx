@@ -4,12 +4,13 @@ import { Button, Dialog, Disclosure, ErrorState, SkeletonText } from '../../comp
 import type { SenderScore, SenderScoreFactor } from '../../data/types'
 import { closeScoreAbout, useScoreAbout } from '../../lib/score-about'
 import { number } from '../../lib/format'
-import { gradeKey } from './gauge'
+import { gradeKey } from '../../lib/standing'
+import { GRADE_BANDS } from '../../../../api/src/standing-model'
 
 const percent = (digits: number) => (value: number) => `${(value * 100).toFixed(digits)}%`
 // Engagement is the marketing unsubscribe rate.
 export const factorFormats: Record<SenderScoreFactor['key'], (value: number) => string> = { complaints: percent(2), content: percent(1), bounces: percent(1), hygiene: percent(1), auth: value => `${Math.round(value * 100)}%`, engagement: percent(2) }
-const grades = 'A+ from 95, A from 90, B from 80, C from 70, D from 60, F below 60.'
+const grades = `${GRADE_BANDS.map((band, i) => band.min ? `${band.grade} from ${band.min}` : `${band.grade} below ${GRADE_BANDS[i - 1].min}`).join(', ')}.`
 
 // What the sender score is and where each part stands: one dialog for the whole app, opened from the score card
 // (lib/score-about.ts). The status, the 14-day trend and (Hosted) the limit the score sets come first, then the six

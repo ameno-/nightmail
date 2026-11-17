@@ -1,4 +1,5 @@
 import { productName } from '../../../api/src/brand.js'
+import type { Grade, Step } from '../../../api/src/standing-model.js'
 export type RegionId = string
 export type ISODate = string
 export type Stream = 'transactional' | 'marketing'
@@ -57,11 +58,11 @@ export interface EmailPreviewRequest { source: { emailId: string } | { html: str
 export interface Email { contact?: {id:string; suppressed:boolean} | null; campaignId?: string | null; text?: string | null; eventsNextCursor?: string | null; fromName?: string; simulated?: boolean; attachments?: string[]; id: string; regionId: RegionId; to: string; from: string; subject: string; stream: Stream; status: EmailStatus; sentAt: ISODate; html: string; events: EmailEvent[] }
 export interface ChartPoint { at: ISODate; sent: number; delivered: number; bounced: number; complaints: number }
 /** GET /v1/sender-score: the workspace's reputation grade, computed by the API. */
-export type SenderGrade = 'A+' | 'A' | 'B' | 'C' | 'D' | 'F'
+export type SenderGrade = Grade
 export interface SenderScoreFactor { key: 'complaints' | 'content' | 'bounces' | 'hygiene' | 'auth' | 'engagement'; label: string; weight: number; value: number | null; score: number | null; points: number | null; source: 'measured' | 'neutral'; basis: string }
 /** Hosted only: the daily limit the score sets (rolling 24 hours, recipients) and what changes it. */
 export interface SenderLimit { daily: number | null; source: 'calibrating' | 'score' | 'override' | 'exempt'; band: number; next: { limit: number; atScore: number } | null; override: { daily: number; expiresAt: ISODate | null } | null; restore: { daily: number; until: ISODate } | null; strikeCapUntil: ISODate | null; perMinute: number; marketingPerHour: number; transactionalReserve: number }
-export type StandingStep = 'ok' | 'notice' | 'warn' | 'restrict' | 'pause'
+export type StandingStep = Step
 export interface StandingReason { code: string; metric: 'complaints' | 'bounces' | 'marketing_bounces' | 'transactional_bounces' | 'screen' | 'external'; value: number; count: number; threshold: number; minimum: number; window: '24h' | '7d' | null; step: StandingStep; message: string }
 /** Hosted only: the enforcement step, why, and what an owner may release from the dashboard. */
 export interface SenderStanding { step: StandingStep; reasons: StandingReason[]; since: ISODate; pauseKind: 'bounce' | 'full' | null; marketingHeld: boolean; marketingRelease: { percent: number; until: ISODate } | null; strikes: number; selfService: { available: boolean; action: 'release_marketing' | 'resume_sending' | null; reason: string | null; availableAt: ISODate | null }; version: number; sequence: number }
