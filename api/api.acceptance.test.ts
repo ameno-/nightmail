@@ -6092,6 +6092,50 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     });
   });
 
+  test('a duplicate Idempotency-Key sent while the first send is in flight gets 409 IDEMPOTENCY_IN_PROGRESS at once, then replays the first', async t => {
+    const db = await fixtureDatabase(t);
+    // The first send claims its key, then waits on its workspace's admission lock, which this connection holds.
+    const whileInFlight = async (wid: string, send: (timeout?: number) => Promise<Reply>) => {
+      await db.query('INSERT INTO job_schedule(workspace_id) VALUES($1) ON CONFLICT DO NOTHING', [wid]);
+      const lock = await fixtureDatabase(t), holder = (await lock.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+      await lock.query('BEGIN'); await lock.query('SELECT 1 FROM job_schedule WHERE workspace_id=$1 FOR UPDATE', [wid]);
+      let first: Promise<Reply> | undefined;
+      try {
+        first = send(10_000);
+        for (let i = 0; !(await db.query(`SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query ~* 'sending_idempotency|idempotency_claim|key_admission_decision'`, [holder])).rowCount; i++) {
+          assert.ok(i < 250, 'The first send never reached the admission lock.'); await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        // Before this change the duplicate waited on the first request's unique insert until it committed.
+        const busy = await send(2_000).catch(cause => assert.fail(`The duplicate waited for the first request: ${cause}`));
+        assert.equal(error(busy, 409, 'IDEMPOTENCY_IN_PROGRESS').retryable, true); assert.equal(busy.headers.get('retry-after'), '1');
+      } finally { await lock.query('COMMIT'); }
+      const queued = ok(await first!, 202);
+      assert.equal(ok(await send(), 202).id, queued.id, 'Once the first commits, the same key replays its receipt.');
+      return queued;
+    };
+    // Self-hosted: idempotent() claims the key and takes the admission lock in one statement.
+    const key = await keyFixture(t), selfHosted = mail(), headers = { 'Idempotency-Key': unique('in-flight') };
+    const wid = (await db.query('SELECT workspace_id FROM api_keys WHERE id=$1', [key.id])).rows[0].workspace_id;
+    await whileInFlight(wid, timeout => http('POST', '/v1/emails/send', key.secret, selfHosted, headers, timeout));
+    // Hosted: the one-statement admission claims the key in direct_admission_state.
+    const [{ createApp }, { nodeRuntime }, { digest }] = await Promise.all([import('./src/app.js'), import('./src/adapters/node.js'), import('./src/core.js')]);
+    const instance = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL, MULTI_TENANT: 'true', ENABLE_LIVE_SES: 'false' }), app = createApp();
+    const hosted = unique('ws-in-flight'), region = 'ap-south-2', acct = '123450000456', secret = `nm_${randomUUID().replaceAll('-', '')}${randomUUID().replaceAll('-', '')}`;
+    try {
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [hosted]);
+      await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$1,$2,jsonb_build_array($2::text))`, [hosted, region]);
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3) ON CONFLICT DO NOTHING`, [region, acct, `arn:aws:sns:${region}:${acct}:fixture`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,tenant_state,region,aws_account_id) VALUES($1,$1,'shared','ready','ready',$2,$3)`, [hosted, region, acct]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('in-flight.example.invalid',$1,$1,'verified')`, [hosted]);
+      await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,$1,'fixture',$2,'fixture','["send"]','[]')`, [hosted, await digest(secret)]);
+      const message = { from: 'orders@in-flight.example.invalid', to: 'customer@example.invalid', subject: 'In flight', text: 'Fixture' }, keyed = { 'Idempotency-Key': 'in-flight-hosted' };
+      await whileInFlight(hosted, timeout => http('POST', '/v1/emails/send', secret, message, keyed, timeout, PUBLIC_ORIGIN, request => app.fetch(request, instance.runtime)));
+    } finally {
+      await instance.close();
+      for (const table of ['sending_email_events', 'operation_events', 'sending_emails', 'sending_idempotency', 'api_request_budgets', 'job_schedule', 'sending_stream_depth', 'domain_claims', 'provider_connections', 'api_keys', 'ses_installation_settings']) await db.query(`DELETE FROM ${table} WHERE workspace_id=$1`, [hosted]);
+      await db.query('DELETE FROM provider_pool_regions WHERE aws_account_id=$1', [acct]); await db.query('DELETE FROM workspaces WHERE id=$1', [hosted]);
+    }
+  });
   test('sends on a simulated deployment use the provider-parity lifecycle; exact retries reuse identity and conflicts do not create mail', async t => {
     const key = await keyFixture(t);
     const liveKey = await keyFixture(t, { permissions: ['read'] });
@@ -18261,7 +18305,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const first=await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1');assert.equal(first.status,201);const again=await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1');assert.equal(again.status,201,JSON.stringify(again.body));assert.equal(again.body.id,first.body.id);assert.equal(again.headers.get('idempotent-replayed'),'true');
         error(await post('/v1/inbound/addresses',{address:'other@receive.example'},'addr-1'),409,'IDEMPOTENCY_CONFLICT');
         await db.query("UPDATE sending_idempotency SET result=NULL WHERE request_key='addr-1'");
-        error(await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1'),409,'IDEMPOTENCY_IN_PROGRESS');
+        const running=await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1');
+        assert.equal(error(running,409,'IDEMPOTENCY_IN_PROGRESS').retryable,true);assert.equal(running.headers.get('retry-after'),'1');
         await db.query("UPDATE sending_idempotency SET created_at=now()-interval '11 minutes' WHERE request_key='addr-1'");
         error(await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1'),409,'IDEMPOTENCY_OUTCOME_UNKNOWN');
         const route=await post('/v1/routing/routes',{match:'replay-route@receive.example',to:[box.id]},'route-1');assert.equal(route.status,201);assert.equal((await post('/v1/routing/routes',{match:'replay-route@receive.example',to:[box.id]},'route-1')).body.id,route.body.id);
@@ -18299,22 +18344,6 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal(again.status,201,diagnostic(again));assert.equal(again.body.id,first.id);assert.equal(again.headers.get('idempotent-replayed'),'true');
         error(await request('POST','/v1/inboxes',key.secret,{type:'sandbox',name:'another'},{'idempotency-key':'provision-1'}),409,'IDEMPOTENCY_CONFLICT');
         ok(await local('POST',`/v1/inbound/keys/${key.id}/revoke`),200);
-      });
-      // tear witness (9 steps): two requests on one key; the holder fails and releases between the other's claim and lookup -> IDEMPOTENCY_CONFLICT.
-      await t.test('create idempotency: a duplicate whose holder failed and released the key gets a retryable answer',async st=>{
-        const query=pg.Client.prototype.query as (...args:unknown[])=>Promise<unknown>;let stage=0;
-        const wire=st.mock.method(pg.Client.prototype,'query',function(this:pg.Client,...args:unknown[]){
-          const text=typeof args[0]==='string'?args[0]:(args[0] as {text?:string})?.text??'';
-          if(this!==db)return query.apply(this,args);
-          // A concurrent holder claims the key first; this request's claim then conflicts with it.
-          if(stage===0&&/^insert into "sending_idempotency"/i.test(text)){stage=1;return query.apply(this,args).then(()=>query.apply(this,args));}
-          // The holder is refused (4xx) and releases the key just before this request reads it.
-          if(stage===1&&/^select .*from "sending_idempotency"/i.test(text)){stage=2;return query.call(this,"DELETE FROM sending_idempotency WHERE request_key='released-1'").then(()=>query.apply(this,args));}
-          return query.apply(this,args);} as typeof pg.Client.prototype.query);
-        const post=()=>local('POST','/v1/lists',{name:'tear released'},'live',{'idempotency-key':'released-1'});
-        let reply:Reply;try{reply=await post();}finally{wire.mock.restore();}
-        assert.equal(stage,2);assert.equal(error(reply,409,'IDEMPOTENCY_IN_PROGRESS').retryable,true);assert.equal(reply.headers.get('retry-after'),'1');
-        assert.equal(ok(await post(),201).name,'tear released');
       });
       await t.test('routing: declarative apply previews a diff, rejects stale versions and round-trips by key', async () => {
         const read = await local('GET', '/v1/routing?format=config'),

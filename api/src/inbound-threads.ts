@@ -13,7 +13,7 @@ import { mailboxMessages as links, mailboxThreads, mailAttachments, mailMessages
 import { htmlToPlain, replyText } from './mailbox-store.js';
 import { boundedHtmlFragment } from './bounded-html.js';
 import { archiveMailboxFiles, sendFromMailbox, finishMailboxArchive, type OutgoingMessage } from './mailbox-send.js';
-import { IdempotencyHeaders, idempotent } from './sending.js';
+import { IdempotencyHeaders, idempotent, idempotentRequest } from './idempotency.js';
 import { SuppressionReason } from './core.js';
 
 const base = '/v1/inbound/threads';
@@ -291,13 +291,13 @@ export async function queueInboundThreadMessage(c: Ctx, actor: Actor, prepare: (
   let runnable = 0,fileSent=false,prepared:Omit<OutgoingMessage,'actor'>|undefined;
   const body=await c.req.json<{attachments?:unknown[]}>();
   // Never resolve the parent, recipients, or attachments on replay. The path already binds the thread.
-  const result = await idempotent(c, actor, body, async db => {
+  const result = await idempotent(c.env.db, { ...idempotentRequest(c), workspaceId: actor.workspaceId, actorKeyId: actor.keyId }, body, async db => {
     const outgoing = prepared ?? await prepare(db);
     fileSent=outgoing.mailbox.kind==='inbox';
     const queued = await sendFromMailbox(c.env, db, { ...outgoing, actor });
     runnable = queued.runnable;
     return messageView(queued.message, [outgoing.mailbox.id]);
-  },undefined,body.attachments?.length ? async()=>{prepared=await prepare(c.env.db);} : undefined);
+  },{prepare:body.attachments?.length ? async()=>{prepared=await prepare(c.env.db);} : undefined});
   if(fileSent||result.attachmentCount) await finishMailboxArchive(c.env,actor.workspaceId,result.id);
   await wakeMailboxSend(c, actor, runnable);
   return result;
