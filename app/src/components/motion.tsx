@@ -1,24 +1,15 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Check, Copy } from 'lucide-react'
-import { useToast, type Tone } from './ui'
+import { useCopy, type Tone } from './ui'
 import './motion.css'
 
 const cx = (...values: Array<string | false | null | undefined>) => values.filter(Boolean).join(' ')
 
 // A labelled copy button whose icon morphs to a check and whose label rolls Copy → Copied.
 export function CopyAction({ value, label, variant = 'secondary', size = 'md', compact = false, className }: { value: string; label: string; variant?: 'secondary' | 'ghost' | 'primary'; size?: 'sm' | 'md'; compact?: boolean; className?: string }) {
-  const [copied, setCopied] = useState(false)
-  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  const toast = useToast()
-  useEffect(() => () => clearTimeout(timer.current), [])
-  async function copy() {
-    try { await navigator.clipboard.writeText(value) } catch { toast('Couldn’t copy to clipboard.', 'error'); return }
-    setCopied(true)
-    clearTimeout(timer.current)
-    timer.current = setTimeout(() => setCopied(false), 1800)
-  }
+  const { copy, copied } = useCopy()
   return <>
-    <button type="button" className={cx('ui-button', `ui-button--${variant}`, `ui-button--${size}`, 'copy-action', compact && 'copy-action--compact', className)} data-copied={copied || undefined} aria-label={label} title={label} onClick={() => void copy()}>
+    <button type="button" className={cx('ui-button', `ui-button--${variant}`, `ui-button--${size}`, 'copy-action', compact && 'copy-action--compact', className)} data-copied={copied || undefined} aria-label={label} title={label} onClick={() => void copy(value)}>
       <span className="copy-action__icon" aria-hidden="true"><Copy size={14} /><Check size={14} strokeWidth={2.5} /></span>
       {!compact && <span className="copy-action__text" aria-hidden="true">Cop<span className="copy-action__roll"><span>y</span><span>ied</span></span></span>}
     </button>

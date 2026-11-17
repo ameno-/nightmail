@@ -6,6 +6,8 @@ export function date(value: string | null | undefined, options?: Intl.DateTimeFo
   if (Number.isNaN(parsed.getTime())) return '—'
   return new Intl.DateTimeFormat('en-US', options ?? { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }).format(parsed)
 }
+/** A file or mailbox size in binary units: 512 B, 1.5 KB, 12.0 MB. */
+export const fileSize = (bytes: number) => bytes < 1024 ? `${number(bytes)} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
 export const time = (value: string) => date(value, { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })
 export function shortDateTime(value: string) {
   const sameYear = new Date(value).getUTCFullYear() === new Date().getUTCFullYear()

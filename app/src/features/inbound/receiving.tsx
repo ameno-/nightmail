@@ -1,5 +1,5 @@
 // Receiving: Routes, Rituals and Endpoints, the words the API uses. One read (getInboundOverview) per screen.
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { Check } from 'lucide-react'
@@ -8,7 +8,7 @@ import { useWorkspaceAccess } from '../../data/context'
 import { request } from '../../data/live'
 import { errorText } from '../../data/types'
 import { number } from '../../lib/format'
-import { useCursorPagination } from '../../lib/pagination'
+import { useCursorPagination, useSearchDraft } from '../../lib/pagination'
 import { CreateAddressDialog } from './addresses'
 import { concepts, kindNote, kinds, type KindFilter } from './concepts'
 import { NewInboxDialog } from './inboxes'
@@ -72,12 +72,7 @@ function GettingStarted({ overview, onCreate }: { overview: Overview; onCreate: 
 function RoutesTab({ overview, fetching, filters, setFilter, page, onPage, onCreate, onEditRoute }: { overview: Overview; fetching: boolean; filters: { kind: KindFilter; domain: string; q: string }; setFilter: (patch: Partial<{ kind: KindFilter; domain: string; q: string }>) => void; page: number; onPage: (next: number) => void; onCreate: () => void; onEditRoute: (r: RouteEntry) => void }) {
   const { canAdminister } = useWorkspaceAccess()
   const [newInbox, setNewInbox] = useState(false)
-  // The box keeps its own text and writes q to the URL (and the overview read) once typing pauses, as Logs does.
-  const [draft, setDraft] = useState(filters.q)
-  const written = useRef(filters.q), typing = useRef<number | undefined>(undefined)
-  useEffect(() => { if (filters.q !== written.current) { window.clearTimeout(typing.current); written.current = filters.q; setDraft(filters.q) } }, [filters.q])
-  useEffect(() => () => window.clearTimeout(typing.current), [])
-  const type = (value: string) => { setDraft(value); window.clearTimeout(typing.current); typing.current = window.setTimeout(() => { written.current = value; setFilter({ q: value }) }, 250) }
+  const [draft, type] = useSearchDraft(filters.q, value => setFilter({ q: value }))
   const hosts = receivingDomains(overview.domains)
   const total = kindCount(overview.counts, 'all')
   if (!overview.manage && !total && !filters.q) return <EmptyState title="No addresses to show" />

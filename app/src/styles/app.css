@@ -158,6 +158,13 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 .private-address__rest { flex: 1 1 0; min-width: 0; filter: blur(.31em); pointer-events: none; }
 .private-address__rest::before { content: 'mnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetax'; display: block; overflow: hidden; }
 .private-address[tabindex] { border-radius: 2px; cursor: default; }
+/* A sender (components/PrivateAddress.tsx): the name, then the address with its brackets, which wraps to its own line as one piece. */
+.email-sender { display: flex; flex-wrap: wrap; column-gap: .3em; }
+.email-sender > span { min-width: 0; max-width: 100%; }
+.email-sender__address { display: flex; }
+.email-sender__address > .private-address { min-width: 0; }
+.email-sender .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.email-sender .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
 /* Direction: a quiet mono tag, Out for sent mail and In for received mail. */
 .log-direction { font-family: var(--font-mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--color-muted); }
 .log-direction[data-direction='received'] { color: var(--color-text); }

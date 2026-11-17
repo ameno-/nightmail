@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { Share } from 'lucide-react'
-import { Button, ConfirmDialog, CopyButton, SecretCode, DataTable, Dialog, Disclosure, DropdownMenu, EmptyState, ErrorState, Field, Input, SectionHeader, Select, useToast, fieldError, MutationError } from '../../components/ui'
+import { Button, ConfirmDialog, CopyButton, SecretCode, DataTable, Dialog, Disclosure, DropdownMenu, EmptyState, ErrorState, Field, Input, SectionHeader, Select, useCopy, useToast, fieldError, MutationError } from '../../components/ui'
 import { useApiMutation, useApiDef, useSession } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { WorkspaceInvitation, WorkspaceMember, WorkspaceRole } from '../../data/types'
@@ -14,9 +14,6 @@ import { productName } from '../../../../api/src/brand'
 const canShare = () => typeof navigator.share === 'function'
 async function shareLink(url: string, toast: ReturnType<typeof useToast>) {
   try { await navigator.share({ title: `Join the workspace on ${productName}`, url }) } catch (error) { if (!(error instanceof DOMException && error.name === 'AbortError')) toast('Couldn’t open sharing.', 'error') }
-}
-async function copyLink(url: string, toast: ReturnType<typeof useToast>) {
-  try { await navigator.clipboard.writeText(url); toast('Invitation link copied', 'success') } catch { toast('Couldn’t copy to clipboard.', 'error') }
 }
 const roleOptions = (owner: boolean) => (owner ? ['owner', 'admin', 'member'] as const : ['admin', 'member'] as const).map(role => ({ value: role, label: roleLabel[role] }))
 // One line per role, behind "What each role can do" where a role is chosen for someone new (the invitation); a change
@@ -73,7 +70,7 @@ export function Members({ owner, onInvite }: { owner: boolean; onInvite: () => v
 }
 
 export function Invitations({ owner }: { owner: boolean }) {
-  const toast = useToast()
+  const toast = useToast(), { copy } = useCopy()
   const invitations = useApiDef(queries.workspaceInvitations())
   const revoke = useApiMutation((_api, id: string) => workspaceApi.revokeInvitation(id), 'Invitation revoked')
   const [revoking, setRevoking] = useState<WorkspaceInvitation | null>(null)
@@ -86,7 +83,7 @@ export function Invitations({ owner }: { owner: boolean }) {
       { ...inviteActions, render: invitation => <span className="cluster settings-row-actions"><CopyButton value={invitation.acceptUrl} label="Copy invitation link" />{(owner || invitation.role !== 'owner') && <Button variant="danger" onClick={() => setRevoking(invitation)}>Revoke</Button>}</span>,
         cardRender: invitation => <DropdownMenu label="Actions for this invitation" title="Invitation" items={[
           ...canShare() ? [{ label: 'Share invitation link', onSelect: () => void shareLink(invitation.acceptUrl, toast) }] : [],
-          { label: 'Copy invitation link', onSelect: () => void copyLink(invitation.acceptUrl, toast) },
+          { label: 'Copy invitation link', onSelect: () => void copy(invitation.acceptUrl, 'Invitation link copied') },
           ...owner || invitation.role !== 'owner' ? [{ label: 'Revoke invitation', destructive: true, onSelect: () => setRevoking(invitation) }] : [],
         ]} /> },
     ]} />}

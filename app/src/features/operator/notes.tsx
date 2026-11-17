@@ -9,6 +9,7 @@ import { relativeTime, shortDateTime } from '../../lib/format'
 import { setUiNotesMode, useUiNotesMode } from '../../lib/ui-notes-mode'
 import { NotesToolbar, noteColumnDefs, useOperatorTabs } from './skeletons'
 import { errorText } from '../../data/types'
+import { useDebounced } from '../../lib/pagination'
 
 // Every UI note across the dashboard (staff's ⌘-click notes, features/ui-notes): filter by status, type and text, open
 // one for its screenshot and everything captured with it, change status in bulk, and make the key an agent uses to fetch
@@ -18,11 +19,6 @@ const def = (key: string) => noteColumnDefs.find(column => column.key === key)!
 const kindLabel = (kind: string) => kind[0]!.toUpperCase() + kind.slice(1)
 const statusTone: Record<NoteStatus, Tone> = { open: 'warning', in_progress: 'info', fixed: 'success', wontfix: 'neutral' }
 const Status = ({ status }: { status: NoteStatus }) => <StatusBadge status={statusLabel[status]} tone={statusTone[status]} />
-function useDebounced<T>(value: T, ms = 250) {
-  const [debounced, setDebounced] = useState(value)
-  useEffect(() => { const timer = setTimeout(() => setDebounced(value), ms); return () => clearTimeout(timer) }, [value, ms])
-  return debounced
-}
 type NotesPage = Awaited<ReturnType<typeof uiNotesApi.list>>
 const Thumb = ({ note }: { note: UiNote }) => <span className="op-shot">{note.screenshot && <img src={note.screenshot.url} alt="" loading="lazy" decoding="async" />}</span>
 

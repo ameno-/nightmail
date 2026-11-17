@@ -7,9 +7,8 @@ import type { Email, EmailEvent, EmailEventDetail } from '../../data/types'
 import { Alert, Button, CopyButton, ErrorState, PageHeader, Sheet, StatusBadge, Tooltip, type Tone } from '../../components/ui'
 import { useEmailDocument } from '../../components/EmailPreview'
 import { EmailViews, SendabilityChip, SendabilityDetails, SendabilityTitle, SendabilityToggle, useSendability, type InsightSource } from '../../components/EmailInsight'
-import { AddressList, NameText, PrivateAddress } from '../../components/PrivateAddress'
+import { AddressList, Sender } from '../../components/PrivateAddress'
 import { AddressText } from '../../components/AddressText'
-import { nameParts } from '../../lib/private-address'
 import { date, label, shortDateTime, time } from '../../lib/format'
 import { EmailDetailSkeleton } from './skeletons'
 import { useDetailLayout } from './detail-layout'
@@ -30,11 +29,6 @@ export function EmailDetailPage() {
   return query.data ? <EmailDetail email={query.data} /> : null
 }
 
-// "Name <address>": the name wraps as one piece and the address, with its brackets, stays together on the next line when it doesn't fit.
-export function Sender({ name, address }: { name?: string | null; address: string }) {
-  const parts = nameParts(name, address)
-  return parts ? <span className="email-sender"><span><NameText parts={parts} /></span><span className="email-sender__address">&lt;<PrivateAddress value={address} />&gt;</span></span> : <PrivateAddress value={address} />
-}
 
 function EmailDetail({ email }: { email: Email }) {
   const { mode, roomy } = useDetailLayout()
