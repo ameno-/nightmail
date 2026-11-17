@@ -20,13 +20,6 @@
 .settings-copy-cell > .cluster {
   flex-shrink: 0;
 }
-  display: flex;
-  align-items: center;
-  gap: 24px;
-  padding-block: 8px;
-}
-  flex: 1;
-}
 .settings-ses { font-family: var(--font-body); }
 .settings-discovery-section { gap: var(--space-16); min-width: 0; }
 .settings-discovery-section + .settings-discovery-section { border-top: 1px solid var(--color-border); padding-top: var(--space-20); }

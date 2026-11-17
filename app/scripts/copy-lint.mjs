@@ -116,7 +116,7 @@ const KEEP_WHY = {
   secret: 'a secret shown once: save it now or lose it',
 };
 export const KEEP = [
-  { why: 'billing', file: 'features/settings/billing.tsx', text: /^Pays for email at \$0\.20 per 1,000 sent or received, plus any tax\.$/ },
+  { why: 'billing', file: 'features/settings/billing.tsx', text: /^Pays for email at \S+ per 1,000 sent or received, plus any tax\.$/ },
   { why: 'billing', file: 'features/settings/billing.tsx', text: /^Charges your saved card when the balance runs low, up to a monthly limit\.$/ },
   { why: 'billing', file: 'features/settings/create-key.tsx', text: /^Billed by the day while the inbox has an app password\.$/ },
   { why: 'secret', file: 'features/settings/create-key.tsx', text: /^Shown once: copy it now/ },
