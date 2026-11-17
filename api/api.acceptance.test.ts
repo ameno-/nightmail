@@ -3268,13 +3268,53 @@ describe('Hosted MCP OAuth and tools', () => {
     return output;
   }
 
+  test('an MCP session is tied to the tools its own credential is listed, not the whole catalog', async t => {
+    const db = await fixtureDatabase(t);
+    const manage = await keyFixture(t), read = await keyFixture(t, { permissions: ['read'] });
+    const init = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } } };
+    const start = async (key: string, path: string) => { const reply = await http('POST', path, key, init, rpcHeaders); assert.equal(reply.status, 200, diagnostic(reply)); return reply.headers.get('mcp-session-id')!; };
+    const list = (key: string, session: string, path: string) => http('POST', path, key, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, { ...rpcHeaders, 'mcp-session-id': session });
+    const fingerprint = (tools: Json) => createHash('sha256').update(JSON.stringify(tools)).digest('hex').slice(0, 16);
+    for (const path of ['/mcp?codemode=true', '/mcp']) {
+      const readSession = await start(read.secret, path), manageSession = await start(manage.secret, path);
+      // The session names exactly the listing this key is shown, so a release that changes only tools hidden from it
+      // (here the manage-only operations) leaves it valid, and one that changes a tool it lists ends it.
+      const readTools = ok(await list(read.secret, readSession, path)).result.tools;
+      assert.equal(readSession.split('.')[0], fingerprint(readTools));
+      assert.equal(manageSession.split('.')[0], fingerprint(ok(await list(manage.secret, manageSession, path)).result.tools));
+      assert.notEqual(readSession.split('.')[0], manageSession.split('.')[0]);
+      const stale = await list(read.secret, manageSession, path);
+      assert.equal(stale.status, 404, diagnostic(stale));
+    }
+    // The credential's own access changes mid-session: its next request is told to start over and list again.
+    const session = await start(manage.secret, '/mcp?codemode=true');
+    await db.query(`UPDATE api_keys SET permissions='["read"]'::jsonb WHERE id=$1`, [manage.id]);
+    const changed = await list(manage.secret, session, '/mcp?codemode=true');
+    assert.equal(changed.status, 404, diagnostic(changed));
+    assert.equal((changed.body as Json).error.code, -32001);
+    assert.equal(ok(await list(manage.secret, await start(manage.secret, '/mcp?codemode=true'), '/mcp?codemode=true')).result.tools.length, ok(await list(read.secret, await start(read.secret, '/mcp?codemode=true'), '/mcp?codemode=true')).result.tools.length);
+  });
+
   test('hosted MCP advertises both catalogs and composes campaign, contact, email and temporary-token workflows', async t => {
     const db = await fixtureDatabase(t);
     const { token, consentId } = await oauthGrant(t, db);
     const initialized = await rpc(token, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } });
     assert.equal(initialized.protocolVersion, '2025-11-25');
     assert.equal(initialized.serverInfo.name, 'nightmail');
+    // A legacy session carries the catalog it started on: same catalog, it keeps working; a release that changed the
+    // tools answers it 404, which tells the client to initialize again and list the new tools.
+    const init = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } } };
+    const sessionId = (await http('POST', '/mcp?codemode=true', token, init, rpcHeaders)).headers.get('mcp-session-id');
+    assert.match(sessionId ?? '', /^[0-9a-f]{16}\.[0-9a-f]{32}$/);
+    const listed = (session: string) => http('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, { ...rpcHeaders, 'mcp-session-id': session });
+    const current = await listed(sessionId!);
+    assert.equal(current.status, 200, diagnostic(current));
+    const earlierCatalog = sessionId!.startsWith('0') ? '1' + sessionId!.slice(1) : '0' + sessionId!.slice(1);
+    const ended = await listed(earlierCatalog);
+    assert.equal(ended.status, 404, diagnostic(ended));
+    assert.equal((ended.body as Json).error.code, -32001);
     const catalog = await rpc(token, 'tools/list');
+    assert.deepEqual(ok(current).result.tools, catalog.tools);
     const defaults=ok(await http('POST','/mcp',token,{jsonrpc:'2.0',id:17,method:'tools/list',params:{}},rpcHeaders)).result.tools;
     // OpenCode adds ?codemode=false to a remote URL: one tool per operation, the same catalog as the legacy ?codemode=true.
     assert.deepEqual((await rpc(token, 'tools/list', {}, '/mcp?codemode=false')).tools, catalog.tools);
