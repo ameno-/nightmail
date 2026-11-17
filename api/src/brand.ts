@@ -47,6 +47,8 @@ export const addresses = {
  * in, and the server name MCP client configs save. */
 export const sdkPackage = '@nightmail/sdk';
 export const apiKeyEnv = 'NIGHTMAIL_API_KEY';
+/** Where an agent's config reads a key limited to an inbox or addresses from. */
+export const inboxKeyEnv = 'NIGHTMAIL_INBOX_KEY';
 export const mcpServerName = 'nightmail';
 /** /health names the service by its slug. */
 export const healthService = productSlug;

@@ -375,11 +375,30 @@ test('review PR #84 P3: an inbox key never goes on a command line; with a key ev
     const snippet = mcpSnippet(client, url, { bearer });
     assert.doesNotMatch(snippet, /^\s*(?:claude|opencode|npx|curl)\b/, `${client} key setup must not be a command`);
     assert.equal(JSON.stringify(JSON.parse(snippet)).includes(`Bearer ${bearer}`), true);
-    for (const step of mcpClientSteps(client, 'key')) assert.doesNotMatch(step, /\bterminal\b|\brun this\b/i, `${client}: ${step}`);
+    for (const step of mcpClientSteps(client, { bearer })) assert.doesNotMatch(step, /\bterminal\b|\brun this\b/i, `${client}: ${step}`);
   }
   assert.equal(JSON.parse(mcpSnippet('claude', url, { bearer })).mcpServers.nightmail.headers.Authorization, `Bearer ${bearer}`);
   assert.equal(mcpSnippet('claude', url, {}), claudeAddCommand(url));
   assert.doesNotMatch(claudeAddCommand(url), /Bearer|Authorization/);
+});
+// PR #351 review: the dashboard's setup for a key it shows once (any API key, including an unrestricted manage key) must
+// never put the key in a config a project can commit. Those read it from an environment variable the steps set; only
+// Claude Code's ~/.claude.json, private to its user, holds the key itself.
+test('a key shown once is set up through an environment variable: no project-scoped config holds it', async () => {
+  const { mcpClients, mcpClientSteps, mcpSnippet } = await import('./src/mcp-clients.js'), { apiKeyEnv } = await import('./src/brand.js');
+  const url = 'https://bane.mx/mcp', key = 'nm_' + 'c'.repeat(64), auth = { key, env: apiKeyEnv };
+  const reference = { opencode: `{env:${apiKeyEnv}}`, cursor: `\${env:${apiKeyEnv}}`, generic: `\${${apiKeyEnv}}` } as const;
+  for (const client of mcpClients) {
+    const snippet = mcpSnippet(client, url, auth), steps = mcpClientSteps(client, auth);
+    assert.doesNotMatch(snippet, /^\s*(?:claude|opencode|npx|curl)\b/, `${client} key setup must not be a command`);
+    if (client === 'claude') {
+      assert.ok(snippet.includes(`Bearer ${key}`) && steps[0]!.includes('~/.claude.json') && !steps.some(step => /project/.test(step) && !/out of your project/.test(step)), `${client}: ${steps}`);
+      continue;
+    }
+    assert.ok(!snippet.includes(key) && !snippet.includes(key.slice(3, 20)), `${client} config holds the key: ${snippet}`);
+    assert.equal(JSON.stringify(JSON.parse(snippet)).includes(`Bearer ${reference[client]}`), true, `${client}: ${snippet}`);
+    assert.ok(steps[0]!.startsWith(`Set ${apiKeyEnv} to the key`) && steps.every(step => !step.includes(key)), `${client}: ${steps}`);
+  }
 });
 test('S3 fixture: object round trips and reserved part headers keep the service available',async t=>{
   const {createRequire}=await import('node:module'),{spawn}=await import('node:child_process'),{once}=await import('node:events');
@@ -3681,13 +3700,14 @@ describe('Hosted MCP OAuth and tools', () => {
       const failure = (result: Json) => [result.isError, result.structuredContent?.error?.code, result._meta?.status];
       const key = async (body: Json) => { const made = ok(await request('POST', '/v1/api-keys', MANAGER, { name: unique('mcp-key'), ...body }), 201); secrets.add(made.secret); return made as Json; };
       const full = await key({ permissions: ['read', 'send', 'manage'] }), reader = await key({ permissions: ['read'] }), sender = await key({ permissions: ['read', 'send'], domains: ['example.com'] });
+      const domainManager = await key({ permissions: ['read', 'send', 'manage'], domains: ['example.com'] });
       const grant = await oauthGrant(t, db, writableScope, request);
       const mint = async (permissions: string[]) => {
         const made = await call(grant.token, 'createAgentToken', { confirm: true, body: { permissions, expiresInSeconds: 600, domains: [], purpose: unique('mcp-agent-token') } });
         assert.equal(made.isError, false, redact(made)); secrets.add(made.structuredContent.token); return made.structuredContent as Json;
       };
       const agent = await mint(['read', 'send', 'manage']), readAgent = await mint(['read']);
-      const credentials: [string, string][] = [['manage key', full.secret], ['read key', reader.secret], ['sender-domain key', sender.secret], ['manage agent token', agent.token], ['read agent token', readAgent.token]];
+      const credentials: [string, string][] = [['manage key', full.secret], ['read key', reader.secret], ['sender-domain key', sender.secret], ['sender-domain manage key', domainManager.secret], ['manage agent token', agent.token], ['read agent token', readAgent.token]];
 
       // Listings: the key's workspace only (no workspaces tool, no workspace argument), and every read is listed exactly when
       // REST, asked with the same credential, does not refuse it.
@@ -3718,6 +3738,7 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.deepEqual(['createInbox', 'createApiKey', 'createContactList', 'sendEmail', 'applyRouting', 'createAgentToken'].map(op => has('manage key', op)), [true, true, true, true, true, false]);
       assert.deepEqual(['createInbox', 'createApiKey', 'createContactList', 'sendEmail', 'getRouting', 'listContacts'].map(op => has('read key', op)), [false, false, false, false, false, true]);
       assert.deepEqual(['listContacts', 'createContactList', 'sendEmail', 'listInboxes', 'listWebhooks'].map(op => has('sender-domain key', op)), [false, false, true, false, false]);
+      assert.deepEqual(['listAppPasswords', 'listInboxes', 'listApiKeys', 'listDomains', 'sendEmail'].map(op => has('sender-domain manage key', op)), [false, false, false, true, true]);
       assert.deepEqual(['createInbox', 'createContactList', 'createApiKey', 'listApiKeys', 'createAgentToken', 'createWebhook', 'applyRouting', 'getRouting'].map(op => has('manage agent token', op)), [true, true, false, false, false, false, false, true]);
 
       // Calls go through REST as the credential, and the audit trail names it.

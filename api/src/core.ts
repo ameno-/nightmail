@@ -308,7 +308,7 @@ export const ownerRoute = (method: string, path: string) => {
 };
 /** UNRESTRICTED_KEY_REQUIRED (app.ts): a sender-domain credential is refused these workspace-wide areas. Audience records
  *  have no sender domain, and a campaign's audience and delivery act on the workspace audience (a draft stays editable). */
-export const unrestrictedRoute = (path: string) => /^\/v1\/(?:contacts|lists|segments|contact-imports|audience-query|settings|webhooks|metrics|sender-score|usage|billing|regions)(?:\/|$)/.test(path)
+export const unrestrictedRoute = (path: string) => /^\/v1\/(?:contacts|lists|segments|contact-imports|audience-query|settings|webhooks|metrics|sender-score|usage|billing|regions|app-passwords)(?:\/|$)/.test(path)
   || !['state', 'preview', 'preview-image', 'archive', undefined].includes(/^\/v1\/campaigns\/[^/]+\/([^/]+)$/.exec(path)?.[1]);
 // The routes of the guards above that handlers call, for the MCP listing (each verified against REST's answers for reads).
 /** receivingAdmin's routes: routing, rituals, endpoints and inbox connections. */

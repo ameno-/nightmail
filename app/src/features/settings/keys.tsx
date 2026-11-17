@@ -15,7 +15,7 @@ import { KeysGuide } from './keys-guide'
 import './api-keys.css'
 import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
 import { ConnectAgentButton, ConnectAgentDialog, McpKeySetup } from '../docs/connect-agent'
-import { productName } from '../../../../api/src/brand'
+import { apiKeyEnv, productName } from '../../../../api/src/brand'
 
 // One table for the three credential types: API keys, agent tokens (a connected agent, with the short-lived tokens it
 // made nested under it) and app passwords.
@@ -167,7 +167,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
     </div>
     {open && <CreateKeyDialog open onOpenChange={setOpen} initial={initial} onCreated={setSecret} onConnectAgent={() => setConnecting(true)} />}
     <ConnectAgentDialog open={connecting} onOpenChange={setConnecting} onCreateKey={() => setOpen(true)} />
-    <SecretDialog secret={secret?.secret ?? null} title={secret?.title ?? 'Key created'} description={secret?.description} onClose={() => setSecret(null)}>{secret?.sendExample && <KeySendExample apiKey={secret.secret} />}{secret?.agent && <McpKeySetup bearer={secret.secret} />}</SecretDialog>
+    <SecretDialog secret={secret?.secret ?? null} title={secret?.title ?? 'Key created'} description={secret?.description} onClose={() => setSecret(null)}>{secret?.sendExample && <KeySendExample apiKey={secret.secret} />}{secret?.agent && <McpKeySetup secret={secret.secret} env={apiKeyEnv} />}</SecretDialog>
     <KeyDetails row={viewing} fields={viewing ? details(viewing) : []} onClose={() => setViewing(null)} onRevoke={row => { setViewing(null); setRevoking(row) }} />
     <RevokeDialog row={revoking} onClose={() => setRevoking(null)} pending={revokeKey.isPending || revokeAgent.isPending || revokeToken.isPending || revokePassword.isPending}
       onConfirm={async row => {

@@ -13,7 +13,7 @@ import { nameParts } from '../../lib/private-address'
 import '../settings/settings.css'
 import './inbound.css'
 import { PrivateAddress, Sender } from '../../components/PrivateAddress'
-import { productName } from '../../../../api/src/brand'
+import { inboxKeyEnv, productName } from '../../../../api/src/brand'
 
 const route = '/receiving/inboxes'
 const DAY = 86_400_000
@@ -65,7 +65,7 @@ export function NewInboxDialog({ open, onOpenChange }: { open: boolean; onOpenCh
         <dl className="settings-facts"><div><dt>Receives until</dt><dd>{date(created.expiresAt)}</dd></div></dl>
         {created.credential && <>
           <SecretField label="API key" value={created.credential.secret} copyLabel="Copy API key" />
-          <McpKeySetup bearer={created.credential.secret} />
+          <McpKeySetup secret={created.credential.secret} env={inboxKeyEnv} />
         </>}
       </div>
     </Dialog>
