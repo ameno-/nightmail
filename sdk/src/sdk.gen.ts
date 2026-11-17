@@ -4372,6 +4372,8 @@ export const updateInboundSubdomain = <ThrowOnError extends boolean = false>(opt
  * List receivable addresses
  *
  * An address key sees only addresses it can access.
+ *
+ * @deprecated
  */
 export const listInboundAddresses = <ThrowOnError extends boolean = false>(options?: Options<ListInboundAddressesData, ThrowOnError>): RequestResult<ListInboundAddressesResponses, ListInboundAddressesErrors, ThrowOnError> => (options?.client ?? client).get<ListInboundAddressesResponses, ListInboundAddressesErrors, ThrowOnError>({
     security: [
@@ -4395,6 +4397,8 @@ export const listInboundAddresses = <ThrowOnError extends boolean = false>(optio
  * Create a receivable address
  *
  * Admin only. The domain must be verified for this workspace; mail arrives once its receiving MX record is active. Permanent addresses claim earlier unrouted mail for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.
+ *
+ * @deprecated
  */
 export const createInboundAddress = <ThrowOnError extends boolean = false>(options: Options<CreateInboundAddressData, ThrowOnError>): RequestResult<CreateInboundAddressResponses, CreateInboundAddressErrors, ThrowOnError> => (options.client ?? client).post<CreateInboundAddressResponses, CreateInboundAddressErrors, ThrowOnError>({
     security: [
@@ -4420,6 +4424,8 @@ export const createInboundAddress = <ThrowOnError extends boolean = false>(optio
 
 /**
  * Admin only. Releases this address and removes its per-address state. Stored messages are kept; future mail follows normal routing. If a route delivers to this inbox, pass detach=true to remove it from those routes in the same change.
+ *
+ * @deprecated
  */
 export const deleteInboundAddress = <ThrowOnError extends boolean = false>(options: Options<DeleteInboundAddressData, ThrowOnError>): RequestResult<DeleteInboundAddressResponses, DeleteInboundAddressErrors, ThrowOnError> => (options.client ?? client).delete<DeleteInboundAddressResponses, DeleteInboundAddressErrors, ThrowOnError>({
     security: [
@@ -4441,6 +4447,8 @@ export const deleteInboundAddress = <ThrowOnError extends boolean = false>(optio
 
 /**
  * Read a receivable address
+ *
+ * @deprecated
  */
 export const getInboundAddress = <ThrowOnError extends boolean = false>(options: Options<GetInboundAddressData, ThrowOnError>): RequestResult<GetInboundAddressResponses, GetInboundAddressErrors, ThrowOnError> => (options.client ?? client).get<GetInboundAddressResponses, GetInboundAddressErrors, ThrowOnError>({
     security: [
@@ -4462,6 +4470,8 @@ export const getInboundAddress = <ThrowOnError extends boolean = false>(options:
 
 /**
  * Admin only. Only supplied fields change. The address, public sender and expiry are immutable.
+ *
+ * @deprecated
  */
 export const updateInboundAddress = <ThrowOnError extends boolean = false>(options: Options<UpdateInboundAddressData, ThrowOnError>): RequestResult<UpdateInboundAddressResponses, UpdateInboundAddressErrors, ThrowOnError> => (options.client ?? client).patch<UpdateInboundAddressResponses, UpdateInboundAddressErrors, ThrowOnError>({
     security: [
