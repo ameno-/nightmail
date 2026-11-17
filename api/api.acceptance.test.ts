@@ -1568,7 +1568,12 @@ test('mail gateway: SMTP queues dispatchable content with a single database conn
     const {rows:[sent]}=await db.query('SELECT raw_key FROM mail_messages WHERE workspace_id=$1 AND sending_email_id=$2',[wid,body.id]);
     const copy=Buffer.from((await rt.storage.get(sent.raw_key))!.body).toString('latin1');
     assert.match(copy,/^Subject: blind\r$/m);
-    assert.doesNotMatch(copy,/bcc|hidden@|folded@|resent@/i);
+    // The headers, unfolded, name no blind-recipient field, and no hidden address is anywhere in the copy. Not a bare
+    // /bcc/ over the whole copy: its Message-ID's random hex can end in …0bcc.
+    const end=copy.indexOf('\r\n\r\n');assert.ok(end>0,'header block');
+    const fields=copy.slice(0,end).replace(/\r\n[ \t]+/g,' ').split('\r\n').map((line:string)=>line.slice(0,line.indexOf(':')).trim().toLowerCase());
+    assert.deepEqual(fields.filter((name:string)=>name==='bcc'||name==='resent-bcc'),[]);
+    for(const hidden of ['hidden@example.invalid','folded@example.invalid','resent@example.invalid'])assert.ok(!copy.toLowerCase().includes(hidden),hidden);
   });
   const usage=()=>db.query('SELECT messages,bytes FROM inbox_state WHERE inbox_id=$1',[bid]).then(r=>r.rows[0]);
   const before=await usage();
@@ -5454,6 +5459,9 @@ describe('Hosted MCP OAuth and tools', () => {
   });
 
   test('Support request logs: Workers Logs lines of the grant’s workspaces only, allow-listed, grouped, weighted, and unavailable without Cloudflare', async t => {
+    // One clock for the whole test, as Postgres's now() is one for its transaction: the default window ends at the next
+    // whole minute and keys the 60-second cache, so two reads either side of a minute boundary missed it (dev, Nov 17).
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start' }, observability: undefined });
       const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
@@ -10058,11 +10066,15 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     const token = url.pathname.split('/').at(-1)!;
     assert.ok(content.html.includes(token) && content.text.includes(token), 'Manage-authorized content retrieval must preserve the usable HTML and text capability.');
     const redacted = ok(await http('GET', `/v1/emails/${source.id}/content`, reader.secret));
+    // The runner dispatches this message meanwhile, writing its events: compare detail and listEmailEvents once it has
+    // settled, or a dispatch between the two reads makes them differ (dev, Nov 17: detail [] and two listed events).
+    await poll(`/v1/emails/${source.id}`, reader.secret, body => body.status === 'delivered');
     const detail=ok(await http('GET',`/v1/emails/${source.id}/detail`,reader.secret));
     assert.deepEqual(detail.contact,{id:contact.id,suppressed:false});
     assert.deepEqual(detail.content,{html:redacted.html,text:redacted.text,attachments:redacted.attachments});
     assert.equal(detail.email.id,source.id); assert.ok(!JSON.stringify(detail).includes(token));
     const listedEvents=page(await http('GET',`/v1/emails/${source.id}/events`,reader.secret)) as {id:string}[];
+    assert.ok(listedEvents.length > 0, 'A delivered message has events.');
     assert.deepEqual((detail.events.data as {id:string}[]).map(e=>e.id),listedEvents.map(e=>e.id),'Detail must return the same events as listEmailEvents.');
     assert.equal(redacted.raw, null, 'Read-only access must not expose an unredacted MIME alternative.');
     assert.ok(!JSON.stringify(redacted).includes(token), 'Read-only content must not disclose the valid unsubscribe token anywhere in its response.');
