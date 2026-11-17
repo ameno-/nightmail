@@ -253,14 +253,16 @@ const keyView = (key: typeof apiKeys.$inferSelect) => ({ id: key.id, name: key.n
 const addressKeys = () => wrapModuleLoad(() => import('./address-keys.js'));
 export const inactiveKey = () => new ApiError(409, 'KEY_INACTIVE', 'This key was revoked or has ended, so it can\'t be changed. Create a new key instead.');
 /**
- * updateApiKey's rule for an MCP approval, and for a key it created: it changes only the keys that approval created.
- * createApiKey gives an approval only keys that end with it, and any other key outlives it. Taking an existing key over
- * isn't the answer either: removing the approval would then revoke a key someone else made.
+ * updateApiKey's rule for an API key an MCP approval created, editing as the caller: it changes only keys that same
+ * approval created. A person's own MCP sign-in has no such limit: an agent signed in as a person changes any key that
+ * person could change in the dashboard, with their role there (checked again as the change is written, holdKeyAdmin).
+ * An edit never moves a key's tie either way: a key an approval created still ends with that approval, and a key the
+ * editing approval didn't create doesn't become tied to it.
  */
 export async function approvalMadeKey(tx: DbExecutor, a: Actor, kind: 'api_key' | 'key', keyId: string) {
-  if (!a.grantId) return;
+  if (!a.grantId || a.credential !== 'apiKey') return;
   const { rows } = await tx.execute(sql`SELECT 1 FROM mail_grant_objects WHERE grant_id = ${a.grantId} AND workspace_id = ${a.workspaceId} AND kind = ${kind} AND resource = ${keyId}`);
-  if (!rows.length) throw new ApiError(403, 'PERMISSION_DENIED', 'An MCP approval changes only the keys it created. Change this key in the dashboard or with a key that has manage permission.');
+  if (!rows.length) throw new ApiError(403, 'PERMISSION_DENIED', 'A key an MCP approval created changes only the keys that approval created. Change this key in the dashboard, over MCP as yourself, or with a key that has manage permission.');
 }
 /**
  * Key administration, checked again inside the transaction that writes a key: manageKeys judged the caller as the request
@@ -403,7 +405,7 @@ export function registerAuth(app: App) {
     return c.json({ id: key.id, revoked: true as const }, 200);
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/api-keys/{id}', operationId: 'updateApiKey', tags: ['ApiKeys'], security,
-    description: 'Changes what a key can reach and keeps its secret, so nothing has to be redeployed. A workspace key takes name, permissions and domains. A key for addresses takes name and access: add or remove addresses (addAddressIds, removeAddressIds), replace them (addressIds) or change access.mail. An inbox key takes name and access.mail. A key\'s type and secret never change. Takes effect at once: requests already waiting lose a removed address, and mail the key queued is sent only within its new access. Needs the access createApiKey needs, checked again as the change is written, and no key changes itself; over MCP, only keys that approval created. Revoked and ended keys can\'t be changed.',
+    description: 'Changes what a key can reach and keeps its secret, so nothing has to be redeployed. A workspace key takes name, permissions and domains. A key for addresses takes name and access: add or remove addresses (addAddressIds, removeAddressIds), replace them (addressIds) or change access.mail. An inbox key takes name and access.mail. A key\'s type and secret never change. Takes effect at once: requests already waiting lose a removed address, and mail the key queued is sent only within its new access. Needs the access createApiKey needs, checked again as the change is written, and no key changes itself. An agent signed in over MCP as a person changes any key that person could change in the dashboard; a key an MCP approval created changes only keys that approval created. Revoked and ended keys can\'t be changed.',
     request: { params: IdParams, headers: IdempotencyHeaders, body: json(KeyUpdate) }, responses: { 200: response(KeySchema), ...errors } }), async c => {
     const auth = manageKeys(c), keyId = c.req.valid('param').id, input = c.req.valid('json');
     if (input.name === undefined && !input.permissions && !input.domains && !input.access) throw new ApiError(422, 'VALIDATION_FAILED', 'Change at least one of name, permissions, domains or access.');
