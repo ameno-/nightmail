@@ -167,7 +167,7 @@ async function reset(r: number) {
   await must('POST', '/v1/endpoints', { type: 'forward', name: 'f', address: 'team@example.net', preverify: true });
   // U: a plain event subscription to box@'s received mail (no routes, no rituals).
   await must('POST', '/v1/inbound/webhooks', { url: URLS.U, key: 'u', addressIds: [`${ws}_box`], eventTypes: ['message.received'], retryAttempts: r });
-  const rows = (await q(`SELECT id,key FROM mailbox_webhooks WHERE workspace_id=$1 AND key IS NOT NULL UNION ALL SELECT hook_id,split_part(ref,':',2) FROM mail_endpoints WHERE workspace_id=$1`, [ws])).rows;
+  const rows = (await q(`SELECT id,key FROM mailbox_webhooks WHERE workspace_id=$1 AND key IS NOT NULL`, [ws])).rows;
   ids = Object.fromEntries(rows.map(x => [x.key.toUpperCase(), x.id]));
   epOf = Object.fromEntries(rows.map(x => [x.id, x.key.toUpperCase()]));
   await must('POST', '/v1/routing/routes', { key: 'r1', match: `a@${host}`, to: ['webhook:w'] });
@@ -387,7 +387,7 @@ async function view(safety: string[]) {
     const job = row.job ? [row.job.status, row.job.attempts] : null;
     deliveries[label] = [row.status, row.attempt_count, row.last_error, row.fence, job, delays[row.id] ?? null];
   }
-  const endpoints = (await q(`SELECT h.id,h.paused,e.verified,e.declined_at IS NOT NULL AS declined FROM mailbox_webhooks h LEFT JOIN mail_endpoints e ON e.hook_id=h.id WHERE h.workspace_id=$1`, [ws])).rows;
+  const endpoints = (await q(`SELECT h.id,h.paused,h.declined_at IS NOT NULL AS declined FROM mailbox_webhooks h WHERE h.workspace_id=$1`, [ws])).rows;
   const forwards = (await q(`SELECT f.message_id,f.endpoint,m.ses_message_id AS ses FROM mail_forward_once f JOIN mail_messages m ON m.id=f.message_id WHERE f.workspace_id=$1`, [ws])).rows.map(r => String(r.ses).slice(ws.length + 1)).sort();
   const sent = (await q(`SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1 AND to_addresses @> '["team@example.net"]'`, [ws]).catch(() => ({ rows: [{ n: -1 }] }))).rows[0].n;
   const box = (await q(`SELECT m.ses_message_id AS ses,l.labels FROM mailbox_messages l JOIN mail_messages m ON m.id=l.message_id WHERE l.mailbox_id=$1 AND l.direction='inbound'`, [`${ws}_box`])).rows;

@@ -159,7 +159,7 @@ export const mailboxEvents = pgTable('mailbox_events', {
 /**
  * Every endpoint, of every type, is one row (migration 322): a webhook (mwh_ ID) or a Slack, Discord or forward
  * endpoint (con_ ID). Deliveries, routes, grants, attempt fences and forward-once rows reference its ID. The table keeps
- * its first name, mailbox_webhooks, until the release that drops mail_endpoints and mail_action_policies.
+ * its first name, mailbox_webhooks.
  */
 export const endpoints = pgTable('mailbox_webhooks', {
   id: text('id').primaryKey(), ...scope(),
