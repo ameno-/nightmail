@@ -1,0 +1,9 @@
+{
+  "dev": {
+    "branchRoutingHash": "55df605c83d63ceda012aa257c385d67c606c125571a6005ca9cbd8f4bdfba44"
+  },
+  "production": {
+    "branchRoutingHash": "372615885b825eac15f0163b053cd2a1d096b2373b802d8198aed39e9c726eaf",
+    "ownerRoutingHash": "ac128c7afa84775868f6fe597c4bae75952447b33c967e738b2e29379c510364"
+  }
+}
