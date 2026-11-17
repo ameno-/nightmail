@@ -4,6 +4,7 @@ import { ApiError, getSes, isSimulatedSes, id, lazyModule, log, logError, Module
 import { attachments, emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
 import { approvedOriginUser, campaignVerdicts, checkedDispatchAttachments, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, QUOTA_REFRESH_MS, queueSimulatedFeedback, rank, sesDailyReserve, sizeCheck, statusForEvent, terminalColumns, terminalEvents, verifiedAttachment } from './sending.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
+import { tieAllows } from './approval-ties.js';
 import { principal } from './mail-gateway.js';
 import { regionalSender, sendingConnections, verifiedClaim } from './domain-claims.js';
 import { claimsOnly } from './send-scope.js';
@@ -548,7 +549,7 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
     ), key_state AS MATERIALIZED (
       SELECT id, workspace_id, permissions, domains FROM api_keys WHERE revoked_at IS NULL
         AND (workspace_id, id) IN (SELECT workspace_id, actor_key_id FROM input)
-        AND mail_key_grant_allows(workspace_id,id,'api_key',${receivingPolicy(runtime.config)}::jsonb) FOR SHARE
+        AND ${tieAllows(runtime.config, sql`workspace_id`, sql`id`, 'api_key')} FOR SHARE
     ), campaign_state AS MATERIALIZED (
       SELECT id, workspace_id, state FROM sending_campaigns WHERE (workspace_id, id) IN (SELECT workspace_id, campaign_id FROM input WHERE campaign_id IS NOT NULL) FOR SHARE
     ), dest AS (

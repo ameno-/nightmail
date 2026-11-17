@@ -211,22 +211,37 @@ export type ApiKeyAccess = {
 };
 
 /**
- * Set when this is tied to an MCP approval: created, or for a webhook set up or changed, over MCP with a person’s sign-in or with a key that is tied. It works only while that approval is active. Null: it lasts, not tied to any approval.
+ * Set when this is tied to MCP approvals: created, or for a webhook set up or changed, over MCP with a person’s sign-in or with a key that is tied. It works only while every one of them is active. Null: it lasts, not tied to any approval.
  */
 export type ApprovalTie = {
     /**
-     * The agent sign-in (mcp_…) it is tied to, as listAgents lists it.
+     * Every approval that owns it is active, so a key is accepted and a webhook is delivered to. False: a key is refused and a webhook is not delivered to until all of them are active again.
      */
-    id: string;
+    active: boolean;
     /**
-     * When the approval ends unless its agent connects again: each new sign-in token moves it later. It also ends when it is revoked.
+     * The earliest end among its owners: when it stops working unless their agents connect again.
      */
     endsAt: string;
     /**
-     * False once the approval has ended, lost the manage scope, or its person is no longer an owner or admin here: a key is refused and a webhook is not delivered to until it is active again.
+     * Each approval that owns it, by ID. A key has one; a webhook has one for each approval that set it up or changed it.
+     */
+    owners: Array<ApprovalOwner>;
+} | null;
+
+export type ApprovalOwner = {
+    /**
+     * An agent sign-in (mcp_…) that owns it, as listAgents lists it.
+     */
+    id: string;
+    /**
+     * When this approval ends unless its agent connects again: each new sign-in token moves it later.
+     */
+    endsAt: string;
+    /**
+     * This approval is active: not revoked or ended, with the manage scope, and its person an owner or admin here.
      */
     active: boolean;
-} | null;
+};
 
 export type ApiKey = {
     id: string;

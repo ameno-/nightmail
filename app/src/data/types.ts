@@ -98,8 +98,8 @@ export type MailPermission = 'read' | 'send' | 'modify' | 'create'
  *  address, including new ones; [] with create: only the inboxes it creates). inbox: one agent inbox. */
 export interface ApiKeyAccess { type: 'workspace' | 'addresses' | 'inbox'; addressIds: string[] | null; inboxId: string | null; mail: MailPermission[] }
 export interface ApiKey { id: string; name: string; prefix: string; permissions: KeyPermission[]; domains: string[]; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null; expiresAt: ISODate | null; access: ApiKeyAccess; approval: ApprovalTie | null }
-/** The MCP approval a key or webhook is tied to: it works only while the approval is active. */
-export interface ApprovalTie { id: string; endsAt: ISODate; active: boolean }
+/** The MCP approvals a key or webhook is tied to: it works only while every one of them is active (active), until the earliest end (endsAt). */
+export interface ApprovalTie { active: boolean; endsAt: ISODate; owners: { id: string; endsAt: ISODate; active: boolean }[] }
 export type CreateApiKeyAccess = { type: 'workspace' } | { type: 'addresses'; addressIds?: string[]; mail?: MailPermission[] } | { type: 'inbox'; inboxId: string; mail?: Exclude<MailPermission, 'create'>[] }
 /** A limited access takes its abilities in access.mail, without permissions or domains. */
 export interface ApiKeyInput { name: string; permissions?: KeyPermission[]; domains?: string[]; access?: CreateApiKeyAccess }

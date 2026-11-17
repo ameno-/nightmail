@@ -2,7 +2,7 @@ import { DASHBOARD_CACHE_NOTE, dashboardRead } from './dashboard-cache.js';
 import { registerSenderScore } from './sender-score.js';
 import { auditContext, auditInsert, recordAudit } from './audit.js';
 import { registerUsage } from './usage.js';
-import { approvalField, approvalTie, tiedNextStep } from './approval-ties.js';
+import { approvalField, approvalTie, tieAllows, tiedNextStep } from './approval-ties.js';
 import { matchesAdoption } from './adopted-identity.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, gte, inArray, isNull, like, lt, or, sql, type SQL } from 'drizzle-orm';
@@ -31,7 +31,6 @@ import type { RoutineIngress } from './sending.js';
 import type { FeedbackItem } from './core.js';
 import { realDestination } from './hosted-sending.js';
 import { webhookSecretBinding as mailboxSecretBinding } from './mailbox-events.js';
-import { receivingPolicy } from './mailbox-ingest-input.js';
 import { mailboxDomains, endpoints, type MxReport } from './db/mailbox.js';
 import { checkMx,expectedMx } from './mailbox-dns.js';
 import { baneRecordIssue, baneRecordUse, defaultReceivingHost, establishedHost, hostOwners, inspectReceivingHost, observeReceiving, refusedCodes, takenIssue, type DomainObservation, type ReceivingHostRow, type ReceivingIssue } from './receiving-host.js';
@@ -1633,9 +1632,8 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   const start = Date.now(); let statusCode: number | null = null, error: string | null = null, retryable = true;
   // A webhook tied to an approval is posted to only while that approval is active, like a request from a key the
   // approval created. Otherwise the delivery fails here, unsent; it can be retried by hand once the approval is active.
-  const inactive = !!delivery.owned && (await runtime.db.execute<{ inactive: boolean }>(sql`SELECT EXISTS(SELECT FROM mail_grant_objects g
-    WHERE g.workspace_id=${job.workspaceId} AND g.kind='webhook' AND g.resource=${delivery.webhook_id}
-      AND NOT mail_management_grant(g.workspace_id,g.grant_id,${receivingPolicy(runtime.config)}::jsonb,false)) AS inactive`)).rows[0]!.inactive;
+  // Every approval that owns it must be active: the rule getWebhook reports as approval.active (approval-ties.ts).
+  const inactive = !!delivery.owned && !(await runtime.db.execute<{ allowed: boolean }>(sql`SELECT ${tieAllows(runtime.config, job.workspaceId, delivery.webhook_id, 'webhook')} AS allowed`)).rows[0]!.allowed;
   if (inactive) { error = 'APPROVAL_INACTIVE'; retryable = false; }
   else try {
     const url = webhookUrl(runtime, delivery.url), binding = secretBinding(job, delivery.webhook_id), secret = await decrypt(runtime, delivery.encrypted_secret, binding);

@@ -28,7 +28,7 @@ export const agentAccess = (permissions: string[]) => permissions.includes('mana
  *  one client are easy to tell apart. The label is display only. */
 export const connectionTitle = (agent: Pick<Agent, 'name' | 'clientId' | 'profile'>) => `${agent.name || agent.clientId}${agent.profile ? ` · ${agent.profile}` : ''}`
 
-/** A key or webhook tied to an MCP approval: whether that approval is active, and until when. */
+/** A key or webhook tied to MCP approvals: whether all of them are active, and until the earliest end. */
 export function approvalLabel(tie: ApprovalTie) {
   if (tie.active) return `Active until ${shortDateTime(tie.endsAt)} UTC`
   return Date.parse(tie.endsAt) <= Date.now() ? `Ended ${shortDateTime(tie.endsAt)} UTC` : 'Inactive'

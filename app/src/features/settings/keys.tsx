@@ -136,7 +136,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
     return `Created ${date(row.password.createdAt)}`
   }
   // A key created over MCP works only while that agent's approval is active.
-  const tiedTo = (tie: ApprovalTie) => { const agent = agents.data?.find(item => item.id === tie.id); return agent ? `${connectionTitle(agent)} · ${approvalLabel(tie)}` : approvalLabel(tie) }
+  const tiedTo = (tie: ApprovalTie) => { const names = tie.owners.flatMap(owner => { const agent = agents.data?.find(item => item.id === owner.id); return agent ? [connectionTitle(agent)] : [] }); return names.length ? `${names.join(', ')} · ${approvalLabel(tie)}` : approvalLabel(tie) }
   // Everything a row shows, in full: the table and the phone's cards clip long names, scopes and address lists.
   const details = (row: Row): [string, ReactNode][] => {
     const { first, second } = access(row)

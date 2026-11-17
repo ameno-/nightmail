@@ -4223,7 +4223,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const { token, consentId } = await oauthGrant(t, db, writableScope, request), approvalId = `mcp_${consentId}`;
       const tool = async (name: string, body: Json) => { const r = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { confirm: true, body } } }, rpcHeaders)).result; assert.equal(r.isError, false, redact(r)); return r.structuredContent; };
       const endsAt = (await db.query('SELECT expires_at FROM nightmail_resource_grants WHERE grant_key=$1', [consentId])).rows[0].expires_at.toISOString();
-      const tie = { id: approvalId, endsAt, active: true };
+      const tie = { active: true, endsAt, owners: [{ id: approvalId, endsAt, active: true }] };
       // Over MCP: a workspace key, a key limited to receiving addresses, a sending webhook and an inbound webhook.
       const key = await tool('createApiKey', { name: 'tied fixture', permissions: ['send'] }); secrets.add(key.secret);
       const limited = await tool('createApiKey', { name: 'tied limited fixture', access: { type: 'addresses', mail: ['read'] } }); secrets.add(limited.secret);
@@ -4256,6 +4256,48 @@ describe('Hosted MCP OAuth and tools', () => {
       ok(await local('POST', `/v1/mcp-connections/${approvalId}/revoke`));
       listed = await keys();
       assert.deepEqual([listed.get(key.id)!.approval, listed.get(key.id)!.revokedAt !== null, listed.get(limited.id)!.revokedAt !== null], [null, true, true]);
+    });
+  });
+
+  test('a webhook two approvals changed reports what its delivery enforces: active only while both are, until the earlier end', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
+      const as = (bearer: string) => async (name: string, args: Json) => { const r = ok(await request('POST', '/mcp?codemode=true', bearer, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { confirm: true, ...args } } }, rpcHeaders)).result; assert.equal(r.isError, false, redact(r)); return r.structuredContent; };
+      const a = await oauthGrant(t, db, writableScope, request), b = await oauthGrant(t, db, writableScope, request);
+      const ids = [`mcp_${a.consentId}`, `mcp_${b.consentId}`], ends = new Map<string, string>();
+      for (const id of ids) ends.set(id, (await db.query('SELECT expires_at FROM nightmail_resource_grants WHERE id=$1', [id])).rows[0].expires_at.toISOString());
+      // The review's reproduction: A sets the webhook up, B changes it. Both own it now.
+      const hook = await as(a.token)('createWebhook', { body: { url: 'https://example.com/hooks/review-shared', eventTypes: ['email.sent'] } });
+      await as(b.token)('updateWebhook', { webhookId: hook.id, body: { description: 'changed by B' } });
+      assert.equal((await db.query("SELECT FROM mail_grant_objects WHERE kind='webhook' AND resource=$1", [hook.id])).rowCount, 2);
+      // An inbound webhook A sets up and B changes, and a key A creates (a key has one owner).
+      const inbound = await as(a.token)('createInboundWebhook', { body: { url: 'https://example.com/hooks/review-shared-inbound' } });
+      await as(b.token)('updateInboundWebhook', { webhookId: inbound.id, body: { description: 'changed by B' } });
+      const key = await as(a.token)('createApiKey', { body: { name: 'shared fixture', permissions: ['send'] } }); secrets.add(key.secret);
+      const posted: string[] = [], transport = runtime.webhookFetch;
+      runtime.webhookFetch = async url => { posted.push(url); return { status: 204 }; };
+      t.after(() => { runtime.webhookFetch = transport; });
+      const sorted = [...ids].sort(), past = new Date(Date.now() - 1000).toISOString();
+      // Every combination of the two approvals: what getWebhook reports agrees with what the real delivery job does.
+      for (const [aLive, bLive] of [[true, true], [true, false], [false, true], [false, false]] as const) {
+        const live = new Map([[ids[0]!, aLive], [ids[1]!, bLive]]), end = (id: string) => live.get(id) ? ends.get(id)! : past;
+        for (const id of ids) await db.query('UPDATE nightmail_resource_grants SET expires_at=$2 WHERE id=$1', [id, end(id)]);
+        const label = `A ${aLive ? 'active' : 'ended'}, B ${bLive ? 'active' : 'ended'}`, both = aLive && bLive;
+        const expected = { active: both, endsAt: sorted.map(end).sort()[0], owners: sorted.map(id => ({ id, endsAt: end(id), active: live.get(id) })) };
+        const reported = ok(await local('GET', `/v1/webhooks/${hook.id}`)).approval;
+        assert.deepEqual(reported, expected, label);
+        assert.deepEqual(ok(await local('GET', `/v1/inbound/webhooks/${inbound.id}`)).approval, expected, label);
+        const delivery = ok(await local('POST', `/v1/webhooks/${hook.id}/test`), 202).id as string;
+        posted.length = 0;
+        await run('operation.webhook');
+        const outcome = (await db.query('SELECT status,last_error FROM operation_deliveries WHERE id=$1', [delivery])).rows[0];
+        assert.deepEqual(outcome, reported.active ? { status: 'delivered', last_error: null } : { status: 'failed', last_error: 'APPROVAL_INACTIVE' }, label);
+        assert.deepEqual(posted, reported.active ? ['https://example.com/hooks/review-shared'] : [], label);
+        // The key A created: listed as active exactly when a request with it is accepted.
+        const listedKey = ok(await local('GET', '/v1/api-keys?limit=100')).data.find((k: Json) => k.id === key.id);
+        const used = await request('GET', '/v1/me', key.secret);
+        assert.equal(listedKey.approval.active, aLive, label);
+        assert.equal(used.status === 200, listedKey.approval.active, label);
+      }
     });
   });
 
