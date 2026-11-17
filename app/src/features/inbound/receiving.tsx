@@ -127,19 +127,22 @@ function EndpointsTab({ overview, refresh }: { overview: Overview; refresh: () =
       refresh()
     } catch (error) { toast(errorText(error), 'error') }
   }
+  // A webhook opens its own page (events, deliveries, headers, secret), named or not.
+  const webhookPage = (e: OverviewEndpoint) => e.type === 'webhook' ? `/receiving/webhooks/${e.id}` : null
   const used = (e: OverviewEndpoint) => [e.routes ? `${number(e.routes)} ${e.routes === 1 ? 'route' : 'routes'}` : null, e.rituals.length ? `ritual ${e.rituals.join(', ')}` : null, e.eventTypes.length ? `${e.eventTypes.length === 1 ? e.eventTypes[0] : `${e.eventTypes.length} events`}` : null].filter(Boolean).join(' · ')
   return <div className="stack rcv-tab">
-    <div className="rcv-kindline"><div className="cluster"><Link className="ui-button ui-button--ghost ui-button--sm" to="/receiving/webhooks">Event webhooks</Link><Button size="sm" onClick={() => setCreating(true)}>New endpoint</Button></div></div>
-    <DataTable className="rcv-table" rows={overview.endpoints} rowKey={e => e.id} rowHref={e => e.source === 'inbound_webhook' ? `/receiving/webhooks/${e.id}` : null}
+    <div className="rcv-kindline"><div className="cluster"><Button size="sm" onClick={() => setCreating(true)}>New endpoint</Button></div></div>
+    <DataTable className="rcv-table" rows={overview.endpoints} rowKey={e => e.id} rowHref={webhookPage}
       empty={<EmptyState title="No endpoints yet" action={<Button onClick={() => setCreating(true)}>New endpoint</Button>} />}
       columns={[
         { key: 'name', label: 'Endpoint', width: '30%', render: e => <div className="rcv-cell"><TargetIcon type={e.type} /><div className="settings-cell-stack"><span className="receiving-clip" title={e.call ?? e.name}>{e.call ? <code>{e.call}</code> : e.name}</span><span className="muted receiving-clip"><PrivateAddress value={e.target} /></span></div></div>,
           cardRender: e => <span className="rcv-cell"><TargetIcon type={e.type} />{e.call ? <code>{e.call}</code> : e.name}</span> },
         { key: 'target', label: 'Target', table: false, card: 'line', render: e => <PrivateAddress value={e.target} /> },
-        { key: 'type', label: 'Type', width: '14%', card: 'hide', render: e => e.source === 'inbound_webhook' ? 'Inbound webhook' : { webhook: 'Webhook', slack: 'Slack', discord: 'Discord', forward: 'Forward' }[e.type] },
+        { key: 'type', label: 'Type', width: '14%', card: 'hide', render: e => ({ webhook: 'Webhook', slack: 'Slack', discord: 'Discord', forward: 'Forward' }[e.type]) },
         { key: 'used', label: 'Used by', width: '30%', card: 'line', render: e => used(e) || <span className="muted">Nothing yet</span> },
         { key: 'status', label: 'Status', width: '16%', card: 'aside', render: e => <StatusBadge status={endpointStatusLabel[e.status]} tone={endpointStatusTone[e.status]} /> },
-        { key: 'actions', label: '', width: 52, align: 'right', render: e => e.source === 'inbound_webhook' ? <DropdownMenu label={`Actions for ${e.name}`} items={[{ label: 'Open', onSelect: () => navigate(`/receiving/webhooks/${e.id}`) }]} /> : <DropdownMenu label={`Actions for ${e.name}`} items={[
+        { key: 'actions', label: '', width: 52, align: 'right', render: e => e.source === 'inbound_webhook' ? <DropdownMenu label={`Actions for ${e.name}`} items={[{ label: 'Open', onSelect: () => navigate(webhookPage(e)!) }]} /> : <DropdownMenu label={`Actions for ${e.name}`} items={[
+          ...(e.type === 'webhook' ? [{ label: 'Open', onSelect: () => navigate(webhookPage(e)!) }] : []),
           { label: 'Edit', onSelect: () => { setEditing(e); setEditOpen(true) } },
           ...(e.type !== 'forward' ? [{ label: 'Send a test message', onSelect: () => void act(e, '/test', 'POST', undefined, `Test posted to ${e.call}.`) }] : []),
           ...(e.type === 'forward' && e.status !== 'ready' ? [{ label: 'Resend confirmation', onSelect: () => void act(e, '/verification', 'POST', {}, 'Confirmation email queued.') }] : []),
@@ -147,8 +150,8 @@ function EndpointsTab({ overview, refresh }: { overview: Overview; refresh: () =
           { label: 'Delete', destructive: true, onSelect: () => { setDeleting(e); setDeleteOpen(true) } },
         ]} /> },
       ]} />
-    {/* The overview reads up to 100 of each; the rest are on the webhooks page (an endpoint list past 100 is API-only). */}
-    {overview.endpointsTruncated && <div className="rcv-foot"><span className="muted">{number(overview.endpoints.length)}+ endpoints</span><Link to="/receiving/webhooks">See every webhook</Link></div>}
+    {/* The overview reads up to 100 named endpoints and 100 webhooks without a name; past that, listEndpoints and listInboundWebhooks page through every one. */}
+    {overview.endpointsTruncated && <div className="rcv-foot"><span className="muted">{number(overview.endpoints.length)}+ endpoints</span></div>}
     <EndpointDialog open={creating} onOpenChange={setCreating} onCreated={e => { setCreating(false); setCreated(e); refresh() }} />
     <EndpointDialog open={editOpen} editing={editing} onOpenChange={setEditOpen} onSaved={e => { setEditOpen(false); toast(`Saved ${e.name}.`, 'success'); refresh() }} />
     <CreatedEndpointDialog created={created} onClose={() => setCreated(null)} />

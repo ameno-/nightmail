@@ -6,7 +6,7 @@ export { InboundPage } from './threads'
 export { InboundAddressDetailPage } from './addresses'
 export { ReceivingPage } from './receiving'
 export { TracePage } from './trace'
-export { InboundWebhookDetailPage, InboundWebhooksPage } from './webhooks'
+export { InboundWebhookDetailPage } from './webhooks'
 
 // Former /mailboxes links keep working: a mailbox is now an address filter on the thread-first inbox.
 function LegacyRedirect({ to, address }: { to: string; address?: string }) {
@@ -18,7 +18,8 @@ function LegacyRedirect({ to, address }: { to: string; address?: string }) {
 }
 export const LegacyMailboxesRedirect = () => <LegacyRedirect to="/receiving" />
 export function LegacyMailboxRedirect() { const { id = '' } = useParams(); return <LegacyRedirect to="/receiving/inbox" address={id} /> }
-export const LegacyMailboxWebhooksRedirect = () => <LegacyRedirect to="/receiving/webhooks" />
+// Webhooks are endpoints: their list is Receiving's Endpoints tab.
+export const LegacyMailboxWebhooksRedirect = () => <Navigate replace to="/receiving?tab=endpoints" />
 export function LegacyMailboxWebhookRedirect() { const { id = '' } = useParams(); return <LegacyRedirect to={`/receiving/webhooks/${encodeURIComponent(id)}`} /> }
 
 export { AgentInboxPage, AgentInboxesPage } from './inboxes'

@@ -186,7 +186,7 @@ export const guides: Guide[] = [
     body: () => <Section title="Check the Webhook-Signature header">
       <p>{webhookSignatureGuide.text}</p>
       <Code label="webhook signature check">{webhookSignatureGuide.code}</Code>
-      <p>Find each webhook’s secret in <Link to="/settings#webhooks">Settings → Webhooks</Link>, and for inbound webhooks in <Link to="/receiving/webhooks">Receiving → Webhooks</Link>.</p>
+      <p>Find each webhook’s secret in <Link to="/settings#webhooks">Settings → Webhooks</Link>, and for received mail’s webhooks in <Link to="/receiving?tab=endpoints">Receiving → Endpoints</Link>.</p>
     </Section>,
   },
 ]
