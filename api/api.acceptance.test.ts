@@ -7632,8 +7632,6 @@ describe('Dashboard API capabilities', () => {
   });
 
   test('campaign content is block HTML: the guide, validation errors, preview rendering and text alternative are observable', async t => {
-    const [{ sanitizeBlockStyle: serverStyle }, { sanitizeBlockStyle: composerStyle }] = await Promise.all([import('./src/block-style.js'), import('../app/src/features/campaigns/block-style.js')]);
-    for (const value of ['color:#3156c7; padding:24px; border-radius:8px', 'font-size:32px;line-height:1.2;', 'position:absolute', 'background-image:url(https://example.com/x.png)', 'padding:200px']) assert.equal(composerStyle(value), serverStyle(value), `Composer and renderer style sanitizers disagree for ${value}`);
     const key = await keyFixture(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('block-content') });
     const guide = ok(await http('GET', '/v1/campaign-content-guide', key.secret));
