@@ -9,6 +9,7 @@ import { awsError, loadSetupSdk, provisionJournaledFeedback, readSelectedDomains
 import { JobDeferred, retryDatabaseFailures } from './jobs.js';
 import { acquireRegionProvisioning, campaignReserved, finishRegionProvisioning, verifyImportedClaims } from './states.js';
 import { claimNameAllowed, releaseConnectionClaims } from './domain-claims.js';
+import { getRegionSettings } from './ses-region-state.js';
 import { lockSendScope } from './send-scope.js';
 import { byoEnabled } from './byo-pilot.js';
 
@@ -231,7 +232,7 @@ export async function selectImports(r:Runtime,wid:string,input:z.infer<typeof Im
   // and regional completeness; a rescan racing these reads invalidates the request.
   for (const [region,domains] of groups) try { await readSelectedDomains(await scoped(r,c,region,'scan'),region,domains); } catch(e) { if (e instanceof ModuleLoadError) throw e; throw awsError(e); }
   return r.db.transaction(async db=>{
-    await lockSendScope(db,wid,{settings:'update'});
+    await getRegionSettings(db,wid,'update');
     const locked=usable(await connection(db,wid,true)),replay=await op.read(db);if (replay) return replay;
     if (locked.id!==c.id || locked.inventory_revision!==input.revision) throw stale();
     for (const [region,domains] of groups) for (const name of domains) await saveIntent(db,c,region,name,true);
@@ -246,7 +247,7 @@ export async function newRegionalDomain(r:Runtime,wid:string,name:string,owner:b
   if (!owner) throw new ApiError(403,'PERMISSION_DENIED','Use an owner or admin dashboard session to enable a regional domain.');
   await writable(r,wid);if (!await claimNameAllowed(name,r.config)) throw new ApiError(422,'DOMAIN_NOT_ALLOWED','A public suffix or reserved domain cannot be claimed.','name');
   return r.db.transaction(async db=>{
-    await lockSendScope(db,wid,{settings:'update'});if (usable(await connection(db,wid,true)).id!==c.id) throw stale();
+    await getRegionSettings(db,wid,'update');if (usable(await connection(db,wid,true)).id!==c.id) throw stale();
     const op=receipt<Op>(c,'domain',key,JSON.stringify([name,override])),prior=await op.read(db);if(prior)return prior;
     const current=(await db.execute<{region:string}>(sql`SELECT region FROM domain_sending_bindings WHERE workspace_id=${wid} AND name=${name} UNION ALL SELECT region FROM byo_domain_intents WHERE connection_id=${c.id} AND name=${name} AND closed_reason IS NULL LIMIT 1`)).rows[0];
     const first=(await db.execute<{region:string}>(sql`SELECT region FROM provider_connection_regions WHERE connection_id=${c.id} AND sending_state='ready' ORDER BY ready_at,region LIMIT 1`)).rows[0];
@@ -306,7 +307,7 @@ const provision=runV5(async(r,c,p,attempt)=>{
       async arn=>fenced((await r.db.execute(sql`UPDATE provider_connection_regions SET feedback_topic_arn=${arn} WHERE ${owned} AND (feedback_topic_arn IS NULL OR feedback_topic_arn=${arn})`)).rowCount));
     if (result.verified) {
       const published=await r.db.transaction(async db=>{
-        await lockSendScope(db,c.workspace_id,{settings:'update'});await connection(db,c.workspace_id,true);
+        await getRegionSettings(db,c.workspace_id,'update');await connection(db,c.workspace_id,true);
         if (!(await db.execute(sql`SELECT FROM provider_connection_regions WHERE ${owned} FOR UPDATE`)).rowCount) return false;
         if (!(await db.execute(finishRegionProvisioning(ref,gen,result.topic))).rowCount) return false;
         await db.execute(sql`UPDATE provider_connection_regions SET ready_at=coalesce(ready_at,clock_timestamp()),provision_error=NULL WHERE ${target}`);
@@ -341,7 +342,7 @@ async function bindIntent(r:Runtime,c:V5Connection,p:Record<string,unknown>) {
   let ses:CandidateIdentity|undefined;
   if (i.importing) try { ses=(await readSelectedDomains(await scoped(r,c,i.region,'scan'),i.region,[i.name])).get(i.name); } catch(e) { if (e instanceof ModuleLoadError) throw e; throw awsError(e); }
   await r.db.transaction(async db=>{
-    await lockSendScope(db,c.workspace_id,{settings:'update'});await connection(db,c.workspace_id,true);
+    await getRegionSettings(db,c.workspace_id,'update');await connection(db,c.workspace_id,true);
     if (!(await db.execute(sql`${select} FOR UPDATE OF i FOR SHARE OF cr`)).rowCount) return;
     await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(substring(${i.name} FROM '[^.]+\\.[^.]+$'),84912))`);
     if ((await db.execute(sql`SELECT WHERE exclusive_domain_overlap(${c.workspace_id},${i.name})`)).rowCount) throw conflict('DOMAIN_CLAIMED','A selected domain now overlaps an exclusive claim.');
@@ -394,7 +395,7 @@ const disconnect:JobHandler=retryDatabaseFailures(async(r,p,j)=>{
   const ticket=sql`id=${j.id} AND workspace_id=${j.workspaceId} AND status='running' AND attempts=${j.attempts} AND payload->>'run'=${p.run}`;
   try {
     const more=await r.db.transaction(async db=>{
-      await lockSendScope(db,j.workspaceId,{settings:'update'});const c=await connection(db,j.workspaceId,true);
+      await getRegionSettings(db,j.workspaceId,'update');const c=await connection(db,j.workspaceId,true);
       if (!c || c.id!==p.connectionId || c.state!=='disconnecting') return false;
       // Fence the worker through one bounded AWS removal and its checkpoint. Losing
       // the response leaves the old journal; a retry proves absence or checks ownership anew.

@@ -27,6 +27,9 @@ const admission = (workspaceId: string, from?: SQL) => sql`INSERT INTO job_sched
 /**
  * Takes a workspace's send locks in order: the campaign row, the admission row, then (when asked) the settings row.
  * Paths that read settings with their sender claims in one statement lock it there instead (lockedSettings).
+ * The admission row holds off every send in the workspace, so a transaction that takes it makes no network call.
+ * Connection work that calls AWS while it holds the settings row locks that row alone (getRegionSettings(db, wid,
+ * 'update')): it never waits for admission, so it stays a compatible subset of this order.
  */
 export async function lockSendScope(db: DbExecutor, workspaceId: string, options: { campaignId?: string; settings?: 'share' | 'update' } = {}): Promise<SendScope> {
   // The admission insert reads the locked campaign row, so one statement takes them in order.

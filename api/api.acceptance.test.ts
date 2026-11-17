@@ -16851,6 +16851,39 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     t.diagnostic(`60 rounds of 4 re-adds, 4 sends and 2 mailbox replies in ${Date.now()-started} ms.`);
     assert.deepEqual(Object.fromEntries(errors),{},'Every concurrent re-add and send completes. 40P01 is a lock-order inversion between them.');
   });
+  // The BYO cleanup job deletes AWS resources while it holds the connection's settings row. It never takes the admission
+  // row (job_schedule), so a slow AWS call never holds off the workspace's sends.
+  test('lock order: the BYO cleanup job holds no admission lock while it waits on AWS',async t=>{
+    const [{nodeRuntime},{regionalByoJobs},{byoStackName},{STSClient}]=await Promise.all([import('./src/adapters/node.js'),import('./src/byo-regional.js'),import('./src/ses-setup.js'),import('@aws-sdk/client-sts')]);
+    const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
+    const account='222288884444',platform='000033334444',region='us-east-2';
+    Object.assign(runtime.config,{multiTenant:true,byoV2:true,regionalSending:true,platformAccount:platform,aws:{accessKeyId:'fixture-platform',secretAccessKey:'fixture-only'}});
+    const g=await fixtureDatabase(t),w=unique('bdead'),con='con_'+randomUUID().replaceAll('-','').slice(0,24),jobId='byo.disconnect:'+con,run=unique('run');
+    cleanup(t,async()=>{
+      await g.query('DELETE FROM provider_connection_regions WHERE connection_id=$1',[con]);
+      for (const table of ['jobs','provider_connections','job_schedule','ses_installation_settings']) await g.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[w]);
+      await g.query('DELETE FROM workspaces WHERE id=$1',[w]);
+    });
+    await g.query('INSERT INTO workspaces(id,name,slug,byo_v2_enabled) VALUES($1,$1,$1,true)',[w]);
+    await g.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$1,$2,jsonb_build_array($2::text))",[w,region]);
+    await g.query('INSERT INTO job_schedule(workspace_id) VALUES($1)',[w]);
+    await g.query(`INSERT INTO provider_connections(id,workspace_id,kind,region,state,template_version,requested_account,aws_account_id,role_arn,external_id,platform_principal_arn)
+      VALUES($1,$2,'byo',$3,'disconnecting','v5',$4,$4,$5,$6,$7)`,[con,w,region,account,`arn:aws:iam::${account}:role/${byoStackName('Bane',con)}`,randomUUID(),`arn:aws:iam::${platform}:role/fixture`]);
+    await g.query('INSERT INTO provider_connection_regions(connection_id,region,feedback_topic_arn) VALUES($1,$2,$3)',[con,region,`arn:aws:sns:${region}:${account}:fixture-feedback`]);
+    await g.query("INSERT INTO jobs(id,type,workspace_id,payload,status,attempts,lease_until) VALUES($1,'byo.disconnect',$2,$3,'running',1,now()+interval '5 minutes')",[jobId,w,JSON.stringify({connectionId:con,run})]);
+    // STS answers only when released, then denies.
+    let reached!:()=>void,release!:()=>void;const called=new Promise<void>(r=>{reached=r;}),released=new Promise<void>(r=>{release=r;});
+    t.mock.method(STSClient.prototype,'send',async()=>{reached();await released;throw Object.assign(new Error('fixture denial'),{name:'AccessDenied'});});
+    const job=regionalByoJobs['byo.disconnect']!(runtime,{connectionId:con,run},{id:jobId,workspaceId:w,attempts:1}).then(()=>'completed',(e:Json)=>String(e?.code??e));
+    await called;
+    try {
+      // A send's admission lock while the cleanup waits on AWS: it never waits for the cleanup.
+      await g.query('BEGIN');
+      await g.query("SET LOCAL lock_timeout='150ms'");
+      await g.query('INSERT INTO job_schedule(workspace_id) VALUES($1) ON CONFLICT(workspace_id) DO UPDATE SET turn=job_schedule.turn WHERE false',[w]);
+    } finally { await g.query('ROLLBACK'); release(); }
+    assert.equal(await job,'AWS_ACCESS_DENIED');
+  });
   // A campaign launch locked the settings row (its sender check) before the admission row (its capacity check), and a
   // BYO disconnect takes them the other way round: a disconnect that started during a launch deadlocked with it (40P01).
   // Both now take them through lockSendScope (campaign row, admission, settings). A gate pins each order.

@@ -5,8 +5,7 @@ import { ApiError, assertSesConfigured, isSimulatedSes, errors, id, json, log, M
 import { caller, assume, platformCredentials } from './provider-credentials.js';
 import { awsError, discoverSes, feedbackUrl, loadSetupSdk, POOL_INSTALLATION, poolTenantName, provisionSes, provisionTenant, setupResources, verifiedByoDomains, type SesDiscovery, byoStackName } from './ses-setup.js';
 import { importByoClaims } from './domain-claims.js';
-import { regionPattern } from './ses-region-state.js';
-import { lockSendScope } from './send-scope.js';
+import { regionPattern, getRegionSettings } from './ses-region-state.js';
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { loadMailboxSetupSdk, preparePoolReceiving } from './mailbox-setup.js';
 import { byoEnabled } from './byo-pilot.js';
@@ -254,7 +253,7 @@ export const byoVerifyJob: JobHandler = retryDatabaseFailures(async (runtime, pa
     }
     const { domains, next } = await verifiedByoDomains(scoped, row.region, cursor);
     await runtime.db.transaction(async tx => {
-      await lockSendScope(tx,row.workspace_id,{settings:'update'});
+      await getRegionSettings(tx,row.workspace_id,'update'); // Same lock order as disconnect.
       if (!(await tx.execute(sql`UPDATE provider_connections SET lease_until=now()+interval '4 minutes' WHERE state='provisioning' AND ${owned}`)).rowCount) return;
       await importByoClaims(tx, row, domains);
       if (!next) await tx.execute(sql`WITH ready AS (${finishProvisioning(owned,'ready')} RETURNING *),
@@ -472,7 +471,7 @@ export function registerProviderConnections(app: App) {
       const current=await get(c.env,wid);
       if (current?.template_version==='v5') {const result=await disconnectV5(c.env,wid,current.id);c.get('actor').wakeJobs=1;return c.json(result,202);}
       await c.env.db.transaction(async db => {
-        await lockSendScope(db, wid, { settings: 'update' });
+        await getRegionSettings(db, wid, 'update'); // Serialize with send admission, which takes FOR SHARE on this row.
         const row = (await db.execute<Row & { pause_reason: string | null }>(sql`SELECT * FROM provider_connections pc WHERE workspace_id=${wid} AND ${notProvisioning()}
           AND NOT EXISTS (SELECT 1 FROM sending_emails WHERE workspace_id=${wid} AND status IN ('queued','attempting','acceptance_unknown'))
           AND NOT EXISTS (SELECT 1 FROM sending_campaigns c WHERE c.workspace_id=${wid} AND ${campaignActive()}) FOR UPDATE`)).rows[0];
