@@ -34,8 +34,6 @@ export async function setBillingEnforcement(db: Client, args: string[]) {
   if (storage !== undefined && storage !== 'none' && !(/^\d{4}-\d{2}-\d{2}$/.test(storage) && Number.isFinite(Date.parse(`${storage}T00:00:00Z`)))) throw new Error(`--storage-from takes a date (YYYY-MM-DD) or none.\n${usage}`);
   const { rows: [current] } = await db.query<{ mode: string }>(`SELECT mode FROM billing_config WHERE singleton FOR UPDATE`);
   if (current && current.mode !== mode && mode !== 'off') await db.query(`SELECT billing_settle_all()`);
-  // The mode history (migration 318) records who changed charging and why, in this transaction.
-  await db.query(`SELECT set_config('billing.actor', 'script', true), set_config('billing.reason', $1, true)`, [reason]);
   const { rows: [audit] } = await db.query(`WITH previous AS (
     SELECT mode,receive_hold,bill_simulated,storage_billing_from FROM billing_config WHERE singleton FOR UPDATE
   ), changed AS (
@@ -51,6 +49,8 @@ export async function setBillingEnforcement(db: Client, args: string[]) {
     SELECT 'installation','set-billing-enforcement',jsonb_build_object('old',(SELECT to_jsonb(p) FROM previous p),'new',to_jsonb(c),'reason',$5::text,'via','script') FROM changed c
     RETURNING details`, [mode, receiveHold, billSimulated, storage ?? null, reason]);
   if (!audit) throw new Error('billing_config has no row: run the migrations first.');
+  // The installation's charging history (migration 318), under the config row this transaction holds.
+  await db.query(`SELECT billing_mode_note(NULL, $1 = 'enforce', 'script', $2)`, [mode, reason]);
   log('info', { code: 'BILLING_ENFORCEMENT_CHANGED', ...audit.details });
   return audit.details as { old: Record<string, unknown>; new: Record<string, unknown> };
 }
