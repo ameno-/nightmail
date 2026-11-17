@@ -38,6 +38,7 @@ type Window = { stage: Stage['name']; from: string; to: string; events: number; 
 type Problem = { fingerprint: string; kind: string; severity: number; title: string; facts: string[]; stages: string[] };
 
 const HOUR = 3_600_000, DAY = 24 * HOUR, PAGE = 1000;
+const gatewayLogGroup = '/ecs/nightmail-mail-gateway';
 const here = dirname(fileURLToPath(import.meta.url));
 const token = process.env.CLOUDFLARE_API_TOKEN;
 if (!token) throw new Error('Set CLOUDFLARE_API_TOKEN (Workers Observability read on both accounts).');
@@ -184,7 +185,7 @@ async function gateway(target: Stage, from: number, to: number): Promise<Record<
   if (!target.awsProfile) return undefined;
   const aws = (...args: string[]) => JSON.parse(execFileSync('aws', [...args, '--profile', target.awsProfile!, '--region', 'us-east-2', '--output', 'json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
   const query = String.raw`fields @message | filter @message like /login refused|GATEWAY_AUTH|authentication service unavailable/ | parse @message /"code":"(?<gcode>[A-Z_]+)"/ | stats count(*) as n by gcode`;
-  const { queryId } = aws('logs', 'start-query', '--log-group-name', '/ecs/bane-mail-gateway', '--start-time', String(Math.floor(from / 1000)), '--end-time', String(Math.floor(to / 1000)), '--query-string', query);
+  const { queryId } = aws('logs', 'start-query', '--log-group-name', gatewayLogGroup, '--start-time', String(Math.floor(from / 1000)), '--end-time', String(Math.floor(to / 1000)), '--query-string', query);
   for (let i = 0; i < 60; i++) {
     const result = aws('logs', 'get-query-results', '--query-id', queryId);
     if (result.status === 'Complete') {
@@ -393,7 +394,7 @@ async function main() {
   const issueLine = (item: Json) => `- [#${item.number}](${item.url}) ${item.title} (${item.stages.join(', ')})`;
   const report = [
     `# Bane nightly report, ${date}`, '',
-    `Window: ${iso(end - DAY)} to ${iso(end)}. Sources: Workers Logs for ${stages.map(item => `\`${item.script}\``).join(' and ')}; CloudWatch \`/ecs/bane-mail-gateway\`. Counts of sampled successes are estimates.`, '',
+    `Window: ${iso(end - DAY)} to ${iso(end)}. Sources: Workers Logs for ${stages.map(item => `\`${item.script}\``).join(' and ')}; CloudWatch \`${gatewayLogGroup}\`. Counts of sampled successes are estimates.`, '',
     '## Problems', '',
     `Filed now (${filed.length}):`, filed.length ? filed.map(issueLine).join('\n') : '- none', '',
     `Already tracked by an open issue (${open.length}):`, open.length ? open.map(issueLine).join('\n') : '- none', '',
