@@ -503,7 +503,7 @@ async function saveObservation(db:DbExecutor,row:HostedDomain,wid:string,ses:Ide
 const hostStatus=(status:string):HostStatus=>status==='active' || status==='provisioning' || status==='disabled' ? status : 'waiting_for_mx';
 const receivingHostConflict=(error:unknown)=>{
   const e=((error as {cause?:unknown})?.cause ?? error) as {code?:string;constraint?:string};
-  return e?.code==='23505' && ['domain_claims_receiving_host','domain_claims_routing','mailbox_domains_receiving_host','mailbox_domains_routing_host'].includes(e.constraint ?? '');
+  return e?.code==='23505' && ['domain_claims_receiving_host','domain_claims_routing','mailbox_domains_routing_host'].includes(e.constraint ?? '');
 };
 // Same DNS checks for "Check MX now" (domain.verify), the hourly sweep (domain.mx) and an explicit choice; see receiving-host.ts.
 const receivingMx=(db:DbExecutor,row:HostedDomain,wid:string):Promise<DomainObservation>=>observeReceiving(db,row,wid,dnsUnavailable);
