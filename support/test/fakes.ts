@@ -69,12 +69,18 @@ export class SupportPlatform extends WorkerEntrypoint {
 // Idempotency-Key as Nightmail applies it (api/src/idempotency.ts): scoped to the API key and the path; the same key with
 // the same body replays the stored result, with a different body it is 409 IDEMPOTENCY_CONFLICT; a refusal stores nothing.
 const keys = new Map();
+const outages = new Map();
 const canonical = value => Array.isArray(value) ? '[' + value.map(canonical).join(',') + ']'
   : value && typeof value === 'object' ? '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical(value[k])).join(',') + '}' : JSON.stringify(value) ?? 'null';
 export default {
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === '/__calls') return Response.json(calls);
+    if (url.pathname === '/__outage') {
+      const { path, status, code, retryAfter } = await request.json();
+      if (status) outages.set(path, { status, code, retryAfter }); else outages.delete(path);
+      return new Response(null, { status: 204 });
+    }
     // Test setup: a key already used for another body (a send that committed but whose response never arrived).
     if (url.pathname === '/__used') { const { authorization, path, key, body } = await request.json(); keys.set(authorization + ' ' + path + ' ' + key, { hash: canonical(body), status: 202, result: { id: 'msg_earlier', threadId: path.split('/')[4] } }); return new Response(null, { status: 204 }); }
     const body = request.method === 'POST' ? await request.json() : null;
@@ -92,6 +98,8 @@ export default {
 };
 async function route(request, url, body) {
   {
+    const outage = outages.get(url.pathname);
+    if (outage) return Response.json({ error: { code: outage.code } }, { status: outage.status, headers: outage.retryAfter ? { 'retry-after': outage.retryAfter } : {} });
     // Like Nightmail: inbox keys get an attachment as a short-lived signed link (on Nightmail's origin for R2-stored mail), and
     // never the admin-only parts route.
     if (request.method === 'GET' && /^\\/v1\\/inbound\\/messages\\/[^/]+\\/attachments\\/part_png$/.test(url.pathname)) return Response.json({ url: url.origin + '/v1/objects/fixture-png.sig', expiresAt: new Date(Date.now() + 300_000).toISOString() });
