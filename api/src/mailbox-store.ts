@@ -116,23 +116,14 @@ export async function createMailbox(tx: DbExecutor, scope: Scope, input: { key?:
 }
 
 /**
- * Holds these mailboxes as they are: whether each has inbox_state (its mail filed in folders) can't change until the
- * caller commits. An address gains inbox_state once, while the release that makes every address an inbox converts it
- * under its workspace's ingest lane and a FOR UPDATE lock on its row; this KEY SHARE lock waits for that and holds it off.
- * Read inbox_state in a later statement, whose snapshot is taken after the wait. Rows in ID order.
- */
-export async function holdMailboxes(tx: DbExecutor, workspaceId: string, mailboxIds: string[]) {
-  await tx.execute(sql`SELECT FROM mailboxes WHERE workspace_id=${workspaceId} AND id=ANY(${sql.param(mailboxIds)}::text[]) ORDER BY id FOR KEY SHARE`);
-}
-/**
  * Adds a stored message to mailboxes and updates each mailbox's thread summary. Returns mailboxes that newly received it.
  * In a mailbox with inbox_state, received mail is counted and filed in its folders, as ingest does (sent mail is filed by
- * the inbox_file_sent trigger).
+ * the inbox_file_sent trigger). Callers hold each mailbox's row (they just created it, updated it, or locked it to send),
+ * so the next release's conversion of an address, which locks the row FOR UPDATE, can't change that meanwhile.
  */
 export async function attachToMailboxes(tx: DbExecutor, scope: Scope, message: typeof mailMessages.$inferSelect, mailboxIds: string[]) {
   if (!mailboxIds.length) return [];
   const inbound = message.direction === 'inbound';
-  if (inbound) await holdMailboxes(tx, scope.workspaceId, mailboxIds);
   const result=await tx.execute<{mailbox_id:string;filed:boolean}>(sql`WITH states AS MATERIALIZED (SELECT inbox_id FROM inbox_state WHERE workspace_id=${scope.workspaceId} AND inbox_id=ANY(${sql.param(mailboxIds)}::text[]) ORDER BY inbox_id FOR UPDATE), added AS (
     INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at)
     SELECT box,${message.id},${scope.workspaceId},${message.threadId},${message.direction},${!inbound},${message.receivedAt}::timestamptz FROM jsonb_array_elements_text(${JSON.stringify(mailboxIds)}::jsonb) b(box) WHERE (SELECT count(*) FROM states)>=0 ORDER BY box ON CONFLICT DO NOTHING RETURNING *
