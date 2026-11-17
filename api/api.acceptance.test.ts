@@ -1537,8 +1537,8 @@ test('mail gateway: SMTP queues dispatchable content with a single database conn
     // The headers, unfolded, name no blind-recipient field, and no hidden address is anywhere in the copy. Not a bare
     // /bcc/ over the whole copy: its Message-ID's random hex can end in …0bcc.
     const end=copy.indexOf('\r\n\r\n');assert.ok(end>0,'header block');
-    const fields=copy.slice(0,end).replace(/\r\n[ \t]+/g,' ').split('\r\n').map(line=>line.slice(0,line.indexOf(':')).trim().toLowerCase());
-    assert.deepEqual(fields.filter(name=>name==='bcc'||name==='resent-bcc'),[]);
+    const fields=copy.slice(0,end).replace(/\r\n[ \t]+/g,' ').split('\r\n').map((line:string)=>line.slice(0,line.indexOf(':')).trim().toLowerCase());
+    assert.deepEqual(fields.filter((name:string)=>name==='bcc'||name==='resent-bcc'),[]);
     for(const hidden of ['hidden@example.invalid','folded@example.invalid','resent@example.invalid'])assert.ok(!copy.toLowerCase().includes(hidden),hidden);
   });
   const usage=()=>db.query('SELECT messages,bytes FROM inbox_state WHERE inbox_id=$1',[bid]).then(r=>r.rows[0]);
