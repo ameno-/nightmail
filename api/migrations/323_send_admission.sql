@@ -97,6 +97,12 @@ BEGIN
         WHERE EXISTS (SELECT FROM verified_sending_domains v WHERE v.workspace_id=wid AND v.region=coalesce(e->>'region',s.default_region)
           AND right('.'||lower(e->>'host'),length(v.name)+1)='.'||v.name)) v;
     END IF;
+    -- A campaign being prepared keeps the binding it was reviewed with: checked, with the sender claim it locks, before
+    -- any attachment is locked. One reviewed without a binding keeps its region (below).
+    IF stage='prepare' AND jsonb_typeof(mails->0->'binding')='object'
+        AND NOT review_binding_ready(wid,mails->0->>'from',mails->0->>'region',mails->0->'binding',sim,req->'platform') THEN
+      d := jsonb_build_object('code','SENDER_BINDING_CHANGED'); EXIT decide;
+    END IF;
     -- Attachments last: lock the visible rows the request names, in id order.
     IF jsonb_array_length(assets)>0 THEN
       SELECT coalesce(jsonb_agg(a ORDER BY a.id),'[]') INTO locked FROM (
@@ -145,9 +151,7 @@ BEGIN
       i := i+1; host := lower(m->>'host');
       needs_dmarc := m->>'kind'='marketing' OR (stage='send' AND cost>0 AND coalesce((h->>'used')::bigint,0)+cost>=(lim->>'bulkVolume')::int);
       IF stage='prepare' AND jsonb_typeof(m->'binding')='object' THEN
-        -- A campaign being prepared keeps the binding it was reviewed with; one reviewed without a binding keeps its region.
-        IF NOT review_binding_ready(wid,m->>'from',m->>'region',m->'binding',sim,req->'platform') THEN d := jsonb_build_object('code','SENDER_BINDING_CHANGED'); EXIT decide; END IF;
-        reg := m->>'region'; c := NULL;
+        reg := m->>'region'; c := NULL; -- Its reviewed binding was checked above.
       ELSIF regional AND stage<>'prepare' THEN
         IF domains<>'[]' AND NOT EXISTS (SELECT FROM jsonb_array_elements_text(domains) x WHERE host=lower(x) OR right(host,length(x)+1)='.'||lower(x)) THEN
           d := jsonb_build_object('code','SENDER_DOMAIN_FORBIDDEN','item',i); EXIT decide; END IF;
@@ -194,7 +198,8 @@ BEGIN
         IF coalesce((h->>'marketingHeld')::boolean,false) THEN d := jsonb_build_object('code','MARKETING_HELD','reason',h->>'marketingHoldReason'); EXIT decide; END IF;
         IF (b->>'enforced')::boolean AND NOT (b->>'ok')::boolean THEN d := jsonb_build_object('code','BALANCE_EXHAUSTED'); EXIT decide; END IF;
       END IF;
-      -- The message's attachments, as stored: all present, within the size and MIME limits SES accepts.
+      -- The message's attachments: none named twice, then, as stored, all present and within the size and MIME limits SES accepts.
+      IF (m->>'duplicate')::boolean THEN d := jsonb_build_object('code','DUPLICATE_ATTACHMENT','item',i); EXIT decide; END IF;
       SELECT coalesce(jsonb_agg(a),'[]') INTO files FROM jsonb_array_elements(locked) a WHERE m->'attachments' ? (a->>'id');
       IF jsonb_array_length(files)<>jsonb_array_length(m->'attachments') THEN d := jsonb_build_object('code','ATTACHMENT_NOT_FOUND','item',i); EXIT decide; END IF;
       IF (SELECT coalesce(sum((a->>'size')::bigint),0) FROM jsonb_array_elements(files) a)>(lim->>'attachmentBytes')::bigint THEN

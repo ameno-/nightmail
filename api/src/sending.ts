@@ -30,9 +30,9 @@ import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_AT
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { headerPrefix, requestHeader } from './brand.js';
-import { canonical, idempotencyGate, idempotencyKey, idempotent, IdempotencyHeaders, idempotentRequest, replay, requestHash, validIdempotencyKey, type ClaimState, type IdempotentRequest } from './idempotency.js';
+import { canonical, idempotencyGate, idempotencyKey, idempotent, IdempotencyHeaders, idempotentRequest, priorResult, replay, requestHash, validIdempotencyKey, type ClaimState, type IdempotentRequest } from './idempotency.js';
 import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, registerPreviewImages, renderPreview } from './preview-images.js';
-import { actorJson, admission, admitted, charges, type AdmissionMail, type Admitted, type Refused, type Released } from './admission.js';
+import { actorJson, admission, admitted, charges, duplicateAttachment, type AdmissionMail, type Admitted, type Refused, type Released } from './admission.js';
 import { contentBytes, estimatedMimeBytes, SEND_LIMITS } from './send-limits.js';
 import { RATES } from './billing/money.js';
 
@@ -410,7 +410,7 @@ function sesHeaders(count: number) {
   if (count>15) throw new ApiError(422,'TOO_MANY_HEADERS','SES accepts at most 15 message headers including unsubscribe and threading headers.','headers');
 }
 function distinctAttachmentIds(ids: string[]) {
-  if (new Set(ids).size !== ids.length) throw new ApiError(422, 'DUPLICATE_ATTACHMENT', 'An attachment can appear only once per message.');
+  if (new Set(ids).size !== ids.length) throw duplicateAttachment();
   return ids;
 }
 function validateAttachmentRows(ids: string[], rows: AttachmentSize[]) {
@@ -733,7 +733,7 @@ const actorAssets = (a: Actor, ids: string[], conversation = false) => visibleAs
 const nulAttachment = () => new ApiError(422, 'VALIDATION_FAILED', 'Request fields are invalid: text cannot contain the NUL character (U+0000).');
 
 /** One message of a send, as built before admission: what TypeScript alone found wrong with it waits in `invalid`. */
-type Outgoing = { snapshot: EmailSnapshot; recipients: number; marketing: boolean; template?: SendRequest['template']; token?: { hash: string; email: string }; invalid?: unknown; oversize?: ApiError };
+type Outgoing = { snapshot: EmailSnapshot; recipients: number; marketing: boolean; template?: SendRequest['template']; token?: { hash: string; email: string }; duplicate?: boolean; invalid?: unknown; oversize?: ApiError };
 /** A direct send's messages, built and checked without the database: URLs, headers, duplicates and the batch's size. */
 async function directMessages(runtime: Runtime, mails: SendRequest[], batch: boolean): Promise<Outgoing[]> {
   const bulk = bulkFlags(mails), out: Outgoing[] = [];
@@ -743,9 +743,11 @@ async function directMessages(runtime: Runtime, mails: SendRequest[], batch: boo
     if (snapshot.html) await validateHtmlUrls(snapshot.html).catch(e => { throw atItem(e, batch ? i : undefined); });
     // PostgreSQL cannot store NUL in an attachment ID; nothing that names one is admitted.
     if (m.attachments.some(file => file.includes('\0'))) throw nulAttachment();
-    const message: Outgoing = { snapshot, recipients: hostedCost(m.to, m.cc, m.bcc), marketing: m.kind === 'marketing' || bulk[i]!, template: m.template };
+    // A repeated attachment is refused by admission after the sender's rules and before the attachment lookup.
+    const message: Outgoing = { snapshot, recipients: hostedCost(m.to, m.cc, m.bcc), marketing: m.kind === 'marketing' || bulk[i]!, template: m.template,
+      duplicate: new Set(m.attachments).size !== m.attachments.length };
     try {
-      sesHeaders(snapshot.headers.length + (m.kind === 'marketing' ? 2 : 0)); distinctAttachmentIds(m.attachments);
+      sesHeaders(snapshot.headers.length + (m.kind === 'marketing' ? 2 : 0));
       if (m.kind === 'marketing') {
         // Only the token's hash and destination come from local preparation; the statement gives it the workspace.
         const link = await (await loadOpsUnsub()).createUnsubscribeLink(runtime, '', snapshot.to[0]!);
@@ -763,21 +765,27 @@ const sendCall = (c: Ctx): SendCall => ({ runtime: c.env, ...idempotentRequest(c
 type Principal = { id:string;workspace_id:string;permissions:Actor['permissions'];domains:string[];used:number|null;max_requests:number };
 type Identity = { credential: SQL; authorize: (key: Principal) => Actor } | { actor: Actor };
 type SendReceipt = { id: string; status: 'queued'; simulated: boolean };
-const admissionMails = (out: Outgoing[]): AdmissionMail[] => out.map(({ snapshot: s, invalid, oversize }) => ({ host: s.from.split('@')[1]!.toLowerCase(), region: s.region || undefined,
-  kind: s.kind, attachments: [...new Set(s.attachments)], bodyBytes: contentBytes(s), invalid: !!invalid, oversize: !!oversize }));
+const admissionMails = (out: Outgoing[]): AdmissionMail[] => out.map(({ snapshot: s, duplicate, invalid, oversize }) => ({ host: s.from.split('@')[1]!.toLowerCase(), region: s.region || undefined,
+  kind: s.kind, attachments: [...new Set(s.attachments)], bodyBytes: contentBytes(s), duplicate: !!duplicate, invalid: !!invalid, oversize: !!oversize }));
 
 /**
  * Admits a send in one statement: the API key's authentication and budget (a warm key), the idempotency claim, the
  * send locks, the decision (send_admission) and every row the send writes. Direct and batch sends, self-hosted and
  * template sends, dashboard and platform notices and campaign tests all come here. A stored template is rendered by
- * SES first, in the region a check-only decision resolves; the screen's measure runs here too, and the decision
- * refuses it only for mail the screen would read.
+ * SES first, in the region a check-only decision resolves, once a retry has been answered from its key; the screen's
+ * measure runs here too, and the decision refuses it only for mail the screen would read.
  */
 async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identity: Identity, options: { batch: boolean; campaign?: { id: string; revision: number }; replayed?: (receipt: SendReceipt) => Promise<void> }): Promise<SendReceipt | { data: SendReceipt[] }> {
   const runtime = call.runtime, cfg = runtime.config, sim = isSimulatedSes(runtime), key = call.key, batch = options.batch;
   if (out.some(m => m.template)) {
     if (!('actor' in identity)) throw new Error('A template send authenticates before admission.');
-    const a = identity.actor, check = await admission(runtime, a.workspaceId, actorJson(a), { stage: 'send', locks: 'none', mails: admissionMails(out), ...charges(runtime, out) },
+    const a = identity.actor;
+    // A retry replays before the template is rendered again or any rule is checked: it may have changed since.
+    if (key !== undefined) {
+      const previous = await priorResult<SendReceipt | { data: SendReceipt[] }>(runtime.db, { workspaceId: a.workspaceId, actorKeyId: a.keyId, path: call.path, key }, body);
+      if (previous) { if ('id' in previous) await options.replayed?.(previous); return previous; }
+    }
+    const check = await admission(runtime, a.workspaceId, actorJson(a), { stage: 'send', locks: 'none', mails: admissionMails(out), ...charges(runtime, out) },
       undefined, actorAssets(a, out.flatMap(m => m.snapshot.attachments)));
     const decided = admitted(runtime, (await runtime.db.execute<{ s: Admitted | Refused }>(sql`SELECT ${check} AS s`)).rows[0]!.s, a.workspaceId,
       { batch, invalid: i => out[i]!.invalid, oversize: i => out[i]!.oversize });
@@ -1260,14 +1268,20 @@ export function registerSending(app: App) {
     return c.json({ id: campaignId, deleted: true as const }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/test', operationId: 'testCampaign', description: 'Send the current draft, personalized with data, to one address as a transactional test. On Hosted sending a test is screened on its own, with the campaign limit (49,152 bytes of screened text by default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } over it).', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(TestCampaign) }, responses: { 202: response(Receipt), ...errors } }), async c => {
-    const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id;
+    const a = actor(c, 'send'), input = c.req.valid('json'), campaignId = c.req.valid('param').id, call = sendCall(c);
+    const replayed = (receipt: SendReceipt) => campaignReplay(a, campaignId)(c.env.db, receipt);
+    // A retry replays before the draft is read: a finished test answers even after its draft changed or was archived.
+    if (call.key !== undefined) {
+      const previous = await priorResult<SendReceipt>(c.env.db, { workspaceId: a.workspaceId, actorKeyId: a.keyId, path: call.path, key: call.key }, input);
+      if (previous) { await replayed(previous); return c.json(Receipt.parse(previous), 202); }
+    }
     // Read and render the draft, then admit the test in one statement that locks the campaign and requires the
     // revision it rendered.
     const row = await findCampaign(c.env.db, a, campaignId);
     if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.');
     const snapshot = { ...await campaignMessage(c.env, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true, null), testCampaignId: campaignId };
-    const result = await admitSends(sendCall(c), input, [{ snapshot, recipients: hostedCost(input.to), marketing: false }], { actor: a },
-      { batch: false, campaign: { id: campaignId, revision: row.revision }, replayed: receipt => campaignReplay(a, campaignId)(c.env.db, receipt) });
+    const result = await admitSends(call, input, [{ snapshot, recipients: hostedCost(input.to), marketing: false }], { actor: a },
+      { batch: false, campaign: { id: campaignId, revision: row.revision }, replayed });
     return c.json(Receipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/send', operationId: 'sendCampaign', description: 'Accept the current revision for durable background delivery: the audience is frozen now, every message is validated in the background, then recipients are released into the dispatch queue. The 202 count is accepted recipient intents, not SES acceptance or delivery; poll the campaign for its state. ' + CAMPAIGN_SCREEN_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSend) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {

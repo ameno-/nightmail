@@ -57,6 +57,18 @@ const where = (s: IdempotencyScope) => sql`workspace_id = ${s.workspaceId} AND a
 async function claim(db: DbExecutor, s: IdempotencyScope, hash: string) {
   return (await db.execute<{ state: ClaimState | null }>(sql`SELECT ${claimKey(s, hash)} AS state`)).rows[0]!.state;
 }
+/**
+ * The answer to a retry, read before the request claims its key and before it reads or renders anything mutable it
+ * names (a campaign test's draft, a stored template): a finished request replays its result even after its source
+ * changed, and one still running is IDEMPOTENCY_IN_PROGRESS. Undefined when the key is free; the request then claims
+ * it as usual. The key's try-lock, if taken here, is released when this statement ends.
+ */
+export async function priorResult<T>(db: DbExecutor, s: IdempotencyScope, body: unknown): Promise<T | undefined> {
+  const [row] = (await db.execute<{ state: ClaimState | null }>(sql`SELECT coalesce(
+    (SELECT jsonb_build_object('previous', result, 'hash', request_hash, 'createdAt', created_at) FROM sending_idempotency WHERE ${where(s)}),
+    CASE WHEN NOT idempotency_lock(${s.workspaceId}, ${s.actorKeyId}, ${s.path}, ${s.key}) THEN '{"previous":null,"busy":true}'::jsonb END) AS state`)).rows;
+  return row?.state ? replay<T>(row.state, await requestHash(body)) : undefined;
+}
 const complete = (db: DbExecutor, s: IdempotencyScope, result: unknown) => db.execute(sql`UPDATE sending_idempotency SET result = ${JSON.stringify(result)}::jsonb WHERE ${where(s)}`);
 // Frees a claim that has no result: one whose request was refused or never wrote.
 const release = (db: DbExecutor, s: IdempotencyScope) => db.execute(sql`DELETE FROM sending_idempotency WHERE ${where(s)} AND result IS NULL`);

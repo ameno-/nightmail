@@ -22,7 +22,7 @@ import { productName } from './brand.js';
  */
 export type Stage = 'send' | 'launch' | 'reserve' | 'release' | 'prepare';
 /** One message as admission sees it. `invalid` and `oversize` are TypeScript's own findings, reported after every rule. */
-export type AdmissionMail = { host: string; region?: string; kind: 'transactional' | 'marketing'; attachments: string[]; bodyBytes: number; invalid?: boolean; oversize?: boolean };
+export type AdmissionMail = { host: string; region?: string; kind: 'transactional' | 'marketing'; attachments: string[]; bodyBytes: number; duplicate?: boolean; invalid?: boolean; oversize?: boolean };
 export type AdmittedAsset = { id: string; size: number; contentId: string | null; contentType: string };
 export type Admitted = { allowed: true; mails: { region: string; binding: SendingBinding | null; connection: ReadyConnection | null }[]; billing: BillingGate | null; assets: AdmittedAsset[]; shared: boolean };
 export type Released = { allowed: true; hostedLeft: number | null; nextChangeAt: string | null; billing: { enforced: boolean; freeSentLeft: number; affordable: number; availableUc: string } | null };
@@ -63,6 +63,7 @@ export async function admission(runtime: Runtime, workspaceId: SQL | string, act
 export const actorJson = (a: { keyId: string; domains: string[] }) => sql`${JSON.stringify({ id: a.keyId, domains: a.domains })}::jsonb`;
 
 const count = (value: number) => value.toLocaleString('en-US');
+export const duplicateAttachment = () => new ApiError(422, 'DUPLICATE_ATTACHMENT', 'An attachment can appear only once per message.');
 /**
  * The API error for a refusal. A batch names the item that failed (emails.3.from); a request-wide limit names none.
  * INVALID_CONTENT and CONTENT_TOO_LARGE_TO_SCREEN are the caller's own findings for that item, which it throws as found.
@@ -99,6 +100,7 @@ export function refusal(runtime: Runtime, d: Refused, local: { batch?: boolean; 
     case 'BULK_DMARC_REQUIRED': return item(new ApiError(409, d.code, `Hosted bulk sending requires a valid DMARC policy and aligned DKIM or SPF. Add or recheck the exact From domain ${d.host}.`, 'from'));
     case 'REGION_NOT_CONFIGURED': return item(new ApiError(422, d.code, 'The requested SES region is not enabled.', 'region'));
     case 'SES_SETUP_REQUIRED': return item(new ApiError(409, d.code, 'Run discovery and complete provisioning for this region before live sending.', 'region'));
+    case 'DUPLICATE_ATTACHMENT': return item(duplicateAttachment());
     case 'ATTACHMENT_NOT_FOUND': return item(new ApiError(404, d.code, 'One or more attachments were not found in this workspace.'));
     case 'ATTACHMENT_LIMIT_EXCEEDED': return item(new ApiError(413, d.code, `Combined attachments may not exceed ${SEND_LIMITS.attachmentBytes / 1024 / 1024} MiB of decoded data.`));
     case 'DUPLICATE_CONTENT_ID': return item(new ApiError(422, d.code, 'Inline content IDs must be unique.'));

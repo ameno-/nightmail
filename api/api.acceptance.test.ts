@@ -12888,14 +12888,22 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await db.query(`UPDATE domain_claims SET sending_state='verified' WHERE token=$1`,[reserved.token]);
       };
       await publish(oh);await publish(va);
-      const renders:string[]=[];
+      const renders:string[]=[];let sesDown=false;
       t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){
+        if(sesDown)throw new Error('A replay must not call SES.');
         const region=await this.config.region();assert.equal(cmd.input.TemplateName,region);
         if(cmd instanceof TestRenderEmailTemplateCommand){renders.push(region);return {RenderedTemplate:'Subject: fixture\r\n\r\nFixture.'};}
         assert.ok(cmd instanceof GetEmailTemplateCommand);return {TemplateContent:{Subject:'fixture'}};
       });
       const batch=ok(await local('POST','/v1/emails/batch',{emails:[va,oh].map(r=>({from:`a@${r}.example`,to:'success@simulator.amazonses.com',template:{name:r,data:{}}}))}),202);
       assert.deepEqual(renders,[va,oh]);assert.deepEqual((await db.query(`SELECT region,snapshot#>>'{binding,connection}' AS connection FROM sending_emails WHERE id=ANY($1) ORDER BY region`,[batch.data.map((m:Json)=>m.id)])).rows,[va,oh].map(region=>({region,connection:wid})));
+      // Review of #361, round 1: a retried template send replays before SES renders again or any rule is checked.
+      const meter=await queryBudget(t,db),templated={from:`a@${oh}.example`,to:'success@simulator.amazonses.com',template:{name:oh,data:{}}},idem={'Idempotency-Key':'pr361-template'};
+      await meter('template-send',async()=>ok(await local('POST','/v1/emails/send',templated),202));
+      const sent=await meter('template-send-keyed',async()=>ok(await local('POST','/v1/emails/send',templated,'live',idem),202));
+      sesDown=true;
+      assert.equal((await meter('template-replay',async()=>ok(await local('POST','/v1/emails/send',templated,'live',idem),202))).id,sent.id);
+      sesDown=false;
       assert.equal((await runtime.db.execute(toggleRegionSending({connectionId:wid,region:va},false,0))).rowCount,0);
       assert.equal((await runtime.db.execute(toggleRegionSending({connectionId:wid,region:va},false,2))).rowCount,1);
       error(await local('POST','/v1/emails/send',{from:`a@${va}.example`,to:address(),subject:'Blocked',text:'No fallback'}),409,'CONNECTION_REQUIRED');
@@ -21444,6 +21452,39 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const hostedDraft=ok(await local('POST','/v1/campaigns',{name:'budget-hosted',from:'a@budget.invalid',subject:'Budget',html:'<p>Budget</p>'},'live',auth),201);
       await send('hosted-campaign-test',3,`/v1/campaigns/${hostedDraft.id}/test`,{to:address()},auth);
       t.diagnostic(`ADMISSION-BUDGETS ${JSON.stringify(budgets)}`);
+    });
+  });
+  // Review of #361, round 1: a retried campaign test answered from the draft as it is now (422 after an edit, 409 once
+  // archived) instead of replaying the test it already sent.
+  test('a retried campaign test replays its receipt after its draft changed or was archived; a held key is IN_PROGRESS first',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local})=>{
+      const key=ok(await local('POST','/v1/api-keys',{name:'replay',permissions:['send','read','manage']}),201),auth={authorization:`Bearer ${key.secret}`};
+      const draft=ok(await local('POST','/v1/campaigns',{name:'replay',from:'sender@example.com',subject:'Before',html:'<p>Before</p>'},'live',auth),201);
+      const path=`/v1/campaigns/${draft.id}/test`,body={to:address()},idem={...auth,'Idempotency-Key':'pr361-replay'},meter=await queryBudget(t,db);
+      const first=await meter('campaign-test-keyed',async()=>ok(await local('POST',path,body,'live',idem),202));
+      ok(await local('PATCH',`/v1/campaigns/${draft.id}`,{revision:draft.revision,draft:{name:'replay',from:'sender@example.com',subject:'',html:'<p>Before</p>'}},'live',auth));
+      assert.equal((await meter('campaign-test-replay',async()=>ok(await local('POST',path,body,'live',idem),202))).id,first.id);
+      ok(await local('PATCH',`/v1/campaigns/${draft.id}/archive`,{archived:true},'live',auth));
+      assert.equal(ok(await local('POST',path,body,'live',idem),202).id,first.id);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1',[runtime.config.workspaceId])).rows[0].n,1);
+      // Another request holding a key answers IN_PROGRESS before the archived draft is read.
+      const other=await fixtureDatabase(t);await other.query('BEGIN');
+      try{
+        assert.equal((await other.query('SELECT idempotency_lock($1,$2,$3,$4) AS held',[runtime.config.workspaceId,key.id,path,'pr361-held'])).rows[0].held,true);
+        error(await local('POST',path,body,'live',{...auth,'Idempotency-Key':'pr361-held'}),409,'IDEMPOTENCY_IN_PROGRESS');
+      }finally{await other.query('ROLLBACK');}
+      error(await local('POST',path,body,'live',{...auth,'Idempotency-Key':'pr361-held'}),409,'CAMPAIGN_ARCHIVED');
+    });
+  });
+  // Review of #361, round 1: a repeated attachment ID was reported as the missing attachment it also named.
+  test('an attachment named twice is 422 DUPLICATE_ATTACHMENT before the attachment lookup, direct and batch',async t=>{
+    await simulatedSesFixture(t,async({local})=>{
+      const twice=()=>mail({attachments:['att_missing_pr361','att_missing_pr361']});
+      const key=ok(await local('POST','/v1/api-keys',{name:'duplicates',permissions:['send']}),201),auth={authorization:`Bearer ${key.secret}`};
+      for(const headers of [{},auth]){
+        assert.equal(error(await local('POST','/v1/emails/send',twice(),'live',headers),422,'DUPLICATE_ATTACHMENT').field,undefined);
+        assert.equal(error(await local('POST','/v1/emails/batch',{emails:[twice()]},'live',headers),422,'DUPLICATE_ATTACHMENT').field,'emails.0');
+      }
     });
   });
   test('query budget: immutable campaign preparation, release, dispatch and storage per recipient',async t=>{
