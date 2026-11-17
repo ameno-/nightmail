@@ -134,7 +134,10 @@ export async function settleClosedHours(runtime: Runtime, cutoff?: string): Prom
     }));
   }
   log('info', { code: 'BILLING_SETTLED', workspaces, entries, busy, ms: Date.now() - started });
-  const { rows: [lag] } = await runtime.db.execute<{ oldest: string | null }>(sql`SELECT (extract(epoch FROM min(hour))*1000)::bigint::text AS oldest FROM billing_usage_hourly WHERE quantity <> settled_quantity OR refunds <> '{}'`);
+  // A refund is written into its mail's own hour, which may be long closed: it is due once the hour it was written in
+  // (adjusted_at) has closed.
+  const { rows: [lag] } = await runtime.db.execute<{ oldest: string | null }>(sql`SELECT (extract(epoch FROM min(greatest(hour, coalesce(date_trunc('hour', adjusted_at, 'UTC'), hour))))*1000)::bigint::text AS oldest
+    FROM billing_usage_hourly WHERE quantity <> settled_quantity OR refunds <> '{}'`);
   if (lag?.oldest && Date.now() - Number(lag.oldest) > LAG_ALERT_MS) log('error', { code: 'BILLING_SETTLE_LAG', oldestOpenHour: new Date(Number(lag.oldest)).toISOString() });
   return { workspaces, entries, busy };
 }

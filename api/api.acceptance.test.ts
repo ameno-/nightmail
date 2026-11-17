@@ -7201,8 +7201,11 @@ describe('Billing: metering, gate and settlement', () => {
     return {
       wid, from,
       send: (recipients = 1) => request('POST', '/v1/emails/send', key.secret, { from, to: Array.from({ length: recipients }, () => `reader-${n++}@example.net`), subject: 'Billing fixture', text: 'Fixture.' }),
-      mode: (mode: 'off' | 'shadow' | 'enforce', extra = '') => db.query(`UPDATE billing_config SET mode=$1${extra}`, [mode]),
-      freeUsed: (sent: number, received = 0) => db.query(`INSERT INTO billing_accounts(workspace_id,free_sent_used,free_received_used) VALUES ($1,$2,$3) ON CONFLICT (workspace_id) DO UPDATE SET free_sent_used=$2,free_received_used=$3,free_month=(date_trunc('month',now() AT TIME ZONE 'UTC'))::date`, [wid, sent, received]),
+      // The installation's mode, charged or not for every hour (tests price hours long gone).
+      mode: async (mode: 'off' | 'shadow' | 'enforce', extra = '') => { await db.query(`UPDATE billing_config SET mode=$1${extra}`, [mode]); await charging(db, null, mode === 'enforce'); },
+      // The workspace free or prepaid, for every hour.
+      exempt: async (on: boolean) => { await db.query(`UPDATE billing_accounts SET mode=$2 WHERE workspace_id=$1`, [wid, on ? 'exempt' : 'prepaid']); await charging(db, wid, !on); },
+      freeUsed: (sent: number, received = 0) => settledThisMonth(db, wid, sent, received),
       post: async (kind: string, source: string, paid: bigint, promo = 0n) => (await db.query(`SELECT billing_post($1,$2,$3,$4,$5,'{}','system') AS r`, [wid, kind, source, paid.toString(), promo.toString()])).rows[0].r,
       position: async () => (await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p,
       open: async (meter: string) => Number((await db.query(`SELECT coalesce(sum(quantity-settled_quantity),0)::int AS n FROM billing_usage_hourly WHERE workspace_id=$1 AND meter=$2`, [wid, meter])).rows[0].n),
@@ -7210,11 +7213,22 @@ describe('Billing: metering, gate and settlement', () => {
     };
   }
   const settle = async (db: pg.Client, wid: string, cutoff = "date_trunc('hour', now(), 'UTC')") => (await db.query(`SELECT billing_settle($1, ${cutoff}) AS s`, [wid])).rows[0].s;
-  // A refund as billing_adjust_sends writes it: into `hour`, noting the hour its mail was metered in (`origin`).
-  const refundInto = (db: pg.Client, wid: string, hour: string, origin: string, meter: string, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity,refunds)
-    VALUES ($1,$2::timestamptz,$3,$4::bigint,jsonb_build_object(extract(epoch FROM $5::timestamptz)::bigint::text,$4::bigint))
-    ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity,
-      refunds=u.refunds||jsonb_build_object(extract(epoch FROM $5::timestamptz)::bigint::text,coalesce((u.refunds->>extract(epoch FROM $5::timestamptz)::bigint::text)::bigint,0)+excluded.quantity)`, [wid, hour, meter, q, origin]);
+  // A cutoff past everything written so far: the settler still never takes the current hour.
+  const later = "now() + interval '1 hour'";
+  // What the mode history (318) says from an hour on, for the installation (null) or a workspace: from `since` (a
+  // timestamp, or hours before the current one), or for every hour. A switch takes effect on an hour boundary in real
+  // time, so tests that price hours long gone state the history instead.
+  const charging = (db: pg.Client, scope: string | null, charged: boolean, since: string | number | 'always' = 'always') => db.query(`INSERT INTO billing_mode_changes(workspace_id,charged,effective_hour,actor)
+    VALUES ($1,$2,CASE WHEN $3::text='always' THEN '-infinity'::timestamptz WHEN $3 ~ '^[0-9]+$' THEN date_trunc('hour',now(),'UTC') - make_interval(hours=>$3::int) ELSE date_trunc('hour',$3::timestamptz,'UTC') END,'fixture')`, [scope, charged, String(since)]);
+  // A refund as billing_adjust_sends writes it: into the hour its mail was metered in, now.
+  const refundInto = (db: pg.Client, wid: string, origin: string, meter: string, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity,adjusted_at)
+    VALUES ($1,date_trunc('hour',$2::timestamptz,'UTC'),$3,$4::bigint,now()) ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity, adjusted_at=excluded.adjusted_at`, [wid, origin, meter, q]);
+  // This month's charged usage as settled so far (and posted at what it costs).
+  const settledThisMonth = (db: pg.Client, wid: string, sent: number, received = 0) => db.query(`INSERT INTO billing_months(workspace_id,month,sent,received,posted_uc) VALUES ($1,(date_trunc('month',now() AT TIME ZONE 'UTC'))::date,$2,$3,billing_month_cost($2,$3,0))
+    ON CONFLICT (workspace_id,month) DO UPDATE SET sent=excluded.sent, received=excluded.received, posted_uc=excluded.posted_uc`, [wid, sent, received]);
+  // A month's settled totals, by whether their hours were charged.
+  const month = async (db: pg.Client, wid: string, first: string) => (await db.query(`SELECT sent::int, received::int, uncharged_sent::int AS "unchargedSent", uncharged_received::int AS "unchargedReceived"
+    FROM billing_months WHERE workspace_id=$1 AND month=$2::date`, [wid, first])).rows[0];
   const captureLogs = (t: TestContext) => { const logs: Json[] = []; for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} }); return logs; };
 
   test('the gate lives in the one admission statement: off and shadow allow, enforce gives 402, exempt and the platform pass, debt blocks free sends', async t => {
@@ -7246,16 +7260,16 @@ describe('Billing: metering, gate and settlement', () => {
       assert.equal((await f.position()).availableUc, '0');
       // Exempt accounts are never gated; neither is the platform's own workspace. There is no invoiced mode (315): an
       // account is prepaid or exempt.
-      await db.query(`UPDATE billing_accounts SET mode='exempt' WHERE workspace_id=$1`, [f.wid]); ok(await f.send(), 202);
+      await f.exempt(true); ok(await f.send(), 202);
       await db.query('SAVEPOINT invoiced');
       await assert.rejects(db.query(`UPDATE billing_accounts SET mode='invoiced' WHERE workspace_id=$1`, [f.wid]), { code: '23514', constraint: 'billing_accounts_mode_check' });
       await db.query('ROLLBACK TO SAVEPOINT invoiced');
-      await db.query(`UPDATE billing_accounts SET mode='prepaid' WHERE workspace_id=$1`, [f.wid]);
+      await f.exempt(false);
       error(await f.send(), 402, 'BALANCE_EXHAUSTED');
       runtime.config.platformDomainWorkspace = f.wid;
       try { ok(await f.send(), 202); } finally { runtime.config.platformDomainWorkspace = undefined; }
       // A debt blocks even sends the free allowance would cover.
-      await db.query(`UPDATE billing_accounts SET free_sent_used=0 WHERE workspace_id=$1`, [f.wid]);
+      await f.freeUsed(0);
       await f.post('adjustment', `adjustment:${unique('debt')}`, -1_000_000n);
       assert.ok((await f.position()).freeSentLeft > 0);
       error(await f.send(), 402, 'BALANCE_EXHAUSTED');
@@ -7264,37 +7278,40 @@ describe('Billing: metering, gate and settlement', () => {
     });
   });
 
-  test('settlement prices closed hours once, applies each direction\'s free tier, rolls the month, and shadow or exempt post $0', async t => {
+  test('settlement prices closed hours once, applies each direction\'s free tier, posts a row per month, and shadow or exempt post $0', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
-      const wid = unique('billing-settle'), at = (h: number) => `date_trunc('hour', now(), 'UTC') - interval '${h} hours'`;
-      const usage = (meter: string, hours: number, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1, ${at(hours)}, $2, $3)
-        ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, meter, q]);
+      const wid = unique('billing-settle');
+      const usage = (meter: string, hour: string, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1, $2::timestamptz, $3, $4)
+        ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, hour, meter, q]);
       const ledger = async () => (await db.query(`SELECT kind,paid_uc::text,promo_uc::text,detail FROM billing_ledger WHERE workspace_id=$1 ORDER BY id`, [wid])).rows;
       const account = async () => (await db.query('SELECT * FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
-      await db.query(`UPDATE billing_config SET mode='shadow'`);
-      // 3,000 sent use the free sends and 1,000 received are free too; then one more send costs 20,000 µ¢ and 7 Omens 70,000 µ¢.
-      await usage('send', 3, 3000); await usage('receive', 3, 1000); await usage('send', 2, 1); await usage('omen', 2, 7); await usage('byo_send', 2, 5);
-      await usage('send', 0, 4); // The current hour is still open: never settled.
-      const first = await settle(db, wid);
+      const at = (cutoff: string) => settle(db, wid, `'${cutoff}'::timestamptz`);
+      // Shadow until 04:00 on July 1, enforced from then, and the workspace free from 06:00.
+      await charging(db, null, false); await charging(db, null, true, '2026-07-01 04:00Z'); await charging(db, wid, false, '2026-07-01 06:00Z');
+      // In shadow, 3,000 sent and 1,000 received, then one more send and 7 Omens: what they would cost is 20,000 µ¢ and
+      // 70,000 µ¢, posted at $0. Usage of a later hour waits for its own settlement.
+      await usage('send', '2026-07-01 01:00Z', 3000); await usage('receive', '2026-07-01 01:00Z', 1000);
+      await usage('send', '2026-07-01 02:00Z', 1); await usage('omen', '2026-07-01 02:00Z', 7); await usage('byo_send', '2026-07-01 02:00Z', 5);
+      await usage('send', '2026-07-01 03:00Z', 4);
+      const first = await at('2026-07-01 03:00Z');
       assert.deepEqual([first.entries, first.costUc, first.charged], [5, '90000', false]);
       const [row] = await ledger();
-      assert.deepEqual([row.kind, row.paid_uc, row.promo_uc, row.detail.costUc, row.detail.meters.send.payable, row.detail.meters.byo_send.costUc], ['usage', '0', '0', '90000', 1, 0], 'Shadow posts a $0 usage row with the would-be cost.');
-      assert.deepEqual([(await account()).free_sent_used, (await account()).free_received_used, (await account()).month_spend_uc, (await account()).balance_uc], [3001, 1000, '90000', '0']);
+      assert.deepEqual([row.kind, row.paid_uc, row.promo_uc, row.detail.costUc, row.detail.usageMonth, row.detail.meters.send.payable, row.detail.meters.byo_send.costUc], ['usage', '0', '0', '90000', '2026-07', 1, 0], 'Shadow posts a $0 usage row with the would-be cost.');
       // Idempotent: a second run finds nothing; a late write into a settled hour settles with the next run.
-      assert.deepEqual(await settle(db, wid), { entries: 0 });
-      await usage('send', 3, 5);
-      assert.equal((await settle(db, wid)).costUc, '100000');
-      // The gate counts the open hour against what's left of the free tier.
-      assert.equal((await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p.openUc, '80000');
-      // Enforce: promo first, then paid; the account goes into debt and unpaid_since starts; a top-up collects it.
-      await db.query(`UPDATE billing_config SET mode='enforce'`);
+      assert.deepEqual(await at('2026-07-01 03:00Z'), { entries: 0 });
+      await usage('send', '2026-07-01 01:00Z', 5);
+      assert.equal((await at('2026-07-01 03:00Z')).costUc, '100000');
+      // Shadow usage doesn't use up the free allowance (Ryan, 2026-11-16): only what is charged does.
+      assert.deepEqual(await month(db, wid, '2026-07-01'), { sent: 0, received: 0, unchargedSent: 3006, unchargedReceived: 1000 });
+      // Enforced: 3,010 sends cost 10 beyond the allowance; promo first, then paid; the account goes into debt and
+      // unpaid_since starts; a top-up collects it.
       await db.query(`SELECT billing_post($1,'grant','grant:fixture',0,50000,'{}','operator:fixture')`, [wid]);
-      await usage('send', 1, 10);
-      const charged = await settle(db, wid);
+      await db.query(`UPDATE billing_config SET mode='enforce'`);
+      await usage('send', '2026-07-01 04:00Z', 3010);
+      const charged = await at('2026-07-01 05:00Z');
       assert.deepEqual([charged.costUc, charged.charged], ['200000', true]);
       const debt = await account();
       assert.deepEqual([debt.promo_uc, debt.balance_uc, debt.unpaid_since !== null], ['0', '-150000', true]);
-      assert.equal((await db.query(`SELECT count(*)::int AS n FROM billing_notices WHERE workspace_id=$1 AND kind='sends_paused' AND status='pending'`, [wid])).rows[0].n, 1);
       await db.query(`SELECT billing_post($1,'topup','attempt:fixture-collect',170000,0,'{}','stripe')`, [wid]);
       const paid = await account();
       assert.deepEqual([paid.balance_uc, paid.unpaid_since, paid.empty_since], ['20000', null, null], 'A top-up collects the debt and ends the episode.');
@@ -7304,19 +7321,18 @@ describe('Billing: metering, gate and settlement', () => {
       await db.query(`SELECT billing_post($1,'write_off','write_off:fixture',480000,0,'{}','system')`, [wid]);
       const written = await account();
       assert.deepEqual([written.balance_uc, written.unpaid_since !== null], ['0', true]);
-      // Exempt accounts settle at $0 under enforce too, with the would-be cost recorded.
-      await db.query(`UPDATE billing_accounts SET mode='exempt' WHERE workspace_id=$1`, [wid]);
-      await usage('omen', 1, 3);
-      assert.deepEqual([(await settle(db, wid)).charged, (await ledger()).at(-1).detail.costUc], [false, '30000']);
-      // Month roll: last month's used free tier doesn't carry over; this month's first emails are free again. (Months
-      // priced per direction: from free_split_from on, the account's cached counters are that month's pool.)
-      await db.query(`UPDATE billing_config SET free_split_from='2026-09-01'`);
-      const roll = unique('billing-roll');
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_sent_used,free_received_used,month_spend_uc) VALUES ($1,'2026-09-01',3000,3000,123)`, [roll]);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,'2026-09-30 23:00Z','send',2),($1,'2026-10-01 05:00Z','send',10)`, [roll]);
-      const rolled = await settle(db, roll, "'2026-10-02 00:00Z'::timestamptz");
-      const after = (await db.query('SELECT free_month::text,free_sent_used,free_received_used,month_spend_uc::text FROM billing_accounts WHERE workspace_id=$1', [roll])).rows[0];
-      assert.deepEqual([rolled.costUc, after], ['40000', { free_month: '2026-10-01', free_sent_used: 10, free_received_used: 0, month_spend_uc: '0' }]);
+      // Free hours settle at $0 too, with the would-be cost recorded.
+      await usage('omen', '2026-07-01 06:00Z', 3);
+      assert.deepEqual([(await at('2026-07-01 07:00Z')).charged, (await ledger()).at(-1).detail.costUc], [false, '30000']);
+      // The month turns: September's late sends are priced against September, October's first 3,000 are free, and each
+      // month gets its own ledger row.
+      const roll = unique('billing-roll'), rolled = (q: string, hour: string) => db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,$2::timestamptz,'send',$3)`, [roll, hour, q]);
+      await rolled('3000', '2026-09-30 21:00Z');
+      assert.equal((await settle(db, roll, "'2026-09-30 22:00Z'::timestamptz")).costUc, '0');
+      await rolled('2', '2026-09-30 23:00Z'); await rolled('10', '2026-10-01 05:00Z');
+      const across = await settle(db, roll, "'2026-10-02 00:00Z'::timestamptz");
+      const months = (await db.query(`SELECT detail->>'usageMonth' AS m, detail->>'costUc' AS c FROM billing_ledger WHERE id = ANY($1::bigint[]) ORDER BY 1`, [across.entryIds])).rows;
+      assert.deepEqual([across.costUc, months], ['40000', [{ m: '2026-09', c: '40000' }, { m: '2026-10', c: '0' }]]);
       // Drift: every balance equals the sum of its ledger rows.
       assert.deepEqual((await db.query(`SELECT a.workspace_id FROM billing_accounts a WHERE a.workspace_id=ANY($1) AND (a.balance_uc,a.promo_uc)<>(SELECT coalesce(sum(paid_uc),0),coalesce(sum(promo_uc),0) FROM billing_ledger l WHERE l.workspace_id=a.workspace_id)`, [[wid, roll]])).rows, []);
       await db.query('SAVEPOINT ledger_append_only');
@@ -7327,22 +7343,20 @@ describe('Billing: metering, gate and settlement', () => {
 
   test('the free tier is 3,000 sent and 3,000 received a month, counted separately: overage in one direction is charged while the other is still free, and both roll over', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
-      await db.query(`UPDATE billing_config SET mode='enforce', free_split_from='2026-07-01'`);
       const meter = (wid: string, hour: string, name: string, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1,$2::timestamptz,$3,$4)
         ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, hour, name, q]);
       // [cost, sends charged, received charged] of one settlement up to the cutoff.
       const priced = async (wid: string, cutoff: string) => {
-        const s = await settle(db, wid, `'${cutoff}'::timestamptz`);
-        const { meters } = (await db.query('SELECT detail FROM billing_ledger WHERE id=$1', [s.entryId])).rows[0].detail;
-        return [s.costUc, meters.send?.payable ?? 0, meters.receive?.payable ?? 0];
+        const s = await settle(db, wid, cutoff === 'later' ? later : `'${cutoff}'::timestamptz`);
+        const rows = (await db.query('SELECT detail FROM billing_ledger WHERE id = ANY($1::bigint[])', [s.entryIds])).rows;
+        const sum = (m: string) => rows.reduce((n, r) => n + (r.detail.meters[m]?.payable ?? 0), 0);
+        return [s.costUc, sum('send'), sum('receive')];
       };
-      const counters = async (wid: string) => (await db.query('SELECT free_month::text AS month, free_sent_used AS sent, free_received_used AS received FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
-      const both = unique('free-both'), sends = unique('free-sends'), receives = unique('free-receives'), legacy = unique('free-legacy');
-      for (const wid of [both, sends, receives]) await db.query(`INSERT INTO billing_accounts(workspace_id,free_month) VALUES ($1,'2026-07-01')`, [wid]);
+      const both = unique('free-both'), sends = unique('free-sends'), receives = unique('free-receives');
       // 3,000 sent (recipients) and 3,000 received in one month are free.
       await meter(both, '2026-07-01 01:00Z', 'send', 3000); await meter(both, '2026-07-01 01:00Z', 'receive', 3000);
       assert.deepEqual(await priced(both, '2026-07-01 02:00Z'), ['0', 0, 0]);
-      assert.deepEqual(await counters(both), { month: '2026-07-01', sent: 3000, received: 3000 });
+      assert.deepEqual(await month(db, both, '2026-07-01'), { sent: 3000, received: 3000, unchargedSent: 0, unchargedReceived: 0 });
       // The 3,001st send is charged while received mail is still free: the 3,000th received costs nothing, the 3,001st does.
       await meter(sends, '2026-07-01 01:00Z', 'send', 3001); await meter(sends, '2026-07-01 01:00Z', 'receive', 2999);
       assert.deepEqual(await priced(sends, '2026-07-01 02:00Z'), ['20000', 1, 0]);
@@ -7360,40 +7374,30 @@ describe('Billing: metering, gate and settlement', () => {
       // Month rollover: both allowances start again in August.
       await meter(sends, '2026-08-01 00:00Z', 'send', 3000); await meter(sends, '2026-08-01 00:00Z', 'receive', 3000);
       assert.deepEqual(await priced(sends, '2026-08-01 01:00Z'), ['0', 0, 0]);
-      assert.deepEqual(await counters(sends), { month: '2026-08-01', sent: 3000, received: 3000 });
+      assert.deepEqual(await month(db, sends, '2026-08-01'), { sent: 3000, received: 3000, unchargedSent: 0, unchargedReceived: 0 });
       await meter(receives, '2026-08-01 00:00Z', 'send', 1);
       assert.deepEqual(await priced(receives, '2026-08-01 01:00Z'), ['0', 0, 0]);
-      // A July refund settled in August (in July's last hour) leaves July's pool for its own direction and returns what
-      // its mail's own hour was charged.
-      await refundInto(db, sends, '2026-07-31 23:00Z', '2026-07-01 01:00Z', 'send', -1);
-      assert.deepEqual(await priced(sends, '2026-08-01 02:00Z'), ['-20000', -1, 0], 'July\'s 3,001st send comes back.');
-      await refundInto(db, receives, '2026-07-31 23:00Z', '2026-07-01 03:00Z', 'send', -1); await refundInto(db, receives, '2026-07-31 23:00Z', '2026-07-01 01:00Z', 'receive', -1);
-      assert.deepEqual(await priced(receives, '2026-08-01 02:00Z'), ['-40000', -1, -1], 'Each refund returns what its own direction paid in July.');
-      // A refund of mail that was free returns nothing: one of the 2,000 sends of 01:00.
-      await refundInto(db, receives, '2026-07-31 23:00Z', '2026-07-01 01:00Z', 'send', -1);
-      assert.deepEqual(await priced(receives, '2026-08-01 03:00Z'), ['0', 0, 0]);
-      assert.deepEqual([await counters(sends), await counters(receives)], [{ month: '2026-08-01', sent: 3000, received: 3000 }, { month: '2026-08-01', sent: 1, received: 0 }]);
-      // A month before the split (free_split_from) shares one pool: after June's 2,000 + 2,000, a late June received
-      // message is charged, and refunding it returns that charge. June's own mail settled with no charge record, so
-      // refunding it returns nothing.
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month) VALUES ($1,'2026-08-01')`, [legacy]);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,settled_quantity) VALUES ($1,'2026-06-10 10:00Z','send',2000,2000),($1,'2026-06-10 10:00Z','receive',2000,2000)`, [legacy]);
-      await meter(legacy, '2026-06-30 23:00Z', 'receive', 1);
-      assert.deepEqual(await priced(legacy, '2026-08-01 01:00Z'), ['20000', 0, 1]);
-      await refundInto(db, legacy, '2026-06-30 23:00Z', '2026-06-30 23:00Z', 'receive', -1);
-      assert.deepEqual(await priced(legacy, '2026-08-01 02:00Z'), ['-20000', 0, -1]);
-      await refundInto(db, legacy, '2026-06-30 23:00Z', '2026-06-10 10:00Z', 'send', -1);
-      assert.deepEqual(await priced(legacy, '2026-08-01 03:00Z'), ['0', 0, 0]);
+      // A refund settled in August goes back into July, its mail's own hour, and gives back what July's cost drops by:
+      // the price of one email for each unit July's total was above its allowance.
+      await refundInto(db, sends, '2026-07-01 01:00Z', 'send', -1);
+      assert.deepEqual(await priced(sends, 'later'), ['-20000', -1, 0], 'July\'s 3,001st send comes back.');
+      await refundInto(db, receives, '2026-07-01 03:00Z', 'send', -1); await refundInto(db, receives, '2026-07-01 01:00Z', 'receive', -1);
+      assert.deepEqual(await priced(receives, 'later'), ['-40000', -1, -1], 'Each refund returns what its own direction cost in July.');
+      // July's sends are back at the allowance, so another refund returns nothing.
+      await refundInto(db, receives, '2026-07-01 01:00Z', 'send', -1);
+      assert.deepEqual(await priced(receives, 'later'), ['0', 0, 0]);
+      assert.deepEqual([await month(db, sends, '2026-08-01'), await month(db, receives, '2026-08-01')],
+        [{ sent: 3000, received: 3000, unchargedSent: 0, unchargedReceived: 0 }, { sent: 1, received: 0, unchargedSent: 0, unchargedReceived: 0 }]);
 
       // The gate prices sends against the sent allowance only. This month: free sends used, every received email left.
       const live = unique('free-live'), gate = async () => (await db.query('SELECT billing_gate($1, 1) AS g', [live])).rows[0].g;
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_sent_used) VALUES ($1,(date_trunc('month',now() AT TIME ZONE 'UTC'))::date,3000)`, [live]);
+      await settledThisMonth(db, live, 3000);
       let g = await gate();
       assert.deepEqual([g.ok, g.requiredUc, g.freeSentLeft, g.freeReceivedLeft], [false, '20000', 0, 3000], 'The 3,001st send needs credit while received mail is still free.');
       await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'receive',1)`, [live]);
       assert.deepEqual([(await gate()).openUc, (await gate()).freeReceivedLeft], ['0', 2999], 'An unsettled received message is free.');
       // And the other way round: received allowance used, sends free.
-      await db.query(`UPDATE billing_accounts SET free_sent_used=0, free_received_used=3000 WHERE workspace_id=$1`, [live]);
+      await settledThisMonth(db, live, 0, 3000);
       await db.query(`DELETE FROM billing_usage_hourly WHERE workspace_id=$1`, [live]);
       g = await gate();
       assert.deepEqual([g.ok, g.requiredUc, g.freeSentLeft, g.freeReceivedLeft], [true, '0', 3000, 0]);
@@ -7402,67 +7406,55 @@ describe('Billing: metering, gate and settlement', () => {
     });
   });
 
-  test('a month before the split prices late writes from its own combined history, even for an account dormant since, and refunds only what has a charge record', async t => {
+  test('a refund of an earlier month\'s mail gives back what that month charged for it, also for an account that hasn\'t settled since, in any session time zone', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
       // Month and hour arithmetic is UTC whatever the session's time zone.
       await db.query(`SET LOCAL TIME ZONE 'America/New_York'`);
-      await db.query(`UPDATE billing_config SET mode='enforce', free_split_from='2026-11-01'`);
       const balance = async (wid: string) => (await db.query('SELECT balance_uc::text AS b FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0].b;
-      // As 313 leaves an account that last settled in October: October cached, per-direction counters zero, and
-      // 2,000 sends + 2,000 received settled under the combined rule (20,000,000 µ¢), with no per-hour charge record.
+      // #301 review 1: October's 200,000 sends cost $39.40; the account doesn't settle again until all of them are
+      // canceled in November. The refund goes back into October and returns the $39.40.
       const wid = unique('dormant');
       await db.query(`SELECT billing_post($1,'topup','attempt:'||$1,10000000000,0,'{}','stripe')`, [wid]);
-      await db.query(`UPDATE billing_accounts SET free_month='2026-10-01' WHERE workspace_id=$1`, [wid]);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,settled_quantity) VALUES ($1,'2026-10-15 10:00Z','send',2000,2000),($1,'2026-10-15 10:00Z','receive',2000,2000)`, [wid]);
-      await db.query(`SELECT billing_post($1,'usage','usage:october:'||$1,$2,0,'{}','system')`, [wid, -20_000_000]);
-      // A late received message is charged against October's pool, not a fresh allowance; refunding it returns that.
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,'2026-10-31 22:00Z','receive',1)`, [wid]);
-      assert.equal((await settle(db, wid, "'2026-11-15 00:00Z'::timestamptz")).costUc, '20000');
-      await refundInto(db, wid, '2026-10-31 23:00Z', '2026-10-31 22:00Z', 'receive', -1);
-      assert.equal((await settle(db, wid, "'2026-11-15 00:00Z'::timestamptz")).costUc, '-20000');
-      // October's own sends settled before the switch with no charge record: canceling them returns nothing (the
-      // operator query in #301 lists any workspace the combined rule charged).
-      await refundInto(db, wid, '2026-10-31 23:00Z', '2026-10-15 10:00Z', 'send', -2000);
-      assert.equal((await settle(db, wid, "'2026-11-15 00:00Z'::timestamptz")).costUc, '0');
-      assert.equal(await balance(wid), '9980000000');
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,'2026-10-15 10:00Z','send',200000),($1,'2026-10-31 22:00Z','receive',1)`, [wid]);
+      assert.equal((await settle(db, wid, "'2026-11-01 00:00Z'::timestamptz")).costUc, '3940000000');
+      assert.equal(await balance(wid), '6060000000');
+      await refundInto(db, wid, '2026-10-15 10:00Z', 'send', -200000);
+      assert.equal((await settle(db, wid, later)).costUc, '-3940000000');
+      assert.equal(await balance(wid), '10000000000');
     });
   });
 
-  test('the split rule in its own month: an exempt cancellation leaves no debt, and refunds price each direction from its own count', async t => {
+  test('a cancellation in a month with both directions\' allowances: canceling sends of an hour that was charged, after the workspace became free, leaves no debt', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
-      await db.query(`UPDATE billing_config SET mode='enforce', free_split_from='2026-07-01'`);
       const wid = unique('split-forward');
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month) VALUES ($1,'2026-07-01')`, [wid]);
       const meter = (hour: string, name: string, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1,$2::timestamptz,$3,$4)
         ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, hour, name, q]);
-      const cost = async (cutoff: string) => (await settle(db, wid, `'${cutoff}'::timestamptz`)).costUc;
-      const account = async () => (await db.query('SELECT balance_uc::text AS balance, unpaid_since IS NOT NULL AS unpaid, free_sent_used AS sent, free_received_used AS received FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
-      const mode = (m: string) => db.query('UPDATE billing_accounts SET mode=$2 WHERE workspace_id=$1', [wid, m]);
-      // The review's case, prepaid with no funds: 3,000 sends, then 3,000 received. The combined rule took $0.60 for the
-      // received; the split rule takes nothing.
+      const cost = async (cutoff: string) => (await settle(db, wid, cutoff === 'later' ? later : `'${cutoff}'::timestamptz`)).costUc;
+      const account = async () => (await db.query('SELECT balance_uc::text AS balance, unpaid_since IS NOT NULL AS unpaid FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
+      // #301 recheck 2, prepaid with no funds: 3,000 sends, then 3,000 received, each free in its own allowance.
       await meter('2026-07-01 01:00Z', 'send', 3000);
       assert.equal(await cost('2026-07-01 02:00Z'), '0');
       await meter('2026-07-01 02:00Z', 'receive', 3000);
       assert.equal(await cost('2026-07-01 03:00Z'), '0');
-      // Exempted, the 3,000 queued sends are canceled; prepaid again: no debt, and the counts are what's left.
-      await mode('exempt');
-      await refundInto(db, wid, '2026-07-01 03:00Z', '2026-07-01 01:00Z', 'send', -3000);
-      assert.equal(await cost('2026-07-01 04:00Z'), '0');
-      await mode('prepaid');
-      assert.deepEqual(await account(), { balance: '0', unpaid: false, sent: 0, received: 3000 });
+      // Free from 03:00, the 3,000 queued sends are canceled (into 01:00, when they were charged); prepaid again from
+      // 04:00: no debt.
+      await charging(db, wid, false, '2026-07-01 03:00Z');
+      await refundInto(db, wid, '2026-07-01 01:00Z', 'send', -3000);
+      assert.equal(await cost('later'), '0');
+      await charging(db, wid, true, '2026-07-01 04:00Z');
+      assert.deepEqual([await account(), await month(db, wid, '2026-07-01')], [{ balance: '0', unpaid: false }, { sent: 0, received: 3000, unchargedSent: 0, unchargedReceived: 0 }]);
       // So 3,000 more sends are free and the 3,001st is charged.
       await meter('2026-07-01 04:00Z', 'send', 3001);
       assert.equal(await cost('2026-07-01 05:00Z'), '20000');
-      assert.deepEqual(await account(), { balance: '-20000', unpaid: true, sent: 3001, received: 3000 });
-      // That send canceled an hour later: its charge comes back and the sends' count drops. Only a payment ends the
-      // unpaid episode, as before.
-      await refundInto(db, wid, '2026-07-01 05:00Z', '2026-07-01 04:00Z', 'send', -1);
-      assert.equal(await cost('2026-07-01 06:00Z'), '-20000');
-      assert.deepEqual(await account(), { balance: '0', unpaid: true, sent: 3000, received: 3000 });
+      assert.deepEqual(await account(), { balance: '-20000', unpaid: true });
+      // That send canceled: its charge comes back. Only a payment ends the unpaid episode, as before.
+      await refundInto(db, wid, '2026-07-01 04:00Z', 'send', -1);
+      assert.equal(await cost('later'), '-20000');
+      assert.deepEqual(await account(), { balance: '0', unpaid: true });
       // A received message past its own 3,000 is charged; sends stay at their count.
       await meter('2026-07-01 06:00Z', 'receive', 1);
       assert.equal(await cost('2026-07-01 07:00Z'), '20000');
-      assert.deepEqual(await account(), { balance: '-20000', unpaid: true, sent: 3000, received: 3001 });
+      assert.deepEqual([await account(), await month(db, wid, '2026-07-01')], [{ balance: '-20000', unpaid: true }, { sent: 3000, received: 3001, unchargedSent: 0, unchargedReceived: 0 }]);
     });
   });
 
@@ -7470,23 +7462,24 @@ describe('Billing: metering, gate and settlement', () => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const f = await billingFixture(runtime, db, local, request);
       const free = async (on: boolean) => (await db.query(`SELECT billing_set_workspace_free($1,$2,'Fixture',NULL,'operator:fixture')->>'mode' AS m`, [f.wid, on])).rows[0].m;
-      const queue = async (rows: number, each: number) => (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
-        SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,$6::int) n),'[]','[]','Queued','{}',false
+      const queue = async (rows: number, each: number) => (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,$6::int) n),'[]','[]','Queued','{}',false,now()-interval '1 hour'
         FROM generate_series(1,$5::int) i RETURNING id`, [unique('queued'), f.wid, REGION, f.from, rows, each])).rows.map(r => r.id as string);
       const cancel = (ids: string[]) => db.query(`UPDATE sending_emails SET status='canceled' WHERE id=ANY($1)`, [ids]);
       const account = async () => (await db.query(`SELECT balance_uc::text AS balance, (SELECT coalesce(sum(remaining_uc),0)::text FROM billing_credit_lots l WHERE l.workspace_id=a.workspace_id) AS lots FROM billing_accounts a WHERE workspace_id=$1`, [f.wid])).rows[0];
       await f.mode('enforce');
-      // Billing sweep B1: an exempt workspace queues 50,000 recipients, which settle at $0 (would-be $9.40).
+      // Billing sweep B1: an exempt workspace queued 50,000 recipients an hour ago, which settle at $0 (would-be $9.40).
       assert.equal(await free(true), 'exempt');
+      await charging(db, f.wid, false);
       const ids = await queue(5, 10_000);
-      const exempt = await settle(db, f.wid, "now() + interval '1 hour'");
+      const exempt = await settle(db, f.wid, later);
       assert.deepEqual([exempt.charged, exempt.costUc], [false, '940000000']);
-      // The free flag ends, and 20,000 of those recipients are canceled. Before, the refund paid out $4.00 of credit.
+      // The free flag ends, and 20,000 of those recipients are canceled. Before 313, the refund paid out $4.00 of credit.
       assert.equal(await free(false), 'prepaid');
       await cancel(ids.slice(0, 2));
-      assert.equal((await f.position()).availableUc, '0', 'A pending refund is no credit.');
-      const refunded = await settle(db, f.wid, "now() + interval '1 hour'");
-      assert.deepEqual([refunded.charged, refunded.costUc], [true, '0']);
+      assert.equal((await f.position()).availableUc, '0', 'A refund of mail that was never charged is no credit.');
+      const refunded = await settle(db, f.wid, later);
+      assert.deepEqual([refunded.entries, refunded.charged], [1, false]);
       assert.deepEqual(await account(), { balance: '0', lots: '0' });
     });
   });
@@ -7496,25 +7489,25 @@ describe('Billing: metering, gate and settlement', () => {
       const f = await billingFixture(runtime, db, local, request), { restoreJob } = await import('./src/billing/restore.js');
       const free = (on: boolean) => db.query(`SELECT billing_set_workspace_free($1,$2,'Fixture',NULL,'operator:fixture')`, [f.wid, on]);
       await f.mode('enforce', ', receive_hold=true');
-      // Exempt: 4,000 recipients queued in four sends settle at $0.
-      await free(true);
-      const ids = (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
-        SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,1000) n),'[]','[]','Queued','{}',false
+      // Exempt: 4,000 recipients queued two hours ago in four sends settle at $0.
+      await free(true); await charging(db, f.wid, false);
+      const ids = (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,1000) n),'[]','[]','Queued','{}',false,now()-interval '2 hours'
         FROM generate_series(1,4) i RETURNING id`, [unique('queued'), f.wid, REGION, f.from])).rows.map(r => r.id as string);
-      assert.equal((await settle(db, f.wid, "now() + interval '1 hour'")).charged, false);
-      // Prepaid with no funds: 4,000 received messages owe $0.20, eight days ago, so received mail is held.
-      await free(false);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'receive',4000)`, [f.wid]);
-      assert.equal((await settle(db, f.wid, "now() + interval '1 hour'")).costUc, '20000000');
+      assert.equal((await settle(db, f.wid, later)).charged, false);
+      // Prepaid from an hour ago with no funds: 4,000 received messages owe $0.20, eight days ago, so received mail is held.
+      await free(false); await charging(db, f.wid, true, 1);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC') - interval '1 hour','receive',4000)`, [f.wid]);
+      assert.equal((await settle(db, f.wid, later)).costUc, '20000000');
       await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '8 days' WHERE workspace_id=$1`, [f.wid]);
       const mid = unique('held');
       await db.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,status,error)
         VALUES ($1,$2,$3,'fixture',$4,'["inbox@billing.example"]','{}','held','BILLING_HOLD')`, [f.wid, mid, REGION, 'held/' + mid]);
       assert.equal((await f.position()).receiveHeld, true);
-      // Canceling 1,000 of the exempt recipients (the campaign-cancel transition) gives nothing back: the debt, the
-      // episode and the hold stay, and the restore job releases nothing.
+      // #301 recheck 3: canceling 1,000 of the exempt recipients (the campaign-cancel transition) gives nothing back: the
+      // debt, the episode and the hold stay, and the restore job releases nothing.
       await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [ids[0]]);
-      assert.equal((await settle(db, f.wid, "now() + interval '1 hour'")).costUc, '0');
+      assert.equal((await settle(db, f.wid, later)).charged, false);
       const account = (await db.query('SELECT balance_uc::text AS balance, unpaid_since IS NOT NULL AS unpaid FROM billing_accounts WHERE workspace_id=$1', [f.wid])).rows[0];
       assert.deepEqual([account, (await f.position()).receiveHeld], [{ balance: '-20000000', unpaid: true }, true]);
       assert.equal((await db.query('SELECT count(*)::int AS n FROM jobs WHERE id=$1', [`billing.restored:${f.wid}`])).rows[0].n, 0);
@@ -7523,29 +7516,24 @@ describe('Billing: metering, gate and settlement', () => {
     });
   });
 
-  test('a refund and a new send that net to zero in one hour are still work: the gate counts the send, the settler charges it, and paid attribution moves with it', async t => {
+  test('canceling exempt mail while new mail is sent lends the new mail nothing: the gate counts each send, the refund goes back into its own hour and gives nothing back', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const f = await billingFixture(runtime, db, local, request);
       const free = (on: boolean) => db.query(`SELECT billing_set_workspace_free($1,$2,'Fixture',NULL,'operator:fixture')`, [f.wid, on]);
       const hour = (h: number) => `date_trunc('hour', now(), 'UTC') - interval '${h} hours'`;
-      // Mail queued an hour ago, as its hour's meter recorded it: one 3,000-recipient send and two single ones.
-      const queuedLastHour = async () => {
-        const ids = (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
-          SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,CASE WHEN i=0 THEN 3000 ELSE 1 END) n),'[]','[]','Queued','{}',false,now()-interval '1 hour'
-          FROM generate_series(0,2) i ORDER BY i RETURNING id`, [unique('queued'), f.wid, REGION, f.from])).rows.map(r => r.id as string);
-        await db.query(`UPDATE billing_usage_hourly SET hour=${hour(1)} WHERE workspace_id=$1 AND meter='send' AND hour=${hour(0)}`, [f.wid]);
-        assert.equal((await settle(db, f.wid, hour(0))).entries, 1);
-        return ids;
-      };
       const cancel = (id: string) => db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [id]);
       await f.mode('enforce');
-      // Exempt origin: 3,002 recipients settle at $0. Prepaid again with credit for exactly two sends.
-      await free(true);
-      const [, a, b] = await queuedLastHour();
-      await free(false);
+      // Exempt an hour ago: one 3,000-recipient send and two single ones, settled at $0.
+      await free(true); await charging(db, f.wid, false);
+      const [, a, b] = (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,CASE WHEN i=0 THEN 3000 ELSE 1 END) n),'[]','[]','Queued','{}',false,now()-interval '1 hour'
+        FROM generate_series(0,2) i ORDER BY i RETURNING id`, [unique('queued'), f.wid, REGION, f.from])).rows.map(r => r.id as string);
+      assert.equal((await settle(db, f.wid, hour(0))).entries, 1);
+      // Prepaid from this hour, this month's free sends used, credit for exactly two sends.
+      await free(false); await charging(db, f.wid, true, 0); await f.freeUsed(3000);
       await f.post('topup', `attempt:${unique('two')}`, 40_000n);
-      // A new send, and one of the exempt recipients canceled in the same hour: the row nets to zero but owes the send,
-      // so the second send takes the last of the credit and the third is refused.
+      // #301 recheck 4: a new send, and one of the exempt recipients canceled in the same hour, used to net to zero in one
+      // row and hide the send. The second send takes the last of the credit and the third is refused.
       ok(await f.send(1), 202);
       await cancel(a!);
       assert.deepEqual([(await f.position()).openUc, (await f.position()).availableUc], ['20000', '20000']);
@@ -7553,58 +7541,55 @@ describe('Billing: metering, gate and settlement', () => {
       await cancel(b!);
       assert.equal((await f.position()).availableUc, '0');
       error(await f.send(1), 402, 'BALANCE_EXHAUSTED');
-      // The net-zero row is still settled, and both sends are charged; the exempt refunds give nothing back.
-      const row = (await db.query(`SELECT quantity::int, settled_quantity::int, refunds <> '{}' AS pending FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='send' AND hour=${hour(0)}`, [f.wid])).rows[0];
-      assert.deepEqual(row, { quantity: 0, settled_quantity: 0, pending: true });
+      // The refunds went back into the hour their mail was metered in; the new sends are this hour's.
+      const rows = async () => (await db.query(`SELECT CASE WHEN hour=${hour(0)} THEN 'now' ELSE 'before' END AS h, quantity::int, settled_quantity::int FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='send' ORDER BY hour`, [f.wid])).rows;
+      assert.deepEqual(await rows(), [{ h: 'before', quantity: 3000, settled_quantity: 3002 }, { h: 'now', quantity: 2, settled_quantity: 0 }]);
+      // The cron settles the refunds, which give nothing back; the two sends wait for their hour to close.
       const { settleClosedHours } = await import('./src/billing/cron.js');
       await settleClosedHours(runtime, (await db.query(`SELECT (${hour(0)} + interval '1 hour')::text AS c`)).rows[0].c);
-      const settled = (await db.query(`SELECT refunds = '{}' AS done FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='send' AND hour=${hour(0)}`, [f.wid])).rows[0];
-      assert.equal(settled.done, true, 'Cron discovery finds the net-zero row.');
-      assert.deepEqual([(await f.account()).balance_uc, (await f.position()).availableUc], ['0', '0']);
+      assert.deepEqual(await rows(), [{ h: 'before', quantity: 3000, settled_quantity: 3000 }, { h: 'now', quantity: 2, settled_quantity: 0 }]);
+      assert.deepEqual([(await f.account()).balance_uc, (await f.position()).availableUc], ['40000', '0']);
     });
   });
 
-  test('a net-zero hour whose refunded mail was paid moves the charge to the new send, and refunding that send returns it', async t => {
+  test('canceling a paid recipient while a new one is sent: the month\'s cost is unchanged, and canceling the new one returns one email\'s price', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const f = await billingFixture(runtime, db, local, request);
       const hour = (h: number) => `date_trunc('hour', now(), 'UTC') - interval '${h} hours'`;
-      const paid = async () => Object.fromEntries((await db.query(`SELECT CASE WHEN hour = ${hour(0)} THEN 'now' ELSE 'before' END AS h, units::int FROM billing_usage_paid WHERE workspace_id=$1 AND meter='send'`, [f.wid])).rows.map(r => [r.h, r.units]));
       await f.mode('enforce');
       await f.post('topup', `attempt:${unique('dollar')}`, 100_000_000n);
-      // Prepaid origin an hour ago: 3,002 recipients, the last two charged.
+      // Prepaid an hour ago: 3,002 recipients, the last two charged.
       const ids = (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
         SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,CASE WHEN i=0 THEN 3000 ELSE 1 END) n),'[]','[]','Queued','{}',false,now()-interval '1 hour'
         FROM generate_series(0,2) i ORDER BY i RETURNING id`, [unique('queued'), f.wid, REGION, f.from])).rows.map(r => r.id as string);
-      await db.query(`UPDATE billing_usage_hourly SET hour=${hour(1)} WHERE workspace_id=$1 AND meter='send' AND hour=${hour(0)}`, [f.wid]);
       assert.equal((await settle(db, f.wid, hour(0))).costUc, '40000');
-      assert.deepEqual(await paid(), { before: 2 });
-      // A new send and one of the paid recipients canceled in the same hour: the refund pays for the new send.
+      // A new send, and one of the paid recipients canceled in the same hour: the month still has 3,002, so nothing is
+      // owed, at once.
       const sent = ok(await f.send(1), 202).id as string;
       await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [ids[1]]);
-      assert.equal((await f.position()).openUc, '20000', 'Until it settles, the refund lends nothing.');
-      const moved = await settle(db, f.wid, "now() + interval '1 hour'");
-      assert.deepEqual([moved.entries, moved.costUc], [1, '0']);
-      assert.deepEqual(await paid(), { before: 1, now: 1 });
-      // Canceling the new send now returns its charge.
+      assert.equal((await f.position()).openUc, '0', 'The refund pays for the new send.');
+      // Canceling the new send too: the month has 3,001, one email's price comes back.
       await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [sent]);
-      assert.equal((await settle(db, f.wid, "now() + interval '1 hour'")).costUc, '-20000');
-      assert.deepEqual([await paid(), (await f.account()).balance_uc], [{ before: 1, now: 0 }, '99980000']);
+      assert.equal((await f.position()).openUc, '-20000');
+      assert.equal((await settle(db, f.wid, later)).costUc, '-20000');
+      assert.deepEqual([(await f.account()).balance_uc, (await f.position()).availableUc], ['99980000', '99980000']);
     });
   });
 
-  test('meters: pre-SES refunds land in the current hour, spam rejections stay charged, receives, Omens and storage count once', async t => {
+  test('meters: a send counts in the hour it was created in and so does its refund; spam rejections stay charged; receives, Omens and storage count once', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const f = await billingFixture(runtime, db, local, request);
       const usage = async () => Object.fromEntries((await db.query(`SELECT meter,sum(quantity)::int AS q FROM billing_usage_hourly WHERE workspace_id=$1 AND hour=date_trunc('hour',now(),'UTC') GROUP BY 1`, [f.wid])).rows.map(r => [r.meter, r.q]));
-      // Two days after admission, a pre-SES rejection refunds its three recipients into the current hour.
-      const old = unique('billing-old');
+      // Created two days ago (a send created now counts now): its three recipients count in that hour.
+      const old = unique('billing-old'), then = "date_trunc('hour', now() - interval '2 days', 'UTC')";
       await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
         VALUES ($1,$2,$3,'fixture',$4,'["a@example.net","b@example.net"]','["c@example.net"]','[]','Old','{}',false,now()-interval '2 days')`, [old, f.wid, REGION, f.from]);
-      assert.equal((await usage()).send, 3);
-      await db.query(`UPDATE billing_config SET mode='shadow'`); await settle(db, f.wid, "now() + interval '1 hour'");
+      assert.deepEqual((await db.query(`SELECT quantity::int FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='send' AND hour=${then}`, [f.wid])).rows[0], { quantity: 3 });
+      await f.mode('shadow'); await settle(db, f.wid, later);
+      // A pre-SES rejection now refunds them into that hour, not the current one: a settled row that is open again.
       await db.query(`UPDATE sending_emails SET status='rejected',error_code='RENDERING_FAILED' WHERE id=$1`, [old]);
-      assert.equal((await usage()).send, 0, 'The refund is an unsettled −3 in the current hour.');
-      assert.equal((await db.query(`SELECT quantity-settled_quantity AS d FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='send' AND hour=date_trunc('hour',now(),'UTC')`, [f.wid])).rows[0].d, '-3');
+      assert.equal((await usage()).send, undefined, 'Nothing lands in the current hour.');
+      assert.deepEqual((await db.query(`SELECT quantity::int, settled_quantity::int, adjusted_at IS NOT NULL AS adjusted FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='send' AND hour=${then}`, [f.wid])).rows[0], { quantity: 0, settled_quantity: 3, adjusted: true });
       // A spam-screen rejection stays charged.
       const spam = unique('billing-spam');
       await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated) VALUES ($1,$2,$3,'fixture',$4,'["s@example.net"]','[]','[]','Spam','{}',false)`, [spam, f.wid, REGION, f.from]);
@@ -7748,42 +7733,40 @@ describe('Billing: metering, gate and settlement', () => {
   test('refunds return promo first, a refund from an earlier month is priced against that month, and write-offs repeat per day', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const f = await billingFixture(runtime, db, local, request);
-      const account = async (wid = f.wid) => (await db.query('SELECT balance_uc::text,promo_uc::text,promo_spent_uc::text FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
+      const account = async (wid = f.wid) => (await db.query('SELECT balance_uc::text,promo_uc::text FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
       const row = (id: string, wid: string, created: string, recipients = 1) => db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
         VALUES ($1,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||n||'@example.net') FROM generate_series(1,$5::int) n),'[]','[]','Fixture','{}',false,${created})`, [id, wid, REGION, f.from, recipients]);
-      const settleAll = (wid = f.wid) => settle(db, wid, "now() + interval '1 hour'");
+      const settleAll = (wid = f.wid) => settle(db, wid, later);
       // Promo pays first; when refunds outweigh new usage, the money goes back to promo up to what promo paid.
       await f.freeUsed(3000);
       await f.post('grant', 'grant:fixture-promo', 0n, 100_000n);
       const sent = unique('promo-paid');
-      await row(sent, f.wid, 'now()', 3);
+      await row(sent, f.wid, "now() - interval '1 hour'", 3);
       await settleAll();
-      assert.deepEqual(await account(), { balance_uc: '0', promo_uc: '40000', promo_spent_uc: '60000' });
+      assert.deepEqual(await account(), { balance_uc: '0', promo_uc: '40000' });
       await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [sent]);
       assert.equal((await settleAll()).costUc, '-60000');
-      assert.deepEqual(await account(), { balance_uc: '0', promo_uc: '100000', promo_spent_uc: '0' }, 'Not a cent of promo became paid (refundable) credit.');
+      assert.deepEqual(await account(), { balance_uc: '0', promo_uc: '100000' }, 'Not a cent of promo became paid (refundable) credit.');
       // A send admitted last month and charged there (beyond that month's free 3,000) is refunded this month: the refund
-      // lands in last month's last hour and returns exactly what last month charged for it.
+      // goes back into last month and returns exactly what last month charged for it.
       const lastMonth = "date_trunc('month', now(), 'UTC') - interval '2 days'";
+      await f.post('topup', `attempt:${unique('cross')}`, 100_000n);
       const old = unique('cross-month');
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1, date_trunc('hour', ${lastMonth}, 'UTC'), 'send', 3000)`, [f.wid]);
       await row(old, f.wid, lastMonth, 2);
-      // As last month settled it: 3,000 free units and these 2 paid ones, recorded as that hour's charged units (the insert
-      // trigger meters into the current hour).
-      await db.query(`UPDATE billing_usage_hourly SET quantity=quantity-2 WHERE workspace_id=$1 AND hour=date_trunc('hour', now(), 'UTC') AND meter='send'`, [f.wid]);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,settled_quantity) VALUES ($1, date_trunc('hour', ${lastMonth}), 'send', 3002, 3002)`, [f.wid]);
-      await db.query(`INSERT INTO billing_usage_paid VALUES ($1, date_trunc('hour', ${lastMonth}), 'send', 2)`, [f.wid]);
+      assert.equal((await settleAll()).costUc, '40000');
       await db.query(`UPDATE sending_emails SET status='rejected',error_code='RENDERING_FAILED' WHERE id=$1`, [old]);
-      const target = (await db.query(`SELECT hour = date_trunc('month', now(), 'UTC') - interval '1 hour' AS last_hour, quantity-settled_quantity AS d FROM billing_usage_hourly WHERE workspace_id=$1 AND quantity<>settled_quantity`, [f.wid])).rows;
-      assert.deepEqual(target, [{ last_hour: true, d: '-2' }]);
+      const target = (await db.query(`SELECT hour = date_trunc('hour', ${lastMonth}, 'UTC') AS origin, quantity-settled_quantity AS d FROM billing_usage_hourly WHERE workspace_id=$1 AND quantity<>settled_quantity`, [f.wid])).rows;
+      assert.deepEqual(target, [{ origin: true, d: '-2' }]);
       assert.equal((await settleAll()).costUc, '-40000', 'Both refunded recipients were paid for last month, so both come back.');
       // A refund of last month's free sends returns nothing, even though this month's free tier is spent.
       const other = unique('billing-free-month'), free = unique('cross-month-free');
       await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [other]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared','222233334444','ready')`, [other, REGION]);
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_sent_used) VALUES ($1,3000)`, [other]);
+      await settledThisMonth(db, other, 3000);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1, date_trunc('hour', ${lastMonth}, 'UTC'), 'send', 9)`, [other]);
       await row(free, other, lastMonth);
-      await db.query(`UPDATE billing_usage_hourly SET quantity=quantity-1 WHERE workspace_id=$1 AND meter='send'`, [other]);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,settled_quantity) VALUES ($1, date_trunc('hour', ${lastMonth}), 'send', 10, 10)`, [other]);
+      await settleAll(other);
       await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [free]);
       assert.equal((await settleAll(other)).costUc, '0');
       // Write-offs: debt that builds up again under the same unpaid episode is written off again (the key carries the day).
@@ -7798,34 +7781,42 @@ describe('Billing: metering, gate and settlement', () => {
       assert.deepEqual(after, { balance_uc: '0', unpaid: true }, 'Written off again; unpaid_since (and a receive hold) stays until a top-up.');
     });
   });
-  test('usage is priced under the mode it was metered in: nothing metered while billing was off is charged when it comes back, and a free flag starting or ending prices its own hour', async t => {
+
+  test('usage is priced under the mode of the hour it was metered in: nothing metered while billing was off is charged when it comes back, and a free flag starting or ending makes its whole hour free', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
       const { setBillingEnforcement } = await import('./scripts/set-billing-enforcement.js');
       const usage = (wid: string, meter: string, hours: number, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity)
         VALUES ($1, date_trunc('hour', now(), 'UTC') - make_interval(hours=>$3), $2, $4) ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, meter, hours, q]);
       const balance = async (wid: string) => (await db.query('SELECT balance_uc::text AS b, unpaid_since IS NOT NULL AS unpaid FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
-      const closed = "date_trunc('hour', now() - interval '5 minutes', 'UTC')", later = "now() + interval '1 hour'";
-      await db.query(`UPDATE billing_config SET mode='enforce'`);
-      // The kill-switch for a day and a half: 50,000 sent and 20,000 received while billing is off, some in the open hour.
+      const open = async (wid: string) => (await db.query('SELECT billing_position($1)->>\'openUc\' AS o', [wid])).rows[0].o;
+      const closed = "date_trunc('hour', now() - interval '5 minutes', 'UTC')";
+      // Billing sweep B2, the kill-switch for a day and a half: 50,000 sent and 20,000 received while billing was off,
+      // some in the open hour.
+      await charging(db, null, false, 36);
+      await db.query(`UPDATE billing_config SET mode='off'`);
       const off = unique('billing-off');
-      await setBillingEnforcement(db, ['off', '--reason', 'Kill-switch while the settler is checked']);
       await db.query(`INSERT INTO billing_accounts(workspace_id) VALUES ($1)`, [off]);
       await usage(off, 'send', 30, 50_000); await usage(off, 'receive', 20, 20_000); await usage(off, 'send', 0, 10);
-      // Back on: none of it is charged, not even the open hour, and no unpaid episode starts.
+      // Back on: charging starts with the next hour. None of it is charged, not even the open hour, and no unpaid episode
+      // starts. (The switch settles every workspace's closed hours, at $0 here.)
       await setBillingEnforcement(db, ['enforce', '--reason', 'Billing back on after the check']);
       assert.deepEqual(await settle(db, off, closed), { entries: 0 });
-      assert.equal((await settle(db, off, later)).entries, 0);
-      assert.deepEqual(await balance(off), { b: '0', unpaid: false });
-      // A workspace's free flag ends with usage still open: that usage stays free. A paying workspace becomes free with
-      // usage still open: that usage is charged as it was metered.
+      assert.deepEqual([await balance(off), await open(off)], [{ b: '0', unpaid: false }, '0']);
+      // A switch takes effect on an hour boundary, in the customer's favour: a free flag that ends leaves the rest of its
+      // hour free, and one that starts makes its whole hour free, usage already sent included.
+      await charging(db, null, true);
       const ending = unique('billing-free-ends'), starting = unique('billing-free-starts');
       await db.query(`SELECT billing_set_workspace_free($1, true, 'Partner trial for the quarter', NULL, 'script')`, [ending]);
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_sent_used) VALUES ($1,(date_trunc('month',now() AT TIME ZONE 'UTC'))::date,3000)`, [starting]);
+      await charging(db, ending, false);
+      await settledThisMonth(db, starting, 3000);
       await usage(ending, 'send', 0, 4000); await usage(starting, 'send', 0, 10);
+      assert.deepEqual([await open(ending), await open(starting)], ['0', '200000']);
       await db.query(`SELECT billing_set_workspace_free($1, false, NULL, NULL, 'script')`, [ending]);
       await db.query(`SELECT billing_set_workspace_free($1, true, 'Partner trial for the quarter', NULL, 'script')`, [starting]);
-      for (const wid of [ending, starting]) await settle(db, wid, later);
-      assert.deepEqual([await balance(ending), await balance(starting)], [{ b: '0', unpaid: false }, { b: '-200000', unpaid: true }]);
+      assert.deepEqual([await open(ending), await open(starting)], ['0', '0']);
+      // From the next hour on, the first is charged and the second isn't.
+      const next = (wid: string) => db.query(`SELECT billing_charged($1, date_trunc('hour', now(), 'UTC') + interval '1 hour') AS c`, [wid]).then(r => r.rows[0].c);
+      assert.deepEqual([await next(ending), await next(starting)], [true, false]);
     });
   });
 
@@ -7910,23 +7901,162 @@ describe('Billing: metering, gate and settlement', () => {
   test('the gate prices an earlier month\'s unsettled usage against that month: a refund there never hands out free sends now', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
       await db.query(`UPDATE billing_config SET mode='enforce'`);
-      const lastMonth = "(date_trunc('month', now() AT TIME ZONE 'UTC') - interval '1 month')::date", lastHour = "date_trunc('month', now(), 'UTC') - interval '1 hour'";
+      const lastMonth = "date_trunc('month', now(), 'UTC') - interval '10 days'", lastHour = "date_trunc('month', now(), 'UTC') - interval '1 hour'";
       const gate = async (wid: string, n: number) => (await db.query('SELECT billing_gate($1, $2) AS g', [wid, n])).rows[0].g;
-      // Last month's 20,000 queued recipients are canceled today (the refund lands in last month's last hour) and this
-      // month's 3,000 free sends are admitted. With $0, another 3,000 needs $0.60.
+      // Billing sweep B3: last month's 20,000 sends cost $3.40, unpaid; today they are canceled (the refund goes back into
+      // last month) and this month's 3,000 free sends are admitted. The refund gives back last month's $3.40, which pays
+      // the debt; it frees no send this month, so another 3,000 needs $0.60.
       const refunded = unique('billing-month-refund');
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month) VALUES ($1,${lastMonth})`, [refunded]);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,${lastHour},'send',-20000),($1,date_trunc('hour',now(),'UTC'),'send',3000)`, [refunded]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',${lastMonth},'UTC'),'send',20000)`, [refunded]);
+      assert.equal((await settle(db, refunded)).costUc, '340000000');
+      await refundInto(db, refunded, (await db.query(`SELECT (${lastMonth})::text AS t`)).rows[0].t, 'send', -20000);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'send',3000)`, [refunded]);
       const g = await gate(refunded, 3000);
-      assert.deepEqual([g.ok, g.freeSentLeft, g.openUc, g.requiredUc], [false, 0, '0', '60000000']);
+      assert.deepEqual([g.ok, g.freeSentLeft, g.openUc, g.availableUc, g.requiredUc], [false, 0, '-340000000', '0', '60000000']);
       // Just after midnight on the 1st, last month's still-open hour is priced against last month's used-up allowance,
       // and this month's 3,000 free sends are all left.
       const rolled = unique('billing-month-open');
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_sent_used) VALUES ($1,${lastMonth},3000)`, [rolled]);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,settled_quantity) VALUES ($1,${lastHour}-interval '1 day','send',3000,3000),($1,${lastHour},'send',500,0)`, [rolled]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,${lastHour}-interval '1 day','send',3000)`, [rolled]);
+      assert.equal((await settle(db, rolled, lastHour)).costUc, '0');
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,${lastHour},'send',500)`, [rolled]);
       const p = (await db.query('SELECT billing_position($1) AS p', [rolled])).rows[0].p;
       assert.deepEqual([p.freeSentLeft, p.openUc, p.availableUc], [3000, '10000000', '-10000000']);
     });
+  });
+
+  test('the free 3,000 count only charged usage: a workspace free earlier in the month pays nothing for its first 3,000 once charged, and a refund returns what the month\'s cost drops by', async t => {
+    await simulatedSesFixture(t, async ({ db }) => {
+      const wid = unique('billing-rules');
+      const meter = (hour: string, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1,$2::timestamptz,'send',$3)
+        ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, hour, q]);
+      const balance = async () => (await db.query('SELECT balance_uc::text AS b FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0].b;
+      await db.query(`SELECT billing_post($1,'topup','attempt:'||$1,1000000000,0,'{}','stripe')`, [wid]);
+      // Free until 10:00 on July 3 (Ryan, 2026-11-16, rule 1): 5,000 free sends would cost $0.40 and use none of the allowance.
+      await charging(db, wid, false); await charging(db, wid, true, '2026-07-03 10:00Z');
+      await meter('2026-07-02 09:00Z', 5000);
+      const free = await settle(db, wid, "'2026-07-02 10:00Z'::timestamptz");
+      assert.deepEqual([free.charged, free.costUc, await balance()], [false, '40000000', '1000000000']);
+      // Charged from then: 3,000 sends are free, the 3,001st costs one email.
+      await meter('2026-07-03 10:00Z', 3001);
+      assert.equal((await settle(db, wid, "'2026-07-03 11:00Z'::timestamptz")).costUc, '20000');
+      assert.deepEqual(await month(db, wid, '2026-07-01'), { sent: 3001, received: 0, unchargedSent: 5000, unchargedReceived: 0 });
+      // Rule 2: canceling free mail gives nothing back; canceling 500 charged sends gives back what the month's cost
+      // drops by, one email (the month is back at its allowance), not 500 emails' price.
+      await refundInto(db, wid, '2026-07-02 09:00Z', 'send', -1000);
+      assert.equal((await settle(db, wid, later)).charged, false);
+      await refundInto(db, wid, '2026-07-03 10:00Z', 'send', -500);
+      assert.equal((await settle(db, wid, later)).costUc, '-20000');
+      assert.equal(await balance(), '1000000000');
+      // A refund noted the way the settler before 334 found it (in the row it landed in, by origin hour) counts in that
+      // origin hour too: July's 2,501 charged sends lose one more, which is free.
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,refunds) VALUES ($1,'2026-07-20 10:00Z','send',-1,jsonb_build_object(extract(epoch FROM '2026-07-03 10:00Z'::timestamptz)::bigint::text,-1))`, [wid]);
+      assert.deepEqual([(await settle(db, wid, later)).costUc, (await month(db, wid, '2026-07-01')).sent], ['0', 2500]);
+      // A settlement by the settler before 334, resumed after it, fails instead of counting usage another way.
+      await db.query('SAVEPOINT old_settler');
+      await assert.rejects(db.query(`SELECT billing_post($1,'usage','usage:old',0,0,'{"meters":{},"charged":true,"rateVersion":1}','system')`, [wid]), { code: '55000' });
+      await db.query('ROLLBACK TO SAVEPOINT old_settler');
+    });
+  });
+
+  test('what is owed doesn\'t depend on when hours settle: random usage, refunds and mode changes, settled at random cutoffs, add up to each month\'s price', async t => {
+    await simulatedSesFixture(t, async ({ db }) => {
+      let seed = 20261117;
+      const random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648), pick = <T>(xs: T[]) => xs[Math.floor(random() * xs.length)]!;
+      const hours = Array.from({ length: 48 }, (_, i) => new Date(Date.UTC(2026, 6, 30, 0) + i * 3_600_000).toISOString());   // July 30 to August 1
+      await charging(db, null, true);
+      for (let round = 0; round < 12; round++) {
+        const wid = unique('billing-order'), changes: [string, boolean][] = [];
+        await db.query(`SELECT billing_post($1,'topup','attempt:'||$1,100000000000,0,'{}','stripe')`, [wid]);
+        // The workspace's history: a few switches at random hours.
+        for (let i = 0; i < 3; i++) { const change: [string, boolean] = [pick(hours), random() < 0.5]; changes.push(change); await charging(db, wid, change[1], change[0]); }
+        const charged = (hour: string) => changes.reduce((c, [at, on]) => at <= hour ? on : c, true);
+        const metered = new Map<string, number>();   // hour|meter → units
+        for (let step = 0; step < 30; step++) {
+          const r = random(), hour = pick(hours), meter = pick(['send', 'send', 'receive', 'omen']);
+          if (r < 0.6) {
+            const q = Math.floor(random() * 2500) + 1;
+            await db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1,$2,$3,$4) ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, hour, meter, q]);
+            metered.set(`${hour}|${meter}`, (metered.get(`${hour}|${meter}`) ?? 0) + q);
+          } else if (r < 0.8) {
+            const [key, units] = pick([...metered.entries()].filter(([, n]) => n > 0).concat([[`${hour}|send`, 0]]));
+            const q = Math.min(units, Math.floor(random() * 1500) + 1);
+            if (q > 0) { await refundInto(db, wid, key.split('|')[0]!, key.split('|')[1]!, -q); metered.set(key, units - q); }
+          } else await settle(db, wid, random() < 0.5 ? later : `'${pick(hours)}'::timestamptz`);
+        }
+        await settle(db, wid, later);
+        // The price of each month from what was metered, by whether its hour was charged.
+        const totals = new Map<string, { send: number; receive: number; omen: number }>();
+        for (const [key, units] of metered) {
+          const [hour, meter] = key.split('|') as [string, 'send' | 'receive' | 'omen'];
+          if (!charged(hour)) continue;
+          const m = hour.slice(0, 7), tot = totals.get(m) ?? { send: 0, receive: 0, omen: 0 };
+          tot[meter] += units; totals.set(m, tot);
+        }
+        const owed = [...totals.values()].reduce((n, x) => n + 20000 * (Math.max(0, x.send - 3000) + Math.max(0, x.receive - 3000)) + 10000 * x.omen, 0);
+        const { b } = (await db.query('SELECT (balance_uc + promo_uc)::text AS b FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
+        assert.equal(BigInt(b), 100000000000n - BigInt(owed), `round ${round}`);
+        assert.equal((await db.query(`SELECT count(*)::int AS n FROM billing_usage_hourly WHERE workspace_id=$1 AND quantity<>settled_quantity`, [wid])).rows[0].n, 0);
+      }
+    });
+  });
+
+  test('a refund written into an old hour settles once the hour it was written in has closed, after that hour\'s credit expiries, as it did in the current hour', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const f = await billingFixture(runtime, db, local, request), { creditExpiry } = await import('./src/billing/cron.js');
+      const position = async () => { const p = await f.position(); return [p.balanceUc, p.availableUc]; };
+      await f.mode('enforce');
+      // Review of #353, round 1: $0.40 of credit, then 4,000 recipients two hours ago cost $0.20.
+      await f.post('topup', `attempt:${unique('lot')}`, 40_000_000n);
+      const ids = (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,1000) n),'[]','[]','Queued','{}',false,now()-interval '2 hours'
+        FROM generate_series(1,4) i RETURNING id`, [unique('queued'), f.wid, REGION, f.from])).rows.map(r => r.id as string);
+      assert.equal((await settle(db, f.wid)).costUc, '20000000');
+      // The credit expired half an hour into the previous hour; 1,000 of the recipients are canceled now.
+      await db.query(`UPDATE billing_credit_lots SET expires_at=date_trunc('hour', now(), 'UTC') - interval '30 minutes' WHERE workspace_id=$1`, [f.wid]);
+      await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [ids[0]]);
+      // The expiry run settles up to the closed hour: the refund, written in this hour, waits; the lot's $0.20 expires.
+      const cutoff = (await db.query(`SELECT date_trunc('hour', now(), 'UTC')::text AS c`)).rows[0].c;
+      await creditExpiry(runtime, cutoff);
+      assert.deepEqual(await position(), ['0', '20000000'], 'Expired; the refund is open.');
+      // The next run settles the refund into new credit.
+      await settle(db, f.wid, later);
+      assert.deepEqual(await position(), ['20000000', '20000000']);
+    });
+  });
+
+  test('send meters take one lock per workspace before its usage rows: cancellations of different mail from the same hours never deadlock', { skip: DATABASE_FIXTURE_SKIP }, async t => {
+    // Committed rows on two connections. B cancels one envelope and stays open; A cancels two others in one statement
+    // and waits for B; B then cancels a fourth from another hour. Refunds write into each mail's own hour, so without
+    // the lock A and B would take two hours' rows in opposite orders (review of #353, round 1).
+    const a = await fixtureDatabase(t), b = await fixtureDatabase(t), wid = unique('billing-meter-lock'), pool = '222233334444';
+    await a.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [wid]);
+    await a.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+    const ids = (await a.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+      SELECT $1||'-'||i,$1,$2,'fixture','hello@billing.example','["r@example.net"]','[]','[]','Queued','{}',false,now()-make_interval(hours=>CASE WHEN i<=2 THEN 48 ELSE 36 END)
+      FROM generate_series(1,4) i ORDER BY i RETURNING id`, [wid, REGION])).rows.map(r => r.id as string);
+    const waiting = async () => {
+      for (const until = Date.now() + 4000; ;) {
+        const { rows: [w] } = await b.query(`SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1`, [(a as unknown as { processID: number }).processID]);
+        if (w?.wait_event_type === 'Lock') return;
+        assert.ok(Date.now() < until, 'A waits for B.');
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    };
+    try {
+      await b.query('BEGIN');
+      await b.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [ids[3]]);
+      const bulk = a.query(`UPDATE sending_emails SET status='canceled' WHERE id=ANY($1)`, [[ids[0], ids[2]]]);
+      await waiting();
+      await b.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [ids[1]]);
+      await b.query('COMMIT');
+      await bulk;
+      assert.equal((await a.query(`SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1 AND status='canceled'`, [wid])).rows[0].n, 4);
+      assert.deepEqual((await a.query(`SELECT quantity::int FROM billing_usage_hourly WHERE workspace_id=$1 ORDER BY hour`, [wid])).rows.map(r => r.quantity), [0, 0]);
+    } finally {
+      await b.query('ROLLBACK').catch(() => {});
+      for (const table of ['sending_emails', 'billing_usage_hourly', 'provider_connections']) await a.query(`DELETE FROM ${table} WHERE workspace_id=$1`, [wid]);
+      await a.query('DELETE FROM workspaces WHERE id=$1', [wid]).catch(() => {});
+    }
   });
 
   test('a promotional credit that covers a debt ends the unpaid episode and its receive hold; the debt is paid by the next top-up', async t => {
@@ -7977,22 +8107,21 @@ describe('Billing: metering, gate and settlement', () => {
 
   test('a refund gives back promotional credit only up to what promo paid for that month\'s usage; the rest is paid credit again', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
-      await db.query(`UPDATE billing_config SET mode='enforce', free_split_from='2026-07-01'`);
+      await db.query(`UPDATE billing_config SET mode='enforce'`);
       const wid = unique('billing-promo-month');
       const meter = (hour: string, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1,$2::timestamptz,'send',$3)
         ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, hour, q]);
       const account = async () => (await db.query('SELECT balance_uc::text AS paid, promo_uc::text AS promo FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_sent_used) VALUES ($1,'2026-07-01',3000)`, [wid]);
-      // July: a $1 grant pays for 5,000 sends beyond the free ones.
+      // Billing sweep B8. July: a $1 grant pays for 5,000 sends beyond the free 3,000.
       await db.query(`SELECT billing_post($1,'grant','grant:'||$1,0,100000000,'{}','operator:fixture')`, [wid]);
-      await meter('2026-07-10 10:00Z', 5000);
+      await meter('2026-07-10 10:00Z', 8000);
       assert.equal((await settle(db, wid, "'2026-07-10 11:00Z'::timestamptz")).costUc, '100000000');
       // August: a $25 top-up pays for 10,000 sends beyond August's free 3,000; those 10,000 are canceled before they go out.
       await db.query(`SELECT billing_post($1,'topup','attempt:'||$1,2500000000,0,'{}','stripe')`, [wid]);
       await meter('2026-08-02 10:00Z', 13000);
       assert.equal((await settle(db, wid, "'2026-08-02 11:00Z'::timestamptz")).costUc, '200000000');
-      await refundInto(db, wid, '2026-08-02 11:00Z', '2026-08-02 10:00Z', 'send', -10000);
-      assert.equal((await settle(db, wid, "'2026-08-02 12:00Z'::timestamptz")).costUc, '-200000000');
+      await refundInto(db, wid, '2026-08-02 10:00Z', 'send', -10000);
+      assert.equal((await settle(db, wid, later)).costUc, '-200000000');
       // The $2 comes back as paid credit: no promo paid for August's sends.
       assert.deepEqual(await account(), { paid: '2500000000', promo: '0' });
     });
@@ -8015,13 +8144,14 @@ describe('Billing: metering, gate and settlement', () => {
 
   test('month boundaries and time zones: "sending paused" reads this month\'s allowance, and storage starts at 00:00 UTC in any session time zone', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
-      await db.query(`UPDATE billing_config SET mode='enforce', free_split_from='2026-01-01'`);
-      // Last month's free sends were used and $0.10 was left; 500 sends from its last hour settle just after midnight.
-      // This month's 3,000 free sends are all left, so sending isn't paused and no notice goes out.
-      const wid = unique('billing-month-end');
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_sent_used) VALUES ($1,(date_trunc('month',now() AT TIME ZONE 'UTC') - interval '1 month')::date,3000)`, [wid]);
+      await db.query(`UPDATE billing_config SET mode='enforce'`);
+      // Billing sweep B10: last month's free sends were used and $0.10 was left; 500 sends from its last hour settle just
+      // after midnight. This month's 3,000 free sends are all left, so sending isn't paused and no notice goes out.
+      const wid = unique('billing-month-end'), lastHour = "date_trunc('month',now(),'UTC') - interval '1 hour'";
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,${lastHour} - interval '1 day','send',3000)`, [wid]);
+      assert.equal((await settle(db, wid, lastHour)).costUc, '0');
       await db.query(`SELECT billing_post($1,'topup','attempt:'||$1,10000000,0,'{}','stripe')`, [wid]);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('month',now(),'UTC') - interval '1 hour','send',500)`, [wid]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,${lastHour},'send',500)`, [wid]);
       assert.equal((await settle(db, wid)).costUc, '10000000');
       const after = (await db.query(`SELECT empty_since, (SELECT count(*)::int FROM billing_notices WHERE workspace_id=$1 AND kind='sends_paused') AS notices FROM billing_accounts WHERE workspace_id=$1`, [wid])).rows[0];
       assert.deepEqual([after.empty_since, after.notices, (await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p.freeSentLeft], [null, 0, 3000]);
@@ -8077,25 +8207,25 @@ describe('Billing: metering, gate and settlement', () => {
     }
   });
 
-  for (const funding of ['top-up', 'promo'] as const) test(`canceling exempt mail never takes the charge of other mail metered in the same hour (${funding}), and a real debt keeps its hold`, async t => {
+  for (const funding of ['top-up', 'promo'] as const) test(`canceling exempt mail never takes the charge of other mail (${funding}), and a real debt keeps its hold`, async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const f = await billingFixture(runtime, db, local, request), { restoreJob } = await import('./src/billing/restore.js');
       const free = (on: boolean) => db.query(`SELECT billing_set_workspace_free($1,$2,'Fixture',NULL,'operator:fixture')`, [f.wid, on]);
-      const queue = async (rows: number) => (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
-        SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,50) n),'[]','[]','Queued','{}',false
-        FROM generate_series(1,$5::int) i RETURNING id`, [unique('queued'), f.wid, REGION, f.from, rows])).rows.map(r => r.id as string);
-      const later = "now() + interval '1 hour'";
+      const queue = async (rows: number, hoursAgo: number) => (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,50) n),'[]','[]','Queued','{}',false,now()-make_interval(hours=>$6::int)
+        FROM generate_series(1,$5::int) i RETURNING id`, [unique('queued'), f.wid, REGION, f.from, rows, hoursAgo])).rows.map(r => r.id as string);
       await f.mode('enforce', ', receive_hold=true');
-      // Exempt: 80 messages × 50 recipients. The exemption ends and they settle at $0.
-      await free(true);
-      const exempt = await queue(80);
-      await free(false);
-      // Funded with exactly $0.20, 20 more messages × 50 recipients in the same hour cost $0.20.
+      // Review of #307, finding 2. Exempt two hours ago: 80 messages × 50 recipients, settled at $0.
+      await free(true); await charging(db, f.wid, false);
+      const exempt = await queue(80, 2);
+      // Prepaid from an hour ago, this month's free sends used, funded with exactly $0.20: 20 more messages × 50
+      // recipients cost $0.20.
+      await free(false); await charging(db, f.wid, true, 1); await f.freeUsed(3000);
       await db.query(`SELECT billing_post($1,$2,'fixture:'||$1,$3,$4,'{}','operator:fixture')`, funding === 'top-up' ? [f.wid, 'topup', 20_000_000, 0] : [f.wid, 'grant', 0, 20_000_000]);
-      const funded = await queue(20);
+      const funded = await queue(20, 1);
       assert.equal((await settle(db, f.wid, later)).costUc, '20000000');
       // 4,000 received messages owe $0.20; eight days later received mail is held.
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'receive',4000)`, [f.wid]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC') - interval '1 hour','receive',4000)`, [f.wid]);
       assert.equal((await settle(db, f.wid, later)).costUc, '20000000');
       await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '8 days' WHERE workspace_id=$1`, [f.wid]);
       const mid = unique('held');
@@ -8103,7 +8233,7 @@ describe('Billing: metering, gate and settlement', () => {
         VALUES ($1,$2,$3,'fixture',$4,'["inbox@billing.example"]','{}','held','BILLING_HOLD')`, [f.wid, mid, REGION, 'held/' + mid]);
       // 20 of the exempt messages are canceled: nothing comes back, the debt and its hold stay, and the funded mail is queued.
       await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=ANY($1)`, [exempt.slice(0, 20)]);
-      assert.equal((await settle(db, f.wid, later)).costUc, '0');
+      assert.equal((await settle(db, f.wid, later)).charged, false);
       const p = await f.position();
       assert.deepEqual([p.balanceUc, p.promoUc, p.receiveHeld], ['-20000000', '0', true]);
       await restoreJob(runtime, {}, { id: `billing.restored:${f.wid}`, attempts: 1, workspaceId: f.wid });
@@ -8219,7 +8349,7 @@ describe('Billing: metering, gate and settlement', () => {
     for (const first of ['settler', 'migration'] as const) {
       const wid = unique(`billing-314-${first}`);
       await a.query(`SELECT billing_post($1,'adjustment','adjustment:'||$1,-1000000,0,'{}','system')`, [wid]);
-      await a.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'send',4000)`, [wid]);
+      await a.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC') - interval '1 hour','send',4000)`, [wid]);
       const settle = (db: pg.Client) => db.query(`SELECT billing_settle($1, now() + interval '1 hour') AS s`, [wid]);
       try {
         if (first === 'settler') {
@@ -8326,7 +8456,7 @@ describe('Billing: metering, gate and settlement', () => {
       // Expiry: the older lot expired 30 minutes into the previous hour. Not before that hour has closed...
       await db.query(`UPDATE billing_credit_lots SET expires_at=date_trunc('hour', now(), 'UTC') - interval '30 minutes' WHERE workspace_id=$1 AND source_id='attempt:older'`, [wid]);
       // ...and usage from before the expiry (5 paid sends in that hour) is settled first, so it spends the expiring credit.
-      await db.query(`UPDATE billing_accounts SET free_sent_used=3000, free_month=(date_trunc('month', now() AT TIME ZONE 'UTC'))::date WHERE workspace_id=$1`, [wid]);
+      await settledThisMonth(db, wid, 3000);
       await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1, date_trunc('hour', now(), 'UTC') - interval '1 hour', 'send', 5)`, [wid]);
       const expiries = async () => (await db.query(`SELECT count(*)::int AS n FROM billing_ledger WHERE workspace_id=$1 AND kind='expire'`, [wid])).rows[0].n;
       const [earlier, cutoff] = (await db.query(`SELECT date_trunc('hour', now(), 'UTC') - interval '1 hour' AS e, date_trunc('hour', now(), 'UTC') AS c`)).rows.map(r => [r.e.toISOString(), r.c.toISOString()])[0]!;
@@ -10097,7 +10227,11 @@ describe('Billing: Stripe', () => {
     assert.equal((await deliver('invoice.payment_failed', voided)).body.outcome, 'processed');
     await recharge();
     const notices = async () => (await db.query("SELECT dedupe_key, status, data FROM billing_notices WHERE workspace_id = $1 AND kind = 'recharge_failed' ORDER BY created_at", [wid])).rows;
-    assert.deepEqual((await notices()).map(n => [n.dedupe_key, n.status, n.data.last4, n.data.code]), [[`recharge_failed:${declined.id}`, 'pending', '4242', 'insufficient_funds']]);
+    // Exactly one notice. Its status is wherever the notice job has got to: the integration shard's job runner may have
+    // claimed it already (sending, then sent, or suppressed: this workspace has no owner to email). #329.
+    assert.deepEqual((await notices()).map(n => [n.dedupe_key, n.data.last4, n.data.code]), [[`recharge_failed:${declined.id}`, '4242', 'insufficient_funds']]);
+    assert.ok(['pending', 'sending', 'sent', 'suppressed'].includes((await notices())[0].status), (await notices())[0].status);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM jobs WHERE id = $1', [`billing.notify:${(await db.query("SELECT id FROM billing_notices WHERE dedupe_key = $1", [`recharge_failed:${declined.id}`])).rows[0].id}`])).rows[0].n, 1);
     assert.equal((await recharges()).length, 3, 'No automatic retry after a decline.');
     // Turned back on: the reason clears. A 3DS request (authentication_required) is a failure of its own, with its own notice.
     await stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 100_000 });
@@ -10306,7 +10440,7 @@ describe('Billing: Stripe', () => {
     const top = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 5000, actor: 'user:fixture', billingEmail: null });
     await deliver('checkout.session.completed', fake.payCheckout((await attempt(top.attemptId)).stripe_checkout_session));
     // The free tier is used up and 240,000 recipients went out an hour ago: $48 owed, not settled yet, $2 left.
-    await db.query('UPDATE billing_accounts SET free_sent_used = 3000 WHERE workspace_id = $1', [wid]);
+    await db.query(`INSERT INTO billing_months(workspace_id,month,sent) VALUES ($1,(date_trunc('month',now() AT TIME ZONE 'UTC'))::date,3000) ON CONFLICT (workspace_id,month) DO UPDATE SET sent=3000`, [wid]); // This month's free sends used.
     await db.query(`INSERT INTO billing_usage_hourly (workspace_id, hour, meter, quantity) VALUES ($1, date_trunc('hour', now(), 'UTC') - interval '1 hour', 'send', 240000)`, [wid]);
     assert.equal((await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p.availableUc, String(200n * UC));
     const refund = (amountCents?: number) => stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: top.attemptId, amountCents, basis: 'billing_error', reason: 'Unused credit', operator: 'operator:fixture' });
@@ -10581,7 +10715,7 @@ describe('Billing: API, MCP and notices', () => {
       // The state follows the balance: debt pauses sending (enforced, prepaid). While the installation doesn't hold
       // received mail, nothing promises a hold; with holds on, the debt starts the received-mail grace.
       await db.query(`SELECT billing_post($1,'usage','usage:fixture-debt',-3000000000,-500000000,'{}','system')`, [wid]);
-      await db.query(`UPDATE billing_accounts SET free_month=date_trunc('month',now() AT TIME ZONE 'UTC')::date,free_sent_used=3000 WHERE workspace_id=$1`, [wid]);
+      await db.query(`INSERT INTO billing_months(workspace_id,month,sent) VALUES ($1,(date_trunc('month',now() AT TIME ZONE 'UTC'))::date,3000) ON CONFLICT (workspace_id,month) DO UPDATE SET sent=3000`, [wid]); // This month's free sends used.
       const unheld = ok(await local('GET', '/v1/billing'));
       assert.deepEqual([unheld.state.sending, unheld.state.receiving, unheld.grace.receiveHoldAt, typeof unheld.grace.unpaidSince], ['paused', 'ok', null, 'string']);
       await db.query('UPDATE billing_config SET receive_hold=true WHERE singleton');
@@ -10836,7 +10970,7 @@ describe('Billing: API, MCP and notices', () => {
       const until = new Date(Date.now() + 30 * 86_400_000).toISOString();
       const gate = async (w = wid) => (await db.query('SELECT billing_gate($1, 10, false) AS g', [w])).rows[0].g;
       const mode = async (w = wid) => (await db.query('SELECT mode,free_via FROM billing_accounts WHERE workspace_id=$1', [w])).rows[0] ?? { mode: 'prepaid', free_via: null };
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_sent_used) VALUES ($1,date_trunc('month',now() AT TIME ZONE 'UTC')::date,3000)`, [wid]);
+      await db.query(`INSERT INTO billing_months(workspace_id,month,sent) VALUES ($1,(date_trunc('month',now() AT TIME ZONE 'UTC'))::date,3000) ON CONFLICT (workspace_id,month) DO UPDATE SET sent=3000`, [wid]); // This month's free sends used.
       assert.deepEqual([(await gate()).ok, (await gate()).enforced], [false, true], 'A prepaid workspace at $0 past its free emails is gated.');
       // Operators only.
       const key = ok(await local('POST', '/v1/api-keys', { name: 'Not an operator', permissions: ['manage'] }), 201); secrets.add(key.secret);
@@ -10855,7 +10989,9 @@ describe('Billing: API, MCP and notices', () => {
       assert.deepEqual([free.mode, free.freePlan, free.state.sending], ['exempt', { until: until.replace(/\.\d{3}Z$/, 'Z') }, 'ok']);
       assert.equal(ok(await local('GET', '/v1/me')).billing.free, true);
       assert.deepEqual([(await gate()).ok, (await gate()).enforced], [true, false], 'A free workspace is never gated.');
-      // Usage is metered and settled at $0, with what it would have cost.
+      // Usage is metered and settled at $0, with what it would have cost. (A flag takes effect from the hour it is set in;
+      // this usage is an hour old, so the history says the workspace was free then too.)
+      await db.query(`INSERT INTO billing_mode_changes(workspace_id,charged,effective_hour,actor) VALUES ($1,false,'-infinity','fixture')`, [wid]);
       await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now())-interval '1 hour','send',2000)`, [wid]);
       await db.query(`SELECT billing_settle($1, date_trunc('hour', now()))`, [wid]);
       const [usage] = (await db.query(`SELECT paid_uc::text,promo_uc::text,detail->>'costUc' AS cost,detail->>'charged' AS charged FROM billing_ledger WHERE workspace_id=$1 AND kind='usage'`, [wid])).rows;

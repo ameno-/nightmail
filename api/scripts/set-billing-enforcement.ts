@@ -17,11 +17,11 @@ const flag = (value: string | undefined, name: string) => {
  * not a deploy, so a rollback is this script with `shadow`. Run it in a transaction: the change, the settlement before
  * it and its audit row (workspace 'installation') commit together.
  *
- * Usage is priced under the mode it was metered in: before the mode changes, every workspace's unsettled usage is
- * settled under the old one (billing_settle_all), so nothing metered while billing was off or in shadow is charged
- * later. That waits for meter writes in flight and holds new ones until the switch commits (migration 314's fence).
- * Switching to off doesn't settle (the kill-switch never waits on the settler or the writers); what it leaves open is
- * settled at $0 when billing comes back on.
+ * Usage is priced under the mode of the hour it was metered in (migration 334): a switch that stops charging takes effect
+ * from the current hour, one that starts charging from the next, as the mode history records it (318). Before the mode
+ * changes, every workspace's closed hours are still settled (billing_settle_all), which waits for meter writes in flight
+ * (migration 314's fence); the next step removes that. Switching to off doesn't settle: the kill-switch never waits on
+ * the settler or the writers.
  */
 export async function setBillingEnforcement(db: Client, args: string[]) {
   const { positionals, values } = parseArgs({ args, allowPositionals: true, options: {
