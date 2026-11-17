@@ -12,7 +12,9 @@ Measure *accepted* and *delivered* separately. This fixture uses real PostgreSQL
 | 200/s | 1,000 | 186.8 → 184.7/s | 23.1/s |
 | 1,000/s | 1,500 | 271.0 → 259.9/s | 32.5/s |
 
-These finite runs include cold quota election and draining an uneven tail. Eight shards do **not** sustain 1,000/s. Sizing is a starting point; it is not evidence that 40 shards, or the current single feedback consumer, can sustain that rate.
+These finite runs include cold quota election and draining an uneven tail.
+
+**Quota refresh (2026-11-16).** A dispatcher reads the shared sample with its first lease, or refreshes it before it claims: one shard wins the refresh fence and calls `GetAccount`, the others poll briefly for its sample. The idle-first-send shortcuts are gone: no send on a stale sample with a refresh after it, no fused singleton claim in the lease statement, and no global lock for the last marketing credits (each shard's share is fixed, and the remainder goes to the first shards). Steady state is unchanged in the eight-shard fixture: 35.9, 186.0 and 269.8/s at 50, 200 and 1,000/s, against 36.0, 185.7 and 267.7/s before. The idle cost is one database round trip before the first send, plus the `GetAccount` wait when that send's sample is stale (30–120 ms measured at 25 ms RTT). The election and its polling stay, because both are steady-state costs. Without the election, eight shards make 8 `GetAccount` calls per refresh instead of 1, against SES's limit of 1 per second. Without the polling, the cold refresh at 1,000/s drops to 235.6/s, because shards that lose the election stop. Eight shards do **not** sustain 1,000/s. Sizing is a starting point; it is not evidence that 40 shards, or the current single feedback consumer, can sustain that rate.
 
 ### Query and storage budget
 
@@ -21,7 +23,7 @@ Baseline `bb00802` and the working tree use the same local fixtures. Calls count
 | Path | Calls before → after (explicit transactions) | Row versions before → after | Logical bytes before → after |
 |---|---:|---:|---:|
 | Transactional admission, 1 | 4 → **1** (1 → 0) | 5 → 6 | 1,334 → 1,440 |
-| Warm fused lease/claim, 1 | 1 → 1 (0) | 2 → 2 | 898 → 900 |
+| Warm lease and claim, 1 (2026-11-16: fused claim removed) | 1 → 2 (0) | 2 → 3 | 900 → 1,538 |
 | SES acceptance write, 1 | 1 → 1 (0) | 4 → 5 | 1,780 → 1,888 |
 | Delivery, 1 | 1 → 1 (0) | 5 → 5 | 2,108 → 2,112 |
 | Batch admission, 100 | 4 → **1** (1 → 0) | 102 → 118 | 58,756 → 60,644 |
@@ -33,7 +35,7 @@ Baseline `bb00802` and the working tree use the same local fixtures. Calls count
 | Campaign dispatch incl. finish | 43 → **41** (0) | 803 → 803 | 801,312 → 335,840 |
 | Inbound reply admission | 25 → 23 (1) | 11 → 13 | 5,047 → 5,225 |
 
-Hosted direct JSON sends with a normal API key use **one client statement** for authentication, the request budget, policy checks, the idempotency receipt and all envelopes. For bodies over 64 KiB with a cold credential fingerprint, authentication runs first to bound speculative parsing; subsequent direct admissions can fuse authentication again. A policy denial releases its new receipt without refunding the request charge; neither envelopes nor attachment links nor unsubscribe tokens are created. This is not a one-call claim for mailbox tracking, stored templates, self-hosted discovery or dashboard authentication. A screened Hosted singleton still needs a lease, external screen, fresh authorization/consent claim and outcome write (three statements with warm quota; two for envelopes eligible for the fused claim). No database lock crosses the classifier or SES call, and ambiguous acceptance is never automatically resent.
+Hosted direct JSON sends with a normal API key use **one client statement** for authentication, the request budget, policy checks, the idempotency receipt and all envelopes. For bodies over 64 KiB with a cold credential fingerprint, authentication runs first to bound speculative parsing; subsequent direct admissions can fuse authentication again. A policy denial releases its new receipt without refunding the request charge; neither envelopes nor attachment links nor unsubscribe tokens are created. This is not a one-call claim for mailbox tracking, stored templates, self-hosted discovery or dashboard authentication. A screened Hosted singleton still needs a lease, external screen, fresh authorization/consent claim and outcome write (three statements with warm quota). No database lock crosses the classifier or SES call, and ambiguous acceptance is never automatically resent.
 
 The previous audit-fix build took **46** calls for campaign dispatch and finish. The lease now returns attachment metadata once per immutable review, and small attachment pages can overlap within the shared byte limit. The acceptance fixture asserts at most **42** calls, a finished campaign and no per-recipient attachment copies. It measured **41** in the full run.
 

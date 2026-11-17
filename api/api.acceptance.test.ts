@@ -15702,7 +15702,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       for(const n of [1,100]){
         const emails=Array.from({length:n},(_,i)=>({from:'a@bench.invalid',to:`to${i}@example.invalid`,subject:'Fixture',text:'Fixture'}));
         await meter(`admit-${n}`,async()=>ok(await local('POST',`/v1/emails/${n===1?'send':'batch'}`,n===1?emails[0]:{emails},'live',{authorization:`Bearer ${key.secret}`,'Idempotency-Key':`bench-${n}`}),202),1);
-        const r=await meter(`dispatch-${n}`,()=>runDispatcher(runtime,{...budgetDispatch,region:REGION,accountId:acct}),n===1?2:80);assert.equal(r.sent,n);
+        const r=await meter(`dispatch-${n}`,()=>runDispatcher(runtime,{...budgetDispatch,region:REGION,accountId:acct}),n===1?3:80);assert.equal(r.sent,n);
         const items=sink.splice(0).filter(i=>i.messageId.endsWith(':Delivery'));assert.equal(items.length,n);
         const outcomes=await meter(`delivery-${n}`,()=>ingestFeedbackBatch(runtime,items),1);assert.ok(outcomes.every(o=>o.ok));
       }
@@ -15729,7 +15729,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const saved=ok(await retry(),202);assert.deepEqual(ok(await retry(),202),saved); // No losing receipt from the previous failure.
       error(await local('POST','/v1/emails/batch',{emails:[good,good]},'live',headers),409,'IDEMPOTENCY_CONFLICT');
       await db.query('UPDATE sending_emails SET status=\'canceled\' WHERE id=$1',[saved.data[0].id]);
-      // The sender cannot force the fused fast path or opt out on Hosted live mail.
+      // The sender cannot skip the screen on Hosted live mail.
       Object.assign(runtime.config,{liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'},hostedScreen:true});
       const guarded=ok(await local('POST','/v1/emails/send',{from:'a@bench.invalid',to:'fixture@example.invalid',subject:'Receipt',text:'Fixture',screen:false},'live',{authorization:`Bearer ${key.secret}`}),202);
       const {SESv2Client}=await import('@aws-sdk/client-sesv2');const calls=t.mock.method(SESv2Client.prototype,'send',async()=>assert.fail('No SES call expected with a warm quota and unavailable mandatory classifier'));
@@ -15764,7 +15764,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       queries.mock.restore(); t.diagnostic(`100 MX dispatches (99 shared workspaces + 1 BYO): ${counts[0]} + ${counts[1]} = ${counts[0]+counts[1]} pg statements (one lane per account, cold quotas)`);
       assert.ok(counts[0]+counts[1]<=60,'Connection and readiness resolution must not add per-email statements.');
 
-      // An idle singleton uses the same authorization and consent locks as the grouped claim.
+      // An idle singleton takes the grouped claim's authorization and consent locks: a lease and a claim, then a record
+      // only for a send that reached SES.
       const wid='bench-1';
       for (const status of ['accepted','suppressed','canceled'] as const) {
         const id=unique('single');
@@ -15772,9 +15773,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           SELECT $1,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,true FROM sending_emails WHERE id='email_bench-1'`,[id]);
         if(status==='suppressed') await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,suppressed) VALUES ($1,$2,'fixture@example.net',true)`,[unique('contact'),wid]);
         if(status==='canceled') await db.query('UPDATE api_keys SET revoked_at=now() WHERE id=$1',[wid]);
-        if(status!=='accepted') await db.query("UPDATE provider_account_limits SET checked_at=clock_timestamp()-interval '90 seconds',refresh_after='-infinity' WHERE aws_account_id=$1 AND region=$2",[accounts[0],REGION]);
         const statements=t.mock.method(db,'query'); await runDispatcher(runtime,{region:REGION,accountId:accounts[0]}); const total=statements.mock.callCount(); statements.mock.restore();
-        assert.equal(total,status==='accepted'?2:1, 'Only a send that reaches SES needs a second (record) statement.');
+        assert.equal(total,status==='accepted'?3:2, 'Only a send that reaches SES needs a third (record) statement.');
         const row=(await db.query(`SELECT status,provider_id,(SELECT count(*)::int FROM sending_email_events WHERE email_id=$1 AND type='dispatch_attempt') AS attempts FROM sending_emails WHERE id=$1`,[id])).rows[0];
         assert.equal(row.status,status); assert.equal(row.attempts,status==='accepted'?1:0); assert.equal(!!row.provider_id,status==='accepted');
       }
@@ -19898,14 +19898,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
-  test('a stale quota refresh follows transactional acceptance except near the daily reserve', async t => {
+  test('a stale quota sample is refreshed before the send; a shard that loses the refresh waits for the winner', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db }) => {
       const { dispatchDue, initialGate } = await import('./src/dispatcher.js');
       const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
-      const send = SESv2Client.prototype.send, visible: boolean[] = []; let pending: string, peer = false;
+      const send = SESv2Client.prototype.send, visible: boolean[] = []; let pending: string;
       t.mock.method(SESv2Client.prototype,'send',async function(this: InstanceType<typeof SESv2Client>, cmd: any) {
         if (cmd instanceof GetAccountCommand) visible.push(!!(await db.query('SELECT provider_id FROM sending_emails WHERE id=$1',[pending])).rows[0].provider_id);
-        else if (peer) await db.query('UPDATE sending_region_limits SET checked_at=clock_timestamp(),next_allowed_at=NULL WHERE workspace_id=$1 AND region=$2',[runtime.config.workspaceId,REGION]);
         return Reflect.apply(send,this,[cmd]);
       });
       for (const used of [0,899]) {
@@ -19915,14 +19914,17 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           max_24_hour_send=1000,sent_last_24_hours=excluded.sent_last_24_hours,checked_at=excluded.checked_at,next_allowed_at=NULL`,[runtime.config.workspaceId,REGION,used]);
         assert.equal((await dispatchDue(runtime,REGION)).sent,1);
       }
-      assert.deepEqual(visible,[true,false]);
-      // A peer owns the refresh fence and does not publish its sample until our send starts.
-      // No quota polling on the critical path, no duplicate GetAccount, and no refilled credit.
-      peer=true; const gate=initialGate();
+      assert.deepEqual(visible,[false,false],'Every stale sample is refreshed before the send it would authorize.');
+      // A peer owns the refresh fence and has not published its sample: nothing is sent on the stale one and GetAccount
+      // is not repeated. Once the peer publishes, the next run sends with it.
+      const gate=initialGate();
       pending=ok(await local('POST','/v1/emails/send',mail()),202).id;
       await db.query(`UPDATE sending_region_limits SET max_24_hour_send=1000,sent_last_24_hours=0,checked_at=clock_timestamp()-interval '2 minutes',next_allowed_at=clock_timestamp()+interval '1 minute' WHERE workspace_id=$1 AND region=$2`,[runtime.config.workspaceId,REGION]);
+      assert.equal((await dispatchDue(runtime,REGION,{gate})).sent,0);
+      assert.deepEqual((await db.query('SELECT status,lease_until,attempt_started_at FROM sending_emails WHERE id=$1',[pending])).rows,[{status:'queued',lease_until:null,attempt_started_at:null}]);
+      await db.query('UPDATE sending_region_limits SET checked_at=clock_timestamp(),next_allowed_at=NULL WHERE workspace_id=$1 AND region=$2',[runtime.config.workspaceId,REGION]);
       assert.equal((await dispatchDue(runtime,REGION,{gate})).sent,1); assert.equal(gate.sentSinceRefresh,1);
-      assert.deepEqual(visible,[true,false]);
+      assert.deepEqual(visible,[false,false]);
     });
   });
 
@@ -19954,13 +19956,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
-  test('an elected post-send refresh with lagging SES usage cannot clear a daily denial', async t => {
+  test('a daily denial holds the shard until the next sample, even when SES usage lags', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db }) => {
       const { dispatchDue, initialGate } = await import('./src/dispatcher.js');
       const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
       const contact = ok(await local('POST','/v1/contacts',{email:address()}),201);
       ok(await local('POST',`/v1/contacts/${contact.id}/consent`,{status:'subscribed',source:'fixture',policyVersion:'v1',evidence:'Fixture',occurredAt:new Date().toISOString()}));
-      const marketing = ok(await local('POST','/v1/emails/send',mail({to:contact.email,kind:'marketing'})),202).id;
       const tx = ok(await local('POST','/v1/emails/send',mail()),202).id;
       await db.query(`INSERT INTO sending_region_limits(workspace_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at)
         VALUES($1,$2,1000,1000,0,clock_timestamp()-interval '90 seconds') ON CONFLICT(workspace_id,region) DO UPDATE SET
@@ -19973,12 +19974,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         return {MessageId:'unexpected-marketing'};
       });
       const gate=initialGate(), start=Date.now(), report=await dispatchDue(runtime,REGION,{gate});
-      assert.deepEqual(calls,[tx,'quota']); assert.equal(report.sent,0); assert.equal(gate.sentSinceRefresh,1);
+      assert.deepEqual(calls,['quota',tx]); assert.equal(report.sent,0); assert.equal(gate.sentSinceRefresh,1);
       assert.ok(gate.dailyBlockedUntil! >= start+60_000); assert.ok(report.quotaRetryAt! >= gate.dailyBlockedUntil!);
       const { rows:[denied] } = await db.query('SELECT status,error_code,scheduled_at FROM sending_emails WHERE id=$1',[tx]);
       assert.equal(denied.status,'queued'); assert.equal(denied.error_code,'SES_DAILY_QUOTA_EXHAUSTED'); assert.ok(denied.scheduled_at.getTime() >= start+59_900);
+      // The sample still shows headroom, but the denial holds the shard: later mail is not leased until the next sample.
+      const marketing = ok(await local('POST','/v1/emails/send',mail({to:contact.email,kind:'marketing'})),202).id;
+      assert.equal((await dispatchDue(runtime,REGION,{gate})).sent,0); assert.deepEqual(calls,['quota',tx]);
       assert.deepEqual((await db.query('SELECT status,attempt_started_at,lease_until FROM sending_emails WHERE id=$1',[marketing])).rows,[{status:'queued',attempt_started_at:null,lease_until:null}]);
-      assert.equal((await dispatchDue(runtime,REGION,{gate})).sent,0); assert.deepEqual(calls,[tx,'quota']);
     });
   });
 
@@ -20012,9 +20015,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
-  test('exhausted shard gives marketing back immediately and any shard can take the last shared credit once', async t => {
+  test('exhausted shard gives marketing back immediately and the last shared credits belong to the first shards', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db }) => {
-      const { dispatchDue } = await import('./src/dispatcher.js'), ws=runtime.config.workspaceId;
+      const { dispatchDue, initialGate } = await import('./src/dispatcher.js'), ws=runtime.config.workspaceId;
       const contact=ok(await local('POST','/v1/contacts',{email:address()}),201);
       ok(await local('POST',`/v1/contacts/${contact.id}/consent`,{status:'subscribed',source:'fixture',policyVersion:'v1',evidence:'Fixture',occurredAt:new Date().toISOString()}));
       ok(await local('POST','/v1/emails/batch',{emails:Array.from({length:9},()=>mail({to:contact.email,kind:'marketing'}))}),202);
@@ -20025,8 +20028,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal((await db.query("SELECT id FROM sending_emails WHERE workspace_id=$1 AND status='queued' AND lease_until IS NULL",[ws])).rowCount,7);
       assert.equal((await drain(0)).sent,2,'Sibling can lease immediately.');
       await db.query('UPDATE sending_region_limits SET sent_last_24_hours=89,checked_at=clock_timestamp() WHERE workspace_id=$1',[ws]);
-      assert.equal((await drain(3)).sent,1,'Sharding must not round a positive global remainder to zero.');
-      assert.equal((await drain(2)).sent,0,'A separate cold shard cannot spend the same last credit twice.');
+      // One credit is left for four shards: it is shard 0's share, so the remainder is neither lost nor spent twice.
+      // A shard keeps its gate across runs (the Durable Object persists it): that gate has then spent its share.
+      assert.equal((await drain(3)).sent,0); assert.equal((await drain(2)).sent,0);
+      const gate=initialGate(),shard0=()=>dispatchDue(runtime,REGION,{shard:{index:0,count:4},gate});
+      assert.equal((await shard0()).sent,1,'Sharding must not round a positive global remainder to zero.');
+      assert.equal((await shard0()).sent,0);
     });
   });
 
