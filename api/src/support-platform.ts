@@ -6,12 +6,18 @@ import type { Config } from './core.js';
 // rotation, and is revoked by removing the binding or the entrypoint.
 //
 // It answers exactly what the support Worker needs and nothing else (PR #137 review L2): verify a handoff, verify an
-// email sender, mint and revoke a support grant, read a handoff, verify a staff sign-in, and the grant-scoped GET
-// /v1/support/* reads. Each call runs through the normal routes, so validation, audit rows and budgets are the same as
-// for an operator. Operator paths act as `service:bane-support`; /v1/support/* still needs the grant's own bearer.
+// email sender, mint and revoke a support grant, read a handoff, verify a staff sign-in, register and close a support
+// conversation, the grant-scoped GET /v1/support/* reads, and the same reads stamped with a conversation (request).
+// Each call runs through the normal routes, so validation, audit rows and budgets are the same as for an operator.
+// Operator paths act as `service:bane-support`; /v1/support/* needs the grant's own bearer, or a registered conversation
+// that only request() can name: it rides on the runtime, never in a header, query parameter or body.
 
 /** What the entrypoint passes to the app as `Runtime.platformCaller`. HTTP requests can never set it. */
 export const SUPPORT_PLATFORM_CALLER = 'bane-support';
+/** The support Worker's conversation IDs (conv_ and 26 base32 characters). */
+export const CONVERSATION_ID = /^conv_[a-z2-7]{26}$/;
+/** The runtime fields a binding call runs with: the caller, and for request() its conversation. */
+export const platformRuntime = (conversation?: string) => ({ platformCaller: SUPPORT_PLATFORM_CALLER, ...(conversation ? { supportConversation: conversation } : {}) }) as { platformCaller: typeof SUPPORT_PLATFORM_CALLER; supportConversation?: string };
 
 const OPERATOR_ROUTES: [method: string, path: RegExp][] = [
   ['POST', /^\/v1\/operator\/support\/verify-email$/],
@@ -20,15 +26,24 @@ const OPERATOR_ROUTES: [method: string, path: RegExp][] = [
   ['GET', /^\/v1\/operator\/support\/handoffs\/sho_[0-9a-f]{32}$/],
   // Never GET staff-sign-in: only an operator's own dashboard session mints a staff token.
   ['POST', /^\/v1\/operator\/support\/staff\/verify$/],
+  ['POST', /^\/v1\/operator\/support\/conversations$/],
+  ['POST', /^\/v1\/operator\/support\/conversations\/conv_[a-z2-7]{26}\/close$/],
 ];
 const SUPPORT_READ = /^\/v1\/support\/[A-Za-z0-9_./-]{1,200}$/;
 const SUPPORT_GRANT = /^(?:nm|bane)_support_[0-9a-f]{64}$/; // bane_: remove after rename cleanup
+/** The one write a conversation makes: narrowing its scope to one workspace. */
+const STAMPED_WRITES: [method: string, path: RegExp][] = [['POST', /^\/v1\/support\/scope$/]];
 
-/** Whether the binding may make this call: the five operator support routes, or a grant's GET under /v1/support. */
+/** Whether the binding may make this call: the operator support routes, or a grant's GET under /v1/support. */
 export function supportPlatformAllows(method: string, path: string) {
   if (path.includes('..') || path.includes('//')) return false;
   if (method === 'GET' && SUPPORT_READ.test(path)) return true;
   return OPERATOR_ROUTES.some(([m, p]) => m === method && p.test(path));
+}
+/** Whether request() may make this call for a conversation: a GET under /v1/support, or its scope write. */
+export function stampedAllows(method: string, path: string) {
+  if (path.includes('..') || path.includes('//')) return false;
+  return (method === 'GET' && SUPPORT_READ.test(path)) || STAMPED_WRITES.some(([m, p]) => m === method && p.test(path));
 }
 
 export type PlatformReply<T = unknown> = { status: number; body: T; requestId: string | null; retryAfter: string | null };
@@ -39,6 +54,11 @@ export type HandoffClaims = {
 export type HandoffCheck =
   | { ok: true; handoff: HandoffClaims & { usedAt: string | null; grantId: string | null; message: string | null } }
   | { ok: false; code: 'HANDOFF_INVALID' | 'HANDOFF_EXPIRED' | 'HANDOFF_NOT_FOUND' | 'SUPPORT_NOT_CONFIGURED' };
+
+/** How the support platform knows who a conversation is for: Nightmail checks each itself. */
+export type ConversationEvidence = { kind: 'handoff'; token: string } | { kind: 'email'; messageId: string };
+export type RegisteredConversation = { id: string; channel: 'chat' | 'email'; mode: 'member' | 'non_member' | 'pending_signin' | 'unverified'; verification: 'handoff' | 'dmarc' | 'signin' | 'none';
+  status: 'open' | 'ticketed' | 'closed'; workspaceId: string | null; contentShared: boolean; created: boolean };
 
 export type StaffCheck =
   | { ok: true; staff: { userId: string; email: string; role: string }; jti: string; expiresAt: string }
@@ -110,24 +130,27 @@ export async function verifyHandoffToken(config: Pick<Config, 'support' | 'publi
  * The binding's methods, over a dispatcher that runs one request through the app as the support platform. Kept free of
  * `cloudflare:workers` so the acceptance suite drives exactly this on Node; src/worker.ts wraps it in the entrypoint.
  */
-export function supportPlatform(dispatch: (request: Request) => Promise<Response>, config: () => Pick<Config, 'support' | 'publicUrl'>) {
+export function supportPlatform(dispatch: (request: Request, conversation?: string) => Promise<Response>, config: () => Pick<Config, 'support' | 'publicUrl'>) {
   const origin = () => config().publicUrl.replace(/\/$/, '');
-  async function call<T>(method: string, path: string, body?: unknown, grant?: string): Promise<PlatformReply<T>> {
-    const url = new URL(path, 'https://internal.invalid');
-    const refuse = (status: number, code: string, message: string) => {
-      const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;
-      return { status, body: { error: { code, message, requestId, retryable: false } } as T, requestId, retryAfter: null };
-    };
-    if (!supportPlatformAllows(method, url.pathname)) return refuse(404, 'NOT_FOUND', 'The support platform cannot call this route.');
-    const onSupport = url.pathname.startsWith('/v1/support/');
-    if (onSupport !== (grant !== undefined) || (grant !== undefined && !SUPPORT_GRANT.test(grant))) return refuse(403, onSupport ? 'SUPPORT_GRANT_REQUIRED' : 'OPERATOR_REQUIRED', 'Use a support grant for /v1/support reads, and only there.');
+  const refuse = <T>(status: number, code: string, message: string): PlatformReply<T> => {
+    const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;
+    return { status, body: { error: { code, message, requestId, retryable: false } } as T, requestId, retryAfter: null };
+  };
+  async function send<T>(method: string, url: URL, body: unknown, grant?: string, conversation?: string): Promise<PlatformReply<T>> {
     const headers: Record<string, string> = { accept: 'application/json', 'user-agent': 'bane-support (service binding)' };
     if (body !== undefined) headers['content-type'] = 'application/json';
     if (grant) headers.authorization = `Bearer ${grant}`;
-    const response = await dispatch(new Request(origin() + url.pathname + url.search, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }));
+    const response = await dispatch(new Request(origin() + url.pathname + url.search, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }), conversation);
     const text = await response.text();
     let parsed: unknown = null; try { parsed = text ? JSON.parse(text) : null; } catch { parsed = { error: { code: 'INVALID_RESPONSE', message: text.slice(0, 200) } }; }
     return { status: response.status, body: parsed as T, requestId: response.headers.get('x-request-id'), retryAfter: response.headers.get('retry-after') };
+  }
+  async function call<T>(method: string, path: string, body?: unknown, grant?: string): Promise<PlatformReply<T>> {
+    const url = new URL(path, 'https://internal.invalid');
+    if (!supportPlatformAllows(method, url.pathname)) return refuse(404, 'NOT_FOUND', 'The support platform cannot call this route.');
+    const onSupport = url.pathname.startsWith('/v1/support/');
+    if (onSupport !== (grant !== undefined) || (grant !== undefined && !SUPPORT_GRANT.test(grant))) return refuse(403, onSupport ? 'SUPPORT_GRANT_REQUIRED' : 'OPERATOR_REQUIRED', 'Use a support grant for /v1/support reads, and only there.');
+    return send<T>(method, url, body, grant);
   }
   return {
     /** A handoff JWS from the dashboard: its signed claims plus the stored row (used or not, the person's message). */
@@ -158,6 +181,25 @@ export function supportPlatform(dispatch: (request: Request) => Promise<Response
     },
     /** A grant-scoped read: `path` under /v1/support/, with its query. */
     read: <T = unknown>(path: string, grant: string) => call<T>('GET', path, undefined, grant),
+    /**
+     * Register a conversation, or another email in it: Nightmail checks the evidence itself (its own signed handoff, or a
+     * message it received at a support address) and decides who the conversation is for. Once per handoff; repeating a
+     * registration answers its current state.
+     */
+    registerConversation: (body: { conversationId: string; evidence: ConversationEvidence }) => call<RegisteredConversation>('POST', '/v1/operator/support/conversations', body),
+    /** End a conversation: every later request for it is refused. Repeating it is harmless. */
+    closeConversation: (conversationId: string) => call<{ id: string; status: 'closed'; closedAt: string }>('POST', `/v1/operator/support/conversations/${encodeURIComponent(String(conversationId))}/close`, {}),
+    /**
+     * A /v1/support request for one registered conversation: a GET, or the scope write (POST /v1/support/scope). The
+     * conversation rides on the runtime, never in the request; Nightmail derives the customer from its row and answers
+     * for their live memberships, within its scope, while it is open.
+     */
+    async request<T = unknown>(conversationId: string, method: string, path: string, body?: unknown): Promise<PlatformReply<T>> {
+      if (typeof conversationId !== 'string' || !CONVERSATION_ID.test(conversationId)) return refuse<T>(403, 'SUPPORT_GRANT_REQUIRED', 'Name a registered support conversation.');
+      const url = new URL(String(path), 'https://internal.invalid'), verb = String(method).toUpperCase();
+      if (!stampedAllows(verb, url.pathname) || (verb === 'GET' && body !== undefined)) return refuse<T>(404, 'NOT_FOUND', 'The support platform cannot call this route for a conversation.');
+      return send<T>(verb, url, body, undefined, conversationId);
+    },
     call,
   };
 }

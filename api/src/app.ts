@@ -24,7 +24,7 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   // Billing: balance, usage, ledger, payments, the Stripe webhook and the operator's billing tools (behind the operator gate).
   if (pathname === '/v1/billing' || pathname.startsWith('/v1/billing/') || pathname.startsWith('/v1/operator/billing/')) return 'billing';
   if (operatorPath(pathname) || pathname.startsWith('/v1/ui-notes/')) return 'operator';
-  if (supportPath(pathname) || pathname === '/v1/activity' || pathname === '/v1/contact-support' || pathname === '/v1/public/support-keys') return 'support';
+  if (supportPath(pathname) || pathname === '/v1/activity' || pathname === '/v1/contact-support' || pathname === '/v1/public/support-keys' || pathname.startsWith('/v1/support-conversations/')) return 'support';
   if (pathname === '/v1/me' || pathname === '/v1/mcp-connections' || pathname.startsWith('/v1/mcp-connections/') || pathname === '/v1/agents' || pathname.startsWith('/v1/agents/') || pathname === '/api/auth' || pathname.startsWith('/api/auth/') || pathname.startsWith('/.well-known/') || pathname === '/mcp/login' || pathname === '/mcp/consent') return 'auth-ui';
   if (pathname === '/mcp' || pathname.startsWith('/mcp/')) return 'mcp';
   if (pathname === '/v1/api-keys' || pathname.startsWith('/v1/api-keys/') || pathname === '/v1/agent-tokens' || pathname.startsWith('/v1/agent-tokens/')) return 'auth';
@@ -83,8 +83,8 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
       case 'overview': return (await import('./overview-setup.js')).registerOverviewSetup;
       case 'operator':
       case 'support': {
-        const [{ registerOperator }, { registerAudit }, { registerSupport, registerSupportOperator }, { registerUiNotes }] = await Promise.all([import('./operator.js'), import('./audit.js'), import('./support.js'), import('./ui-notes.js')]);
-        return (target: App) => { registerOperator(target); registerAudit(target); registerSupport(target); registerSupportOperator(target); registerUiNotes(target); };
+        const [{ registerOperator }, { registerAudit }, { registerSupport, registerSupportOperator }, { registerSupportConversations }, { registerUiNotes }] = await Promise.all([import('./operator.js'), import('./audit.js'), import('./support.js'), import('./support-conversations.js'), import('./ui-notes.js')]);
+        return (target: App) => { registerOperator(target); registerAudit(target); registerSupport(target); registerSupportOperator(target); registerSupportConversations(target); registerUiNotes(target); };
       }
       case 'billing': {
         const [{ registerBilling }, { registerStripeWebhook }] = await Promise.all([import('./billing/routes.js'), import('./billing/stripe-webhook.js')]);
@@ -318,18 +318,18 @@ export async function createOpenApiApp(): Promise<App> {
     { registerMcpAuth }, { registerDashboardAuth }, { registerAudience }, { registerAudienceQuery },
     { registerTemplates }, { registerSending }, { registerOperations }, { registerSesRegions },
     { registerMailbox }, { registerWorkspaces }, { registerProviderConnections }, { registerMcp }, { registerPublicStats }, { registerOverviewSetup }, { registerOperator },
-    { registerAudit }, { registerSupport, registerSupportOperator }, { registerUiNotes },
+    { registerAudit }, { registerSupport, registerSupportOperator }, { registerSupportConversations }, { registerUiNotes },
   ] = await wrapModuleLoad(() => Promise.all([
     import('./mcp-auth.js'), import('./dashboard-auth.js'), import('./audience.js'), import('./audience-query.js'),
     import('./templates.js'), import('./sending.js'), import('./operations.js'), import('./ses-regions.js'),
     import('./mailbox.js'), import('./workspaces.js'), import('./provider-connections.js'), import('./mcp.js'), import('./public-stats.js'), import('./overview-setup.js'), import('./operator.js'),
-    import('./audit.js'), import('./support.js'), import('./ui-notes.js'),
+    import('./audit.js'), import('./support.js'), import('./support-conversations.js'), import('./ui-notes.js'),
   ]));
   const [{ registerBilling }, { registerStripeWebhook }] = await wrapModuleLoad(() => Promise.all([import('./billing/routes.js'), import('./billing/stripe-webhook.js')]));
   registerMcpAuth(full); registerDashboardAuth(full); registerAuth(full); registerAudience(full); registerAudienceQuery(full);
   registerTemplates(full); registerSending(full); registerOperations(full); registerSesRegions(full); registerMailbox(full);
   registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full); registerOverviewSetup(full); registerOperator(full);
-  registerAudit(full); registerSupport(full); registerSupportOperator(full); registerUiNotes(full);
+  registerAudit(full); registerSupport(full); registerSupportOperator(full); registerSupportConversations(full); registerUiNotes(full);
   registerBilling(full); registerStripeWebhook(full);
   return full;
 }
