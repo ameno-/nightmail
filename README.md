@@ -59,8 +59,8 @@ See the [SDK guide](sdk/README.md) for usage examples, or [connect an MCP client
 
 Configure **environment-scoped** variables (not repository-wide). The deploy secrets
 live in AWS Secrets Manager (`us-east-1`, account `604439173067`) and are read through
-GitHub OIDC by each environment's own role, `arn:aws:iam::604439173067:role/github/bane-dev`
-or `arn:aws:iam::604439173067:role/github/bane-production`:
+GitHub OIDC by each environment's own role, `arn:aws:iam::604439173067:role/github/nightmail-dev`
+or `arn:aws:iam::604439173067:role/github/nightmail-production`:
 
 | Environment | AWS Secrets Manager | Variables |
 |---|---|---|
