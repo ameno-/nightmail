@@ -5,7 +5,7 @@ import { agentTokenMintRefusal, digest, keyAdminRefusal, lastingRefusal, memberA
 import { getMcpGrantActor, withMcpAuthorization } from './mcp-auth.js';
 import { chooseWorkspace, setDefaultWorkspace, WorkspaceChoice, type McpConnection } from './oidc-resource.js';
 import { buildMcpCatalog, TOOLSETS, EMAIL_SEND_CONFIRMATION, EMAIL_SEND_ROUTING, type McpOperation } from './mcp-catalog.js';
-import { describeAction, describeTool, resourceActions, resourceTools } from './mcp-resources.js';
+import { describeAction, describeTool, listedTool, resourceActions, resourceTools } from './mcp-resources.js';
 import { mcpServerName, productName } from './brand.js';
 
 type ObjectValue = Record<string, any>;
@@ -90,13 +90,13 @@ const WORKSPACE_LIST: Tool['outputSchema'] = { type: 'object', required: ['data'
     id: { type: 'string' }, name: { type: 'string' }, slug: { type: 'string' }, role: { type: 'string', enum: ['owner', 'admin', 'member'] },
     permissions: { type: 'array', items: { type: 'string', enum: ['nightmail:read', 'nightmail:send', 'nightmail:manage', 'bane:read', 'bane:send', 'bane:manage'] } }, default: { type: 'boolean' } } } },
   default: { type: ['string', 'null'] }, defaultSource: { type: ['string', 'null'], enum: ['set', 'only', 'last-used', null] } } };
-const workspaceTools: Tool[] = [
+export const workspaceTools: Tool[] = [
   { name: 'workspaces', description: `List your ${productName} workspaces, your role and what this connection may do in each, and the default workspace a call without workspace uses.`,
     inputSchema: { type: 'object', properties: {}, additionalProperties: false }, outputSchema: WORKSPACE_LIST, annotations: { readOnlyHint: true, openWorldHint: false } },
   { name: 'setDefaultWorkspace', description: 'Set the workspace this connection’s calls use when they name none. One of your own workspaces, by ID, slug or name.',
     inputSchema: { type: 'object', properties: { workspace: WORKSPACE_ARG }, required: ['workspace'], additionalProperties: false }, outputSchema: WORKSPACE_LIST, annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: false } },
 ];
-const workspaceResource: Tool = { name: 'workspaces', description: 'Your workspaces, your role and access in each, and the default (list), or set the default (setDefault). Every tool takes workspace, an ID or name; without it, the default.',
+export const workspaceResource: Tool = { name: 'workspaces', description: 'Your workspaces, your role and access in each, and the default (list), or set the default (setDefault). Every tool takes workspace, an ID or name; without it, the default.',
   inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['list', 'setDefault'] }, workspace: { type: 'string' } }, required: ['action'] }, annotations: { idempotentHint: true, openWorldHint: false } };
 
 /**
@@ -164,9 +164,11 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
   const visible = new Map([...operations].filter(([, op]) => listed(op)));
   function listTools() {
     // A key or an inbox key acts in its own workspace: its tools take no workspace.
-    if (!connection) return codeMode ? [...visible.values()].map(op => op.tool) : resourceTools(visible);
-    return codeMode ? [...workspaceTools, ...[...visible.values()].map(op => withWorkspace(op.tool))]
+    const tools = !connection ? codeMode ? [...visible.values()].map(op => op.tool) : resourceTools(visible)
+      : codeMode ? [...workspaceTools, ...[...visible.values()].map(op => withWorkspace(op.tool))]
       : [workspaceResource, ...resourceTools(visible).map(tool => tool.name === describeTool.name ? tool : withWorkspace(tool, { type: 'string' }))];
+    // Every listing, plain and Code Mode, leaves out the hints that equal the spec's defaults (listedTool).
+    return tools.map(listedTool);
   }
   const version = await listingVersion(`${connection ? 'connection' : 'key'}|${codeMode}|${[...visible.keys()].join(',')}`, listTools);
   if (session !== null && !session.startsWith(`${version}.`)) {

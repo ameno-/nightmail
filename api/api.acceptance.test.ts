@@ -599,11 +599,23 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   const bearer=Object.entries(spec.paths??{}).filter(([path])=>!/^\/v1\/(?:support|operator)\//.test(path)).flatMap(([,item])=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&!['receiveSesSnsEvent','revealWebhookSecret','getRitualVersion','createBillingTopUp','updateBillingAutoRecharge','createBillingCardSetup','deleteBillingPaymentMethod'].includes(o.operationId)).map((o:Json)=>o.operationId as string);
   // Members and invitations are session routes that an owner's or admin's own sign-in also calls (core.ts memberAdminRoute).
   assert.deepEqual([...catalog.keys()].sort(), [...bearer,'waitForMessage','listWorkspaceMembers','listWorkspaceInvitations','createWorkspaceInvitation','revokeWorkspaceInvitation'].sort());
-  const { resourceTools, resourceInventory } = await import('./src/mcp-resources.js');
+  const { resourceTools, resourceInventory, listedTool } = await import('./src/mcp-resources.js'), { workspaceTools, workspaceResource } = await import('./src/mcp.js');
   assert.deepEqual(resourceInventory().map(x=>x.operation).sort(), [...catalog.keys()].sort());
-  const plain = resourceTools(catalog), bytes = Buffer.byteLength(JSON.stringify({jsonrpc:'2.0',id:1,result:{tools:plain}}));
-  // Budget the full-grant JSON-RPC response, including discovery, not just an ordinary manage grant.
-  assert.equal(plain.length, 30); assert.ok(bytes <= 50_000, `${bytes} bytes`);
+  // The listing's byte budget is measured as sent, for the largest credential (Hosted MCP members and invitations).
+  const plain = resourceTools(catalog);
+  assert.equal(plain.length, 30);
+  // tools/list leaves out the hints that equal the MCP spec's defaults: every tool it can list (each operation's Code Mode
+  // tool, each plain resource tool and describe_tool, the workspace tools) keeps the same effective hints, and keeps
+  // destructiveHint wherever it was set.
+  const effective = (a: Json = {}) => ({ readOnlyHint: a.readOnlyHint ?? false, destructiveHint: a.destructiveHint ?? true, idempotentHint: a.idempotentHint ?? false, openWorldHint: a.openWorldHint ?? true, title: a.title });
+  const listable = [...[...catalog.values()].map(op => op.tool), ...plain, ...workspaceTools, workspaceResource];
+  assert.equal(listable.length, catalog.size + plain.length + 3);
+  for (const tool of listable) {
+    const listed = listedTool(tool);
+    assert.deepEqual(effective(listed.annotations), effective(tool.annotations), tool.name);
+    assert.equal(listed.annotations?.destructiveHint, tool.annotations?.destructiveHint, tool.name);
+    assert.deepEqual({ ...listed, annotations: undefined }, { ...tool, annotations: undefined }, tool.name);
+  }
   for (const {name,action,operation} of resourceInventory()) {
     const schema = plain.find(t=>t.name===name)!.inputSchema as Json;
     const branch = schema.oneOf.find((v:Json)=>v.properties.action.const===action);
@@ -5159,6 +5171,17 @@ describe('Hosted MCP OAuth and tools', () => {
       const refused = (result: Json, status: number | null, code: string) => { assert.equal(result.isError, true, redact(result)); assert.equal(result._meta.status, status, redact(result)); assert.equal(result.structuredContent.error.code, code, redact(result)); return result.structuredContent.error; };
       const tools = ['listWorkspaceMembers', 'listWorkspaceInvitations', 'createWorkspaceInvitation', 'revokeWorkspaceInvitation'];
       const owner = await signIn(manager!.userId), adminSignIn = await signIn(admin.userId), reader = await signIn(admin.userId, 'bane:read offline_access'), memberSignIn = await signIn(member.userId);
+
+      // The listing budget, measured as sent for the largest credential: an owner's sign-in on Hosted with every ordinary
+      // toolset (the default), with the workspaces tool and the workspace argument each tool takes.
+      const wire = Buffer.byteLength(JSON.stringify(ok(await request('POST', '/mcp', owner.token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders))));
+      t.diagnostic(`Hosted owner plain tools/list: ${wire} bytes`);
+      assert.ok(wire <= 50_000, `${wire} bytes`);
+      // Plain and Code Mode listings send no hint that equals the spec's default, and every tool keeps destructiveHint.
+      for (const path of ['/mcp', '/mcp?codemode=true']) for (const tool of (await mcp(owner.token, 'tools/list', {}, path)).tools) {
+        assert.ok(tool.annotations?.readOnlyHint !== false && tool.annotations?.idempotentHint !== false && tool.annotations?.openWorldHint !== true, `${path} ${tool.name}`);
+        if (!['workspaces', 'setDefaultWorkspace', 'describe_tool'].includes(tool.name)) assert.equal(typeof tool.annotations?.destructiveHint, 'boolean', `${path} ${tool.name}`);
+      }
 
       // An owner's sign-in: the four tools, never role changes or removal, in Code Mode and as actions of the plain settings resource.
       const ownerTools = await listed(owner.token);

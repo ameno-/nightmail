@@ -173,6 +173,17 @@ export function resourceTools(operations: ReadonlyMap<string, McpOperation>): To
   }).concat([describeTool]);
 }
 
+// MCP 2025-11-25 ToolAnnotations: readOnlyHint, idempotentHint default false and openWorldHint true; destructiveHint stays explicit.
+const DEFAULT_HINTS: Record<string, boolean> = { readOnlyHint: false, idempotentHint: false, openWorldHint: true };
+/** A tool as tools/list sends it: without the hints that equal the spec's defaults, which saves about 2 KB per listing.
+ *  destructiveHint is kept wherever it is set, for clients that don't apply the defaults. */
+export function listedTool(tool: Tool): Tool {
+  if (!tool.annotations) return tool;
+  const { annotations, ...rest } = tool;
+  const hints = Object.fromEntries(Object.entries(annotations).filter(([key, value]) => !Object.hasOwn(DEFAULT_HINTS, key) || DEFAULT_HINTS[key] !== value));
+  return Object.keys(hints).length ? { ...rest, annotations: hints } : rest;
+}
+
 export function resourceInventory() {
   return Object.entries(resources).flatMap(([name, { actions }]) => Object.entries(actions).map(([action, operation]) => ({ name, action, operation })));
 }
