@@ -66,12 +66,32 @@ export class SupportPlatform extends WorkerEntrypoint {
     return body ? ok(body) : ok({ error: { code: 'NOT_FOUND', message: 'nope' } }, 404);
   }
 }
+// Idempotency-Key as Nightmail applies it (api/src/idempotency.ts): scoped to the API key and the path; the same key with
+// the same body replays the stored result, with a different body it is 409 IDEMPOTENCY_CONFLICT; a refusal stores nothing.
+const keys = new Map();
+const canonical = value => Array.isArray(value) ? '[' + value.map(canonical).join(',') + ']'
+  : value && typeof value === 'object' ? '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical(value[k])).join(',') + '}' : JSON.stringify(value) ?? 'null';
 export default {
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === '/__calls') return Response.json(calls);
+    // Test setup: a key already used for another body (a send that committed but whose response never arrived).
+    if (url.pathname === '/__used') { const { authorization, path, key, body } = await request.json(); keys.set(authorization + ' ' + path + ' ' + key, { hash: canonical(body), status: 202, result: { id: 'msg_earlier', threadId: path.split('/')[4] } }); return new Response(null, { status: 204 }); }
     const body = request.method === 'POST' ? await request.json() : null;
-    calls.push(['api', request.method, url.pathname, body, request.headers.get('authorization'), request.headers.get('idempotency-key')]);
+    const call = ['api', request.method, url.pathname, body, request.headers.get('authorization'), request.headers.get('idempotency-key')];
+    calls.push(call);
+    const scope = call[5] && request.method === 'POST' ? call[4] + ' ' + url.pathname + ' ' + call[5] : null, stored = scope && keys.get(scope);
+    const answer = stored ? (stored.hash === canonical(body) ? Response.json(stored.result, { status: stored.status })
+      : Response.json({ error: { code: 'IDEMPOTENCY_CONFLICT', message: 'This Idempotency-Key was already used with a different request. Use a new key for a new request.' } }, { status: 409 }))
+      : await route(request, url, body);
+    // [6]: the status Nightmail answered, so a test can tell a delivered send from a refused one.
+    call.push(answer.status);
+    if (scope && !stored && answer.ok) keys.set(scope, { hash: canonical(body), status: answer.status, result: await answer.clone().json() });
+    return answer;
+  },
+};
+async function route(request, url, body) {
+  {
     // Like Nightmail: inbox keys get an attachment as a short-lived signed link (on Nightmail's origin for R2-stored mail), and
     // never the admin-only parts route.
     if (request.method === 'GET' && /^\\/v1\\/inbound\\/messages\\/[^/]+\\/attachments\\/part_png$/.test(url.pathname)) return Response.json({ url: url.origin + '/v1/objects/fixture-png.sig', expiresAt: new Date(Date.now() + 300_000).toISOString() });
@@ -82,7 +102,7 @@ export default {
       const id = url.pathname.split('/').pop();
       // id → [thread, from, dmarc, to, subject, text]; unknown ids are Ada's Gmail question.
       const table = {
-        msg_mail_1: ['thr_mail_1'], msg_mail_2: ['thr_mail_1'], msg_nodmarc_1: ['thr_nodmarc', null, 'FAIL'], msg_auto_1: ['thr_auto'], msg_image_1: ['thr_image'],
+        msg_mail_1: ['thr_mail_1'], msg_mail_2: ['thr_mail_1'], msg_nodmarc_1: ['thr_nodmarc', null, 'FAIL'], msg_nodmarc_lost: ['thr_nodmarc_lost', null, 'FAIL'], msg_auto_1: ['thr_auto'], msg_image_1: ['thr_image'],
         msg_nodmarc_spoof: ['thr_mail_1', null, 'FAIL', null, 'Refund', 'refund my top-up please'], msg_stranger_1: ['thr_mail_1', 'stranger@else.test'],
         msg_phish_1: ['thr_phish', null, 'PASS', null, 'Reset', 'Please send me the reset link'],
         msg_stranger_cap_1: ['thr_cap_1', 'stranger@else.test'], msg_stranger_cap_2: ['thr_cap_2', 'stranger@else.test'], msg_stranger_cap_3: ['thr_cap_3', 'stranger@else.test'],
@@ -106,8 +126,8 @@ export default {
     if (request.method === 'POST' && url.pathname === '/v1/inbound/threads') return Response.json({ id: 'msg_new', threadId: 'thr_new_' + calls.length }, { status: 202 });
     if (request.method === 'POST' && /^\\/v1\\/inbound\\/threads\\/[^/]+\\/reply$/.test(url.pathname)) return Response.json({ id: 'msg_reply', threadId: url.pathname.split('/')[4] }, { status: 202 });
     return Response.json({ error: { code: 'NOT_FOUND' } }, { status: 404 });
-  },
-};
+  }
+}
 `;
 
 // ---------- the scripted model ----------
