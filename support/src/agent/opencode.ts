@@ -14,12 +14,12 @@ import { log } from '../log.js';
 // retries and eviction recovery; we give it one custom agent, our tools as a plugin, and a fetch it must use for every
 // request. Upgrading means bumping @opencode/sdk and @opencode/plugin together (pinned, see package.json).
 //
-// Pinned model (owner decision): Claude Sonnet 5.5 at medium effort through Console's inference gateway, nothing else.
+// Pinned model (owner decision): Claude Opus 5.5 at medium effort through Console's inference gateway, nothing else.
 // The pin is enforced four ways: the config model, the agent model, the session model (without it OpenCode would fall
 // back to any available model) and a provider policy; and the fetch below refuses any request that isn't exactly it.
 // A conversation whose session was made under an earlier pin is switched to this one before its next turn.
 
-export const MODEL = { providerID: 'anthropic', model: 'claude-sonnet-5-5', variant: 'medium' } as const;
+export const MODEL = { providerID: 'anthropic', model: 'claude-opus-5-5', variant: 'medium' } as const;
 const PIN = `${MODEL.model}#${MODEL.variant}`;
 const MAX_STEPS = 25;
 const TOOL_NAMES = TOOLS.map(t => t.name);

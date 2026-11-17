@@ -137,7 +137,7 @@ export const recorded: Recorded[] = [];
 export const control = { failStatus: 0 };
 
 const sse = (events: Array<[string, unknown]>) => new Response(events.map(([type, data]) => `event: ${type}\ndata: ${JSON.stringify({ type, ...(data as object) })}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } });
-const start = (id: string): [string, unknown] => ['message_start', { message: { id, type: 'message', role: 'assistant', model: 'claude-sonnet-5-5', content: [], stop_reason: null, usage: { input_tokens: 1200, output_tokens: 1 } } }];
+const start = (id: string): [string, unknown] => ['message_start', { message: { id, type: 'message', role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, usage: { input_tokens: 1200, output_tokens: 1 } } }];
 const toolUse = (id: string, name: string, input: object) => sse([
   start('msg_tool'), ['content_block_start', { index: 0, content_block: { type: 'tool_use', id, name, input: {} } }],
   ['content_block_delta', { index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } }], ['content_block_stop', { index: 0 }],
@@ -164,6 +164,8 @@ export async function fakeGateway(request: Request): Promise<Response> {
   const body = request.method === 'POST' ? await request.json().catch(() => undefined) as any : undefined;
   recorded.push({ url: request.url, headers: Object.fromEntries(request.headers), body });
   if (!new URL(request.url).pathname.endsWith('/messages')) return new Response('not found', { status: 404 });
+  // Like a key allowed only the pinned model: anything else is refused.
+  if (body?.model !== 'claude-opus-5-5' || body?.output_config?.effort !== 'medium') return Response.json({ type: 'error', error: { type: 'permission_error', message: 'Model access is disabled' } }, { status: 403 });
   if (control.failStatus) return Response.json({ type: 'error', error: { type: 'overloaded_error', message: 'fake failure' } }, { status: control.failStatus });
   const said = lastUserText(body), answered = blocks(body?.messages?.at(-1)).some(b => b.type === 'tool_result');
   const lastUser = [...(body?.messages ?? [])].reverse().find((m: any) => m.role === 'user' && blocks(m).some(b => b.type === 'text'));
