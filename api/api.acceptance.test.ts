@@ -3710,7 +3710,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const ended = (await agents('?includeInactive=true')).find(a => a.id === agentId);
     assert.deepEqual([ended?.status, ended?.tokens.map((x: Json) => x.id === minted.id && x.revokedAt !== null)], ['revoked', [true]]);
   });
-  test('updateApiKey over MCP: an approval changes only the keys it created, which stay tied to it, and a temporary token changes none', async t => {
+  test('updateApiKey over MCP: a person\'s sign-in changes any key their role can, ties stay with the approval that made a key, and keys an approval made and temporary tokens keep their limits', async t => {
     const db = await fixtureDatabase(t);
     const issued = await oauthGrant(t, db), agentId = `mcp_${issued.consentId}`;
     const box = async () => { const made = ok(await http('POST', '/v1/inboxes', MANAGER, { type: 'sandbox' }), 201); cleanup(t, async () => { await http('DELETE', `/v1/inboxes/${made.id}`, MANAGER); }); return made; };
@@ -3737,17 +3737,34 @@ describe('Hosted MCP OAuth and tools', () => {
     const dropped = await callTool(issued.token, 'updateApiKey', { confirm: true, keyId: maker.id, body: { access: { addressIds: [first.id], mail: ['read'] } } });
     assert.deepEqual([dropped.access.addressIds, dropped.access.createdInboxIds], [[first.id], []]);
     assert.equal((await viaKey()).error?.code, 'NOT_FOUND');
-    // Not a key someone else made, over MCP or with a key the approval made; and a key never changes itself.
+    // The person's own sign-in changes any key their role lets them change in the dashboard: one made there, and one a
+    // different approval made. The trail names the person and MCP. Neither key becomes tied to the editing approval.
     const theirs = ok(await http('POST', '/v1/api-keys', MANAGER, { name: 'Dashboard agent', access: { type: 'addresses', addressIds: [first.id] } }), 201);
     secrets.add(theirs.secret); revokeLater(theirs.id);
-    const refused = await rpc(issued.token, 'tools/call', { name: 'updateApiKey', arguments: { confirm: true, keyId: theirs.id, body: { access: { addAddressIds: [second.id] } } } });
-    assert.equal(refused.structuredContent?.error?.code, 'PERMISSION_DENIED', redact(refused));
+    assert.deepEqual((await callTool(issued.token, 'updateApiKey', { confirm: true, keyId: theirs.id, body: { access: { addAddressIds: [second.id] } } })).access.addressIds, [first.id, second.id]);
+    ok(await http('GET', `/v1/inboxes/${second.id}/messages`, theirs.secret));
+    assert.deepEqual((await db.query("SELECT actor_type, actor_id, user_id, via FROM audit_events WHERE action = 'api_key.update' AND target_id = $1", [theirs.id])).rows,
+      [{ actor_type: 'mcp_grant', actor_id: agentId, user_id: manager!.userId, via: 'mcp' }]);
+    const other = await oauthGrant(t, db);
+    const elsewhere = await callTool(other.token, 'createApiKey', { confirm: true, body: { name: 'Another agent\'s key', access: { type: 'addresses', addressIds: [first.id] } } }, 201);
+    secrets.add(elsewhere.secret); revokeLater(elsewhere.id);
+    assert.deepEqual((await callTool(issued.token, 'updateApiKey', { confirm: true, keyId: elsewhere.id, body: { access: { addAddressIds: [second.id] } } })).access.addressIds, [first.id, second.id]);
+    ok(await http('GET', `/v1/inboxes/${second.id}/messages`, elsewhere.secret));
+    const ties = async (id: string) => (await db.query('SELECT grant_id FROM mail_grant_objects WHERE resource = $1', [id])).rows.map(r => r.grant_id);
+    assert.deepEqual([await ties(theirs.id), await ties(elsewhere.id)], [[], [other.consentId]]);
+    // A key the approval made keeps #372's rule as a caller: only keys that approval made, never itself. So does any API
+    // key that isn't unrestricted manage.
     const grantKey = await callTool(issued.token, 'createApiKey', { confirm: true, body: { name: 'MCP manager', permissions: ['manage'] } }, 201);
     secrets.add(grantKey.secret); revokeLater(grantKey.id);
-    error(await http('PATCH', `/v1/api-keys/${theirs.id}`, grantKey.secret, { access: { addAddressIds: [second.id] } }), 403, 'PERMISSION_DENIED');
+    error(await http('PATCH', `/v1/api-keys/${theirs.id}`, grantKey.secret, { access: { removeAddressIds: [second.id] } }), 403, 'PERMISSION_DENIED');
     error(await http('PATCH', `/v1/api-keys/${grantKey.id}`, grantKey.secret, { name: 'Itself' }), 403, 'PERMISSION_DENIED');
     assert.equal(ok(await http('PATCH', `/v1/api-keys/${own.id}`, grantKey.secret, { name: 'Renamed by its approval' })).name, 'Renamed by its approval');
-    assert.deepEqual((await db.query('SELECT mailbox_ids FROM mailbox_keys WHERE id = $1', [theirs.id])).rows[0].mailbox_ids, [first.id]);
+    for (const body of [{ permissions: ['send'] }, { permissions: ['manage'], domains: ['example.com'] }]) {
+      const restricted = ok(await http('POST', '/v1/api-keys', MANAGER, { name: unique('restricted caller'), ...body }), 201);
+      secrets.add(restricted.secret); revokeLater(restricted.id);
+      error(await http('PATCH', `/v1/api-keys/${theirs.id}`, restricted.secret, { access: { removeAddressIds: [second.id] } }), 403, 'PERMISSION_DENIED');
+    }
+    assert.deepEqual((await db.query('SELECT mailbox_ids FROM mailbox_keys WHERE id = $1', [theirs.id])).rows[0].mailbox_ids, [first.id, second.id]);
     assert.deepEqual((await db.query("SELECT actor_type FROM audit_events WHERE action = 'api_key.update' AND target_id = $1 ORDER BY id", [own.id])).rows.map(r => r.actor_type), ['mcp_grant', 'api_key']);
     // A temporary agent token changes no key, and neither catalog offers it the tool.
     const agent = await callTool(issued.token, 'createAgentToken', { body: { permissions: ['read', 'manage'], expiresInSeconds: 120, domains: [], purpose: 'updateApiKey fixture' }, confirm: true }, 201);
@@ -3755,10 +3772,76 @@ describe('Hosted MCP OAuth and tools', () => {
     error(await http('PATCH', `/v1/api-keys/${own.id}`, agent.token, { access: { removeAddressIds: [second.id] } }), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
     const offered = async (bearer: string) => (await rpc(bearer, 'tools/list')).tools.some((tool: Json) => tool.name === 'updateApiKey');
     assert.deepEqual([await offered(issued.token), await offered(grantKey.secret), await offered(agent.token)], [true, true, false]);
-    // The change kept the key tied to its approval: revoking the approval ends it, and an ended key isn't changed.
+    // The plain listing offers it as keys · update to the person's sign-in too.
+    const keysTool = (await rpc(issued.token, 'tools/list', {}, '/mcp')).tools.find((tool: Json) => tool.name === 'keys');
+    assert.ok(keysTool.inputSchema.oneOf.some((branch: Json) => branch.properties.action.const === 'update'), 'keys · update is listed');
+    // Edits kept every tie: revoking the editing approval ends only the key it made and an ended key isn't changed;
+    // revoking the approval that made the other agent's key ends that one, and the dashboard key keeps working.
     assert.equal(ok(await http('POST', `/v1/agents/${agentId}/revoke`, MANAGER)).scope, 'agent');
     error(await http('GET', `/v1/inboxes/${first.id}/messages`, own.secret), 401, 'AUTH_INVALID');
     error(await http('PATCH', `/v1/api-keys/${own.id}`, MANAGER, { name: 'After the approval' }), 409, 'KEY_INACTIVE');
+    for (const key of [theirs, elsewhere]) ok(await http('GET', `/v1/inboxes/${second.id}/messages`, key.secret));
+    assert.equal(ok(await http('POST', `/v1/agents/mcp_${other.consentId}/revoke`, MANAGER)).scope, 'agent');
+    error(await http('GET', `/v1/inboxes/${first.id}/messages`, elsewhere.secret), 401, 'AUTH_INVALID');
+    ok(await http('GET', `/v1/inboxes/${second.id}/messages`, theirs.secret));
+  });
+  test('updateApiKey over MCP: the person\'s role is checked again as the change is written, so a sign-in demoted mid-request changes nothing', async t => {
+    // Two real connections: one holds the approval's request-budget row, which REST charges after MCP has authorized the
+    // call and before the write's transaction; the other watches the call wait there, and demotes the person meanwhile.
+    const db = await fixtureDatabase(t), observer = await fixtureDatabase(t);
+    const issued = await oauthGrant(t, db), agentId = `mcp_${issued.consentId}`;
+    const key = ok(await http('POST', '/v1/api-keys', MANAGER, { name: unique('demotion target'), permissions: ['read'] }), 201);
+    secrets.add(key.secret); cleanup(t, async () => { await http('POST', `/v1/api-keys/${key.id}/revoke`, MANAGER); });
+    const rename = (name: string) => rpc(issued.token, 'tools/call', { name: 'updateApiKey', arguments: { confirm: true, keyId: key.id, body: { name } } });
+    assert.equal((await rename('Before')).structuredContent.name, 'Before');
+    const { rows: [{ role: was }] } = await observer.query("SELECT role FROM workspace_members WHERE workspace_id = 'default' AND user_id = $1", [manager!.userId]);
+    const role = (value: string) => observer.query("UPDATE workspace_members SET role = $1 WHERE workspace_id = 'default' AND user_id = $2", [value, manager!.userId]);
+    cleanup(t, async () => { await role(was); });
+    await db.query('BEGIN');
+    await db.query("SELECT 1 FROM api_request_budgets WHERE workspace_id = 'default' AND key_id = $1 FOR UPDATE", [agentId]);
+    let pending: Promise<Json>;
+    try {
+      pending = rename('Demoted');
+      let waiting = false;
+      for (let i = 0; i < 250 && !waiting; i++) {
+        waiting = (await observer.query("SELECT EXISTS (SELECT FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query ~* 'api_request_budgets') AS w")).rows[0].w;
+        if (!waiting) await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      assert.ok(waiting, 'The call reached its request-budget row');
+      await role('member');
+    } finally { await db.query('COMMIT'); }
+    // Authorized as an owner, refused when the change is written: the role there is the person's role now.
+    const refused = await pending!;
+    assert.equal(refused.structuredContent?.error?.code, 'AUTH_INVALID', redact(refused));
+    assert.equal((await db.query('SELECT name FROM api_keys WHERE id = $1', [key.id])).rows[0].name, 'Before');
+    // A new call as a member is refused before any tool runs (self-hosted MCP admits only owners and admins).
+    assert.equal((await http('POST', '/mcp?codemode=true', issued.token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'updateApiKey', arguments: { confirm: true, keyId: key.id, body: { name: 'As a member' } } } }, rpcHeaders)).status, 403);
+    assert.equal((await db.query('SELECT name FROM api_keys WHERE id = $1', [key.id])).rows[0].name, 'Before');
+    await role(was);
+  });
+  test('updateApiKey over MCP, hosted: an owner\'s sign-in is offered it and changes a dashboard key; as a member it is neither offered nor allowed', async t => {
+    await simulatedSesFixture(t, async ({ db, request, runtime, local }) => {
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Dashboard key', permissions: ['read'] }), 201);
+      runtime.config.multiTenant = true;
+      try {
+        const { token, consentId } = await oauthGrant(t, db, writableScope, request);
+        const call = async (name: string) => ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'updateApiKey', arguments: { confirm: true, keyId: key.id, body: { name } } } }, rpcHeaders)).result.structuredContent;
+        const offered = async () => (ok(await request('POST', '/mcp?codemode=false', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders)).result.tools as Json[]).some(tool => tool.name === 'updateApiKey');
+        assert.equal(await offered(), true);
+        assert.equal((await call('Renamed by its owner\'s agent')).name, 'Renamed by its owner\'s agent');
+        await db.query('UPDATE workspace_members SET role = $1 WHERE workspace_id = $2 AND user_id = $3', ['member', runtime.config.workspaceId, manager!.userId]);
+        assert.equal(await offered(), false);
+        assert.equal((await call('As a member')).error.code, 'TOOL_UNAVAILABLE');
+        // REST refuses the member's approval as well, whatever a listing says.
+        const [{ createApp }, { dispatchAsActor }, { getMcpGrantActor }] = await Promise.all([import('./src/app.js'), import('./src/auth.js'), import('./src/mcp-auth.js')]);
+        const member = (await getMcpGrantActor(runtime, 'mcp_' + consentId, runtime.config.workspaceId))!;
+        assert.equal(member.role, 'member');
+        const direct = await dispatchAsActor(createApp(), new Request(`${PUBLIC_ORIGIN}/v1/api-keys/${key.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify({ name: 'Direct' }) }),
+          runtime, member, { requestId: `req_${'0'.repeat(32)}`, clientIp: null, userAgent: null });
+        assert.equal(direct.status, 403);
+        assert.equal((await db.query('SELECT name FROM api_keys WHERE id = $1', [key.id])).rows[0].name, 'Renamed by its owner\'s agent');
+      } finally { runtime.config.multiTenant = false; }
+    });
   });
   test('API keys: a key write re-checks its caller as it writes: a narrowed caller\'s pending edit or create is refused, and two keys editing each other neither deadlock nor widen', async t => {
     // Two real connections: one holds key rows (to schedule the race), the other watches the API's requests wait on them.
