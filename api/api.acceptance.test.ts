@@ -4228,6 +4228,67 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  // Migration 322 copies each endpoint table's writes to the other, in the writer's transaction. Before it runs, every
+  // endpoint write takes the endpoint's mailbox_webhooks row before its mail_endpoints row, so no two wait in a cycle.
+  test('endpoint writes take one lock order: a recipient’s confirm, decline or stop and a forward’s dispatch wait for an edit holding the endpoint, never the reverse', async t => {
+    const [{ nodeRuntime }, { answerForward, forwardStopUrl }, { forwardStillAllowed }, { createApp }, { encrypt }, { digest }, { sql }] = await Promise.all([import('./src/adapters/node.js'),
+      import('./src/ritual-endpoints.js'), import('./src/dispatcher.js'), import('./src/app.js'), import('./src/operations.js'), import('./src/core.js'), import('drizzle-orm')]);
+    const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL }); cleanup(t, close);
+    const db = await fixtureDatabase(t), w = unique('lockorder'), app = createApp();
+    cleanup(t, async () => {
+      for (const table of ['mail_forward_once', 'mail_messages', 'mail_threads', 'mailbox_webhooks']) await db.query(`DELETE FROM ${table} WHERE workspace_id=$1`, [w]);
+      await db.query('DELETE FROM workspaces WHERE id=$1', [w]);
+    });
+    await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [w]);
+    // A forward as createEndpoint leaves it: pending with a confirmation link, or confirmed.
+    const forward = async (pending: boolean) => {
+      const hook = 'con_' + randomUUID().replaceAll('-', ''), token = 'fwd_' + randomUUID().replaceAll('-', '') + randomUUID().replaceAll('-', ''), ref = 'forward:f' + hook.slice(4, 16);
+      await db.query("INSERT INTO mailbox_webhooks(id,workspace_id,name,url,event_types,encrypted_secret) VALUES($1,$2,$3,'https://ritual.invalid/','[]','synthetic')", [hook, w, ref]);
+      await db.query("INSERT INTO mail_endpoints(workspace_id,ref,hook_id,encrypted_value,verified,proof_hash,expires_at,request_from) VALUES($1,$2,$3,$4,$5,$6,now()+interval '1 hour','box@example.org')",
+        [w, ref, hook, await encrypt(runtime, 'teammate@example.net', `${w}:endpoint:${hook}`), !pending, pending ? await digest(token) : null]);
+      return { hook, token };
+    };
+    const state = async (hook: string) => (await db.query('SELECT verified,declined_at IS NOT NULL AS declined FROM mail_endpoints WHERE hook_id=$1', [hook])).rows[0];
+    // An edit holds the endpoint row, then writes its mail_endpoints row, as updateEndpoint does. `act` has to wait for the
+    // endpoint row holding nothing the edit needs next: had it locked the mail_endpoints row first, the edit's write would
+    // wait for it (here a lock_timeout; once 322's triggers copy writes across, a deadlock).
+    const whileEditing = async <T>(hook: string, act: () => Promise<T>, write = 'ref=ref') => {
+      const edit = await fixtureDatabase(t), holder = (await edit.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+      await edit.query('BEGIN'); await edit.query("SET LOCAL lock_timeout='3s'");
+      let pending: Promise<T> | undefined;
+      try {
+        await edit.query('SELECT FROM mailbox_webhooks WHERE id=$1 FOR UPDATE', [hook]);
+        pending = act(); pending.catch(() => {});
+        for (let i = 0; !(await db.query('SELECT FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))', [holder])).rowCount; i++) {
+          assert.ok(i < 250, 'It never waited for the endpoint row the edit holds.'); await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        await edit.query(`UPDATE mail_endpoints SET ${write} WHERE hook_id=$1`, [hook]);
+        await edit.query('COMMIT');
+      } catch (cause) { await edit.query('ROLLBACK'); throw cause; }
+      return pending!;
+    };
+    // The recipient allows, or declines, from the emailed link.
+    const allow = await forward(true);
+    assert.equal((await whileEditing(allow.hook, () => answerForward(runtime, allow.token, 'allow'))).address, 'teammate@example.net');
+    assert.deepEqual(await state(allow.hook), { verified: true, declined: false });
+    const refuse = await forward(true);
+    await whileEditing(refuse.hook, () => answerForward(runtime, refuse.token, 'decline'));
+    assert.deepEqual(await state(refuse.hook), { verified: false, declined: true });
+    // The stop link in a forwarded message.
+    const stop = await forward(false), path = new URL(await forwardStopUrl(runtime, stop.hook)).pathname;
+    const stopped = await whileEditing(stop.hook, async () => app.fetch(new Request(runtime.config.publicUrl.replace(/\/$/, '') + path, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'choice=decline' }), runtime));
+    assert.equal(stopped.status, 200);
+    assert.deepEqual(await state(stop.hook), { verified: false, declined: true });
+    // A forward's queued email: the dispatcher's check waits for the endpoint row too, then sees the decline that commits meanwhile.
+    const sent = await forward(false), thread = unique('thr'), message = unique('msg'), email = unique('em');
+    await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)', [thread, w]);
+    await db.query("INSERT INTO mail_messages(id,workspace_id,direction,thread_id,status,lifecycle) VALUES($1,$2,'inbound',$3,'received','default')", [message, w, thread]);
+    await db.query('INSERT INTO mail_forward_once(workspace_id,message_id,endpoint,email_id) VALUES($1,$2,$3,$4)', [w, message, sent.hook, email]);
+    const allowed = async () => (await runtime.db.execute<{ ok: boolean }>(sql`SELECT ${forwardStillAllowed(runtime, sql`x`)} AS ok FROM (SELECT ${email}::text AS id,${w}::text AS workspace_id,${'forward:' + sent.hook}::text AS actor_key_id) x`)).rows[0]!.ok;
+    assert.equal(await allowed(), true);
+    assert.equal(await whileEditing(sent.hook, allowed, 'declined_at=now()'), false);
+  });
+
   test('a removal waits for a receiving write under way, then holds what the write changed', async t => {
     // Two connections: the write pauses inside its transaction after it has recorded its approval and before it locks
     // the webhook, and the owner removes the approval meanwhile. The removal waits for the write, then holds the webhook.
@@ -18278,6 +18339,22 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         } finally { await call('PUT', '/v1/rituals', {}); }
         assert.equal((await call('PATCH', legacy, { key: 'in-use-renamed' })).key, 'in-use-renamed');
         await call('DELETE', legacy);
+      });
+      // Migration 322 gives Slack, Discord and forward endpoints a key, while this release still resolves routes.
+      await t.test('routing: a Slack, Discord or forward endpoint is never a route destination, by ID or by name, even once it has a key', async () => {
+        await call('POST', '/v1/endpoints', { type: 'slack', name: 'route-slack', url: 'https://hooks.slack.com/services/T0ROUTE/B0ROUTE/routefixture0001' }, 201);
+        const con = (await db.query("SELECT hook_id FROM mail_endpoints WHERE workspace_id=$1 AND ref='slack:route-slack'", [wid])).rows[0].hook_id as string;
+        await db.query('UPDATE mailbox_webhooks SET key=$2 WHERE id=$1', [con, 'route-slack']);
+        const config = (to: string[]) => ({ envelope: { to: ['route-check@receive.example'] }, config: { routes: [{ match: 'route-check@receive.example', to }] } });
+        try {
+          error(await local('POST', '/v1/routing/routes', { match: 'route-check@receive.example', to: ['webhook:route-slack'] }), 422, 'UNKNOWN_DESTINATION');
+          error(await local('POST', '/v1/routing/test', config(['webhook:route-slack'])), 422, 'UNKNOWN_DESTINATION');
+          // Its ID was never a destination: routes take mbx_ and mwh_ IDs only.
+          error(await local('POST', '/v1/routing/routes', { match: 'route-check@receive.example', to: [con] }), 422, 'VALIDATION_FAILED');
+          // A webhook's name still resolves, and the exported config names only webhooks.
+          assert.deepEqual((await call('POST', '/v1/routing/test', config(['webhook:support-hook']))).recipients[0].webhooks, [hook.id]);
+          assert.ok(!JSON.stringify(await call('GET', '/v1/routing?format=config')).includes('route-slack'));
+        } finally { await call('DELETE', '/v1/endpoints/route-slack'); }
       });
       await t.test('inbound overview: one read merges addresses, patterns, routes and catch-alls with their rituals and endpoints; dry runs step through each condition', async () => {
         const box2 = await call('POST', '/v1/inbound/addresses', { address: 'overview@receive.example', key: 'overview', displayName: 'Overview desk', aliases: ['ov-alias@receive.example'], rules: ['ov+*@receive.example'] }, 201);

@@ -531,6 +531,20 @@ async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<s
   const claimed = await db.execute<{ id: string; status: EmailStatus; webhooks:number }>(sql`WITH ${claimCtes(runtime, prepared[0]!.mail.region, rows)} SELECT id,status,(SELECT count(*)::int FROM webhook_jobs) AS webhooks FROM claimed`);
   return {statuses:new Map(claimed.rows.map(row => [row.id, row.status])),webhooks:claimed.rows[0]?.webhooks??0};
 }
+/**
+ * A forward's email is sent only while its endpoint is still a confirmed, unpaused forward and every approval behind it
+ * is active. It share-locks the forward-once row, the endpoint row, then its mail_endpoints row: the order every endpoint
+ * write takes them in (ritual-endpoints.ts lockEndpointRow), so a decline or an edit committing now is either seen or
+ * waits for this decision, and the two never wait on each other in a cycle. `x` has id, workspace_id and actor_key_id.
+ */
+export function forwardStillAllowed(runtime: Pick<Runtime, 'config'>, x: SQL) {
+  return sql`EXISTS (
+    SELECT FROM mail_forward_once f JOIN mailbox_webhooks h ON h.workspace_id=f.workspace_id AND h.id=f.endpoint
+    JOIN mail_endpoints d ON d.workspace_id=h.workspace_id AND d.hook_id=h.id
+    WHERE f.email_id=${x}.id AND f.workspace_id=${x}.workspace_id AND ${x}.actor_key_id='forward:'||f.endpoint AND starts_with(d.ref,'forward:')
+    AND d.verified AND d.declined_at IS NULL AND NOT h.paused AND NOT EXISTS(SELECT FROM jsonb_array_elements_text(f.grants) gid WHERE NOT mail_receiving_grant(f.workspace_id,gid,${receivingPolicy(runtime.config)}::jsonb))
+    FOR SHARE OF f, h, d)`;
+}
 function claimCtes(runtime: Runtime, region: string, input: SQL) {
   return sql`input AS MATERIALIZED (${input}
     ), key_state AS MATERIALIZED (
@@ -559,11 +573,7 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
     ), eligibility AS MATERIALIZED (
       SELECT x.id,
         CASE WHEN starts_with(x.actor_key_id, 'mcp_') THEN x.mcp_allowed
-          WHEN starts_with(x.actor_key_id,'forward:') THEN EXISTS (
-            SELECT FROM mail_forward_once f JOIN mail_endpoints d ON d.workspace_id=f.workspace_id AND d.hook_id=f.endpoint
-            JOIN mailbox_webhooks h ON h.workspace_id=d.workspace_id AND h.id=d.hook_id
-            WHERE f.email_id=x.id AND f.workspace_id=x.workspace_id AND x.actor_key_id='forward:'||f.endpoint AND starts_with(d.ref,'forward:')
-            AND d.verified AND d.declined_at IS NULL AND NOT h.paused AND NOT EXISTS(SELECT FROM jsonb_array_elements_text(f.grants) gid WHERE NOT mail_receiving_grant(f.workspace_id,gid,${receivingPolicy(runtime.config)}::jsonb)) FOR SHARE)
+          WHEN starts_with(x.actor_key_id,'forward:') THEN ${forwardStillAllowed(runtime, sql`x`)}
           -- An owner notice (sendSystemEmail): only from the configured platform workspace, about a committed standing event.
           WHEN starts_with(x.actor_key_id, 'standing:') THEN x.campaign_id IS NULL AND x.workspace_id=${runtime.config.platformDomainWorkspace ?? null}::text
             AND EXISTS (SELECT FROM standing_events s WHERE s.id=substr(x.actor_key_id,10))
