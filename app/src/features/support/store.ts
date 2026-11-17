@@ -31,6 +31,8 @@ export interface ChatState {
   /** A conversation-wide limit from the server: RATE_LIMITED (until a time) or BUDGET_EXHAUSTED. */
   limit: { code: string; message: string; until: number | null } | null
   humanRequested: boolean
+  /** The person has a conversation from an earlier page to continue (it is never opened on its own). */
+  canContinue: boolean
   draft: string
   attachments: Attachment[]
   /** Why the last screenshot was refused (type, size or count), until the next one is added or a message is sent. */
@@ -42,7 +44,7 @@ export interface ChatState {
   announcement: string
 }
 
-const initial = (): ChatState => ({ connection: 'idle', retryAt: null, reason: null, hello: null, status: 'open', messages: [], busy: false, closed: null, limit: null, humanRequested: false, draft: '', attachments: [], attachError: null, imagesSent: 0, unread: false, announcement: '' })
+const initial = (): ChatState => ({ connection: 'idle', retryAt: null, reason: null, hello: null, status: 'open', messages: [], busy: false, closed: null, limit: null, humanRequested: false, canContinue: false, draft: '', attachments: [], attachError: null, imagesSent: 0, unread: false, announcement: '' })
 const flat = (text: string) => text.replace(/\s+/g, ' ').trim()
 const textOf = (message: ChatMessage) => message.parts.flatMap(part => part.kind === 'text' ? [part.text] : []).join('\n\n')
 // What a screen reader should say: the answer without its Markdown markers.
@@ -80,6 +82,7 @@ export class SupportStore {
 
   constructor(readonly transport: SupportTransport) {
     this.unsubscribe = transport.subscribe(event => this.handle(event))
+    this.state = { ...this.state, canContinue: transport.last() !== null }
   }
   readonly subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   readonly getSnapshot = () => this.state
@@ -200,7 +203,14 @@ export class SupportStore {
   cancel() { this.transport.send({ type: 'cancel' }) }
   requestHuman() { if (this.transport.send({ type: 'human.request' })) this.set({ humanRequested: true }) }
   end() { this.transport.send({ type: 'end' }) }
-  restart() { this.lastUserMessage = null; this.outbox = []; this.set({ ...initial(), draft: this.state.draft }); this.transport.restart() }
+  restart() { this.lastUserMessage = null; this.outbox = []; this.set({ ...initial(), draft: this.state.draft }); this.transport.restart(); this.set({ canContinue: this.transport.last() !== null }) }
+  /** "Continue last conversation": the panel switches to it and shows its history. */
+  continueLast() {
+    this.lastUserMessage = null; this.outbox = []
+    this.set({ ...initial(), draft: this.state.draft })
+    this.transport.continueLast()
+    this.set({ canContinue: this.transport.last() !== null })
+  }
   dispose() { for (const controller of this.uploads.values()) controller.abort(); this.unsubscribe(); this.transport.dispose(); this.listeners.clear() }
 
   private handle(event: TransportEvent) {

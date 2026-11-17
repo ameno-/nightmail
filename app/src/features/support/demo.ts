@@ -172,6 +172,8 @@ export function createDemoTransport({ firstName, workspace }: { firstName: strin
       })
     },
     restart() { seq = 0; void start() },
+    last: () => null,
+    continueLast() {},
     dispose() { clear(); conversation++; listeners.clear(); if (debug.transport === transport) delete (window as { __baneSupportDemo?: unknown }).__baneSupportDemo },
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener) } },
   }

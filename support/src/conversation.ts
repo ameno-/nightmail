@@ -147,7 +147,8 @@ export class SupportConversation extends DurableObject<Env> {
     const pending = this.sql.exec<{ id: string; workspace_id: string }>("SELECT id, workspace_id FROM _support_consent WHERE state = 'pending'").toArray();
     const granted = this.grant()?.content_workspace_id ?? null;
     for (const consent of pending) if (handoff.shareContent && granted === consent.workspace_id) this.resolveConsent(consent.id, 'allow');
-    this.notice(handoff.shareContent && granted ? 'Content access allowed for this conversation.' : 'Account access renewed.');
+    // A plain renewal (reconnecting, an expired chat token) says nothing: no message appears that the person didn't ask for.
+    if (handoff.shareContent && granted) this.notice('Content access allowed for this conversation.');
     if (handoff.shareContent && granted && pending.length) this.enqueueTurn({ text: '[The customer allowed content access for this workspace. Continue where you left off.]', hidden: true });
     return { ok: true };
   }
