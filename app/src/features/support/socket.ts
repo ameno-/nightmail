@@ -9,13 +9,14 @@ import { hostedHosts, productName, supportHost } from '../../../../api/src/brand
 type Started = { conversationId: string; chatToken: string; socketUrl: string; expiresAt: string }
 class StartError extends Error { constructor(readonly status: number, readonly code: string, readonly retryAfter?: number) { super(code) } }
 
-// What a reload needs to rejoin the conversation (PROTOCOL.md §1): its ID, the socket URL until it expires, and when it
-// last had a message. A conversation that ended (the server said so, or a day passed without a message: the support
-// Worker closes a chat after 24 hours idle) is forgotten here, so opening Help starts a new one at once instead of
-// asking /chat/resume for one that is gone.
-type Saved = { conversationId: string; socketUrl?: string; expiresAt?: string; activeAt?: number }
+// What rejoins a conversation (PROTOCOL.md §1): its ID, the socket URL until it expires, when it last had a message, and
+// whether the person wrote in it. Two per workspace, for this tab: the conversation the panel is in, and the last one
+// the person wrote in on an earlier page, which only "Continue last conversation" opens. A conversation that ended (the
+// server said so, or a day passed without a message: the support Worker closes a chat after 24 hours idle) is forgotten,
+// so nothing asks /chat/resume for one that is gone.
+type Saved = { conversationId: string; socketUrl?: string; expiresAt?: string; activeAt?: number; written?: boolean }
 const IDLE_CLOSE_MS = 24 * 3_600_000
-const storageKey = (workspaceId: string) => `bane.support.conversation.${workspaceId}`
+const storageKey = (workspaceId: string, slot: 'conversation' | 'last' = 'conversation') => `bane.support.${slot}.${workspaceId}`
 function load(key: string): Saved | null {
   let raw: string | null = null
   try { raw = sessionStorage.getItem(key) } catch { return null }
@@ -26,8 +27,8 @@ function load(key: string): Saved | null {
   return saved
 }
 const save = (key: string, value: Saved | null) => { try { if (value) sessionStorage.setItem(key, JSON.stringify(value)); else sessionStorage.removeItem(key) } catch { /* Session-only. */ } }
-/** A message in the conversation: it stays open for another day. */
-const touch = (key: string) => { const saved = load(key); if (saved) save(key, { ...saved, activeAt: Date.now() }) }
+/** A message in the conversation: it stays open for another day; `written` when it is the person's. */
+const touch = (key: string, written = false) => { const saved = load(key); if (saved) save(key, { ...saved, activeAt: Date.now(), ...written ? { written } : {} }) }
 const fresh = (expiresAt?: string) => Boolean(expiresAt && Date.parse(expiresAt) - Date.now() > 60_000)
 
 // A screenshot upload (§5.1) over XHR, which reports upload progress (fetch doesn't).
@@ -75,8 +76,15 @@ const handoff = async (shareContent: boolean) => {
 }
 
 export function createSocketTransport({ origin, workspaceId, resume }: { origin: string; workspaceId: string; resume?: string | null }): SupportTransport {
-  const key = storageKey(workspaceId)
-  if (resume) save(key, { conversationId: resume })
+  const key = storageKey(workspaceId), lastKey = storageKey(workspaceId, 'last')
+  // A new page opens Help on a new conversation: the one from before is kept for "Continue last conversation" and never
+  // shown on its own. One the person never wrote in is reused instead, so opening Help again doesn't start another.
+  // A support email's "continue in Nightmail" link (`resume`) opens its conversation, as asked.
+  if (resume) save(key, { conversationId: resume, written: true })
+  else {
+    const before = load(key)
+    if (before && before.written !== false) { save(lastKey, before); save(key, null) }
+  }
   const listeners = new Set<(event: TransportEvent) => void>()
   const emit = (event: TransportEvent) => { for (const listener of listeners) listener(event) }
   // After a reload, the saved socket URL reconnects directly while it is still valid.
@@ -130,8 +138,8 @@ export function createSocketTransport({ origin, workspaceId, resume }: { origin:
       return
     }
     if (current !== generation || disposed) return
-    const previous = load(key)
-    save(key, { conversationId: started.conversationId, socketUrl: started.socketUrl, expiresAt: started.expiresAt, activeAt: previous?.conversationId === started.conversationId ? previous.activeAt : Date.now() })
+    const previous = load(key), same = previous?.conversationId === started.conversationId
+    save(key, { conversationId: started.conversationId, socketUrl: started.socketUrl, expiresAt: started.expiresAt, activeAt: same ? previous.activeAt : Date.now(), written: same ? previous.written ?? true : false })
     let opened = false
     const ws = socket = new WebSocket(started.socketUrl)
     ws.onopen = () => {
@@ -147,6 +155,7 @@ export function createSocketTransport({ origin, workspaceId, resume }: { origin:
       if (message.type === 'error' && message.code === 'BAD_MESSAGE') console.warn('[support] the server refused a message from the panel', message.message)
       if (message.type === 'closed' || message.type === 'hello' && message.status === 'closed') save(key, null)
       else if (message.type === 'message.end') touch(key)
+      else if (message.type === 'history' && message.messages.some(item => item.role === 'user')) touch(key, true)
       emit({ type: 'server', message })
     }
     ws.onclose = event => {
@@ -165,7 +174,7 @@ export function createSocketTransport({ origin, workspaceId, resume }: { origin:
   function send(message: ClientMessage) {
     if (!socket || socket.readyState !== WebSocket.OPEN) return false
     socket.send(JSON.stringify(message))
-    if (message.type === 'user.message') touch(key)
+    if (message.type === 'user.message') touch(key, true)
     return true
   }
   const online = () => { if (state === 'offline') { attempt = 0; void connect() } }
@@ -194,6 +203,18 @@ export function createSocketTransport({ origin, workspaceId, resume }: { origin:
       }
     },
     restart() { save(key, null); started = null; generation++; teardown(); state = 'idle'; attempt = 0; void connect() },
+    last: () => { const last = load(lastKey); return last && last.conversationId !== load(key)?.conversationId ? last.conversationId : null },
+    // The last conversation becomes the panel's. The one it leaves is kept as the last if the person wrote in it, else
+    // ended: nothing in it to keep, and it holds account access until it closes.
+    continueLast() {
+      const last = load(lastKey), current = load(key)
+      if (!last) return
+      if (current?.written) save(lastKey, current)
+      else { if (current) send({ type: 'end' }); save(lastKey, null) }
+      save(key, last)
+      started = last.socketUrl && fresh(last.expiresAt) ? { conversationId: last.conversationId, chatToken: '', socketUrl: last.socketUrl, expiresAt: last.expiresAt! } : null
+      generation++; teardown(); state = 'idle'; attempt = 0; void connect()
+    },
     dispose() { disposed = true; generation++; clearTimeout(retry); teardown(); window.removeEventListener('online', online); listeners.clear() },
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener) } },
   }

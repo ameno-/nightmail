@@ -94,6 +94,10 @@ export interface SupportTransport {
   allowContent(requestId: string): Promise<void>
   /** Forgets this conversation and opens a new one. */
   restart(): void
+  /** The last conversation the person wrote in on an earlier page, when it isn't this one: only opened on request. */
+  last(): string | null
+  /** Opens that conversation in the panel, with its history. */
+  continueLast(): void
   /** Whether this transport takes screenshots. */
   readonly uploads: boolean
   /** Uploads one screenshot (§5.1), reporting progress from 0 to 1; the returned att_ ID goes in user.message.attachments.

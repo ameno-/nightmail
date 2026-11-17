@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type FormEvent, type KeyboardEvent, type RefObject } from 'react'
-import { ArrowUp, Check, CircleAlert, Image as ImageIcon, ImagePlus, Square, UserRound, X } from 'lucide-react'
+import { ArrowUp, Check, CircleAlert, History, Image as ImageIcon, ImagePlus, Square, UserRound, X } from 'lucide-react'
 import { Button, DropdownMenu, IconButton } from '../../components/ui'
 import { SheetOpenEffects, useSheetDrag } from '../../components/ui/sheet'
 import { useSession } from '../../data/context'
@@ -15,8 +15,9 @@ import { productName } from '../../../../api/src/brand'
 
 const cx = (...values: Array<string | false | null | undefined>) => values.filter(Boolean).join(' ')
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches
-/** The panel's own first line: there from the moment it opens, with no model call and nothing to wait for. */
-const OPENING = 'What can we help you with?'
+/** The panel's own first line: there from the moment it opens, with no model call and nothing to wait for. On a new page
+ *  it is all the panel shows; an earlier conversation opens only from "Continue last conversation". */
+const OPENING = 'Hey, what’s up? How can we help?'
 /** The status line while an answer is being worked on and no step is running. */
 const WORKING = 'Working on it…'
 
@@ -96,6 +97,7 @@ function Header({ state, store, workspaceName, onClose }: { state: ChatState; st
     </div>
     <div className="support-panel__actions">
       <DropdownMenu label="Conversation options" title="Conversation" items={[
+        ...state.canContinue ? [{ label: 'Continue last conversation', icon: <History size={16} />, onSelect: () => store.continueLast() }] : [],
         { label: ticketed ? `Passed to the ${productName} team` : 'Talk to a person', icon: <UserRound size={16} />, disabled: ticketed || state.connection !== 'open' || Boolean(state.closed), onSelect: () => store.requestHuman() },
         { label: 'End conversation', icon: <X size={16} />, disabled: Boolean(state.closed) || state.connection !== 'open', onSelect: () => store.end() },
       ]} />

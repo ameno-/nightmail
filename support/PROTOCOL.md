@@ -30,7 +30,7 @@ panel ══ WebSocket socketUrl ═══════════════�
 
 3. **Connect.** `new WebSocket(socketUrl)`, i.e. `wss://support.bane.mx/c/<conversationId>?token=<chatToken>`. The Worker checks the token (bound to this conversation and this person) and the `Origin`. A refused upgrade is a plain `401`/`403`/`404` with no body; get a fresh handoff and call `/chat/resume`.
 
-Keep `conversationId`, `socketUrl` and `expiresAt` in `sessionStorage` so a reload reconnects to the same conversation. Switching workspace in the dashboard starts a new conversation (the handoff's workspace is the conversation's scope).
+Keep `conversationId`, `socketUrl` and `expiresAt` in `sessionStorage`. On a new page the panel opens on a new conversation and shows only its opening line: the person's earlier conversation is never loaded on its own, only from **Continue last conversation** (`/chat/resume`). A conversation the person never wrote in is reused instead of starting another. Switching workspace in the dashboard starts a new conversation (the handoff's workspace is the conversation's scope).
 
 ## 2. Resuming, renewing and granting content access
 
@@ -46,7 +46,7 @@ The handoff's user must be the conversation's user (`403 { error: { code: "NOT_Y
 ## 3. Message flow at a glance
 
 ```
-panel  : "What can we help you with?"  (its own fixed opening line, shown the moment it opens; no model call)
+panel  : "Hey, what's up? How can we help?"  (its own fixed opening line, shown the moment it opens; no model call)
 server → hello                      (always first, on every connect)
 server → history                    (on reconnect; empty on a new conversation)
 client → user.message               (the panel takes it at once and sends it after history; §5)
@@ -97,7 +97,7 @@ Every server message has `v: 1`, a `type` and a `seq`: a per-conversation counte
   "redacted": false }                  // true when the output gate replaced it (§6)
 ```
 
-- The server writes no greeting: the panel opens every conversation with its own fixed line, "What can we help you with?", and the customer writes first. `kind: "first"` appears only in the history of conversations opened before Nov 16, 2026, when the agent wrote a greeting.
+- The server writes no greeting: the panel opens every conversation with its own fixed line, "Hey, what's up? How can we help?", and the customer writes first. Nothing else arrives unasked: a renewal (`/chat/resume`) adds no message, only allowing content access does ("Content access allowed for this conversation."). `kind: "first"` appears only in the history of conversations opened before Nov 16, 2026, when the agent wrote a greeting.
 - `kind: "notice"` is a short line from the harness, not the model (for example "Account access renewed"). Render it smaller.
 - Text is **Markdown, restricted**: paragraphs, `**bold**`, `` `code` ``, fenced code, numbered and bulleted lists, links. Render links only to `https://bane.mx`, `https://dev.bane.mx`, `https://support.bane.mx`, `https://support.dev.bane.mx` and `https://github.com/anomalyco/nightmail`; show any other URL as plain text. Never render images or raw HTML.
 - Always use `message.end.text` as the stored text. When `redacted` is true, it is a replacement such as "I've sent this to the team to check".
