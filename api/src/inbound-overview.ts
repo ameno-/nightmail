@@ -75,6 +75,33 @@ type Slim = { id: string; address: string; displayName: string | null };
 type Hook = { id: string; name: string | null; description: string; url: string; event_types: string[]; mailbox_ids: string[] | null; paused: boolean; routes?: number };
 type Subscribers = { list: Hook[]; total: number; active: number };
 type RoutesResult = { counts: Record<string, number>; page: PageRow[]; boxes: { row: MailboxRow; addresses: { address: string; kind: string }[]; stat: { threads: number; unread: number; last: string | null } | null }[]; dest_boxes: Slim[]; dest_endpoints: EndpointRow[]; dest_hooks: Hook[]; subscribers: Record<string, Subscribers> };
+type ListedEndpoint = EndpointRow & { routes: number };
+/** One endpoint as the overview and listInboundEndpoints show it: a named endpoint of any type, or a webhook without a name. */
+async function endpointEntry(env: Ctx['env'], w: string, row: ListedEndpoint, calls: (name: string) => string[]): Promise<z.infer<typeof OverviewEndpoint>> {
+  if (row.key !== null) {
+    const e = await endpointView(env, w, row);
+    return { id: row.id, source: 'endpoint', name: e.name, type: e.type, status: e.status, target: e.target, call: e.call, eventTypes: row.event_types, routes: row.routes, rituals: calls(e.name) };
+  }
+  return { id: row.id, source: 'inbound_webhook', name: row.description || row.name || webhookUrlHint(row.url!), type: 'webhook', status: row.paused ? 'paused' : 'ready',
+    target: webhookUrlHint(row.url!), call: null, eventTypes: row.event_types, routes: row.routes, rituals: [] };
+}
+/** Every ritual with the endpoints and inboxes it can call. The plan holds every ritual's compiled form while any ritual runs; with none attached or all off, compile here. */
+function ritualCalls(config: Partial<Config> | null, programs: Programs | null) {
+  const compiled = (key: string, source: string): RitualIR | null => { if (programs?.rituals[key]) return programs.rituals[key]!; try { return compileRitual(source); } catch { return null; } };
+  return (config?.rituals ?? []).map(ritual => {
+    const ir = compiled(ritual.key, ritual.source), refs = ir?.refs ?? [];
+    return { ritual, ir, calls: refs.filter(r => r.startsWith('endpoint:')).map(r => r.slice(9)), delivers: refs.filter(r => r.startsWith('inbox:')).map(r => r.slice(6)) };
+  });
+}
+const encodeEndpoint = (row: { key: string | null; id: string }) => Buffer.from(JSON.stringify([row.key === null, row.key ?? '', row.id])).toString('base64url');
+function decodeEndpoint(cursor: string | undefined) {
+  if (!cursor) return null;
+  try {
+    const [unnamed, key, id] = JSON.parse(Buffer.from(cursor, 'base64url').toString()) as [boolean, string, string];
+    if (typeof unnamed !== 'boolean' || typeof key !== 'string' || typeof id !== 'string') throw Error();
+    return { unnamed, key, id };
+  } catch { throw new ApiError(422, 'INVALID_CURSOR', 'cursor is not a cursor this endpoint returned.', 'cursor'); }
+}
 type WorkspaceResult = { config: Partial<Config> | null; programs: Programs | null; acted: Record<string, string>; names: Record<string, string>; endpoints: (EndpointRow & { routes: number; listed: boolean })[]; endpoints_more: boolean; hooks: Hook[]; hooks_more: boolean; keyed: (Slim & { key: string })[]; domains: { id: string; name: string; status: string; catchAll: string }[] };
 
 export function registerInboundOverview(app: App, deps: Deps) {
@@ -304,18 +331,43 @@ export function registerInboundOverview(app: App, deps: Deps) {
       const ritualKeys = ritualsFor([r.match]);
       return { id: r.id, kind: r.kind, match: r.match, host: r.host, address: null, route, catchAll: null, rituals: ritualKeys, ...complete(merge(route ? routed(route) : [], viaRituals(ritualKeys))) };
     });
-    // The plan holds every ritual's compiled form while any ritual runs; with none attached or all off, compile here.
-    const compiled = (key: string, source: string): RitualIR | null => { if (programs[key]) return programs[key]!; try { return compileRitual(source); } catch { return null; } };
-    const rituals = (ws.config?.rituals ?? []).map(({ key, source, recipe, enabled }) => {
-      const ir = compiled(key, source), refs = ir?.refs ?? [];
-      return { key, calls: refs.filter(r => r.startsWith('endpoint:')).map(r => r.slice(9)), delivers: refs.filter(r => r.startsWith('inbox:')).map(r => r.slice(6)),
-        omens: Object.keys(ir?.omens ?? {}), attachedTo: attachments.filter(a => a.ritual === key).map(a => a.target), addresses: attachments.filter(a => a.ritual === key).map(a => ws.names[a.target] ?? a.target), recipe: recipe ?? null, enabled: enabled !== false, lastMatchedAt: ws.acted[key] ?? null };
-    });
+    const rituals = ritualCalls(ws.config, ws.programs).map(({ ritual: { key, recipe, enabled }, ir, calls, delivers }) => ({ key, calls, delivers,
+      omens: Object.keys(ir?.omens ?? {}), attachedTo: attachments.filter(a => a.ritual === key).map(a => a.target), addresses: attachments.filter(a => a.ritual === key).map(a => ws.names[a.target] ?? a.target), recipe: recipe ?? null, enabled: enabled !== false, lastMatchedAt: ws.acted[key] ?? null }));
+    const callers = (name: string) => rituals.filter(r => r.calls.includes(name)).map(r => r.key);
     const listed = ws.endpoints.filter(e => e.listed).sort((a, b) => a.key! < b.key! ? -1 : 1).slice(0, OVERVIEW_ENDPOINTS);
-    const endpoints: z.infer<typeof OverviewEndpoint>[] = [
-      ...listed.map(row => { const e = endpointViews.get(row.id)!; return { id: e.hook, source: 'endpoint' as const, name: e.view.name, type: e.view.type, status: e.view.status, target: e.view.target, call: e.view.call, eventTypes: row.event_types, routes: row.routes, rituals: rituals.filter(r => r.calls.includes(e.view.name)).map(r => r.key) }; }),
-      ...ws.hooks.slice(0, OVERVIEW_ENDPOINTS).map(h => ({ id: h.id, source: 'inbound_webhook' as const, name: h.description || h.name || webhookUrlHint(h.url), type: 'webhook' as const, status: h.paused ? 'paused' as const : 'ready' as const, target: webhookUrlHint(h.url), call: null, eventTypes: h.event_types, routes: h.routes ?? 0, rituals: [] })),
+    const endpoints = [
+      ...await Promise.all(listed.map(row => endpointEntry(c.env, w, row, callers))),
+      ...await Promise.all(ws.hooks.slice(0, OVERVIEW_ENDPOINTS).map(h => endpointEntry(c.env, w, { ...h, key: null, routes: h.routes ?? 0 } as ListedEndpoint, callers))),
     ];
     return c.json({ counts, routes: { data, nextCursor: last ? encode(last) : null }, rituals, endpoints, endpointsTruncated: ws.endpoints_more || ws.hooks_more, domains: ws.domains, manage } as never, 200);
+  });
+
+  // Every endpoint, a page at a time: what the Receiving screen's Endpoints list reads (the overview lists the first 100 of each kind).
+  app.openapi(createRoute({
+    method: 'get', path: '/v1/inbound/endpoints', operationId: 'listInboundEndpoints', tags: ['Endpoints'], security: deps.security,
+    summary: 'List every endpoint a page at a time, with the routes and rituals that use it',
+    description: 'Named endpoints of every type (Slack, Discord, webhook, forward) by name, then webhooks without a name. Pass nextCursor back as cursor until it is null. addressId lists only the webhooks that get that address\'s received mail (subscribed to it or to every address), the full list a route\'s toMore points to.',
+    request: { query: z.object({
+      cursor: z.string().max(400).optional().describe('nextCursor from the previous page.'),
+      limit: z.coerce.number().int().min(1).max(100).default(50),
+      addressId: z.string().min(1).max(120).optional().describe('Only webhooks that get this address\'s received mail.'),
+    }) },
+    responses: { 200: response(z.object({ data: z.array(OverviewEndpoint), nextCursor: z.string().nullable() }).openapi('InboundEndpointPage')), ...errors },
+  }), async c => {
+    const value = deps.access(c, 'read'), w = value.workspaceId, q = c.req.valid('query'), after = decodeEndpoint(q.cursor);
+    if (!value.admin) throw new ApiError(403, 'ADMIN_REQUIRED', 'Endpoints cover every address in the workspace. Use an owner or admin session, or an API key with manage permission on all domains.');
+    const result = (await c.env.db.execute<{ config: Partial<Config> | null; programs: Programs | null; rows: ListedEndpoint[] }>(sql`/* inbound endpoints */
+      WITH page AS (SELECT ${endpointColumns()} FROM mailbox_webhooks h WHERE h.workspace_id=${w}
+          AND (${q.addressId ?? null}::text IS NULL OR (h.type='webhook' AND h.event_types ? 'message.received' AND (h.mailbox_ids IS NULL OR h.mailbox_ids ? ${q.addressId ?? ''})))
+          AND (${after === null}::boolean OR (h.key IS NULL, coalesce(h.key,''), h.id) > (${after?.unnamed ?? false}::boolean, ${after?.key ?? ''}::text, ${after?.id ?? ''}::text))
+          ORDER BY h.key IS NULL, coalesce(h.key,''), h.id LIMIT ${q.limit + 1}),
+        usage AS (SELECT d AS id, count(*)::int AS n FROM mail_routes r CROSS JOIN LATERAL jsonb_array_elements_text(r.destinations) d
+          WHERE r.workspace_id=${w} AND jsonb_typeof(r.destinations)='array' AND r.destinations ?| ARRAY(SELECT id FROM page) AND d IN (SELECT id FROM page) GROUP BY d)
+      SELECT c.config, c.programs, (SELECT coalesce(jsonb_agg(to_jsonb(p) || jsonb_build_object('routes', coalesce((SELECT n FROM usage WHERE usage.id=p.id),0))
+          ORDER BY p.key IS NULL, coalesce(p.key,''), p.id),'[]'::jsonb) FROM page p) AS rows
+      FROM (SELECT 1) one LEFT JOIN mail_ritual_configs c ON c.workspace_id=${w}`)).rows[0]!;
+    const calls = ritualCalls(result.config, result.programs), callers = (name: string) => calls.filter(r => r.calls.includes(name)).map(r => r.ritual.key);
+    const rows = result.rows.slice(0, q.limit);
+    return c.json({ data: await Promise.all(rows.map(row => endpointEntry(c.env, w, row, callers))), nextCursor: result.rows.length > q.limit ? encodeEndpoint(rows.at(-1)!) : null }, 200);
   });
 }

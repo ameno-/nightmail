@@ -4374,6 +4374,20 @@ describe('Hosted MCP OAuth and tools', () => {
       ok(await local('PATCH', '/v1/endpoints/last', { paused: true }));
       assert.equal(ok(await local('PATCH', '/v1/endpoints/spare', { paused: false })).status, 'ready');
       error(await local('PATCH', `/v1/inbound/webhooks/${(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='last'", [w])).rows[0].id}`, { paused: false }), 409, 'MAILBOX_HOOK_LIMIT');
+      // The Endpoints list pages through every one of the 500-odd, named ones first by name, each once.
+      const seen: Json[] = [];
+      for (let cursor: string | null = null, n = 0; n === 0 || cursor; n++) {
+        assert.ok(n < 20, 'The list never ended.');
+        const page = ok(await local('GET', `/v1/inbound/endpoints?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`));
+        seen.push(...page.data); cursor = page.nextCursor;
+      }
+      const all = (await db.query('SELECT id,key FROM mailbox_webhooks WHERE workspace_id=$1 ORDER BY key IS NULL, coalesce(key,\'\'), id', [w])).rows;
+      assert.deepEqual(seen.map(e => e.id), all.map(r => r.id));
+      assert.deepEqual(seen.filter(e => e.source === 'endpoint').map(e => e.name), ['crm', 'last', 'ops', 'spare']);
+      assert.deepEqual(seen.find(e => e.id === crm.id), { id: crm.id, source: 'endpoint', name: 'crm', type: 'webhook', status: 'ready', target: '\u2022\u2022\u2022\u2022/crm', call: 'endpoints.crm', eventTypes: ['message.received'], routes: 0, rituals: [] });
+      // An address's filter keeps the webhooks that get its received mail: crm subscribes for every address.
+      assert.deepEqual(ok(await local('GET', '/v1/inbound/endpoints?addressId=mbx_any')).data.map((e: Json) => e.id), [crm.id]);
+      error(await local('GET', '/v1/inbound/endpoints?cursor=forged'), 422, 'INVALID_CURSOR');
       // Every endpoint is a row of one kind: no Slack endpoint carries a URL or a signing secret any more.
       assert.deepEqual((await db.query("SELECT type,url,encrypted_secret,encrypted_target IS NOT NULL AS target FROM mailbox_webhooks WHERE workspace_id=$1 AND key='ops'", [w])).rows, [{ type: 'slack', url: null, encrypted_secret: null, target: true }]);
     });

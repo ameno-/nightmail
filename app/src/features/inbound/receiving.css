@@ -228,6 +228,7 @@ html:not([data-privacy='off']) .trace-to.private-field:not(:hover, :focus)::plac
 /* An address in a clipped line keeps its focus ring inside the clip. */
 .receiving-clip .private-address:focus-visible { outline-offset: -2px; }
 .rcv-kindline > .cluster { flex: none; flex-wrap: nowrap; }
+.rcv-kindline > .rcv-filter-chip { margin-right: auto; }
 .rcv-toolbar__end > .cluster { flex: none; flex-wrap: nowrap; }
 /* A ghost button that starts the row sits on the column's edge. */
 .rcv-steps__aside > .ui-button--ghost:first-child { margin-inline-start: calc(-1 * var(--button-pad-x, 11px)); }

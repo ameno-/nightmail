@@ -29,6 +29,16 @@ export type Overview = {
 }
 export type OverviewQuery = { kind?: string; origin?: 'api' | 'auto'; domain?: string; q?: string; cursor?: string; limit?: number }
 
+/** listInboundEndpoints: every endpoint a page at a time, or with addressId the webhooks that get that address's received mail. */
+export type EndpointPage = { data: OverviewEndpoint[]; nextCursor: string | null }
+export type EndpointQuery = { addressId?: string; cursor?: string; limit: number }
+export const endpointsKey = (query: EndpointQuery) => ['inbound-endpoints', query.addressId ?? '', query.cursor ?? '', query.limit] as const
+export function useEndpointPage(query: EndpointQuery, enabled = true) {
+  return useApiQuery(endpointsKey(query), (_api, signal) => {
+    const params = new URLSearchParams(Object.entries(query).filter(([, v]) => v !== undefined && v !== '').map(([k, v]) => [k, String(v)]))
+    return request<EndpointPage>(`/v1/inbound/endpoints?${params}`, { signal })
+  }, { keepPrevious: true, enabled })
+}
 export const overviewKey = (query: OverviewQuery) => ['inbound-overview', query.kind ?? '', query.origin ?? '', query.domain ?? '', query.q ?? '', query.cursor ?? '', query.limit ?? 50] as const
 export const readOverview = (query: OverviewQuery, signal?: AbortSignal) => {
   const params = new URLSearchParams(Object.entries(query).filter(([, v]) => v !== undefined && v !== '').map(([k, v]) => [k, String(v)]))

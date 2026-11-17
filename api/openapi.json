@@ -12707,6 +12707,27 @@
           "catchAll"
         ]
       },
+      "InboundEndpointPage": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InboundOverviewEndpoint"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data",
+          "nextCursor"
+        ]
+      },
       "UpdateInboundThread": {
         "type": "object",
         "properties": {
@@ -58583,6 +58604,187 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/inbound/overview' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/inbound/endpoints": {
+      "get": {
+        "operationId": "listInboundEndpoints",
+        "tags": [
+          "Endpoints"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "summary": "List every endpoint a page at a time, with the routes and rituals that use it",
+        "description": "Named endpoints of every type (Slack, Discord, webhook, forward) by name, then webhooks without a name. Pass nextCursor back as cursor until it is null. addressId lists only the webhooks that get that address's received mail (subscribed to it or to every address), the full list a route's toMore points to.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 400,
+              "description": "nextCursor from the previous page."
+            },
+            "required": false,
+            "description": "nextCursor from the previous page.",
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "description": "Only webhooks that get this address's received mail."
+            },
+            "required": false,
+            "description": "Only webhooks that get this address's received mail.",
+            "name": "addressId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboundEndpointPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { listInboundEndpoints } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await listInboundEndpoints({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/inbound/endpoints' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
           }
         ]
       }

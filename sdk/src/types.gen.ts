@@ -3752,6 +3752,11 @@ export type InboundOverviewDomain = {
     catchAll: 'create_address' | 'store';
 };
 
+export type InboundEndpointPage = {
+    data: Array<InboundOverviewEndpoint>;
+    nextCursor: string | null;
+};
+
 export type UpdateInboundThread = {
     /**
      * Opaque inbound address ID (mbx_…).
@@ -20648,6 +20653,77 @@ export type GetInboundOverviewResponses = {
 };
 
 export type GetInboundOverviewResponse = GetInboundOverviewResponses[keyof GetInboundOverviewResponses];
+
+export type ListInboundEndpointsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * nextCursor from the previous page.
+         */
+        cursor?: string;
+        limit?: number;
+        /**
+         * Only webhooks that get this address's received mail.
+         */
+        addressId?: string;
+    };
+    url: '/v1/inbound/endpoints';
+};
+
+export type ListInboundEndpointsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListInboundEndpointsError = ListInboundEndpointsErrors[keyof ListInboundEndpointsErrors];
+
+export type ListInboundEndpointsResponses = {
+    /**
+     * Success
+     */
+    200: InboundEndpointPage;
+};
+
+export type ListInboundEndpointsResponse = ListInboundEndpointsResponses[keyof ListInboundEndpointsResponses];
 
 export type ReplyToInboundThreadData = {
     body: ReplyToInboundThread;

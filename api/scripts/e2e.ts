@@ -757,6 +757,9 @@ async function inboundWebhook(addressId: string, threadId: string) {
   check((await pages(cursor => api('listInboundWebhooks', { query: { limit: 5, cursor } }))).some(h => h.id === path.id), 'inbound webhook not reached by cursor paging');
   check(hasId(await api('listInboundWebhooks', { query: { addressId, eventType: 'thread.updated' } }), path.id), 'inbound webhook filters dropped a subscriber');
   check(!hasId(await api('listInboundWebhooks', { query: { addressId, eventType: 'message.received' } }), path.id), 'inbound webhook event filter kept a non-subscriber');
+  // The Endpoints list pages through every endpoint; the address filter keeps only webhooks that get that address's received mail.
+  check((await pages(cursor => api('listInboundEndpoints', { query: { limit: 5, cursor } }))).some(e => e.id === path.id && e.type === 'webhook'), 'webhook not reached through the endpoint list');
+  check(!(await api('listInboundEndpoints', { query: { addressId } })).data.some(e => e.id === path.id), 'endpoint list address filter kept a non-subscriber');
   const rotated = await api('rotateInboundWebhookSecret', { path });
   check(rotated.secret.startsWith('whsec_') && rotated.secret !== item.secret, 'inbound webhook secret did not rotate');
   const before = await api('listInboundEvents', { query: { addressId, types: 'thread.updated' } });

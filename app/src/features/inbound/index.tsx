@@ -18,8 +18,12 @@ function LegacyRedirect({ to, address }: { to: string; address?: string }) {
 }
 export const LegacyMailboxesRedirect = () => <LegacyRedirect to="/receiving" />
 export function LegacyMailboxRedirect() { const { id = '' } = useParams(); return <LegacyRedirect to="/receiving/inbox" address={id} /> }
-// Webhooks are endpoints: their list is Receiving's Endpoints tab.
-export const LegacyMailboxWebhooksRedirect = () => <Navigate replace to="/receiving?tab=endpoints" />
+// Webhooks are endpoints: their list is Receiving's Endpoints tab, and an address's subscribers its address filter.
+export function WebhooksListRedirect() {
+  const address = new URLSearchParams(useLocation().search).get('address')
+  return <Navigate replace to={`/receiving?tab=endpoints${address ? `&address=${encodeURIComponent(address)}` : ''}`} />
+}
+export const LegacyMailboxWebhooksRedirect = WebhooksListRedirect
 export function LegacyMailboxWebhookRedirect() { const { id = '' } = useParams(); return <LegacyRedirect to={`/receiving/webhooks/${encodeURIComponent(id)}`} /> }
 
 export { AgentInboxPage, AgentInboxesPage } from './inboxes'

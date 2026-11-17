@@ -130,7 +130,7 @@ function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address:
       {/* The list is where its mail goes, a route's changes included (no Inbox when the route sends it elsewhere,
           Dropped when it drops it); webhooks past the first 50 are one link away. */}
       {!entry ? <SkeletonText width="50%" /> : <ul>{entry.to.map(t => <li key={`${t.type}:${t.id}`}><TargetIcon type={t.type} /><span>{targetName(t, address.id)}</span>{(t.via || t.status === 'paused' || t.type !== 'inbox' || t.id !== address.id) && <span className="muted">{t.via ? `via ${t.via}` : t.status === 'paused' ? 'Paused' : typeLabel[t.type]}</span>}</li>)}
-        {entry.toTruncated && <li><Link to="/receiving?tab=endpoints">{number(entry.toTotal - entry.to.length)} more {entry.toTotal - entry.to.length === 1 ? 'webhook' : 'webhooks'}</Link></li>}</ul>}
+        {entry.toTruncated && <li><Link to={`/receiving?tab=endpoints&address=${encodeURIComponent(address.id)}`}>{number(entry.toTotal - entry.to.length)} more {entry.toTotal - entry.to.length === 1 ? 'webhook' : 'webhooks'}</Link></li>}</ul>}
       <div className="addr-step__actions"><Button size="sm" onClick={() => setRouting(true)}>{entry?.route ? 'Edit route' : 'Add a route'}</Button></div>
     </section>
     {routing && <RouteEditor match={address.address} route={entry?.route} to={[address.id]} onClose={() => { setRouting(false); void overview.refetch() }} />}

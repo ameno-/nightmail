@@ -106,6 +106,7 @@ Everything is at most two clicks from Receiving.
 | Edit, attach or try a script | Receiving → Rituals → the ritual (Edit as code for a ready-made one) |
 | Create, test, pause or delete an endpoint | Receiving → Endpoints |
 | Subscribe a webhook to inbound events | Receiving → Endpoints → the webhook |
+| See every webhook that gets an address's mail | Receiving → Routes → the address → Goes to → more webhooks |
 | Create an agent inbox | Receiving → Routes → Agent inboxes → New agent inbox |
 | Test what would happen to an email | Receiving → Trace |
 | Set up receiving or change a catch-all | Domains → the domain |
@@ -114,7 +115,7 @@ Older links keep working: `/receiving/routing` opens Routes, and `/receiving/end
 
 ## API, SDK and MCP
 
-The Receiving screen is one read: `getInboundOverview` (`GET /v1/inbound/overview`) returns a page of routes merged across kinds, each with the rituals that run on it and where its mail goes, plus counts per kind, the rituals, up to 100 endpoints and 100 inbound webhooks (`endpointsTruncated` says when there are more; read them all with `listEndpoints` and `listInboundWebhooks`, following `nextCursor`) and the domains. Each route's `to` is complete except for webhook subscribers beyond 50; then `toTruncated` is true, `toTotal` counts every target and `toMore` is the `listInboundWebhooks?addressId=…&eventType=message.received` path that lists them all. Filter with `kind` (`address`, `inbox`, `route`, `pattern`, `catch_all`, comma-separated), `origin` (address rows only: `api` or `auto`), `domain` and `q`; page with `cursor`. It costs two database statements whatever the number of routes.
+The Receiving screen is one read: `getInboundOverview` (`GET /v1/inbound/overview`) returns a page of routes merged across kinds, each with the rituals that run on it and where its mail goes, plus counts per kind, the rituals, up to 100 endpoints and 100 inbound webhooks (`endpointsTruncated` says when there are more; read them all with `listInboundEndpoints`, following `nextCursor`) and the domains. Each route's `to` is complete except for webhook subscribers beyond 50; then `toTruncated` is true, `toTotal` counts every target and `toMore` is the `listInboundWebhooks?addressId=…&eventType=message.received` path that lists them all. Filter with `kind` (`address`, `inbox`, `route`, `pattern`, `catch_all`, comma-separated), `origin` (address rows only: `api` or `auto`), `domain` and `q`; page with `cursor`. It costs two database statements whatever the number of routes.
 
 Access matches the other receiving reads: members and scoped keys see only their own addresses; the full view needs a manage credential, and credentials that come from an MCP approval also need its explicit receiving consent. Over MCP it is offered exactly to the approvals REST allows. Webhook, Slack and Discord URLs are write-only: only the last four characters are returned.
 
@@ -125,7 +126,7 @@ Access matches the other receiving reads: members and scoped keys see only their
 | Routes | `listRoutes`, `createRoute`, `updateRoute`, `deleteRoute`, `testRouting` |
 | Catch-all | `updateInboundDomain` (`catchAll`) |
 | Rituals and Try it | `saveRitual`, `attachRituals`, `testRituals` (trace rows carry a step-by-step `timeline`) |
-| Endpoints | `listEndpoints`, `createEndpoint`, `updateEndpoint`, `testEndpoint`, `deleteEndpoint` |
+| Endpoints | `listInboundEndpoints` (every endpoint, named or not, a page at a time; `addressId` keeps the webhooks that get an address's received mail), `listEndpoints`, `createEndpoint`, `updateEndpoint`, `testEndpoint`, `deleteEndpoint` |
 | Inbound webhooks | `listInboundWebhooks` (`cursor`, `limit`, `addressId`, `eventType`), `getInboundWebhook`, `createInboundWebhook`, `updateInboundWebhook` |
 
 Endpoints and webhooks are one model. Every endpoint, whatever its type, is one row with one ID (`mwh_…` for a webhook, `con_…` for Slack, Discord and forwards); a webhook's `key` is its endpoint name. `/v1/endpoints` lists and changes named endpoints of every type, and `/v1/inbound/webhooks` lists and changes webhooks, named or not. Both go through the same writer (`api/src/endpoints.ts`), so names, caps (32 active webhooks with event subscriptions, 500 active route-only webhooks, 50 Slack, Discord and forward endpoints), the in-use checks and pause and resume are the same through either.
