@@ -96,7 +96,7 @@ const FORWARD_BLOCKING_HEADERS = new Set([...loopHeaderNames, 'auto-submitted', 
  * Whether a received message may ever be forwarded: parsed, not automated, not spam, virus scan passed, DMARC not
  * failed, fewer than 200 top-level headers, none of FORWARD_BLOCKING_HEADERS and fewer than 25 Received hops.
  * Decided once at ingest from the complete parsed header names (lower case) and stored as verdicts.forwardEligible;
- * a forward reads only that (deliverConnector). Migration 315 set it on older messages by the same rule.
+ * a forward reads only that (deliverConnector). Migration 316 set it on older messages by the same rule.
  */
 export function forwardEligibility(message: { status?: string; automated?: boolean; spam?: boolean; verdicts?: Verdicts }, headerNames: readonly string[]) {
   return message.status === 'received' && !message.automated && !message.spam && message.verdicts?.virus === 'PASS' && message.verdicts.dmarc !== 'FAIL'

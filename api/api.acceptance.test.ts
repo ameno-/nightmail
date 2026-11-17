@@ -18451,11 +18451,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         // Recorded at ingest for every message, though nothing routes this address yet.
         assert.deepEqual(Object.fromEntries(Object.entries(await verdicts()).map(([mid,v])=>[mid,v.forwardEligible])),Object.fromEntries(cases.map(([mid,,ok])=>[mid,ok])));
         // As stored by earlier deployments: no verdict, or the earlier ingest's forwardSafe (it let List-Id and 25 hops
-        // through). The backfill (migration 315) applies the same rule, keeps an earlier refusal, and runs twice the same.
+        // through). The backfill (migration 316) applies the same rule, keeps an earlier refusal, and runs twice the same.
         await db.query("UPDATE mail_messages SET verdicts=verdicts-'forwardEligible'-'ritualVerified' WHERE workspace_id=$1 AND ses_message_id=ANY($2)",[wid,cases.map(c=>c[0])]);
         await db.query(`UPDATE mail_messages SET verdicts=verdicts||'{"forwardSafe":true}' WHERE workspace_id=$1 AND ses_message_id IN ('fwd-list','fwd-hops-25','fwd-old')`,[wid]);
         await db.query(`UPDATE mail_messages SET verdicts=verdicts||'{"forwardSafe":false}' WHERE workspace_id=$1 AND ses_message_id='fwd-was-refused'`,[wid]);
-        const backfill=await readFile(new URL('./migrations/315_forward_eligibility.sql',import.meta.url),'utf8');
+        const backfill=await readFile(new URL('./migrations/316_forward_eligibility.sql',import.meta.url),'utf8');
         await db.query(backfill);const once=await verdicts();await db.query(backfill);assert.deepEqual(await verdicts(),once);
         assert.deepEqual(Object.fromEntries(Object.entries(once).map(([mid,v])=>[mid,[v.forwardEligible,'forwardSafe' in v]])),Object.fromEntries(cases.map(([mid,,ok])=>[mid,[ok&&mid!=='fwd-was-refused',false]])));
         await call('PUT','/v1/rituals',{rituals:[{key:'forward',source:'export default function route(email,ctx){endpoints.team() }'}],attachments:[{ritual:'forward',target:box.id}]});
