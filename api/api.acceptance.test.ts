@@ -13787,9 +13787,29 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         zone.set(`reply.${split.name}`, { mx: [ses, '10 mx.backup.example.'] });
         await recheck(split); let d = await read(split);
         assert.equal(d.receiving, 'verified', 'Additional MX records are not proof that the verified record disappeared.');
-        assert.equal(d.receivingIssue.code, 'split'); assert.match(d.receivingIssue.message, /same or a better priority than Amazon SES, so mail for reply\..* is split/);
+        assert.deepEqual([d.receivingIssue.code, d.receivingIssue.message], ['split', 'Mail is split with mx.backup.example.']);
         zone.set(`reply.${split.name}`, { mx: [ses, '20 mx.backup.example.'] });
-        await recheck(split); d = await read(split); assert.equal(d.receivingIssue.code, 'split'); assert.match(d.receivingIssue.message, /as a backup/);
+        await recheck(split); d = await read(split);
+        assert.deepEqual([d.receivingIssue.code, d.receivingIssue.message], ['split', 'mx.backup.example is the backup.']);
+        // Staged behind another provider (theirs ahead of ours): the same code, and the message says how to finish the move.
+        zone.set(`reply.${split.name}`, { mx: ['5 mx.backup.example.', ses] });
+        await recheck(split); d = await read(split);
+        assert.deepEqual([d.receivingIssue.code, d.receivingIssue.blocking, d.receivingIssue.message], ['split', false, 'Mail goes to mx.backup.example first. Remove its MX records to finish the move.']);
+        // Several providers on one host: the sentence names only the ones that decide the order.
+        for (const [mx, message] of [
+          [['5 mx.a.example.', ses, '20 mx.b.example.'], 'Mail goes to mx.a.example first. Remove its MX records to finish the move.'],
+          [['10 mx.a.example.', ses, '20 mx.b.example.'], 'Mail is split with mx.a.example.'],
+          [['5 aspmx.l.google.com.', ses, '20 tenant.mail.protection.outlook.com.'], 'Mail goes to Google Workspace first. Remove its MX records to finish the move.'],
+          [['5 mx.a.example.', '10 mx.b.example.', ses, '20 mx.c.example.'], 'Mail goes to mx.a.example first. Remove its MX records to finish the move.'],
+          [['5 mx.a.example.', '5 mx.b.example.', ses], 'Mail goes to mx.a.example, mx.b.example first. Remove their MX records to finish the move.'],
+          [[ses, '20 mx.a.example.', '30 mx.b.example.'], 'mx.a.example, mx.b.example are the backups.'],
+        ] as const) {
+          zone.set(`reply.${split.name}`, { mx: [...mx] }); await recheck(split);
+          assert.deepEqual([(await read(split)).receivingIssue.message], [message], mx.join(' '));
+        }
+        const staged = await claim(`${unique('rx-staged')}.example`);
+        zone.set(`inbound.${staged.name}`, { mx: ['5 mx.backup.example.', ses] });
+        assert.match(error(await choose(staged, `inbound.${staged.name}`), 409, 'RECEIVING_HOST_IN_USE').message, /^Move mail for inbound\..*\? Mail goes to mx\.backup\.example first\./, 'Taking over a host with a foreign MX still asks first.');
         zone.set(`reply.${split.name}`, { mx: [ses] }); await recheck(split); assert.equal((await read(split)).receivingIssue, null);
 
         const wild = await claim(`${unique('rx-wildcard')}.example`);
@@ -13958,12 +13978,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(inbox.name, `inbox.${name}`);
 
         // Nightmail's MX goes on the root at a lower priority first, beside the provider's (backup-MX staging): it receives
-        // whatever mail reaches it, and says how the mail is split.
+        // whatever fails over to it, and says the provider still gets mail first.
         zone.set(name, { mx: ['5 mx.other.example.', ses] });
         await recheck(d);
         assert.deepEqual(await states(), { [`reply.${name}`]: 'active', [name]: 'mixed', [`inbox.${name}`]: 'active' });
         const mixed = (await hosts()).find(h => h.name === name)!;
-        assert.deepEqual([mixed.issue.code, mixed.mx.state], ['split', 'mixed']);
+        assert.deepEqual([mixed.issue.code, mixed.mx.state, mixed.mx.split, mixed.issue.message], ['split', 'mixed', true, 'Mail goes to mx.other.example first. Remove its MX records to finish the move.']);
         const domain = await read(d);
         assert.deepEqual(domain.dns.filter((r: Json) => r.purpose === 'receiving').map((r: Json) => [r.name, r.status]), [[`reply.${name}`, 'verified'], [name, 'verified'], [`inbox.${name}`, 'verified']]);
         assert.equal(domain.receiving, 'verified');
