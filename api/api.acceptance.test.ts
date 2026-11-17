@@ -16872,6 +16872,109 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     await db.query('UPDATE mailbox_threads SET message_count=message_count+1,unread_count=unread_count+1 WHERE mailbox_id=$1 AND thread_id=$2',[bid,tid]);
     assert.deepEqual(await summary(),{message_count:2,unread_count:2});
   });
+  // The next release makes every address an inbox: it gives each one inbox_state and files its mail, one address at a time,
+  // holding its workspace's ingest lane and then the address row FOR UPDATE, while this release's Worker still serves.
+  // Every writer takes lanes before rows: a thread change takes the ingest lane in its first statement.
+  test('addresses with and without inbox state: a thread change takes the ingest lane first, so conversion, ingest and deletion wait in one order; an ordinary change keeps its statement budget', async t => {
+    const [{ nodeRuntime }, { createApp }, { digest }] = await Promise.all([import('./src/adapters/node.js'), import('./src/app.js'), import('./src/core.js')]);
+    const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL }); cleanup(t, close);
+    const db = await fixtureDatabase(t), other = await fixtureDatabase(t), pid = (await other.query('SELECT pg_backend_pid() AS pid')).rows[0].pid, app = createApp();
+    const w = unique('convert'), domain = unique('mdom');
+    const secret = `nm_${randomUUID().replaceAll('-', '')}${randomUUID().replaceAll('-', '')}`; secrets.add(secret);
+    cleanup(t, async () => {
+      for (const table of ['mailboxes', 'mail_messages', 'mail_threads', 'mailbox_domains', 'mailbox_events', 'mailbox_write_lanes', 'api_keys']) await db.query(`DELETE FROM ${table} WHERE workspace_id=$1`, [w]);
+      await db.query('DELETE FROM workspaces WHERE id=$1', [w]);
+    });
+    await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [w]);
+    await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,$2,'fixture',$3,'fixture','["read","send","manage"]','[]')`, [unique('key'), w, await digest(secret)]);
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,$3,$4,'active')", [domain, w, `${domain}.example`, REGION]);
+    const receive = async (c: pg.Client, bid: string, tid: string) => {
+      const id = unique('msg');
+      await c.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,lifecycle) VALUES($1,$2,$3,'inbound','default')", [id, w, tid]);
+      await c.query("INSERT INTO mailbox_messages(workspace_id,mailbox_id,message_id,thread_id,direction,received_at,read) VALUES($1,$2,$3,$4,'inbound',now(),false)", [w, bid, id, tid]);
+      return id;
+    };
+    // An address with one received message in one thread; converted: given inbox_state with that message filed.
+    const address = async (converted: boolean) => {
+      const bid = unique('mbx'), tid = unique('thr'), name = `${bid}@${domain}.example`;
+      await db.query('INSERT INTO mailboxes(id,workspace_id,domain_id,address) VALUES($1,$2,$3,$4)', [bid, w, domain, name]);
+      await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')", [w, name, bid]);
+      await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)', [tid, w]);
+      const mid = await receive(db, bid, tid);
+      await db.query('INSERT INTO mailbox_threads(mailbox_id,thread_id,workspace_id,message_count,unread_count,last_message_at,last_inbound_at) VALUES($1,$2,$3,1,1,now(),now())', [bid, tid, w]);
+      if (converted) await convert(db, bid);
+      return { bid, tid, mid };
+    };
+    const convert = async (c: pg.Client, bid: string) => {
+      await c.query('INSERT INTO inbox_state(inbox_id,workspace_id,messages) SELECT $1,$2,count(*) FROM mailbox_messages WHERE mailbox_id=$1', [bid, w]);
+      await c.query('SELECT inbox_file_delivery(mailbox_id,message_id,NULL,true) FROM mailbox_messages WHERE mailbox_id=$1 ORDER BY received_at,message_id', [bid]);
+    };
+    const call = (method: string, path: string, body?: Json) => Promise.resolve(app.fetch(new Request(runtime.config.publicUrl.replace(/\/$/, '') + path, { method,
+      headers: { authorization: `Bearer ${secret}`, ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) }), runtime));
+    const started = (p: Promise<Response>) => { p.catch(() => {}); return p; };
+    const waitedOn = async (holder: number, what: string) => {
+      for (let i = 0; !(await db.query('SELECT FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))', [holder])).rowCount; i++) {
+        assert.ok(i < 250, `${what} never waited.`); await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    };
+    const lane = () => other.query("INSERT INTO mailbox_write_lanes(workspace_id,lane) VALUES($1,'ingest') ON CONFLICT(workspace_id,lane) DO UPDATE SET lane=excluded.lane WHERE false", [w]);
+    const roles = async (bid: string, mid: string) => (await db.query('SELECT role FROM inbox_entries WHERE inbox_id=$1 AND message_id=$2', [bid, mid])).rows;
+    // Every statement the database receives is counted. Once armed, the first statement a request runs inside its
+    // transaction stops after it returns, holding whatever lock it took, until released.
+    let statements = 0, gate: { at: (pid: number) => void; release: Promise<void> } | undefined;
+    const query = pg.Client.prototype.query;
+    t.mock.method(pg.Client.prototype, 'query', async function (this: pg.Client & { inTransaction?: boolean; processID?: number }, ...args: unknown[]) {
+      statements++;
+      const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
+      const result = await (query as (...a: unknown[]) => unknown).apply(this, args);
+      if (/^\s*begin\b/i.test(text)) this.inTransaction = true;
+      else if (/^\s*(commit|rollback)\b/i.test(text)) this.inTransaction = false;
+      else if (gate && this.inTransaction) { const held = gate; gate = undefined; held.at(this.processID!); await held.release; }
+      return result;
+    });
+
+    // The review's reproduction: a thread change gets its first lock, then the address is deleted. The delete waits for
+    // the lane the change holds; on #360's first head the change held the address row, the delete then held the lane
+    // and waited for the row, and the change waited for the lane: 40P01.
+    const first = await address(true);
+    let at!: (pid: number) => void, release!: () => void;
+    const holding = new Promise<number>(resolve => { at = resolve; });
+    gate = { at, release: new Promise<void>(resolve => { release = resolve; }) };
+    const changing = started(call('PATCH', `/v1/inbound/threads/${first.tid}`, { addressId: first.bid, starred: true }));
+    const changer = await holding;
+    const deleting = started(call('DELETE', `/v1/inbound/addresses/${first.bid}`));
+    await waitedOn(changer, 'The delete');
+    release();
+    assert.deepEqual([(await changing).status, (await deleting).status], [200, 200]);
+    assert.equal((await db.query('SELECT FROM mailboxes WHERE id=$1', [first.bid])).rowCount, 0);
+
+    // An ordinary address: archiving and unarchiving its thread costs the statements it did before this release.
+    const plain = await address(false), path = `/v1/inbound/threads/${plain.tid}`;
+    assert.equal((await call('PATCH', path, { addressId: plain.bid, archived: true })).status, 200);
+    const before = statements, unarchived = await call('PATCH', path, { addressId: plain.bid, archived: false });
+    assert.equal(statements - before, 9, 'An ordinary address thread change takes 9 statements, as on dev.');
+    assert.deepEqual(((await unarchived.json()) as Json), { addressId: plain.bid, unreadCount: 1, archived: false, starred: false, trashed: false, spam: false, labels: [] });
+
+    // The conversion holds the lane and the address row while it files. Archiving waits for the lane, then moves the entry it filed.
+    await other.query('BEGIN'); await lane(); await other.query('SELECT FROM mailboxes WHERE id=$1 FOR UPDATE', [plain.bid]);
+    const archived = started(call('PATCH', path, { addressId: plain.bid, archived: true }));
+    await waitedOn(pid, 'Archiving');
+    await convert(other, plain.bid);
+    await other.query('COMMIT');
+    const reply = await archived; assert.equal(reply.status, 200); assert.equal(((await reply.json()) as Json).archived, true);
+    assert.deepEqual(await roles(plain.bid, plain.mid), [{ role: 'archive' }]);
+
+    // Ingest holds the lane and the address's inbox_state, then adds a message (a key share on the address row). The delete
+    // waits for the lane, holding nothing ingest needs: deleting the row before locking inbox_state would deadlock.
+    const ingested = await address(true);
+    await other.query('BEGIN'); await lane(); await other.query('SELECT FROM inbox_state WHERE inbox_id=$1 FOR UPDATE', [ingested.bid]);
+    const deleted = started(call('DELETE', `/v1/inbound/addresses/${ingested.bid}`));
+    await waitedOn(pid, 'The delete');
+    await receive(other, ingested.bid, ingested.tid);
+    await other.query('COMMIT');
+    assert.equal((await deleted).status, 200);
+    assert.equal((await db.query('SELECT FROM mailboxes WHERE id=$1', [ingested.bid])).rowCount, 0);
+  });
   // Receive admission races (api/tear/admission). Two connections insert receipts the way the SNS
   // route does; the mail_receive_admit trigger and the window and backlog it charges are under test.
   const receiptRace=async(t:TestContext,limits:{messages:number;backlog:number})=>{
@@ -17995,6 +18098,25 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await t.test('ephemeral inbox: retention removes unreferenced rows, threads and R2 objects, not default mail',async()=>{
         await charged(1,()=>db.query('SELECT mail_gc_batch(1000)'));for(const j of await jobs('mail.deleteObjects'))await charged(0,()=>mailboxIngestJobs[j.type](runtime,j.payload,{id:j.id,workspaceId:wid,attempts:1}));assert.equal(stored.has(first.raw_key),false);assert.ok(stored.has(sharedMail.raw_key));assert.equal((await db.query('SELECT FROM mailbox_messages WHERE message_id=$1 AND mailbox_id=$2',[sharedMail.id,other.id])).rowCount,1);for(const [table,id] of [['mail_messages',first.id],['mail_threads',first.thread_id],['mailboxes',box.id]])assert.equal((await db.query(`SELECT FROM ${table} WHERE id=$1`,[id])).rowCount,0);
         await db.query('INSERT INTO mail_gc_candidates(workspace_id,message_id) VALUES($1,$2)',[wid,defaultMsg.id]);await db.query('SELECT mail_gc_batch(1000)');assert.equal((await db.query('SELECT FROM mail_messages WHERE id=$1',[defaultMsg.id])).rowCount,1);assert.ok(stored.has(defaultMsg.raw_key));
+      });
+      // The next release makes every address an inbox: it gives each address inbox_state and files its mail, one address at a
+      // time, holding the workspace's ingest lane and the address row. This release is the Worker serving while that runs.
+      const convert=async(c:pg.Client,bid:string)=>{
+        await c.query("INSERT INTO inbox_state(inbox_id,workspace_id,messages,bytes) SELECT $1,$2,count(*),coalesce(sum(m.size_bytes),0) FROM mailbox_messages x JOIN mail_messages m ON m.id=x.message_id WHERE x.mailbox_id=$1 AND x.direction='inbound'",[bid,wid]);
+        await c.query('SELECT inbox_file_delivery(mailbox_id,message_id,NULL,true) FROM mailbox_messages WHERE mailbox_id=$1 ORDER BY received_at,message_id',[bid]);
+      };
+      const roles=async(bid:string,mid:string)=>(await db.query('SELECT role FROM inbox_entries WHERE inbox_id=$1 AND message_id=$2 ORDER BY role',[bid,mid])).rows.map((r:Json)=>r.role);
+      await t.test('a converted address: thread changes go through the inbox writer, and mail an alias claims is counted and filed',async()=>{
+        const address=ok(await local('POST','/v1/inbound/addresses',{address:'converted@'+host}),201),m=await deliver('converted-first',[address.address]);
+        await convert(db,address.id);assert.deepEqual(await roles(address.id,m.id),['inbox']);
+        const state=ok(await local('PATCH',`/v1/inbound/threads/${m.thread_id}`,{addressId:address.id,archived:true,read:true}));
+        assert.deepEqual([state.archived,state.unreadCount],[true,0]);assert.deepEqual(await roles(address.id,m.id),['archive']);
+        assert.deepEqual((await db.query("SELECT role,total,unseen FROM inbox_folders WHERE inbox_id=$1 AND role IN ('archive','inbox') ORDER BY role",[address.id])).rows,[{role:'archive',total:1,unseen:0},{role:'inbox',total:0,unseen:0}]);
+        const claimed=await deliver('converted-claimed',['claimed@'+host]);assert.equal((await db.query('SELECT FROM mail_unrouted WHERE message_id=$1',[claimed.id])).rowCount,1);
+        ok(await local('PATCH',`/v1/inbound/addresses/${address.id}`,{aliases:['claimed@'+host]}));
+        assert.deepEqual(await roles(address.id,claimed.id),['inbox']);
+        assert.deepEqual((await db.query('SELECT messages,bytes::int FROM inbox_state WHERE inbox_id=$1',[address.id])).rows[0],{messages:2,bytes:m.size_bytes+claimed.size_bytes});
+        ok(await local('DELETE',`/v1/inbound/addresses/${address.id}`));assert.equal((await db.query('SELECT FROM inbox_state WHERE inbox_id=$1',[address.id])).rowCount,0);
       });
       await t.test('combined ingest: routed R2 delivery, recipient-specific holds and release at the 2/3 statement budget',async()=>{
         const lease=ok(await local('POST',root,{localPart:'routed',limits:{messages:1}}),201);

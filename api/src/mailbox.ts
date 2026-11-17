@@ -172,7 +172,8 @@ async function mailboxViews(runtime: Runtime, rows: MailboxRow[]) {
 type MessageRow = typeof mailMessages.$inferSelect;
 const keyView = (row: typeof mailboxKeys.$inferSelect) => ({ id: row.id, name: row.name, prefix: row.prefix, addressIds: row.mailboxIds, permissions: row.permissions, createdAt: iso(row.createdAt)!, lastUsedAt: iso(row.lastUsedAt), revokedAt: iso(row.revokedAt) });
 async function refreshThread(tx: Runtime['db'] | Parameters<Parameters<Runtime['db']['transaction']>[0]>[0], mailboxId: string, threadId: string) {
-  await tx.execute(sql`UPDATE mailbox_threads SET unread_count = (SELECT count(*) FROM mailbox_messages WHERE mailbox_id = ${mailboxId} AND thread_id = ${threadId} AND NOT read AND direction = 'inbound') WHERE mailbox_id = ${mailboxId} AND thread_id = ${threadId}`);
+  const where = and(eq(mailboxThreads.mailboxId, mailboxId), eq(mailboxThreads.threadId, threadId));
+  return (await tx.update(mailboxThreads).set({ unreadCount: sql`(SELECT count(*) FROM mailbox_messages WHERE mailbox_id = ${mailboxId} AND thread_id = ${threadId} AND NOT read AND direction = 'inbound')` }).where(where).returning())[0];
 }
 
 const UpdateInboundThread = z.object({
@@ -183,11 +184,15 @@ const UpdateInboundThread = z.object({
 type ThreadPatchInput = Omit<z.infer<typeof UpdateInboundThread>, 'addressId'>;
 async function patchThread(c: Ctx, mailboxId: string, threadId: string, patch: ThreadPatchInput) {
   const { scope,mailbox } = await mailboxFor(c, mailboxId, 'modify');
+  let changed: typeof mailboxThreads.$inferSelect | undefined;
   const runnable = await c.env.db.transaction(async tx => {
-    if(mailbox.kind==='inbox'){
-      if(!((await tx.execute<{ok:boolean}>(sql`SELECT inbox_patch_thread(${scope.workspaceId},${mailboxId},${threadId},${JSON.stringify(patch)}::jsonb) ok`)).rows[0]?.ok))throw new ApiError(404,'NOT_FOUND','Thread was not found in this inbox.');
+    // The SQL writer first, for every mailbox. It takes the workspace's ingest lane before any row, as ingest, deleting
+    // an address and the next release's conversion of each address do, and writes a mailbox that has inbox_state (an
+    // agent inbox, and from that release every address). Otherwise it changes nothing and keeps the lane, so an address
+    // without inbox_state can't gain it before this commits: the address writer below writes it.
+    if ((await tx.execute<{ok:boolean}>(sql`SELECT inbox_patch_thread(${scope.workspaceId},${mailboxId},${threadId},${JSON.stringify(patch)}::jsonb) ok`)).rows[0]?.ok)
       return recordEvents(tx,scope.workspaceId,[{type:'thread.updated',mailboxId,threadId,data:{changes:patch}}]);
-    }
+    if (mailbox.kind === 'inbox') throw new ApiError(404,'NOT_FOUND','Thread was not found in this inbox.');
     const [row] = await tx.select().from(mailboxThreads).where(and(eq(mailboxThreads.mailboxId, mailboxId), eq(mailboxThreads.threadId, threadId))).for('update');
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Thread was not found in this mailbox.');
     if (patch.read === true) await tx.update(mailboxMessages).set({ read: true }).where(and(eq(mailboxMessages.mailboxId, mailboxId), eq(mailboxMessages.threadId, row.threadId), eq(mailboxMessages.read, false)));
@@ -196,15 +201,16 @@ async function patchThread(c: Ctx, mailboxId: string, threadId: string, patch: T
       if (latest) await tx.update(mailboxMessages).set({ read: false }).where(and(eq(mailboxMessages.mailboxId, mailboxId), eq(mailboxMessages.messageId, latest.id)));
     }
     const labels = [...new Set([...row.labels.filter(label => !patch.removeLabels?.includes(label)), ...(patch.addLabels ?? [])])].slice(0, 50);
-    await tx.update(mailboxThreads).set({
+    [changed] = await tx.update(mailboxThreads).set({
       ...(patch.archived !== undefined ? { archived: patch.archived } : {}), ...(patch.starred !== undefined ? { starred: patch.starred } : {}), ...(patch.spam !== undefined ? { spam: patch.spam } : {}),
       ...(patch.trashed !== undefined ? { trashedAt: patch.trashed ? (row.trashedAt ?? new Date().toISOString()) : null } : {}), labels,
-    }).where(and(eq(mailboxThreads.mailboxId, mailboxId), eq(mailboxThreads.threadId, row.threadId)));
-    if (patch.read !== undefined) await refreshThread(tx, mailboxId, row.threadId);
+    }).where(and(eq(mailboxThreads.mailboxId, mailboxId), eq(mailboxThreads.threadId, row.threadId))).returning();
+    if (patch.read !== undefined) changed = await refreshThread(tx, mailboxId, row.threadId);
     return recordEvents(tx, scope.workspaceId, [{ type: 'thread.updated', mailboxId, threadId, data: { changes: patch } }]);
   });
   if (runnable) try { await c.env.wake?.(runnable,'webhook'); } catch { /* Webhook jobs are durable. */ }
-  const [updated] = await c.env.db.select().from(mailboxThreads).where(and(eq(mailboxThreads.mailboxId, mailboxId), eq(mailboxThreads.threadId, threadId)));
+  // The address writer returned its row; the SQL writer's is read back.
+  const [updated] = changed ? [changed] : await c.env.db.select().from(mailboxThreads).where(and(eq(mailboxThreads.mailboxId, mailboxId), eq(mailboxThreads.threadId, threadId)));
   return AddressState.parse({...updated,addressId:mailboxId,trashed:!!updated?.trashedAt});
 }
 
@@ -480,7 +486,12 @@ function registerAddresses(app: App) {
     admin(c); const { mailbox, scope } = await mailboxFor(c, c.req.valid('param').addressId);
     if(mailbox.kind==='inbox'){await endInbox(c.env.db,sql`b.workspace_id=${scope.workspaceId} AND b.id=${mailbox.id}`,auditContext(c));return c.json({ok:true as const},200);}
     const runnable = await c.env.db.transaction(async tx => {
+      // inbox_end's lock order, as the address may have inbox_state: lanes (ingest, then address), the row, its inbox_state,
+      // then its threads. Ingest takes the lane before inbox_state, and the SQL writer inbox_state before threads.
+      await lockMailboxLane(tx, scope.workspaceId, 'ingest');
       await detachDestination(tx,c,scope.workspaceId,mailbox.id);
+      await tx.execute(sql`SELECT FROM mailboxes WHERE workspace_id=${scope.workspaceId} AND id=${mailbox.id} FOR UPDATE`);
+      await tx.execute(sql`SELECT FROM inbox_state WHERE workspace_id=${scope.workspaceId} AND inbox_id=${mailbox.id} FOR UPDATE`);
       await tx.delete(mailboxThreads).where(eq(mailboxThreads.mailboxId, mailbox.id));
       await tx.delete(mailboxes).where(eq(mailboxes.id, mailbox.id));
       if (mailbox.expiresAt === null) await recordAudit(tx, c, { action: 'address.delete', workspaceId: scope.workspaceId, target: { type: 'address', id: mailbox.id }, before: { address: mailbox.address, key: mailbox.key } });
