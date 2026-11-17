@@ -1,6 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { request } from './live'
-import { useApi } from './context'
 import type { ConnectionKind, Identity, ProviderConnection } from './types'
 
 // Multi-tenant sending connection. Owner/admin dashboard sessions only.
@@ -16,10 +15,9 @@ export const connectionKindLabel: Record<ConnectionKind, string> = { shared: 'Ho
 export const retryableConnectionErrors = new Set(['CONNECTION_BUSY', 'SNS_CONFIRMATION_PENDING', 'PROVISIONING_INCOMPLETE', 'AWS_SETUP_TIMEOUT', 'AWS_THROTTLED'])
 // Keeps the full connection and the /v1/me summary (which gates the app) in step.
 export function useConnectionCache() {
-  const api = useApi()
   const client = useQueryClient()
   return (connection: ProviderConnection | null) => {
-    client.setQueryData(['bane', api.mode, 'connection'], connection)
+    client.setQueryData(['bane', 'connection'], connection)
     client.setQueryData<Identity>(['identity'], old => old && { ...old, connection: connection && { kind: connection.kind, region: connection.region, state: connection.state, tenant: connection.tenant } })
   }
 }

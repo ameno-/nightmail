@@ -123,7 +123,7 @@ function RegionDetail({entry, inspected}: {entry: RegionCatalogEntry; inspected:
     {!confirmOpen && <MutationError error={provision.error} />}
     {ready ? <details className="settings-provisioning-details"><summary>Provisioning details</summary><div className="stack">{actions}{checklist}</div></details> : checklist}
     {!report && (discovery.isFetching || discovering) ? <RegionDiscoverySkeleton /> : report ? <DiscoveryReport report={report} entry={entry} /> : null}
-    <ConfirmDialog open={confirmOpen} onOpenChange={setConfirmOpen} title={`Provision ${entry.region}?`} description={api.mode === 'demo' ? 'Simulates SES configuration sets and SNS feedback. No real AWS resources or email are changed.' : `Creates or repairs SES configuration sets and SNS feedback in ${entry.region} of AWS account ${report?.account?.id ?? '(not identified)'}: real changes, even in Test. Email, DNS and production access don’t change.`} confirmLabel="Provision resources" pending={provision.isPending} onConfirm={() => provision.mutateAsync()} />
+    <ConfirmDialog open={confirmOpen} onOpenChange={setConfirmOpen} title={`Provision ${entry.region}?`} description={`Creates or repairs SES configuration sets and SNS feedback in ${entry.region} of AWS account ${report?.account?.id ?? '(not identified)'}: real changes, even in Test. Email, DNS and production access don’t change.`} confirmLabel="Provision resources" pending={provision.isPending} onConfirm={() => provision.mutateAsync()} />
   </section>
 }
 

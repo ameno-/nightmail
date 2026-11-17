@@ -4,7 +4,7 @@ import { useGuardedMutation } from '../../lib/single-flight'
 import { Send } from 'lucide-react'
 import { Alert, Button, ErrorText, SectionHeader, Tabs } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
-import { useApi, useApiQuery, usePublicOrigin, useSession } from '../../data/context'
+import { useApiQuery, usePublicOrigin, useSession } from '../../data/context'
 import { request } from '../../data/live'
 import type { Domain } from '../../data/types'
 import './developer.css'
@@ -52,7 +52,6 @@ export function TestSend({ domain, onSent }: { domain: Domain; onSent?: (id: str
 export function FirstSend({ domain, apiKey = null, title = 'Send your first email', testButton = true, compact = false }: { domain: Domain | null; apiKey?: string | null; title?: string; testButton?: boolean; compact?: boolean }) {
   const origin = usePublicOrigin()
   const identity = useSession()?.identity
-  const demo = useApi().mode === 'demo'
   const [language, setLanguage] = useState('curl')
   const to = identity?.email ?? 'you@example.com'
   const from = `hello@${domain?.name ?? 'acme.com'}`
@@ -66,7 +65,7 @@ export function FirstSend({ domain, apiKey = null, title = 'Send your first emai
     </div>
     <div className="developer-client-panels developer-client-panels--fit" data-sensitive={apiKey ? true : undefined}>{languages.map(item => <pre key={item.value} className="developer-code developer-client-panel" tabIndex={0} aria-label={`${item.label} example`} data-active={item.value === language || undefined} inert={item.value !== language}><code><MaskedText text={snippets[item.value as 'curl' | 'sdk']} /></code></pre>)}</div>
     {!compact && <p className="muted developer-copy">To test each outcome without a real inbox, send to {simulator.map((address, index) => <span key={address}>{index > 0 && (index === simulator.length - 1 ? ' or ' : ', ')}<code>{address}</code></span>)}. They use your daily limit like any send, but never count towards your sender score.</p>}
-    {testButton && !demo && domain && <TestSend domain={domain} />}
+    {testButton && domain && <TestSend domain={domain} />}
   </section>
 }
 

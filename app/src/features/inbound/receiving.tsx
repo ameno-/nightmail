@@ -24,6 +24,7 @@ import './inbound.css'
 import './receiving.css'
 import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
 import { isMailbox } from '../../lib/private-address'
+import { resourceOf } from '../../data/invalidation'
 
 type Tab = 'routes' | 'rituals' | 'endpoints'
 const PAGE = 50
@@ -187,7 +188,7 @@ export function ReceivingPage() {
   const client = useQueryClient(), toast = useToast()
   useLiveVersion(manage && !!data, change => {
     if (change.first) return
-    void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && query.queryKey[2] === 'inbound-overview' })
+    void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && resourceOf(query.queryKey) === 'inbound-overview' })
     if (change.actor?.self && change.actor.type === 'member') return
     toast(`${change.versionMoved ? 'Routes and rituals' : 'Endpoints'} updated by ${actorText(change.actor)}${change.versionMoved ? ` · version ${change.version}` : ''}`, 'info')
   }, { endpoints: true })

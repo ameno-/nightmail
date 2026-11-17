@@ -316,11 +316,10 @@ test('review PR #84 P2: examples use the server’s canonical origin, never the 
   // P2: the dashboard's origin comes from /v1/me or /health (PUBLIC_URL). A page served under another Host is flagged
   // (Docs then shows no examples), and an unknown origin is null (callers wait) rather than the page's own address.
   const { canonicalOrigin, originOf } = await import('../app/src/lib/public-origin.js');
-  assert.deepEqual(canonicalOrigin({ identity: null, instance: 'https://bane.mx', demo: false, page: 'https://attacker.example' }), { origin: 'https://bane.mx', foreign: true });
-  assert.deepEqual(canonicalOrigin({ identity: 'https://bane.mx', instance: 'https://attacker.example', demo: false, page: 'https://bane.mx' }), { origin: 'https://bane.mx', foreign: false });
-  assert.deepEqual(canonicalOrigin({ identity: null, instance: null, demo: false, page: 'https://attacker.example' }), { origin: null, foreign: false });
-  assert.deepEqual(canonicalOrigin({ identity: null, instance: 'javascript:alert(1)', demo: false, page: 'https://bane.mx' }), { origin: null, foreign: false });
-  assert.deepEqual(canonicalOrigin({ identity: null, instance: null, demo: true, page: 'http://127.0.0.1:5173' }), { origin: 'http://127.0.0.1:5173', foreign: false });
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: 'https://bane.mx', page: 'https://attacker.example' }), { origin: 'https://bane.mx', foreign: true });
+  assert.deepEqual(canonicalOrigin({ identity: 'https://bane.mx', instance: 'https://attacker.example', page: 'https://bane.mx' }), { origin: 'https://bane.mx', foreign: false });
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: null, page: 'https://attacker.example' }), { origin: null, foreign: false });
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: 'javascript:alert(1)', page: 'https://bane.mx' }), { origin: null, foreign: false });
   assert.equal(originOf('https://bane.mx/'), 'https://bane.mx');
 });
 test('review PR #84 P3: an inbox key never goes on a command line; with a key every MCP client gets a JSON config', async () => {

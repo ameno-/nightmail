@@ -11,6 +11,7 @@ import { useCursorPagination } from '../../lib/pagination'
 import { date } from '../../lib/format'
 import './billing.css'
 import { productName } from '../../../../api/src/brand'
+import { resourceOf } from '../../data/invalidation'
 
 type RowProps = { title: ReactNode; error?: ReactNode; children: ReactNode }
 const cardLabel = (card: { brand: string; last4: string }) => `${cardBrand(card.brand)}\u00a0••••\u00a0${card.last4}`
@@ -20,7 +21,7 @@ const final = (payment: Payment | undefined) => !!payment && !['created', 'pendi
 function useBillingRefresh() {
   const client = useQueryClient()
   return () => {
-    void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && String(query.queryKey[2]).startsWith('billing') })
+    void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && resourceOf(query.queryKey).startsWith('billing') })
     void client.invalidateQueries({ queryKey: ['identity'] })
   }
 }

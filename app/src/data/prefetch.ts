@@ -36,14 +36,14 @@ function firstScreen(path: string, { regionId, multiTenant, canAdminister }: Sco
 }
 
 export function prefetchQueries(cache: QueryClient, api: BaneApi, defs: QueryDef<unknown>[]) {
-  return Promise.allSettled(defs.map(query => cache.prefetchQuery({ queryKey: ['bane', api.mode, ...query.key], queryFn: ({ signal }) => query.read(api, signal), staleTime: FRESH })))
+  return Promise.allSettled(defs.map(query => cache.prefetchQuery({ queryKey: ['bane', ...query.key], queryFn: ({ signal }) => query.read(api, signal), staleTime: FRESH })))
 }
 
 // Warms a few queries for the current API (GET only; anything fresh or in flight is skipped).
 export function usePrefetchQueries() {
   const cache = useQueryClient()
   const api = useApi()
-  return useCallback((defs: QueryDef<unknown>[]) => api.mode === 'live' ? prefetchQueries(cache, api, defs) : Promise.resolve([]), [cache, api])
+  return useCallback((defs: QueryDef<unknown>[]) => prefetchQueries(cache, api, defs), [cache, api])
 }
 
 // Loads a sidebar page's code and warms its first-screen queries. GET only; queries already fresh or in flight are skipped.
@@ -54,7 +54,7 @@ export function usePrefetchRoute() {
   const { multiTenant, canAdminister } = useWorkspaceAccess()
   return useCallback(async (path: string) => {
     const chunk = routeChunks[path]?.().catch(() => {})
-    const data = api.mode === 'live' ? prefetchQueries(cache, api, firstScreen(path, { regionId, multiTenant, canAdminister })) : undefined
+    const data = prefetchQueries(cache, api, firstScreen(path, { regionId, multiTenant, canAdminister }))
     // The docs read the public API definition, not the workspace's API.
     const docs = path === '/docs' ? cache.prefetchQuery(openApiQuery) : undefined
     await Promise.all([chunk, data, docs])

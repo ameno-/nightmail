@@ -15,7 +15,7 @@ import {
 } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
 import { EmailInsight, LOW_SENDABILITY, SendabilityWarning, useSendability } from '../../components/EmailInsight'
-import { date, number, time } from '../../lib/format'
+import { date, number } from '../../lib/format'
 import { CampaignAudienceSkeleton, CampaignRouteSkeleton } from './skeletons'
 import { CampaignPacing, CampaignProgress, campaignDisplayStatus, campaignPollInterval, maxPerDay, maxRatePercent, minPerDay, minRatePercent, perDayError, ratePercentError } from './CampaignProgress'
 import { CampaignArchiveButton } from './CampaignArchiveButton'
@@ -269,8 +269,8 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
         }
       }
       const saved = await saveMutation.mutateAsync(submitted)
-      cache.setQueryData(['bane', api.mode, 'campaign', saved.id], saved)
-      void cache.invalidateQueries({queryKey: ['bane', api.mode, 'campaigns'], refetchType: 'none'})
+      cache.setQueryData(['bane', 'campaign', saved.id], saved)
+      void cache.invalidateQueries({queryKey: ['bane', 'campaigns'], refetchType: 'none'})
       if (!mounted.current) return
       creation.current = null
       const changedWhileSaving = editVersion.current !== version
@@ -458,9 +458,8 @@ const sampleValue = (key: string) => key === 'email' ? 'sam@example.com' : key =
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, char => `&#${char.charCodeAt(0)};`)
 
 function useCampaignCache() {
-  const api = useApi()
   const cache = useQueryClient()
-  return (next: Campaign) => { cache.setQueryData(['bane', api.mode, 'campaign', next.id], next); void cache.invalidateQueries({ queryKey: ['bane', api.mode, 'campaigns'], refetchType: 'none' }) }
+  return (next: Campaign) => { cache.setQueryData(['bane', 'campaign', next.id], next); void cache.invalidateQueries({ queryKey: ['bane', 'campaigns'], refetchType: 'none' }) }
 }
 
 function ScheduledBanner({ campaign }: { campaign: Campaign }) {
@@ -528,7 +527,7 @@ function CancelCampaignButton({ campaign }: { campaign: Campaign }) {
   const [open, setOpen] = useState(false)
   return <>
     <Button variant="ghost" disabled={!canAdminister} title={canAdminister ? 'Stop releasing recipients and cancel queued emails' : 'Only owners and admins can cancel campaigns.'} onClick={() => setOpen(true)}>Cancel campaign</Button>
-    <ConfirmDialog open={open} onOpenChange={setOpen} danger title="Cancel this campaign?" description="Queued emails are canceled and remaining recipients won’t get it. Sent emails stay sent. You can’t undo this." confirmLabel="Cancel campaign" onConfirm={async () => { const result = await api.campaigns.cancel(campaign.id); toast(`Campaign canceled · ${number(result.canceled)} not sent`, 'success'); await cache.invalidateQueries({ queryKey: ['bane', api.mode, 'campaign', campaign.id] }); void cache.invalidateQueries({ queryKey: ['bane', api.mode, 'campaigns'], refetchType: 'none' }) }} />
+    <ConfirmDialog open={open} onOpenChange={setOpen} danger title="Cancel this campaign?" description="Queued emails are canceled and remaining recipients won’t get it. Sent emails stay sent. You can’t undo this." confirmLabel="Cancel campaign" onConfirm={async () => { const result = await api.campaigns.cancel(campaign.id); toast(`Campaign canceled · ${number(result.canceled)} not sent`, 'success'); await cache.invalidateQueries({ queryKey: ['bane', 'campaign', campaign.id] }); void cache.invalidateQueries({ queryKey: ['bane', 'campaigns'], refetchType: 'none' }) }} />
   </>
 }
 
@@ -608,7 +607,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
     if (audience.data && audience.data.eligible < 1) { setError('Nobody on this list can receive campaigns yet. Mark contacts as subscribed or choose another list.'); return }
     if (paceError) { setError(`Recipients per day: ${paceError}`); return }
     if (shareError) { setError(`Sending speed limit: ${shareError}`); return }
-    const input: SendCampaignInput = { id: campaign.id, mode, timezone: 'UTC', revision: campaign.revision }
+    const input: SendCampaignInput = { id: campaign.id, mode, revision: campaign.revision }
     // Defaults (no daily limit, auto-pause on, full send rate) need no pacing object.
     if (pace.limit || !pace.autoPause || sharePercent < 100) input.pacing = { perDay: pace.limit ? perDay : null, autoPause: pace.autoPause, rateShare: sharePercent / 100 }
     if (mode === 'schedule') {

@@ -3,7 +3,7 @@ import { useIsFetching, useQuery } from '@tanstack/react-query'
 import { Link, Navigate, useLocation, useNavigate, useNavigationType, useParams } from 'react-router'
 import { Alert, EmptyState, ErrorState, Input, SkeletonText, Tabs } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
-import { useApi, useApiQuery, useCanonicalOrigin, useSession, useWorkspaceAccess } from '../../data/context'
+import { useApiQuery, useCanonicalOrigin, useSession, useWorkspaceAccess } from '../../data/context'
 import { AgentPrompt, agentPrompt } from './agent-setup'
 import { guides, type Guide } from './guides'
 import { SendingLimitsGuide } from '../score/limits'
@@ -171,17 +171,16 @@ function MissingPage() {
   return <article className="docs-operation"><EmptyState headingAs="h1" title="Page not found" description="This page isn’t in the docs. It may have moved." action={<Link to="/docs">Open the overview</Link>} /></article>
 }
 
-// Workspace admins (and demo mode) get a prompt with this workspace's domain; null while it loads.
+// Workspace admins get a prompt with this workspace's domain; null while it loads.
 // Members and signed-out readers get the general prompt, so they never call /v1/domains.
 function useAgentPrompt() {
   const identity = useSession()?.identity
   const checkingSession = useIsFetching({ queryKey: ['identity'] }) > 0
   const { multiTenant, canAdminister } = useWorkspaceAccess()
-  const demo = useApi().mode === 'demo'
-  const withDomain = (Boolean(identity) || demo) && canAdminister
+  const withDomain = Boolean(identity) && canAdminister
   const origin = useDocsOrigin()
   const domains = useApiQuery(['domains', 'agent-prompt'], (api, signal) => api.domains.list({ page: 1, pageSize: 20, refresh: false }, signal), { enabled: withDomain })
-  if ((!identity && !demo && checkingSession) || (withDomain && domains.isPending)) return null
+  if ((!identity && checkingSession) || (withDomain && domains.isPending)) return null
   // Prefer a verified domain for the test send; any domain still gives the agent its DNS context.
   const items = domains.data?.items ?? []
   const domain = withDomain ? items.find(row => row.status === 'verified') ?? items[0] ?? null : undefined

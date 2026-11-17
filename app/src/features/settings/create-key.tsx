@@ -64,7 +64,7 @@ export function CreateKeyDialog({ open, onOpenChange, onCreated, onConnectAgent,
 function useInboxOptions(key: string, filter: { type?: Inbox['type'] }, enabled: boolean) {
   const api = useApi()
   return useInfiniteQuery({
-    queryKey: ['bane', api.mode, 'agent-inboxes', key],
+    queryKey: ['bane', 'agent-inboxes', key],
     enabled,
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam, signal }) => api.inboxes.list({ ...filter, status: 'active', cursor: pageParam }, signal),
@@ -112,11 +112,11 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormP
   const pending = create.isPending
   useEffect(() => onPending(pending), [pending, onPending])
   const domainOptions = useInfiniteQuery({
-    queryKey: ['bane', api.mode, 'domains', 'key-options'],
+    queryKey: ['bane', 'domains', 'key-options'],
     enabled: open && workspace,
     initialPageParam: { page: 1 } as Pick<PageRequest, 'page' | 'cursor'>,
     queryFn: ({ pageParam, signal }) => api.domains.list({ ...pageParam, pageSize: 10 }, signal),
-    getNextPageParam: last => last.nextCursor ? { cursor: last.nextCursor } : api.mode === 'demo' && last.total !== undefined && last.page * last.pageSize < last.total ? { page: last.page + 1 } : undefined,
+    getNextPageParam: last => last.nextCursor ? { cursor: last.nextCursor } : undefined,
     staleTime: 60_000,
     retry: false,
   })

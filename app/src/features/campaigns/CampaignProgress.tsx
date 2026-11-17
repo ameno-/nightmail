@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { useApi, useApiMutation, useWorkspaceAccess } from '../../data/context'
+import { useApiMutation, useWorkspaceAccess } from '../../data/context'
 import { campaignResumable, errorText, type Campaign, type CampaignPacingInput } from '../../data/types'
 import { Alert, Button, Checkbox, Input } from '../../components/ui'
 import { date, number, relativeTime, time } from '../../lib/format'
@@ -73,7 +73,6 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
 
 // Pause, resume, and daily-limit controls for a send that is still releasing recipients.
 export function CampaignPacing({ campaign }: { campaign: Campaign }) {
-  const api = useApi()
   const cache = useQueryClient()
   // Pausing, resuming and pacing are delivery controls: owners and admins only.
   const { canAdminister } = useWorkspaceAccess()
@@ -87,10 +86,10 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
   const [share, setShare] = useState(() => String(ratePercent(pacing?.rateShare)))
   const [error, setError] = useState('')
   // Each action returns the full campaign; write it into the cache instead of refetching everything.
-  const campaignKey = ['bane', api.mode, 'campaign', campaign.id]
+  const campaignKey = ['bane', 'campaign', campaign.id]
   function accept(next: Campaign) {
     cache.setQueryData(campaignKey, next)
-    void cache.invalidateQueries({ queryKey: ['bane', api.mode, 'campaigns'], refetchType: 'none' })
+    void cache.invalidateQueries({ queryKey: ['bane', 'campaigns'], refetchType: 'none' })
   }
   const pause = useApiMutation((api, id: string) => api.campaigns.pause(id), 'Sending paused', false, false)
   const resume = useApiMutation((api, id: string) => api.campaigns.resume(id), 'Sending resumed', false, false)

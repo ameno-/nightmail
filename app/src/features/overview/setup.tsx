@@ -2,7 +2,7 @@ import { useState, type CSSProperties, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router'
 import { ArrowUpRight, Check, Info } from 'lucide-react'
-import { useApi, useApiDef, useSession, useWorkspaceAccess } from '../../data/context'
+import { useApiDef, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { request } from '../../data/live'
 import type { Identity, SenderScore, SendingLimit } from '../../data/types'
@@ -13,20 +13,20 @@ import { limitNotes } from '../score'
 import { SendingLimitsGuide } from '../score/limits'
 import './setup.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
+import { resourceOf } from '../../data/invalidation'
 
 // The hosted limit as GET /v1/me reports it, refreshed with the overview so usage stays current.
 export function useSendingLimit() { return useSendingLimitRead().limit }
 // Whether the limit is still being read, so Overview's detail column can wait for it instead of growing a row.
 export function useSendingLimitPending() { return useSendingLimitRead().pending }
 function useSendingLimitRead() {
-  const api = useApi()
   const identity = useSession()?.identity
   const hosted = identity?.multiTenant === true && identity.connection?.kind === 'shared'
   // Seeded with the session's own /v1/me, so opening Overview doesn't ask again; it refreshes each minute.
   // An identity without the limit (the connection cache keeps only a summary) is not a seed: the limit is read.
-  const live = useQuery({ queryKey: ['bane', api.mode, 'sending-limit', identity?.workspaceId], enabled: hosted && api.mode === 'live', refetchInterval: 60_000, refetchIntervalInBackground: false,
+  const live = useQuery({ queryKey: ['bane', 'sending-limit', identity?.workspaceId], enabled: hosted, refetchInterval: 60_000, refetchIntervalInBackground: false,
     initialData: identity?.connection?.sendingLimit !== undefined ? identity ?? undefined : undefined, staleTime: 60_000, queryFn: ({ signal }) => request<Identity>('/v1/me', { signal }) })
-  return { limit: hosted ? (live.data ?? identity)?.connection?.sendingLimit ?? null : null, pending: hosted && api.mode === 'live' && live.isPending }
+  return { limit: hosted ? (live.data ?? identity)?.connection?.sendingLimit ?? null : null, pending: hosted && live.isPending }
 }
 
 export function limitSummary(limit: SendingLimit) {
@@ -74,7 +74,7 @@ export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; 
   // The new email shows in Latest emails, the facts and the next steps without a reload.
   const sentTest = (id: string) => {
     setTestId(id)
-    void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && ['overview', 'overview-setup', 'logs', 'emails', 'sender-score', 'sending-limit'].includes(String(query.queryKey[2])) }).catch(() => {})
+    void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && ['overview', 'overview-setup', 'logs', 'emails', 'sender-score', 'sending-limit'].includes(resourceOf(query.queryKey)) }).catch(() => {})
   }
   if (!enabled) return { loading: false, steps: null }
   if (setup.isPending) return { loading: true, steps: null }

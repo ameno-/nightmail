@@ -5,7 +5,7 @@ import { useApi, useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { Email, EmailEvent, EmailEventDetail } from '../../data/types'
 import { Alert, Button, CopyButton, ErrorState, PageHeader, Sheet, StatusBadge, Tooltip, type Tone } from '../../components/ui'
-import { htmlToText, useEmailDocument } from '../../components/EmailPreview'
+import { useEmailDocument } from '../../components/EmailPreview'
 import { EmailViews, SendabilityChip, SendabilityDetails, SendabilityTitle, SendabilityToggle, useSendability, type InsightSource } from '../../components/EmailInsight'
 import { AddressList, NameText, PrivateAddress } from '../../components/PrivateAddress'
 import { AddressText } from '../../components/AddressText'
@@ -37,7 +37,6 @@ export function Sender({ name, address }: { name?: string | null; address: strin
 }
 
 function EmailDetail({ email }: { email: Email }) {
-  const api = useApi()
   const { mode, roomy } = useDetailLayout()
   const [panel, setPanel] = useState(false)
   // A phone or tablet opens the delivery and the facts, and the score, in sheets; each returns focus to its opener.
@@ -48,7 +47,7 @@ function EmailDetail({ email }: { email: Email }) {
   const panelRef = useRef<HTMLElement>(null)
   useEffect(() => { if (panel) panelRef.current?.focus() }, [panel])
   const hasHtml = email.html.trim().length > 0
-  const text = email.text ?? (api.mode === 'demo' && hasHtml ? htmlToText(email.html) : '')
+  const text = email.text ?? ''
   const source = useMemo<InsightSource>(() => ({ kind: 'email', id: email.id, html: hasHtml }), [email.id, hasHtml])
   const check = useSendability(source)
   // The email as its recipients saw it: its own fonts, styles and image sizes, and its remote images (tracking pixels removed).
@@ -239,7 +238,7 @@ function Delivery({ email, vertical }: { email: Email; vertical: boolean }) {
   const times = steps.map((step, index) => { const at = step.at ? stamp(step.at, day) : ''; if (!at || at === previous) return ''; previous = at; lastShown = index; return at })
   const more = async () => {
     setBusy(true); setError('')
-    try { const next = await api.emailEvents!(email.id, cursor!); setEvents(previous => [...previous, ...next.items]); setCursor(next.nextCursor) }
+    try { const next = await api.emailEvents(email.id, cursor!); setEvents(previous => [...previous, ...next.items]); setCursor(next.nextCursor) }
     catch (cause) { setError(errorText(cause, 'Couldn’t load events.')) } finally { setBusy(false) }
   }
   return <div className="delivery" data-vertical={vertical || undefined}>
@@ -263,7 +262,7 @@ function Delivery({ email, vertical }: { email: Email; vertical: boolean }) {
         <Link className="delivery__fact delivery__contact" to={`/audience/contacts/${encodeURIComponent(contact!.id)}`}><span className="delivery__dot ui-tone--danger" aria-hidden="true" /><span className="delivery__name">Suppressed</span><ArrowUpRight size={12} aria-hidden="true" /></Link>
       </Tooltip></li>}
     </ol>
-    {cursor && api.emailEvents && <Button variant="ghost" size="sm" loading={busy} onClick={() => void more()}>More events</Button>}
+    {cursor && <Button variant="ghost" size="sm" loading={busy} onClick={() => void more()}>More events</Button>}
     {error && <Alert tone="danger">{error}</Alert>}
   </div>
 }
