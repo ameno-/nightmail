@@ -6560,7 +6560,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       let first: Promise<Reply> | undefined;
       try {
         first = send();
-        for (let i = 0; !(await db.query(`SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query ~* 'idempotency|key_admission_decision|api_request_budgets'`, [holder])).rowCount; i++) {
+        for (let i = 0; !(await db.query(`SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query ~* 'idempotency|key_admission_decision|send_admission|api_request_budgets'`, [holder])).rowCount; i++) {
           assert.ok(i < 250, 'The first send never reached the admission lock.'); await new Promise(resolve => setTimeout(resolve, 20));
         }
         // Before this change the duplicate waited on the first request's unique insert (or its API key's budget row) until it committed.
@@ -6601,6 +6601,78 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       for (const table of ['sending_email_events', 'operation_events', 'sending_emails', 'sending_idempotency', 'api_request_budgets', 'job_schedule', 'sending_stream_depth', 'domain_claims', 'provider_connections', 'api_keys', 'ses_installation_settings']) await db.query(`DELETE FROM ${table} WHERE workspace_id=$1`, [hosted]);
       await db.query('DELETE FROM provider_pool_regions WHERE aws_account_id=$1', [acct]); await db.query('DELETE FROM workspaces WHERE id=$1', [hosted]);
     }
+  });
+  // Review of #361, round 2: a stored-template send or a campaign test only looked for a finished request with its key
+  // before it rendered, and claimed the key afterwards: a duplicate sent meanwhile rendered again and got 202. Both now
+  // claim it first (idempotent's prepare). A committed self-hosted live workspace; only the AWS SDK transport is mocked.
+  async function claimFirstFixture(t: TestContext) {
+    const db = await fixtureDatabase(t);
+    const [{ createApp }, { nodeRuntime }, { digest }, { credentialFingerprint, discoveryTarget }, { SESv2Client, TestRenderEmailTemplateCommand }] = await Promise.all([
+      import('./src/app.js'), import('./src/adapters/node.js'), import('./src/core.js'), import('./src/ses-region-state.js'), import('@aws-sdk/client-sesv2')]);
+    const instance = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL, MULTI_TENANT: 'false', ENABLE_LIVE_SES: 'true' }), app = createApp(), runtime = instance.runtime;
+    const w = unique('ws-claim-first'), secret = `nm_${randomUUID().replaceAll('-', '')}${randomUUID().replaceAll('-', '')}`, topic = `arn:aws:sns:${REGION}:111122223333:claim-first`;
+    Object.assign(runtime.config, { workspaceId: w, liveEnabled: true, aws: { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' } });
+    cleanup(t, async () => {
+      await instance.close();
+      const tables = (await db.query(`SELECT c.table_name FROM information_schema.columns c JOIN information_schema.tables x USING (table_schema, table_name)
+        WHERE c.table_schema='public' AND c.column_name='workspace_id' AND x.table_type='BASE TABLE'`)).rows.map(r => r.table_name as string);
+      for (let pass = 0; pass < 3; pass++) for (const table of tables) await db.query(`DELETE FROM "${table}" WHERE workspace_id=$1`, [w]).catch(() => {});
+      await db.query('DELETE FROM workspaces WHERE id=$1', [w]);
+    });
+    await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [w]);
+    await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$1,$2,jsonb_build_array($2::text))`, [w, REGION]);
+    await db.query(`INSERT INTO ses_region_discovery(workspace_id,region,report,credentials_fingerprint,public_url,trusted_account_id,trusted_topic_arn) VALUES($1,$2,$3,$4,$5,'111122223333',$6)`, [w, REGION,
+      { provisioned: true, account: { id: '111122223333', sendingEnabled: true }, resources: { topic: { arn: topic }, transactional: { sendingEnabled: true }, marketing: { sendingEnabled: true } } },
+      await credentialFingerprint(runtime.config), discoveryTarget(runtime.config), topic]);
+    await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,$1,'fixture',$2,'fixture','["send","read","manage"]','[]')`, [w, await digest(secret)]);
+    // SES: the first template render waits until released.
+    const gate = { renders: 0, reached: undefined as unknown as Promise<void>, release: () => {} };
+    let reached = () => {}; gate.reached = new Promise<void>(resolve => { reached = resolve; }); const released = new Promise<void>(resolve => { gate.release = resolve; });
+    t.mock.method(SESv2Client.prototype, 'send', async (command: unknown) => {
+      if (command instanceof TestRenderEmailTemplateCommand) { if (++gate.renders === 1) { reached(); await released; } return { RenderedTemplate: 'Subject: fixture\r\n\r\nFixture.' }; }
+      return { TemplateContent: { Subject: 'fixture' } };
+    });
+    const post = (path: string, body: Json, key?: string) => http('POST', path, secret, body, key ? { 'Idempotency-Key': key } : {}, 10_000, PUBLIC_ORIGIN, request => app.fetch(request, runtime));
+    // From an independent connection: the claims with no result yet.
+    const pending = async () => (await db.query('SELECT count(*)::int AS n FROM sending_idempotency WHERE workspace_id=$1 AND result IS NULL', [w])).rows[0].n as number;
+    const promptly = (reply: Promise<Reply>) => Promise.race([reply, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('no answer within 2 s')), 2_000))]);
+    return { db, w, gate, post, pending, promptly };
+  }
+  test('a stored-template send claims its Idempotency-Key before SES renders: a duplicate is IN_PROGRESS and renders nothing', async t => {
+    const { gate, post, pending, promptly } = await claimFirstFixture(t);
+    const body = { from: 'orders@example.com', to: 'customer@example.invalid', region: REGION, template: { name: 'fixture', data: {} } }, key = 'claim-first-template';
+    const first = post('/v1/emails/send', body, key);
+    try {
+      await gate.reached;
+      assert.equal(await pending(), 1, 'While SES renders, the first request owns a committed pending claim.');
+      error(await promptly(post('/v1/emails/send', body, key)), 409, 'IDEMPOTENCY_IN_PROGRESS');
+      assert.equal(gate.renders, 1, 'The duplicate rendered nothing.');
+    } finally { gate.release(); }
+    const queued = ok(await first, 202);
+    assert.equal(ok(await post('/v1/emails/send', body, key), 202).id, queued.id); assert.equal(gate.renders, 1);
+    error(await post('/v1/emails/send', { ...body, template: { name: 'fixture', data: { other: true } } }, key), 409, 'IDEMPOTENCY_CONFLICT');
+  });
+  test('a campaign test claims its Idempotency-Key before it reads its draft: a duplicate is IN_PROGRESS and renders nothing', async t => {
+    const { db, w, post, pending, promptly } = await claimFirstFixture(t);
+    const draft = ok(await post('/v1/campaigns', { name: 'claim-first', from: 'orders@example.com', subject: 'Claim first', html: '<p>Claim first</p>' }), 201);
+    const path = `/v1/campaigns/${draft.id}/test`, body = { to: 'tester@example.invalid' }, key = 'claim-first-test';
+    // The draft cannot be read while another connection holds its table: the first request waits there.
+    const lock = await fixtureDatabase(t), holder = (await lock.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+    await lock.query('BEGIN'); await lock.query(`SET LOCAL lock_timeout='2s'`); await lock.query('LOCK TABLE sending_campaigns IN ACCESS EXCLUSIVE MODE');
+    let first: Promise<Reply> | undefined;
+    try {
+      first = post(path, body, key);
+      for (let i = 0; !(await db.query(`SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, [holder])).rowCount; i++) {
+        assert.ok(i < 250, 'The first campaign test never reached its draft.'); await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      assert.equal(await pending(), 1, 'While it reads its draft, the first request owns a committed pending claim.');
+      // An answer while the draft is unreadable is one that read and rendered nothing.
+      error(await promptly(post(path, body, key)), 409, 'IDEMPOTENCY_IN_PROGRESS');
+    } finally { await lock.query('COMMIT'); }
+    const queued = ok(await first!, 202);
+    assert.equal(ok(await post(path, body, key), 202).id, queued.id);
+    error(await post(path, { to: 'other@example.invalid' }, key), 409, 'IDEMPOTENCY_CONFLICT');
+    assert.equal((await db.query(`SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1 AND snapshot->>'testCampaignId'=$2`, [w, draft.id])).rows[0].n, 1);
   });
   test('sends on a simulated deployment use the provider-parity lifecycle; exact retries reuse identity and conflicts do not create mail', async t => {
     const key = await keyFixture(t);
@@ -12888,14 +12960,22 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await db.query(`UPDATE domain_claims SET sending_state='verified' WHERE token=$1`,[reserved.token]);
       };
       await publish(oh);await publish(va);
-      const renders:string[]=[];
+      const renders:string[]=[];let sesDown=false;
       t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){
+        if(sesDown)throw new Error('A replay must not call SES.');
         const region=await this.config.region();assert.equal(cmd.input.TemplateName,region);
         if(cmd instanceof TestRenderEmailTemplateCommand){renders.push(region);return {RenderedTemplate:'Subject: fixture\r\n\r\nFixture.'};}
         assert.ok(cmd instanceof GetEmailTemplateCommand);return {TemplateContent:{Subject:'fixture'}};
       });
       const batch=ok(await local('POST','/v1/emails/batch',{emails:[va,oh].map(r=>({from:`a@${r}.example`,to:'success@simulator.amazonses.com',template:{name:r,data:{}}}))}),202);
       assert.deepEqual(renders,[va,oh]);assert.deepEqual((await db.query(`SELECT region,snapshot#>>'{binding,connection}' AS connection FROM sending_emails WHERE id=ANY($1) ORDER BY region`,[batch.data.map((m:Json)=>m.id)])).rows,[va,oh].map(region=>({region,connection:wid})));
+      // Review of #361, round 1: a retried template send replays before SES renders again or any rule is checked.
+      const meter=await queryBudget(t,db),templated={from:`a@${oh}.example`,to:'success@simulator.amazonses.com',template:{name:oh,data:{}}},idem={'Idempotency-Key':'pr361-template'};
+      await meter('template-send',async()=>ok(await local('POST','/v1/emails/send',templated),202));
+      const sent=await meter('template-send-keyed',async()=>ok(await local('POST','/v1/emails/send',templated,'live',idem),202));
+      sesDown=true;
+      assert.equal((await meter('template-replay',async()=>ok(await local('POST','/v1/emails/send',templated,'live',idem),202))).id,sent.id);
+      sesDown=false;
       assert.equal((await runtime.db.execute(toggleRegionSending({connectionId:wid,region:va},false,0))).rowCount,0);
       assert.equal((await runtime.db.execute(toggleRegionSending({connectionId:wid,region:va},false,2))).rowCount,1);
       error(await local('POST','/v1/emails/send',{from:`a@${va}.example`,to:address(),subject:'Blocked',text:'No fallback'}),409,'CONNECTION_REQUIRED');
@@ -17279,11 +17359,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const receipts=(await g.query('SELECT ses_message_id,recipients FROM mail_receipts WHERE workspace_id=$1 ORDER BY 1',[w])).rows;
     assert.deepEqual(receipts.map(r=>[r.ses_message_id,r.recipients]),[['a-new',to('a')],['z-known',to('a','b','c')]]);
   });
+  // A send's sender decision under its send locks (send_admission), as direct, campaign and mailbox sends make it.
+  const senderRoute=async(runtime:import('./src/core.js').Runtime,tx:import('./src/core.js').DbExecutor,held:import('./src/send-scope.js').SendScope,actor:import('./src/core.js').Actor,from:string,marketing=false)=>{
+    const [{admission,actorJson,admitted},{sql}]=await Promise.all([import('./src/admission.js'),import('drizzle-orm')]);
+    const decision=await admission(runtime,actor.workspaceId,actorJson(actor),{stage:'send',locks:held,mails:[{host:from.split('@')[1]!.toLowerCase(),kind:marketing?'marketing':'transactional',attachments:[],bodyBytes:0}]});
+    const route=admitted(runtime,(await tx.execute<{s:import('./src/admission.js').Admitted}>(sql`SELECT ${decision} AS s`)).rows[0]!.s,actor.workspaceId).mails[0]!;
+    return {region:route.region,binding:route.binding};
+  };
   // Dev E2E, Nov 12 (40P01, 500 after ~8 s): POST /v1/domains (reserve_placed_claim) locks the settings row, then the
   // claim. A send's region lookup locked the closest claim inside regional_sender before its FOR SHARE OF the settings
   // row, so a reply from a domain deadlocked with a re-add of that domain (and with domain.verify queued on the claim).
   test('regional sender: a send waits on the settings row before it locks the claim a domain re-add needs',async t=>{
-    const {nodeRuntime}=await import('./src/adapters/node.js'),{sendingRegion}=await import('./src/sending.js'),{lockSendScope}=await import('./src/send-scope.js');
+    const {nodeRuntime}=await import('./src/adapters/node.js'),{lockSendScope}=await import('./src/send-scope.js');
     const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
     Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:false});
     const g=await fixtureDatabase(t),w=unique('sdead'),host=w+'.invalid',region='us-east-2';
@@ -17299,7 +17386,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     let send:Promise<unknown>|undefined,readd:string|undefined;
     try {
       await g.query('SELECT FROM ses_installation_settings WHERE workspace_id=$1 FOR NO KEY UPDATE',[w]);
-      send=runtime.db.transaction(async tx=>sendingRegion(runtime,tx,await lockSendScope(tx,w),actor,`reply@${host}`));send.catch(()=>{});
+      send=runtime.db.transaction(async tx=>senderRoute(runtime,tx,await lockSendScope(tx,w),actor,`reply@${host}`));send.catch(()=>{});
       for(let i=0;i<400&&!(await g.query('SELECT FROM pg_stat_activity WHERE pg_backend_pid()=ANY(pg_blocking_pids(pid))')).rowCount;i++)await new Promise(r=>setTimeout(r,5));
       // Then it locks the claim. Before the fix the waiting send already held it FOR SHARE: 40P01 after deadlock_timeout.
       const started=Date.now();
@@ -17358,7 +17445,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   // and ungated, many times, so a new lock-order inversion between them fails here, not on dev. Add a pair here once its
   // own fix lands; CI also fails the job on any deadlock Postgres counts during the suite (.github/scripts/acceptance.sh).
   test('lock order: concurrent domain re-adds, sends and mailbox replies on one domain never deadlock',async t=>{
-    const {nodeRuntime}=await import('./src/adapters/node.js'),{sendingRegion}=await import('./src/sending.js'),{sendFromMailbox}=await import('./src/mailbox-send.js'),{createMailbox}=await import('./src/mailbox-store.js'),{lockSendScope}=await import('./src/send-scope.js');
+    const {nodeRuntime}=await import('./src/adapters/node.js'),{sendFromMailbox}=await import('./src/mailbox-send.js'),{createMailbox}=await import('./src/mailbox-store.js'),{lockSendScope}=await import('./src/send-scope.js');
     const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
     Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:false});
     const g=await fixtureDatabase(t),w=unique('ldead'),host=w+'.invalid',region='us-fixture-'+w.slice(-8),account=String(Date.now()).slice(-12).padStart(12,'6');
@@ -17386,7 +17473,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     for(let round=0;round<60;round++){
       const work=[
         ...Array.from({length:4},()=>readds.query('SELECT id FROM reserve_placed_claim($1,$2,NULL,$3)',[w,host,unique('dom')]).then(r=>assert.equal(r.rows[0].id,w,'A re-add returns the existing domain.'))),
-        ...Array.from({length:4},(_,i)=>runtime.db.transaction(async tx=>sendingRegion(runtime,tx,await lockSendScope(tx,w),actor,`reply@${host}`,undefined,i%2===1))),
+        ...Array.from({length:4},(_,i)=>runtime.db.transaction(async tx=>senderRoute(runtime,tx,await lockSendScope(tx,w),actor,`reply@${host}`,i%2===1))),
         ...Array.from({length:2},reply),
       ];
       for(const r of await Promise.allSettled(work))if(r.status==='rejected')note(r.reason);
@@ -21532,6 +21619,68 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('query budget: every kind of send is admitted by one statement after authentication',async t=>{
+    await simulatedSesFixture(t,async({db,runtime,local})=>{
+      const wid=runtime.config.workspaceId,acct='112223330044';
+      const meter=await queryBudget(t,db),budgets:Record<string,number>={};
+      const send=async(label:string,max:number,path:string,body:Json,headers:Record<string,string>={})=>{budgets[label]=max;return meter(label,async()=>ok(await local('POST',path,body,'live',headers),202),max);};
+      const key=ok(await local('POST','/v1/api-keys',{name:'budget',permissions:['send','read','manage']}),201),auth={authorization:`Bearer ${key.secret}`};
+      ok(await local('GET','/v1/emails',undefined,'live',auth)); // A warm key: its fingerprint is known.
+      // Self-hosted: the key's budget charge, then one admission statement.
+      await send('self-hosted-send',2,'/v1/emails/send',mail(),{...auth,'Idempotency-Key':'budget-self'});
+      await send('self-hosted-batch-100',2,'/v1/emails/batch',{emails:Array.from({length:100},()=>mail())},{...auth,'Idempotency-Key':'budget-self-batch'});
+      await send('self-hosted-session',2,'/v1/emails/send',mail());
+      const draft=ok(await local('POST','/v1/campaigns',{name:'budget',from:'sender@example.com',subject:'Budget',html:'<p>Budget</p>'},'live',auth),201);
+      // A campaign test reads the draft, renders it, then admits it in one statement.
+      await send('self-hosted-campaign-test',3,`/v1/campaigns/${draft.id}/test`,{to:address()},auth);
+      // Hosted.
+      runtime.config.multiTenant=true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[REGION,acct,`arn:aws:sns:${REGION}:${acct}:fixture`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`,[wid,REGION,acct]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('budget.invalid',$1,$1,'verified')`,[wid]);
+      const hosted=()=>({from:'a@budget.invalid',to:address(),subject:'Budget',text:'Budget'});
+      const cold=ok(await local('POST','/v1/api-keys',{name:'budget-cold',permissions:['send','read']}),201),bearer={authorization:`Bearer ${cold.secret}`};
+      await send('hosted-cold-key',2,'/v1/emails/send',hosted(),{...bearer,'Idempotency-Key':'budget-cold'});
+      await send('hosted-warm-key',1,'/v1/emails/send',hosted(),{...bearer,'Idempotency-Key':'budget-warm'});
+      await send('hosted-session',2,'/v1/emails/send',hosted());
+      const hostedDraft=ok(await local('POST','/v1/campaigns',{name:'budget-hosted',from:'a@budget.invalid',subject:'Budget',html:'<p>Budget</p>'},'live',auth),201);
+      await send('hosted-campaign-test',3,`/v1/campaigns/${hostedDraft.id}/test`,{to:address()},auth);
+      t.diagnostic(`ADMISSION-BUDGETS ${JSON.stringify(budgets)}`);
+    });
+  });
+  // Review of #361, round 1: a retried campaign test answered from the draft as it is now (422 after an edit, 409 once
+  // archived) instead of replaying the test it already sent.
+  test('a retried campaign test replays its receipt after its draft changed or was archived; a held key is IN_PROGRESS first',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local})=>{
+      const key=ok(await local('POST','/v1/api-keys',{name:'replay',permissions:['send','read','manage']}),201),auth={authorization:`Bearer ${key.secret}`};
+      const draft=ok(await local('POST','/v1/campaigns',{name:'replay',from:'sender@example.com',subject:'Before',html:'<p>Before</p>'},'live',auth),201);
+      const path=`/v1/campaigns/${draft.id}/test`,body={to:address()},idem={...auth,'Idempotency-Key':'pr361-replay'},meter=await queryBudget(t,db);
+      const first=await meter('campaign-test-keyed',async()=>ok(await local('POST',path,body,'live',idem),202));
+      ok(await local('PATCH',`/v1/campaigns/${draft.id}`,{revision:draft.revision,draft:{name:'replay',from:'sender@example.com',subject:'',html:'<p>Before</p>'}},'live',auth));
+      assert.equal((await meter('campaign-test-replay',async()=>ok(await local('POST',path,body,'live',idem),202))).id,first.id);
+      ok(await local('PATCH',`/v1/campaigns/${draft.id}/archive`,{archived:true},'live',auth));
+      assert.equal(ok(await local('POST',path,body,'live',idem),202).id,first.id);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1',[runtime.config.workspaceId])).rows[0].n,1);
+      // Another request holding a key answers IN_PROGRESS before the archived draft is read.
+      const other=await fixtureDatabase(t);await other.query('BEGIN');
+      try{
+        assert.equal((await other.query('SELECT idempotency_lock($1,$2,$3,$4) AS held',[runtime.config.workspaceId,key.id,path,'pr361-held'])).rows[0].held,true);
+        error(await local('POST',path,body,'live',{...auth,'Idempotency-Key':'pr361-held'}),409,'IDEMPOTENCY_IN_PROGRESS');
+      }finally{await other.query('ROLLBACK');}
+      error(await local('POST',path,body,'live',{...auth,'Idempotency-Key':'pr361-held'}),409,'CAMPAIGN_ARCHIVED');
+    });
+  });
+  // Review of #361, round 1: a repeated attachment ID was reported as the missing attachment it also named.
+  test('an attachment named twice is 422 DUPLICATE_ATTACHMENT before the attachment lookup, direct and batch',async t=>{
+    await simulatedSesFixture(t,async({local})=>{
+      const twice=()=>mail({attachments:['att_missing_pr361','att_missing_pr361']});
+      const key=ok(await local('POST','/v1/api-keys',{name:'duplicates',permissions:['send']}),201),auth={authorization:`Bearer ${key.secret}`};
+      for(const headers of [{},auth]){
+        assert.equal(error(await local('POST','/v1/emails/send',twice(),'live',headers),422,'DUPLICATE_ATTACHMENT').field,undefined);
+        assert.equal(error(await local('POST','/v1/emails/batch',{emails:[twice()]},'live',headers),422,'DUPLICATE_ATTACHMENT').field,'emails.0');
+      }
+    });
+  });
   test('query budget: immutable campaign preparation, release, dispatch and storage per recipient',async t=>{
     await simulatedSesFixture(t,async({runtime,db,local})=>{
       const {jobHandlers}=await import('./src/sending.js'),{JobDeferred}=await import('./src/jobs.js'),{dispatchDue}=await import('./src/dispatcher.js');
