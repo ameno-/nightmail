@@ -3684,7 +3684,7 @@ export type InboundOverviewTarget = {
      */
     type: 'inbox' | 'webhook' | 'slack' | 'discord' | 'forward' | 'store' | 'drop' | 'create_address';
     /**
-     * Address ID for an inbox, webhook ID (mwh_…) for an endpoint or inbound webhook; null for store, drop and create_address.
+     * Address ID for an inbox, endpoint ID (mwh_… for a webhook, con_… for Slack, Discord or a forward); null for store, drop and create_address.
      */
     id: string | null;
     /**
@@ -3707,11 +3707,11 @@ export type InboundOverviewTarget = {
 
 export type InboundOverviewEndpoint = {
     /**
-     * Webhook ID (mwh_…) that delivers for it.
+     * Endpoint ID: mwh_… for a webhook, con_… for Slack, Discord or a forward.
      */
     id: string;
     /**
-     * endpoint: a named endpoint rituals call (and routes can name). inbound_webhook: a webhook created with createInboundWebhook.
+     * endpoint: a named endpoint, which rituals call (listEndpoints). inbound_webhook: a webhook without a name (listInboundWebhooks lists every webhook, named or not).
      */
     source: 'endpoint' | 'inbound_webhook';
     name: string;
@@ -3726,7 +3726,7 @@ export type InboundOverviewEndpoint = {
      */
     call: string | null;
     /**
-     * Events an inbound webhook subscribes to; empty for endpoints and route-only webhooks.
+     * Events a webhook subscribes to; empty for a route-only webhook and for Slack, Discord and forward endpoints.
      */
     eventTypes: Array<string>;
     /**
@@ -3961,7 +3961,7 @@ export type InboundWebhook = {
     updatedAt: string;
     addressIds: Array<string> | null;
     /**
-     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     * Its endpoint name: rituals call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names.
      */
     key: string | null;
     /**
@@ -3992,7 +3992,7 @@ export type InboundWebhook = {
 
 export type CreateInboundWebhook = {
     /**
-     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     * Its endpoint name: rituals call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names.
      */
     key?: string | null;
     /**
@@ -4046,7 +4046,7 @@ export type InboundWebhookList = {
 
 export type UpdateInboundWebhook = {
     /**
-     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     * Its endpoint name: rituals call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names.
      */
     key?: string | null;
     /**

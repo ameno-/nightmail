@@ -186,9 +186,9 @@ async function workspaceSummaries(db: DbExecutor, list: SupportScope['workspaces
       (SELECT json_build_object('kind', pc.kind, 'region', pc.region, 'state', to_jsonb(pc) ->> 'state', 'paused', pc.paused_at IS NOT NULL, 'pauseReason', left(to_jsonb(pc) ->> 'pause_reason', 300),
         'dailyLimitOverride', w.send_cap_override) FROM provider_connections pc WHERE pc.workspace_id = w.id) AS sending,
       json_build_object('domains', (SELECT count(*) FROM operation_domains WHERE workspace_id = w.id), 'apiKeys', (SELECT count(*) FROM api_keys WHERE workspace_id = w.id AND revoked_at IS NULL),
-        'webhooks', (SELECT count(*) FROM operation_webhooks WHERE workspace_id = w.id) + (SELECT count(*) FROM mailbox_webhooks WHERE workspace_id = w.id),
+        'webhooks', (SELECT count(*) FROM operation_webhooks WHERE workspace_id = w.id) + (SELECT count(*) FROM mailbox_webhooks WHERE workspace_id = w.id AND type = 'webhook'),
         'inboxes', (SELECT count(*) FROM mailboxes WHERE workspace_id = w.id AND kind = 'inbox'), 'addresses', (SELECT count(*) FROM mailboxes WHERE workspace_id = w.id AND kind = 'address'),
-        'routes', (SELECT count(*) FROM mail_routes WHERE workspace_id = w.id), 'endpoints', (SELECT count(*) FROM mail_endpoints WHERE workspace_id = w.id),
+        'routes', (SELECT count(*) FROM mail_routes WHERE workspace_id = w.id), 'endpoints', (SELECT count(*) FROM mailbox_webhooks WHERE workspace_id = w.id AND type <> 'webhook'),
         'campaigns', (SELECT count(*) FROM sending_campaigns WHERE workspace_id = w.id), 'templates', (SELECT count(*) FROM campaign_templates WHERE workspace_id = w.id),
         'contacts', (SELECT count(*) FROM (SELECT FROM audience_contacts WHERE workspace_id = w.id LIMIT 100000) x)) AS counts
     FROM workspaces w WHERE w.id = ANY(${ids(list.map(w => w.id))})`);

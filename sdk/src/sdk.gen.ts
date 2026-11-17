@@ -4820,7 +4820,7 @@ export const revokeInboundKey = <ThrowOnError extends boolean = false>(options: 
 /**
  * List inbound webhooks a page at a time, in a stable ID order
  *
- * Pass nextCursor back as cursor until it is null to read every webhook. addressId and eventType narrow the list to the webhooks that get that address's events (subscribed to it or to every address); getInboundOverview links a route's full list of subscribers this way.
+ * Every webhook endpoint, named or not. Pass nextCursor back as cursor until it is null to read every webhook. addressId and eventType narrow the list to the webhooks that get that address's events (subscribed to it or to every address); getInboundOverview links a route's full list of subscribers this way.
  */
 export const listInboundWebhooks = <ThrowOnError extends boolean = false>(options?: Options<ListInboundWebhooksData, ThrowOnError>): RequestResult<ListInboundWebhooksResponses, ListInboundWebhooksErrors, ThrowOnError> => (options?.client ?? client).get<ListInboundWebhooksResponses, ListInboundWebhooksErrors, ThrowOnError>({
     security: [
@@ -4843,7 +4843,7 @@ export const listInboundWebhooks = <ThrowOnError extends boolean = false>(option
 /**
  * Subscribe to inbound events
  *
- * Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret, and for the inbound format its verification token, are returned once.
+ * Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret, and for the inbound format its verification token, are returned once. A webhook with a key is also a named endpoint (listEndpoints).
  */
 export const createInboundWebhook = <ThrowOnError extends boolean = false>(options: Options<CreateInboundWebhookData, ThrowOnError>): RequestResult<CreateInboundWebhookResponses, CreateInboundWebhookErrors, ThrowOnError> => (options.client ?? client).post<CreateInboundWebhookResponses, CreateInboundWebhookErrors, ThrowOnError>({
     security: [

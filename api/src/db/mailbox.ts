@@ -152,14 +152,35 @@ export const mailboxEvents = pgTable('mailbox_events', {
   data: jsonb('data').$type<Record<string, unknown>>().notNull(), createdAt: ts('created_at').notNull().defaultNow(),
 });
 
-export const mailboxWebhooks = pgTable('mailbox_webhooks', {
-  id: text('id').primaryKey(), ...scope(), url: text('url').notNull(), description: text('description').notNull().default(''),
-  eventTypes: jsonb('event_types').$type<string[]>().notNull(), mailboxIds: jsonb('mailbox_ids').$type<string[] | null>(), paused: boolean('paused').notNull().default(false),
+/**
+ * Every endpoint, of every type, is one row (migration 322): a webhook (mwh_ ID) or a Slack, Discord or forward
+ * endpoint (con_ ID). Deliveries, routes, grants, attempt fences and forward-once rows reference its ID. The table keeps
+ * its first name, mailbox_webhooks, until the release that drops mail_endpoints and mail_action_policies.
+ */
+export const endpoints = pgTable('mailbox_webhooks', {
+  id: text('id').primaryKey(), ...scope(),
+  type: text('type').$type<'webhook' | 'slack' | 'discord' | 'forward'>().notNull().default('webhook'),
+  /** The endpoint name rituals call and routes can name (endpoints.<key>); unique in the workspace across every type. Optional for a webhook. */
+  key: text('key'),
+  // Webhooks: where and how they post, and the events they subscribe to (none for a route-only webhook).
+  url: text('url'), encryptedSecret: text('encrypted_secret'), encryptedHeaders: text('encrypted_headers'),
+  name: text('name'), description: text('description').notNull().default(''),
+  eventTypes: jsonb('event_types').$type<string[]>().notNull(), mailboxIds: jsonb('mailbox_ids').$type<string[] | null>(),
+  format: text('format').$type<'bane' | 'inbound'>().notNull().default('bane'), junk: text('junk').$type<'skip' | 'include'>().notNull().default('skip'),
+  include: jsonb('include').$type<('message' | 'raw')[]>().notNull().default([]), timeoutSeconds: smallint('timeout_seconds').notNull().default(5), retryAttempts: smallint('retry_attempts').notNull().default(9),
+  /** Slack and Discord: the URL; forward: the recipient address. Encrypted, bound to `<workspace>:endpoint:<id>`. */
+  encryptedTarget: text('encrypted_target'),
+  // A forward's confirmation by emailed link: always verified for other types.
+  verified: boolean('verified').notNull().default(true), proofHash: text('proof_hash'), expiresAt: ts('expires_at'), requestedAt: ts('requested_at'),
+  requestFrom: text('request_from'), confirmedAt: ts('confirmed_at'), declinedAt: ts('declined_at'), preverifiedBy: text('preverified_by'),
+  // Policy overrides (all three or none); null means the type's default (DEFAULT_POLICY).
+  perMinute: integer('per_minute'), retryOnTimeout: boolean('retry_on_timeout'), idempotent: boolean('idempotent'),
+  paused: boolean('paused').notNull().default(false),
   // Held when the approval that created or changed it was removed: resuming takes the URL again.
   reconfirm: boolean('reconfirm').notNull().default(false),
-  key:text('key'),name:text('name'),format:text('format').$type<'bane'|'inbound'>().notNull().default('bane'),junk:text('junk').$type<'skip'|'include'>().notNull().default('skip'),include:jsonb('include').$type<('message'|'raw')[]>().notNull().default([]),timeoutSeconds:smallint('timeout_seconds').notNull().default(5),retryAttempts:smallint('retry_attempts').notNull().default(9),
-  encryptedSecret: text('encrypted_secret').notNull(), encryptedHeaders: text('encrypted_headers'), createdAt: ts('created_at').notNull().defaultNow(), updatedAt: ts('updated_at').notNull().defaultNow(),
+  createdAt: ts('created_at').notNull().defaultNow(), updatedAt: ts('updated_at').notNull().defaultNow(),
 });
+export type EndpointRecord = typeof endpoints.$inferSelect;
 
 export const mailboxWebhookDeliveries = pgTable('mailbox_webhook_deliveries', {
   id: text('id').primaryKey(), ...scope(), webhookId: text('webhook_id').notNull(), eventSeq: bigint('event_seq', { mode: 'number' }),

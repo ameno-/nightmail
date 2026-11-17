@@ -1,6 +1,6 @@
 import { and, eq, sql } from 'drizzle-orm';
 import { ApiError, id, lazyModule, type ClaimedWebhook, type Runtime } from './core.js';
-import { mailMessages, retainedMail, type mailboxWebhooks, type MailAddress } from './db/mailbox.js';
+import { mailMessages, retainedMail, type EndpointRecord, type MailAddress } from './db/mailbox.js';
 import { webhookSecretBinding } from './mailbox-events.js';
 import { safeForwardHtml } from './mailbox-send.js';
 import { readableMailboxKey } from './mailbox-setup.js';
@@ -237,14 +237,14 @@ async function send(runtime: Runtime, w: string, h: ClaimedWebhook, secret: stri
   });
   return postWebhook(runtime, h.url, headers, body, h.encrypted_headers, webhookSecretBinding(w, h.webhook_id), h.timeout_seconds ?? 5);
 }
-/** Renders a claimed delivery in its webhook's format, signs it and posts it through the SSRF-guarded transport. */
+/** Renders a claimed webhook delivery in its webhook's format, signs it and posts it through the SSRF-guarded transport. */
 export async function deliverInboundWebhook(runtime: Runtime, w: string, h: ClaimedWebhook) {
-  if(h.webhook_id.startsWith('con_'))return (await import('./ritual-endpoints.js')).deliverConnector(runtime,w,h);
   const url = webhookUrl(runtime, h.url);
   return send(runtime, w, { ...h, url }, await decrypt(runtime, h.encrypted_secret, webhookSecretBinding(w, h.webhook_id)));
 }
 /** A synthetic message.received for the example message. An override URL gets a throwaway secret and none of the endpoint's custom headers. */
-export async function sendTestWebhook(runtime: Runtime, hook: typeof mailboxWebhooks.$inferSelect, input: { format?: 'bane' | 'inbound'; overrideUrl?: string }) {
+export async function sendTestWebhook(runtime: Runtime, hook: EndpointRecord, input: { format?: 'bane' | 'inbound'; overrideUrl?: string }) {
+  if (hook.type !== 'webhook' || hook.url === null || hook.encryptedSecret === null) throw new ApiError(422, 'NOT_A_WEBHOOK', 'Only webhook endpoints take a test delivery.');
   const url = webhookUrl(runtime, input.overrideUrl ?? hook.url),
     override = url !== hook.url,
     eventId = id('mev');

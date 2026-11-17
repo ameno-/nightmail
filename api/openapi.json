@@ -12544,7 +12544,7 @@
               "string",
               "null"
             ],
-            "description": "Address ID for an inbox, webhook ID (mwh_…) for an endpoint or inbound webhook; null for store, drop and create_address."
+            "description": "Address ID for an inbox, endpoint ID (mwh_… for a webhook, con_… for Slack, Discord or a forward); null for store, drop and create_address."
           },
           "name": {
             "type": "string",
@@ -12594,7 +12594,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "description": "Webhook ID (mwh_…) that delivers for it."
+            "description": "Endpoint ID: mwh_… for a webhook, con_… for Slack, Discord or a forward."
           },
           "source": {
             "type": "string",
@@ -12602,7 +12602,7 @@
               "endpoint",
               "inbound_webhook"
             ],
-            "description": "endpoint: a named endpoint rituals call (and routes can name). inbound_webhook: a webhook created with createInboundWebhook."
+            "description": "endpoint: a named endpoint, which rituals call (listEndpoints). inbound_webhook: a webhook without a name (listInboundWebhooks lists every webhook, named or not)."
           },
           "name": {
             "type": "string"
@@ -12642,7 +12642,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Events an inbound webhook subscribes to; empty for endpoints and route-only webhooks."
+            "description": "Events a webhook subscribes to; empty for a route-only webhook and for Slack, Discord and forward endpoints."
           },
           "routes": {
             "type": "integer",
@@ -13455,7 +13455,7 @@
               "null"
             ],
             "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
-            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
+            "description": "Its endpoint name: rituals call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names."
           },
           "name": {
             "type": [
@@ -13534,7 +13534,7 @@
               "null"
             ],
             "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
-            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
+            "description": "Its endpoint name: rituals call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names."
           },
           "name": {
             "type": [
@@ -13706,7 +13706,7 @@
               "null"
             ],
             "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
-            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
+            "description": "Its endpoint name: rituals call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names."
           },
           "name": {
             "type": [
@@ -59496,7 +59496,7 @@
           "Inbound webhooks"
         ],
         "summary": "Subscribe to inbound events",
-        "description": "Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret, and for the inbound format its verification token, are returned once.",
+        "description": "Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret, and for the inbound format its verification token, are returned once. A webhook with a key is also a named endpoint (listEndpoints).",
         "requestBody": {
           "required": true,
           "content": {
@@ -59649,7 +59649,7 @@
           "Inbound webhooks"
         ],
         "summary": "List inbound webhooks a page at a time, in a stable ID order",
-        "description": "Pass nextCursor back as cursor until it is null to read every webhook. addressId and eventType narrow the list to the webhooks that get that address's events (subscribed to it or to every address); getInboundOverview links a route's full list of subscribers this way.",
+        "description": "Every webhook endpoint, named or not. Pass nextCursor back as cursor until it is null to read every webhook. addressId and eventType narrow the list to the webhooks that get that address's events (subscribed to it or to every address); getInboundOverview links a route's full list of subscribers this way.",
         "parameters": [
           {
             "schema": {

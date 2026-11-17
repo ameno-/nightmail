@@ -19,7 +19,7 @@ Receiving is where mail that arrives at your domains is routed, filtered and sen
 |---|---|---|
 | **Routes** | Every address that receives mail, and where its mail goes. | `support@acme.com → triage → Inbox, Slack support` |
 | **Rituals** | Short scripts that run on a route's mail: label it, filter it, or send it on. | If the subject mentions a refund, label it and post it to Slack. |
-| **Endpoints** | Named places mail can be sent: Slack, Discord, a webhook or a forward. | `endpoints.support({ text: email.subject })` |
+| **Endpoints** | Places mail can be sent: Slack, Discord, a webhook or a forward. A named one is called from rituals; a webhook can also subscribe to events. | `endpoints.support({ text: email.subject })` |
 | **Trace** | Dry-run an email through your routes and rituals; nothing is sent or saved. | |
 
 Rituals and endpoints are described in full in [rituals.md](rituals.md); agent inboxes in [inboxes.md](inboxes.md).
@@ -48,7 +48,7 @@ A route that has no ritual yet says so in its row (**No ritual · add**), so wha
 | On screen | Meaning | API (`to[].type`) |
 |---|---|---|
 | Inbox | The address keeps the thread. | `inbox` |
-| Webhook, Slack, Discord, Forward | An endpoint or an inbound webhook. | `webhook`, `slack`, `discord`, `forward` |
+| Webhook, Slack, Discord, Forward | An endpoint. | `webhook`, `slack`, `discord`, `forward` |
 | Stored, no inbox | Kept and readable over the API by message ID, but in no inbox. | `store` |
 | Dropped | Not stored. | `drop` |
 | New address per recipient | The domain's catch-all creates an address for each new recipient. | `create_address` |
@@ -105,12 +105,12 @@ Everything is at most two clicks from Receiving.
 | Turn a ritual off, edit, trace or delete it | Receiving → Rituals → its switch or ⋯ menu |
 | Edit, attach or try a script | Receiving → Rituals → the ritual (Edit as code for a ready-made one) |
 | Create, test, pause or delete an endpoint | Receiving → Endpoints |
-| Subscribe a URL to inbound events | Receiving → Endpoints → Event webhooks |
+| Subscribe a webhook to inbound events | Receiving → Endpoints → the webhook |
 | Create an agent inbox | Receiving → Routes → Agent inboxes → New agent inbox |
 | Test what would happen to an email | Receiving → Trace |
 | Set up receiving or change a catch-all | Domains → the domain |
 
-Older links keep working: `/receiving/routing` opens Routes and `/receiving/endpoints` opens the Endpoints tab.
+Older links keep working: `/receiving/routing` opens Routes, and `/receiving/endpoints` and `/receiving/webhooks` open the Endpoints tab.
 
 ## API, SDK and MCP
 
@@ -127,6 +127,8 @@ Access matches the other receiving reads: members and scoped keys see only their
 | Rituals and Try it | `saveRitual`, `attachRituals`, `testRituals` (trace rows carry a step-by-step `timeline`) |
 | Endpoints | `listEndpoints`, `createEndpoint`, `updateEndpoint`, `testEndpoint`, `deleteEndpoint` |
 | Inbound webhooks | `listInboundWebhooks` (`cursor`, `limit`, `addressId`, `eventType`), `getInboundWebhook`, `createInboundWebhook`, `updateInboundWebhook` |
+
+Endpoints and webhooks are one model. Every endpoint, whatever its type, is one row with one ID (`mwh_…` for a webhook, `con_…` for Slack, Discord and forwards); a webhook's `key` is its endpoint name. `/v1/endpoints` lists and changes named endpoints of every type, and `/v1/inbound/webhooks` lists and changes webhooks, named or not. Both go through the same writer (`api/src/endpoints.ts`), so names, caps (32 active webhooks with event subscriptions, 500 active route-only webhooks, 50 Slack, Discord and forward endpoints), the in-use checks and pause and resume are the same through either.
 
 ```sh
 curl "$BANE/v1/inbound/overview?kind=address,route&origin=api&q=support" -H "Authorization: Bearer $KEY"

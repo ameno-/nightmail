@@ -209,11 +209,8 @@ function checkRoutes(routes: Route[]) {
     patterns.set(hostOf(r.match), n);
   }
 }
-/**
- * A route delivers to inboxes and webhooks only. A Slack, Discord or forward endpoint (con_) also has a mailbox_webhooks
- * row, and from migration 322 a key: it is never a route destination, by ID or as webhook:<key>, keyed or not.
- */
-const realWebhook = sql`NOT starts_with(h.id,'con_')`;
+/** A route delivers to inboxes and webhooks only: a Slack, Discord or forward endpoint is never a destination, by ID or as webhook:<key>. */
+const realWebhook = sql`h.type='webhook'`;
 /** Replaces keys with IDs in place. Leniently (restores), drops destinations that no longer exist instead of failing. */
 async function resolveDestinations(tx: DbExecutor, w: string, routes: Route[], lenient: boolean) {
   const refs = [...referenceSet(routes)],

@@ -1,4 +1,4 @@
-import {ActionRetry,ritualDelivery} from './ritual-delivery.js';
+import {ActionRetry,deliverEndpoint} from './endpoint-delivery.js';
 import { and, eq, gt, inArray, isNotNull, max, sql, type SQL } from 'drizzle-orm';
 import { ApiError, lazyModule, log, ModuleLoadError, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { mailboxEvents } from './db/mailbox.js';
@@ -62,14 +62,14 @@ export async function latestCursor(db: DbExecutor, workspaceId: string, scope: E
   return result?.seq ?? 0;
 }
 
-const loadWebhookOps = lazyModule(() => import('./inbound-webhook.js'));
+const loadEndpoints = lazyModule(() => import('./endpoints.js'));
 const webhookJob: JobHandler = async (runtime, payload, job) => {
   const delivery=job.webhook!==undefined?job.webhook:(await runtime.db.execute<import('./core.js').ClaimedWebhook>(sql`WITH claimed AS (SELECT ${job.id}::text AS id,${job.workspaceId}::text AS workspace_id,'mailbox.webhook' AS type,${JSON.stringify(payload)}::jsonb AS payload),${inboundHookClaim} SELECT * FROM inbound_hooks WHERE blocked IS NULL`)).rows[0];
   if(!delivery)return;
-  const {deliverInboundWebhook}=await loadWebhookOps();
+  const {sendToEndpoint}=await loadEndpoints();
   let statusCode: number | null = null, error: string | null = null, retryable = true;
   let actionError:ActionRetry|undefined;try {
-    const result=await ritualDelivery(runtime,job.workspaceId,delivery,()=>deliverInboundWebhook(runtime,job.workspaceId,delivery),job);
+    const result=await deliverEndpoint(runtime,job.workspaceId,delivery,()=>sendToEndpoint(runtime,job.workspaceId,delivery),job);
     // Paused after the claim (the fence parked it for resume), or no longer this claim's: nothing was sent.
     if(result.parked)return;
     if(result.status===410)retryable=false;
