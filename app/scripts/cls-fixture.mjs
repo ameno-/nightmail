@@ -420,6 +420,9 @@ async function standing(db, workspaceId, { score, limit, step, reasons = [], sin
 
 // Billing, enforced: Northwind is funded (top-ups, a welcome credit, hourly usage, a saved card and auto-recharge on);
 // Harbor owes $12.40 after its free allowance, so sending is paused and received mail is in its 7-day grace.
+// A workspace's month as the settler leaves it: charged sends and received settled, and the cost posted for them.
+const month = (db, wid, sent, received, costUc) => db.query(`INSERT INTO billing_months(workspace_id,month,sent,received,other_uc,posted_uc)
+  VALUES ($1,(date_trunc('month',now() AT TIME ZONE 'UTC'))::date,$2,$3,$4::numeric-billing_month_cost($2,$3,0),$4::bigint)`, [wid, sent, received, String(costUc)]);
 async function billing(db) {
   const post = (wid, kind, source, paid, promo = 0n, detail = {}, who = 'system') => db.query('SELECT billing_post($1,$2,$3,$4::bigint,$5::bigint,$6::jsonb,$7)', [wid, kind, source, String(paid), String(promo), JSON.stringify(detail), who]);
   const usage = (wid, i, send, receive, omen = 0) => {
@@ -432,13 +435,18 @@ async function billing(db) {
   for (const [i, [send, receive, omen]] of [[412, 38, 12], [1260, 75, 30], [96, 12, 0], [884, 41, 9], [57, 3, 0], [2210, 120, 44]].entries()) await usage('ws_northwind', i, send, receive, omen);
   await post('ws_northwind', 'topup', 'attempt:bpa_cls_recharge', 2_500_000_000n, 0n, { recharge: true }, 'stripe');
   await db.query(`UPDATE billing_accounts SET stripe_customer='cus_cls_northwind',stripe_payment_method='pm_cls_northwind',card_brand='visa',card_last4='4242',card_exp_month=4,card_exp_year=2028,card_fingerprint='fp_cls',
-    recharge_enabled=true,free_month=date_trunc('month',now() AT TIME ZONE 'UTC')::date,free_sent_used=1640,free_received_used=500,month_spend_uc=104000000 WHERE workspace_id='ws_northwind'`);
-  await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,settled_quantity) SELECT 'ws_northwind',date_trunc('hour',now())-make_interval(hours=>g),m.meter,m.q,m.q
-    FROM generate_series(2,7) g CROSS JOIN (VALUES ('send',820),('receive',48),('omen',16)) m(meter,q)`);
+    recharge_enabled=true WHERE workspace_id='ws_northwind'`);
+  // This month as settled (billing_months, migration 334): 1,640 free sends and 500 free received used, $1.04 so far.
+  await month(db, 'ws_northwind', 1640, 500, 104_000_000n);
+  // The hours' meters for the usage chart, settled. Sends the fixture created in those hours count there too.
+  await db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity,settled_quantity) SELECT 'ws_northwind',date_trunc('hour',now())-make_interval(hours=>g),m.meter,m.q,m.q
+    FROM generate_series(2,7) g CROSS JOIN (VALUES ('send',820),('receive',48),('omen',16)) m(meter,q)
+    ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity, settled_quantity=u.settled_quantity+excluded.settled_quantity`);
   await db.query("INSERT INTO mail_storage_aged(workspace_id,aged_bytes,aged_through) VALUES ('ws_northwind',214000000,(now() AT TIME ZONE 'UTC')::date-91)");
   await post('ws_harbor', 'topup', 'attempt:bpa_cls_harbor', 2_000_000_000n, 0n, {}, 'stripe');
   await usage('ws_harbor', 0, 158_000, 4000);
-  await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '2 days',empty_since=now()-interval '2 days',free_month=date_trunc('month',now() AT TIME ZONE 'UTC')::date,free_sent_used=3000,free_received_used=3000,month_spend_uc=3240000000 WHERE workspace_id='ws_harbor'`);
+  await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '2 days',empty_since=now()-interval '2 days' WHERE workspace_id='ws_harbor'`);
+  await month(db, 'ws_harbor', 3000, 3000, 3_240_000_000n);
 }
 
 /** Driftwood's triage ritual, version `n`: each agent save in a live job changes one line in place, so the line count
