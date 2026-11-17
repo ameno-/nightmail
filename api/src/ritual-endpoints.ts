@@ -177,10 +177,20 @@ async function senderBox(tx: DbExecutor, w: string, from?: string) {
 }
 const forwardBase = (runtime: Runtime) => runtime.config.publicUrl.replace(/\/$/, '') + '/v1/forwarding';
 /**
+ * One lock order for an endpoint: its mailbox_webhooks row, then its mail_endpoints row (and its policy). Creating,
+ * editing and deleting an endpoint take them in that order; a recipient's confirm, decline or stop and a new
+ * confirmation request take the endpoint row here first, so no two endpoint writes ever wait on each other in a cycle,
+ * also once the next release copies each table's writes to the other (migration 322).
+ */
+async function lockEndpointRow(tx: DbExecutor, w: string, hookId: string) {
+  await tx.execute(sql`SELECT FROM mailbox_webhooks WHERE workspace_id=${w} AND id=${hookId} FOR UPDATE`);
+}
+/**
  * Emails the recipient a single-use, 24-hour confirmation link. The message is sealed: the
  * workspace's sent-mail views show it with the link withheld, because the link alone confirms.
  */
 async function requestConfirmation(c: Ctx, tx: DbExecutor, w: string, row: { hook_id: string }, address: string, from?: string) {
+  await lockEndpointRow(tx, w, row.hook_id);
   const box = await senderBox(tx, w, from);
   const addressHash = await digest(address);
   const declined = (await tx.execute<{ until: string }>(sql`SELECT (declined_at+interval '30 days')::text AS until FROM mail_forward_declines WHERE workspace_id=${w} AND address_hash=${addressHash} AND declined_at>now()-interval '30 days'`)).rows[0];
@@ -374,6 +384,7 @@ async function pendingByToken(db: DbExecutor, token: string) {
   return (await db.execute<Pending>(sql`SELECT workspace_id,hook_id,encrypted_value,request_from FROM mail_endpoints WHERE proof_hash=${await digest(token)} AND NOT verified AND declined_at IS NULL AND expires_at>now()`)).rows[0];
 }
 async function decline(tx: DbExecutor, runtime: Runtime, row: Pending) {
+  await lockEndpointRow(tx, row.workspace_id, row.hook_id);
   await tx.execute(sql`UPDATE mail_endpoints SET verified=false,proof_hash=NULL,declined_at=now() WHERE workspace_id=${row.workspace_id} AND hook_id=${row.hook_id}`);
   const hash = await digest(await decrypt(runtime, row.encrypted_value, row.workspace_id + ':endpoint:' + row.hook_id));
   await tx.execute(sql`INSERT INTO mail_forward_declines(workspace_id,address_hash) VALUES(${row.workspace_id},${hash}) ON CONFLICT(workspace_id,address_hash) DO UPDATE SET declined_at=now()`);
@@ -381,7 +392,10 @@ async function decline(tx: DbExecutor, runtime: Runtime, row: Pending) {
 /** Records the recipient's choice. Single use: the token is cleared by whichever choice comes first. */
 export async function answerForward(runtime: Runtime, token: string, choice: 'allow' | 'decline') {
   return runtime.db.transaction(async tx => {
-    const row = (await tx.execute<Pending>(sql`SELECT workspace_id,hook_id,encrypted_value,request_from FROM mail_endpoints WHERE proof_hash=${await digest(token)} AND NOT verified AND declined_at IS NULL AND expires_at>now() FOR UPDATE`)).rows[0];
+    // The endpoint row first, then the pending request, decided again under both locks.
+    const proof = await digest(token), found = (await tx.execute<{ workspace_id: string; hook_id: string }>(sql`SELECT workspace_id,hook_id FROM mail_endpoints WHERE proof_hash=${proof}`)).rows[0];
+    if (found) await lockEndpointRow(tx, found.workspace_id, found.hook_id);
+    const row = found && (await tx.execute<Pending>(sql`SELECT workspace_id,hook_id,encrypted_value,request_from FROM mail_endpoints WHERE workspace_id=${found.workspace_id} AND hook_id=${found.hook_id} AND proof_hash=${proof} AND NOT verified AND declined_at IS NULL AND expires_at>now() FOR UPDATE`)).rows[0];
     if (!row) throw new ApiError(410, 'CONFIRMATION_UNAVAILABLE', 'This link was already used or has expired.');
     if (choice === 'allow') await tx.execute(sql`UPDATE mail_endpoints SET verified=true,proof_hash=NULL,confirmed_at=now() WHERE workspace_id=${row.workspace_id} AND hook_id=${row.hook_id}`);
     else await decline(tx, runtime, row);

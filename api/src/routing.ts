@@ -209,6 +209,11 @@ function checkRoutes(routes: Route[]) {
     patterns.set(hostOf(r.match), n);
   }
 }
+/**
+ * A route delivers to inboxes and webhooks only. A Slack, Discord or forward endpoint (con_) also has a mailbox_webhooks
+ * row, and from migration 322 a key: it is never a route destination, by ID or as webhook:<key>, keyed or not.
+ */
+const realWebhook = sql`NOT starts_with(h.id,'con_')`;
 /** Replaces keys with IDs in place. Leniently (restores), drops destinations that no longer exist instead of failing. */
 async function resolveDestinations(tx: DbExecutor, w: string, routes: Route[], lenient: boolean) {
   const refs = [...referenceSet(routes)],
@@ -220,8 +225,8 @@ async function resolveDestinations(tx: DbExecutor, w: string, routes: Route[], l
         sql`WITH refs AS MATERIALIZED (SELECT ref,split_part(ref,':',2) AS key FROM jsonb_array_elements_text(${JSON.stringify(refs)}::jsonb) ref)
           SELECT ref,b.id FROM refs JOIN mailboxes b ON b.workspace_id=${w} AND b.id=ref WHERE starts_with(ref,'mbx_')
           UNION ALL SELECT ref,b.id FROM refs JOIN mailboxes b ON b.workspace_id=${w} AND b.key=refs.key WHERE starts_with(ref,'inbox:')
-          UNION ALL SELECT ref,h.id FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.id=ref WHERE starts_with(ref,'mwh_')
-          UNION ALL SELECT ref,h.id FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.key=refs.key WHERE starts_with(ref,'webhook:')`,
+          UNION ALL SELECT ref,h.id FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.id=ref AND ${realWebhook} WHERE starts_with(ref,'mwh_')
+          UNION ALL SELECT ref,h.id FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.key=refs.key AND ${realWebhook} WHERE starts_with(ref,'webhook:')`,
       )
     ).rows.map((d) => [d.ref, d.id]),
   );
@@ -420,7 +425,7 @@ export function registerRouting(app: App) {
       const keys = new Map(
         (
           await c.env.db.execute<{ id: string; ref: string }>(
-            sql`SELECT id,'inbox:'||key AS ref FROM mailboxes WHERE workspace_id=${w} AND key IS NOT NULL UNION ALL SELECT id,'webhook:'||key FROM mailbox_webhooks WHERE workspace_id=${w} AND key IS NOT NULL`,
+            sql`SELECT id,'inbox:'||key AS ref FROM mailboxes WHERE workspace_id=${w} AND key IS NOT NULL UNION ALL SELECT id,'webhook:'||key FROM mailbox_webhooks h WHERE workspace_id=${w} AND key IS NOT NULL AND ${realWebhook}`,
           )
         ).rows.map((r) => [r.id, r.ref]),
       );
