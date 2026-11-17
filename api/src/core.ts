@@ -230,6 +230,32 @@ export function actor(c: Ctx, action: Permission | 'editContent' = 'read'): Acto
   if (!value || (!value.permissions.includes('manage') && !value.permissions.includes(permission))) throw new ApiError(403, 'PERMISSION_DENIED', `This operation requires ${permission} permission.`);
   return value;
 }
+/**
+ * The one rule for changes that outlive the credential making them: API keys, sending and receiving webhooks, endpoints,
+ * routes, rituals, inbound keys, mail client passwords and inbox connections. A temporary agent token lasts at most a
+ * day, so it reads and tests these but never creates, changes or removes them. Every such write calls this.
+ */
+export function lasting(c: Ctx, what: string) {
+  if (c.get('actor')?.credential === 'agentToken')
+    throw new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', `Temporary agent tokens cannot ${what}. Use the dashboard, an API key or the MCP approval itself.`);
+}
+/** What `lasting` refuses, for the areas that share a wording (sending and receiving webhooks; API keys and inbound keys). */
+export const WEBHOOK_CHANGE = 'create, change or delete webhooks or read their signing secrets', KEY_CHANGE = 'create, list or revoke API keys';
+/**
+ * Receiving configuration (routing, rituals, endpoints, inbox connections) covers every address in the workspace: an
+ * owner or admin, an API key with manage on all domains, or an MCP approval with receiving consent, which reads with
+ * read. A change (`change` says what, for the error) needs manage, receiving consent and a lasting credential.
+ */
+export function receivingAdmin(c: Ctx, change?: string): Actor {
+  const a = actor(c, !change && c.get('actor')?.receivingConsent ? 'read' : 'manage');
+  if (a.domains.length || a.role === 'member')
+    throw new ApiError(403, 'ADMIN_REQUIRED', 'Receiving configuration covers every address in the workspace. Use an owner or admin session, or an API key with manage permission on all domains.');
+  if (change) {
+    if (a.grantId && !a.receivingConsent) throw new ApiError(403, 'ADMIN_REQUIRED', 'Reconnect with explicit receiving consent to change receiving configuration.');
+    lasting(c, change);
+  }
+  return a;
+}
 // ---------- route guards shared by REST and the MCP listing ----------
 // Each takes a concrete request path or an OpenAPI template ({id} segments). The middleware that
 // enforces a guard and the MCP listing that must agree with it call the same predicate.

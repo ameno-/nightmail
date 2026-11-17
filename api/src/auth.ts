@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, gt, isNull, sql, type SQL } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
-import { ApiError, actor, digest, errors, hasSessionCookie, id, IdParams, isoTime, json, PageQuery, page, randomSecret, response, security, senderDomainAllowed, timed, wrapModuleLoad } from './core.js';
+import { ApiError, actor, digest, errors, hasSessionCookie, id, IdParams, isoTime, json, KEY_CHANGE, lasting, PageQuery, page, randomSecret, response, security, senderDomainAllowed, timed, wrapModuleLoad } from './core.js';
 import type { Actor, App, AppEnv, Ctx, Runtime } from './core.js';
 import { agentTokens, apiKeys } from './db/core.js';
 import { mailboxKeys } from './db/mailbox.js';
@@ -160,7 +160,7 @@ const KeyInput = z.object({ name: z.string().trim().min(1).max(100),
 }).strict().openapi('CreateApiKey');
 export function manageKeys(c: Parameters<typeof actor>[0]) {
   const value = actor(c, 'manage');
-  if (value.credential === 'agentToken') throw new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Temporary agent tokens cannot create, list, or revoke API keys.');
+  lasting(c, KEY_CHANGE);
   if (value.domains.length) throw new ApiError(403, 'PERMISSION_DENIED', 'Key administration requires unrestricted management access.');
   return value;
 }
@@ -170,7 +170,7 @@ const keyView = (key: typeof apiKeys.$inferSelect) => ({ id: key.id, name: key.n
 // Keys limited to addresses or an inbox live in mailbox_keys (address-keys.ts); loaded only when a request names one.
 const addressKeys = () => wrapModuleLoad(() => import('./address-keys.js'));
 export function registerAuth(app: App) {
-  app.openapi(createRoute({ method: 'post', path: '/v1/agent-tokens', operationId: 'createAgentToken', tags: ['Auth'], security, description: 'A short-lived, nonrefreshable token for temporary scripts. Requires an MCP approval and never exceeds it; manage tokens cannot administer credentials.', request: { body: json(z.object({
+  app.openapi(createRoute({ method: 'post', path: '/v1/agent-tokens', operationId: 'createAgentToken', tags: ['Auth'], security, description: 'A short-lived, nonrefreshable token for temporary scripts. Requires an MCP approval and never exceeds it. A manage token makes no change that outlasts it: no API keys, webhooks, endpoints, routes, rituals, mail client passwords or inbox connections.', request: { body: json(z.object({
     permissions: z.array(z.enum(['read', 'send', 'manage'])).min(1).max(3).refine(value => value[0] === 'read' && new Set(value).size === value.length, 'Start with read and do not repeat permissions.'),
     expiresInSeconds: z.number().int().min(30).max(86400), domains: z.array(z.string().trim().toLowerCase().regex(/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/)).max(50).default([]),
     purpose: z.string().trim().min(1).max(200),

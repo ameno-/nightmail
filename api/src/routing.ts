@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { retainedMail } from './db/mailbox.js';
-import { actor, ApiError, errors, id, json, response, security, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
+import { actor, ApiError, errors, id, json, receivingAdmin, response, security, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
 import { auditContext, auditInsert } from './audit.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
 import { PARSE_LIMIT } from './mailbox-mime.js';
@@ -364,26 +364,14 @@ const addressesOf = (list: MimeAddress[] | undefined): string[] =>
 export function registerRouting(app: App) {
   const path = '/v1/routing',
     meta = { security, tags: ['Routing'] };
-  // Each operation says whether it only reads. With receiving consent, reads and the dry run need
-  // read; every change needs manage.
-  const workspace = (c: Ctx, read = c.req.method === 'GET') => {
-    const a=actor(c,c.get('actor')?.receivingConsent&&read?'read':'manage');
-    if (a.domains.length || a.role === 'member')
-      throw fail(
-        403,
-        'ADMIN_REQUIRED',
-        'Routing covers every address in the workspace. Use an owner or admin session, or an API key with manage permission on all domains.',
-      );
-    return a.workspaceId;
-  };
+  // Reads and the dry run need read with receiving consent; every change goes through edit.
+  const workspace = (c: Ctx) => receivingAdmin(c).workspaceId;
   const edit = async (
     c: Ctx,
     change: (routes: Route[], tx: DbExecutor, version: number) => Route[] | Promise<Route[]>,
     options: Parameters<typeof save>[6] = {},
   ) => {
-    const w = workspace(c, false);
-    if (c.get('actor').credential==='agentToken'||(c.get('actor').grantId&&!c.get('actor').receivingConsent))
-      throw fail(403, 'ADMIN_REQUIRED', 'MCP and agent credentials can read and test routing, not change it. Change routes in the dashboard or with an API key.');
+    const w = receivingAdmin(c, 'change routes').workspaceId;
     const result = await c.env.db.transaction(async (tx) => {
       await lockMailboxLane(tx, w, 'address');
       // Hold the approval before any route row: a removal disables an approval's routes after it has taken the approval.
@@ -662,7 +650,7 @@ export function registerRouting(app: App) {
       responses: { 200: response(RoutingTestResult), ...errors },
     }),
     async (c) => {
-      const w = workspace(c, true),
+      const w = workspace(c),
         input = c.req.valid('json');
       if(input.config){if(input.config.routes.length>1000)throw fail(422,'TEST_CONFIG_LIMIT','A preview accepts up to 1,000 routes.');checkReferenceBudget(input.config.routes);}
       if (input.messageId && input.raw) throw fail(422, 'INVALID_TEST', 'Supply messageId or raw, not both.', 'raw');

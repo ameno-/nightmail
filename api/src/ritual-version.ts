@@ -1,8 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { checkBudget } from './auth.js';
-import { errors, response, security, type Actor, type App, type DbExecutor } from './core.js';
-import { ritualAdmin } from './rituals.js';
+import { errors, receivingAdmin, response, security, type Actor, type App, type DbExecutor } from './core.js';
 
 // The dashboard's live view of rituals, routes and endpoints, for a person editing next to an agent that saves over MCP.
 // One long poll per open page: each tick is one statement of primary-key reads (the routing version every ritual and
@@ -61,7 +60,7 @@ export function registerRitualVersion(app: App) {
     request: { query: Query },
     responses: { 200: response(VersionState), ...errors },
   }), async c => {
-    const a = ritualAdmin(c), w = a.workspaceId, q = c.req.valid('query');
+    const a = receivingAdmin(c), w = a.workspaceId, q = c.req.valid('query');
     const watching = q.after !== undefined || q.endpoints !== undefined, wait = watching ? q.wait : 0;
     // Every tick this call may take is charged before the first, like the inbox long polls (src/mailbox.ts poll()).
     const max = c.env.config.apiRateLimitPerMinute, ticks = 1 + Math.ceil(wait * 1000 / TICK_MS);
