@@ -1,14 +1,16 @@
 SET LOCAL lock_timeout='2s';
 
 -- Every address is an inbox (receiving-8): it has inbox_state and folders, and one SQL writer changes its thread and
--- message state, as for agent inboxes. Existing addresses keep their IDs and are converted in place by convert_addresses, one at a
--- time; a new address is converted as it is inserted (inbox_adopt_new). A temporary address stays what it was: an inbox
--- whose lease is expires_at with no delete_after (kept, receiving stops at expiry). kind='address' keeps what an address
--- may do that an agent inbox may not (start threads, its own send limits).
+-- message state, as for agent inboxes. Existing addresses keep their IDs and are converted in place by convert_addresses,
+-- one at a time; a new address is converted as it is inserted (inbox_adopt_new). A temporary address stays what it was:
+-- an inbox whose lease is expires_at with no delete_after (kept, receiving stops at expiry). kind='address' keeps what
+-- an address may do that an agent inbox may not (start threads, its own send limits).
 --
--- Expand only: the Worker this replaces (#360, deployed first) serves while this and convert_addresses run. It already writes thread
--- state through the SQL writer, and files and counts claimed mail, for any mailbox with inbox_state, and decides under a
--- KEY SHARE lock on the mailbox row, which inbox_adopt_batch's FOR UPDATE excludes. Nothing it does needs the fence.
+-- Expand only: the Worker this replaces (#360, deployed first) serves while this and convert_addresses run. Every writer
+-- takes lanes before rows. Its thread change calls inbox_patch_thread first, which takes the workspace's ingest lane:
+-- with inbox_state it writes through the SQL writer, otherwise it keeps the lane while the address writer runs, so
+-- inbox_adopt_batch (the lane, then the row FOR UPDATE) waits for it or it for the batch. Claimed mail is filed and
+-- counted for any mailbox with inbox_state; its callers hold the address row. Nothing it does needs the fence.
 
 -- The writer fence (140, 152) kept the TypeScript writer off inbox rows during the folder rollout. There is one writer
 -- now, so the fence and the marker it read go; each wrapper keeps the ingest lane it takes (148).

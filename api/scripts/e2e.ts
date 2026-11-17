@@ -123,13 +123,12 @@ Object.assign(SKIP, {
   listInboxes: receivingMvp,
   ...(!destructive?{createInboxFolder:receivingMvp,updateInboxFolder:receivingMvp,deleteInboxFolder:receivingMvp,listInboxAppPasswords:receivingMvp,createInboxAppPassword:'A real password starts a billable day. Isolated positive test; dev probes a nonexistent inbox.',revokeInboxAppPassword:receivingMvp}:{}),
   getInbox: receivingMvp,
-  listInboxFolders:receivingMvp, getInboxChanges:receivingMvp, copyInboxMessage:receivingMvp, moveInboxMessage:receivingMvp, deleteInboxMessage:receivingMvp, expungeInboxFolder:receivingMvp,
   updateInbox: receivingMvp,
   deleteInbox: receivingMvp,
   simulateInboxMessage: receivingMvp,
-  listInboxMessages: receivingMvp,
-  getInboxMessage: receivingMvp,
-  updateInboxMessage: receivingMvp,
+  // Every address is an inbox: the dev scenario reads and changes a temporary address's mail through these (addressInbox).
+  ...(!destructive ? { listInboxFolders: receivingMvp, getInboxChanges: receivingMvp, copyInboxMessage: receivingMvp, moveInboxMessage: receivingMvp,
+    deleteInboxMessage: receivingMvp, expungeInboxFolder: receivingMvp, listInboxMessages: receivingMvp, getInboxMessage: receivingMvp, updateInboxMessage: receivingMvp } : {}),
   getInboxAttachment: receivingMvp,
   releaseRetiredAddress: receivingMvp,
   testInboundWebhook: receivingMvp,
@@ -864,6 +863,37 @@ async function inbound() {
     const email = await api('getEmail',{path:{id:emailId}});
     check(!email.simulated && email.providerId,'inbound loop missing provider acceptance'); providerAccepted.add(email.providerId);
   }
+  if (destructive) await step('A temporary address is an inbox: its mail and folders through the inbox routes', () => addressInbox(receiver.id, sender.id, msg.id, sent.id));
+}
+
+// Every address is an inbox: its received and sent mail is filed in folders, and the inbox routes read and change it by
+// the address ID. Run-owned temporary addresses and their own messages only; deleting the addresses ends it.
+async function addressInbox(id: string, otherId: string, messageId: string, sentId: string) {
+  const folders = async () => Object.fromEntries((await api('listInboxFolders', { path: { id } })).data.map(f => [f.role, f]));
+  const state = (await api('listInboxFolders', { path: { id } })).state, before = await folders();
+  const listed = (await api('listInboxMessages', { path: { id }, query: { folder: 'inbox', limit: 100 } })).data.find(m => m.id === messageId);
+  check(listed?.uid && before.inbox.total >= 1, 'received mail not filed in the address inbox');
+  const path = { id, messageId }, detail = await api('getInboxMessage', { path });
+  check(detail.id === messageId && detail.folders.some(f => f.folder === 'inbox' && f.uid === listed.uid), 'address message read through its inbox differs');
+  // A state change, seen in the change feed.
+  check((await api('updateInboxMessage', { path, body: { read: !detail.read } })).read === !detail.read, 'read state not changed');
+  check((await api('getInboxChanges', { path: { id }, query: { since: state } })).changed.includes(messageId), 'change feed missing the read change');
+  // A copy expunged from Archive, then the message moved to Archive and deleted to Trash.
+  const copy = await api('copyInboxMessage', { path, body: { source: 'inbox', uid: listed.uid, folder: 'archive' } });
+  await api('updateInboxMessage', { path, body: { source: 'archive', uid: copy.uid!, deleted: true } });
+  check((await api('expungeInboxFolder', { path: { id, folder: 'archive' }, body: { uids: [copy.uid!] } })).expunged === 1, 'copy not expunged');
+  const moved = await api('moveInboxMessage', { path, body: { source: 'inbox', uid: listed.uid, folder: 'archive' } });
+  await api('deleteInboxMessage', { path, query: { source: 'archive', uid: moved.uid! } });
+  const after = await folders();
+  check(after.inbox.total === before.inbox.total - 1 && after.archive.total === before.archive.total && after.trash.total === before.trash.total + 1, 'folder counts differ after the moves');
+  // A key for the other run-owned address reads that address's Sent mail, and none of this one's.
+  const key = await api('createInboundKey', { body: { name: `${prefix}-other`, addressIds: [otherId], permissions: ['read'] } });
+  defer(`revoke inbound key ${key.id}`, async () => check((await api('revokeInboundKey', { path: { id: key.id } })).revokedAt, 'inbound key not revoked'));
+  const other = createClient({ baseUrl: base.origin, redirect: 'error', headers: { Authorization: `Bearer ${key.secret}` } });
+  check((await api('listInboxMessages', { client: other, path: { id: otherId }, query: { folder: 'sent', limit: 100 } })).data.some(m => m.id === sentId), 'sent mail not filed in Sent');
+  await expectDenial(() => api('listInboxMessages', { client: other, path: { id } }), 404, 'NOT_FOUND');
+  await expectDenial(() => api('getInboxMessage', { client: other, path }), 404, 'NOT_FOUND');
+  await expectDenial(() => api('listInboxFolders', { client: other, path: { id } }), 404, 'NOT_FOUND');
 }
 
 async function prepare() {

@@ -18235,12 +18235,28 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         ok(await request('POST',`${inboxPath}/messages/${claimed.id}/move`,scoped,{source:'inbox',uid:inboxed[0].uid,folder:'archive'}));
         assert.deepEqual(await roles(address.id,claimed.id),['archive']);
         assert.ok(ok(await request('GET',`${inboxPath}/folders`,scoped)).data.some((f:Json)=>f.role==='archive'&&f.total===2));
+        // The live E2E's sequence (scripts/e2e.ts addressInbox): a read change in the change feed, a copy expunged from
+        // Archive, a move and a delete to Trash, with folder counts; another address's key reads none of it.
+        const counts=async()=>Object.fromEntries(ok(await request('GET',`${inboxPath}/folders`,scoped)).data.map((f:Json)=>[f.role,f.total]));
+        const since=ok(await request('GET',`${inboxPath}/folders`,scoped)).state,before=await counts(),url=`${inboxPath}/messages/${m.id}`;
+        const entry=ok(await request('GET',url,scoped)).folders[0];assert.equal(entry.folder,'archive');
+        assert.equal(ok(await request('PATCH',url,scoped,{read:false})).read,false);
+        assert.ok(ok(await request('GET',`${inboxPath}/changes?since=${since}`,scoped)).changed.includes(m.id));
+        const copy=ok(await request('POST',`${url}/copy`,scoped,{source:'archive',uid:entry.uid,folder:'inbox'}));
+        ok(await request('PATCH',url,scoped,{source:'inbox',uid:copy.uid,deleted:true}));
+        assert.equal(ok(await request('POST',`${inboxPath}/folders/inbox/expunge`,scoped,{uids:[copy.uid]})).expunged,1);
+        const moved=ok(await request('POST',`${url}/move`,scoped,{source:'archive',uid:entry.uid,folder:'inbox'}));
+        ok(await request('DELETE',`${url}?source=inbox&uid=${moved.uid}`,scoped));
+        assert.deepEqual(await counts(),{...before,archive:before.archive-1,trash:before.trash+1});
+        const unrelated=ok(await local('POST','/v1/inbound/addresses',{address:'unrelated@'+host}),201);
+        const otherKey=ok(await local('POST','/v1/inbound/keys',{name:'other',addressIds:[unrelated.id],permissions:['read']}),201).secret;
+        for(const path of [`${inboxPath}/messages`,url,`${inboxPath}/folders`])error(await request('GET',path,otherKey),404,'NOT_FOUND');
         error(await local('GET',inboxPath),404);assert.ok(!ok(await local('GET',root)).data.some((b:Json)=>b.id===address.id));
         // A temporary address is an inbox whose lease is expiresAt alone: receiving stops then, and it is kept.
         const lease=ok(await local('POST','/v1/inbound/addresses',{address:'lease@'+host,ttlSeconds:600}),201);
         assert.deepEqual((await db.query('SELECT b.delete_after,s.messages FROM mailboxes b JOIN inbox_state s ON s.inbox_id=b.id WHERE b.id=$1',[lease.id])).rows,[{delete_after:null,messages:0}]);
         // Deleting releases the address through inbox_end: its threads and folders go, its mail stays.
-        for(const id of [address.id,lease.id])ok(await local('DELETE',`/v1/inbound/addresses/${id}`));
+        for(const id of [address.id,lease.id,unrelated.id])ok(await local('DELETE',`/v1/inbound/addresses/${id}`));
         assert.equal((await db.query('SELECT FROM inbox_state WHERE inbox_id=ANY($1::text[])',[[address.id,lease.id]])).rowCount,0);
         assert.equal((await db.query('SELECT FROM mail_messages WHERE id=ANY($1::text[])',[[m.id,claimed.id]])).rowCount,2);
       });
