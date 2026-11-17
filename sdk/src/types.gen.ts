@@ -3632,7 +3632,7 @@ export type InboundOverview = {
 
 export type InboundOverviewRoute = {
     /**
-     * Address ID, route ID, <addressId>:<pattern> for an address pattern, or default:<domainId> for a domain default.
+     * Address ID, route ID, <addressId>:<pattern> for an address pattern, or default:<domainId> (default:<hostId> for a domain’s other receiving hosts) for a host’s default.
      */
     id: string;
     kind: 'address' | 'inbox' | 'route' | 'pattern' | 'catch_all';

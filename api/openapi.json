@@ -12396,7 +12396,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "description": "Address ID, route ID, <addressId>:<pattern> for an address pattern, or default:<domainId> for a domain default."
+            "description": "Address ID, route ID, <addressId>:<pattern> for an address pattern, or default:<domainId> (default:<hostId> for a domain’s other receiving hosts) for a host’s default."
           },
           "kind": {
             "type": "string",
