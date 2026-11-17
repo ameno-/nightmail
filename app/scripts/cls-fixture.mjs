@@ -99,6 +99,7 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
     const agent = new Agent({ keepAlive: true, maxSockets: 128 });
     cleanups.push(() => agent.destroy());
     let serverLog = '';
+    const proxied = new Map(); let proxiedSeq = 0; // DIAG
     const serve = async () => {
       const apiPort = await freePort(), proxyPort = await freePort();
       const apiOrigin = `http://127.0.0.1:${apiPort}`, origin = `http://127.0.0.1:${proxyPort}`;
@@ -114,6 +115,8 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
       }
       const proxy = createHttpServer(async (req, res) => {
         const rawUrl = req.url || '/', q = rawUrl.indexOf('?'), pathname = q === -1 ? rawUrl : rawUrl.slice(0, q);
+        const diagId = ++proxiedSeq, diag = { port: proxyPort, url: rawUrl, at: Date.now(), st: 'in' }; proxied.set(diagId, diag); res.once('close', () => proxied.delete(diagId)); res.once('finish', () => proxied.delete(diagId));
+        res.diag = diag;
         const sleep = ms => new Promise(done => { const t = setTimeout(done, ms); res.once('close', () => { clearTimeout(t); done(); }); });
         if (pathname.startsWith('/fonts/')) {
           if (fontDelay > 0) { await sleep(fontDelay); if (res.destroyed || res.writableEnded) return; }
@@ -151,16 +154,19 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
             });
             assetCache.set(key, entry);
           }
+          res.diag.st = 'asset-wait';
           const cached = await entry;
           if (res.destroyed || res.writableEnded) return;
           if (cached) { res.writeHead(cached.status, cached.headers); res.end(req.method === 'HEAD' ? undefined : cached.body); return; }
         }
-        if (pathname.startsWith('/v1/') && delay) { await sleep(delay(rawUrl)); if (res.destroyed || res.writableEnded) return; }
+        if (pathname.startsWith('/v1/') && delay) { res.diag.st = 'sleep'; await sleep(delay(rawUrl)); if (res.destroyed || res.writableEnded) return; }
         // A kept-alive socket the API closed for idling (Node's 5 s keepAliveTimeout) just as it was reused resets
         // before any response: a GET or HEAD has no body to lose, so it goes again once on a fresh socket. Without this
         // the page saw an empty response (ERR_EMPTY_RESPONSE), now and then, on whichever load drew that socket.
         const forward = (retry) => {
+          res.diag.st = retry ? 'upstream' : 'upstream-retry';
           const up = httpRequest({ hostname: '127.0.0.1', port: apiPort, method: req.method, path: rawUrl, headers: req.headers, agent }, upRes => {
+            res.diag.st = 'piping ' + upRes.statusCode;
             res.writeHead(upRes.statusCode ?? 502, upRes.headers);
             if (req.method === 'HEAD') { upRes.resume(); res.end(); return; }
             upRes.pipe(res);
@@ -206,7 +212,8 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
       };
       return (sessions[key] = { cookie, api: call });
     }
-    return { origin, origins, apiOrigin, db, signIn, sessions, stop, serverLog: () => serverLog };
+    const proxyPending = () => [...proxied.values()].map(d => `${d.port}${d.url} ${d.st} ${Date.now() - d.at}ms`);
+    return { origin, origins, apiOrigin, db, signIn, sessions, stop, serverLog: () => serverLog, proxyPending, agentState: () => Object.fromEntries(Object.entries(agent.sockets).map(([k, v]) => [k, v.length]).concat(Object.entries(agent.requests).map(([k, v]) => ['queued ' + k, v.length]))) };
   } catch (error) { await stop(); throw error; }
 }
 
