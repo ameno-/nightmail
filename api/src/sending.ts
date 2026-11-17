@@ -33,7 +33,7 @@ import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_AT
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { headerPrefix, requestHeader } from './brand.js';
-import { canonical, idempotencyKey, idempotent, IdempotencyHeaders, idempotentRequest, replay, requestHash, validIdempotencyKey, type ClaimState, type IdempotentRequest } from './idempotency.js';
+import { canonical, idempotencyKey, idempotencyLock, idempotent, IdempotencyHeaders, idempotentRequest, replay, requestHash, validIdempotencyKey, type ClaimState, type IdempotentRequest } from './idempotency.js';
 import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, registerPreviewImages, renderPreview } from './preview-images.js';
 
 type HtmlParser = typeof import('parse5').parse;
@@ -857,7 +857,7 @@ function checkSender(runtime: Runtime, a: Actor, state: AdmissionState, mail: Se
 // Auth middleware calls this only for ordinary bearer keys, after the request size gate.
 // Malformed inputs, mailbox tracking and provider-rendered templates keep their normal
 // authenticated handler (including error ordering). No external I/O before admission.
-export async function tryAtomicKeyAdmission(c:Ctx,credential:SQL) {
+export async function tryAtomicKeyAdmission(c:Ctx,credentialCtes:(charge?:SQL)=>SQL) {
   if(!/^application\/json(?:\s*;|$)/i.test(c.req.header('content-type')??''))return;
   await boundRequestBody(c);
   const body=await c.req.json().catch(()=>undefined), batch=c.req.path==='/v1/emails/batch';
@@ -867,14 +867,17 @@ export async function tryAtomicKeyAdmission(c:Ctx,credential:SQL) {
   if(('replyAddressId' in input && input.replyAddressId)||('replyMailboxId' in input && input.replyMailboxId)||mails.some(m=>m.template || m.attachments.some(a=>a.includes('\0'))))return;
   const key=c.req.header('Idempotency-Key');if(key!==undefined && !validIdempotencyKey(key))return;
   if(batch && mails.reduce((n,m)=>n+(m.html?.length??0)+(m.text?.length??0),0)>2*1024*1024)return;
-  // The statement authenticates the key: charge its budget and check its permission before any admission answer.
-  const authorize=(k:Principal):Actor=>{checkBudget(c,k.used,k.max_requests);const a:Actor={keyId:k.id,workspaceId:k.workspace_id,permissions:k.permissions,domains:k.domains,credential:'apiKey'};c.set('actor',a);return actor(c,'send');};
+  // The statement authenticates the key and answers 401, 429 and 403 before any admission answer. A duplicate of a
+  // request still holding its Idempotency-Key is refused before it waits on the key's budget row, uncharged.
+  const credential=credentialCtes(key===undefined?undefined:sql`NOT (credential.permissions ?| ARRAY['manage','send']) OR ${idempotencyLock(sql`credential.workspace_id`,sql`credential.id`,c.req.path,key)}`);
+  const authorize=(k:Principal):Actor=>{if(k.used!==null)checkBudget(c,k.used,k.max_requests);const a:Actor={keyId:k.id,workspaceId:k.workspace_id,permissions:k.permissions,domains:k.domains,credential:'apiKey'};c.set('actor',a);return actor(c,'send');};
   return c.json(await atomicAdmission({runtime:c.env,path:c.req.path,key},input,{credential,authorize}),202);
 }
 /** A send request without the Hono context: internal senders (sendSystemEmail) build one directly. */
 type SendCall = IdempotentRequest & { runtime: Runtime };
 const sendCall = (c: Ctx): SendCall => ({ runtime: c.env, ...idempotentRequest(c) });
-type Principal = { id:string;workspace_id:string;permissions:Actor['permissions'];domains:string[];used:number;max_requests:number };
+// used is null for an uncharged duplicate of a request that still holds its key.
+type Principal = { id:string;workspace_id:string;permissions:Actor['permissions'];domains:string[];used:number|null;max_requests:number };
 
 async function atomicAdmission(call:SendCall,input:SendRequest|{emails:SendRequest[]},identity:{credential:SQL;authorize:(key:Principal)=>Actor}|{actor:Actor},screenChecked=false):Promise<{id:string;status:'queued';simulated:boolean}|{data:{id:string;status:'queued';simulated:boolean}[]}> {
   const runtime=call.runtime,batch='emails' in input,mails=batch?input.emails:[input],key=call.key;
@@ -918,10 +921,10 @@ async function atomicAdmission(call:SendCall,input:SendRequest|{emails:SendReque
     AND CASE WHEN k.domains='[]'::jsonb THEN ${sharedAttachmentAccess(uploader)} ELSE ${domainAttachmentAccess(uploader, sql`k.domains`)} END
   ) END` : requestedAssets;
   type State=AdmissionState & {allowed:boolean;invalidMime?:boolean;bulk?:BulkFacts};
-  const principal='credential' in identity?sql`SELECT k.*,b.used FROM credential k,budget b`:sql`SELECT ${identity.actor.keyId}::text AS id,${identity.actor.workspaceId}::text AS workspace_id,
+  const principal='credential' in identity?sql`SELECT k.*,b.used FROM credential k LEFT JOIN budget b ON true`:sql`SELECT ${identity.actor.keyId}::text AS id,${identity.actor.workspaceId}::text AS workspace_id,
     ${JSON.stringify(identity.actor.permissions)}::jsonb AS permissions,${JSON.stringify(identity.actor.domains)}::jsonb AS domains,0 AS used,0 AS max_requests`;
   const {rows:[result]}=await runtime.db.execute<Principal & {s:State|ClaimState|null}>(sql`WITH ${'credential' in identity?sql`${identity.credential},`:sql``} state AS MATERIALIZED (
-    SELECT k.*, CASE WHEN k.used<=k.max_requests AND k.permissions ?| ARRAY['manage','send'] THEN
+    SELECT k.*, CASE WHEN k.used IS NULL THEN jsonb_build_object('previous',NULL,'busy',true) WHEN k.used<=k.max_requests AND k.permissions ?| ARRAY['manage','send'] THEN
       key_admission_decision(k.workspace_id,k.id,k.domains,${call.path},${key??null},${hash},${JSON.stringify(receipt)}::jsonb,${JSON.stringify(wanted)}::jsonb,${admissibleAssets},
         ${sim},${cost},${marketing},${caps.firstWeek},${caps.secondWeek},${caps.mature},${cfg.dispatch.dailyHeadroomPercent},${regional},${!!cfg.trustedPool},${!!cfg.requireDmarcForBulk},${!prepError && !oversize.some(Boolean)},${platformPolicy(cfg)}::jsonb,
         CASE WHEN k.workspace_id IS NOT DISTINCT FROM ${cfg.platformDomainWorkspace??null}::text THEN 0 ELSE ${billable}::int END) END s FROM (${principal}) k

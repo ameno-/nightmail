@@ -1,29 +1,35 @@
 -- One Idempotency-Key protocol on sending_idempotency (src/idempotency.ts). Every caller claims a key here: the
 -- create middleware, idempotent() (campaigns, uploads, mailbox and thread sends, self-hosted and template sends) and
 -- the one-statement direct admission below. A concurrent duplicate no longer waits on the first request's unique
--- insert: while that request's transaction holds the key, the duplicate gets 409 IDEMPOTENCY_IN_PROGRESS at once.
+-- insert: while that request holds the key, the duplicate gets 409 IDEMPOTENCY_IN_PROGRESS at once.
 --
+-- The key's try-lock. Transaction-scoped (Hyperdrive pools by transaction) and it never waits, so it cannot join a
+-- lock cycle. A hash collision between two keys only makes one of them answer IN_PROGRESS while the other runs.
+CREATE FUNCTION idempotency_lock(wid text, actor text, route text, idem text) RETURNS boolean LANGUAGE sql VOLATILE AS $$
+  SELECT pg_try_advisory_xact_lock(hashtextextended(jsonb_build_array(wid, actor, route, idem)::text, 71953))
+$$;
+
 -- Returns NULL when this request now owns the key. Otherwise {previous, hash, createdAt} of the committed claim
--- (previous is its stored result, NULL while a multi-step create is still running), or {previous: null, busy: true}
--- while another open transaction holds the key. The try-lock never waits, so it cannot join a lock cycle. A holder
--- that releases its claim between this INSERT and the read leaves the key free: claim it on the second pass.
+-- (previous is its stored result, NULL while a multi-step request is still running), or {previous: null, busy: true}
+-- while another open transaction holds the key. A committed claim is read before the lock, so replays never contend.
+-- Each statement of a volatile function takes a new snapshot: the second pass sees a claim committed after the first
+-- read, and a claim released after it is claimed here.
 CREATE FUNCTION idempotency_claim(wid text, actor text, route text, idem text, body_hash text, receipt jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE AS $$
 DECLARE previous jsonb;
 BEGIN
-  IF NOT pg_try_advisory_xact_lock(hashtextextended(jsonb_build_array(wid, actor, route, idem)::text, 71953)) THEN
-    RETURN jsonb_build_object('previous', NULL, 'busy', true);
-  END IF;
   FOR pass IN 1..2 LOOP
-    INSERT INTO sending_idempotency(workspace_id, actor_key_id, path, request_key, request_hash, result)
-      VALUES (wid, actor, route, idem, body_hash, receipt) ON CONFLICT DO NOTHING;
-    IF FOUND THEN RETURN NULL; END IF;
-    -- A volatile function's next statement takes a new snapshot: it sees the claim the INSERT conflicted with.
     SELECT jsonb_build_object('previous', result, 'hash', request_hash, 'createdAt', created_at) INTO previous
       FROM sending_idempotency WHERE workspace_id = wid AND actor_key_id = actor AND path = route AND request_key = idem;
     IF previous IS NOT NULL THEN RETURN previous; END IF;
+    EXIT WHEN NOT idempotency_lock(wid, actor, route, idem);
+    INSERT INTO sending_idempotency(workspace_id, actor_key_id, path, request_key, request_hash, result)
+      VALUES (wid, actor, route, idem, body_hash, receipt) ON CONFLICT DO NOTHING;
+    IF FOUND THEN RETURN NULL; END IF;
   END LOOP;
-  RETURN jsonb_build_object('previous', NULL, 'busy', true);
+  -- The request's own hash: a Worker from before this migration compares it and answers a retryable 500, never a
+  -- permanent IDEMPOTENCY_CONFLICT that could make a client retry with a new key.
+  RETURN jsonb_build_object('previous', NULL, 'hash', body_hash, 'busy', true);
 END $$;
 
 -- 064's function with its claim replaced by idempotency_claim; the rest is unchanged. key_admission_decision returns

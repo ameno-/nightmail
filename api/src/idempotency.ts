@@ -43,6 +43,8 @@ export const requestHash = (value: unknown) => digest(canonical(value));
 export type IdempotencyScope = { workspaceId: string; actorKeyId: string; path: string; key: string };
 /** What idempotency_claim returns for a key this request did not get. */
 export type ClaimState = { previous: Record<string, unknown> | null; hash?: string; createdAt?: string; busy?: true };
+/** The key's try-lock, for a statement that must refuse a duplicate before it takes any other lock (see tryAtomicKeyAdmission). */
+export const idempotencyLock = (workspaceId: SQL, actorKeyId: SQL, path: string, key: string) => sql`idempotency_lock(${workspaceId}, ${actorKeyId}, ${path}, ${key})`;
 /** The claim, an expression: NULL when this request now owns the key, otherwise its ClaimState. receipt is stored with it. */
 const claimKey = (s: IdempotencyScope, hash: string, receipt?: unknown) =>
   sql`idempotency_claim(${s.workspaceId}, ${s.actorKeyId}, ${s.path}, ${s.key}, ${hash}, ${receipt === undefined ? null : JSON.stringify(receipt)}::jsonb)`;
@@ -56,7 +58,8 @@ async function committed(db: DbExecutor, s: IdempotencyScope): Promise<ClaimStat
   return row ?? { previous: null, busy: true };
 }
 const complete = (db: DbExecutor, s: IdempotencyScope, result: unknown) => db.execute(sql`UPDATE sending_idempotency SET result = ${JSON.stringify(result)}::jsonb WHERE ${where(s)}`);
-const release = (db: DbExecutor, s: IdempotencyScope) => db.execute(sql`DELETE FROM sending_idempotency WHERE ${where(s)}`);
+// Frees a claim that has no result: one whose request was refused or never wrote.
+const release = (db: DbExecutor, s: IdempotencyScope) => db.execute(sql`DELETE FROM sending_idempotency WHERE ${where(s)} AND result IS NULL`);
 
 const inProgress = () => new ApiError(409, 'IDEMPOTENCY_IN_PROGRESS', 'Another request with this Idempotency-Key is still running. Retry with the same key after Retry-After; do not repeat the request with a new key.', undefined, true);
 /** The replay rule. Returns the stored result of a finished request; throws for every other state. */
@@ -73,11 +76,13 @@ export function replay<T>(state: ClaimState, hash: string): T {
 }
 
 /**
- * Runs work in one transaction under the request's key and stores its result with the claim. While that
- * transaction is open a duplicate answers IDEMPOTENCY_IN_PROGRESS; once it commits, the duplicate replays the result.
+ * Runs work in one transaction under the request's key and stores its result with the claim. While the request
+ * holds the key a duplicate answers IDEMPOTENCY_IN_PROGRESS; once it commits, the duplicate replays the result.
  * - receipt: the result is known before the work (preallocated IDs). The claim stores it, and lock takes the
  *   caller's lock in the claim's statement, only for the request that won the key (and alone without a key).
- * - prepare: I/O that must run outside the transaction. A finished request replays before it runs again.
+ * - prepare: I/O that must run outside the transaction (an object upload). Only the request that owns the key runs
+ *   it: the claim commits first, pending, and the transaction stores the result with the write. A failure leaves no
+ *   result, so it frees the key; a commit whose acknowledgement was lost keeps its result and replays.
  * - replayed: rechecks that the caller may still read a replayed result.
  */
 export async function idempotent<T extends Record<string, unknown>>(db: Database, request: IdempotentRequest & { workspaceId: string; actorKeyId: string }, body: unknown, work: (tx: DbExecutor) => Promise<T>,
@@ -88,9 +93,12 @@ export async function idempotent<T extends Record<string, unknown>>(db: Database
   const hash = await requestHash(body);
   const answer = async (tx: DbExecutor, state: ClaimState) => { const result = replay<T>(state, hash); await replayed?.(tx, result); return result; };
   if (prepare) {
-    const state = await committed(db, scope);
-    if (state.previous || state.hash && state.hash !== hash) return answer(db, state);
-    await prepare();
+    const state = await claim(db, scope, hash);
+    if (state) return answer(db, state);
+    try {
+      await prepare();
+      return await db.transaction(async tx => { const result = await work(tx); await complete(tx, scope, result); return result; });
+    } catch (error) { await release(db, scope).catch(() => {}); throw error; }
   }
   return db.transaction(async tx => {
     // With a receipt, the claim and the caller's lock run in one statement.

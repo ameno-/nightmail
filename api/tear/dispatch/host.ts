@@ -376,7 +376,10 @@ const sendBody = (persona: Persona, kind = 'transactional') => ({ from: 'sender@
 async function send(persona: Persona, key?: string, concurrent = false, secret = SECRET) {
   const headers: Record<string, string> = key ? { 'idempotency-key': `${W}-${key}` } : {};
   const one = () => api('POST', '/v1/emails/send', sendBody(persona), headers, secret);
+  // Two at once: the one that finds the other still holding the key answers 409 IDEMPOTENCY_IN_PROGRESS; retried after
+  // both settle, it must replay the other's receipt, so the model still sees one email and two receipts.
   const replies = concurrent ? await Promise.all([one(), one()]) : [await one()];
+  for (const [i, reply] of replies.entries()) if (reply.status === 409 && reply.body?.error?.code === 'IDEMPOTENCY_IN_PROGRESS') replies[i] = await one();
   return replies.map(reply => {
     if (reply.status !== 202) return [reply.status, reply.body?.error?.code ?? null];
     const id = reply.body.id as string;

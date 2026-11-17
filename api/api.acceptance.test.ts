@@ -6095,18 +6095,19 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
   test('a duplicate Idempotency-Key sent while the first send is in flight gets 409 IDEMPOTENCY_IN_PROGRESS at once, then replays the first', async t => {
     const db = await fixtureDatabase(t);
     // The first send claims its key, then waits on its workspace's admission lock, which this connection holds.
-    const whileInFlight = async (wid: string, send: (timeout?: number) => Promise<Reply>) => {
+    const whileInFlight = async (wid: string, send: () => Promise<Reply>) => {
       await db.query('INSERT INTO job_schedule(workspace_id) VALUES($1) ON CONFLICT DO NOTHING', [wid]);
       const lock = await fixtureDatabase(t), holder = (await lock.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
       await lock.query('BEGIN'); await lock.query('SELECT 1 FROM job_schedule WHERE workspace_id=$1 FOR UPDATE', [wid]);
       let first: Promise<Reply> | undefined;
       try {
-        first = send(10_000);
-        for (let i = 0; !(await db.query(`SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query ~* 'sending_idempotency|idempotency_claim|key_admission_decision'`, [holder])).rowCount; i++) {
+        first = send();
+        for (let i = 0; !(await db.query(`SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query ~* 'idempotency|key_admission_decision|api_request_budgets'`, [holder])).rowCount; i++) {
           assert.ok(i < 250, 'The first send never reached the admission lock.'); await new Promise(resolve => setTimeout(resolve, 20));
         }
-        // Before this change the duplicate waited on the first request's unique insert until it committed.
-        const busy = await send(2_000).catch(cause => assert.fail(`The duplicate waited for the first request: ${cause}`));
+        // Before this change the duplicate waited on the first request's unique insert (or its API key's budget row) until it committed.
+        const busy = await Promise.race([send(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('no answer within 2 s')), 2_000))])
+          .catch(cause => assert.fail(`The duplicate waited for the first request: ${cause}`));
         assert.equal(error(busy, 409, 'IDEMPOTENCY_IN_PROGRESS').retryable, true); assert.equal(busy.headers.get('retry-after'), '1');
       } finally { await lock.query('COMMIT'); }
       const queued = ok(await first!, 202);
@@ -6116,8 +6117,9 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     // Self-hosted: idempotent() claims the key and takes the admission lock in one statement.
     const key = await keyFixture(t), selfHosted = mail(), headers = { 'Idempotency-Key': unique('in-flight') };
     const wid = (await db.query('SELECT workspace_id FROM api_keys WHERE id=$1', [key.id])).rows[0].workspace_id;
-    await whileInFlight(wid, timeout => http('POST', '/v1/emails/send', key.secret, selfHosted, headers, timeout));
-    // Hosted: the one-statement admission claims the key in direct_admission_state.
+    await whileInFlight(wid, () => http('POST', '/v1/emails/send', key.secret, selfHosted, headers, 10_000));
+    // Hosted: the one-statement admission claims the key in direct_admission_state, first for a key the API has not
+    // seen yet (it authenticates separately), then for a warm key, whose statement also charges the key's budget.
     const [{ createApp }, { nodeRuntime }, { digest }] = await Promise.all([import('./src/app.js'), import('./src/adapters/node.js'), import('./src/core.js')]);
     const instance = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL, MULTI_TENANT: 'true', ENABLE_LIVE_SES: 'false' }), app = createApp();
     const hosted = unique('ws-in-flight'), region = 'ap-south-2', acct = '123450000456', secret = `nm_${randomUUID().replaceAll('-', '')}${randomUUID().replaceAll('-', '')}`;
@@ -6128,8 +6130,10 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,tenant_state,region,aws_account_id) VALUES($1,$1,'shared','ready','ready',$2,$3)`, [hosted, region, acct]);
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('in-flight.example.invalid',$1,$1,'verified')`, [hosted]);
       await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,$1,'fixture',$2,'fixture','["send"]','[]')`, [hosted, await digest(secret)]);
-      const message = { from: 'orders@in-flight.example.invalid', to: 'customer@example.invalid', subject: 'In flight', text: 'Fixture' }, keyed = { 'Idempotency-Key': 'in-flight-hosted' };
-      await whileInFlight(hosted, timeout => http('POST', '/v1/emails/send', secret, message, keyed, timeout, PUBLIC_ORIGIN, request => app.fetch(request, instance.runtime)));
+      const message = { from: 'orders@in-flight.example.invalid', to: 'customer@example.invalid', subject: 'In flight', text: 'Fixture' };
+      const post = (key: string) => () => http('POST', '/v1/emails/send', secret, message, { 'Idempotency-Key': key }, 10_000, PUBLIC_ORIGIN, request => app.fetch(request, instance.runtime));
+      await whileInFlight(hosted, post('in-flight-cold'));
+      await whileInFlight(hosted, post('in-flight-warm'));
     } finally {
       await instance.close();
       for (const table of ['sending_email_events', 'operation_events', 'sending_emails', 'sending_idempotency', 'api_request_budgets', 'job_schedule', 'sending_stream_depth', 'domain_claims', 'provider_connections', 'api_keys', 'ses_installation_settings']) await db.query(`DELETE FROM ${table} WHERE workspace_id=$1`, [hosted]);
