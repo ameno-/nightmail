@@ -6967,7 +6967,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       let first: Promise<Reply> | undefined;
       try {
         first = send();
-        for (let i = 0; !(await db.query(`SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query ~* 'idempotency|key_admission_decision|send_admission|api_request_budgets'`, [holder])).rowCount; i++) {
+        for (let i = 0; !(await db.query(`SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query ~* 'idempotency|send_admission|api_request_budgets'`, [holder])).rowCount; i++) {
           assert.ok(i < 250, 'The first send never reached the admission lock.'); await new Promise(resolve => setTimeout(resolve, 20));
         }
         // Before this change the duplicate waited on the first request's unique insert (or its API key's budget row) until it committed.
@@ -6983,7 +6983,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     const key = await keyFixture(t), selfHosted = mail(), headers = { 'Idempotency-Key': unique('in-flight') };
     const wid = (await db.query('SELECT workspace_id FROM api_keys WHERE id=$1', [key.id])).rows[0].workspace_id;
     await whileInFlight(wid, () => http('POST', '/v1/emails/send', key.secret, selfHosted, headers, 10_000));
-    // Hosted: the one-statement admission claims the key in direct_admission_state, first for a key the API has not
+    // Hosted: the one-statement admission claims the key in send_admission, first for a key the API has not
     // seen yet (it authenticates separately), then for a warm key, whose statement also charges the key's budget.
     const [{ createApp }, { nodeRuntime }, { digest }] = await Promise.all([import('./src/app.js'), import('./src/adapters/node.js'), import('./src/core.js')]);
     const instance = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL, MULTI_TENANT: 'true', ENABLE_LIVE_SES: 'false' }), app = createApp();
@@ -22718,6 +22718,27 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await send('hosted-campaign-test',3,`/v1/campaigns/${hostedDraft.id}/test`,{to:address()},auth);
       t.diagnostic(`ADMISSION-BUDGETS ${JSON.stringify(budgets)}`);
     });
+  });
+  // Contract step for #361: migration 329 drops the admission the Worker before send_admission called. It runs while
+  // the previous release (already on send_admission) serves, so nothing left in the database may call what it drops.
+  test('send admission contract: 329 drops every signature of the pre-send_admission functions, and nothing calls them',async t=>{
+    const db=await fixtureDatabase(t),migration=await readFile(new URL('./migrations/329_drop_key_admission.sql',import.meta.url),'utf8');
+    const remaining=async()=>(await db.query("SELECT p.oid::regprocedure::text AS f FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname IN ('key_admission_decision','direct_admission_state') ORDER BY 1")).rows.map(r=>r.f);
+    assert.deepEqual(await remaining(),[],'The fixture database applied 329.');
+    // No function, trigger function or view in the migrated schema names them (PL/pgSQL calls are not dependencies Postgres tracks).
+    assert.deepEqual((await db.query(`SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.prosrc ~ '\\m(key_admission_decision|direct_admission_state)\\M'
+      UNION ALL SELECT viewname FROM pg_views WHERE schemaname='public' AND definition ~ '\\m(key_admission_decision|direct_admission_state)\\M'`)).rows,[]);
+    // A database upgraded from the previous release has them (here with an older overload too): 329 drops each one.
+    await db.query('BEGIN');
+    try {
+      await db.query(`CREATE FUNCTION direct_admission_state(text,text,text,text,text,jsonb,jsonb,jsonb,boolean,integer,integer,integer,integer,integer,numeric) RETURNS jsonb LANGUAGE sql AS 'SELECT NULL::jsonb';
+        CREATE FUNCTION key_admission_decision(text,text,jsonb,text,text,text,jsonb,jsonb,jsonb,boolean,integer,integer,integer,integer,integer,numeric,boolean,boolean,boolean,boolean,jsonb,integer) RETURNS jsonb LANGUAGE sql AS 'SELECT direct_admission_state($1,$2,$4,$5,$6,$3,$7,$8,$10,$11,$12,$13,$14,$15,$16)';
+        CREATE FUNCTION key_admission_decision(text,text,jsonb) RETURNS jsonb LANGUAGE sql AS 'SELECT NULL::jsonb'`);
+      assert.equal((await remaining()).length,3);
+      await db.query(migration);
+      assert.deepEqual(await remaining(),[]);
+      await db.query(migration); // Applying it again changes nothing.
+    } finally { await db.query('ROLLBACK'); }
   });
   // Review of #361, round 1: a retried campaign test answered from the draft as it is now (422 after an edit, 409 once
   // archived) instead of replaying the test it already sent.
