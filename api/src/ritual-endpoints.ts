@@ -11,7 +11,7 @@ import { lockMailboxLane } from './mailbox-store.js';
 import { sendFromMailbox } from './mailbox-send.js';
 import { endpointPolicy, DEFAULT_POLICY } from './ritual-retry.js';
 import { endpointCall, endpointPayloads, type EndpointType } from './ritual-schema.js';
-import { loopHeader, loopHeaderNames, productName } from './brand.js';
+import { loopHeader, productName } from './brand.js';
 
 const base = '/v1/endpoints',
   meta = { security, tags: ['Endpoints'] },
@@ -120,9 +120,23 @@ export async function endpointView(runtime: Runtime, w: string, r: EndpointRow):
   return { name: r.name, type: r.type, status, call, target, policy, expiresAt: status === 'pending' || status === 'expired' ? iso(r.expires_at) : null, nextStep, createdAt: iso(r.created_at)! };
 }
 const missingEndpoint = (name: string) => new ApiError(404, 'NOT_FOUND', `No endpoint named ${name}. List them with listEndpoints.`);
-/** The attached rituals that call endpoints.<name>. Their programs (stored once a ritual is attached) resolved the name and checked its type when saved. */
-async function ritualsCalling(tx: DbExecutor, w: string, name: string) {
-  return (await tx.execute<{ key: string }>(sql`SELECT r.key FROM mail_ritual_configs c, jsonb_each(c.programs->'rituals') r WHERE c.workspace_id=${w} AND r.value->'refs' ? ${'endpoint:' + name} ORDER BY r.key`)).rows.map(r => r.key);
+/**
+ * Refuses a change that would leave an attached ritual calling endpoints.<name> with nothing behind it, or with the
+ * wrong payload: deleting the endpoint, renaming it (for a keyed webhook, also removing its key) or switching its type.
+ * A delete is also refused while a route delivers to it. Both APIs that change endpoints, /v1/endpoints and
+ * /v1/inbound/webhooks, check through this. The caller holds the address lane, which ritual and route saves take too.
+ */
+export async function assertEndpointUnused(tx: DbExecutor, w: string, endpoint: { name: string | null; hookId: string }, change: 'delete' | 'rename' | 'switch', field = change === 'switch' ? 'type' : 'name') {
+  // Attached rituals' programs resolved endpoints.<name> and checked its type when they were saved.
+  const callers = endpoint.name === null ? [] : (await tx.execute<{ key: string }>(sql`SELECT r.key FROM mail_ritual_configs c, jsonb_each(c.programs->'rituals') r
+    WHERE c.workspace_id=${w} AND r.value->'refs' ? ${'endpoint:' + endpoint.name} ORDER BY r.key`)).rows.map(r => r.key);
+  if (callers.length) {
+    const one = callers.length === 1, them = one ? 'ritual' : 'rituals';
+    throw new ApiError(409, 'ENDPOINT_IN_USE', `Attached ${them} ${callers.join(', ')} ${one ? 'calls' : 'call'} endpoints.${endpoint.name}. ` + (change === 'delete'
+      ? `Remove the call or detach the ${them}, then delete.` : `To ${change} it, create a new endpoint, point the ${them} at it, then delete this one.`), change === 'delete' ? undefined : field);
+  }
+  if (change === 'delete' && (await tx.execute(sql`SELECT FROM mail_routes WHERE workspace_id=${w} AND destinations ? ${endpoint.hookId} LIMIT 1`)).rowCount)
+    throw new ApiError(409, 'ENDPOINT_IN_USE', `A route delivers to ${endpoint.name ?? endpoint.hookId}. Remove it from routes first (deleteInboundWebhook with detach=true does both).`);
 }
 async function findEndpoint(db: DbExecutor, w: string, name: string) {
   const row = (await endpointRows(db, w, { name, limit: 1 }))[0];
@@ -257,11 +271,7 @@ export function registerEndpoints(app: App) {
       if (retype && q.url === undefined) throw new ApiError(422, 'ENDPOINT_URL_REQUIRED', `Switching ${name} to ${retype === 'slack' ? 'Slack' : 'Discord'} needs its ${retype === 'slack' ? 'Slack incoming webhook' : 'Discord webhook'} URL.`, 'url');
       const webhookOnly = (['headers', 'timeoutSeconds', 'retryAttempts'] as const).find(k => q[k] !== undefined);
       if (webhookOnly && row.type !== 'webhook') throw new ApiError(422, 'WEBHOOK_SETTING_ONLY', `${webhookOnly} applies to webhook endpoints only.`, webhookOnly);
-      if (rename || retype) {
-        // Renaming or retyping it would leave an attached ritual calling a name that no longer exists, or with the wrong payload.
-        const callers = await ritualsCalling(tx, w, name);
-        if (callers.length) throw new ApiError(409, 'ENDPOINT_IN_USE', `Attached ${callers.length === 1 ? 'ritual' : 'rituals'} ${callers.join(', ')} ${callers.length === 1 ? 'calls' : 'call'} endpoints.${name}. To ${rename ? 'rename' : 'switch'} it, create a new endpoint, point the ${callers.length === 1 ? 'ritual' : 'rituals'} at it, then delete this one.`, rename ? 'name' : 'type');
-      }
+      if (rename || retype) await assertEndpointUnused(tx, w, { name, hookId: row.hook_id }, rename ? 'rename' : 'switch');
       if (rename) await assertEndpointName(tx, w, rename, row.hook_id);
       if (q.url !== undefined && row.type === 'forward') throw new ApiError(422, 'FORWARD_ADDRESS_FIXED', 'A forward address cannot change. Create a new forward endpoint so its recipient can confirm.', 'url');
       if (row.type === 'webhook') {
@@ -300,9 +310,7 @@ export function registerEndpoints(app: App) {
     await c.env.db.transaction(async tx => {
       await lockMailboxLane(tx, w, 'address');
       const row = await findEndpoint(tx, w, name);
-      const callers = await ritualsCalling(tx, w, name);
-      if (callers.length) throw new ApiError(409, 'ENDPOINT_IN_USE', `Attached ${callers.length === 1 ? 'ritual' : 'rituals'} ${callers.join(', ')} ${callers.length === 1 ? 'calls' : 'call'} endpoints.${name}. Remove the call or detach the ${callers.length === 1 ? 'ritual' : 'rituals'}, then delete.`);
-      if ((await tx.execute(sql`SELECT FROM mail_routes WHERE workspace_id=${w} AND destinations ? ${row.hook_id} LIMIT 1`)).rowCount) throw new ApiError(409, 'ENDPOINT_IN_USE', `A route delivers to ${name}. Remove it from routes first (deleteInboundWebhook with detach=true does both).`);
+      await assertEndpointUnused(tx, w, { name, hookId: row.hook_id }, 'delete');
       await tx.delete(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, w), eq(mailboxWebhooks.id, row.hook_id)));
       await recordAudit(tx, c, { action: 'endpoint.delete', workspaceId: w, target: { type: 'endpoint', id: row.hook_id }, before: { name, type: row.type } });
     });
@@ -423,19 +431,6 @@ function registerForwardPages(app: App) {
   });
 }
 
-/**
- * Ingest records whether a message may be forwarded. A message stored before it did (or before its
- * workspace routed) is judged from its stored columns by the same rules: parsed, not automated,
- * DMARC not failed, no loop or auto-reply header, at most 25 Received headers. Stored headers are
- * complete below 200 (the parser already caps their size), so more than that is never forwarded.
- */
-function forwardSafe(m: typeof mailMessages.$inferSelect) {
-  const stored = (m.verdicts as { forwardSafe?: boolean }).forwardSafe;
-  if (stored !== undefined) return stored;
-  const names = m.headers.map(h => h.name.toLowerCase());
-  return m.status === 'received' && !m.automated && m.verdicts.dmarc !== 'FAIL' && names.length < 200
-    && !names.some(n => [...loopHeaderNames, 'auto-submitted', 'x-autoreply', 'x-autorespond'].includes(n)) && names.filter(n => n === 'received').length <= 25;
-}
 /** Delivers one Slack, Discord or forward call. Retries, rates and fences are applied by ritualDelivery. */
 export async function deliverConnector(runtime: Runtime, w: string, h: ClaimedWebhook) {
   const event = h.payload as { messageId: string; type: string; ritualBody?: unknown; data: { recipients?: string[]; junk?: boolean } },
@@ -450,16 +445,8 @@ export async function deliverConnector(runtime: Runtime, w: string, h: ClaimedWe
   await runtime.db.transaction(async tx => {
     await checkExternal(tx, w, value);
     const [m] = await tx.select().from(mailMessages).where(and(eq(mailMessages.workspaceId, w), eq(mailMessages.id, event.messageId), eq(mailMessages.direction, 'inbound'), retainedMail()));
-    if (
-      !m ||
-      forwardSafe(m) !== true ||
-      m.automated ||
-      m.spam ||
-      m.status !== 'received' ||
-      m.verdicts.virus !== 'PASS' ||
-      m.headers.some(x => ['auto-submitted', ...loopHeaderNames, 'list-id', 'precedence'].includes(x.name.toLowerCase())) ||
-      m.headers.filter(x => x.name.toLowerCase() === 'received').length >= 25
-    )
+    // Whether it may be forwarded never changes after ingest (forwardEligibility); only whether it is still kept does.
+    if (!m || m.verdicts.forwardEligible !== true)
       throw new ApiError(422, 'FORWARD_BLOCKED', 'Automated, junk, unparsed, looped or unscanned mail is never forwarded.');
     const recipient = event.data.recipients![0]!;
     const [box] = await tx.select().from(mailboxes).where(and(eq(mailboxes.workspaceId, w), sql`id=(SELECT mailbox_id FROM mailbox_addresses WHERE workspace_id=${w} AND address IN (${recipient},regexp_replace(${recipient},'[+][^@]*@','@')) ORDER BY (address=${recipient}) DESC LIMIT 1)`));
@@ -468,7 +455,7 @@ export async function deliverConnector(runtime: Runtime, w: string, h: ClaimedWe
     if (!(await tx.execute(sql`INSERT INTO mail_forward_once(workspace_id,message_id,endpoint,grants) VALUES(${w},${m.id},${hook},${JSON.stringify((h.payload as {grants?:string[]}).grants??[])}::jsonb) ON CONFLICT DO NOTHING RETURNING 1`)).rowCount) return;
     await debit(tx, w, 'forward-daily', 1000, 'day');
     await debit(tx, w, 'forward-hourly:' + hook, 200, 'hour');
-    // Any incoming loop token blocks a forward (above), including tokens from other installations.
+    // Any incoming loop token blocks a forward (forwardEligibility), including tokens from other installations.
     const loop = await crypto.subtle.importKey('raw', Buffer.from(runtime.config.encryptionKey, 'hex'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
     const token = Buffer.from(await crypto.subtle.sign('HMAC', loop, new TextEncoder().encode(w + ':' + m.id))).toString('base64url');
     const sender = (((m.verdicts as { ritualVerified?: boolean }).ritualVerified && m.fromName) || m.fromAddress || 'Sender').replaceAll('@', ' at ').replace(/[\x00-\x1f<>\x7f]/g, ' ').slice(0, 100);

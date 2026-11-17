@@ -1508,6 +1508,15 @@ test('mail gateway: SMTP queues dispatchable content with a single database conn
       await new Promise(resolve=>setTimeout(resolve,25));
     }
   });
+  // The Sent copy keeps no blind recipients: Bcc and Resent-Bcc go, folds included, as they do from received mail.
+  await t.test('blind recipients',async()=>{
+    const res=await submit('To: sink@example.invalid\r\nBcc: hidden@example.invalid,\r\n folded@example.invalid\r\nResent-Bcc: resent@example.invalid\r\nSubject: blind\r\n\r\nHello\r\n'),body=await res.json() as Json;
+    assert.equal(res.status,200,JSON.stringify(body));
+    const {rows:[sent]}=await db.query('SELECT raw_key FROM mail_messages WHERE workspace_id=$1 AND sending_email_id=$2',[wid,body.id]);
+    const copy=Buffer.from((await rt.storage.get(sent.raw_key))!.body).toString('latin1');
+    assert.match(copy,/^Subject: blind\r$/m);
+    assert.doesNotMatch(copy,/bcc|hidden@|folded@|resent@/i);
+  });
   const usage=()=>db.query('SELECT messages,bytes FROM inbox_state WHERE inbox_id=$1',[bid]).then(r=>r.rows[0]);
   const before=await usage();
   for(const [quota,value] of [['quota_messages',before.messages],['quota_bytes',Number(before.bytes)+1]] as const){
@@ -1521,7 +1530,7 @@ test('mail gateway: SMTP queues dispatchable content with a single database conn
   assert.equal(((await denied.json()) as Json).error.code,'RECIPIENT_INELIGIBLE');
   await db.query('SELECT inbox_revoke_password($1,$2,$3)',[wid,bid,kid]);
   assert.equal((await submit('Subject: revoked\r\n\r\nNo send\r\n')).status,403);
-  assert.equal((await db.query('SELECT count(*)::int n FROM sending_emails WHERE actor_key_id=$1',[kid])).rows[0].n,3);
+  assert.equal((await db.query('SELECT count(*)::int n FROM sending_emails WHERE actor_key_id=$1',[kid])).rows[0].n,4);
 });
 test('mail gateway: the IMAP/SMTP score cap is the cap admission uses for the stored standing',async t=>{
   const {drizzle}=await import('drizzle-orm/node-postgres'),{protocolScoreCap}=await import('./src/sender-score.js');
@@ -17698,7 +17707,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         for(const {type,payload} of items){if(payload.mid==='spoof')await assert.rejects(run(type,payload),{code:'MAILBOX_STAGING_ENVELOPE_UNKNOWN'});else {await run(type,payload);await run(type,payload);}}
         assert.deepEqual(quarantined,['quarantine/spoof']);assert.equal((await jobs('mailbox.ingest')).length,1);
         await run('mailbox.ingest',{sesMessageId:'orphan'});
-        assert.deepEqual((await db.query("SELECT envelope_to,verdicts FROM mail_messages WHERE workspace_id=$1 AND ses_message_id='orphan'",[wid])).rows,[{envelope_to:['blind@receive.example'],verdicts:{spam:'FAIL',virus:'PASS'}}]);
+        assert.deepEqual((await db.query("SELECT envelope_to,verdicts FROM mail_messages WHERE workspace_id=$1 AND ses_message_id='orphan'",[wid])).rows,[{envelope_to:['blind@receive.example'],verdicts:{spam:'FAIL',virus:'PASS',forwardEligible:false}}]);
         const spoof=items.find(j=>j.payload.mid==='spoof')!;
         for(stageError of ['NoSuchKey','NotFound','PreconditionFailed']) await run(spoof.type,spoof.payload);
         stageError='AccessDenied';for(const item of [j,spoof])await assert.rejects(run(item.type,item.payload),{code:'MAILBOX_STAGING_ACCESS_DENIED',retryable:false});
@@ -18086,6 +18095,21 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await call('PUT',path,{...config,rituals:[{key:'triage',source:'export default function route(email){endpoints["support-hook"]({part:1});endpoints["support-hook"]({part:2})}'}]});
         const multi=await ingest('two-actions',[box.address]);assert.deepEqual((await db.query("SELECT payload->'ritualBody' AS body FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2 ORDER BY body",[hook.id,multi.id])).rows.map(r=>r.body),[{part:1},{part:2}]);await call('PUT',path,{});
       });
+      await t.test('endpoints: a keyed webhook an attached ritual calls is neither deleted nor renamed, through either API', async () => {
+        const made = await call('POST', '/v1/inbound/webhooks', { url: 'https://hooks.example.org/in-use', eventTypes: [], key: 'in-use-hook' }, 201), legacy = '/v1/inbound/webhooks/' + made.id;
+        await call('PUT', '/v1/rituals', { rituals: [{ key: 'caller', source: 'export default function route(email){endpoints["in-use-hook"]({})}' }], attachments: [{ target: box.id, ritual: 'caller' }] });
+        try {
+          for (const [method, path, body, field] of [['DELETE', legacy, undefined, undefined], ['PATCH', legacy, { key: 'in-use-renamed' }, 'key'], ['PATCH', legacy, { key: null }, 'key'],
+            ['DELETE', '/v1/endpoints/in-use-hook', undefined, undefined], ['PATCH', '/v1/endpoints/in-use-hook', { name: 'in-use-renamed' }, 'name']] as const) {
+            const refused = error(await local(method, path, body), 409, 'ENDPOINT_IN_USE');
+            assert.match(refused.message, /^Attached ritual caller calls endpoints\.in-use-hook\./, `${method} ${path}`);
+            assert.equal(refused.field, field, `${method} ${path}`);
+          }
+          assert.equal((await call('PATCH', legacy, { description: 'still called' })).key, 'in-use-hook');
+        } finally { await call('PUT', '/v1/rituals', {}); }
+        assert.equal((await call('PATCH', legacy, { key: 'in-use-renamed' })).key, 'in-use-renamed');
+        await call('DELETE', legacy);
+      });
       await t.test('inbound overview: one read merges addresses, patterns, routes and catch-alls with their rituals and endpoints; dry runs step through each condition', async () => {
         const box2 = await call('POST', '/v1/inbound/addresses', { address: 'overview@receive.example', key: 'overview', displayName: 'Overview desk', aliases: ['ov-alias@receive.example'], rules: ['ov+*@receive.example'] }, 201);
         const only = await route('ov-route@receive.example', [hook.id]), dropped = await route('ov-drop@receive.example', 'drop');
@@ -18412,17 +18436,32 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           assert.equal((await db.query('SELECT FROM mail_forward_once WHERE message_id=$1 AND endpoint=$2',[m.id,hookId])).rowCount,1);
         }finally{await call('PUT','/v1/rituals',{});}
       });
-      await t.test('rituals: mail stored before forward verdicts existed is forwarded when safe and refused when looped',async()=>{
+      await t.test('rituals: one forward rule, recorded at ingest for every message and backfilled for older mail; a forward reads only it',async()=>{
         // tear/delivery witnesses: ingest m1 z, strip m1, rituals forward, ingest m1 b+z, run K m1:F (and the loop variant).
         const {mailboxEventJobs}=await import('./src/mailbox-events.js');
         const hookId=(await db.query("SELECT hook_id FROM mail_endpoints WHERE workspace_id=$1 AND ref='forward:team' AND verified",[wid])).rows[0].hook_id;
-        const first=async(mid:string,extra:string)=>{raw.set(mid,Buffer.from(`From: Agent <a@example.org>\r\n${extra}Subject: Test ${mid}\r\nMessage-ID: <${mid}@example.org>\r\n\r\nHello`));await submit(mid,['late@receive.example'],'Mail');await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);
-          // As stored by a deployment that did not record the verdicts yet.
-          await db.query("UPDATE mail_messages SET verdicts=verdicts-'forwardSafe'-'ritualVerified' WHERE workspace_id=$1 AND ses_message_id=$2",[wid,mid]);};
-        await first('fwd-old','');await first('fwd-old-loop','X-Bane-Loop: v1.1.synthetic\r\n');await first('fwd-new-loop','X-Nightmail-Loop: v1.1.synthetic\r\n');
+        const hops=(n:number)=>'Received: from relay.example.org by mx.example.org\r\n'.repeat(n);
+        // [message, extra headers, forwardable]: the strictest of the three earlier checks (ingest, the stored-column
+        // fallback and the send transaction), so nothing is forwarded that one of them refused.
+        const cases=[['fwd-old','',true],['fwd-old-loop','X-Bane-Loop: v1.1.synthetic\r\n',false],['fwd-new-loop','X-Nightmail-Loop: v1.1.synthetic\r\n',false],
+          ['fwd-list','List-Id: <spring.example.net>\r\n',false],['fwd-precedence','Precedence: first-class\r\n',false],['fwd-hops-24',hops(24),true],['fwd-hops-25',hops(25),false],['fwd-was-refused','',true]] as const;
+        const verdicts=async():Promise<Record<string,Json>>=>(await db.query('SELECT ses_message_id AS mid,verdicts FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=ANY($2)',[wid,cases.map(c=>c[0])])).rows
+          .reduce((all:Record<string,Json>,row:Json)=>({...all,[row.mid]:row.verdicts}),{});
+        for(const [mid,extra] of cases){raw.set(mid,Buffer.from(`From: Agent <a@example.org>\r\n${extra}Subject: Test ${mid}\r\nMessage-ID: <${mid}@example.org>\r\n\r\nHello`));await submit(mid,['late@receive.example'],'Mail');await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);}
+        // Recorded at ingest for every message, though nothing routes this address yet.
+        assert.deepEqual(Object.fromEntries(Object.entries(await verdicts()).map(([mid,v])=>[mid,v.forwardEligible])),Object.fromEntries(cases.map(([mid,,ok])=>[mid,ok])));
+        // As stored by earlier deployments: no verdict, or the earlier ingest's forwardSafe (it let List-Id and 25 hops
+        // through). The backfill (migration 315) applies the same rule, keeps an earlier refusal, and runs twice the same.
+        await db.query("UPDATE mail_messages SET verdicts=verdicts-'forwardEligible'-'ritualVerified' WHERE workspace_id=$1 AND ses_message_id=ANY($2)",[wid,cases.map(c=>c[0])]);
+        await db.query(`UPDATE mail_messages SET verdicts=verdicts||'{"forwardSafe":true}' WHERE workspace_id=$1 AND ses_message_id IN ('fwd-list','fwd-hops-25','fwd-old')`,[wid]);
+        await db.query(`UPDATE mail_messages SET verdicts=verdicts||'{"forwardSafe":false}' WHERE workspace_id=$1 AND ses_message_id='fwd-was-refused'`,[wid]);
+        const backfill=await readFile(new URL('./migrations/315_forward_eligibility.sql',import.meta.url),'utf8');
+        await db.query(backfill);const once=await verdicts();await db.query(backfill);assert.deepEqual(await verdicts(),once);
+        assert.deepEqual(Object.fromEntries(Object.entries(once).map(([mid,v])=>[mid,[v.forwardEligible,'forwardSafe' in v]])),Object.fromEntries(cases.map(([mid,,ok])=>[mid,[ok&&mid!=='fwd-was-refused',false]])));
         await call('PUT','/v1/rituals',{rituals:[{key:'forward',source:'export default function route(email,ctx){endpoints.team() }'}],attachments:[{ritual:'forward',target:box.id}]});
         try{
-          for(const [mid,status,error] of [['fwd-old','delivered',null],['fwd-old-loop','failed','FORWARD_BLOCKED'],['fwd-new-loop','failed','FORWARD_BLOCKED']] as const){
+          for(const [mid,,ok] of cases){
+            const [status,error]=ok&&mid!=='fwd-was-refused'?['delivered',null]:['failed','FORWARD_BLOCKED'];
             await submit(mid,['late@receive.example',box.address],'Mail');await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);
             const m=(await db.query('SELECT id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];
             const d=(await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,m.id])).rows[0];

@@ -5,31 +5,12 @@ import { mailboxes } from './db/mailbox.js';
 import { principal } from './mail-gateway.js';
 import { boundMailBucket, mailKey, withMailObjects } from './mail-objects.js';
 import { mimeIndex } from './mailbox-mime-index.js';
+import { stripBlindRecipients } from './mailbox-mime.js';
 import { sendFromMailbox, resolveAttachments } from './mailbox-send.js';
 import { protocolScoreCap } from './sender-score.js';
 import {savePreview} from './protocol-preview.js';
 
 type Content = { kid: string; content: string; op: 'submit'; from: string; to: string[] };
-/** Preserve raw octets, including the body. Strip folded Bcc header fields only. */
-function scrub(input: Uint8Array) {
-  const bytes = Buffer.from(input),
-    end = bytes.indexOf('\r\n\r\n');
-  if (end < 0) return bytes;
-  const lines = Buffer.from(bytes.subarray(0, end)).toString('latin1').split('\r\n');
-  let skip = false;
-  return Buffer.concat([
-    Buffer.from(
-      lines
-        .filter((l: string) => {
-          if (!/^[ \t]/.test(l)) skip = /^bcc:/i.test(l);
-          return !skip;
-        })
-        .join('\r\n') + '\r\n\r\n',
-      'latin1',
-    ),
-    bytes.subarray(end + 4),
-  ]);
-}
 export async function contentWrite(c: Ctx, p: Content) {
   const rt = c.env;
   const auth = principal(rt, 'smtp', sql`p.id=${p.kid}`);
@@ -40,7 +21,7 @@ export async function contentWrite(c: Ctx, p: Content) {
   if (!who) throw new ApiError(403, 'CREDENTIAL_REVOKED', 'Protocol access denied.');
   const input = Buffer.from(p.content, 'base64');
   if (input.length > SMTP_WIRE_LIMIT) throw new ApiError(413, 'MESSAGE_SIZE', 'Message is too large.');
-  const raw = scrub(input);
+  const scrubbed = stripBlindRecipients(input), raw = Buffer.from(scrubbed.buffer, scrubbed.byteOffset, scrubbed.byteLength);
   const m = await parseInboundMime(raw,'submission');
   if (!m) throw new ApiError(422, 'MIME_LIMIT', 'Message could not be safely parsed.');
   const mid = id('msg'),

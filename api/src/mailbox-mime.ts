@@ -8,13 +8,13 @@ const loadS3Commands = lazyModule(() => import('@aws-sdk/client-s3'));
 const MiB=1024*1024, PREFIX=2*MiB, FIRST_PART=5.25*MiB;
 export const PARSE_LIMIT=6*MiB;
 
-// AWS's receiving-email-notifications-examples shows the SES-added first Received field can end
-// in "for recipient@example.com;". Remove that field (including folds) when not ours. The S3
-// action preserves raw MIME, so also drop top-level Bcc/Resent-Bcc if physically present.
-// Operate on byte offsets: never reserialize MIME, DKIM headers, attachments or the body.
-function workspaceMime(bytes:Uint8Array,region:string,recipients:string[]) {
+// One top-level header field, with its folds: the first 12 characters of its name in lower case, and its text (latin1) on demand.
+type HeaderField = { name: string; size: number; firstLine: () => string; text: () => string };
+// Drops each top-level header field that `drop` picks, working on byte offsets: never reserializes MIME, DKIM headers,
+// attachments or the body. Returns the input itself when nothing is dropped.
+function dropHeaderFields(bytes:Uint8Array,drop:(field:HeaderField)=>boolean) {
   const raw=Buffer.from(bytes.buffer,bytes.byteOffset,bytes.byteLength);
-  let pos=0,kept=0,seenReceived=false;
+  let pos=0,kept=0;
   let copy:Buffer|undefined,written=0;
   while(pos<raw.length) {
     const start=pos;
@@ -22,19 +22,30 @@ function workspaceMime(bytes:Uint8Array,region:string,recipients:string[]) {
     const firstEnd=end<0?raw.length:end;
     pos=end<0?raw.length:end+1;
     while(raw[pos]===32 || raw[pos]===9) { end=raw.indexOf(10,pos); pos=end<0?raw.length:end+1; }
-    const name=raw.toString('latin1',start,Math.min(firstEnd,start+12)).toLowerCase();
-    const maybeBlind=name.startsWith('bcc') || name.startsWith('resent-bcc');
-    let remove=maybeBlind && /^(?:bcc|resent-bcc)[ \t]*:/i.test(raw.toString('latin1',start,firstEnd));
-    if (!seenReceived && name.startsWith('received:')) {
-      seenReceived=true;
-      const field=pos-start<=64*1024 ? raw.toString('latin1',start,pos).replace(/\r?\n[ \t]+/g,' ') : '';
-      const match=/\bby\s+inbound-smtp\.([\w-]+)\.amazonaws\.com\b[^;]*?\sfor\s+([^;]+);/i.exec(field);
-      remove=!field || (match?.[1]===region && !recipients.includes(match[2]!.trim().replace(/^<|>$/g,'').toLowerCase()));
-    }
-    if (remove) { copy??=Buffer.allocUnsafe(raw.length);written+=raw.copy(copy,written,kept,start);kept=pos; }
+    const fieldEnd=pos;
+    const field={ name: raw.toString('latin1',start,Math.min(firstEnd,start+12)).toLowerCase(), size: fieldEnd-start,
+      firstLine: () => raw.toString('latin1',start,firstEnd), text: () => raw.toString('latin1',start,fieldEnd) };
+    if (drop(field)) { copy??=Buffer.allocUnsafe(raw.length);written+=raw.copy(copy,written,kept,start);kept=fieldEnd; }
   }
   if (!copy) return bytes;
   return copy.subarray(0,written+raw.copy(copy,written,kept));
+}
+const blindField=(f:HeaderField)=>(f.name.startsWith('bcc') || f.name.startsWith('resent-bcc')) && /^(?:bcc|resent-bcc)[ \t]*:/i.test(f.firstLine());
+/** Removes top-level Bcc and Resent-Bcc fields, so blind recipients are never stored: received mail (workspaceMime) and an SMTP submission's Sent copy (protocol-content.ts) both strip them here. */
+export const stripBlindRecipients=(bytes:Uint8Array)=>dropHeaderFields(bytes,blindField);
+
+// AWS's receiving-email-notifications-examples shows the SES-added first Received field can end
+// in "for recipient@example.com;". Remove that field (including folds) when not ours. The S3
+// action preserves raw MIME, so also drop top-level Bcc/Resent-Bcc if physically present.
+function workspaceMime(bytes:Uint8Array,region:string,recipients:string[]) {
+  let seenReceived=false;
+  return dropHeaderFields(bytes,f=>{
+    if (seenReceived || !f.name.startsWith('received:')) return blindField(f);
+    seenReceived=true;
+    const field=f.size<=64*1024 ? f.text().replace(/\r?\n[ \t]+/g,' ') : '';
+    const match=/\bby\s+inbound-smtp\.([\w-]+)\.amazonaws\.com\b[^;]*?\sfor\s+([^;]+);/i.exec(field);
+    return !field || (match?.[1]===region && !recipients.includes(match[2]!.trim().replace(/^<|>$/g,'').toLowerCase()));
+  });
 }
 
 /** Inspect the exact bytes being copied. CopySourceIfMatch prevents substituting another object after inspection. */

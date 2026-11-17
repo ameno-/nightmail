@@ -8,7 +8,7 @@ const cidr = "10.68.0.0/16";
 
 type Stage = { account: string; cloudflareAccountId: string; origin: string };
 
-/** The stage's own API origin. The gateway binary falls back to production, so never leave it unset. */
+/** The stage's own API origin, which the gateway requires (it never falls back to another installation). */
 function apiOrigin(stage: "dev" | "production", origin: string) {
   const url = URL.canParse(origin) ? new URL(origin) : undefined;
   if (!url || url.protocol !== "https:" || url.origin !== origin || (stage === "production") !== (url.hostname === "bane.mx")) {
