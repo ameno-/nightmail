@@ -1,8 +1,9 @@
 import { sql } from 'drizzle-orm';
-import { ApiError, digest, id, isoTime, randomSecret, type Ctx } from './core.js';
+import { ApiError, digest, id, isoTime, randomSecret, type Actor, type Ctx, type DbExecutor } from './core.js';
 import { mailboxKeys, type MailboxPermission } from './db/mailbox.js';
 import { recordAudit } from './audit.js';
-import { ownReceiving } from './rituals.js';
+import { approvalMadeKey, inactiveKey } from './auth.js';
+import { holdReceiving, ownReceiving } from './rituals.js';
 import { secretPrefixes, shownPrefix } from './brand.js';
 
 // An API key limited to receiving addresses or to one agent inbox. These keep their own table and bearer prefix
@@ -61,6 +62,54 @@ export async function createLimitedKey(c: Ctx, workspaceId: string, name: string
   });
   c.header('Cache-Control', 'no-store');
   return { row, secret };
+}
+
+export type LimitedChange = { name?: string; access?: { addressIds?: string[] | null; addAddressIds?: string[]; removeAddressIds?: string[]; mail?: MailboxPermission[] }; permissions?: unknown; domains?: unknown };
+/**
+ * updateApiKey for a limited key: its name, its addresses and its mail, in place, under the rules createLimitedKey
+ * applies to a new key, so a change never gives a key what a new one couldn't have. The caller has checked it may
+ * administer keys and isn't this key. The change applies at once: every request with the key reads its row
+ * (authorizeInboxKey), a long poll reads it again each second (auth.ts longPoll), and dispatch checks the sending
+ * address against it (dispatcher.ts), so mail queued from a removed address is not sent.
+ */
+export async function updateLimitedKey(tx: DbExecutor, c: Ctx, a: Actor, keyId: string, change: LimitedChange) {
+  if (change.permissions || change.domains) throw new ApiError(422, 'VALIDATION_FAILED', 'A key for addresses or an inbox takes its permissions in access.mail and has no sender domains.', change.permissions ? 'permissions' : 'domains');
+  const access = change.access ?? {}, add = access.addAddressIds ?? [], remove = access.removeAddressIds ?? [];
+  if (access.addressIds !== undefined && (add.length || remove.length)) throw new ApiError(422, 'VALIDATION_FAILED', 'Replace the addresses with addressIds, or add and remove some; not both.', 'access.addressIds');
+  if (add.some(id => remove.includes(id))) throw new ApiError(422, 'VALIDATION_FAILED', 'An address can\'t be both added and removed.', 'access.removeAddressIds');
+  // An approval (or a key it made) changes a limited key as it creates one: with receiving consent, holding the approval
+  // until commit, before the key row (the order its removal takes them in).
+  await holdReceiving(tx, c);
+  const [row] = await tx.select().from(mailboxKeys).where(sql`${mailboxKeys.workspaceId} = ${a.workspaceId} AND ${mailboxKeys.id} = ${keyId}`).for('update');
+  if (!row) throw new ApiError(404, 'NOT_FOUND', 'API key was not found.');
+  if (row.revokedAt || row.expiresAt && Date.parse(row.expiresAt) <= Date.now()) throw inactiveKey();
+  await approvalMadeKey(tx, a, 'key', row.id);
+  const inbox = row.inboxId !== null, mail = access.mail ? [...new Set(access.mail)] : row.permissions;
+  if (inbox && (access.addressIds !== undefined || add.length || remove.length)) throw new ApiError(422, 'VALIDATION_FAILED', 'A key for one inbox keeps its inbox. Change its mail, or create a key for addresses.', 'access.addressIds');
+  if (inbox && mail.includes('create')) throw new ApiError(422, 'VALIDATION_FAILED', 'A key for one inbox can read, send and modify; create needs a key for addresses.', 'access.mail');
+  let ids = row.mailboxIds;
+  if (access.addressIds !== undefined) ids = access.addressIds && [...new Set(access.addressIds)];
+  else if (ids === null && remove.length) throw new ApiError(422, 'ADDRESS_SCOPE_REQUIRED', 'This key covers every address. Set addressIds to the ones it keeps.', 'access.removeAddressIds');
+  // A key for every address already has the ones added.
+  else if (ids !== null) ids = [...new Set([...ids, ...add])].filter(id => !remove.includes(id));
+  if (ids && ids.length > 500) throw new ApiError(422, 'VALIDATION_FAILED', 'A key covers at most 500 addresses. Use a key for every address instead.', access.addressIds ? 'access.addressIds' : 'access.addAddressIds');
+  if (!inbox && (mail.includes('create') && ids === null || ids?.length === 0 && !mail.includes('create')))
+    throw new ApiError(422, 'ADDRESS_SCOPE_REQUIRED', 'Provisioning keys need an explicit addressIds scope.', 'access.addressIds');
+  // Every address it gains is one of this workspace's, held until commit like createLimitedKey's.
+  const gained = ids?.filter(id => !row.mailboxIds?.includes(id)) ?? [];
+  if (gained.length) {
+    const found = (await tx.execute<{ id: string }>(sql`SELECT id FROM mailboxes WHERE workspace_id = ${a.workspaceId} AND id = ANY(${sql.param(gained)}::text[]) FOR SHARE`)).rows;
+    if (found.length !== gained.length) throw new ApiError(422, 'MAILBOX_NOT_FOUND', 'Every ID must identify an existing receiving address.', access.addressIds ? 'access.addressIds' : 'access.addAddressIds');
+  }
+  const name = change.name ?? row.name;
+  if (name === row.name && JSON.stringify(ids) === JSON.stringify(row.mailboxIds) && JSON.stringify(mail) === JSON.stringify(row.permissions)) return row;
+  const [updated] = await tx.update(mailboxKeys).set({ name, mailboxIds: ids, permissions: mail }).where(sql`${mailboxKeys.id} = ${row.id}`).returning();
+  // Before and after are cut to 20 addresses in the trail; what changed is listed on its own.
+  const removed = ids === null ? [] : row.mailboxIds?.filter(id => !ids.includes(id)) ?? [];
+  await recordAudit(tx, c, { action: 'api_key.update', workspaceId: a.workspaceId, target: { type: 'api_key', id: row.id },
+    before: { name: row.name, access: limitedAccess(row) }, after: { name, access: limitedAccess(updated!) },
+    details: { ...gained.length && row.mailboxIds ? { addedAddressIds: gained } : {}, ...removed.length ? { removedAddressIds: removed } : {} } });
+  return updated!;
 }
 
 /** Revokes a limited key. A repeated revoke keeps the first time and writes no second audit row. */

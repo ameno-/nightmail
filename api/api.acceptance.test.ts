@@ -3670,6 +3670,43 @@ describe('Hosted MCP OAuth and tools', () => {
     const ended = (await agents('?includeInactive=true')).find(a => a.id === agentId);
     assert.deepEqual([ended?.status, ended?.tokens.map((x: Json) => x.id === minted.id && x.revokedAt !== null)], ['revoked', [true]]);
   });
+  test('updateApiKey over MCP: an approval changes only the keys it created, which stay tied to it, and a temporary token changes none', async t => {
+    const db = await fixtureDatabase(t);
+    const issued = await oauthGrant(t, db), agentId = `mcp_${issued.consentId}`;
+    const box = async () => { const made = ok(await http('POST', '/v1/inboxes', MANAGER, { type: 'sandbox' }), 201); cleanup(t, async () => { await http('DELETE', `/v1/inboxes/${made.id}`, MANAGER); }); return made; };
+    const [first, second] = [await box(), await box()];
+    const revokeLater = (id: string) => cleanup(t, async () => { await http('POST', `/v1/api-keys/${id}/revoke`, MANAGER); });
+    // The approval's own key: it adds an address, a retry with the same idempotency key replays, and the secret reads it.
+    const own = await callTool(issued.token, 'createApiKey', { confirm: true, body: { name: 'MCP support agent', access: { type: 'addresses', addressIds: [first.id] } } }, 201);
+    secrets.add(own.secret); revokeLater(own.id);
+    const widen = { confirm: true, keyId: own.id, idempotencyKey: unique('mcp-widen'), body: { access: { addAddressIds: [second.id] } } };
+    const widened = await callTool(issued.token, 'updateApiKey', widen);
+    assert.deepEqual(widened.access.addressIds, [first.id, second.id]);
+    assert.deepEqual(await callTool(issued.token, 'updateApiKey', widen), widened);
+    ok(await http('GET', `/v1/inboxes/${second.id}/messages`, own.secret));
+    // Not a key someone else made, over MCP or with a key the approval made; and a key never changes itself.
+    const theirs = ok(await http('POST', '/v1/api-keys', MANAGER, { name: 'Dashboard agent', access: { type: 'addresses', addressIds: [first.id] } }), 201);
+    secrets.add(theirs.secret); revokeLater(theirs.id);
+    const refused = await rpc(issued.token, 'tools/call', { name: 'updateApiKey', arguments: { confirm: true, keyId: theirs.id, body: { access: { addAddressIds: [second.id] } } } });
+    assert.equal(refused.structuredContent?.error?.code, 'PERMISSION_DENIED', redact(refused));
+    const grantKey = await callTool(issued.token, 'createApiKey', { confirm: true, body: { name: 'MCP manager', permissions: ['manage'] } }, 201);
+    secrets.add(grantKey.secret); revokeLater(grantKey.id);
+    error(await http('PATCH', `/v1/api-keys/${theirs.id}`, grantKey.secret, { access: { addAddressIds: [second.id] } }), 403, 'PERMISSION_DENIED');
+    error(await http('PATCH', `/v1/api-keys/${grantKey.id}`, grantKey.secret, { name: 'Itself' }), 403, 'PERMISSION_DENIED');
+    assert.equal(ok(await http('PATCH', `/v1/api-keys/${own.id}`, grantKey.secret, { name: 'Renamed by its approval' })).name, 'Renamed by its approval');
+    assert.deepEqual((await db.query('SELECT mailbox_ids FROM mailbox_keys WHERE id = $1', [theirs.id])).rows[0].mailbox_ids, [first.id]);
+    assert.deepEqual((await db.query("SELECT actor_type FROM audit_events WHERE action = 'api_key.update' AND target_id = $1 ORDER BY id", [own.id])).rows.map(r => r.actor_type), ['mcp_grant', 'api_key']);
+    // A temporary agent token changes no key, and neither catalog offers it the tool.
+    const agent = await callTool(issued.token, 'createAgentToken', { body: { permissions: ['read', 'manage'], expiresInSeconds: 120, domains: [], purpose: 'updateApiKey fixture' }, confirm: true }, 201);
+    secrets.add(agent.token);
+    error(await http('PATCH', `/v1/api-keys/${own.id}`, agent.token, { access: { removeAddressIds: [second.id] } }), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
+    const offered = async (bearer: string) => (await rpc(bearer, 'tools/list')).tools.some((tool: Json) => tool.name === 'updateApiKey');
+    assert.deepEqual([await offered(issued.token), await offered(grantKey.secret), await offered(agent.token)], [true, true, false]);
+    // The change kept the key tied to its approval: revoking the approval ends it, and an ended key isn't changed.
+    assert.equal(ok(await http('POST', `/v1/agents/${agentId}/revoke`, MANAGER)).scope, 'agent');
+    error(await http('GET', `/v1/inboxes/${first.id}/messages`, own.secret), 401, 'AUTH_INVALID');
+    error(await http('PATCH', `/v1/api-keys/${own.id}`, MANAGER, { name: 'After the approval' }), 409, 'KEY_INACTIVE');
+  });
 
   test('R1: grant edits preserve the human attachment chain across revocation', async t => {
     await simulatedSesFixture(t,async({db,local,request})=>{
@@ -18446,6 +18483,105 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       error(await local('POST', '/v1/api-keys', { name: 'Foreign', access: { type: 'addresses', addressIds: [foreign.id] } }), 422, 'MAILBOX_NOT_FOUND');
       error(await read(as('every'), foreign.id), 404, 'NOT_FOUND'); error(await read(foreign.secret, a.id), 404, 'NOT_FOUND');
       assert.equal((await db.query('SELECT revoked_at FROM mailbox_keys WHERE id = $1', [foreign.key])).rows[0].revoked_at, null);
+    });
+  });
+  test('API keys: updateApiKey changes a key in place with its secret, at once, and never past what createApiKey allows', async t => {
+    await simulatedSesFixture(t, async ({ db, runtime, local, request }) => {
+      const wid = runtime.config.workspaceId, hex = () => randomUUID().replaceAll('-', '');
+      runtime.mailR2 = { write: true, name: 'fake', bucket: { put: async () => {} } } as unknown as typeof runtime.mailR2;
+      const box = async () => ok(await local('POST', '/v1/inboxes', { type: 'sandbox' }), 201);
+      const [first, added] = [await box(), await box()];
+      const deliver = (id: string, subject: string) => local('POST', `/v1/inboxes/${id}/simulate`, { from: 'qa@fixture.invalid', subject, text: subject });
+      ok(await deliver(added.id, 'Before the key had it'), 202);
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Support agent', access: { type: 'addresses', addressIds: [first.id], mail: ['read'] } }), 201);
+      const messages = (id: string, query = '') => request('GET', `/v1/inboxes/${id}/messages${query}`, key.secret, undefined, {}, 15_000);
+      const change = (id: string, body: Json, headers: Record<string, string> = {}) => local('PATCH', `/v1/api-keys/${id}`, body, 'live', headers);
+      const access = (addressIds: string[] | null, mail = ['read']) => ({ type: 'addresses', addressIds, inboxId: null, mail });
+      error(await messages(added.id), 404, 'NOT_FOUND');
+
+      // Adding an address: the same secret reads its mail at once. A retry with the same Idempotency-Key replays the
+      // result; the key with another body conflicts; adding it again without one changes nothing and records nothing.
+      const widen = { access: { addAddressIds: [added.id] } }, retry = { 'Idempotency-Key': unique('widen') };
+      const widened = ok(await change(key.id, widen, retry));
+      assert.deepEqual([widened.id, widened.prefix, widened.access, widened.permissions], [key.id, key.prefix, access([first.id, added.id]), []]);
+      assert.deepEqual(ok(await messages(added.id)).data.map((m: Json) => m.subject), ['Before the key had it']);
+      assert.deepEqual(ok(await change(key.id, widen, retry)), widened);
+      error(await change(key.id, { access: { addAddressIds: [first.id] } }, retry), 409, 'IDEMPOTENCY_CONFLICT');
+      assert.deepEqual(ok(await change(key.id, widen)).access, widened.access);
+      const audits = async () => (await db.query("SELECT actor_type, actor_id, summary FROM audit_events WHERE workspace_id = $1 AND action = 'api_key.update' AND target_id = $2 ORDER BY at, id", [wid, key.id])).rows;
+      const [recorded] = await audits();
+      assert.deepEqual([recorded.actor_type, recorded.actor_id, recorded.summary.before.access.addressIds, recorded.summary.after.access.addressIds, recorded.summary.addedAddressIds],
+        ['member', manager!.userId, [first.id], [first.id, added.id], [added.id]]);
+      assert.equal((await audits()).length, 1);
+
+      // Removing it is refused at once, to a poll already waiting on it too: the poll ends without reading mail that
+      // arrives after the change, and the next request is refused.
+      const cursor = ok(await messages(added.id)).cursor, started = Date.now();
+      const waiting = messages(added.id, `?after=${cursor}&wait=10`);
+      await new Promise(resolve => setTimeout(resolve, 200));
+      assert.deepEqual(ok(await change(key.id, { access: { removeAddressIds: [added.id] } })).access, access([first.id]));
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      ok(await deliver(added.id, 'After the key lost it'), 202);
+      assert.deepEqual(ok(await waiting).data, []);
+      assert.ok(Date.now() - started < 5_000, 'The poll ends when the key changes, not when it times out.');
+      error(await messages(added.id), 404, 'NOT_FOUND');
+      ok(await messages(first.id));
+      assert.deepEqual((await audits()).at(-1).summary.removedAddressIds, [added.id]);
+
+      // Every address must be one of this workspace's; another workspace's keys aren't found here.
+      const other = unique('keys-ws'), otherDomain = unique('mdom'), foreign = { box: `mbx_${hex()}`, key: `mbk_${hex()}` };
+      await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [other]);
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')", [otherDomain, other, `${other}.example`, REGION]);
+      await db.query('INSERT INTO mailboxes(id,workspace_id,domain_id,address) VALUES($1,$2,$3,$4)', [foreign.box, other, otherDomain, `team@${other}.example`]);
+      await db.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) VALUES($1,$2,'foreign',$3,'nm_mbx_000000','[]','["read"]')`, [foreign.key, other, hex()]);
+      for (const body of [{ access: { addAddressIds: [foreign.box] } }, { access: { addressIds: [first.id, foreign.box] } }]) error(await change(key.id, body), 422, 'MAILBOX_NOT_FOUND');
+      error(await change(foreign.key, { access: { addAddressIds: [first.id] } }), 404, 'NOT_FOUND');
+      assert.deepEqual((await db.query('SELECT mailbox_ids FROM mailbox_keys WHERE id = $1', [key.id])).rows[0].mailbox_ids, [first.id]);
+
+      // A key's type never changes, nor an inbox key's inbox; a key for every address names the ones it keeps.
+      error(await change(key.id, { permissions: ['manage'] }), 422, 'VALIDATION_FAILED');
+      error(await change(key.id, { access: { addressIds: [first.id], addAddressIds: [added.id] } }), 422, 'VALIDATION_FAILED');
+      error(await change(key.id, {}), 422, 'VALIDATION_FAILED');
+      const inboxKey = ok(await local('POST', '/v1/api-keys', { name: 'Inbox agent', access: { type: 'inbox', inboxId: added.id } }), 201);
+      error(await change(inboxKey.id, { access: { addAddressIds: [first.id] } }), 422, 'VALIDATION_FAILED');
+      error(await change(inboxKey.id, { access: { mail: ['read', 'create'] } }), 422, 'VALIDATION_FAILED');
+      assert.deepEqual(ok(await change(inboxKey.id, { access: { mail: ['read', 'modify'] } })).access, { type: 'inbox', addressIds: [added.id], inboxId: added.id, mail: ['read', 'modify'] });
+      const every = ok(await local('POST', '/v1/api-keys', { name: 'Every address', access: { type: 'addresses' } }), 201);
+      error(await change(every.id, { access: { removeAddressIds: [first.id] } }), 422, 'ADDRESS_SCOPE_REQUIRED');
+      assert.deepEqual(ok(await change(every.id, { access: { addressIds: [first.id] } })).access, access([first.id]));
+
+      // Only what createApiKey allows: not a send key, not a domain-limited manage key, and never a key on itself.
+      const sender = ok(await local('POST', '/v1/api-keys', { name: 'Sender', permissions: ['send'] }), 201);
+      const domainManager = ok(await local('POST', '/v1/api-keys', { name: 'Domain manager', permissions: ['manage'], domains: ['example.com'] }), 201);
+      const admin = ok(await local('POST', '/v1/api-keys', { name: 'Manager', permissions: ['read', 'send', 'manage'] }), 201);
+      for (const restricted of [sender, domainManager]) {
+        error(await request('PATCH', `/v1/api-keys/${key.id}`, restricted.secret, widen), 403, 'PERMISSION_DENIED');
+        error(await request('PATCH', `/v1/api-keys/${restricted.id}`, restricted.secret, { permissions: ['read', 'send', 'manage'], domains: [] }), 403, 'PERMISSION_DENIED');
+      }
+      error(await request('PATCH', `/v1/api-keys/${admin.id}`, admin.secret, { name: 'Renamed' }), 403, 'PERMISSION_DENIED');
+      error(await request('PATCH', `/v1/api-keys/${key.id}`, key.secret, widen), 401, 'AUTH_INVALID');
+      assert.deepEqual((await db.query('SELECT permissions, domains FROM api_keys WHERE id = ANY($1) ORDER BY name', [[sender.id, domainManager.id]])).rows, [{ permissions: ['manage'], domains: ['example.com'] }, { permissions: ['send'], domains: [] }]);
+      // A manage key changes another key as it could create it, and a workspace key's new permissions apply at once.
+      error(await request('GET', '/v1/emails', sender.secret), 403, 'PERMISSION_DENIED');
+      assert.deepEqual(ok(await request('PATCH', `/v1/api-keys/${sender.id}`, admin.secret, { name: 'Reader', permissions: ['read'] })).permissions, ['read']);
+      ok(await request('GET', '/v1/emails', sender.secret));
+      ok(await request('PATCH', `/v1/api-keys/${sender.id}`, admin.secret, { permissions: ['send'] }));
+      error(await request('GET', '/v1/emails', sender.secret), 403, 'PERMISSION_DENIED');
+      error(await change(sender.id, { access: { mail: ['read'] } }), 422, 'VALIDATION_FAILED');
+      // A workspace key's waiting poll ends too when its permissions narrow, and its next request is refused.
+      const watcher = ok(await local('POST', '/v1/api-keys', { name: 'Watcher', permissions: ['read', 'manage'] }), 201), polling = Date.now();
+      const events = request('GET', '/v1/inbound/events?wait=10', watcher.secret, undefined, {}, 15_000);
+      await new Promise(resolve => setTimeout(resolve, 200));
+      ok(await change(watcher.id, { permissions: ['send'] }));
+      assert.deepEqual(ok(await events).data, []);
+      assert.ok(Date.now() - polling < 5_000, 'The poll ends when the key changes, not when it times out.');
+      error(await request('GET', '/v1/inbound/events', watcher.secret), 403);
+
+      // Revoked and ended keys can't be changed.
+      ok(await local('POST', `/v1/api-keys/${sender.id}/revoke`));
+      ok(await local('POST', `/v1/api-keys/${key.id}/revoke`));
+      ok(await local('DELETE', `/v1/inboxes/${added.id}`), 202);
+      for (const id of [sender.id, key.id, inboxKey.id]) error(await change(id, { name: 'Back again' }), 409, 'KEY_INACTIVE');
     });
   });
   test('agent inbox contracts and storage budgets',async t=>{
