@@ -8682,7 +8682,7 @@ describe('Campaign authorization and dispatch credentials', () => {
       const campaign = ok(await local('POST', '/v1/campaigns', { name: 'Fixture', from: 'a@sender.example', subject: 'Locked test', html: '<p>Fixture</p>', audience: { listId: list.id } }), 201);
       const wid = runtime.config.workspaceId, holder = await fixtureDatabase(t);
       assert.equal((await db.query('SELECT FROM job_schedule WHERE workspace_id=$1', [wid])).rowCount, 0);
-      // Another admission in this workspace holds its lock: the job_schedule row lockAdmission upserts.
+      // Another admission in this workspace holds its lock: the job_schedule row lockSendScope upserts.
       await holder.query('BEGIN');
       try {
         await holder.query('INSERT INTO job_schedule(workspace_id) VALUES($1)', [wid]);
@@ -12125,7 +12125,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     error(await api(owner,'POST','/v1/emails/batch',{emails:[{from:`a@${host}`,to:'success@simulator.amazonses.com',subject:'A',text:'A'},{from:`b@dev.${host}`,to:'success@simulator.amazonses.com',subject:'B',text:'B'}]}),403,'PLATFORM_SENDER_REFUSED');
     assert.equal((await db.query('SELECT FROM sending_emails WHERE workspace_id=$1',[owner])).rowCount,0,'A refused batch admits nothing.');
     // Removing or moving the configuration stops it at once: admission, campaign reviews, replies and dispatch all read regional_sender.
-    const route=async()=>(await runtime.db.execute<{verified:boolean;platform_refused:boolean}>(sql`SELECT verified,platform_refused FROM ${regionalSender(runtime,owner,host)} r`)).rows[0];
+    const route=async()=>(await runtime.db.execute<{verified:boolean;platform_refused:boolean}>(sql`SELECT verified,platform_refused FROM ${regionalSender(runtime,(await import('./src/send-scope.js')).claimsOnly,owner,host)} r`)).rows[0];
     assert.deepEqual(await route(),{verified:true,platform_refused:false});
     for (const configured of [undefined,other]) {
       runtime.config.platformDomainWorkspace=configured;
@@ -16740,7 +16740,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   // claim. A send's region lookup locked the closest claim inside regional_sender before its FOR SHARE OF the settings
   // row, so a reply from a domain deadlocked with a re-add of that domain (and with domain.verify queued on the claim).
   test('regional sender: a send waits on the settings row before it locks the claim a domain re-add needs',async t=>{
-    const {nodeRuntime}=await import('./src/adapters/node.js'),{sendingRegion}=await import('./src/sending.js');
+    const {nodeRuntime}=await import('./src/adapters/node.js'),{sendingRegion}=await import('./src/sending.js'),{lockSendScope}=await import('./src/send-scope.js');
     const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
     Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:false});
     const g=await fixtureDatabase(t),w=unique('sdead'),host=w+'.invalid',region='us-east-2';
@@ -16756,7 +16756,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     let send:Promise<unknown>|undefined,readd:string|undefined;
     try {
       await g.query('SELECT FROM ses_installation_settings WHERE workspace_id=$1 FOR NO KEY UPDATE',[w]);
-      send=runtime.db.transaction(tx=>sendingRegion(runtime,tx,actor,`reply@${host}`));send.catch(()=>{});
+      send=runtime.db.transaction(async tx=>sendingRegion(runtime,tx,await lockSendScope(tx,w),actor,`reply@${host}`));send.catch(()=>{});
       for(let i=0;i<400&&!(await g.query('SELECT FROM pg_stat_activity WHERE pg_backend_pid()=ANY(pg_blocking_pids(pid))')).rowCount;i++)await new Promise(r=>setTimeout(r,5));
       // Then it locks the claim. Before the fix the waiting send already held it FOR SHARE: 40P01 after deadlock_timeout.
       const started=Date.now();
@@ -16815,7 +16815,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   // and ungated, many times, so a new lock-order inversion between them fails here, not on dev. Add a pair here once its
   // own fix lands; CI also fails the job on any deadlock Postgres counts during the suite (.github/scripts/acceptance.sh).
   test('lock order: concurrent domain re-adds, sends and mailbox replies on one domain never deadlock',async t=>{
-    const {nodeRuntime}=await import('./src/adapters/node.js'),{sendingRegion}=await import('./src/sending.js'),{sendFromMailbox}=await import('./src/mailbox-send.js'),{createMailbox}=await import('./src/mailbox-store.js');
+    const {nodeRuntime}=await import('./src/adapters/node.js'),{sendingRegion}=await import('./src/sending.js'),{sendFromMailbox}=await import('./src/mailbox-send.js'),{createMailbox}=await import('./src/mailbox-store.js'),{lockSendScope}=await import('./src/send-scope.js');
     const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
     Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:false});
     const g=await fixtureDatabase(t),w=unique('ldead'),host=w+'.invalid',region='us-fixture-'+w.slice(-8),account=String(Date.now()).slice(-12).padStart(12,'6');
@@ -16843,13 +16843,74 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     for(let round=0;round<60;round++){
       const work=[
         ...Array.from({length:4},()=>readds.query('SELECT id FROM reserve_placed_claim($1,$2,NULL,$3)',[w,host,unique('dom')]).then(r=>assert.equal(r.rows[0].id,w,'A re-add returns the existing domain.'))),
-        ...Array.from({length:4},(_,i)=>runtime.db.transaction(tx=>sendingRegion(runtime,tx,actor,`reply@${host}`,undefined,i%2===1))),
+        ...Array.from({length:4},(_,i)=>runtime.db.transaction(async tx=>sendingRegion(runtime,tx,await lockSendScope(tx,w),actor,`reply@${host}`,undefined,i%2===1))),
         ...Array.from({length:2},reply),
       ];
       for(const r of await Promise.allSettled(work))if(r.status==='rejected')note(r.reason);
     }
     t.diagnostic(`60 rounds of 4 re-adds, 4 sends and 2 mailbox replies in ${Date.now()-started} ms.`);
     assert.deepEqual(Object.fromEntries(errors),{},'Every concurrent re-add and send completes. 40P01 is a lock-order inversion between them.');
+  });
+  // A campaign launch locked the settings row (its sender check) before the admission row (its capacity check), and a
+  // BYO disconnect takes them the other way round: a disconnect that started during a launch deadlocked with it (40P01).
+  // Both now take them through lockSendScope (campaign row, admission, settings). A gate pins each order.
+  test('lock order: a campaign launch and a BYO disconnect in one workspace never deadlock, whichever starts first',async t=>{
+    const {nodeRuntime}=await import('./src/adapters/node.js'),{createApp}=await import('./src/app.js'),{disconnectV5}=await import('./src/byo-regional.js');
+    const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
+    const g=await fixtureDatabase(t),w=unique('cdead'),host=w+'.invalid',region='us-east-2';
+    // The platform workspace has no billing account to settle; nothing here sends.
+    Object.assign(runtime.config,{multiTenant:true,regionalSending:true,byoV2:true,liveEnabled:false,platformDomainWorkspace:w});
+    const secret='nm_'+(randomUUID()+randomUUID()).replaceAll('-','');
+    cleanup(t,async()=>{
+      await g.query('DELETE FROM sending_review_recipients WHERE review_id IN (SELECT id FROM sending_campaign_reviews WHERE workspace_id=$1)',[w]);
+      for (const table of ['jobs','sending_campaigns','sending_campaign_reviews','sending_idempotency','audience_list_members','audience_lists','audience_contacts','api_keys','api_request_budgets','job_schedule','operation_domains','domain_claims','provider_connections','ses_installation_settings'])
+        await g.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[w]);
+      await g.query('DELETE FROM workspaces WHERE id=$1',[w]);
+    });
+    await g.query('INSERT INTO workspaces(id,name,slug,byo_v2_enabled) VALUES($1,$1,$1,true)',[w]);
+    await g.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$1,$2,jsonb_build_array($2::text))",[w,region]);
+    await g.query("INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared','111122223333','ready')",[w,region]);
+    await g.query("INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES($1,$2,$2,'verified')",[host,w]);
+    await g.query('INSERT INTO operation_domains(id,name,workspace_id,region) VALUES($1,$2,$1,$3)',[w,host,region]);
+    await g.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,$1,'lock order',$2,$3,'["read","send","manage"]','[]')`,[w,createHash('sha256').update(secret).digest('hex'),secret.slice(0,14)]);
+    const app=createApp(),call=async(method:string,path:string,body?:Json)=>{
+      const res=await app.fetch(new Request(PUBLIC_ORIGIN+path,{method,headers:{authorization:`Bearer ${secret}`,'content-type':'application/json'},body:body&&JSON.stringify(body)}),runtime);
+      return {status:res.status,body:await res.json() as Json};
+    };
+    const list=(await call('POST','/v1/lists',{name:'Lock order'})).body,contact=(await call('POST','/v1/contacts',{email:`reader@${w}.example.com`})).body;
+    assert.equal((await call('POST',`/v1/contacts/${contact.id}/consent`,{status:'subscribed',source:'acceptance-fixture',policyVersion:'acceptance-v1',evidence:'Synthetic consent on a reserved fixture address.'})).status,200);
+    assert.equal((await call('POST',`/v1/lists/${list.id}/members`,{contactIds:[contact.id]})).status,200);
+    // Sessions of this database waiting on a lock: this suite runs one test at a time on it.
+    const waiting=async(n:number)=>{
+      for(let i=0;i<400;i++){if((await g.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'")).rows[0].n>=n)return;await new Promise(r=>setTimeout(r,5));}
+      assert.fail(`Expected ${n} sessions waiting on a lock.`);
+    };
+    const settled=(work:Promise<unknown>)=>work.then(value=>value,(e:Json)=>String(e?.cause?.code??e?.code??e));
+    for(const first of ['launch','disconnect'] as const){
+      const campaign=await call('POST','/v1/campaigns',{name:unique('lock-order'),from:`news@${host}`,subject:'Lock order',html:'<p>Fixture</p>',audience:{listId:list.id}});
+      assert.equal(campaign.status,201,JSON.stringify(campaign.body));
+      const launch=()=>call('POST',`/v1/campaigns/${campaign.body.id}/send`,{revision:campaign.body.revision});
+      const gate=await fixtureDatabase(t);
+      let launched:Promise<{status:number;body:Json}>|undefined,disconnected:Promise<unknown>|undefined;
+      await gate.query('BEGIN');
+      try {
+        if(first==='launch'){
+          // The launch stops at its review, after the locks it takes first. The disconnect then starts.
+          await gate.query('LOCK TABLE sending_campaign_reviews IN SHARE MODE');
+          launched=launch();await waiting(1);
+          disconnected=settled(disconnectV5(runtime,w,'con_missing'));await waiting(2);
+        } else {
+          // The disconnect stops at the settings row, holding admission. The launch then starts.
+          await gate.query('SELECT FROM ses_installation_settings WHERE workspace_id=$1 FOR SHARE',[w]);
+          disconnected=settled(disconnectV5(runtime,w,'con_missing'));await waiting(1);
+          launched=launch();await waiting(2);
+        }
+        await gate.query('COMMIT');
+      } finally { await gate.query('ROLLBACK'); }
+      const result=await launched!;
+      assert.equal(result.status,202,`${first} first: ${JSON.stringify(result.body)}`);
+      assert.equal(await disconnected,'SCAN_STALE',`${first} first: the disconnect gets past its locks (no connection to disconnect here).`);
+    }
   });
   // Recheck 2 of #57 (tear witness, 5 steps: accept m1 a, claim, accept m1 ac, lose, legacy-fail -> the previous
   // Worker's unfenced terminal write failed the receipt its reopen had expanded). Lease exhaustion retires a job

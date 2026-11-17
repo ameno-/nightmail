@@ -18,7 +18,8 @@ import { assertTenantReady, countScreened, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CA
 import { productName } from './brand.js';
 import type { CampaignScreen } from './screen.js';
 export { simulatedTopic, taggedEmailId, terminalColumns, terminalEvents };
-import { checkRoute, lockedSettings, platformPolicy, regionalSender, regionalSending, senderRoutes, sendingConnections, unverifiedSender, verifiedClaim, type SenderRoute, type SendingBinding } from './domain-claims.js';
+import { checkRoute, platformPolicy, regionalSender, regionalSending, senderRoutes, sendingConnections, unverifiedSender, verifiedClaim, type SenderRoute, type SendingBinding } from './domain-claims.js';
+import { claimSendScope, claimsOnly, lockedSettings, lockSendScope, type ClaimsOnly, type SendScope } from './send-scope.js';
 import { dmarcView } from './dmarc.js';
 import type { IdentityFacts } from './states.js';
 import { assertLiveRegionReady, assertRegionEnabled, credentialFingerprint, discoveryTarget, regionPattern } from './ses-region-state.js';
@@ -89,15 +90,6 @@ const workspaceBuffer = (rate: number) => Math.min(50000, Math.max(1000, Math.ce
 // Recheck a full buffer or in-flight campaign once its backlog should have drained at the cached
 // regional rate; rechecking sooner only repeats the same work. Unknown rates use a fixed interval.
 const drainDelayMs = (backlog: number, rate: number, floor = 1000) => rate > 0 ? Math.max(floor, Math.min(15000, Math.ceil(1000 * backlog / rate))) : 5000;
-// Called only inside admission transactions, before campaign/attachment locks.
-// A workspace row lock serializes admission without Hyperdrive-unsupported
-// advisory locks. Reuse the scheduler row without changing its rotation counter.
-export function lockAdmission(db: DbExecutor, a: Pick<Actor,'workspaceId'>, claim?: SQL) {
-  // ON CONFLICT locks the existing tuple even when its UPDATE predicate is false. No dead tuple per send.
-  const lock = sql`INSERT INTO job_schedule (workspace_id) SELECT ${a.workspaceId}::text ${claim ? sql`FROM claim` : sql``}
-    ON CONFLICT (workspace_id) DO UPDATE SET turn = job_schedule.turn WHERE false`;
-  return db.execute(claim ? sql`WITH claim AS (${claim}), locked AS (${lock}) SELECT 1 FROM claim` : lock);
-}
 // billable: every recipient of the submission, even when the installation simulates SES (billing_gate prices those only
 // with bill_simulated). The billing column is NULL off Hosted and for the platform's own workspace.
 const pendingCounts = (runtime: Pick<Runtime, 'config'>, a: Actor, cost: number, marketing = 0, incoming = 1, marketingRows = 0, billable = cost, sim = false) => sql`SELECT projected, ${hostedAllowance(runtime.config, a.workspaceId, cost, marketing)} AS hosted, ${billingGate(runtime.config, a.workspaceId, billable, sim)} AS billing,
@@ -108,8 +100,7 @@ function assertPending(counts: { projected: number; quota: number | string | nul
   const cap = pendingCap(counts.quota, counts.hosted);
   if (counts.projected > cap) throw new ApiError(429, 'PENDING_EMAIL_LIMIT_EXCEEDED', `This submission exceeds the outstanding email limit of ${cap} for this workspace. Wait for queued mail to dispatch before retrying.`, undefined, true);
 }
-/** Caller holds the admission lock (sendFromMailbox takes it before its sender check). */
-async function checkPending(runtime: Runtime, db: DbExecutor, a: Actor, cost: number, marketingStream = false) {
+async function checkPending(runtime: Runtime, db: DbExecutor, _held: SendScope, a: Actor, cost: number, marketingStream = false) {
   const sim = isSimulatedSes(runtime), charge = sim ? 0 : cost, marketing = marketingStream ? charge : 0;
   const { rows: [counts] } = await db.execute<{ projected: number; quota: number | null; hosted: HostedAllowance | null; billing: BillingGate | null }>(pendingCounts(runtime, a, charge, marketing, 1, 0, cost, sim));
   assertBilling(counts!.billing, counts!.hosted, { workspaceId: a.workspaceId, config: runtime.config });
@@ -384,10 +375,8 @@ function checkBulk(runtime:Runtime,kind:string|undefined,marketing:boolean,host:
   if(!policy || policy.status==='missing' || policy.status==='invalid' || !(policy.alignment.dkim || policy.alignment.spf))
     throw new ApiError(409,'BULK_DMARC_REQUIRED',`Hosted bulk sending requires a valid DMARC policy and aligned DKIM or SPF. Add or recheck the exact From domain ${host}.`,'from');
 }
-// Reuse the existing region-lock round trip for non-batch admission (including mailbox replies). Lock the settings
-// row before any claim (lockedSettings): a top-level FOR SHARE OF s ran after the claim locks inside regional_sender
-// and verified_sending_domains, and deadlocked with POST /v1/domains.
-export async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: string, requested?: string, marketing=false):Promise<{region:string;binding?:SendingBinding}> {
+// Reuse the existing region-lock round trip for non-batch admission (including mailbox replies).
+export async function sendingRegion(runtime: Runtime, db: DbExecutor, held: SendScope, a: Actor, from: string, requested?: string, marketing=false):Promise<{region:string;binding?:SendingBinding}> {
   if (!runtime.config.multiTenant) {
     const selected = await assertRegionEnabled(db, a.workspaceId, requested);
     keySender(a, from); return {region:selected};
@@ -395,14 +384,14 @@ export async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, 
   const host=from.split('@')[1]!.toLowerCase(), bulk=bulkColumns(runtime,a.workspaceId,marketing?[host]:[]);
   if (regionalSending(runtime)) {
     keySender(a,from);
-    const row=(await db.execute<SenderRoute & {bulk?:BulkFacts}>(sql`WITH ${lockedSettings(a.workspaceId)} SELECT r.* ${bulk} FROM settings s CROSS JOIN LATERAL ${regionalSender(runtime,sql`s.workspace_id`,host)} r`)).rows[0];
+    const row=(await db.execute<SenderRoute & {bulk?:BulkFacts}>(sql`WITH ${lockedSettings(held)} SELECT r.* ${bulk} FROM settings s CROSS JOIN LATERAL ${regionalSender(runtime,held,sql`s.workspace_id`,host)} r`)).rows[0];
     const route=checkRoute(runtime,row,requested);
     checkBulk(runtime,route.connection!.kind,marketing,host,row?.bulk);
     a.dispatchAccount={aws_account_id:route.connection!.aws_account_id,kind:route.connection!.kind};
     return {region:route.region,binding:route.binding};
   }
   const selected = sql`coalesce(${requested ?? null}, s.default_region)`;
-  const state = (await db.execute<{ region: string; enabled_regions: string[]; verified: boolean; bulk?:BulkFacts; aws_account_id: string | null; kind: ReadyConnection['kind']; tenant_state: TenantState; pause_reason: string | null }>(sql`WITH ${lockedSettings(a.workspaceId)}
+  const state = (await db.execute<{ region: string; enabled_regions: string[]; verified: boolean; bulk?:BulkFacts; aws_account_id: string | null; kind: ReadyConnection['kind']; tenant_state: TenantState; pause_reason: string | null }>(sql`WITH ${lockedSettings(held)}
     SELECT ${selected} AS region, s.enabled_regions, pc.aws_account_id, pc.kind, pc.tenant_state, pc.pause_reason,
     ${verifiedClaim(sql`s.workspace_id`, selected, sql`${host}::text`)} AS verified ${bulk}
     FROM settings s LEFT JOIN ${sendingConnections(runtime)} pc ON pc.workspace_id=s.workspace_id AND pc.region=${selected}`)).rows[0];
@@ -764,10 +753,11 @@ async function assertScreenable(runtime: Runtime, snapshot: EmailSnapshot, share
   const refused = await screenRefusal(runtime, snapshot, index);
   if (refused) throw refused;
 }
-async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: SendRequest, preview = false, lockedAttachments?: AttachmentSize[], sharedValidated = false, htmlValidated = false, preparedUnsubscribeUrl?: string, connection?: ReadyConnection,bulkVolume=false,conversation=false): Promise<EmailSnapshot> {
-  const route = sharedValidated ? {region:request.region!} : runtime.config.multiTenant ? await sendingRegion(runtime,db,a,request.from,request.region,bulkVolume || request.kind==='marketing') : {region:await assertRegionEnabled(db,a.workspaceId,request.region)};
+// sender: the send locks to check the route under, or 'validated' when the caller's statement already checked it.
+async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, sender: SendScope | 'validated', request: SendRequest, preview = false, lockedAttachments?: AttachmentSize[], htmlValidated = false, preparedUnsubscribeUrl?: string, connection?: ReadyConnection,bulkVolume=false,conversation=false): Promise<EmailSnapshot> {
+  const route = sender === 'validated' ? {region:request.region!} : await sendingRegion(runtime,db,sender,a,request.from,request.region,bulkVolume || request.kind==='marketing');
   const input = { ...request, region:route.region };
-  if (!sharedValidated) {
+  if (sender !== 'validated') {
     if (!isSimulatedSes(runtime) && !runtime.config.multiTenant) await assertLiveRegionReady(runtime, db, input.region, input.kind, false, a.workspaceId);
     if (!runtime.config.multiTenant) keySender(a, input.from);
   }
@@ -986,10 +976,12 @@ async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emai
   if (mx) for (const [i, mail] of mails.entries()) {
     const all = hostedCost(mail.to, mail.cc, mail.bcc), n = simulated ? 0 : all; cost += n; billable += all; if (mail.kind === 'marketing' || bulkMail[i]) marketing += n;
   }
+  let held: SendScope | null = null;
   return idempotent(env.db, { ...call, workspaceId: a.workspaceId, actorKeyId: a.keyId }, input, async db => {
+    if (!held) throw new Error('A direct send runs under its send locks.');
     const attachmentIds = assetIds.filter(id => !id.includes('\0'));
-    // A new READ COMMITTED statement after the workspace lock sees the previous sender's committed rows.
-    // Lock settings against disablement; read only readiness (not discovery reports) and lock each asset once.
+    // A new READ COMMITTED statement under the send locks sees the previous sender's committed rows.
+    // Read only readiness (not discovery reports) and lock each asset once.
     const ready = !mx && !isSimulatedSes(env) ? sql`ARRAY(SELECT wanted.region || ':' || wanted.kind FROM (
       SELECT DISTINCT coalesce(m.region, settings.default_region) AS region, m.kind FROM settings,
         jsonb_to_recordset(${JSON.stringify(mails.filter(m => m.region === undefined || regionPattern.test(m.region)).map(({ region, kind }) => ({ region, kind })))}::jsonb) m(region text, kind text)
@@ -1007,8 +999,8 @@ async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emai
       FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ host: m.from.split('@')[1]!.toLowerCase(), region: m.region })))}::jsonb) m(host text,region text)
       WHERE ${verifiedClaim(sql`settings.workspace_id`, sql`coalesce(m.region, settings.default_region)`, sql`m.host`)})` : sql`ARRAY[]::text[]`;
     const state = (await db.execute<AdmissionState & {ready:string[];connection:SenderRoute['connection'];bulk?:BulkFacts}>(sql`
-      WITH ${lockedSettings(a.workspaceId)}
-      SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified, ${mx && !regional ? sql`to_jsonb(pc)` : sql`NULL`} AS connection ${regional ? sql`,${senderRoutes(env,a.workspaceId,hosts)} AS routes` : sql``} ${bulk}
+      WITH ${lockedSettings(held)}
+      SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified, ${mx && !regional ? sql`to_jsonb(pc)` : sql`NULL`} AS connection ${regional ? sql`,${senderRoutes(env,held,hosts)} AS routes` : sql``} ${bulk}
       FROM (${pendingCounts(env, a, cost, marketing, mails.length, mails.filter(m => m.kind === 'marketing').length, billable, simulated)}) counts LEFT JOIN settings ON true ${mx && !regional ? sql`LEFT JOIN ${sendingConnections(env)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
     assertBilling(state.billing, state.hosted, { workspaceId: a.workspaceId, config: env.config });
     checkCapacity(state, cost, marketing);
@@ -1025,7 +1017,7 @@ async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emai
       validateAttachmentRows(mail.attachments, attached);
       const link = mail.kind === 'marketing' ? await (await loadOpsUnsub()).createUnsubscribeLink(env, a.workspaceId, Array.isArray(mail.to) ? mail.to[0]! : mail.to) : undefined;
       const route=state.routes?.[hosts[i]!];
-      const snapshot = await prepare(runtime, db, a, { ...mail, region }, false, attached, true, true, link?.url, route?.connection ?? state.connection ?? undefined);
+      const snapshot = await prepare(runtime, db, a, 'validated', { ...mail, region }, false, attached, true, link?.url, route?.connection ?? state.connection ?? undefined);
       await assertScreenable(env, snapshot, (route?.connection ?? state.connection)?.kind === 'shared', batch ? i : undefined);
       if (bulkMail[i]) snapshot.bulk = true;
       if (route) snapshot.binding=route.binding;
@@ -1046,7 +1038,11 @@ async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emai
     if (state.connection) a.dispatchAccount = { aws_account_id: state.connection.aws_account_id, kind: state.connection.kind };
     for (const row of rows) noteDispatch(a, row.snapshot);
     return receipt;
-  }, { receipt: { result: receipt, lock: (tx, claimed) => lockAdmission(tx, a, claimed) } });
+  }, { receipt: { result: receipt, lock: async (tx, claim) => {
+    // The admission lock, with the key's claim when there is one: only the request that won the key holds it.
+    const locked = claim ? await claimSendScope(tx, a.workspaceId, claim) : { claimed: [], scope: await lockSendScope(tx, a.workspaceId) };
+    held = locked.scope; return { rows: locked.claimed };
+  } } });
 }
 async function saveAttachment(c: Ctx, a: Actor, metadata: AttachmentMetadataInput, bytes: Uint8Array) {
   sesAttachment(metadata);
@@ -1064,7 +1060,7 @@ function attachmentUpload(runtime:Runtime,a:Pick<Actor,'workspaceId'>,input:Retu
   return {
     async put(){
       await runtime.db.transaction(async db=>{
-        await lockAdmission(db,a);
+        await lockSendScope(db,a.workspaceId);
         const {rows}=await db.execute<{bytes:string}>(sql`SELECT bytes FROM sending_asset_usage WHERE workspace_id=${a.workspaceId}`);
         if(Number(rows[0]?.bytes??0)+bytes.length>SENDING_LIMITS.storedAttachmentBytes) throw new ApiError(413,'STORED_ATTACHMENT_LIMIT_EXCEEDED','Stored attachment quota exceeded. Delete unused attachments.');
         await db.execute(sql`INSERT INTO sending_upload_reservations(id,workspace_id,storage_key,size) VALUES(${attachmentId},${a.workspaceId},${storageKey},${bytes.length})`);
@@ -1102,8 +1098,8 @@ export async function storeAttachmentBytes(runtime: Runtime, a: Pick<Actor,'work
 }
 export type MailboxSendRequest = { protocolEnvelope?:boolean; from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region?: string; subject: string; html?: string; text?: string; attachments: string[]; tracking?: boolean; screen?: boolean; sealed?: boolean; headers: { Name: string; Value: string }[] };
 /** Queues one transactional email through the normal pipeline (admission, region readiness, suppression, dispatch) with extra MIME headers.
- * Only sendFromMailbox calls it, after taking the admission lock. */
-export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, a: Actor, request: MailboxSendRequest, replyAuthors: string[] | null) {
+ * Only sendFromMailbox calls it. */
+export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, held: SendScope, a: Actor, request: MailboxSendRequest, replyAuthors: string[] | null) {
   sesHeaders(request.headers.length);
   const schema = request.protocolEnvelope ? ProtocolSendInput : SendInput;
   const parsed = schema.safeParse({ from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}), to: request.protocolEnvelope?[...request.to,...request.cc,...request.bcc]:request.to, cc:request.protocolEnvelope?[]:request.cc, bcc:request.protocolEnvelope?[]:request.bcc, replyTo: request.replyTo, region: request.region, kind: 'transactional', subject: request.subject, ...(request.html ? { html: request.html } : {}), ...(request.text ? { text: request.text } : {}), attachments: request.attachments, tracking: request.tracking ?? false, screen: request.screen });
@@ -1113,10 +1109,10 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, a: Act
   // tracked sends and SMTP submissions all arrive here): bulk mail is charged and held as marketing, in the same statement.
   const [isBulk] = bulkFlags([{ kind: 'transactional', to: request.to, cc: request.cc, bcc: request.bcc, subject: request.subject, html: request.html, text: request.text,
     headers: [...(parsed.data.headers ?? []), ...request.headers.map(h => ({ name: h.Name, value: h.Value }))] }]);
-  const bulk=await checkPending(runtime, db, a, hostedCost(request.to, request.cc, request.bcc), isBulk);
+  const bulk=await checkPending(runtime, db, held, a, hostedCost(request.to, request.cc, request.bcc), isBulk);
   // The mailbox rules admitted this sender and these attachments; the sending log's reader rule is for other callers.
   // prepare and queueEmail look the attachments up where every send does, after the region's settings and claim.
-  const snapshot = await prepare(runtime, db, a, parsed.data,false,undefined,false,false,undefined,undefined,bulk,true);
+  const snapshot = await prepare(runtime, db, a, held, parsed.data,false,undefined,false,undefined,undefined,bulk,true);
   await assertScreenable(runtime, snapshot, a.dispatchAccount?.kind === 'shared');
   if (isBulk) snapshot.bulk = true;
   if(request.protocolEnvelope){snapshot.to=request.to;snapshot.cc=request.cc;snapshot.bcc=request.bcc;}
@@ -1150,9 +1146,11 @@ async function renderCampaignContent(runtime: Runtime, draft: Pick<CampaignDraft
   return { html: renderBlockHtml(draft.html, { fontBase: `${runtime.config.publicUrl}/fonts/`, title: draft.subject }), text: renderBlockText(draft.html) || undefined };
 }
 const RECIPIENT_CONTENT_ERRORS = new Set(['CAMPAIGN_RECIPIENT_INVALID', 'MISSING_TEMPLATE_VARIABLE', 'UNSUPPORTED_TEMPLATE_SYNTAX', 'UNSAFE_TEMPLATE_CONTEXT', 'UNSAFE_HTML_URL', 'ENCODED_MESSAGE_TOO_LARGE', 'RENDERED_CONTENT_TOO_LARGE']);
-async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft: CampaignDraft, contact: ReviewedRecipient, test = false, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[], prepared?: { html?: string; text?: string }, templateValidated = false, htmlValidated = false, version = CAMPAIGN_RENDERER_VERSION) {
+// source: the content the review already rendered and checked, or the send locks to render now and check the route under.
+async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft: CampaignDraft, contact: ReviewedRecipient, test = false, preview = false, lockedAttachments: (typeof attachments.$inferSelect)[] | undefined, source: SendScope | { html?: string; text?: string }, templateValidated = false, htmlValidated = false, version = CAMPAIGN_RENDERER_VERSION) {
   try {
     const values = { ...draft.defaults, ...Object.fromEntries(Object.entries(contact.properties).filter(([, value]) => value !== null && value !== undefined)), email: contact.email, ...(contact.name ? { name: contact.name } : {}) };
+    const prepared = 'workspaceId' in source ? undefined : source;
     const rendered = prepared ?? await renderCampaignContent(runtime, draft);
     const parse = rendered.html && (!templateValidated || draft.previewText) ? await loadParse5() : undefined;
     const parsed = SendInput.safeParse({ from: draft.from, fromName: draft.fromName, to: contact.email, replyTo: draft.replyTo, region: test ? campaignSendRegion(runtime,draft) : draft.region, kind: test ? 'transactional' : 'marketing', subject: interpolate(draft.subject, values, false, templateValidated), html: withPreheader(interpolate(rendered.html, values, true, templateValidated, parse), draft.previewText, parse, version), text: interpolate(rendered.text, values, false, templateValidated), attachments: draft.attachments, tracking: test ? false : draft.tracking });
@@ -1160,7 +1158,7 @@ async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft
       const fields = [...new Set(parsed.error.issues.map(issue => issue.path.join('.') || 'content'))].join(', ');
       throw new ApiError(422, 'CAMPAIGN_RECIPIENT_INVALID', `Recipient or rendered message is invalid (${fields}).`);
     }
-    const snapshot = await prepare(runtime, db, a, parsed.data, preview, lockedAttachments, prepared !== undefined, htmlValidated);
+    const snapshot = await prepare(runtime, db, a, 'workspaceId' in source ? source : 'validated', parsed.data, preview, lockedAttachments, htmlValidated);
     if (draft.previewText !== undefined) snapshot.previewText = draft.previewText;
     return snapshot;
   } catch (error) {
@@ -1448,8 +1446,7 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/test', operationId: 'testCampaign', description: 'Send the current draft, personalized with data, to one address as a transactional test. On Hosted sending a test is screened on its own, with the campaign limit (49,152 bytes of screened text by default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } over it).', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(TestCampaign) }, responses: { 202: response(Receipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id;
-    // checkPending reads the queue under the admission lock, taken after the campaign row as launch, resume and release do.
-    const result = await idempotent(c.env.db, keyed(c, a), input, async db => { const row = await findCampaign(db, a, campaignId, true); if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.'); await lockAdmission(db, a); await checkPending(c.env, db, a, hostedCost(input.to)); const snapshot = await campaignMessage(c.env, db, a, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true); await assertScreenable(c.env, { ...snapshot, testCampaignId: campaignId }, a.dispatchAccount?.kind === 'shared'); return queueEmail(c.env, db, a, { ...snapshot, testCampaignId: campaignId }, undefined, undefined, c.get('requestId')); }, { replayed: campaignReplay(a, campaignId) });
+    const result = await idempotent(c.env.db, keyed(c, a), input, async db => { const held = await lockSendScope(db, a.workspaceId, { campaignId }); const row = await findCampaign(db, a, campaignId, true); if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.'); await checkPending(c.env, db, held, a, hostedCost(input.to)); const snapshot = await campaignMessage(c.env, db, a, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true, false, undefined, held); await assertScreenable(c.env, { ...snapshot, testCampaignId: campaignId }, a.dispatchAccount?.kind === 'shared'); return queueEmail(c.env, db, a, { ...snapshot, testCampaignId: campaignId }, undefined, undefined, c.get('requestId')); }, { replayed: campaignReplay(a, campaignId) });
     return c.json(Receipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/send', operationId: 'sendCampaign', description: 'Accept the current revision for durable background delivery: the audience is frozen now, every message is validated in the background, then recipients are released into the dispatch queue. The 202 count is accepted recipient intents, not SES acceptance or delivery; poll the campaign for its state. ' + CAMPAIGN_SCREEN_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSend) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
@@ -1504,7 +1501,7 @@ export function registerSending(app: App) {
     // before (the others are skipped and counted as canceled), and the campaign's own health check runs at once.
     // A second quarantine needs an operator (above).
     if (campaign.pauseReason?.code === 'LIST_QUALITY') { await db.execute(clearProbe(ref)); await db.execute(restrictToDelivered(ref)); }
-    if (campaign.state==='failed' && campaign.error?.code==='JOB_LEASE_EXHAUSTED') await checkCampaignCapacity(db,{...a,keyId:campaign.actorKeyId??a.keyId},0);
+    if (campaign.state==='failed' && campaign.error?.code==='JOB_LEASE_EXHAUSTED') await checkCampaignCapacity(db,await lockSendScope(db,a.workspaceId,{campaignId:campaign.id}),{...a,keyId:campaign.actorKeyId??a.keyId},0);
     await db.execute(queueCampaignRun(ref, campaign.requestId ? { requestId: campaign.requestId } : {}, next === 'scheduled' ? campaign.scheduledAt : null));
     await recordAudit(db, c, { action: 'campaign.resume', workspaceId: a.workspaceId, target: { type: 'campaign', id: campaign.id }, before: { state: campaign.state }, after: { state: next } });
     a.wakeJobs = Math.max(a.wakeJobs ?? 0, 1);
@@ -1543,8 +1540,7 @@ export function registerSending(app: App) {
 const campaignRef = (a: Pick<Actor, 'workspaceId'>, campaignId: string) => ({ workspaceId: a.workspaceId, id: campaignId });
 const sharedConnection = (wid: string) => sql`EXISTS (SELECT 1 FROM provider_connections WHERE workspace_id=${wid} AND kind='shared')`;
 const hostedAutoPauseRequired = () => new ApiError(422, 'HOSTED_AUTO_PAUSE_REQUIRED', 'Automatic bounce and complaint pauses cannot be disabled on Hosted shared sending.', 'autoPause');
-async function checkCampaignCapacity(db: DbExecutor, a: Actor, incoming: number) {
-  await lockAdmission(db, a);
+async function checkCampaignCapacity(db: DbExecutor, _held: SendScope, a: Actor, incoming: number) {
   // Unreleased intents of every active or resumable campaign plus its email rows still in the dispatch queue, each counted
   // exactly once. A failed launch that released nothing holds no reservation (it is edited or launched again from scratch). Direct mail keeps its own admission limit.
   const result = await db.execute<{ total: string; key: string }>(sql`
@@ -1621,8 +1617,9 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   if (input.scheduledAt && (Date.parse(input.scheduledAt) <= Date.now() || Date.parse(input.scheduledAt) > Date.now() + 365 * 86400000)) throw new ApiError(422, 'INVALID_SCHEDULE', 'Schedule between now and one year from now.');
   // Campaign mail is never dispatched for a member origin (approvedOriginUser); refuse here instead of canceling later.
   if (a.role === 'member') throw new ApiError(403, 'PERMISSION_DENIED', 'Only workspace owners and admins can send campaigns.');
+  const held = await lockSendScope(db, a.workspaceId, { campaignId });
   const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision);
-  const draft = readyCampaign(row.draft); const route=await sendingRegion(runtime, db, a, draft.from, campaignSendRegion(runtime,row.draft),true);
+  const draft = readyCampaign(row.draft); const route=await sendingRegion(runtime, db, held, a, draft.from, campaignSendRegion(runtime,row.draft),true);
   if (input.pacing?.autoPause === false && runtime.config.multiTenant && a.dispatchAccount?.kind === 'shared') throw hostedAutoPauseRequired();
   if (runtime.config.multiTenant && a.dispatchAccount?.kind === 'shared') {
     // The standing's restrict or an operator's hold, or a marketing hold placed before the standing took over.
@@ -1647,7 +1644,7 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   await db.insert(campaignReviews).values({ id: reviewId, rendererVersion: CAMPAIGN_RENDERER_VERSION, workspaceId: a.workspaceId, campaignId, revision: row.revision, draft: reviewed, contentHash, rendered });
   const propertyKeys = placeholderKeys(draft, rendered);
   const counts = await (await wrapModuleLoad(() => import('./audience.js'))).snapshotCampaignAudience(db, a, draft.audience, reviewId, propertyKeys);
-  await checkCampaignCapacity(db, a, counts.eligible);
+  await checkCampaignCapacity(db, held, a, counts.eligible);
   const lockedAttachments = await attachmentRows(db, a, draft.attachments, true);
   for (const asset of lockedAttachments) sesAttachment(asset);
   await linkAttachments(db, a, draft.attachments, 'review', reviewId, lockedAttachments);
@@ -2042,8 +2039,8 @@ async function readRun(runtime: Runtime, a: Actor, campaignId: string): Promise<
   return row;
 }
 const staleReview = () => new ApiError(409,'SENDER_BINDING_CHANGED','The reviewed sending binding is no longer ready.');
-async function assertReviewBinding(runtime:Runtime,db:DbExecutor,a:Actor,draft:CampaignDraft) {
-  if (!(await db.execute(sql`SELECT 1 FROM ${regionalSender(runtime,a.workspaceId,draft.from.split('@')[1]!.toLowerCase())} r
+async function assertReviewBinding(runtime:Runtime,db:DbExecutor,locks:SendScope|ClaimsOnly,a:Actor,draft:CampaignDraft) {
+  if (!(await db.execute(sql`SELECT 1 FROM ${regionalSender(runtime,locks,a.workspaceId,draft.from.split('@')[1]!.toLowerCase())} r
     WHERE r.verified AND r.region=${draft.region} AND r.connection IS NOT NULL AND r.binding=${JSON.stringify(draft.binding)}::jsonb
       AND (${isSimulatedSes(runtime)} OR r.connection->>'kind'<>'shared' OR r.connection->>'tenant_state'='ready')`)).rowCount) throw staleReview();
 }
@@ -2260,7 +2257,7 @@ async function prepareStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
     if (campaign.state !== 'preparing' || campaign.reviewId !== row.reviewId) return;
     const authorized = await originAllowed(runtime, db, { ...a, actorKeyId: a.keyId, campaignId: campaign.id, snapshot: { from: review.draft.from } });
     if (!authorized) { await cancelCampaignWork(db, a, campaign, 'ORIGIN_KEY_REVOKED'); return; }
-    if (review.draft.binding) await assertReviewBinding(runtime,db,a,review.draft);
+    if (review.draft.binding) await assertReviewBinding(runtime,db,claimsOnly,a,review.draft);
     else await assertRegionEnabled(db, a.workspaceId, review.draft.region);
     if (!isSimulatedSes(runtime) && !runtime.config.multiTenant) await assertLiveRegionReady(runtime, db, review.draft.region, 'marketing', true, a.workspaceId);
     const lockedAttachments = await attachmentRows(db, a, review.draft.attachments, true);
@@ -2400,12 +2397,12 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   }
   const draft = row.reviewDraft!, limits_ = limitsTable(runtime);
   const released = await runtime.db.transaction(async db => {
+    const held = await lockSendScope(db, a.workspaceId, { campaignId: row.id });
     const campaign = await findCampaign(db, a, row.id, true);
     if (campaign.state !== 'sending' || campaign.reviewId !== row.reviewId || campaign.expanded >= campaign.total) return null;
-    await lockAdmission(db, a);
     const authorized = await originAllowed(runtime, db, { ...a, actorKeyId: a.keyId, campaignId: campaign.id, snapshot: { from: draft.from } });
     if (!authorized) { await cancelCampaignWork(db, a, campaign, 'ORIGIN_KEY_REVOKED'); return null; }
-    if (draft.binding) await assertReviewBinding(runtime,db,a,draft); // Fence the actual insert against disable/reclaim after the precheck.
+    if (draft.binding) await assertReviewBinding(runtime,db,held,a,draft); // Fence the actual insert against disable/reclaim after the precheck.
     const [buffer] = await db.select({ total: sql<number>`count(*)::int`, campaign: sql<number>`count(*) FILTER (WHERE ${emails.campaignId} = ${campaign.id})::int`,
       hosted: hostedAllowance(runtime.config, a.workspaceId, campaign.simulated ? 0 : 1),
       billing: sql<BillingGate | null>`${billingGate(runtime.config, a.workspaceId, 0, campaign.simulated)}`,
