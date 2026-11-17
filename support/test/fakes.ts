@@ -116,7 +116,7 @@ export const recorded: Recorded[] = [];
 export const control = { failStatus: 0 };
 
 const sse = (events: Array<[string, unknown]>) => new Response(events.map(([type, data]) => `event: ${type}\ndata: ${JSON.stringify({ type, ...(data as object) })}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } });
-const start = (id: string): [string, unknown] => ['message_start', { message: { id, type: 'message', role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, usage: { input_tokens: 1200, output_tokens: 1 } } }];
+const start = (id: string): [string, unknown] => ['message_start', { message: { id, type: 'message', role: 'assistant', model: 'claude-sonnet-5-5', content: [], stop_reason: null, usage: { input_tokens: 1200, output_tokens: 1 } } }];
 const toolUse = (id: string, name: string, input: object) => sse([
   start('msg_tool'), ['content_block_start', { index: 0, content_block: { type: 'tool_use', id, name, input: {} } }],
   ['content_block_delta', { index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } }], ['content_block_stop', { index: 0 }],
@@ -163,7 +163,6 @@ export async function fakeGateway(request: Request): Promise<Response> {
       expected: 'A test delivery', actual: 'HTTP 500' });
     return text(['That’s a Nightmail bug: I’ve passed it to the Nightmail team.']);
   }
-  if (said.includes('just opened the support chat')) return text(['Hi Ada, I see you sent ', '"Early access" yesterday', ' with 42% opens. What are we working on today?']);
   if (said.includes('A support email arrived')) return answered ? text(['Hi Ada,\n\nGmail hard-bounced 61 of 1,000 sends this week.\n\nNightmail support (AI)']) : toolUse('toolu_e', 'bounce_reasons', { provider: 'gmail' });
   if (said.includes('Gmail bounces')) return answered ? text(['Gmail hard-bounced 61 of 1,000 sends (6.1%). Here’s what I’d do:\n\n1. Remove the import from Oct 25.']) : toolUse('toolu_b', 'bounce_reasons', { provider: 'gmail', days: 7 });
   if (said.includes('refund')) return answered ? text(['I’ve passed this to the Nightmail team. Someone will reply by email.']) : toolUse('toolu_t', 'file_ticket', {

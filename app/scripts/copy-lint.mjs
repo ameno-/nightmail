@@ -20,8 +20,9 @@ const app = resolve(dirname(fileURLToPath(import.meta.url)), '..'), src = join(a
 const BASELINE = join(app, 'scripts/copy-baseline.json');
 
 // Content that isn't dashboard copy: the legal documents and docs (their own review), the signed-out home, demo and
-// seed data, the scripted support conversation, logos and the email preview's CSS.
-const SKIP = /^(features\/(legal|docs|home)\/|data\/(mock|seed)\.ts$|features\/support\/demo\.ts$|components\/(NightmailLogo|AnomalyLogo|EmailPreview)\.tsx$)/;
+// seed data, the scripted support conversation, logos and the email preview's CSS. Connect an agent lives in docs/ but
+// is only a dashboard dialog, so it is linted; the docs files it shares embeds with pass `compact` in the dashboard.
+const SKIP = /^(features\/(legal|home)\/|features\/docs\/(?!connect-agent\.tsx$)|data\/(mock|seed)\.ts$|features\/support\/demo\.ts$|components\/(NightmailLogo|AnomalyLogo|EmailPreview)\.tsx$)/;
 
 // Words and sentences per element type. Sentences are counted on the whole string; words exclude code.
 const LIMITS = {
@@ -98,7 +99,78 @@ export const RULES = {
   restate: 'A description that repeats its own heading or label tells the reader nothing new.',
   duplicate: 'The same sentence in two places of one feature drifts apart; say it once (a shared constant) or cut one.',
   typography: 'Curly quotes and apostrophes, and the single ellipsis character.',
+  tagline: 'A line under a heading (a page, section, dialog or empty state’s description) says what the heading and layout should: cut it, and fix the layout if the screen needs it.',
+  helper: 'Helper text under a form field: use a clearer label, a unit inside the input, a sensible default, or validation that shows only when something is wrong.',
+  caption: 'A secondary label (a caption, a sublabel, a meta line, “Optional”): cut it, or put the detail behind a click on its summary.',
+  reassure: 'Copy that rules out a failure or pre-empts a worry the reader never had (“never”, “don’t worry”, “may look”, “like the old”): the behaviour is the fix, not a caption about it. Cut the clause; if nothing is left, the element.',
 };
+
+// Ryan’s rule for every dashboard screen: “Cut taglines, helper text and secondary labels. If a screen needs them to make
+// sense, fix the layout.” The tagline, helper and caption rules find them (secondary below). What stays is listed here,
+// one entry per string, and only in these categories; errors, alerts, confirmations and accessibility text are never
+// secondary. `text` matches the start of the string as the linter reads it (code and variables as “…”).
+const KEEP_WHY = {
+  legal: 'legally required: terms a person accepts, consent to email them',
+  safety: 'what a destructive or irreversible action does, before it is taken',
+  billing: 'billing terms, before a charge',
+  secret: 'a secret shown once: save it now or lose it',
+};
+export const KEEP = [
+  { why: 'billing', file: 'features/settings/billing.tsx', text: /^Pays for email at \$0\.20 per 1,000 sent or received, plus any tax\.$/ },
+  { why: 'billing', file: 'features/settings/billing.tsx', text: /^Charges your saved card when the balance runs low, up to a monthly limit\.$/ },
+  { why: 'billing', file: 'features/settings/create-key.tsx', text: /^Billed by the day while the inbox has an app password\.$/ },
+  { why: 'secret', file: 'features/settings/create-key.tsx', text: /^Shown once: copy it now/ },
+  { why: 'secret', file: 'features/inbound/shared.tsx', text: /^It won’t be shown again\.$/ },
+  { why: 'secret', file: 'features/settings/webhooks.tsx', text: /^Keep it on your server: anyone with it can sign requests as …\.$|^Keep it on your server: anyone with it can sign requests as Nightmail\.$/ },
+  { why: 'legal', file: 'components/ContactSupport.tsx', text: /^Lets support read email bodies in this workspace, for this request only\.$/ },
+  { why: 'legal', file: 'features/audience/bulk.tsx', text: /^Confirm they (agreed before marking them subscribed|subscribed again)\.$/ },
+  { why: 'legal', file: 'features/audience/contacts.tsx', text: /^Records that they agreed to marketing email\.$/ },
+  { why: 'legal', file: 'features/audience/contacts.tsx', text: /^Transactional email still sends\.$/ },
+  { why: 'safety', file: 'lib/leave-guard.tsx', text: /^You haven’t saved …; leaving discards them\.$/ },
+  { why: 'safety', file: 'App.tsx', text: /^Unsaved changes may be lost\.$/ },
+  { why: 'safety', file: 'components/AppShell.tsx', text: /^Unsaved changes on it may be lost\.$/ },
+  { why: 'safety', file: 'features/settings/workspace-members.tsx', text: /^They lose access to keys, domains, webhooks, sending and members at once\.$/ },
+  { why: 'safety', file: 'features/score/standing.tsx', text: /^Marketing resumes at 50% for 48 hours, once per 14 days\.$/ },
+  { why: 'safety', file: 'features/score/standing.tsx', text: /^Sending resumes at 50% for 48 hours \(marketing after 24\), once per 30 days\.$/ },
+  { why: 'safety', file: 'features/settings/workspace-members.tsx', text: /^They can manage keys, domains, webhooks, sending and members\.$/ },
+  { why: 'safety', file: 'features/settings/workspace-members.tsx', text: /^They can remove you; only another owner can undo this\.$/ },
+  { why: 'safety', file: 'features/operator/index.tsx', text: /^Owners see a pause banner and get an email\.$/ },
+  { why: 'safety', file: 'features/operator/index.tsx', text: /^A strike stays on record\.$/ },
+  { why: 'safety', file: 'features/operator/index.tsx', text: /^Campaigns pause and new marketing is refused\.$/ },
+  { why: 'safety', file: 'features/operator/index.tsx', text: /^The workspace moves to Warn until it clears\.$/ },
+];
+for (const k of KEEP) if (!KEEP_WHY[k.why]) throw new Error(`copy-lint KEEP: “${k.why}” is not a kept category (${Object.keys(KEEP_WHY).join(', ')})`);
+// State, not explanation: a loading line, or a short “No … yet” where a list or value would be.
+const STATE = /^(Loading\b.*…$|(No|Nothing)\b(?!\s*one\b)[^.:;]{0,32}\.?$)/;
+const HEADING_TAG = /^(h[1-6]|legend|PageHeader|SectionHeader)$/;
+const isHeadingEl = el => HEADING_TAG.test(tagName(el)) || /__title\b|-title\b/.test(classOf(el));
+const kept = item => KEEP.some(k => k.file === item.file && k.text.test(item.text));
+// Which secondary rule a string breaks, if any.
+function secondary(item) {
+  if (item.srOnly || item.role === 'alert' || item.role === 'status' || STATE.test(item.text)) return null;
+  if (kept(item)) return null;
+  const { kind, prop, tag = '', cls = '' } = item;
+  if (['field', 'label', 'option', 'placeholder'].includes(kind) && /(^|\(|\s)optional\b/i.test(item.text)) return ['caption', '“Optional” is a secondary label: leave the field empty by default, or move it out of the required path'];
+  if (kind === 'description') return ['tagline', `a description${tag ? ` on ${tag}` : ''}: let the heading and layout say it`];
+  if (kind === 'empty' && tag) return ['tagline', 'an empty state’s description: the empty state is its heading and its action'];
+  if (kind === 'helper') {
+    if (prop === 'subtitle') return ['tagline', 'a subtitle under a page heading'];
+    if (tag === 'Field' && /^(hint|help|note)$/.test(prop ?? '') || !prop && /hint|help/.test(cls)) return ['helper', 'helper text under a field: fix the label, the control or its default instead'];
+    return ['caption', `a secondary line${prop ? ` (${prop})` : ''}: cut it, or open the detail from its summary`];
+  }
+  if (item.underHeading && ['body', 'description'].includes(kind)) return ['tagline', 'a line right under a heading: let the heading and layout say it'];
+  return null;
+}
+// The clean-copy ladder's third rung (copy-fix.md): copy that rules out a failure rather than describing a behaviour,
+// scar tissue from a fixed bug, a design decision defended, a hedge about something that works. Confirmations and errors
+// state real consequences and are left to their own rules.
+const REASSURE = /\bdon[’']?t worry\b|\bno need to (worry|wait)\b|\b(may|might|can) (look|seem|appear)\b|\b(looks?|seems?|appears?) (slow|off|wrong|stuck|broken)\b|\blike the old\b|\bunlike (before|the old)\b|\b(always|still) (keeps?|works?)\b|\bnever\b|\bnothing (is|gets|was) (lost|deleted|removed|changed|charged|sent)\b|\bwon[’']?t (lose|delete|remove|change|affect|charge|break)\b|\bis(n[’']?t| not) (lost|deleted|removed|affected|charged)\b|\bwithout (losing|affecting|breaking|changing)\b|\b(it[’']?s|is) safe to\b|\bjust works\b/i;
+function reassures(item) {
+  // A value (“Never”) or a status that starts with it (“Never sent to SES.”) describes a state, not a worry.
+  if (!['body', 'description', 'helper', 'empty', 'tooltip', 'alert', 'toast'].includes(item.kind) || item.srOnly || kept(item) || words(item.text) < 3 || /^never\b/i.test(item.text)) return null;
+  const m = prose(item.text).match(REASSURE);
+  return m ? [`“${m[0]}” rules out a failure or answers a worry nobody had: cut the clause`, m[0].toLowerCase()] : null;
+}
 
 // ---------------------------------------------------------------- extraction
 const require = createRequire(join(app, 'package.json'));
@@ -136,7 +208,7 @@ const brandName = e => e.type === 'Identifier' && e.name === 'productName' ? 'Ni
   : e.type === 'CallExpression' && e.callee.type === 'MemberExpression' && e.callee.object.type === 'Identifier' && e.callee.object.name === 'productName' ? 'nightmail' : null;
 const templateText = t => t.quasis.map((q, i) => (q.value.cooked ?? '') + (i < t.expressions.length ? brandName(t.expressions[i]) ?? PH : '')).join('');
 // Strings that aren't prose: identifiers, paths, URLs, selectors, CSS, markup, code.
-const codeLike = s => /^(https?:|mailto:|\/|#|\.|[a-z][\w-]*:)/.test(s) || /[{};=<>]|=>|\(\)|\$\{/.test(s) || /^[\w.@+-]+$/.test(s) && !/^[A-Z][a-z]+$/.test(s);
+const codeLike = s => /^(https?:|mailto:|\/|#|\.|[a-z][\w-]*:)/.test(s) || /[{}=<>]|=>|\(\)|\$\{|;(?!\s+[A-Za-z“‘(])/.test(s) || /^[\w.@+-]+$/.test(s) && !/^[A-Z][a-z]+$/.test(s);
 const sentenceLike = s => /^[A-Z“"‘(]/.test(s) && / /.test(s) && words(s) >= 4 && !codeLike(s) && /[a-z]/.test(s);
 const mergeable = c => c.type === 'JSXElement' && INLINE.has(tagName(c)) && !CODE.has(tagName(c)) && !OWN_LINE.test(classOf(c));
 
@@ -183,7 +255,11 @@ function textKind(el, hint) {
 export function extract(file, code) {
   let ast;
   try { ast = parse(code, { sourceType: 'module', plugins: ['jsx', 'typescript'], errorRecovery: true }); } catch (error) { return [{ file, line: 1, kind: 'error', text: '', parseError: error.message }]; }
-  const items = [], seen = new Set(), consumed = new Set();
+  const items = [], seen = new Set(), consumed = new Set(), underHeading = new Set();
+  // The elements a JSX element renders as its children, through fragments and `cond && <p/>` or `a ? <p/> : <q/>`.
+  const rendered = e => !e ? [] : e.type === 'JSXElement' ? [e] : e.type === 'JSXFragment' ? e.children.flatMap(rendered)
+    : e.type === 'JSXExpressionContainer' || e.type === 'ParenthesizedExpression' ? rendered(e.expression)
+    : e.type === 'LogicalExpression' ? rendered(e.right) : e.type === 'ConditionalExpression' ? [...rendered(e.consequent), ...rendered(e.alternate)] : [];
   const emit = (node, kind, text, extra = {}) => {
     if (seen.has(node)) return; seen.add(node);
     text = clean(text);
@@ -210,7 +286,11 @@ export function extract(file, code) {
         const name = tagName(node);
         if (CODE.has(name) || name === 'style' || name === 'svg' || name === 'script') return;
         // An element with text of its own is one run, inline children included; without, each child speaks for itself.
-        if (!consumed.has(node) && kids(node).some(isText)) emit(node, textKind(node, hint), flatten(node.children, consumed), { tag: name, element: owner });
+        // A child right after a heading child (its subtitle or intro, if it is text).
+        const children = node.children.filter(c => c.type !== 'JSXText' || c.value.trim());
+        children.forEach((c, i) => { if (i && rendered(children[i - 1]).some(isHeadingEl)) for (const e of rendered(c)) if (!isHeadingEl(e)) underHeading.add(e); });
+        const cls = classOf(node);
+        if (!consumed.has(node) && kids(node).some(isText)) emit(node, textKind(node, hint), flatten(node.children, consumed), { tag: name, element: owner, cls, role: attr(node, 'role')?.value?.value, srOnly: /\bsr-only\b/.test(cls), underHeading: underHeading.has(node) });
         for (const a of node.openingElement.attributes) {
           if (a.type !== 'JSXAttribute' || !a.value) continue;
           const kindFor = PROP_KIND[a.name.name];
@@ -327,7 +407,8 @@ function relations(items) {
   const byElement = new Map();
   for (const item of items) if (item.element) (byElement.get(item.element) ?? byElement.set(item.element, []).get(item.element)).push(item);
   for (const group of byElement.values()) {
-    const labels = group.filter(i => i.kind === 'heading' || i.kind === 'label'), details = group.filter(i => ['description', 'helper', 'empty', 'confirm'].includes(i.kind));
+    // A field's label counts too: a hint or caption under it that repeats its words says nothing new.
+    const labels = group.filter(i => ['heading', 'label', 'field'].includes(i.kind)), details = group.filter(i => ['description', 'helper', 'empty', 'confirm'].includes(i.kind));
     for (const d of details) for (const l of labels) if (restates(l.text, d.text)) found.push({ item: d, rule: 'restate', message: `repeats its ${l.prop ?? 'label'} “${l.text}”`, term: l.text.toLowerCase() });
   }
   // A heading followed directly by a paragraph in the same file (the next item, within 3 lines).
@@ -363,7 +444,13 @@ export function lint() {
     if (SKIP.test(file)) continue;
     const list = extract(file, readFileSync(path, 'utf8'));
     items.push(...list);
-    for (const item of list) for (const f of check(item)) findings.push({ ...f, item });
+    for (const item of list) {
+      for (const f of check(item)) findings.push({ ...f, item });
+      const s = secondary(item);
+      if (s) findings.push({ rule: s[0], message: s[1], item });
+      const r = reassures(item);
+      if (r) findings.push({ rule: 'reassure', message: r[0], term: r[1], item });
+    }
     findings.push(...relations(list));
   }
   findings.push(...duplicates(items));

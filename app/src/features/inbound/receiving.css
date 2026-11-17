@@ -15,13 +15,10 @@
 .rcv-target[data-muted] { color: var(--color-muted); }
 .rcv-via { color: var(--color-faint); font-size: var(--text-xs); }
 .rcv-chain { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-4); }
-.rcv-chain code, .rcv-cell code, .rcv-step code, .rcv-concept code, .addr-path code { font-family: var(--font-mono); font-size: var(--text-sm); }
+.rcv-chain code, .rcv-cell code, .rcv-step code, .addr-path code { font-family: var(--font-mono); font-size: var(--text-sm); }
 .rcv-chain__then { margin-right: var(--space-4); color: var(--color-faint); }
 .rcv-add { color: var(--color-muted); text-decoration: none; white-space: nowrap; transition: color var(--motion-duration); }
 .rcv-add:hover { color: var(--color-text); text-decoration: underline; text-underline-offset: 3px; }
-.rcv-concept { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-4) var(--space-12); min-width: 0; margin: 0; color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
-.rcv-concept > span { flex: none; max-width: 100%; }
-.rcv-concept > code { white-space: nowrap; color: var(--color-faint); font-size: var(--text-xs); }
 
 /* One fixed-height loading block, replaced by the tabs once the one read arrives. */
 .rcv-skeleton { display: grid; gap: var(--space-16); }
@@ -41,7 +38,8 @@
 .rcv-filter:active { transform: scale(.97); }
 .rcv-filter[aria-pressed='true'] { background: var(--color-active-bg); color: var(--color-text); }
 .rcv-filter:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
-.rcv-kindline { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); min-height: var(--control-height); }
+/* A tab's own actions, on the right above its table. */
+.rcv-kindline { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-16); min-height: var(--control-height); }
 .rcv-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); min-height: var(--control-height); font-size: var(--text-sm); transition: opacity 160ms ease-out; }
 .rcv-foot[data-busy] { opacity: .6; }
 .rcv-foot .ui-pagination { margin: 0; }
@@ -55,20 +53,19 @@
 .rcv-step__body { display: grid; align-content: start; justify-items: start; gap: var(--space-8); min-width: 0; }
 .rcv-step__body h3 { margin: 0; font-size: var(--text-md); line-height: 22px; font-weight: var(--font-weight-bold); }
 .rcv-step__body p { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
-.rcv-steps__aside { grid-column: 1 / -1; padding-top: var(--space-16); border-top: 1px solid var(--color-border-muted); font-size: var(--text-sm); }
+.rcv-steps__aside { grid-column: 1 / -1; padding-top: var(--space-12); border-top: 1px solid var(--color-border-muted); }
 
 /* An address's path: Route → Rituals → Goes to, each step with its actions. */
 .addr-path { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr); border-block: 1px solid var(--color-border-muted); }
-.addr-step { display: grid; grid-template-rows: auto auto 1fr auto; align-content: start; gap: var(--space-8); min-width: 0; padding: var(--space-16) var(--space-16) var(--space-16) 0; scroll-margin-top: var(--space-24); }
+.addr-step { display: grid; grid-template-rows: auto 1fr auto; align-content: start; gap: var(--space-8); min-width: 0; padding: var(--space-16) var(--space-16) var(--space-16) 0; scroll-margin-top: var(--space-24); }
 .addr-step + .addr-arrow + .addr-step { padding-left: var(--space-16); }
 .addr-arrow { display: grid; place-items: center; width: 24px; color: var(--color-faint); font-family: var(--font-mono); }
 .addr-step h2 { margin: 0; font-size: var(--text-md); line-height: 22px; font-weight: var(--font-weight-bold); }
-.addr-step > p { margin: 0; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.addr-step > p { margin: 0; color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
 .addr-step ul { display: grid; align-content: start; gap: var(--space-6); margin: 0; padding: 0; list-style: none; }
 .addr-step li { display: flex; align-items: center; gap: var(--space-8); min-width: 0; min-height: 24px; font-size: var(--text-sm); line-height: var(--leading-sm); }
 .addr-step li > .muted { margin-left: auto; font-size: var(--text-xs); white-space: nowrap; }
 .addr-step li .ui-icon-button { margin-left: var(--space-4); }
-.addr-step__empty { color: var(--color-muted); font-size: var(--text-sm); }
 .addr-step__actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); }
 .addr-step__foot { display: grid; gap: var(--space-8); }
 /* A ghost button that starts a row sits on the column's edge, its label under the text above it. */
@@ -104,6 +101,9 @@ li + li > .trace-recent__row { border-top: 1px solid var(--color-border-muted); 
 .trace-sample { display: grid; grid-template-columns: minmax(220px, 320px) minmax(0, 1fr); gap: var(--space-16); align-items: start; }
 .trace-sample__mime { margin: 0; padding: var(--space-12); border-radius: var(--radius-sm); background: var(--color-layer-1); color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .trace-out { scroll-margin-top: var(--space-24); }
+/* Trace it as mail to: an address typed there is masked like any other, but its placeholder is the default it falls
+   back to (the message's own recipients), not an address, so it stays readable. */
+html:not([data-privacy='off']) .trace-to.private-field:not(:hover, :focus)::placeholder { color: var(--color-muted); text-shadow: none; }
 
 .trace-view { display: grid; gap: var(--space-16); }
 .trace-view__bar { display: flex; align-items: center; justify-content: space-between; min-height: var(--control-height); font-size: var(--text-sm); }
@@ -171,12 +171,10 @@ li + li > .trace-recent__row { border-top: 1px solid var(--color-border-muted); 
 .ritual-try__options { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 360px)); gap: var(--space-16); align-items: start; }
 .ritual-try__range { width: 100%; height: var(--control-height); margin: 0; accent-color: var(--color-accent); }
 .ritual-try__score { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-.rcv-truncated { margin: 0; font-size: var(--text-sm); }
+.rcv-filter-chip { display: inline-flex; align-items: center; gap: 2px; min-width: 0; max-width: 100%; height: var(--control-height); padding: 0 2px 0 10px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: var(--text-sm); }
 /* Phone: the kind filters scroll sideways in one row, the domain picker and search take full rows, and a route's card
    shows its rituals then where its mail goes. */
 @media (max-width: 640px) {
-  /* The line wraps beside the Guide link instead of pushing it past the screen's edge. */
-  .rcv-concept > span { flex: 1 1 0; min-width: 0; }
   .rcv-toolbar { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: var(--space-8); }
   .rcv-filters { flex-wrap: nowrap; margin: calc(-1 * var(--focus-reach)) calc(-1 * var(--bleed, 0px)); padding: var(--focus-reach) var(--bleed, 0px) var(--focus-reach) calc(var(--bleed, 0px) - 8px); overflow-x: auto; }
   .rcv-filter { flex: none; height: 36px; }
@@ -185,7 +183,9 @@ li + li > .trace-recent__row { border-top: 1px solid var(--color-border-muted); 
   .rcv-kindline { flex-wrap: wrap; gap: var(--space-8); }
   .rcv-foot { flex-wrap: wrap; }
 }
-.rcv-card-to { display: inline-flex; align-items: center; gap: var(--space-8); }
+/* A card's one line: its first ritual (+ how many more), then where its mail goes; it clips at the card's edge. */
+.rcv-card-to { display: inline-flex; align-items: center; gap: var(--space-8); min-width: 0; overflow: hidden; mask-image: linear-gradient(90deg, #000 calc(100% - 20px), transparent); }
+.rcv-card-to__ritual { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--text-sm); }
 .rcv-card-to > span[aria-hidden] { color: var(--color-faint); }
 .rcv-card-to .rcv-targets { flex-wrap: nowrap; }
 .rcv-unread { color: var(--color-text); font-weight: var(--font-weight-bold); }
@@ -219,17 +219,15 @@ li + li > .trace-recent__row { border-top: 1px solid var(--color-border-muted); 
 .addr-step li > .rcv-match { flex: 0 1 auto; }
 .rcv-step__body .cluster > .ui-button--ghost:first-child { margin-inline-start: calc(-1 * var(--button-pad-x, 11px)); }
 @media (max-width: 640px) {
-  .rcv-concept > code { order: 3; flex-basis: 100%; white-space: normal; overflow-wrap: anywhere; }
   /* A recent message: subject and time, then its first words on a line of their own. */
   .addr-recent a { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'subject time' 'snippet snippet'; gap: 2px var(--space-12); padding-block: var(--space-8); }
   .addr-recent__subject { grid-area: subject; }
   .addr-recent time { grid-area: time; }
   .addr-recent__snippet { grid-area: snippet; font-size: var(--text-xs); }
 }
-.inbound-note.rcv-note { max-width: 90ch; }
 /* An address in a clipped line keeps its focus ring inside the clip. */
 .receiving-clip .private-address:focus-visible { outline-offset: -2px; }
-@media (min-width: 641px) {
-  .rcv-kindline > .rcv-concept { flex: 1 1 0; }
-  .rcv-kindline > .cluster { flex: none; flex-wrap: nowrap; }
-}
+.rcv-kindline > .cluster { flex: none; flex-wrap: nowrap; }
+.rcv-toolbar__end > .cluster { flex: none; flex-wrap: nowrap; }
+/* A ghost button that starts the row sits on the column's edge. */
+.rcv-steps__aside > .ui-button--ghost:first-child { margin-inline-start: calc(-1 * var(--button-pad-x, 11px)); }

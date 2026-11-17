@@ -8,12 +8,13 @@ import { accountApi, accountsKey } from '../../data/accounts'
 import { useApiDef, useApiMutation, useSession } from '../../data/context'
 import { queries } from '../../data/queries'
 import { McpApproval, Row } from './hosted'
-import { connectionTitle } from './key-labels'
+import { agentAccess, connectionTitle } from './key-labels'
 
 // One connected agent (/settings/mcp/<id>), linked from Settings and the rituals page. One agent is one account: the
 // account its client signed in as at the account service. The page lists this browser's connected accounts with that one
 // marked, and acts only as the account you pick, never silently as the tab's account; with the right one active, its
-// default workspace follows. "Use another account" adds an account through the account service's chooser.
+// default workspace follows. "Use another account" adds an account through the account service's chooser. What the agent
+// may do (its access) is the header's badge once it loads.
 export function McpApprovalPage() {
   const { id = '' } = useParams()
   const session = useSession()
@@ -34,9 +35,8 @@ export function McpApprovalPage() {
     try { await session!.switchAccount(account, location.pathname) } finally { setSwitching(false) }
   }
   return <div className="stack mcp-approval">
-    <PageHeader title="Connected agent" backTo="/settings#account" />
+    <PageHeader title="Connected agent" backTo="/settings#account" actions={ready && connection.data ? <StatusBadge status={agentAccess(connection.data.permissions)} tone="neutral" /> : undefined} />
     <SectionHeader title="Account" />
-    <p className="muted">The agent acts as the account it signed in with: approve that one.</p>
     {browser.isError ? <ErrorState error={browser.error} onRetry={() => void browser.refetch()} /> : <div className="settings-rows" role="radiogroup" aria-label="Account">
       {/* One row while loading (the usual one account); further accounts and the last row are added below it, so
           nothing that is already shown moves. */}
@@ -46,7 +46,7 @@ export function McpApprovalPage() {
             <AccountAvatar name={account.name} email={account.email} /><span className="settings-row__label"><span title={account.name || undefined}>{account.name || account.email}</span>{account.email && <PrivateAddress className="muted" value={account.email} />}</span></span>
           <span className="settings-row__control">{account.id === owner && <StatusBadge status="This agent" tone="info" />}{account.id === identity?.id && <span className="muted">This tab</span>}</span>
         </label>)}
-      {browser.data && <div className="settings-row"><span className="settings-row__label"><span>Another account</span><span className="muted">Choose it at Anomaly account</span></span><span className="settings-row__control"><Button onClick={() => session?.addAccount(location.pathname)}>Use another account</Button></span></div>}
+      {browser.data && <div className="settings-row"><span className="settings-row__label"><span>Another account</span></span><span className="settings-row__control"><Button onClick={() => session?.addAccount(location.pathname)}>Use another account</Button></span></div>}
     </div>}
     {browser.data && (!owner ? <Alert tone="info" title="This agent used another account">It signed in with an account not connected in this browser. Add that account, or reconnect the client and choose one of these at Anomaly account.</Alert>
       : picked !== owner ? <Alert tone="info" title="Not this agent’s account">The client signed in with a different account. To connect {pickedAccount?.name || 'this account'} instead, reconnect the client and choose it at Anomaly account.</Alert>
@@ -54,11 +54,10 @@ export function McpApprovalPage() {
       : null)}
     {ready && <>
       <SectionHeader title="Default workspace" />
-      <p className="muted">Tool calls that name no workspace use this one, as your role allows.</p>
       {connection.isError ? <ErrorState error={connection.error} onRetry={() => void connection.refetch()} />
         : !connection.data ? <div className="settings-rows"><div className="settings-row"><Skeleton width={200} height={20} /></div></div>
         : connection.data.status === 'active' ? <div className="settings-rows"><McpApproval key={`${connection.data.id}:${connection.data.workspaceId}`} app={connection.data} workspaces={identity?.workspaces ?? []} linked={false} onRevoke={() => revoke.mutate(connection.data!.id)} /></div>
-        : <div className="settings-rows"><Row title={connectionTitle(connection.data)} hint={connection.data.clientId}>{connection.data.status === 'expired' ? 'Expired · reconnect the client' : 'Revoked · reconnect the client'}</Row></div>}
+        : <div className="settings-rows"><Row title={connectionTitle(connection.data)}>{connection.data.status === 'expired' ? 'Expired · reconnect the client' : 'Revoked · reconnect the client'}</Row></div>}
     </>}
   </div>
 }

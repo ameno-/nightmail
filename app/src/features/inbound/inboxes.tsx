@@ -3,14 +3,14 @@ import type { McpClient } from '../../../../api/src/mcp-clients'
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { request } from '../../data/live'
-import { Alert, Button, Checkbox, ConfirmDialog, DropdownMenu, CopyButton, SecretCode, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge, type Tone } from '../../components/ui'
+import { Alert, Button, Checkbox, ConfirmDialog, DropdownMenu, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge, type Tone } from '../../components/ui'
 import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { ApiKey, CreatedInbox, Inbox, InboxInput, InboxMessage, InboxStatus, MailboxDomain } from '../../data/types'
 import { date, number } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { fieldError, MutationError } from '../settings/shared'
-import { when, Sender } from './shared'
+import { SecretField, when, Sender } from './shared'
 import { nameParts } from '../../lib/private-address'
 import '../settings/settings.css'
 import './inbound.css'
@@ -18,7 +18,11 @@ import { PrivateAddress } from '../../components/PrivateAddress'
 import { productName } from '../../../../api/src/brand'
 
 const route = '/receiving/inboxes'
-const lifetimes = [{ value: '3600', label: '1 hour' }, { value: '86400', label: '24 hours' }, { value: '604800', label: '7 days' }, { value: '2592000', label: '30 days' }]
+const DAY = 86_400_000
+const day = (ms: number) => date(new Date(ms).toISOString(), { month: 'short', day: 'numeric', timeZone: 'UTC' })
+// Each lifetime says when the inbox and its mail are deleted: it receives for that long, holds new mail one more day,
+// then is erased (deleteAfter on the inbox).
+const lifetimes = (now: number) => [['3600', '1 hour'], ['86400', '24 hours'], ['604800', '7 days'], ['2592000', '30 days']].map(([value, label]) => ({ value: value!, label: `${label}, deleted ${day(now + Number(value) * 1000 + DAY)}` }))
 const statusTone: Record<InboxStatus, Tone> = { active: 'success', expired: 'warning', deleting: 'neutral' }
 const statusLabel: Record<InboxStatus, string> = { active: 'Active', expired: 'Expired', deleting: 'Deleting' }
 const size = (bytes: number) => bytes < 1024 ? `${number(bytes)} B` : bytes < 1048576 ? `${(bytes / 1024).toFixed(1)} KiB` : `${(bytes / 1048576).toFixed(1)} MiB`
@@ -45,11 +49,12 @@ export function NewInboxDialog({ open, onOpenChange }: { open: boolean; onOpenCh
   const [client, setClient] = useState<McpClient>('opencode')
   const [connecting, setConnecting] = useState(false)
   const url = useMcpUrl()
+  const [now, setNow] = useState(() => Date.now())
   // No toast: the dialog itself turns into "Agent inbox created".
   const create = useApiMutation((api, input: InboxInput) => api.inboxes.create(input))
   const created: CreatedInbox | undefined = create.data
   const noHost = !domains.isPending && !hosts.length
-  useEffect(() => { if (open) { create.reset(); setHost(''); setName(''); setLifetime('86400'); setWithKey(true); setReplies(false); setClient('opencode') } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (open) { create.reset(); setHost(''); setName(''); setLifetime('86400'); setWithKey(true); setReplies(false); setClient('opencode'); setNow(Date.now()) } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   // Without an active receiving host the only inbox that works is a sandbox.
   useEffect(() => { if (open) setType(noHost ? 'sandbox' : 'ephemeral') }, [open, noHost])
   async function submit(event: FormEvent) {
@@ -61,30 +66,30 @@ export function NewInboxDialog({ open, onOpenChange }: { open: boolean; onOpenCh
   if (created) return <>
     <Dialog sensitive={Boolean(created.credential)} open={open && !connecting} onOpenChange={next => { if (!next) close() }} title="Agent inbox created" className="connect-agent-dialog" footer={<><Button onClick={close}>Done</Button>{!created.credential && <Button onClick={() => setConnecting(true)}>Connect an agent</Button>}<Button variant="primary" onClick={() => { close(); navigate(`${route}/${created.id}`) }}>Open inbox</Button></>}>
       <div className="stack">
-        <Field label="Address" hint={`Receives until ${date(created.expiresAt)}. ${created.type === 'sandbox' ? 'A sandbox address only gets test mail: use Send test mail on its page, or POST /v1/inboxes/{id}/simulate.' : 'Mail sent to it shows up on its page and through the API.'}`}><div className="settings-copy-cell"><code><PrivateAddress value={created.address} /></code><CopyButton value={created.address} label="Copy address" /></div></Field>
+        <Field label="Address"><div className="settings-copy-cell"><code><PrivateAddress value={created.address} /></code><CopyButton value={created.address} label="Copy address" /></div></Field>
+        <dl className="settings-facts"><div><dt>Receives until</dt><dd>{date(created.expiresAt)}</dd></div></dl>
         {created.credential && <>
-          <Field label="API key" hint="Copy it now; it won’t be shown again. It reads and manages only this inbox, over the API or MCP, and stops working when the inbox is deleted.">
-            <div className="settings-copy-cell"><SecretCode>{created.credential.secret}</SecretCode><CopyButton value={created.credential.secret} label="Copy API key" /></div>
-          </Field>
+          <SecretField label="API key" value={created.credential.secret} copyLabel="Copy API key" />
           <div className="stack"><strong className="connect-agent__title">Use it with an agent</strong><McpClientSetup client={client} onClient={setClient} url={url} auth={{ bearer: created.credential.secret }} label="Agent" /></div>
         </>}
       </div>
     </Dialog>
     <ConnectAgentDialog open={open && connecting} onOpenChange={next => { if (!next) { setConnecting(false); close() } }} inboxId={created.id} />
   </>
-  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) onOpenChange(next) }} title="New agent inbox" description="An expiring address where an agent or test receives mail, like sign-up codes." footer={<><Button disabled={create.isPending} onClick={close}>Cancel</Button><Button variant="primary" type="submit" form="agent-inbox-create" loading={create.isPending} disabled={domains.isPending}>Create inbox</Button></>}>
+  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) onOpenChange(next) }} title="New agent inbox" footer={<><Button disabled={create.isPending} onClick={close}>Cancel</Button><Button variant="primary" type="submit" form="agent-inbox-create" loading={create.isPending} disabled={domains.isPending}>Create inbox</Button></>}>
     <form id="agent-inbox-create" className="stack" onSubmit={submit} noValidate>
       <MutationError error={create.error} />
       {noHost && <Alert tone="info">No domain receives mail yet, so this is a sandbox inbox for test mail only. For a real address, add a domain in <Link to="/domains">Domains</Link> and publish its receiving MX record.</Alert>}
-      <Field label="Address" htmlFor="agent-inbox-type" error={fieldError(create.error, 'domain')} hint={type === 'sandbox' ? 'A made-up .invalid address; only test mail you send reaches it.' : 'A random address on this domain that nobody can guess.'}>
+      {/* Each choice says what the address is: a random one nobody can guess on a receiving host, or a sandbox. */}
+      <Field label="Address" htmlFor="agent-inbox-type" error={fieldError(create.error, 'domain')}>
         <Select id="agent-inbox-type" value={type === 'sandbox' ? 'sandbox' : host || hosts[0] || ''} disabled={create.isPending} onValueChange={value => { if (value === 'sandbox') setType('sandbox'); else { setType('ephemeral'); setHost(value) } }}
-          options={[...hosts.map(value => ({ value, label: `…@${value}` })), { value: 'sandbox', label: 'Sandbox: test mail only' }]} />
+          options={[...hosts.map(value => ({ value, label: `Random address @${value}` })), { value: 'sandbox', label: 'Sandbox: test mail only' }]} />
       </Field>
-      <Field label="Name" htmlFor="agent-inbox-name" hint="Optional. Shown in lists and as the sender name on replies.">
+      <Field label="Name" htmlFor="agent-inbox-name">
         <Input id="agent-inbox-name" value={name} maxLength={200} onChange={event => setName(event.target.value)} disabled={create.isPending} placeholder="Sign-up test" autoComplete="off" />
       </Field>
-      <Field label="Receives mail for" htmlFor="agent-inbox-lifetime" hint="Then mail is held 1 day, and the inbox and its mail are deleted.">
-        <Select id="agent-inbox-lifetime" value={lifetime} onValueChange={setLifetime} disabled={create.isPending} options={lifetimes} />
+      <Field label="Receives mail for" htmlFor="agent-inbox-lifetime">
+        <Select id="agent-inbox-lifetime" value={lifetime} onValueChange={setLifetime} disabled={create.isPending} options={lifetimes(now)} />
       </Field>
       <Checkbox checked={withKey} onCheckedChange={setWithKey} disabled={create.isPending} label="Create an API key that can only read this inbox" />
       {type === 'ephemeral' && <Checkbox checked={replies} onCheckedChange={setReplies} disabled={create.isPending} label="Allow replies to senders, up to 20 a day" />}
@@ -107,7 +112,7 @@ export function AgentInboxesPage() {
     </>} />
     {inboxes.error ? <ErrorState error={inboxes.error} onRetry={() => void inboxes.refetch()} /> : <>
       <DataTable loading={inboxes.isPending} skeletonRows={4} rows={inboxes.data ?? []} rowKey={row => row.id} rowHref={row => `${route}/${row.id}`}
-        empty={<EmptyState title={q ? 'No matching inboxes' : 'No agent inboxes yet'} description={q ? undefined : 'Expiring addresses for agents and tests. Create one, or let an agent create its own over MCP or the API.'} action={!q && canAdminister ? <Button onClick={() => setCreating(true)}>New inbox</Button> : undefined} />}
+        empty={<EmptyState title={q ? 'No matching inboxes' : 'No agent inboxes yet'} action={!q && canAdminister ? <Button onClick={() => setCreating(true)}>New agent inbox</Button> : undefined} />}
         columns={[
           // An inbox's card: its address and status, its name or type, then expiry and mail counts.
           { key: 'address', label: 'Address', width: '26%', render: row => <span className="mailbox-address"><span className="receiving-clip"><PrivateAddress value={row.address} /></span>{row.type === 'sandbox' && <StatusBadge status="Sandbox" tone="neutral" />}</span>, cardRender: row => <PrivateAddress value={row.address} /> },
@@ -151,7 +156,6 @@ const factTerms = ['Status', 'Expires', 'Deleted after', 'Delivered', 'Stored', 
 const permissionWords: Record<string, string> = { read: 'Read mail', modify: 'Mark read, delete', send: 'Reply' }
 /** A key limited to this inbox: an inbox key, or one for these addresses that names only this inbox. */
 const keyFor = (key: ApiKey, inboxId: string) => key.access.inboxId === inboxId || key.access.type !== 'workspace' && key.access.addressIds?.length === 1 && key.access.addressIds[0] === inboxId
-const extensions = [{ value: '86400', label: '1 more day' }, { value: '604800', label: '7 more days' }, { value: 'max', label: 'As long as allowed (30 days from creation)' }]
 export function AgentInboxPage() {
   const { id = '' } = useParams()
   return <InboxDetail key={id} id={id} />
@@ -161,13 +165,18 @@ export function AgentInboxPage() {
 function EditInboxDialog({ inbox, open, onOpenChange }: { inbox: Inbox; open: boolean; onOpenChange: (open: boolean) => void }) {
   const [name, setName] = useState(inbox.name ?? '')
   const [extend, setExtend] = useState('')
-  const limit = Date.parse(inbox.createdAt) + 30 * 86_400_000
-  const until = extend === '' ? null : new Date(extend === 'max' ? limit : Math.min(limit, Math.max(Date.now(), Date.parse(inbox.expiresAt)) + Number(extend) * 1000))
+  const limit = Date.parse(inbox.createdAt) + 30 * DAY, expires = Date.parse(inbox.expiresAt)
+  const untilOf = (value: string) => value === 'max' ? limit : Math.min(limit, Math.max(Date.now(), expires) + Number(value) * 1000)
+  const until = extend === '' ? null : new Date(untilOf(extend))
   const save = useApiMutation((_api, body: { name?: string; expiresAt?: string }) => request(`/v1/inboxes/${encodeURIComponent(inbox.id)}`, { method: 'PATCH', body }), 'Inbox updated', false, true, inbox.id)
   useEffect(() => { if (open) { save.reset(); setName(inbox.name ?? ''); setExtend('') } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   // An expired inbox can still be kept longer during its hold day: updateInbox takes any expiry up to the limit.
-  const canExtend = inbox.status !== 'deleting' && limit - 60_000 > Math.max(Date.now(), Date.parse(inbox.expiresAt))
-  const atLimit = Date.parse(inbox.expiresAt) >= limit - 60_000
+  const canExtend = inbox.status !== 'deleting' && limit - 60_000 > Math.max(Date.now(), expires)
+  // Each choice is the day it receives until and the day it and its mail are deleted, one later; the last is as long as
+  // an inbox can last (30 days from creation), and an inbox already there can't be kept longer.
+  const choice = (value: string, at: number, verb = 'Until') => ({ value, label: `${verb} ${day(at)}${at >= limit - 60_000 ? ' (longest)' : ''}, deleted ${day(value === '' && inbox.deleteAfter ? Date.parse(inbox.deleteAfter) : at + DAY)}` })
+  const options = !inbox.expiresAt ? [{ value: '', label: 'Never expires' }]
+    : [choice('', expires, inbox.status === 'expired' ? 'Expired' : 'Until'), ...(canExtend ? ['86400', '604800', 'max'].map(value => choice(value, untilOf(value))) : [])].filter((option, i, all) => all.findIndex(other => other.label.split(',')[0] === option.label.split(',')[0]) === i)
   async function submit(event: FormEvent) {
     event.preventDefault()
     try { await save.mutateAsync({ ...(name.trim() !== (inbox.name ?? '') ? { name: name.trim() } : {}), ...(until ? { expiresAt: until.toISOString() } : {}) }); onOpenChange(false) } catch { /* Shown in the form. */ }
@@ -175,9 +184,9 @@ function EditInboxDialog({ inbox, open, onOpenChange }: { inbox: Inbox; open: bo
   return <Dialog open={open} onOpenChange={next => { if (!save.isPending) onOpenChange(next) }} title="Edit agent inbox" footer={<><Button disabled={save.isPending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form="agent-inbox-edit" loading={save.isPending}>Save</Button></>}>
     <form id="agent-inbox-edit" className="stack" onSubmit={submit} noValidate>
       <MutationError error={save.error} />
-      <Field label="Name" htmlFor="agent-inbox-edit-name" error={fieldError(save.error, 'name')} hint="Shown in lists and as the sender name on replies."><Input id="agent-inbox-edit-name" value={name} maxLength={200} onChange={event => setName(event.target.value)} disabled={save.isPending} autoComplete="off" /></Field>
-      <Field label="Keep it longer" htmlFor="agent-inbox-edit-extend" error={fieldError(save.error, 'expiresAt')} hint={!inbox.expiresAt ? 'It never expires.' : !canExtend ? `${atLimit ? 'It already lasts the maximum' : 'It can’t be kept longer'}: 30 days from creation (${date(new Date(limit).toISOString())}).` : until ? `It will receive until ${date(until.toISOString())}, then be deleted a day later.` : inbox.status === 'expired' ? `It expired on ${date(inbox.expiresAt)}. Keep it longer to receive again.` : `It receives until ${date(inbox.expiresAt)}.`}>
-        <Select id="agent-inbox-edit-extend" value={extend} onValueChange={setExtend} disabled={save.isPending || !canExtend} options={[{ value: '', label: 'Keep the current expiry' }, ...extensions]} />
+      <Field label="Name" htmlFor="agent-inbox-edit-name" error={fieldError(save.error, 'name')}><Input id="agent-inbox-edit-name" value={name} maxLength={200} onChange={event => setName(event.target.value)} disabled={save.isPending} autoComplete="off" /></Field>
+      <Field label="Receives mail" htmlFor="agent-inbox-edit-extend" error={fieldError(save.error, 'expiresAt')}>
+        <Select id="agent-inbox-edit-extend" value={extend} onValueChange={setExtend} disabled={save.isPending || !canExtend} options={options} />
       </Field>
     </form>
   </Dialog>
@@ -204,6 +213,8 @@ function InboxDetail({ id }: { id: string }) {
   }, { enabled: canAdminister })
   const remove = useApiMutation((api, _: void) => api.inboxes.remove(id), 'Inbox deleted', false, true, id)
   const revoke = useApiMutation((api, keyId: string) => api.keys.revoke(keyId), 'API key revoked')
+  // A sandbox only gets mail this way (simulateInboxMessage): a sign-up code to read, as an agent or test would.
+  const simulate = useApiMutation((_api, _: void) => request(`/v1/inboxes/${encodeURIComponent(id)}/simulate`, { method: 'POST', body: { from: 'hello@example.com', subject: 'Your sign-up code', text: 'Your code is 482913. It expires in 10 minutes.' } }), 'Test mail sent', false, true, id)
   const b: Inbox | undefined = inbox.data
   if (inbox.error) return <><PageHeader title="Agent inbox" backTo={route} /><ErrorState error={inbox.error} onRetry={() => void inbox.refetch()} /></>
   const next = messages.data?.hasMore ? messages.data.cursor : null
@@ -235,13 +246,12 @@ function InboxDetail({ id }: { id: string }) {
       {b.status === 'expired' && <Alert tone="info">This inbox expired. New mail is still stored but held until it is erased on {date(b.deleteAfter)}.</Alert>}
       {b.usage.held > 0 && b.status !== 'deleting' && <Alert tone="warning">{number(b.usage.held)} {b.usage.held === 1 ? 'message is' : 'messages are'} held: stored and listed below, but not delivered to waiting agents or webhooks.</Alert>}
     </>}
-    <p className="muted inbox-facts-note">Mail after it expires or over a limit is held: stored, not delivered.</p>
     <section className="section stack" aria-labelledby="agent-inbox-messages">
       <SectionHeader title={<span id="agent-inbox-messages">Messages</span>} actions={!folders.error && <Select className="inbox-folder" aria-label="Folder" value={folder||'deliveries'} onValueChange={value=>{setFolder(value==='deliveries'?'':value);pagination.reset()}} options={[{value:'deliveries',label:'All deliveries'},...(folders.data?.data??[]).map(f=>({value:f.id,label:`${f.path} · ${number(f.total)}${f.subscribed?' · subscribed':''}`}))]}/>} />
       {folders.error && <ErrorState error={folders.error} onRetry={()=>void folders.refetch()}/>}
       {messages.error ? <ErrorState error={messages.error} onRetry={() => void messages.refetch()} /> : <>
         <DataTable loading={!settled} skeletonRows={3} minRows={3} rows={messages.data?.data ?? []} rowKey={row => row.id} onRowClick={row => setSelected(row.id)}
-          empty={<EmptyState title="No mail yet" description={b?.type === 'sandbox' ? 'Send test mail with POST /v1/inboxes/{id}/simulate.' : b ? 'Mail sent to this inbox shows up here within seconds.' : undefined} />}
+          empty={<EmptyState title="No mail yet" action={b?.type === 'sandbox' && b.status === 'active' && canAdminister ? <Button loading={simulate.isPending} onClick={() => void simulate.mutateAsync().catch(() => undefined)}>Send test mail</Button> : undefined} />}
           columns={[
             // A message's card: its subject and status, then the sender and any code it carries.
             { key: 'from', label: 'From', width: '24%', card: 'line', render: row => <span className="inbox-clip"><Sender value={row.from} /></span> },
@@ -254,10 +264,10 @@ function InboxDetail({ id }: { id: string }) {
       </>}
     </section>
     {canAdminister && settled && <section className="section stack" aria-labelledby="agent-inbox-keys">
-      <SectionHeader title={<span id="agent-inbox-keys">API keys for this inbox</span>} />
-      <p className="muted inbox-facts-note">They read only this inbox and stop working when it’s deleted.</p>
+      {/* The list checks the first 1,000 active keys; past that, API keys has the rest. */}
+      <SectionHeader title={<span id="agent-inbox-keys">API keys for this inbox</span>} actions={keys.data && !keys.data.complete && <Link className="ui-button ui-button--ghost ui-button--sm" to="/api-keys">More in API keys</Link>} />
       {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable loading={keys.isPending} skeletonRows={1} rows={keys.data?.data ?? []} rowKey={key => key.id}
-        empty={<EmptyState title="No keys" description="Connect an agent to create one." />}
+        empty={<EmptyState title="No keys" />}
         columns={[
           // A key's card: its name and when it was last used, what it can do, and Revoke in the row menu.
           { key: 'name', label: 'Name', width: '30%', card: 'title', render: key => key.name },
@@ -267,7 +277,6 @@ function InboxDetail({ id }: { id: string }) {
           { key: 'revoke', label: '', align: 'right', width: 100, card: 'end', render: key => <Button variant="danger" size="sm" aria-label={`Revoke ${key.name}`} onClick={() => setRevoking(key)}>Revoke</Button>,
             cardRender: key => <DropdownMenu label={`Actions for ${key.name}`} title={key.name} items={[{ label: 'Revoke key', destructive: true, onSelect: () => setRevoking(key) }]} /> },
         ]} />}
-      {keys.data && !keys.data.complete && <p className="muted inbox-facts-note">Only the first 1,000 active keys were checked; <Link to="/api-keys">API keys</Link> lists them all.</p>}
     </section>}
     {selected && <MessageDialog inboxId={id} messageId={selected} onClose={() => setSelected(null)} />}
     {b && <EditInboxDialog inbox={b} open={editing} onOpenChange={setEditing} />}

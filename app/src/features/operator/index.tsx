@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
+import { Plus } from 'lucide-react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, Checkbox, ControlSkeleton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, Input, PageHeader, SectionHeader, Select, SkeletonText, StatusBadge, Switch, Tabs, Textarea, useToast, type Column, type MenuItem, type Tone } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -63,7 +64,7 @@ function Queue() {
     <QueueToolbar search={search} step={step} onSearch={setSearch} onStep={setStep} />
     {queue.isError && !queue.data ? <ErrorState error={queue.error} onRetry={() => void queue.refetch()} />
       : <DataTable className="op-table" loading={queue.isPending} skeletonRows={6} rows={queue.data ?? []} rowKey={row => row.workspaceId} rowHref={row => `/operator/workspaces/${encodeURIComponent(row.workspaceId)}`}
-        empty={<EmptyState title={q ? 'No workspace matches' : 'Nothing to review'} description={q ? 'Search by workspace ID or name.' : 'Workspaces above good standing, watched ones and quarantined campaigns appear here.'} />} columns={queueColumns} />}
+        empty={<EmptyState title={q ? 'No workspace matches' : 'Nothing to review'} action={q ? <Button onClick={() => setSearch('')}>Clear search</Button> : undefined} />} columns={queueColumns} />}
   </>
 }
 
@@ -220,7 +221,7 @@ function WorkspaceBody({ data, canAct, onReleaseCampaign }: { data: OperatorWork
         <div><dt>Free (not billed)</dt><dd className="op-free">{!free ? <ControlSkeleton width={36} /> : <>
           <span title={canAct ? undefined : 'Needs the operator role'}><Switch label={<span className="sr-only">Free (not billed)</span>} checked={Boolean(free.workspace && !free.workspace.expired)} disabled={!canAct}
             onCheckedChange={on => setFreeAction({ kind: 'workspace', on, key: crypto.randomUUID() })} /></span>
-          <span className="muted op-cell" title={free.workspace?.reason ?? undefined}>{free.workspace ? `${free.workspace.expired ? 'Ended' : 'Since'} ${when(free.workspace.expired ? free.workspace.until : free.workspace.at)}${!free.workspace.expired && free.workspace.until ? ` · until ${when(free.workspace.until)}` : ''} · ${free.workspace.reason ?? ''}` : 'This workspace’s own flag'}</span>
+          {free.workspace && <span className="muted op-cell" title={free.workspace.reason ?? undefined}>{`${free.workspace.expired ? 'Ended' : 'Since'} ${when(free.workspace.expired ? free.workspace.until : free.workspace.at)}${!free.workspace.expired && free.workspace.until ? ` · until ${when(free.workspace.until)}` : ''} · ${free.workspace.reason ?? ''}`}</span>}
         </>}</dd></div>
         <div><dt>Free owners</dt><dd>{!free ? <SkeletonText width={160} /> : number(free.people.filter(p => p.role === 'owner' && p.free?.live).length)}</dd></div>
       </dl>}
@@ -274,27 +275,38 @@ function Timeline({ workspaceId }: { workspaceId: string }) {
 
 // ---------------------------------------------------------------- actions
 
-const actionCopy: Record<ActionKind, { title: string; description: string; confirm: string; done: string; danger?: boolean }> = {
-  pause: { title: 'Pause sending?', description: 'Stops all sending at SES; owners see a pause banner and get an email.', confirm: 'Pause sending', done: 'Sending paused', danger: true },
-  resume: { title: 'Resume sending?', description: 'Sending resumes at the restore share you choose; a strike stays on record.', confirm: 'Resume sending', done: 'Sending resumed' },
-  hold: { title: 'Hold marketing?', description: 'Campaigns pause and new marketing is refused; transactional mail keeps sending.', confirm: 'Hold marketing', done: 'Marketing held' },
-  release: { title: 'Release marketing?', description: 'Campaigns can send again; the workspace stays at Warn until it clears.', confirm: 'Release marketing', done: 'Marketing released' },
-  limit: { title: 'Set the daily limit', description: 'Replaces the score’s limit until it expires; clear it to go back to the score’s limit.', confirm: 'Save limit', done: 'Limit saved' },
-  campaign: { title: 'Release this campaign?', description: 'The quarantined campaign resumes where it stopped.', confirm: 'Release campaign', done: 'Campaign released' },
+// A consequential action says, in one sentence, the consequence its title doesn't (pause, resume, hold, release);
+// setting a limit or releasing one campaign is said by its title and fields.
+const actionCopy: Record<ActionKind, { title: string; description?: string; confirm: string; done: string; danger?: boolean }> = {
+  pause: { title: 'Pause sending?', description: 'Owners see a pause banner and get an email.', confirm: 'Pause sending', done: 'Sending paused', danger: true },
+  resume: { title: 'Resume sending?', description: 'A strike stays on record.', confirm: 'Resume sending', done: 'Sending resumed' },
+  hold: { title: 'Hold marketing?', description: 'Campaigns pause and new marketing is refused.', confirm: 'Hold marketing', done: 'Marketing held' },
+  release: { title: 'Release marketing?', description: 'The workspace moves to Warn until it clears.', confirm: 'Release marketing', done: 'Marketing released' },
+  limit: { title: 'Set the daily limit', confirm: 'Save limit', done: 'Limit saved' },
+  campaign: { title: 'Release this campaign?', confirm: 'Release campaign', done: 'Campaign released' },
+}
+const reasonLabel = 'Reason for the audit log'
+const reasonCheck = (reason: string) => reason.trim().length < 10 ? 'At least 10 characters.' : reason.trim().length > 1000 ? 'At most 1,000 characters.' : ''
+const futureError = 'A time in the future.'
+const ticketLabel = 'Ticket ID or URL'
+// An optional date: its Add button leaves it out (no end) until pressed, so empty never needs explaining.
+function OptionalDate({ add, label, value, onChange, error, disabled }: { add: string; label: string; value: string; onChange: (value: string) => void; error?: string; disabled?: boolean }) {
+  const [open, setOpen] = useState(value !== '')
+  if (!open) return <Button variant="ghost" className="op-add-date" disabled={disabled} onClick={() => setOpen(true)}><Plus size={14} aria-hidden="true" />{add}</Button>
+  return <Field label={label} error={error}><Input type="datetime-local" autoFocus value={value} disabled={disabled} onChange={event => onChange(event.target.value)} /></Field>
 }
 // Each opening has its own Idempotency-Key, and every submit sends If-Match with the standing version it was decided on.
 // Free (not billed): a workspace's own flag, or a person's (every workspace they own while they own it). Operators only;
-// the reason goes into the audit log. An end date is optional.
-const ticketHint = 'Optional: the support ticket ID or URL.'
+// the reason goes into the audit log. An end date is optional. Billing again says what it charges before it does.
 type FreeAction = { kind: 'workspace' | 'person'; on: boolean; userId?: string; key: string }
 function FreeDialog({ action, workspaceId, onClose }: { action: FreeAction | null; workspaceId: string; onClose: () => void }) {
   const last = useRef(action)
   if (action) last.current = action
   const shown = action ?? last.current
-  const title = !shown ? '' : shown.kind === 'workspace' ? shown.on ? 'Make this workspace free?' : 'Bill this workspace again?' : shown.on ? 'Make this person’s account free?' : 'End this person’s free account?'
-  const description = !shown ? undefined : shown.kind === 'workspace'
-    ? shown.on ? 'It is never gated or charged; usage is still measured. The customer sees “Free plan (courtesy of Anomaly)”.' : 'Usage settled from now on is charged again, unless an owner has a free account.'
-    : shown.on ? 'Every workspace this person owns is free while they own it. It binds to their sign-in, not their email.' : 'The workspaces they own are billed again unless they are free on their own.'
+  const title = !shown ? '' : shown.kind === 'workspace' ? shown.on ? 'Make this workspace free?' : 'Bill this workspace again?' : shown.on ? 'Make every workspace this person owns free?' : 'End this person’s free account?'
+  const description = !shown || shown.on ? undefined : shown.kind === 'workspace'
+    ? 'Usage settled from now on is charged again, unless an owner has a free account.'
+    : 'The workspaces they own are billed again unless they are free on their own.'
   return <Dialog open={action !== null} onOpenChange={next => { if (!next) onClose() }} title={title} description={description}>
     {shown && <FreeForm key={shown.key} action={shown} workspaceId={workspaceId} onClose={onClose} />}
   </Dialog>
@@ -302,8 +314,7 @@ function FreeDialog({ action, workspaceId, onClose }: { action: FreeAction | nul
 function FreeForm({ action, workspaceId, onClose }: { action: FreeAction; workspaceId: string; onClose: () => void }) {
   const client = useQueryClient(), toast = useToast()
   const [reason, setReason] = useState(''), [ticket, setTicket] = useState(''), [until, setUntil] = useState(''), [tried, setTried] = useState(false)
-  const reasonError = reason.trim().length < 10 ? 'At least 10 characters.' : reason.trim().length > 1000 ? 'At most 1,000 characters.' : ''
-  const untilError = until && !(Date.parse(until) > Date.now()) ? 'A time in the future.' : ''
+  const reasonError = reasonCheck(reason), untilError = until && !(Date.parse(until) > Date.now()) ? futureError : ''
   const mutation = useMutation({
     mutationFn: () => {
       const input = { free: action.on, reason, ticketRef: ticket, until: until ? new Date(until).toISOString() : null }, guard = { idempotencyKey: action.key }
@@ -313,9 +324,9 @@ function FreeForm({ action, workspaceId, onClose }: { action: FreeAction; worksp
   })
   function submit(event: FormEvent) { event.preventDefault(); setTried(true); if (!reasonError && !untilError) mutation.mutate() }
   return <form className="op-dialog-fields" onSubmit={submit} noValidate>
-    {action.on && <Field label="Ends" hint="Optional. Empty means no end date." error={tried ? untilError : ''}><Input type="datetime-local" value={until} onChange={event => setUntil(event.target.value)} /></Field>}
-    <Field label="Reason" hint="Goes into the audit log." error={tried ? reasonError : ''}><Textarea value={reason} maxLength={1000} onChange={event => setReason(event.target.value)} /></Field>
-    <Field label="Ticket" hint={ticketHint}><Input value={ticket} maxLength={200} onChange={event => setTicket(event.target.value)} /></Field>
+    <Field label={reasonLabel} error={tried ? reasonError : ''}><Textarea value={reason} maxLength={1000} onChange={event => setReason(event.target.value)} /></Field>
+    <Field label={ticketLabel}><Input value={ticket} maxLength={200} onChange={event => setTicket(event.target.value)} /></Field>
+    {action.on && <OptionalDate add="Add an end date" label="Ends" value={until} onChange={setUntil} error={tried ? untilError : ''} />}
     {mutation.error && <Alert tone="danger">{mutation.error instanceof Error ? mutation.error.message : 'Couldn’t complete the action.'}</Alert>}
     <div className="ui-dialog__footer"><Button disabled={mutation.isPending} onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" loading={mutation.isPending}>{action.on ? 'Make free' : 'Bill again'}</Button></div>
   </form>
@@ -324,7 +335,7 @@ function ActionDialog({ action, workspace, onClose }: { action: PendingAction | 
   const last = useRef(action)
   if (action) last.current = action
   const shown = action ?? last.current
-  return <Dialog open={action !== null} onOpenChange={next => { if (!next) onClose() }} title={shown ? actionCopy[shown.kind].title : ''} description={shown ? shown.kind === 'campaign' ? `${shown.campaign?.name}: ${actionCopy.campaign.description}` : actionCopy[shown.kind].description : undefined}>
+  return <Dialog open={action !== null} onOpenChange={next => { if (!next) onClose() }} title={!shown ? '' : shown.kind === 'campaign' && shown.campaign ? `Release ${shown.campaign.name}?` : actionCopy[shown.kind].title} description={shown ? actionCopy[shown.kind].description : undefined}>
     {shown && <ActionForm key={shown.key} action={shown} workspace={workspace} onClose={onClose} />}
   </Dialog>
 }
@@ -332,11 +343,14 @@ function ActionForm({ action, workspace, onClose }: { action: PendingAction; wor
   const client = useQueryClient(), toast = useToast()
   const copy = actionCopy[action.kind]
   const [reason, setReason] = useState(''), [ticket, setTicket] = useState(''), [restore, setRestore] = useState<'50' | '100'>('50')
-  const [daily, setDaily] = useState(workspace.override ? String(workspace.override.daily) : ''), [expires, setExpires] = useState(''), [clear, setClear] = useState(false)
+  // The limit starts at the current override, or else at the score's band, so the number to change from is in the field.
+  const band = workspace.score.limit?.band
+  const [daily, setDaily] = useState(workspace.override ? String(workspace.override.daily) : band ? String(band) : ''), [expires, setExpires] = useState(''), [clear, setClear] = useState(false)
   const [tried, setTried] = useState(false)
-  const reasonError = reason.trim().length < 10 ? 'At least 10 characters.' : reason.trim().length > 1000 ? 'At most 1,000 characters.' : ''
+  const reasonError = reasonCheck(reason)
   const ticketError = ticket.trim().length > 200 ? 'At most 200 characters.' : ''
   const dailyValue = Number(daily), dailyError = action.kind === 'limit' && !clear && !(Number.isInteger(dailyValue) && dailyValue >= 1 && dailyValue <= 10_000_000) ? 'A whole number from 1 to 10,000,000.' : ''
+  const expiresAt = Date.parse(expires), expiresError = action.kind === 'limit' && !clear && expires ? !(expiresAt > Date.now()) ? futureError : expiresAt > Date.now() + 366 * 86_400_000 ? 'At most a year ahead.' : '' : ''
   const mutation = useMutation({
     mutationFn: () => {
       const id = workspace.workspace.id, why = { reason, ticketRef: ticket }, guard = { idempotencyKey: action.key, ifMatch: workspace.standing?.version }
@@ -356,18 +370,18 @@ function ActionForm({ action, workspace, onClose }: { action: PendingAction; wor
   function submit(event: FormEvent) {
     event.preventDefault()
     setTried(true)
-    if (reasonError || ticketError || dailyError) return
+    if (reasonError || ticketError || dailyError || expiresError) return
     mutation.mutate()
   }
   return <form className="op-dialog-fields" onSubmit={submit} noValidate>
     {action.kind === 'resume' && <Field label="Restore"><Select aria-label="Restore" value={restore} onValueChange={value => setRestore(value as '50' | '100')} options={[{ value: '50', label: '50% of the limit for 48 hours' }, { value: '100', label: 'The full limit' }]} /></Field>}
     {action.kind === 'limit' && <>
       <Checkbox checked={clear} onCheckedChange={setClear} label="Return to the score’s limit" disabled={!workspace.override} />
-      <Field label="Daily limit" hint={`Recipients per rolling 24 hours. The score’s band is ${number(workspace.score.limit?.band ?? 0)}.`} error={tried ? dailyError : ''}><Input type="number" inputMode="numeric" min={1} max={10_000_000} step={1} value={clear ? '' : daily} disabled={clear} onChange={event => setDaily(event.target.value)} /></Field>
-      <Field label="Expires" hint="Optional, at most a year ahead. Empty means no expiry."><Input type="datetime-local" value={expires} disabled={clear} onChange={event => setExpires(event.target.value)} /></Field>
+      <Field label="Daily limit" error={tried ? dailyError : ''}><Input type="number" inputMode="numeric" min={1} max={10_000_000} step={1} value={clear ? '' : daily} disabled={clear} onChange={event => setDaily(event.target.value)} /></Field>
     </>}
-    <Field label="Reason" hint="Goes into the audit log and the workspace’s timeline." error={tried ? reasonError : ''}><Textarea value={reason} maxLength={1000} onChange={event => setReason(event.target.value)} /></Field>
-    <Field label="Ticket" hint={ticketHint} error={tried ? ticketError : ''}><Input value={ticket} maxLength={200} onChange={event => setTicket(event.target.value)} /></Field>
+    <Field label={reasonLabel} error={tried ? reasonError : ''}><Textarea value={reason} maxLength={1000} onChange={event => setReason(event.target.value)} /></Field>
+    <Field label={ticketLabel} error={tried ? ticketError : ''}><Input value={ticket} maxLength={200} onChange={event => setTicket(event.target.value)} /></Field>
+    {action.kind === 'limit' && <OptionalDate add="Add an expiry" label="Expires" value={expires} onChange={setExpires} error={tried ? expiresError : ''} disabled={clear} />}
     {mutation.error && <Alert tone="danger">{mutation.error instanceof Error ? mutation.error.message : 'Couldn’t complete the action.'}</Alert>}
     <div className="ui-dialog__footer"><Button disabled={mutation.isPending} onClick={onClose}>Cancel</Button><Button type="submit" variant={copy.danger ? 'danger' : 'primary'} loading={mutation.isPending}>{copy.confirm}</Button></div>
   </form>

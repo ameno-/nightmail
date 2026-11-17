@@ -22,7 +22,7 @@ export function StandingCard({ report }: { report: SenderScore }) {
   const reasons = bannered ? standing.reasons.slice(1) : standing.reasons
   const did = bannered ? didExtra(standing).trim() : `${standingDid[step]}${didExtra(standing)}`
   return <section id="standing" className={`standing-card ui-tone--${standingTone(step)}`} aria-labelledby="standing-title" data-step={step}>
-    <div className="standing-card__head"><span className="standing-card__dot" aria-hidden="true" /><h2 id="standing-title">{standingTitle[step]}</h2><span className="muted">Since {shortDateTime(standing.since)}</span></div>
+    <div className="standing-card__head"><span className="standing-card__dot" aria-hidden="true" /><h2 id="standing-title">{standingTitle[step]}</h2></div>
     {(reasons.length > 0 || !bannered) && <div className="standing-card__part"><h3>{bannered ? 'Also' : 'What happened'}</h3>
       {reasons.length ? <ul>{reasons.map(reason => <li key={reason.code}>{reason.message}</li>)}</ul> : <p>{standingFallback[step]}</p>}
     </div>}
@@ -34,9 +34,9 @@ export function StandingCard({ report }: { report: SenderScore }) {
         {step === 'warn' && <li>This clears by itself after 24 hours under 80% of the line.</li>}
       </ol>
     </div>
-    {(step !== 'warn' || offer.available) && <div className="standing-card__action">
-      {offer.available && offer.action ? canAdminister ? <Button variant="primary" onClick={() => setReleasing(true)}>{releaseLabel[offer.action]}</Button>
-        : <p className="muted">Owners and admins can {releaseLabel[offer.action].toLowerCase()} once the checklist is done.</p>
+    {/* The release is for owners and admins; members see why it isn't open yet, and nothing once it is. */}
+    {(step !== 'warn' || offer.available) && !(offer.available && offer.action && !canAdminister) && <div className="standing-card__action">
+      {offer.available && offer.action ? <Button variant="primary" onClick={() => setReleasing(true)}>{releaseLabel[offer.action]}</Button>
         : <p className="muted">{offer.reason ?? 'This needs a review.'}{offer.availableAt ? ` Available from ${shortDateTime(offer.availableAt)} UTC.` : ''}</p>}
     </div>}
     <Link className="standing-card__docs" to="/docs#sending-limits">How limits work</Link>

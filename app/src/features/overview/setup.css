@@ -1,8 +1,8 @@
 /* Setup steps in Overview's detail column (hosted admins until the first email). */
 .setup-rail { display: flex; flex-direction: column; gap: var(--space-8); }
-.setup-rail__head { display: flex; align-items: baseline; justify-content: space-between; }
+.setup-rail__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-8); height: 24px; }
 .setup-rail__head h2 { font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
-.setup-rail__head .muted { font-size: var(--text-xs); }
+@media (max-width: 640px) { .setup-rail__head, .setup-rail__head .ui-button { height: 44px; } }
 .setup-rail ol { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
 .setup-rail li { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: var(--space-12); padding-block: 6px; font-size: var(--text-sm); line-height: var(--leading-sm); animation: row-enter 220ms var(--ease-out-strong) both; animation-delay: calc(var(--i, 0) * 40ms); }
 /* The mark holds the number and a check in one cell; finishing a step cross-fades and pops the check in. */

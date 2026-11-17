@@ -15,7 +15,7 @@ import { consentTitle } from './consent'
 export const pageSize = 8
 export const date = (value: string | null) => value ? formatDate(value) : 'Never'
 export { number }
-export { ConsentLegend, consentHelp, consentTitle, evidenceRequired, statusOptions, subscribeDescription } from './consent'
+export { ConsentLegend, consentTitle, evidenceRequired, noUnknown, statusOptions } from './consent'
 /** A contact name is free text: addresses in it are masked (AddressText), so it is a tooltip only when it holds none. */
 export const nameTitle = (name?: string) => name && !addressParts(name).some(part => part.address) ? name : undefined
 export function fieldError(error: unknown, field: string) { return error instanceof ApiError ? error.fields[field] : undefined }

@@ -1,9 +1,14 @@
-import type { SelectOption } from '../../components/ui'
+import { CopyButton, Field, SecretCode, type SelectOption } from '../../components/ui'
 import type { InboundAddress, MailAddress } from '../../data/types'
 import { NameText, PrivateAddress } from '../../components/PrivateAddress'
 import { cleanName, nameParts } from '../../lib/private-address'
 
 export { cleanName }
+/** A secret shown once (an inbox's API key, a webhook endpoint's signing secret) with its copy button, and the one thing
+ *  to know about it now. */
+export function SecretField({ label, value, copyLabel }: { label: string; value: string; copyLabel: string }) {
+  return <Field label={label} hint="It won’t be shown again."><div className="settings-copy-cell"><SecretCode>{value}</SecretCode><CopyButton value={value} label={copyLabel} /></div></Field>
+}
 /** A sender in a list: the display name, or the masked address when there is none (or it only repeats the address). */
 export function Sender({ value }: { value: MailAddress }) { const parts = nameParts(value.name, value.address); return parts ? <NameText parts={parts} /> : <PrivateAddress value={value.address} /> }
 /** A sender in words, for a label or a title: the display name, never a piece of the address. */

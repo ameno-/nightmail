@@ -171,7 +171,7 @@ const eventCopy: Record<string, [name: string, meaning: string]> = {
   complaint: ['Marked as spam', 'The recipient reported it as spam.'],
   complaint_feedback: ['Not spam', 'The recipient’s provider reported it as not spam.'],
   reject: ['Rejected', 'SES refused to send it, for example because it contained a virus.'],
-  rendering_failure: ['Rendering failed', 'A template value couldn’t be filled in, so nothing was sent.'],
+  rendering_failure: ['Rendering failed', 'A template value couldn’t be filled in.'],
   delivery_delay: ['Delayed', 'The recipient’s server put it off; SES keeps retrying.'],
   open: ['Opened', 'The recipient opened it with images on.'],
   click: ['Clicked', 'The recipient clicked a link in it.'],

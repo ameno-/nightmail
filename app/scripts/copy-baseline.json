@@ -3,7 +3,7 @@
  "findings": {
   "app/src/components/EmailInsight.tsx": {
    "length/label": [
-    "206: can i email (opens in a new tab)"
+    "204: can i email (opens in a new tab)"
    ]
   },
   "app/src/components/LegalLinks.tsx": {
@@ -13,7 +13,7 @@
   },
   "app/src/features/inbound/trace.tsx": {
    "length/placeholder": [
-    "78: from: ana@example.org to: support@acme.com subject: invoice "
+    "76: from: ana@example.org to: support@acme.com subject: invoice "
    ]
   }
  }

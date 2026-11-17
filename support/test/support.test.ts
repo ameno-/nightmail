@@ -129,7 +129,7 @@ describe('support Worker', () => {
     }
   });
 
-  test('a chat: the agent greets first, answers with a tool, and the grant never leaves the Durable Object', async () => {
+  test('a chat: opening costs no model call, the agent answers with a tool, and the grant never leaves the Durable Object', async () => {
     const token = handoff();
     const started = await post('/chat/start', { handoff: token });
     assert.equal(started.status, 200, JSON.stringify(started.body));
@@ -145,33 +145,37 @@ describe('support Worker', () => {
     const chat = await connect(started.body.socketUrl);
     const hello = await chat.until(f => f.type === 'hello');
     assert.deepEqual([hello.v, hello.agent, hello.workspace, hello.channel], [1, { name: 'Nightmail support', ai: true }, { id: 'ws_acme', name: 'Acme Prod' }, 'chat']);
-    await chat.until(f => f.type === 'history');
-    const first = await chat.until(f => f.type === 'message.start' && f.kind === 'first');
-    const greeting = await chat.until(f => f.type === 'message.end' && f.messageId === first.messageId, 60_000);
-    assert.equal(greeting.text, 'Hi Ada, I see you sent "Early access" yesterday with 42% opens. What are we working on today?');
-    const deltas = chat.frames.filter(f => f.type === 'text.delta' && f.messageId === first.messageId).map(f => f.delta).join('');
-    assert.equal(deltas, greeting.text, 'The greeting streams as deltas.');
-    // The greeting is built from the context bundle, with the pinned model, the gateway key and our tools only.
-    const greetingRequest = recorded[before]!;
-    assert.equal(greetingRequest.headers.authorization, `Bearer ${GATEWAY_KEY}`);
-    assert.equal(greetingRequest.headers['x-api-key'], undefined);
-    assert.equal(greetingRequest.body.model, 'claude-opus-5-5');
-    assert.deepEqual(greetingRequest.body.output_config, { effort: 'medium' });
-    assert.ok(greetingRequest.url.startsWith('https://opencode.ai/inference/anthropic/v1/messages'));
-    const tools = greetingRequest.body.tools.map((t: any) => t.name).sort();
-    assert.ok(tools.includes('bounce_reasons') && tools.includes('file_ticket') && !tools.some((n: string) => ['bash', 'read', 'edit', 'write', 'skill', 'task', 'webfetch', 'execute'].includes(n)), tools.join());
-    const system = JSON.stringify(greetingRequest.body.system);
-    assert.ok(system.includes('Early access') && system.includes('Acme Prod') && system.includes('How Nightmail support writes'), 'Context bundle and VOICE.md reach the system prompt.');
-    assert.ok(!system.includes('<env>'), 'No host filesystem context.');
+    const history = await chat.until(f => f.type === 'history');
+    assert.deepEqual(history.messages, [], 'A new conversation starts empty: the panel shows its own opening line.');
+    // Opening a chat makes no model call and writes no greeting; OpenCode boots in the background meanwhile.
+    await new Promise(r => setTimeout(r, 500));
+    assert.equal(recorded.length, before, 'No model call when the chat opens.');
+    assert.ok(!chat.frames.some(f => f.type === 'message.start' || f.type === 'status'), chat.frames.map(f => f.type).join());
 
     chat.send({ type: 'user.message', clientMessageId: 'c1', text: 'Why are Gmail bounces up?' });
     chat.send({ type: 'user.message', clientMessageId: 'c1', text: 'Why are Gmail bounces up?' });
     const toolStart = await chat.until(f => f.type === 'tool.start' && f.tool === 'bounce_reasons', 60_000);
     assert.equal(toolStart.label, 'Checking your Gmail bounces…');
+    // The first turn's request: the pinned model, the gateway key, our tools only, and the customer block with VOICE.md.
+    const firstRequest = recorded[before]!;
+    assert.equal(firstRequest.headers.authorization, `Bearer ${GATEWAY_KEY}`);
+    assert.equal(firstRequest.headers['x-api-key'], undefined);
+    assert.equal(firstRequest.body.model, 'claude-sonnet-5-5');
+    assert.deepEqual(firstRequest.body.output_config, { effort: 'medium' });
+    assert.ok(firstRequest.url.startsWith('https://opencode.ai/inference/anthropic/v1/messages'));
+    const tools = firstRequest.body.tools.map((t: any) => t.name).sort();
+    assert.ok(tools.includes('bounce_reasons') && tools.includes('file_ticket') && !tools.some((n: string) => ['bash', 'read', 'edit', 'write', 'skill', 'task', 'webfetch', 'execute'].includes(n)), tools.join());
+    const system = JSON.stringify(firstRequest.body.system);
+    assert.ok(system.includes('Acme Prod') && system.includes('How Nightmail support writes'), 'The customer block and VOICE.md reach the system prompt.');
+    assert.ok(!system.includes('<env>') && !system.includes('<context>'), 'No host filesystem context and no greeting bundle.');
+    // The static prefix (tools, system prompt) is cached for an hour; the customer block and the messages for five minutes.
+    assert.deepEqual([firstRequest.body.tools.at(-1).cache_control, firstRequest.body.system[0].cache_control, firstRequest.body.system[1].cache_control],
+      [{ type: 'ephemeral', ttl: '1h' }, { type: 'ephemeral', ttl: '1h' }, { type: 'ephemeral' }]);
     const toolEnd = await chat.until(f => f.type === 'tool.end' && f.toolCallId === toolStart.toolCallId);
     assert.deepEqual([toolEnd.ok, toolEnd.label], [true, 'Checked your Gmail bounces']);
     const answer = await chat.until(f => f.type === 'message.end' && f.messageId === toolStart.messageId, 60_000);
     assert.match(answer.text, /^Gmail hard-bounced 61 of 1,000/);
+    assert.equal(chat.frames.filter(f => f.type === 'text.delta' && f.messageId === answer.messageId).map(f => f.delta).join(''), answer.text, 'The answer streams as deltas.');
     assert.equal(chat.frames.filter(f => f.type === 'message.start' && f.kind === 'reply').length, 1, 'A resent clientMessageId is ignored.');
     // The tool result the model read was projected: untrusted text fenced, operator fields and grant gone, addresses kept out.
     const toolTurn = recorded.slice(before).find(r => JSON.stringify(r.body.messages).includes('tool_result'))!;
@@ -186,16 +190,16 @@ describe('support Worker', () => {
     // Reconnecting replays the transcript.
     chat.ws.close();
     const again = await connect(started.body.socketUrl);
-    const history = await again.until(f => f.type === 'history');
-    assert.deepEqual(history.messages.map((m: any) => [m.role, m.kind ?? null]), [['assistant', 'first'], ['user', null], ['assistant', 'reply']]);
-    assert.deepEqual(history.messages[2].tools.map((t: any) => t.label), ['Checked your Gmail bounces']);
+    const replay = await again.until(f => f.type === 'history');
+    assert.deepEqual(replay.messages.map((m: any) => [m.role, m.kind ?? null]), [['user', null], ['assistant', 'reply']]);
+    assert.deepEqual(replay.messages[1].tools.map((t: any) => t.label), ['Checked your Gmail bounces']);
     again.ws.close();
   }, 180_000);
 
   test('a refund request files one ticket, emails the team and opens the customer’s follow-up thread', async () => {
     const started = await post('/chat/start', { handoff: handoff() });
     const chat = await connect(started.body.socketUrl);
-    await chat.until(f => f.type === 'message.end' && f.text?.startsWith('Hi Ada'), 60_000);
+    await chat.until(f => f.type === 'history');
     chat.send({ type: 'user.message', clientMessageId: 'r1', text: 'Can I get a refund of my duplicate top-up?' });
     const filed = await chat.until(f => f.type === 'ticket.filed', 60_000);
     assert.match(filed.ticketId, /^tkt_[a-z2-7]{16}$/);
@@ -223,7 +227,7 @@ describe('support Worker', () => {
   test('content consent: the agent asks, the panel allows with a fresh handoff, the grant is re-minted', async () => {
     const started = await post('/chat/start', { handoff: handoff() });
     const chat = await connect(started.body.socketUrl);
-    await chat.until(f => f.type === 'message.end' && f.text?.startsWith('Hi Ada'), 60_000);
+    await chat.until(f => f.type === 'history');
     chat.send({ type: 'user.message', clientMessageId: 'k1', text: 'Can you look at the content of my promo?' });
     const consent = await chat.until(f => f.type === 'consent.request', 60_000);
     assert.match(consent.requestId, /^cns_/);
@@ -242,7 +246,7 @@ describe('support Worker', () => {
   test('the output gate replaces a leaking answer and files a ticket', async () => {
     const started = await post('/chat/start', { handoff: handoff() });
     const chat = await connect(started.body.socketUrl);
-    await chat.until(f => f.type === 'message.end' && f.text?.startsWith('Hi Ada'), 60_000);
+    await chat.until(f => f.type === 'history');
     chat.send({ type: 'user.message', clientMessageId: 'l1', text: 'leak please' });
     const end = await chat.until(f => f.type === 'message.end' && f.redacted === true, 60_000);
     assert.match(end.text, /sent this one to the Nightmail team/);
@@ -357,7 +361,7 @@ describe('support Worker', () => {
   }, 120_000);
 
   test('M5: daily caps on turns, tickets, mail and confirm links; unverified email gets no model turn; the team is alerted once', async () => {
-    const caps = new Miniflare({ cf: false, telemetry: { enabled: false }, workers: [worker('support', baseEnv({ LIMIT_TURNS_PER_DAY: text('4'), LIMIT_TICKETS_PER_PERSON: text('1'), LIMIT_MAIL_PER_SENDER: text('2'), LIMIT_CONFIRMS_PER_ADDRESS: text('1'), LIMIT_TICKETS_INTAKE_PER_MAILBOX: text('2') })),
+    const caps = new Miniflare({ cf: false, telemetry: { enabled: false }, workers: [worker('support', baseEnv({ LIMIT_TURNS_PER_DAY: text('2'), LIMIT_TICKETS_PER_PERSON: text('1'), LIMIT_MAIL_PER_SENDER: text('2'), LIMIT_CONFIRMS_PER_ADDRESS: text('1'), LIMIT_TICKETS_INTAKE_PER_MAILBOX: text('2') })),
       { config: { name: 'fake-bane', compatibilityDate: '2026-09-08', manifest: { mainModule: 'bane.js', modules: { 'bane.js': { type: 'esm', contents: FAKE_BANE } } }, env: {} } }] } as never);
     try {
       await migrate(caps);
@@ -385,23 +389,23 @@ describe('support Worker', () => {
         return { ws, frames, until, send: (m: unknown) => ws.send(JSON.stringify(m)) };
       };
       const one = await open();
-      await one.until(f => f.type === 'message.end' && f.text?.startsWith('Hi Ada'));                    // turn 1
-      one.send({ type: 'user.message', clientMessageId: 'r1', text: 'refund please' });
-      assert.ok(await one.until(f => f.type === 'ticket.filed'), 'The first ticket today is filed.');      // turn 2
+      await one.until(f => f.type === 'history');
+      one.send({ type: 'user.message', clientMessageId: 'r1', text: 'refund please' });                   // turn 1
+      assert.ok(await one.until(f => f.type === 'ticket.filed'), 'The first ticket today is filed.');
       await one.until(f => f.type === 'message.end' && f.kind !== 'first' && f.text?.length);
       const two = await open();
-      await two.until(f => f.type === 'message.end' && f.text?.startsWith('Hi Ada'));                    // turn 3
-      two.send({ type: 'user.message', clientMessageId: 'r2', text: 'refund please' });                   // turn 4
+      await two.until(f => f.type === 'history');
+      two.send({ type: 'user.message', clientMessageId: 'r2', text: 'refund please' });                   // turn 2
       const refused = await two.until(f => f.type === 'tool.end' && f.label === 'Passed this to the Nightmail team');
       assert.equal(refused.ok, false, 'A second ticket today for the same person is refused.');
       await two.until(f => f.type === 'message.end' && f.text?.includes('passed this'));
       assert.ok(!two.frames.some(f => f.type === 'ticket.filed'));
-      two.send({ type: 'user.message', clientMessageId: 'r3', text: 'hello?' });                         // turn 5 > 4
+      two.send({ type: 'user.message', clientMessageId: 'r3', text: 'hello?' });                         // turn 3 > 2
       const busy = await two.until(f => f.type === 'error' && f.code === 'BUDGET_EXHAUSTED');
       assert.match(busy.message, /a lot of questions today/);
       two.send({ type: 'user.message', clientMessageId: 'r4', text: 'hello again?' });
       await new Promise(r => setTimeout(r, 1500));
-      const alerts = (await fakeCalls(caps)).filter(c => c[0] === 'api' && c[2] === '/v1/inbound/threads' && /Daily model-turn budget reached \(4\)/.test(c[3].subject ?? ''));
+      const alerts = (await fakeCalls(caps)).filter(c => c[0] === 'api' && c[2] === '/v1/inbound/threads' && /Daily model-turn budget reached \(2\)/.test(c[3].subject ?? ''));
       assert.equal(alerts.length, 1, 'The team is alerted once a day.');
       assert.deepEqual(alerts[0][3].to, ['ryan@anoma.ly']);
       // Mail per DMARC-passing sender: the third message today is over the cap, kept for the digest (not answered).
@@ -531,7 +535,7 @@ describe('support Worker', () => {
   test('screenshots: upload with the chat token, the model sees the stripped image, a bug ticket carries it and the request logs', async () => {
     const started = await post('/chat/start', { handoff: handoff() });
     const chat = await connect(started.body.socketUrl);
-    await chat.until(f => f.type === 'message.end' && f.text?.startsWith('Hi Ada'), 60_000);
+    await chat.until(f => f.type === 'history');
     const url = `${SUPPORT}/c/${started.body.conversationId}/attachments`, auth = { authorization: `Bearer ${started.body.chatToken}`, origin: ORIGIN };
     const send = (body: Uint8Array, headers: Record<string, string> = {}) => mf.dispatchFetch(url, { method: 'POST', body, headers: { 'content-type': 'image/png', ...auth, ...headers } }).then(async r => ({ status: r.status, body: await r.json().catch(() => null) as any }));
     assert.equal((await send(pngWithMetadata(), { authorization: 'Bearer nope' })).status, 401);
@@ -564,7 +568,7 @@ describe('support Worker', () => {
     assert.equal(filed.ticketType, 'bug');
     await chat.until(f => f.type === 'message.end' && f.text?.includes('Nightmail bug'), 60_000);
     const tools = chat.frames.filter(f => f.type === 'tool.start').map(f => f.label);
-    assert.ok(tools.includes('Checking your recent API errors…'), tools.join());
+    assert.ok(tools.includes('Reading your recent logs…'), tools.join());
     const ends = chat.frames.filter(f => f.type === 'tool.end' && f.label === 'Passed this to the Nightmail team');
     assert.deepEqual(ends.map(e => e.ok), [false, true], 'The incomplete bug ticket was refused, then filed.');
     const logs = (await fakeCalls()).find(c => c[0] === 'read' && c[1].startsWith('/v1/support/requests?'));
@@ -682,6 +686,8 @@ describe('support Worker', () => {
       const ws = (socket as any).webSocket; ws.accept();
       const frames: any[] = [];
       ws.addEventListener('message', (e: MessageEvent) => frames.push(JSON.parse(String(e.data))));
+      for (let i = 0; i < 50 && !frames.some(f => f.type === 'history'); i++) await new Promise(r => setTimeout(r, 100));
+      ws.send(JSON.stringify({ type: 'user.message', clientMessageId: 'n1', text: 'Why are Gmail bounces up?' }));
       for (let i = 0; i < 100 && !frames.some(f => f.type === 'error'); i++) await new Promise(r => setTimeout(r, 100));
       const failure = frames.find(f => f.type === 'error');
       assert.deepEqual([failure?.code, failure?.retryable], ['TURN_FAILED', false], JSON.stringify(frames));

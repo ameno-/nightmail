@@ -9,10 +9,10 @@ import { date, fieldError, ListPicker, MutationError, number, ruleSummary } from
 import { useAdaptivePageSize } from '../../lib/pagination'
 import { AudienceHeader } from './header'
 
-// Teaches what a segment is where there are none yet; the demo and the live list share it.
+// The demo and the live list share it.
 export function SegmentsEmpty({ search, onClear }: { search: string; onClear: () => void }) {
   return search ? <EmptyState title="No matching segments" action={<Button onClick={onClear}>Clear search</Button>} />
-    : <EmptyState title="No segments yet" description="A saved filter, like “Plan is pro”. Campaigns use it to reach only matching people." action={<Link className="ui-button ui-button--secondary ui-button--md" to="/audience/segments/new">Create segment</Link>} />
+    : <EmptyState title="No segments yet" action={<Link className="ui-button ui-button--secondary ui-button--md" to="/audience/segments/new">Create segment</Link>} />
 }
 
 export function LiveSegmentsPage() {
@@ -90,12 +90,14 @@ function LiveSegmentEditor({ initial, onCreated }: { initial: Segment | null; on
   const [builder, setBuilder] = useState<Builder>(() => initial ? toBuilder(initial.rule) : { match: 'all', rows: [newRow()] })
   const [json, setJson] = useState<string | null>(null), [jsonError, setJsonError] = useState('')
   const [checked, setChecked] = useState(false)
+  // Add condition at the limit says why instead of doing nothing; any other change clears it.
+  const [full, setFull] = useState(false)
   const [countList, setCountList] = useState('')
   const save = useApiMutation((api, input: { id?: string; name: string; rule: Record<string, unknown> }) => api.segments.save({ ...input, match: 'all', rules: [] }), 'Segment saved')
   const errors = builder.rows.map(rowError)
   const serverField = save.error instanceof ApiError ? Object.keys(save.error.fields)[0] ?? '' : ''
   const serverRow = /^rule\.rules\.(\d+)/.exec(serverField)?.[1]
-  const update = (next: Builder) => { setBuilder(next); save.reset() }
+  const update = (next: Builder) => { setBuilder(next); setFull(false); save.reset() }
   const updateRow = (id: string, patch: Partial<Row>) => update({ ...builder, rows: builder.rows.map(row => row.id === id ? { ...row, ...patch } : row) })
   function changeField(row: Row, field: string) {
     if (activity(field) === activity(row.field)) return updateRow(row.id, { field })
@@ -134,30 +136,32 @@ function LiveSegmentEditor({ initial, onCreated }: { initial: Segment | null; on
           <div className="audience-conditions" role="group" aria-label="Conditions">
             <div className="audience-condition audience-condition--head" aria-hidden="true"><span>Field</span><span>Condition</span><span>Value</span><span /></div>
             {builder.rows.map((row, index) => { const error = checked && errors[index] || (serverRow === String(index) ? save.error instanceof ApiError ? save.error.fields[serverField] : undefined : undefined), n = index + 1; return <Fragment key={row.id}>
-              {row.group ? <div className="audience-condition"><div className="audience-condition-group"><span className="audience-cell-text" title={ruleSummary(row.group)}>{ruleSummary(row.group)}</span><span className="muted">Group of conditions. Edit as JSON to change it.</span></div><IconButton className="audience-condition-remove" label={`Remove condition ${n}`} disabled={builder.rows.length === 1} onClick={() => update({ ...builder, rows: builder.rows.filter(item => item.id !== row.id) })}><X size={16} /></IconButton></div>
+              {row.group ? <div className="audience-condition"><div className="audience-condition-group"><span className="audience-cell-text" title={ruleSummary(row.group)}>{ruleSummary(row.group)}</span><Button variant="ghost" size="sm" onClick={toggleJson}><Braces size={14} aria-hidden="true" />Edit as JSON</Button></div><IconButton className="audience-condition-remove" label={`Remove condition ${n}`} disabled={builder.rows.length === 1} onClick={() => update({ ...builder, rows: builder.rows.filter(item => item.id !== row.id) })}><X size={16} /></IconButton></div>
                 : <div className="audience-condition">
                   <Select className="audience-condition-field" aria-label={`Condition ${n} field`} value={row.field} onValueChange={value => changeField(row, value)} options={fields} />
                   <Select className="audience-condition-operator" aria-label={`Condition ${n} operator`} value={row.operator} onValueChange={value => updateRow(row.id, { operator: value })} options={activity(row.field) ? activityOperators : textOperators} />
                   {activity(row.field) ? <div className="audience-condition-value audience-condition-days"><Input type="number" inputMode="numeric" min={1} max={730} step={1} aria-label={`Condition ${n} days`} aria-invalid={Boolean(error) || undefined} value={row.value} onChange={event => updateRow(row.id, { value: event.target.value })} /><span className="muted">days</span></div>
-                    : <Input className="audience-condition-value" aria-label={`Condition ${n} value`} aria-invalid={Boolean(error) || undefined} maxLength={200} value={row.value} onChange={event => updateRow(row.id, { value: event.target.value })} />}
+                    : <Input className="audience-condition-value" aria-label={`Condition ${n} value`} aria-invalid={Boolean(error) || undefined} maxLength={200} placeholder={placeholders[row.field]} value={row.value} onChange={event => updateRow(row.id, { value: event.target.value })} />}
                   <IconButton className="audience-condition-remove" label={`Remove condition ${n}`} disabled={builder.rows.length === 1} onClick={() => update({ ...builder, rows: builder.rows.filter(item => item.id !== row.id) })}><X size={16} /></IconButton>
                 </div>}
               {error && <div className="ui-field__hint ui-field__error" role="alert">Condition {n}: {error}</div>}
             </Fragment> })}
           </div>
-          <div className="cluster"><Button disabled={builder.rows.length >= MAX_ROWS} onClick={() => update({ ...builder, rows: [...builder.rows, newRow()] })}><Plus size={16} />Add condition</Button><span className="ui-field__hint">{builder.rows.length >= MAX_ROWS ? 'A group holds 10 conditions. Edit as JSON to nest groups.' : '“Is” matches exact text; “contains” ignores case. Opens and clicks count tracked campaign email.'}</span></div>
-        </> : <Field label="Rule JSON" htmlFor="segment-rule" error={jsonError || (serverField.startsWith('rule') && save.error instanceof ApiError ? save.error.fields[serverField] : undefined)} hint={<>A condition is {'{"field", "operator", "value"}'} (email, firstName, plan, country with eq, neq or contains) or {'{"field", "operator", "days"}'} (lastOpenAt, lastClickAt with within or inactive, 1–730 days). Group them with {'{"operator": "and" | "or", "rules": […]}'}: 10 rules a group, 3 levels, 50 in all.</>}><Textarea id="segment-rule" className="audience-json" rows={14} spellCheck={false} value={json} onChange={event => { setJson(event.target.value); setJsonError(''); save.reset() }} /></Field>}
+          <div className="cluster"><Button onClick={() => builder.rows.length >= MAX_ROWS ? setFull(true) : update({ ...builder, rows: [...builder.rows, newRow()] })}><Plus size={16} />Add condition</Button></div>
+          {full && <div className="ui-field__hint ui-field__error" role="alert">A group holds 10 conditions. Edit as JSON to nest groups.</div>}
+        </> : <Field label="Rule JSON" htmlFor="segment-rule" error={jsonError || (serverField.startsWith('rule') && save.error instanceof ApiError ? save.error.fields[serverField] : undefined)}><Textarea id="segment-rule" className="audience-json" rows={14} spellCheck={false} value={json} onChange={event => { setJson(event.target.value); setJsonError(''); save.reset() }} /></Field>}
         <MutationError error={save.error} />
       </section>
-      <section className="section stack"><SectionHeader title="Matching contacts" actions={<ListPicker className="audience-count-list" label="Count within list" emptyLabel="All contacts" value={countList} onChange={setCountList} />} />
-        {saved ? <SegmentCounts id={saved.id} at={saved.at} listId={countList} stale={ruleChanged} /> : <p className="audience-summary muted">Save the segment to count who matches.</p>}
-      </section>
+      {/* Counts are of the saved rule, so the section appears with the first save. */}
+      {saved && <section className="section stack"><SectionHeader title="Matching contacts" actions={<ListPicker className="audience-count-list" label="Count within list" emptyLabel="All contacts" value={countList} onChange={setCountList} />} />
+        <SegmentCounts id={saved.id} at={saved.at} listId={countList} stale={ruleChanged} />
+      </section>}
     </form>
   </div>
 }
 function SegmentCounts({ id, at, listId, stale }: { id: string; at: string; listId: string; stale: boolean }) {
   const query = useApiQuery(['segments', 'preview', id, at, listId], (api, signal) => api.segments.preview({ id, name: '', match: 'all', rules: [], listId: listId || undefined }, signal))
   if (query.isPending) return <LoadingRegion label="Counting matching contacts"><AudienceSummarySkeleton /></LoadingRegion>
-  if (query.isError) return query.error instanceof ApiError && query.error.code === 'AUDIENCE_LIMIT_EXCEEDED' ? <p className="audience-summary muted">Over 1,000 match, too many to preview; pick a list to count within it.</p> : <ErrorState error={query.error} onRetry={() => query.refetch()} />
-  return <div className="audience-summary cluster"><span><strong>{number(query.data.matched)}</strong> match</span><span>{number(query.data.eligible)} can receive campaigns</span><span className="muted">{number(query.data.unsubscribed)} not subscribed</span><span className="muted">{number(query.data.suppressed)} suppressed</span>{stale && <span className="muted">Counts are for the saved conditions. Save to update them.</span>}</div>
+  if (query.isError) return query.error instanceof ApiError && query.error.code === 'AUDIENCE_LIMIT_EXCEEDED' ? <div className="audience-summary cluster"><span><strong>Over 1,000</strong> match</span></div> : <ErrorState error={query.error} onRetry={() => query.refetch()} />
+  return <div className="audience-summary cluster"><span><strong>{number(query.data.matched)}</strong> match</span><span>{number(query.data.eligible)} can receive campaigns</span><span className="muted">{number(query.data.unsubscribed)} not subscribed</span><span className="muted">{number(query.data.suppressed)} suppressed</span>{stale && <span className="muted">Save to update</span>}</div>
 }

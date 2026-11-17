@@ -16,7 +16,6 @@ import { productName } from '../../../../api/src/brand'
 const events: WebhookEvent[] = ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed', 'email.opened', 'email.clicked', 'contact.subscription_changed', 'account.standing.changed']
 // The same defaults as POST /v1/webhooks: every delivery outcome. Opens, clicks, subscription and standing changes are opt-in.
 const defaultEvents: WebhookEvent[] = ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed']
-const eventHints: Partial<Record<WebhookEvent, string>> = { 'account.standing.changed': 'Sending warned, held or released', 'email.sent': 'SES accepted the email', 'email.delivered': 'The recipient’s server accepted it', 'email.bounced': 'It couldn’t be delivered', 'email.complained': 'The recipient marked it as spam', 'email.rejected': 'Refused before sending', 'email.rendering_failed': 'A template couldn’t be filled in', 'email.delivery_delayed': 'Delivery is being retried', 'email.opened': 'Needs open tracking', 'email.clicked': 'Needs click tracking', 'contact.subscription_changed': 'A contact subscribed or unsubscribed' }
 const blankEndpoint: WebhookInput = { name: '', url: '', regionIds: 'all', events: [...defaultEvents] }
 const column = (columns: ReturnType<typeof webhookColumns>, key: string) => columns.find(item => item.key === key)!
 const eventLabel = (event: string) => event === 'account.standing.changed' ? 'Sending standing changed' : label(event.replace(/^email\./, '').replace('.', '_'))
@@ -31,7 +30,7 @@ function validate(input: WebhookInput) {
     try {
       const url = new URL(input.url.trim())
       if (url.protocol !== 'https:') errors.url = 'Use an https:// URL. Webhooks are only delivered over HTTPS.'
-      else if (url.username || url.password) errors.url = 'Remove the user name and password from the URL; send credentials as a header below instead.'
+      else if (url.username || url.password) errors.url = 'Remove the user name and password from the URL. Send them as a header.'
       else if (!url.hostname) errors.url = FULL_URL
     } catch { errors.url = FULL_URL }
   }
@@ -40,23 +39,26 @@ function validate(input: WebhookInput) {
   return errors
 }
 
-function EndpointFields({ input, urlHint, onChange, regions, errors, apiError, disabled, headers }: { input: WebhookInput; urlHint?: string; onChange: (input: WebhookInput) => void; regions: RegionCatalogEntry[]; errors: Record<string, string>; apiError: unknown; disabled: boolean; headers: { current: Webhook['headers']; draft: HeaderDraft; onChange: (draft: HeaderDraft) => void } }) {
+// An existing webhook's URL field starts empty with the saved URL as its placeholder: left empty, the URL stays.
+function EndpointFields({ input, savedUrl, onChange, regions, errors, apiError, disabled, headers }: { input: WebhookInput; savedUrl?: string; onChange: (input: WebhookInput) => void; regions: RegionCatalogEntry[]; errors: Record<string, string>; apiError: unknown; disabled: boolean; headers: { current: Webhook['headers']; draft: HeaderDraft; onChange: (draft: HeaderDraft) => void } }) {
   // Hosted endpoints leave regionIds out: they cover every region and an update keeps the saved scope.
   const scope = input.regionIds
   return <div className="stack">
     <div className="form-grid">
       <Field label="Name" htmlFor="endpoint-name" error={errors.name || fieldError(apiError, 'name')}><Input id="endpoint-name" value={input.name} onChange={event => onChange({ ...input, name: event.target.value })} required disabled={disabled} placeholder="Support notifications" /></Field>
-      <Field label="Endpoint URL" htmlFor="endpoint-url" hint={urlHint && 'Leave blank to keep it.'} error={errors.url || fieldError(apiError, 'url')}><SecretInput id="endpoint-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} required={!input.id} disabled={disabled} placeholder={urlHint ?? 'https://support.acme.com/hooks/email'} /></Field>
+      <Field label="Endpoint URL" htmlFor="endpoint-url" error={errors.url || fieldError(apiError, 'url')}><SecretInput id="endpoint-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} required={!input.id} disabled={disabled} placeholder={savedUrl ?? 'https://support.acme.com/hooks/email'} /></Field>
     </div>
-    {scope !== undefined && <div className="stack settings-region-scope"><Field label="Region scope" htmlFor="endpoint-scope" error={errors.regionIds || fieldError(apiError, 'regionIds')} hint={scope === 'all' ? 'Includes future regions.' : undefined}><Select id="endpoint-scope" value={scope === 'all' ? 'all' : 'selected'} onValueChange={value => onChange({ ...input, regionIds: value === 'all' ? 'all' : regions.filter(region => region.enabled).map(region => region.region) })} disabled={disabled} options={[{ value: 'all', label: 'All regions' }, { value: 'selected', label: 'Selected regions' }]} /></Field>
+    {scope !== undefined && <div className="stack settings-region-scope"><Field label="Region scope" htmlFor="endpoint-scope" error={errors.regionIds || fieldError(apiError, 'regionIds')}><Select id="endpoint-scope" value={scope === 'all' ? 'all' : 'selected'} onValueChange={value => onChange({ ...input, regionIds: value === 'all' ? 'all' : regions.filter(region => region.enabled).map(region => region.region) })} disabled={disabled} options={[{ value: 'all', label: 'All regions, including new ones' }, { value: 'selected', label: 'Selected regions' }]} /></Field>
     {scope !== 'all' && <div className="settings-choices" role="group" aria-label="Selected regions">{regions.map(region => { const checked = scope.includes(region.region); return <Checkbox key={region.region} label={`${region.region}${region.enabled ? '' : ' · Disabled'}`} checked={checked} disabled={disabled || (!region.enabled && !checked)} onCheckedChange={next => onChange({ ...input, regionIds: next ? [...scope, region.region] : scope.filter(id => id !== region.region) })} /> })}</div>}</div>}
-    <div className="ui-field"><div id="endpoint-events-label" className="ui-field__label">Events</div><div className="settings-choices settings-choices--events" role="group" aria-labelledby="endpoint-events-label" aria-describedby={errors.events || fieldError(apiError, 'events') ? 'endpoint-events-error' : undefined}>{events.map(event => <Checkbox key={event} label={<span className="settings-cell-stack"><span>{eventLabel(event)}</span>{eventHints[event] && <span className="ui-field__hint">{eventHints[event]}</span>}</span>} checked={input.events.includes(event)} disabled={disabled} onCheckedChange={checked => onChange({ ...input, events: checked ? [...input.events, event] : input.events.filter(current => current !== event) })} />)}</div>{(errors.events || fieldError(apiError, 'events')) && <div id="endpoint-events-error" className="ui-field__error" role="alert">{errors.events || fieldError(apiError, 'events')}</div>}</div>
+    <div className="ui-field"><div id="endpoint-events-label" className="ui-field__label">Events</div><div className="settings-choices settings-choices--events" role="group" aria-labelledby="endpoint-events-label" aria-describedby={errors.events || fieldError(apiError, 'events') ? 'endpoint-events-error' : undefined}>{events.map(event => <Checkbox key={event} label={eventLabel(event)} checked={input.events.includes(event)} disabled={disabled} onCheckedChange={checked => onChange({ ...input, events: checked ? [...input.events, event] : input.events.filter(current => current !== event) })} />)}</div>{(errors.events || fieldError(apiError, 'events')) && <div id="endpoint-events-error" className="ui-field__error" role="alert">{errors.events || fieldError(apiError, 'events')}</div>}</div>
     <WebhookHeadersField current={headers.current} draft={headers.draft} onChange={headers.onChange} errors={errors} apiError={apiError} disabled={disabled} />
   </div>
 }
 
 export const useWebhooks = (cursor?: string, enabled = true) => useApiDef(queries.webhooks(cursor), { enabled, keepPrevious: true })
-export function WebhooksSection({ note = true }: { note?: boolean } = {}) {
+// Outbound webhooks: the table, its rows open each one. Signatures and the event payloads are in the docs, linked from a
+// webhook's signing secret.
+export function WebhooksSection() {
   const navigate = useNavigate()
   const pagination = useCursorPagination()
   const webhooks = useWebhooks(pagination.cursor)
@@ -64,8 +66,6 @@ export function WebhooksSection({ note = true }: { note?: boolean } = {}) {
   const columns = webhookColumns(multiTenant)
   return <section id="webhooks" className="section stack settings-group settings-rule">
     <SectionHeader title="Webhooks" actions={<Button onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button>} />
-    <p className="muted settings-section-note"><Link to="/docs/webhook-signatures">Signed</Link> calls to your URL when email you send is delivered, bounces and more.</p>
-    {note && <p className="muted settings-section-note">For received mail, use <Link to="/receiving/webhooks">Inbound webhooks</Link>.</p>}
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable className="settings-webhooks-table" loading={webhooks.isPending} skeletonRows={2} minRows={2} rows={webhooks.data ?? []} rowKey={webhook => webhook.id} rowHref={webhook => `/settings/webhooks/${webhook.id}`} empty={<EmptyState title="No webhooks" />} columns={[
       { ...column(columns, 'name'), render: (webhook: Webhook) => <div className="settings-webhook-name"><span title={webhook.name}>{webhook.name}</span><span className="muted" title={webhook.url}>{webhook.url}</span></div>, cardRender: (webhook: Webhook) => webhook.name },
       { ...column(columns, 'url'), render: (webhook: Webhook) => webhook.url },
@@ -107,7 +107,7 @@ function NewWebhook() {
       <EndpointFields input={input} onChange={setInput} regions={regions.data?.data ?? []} errors={errors} apiError={save.error} disabled={save.isPending} headers={{ current: [], draft: headers, onChange: setHeaders }} />
       <div className="cluster form-actions"><Button disabled={save.isPending} onClick={() => navigate('/settings#webhooks')}>Cancel</Button><Button variant="primary" type="submit" loading={save.isPending}>Add webhook</Button></div>
     </form>}
-    <SecretDialog secret={created?.secret ?? null} title="Webhook created · Signing secret" onClose={() => { const id = created?.id; setCreated(null); if (id) navigate(`/settings/webhooks/${id}`, { replace: true }) }}><SigningNote /></SecretDialog>
+    <SecretDialog secret={created?.secret ?? null} title="Webhook created · Signing secret" onClose={() => { const id = created?.id; setCreated(null); if (id) navigate(`/settings/webhooks/${id}`, { replace: true }) }}><SigningGuide /></SecretDialog>
   </div>
 }
 
@@ -177,8 +177,8 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
   const actionDescription = action === 'rotate' ? 'The current secret stops working at once, so update your server with the new one. To copy the current secret instead, use Reveal.' : action === 'delete' ? `${productName} stops calling this URL. Its delivery history is deleted too.` : action === 'pause' ? `${productName} stops calling this URL. Events from the pause are kept and delivered when you resume.` : `${productName} starts calling this URL again, including events held while it was paused.`
   return <div className="stack settings-page">
     <PageHeader title={webhook.name} backTo="/settings#webhooks" actions={<><StatusBadge status={label(webhook.status)} /><Button disabled={pending} onClick={() => setAction(webhook.status === 'active' ? 'pause' : 'resume')}>{webhook.status === 'active' ? 'Pause' : 'Resume'}</Button><Button variant="primary" form="edit-webhook" type="submit" loading={save.isPending} disabled={pending}>Save changes</Button></>} />
-    <form id="edit-webhook" className="stack" onSubmit={submit} noValidate><MutationError error={save.error} /><EndpointFields input={input} urlHint={save.data?.url ?? webhook.url} onChange={setInput} regions={regions} errors={errors} apiError={save.error} disabled={pending} headers={{ current: currentHeaders, draft: headers, onChange: setHeaders }} /></form>
-    <section className="section stack settings-rule"><SectionHeader title="Signing secret" actions={<><Button loading={reveal.isPending} disabled={pending} onClick={async () => { try { setSecret({ value: (await reveal.mutateAsync(webhook.id)).secret, rotated: false }) } catch { /* Shown inline. */ } }}>Reveal</Button><Button disabled={pending} onClick={() => setAction('rotate')}>Rotate</Button><Button loading={test.isPending} disabled={pending || webhook.status === 'paused'} title={webhook.status === 'paused' ? 'Resume this webhook to test delivery' : 'Sends a sample email.delivered event, marked as a test'} onClick={async () => { try { await test.mutateAsync(webhook.id); setHistory(null); historyPagination.reset() } catch { /* Shown inline. */ } }}>Test webhook</Button></>} /><SigningNote /><MutationError error={test.error ?? reveal.error} /></section>
+    <form id="edit-webhook" className="stack" onSubmit={submit} noValidate><MutationError error={save.error} /><EndpointFields input={input} savedUrl={save.data?.url ?? webhook.url} onChange={setInput} regions={regions} errors={errors} apiError={save.error} disabled={pending} headers={{ current: currentHeaders, draft: headers, onChange: setHeaders }} /></form>
+    <section className="section stack settings-rule"><SectionHeader title={<span className="settings-guide-title">Signing secret<SigningGuide /></span>} actions={<><Button loading={reveal.isPending} disabled={pending} onClick={async () => { try { setSecret({ value: (await reveal.mutateAsync(webhook.id)).secret, rotated: false }) } catch { /* Shown inline. */ } }}>Reveal</Button><Button disabled={pending} onClick={() => setAction('rotate')}>Rotate</Button><Button loading={test.isPending} disabled={pending || webhook.status === 'paused'} title={webhook.status === 'paused' ? 'Resume this webhook to test delivery' : 'Sends a sample email.delivered event, marked as a test'} onClick={async () => { try { await test.mutateAsync(webhook.id); setHistory(null); historyPagination.reset() } catch { /* Shown inline. */ } }}>Test webhook</Button></>} /><MutationError error={test.error ?? reveal.error} /></section>
     <section className="section stack settings-rule"><SectionHeader title="Delivery history" /><MutationError error={retry.error} />
       <DataTable minRows={3} rows={history?.items ?? webhook.deliveries} rowKey={delivery => delivery.id} empty={<EmptyState title="No deliveries yet" />} columns={[
         { ...column(deliveryColumnSet, 'time'), render: (delivery: WebhookDelivery) => <div>{time(delivery.at)}<div className="muted">{date(delivery.at)}</div></div>, cardRender: (delivery: WebhookDelivery) => `${date(delivery.at, { month: 'short', day: 'numeric', timeZone: 'UTC' })} · ${time(delivery.at)}` },
@@ -196,18 +196,18 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
     </section>
     <div><Button variant="danger" disabled={pending} onClick={() => setAction('delete')}>Delete webhook</Button></div>
     <ConfirmDialog open={action !== null} onOpenChange={open => { if (!open) setAction(null) }} title={actionTitle} description={actionDescription} confirmLabel={action === 'rotate' ? 'Rotate secret' : action === 'delete' ? 'Delete webhook' : action === 'pause' ? 'Pause webhook' : 'Resume webhook'} danger={action === 'delete' || action === 'rotate'} pending={pending} onConfirm={confirm} />
-    <SecretDialog secret={secret?.value ?? null} title={`${webhook.name} · ${secret?.rotated ? 'New signing secret' : 'Signing secret'}`} description={secret?.rotated ? undefined : `Keep it on your server: anyone with it can sign requests as ${productName}.`} onClose={() => { setSecret(null); rotate.reset(); reveal.reset() }}><SigningNote /></SecretDialog>
+    <SecretDialog secret={secret?.value ?? null} title={`${webhook.name} · ${secret?.rotated ? 'New signing secret' : 'Signing secret'}`} description={secret?.rotated ? undefined : `Keep it on your server: anyone with it can sign requests as ${productName}.`} onClose={() => { setSecret(null); rotate.reset(); reveal.reset() }}><SigningGuide /></SecretDialog>
     <Dialog open={inspected !== null} onOpenChange={open => { if (!open) setInspected(null) }} title={inspected?.test ? 'Test delivery payload' : 'Delivery payload'} description={inspected ? [inspected.event, ...multiTenant ? [] : [inspected.regionId], label(inspected.status)].join(' · ') : undefined} footer={<Button onClick={() => setInspected(null)}>Close</Button>}><pre className="settings-payload">{JSON.stringify(inspected?.payload ?? {}, null, 2)}</pre></Dialog>
   </div>
 }
 
 export function WebhookDetailPage() {
   const { id } = useParams()
-  if (!useWorkspaceAccess().canAdminister) return <AdminOnlyPage title={!id || id === 'new' ? 'Add webhook' : 'Webhook'} backTo="/settings#webhooks" action="add webhooks for email events and see their deliveries" />
+  if (!useWorkspaceAccess().canAdminister) return <AdminOnlyPage title={!id || id === 'new' ? 'Add webhook' : 'Webhook'} backTo="/settings#webhooks" />
   return !id || id === 'new' ? <NewWebhook /> : <ExistingWebhook key={id} id={id} />
 }
 
-// How to use the signing secret, wherever it is shown.
-function SigningNote() {
-  return <p className="muted settings-section-note">Signatures arrive in the <code>Webhook-Signature</code> header: <Link to="/docs/webhook-signatures">verify them on your server</Link>.</p>
+// How to verify a signature with the secret (the Webhook-Signature header), wherever the secret is shown: the docs' guide.
+function SigningGuide() {
+  return <Link className="guide-link" to="/docs/webhook-signatures">Guide</Link>
 }

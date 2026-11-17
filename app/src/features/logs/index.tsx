@@ -94,9 +94,10 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
       <DataTable<LogEntry> className="logs-table" tableRef={tableRef} loading={query.isPending || (campaignOnly && campaign.isPending)} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => `${query.isPlaceholderData ? 'previous:' : ''}${row.direction}:${row.id}`} rowHref={logHref} rowLabel={logRowLabel} onRowIntent={rowIntent} columns={logsPageColumns}
         empty={campaignOnly && campaign.isError && !campaign.data ? <ErrorState error={campaign.error} onRetry={() => campaign.refetch()} />
-          : campaignId && campaignOnly && campaign.data && !campaign.data.counts?.total ? <EmptyState title="Nothing sent from this campaign yet" description={campaign.data.scheduledAt && Date.parse(campaign.data.scheduledAt) > Date.now() ? `It is scheduled for ${date(campaign.data.scheduledAt)} at ${time(campaign.data.scheduledAt)} UTC. Each email appears here once it sends.` : 'Each email appears here once it sends.'} action={<Link className="ui-button ui-button--secondary ui-button--md" to={`/campaigns/${encodeURIComponent(campaignId)}/review`}>Back to campaign</Link>} />
+          // A campaign that hasn't sent says when it will, in its heading.
+          : campaignId && campaignOnly && campaign.data && !campaign.data.counts?.total ? <EmptyState title={campaign.data.scheduledAt && Date.parse(campaign.data.scheduledAt) > Date.now() ? `Scheduled for ${date(campaign.data.scheduledAt)} at ${time(campaign.data.scheduledAt)} UTC` : 'Nothing sent from this campaign yet'} action={<Link className="ui-button ui-button--secondary ui-button--md" to={`/campaigns/${encodeURIComponent(campaignId)}/review`}>Back to campaign</Link>} />
           : filtered ? <EmptyState title="No matching mail" action={<Button onClick={() => update({ q: null, status: null, stream: null, campaign: null, ...direction !== 'all' && !campaignId ? { view: null } : {} })}>Clear filters</Button>} />
-          : <EmptyState title={direction === 'received' ? 'No mail received yet' : direction === 'sent' ? 'No mail sent yet' : 'No mail yet'} description={direction === 'received' ? 'Mail sent to your receiving addresses appears here.' : direction === 'sent' ? 'Every email you send appears here.' : 'Every email you send or receive appears here.'} action={direction === 'received' ? <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving">Set up receiving</Link> : <Link className="ui-button ui-button--secondary ui-button--md" to="/docs#quickstart">Send your first email</Link>} />} />
+          : <EmptyState title={direction === 'received' ? 'No mail received yet' : direction === 'sent' ? 'No mail sent yet' : 'No mail yet'} action={direction === 'received' ? <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving">Set up receiving</Link> : <Link className="ui-button ui-button--secondary ui-button--md" to="/docs#quickstart">Send your first email</Link>} />} />
       {query.data ? <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} count={query.data.items.length} onPageChange={next => update({ page: next === 1 ? null : String(next) }, true)} /> : <PaginationSkeleton />}
     </>}
   </div>
@@ -109,6 +110,8 @@ export function LogDetailPage() {
 }
 
 const checkTone = (value?: string) => value === 'PASS' ? 'success' as const : value === 'FAIL' ? 'danger' as const : value === 'GRAY' ? 'warning' as const : 'neutral' as const
+// NONE is a sender without the record to check, not a failure: the badge says so.
+const verdictLabel = (value: string) => value.toUpperCase() === 'NONE' ? 'no record' : label(value.toLowerCase())
 const fileSize = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1_048_576 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1_048_576).toFixed(1)} MB`
 export function ReceivedEmailDetailPage() {
   const { id = '' } = useParams()
@@ -135,7 +138,7 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
   const routed = Boolean(email.addresses?.length) && recipients.every(address => inboxFor(address))
   return <div className="email-detail-page"><PageHeader title={email.subject || '(no subject)'} backTo="/logs" actions={email.rawUrl ? <a className="ui-button ui-button--secondary ui-button--md" href={email.rawUrl}><Download size={16} />Download .eml</a> : undefined} />
     <dl className="email-metadata"><div><dt>From</dt><dd><Sender name={email.from.name} address={email.from.address} /></dd></div><div><dt>To</dt><dd>{recipients.map((address, index) => <Fragment key={`${index}:${address}`}>{index > 0 && ', '}{inboxFor(address) ? <Link to={`/receiving/inbox?address=${encodeURIComponent(inboxFor(address)!.id)}&thread=${encodeURIComponent(email.threadId)}&message=${encodeURIComponent(email.id)}`}><PrivateAddress value={address} /></Link> : <PrivateAddress value={address} />}</Fragment>)}</dd></div>{email.addresses && !routed && <div><dt>Address</dt><dd>{email.addresses.length ? email.addresses.map((mailbox, index) => <Fragment key={mailbox.id}>{index > 0 && ', '}<Link to={`/receiving/inbox?address=${encodeURIComponent(mailbox.id)}&thread=${encodeURIComponent(email.threadId)}&message=${encodeURIComponent(email.id)}`}><PrivateAddress value={mailbox.address} /></Link></Fragment>) : 'Unrouted'}</dd></div>}</dl>
-    {email.spam && <Alert tone="warning">SES flagged this message as spam or a virus. It’s stored, but spam never creates a new address.</Alert>}
+    {email.spam && <Alert tone="warning">SES flagged this message as spam or a virus.</Alert>}
     {email.bodyTruncated && <Alert tone="info">Part of this message was too large to store. Download the original for the full content.</Alert>}
     <div className="email-detail-grid"><section><Tabs value={view} onValueChange={setView} items={[{ value: 'preview', label: 'Preview' }, { value: 'plain', label: 'Plain text' }, { value: 'html', label: 'HTML' }, { value: 'headers', label: 'Headers' }]} />
       {view === 'preview' ? hasHtml ? <><ReceivedEmailPreview html={html} tooComplex={email.htmlTooComplex} title="Received message preview" inlineImages={inlineImages} />{email.htmlTooComplex && email.text && <pre className="plain-text-preview">{email.text}</pre>}</> : email.text ? <pre className="plain-text-preview">{email.text}</pre> : <EmptyState title="This message has no body" />
@@ -147,7 +150,7 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
       <dl className="received-facts">
         <div><dt>Received</dt><dd>{date(email.receivedAt)} · {time(email.receivedAt)} UTC</dd></div>
         {email.sentAt && <div><dt>Sent</dt><dd>{date(email.sentAt)} · {time(email.sentAt)} UTC</dd></div>}
-        {checks.length > 0 && <div><dt>Checks</dt><dd><span className="cluster">{checks.map(key => <StatusBadge key={key} status={`${key.toUpperCase()} ${label(String(verdicts[key]).toLowerCase())}`} tone={checkTone(String(verdicts[key]))} />)}</span>{checks.some(key => !['PASS', 'FAIL'].includes(String(verdicts[key]).toUpperCase())) && <span className="muted received-checks-note">None means no record to check, not a failure.</span>}</dd></div>}
+        {checks.length > 0 && <div><dt>Checks</dt><dd><span className="cluster">{checks.map(key => <StatusBadge key={key} status={`${key.toUpperCase()} ${verdictLabel(String(verdicts[key]))}`} tone={checkTone(String(verdicts[key]))} />)}</span></dd></div>}
         {email.cc.length > 0 && <div><dt>Cc</dt><dd><AddressList values={email.cc.map(cc => cc.address)} /></dd></div>}
         {email.replyTo.length > 0 && <div><dt>Reply-To</dt><dd><AddressList values={email.replyTo.map(r => r.address)} /></dd></div>}
         {email.sizeBytes != null && <div><dt>Size</dt><dd>{fileSize(email.sizeBytes)}</dd></div>}

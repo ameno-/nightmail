@@ -26,9 +26,9 @@ const lines: [what: string, warn: string, restrict: string, pause: string][] = [
 // What each step does, then how it ends.
 const ladder: { step: string; mark: string; tone: string; does: string; recovery: string }[] = [
   { step: 'Notice', mark: '·', tone: 'neutral', does: 'A first complaint or a few bounces adds a dashboard note.', recovery: 'It clears by itself.' },
-  { step: 'Warn', mark: '1', tone: 'warning', does: 'The limit stops rising and owners and admins get an email. Mail still sends.', recovery: 'Clears after 24 hours under 80% of the line.' },
+  { step: 'Warn', mark: '1', tone: 'warning', does: 'The limit stops rising and owners and admins get an email.', recovery: 'Clears after 24 hours under 80% of the line.' },
   { step: 'Restrict', mark: '2', tone: 'warning', does: 'Marketing is held; receipts and resets still send.', recovery: 'After 24 hours owners and admins can release it from Overview: 50% for 48 hours, once per 14 days.' },
-  { step: 'Pause', mark: '3', tone: 'danger', does: 'Sending stops; receiving, inboxes and the dashboard still work. Queued mail is canceled after 72 hours.', recovery: 'A pause from transactional bounces alone: owners can resume it at 50% for 48 hours, once per 30 days. Others need a review.' },
+  { step: 'Pause', mark: '3', tone: 'danger', does: 'Sending stops. Queued mail is canceled after 72 hours.', recovery: 'A pause from transactional bounces alone: owners can resume it at 50% for 48 hours, once per 30 days. Others need a review.' },
 ]
 
 // `limit` marks the row the workspace is on. `compact` (Overview's dialog) leads with the limit table and opens the
@@ -38,7 +38,8 @@ export function SendingLimitsGuide({ headings = 'h3', limit, compact = false }: 
   return <div className="limits-guide" data-compact={compact || undefined}>
     <section aria-label="Score and daily limit">
       <H>Score and daily limit</H>
-      <p>Hosted only: recipients per rolling 24 hours, set by the sender score.</p>
+      {/* Overview's dialog is Hosted's only; what the limit counts is in the docs it links to. */}
+      {!compact && <p>Hosted only: recipients per rolling 24 hours, set by the sender score.</p>}
       <div className="limits-table-scroll"><table className="limits-table">
         <thead><tr><th scope="col">Score</th><th scope="col">Daily limit</th><th scope="col">Per minute</th></tr></thead>
         <tbody>{bands.map(([score, cap, current]) => <tr key={score} aria-current={limit && current(limit) ? 'true' : undefined}><td>{score}{limit && current(limit) && <span className="limits-table__now">Now</span>}</td><td>{typeof cap === 'number' ? number(cap) : cap.split(' · ').map((part, i, all) => <Fragment key={part}><span className="limits-table__part">{part}</span>{i < all.length - 1 && ' · '}</Fragment>)}</td><td>{typeof cap === 'number' ? number(perMinute(cap)) : number(500)}</td></tr>)}</tbody>

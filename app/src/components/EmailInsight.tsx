@@ -8,7 +8,6 @@ import { AddressText } from './AddressText'
 import { EmailFrame, FRAME_WIDTH, frameDocument, frameKey, frameSize, shownWidth, useFrameSizes, type FrameDevice } from './EmailFrame'
 import { Alert, Button, DropdownMenu, ErrorText, Sheet, Skeleton, SkeletonText, Tooltip } from './ui'
 import './email-insight.css'
-import { productName } from '../../../api/src/brand'
 
 // "Will this email land and look right": the sendability check (POST /v1/emails/check) as a score, the fixes to make
 // first and every finding, and the preview: the email as sent and as each client emulation shows it (POST
@@ -73,8 +72,7 @@ const plural = (count: number, word: string) => `${count} ${word}${count === 1 ?
 export function SendabilityWarning({ report, action }: { report: SendabilityReport; action?: ReactNode }) {
   const fixes = topFixes(report)
   return <Alert tone="warning" title={`Sendability ${report.score} of 100 (${report.grade})`}>
-    <p>{fixes.length ? 'Fix these first. You can still send.' : 'You can still send.'}</p>
-    {fixes.length > 0 && <ol className="ei-warning-fixes">{fixes.map(finding => <li key={finding.ruleId}><AddressText text={finding.fix} /></li>)}</ol>}
+    {fixes.length > 0 && <><p>Fix these first.</p><ol className="ei-warning-fixes">{fixes.map(finding => <li key={finding.ruleId}><AddressText text={finding.fix} /></li>)}</ol></>}
     {action}
   </Alert>
 }
@@ -108,7 +106,7 @@ export function SendabilityDetails({ check, expanded = false, previewed = true, 
   const open = (ruleId: string | null) => { setFocus(ruleId); setAll(true) }
   return <section className="ss" aria-labelledby={titled ? id : undefined} aria-busy={checking || undefined} data-full={full || undefined}>
     {head(<><span className="ss__status muted" role="status">{checking ? 'Checking…' : ''}</span><Score report={report} /></>)}
-    {warnBelow !== undefined && report.score < warnBelow && fixes.length > 0 && <p className="ss__warn">Fix these before sending. You can still send.</p>}
+    {warnBelow !== undefined && report.score < warnBelow && fixes.length > 0 && <p className="ss__warn">Fix these before sending.</p>}
     {full ? <>
       <Categories report={report} />
       <Findings findings={ranked(report, findings)} focus={focus} />
@@ -207,43 +205,40 @@ function IssueList({ issues }: { issues: PreviewIssue[] }) {
   </li>)}</ul>
 }
 
-const EMULATED = 'emulated offline. Not a screenshot, and remote images don’t load.'
-// Over each column: what it shows, and for an emulated client its issue count (opening the list over the frame) and
-// that it is an emulation without remote images.
-function Caption({ label, width, emulated, issues = [], classic = [], open = false, onOpenChange, panel }: { label: string; width?: number; emulated?: string; issues?: PreviewIssue[]; classic?: PreviewIssue[]; open?: boolean; onOpenChange?: (open: boolean) => void; panel?: string }) {
-  const any = issues.length + classic.length > 0
+// Over each column: what it shows, and for a client its issue count, classic Outlook's included (opening the list over
+// the frame). Remote images don't load in an emulation; their boxes show as placeholders (EmailFrame.tsx), not a note.
+function Caption({ label, width, issues, classic = [], open = false, onOpenChange, panel }: { label: string; width?: number; issues?: PreviewIssue[]; classic?: PreviewIssue[]; open?: boolean; onOpenChange?: (open: boolean) => void; panel?: string }) {
+  const all = issues ? [...issues, ...classic] : []
   return <div className="ev-caption" style={width ? { width } : undefined}>
     <span className="ev-caption__label">{label}</span>
-    {emulated && <span className="ev-caption__end">
-      {any ? <button type="button" className="ev-caption__issues" aria-expanded={open} aria-controls={panel} onClick={() => onOpenChange?.(!open)}>
-        <span className={`ei-dot ui-tone--${issueTone(issues.length ? issues : classic)}`} aria-hidden="true" />{issues.length ? plural(issues.length, 'issue') : 'No issues'}
-        {classic.length > 0 && <span className="ev-caption__classic"> · {classic.length} in classic Outlook</span>}<ChevronRight size={14} aria-hidden="true" />
+    {issues && <span className="ev-caption__end">
+      {all.length ? <button type="button" className="ev-caption__issues" aria-expanded={open} aria-controls={panel} onClick={() => onOpenChange?.(!open)}>
+        <span className={`ei-dot ui-tone--${issueTone(all)}`} aria-hidden="true" />{plural(all.length, 'issue')}<ChevronRight size={14} aria-hidden="true" />
       </button> : <span className="ev-caption__clear"><Check size={14} aria-hidden="true" />No issues</span>}
-      <Tooltip content={`${emulated}, ${EMULATED}`}><span className="ev-caption__note" tabIndex={0}>Emulated<span className="ev-caption__more"> · images off</span></span></Tooltip>
     </span>}
   </div>
 }
+// Classic Outlook for Windows renders with Word, so it is checked, not previewed: its issues follow under its name.
 function IssueLists({ issues, classic }: { issues: PreviewIssue[]; classic: PreviewIssue[] }) {
   return <>
     {issues.length > 0 && <IssueList issues={issues} />}
-    {classic.length > 0 && <><h3 className="ei-group">Classic Outlook for Windows</h3><p className="ev-note muted">{`It renders with Word, so ${productName} checks its support instead of previewing it.`}</p><IssueList issues={classic} /></>}
+    {classic.length > 0 && <><h3 className="ei-group">Classic Outlook for Windows</h3><IssueList issues={classic} /></>}
   </>
 }
 function IssuePanel({ id, issues, classic, open }: { id: string; issues: PreviewIssue[]; classic: PreviewIssue[]; open: boolean }) {
   return <div id={id} className="ev-issues" data-open={open || undefined} inert={!open}><div><IssueLists issues={issues} classic={classic} /></div></div>
 }
-// A phone's issue count beside the view, opening the client's issues in a sheet with what the emulation leaves out.
+// A phone's issue count beside the view, opening the client's issues in a sheet.
 function IssuesButton({ caption, issues, classic }: { caption: string; issues: PreviewIssue[]; classic: PreviewIssue[] }) {
   const [open, setOpen] = useState(false)
   const trigger = useRef<HTMLButtonElement>(null)
-  const any = issues.length + classic.length > 0
+  const all = [...issues, ...classic]
   return <>
     <button ref={trigger} type="button" className="ev-issues-button" aria-haspopup="dialog" onClick={() => setOpen(true)}>
-      {any ? <><span className={`ei-dot ui-tone--${issueTone(issues.length ? issues : classic)}`} aria-hidden="true" />{issues.length ? plural(issues.length, 'issue') : 'No issues'}</> : <><Check size={14} aria-hidden="true" />No issues</>}
+      {all.length ? <><span className={`ei-dot ui-tone--${issueTone(all)}`} aria-hidden="true" />{plural(all.length, 'issue')}</> : <><Check size={14} aria-hidden="true" />No issues</>}
     </button>
     <Sheet open={open} onOpenChange={setOpen} title={caption} className="ev-issues-sheet" returnFocus={trigger}>
-      <p className="ev-note muted">An offline emulation, not a screenshot: remote images don’t load.</p>
-      {any ? <IssueLists issues={issues} classic={classic} /> : <p className="ei-clear"><Check size={16} aria-hidden="true" />No issues</p>}
+      {all.length ? <IssueLists issues={issues} classic={classic} /> : <p className="ei-clear"><Check size={16} aria-hidden="true" />No issues</p>}
     </Sheet>
   </>
 }
@@ -307,7 +302,7 @@ function ViewPicker({ value, current, options, onChange, loading }: { value: str
     <Sheet open={open} onOpenChange={setOpen} title="View" className="ui-action-sheet ev-picker-sheet" returnFocus={trigger}>
       <div className="ui-action-sheet__items" role="listbox" aria-label="View">
         {options.map(option => <button key={option.value} type="button" role="option" aria-selected={option.value === value} className="ui-action-sheet__item" onClick={() => { setOpen(false); onChange(option.value) }}>
-          <span className="ui-action-sheet__label">{option.label}{option.hint && <span className="ui-action-sheet__hint">{option.hint}</span>}</span>
+          <span className="ui-action-sheet__label">{option.label}</span>
           {option.count ? <span className="ev-view__count" data-tone={option.tone}>{plural(option.count, 'issue')}</span> : null}
           {option.value === value && <Check size={14} aria-hidden="true" />}
         </button>)}
@@ -410,9 +405,15 @@ export function EmailViews({ source, previewSource, check, original, loading = f
   // widths show, a client's count covers both.
   const clientsReady = Boolean(previewSource) && !check.isPending && (!needs.desktop || !queries.desktop.isPending) && (!needs.mobile || !queries.mobile.isPending)
   const counted: FrameDevice[] = both ? ['desktop', 'mobile'] : [device]
-  const issuesOf = (item: Client) => { const all = new Map<string, PreviewIssue>(); for (const on of counted) for (const issue of readers[on](item.clients[on])) if (!all.has(issue.feature) || issue.severity === 'error') all.set(issue.feature, issue); return [...all.values()] }
+  // At desktop width Outlook's count takes in classic Outlook's, as its caption does.
+  const issuesOf = (item: Client) => {
+    const all = new Map<string, PreviewIssue>()
+    for (const on of counted) for (const issue of readers[on](item.clients[on])) if (!all.has(issue.feature) || issue.severity === 'error') all.set(issue.feature, issue)
+    const classic = item.value === 'outlook' && counted.includes('desktop') ? readers.desktop(CLASSIC_OUTLOOK) : []
+    return [...all.values(), ...classic]
+  }
   const options: ViewOption[] = [
-    ...original ? [{ value: 'original', label: 'Original', hint: hasHtml ? 'As sent, with its images' : 'As sent: plain text only' }] : [],
+    ...original ? [{ value: 'original', label: 'Original' }] : [],
     ...clientsReady ? CLIENTS.map(item => { const issues = issuesOf(item); return { value: item.value, label: item.label, count: issues.length || undefined, tone: issueTone(issues), hint: counted.map(on => item.captions[on]).join(' and ') } }) : [],
   ]
 
@@ -437,7 +438,7 @@ export function EmailViews({ source, previewSource, check, original, loading = f
   const offTheme = !client ? 'Dark mode depends on the client' : undefined, offWidth = sourceView || !hasHtml ? 'Width applies to previews' : undefined
   const more = original && <DropdownMenu label="More views" align="end" items={[{ label: 'HTML source', onSelect: () => setChosen('html'), disabled: !hasHtml }, { label: 'Plain text', onSelect: () => setChosen('text') }]}
     trigger={<button type="button" className="ev-more" data-active={(sourceView && !compact) || undefined} aria-label={sourceView ? `More views: ${view === 'html' ? 'HTML source' : 'Plain text'}` : 'More views'} title="More views">{sourceView && !compact ? (view === 'html' ? 'HTML' : 'Text') : <MoreHorizontal size={16} aria-hidden="true" />}</button>} />
-  if (!original && !previewSource && !loading) return <p className="muted ev-note">Add content to see it in each email client.</p>
+  if (!original && !previewSource && !loading) return <p className="muted ev-note">Nothing to preview</p>
   return <div className="ev" data-fill={fill || undefined} data-compact={compact || undefined}>
     {compact ? <div className="ev-toolbar">
       <ViewPicker value={view} current={sourceView ? (view === 'html' ? 'HTML source' : 'Plain text') : options.find(option => option.value === view)?.label ?? client?.label ?? 'Original'} options={options} onChange={setChosen} loading={listing} />
@@ -461,7 +462,7 @@ export function EmailViews({ source, previewSource, check, original, loading = f
       {!compact && <div className="ev-captions">
         {sourceView ? <Caption label={view === 'html' ? 'HTML source' : 'Plain text'} />
           : view === 'original' && original && !hasHtml ? <Caption label={sentLabel('desktop')} />
-          : showFrames && columns.map((column, index) => { const about = describe(column); return <Caption key={column.key} label={about.label} width={widths[index]} emulated={about.item?.captions[column.device]} issues={about.issues} classic={about.classic}
+          : showFrames && columns.map((column, index) => { const about = describe(column); return <Caption key={column.key} label={about.label} width={widths[index]} issues={about.issues} classic={about.classic}
             open={Boolean(about.key && openIssues[about.key])} onOpenChange={open => setOpenIssues(state => ({ ...state, [about.key!]: open }))} panel={`${id}-${column.key}`} /> })}
       </div>}
       <div ref={canvas} className={fill ? 'ev-canvas ui-scroll-fade' : 'ev-canvas'}>

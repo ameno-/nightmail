@@ -39,12 +39,16 @@
 .ov-spark rect.ov-spark__zero { fill: var(--color-layer-3); }
 .ov-spark--skeleton { display: block; border-radius: 2px; background: var(--color-layer-1); }
 
-/* Activity: a 20px head and a 196px plot. */
+/* Activity: a 20px head (its title) and a 196px plot. */
 .ov-chart { display: flex; flex-direction: column; gap: var(--space-4); }
 .ov-chart__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); height: 20px; }
 .ov-chart__head h2 { font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
 .ov-chart__plot { position: relative; height: 196px; }
 .ov-chart__plot .activity-chart { position: absolute; inset: 0; min-height: 0; }
+/* The legend sits on the scales' title row: each series' key over its own scale. */
+.activity-chart__keys { position: absolute; inset: 0 0 auto; z-index: 1; display: flex; justify-content: space-between; gap: var(--space-16); height: 16px; line-height: 16px; pointer-events: none; }
+.activity-chart__keys > :last-child { margin-left: auto; }
+@media (max-width: 640px) { .activity-chart__keys .chart-legend { gap: var(--space-12); } }
 .ov-chart__plot .ui-empty-state { height: 100%; justify-content: center; padding: 0; }
 .ov-chart__plot--loading { border-radius: var(--radius-sm); background: var(--color-layer-1); animation: ui-pulse 1.2s ease-in-out infinite alternate; }
 
@@ -68,7 +72,7 @@
 }
 @media (max-width: 960px) { .ov-split { grid-template-columns: minmax(0, 1fr); } }
 /* Phone: the controls take their own row (range tabs, then the stream filter filling the rest); the four facts are a
-   2 × 2 grid with smaller values; the chart's legend sits under its title. Heights stay fixed, as above. */
+   2 × 2 grid with smaller values. Heights stay fixed, as above. */
 @media (max-width: 640px) {
   .page-surface > .ui-page-header:has(+ .ov-split) > .cluster:last-child, .ov-controls { flex: 1 1 100%; }
   .ov-controls .ui-tabs { flex: none; }
@@ -80,8 +84,6 @@
   .ov-facts > div { height: 68px; }
   .ov-facts__value { font-size: 20px; }
   .ov-spark { width: 44px; height: 20px; }
-  .ov-chart__head { height: auto; flex-wrap: wrap; row-gap: var(--space-4); }
-  .ov-chart__head .chart-legend { gap: var(--space-12); }
 }
 
 /* A new range or stream: the old figures stay up and dim once the new ones take over 100 ms, then brighten as they

@@ -15,6 +15,10 @@ import { productName } from '../../../../api/src/brand'
 
 const cx = (...values: Array<string | false | null | undefined>) => values.filter(Boolean).join(' ')
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches
+/** The panel's own first line: there from the moment it opens, with no model call and nothing to wait for. */
+const OPENING = 'What can we help you with?'
+/** The status line while an answer is being worked on and no step is running. */
+const WORKING = 'Working on it…'
 
 // The support chat (hosted): Nightmail's AI support agent in a panel docked at the bottom left on a desktop, where it grows
 // out of the Help button and leaves the page readable beside it, and a sheet above the tab bar on a phone. It is not
@@ -23,6 +27,7 @@ export function SupportPanel({ mode, open, onClose, onUnread, resume }: { mode: 
   const identity = useSession()?.identity ?? null
   const phone = usePhone(), touch = useTouch()
   const workspaceId = identity?.workspaceId ?? 'demo'
+  const workspaceName = identity?.workspaces?.find(item => item.id === identity.workspaceId)?.name ?? null
   const store = useMemo(() => supportStore(`${mode}:${workspaceId}`, () => {
     const origin = supportOrigin()
     if (mode === 'live' && origin) return createSocketTransport({ origin, workspaceId, resume })
@@ -65,22 +70,23 @@ export function SupportPanel({ mode, open, onClose, onUnread, resume }: { mode: 
     <section ref={panel} id="support-panel" className={cx('support-panel', phone && 'support-panel--sheet')} role="dialog" aria-modal="false" aria-labelledby="support-title"
       data-open={open || undefined} data-busy={busy || undefined} tabIndex={-1} onKeyDown={onKeyDown} {...drag} {...drop}>
       {phone && <div className="ui-sheet__grab" aria-hidden="true"><span /></div>}
-      <Header state={state} store={store} onClose={close} />
+      <Header state={state} store={store} workspaceName={workspaceName} onClose={close} />
       <Conversation state={state} store={store} open={open} />
       <Composer state={state} store={store} input={input} busy={busy} canAttach={canAttach} />
-      <div className="support-drop" data-active={dragging || undefined} aria-hidden="true"><ImagePlus size={20} /><span>Drop a screenshot to attach</span><span className="support-drop__hint">PNG, JPEG or WebP, up to 5 MB</span></div>
+      <div className="support-drop" data-active={dragging || undefined} aria-hidden="true"><ImagePlus size={20} /><span>Drop a screenshot to attach</span></div>
       <div className="sr-only" role="status" aria-live="polite">{state.announcement}</div>
     </section>
   </>
 }
 
-function Header({ state, store, onClose }: { state: ChatState; store: SupportStore; onClose: () => void }) {
+function Header({ state, store, workspaceName, onClose }: { state: ChatState; store: SupportStore; workspaceName: string | null; onClose: () => void }) {
   const hello = state.hello
+  // While it connects the header already reads as it will once connected; only the dot turns green.
+  const workspace = hello?.workspace.name ?? workspaceName
   const [tone, subtitle] = state.closed ? ['neutral', 'Conversation ended']
     : state.connection === 'offline' ? ['warning', 'Offline · reconnecting']
     : state.connection === 'unavailable' ? ['danger', 'Unavailable']
-    : !hello ? ['neutral', 'Connecting…']
-    : ['success', `${hello.agent.ai ? 'AI support agent' : 'Support'} · ${hello.workspace.name}`]
+    : [hello ? 'success' : 'neutral', `${hello?.agent.ai === false ? 'Support' : 'AI support agent'}${workspace ? ` · ${workspace}` : ''}`]
   const ticketed = state.status === 'ticketed' || state.humanRequested
   return <header className="support-panel__header">
     <NightmailMark className="support-panel__mark" size={18} />
@@ -115,9 +121,6 @@ function Conversation({ state, store, open }: { state: ChatState; store: Support
   useLayoutEffect(() => { if (open && scroller.current) { pinned.current = true; scroller.current.scrollTop = scroller.current.scrollHeight } }, [open])
   const last = state.messages.at(-1)
   useLayoutEffect(() => { if (last?.role === 'user') pinned.current = true }, [last?.id])
-  const streaming = state.messages.some(message => message.streaming)
-  // Before the greeting starts, and while an answer is being thought about, a caret holds the agent's place.
-  const typing = !state.closed && state.connection !== 'unavailable' && !streaming && (state.messages.length === 0 ? state.connection !== 'offline' : state.busy && last?.role === 'user')
   const touch = () => { touched.current = performance.now() }
   return <div ref={scroller} className="support-log" tabIndex={0} aria-label="Conversation" onWheel={touch} onTouchMove={touch} onKeyDown={touch} onPointerDown={touch}
     onScroll={event => {
@@ -126,8 +129,8 @@ function Conversation({ state, store, open }: { state: ChatState; store: Support
       else if (performance.now() - touched.current < 600) pinned.current = false
     }}>
     <div ref={inner} className="support-log__inner">
-      {state.messages.map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} onRetry={() => store.retry()} /> : <AgentMessage key={message.id} message={message} store={store} closed={Boolean(state.closed)} />)}
-      {typing && <p className="support-message support-typing" aria-label={`${productName} support is writing`}><Caret /></p>}
+      <article className="support-message support-message--agent support-message--opening"><div className="support-text"><p>{OPENING}</p></div></article>
+      {state.messages.map(message => message.role === 'user' ? <UserMessage key={message.key ?? message.id} message={message} onRetry={() => store.retry()} /> : <AgentMessage key={message.key ?? message.id} message={message} store={store} closed={Boolean(state.closed)} />)}
       <InlineStatus state={state} store={store} />
     </div>
   </div>
@@ -145,23 +148,21 @@ function UserMessage({ message, onRetry }: { message: ChatMessage; onRetry: () =
   </div>
 }
 
-// An answer as it arrived: text, the quiet progress lines of what the agent checked, and the cards it asked for.
+// An answer as it arrives: its text and the cards it asked for. While it is being worked on, one quiet status line says
+// what the agent is doing (the step running, from its label; between steps "Working on it…"), and the text takes its
+// place when it arrives. Steps never show their inputs: the labels are fixed text from the server.
 function AgentMessage({ message, store, closed }: { message: ChatMessage; store: SupportStore; closed: boolean }) {
-  const groups: Array<{ key: string; tools: Extract<Part, { kind: 'tool' }>[] } | { key: string; part: Exclude<Part, { kind: 'tool' }>; index: number }> = []
-  message.parts.forEach((part, index) => {
-    const previous = groups.at(-1)
-    if (part.kind === 'tool') { if (previous && 'tools' in previous) previous.tools.push(part); else groups.push({ key: `t${index}`, tools: [part] }) }
-    else groups.push({ key: `p${index}`, part, index })
-  })
   const lastPart = message.parts.at(-1)
-  const waiting = message.streaming && lastPart?.kind !== 'text' && lastPart?.kind !== 'ticket' && !message.parts.some(part => part.kind === 'tool' && part.state === 'running' || part.kind === 'consent' && (part.state === 'open' || part.state === 'allowing'))
+  const asking = message.parts.some(part => part.kind === 'consent' && (part.state === 'open' || part.state === 'allowing'))
+  const working = message.streaming && lastPart?.kind !== 'text' && !asking
+  const running = [...message.parts].reverse().find(part => part.kind === 'tool' && part.state === 'running')
+  const shown = message.parts.map((part, index) => ({ part, index })).filter(({ part }) => part.kind !== 'tool')
+  if (!working && !shown.length) return null
   return <article className={cx('support-message', 'support-message--agent', message.kind === 'notice' && 'support-message--notice')} data-restored={message.restored || undefined}>
-    {groups.map(group => 'tools' in group
-      ? <ul key={group.key} className="support-tools">{group.tools.map(tool => <ToolLine key={tool.id} label={tool.label} state={tool.state} />)}</ul>
-      : group.part.kind === 'text' ? <StreamText key={group.key} text={group.part.text} live={message.streaming} last={group.index === message.parts.length - 1} restored={message.restored} />
-      : group.part.kind === 'consent' ? <ConsentCard key={group.key} part={group.part} closed={closed} onDecide={decision => { if (group.part.kind === 'consent') decide(store, group.part.request.requestId, decision) }} />
-      : <TicketCard key={group.key} part={group.part} />)}
-    {waiting && <p className="support-typing"><Caret /></p>}
+    {shown.map(({ part, index }) => part.kind === 'text' ? <StreamText key={index} text={part.text} live={message.streaming} last={index === message.parts.length - 1} restored={message.restored} />
+      : part.kind === 'consent' ? <ConsentCard key={index} part={part} closed={closed} onDecide={decision => decide(store, part.request.requestId, decision)} />
+      : part.kind === 'ticket' ? <TicketCard key={index} part={part} /> : null)}
+    {working && <AgentStatus label={running?.kind === 'tool' && running.label.trim() ? running.label : WORKING} />}
   </article>
 }
 
@@ -210,7 +211,9 @@ function useSmoothText(text: string, live: boolean) {
 // The caret is an empty inline box (no text, no inline-block), so moving along with the text never counts as a layout shift.
 function Caret() { return <span className="support-caret" aria-hidden="true" /> }
 
-function ToolLine({ label, state }: { label: string; state: 'running' | 'done' | 'failed' }) {
+// The status line: a breathing dot and the label, with a slow sheen across it; a new label rolls in over the old one.
+// Under reduced motion it is still text that changes in place.
+function AgentStatus({ label }: { label: string }) {
   const [previous, setPrevious] = useState<string | null>(null)
   const last = useRef(label)
   useEffect(() => {
@@ -220,13 +223,13 @@ function ToolLine({ label, state }: { label: string; state: 'running' | 'done' |
     const timer = setTimeout(() => setPrevious(null), 260)
     return () => clearTimeout(timer)
   }, [label])
-  return <li className="support-tool" data-state={state}>
-    <span className="support-tool__mark" aria-hidden="true"><span className="support-tool__dot" /><Check className="support-tool__check" size={12} strokeWidth={2.5} /><X className="support-tool__fail" size={12} strokeWidth={2.5} /></span>
-    <span className="support-tool__label" title={label}>
-      {previous && <span key={`was:${previous}`} className="support-tool__text" data-leaving="" aria-hidden="true">{previous}</span>}
-      <span key={label} className="support-tool__text" data-entering={previous ? '' : undefined}>{label}</span>
+  return <p className="support-status" role="status">
+    <span className="support-status__dot" aria-hidden="true" />
+    <span className="support-status__label">
+      {previous && <span key={`was:${previous}`} className="support-status__text" data-leaving="" aria-hidden="true">{previous}</span>}
+      <span key={label} className="support-status__text" data-entering={previous ? '' : undefined}>{label}</span>
     </span>
-  </li>
+  </p>
 }
 
 function ConsentCard({ part, closed, onDecide }: { part: Extract<Part, { kind: 'consent' }>; closed: boolean; onDecide: (decision: 'allow' | 'deny') => void }) {
@@ -246,16 +249,19 @@ function ConsentCard({ part, closed, onDecide }: { part: Extract<Part, { kind: '
   </div>
 }
 
-// What the ticket is ("Bug report filed", "Billing question passed to …"), its ID, who replies where, and the
-// screenshots that went with it.
+// What the ticket is ("Bug report filed", "Billing question passed to …") and its ID, then its facts: where the reply
+// goes, when, and the screenshots that went with it.
 function TicketCard({ part }: { part: Extract<Part, { kind: 'ticket' }> }) {
   const { ticket, screenshots } = part
   return <div className="support-card support-ticket" role="group" aria-label="Ticket">
     <span className="support-ticket__mark" aria-hidden="true"><Check size={12} strokeWidth={2.75} /></span>
     <div className="support-ticket__text">
       <p className="support-ticket__title"><span>{ticketTitle(ticket)}</span><code>{ticket.ticketId}</code></p>
-      <p className="support-card__body">Someone will reply by email to <MaskedAddress value={ticket.replyTo} />, {ticket.expect}.</p>
-      {screenshots > 0 && <p className="support-ticket__meta"><ImageIcon size={13} aria-hidden="true" />{plural(screenshots, 'screenshot')} attached</p>}
+      <dl className="support-ticket__facts">
+        <div><dt>Reply to</dt><dd><MaskedAddress value={ticket.replyTo} /></dd></div>
+        <div><dt>When</dt><dd>{ticket.expect}</dd></div>
+        {screenshots > 0 && <div><dt>Screenshots</dt><dd>{screenshots}</dd></div>}
+      </dl>
     </div>
   </div>
 }
@@ -288,28 +294,31 @@ function Composer({ state, store, input, busy, canAttach }: { state: ChatState; 
     <span>This conversation ended.</span>
     <Button size="sm" onClick={() => store.restart()}>Start a new conversation</Button>
   </div>
+  // Open for typing and sending from the moment the panel opens: what is sent before the conversation is connected goes
+  // out once it is. Only a lost or refused connection holds the box.
   const online = state.connection === 'open' && Boolean(state.hello)
+  const ready = state.connection !== 'offline' && state.connection !== 'unavailable'
   const sendable = store.sendable()
   const stop = busy && !state.draft.trim() && !state.attachments.length && online
   function submit(event?: FormEvent) {
     event?.preventDefault()
     if (stop) { store.cancel(); return }
-    if (online && !limited) store.send()
+    if (ready && !limited) store.send()
   }
   return <form className="support-composer" onSubmit={submit}>
     <AttachmentTray state={state} store={store} />
-    <div className="support-composer__box" data-disabled={!online || limited || undefined}>
+    <div className="support-composer__box" data-disabled={!ready || limited || undefined}>
       {store.transport.uploads && <>
         <IconButton size="sm" className="support-composer__attach" label="Attach a screenshot" disabled={!canAttach || limited} onClick={() => picker.current?.click()}><ImagePlus size={16} /></IconButton>
         {/* On a phone this opens the photo picker: images only, no camera capture. */}
         <input ref={picker} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden tabIndex={-1} onChange={event => { void store.attach([...event.target.files ?? []]); event.target.value = '' }} />
       </>}
       <textarea ref={input} className="support-composer__input" rows={1} value={state.draft} maxLength={MAX_MESSAGE} aria-label={`Message ${productName} support`}
-        placeholder={!online ? state.connection === 'offline' ? 'Waiting for the connection…' : 'Connecting…' : limited ? 'Messages are paused for now' : 'Ask anything about your sending'}
+        placeholder={state.connection === 'offline' ? 'Waiting for the connection…' : limited ? 'Messages are paused for now' : 'Ask anything about your sending'}
         onChange={event => store.setDraft(event.target.value)}
         onPaste={event => { const pasted = [...event.clipboardData.files]; if (pasted.length && canAttach) { event.preventDefault(); void store.attach(pasted) } }}
         onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() } }} />
-      <IconButton type="submit" variant={stop ? 'secondary' : 'primary'} size="sm" className="support-composer__send" label={stop ? 'Stop answering' : 'Send'} data-stop={stop || undefined} disabled={stop ? false : !sendable || !online || limited}>
+      <IconButton type="submit" variant={stop ? 'secondary' : 'primary'} size="sm" className="support-composer__send" label={stop ? 'Stop answering' : 'Send'} data-stop={stop || undefined} disabled={stop ? false : !sendable || !ready || limited}>
         <span className="support-composer__icons" aria-hidden="true"><ArrowUp size={14} strokeWidth={2.25} /><Square size={9} strokeWidth={0} fill="currentColor" /></span>
       </IconButton>
     </div>

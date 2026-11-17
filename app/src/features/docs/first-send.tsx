@@ -41,14 +41,15 @@ export function TestSend({ domain, onSent }: { domain: Domain; onSent?: (id: str
   return <>
     <div className="first-send-test">
       <Button loading={test.isPending} disabled={!verified || test.isSuccess} onClick={() => test.mutate()}><Send size={14} aria-hidden />Send a test email</Button>
-      <span className="muted" role="status">{test.isSuccess ? <>Test email queued to <PrivateAddress value={to} />{test.data.simulated ? ' (simulated)' : ''}. <Link to={`/logs/${encodeURIComponent(test.data.id)}`}>View in Logs</Link></> : verified ? <>From <PrivateAddress value={from} /> to <PrivateAddress value={to} />.</> : `Available once ${domain.name} is verified.`}</span>
+      <span className="muted" role="status">{test.isSuccess ? <>Test email queued to <PrivateAddress value={to} />{test.data.simulated ? ' (simulated)' : ''}. <Link to={`/logs/${encodeURIComponent(test.data.id)}`}>View in Logs</Link></> : verified ? <>From <PrivateAddress value={from} /> to <PrivateAddress value={to} /></> : `Available once ${domain.name} is verified.`}</span>
     </div>
     {test.error ? <Alert tone="danger"><ErrorText error={test.error} /></Alert> : null}
   </>
 }
 
-/** Copyable curl and SDK examples plus a test send from the dashboard. Sending needs a verified domain. */
-export function FirstSend({ domain, apiKey = null, title = 'Send your first email', testButton = true }: { domain: Domain | null; apiKey?: string | null; title?: string; testButton?: boolean }) {
+/** Copyable curl and SDK examples plus a test send from the dashboard. Sending needs a verified domain. `compact`
+ *  (onboarding, the key-created dialog) leaves out the simulator tip, which is a reference for testing, not a step. */
+export function FirstSend({ domain, apiKey = null, title = 'Send your first email', testButton = true, compact = false }: { domain: Domain | null; apiKey?: string | null; title?: string; testButton?: boolean; compact?: boolean }) {
   const origin = usePublicOrigin()
   const identity = useSession()?.identity
   const demo = useApi().mode === 'demo'
@@ -64,14 +65,15 @@ export function FirstSend({ domain, apiKey = null, title = 'Send your first emai
       <CopyAction key={language} value={snippets[language as 'curl' | 'sdk']} label={`Copy ${language === 'curl' ? 'cURL' : 'TypeScript'} example`} variant="ghost" size="sm" compact className="developer-copy-icon" />
     </div>
     <div className="developer-client-panels developer-client-panels--fit" data-sensitive={apiKey ? true : undefined}>{languages.map(item => <pre key={item.value} className="developer-code developer-client-panel" tabIndex={0} aria-label={`${item.label} example`} data-active={item.value === language || undefined} inert={item.value !== language}><code><MaskedText text={snippets[item.value as 'curl' | 'sdk']} /></code></pre>)}</div>
-    <p className="muted developer-copy">To test each outcome without a real inbox, send to {simulator.map((address, index) => <span key={address}>{index > 0 && (index === simulator.length - 1 ? ' or ' : ', ')}<code>{address}</code></span>)}. They use your daily limit like any send, but never count towards your sender score.</p>
+    {!compact && <p className="muted developer-copy">To test each outcome without a real inbox, send to {simulator.map((address, index) => <span key={address}>{index > 0 && (index === simulator.length - 1 ? ' or ' : ', ')}<code>{address}</code></span>)}. They use your daily limit like any send, but never count towards your sender score.</p>}
     {testButton && !demo && domain && <TestSend domain={domain} />}
   </section>
 }
 
-// Shown with a newly created API key: the same examples with that key and the workspace's first verified domain.
+// Shown with a newly created API key (a dashboard dialog, so compact): the same examples with that key and the
+// workspace's first verified domain.
 export function KeySendExample({ apiKey }: { apiKey: string }) {
   const domains = useApiQuery(['domains', 'key-example'], (api, signal) => api.domains.list({ page: 1, pageSize: 10, refresh: false }, signal))
   const items = domains.data?.items ?? []
-  return <FirstSend domain={items.find(domain => domain.status === 'verified') ?? items[0] ?? null} apiKey={apiKey} title="Send with this key" testButton={false} />
+  return <FirstSend domain={items.find(domain => domain.status === 'verified') ?? items[0] ?? null} apiKey={apiKey} title="Send with this key" testButton={false} compact />
 }

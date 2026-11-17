@@ -90,7 +90,7 @@ export function ActivitySection() {
   return <section className="section stack activity">
     <SectionHeader title="Activity" actions={<Select className="activity-filter" aria-label="Show activity for" value={area} onValueChange={setArea} options={[{ value: '', label: 'All activity' }, ...activityAreas]} />} />
     {activity.error && !activity.data ? <ErrorState error={activity.error} onRetry={() => void activity.refetch()} /> : <DataTable className="activity-table" loading={activity.isPending} skeletonRows={8} minRows={3} rows={rows} rowKey={entry => entry.id} onRowClick={setOpen}
-      empty={<EmptyState title={area ? 'No matching activity' : 'No activity yet'} description={area ? undefined : 'Changes to members, keys, domains, webhooks and settings appear here.'} />} columns={[
+      empty={<EmptyState title={area ? 'No matching activity' : 'No activity yet'} />} columns={[
         { ...when, render: entry => <When at={entry.at} /> },
         { ...who, render: entry => <Cell full={whoText(entry.actor)}><Who actor={entry.actor} /></Cell>, cardRender: entry => <Who actor={entry.actor} /> },
         { ...action, render: entry => <Cell full={actionLabel(entry.action)} hint={entry.action}>{actionLabel(entry.action)}</Cell>, cardRender: entry => actionLabel(entry.action) },
@@ -119,12 +119,14 @@ function Changes({ summary }: { summary: Record<string, unknown> }) {
   return <dl className="activity-changes">{rows.map(row => <div key={row.key}><dt>{row.key}</dt><dd>{row.value}</dd></div>)}</dl>
 }
 function ActivityDetails({ entry, onClose }: { entry: AuditEntry | null; onClose: () => void }) {
-  return <Dialog open={entry !== null} onOpenChange={open => { if (!open) onClose() }} title={entry ? actionLabel(entry.action) : ''} description={entry ? `${shortDateTime(entry.at)} UTC · via ${channel[entry.via] ?? entry.via}` : undefined} footer={<Button onClick={onClose}>Close</Button>}>
+  // When it happened leads the facts; where it came from (the channel with its client and network) is From.
+  return <Dialog open={entry !== null} onOpenChange={open => { if (!open) onClose() }} title={entry ? actionLabel(entry.action) : ''} footer={<Button onClick={onClose}>Close</Button>}>
     {entry && <div className="stack">
       <dl className="settings-facts activity-facts">
+        <div><dt>When</dt><dd>{shortDateTime(entry.at)} UTC</dd></div>
         <div><dt>Who</dt><dd><Who actor={entry.actor} /></dd></div>
         <div><dt>Target</dt><dd>{entry.target ? <><Target entry={entry} />{entry.action !== 'support.view' && targetName(entry) !== entry.target.id && entry.target.id && <span className="muted"> · <code>{entry.target.id}</code></span>}</> : '—'}</dd></div>
-        <div><dt>From</dt><dd>{fromText(entry)}</dd></div>
+        <div><dt>From</dt><dd>{[fromText(entry), entry.client ? `via ${channel[entry.via] ?? entry.via}` : null].filter(Boolean).join(' · ')}</dd></div>
         {entry.subject && <div><dt>{entry.action === 'support.view' ? 'Requested by' : 'Member'}</dt><dd>{entry.subject.email ? <PrivateAddress value={entry.subject.email} /> : <code>{entry.subject.userId}</code>}</dd></div>}
         {entry.action === 'support.view' && ticketOf(entry) && <div><dt>Ticket</dt><dd>{ticketOf(entry)}</dd></div>}
         {entry.reason && <div className="settings-fact-wide"><dt>Reason</dt><dd>{entry.reason}</dd></div>}

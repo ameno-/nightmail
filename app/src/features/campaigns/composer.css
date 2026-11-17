@@ -58,6 +58,7 @@ body:has(.email-composer[data-inactive]) :is([data-re-bubble-menu], [data-re-sla
 .composer-inspector [data-re-inspector-toggle-item] { border-color: #a8a8a8; background: #fff; color: #181818; }
 .composer-inspector [data-re-inspector-toggle-item][data-active] { background: #181818; color: #fff; }
 .composer-inspector-hint { margin: 12px 0 0; color: var(--color-muted); font-size: var(--text-sm); line-height: 1.5; }
+.composer-inspector-action { align-self: flex-start; margin-top: 12px; }
 @media (max-width: 899px) {
   .composer-inspector { inset-block-start: 64px; inset-inline: 8px; width: auto; max-height: calc(100dvh - 72px - var(--tab-bar-height, 56px) - env(safe-area-inset-bottom)); }
 }
