@@ -540,6 +540,17 @@ fn tls_materials(
     ))
 }
 
+/// The API that real mode authenticates against, from MAILGW_API_TOKEN and MAILGW_API_URL. The URL has no default:
+/// a task started without one would send app-password logins to another installation, so the gateway won't start.
+fn api_backend(token: Option<String>, url: Option<String>) -> Result<Option<Arc<remote::Api>>> {
+    token
+        .map(|key| {
+            let url = url.context("MAILGW_API_URL is required with MAILGW_API_TOKEN")?;
+            remote::Api::new(url, key).map(Arc::new)
+        })
+        .transpose()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // One JSON object per line, like the API's logs (api/src/core.ts): CloudWatch Logs Insights reads the fields and
@@ -562,16 +573,10 @@ async fn main() -> Result<()> {
         pem("MAILGW_CERT_PEM", "MAILGW_CERT")?,
         pem("MAILGW_KEY_PEM", "MAILGW_KEY")?,
     )?;
-    let api = env::var("MAILGW_API_TOKEN")
-        .ok()
-        .map(|key| {
-            remote::Api::new(
-                env::var("MAILGW_API_URL").unwrap_or_else(|_| "https://bane.mx".into()),
-                key,
-            )
-            .map(Arc::new)
-        })
-        .transpose()?;
+    let api = api_backend(
+        env::var("MAILGW_API_TOKEN").ok(),
+        env::var("MAILGW_API_URL").ok(),
+    )?;
     tokio_rustls::rustls::crypto::ring::default_provider()
         .install_default()
         .ok();
@@ -767,6 +772,21 @@ mod tests {
         assert!(
             tls_materials(&chain[..], b"-----BEGIN PRIVATE KEY-----\nAQID".as_slice()).is_err()
         );
+    }
+
+    #[test]
+    fn real_mode_requires_its_api_url() {
+        let token = || Some("t".repeat(32));
+        let missing = api_backend(token(), None)
+            .err()
+            .expect("started without MAILGW_API_URL");
+        assert!(missing.to_string().contains("MAILGW_API_URL"));
+        assert!(
+            api_backend(token(), Some("https://dev.example.org".into()))
+                .unwrap()
+                .is_some()
+        );
+        assert!(api_backend(None, None).unwrap().is_none());
     }
 
     #[tokio::test]

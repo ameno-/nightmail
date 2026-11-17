@@ -90,6 +90,25 @@ function authenticatedFrom(email: Email | null, address: string, mail: ReceivedN
   });
 }
 const cap = (value: string | undefined | null) => value && value.length > BODY_LIMIT ? { value: value.slice(0, BODY_LIMIT), truncated: true } : { value: value ?? null, truncated: false };
+// Loop markers (ours, under every name, and other installations'), auto-replies and list mail.
+const FORWARD_BLOCKING_HEADERS = new Set([...loopHeaderNames, 'auto-submitted', 'x-autoreply', 'x-autorespond', 'list-id', 'precedence']);
+/**
+ * Whether a received message may ever be forwarded: parsed, not automated, not spam, virus scan passed, DMARC not
+ * failed, fewer than 200 top-level headers, none of FORWARD_BLOCKING_HEADERS and fewer than 25 Received hops.
+ * Decided once at ingest from the complete parsed header names (lower case) and stored as verdicts.forwardEligible;
+ * a forward reads that (deliverConnector).
+ */
+export function forwardEligibility(message: { status?: string; automated?: boolean; spam?: boolean; verdicts?: Verdicts }, headerNames: readonly string[]) {
+  return message.status === 'received' && !message.automated && !message.spam && message.verdicts?.virus === 'PASS' && message.verdicts.dmarc !== 'FAIL'
+    && headerNames.length < 200 && !headerNames.some(name => FORWARD_BLOCKING_HEADERS.has(name)) && headerNames.filter(name => name === 'received').length < 25;
+}
+/**
+ * The same rule for a message stored without forwardEligible (before this release, or by the Worker it replaces while
+ * it rolls out), over its stored columns: its stored headers are capped at 200 (so 200 count as incomplete), and an
+ * earlier forwardSafe refusal stands. Migration 321 applies this to the messages stored before it.
+ */
+export const storedForwardEligibility = (message: { status: string; automated: boolean; spam: boolean; verdicts: Verdicts; headers: MailHeader[] }) =>
+  (message.verdicts as { forwardSafe?: boolean }).forwardSafe !== false && forwardEligibility(message, message.headers.map(h => h.name.toLowerCase()));
 export function headersOf(email: Email | null): MailHeader[] {
   const out: MailHeader[] = []; let size = 0;
   for (const header of email?.headers ?? []) { if (header.key==='bcc' || header.key==='resent-bcc') continue; size += header.originalKey.length + header.value.length; if (size > HEADER_LIMIT || out.length >= 200) break; out.push({ name: header.originalKey, value: header.value }); }
@@ -578,11 +597,12 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
         verdicts, spam, automated: automated(email, raw, from.address), status,
       };
   const verifiedAuthor=replyAuthorVerified(email,from.address,notification.mail,verdicts);
+  // A forward can be queued later than this first store (a reopened receipt, another receipt of the same email,
+  // rituals saved meanwhile) and reads these verdicts from the stored message. Forward eligibility is recorded for
+  // every message; the author check by any workspace that routes, not only one whose rituals already run.
+  verdicts.forwardEligible=forwardEligibility(message,email?.headers.map(h=>h.key)??[]);
   try {
-    // A forward can be queued later than this first store (a reopened receipt, another receipt of the
-    // same email, rituals saved meanwhile) and reads these verdicts from the stored message, so any
-    // workspace that routes records them, not only one whose rituals already run.
-    if(receipt.routing)Object.assign(verdicts,{ritualVerified:verifiedAuthor,forwardSafe:!!email && !message.automated && verdicts.dmarc!=='FAIL' && !email.headers.some(h=>[...loopHeaderNames,'auto-submitted','x-autoreply','x-autorespond'].includes(h.key)) && email.headers.filter(h=>h.key==='received').length<=25});
+    if(receipt.routing)Object.assign(verdicts,{ritualVerified:verifiedAuthor});
     if(receipt.routing?.programs){const {ritualPipeline,projectEmail}=await import('./ritual-pipeline.js');const evaluated=await ritualPipeline(runtime,scope.workspaceId,receipt.routing,projectEmail(message,attachments,verifiedAuthor),undefined,false,receipt.createdAt,{omens:bill.position?.omens!==false});plan=evaluated.plan;Object.assign(verdicts,{ritualScores:evaluated.answers},evaluated.omenCalls?{omenCalls:evaluated.omenCalls}:{},evaluated.acted.length?{ritualsActed:evaluated.acted}:{});}
     if(!initiallyKept&&keptRoute(plan)){
       if(unverifiedKept)throw new JobDeferred(new Date(Date.now()+60000).toISOString());

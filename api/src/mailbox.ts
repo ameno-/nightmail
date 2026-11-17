@@ -802,7 +802,7 @@ function registerInboundWebhooks(app: App) {
       // Serialize partial updates: two independently valid changes must not combine into a scoped message.stored subscription.
       const access = manageHook(c);
       // Same lock order as endpoint writes: the address lane before the webhook row.
-      if (input.key) await lockMailboxLane(tx, access.workspaceId, 'address');
+      if (input.key !== undefined) await lockMailboxLane(tx, access.workspaceId, 'address');
       // The approval is held before the webhook row is locked, the order a removal takes them in. The row stays
       // locked until the update, so a removal that lands meanwhile holds the webhook again afterwards.
       await ownReceiving(tx,c,'endpoint',webhookId);
@@ -818,7 +818,12 @@ function registerInboundWebhooks(app: App) {
         c.get('actor').wakeJobs=1;
       }
       const url = input.url ? webhookUrl(c.env, input.url) : undefined;
-      if (input.key && input.key !== row.key) await (await import('./ritual-endpoints.js')).assertEndpointName(tx, row.workspaceId, input.key, row.id, false);
+      if (input.key !== undefined && input.key !== row.key) {
+        // Its key is its endpoint name: an attached ritual calling the old one must not lose it.
+        const endpoints = await import('./ritual-endpoints.js');
+        await endpoints.assertEndpointUnused(tx, row.workspaceId, { name: row.key, hookId: row.id }, 'rename', 'key');
+        if (input.key) await endpoints.assertEndpointName(tx, row.workspaceId, input.key, row.id, false);
+      }
       const [result] = await tx.update(mailboxWebhooks).set({ key: input.key, name: input.name, mailboxIds: input.addressIds, description: input.description, paused: input.paused, reconfirm: url ? false : undefined, url, eventTypes, format, junk, include: input.include, timeoutSeconds: input.timeoutSeconds, retryAttempts: input.retryAttempts,
         encryptedSecret: url && url!==row.url && (format==='inbound'||row.format==='inbound') ? await encrypt(c.env,webhookSecret(),webhookSecretBinding(row.workspaceId,row.id)):undefined, encryptedHeaders: await encryptWebhookHeaders(c.env, input.headers ?? (url && url !== row.url ? [] : undefined), webhookSecretBinding(row.workspaceId, webhookId)), updatedAt: new Date().toISOString() }).where(eq(mailboxWebhooks.id, webhookId)).returning();
       // Changed field names and non-secret values: a URL hint, never header values.
@@ -831,8 +836,14 @@ function registerInboundWebhooks(app: App) {
   });
   const detach = z.object({ detach: z.enum(['true', 'false']).optional().describe('Also remove it from every route that delivers to it, as one routing version. Without it, a referenced webhook is not deleted.') });
   app.openapi(createRoute({ method: 'delete', path: `${path}/{id}`, operationId: 'deleteInboundWebhook', security, tags, request: { params: IdParam, query: detach }, responses: { 200: response(Ok), ...errors } }), async c => {
-    const { row } = await getWebhook(c, c.req.valid('param').id,manageHook(c));
-    await c.env.db.transaction(async tx => { await detachDestination(tx, c, row.workspaceId, row.id); await tx.delete(mailboxWebhooks).where(eq(mailboxWebhooks.id, row.id));
+    const value = manageHook(c), webhookId = c.req.valid('param').id;
+    await c.env.db.transaction(async tx => {
+      // The address lane before the webhook row, as endpoint writes take them; the row's key is read under both.
+      await lockMailboxLane(tx, value.workspaceId, 'address');
+      const { row } = await getWebhook(c, webhookId, value, tx);
+      await detachDestination(tx, c, row.workspaceId, row.id);
+      await (await import('./ritual-endpoints.js')).assertEndpointUnused(tx, row.workspaceId, { name: row.key, hookId: row.id }, 'delete');
+      await tx.delete(mailboxWebhooks).where(eq(mailboxWebhooks.id, row.id));
       await recordAudit(tx, c, { action: 'inbound_webhook.delete', workspaceId: row.workspaceId, target: { type: 'inbound_webhook', id: row.id }, before: { url: webhookUrlHint(row.url), key: row.key, name: row.name, eventTypes: row.eventTypes } }); });
     return c.json({ ok: true as const }, 200);
   });
