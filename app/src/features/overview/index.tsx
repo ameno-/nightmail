@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
-import { useApi, useApiDef, useRegion, useWorkspaceAccess } from '../../data/context'
+import { useApiDef, useRegion, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { useRegionCatalog, useRegionDiscovery } from '../../data/regions'
 import { accountStatus, ratePercent, rateStatus } from '../../lib/reputation'
@@ -26,7 +26,6 @@ import { useCompactShell, useMediaQuery } from '../../lib/media'
 // the old figures up (dimmed if the new ones take over 100 ms), then numbers tween and charts morph or crossfade.
 export function OverviewPage() {
   const { regionId } = useRegion()
-  const live = useApi().mode === 'live'
   const [range, setRange] = useState<TimeRange>('24h')
   const [searchParams, setSearchParams] = useSearchParams()
   const requested = searchParams.get('stream')
@@ -67,7 +66,7 @@ export function OverviewPage() {
         <Fragment key={held ? 'held' : 'ready'}>
           {query.isError && !data ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
             {data && !held ? <Facts data={data} stale={query.isPlaceholderData} /> : <FactsSkeleton />}
-            {data && !held ? <Chart data={data} range={shownRange} live={live} stale={query.isPlaceholderData} /> : <ChartSkeleton />}
+            {data && !held ? <Chart data={data} range={shownRange} stale={query.isPlaceholderData} /> : <ChartSkeleton />}
           </>}
           <LatestEmails count={count} held={held} />
         </Fragment>
@@ -134,10 +133,10 @@ function Spark({ values: target, tone }: { values: number[]; tone: string }) {
   </svg>
 }
 
-function Chart({ data, range, live, stale }: { data: Overview; range: TimeRange; live: boolean; stale: boolean }) {
+function Chart({ data, range, stale }: { data: Overview; range: TimeRange; stale: boolean }) {
   return <section className="ov-chart" aria-label="Sending activity" data-stale={stale || undefined}>
     <div className="ov-chart__head"><h2>Activity</h2></div>
-    <Crossfade id={data.sent ? buckets(data.points) : 'empty'} className="ov-chart__plot">{data.sent ? <ActivityChart points={data.points} createdOnly={live} range={range} /> : <EmptyState title="No emails in this period" />}</Crossfade>
+    <Crossfade id={data.sent ? buckets(data.points) : 'empty'} className="ov-chart__plot">{data.sent ? <ActivityChart points={data.points} range={range} /> : <EmptyState title="No emails in this period" />}</Crossfade>
   </section>
 }
 
@@ -181,7 +180,7 @@ function ReputationSummary({ report, regionId }: { report: SesDiscovery | undefi
 // Three whole-number steps so every gridline label is a distinct integer.
 function niceMax(value: number) { const raw = Math.max(1, value) / 3, base = 10 ** Math.floor(Math.log10(raw)), step = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].map(m => m * base).find(m => m >= raw && Number.isInteger(m)) ?? Math.ceil(raw); return step * 3 }
 // New counts over the same buckets morph the bars, the lines and their scales (200 ms); the scale labels crossfade.
-export function ActivityChart({ points: target, range, createdOnly = false }: { points: ChartPoint[]; range: TimeRange; createdOnly?: boolean }) {
+function ActivityChart({ points: target, range }: { points: ChartPoint[]; range: TimeRange }) {
   const [active, setActive] = useState<number | null>(null)
   // The hours are one tab stop (the last one focused, else the newest); the arrow keys, Home and End step between them.
   const [stop, setStop] = useState<number | null>(null)
@@ -232,7 +231,7 @@ export function ActivityChart({ points: target, range, createdOnly = false }: { 
   // The legend is the scales' titles: Emails over the left scale, bounces and complaints over the right one.
   return <div ref={container} className="activity-chart" onMouseLeave={() => setActive(null)}>
     <div className="activity-chart__keys"><span className="chart-legend"><span><i className="legend-sent" />Emails</span></span>{hasOutcomes && <span className="chart-legend"><span><i className="legend-bounces" />Bounces</span><span><i className="legend-complaints" />Complaints</span></span>}</div>
-    <svg viewBox={`0 0 ${width} ${height}`} role="group" aria-label={createdOnly ? `Emails created per ${hourly ? 'hour' : 'day'} on the left scale; outcomes for those emails on the right scale.` : `Email activity per ${hourly ? 'hour' : 'day'}. Sends use the left scale; bounces and complaints use the right scale.`}>
+    <svg viewBox={`0 0 ${width} ${height}`} role="group" aria-label={`Emails created per ${hourly ? 'hour' : 'day'} on the left scale; outcomes for those emails on the right scale.`}>
     {[0, 1, 2, 3].map(i => <line key={i} x1={left} x2={right} y1={top + i * (bottom - top) / 3} y2={top + i * (bottom - top) / 3} className="chart-grid" />)}
     <Crossfade as="g" id={`${maxSent}:${hasOutcomes ? maxException : ''}`}>{[0, 1, 2, 3].map(i => <g key={i}><text x={0} y={top + i * (bottom - top) / 3 + 4} className="chart-label">{number(Math.round(maxSent * (1 - i / 3)))}</text>{hasOutcomes && <text x={width - 2} y={top + i * (bottom - top) / 3 + 4} textAnchor="end" className="chart-label">{number(Math.round(maxException * (1 - i / 3)))}</text>}</g>)}</Crossfade>
     {points.map((p, i) => p.sent > 0 && <rect key={p.at} x={x(i) - barWidth / 2} y={y(p.sent, sentScale)} width={barWidth} height={bottom - y(p.sent, sentScale)} rx={Math.min(2, barWidth / 2)} className={`chart-bar${active === i ? ' chart-bar--active' : ''}`} />)}{hasOutcomes && <><path d={line('bounced', exceptionScale)} className="chart-line chart-line--bounces" /><path d={line('complaints', exceptionScale)} className="chart-line chart-line--complaints" /></>}
@@ -242,7 +241,7 @@ export function ActivityChart({ points: target, range, createdOnly = false }: { 
       return <text key={i} x={x(i)} y={height - (range === '30d' ? 13 : 22)} textAnchor="middle" className="chart-label">{range === '24h' ? date(points[i].at, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' }) : day}{range === '7d' ? <tspan x={x(i)} dy={15}>{date(points[i].at, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })}</tspan> : dated ? <tspan x={x(i)} dy={15} className="chart-label--date">{day}</tspan> : null}</text> })}
     {target.map((p, i) => {
       const start = left + i * slot, end = start + slot
-      return <rect key={p.at} x={start} y={top} width={Math.max(0, end - start)} height={bottom - top} fill="transparent" data-point={i} tabIndex={i === Math.min(stop ?? count - 1, count - 1) ? 0 : -1} role="button" aria-label={`${pointLabel(p.at)}: ${number(p.sent)} ${createdOnly ? 'created' : 'sent'}${hasOutcomes ? `, ${p.bounced} bounces, ${p.complaints} complaints` : ''}`} onMouseEnter={() => setActive(i)} onFocus={() => { setActive(i); setStop(i) }} onBlur={() => setActive(null)} onKeyDown={event => { const next = event.key === 'ArrowRight' ? Math.min(count - 1, i + 1) : event.key === 'ArrowLeft' ? Math.max(0, i - 1) : event.key === 'Home' ? 0 : event.key === 'End' ? count - 1 : null; if (next === null) return; event.preventDefault(); event.currentTarget.parentElement?.querySelector<SVGElement>(`[data-point="${next}"]`)?.focus() }} />
+      return <rect key={p.at} x={start} y={top} width={Math.max(0, end - start)} height={bottom - top} fill="transparent" data-point={i} tabIndex={i === Math.min(stop ?? count - 1, count - 1) ? 0 : -1} role="button" aria-label={`${pointLabel(p.at)}: ${number(p.sent)} created${hasOutcomes ? `, ${p.bounced} bounces, ${p.complaints} complaints` : ''}`} onMouseEnter={() => setActive(i)} onFocus={() => { setActive(i); setStop(i) }} onBlur={() => setActive(null)} onKeyDown={event => { const next = event.key === 'ArrowRight' ? Math.min(count - 1, i + 1) : event.key === 'ArrowLeft' ? Math.max(0, i - 1) : event.key === 'Home' ? 0 : event.key === 'End' ? count - 1 : null; if (next === null) return; event.preventDefault(); event.currentTarget.parentElement?.querySelector<SVGElement>(`[data-point="${next}"]`)?.focus() }} />
     })}
     {selectedPoint && active !== null && <line x1={x(active)} x2={x(active)} y1={top} y2={bottom} className="chart-crosshair" />}
   </svg>{selectedPoint && <div className="chart-tooltip" role="status"><strong>{pointLabel(selectedPoint.at)}</strong><span>Emails <b>{number(selectedPoint.sent)}</b></span>{hasOutcomes && <><span>Bounces <b>{number(selectedPoint.bounced)}</b></span><span>Complaints <b>{number(selectedPoint.complaints)}</b></span></>}</div>}</div>

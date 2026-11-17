@@ -8,7 +8,7 @@ import { IconButton } from './ui'
 // The support chat's Help button and the panel's host, in the dashboard shell (AppShell). The panel's code loads once the
 // page is idle (hover, focus or press warms it sooner); the conversation and its transport start when Help opens.
 //
-// Where it runs: the demo dashboard and ?support=demo (kept for the browser session; ?support=off clears it) get the
+// Where it runs: ?support=demo (kept for the browser session; ?support=off clears it) get the
 // scripted demo conversation. Hosted workspaces get the live support Worker by the build's VITE_SUPPORT_CHAT: "true" for
 // everyone (dev deploys), "staff" for Nightmail staff (the operator role) and workspaces Anomaly made free, unset for no one
 // (production until it is rolled out). ?support=<conversationId> (a support email's "continue in Nightmail" link) opens the
@@ -18,7 +18,7 @@ const Panel = panel.page(module => module.SupportPanel)
 const modeKey = 'nightmail.support'
 export type SupportMode = 'demo' | 'live'
 
-function readMode(demoApi: boolean, hosted: boolean, staff: boolean) {
+function readMode(hosted: boolean, staff: boolean) {
   const param = new URLSearchParams(window.location.search).get('support')
   try {
     if (param === 'demo') sessionStorage.setItem(modeKey, 'demo')
@@ -28,13 +28,13 @@ function readMode(demoApi: boolean, hosted: boolean, staff: boolean) {
   try { stored = sessionStorage.getItem(modeKey) } catch { stored = param === 'demo' ? 'demo' : null }
   const flag = import.meta.env.VITE_SUPPORT_CHAT as string | undefined
   const live = hosted && (flag === 'true' || flag === 'staff' && staff)
-  const mode: SupportMode | null = demoApi || stored === 'demo' ? 'demo' : live ? 'live' : null
+  const mode: SupportMode | null = stored === 'demo' ? 'demo' : live ? 'live' : null
   return { mode, resume: mode === 'live' && param?.startsWith('conv_') ? param : null }
 }
 
 export type SupportChat = ReturnType<typeof useSupportChat>
-export function useSupportChat({ demoApi, hosted, staff }: { demoApi: boolean; hosted: boolean; staff: boolean }) {
-  const [{ mode, resume }] = useState(() => readMode(demoApi, hosted, staff))
+export function useSupportChat({ hosted, staff }: { hosted: boolean; staff: boolean }) {
+  const [{ mode, resume }] = useState(() => readMode(hosted, staff))
   const [open, setOpen] = useState(Boolean(resume))
   const [used, setUsed] = useState(Boolean(resume))
   const [unread, setUnread] = useState(false)

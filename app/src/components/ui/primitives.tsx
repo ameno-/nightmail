@@ -7,7 +7,7 @@ import * as SwitchPrimitive from '@radix-ui/react-switch';
 import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, LoaderCircle, MoreHorizontal, Search, X } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { label as formatLabel } from '../../lib/format';
-import { permissionCodes, tryAgain } from '../../data/types';
+import { ApiError, errorText, permissionCodes, tryAgain } from '../../data/types';
 import { PrivateAddress } from '../PrivateAddress';
 import { TOUCH, matches, usePhone, useTouch } from '../../lib/media';
 import { SkeletonText, PaginationSkeleton, ControlSkeleton } from './skeleton';
@@ -337,20 +337,23 @@ export function Alert({ tone = 'neutral', title, children, onDismiss, timer, ...
 export function EmptyState({ title, description, action, headingAs: Heading = 'h3' }: { title: string; description?: string; action?: ReactNode; headingAs?: 'h1' | 'h3' }) {
   return <div data-component="EmptyState" className="ui-empty-state"><Heading>{title}</Heading>{description && <p className="muted">{description}</p>}{action && <div>{action}</div>}</div>;
 }
-export function LoadingState({ rows = 5 }: { rows?: number }) {
-  return <div className="ui-loading" role="status" aria-label="Loading"><span className="sr-only">Loading…</span>{Array.from({ length: rows }, (_, index) => <div key={index} className="ui-skeleton-row" aria-hidden="true"><span className="ui-skeleton" /><span className="ui-skeleton" /><span className="ui-skeleton" /></div>)}</div>;
-}
-// API errors carry plain-language `text` and a `reference` (code and request ID) shown as secondary detail.
+// An API error's message is plain language; its `reference` (code and request ID) follows as secondary detail for support.
 export function ErrorText({ error, fallback = tryAgain }: { error: unknown; fallback?: string }) {
-  if (error instanceof Error && 'text' in error && 'reference' in error) return <><span>{String(error.text)}</span><span className="ui-error-reference">{String(error.reference)}</span></>;
-  return <>{error instanceof Error ? error.message : typeof error === 'string' ? error : fallback}</>;
+  if (error instanceof ApiError) return <><span>{error.message}</span><span className="ui-error-reference">{error.reference}</span></>;
+  return <>{errorText(error, fallback)}</>;
 }
+/** A failed save or action, under its form. */
+export function MutationError({ error }: { error: unknown }) {
+  return error ? <Alert tone="danger"><ErrorText error={error} /></Alert> : null;
+}
+/** What the API said about one field of a failed save. */
+export const fieldError = (error: unknown, field: string) => error instanceof ApiError ? error.fields[field] : undefined;
 // A role that can't open something isn't a failure: a calm note with who can, and no retry that would fail again.
 const permissionError = (error: unknown) => error instanceof Error && 'code' in error && permissionCodes.has(String(error.code));
 // Something that isn't there stays missing however often it is asked for: no retry beside it.
 const notFound = (error: unknown) => error instanceof Error && (('status' in error && error.status === 404) || ('code' in error && /not_found/i.test(String(error.code))));
 export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
-  if (permissionError(error)) return <div className="ui-error-state"><Alert tone="neutral" title="Owners and admins only"><span>{error instanceof Error && 'text' in error ? String(error.text) : 'Only workspace owners and admins can open this.'}</span></Alert></div>;
+  if (permissionError(error)) return <div className="ui-error-state"><Alert tone="neutral" title="Owners and admins only"><span>{error instanceof ApiError ? error.message : 'Only workspace owners and admins can open this.'}</span></Alert></div>;
   return <div className="ui-error-state"><Alert tone="danger" title="Couldn’t load this content"><ErrorText error={error} />{onRetry && !notFound(error) && <div className="ui-error-state__retry"><Button onClick={onRetry}>Try again</Button></div>}</Alert></div>;
 }
 type ToastTone = 'success' | 'error' | 'info';
@@ -394,11 +397,35 @@ export function useToast(): ToastFn {
 export function SecretCode({ children, className }: { children: ReactNode; className?: string }) {
   return <code data-sensitive className={className}>{children}</code>;
 }
-export function CopyButton({ value, label = 'Copy' }: { value: string; label?: string }) {
-  const [copied, setCopied] = useState(false);
-  const [error, setError] = useState(false);
-  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+/** A secret shown once (an API key, a signing secret), with its copy button. Sensitive as a whole: the secret, and any
+ * example built from it (children), never reach a UI note. */
+export function SecretDialog({ secret, title, onClose, children, description = 'Shown once. Copy it now.' }: { secret: string | null; title: string; onClose: () => void; children?: ReactNode; description?: string }) {
+  return <Dialog sensitive dismissible={false} open={secret !== null} onOpenChange={open => { if (!open) onClose(); }} title={title} description={description} footer={<Button variant="primary" onClick={onClose}>Done</Button>}>
+    <div className="ui-secret"><SecretCode>{secret}</SecretCode>{secret && <CopyButton value={secret} label="Copy secret" />}</div>
+    {children}
+  </Dialog>;
+}
+/**
+ * Copies text to the clipboard, for every copy control. `copied` holds for 1.8 s after a copy, for a button's check;
+ * `done`, when given, is toasted instead, for a copy from a menu or action sheet. A failure says so in a toast.
+ */
+export function useCopy() {
   const toast = useContext(ToastContext);
+  const [copied, setCopied] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);
-  return <span className="cluster"><IconButton label={copied ? 'Copied' : label} onClick={async () => { try { await navigator.clipboard.writeText(value); setCopied(true); setError(false); clearTimeout(timer.current); timer.current = setTimeout(() => setCopied(false), 1800); } catch { setError(true); toast?.('Couldn’t copy to clipboard.', 'error'); } }}>{copied ? <Check size={14} /> : <Copy size={14} />}</IconButton><span className="sr-only" role="status">{copied ? 'Copied to clipboard' : error ? 'Couldn’t copy to clipboard' : ''}</span></span>;
+  const copy = useCallback(async (value: string, done?: string) => {
+    try { await navigator.clipboard.writeText(value); } catch { setFailed(true); toast?.('Couldn’t copy to clipboard.', 'error'); return false; }
+    if (done) toast?.(done, 'success');
+    setCopied(true); setFailed(false);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setCopied(false), 1800);
+    return true;
+  }, [toast]);
+  return { copy, copied, failed };
+}
+export function CopyButton({ value, label = 'Copy' }: { value: string; label?: string }) {
+  const { copy, copied, failed } = useCopy();
+  return <span className="cluster"><IconButton label={copied ? 'Copied' : label} onClick={() => void copy(value)}>{copied ? <Check size={14} /> : <Copy size={14} />}</IconButton><span className="sr-only" role="status">{copied ? 'Copied to clipboard' : failed ? 'Couldn’t copy to clipboard' : ''}</span></span>;
 }

@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { useApi, useApiMutation, useWorkspaceAccess } from '../../data/context'
+import { useApiMutation, useWorkspaceAccess } from '../../data/context'
 import { campaignResumable, errorText, type Campaign, type CampaignPacingInput } from '../../data/types'
 import { Alert, Button, Checkbox, Input } from '../../components/ui'
 import { date, number, relativeTime, time } from '../../lib/format'
@@ -70,11 +70,9 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
   </div>
 }
 
-const message = errorText
 
 // Pause, resume, and daily-limit controls for a send that is still releasing recipients.
 export function CampaignPacing({ campaign }: { campaign: Campaign }) {
-  const api = useApi()
   const cache = useQueryClient()
   // Pausing, resuming and pacing are delivery controls: owners and admins only.
   const { canAdminister } = useWorkspaceAccess()
@@ -88,10 +86,10 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
   const [share, setShare] = useState(() => String(ratePercent(pacing?.rateShare)))
   const [error, setError] = useState('')
   // Each action returns the full campaign; write it into the cache instead of refetching everything.
-  const campaignKey = ['nightmail', api.mode, 'campaign', campaign.id]
+  const campaignKey = ['nightmail', 'campaign', campaign.id]
   function accept(next: Campaign) {
     cache.setQueryData(campaignKey, next)
-    void cache.invalidateQueries({ queryKey: ['nightmail', api.mode, 'campaigns'], refetchType: 'none' })
+    void cache.invalidateQueries({ queryKey: ['nightmail', 'campaigns'], refetchType: 'none' })
   }
   const pause = useApiMutation((api, id: string) => api.campaigns.pause(id), 'Sending paused', false, false)
   const resume = useApiMutation((api, id: string) => api.campaigns.resume(id), 'Sending resumed', false, false)
@@ -102,7 +100,7 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
     try { accept(await action()) }
     catch (cause) {
       if (isDuplicateSubmission(cause)) return
-      setError(message(cause))
+      setError(errorText(cause))
       // A conflict means the send moved on (finished, paused elsewhere); show its real state.
       void cache.invalidateQueries({ queryKey: campaignKey })
     }

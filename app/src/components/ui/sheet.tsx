@@ -73,4 +73,3 @@ export function Sheet({ open, onOpenChange, title, description, children, classN
   </DialogPrimitive.Portal></DialogPrimitive.Root>
 }
 export function SheetOpenEffects() { useKeyboardInset(); return null }
-export const SheetClose = DialogPrimitive.Close

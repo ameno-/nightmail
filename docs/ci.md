@@ -1,6 +1,6 @@
 # CI: what runs where, and how to fix it
 
-Every change reaches production through `dev`: a PR merges into `dev`, the dev deploy migrates the dev database, deploys the Worker and runs the live E2E (`api/scripts/e2e.ts`) against `dev.bane.mx`. Production requires a green live E2E for the exact SHA and green CI for its code tree.
+Every change reaches production through `dev`: a PR merges into `dev`, the dev deploy migrates the dev database, deploys the Worker and runs the live E2E (`api/scripts/e2e.ts`) against `dev.bane.mx`. Production requires a green live E2E and green dev push CI for the exact SHA.
 
 ## Merging into `dev`: the merge queue
 
@@ -22,26 +22,24 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 | PR, merge group, `dev` push | `audit`, `gateway`, `cls`, `support` | Dependency advisories, the Rust mail gateway, four shards of layout shift and density measurements, and the support Worker tests |
 | `dev` push, alongside CI | Deploy dev | Migrate, deploy, health and live dev E2E. Support prepares alongside the main Worker but waits for its health check before changing D1 or its service binding. |
 | Daily 07:17 UTC, or by hand | Nightly | The acceptance suite (quarantined tests included) and the CLS gate, ten repetitions each by default, reported in one issue |
-| Production push or dispatch | Deploy production | Requires a passing live dev E2E and CI proof (see **Releasing to production**) |
+| `production` push | Deploy production | Requires a passing live dev E2E and CI proof (see **Releasing to production**) |
 | Daily 03:00 ET, on Ryan's Mac | Nightly report | The last 24 hours of production and dev logs against the previous week; files `nightly` issues and starts a self-improve session (below) |
 
 CI, nightly and deploy use Blacksmith Ubuntu 24.04 (4 vCPUs for builds, tests and deploys; 2 for lightweight checks). `release.yml` stays on GitHub-hosted runners for npm trusted publishing. Blacksmith routes `actions/cache` to its local cache. Postgres runs on tmpfs; the CLS cache holds the locked Playwright browser and an exact-SHA Vite build, never a deploy artifact. Each protected suite check requires every matrix job to succeed. [Measured PR CI: 93 seconds](https://github.com/anomalyco/nightmail/actions/runs/43788887814), including queue time.
 
 ## Releasing to production
 
-1. **Dev.** Once the dev push deploy and live E2E pass, the dev run uses its ephemeral `GITHUB_TOKEN` to dispatch `deploy.yml` on `production` with the tested SHA and source run ID. No branch moves or push credential. No wait for support dev.
-   `AUTO_SHIP` (repository variable, unset or `on` by default): set `off` to stop automatic promotion; use the normal `git push bane <sha>:production` for manual shipping. Install changed release controls on the protected production branch via that path.
-2. **Production.** Under the production lock, Authorize authenticates the source dev push/job, requires the exact dev tip and a descendant of the last successful production Worker deployment, and checks the live E2E and CI (identical queue tree or exact dev push). Privileged jobs recheck the tips and freeze. Manual pushes must also move forward from the deployed Worker; an explicit authorized rollback dispatch is the exception.
-   The branch holds the trusted release workflow; it need not equal the running application. Read the verified environment deployment with `GITHUB_REPOSITORY=anomalyco/nightmail bash .github/scripts/deployed-sha.sh production`. The job name records the actual Worker SHA, including for rollback and automatic dispatches.
-3. **No approval.** The `production` environment has no required reviewers (removed on Nov 12; before that, every production run waited for thdxr or R44VC0RP to approve). The deploy proceeds as soon as Authorize has the proof. These guards remain: the `production` ruleset (fast-forward only, no deletion), its branch protection (only thdxr and R44VC0RP push), the environment's branch policy (`production` only), the actor check, the stage-tip check in every job, and `PROD_DEPLOY_ENABLED`. To put an approval back, add a required-reviewers rule to the environment (Settings → Environments → `production`, or `PUT repos/anomalyco/nightmail/environments/production` with `reviewers` and the existing `deployment_branch_policy`).
+1. **Prove the commit.** Merge to `dev`. Wait for the main dev deploy, its live E2E and dev push CI to pass for the merge SHA. Nothing ships to production automatically.
+2. **Promote it.** Fast-forward `production` to that SHA: `git push bane <sha>:refs/heads/production`. Only this push starts a production deployment. Under the stage lock, Authorize checks that the SHA is on `dev`, descends from the last healthy production deploy and has both proofs. Only `thdxr` and `R44VC0RP` may push; privileged jobs recheck the branch tip and the `PROD_DEPLOY_ENABLED` freeze switch. No separate reviewer approval is needed.
+3. **Verify it.** Watch the production push run through the Worker and support health checks. The branch names the release; if a push is pending or fails, `GITHUB_REPOSITORY=anomalyco/nightmail bash .github/scripts/deployed-sha.sh production` reports the last healthy main Worker SHA. Retry the full push run while it is still the tip, or fix forward. To undo a change, prove a revert on `dev` and fast-forward to it; never move `production` backwards.
 
-**Pulumi only runs when it has work.** `.github/scripts/pulumi-has-work.sh` compares the commit being deployed with the commit of the stage's newest successful Deploy job (read from the job's name, so a rollback counts as the commit it deployed). Pulumi runs when one of these changed in that range:
+**Pulumi only runs when it has work.** `.github/scripts/pulumi-has-work.sh` compares the commit being deployed with the last healthy main Worker SHA for that stage, not the previous branch tip. Pulumi runs when one of these changed in that range:
 
 - `infra/`, except Markdown and the other stage's stack settings;
-- `api/src/mail-controls.ts`, the token action, or a script that checks the receiving set, copies the backend or checks the gateway plan;
+- `api/src/mail-controls.ts`, the token action, or the script that checks the receiving set;
 - the `pulumi` job in `deploy.yml`, including its CLI version, after expanding anchors and ignoring its `Require …` guard steps, the equivalent Ubuntu runner labels and the download-cache step.
 
-An edit to the verifier or scope script alone still runs the live tenant-routing check, before the main Worker migrates. A missing or non-ancestor base, unknown job change or explicit manual dispatch requires Pulumi; automatic production dispatch uses the same deployed-base comparison as dev. No token is shared between jobs: each Cloudflare caller mints and uses its own IP-bound token.
+An edit to the verifier or scope script alone still runs the live tenant-routing check, before the main Worker migrates. A missing or non-ancestor base, unknown job change or manual dev dispatch requires Pulumi. No token is shared between jobs: each Cloudflare caller mints and uses its own IP-bound token.
 
 ## When the dev E2E fails
 
@@ -170,7 +168,7 @@ Ryan's Mac runs it nightly with cronctl (`bane-tear-nightly`, 02:30) from a deta
 
 ## Request logs
 
-Every process logs one JSON object per line (`log` and `logError` in `api/src/core.ts`): the Worker to Workers Logs (`observability` in both wrangler configs, 100% head sampling), the Node API and runner to stdout (CloudWatch on Fargate), and the mail gateway to CloudWatch `/ecs/bane-mail-gateway`. Each line carries `service` (`worker`, `api`, `runner`, `gateway`) and `deploy`, the first 12 characters of the commit (`DEPLOY_SHA`, which `deploy-worker.sh` sets on the Worker; set it in the environment for Node).
+Every process logs one JSON object per line (`log` and `logError` in `api/src/core.ts`): the Worker to Workers Logs (`observability` in both wrangler configs, 100% head sampling), the Node API and runner to stdout (CloudWatch on Fargate), and the mail gateway to CloudWatch `/ecs/nightmail-mail-gateway`. Each line carries `service` (`worker`, `api`, `runner`, `gateway`) and `deploy`, the first 12 characters of the commit (`DEPLOY_SHA`, which `deploy-worker.sh` sets on the Worker; set it in the environment for Node).
 
 - **One request line per request** (`event: "request"`, written by the first middleware in `app.ts`): `requestId`, `route` (the matched handler's template, such as `/v1/emails/:id` or `/mcp`, or `unmatched`; never the raw path), `method`, `status`, `code` and `field` for a failure, `databaseCode`, `durationMs`, `workspace` (the workspace ID only), `principal` (`apiKey`, `dashboard`, `mcp`, `agentToken`, `inboxKey`, `gateway`, `anonymous`) and per-step `timings`. Level: `info` below 400, `warn` for 4xx, `error` for 5xx. `field` names only the schema's own top-level fields: an unsupported key is whatever the caller sent, so it is never logged. MCP authenticates and answers inside its route, so `/mcp` records its principal and a failure code itself (`MCP_AUTH_REQUIRED`, `AUTH_UNAVAILABLE`, `ORIGIN_NOT_ALLOWED`, `MCP_HTTP_<status>`).
 - **One error line per unexpected failure** (`logError`): the same `requestId` (or `jobId` for a job), `code` (an upper-case code string, else `UNKNOWN_ERROR`), `errorType` (a string `name` shaped like a class name, else `Error`), `databaseCode` (a five-character SQLSTATE string from the `cause` chain) and up to 12 stack frames from Nightmail's own code (the Worker bundle, `src/` or `dist/`), rebuilt as `function (file:line:column)`. Never a message, neither the error's nor an `ApiError`'s: a database error's message quotes its parameters, and an error's name is just a property, and either can span lines that look like frames. So `stackFrames` reads frames only after the exact `name: message` header text (matched by characters, not lines), and logs no frames when the stack does not start with it.

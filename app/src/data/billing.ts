@@ -8,7 +8,7 @@ export type BillingState = { sending: 'ok' | 'low' | 'paused'; receiving: 'ok' |
 export interface FreeAllowance { limit: number; used: number; left: number }
 export interface BillingSummary {
   enforcement: Enforcement
-  mode: 'prepaid' | 'invoiced' | 'exempt'
+  mode: 'prepaid' | 'exempt'
   state: BillingState
   balance: { paid: string; promo: string; unsettled: string; available: string } | null
   /** One allowance per direction, counted separately; emails repeats sent for older clients. received is null unless the
@@ -55,6 +55,11 @@ export function usd(uc: string | bigint, options: { sign?: boolean } = {}) {
   return `${neg ? '−' : options.sign && v > 0n ? '+' : ''}$${whole.toLocaleString('en-US')}.${frac}`
 }
 export const centsUsd = (cents: number) => usd(BigInt(cents) * UC_PER_CENT)
+/** A price the API states in dollars (prices.emailPerThousand "0.20") as µ¢. */
+export function priceUc(dollars: string) {
+  const [whole, fraction = ''] = dollars.split('.')
+  return BigInt(whole) * 100n * UC_PER_CENT + BigInt(fraction.padEnd(8, '0').slice(0, 8))
+}
 export const total = (b: NonNullable<BillingSummary['balance']>) => BigInt(b.paid) + BigInt(b.promo)
 /** Whole dollars typed by a person ("25", "$25", "25.50") as cents, or null. */
 export function parseDollars(text: string) {

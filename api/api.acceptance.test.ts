@@ -316,11 +316,10 @@ test('review PR #84 P2: examples use the server’s canonical origin, never the 
   // P2: the dashboard's origin comes from /v1/me or /health (PUBLIC_URL). A page served under another Host is flagged
   // (Docs then shows no examples), and an unknown origin is null (callers wait) rather than the page's own address.
   const { canonicalOrigin, originOf } = await import('../app/src/lib/public-origin.js');
-  assert.deepEqual(canonicalOrigin({ identity: null, instance: 'https://bane.mx', demo: false, page: 'https://attacker.example' }), { origin: 'https://bane.mx', foreign: true });
-  assert.deepEqual(canonicalOrigin({ identity: 'https://bane.mx', instance: 'https://attacker.example', demo: false, page: 'https://bane.mx' }), { origin: 'https://bane.mx', foreign: false });
-  assert.deepEqual(canonicalOrigin({ identity: null, instance: null, demo: false, page: 'https://attacker.example' }), { origin: null, foreign: false });
-  assert.deepEqual(canonicalOrigin({ identity: null, instance: 'javascript:alert(1)', demo: false, page: 'https://bane.mx' }), { origin: null, foreign: false });
-  assert.deepEqual(canonicalOrigin({ identity: null, instance: null, demo: true, page: 'http://127.0.0.1:5173' }), { origin: 'http://127.0.0.1:5173', foreign: false });
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: 'https://bane.mx', page: 'https://attacker.example' }), { origin: 'https://bane.mx', foreign: true });
+  assert.deepEqual(canonicalOrigin({ identity: 'https://bane.mx', instance: 'https://attacker.example', page: 'https://bane.mx' }), { origin: 'https://bane.mx', foreign: false });
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: null, page: 'https://attacker.example' }), { origin: null, foreign: false });
+  assert.deepEqual(canonicalOrigin({ identity: null, instance: 'javascript:alert(1)', page: 'https://bane.mx' }), { origin: null, foreign: false });
   assert.equal(originOf('https://bane.mx/'), 'https://bane.mx');
 });
 test('review PR #84 P3: an inbox key never goes on a command line; with a key every MCP client gets a JSON config', async () => {
@@ -3362,10 +3361,46 @@ describe('Hosted MCP OAuth and tools', () => {
     });
     await t.test('routing H2: delegated manage cannot create durable hooks or repoint a content destination',async()=>{
       const path='/v1/inbound/webhooks',url='https://example.com/synthetic',headers={'x-bane-environment':'live'};
-      for(const fields of [{},{format:'inbound'},{include:['message','raw']}])error(await http('POST',path,managed.token,{url,...fields},headers),403,'ADMIN_REQUIRED');
+      for(const fields of [{},{format:'inbound'},{include:['message','raw']}])error(await http('POST',path,managed.token,{url,...fields},headers),403,'CREDENTIAL_DELEGATION_FORBIDDEN');
       const owned=ok(await http('POST',path,MANAGER,{url,format:'inbound',paused:true},headers),201);
-      error(await http('PATCH',`${path}/${owned.id}`,managed.token,{url:'https://example.org/synthetic'},headers),403,'ADMIN_REQUIRED');
+      error(await http('PATCH',`${path}/${owned.id}`,managed.token,{url:'https://example.org/synthetic'},headers),403,'CREDENTIAL_DELEGATION_FORBIDDEN');
       assert.equal(ok(await http('GET',`${path}/${owned.id}`,MANAGER,undefined,headers)).url,'••••'+url.slice(-4));ok(await http('DELETE',`${path}/${owned.id}`,MANAGER,undefined,headers));
+    });
+    await t.test('a temporary manage token reads and previews receiving configuration but makes no lasting change, routes included', async () => {
+      // Its own token: the shared one above lasts 30 seconds. Every refusal is the same rule (lasting in core.ts) and code.
+      const agent = await callTool(token, 'createAgentToken', { body: { permissions: ['read', 'manage'], expiresInSeconds: 600, domains: [], purpose: 'Synthetic lasting-change fixture' }, confirm: true }, 201);
+      secrets.add(agent.token);
+      const hook = ok(await http('POST', '/v1/inbound/webhooks', MANAGER, { url: 'https://example.com/synthetic-lasting', paused: true }), 201);
+      try {
+        const before = ok(await http('GET', '/v1/routing', MANAGER)).version;
+        const writes: [string, string, unknown?][] = [
+          ['PUT', '/v1/routing', { routes: [] }], ['POST', '/v1/routing/routes', { match: 'fixture@example.com', to: [hook.id] }],
+          ['PATCH', '/v1/routing/routes/billing', { to: [] }], ['DELETE', '/v1/routing/routes/billing'], ['POST', '/v1/routing/versions/1/restore'],
+          ['PUT', '/v1/rituals', {}], ['PUT', '/v1/rituals/scripts/fixture', { key: 'fixture', source: 'export default function route(email){}' }],
+          ['PATCH', '/v1/rituals/scripts/fixture', { enabled: false }], ['DELETE', '/v1/rituals/scripts/fixture'], ['POST', '/v1/rituals/restore', { version: 1 }],
+          ['PUT', '/v1/rituals/omens', {}], ['POST', '/v1/rituals/recipes', { recipe: 'fixture', addresses: ['fixture@example.com'] }], ['PUT', '/v1/rituals/scripts/fixture/recipe', {}],
+          ['POST', '/v1/endpoints', { type: 'slack', name: 'agent-fixture', url: 'https://hooks.slack.com/services/T0AGENT/B0AGENT/synthetic' }],
+          ['PATCH', '/v1/endpoints/agent-fixture', { paused: true }], ['DELETE', '/v1/endpoints/agent-fixture'],
+          ['POST', '/v1/endpoints/agent-fixture/verification', {}], ['POST', '/v1/endpoints/agent-fixture/test'],
+          ['POST', '/v1/inbound/webhooks', { url: 'https://example.com/synthetic-agent' }], ['PATCH', `/v1/inbound/webhooks/${hook.id}`, { paused: false }],
+          ['DELETE', `/v1/inbound/webhooks/${hook.id}`], ['POST', `/v1/inbound/webhooks/${hook.id}/rotate-secret`],
+          ['POST', '/v1/inbound/keys', { name: 'agent fixture' }], ['GET', '/v1/inbound/keys'], ['POST', '/v1/inbound/keys/mbk_fixture/revoke'],
+          ['DELETE', '/v1/inboxes/fixture/app-passwords/fixture'], ['POST', '/v1/inbox-connections', { inboxes: ['fixture'], client: 'generic', auth: 'key' }],
+        ];
+        for (const [method, path, body] of writes) {
+          const reply = await http(method, path, agent.token, body, path === '/v1/routing' ? { 'if-match': '*' } : {});
+          assert.equal(reply.status, 403, `${method} ${path}: ${redact(reply.body)}`);
+          assert.equal(reply.body?.error?.code, 'CREDENTIAL_DELEGATION_FORBIDDEN', `${method} ${path}`);
+        }
+        assert.equal(ok(await http('GET', '/v1/routing', MANAGER)).version, before, 'No refused write saved a routing version.');
+        assert.equal(ok(await http('GET', `/v1/inbound/webhooks/${hook.id}`, MANAGER)).paused, true);
+        // Reads and previews stay open: routing, its dry run, rituals, endpoints and a webhook's deliveries.
+        for (const path of ['/v1/routing', '/v1/routing/routes', '/v1/rituals', '/v1/endpoints', `/v1/inbound/webhooks/${hook.id}`, `/v1/inbound/webhooks/${hook.id}/deliveries`]) ok(await http('GET', path, agent.token));
+        assert.ok(Array.isArray(ok(await http('POST', '/v1/routing/test', agent.token, { envelope: { to: ['fixture@example.com'] } })).recipients));
+      } finally {
+        ok(await http('DELETE', `/v1/inbound/webhooks/${hook.id}`, MANAGER));
+        ok(await http('POST', `/v1/agent-tokens/${agent.id}/revoke`, MANAGER, undefined, { 'x-bane-environment': 'live' }));
+      }
     });
     await t.test('PR92 P2: a webhook signing secret is never read back through a delegated credential, every hand-out is recorded, and reads have a small budget', async () => {
       const hook = await resource(t, MANAGER, '/v1/webhooks', { url: `https://example.com/hooks/${unique('reveal')}`, paused: true }), path = `/v1/webhooks/${hook.id}/secret`;
@@ -6228,7 +6263,7 @@ describe('Billing: metering, gate and settlement', () => {
       refunds=u.refunds||jsonb_build_object(extract(epoch FROM $5::timestamptz)::bigint::text,coalesce((u.refunds->>extract(epoch FROM $5::timestamptz)::bigint::text)::bigint,0)+excluded.quantity)`, [wid, hour, meter, q, origin]);
   const captureLogs = (t: TestContext) => { const logs: Json[] = []; for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} }); return logs; };
 
-  test('the gate lives in the one admission statement: off and shadow allow, enforce gives 402, exempt, invoiced and the platform pass, debt blocks free sends', async t => {
+  test('the gate lives in the one admission statement: off and shadow allow, enforce gives 402, exempt and the platform pass, debt blocks free sends', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const f = await billingFixture(runtime, db, local, request), meter = await queryBudget(t, db);
       // Billing launches enforced (300); a workspace created since is prepaid. Off, the kill-switch: sends are metered
@@ -6255,8 +6290,12 @@ describe('Billing: metering, gate and settlement', () => {
       const results = await Promise.all(Array.from({ length: 20 }, () => f.send()));
       assert.deepEqual([results.filter(r => r.status === 202).length, results.filter(r => r.status === 402 && r.body.error.code === 'BALANCE_EXHAUSTED').length], [10, 10]);
       assert.equal((await f.position()).availableUc, '0');
-      // Exempt and invoiced accounts are never gated; neither is the platform's own workspace.
-      for (const mode of ['exempt', 'invoiced']) { await db.query('UPDATE billing_accounts SET mode=$2 WHERE workspace_id=$1', [f.wid, mode]); ok(await f.send(), 202); }
+      // Exempt accounts are never gated; neither is the platform's own workspace. There is no invoiced mode (315): an
+      // account is prepaid or exempt.
+      await db.query(`UPDATE billing_accounts SET mode='exempt' WHERE workspace_id=$1`, [f.wid]); ok(await f.send(), 202);
+      await db.query('SAVEPOINT invoiced');
+      await assert.rejects(db.query(`UPDATE billing_accounts SET mode='invoiced' WHERE workspace_id=$1`, [f.wid]), { code: '23514', constraint: 'billing_accounts_mode_check' });
+      await db.query('ROLLBACK TO SAVEPOINT invoiced');
       await db.query(`UPDATE billing_accounts SET mode='prepaid' WHERE workspace_id=$1`, [f.wid]);
       error(await f.send(), 402, 'BALANCE_EXHAUSTED');
       runtime.config.platformDomainWorkspace = f.wid;
@@ -7176,6 +7215,33 @@ describe('Billing: metering, gate and settlement', () => {
     }
   });
 
+  test('migration 315 stops on an invoiced account instead of converting it; without one, accounts are prepaid or exempt with no paid_mode', { skip: DATABASE_FIXTURE_SKIP }, async t => {
+    // billing_accounts as 314 left it, in a schema of its own inside a transaction that rolls back.
+    const db = await fixtureDatabase(t), schema = 'billing315_' + randomUUID().replaceAll('-', '');
+    const migration = await readFile(new URL('./migrations/315_billing_drop_invoiced.sql', import.meta.url), 'utf8');
+    const accounts = async () => (await db.query('SELECT * FROM billing_accounts ORDER BY workspace_id')).rows;
+    await db.query('BEGIN');
+    try {
+      await db.query(`CREATE SCHEMA ${schema}; SET LOCAL search_path TO ${schema};
+        CREATE TABLE billing_accounts (workspace_id text PRIMARY KEY, mode text NOT NULL DEFAULT 'prepaid' CHECK (mode IN ('prepaid','invoiced','exempt')),
+          paid_mode text NOT NULL DEFAULT 'prepaid' CHECK (paid_mode IN ('prepaid','invoiced')));
+        INSERT INTO billing_accounts VALUES ('w-exempt','exempt','prepaid'),('w-prepaid','prepaid','prepaid')`);
+      // An invoiced account, and a free one that would turn invoiced when its flag ends: neither is converted.
+      for (const [mode, paid] of [['invoiced', 'invoiced'], ['exempt', 'invoiced']]) {
+        await db.query(`INSERT INTO billing_accounts VALUES ('w-invoiced',$1,$2)`, [mode, paid]);
+        const before = await accounts();
+        await db.query('SAVEPOINT migrate');
+        await assert.rejects(db.query(migration), { code: 'P0001', message: '1 billing account(s) are invoiced', hint: /scripts\/set-billing-mode\.ts/ });
+        await db.query('ROLLBACK TO SAVEPOINT migrate');
+        assert.deepEqual(await accounts(), before, `${mode}/${paid} is left as it was.`);
+        await db.query(`DELETE FROM billing_accounts WHERE workspace_id='w-invoiced'`);
+      }
+      await db.query(migration);
+      assert.deepEqual(await accounts(), [{ workspace_id: 'w-exempt', mode: 'exempt' }, { workspace_id: 'w-prepaid', mode: 'prepaid' }]);
+      await assert.rejects(db.query(`INSERT INTO billing_accounts VALUES ('w-new','invoiced')`), { code: '23514', constraint: 'billing_accounts_mode_check' });
+    } finally { await db.query('ROLLBACK'); }
+  });
+
   test('a write-off takes only the debt left when it runs: a top-up landing during the daily scan is collected, not forgiven', { skip: DATABASE_FIXTURE_SKIP }, async t => {
     // Committed rows on two connections: the scan reads the account, then a top-up commits before the write-off posts.
     const a = await fixtureDatabase(t), b = await fixtureDatabase(t), wid = unique('billing-writeoff-race');
@@ -7633,8 +7699,6 @@ describe('Dashboard API capabilities', () => {
   });
 
   test('campaign content is block HTML: the guide, validation errors, preview rendering and text alternative are observable', async t => {
-    const [{ sanitizeBlockStyle: serverStyle }, { sanitizeBlockStyle: composerStyle }] = await Promise.all([import('./src/block-style.js'), import('../app/src/features/campaigns/block-style.js')]);
-    for (const value of ['color:#3156c7; padding:24px; border-radius:8px', 'font-size:32px;line-height:1.2;', 'position:absolute', 'background-image:url(https://example.com/x.png)', 'padding:200px']) assert.equal(composerStyle(value), serverStyle(value), `Composer and renderer style sanitizers disagree for ${value}`);
     const key = await keyFixture(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('block-content') });
     const guide = ok(await http('GET', '/v1/campaign-content-guide', key.secret));
@@ -9717,8 +9781,13 @@ describe('Billing: API, MCP and notices', () => {
       const before = (await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE workspace_id=$1`, [wid])).rows[0].n;
       error(await local('POST', `${base}/write-off`, { reason: 'Customer closed the account' }, 'live', once('write-off-2')), 409, 'NOTHING_OWED');
       assert.equal((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE workspace_id=$1`, [wid])).rows[0].n, before, 'A refused change leaves no audit row.');
+      // A workspace is prepaid or exempt; invoiced is refused before anything changes, and the account has no paid_mode.
+      assert.equal(error(await local('PUT', `${base}/mode`, { mode: 'invoiced', reason: 'Enterprise contract, invoiced monthly' }), 422, 'VALIDATION_FAILED').field, 'mode');
       const mode = ok(await local('PUT', `${base}/mode`, { mode: 'exempt', reason: 'Anomaly’s own workspace' }));
       assert.equal(mode.account.mode, 'exempt');
+      assert.ok(!('paid_mode' in mode.account) && !('paid_mode' in ok(await local('GET', base)).account), 'paid_mode is gone (315).');
+      assert.equal(ok(await local('PUT', `${base}/mode`, { mode: 'prepaid', reason: 'Back to paying as it goes' })).account.mode, 'prepaid');
+      assert.equal(ok(await local('GET', '/v1/billing')).mode, 'prepaid');
       assert.deepEqual(ok(await local('GET', base)).ledger.map((l: Json) => l.kind), ['write_off', 'adjustment', 'adjustment', 'grant']);
       error(await local('GET', '/v1/operator/billing/no-such-workspace'), 404, 'NOT_FOUND');
     });
@@ -9815,6 +9884,11 @@ describe('Billing: API, MCP and notices', () => {
       const wid = await hostedBilling(runtime, db);
       const [{ setBillingMode }, { setBillingEnforcement }] = await Promise.all([import('./scripts/set-billing-mode.js'), import('./scripts/set-billing-enforcement.js')]);
       await assert.rejects(setBillingMode(db, [wid, 'free', '--reason', 'Anomaly workspace exemption']), /Usage/);
+      // invoiced is gone (315): the script refuses it, and so does billing_set_mode for any other caller.
+      await assert.rejects(setBillingMode(db, [wid, 'invoiced', '--reason', 'Enterprise contract, invoiced monthly']), /Usage: set-billing-mode\.ts WORKSPACE_ID prepaid\|exempt /);
+      await db.query('SAVEPOINT invoiced');
+      await assert.rejects(db.query(`SELECT billing_set_mode($1,'invoiced','Enterprise contract, invoiced monthly','script')`, [wid]), { code: '22023', message: 'unknown billing mode invoiced' });
+      await db.query('ROLLBACK TO SAVEPOINT invoiced');
       await assert.rejects(setBillingMode(db, ['no-such-workspace', 'exempt', '--reason', 'Anomaly workspace exemption']), /No workspace/);
       assert.deepEqual(await setBillingMode(db, [wid, 'exempt', '--reason', 'Anomaly workspace exemption']), { old: 'prepaid', new: 'exempt', reason: 'Anomaly workspace exemption', via: 'script' });
       assert.equal((await db.query('SELECT mode FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0].mode, 'exempt');

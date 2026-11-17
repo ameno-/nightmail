@@ -2,25 +2,36 @@ import { Fragment, type ReactNode } from 'react'
 import { Disclosure } from '../../components/ui'
 import type { SenderLimit } from '../../data/types'
 import { number } from '../../lib/format'
+import { CALIBRATION, GRADE_BANDS, LADDER, LIMIT_BANDS, SCORE, burstFor, pct } from '../../../../api/src/standing-model'
 import './limits.css'
 
 // How sending limits work: the published score → limit table, the warning lines as one table (a rate and a count for
 // each step) with what each step does, and the campaign list probe. The public docs (/docs#sending-limits) and
 // Overview's explainer render this one copy. Detection internals stay out.
-const perMinute = (limit: number) => Math.min(500, Math.max(50, Math.floor(limit / 20)))
+// The published numbers (api/src/standing-model.ts) behind each table, so the copy follows the API when they change.
 // The score and its grade in one cell; `source` and `band` pick out the row a workspace is on (SenderLimit).
+const scoreBands = [...LIMIT_BANDS].reverse().map((band, i, all) => ({ limit: band.limit, from: band.min, to: i + 1 < all.length ? all[i + 1].min - 1 : Infinity }))
+// The grades a score range spans: the one at its closed end, then the others with where they start or stop.
+function gradeSpan(from: number, to: number) {
+  const spans = GRADE_BANDS.map((band, i) => ({ grade: band.grade, from: band.min, to: i ? GRADE_BANDS[i - 1].min - 1 : Infinity })).filter(band => band.from <= to && band.to >= from)
+  if (from === -Infinity) return [spans[0].grade, ...spans.slice(1).map(band => `${band.grade} under ${band.to + 1}`)].join(', ')
+  const [first, ...rest] = spans.reverse()
+  return [first.grade, ...rest.map(band => `${band.grade} from ${band.from}`)].join(', ')
+}
+const scoreRange = (from: number, to: number) => from === -Infinity ? `Under ${to + 1}` : to === Infinity ? `${from} and up` : `${from}–${to}`
 const bands: [score: string, limit: number | string, current: (limit: SenderLimit) => boolean][] = [
-  ['Calibrating, first 100 sent', 100, l => l.source === 'calibrating'], ['Under 65 · D, F under 60', 100, l => l.source === 'score' && l.band === 100],
-  ['65–69 · D', 200, l => l.source === 'score' && l.band === 200], ['70–74 · C', 500, l => l.source === 'score' && l.band === 500],
-  ['75–79 · C', 1_000, l => l.source === 'score' && l.band === 1_000], ['80–84 · B', 2_000, l => l.source === 'score' && l.band === 2_000],
-  ['85–89 · B', 5_000, l => l.source === 'score' && l.band === 5_000], ['90 and up · A, A+ from 95', 10_000, l => l.source === 'score' && l.band === 10_000],
+  [`Calibrating, first ${CALIBRATION.recipients} sent`, CALIBRATION.limit, l => l.source === 'calibrating'],
+  ...scoreBands.map(({ limit, from, to }): (typeof bands)[number] => [`${scoreRange(from, to)} · ${gradeSpan(from, to)}`, limit, l => l.source === 'score' && l.band === limit]),
   ['On request', '25,000 · 50,000 · 100,000', () => false],
 ]
-// Each cell is the rate and the count that must both be reached; a dash where the step has no line for it.
+// Each cell is the rate and the count that must both be reached; a dash where the step has no line for it. A line
+// with the rate of the one before it gives only its count. `window` adds the period a line counts over.
+type Line = { rate: number; count: number; window?: string }
+const at = (lines: readonly Line[], window = true) => lines.map((line, i) => `${i && line.rate === lines[i - 1].rate ? '' : `${pct(line.rate)} and `}${line.count}${window ? ` in ${line.window === '7d' ? '7 days' : '24 h'}` : ''}`).join(', or ')
 const lines: [what: string, warn: string, restrict: string, pause: string][] = [
-  ['Complaints', '0.05% and 2 in 24 h, or 3 in 7 days', '0.1% and 3 in 24 h', '0.3% and 5 in 24 h, or 0.15% and 10 in 7 days'],
-  ['Hard bounces', '2% and 10 in 24 h, or 1.5% and 10 in 7 days', 'Marketing 4% and 25; any mail 8% and 50', 'Transactional 5% and 50'],
-  ['Spam-screen rejections', '2% and 3 in 24 h', '5% and 10', '10% and 25'],
+  ['Complaints', at(LADDER.complaints.warn), at(LADDER.complaints.restrict), at(LADDER.complaints.pause)],
+  ['Hard bounces', at(LADDER.bounces.warn), `Marketing ${at(LADDER.marketingBounces.restrict, false)}; any mail ${at(LADDER.anyBounces.restrict, false)}`, `Transactional ${at(LADDER.transactionalBounces.pause, false)}`],
+  ['Spam-screen rejections', at(LADDER.screen.warn), at(LADDER.screen.restrict, false), at(LADDER.screen.pause, false)],
   ['Other', '–', '–', 'AWS paused sending, or confirmed abuse'],
 ]
 // What each step does, then how it ends.
@@ -42,11 +53,11 @@ export function SendingLimitsGuide({ headings = 'h3', limit, compact = false }: 
       {!compact && <p>Hosted only: recipients per rolling 24 hours, set by the sender score.</p>}
       <div className="limits-table-scroll"><table className="limits-table">
         <thead><tr><th scope="col">Score</th><th scope="col">Daily limit</th><th scope="col">Per minute</th></tr></thead>
-        <tbody>{bands.map(([score, cap, current]) => <tr key={score} aria-current={limit && current(limit) ? 'true' : undefined}><td>{score}{limit && current(limit) && <span className="limits-table__now">Now</span>}</td><td>{typeof cap === 'number' ? number(cap) : cap.split(' · ').map((part, i, all) => <Fragment key={part}><span className="limits-table__part">{part}</span>{i < all.length - 1 && ' · '}</Fragment>)}</td><td>{typeof cap === 'number' ? number(perMinute(cap)) : number(500)}</td></tr>)}</tbody>
+        <tbody>{bands.map(([score, cap, current]) => <tr key={score} aria-current={limit && current(limit) ? 'true' : undefined}><td>{score}{limit && current(limit) && <span className="limits-table__now">Now</span>}</td><td>{typeof cap === 'number' ? number(cap) : cap.split(' · ').map((part, i, all) => <Fragment key={part}><span className="limits-table__part">{part}</span>{i < all.length - 1 && ' · '}</Fragment>)}</td><td>{number(burstFor(typeof cap === 'number' ? cap : Infinity))}</td></tr>)}</tbody>
       </table></div>
       <ul className="limits-notes">
         <li>Marketing can use all but 100 or 10% (whichever is more), kept for receipts and resets.</li>
-        <li>The score moves at most 5 up or 10 down a day. A band drops only 2 points under its floor.</li>
+        <li>The score moves at most {SCORE.maxRise} up or {SCORE.maxFall} down a day. A band drops only {SCORE.hysteresis} points under its floor.</li>
       </ul>
     </section>
     <Part title="Warnings and holds" H={H} compact={compact}>

@@ -6,13 +6,13 @@ import { queries } from '../../data/queries'
 import type { LogDirection, LogEntry, ReceivedEmailDetail } from '../../data/types'
 import { Alert, Button, CopyButton, DataTable, EmptyState, ErrorState, Input, PaginationSkeleton, PageHeader, Pagination, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
 import { ReceivedEmailPreview } from '../../components/EmailPreview'
-import { date, label, time } from '../../lib/format'
+import { date, fileSize, label, time } from '../../lib/format'
 import { downloadCsv } from '../../lib/download'
 import { ReceivedEmailSkeleton } from './skeletons'
 import { isReceivedId, logsPageColumns, logCsvRows, logHref, logRowLabel, useLogRowIntent } from './rows'
-import { useAdaptivePageSize } from '../../lib/pagination'
-import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
-import { EmailDetailPage, Sender } from './email-detail'
+import { useAdaptivePageSize, useSearchDraft } from '../../lib/pagination'
+import { AddressList, PrivateAddress, Sender } from '../../components/PrivateAddress'
+import { EmailDetailPage } from './email-detail'
 
 const directions = [{ value: 'all', label: 'All' }, { value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]
 // Sent statuses, most looked-for first; received and spam filter received mail (spam is visible to owners and admins).
@@ -62,13 +62,7 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
     return next
   }, { replace: true })
   const clearCampaign = () => update({ campaign: null })
-  // The box keeps its own text while you type and writes it to the URL once you pause: binding the input to the URL
-  // directly dropped keystrokes that landed before the previous one's navigation. Back or Clear filters still reset it.
-  const [draft, setDraft] = useState(search)
-  const written = useRef(search), typing = useRef<number | undefined>(undefined)
-  useEffect(() => { if (search !== written.current) { window.clearTimeout(typing.current); written.current = search; setDraft(search) } }, [search])
-  useEffect(() => () => window.clearTimeout(typing.current), [])
-  const type = (value: string) => { setDraft(value); window.clearTimeout(typing.current); typing.current = window.setTimeout(() => { written.current = value; update({ q: value }) }, 250) }
+  const [draft, type] = useSearchDraft(search, value => update({ q: value }))
   const {pageSize, tableRef, measured} = useAdaptivePageSize(5, 100, 'logs')
   // A new page size (the window resized) starts from the first page; the size settling on mount keeps the URL's page.
   const fitted = useRef<number | null>(null)
@@ -112,7 +106,6 @@ export function LogDetailPage() {
 const checkTone = (value?: string) => value === 'PASS' ? 'success' as const : value === 'FAIL' ? 'danger' as const : value === 'GRAY' ? 'warning' as const : 'neutral' as const
 // NONE is a sender without the record to check, not a failure: the badge says so.
 const verdictLabel = (value: string) => value.toUpperCase() === 'NONE' ? 'no record' : label(value.toLowerCase())
-const fileSize = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1_048_576 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1_048_576).toFixed(1)} MB`
 export function ReceivedEmailDetailPage() {
   const { id = '' } = useParams()
   // Delivery details (envelope, region, verdicts, headers, the raw .eml) are for owners and admins; members read the message.

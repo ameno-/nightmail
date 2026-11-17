@@ -1,8 +1,7 @@
 import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffect, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation, useNavigate } from 'react-router'
-import { createMockApi } from './mock'
-import { ApiError, type Identity, type Api, type WorkspaceInvitationPreview } from './types'
+import { ApiError, type Identity, type Api, type WorkspaceInvitationPreview, errorText } from './types'
 import { roleLabel, workspaceApi } from './workspaces'
 import { createLiveApi, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace } from './live'
 import { accountApi, accountsKey, announce, expectAccount, onAccountEvent, POPUP_PATH, takeExpectedAccount, type AccountList } from './accounts'
@@ -77,7 +76,7 @@ async function loadIdentity(signal?: AbortSignal) {
 }
 function invitationError(error: unknown) {
   if (error instanceof ApiError && error.status === 404) return 'This invitation is invalid, expired or for another email address. Ask for a new one.'
-  return `Couldn’t open the invitation. ${error instanceof Error ? error.message : 'Try the link again.'}`
+  return `Couldn’t open the invitation. ${errorText(error, 'Try the link again.')}`
 }
 const expiry = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 // Shown before anything changes: the question, its facts and the two answers. The slug tells apart workspaces that
@@ -99,11 +98,10 @@ function InvitationReview({ invitation, email, firstWorkspace, joining, error, o
 }
 /** Pages anyone can open, signed in or not. */
 export const isPublicPath = (path: string) => path === '/docs' || path.startsWith('/docs/') || path === '/legal' || path.startsWith('/legal/')
-export function ApiProvider({ children, api }: { children: ReactNode; api?: Api }) {
+export function ApiProvider({ children }: { children: ReactNode }) {
   // The docs and the legal pages are public: they render signed out, and /v1/me only adds the workspace's context.
   const publicRoute = isPublicPath(useLocation().pathname)
   const navigate = useNavigate()
-  const [provided] = useState(() => api ?? (import.meta.env.VITE_DEMO_MODE === 'true' ? createMockApi() : null))
   // A sign-in (or a return from a provider) this tab started names the account the page opens as; the tab then stays
   // with it. The server names only an account this browser has a session for; a link alone never moves the tab.
   useState(() => {
@@ -115,13 +113,13 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Api 
   })
   // Bumped on workspace switches so clients, cursors and every mounted screen start fresh.
   const [generation, setGeneration] = useState(0)
-  const client = useMemo(() => provided ?? createLiveApi(), [provided, generation])
+  const client = useMemo(() => createLiveApi(), [generation])
   const cache = useQueryClient()
   const toast = useToast()
   const [authError, setAuthError] = useState<unknown>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [invitation, setInvitation] = useState(() => client.mode === 'demo' || publicRoute ? null : new URLSearchParams(window.location.search).get('invitation'))
+  const [invitation, setInvitation] = useState(() => publicRoute ? null : new URLSearchParams(window.location.search).get('invitation'))
   function clearInvitation() {
     const url = new URL(window.location.href)
     url.searchParams.delete('invitation')
@@ -151,7 +149,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Api 
     },
   })
   const identity = useQuery({
-    queryKey: ['identity'], enabled: client.mode !== 'demo',
+    queryKey: ['identity'],
     networkMode: 'always', refetchOnReconnect: true,
     retry: (failures, error) => failures < 1 && error instanceof ApiError && error.code !== 'AUTH_NOT_CONFIGURED' && (error.code === 'NETWORK_UNAVAILABLE' || (error.status ?? 0) >= 500),
     queryFn: async ({signal}) => {
@@ -243,7 +241,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Api 
     const callback = new URL(window.location.pathname, window.location.origin)
     callback.search = window.location.search; callback.searchParams.delete('auth')
     try { const url = await accountApi.signIn(callback.href, true); expectAccount(); window.location.assign(url) }
-    catch (error) { toast(error instanceof ApiError && error.code === 'ACCOUNT_LIMIT' ? authMessages.account_limit : error instanceof Error ? error.message : 'Couldn’t add an account.', 'error') }
+    catch (error) { toast(error instanceof ApiError && error.code === 'ACCOUNT_LIMIT' ? authMessages.account_limit : errorText(error, 'Couldn’t add an account.'), 'error') }
   }
   useEffect(() => onAccountEvent(event => {
     if (event.type === 'add-started') { if (event.tab && event.tab === adding.current?.tab) window.clearTimeout(adding.current.fallback); return }
@@ -279,16 +277,16 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Api 
   // still need onboarding wait for /v1/me, so onboarding never starts dashboard requests.
   useEffect(() => {
     // A remembered workspace means a hosted installation, which never reads it.
-    if (client.mode === 'demo' || publicRoute || invitation || selectedWorkspace() || window.location.pathname === '/onboarding' || !dashboardLikelyReady(selectedWorkspace())) return
+    if (publicRoute || invitation || selectedWorkspace() || window.location.pathname === '/onboarding' || !dashboardLikelyReady(selectedWorkspace())) return
     void cache.prefetchQuery({ queryKey: regionCatalogKey(client), queryFn: ({ signal }) => client.regions.list(signal), staleTime: 30_000 })
   }, [cache, client, publicRoute, invitation])
   useEffect(() => {
-    if (!identity.data || client.mode === 'demo' || identityOnboardingStage(identity.data)) return
+    if (!identity.data || identityOnboardingStage(identity.data)) return
     const match = window.location.pathname.match(/^\/campaigns\/([^/]+)\/(?:edit|review)$/)
     if (!match) return
     let id: string
     try { id = decodeURIComponent(match[1]) } catch { return }
-    void cache.prefetchQuery({ queryKey: ['nightmail', client.mode, 'campaign', id], queryFn: ({ signal }) => client.campaigns.get(id, signal), staleTime: 30_000 })
+    void cache.prefetchQuery({ queryKey: ['nightmail', 'campaign', id], queryFn: ({ signal }) => client.campaigns.get(id, signal), staleTime: 30_000 })
   }, [cache, client, identity.data])
   // Before a session is known, a 401 from the boot prefetch is answered by /v1/me itself.
   useEffect(() => { const denied = () => { if (!isPublicPath(window.location.pathname) && cache.getQueryData(['identity']) === undefined) return; cache.clear(); void identity.refetch() }; window.addEventListener('nightmail:unauthorized', denied); return () => window.removeEventListener('nightmail:unauthorized', denied) }, [cache])
@@ -329,7 +327,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Api 
   // Multi-tenant installations greet everyone at "/" with the public homepage (signed in, it is App's index route);
   // /health says which this is.
   // Start alongside /v1/me when no ready dashboard session is remembered so signed-out visitors avoid a second round trip.
-  const checkHome = client.mode !== 'demo' && window.location.pathname === '/' && (signedOut || (!invitation && !dashboardLikelyReady(selectedWorkspace())))
+  const checkHome = window.location.pathname === '/' && (signedOut || (!invitation && !dashboardLikelyReady(selectedWorkspace())))
   const home = useQuery({ queryKey: ['public-home'], enabled: checkHome, staleTime: Infinity, retry: false, queryFn: async ({signal}) => {
     const multiTenant = (await request<{multiTenant?: boolean} | null>('/health', {signal}))?.multiTenant === true
     if (multiTenant) await loadHome()
@@ -345,10 +343,10 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Api 
   // M9: an account whose only way in is the invitation signs in with no workspace, so /v1/me is 401 while
   // the invitation itself is readable. It gets the same review; nothing joins until the recipient clicks Join.
   const invitee = signedOut && invitation !== null && review.data?.status === 'pending'
-  const reviewing = !publicRoute && client.mode !== 'demo' && invitation !== null && ((identity.data && !identity.isError) || invitee || (signedOut && review.isFetching))
+  const reviewing = !publicRoute && invitation !== null && ((identity.data && !identity.isError) || invitee || (signedOut && review.isFetching))
   return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, notice, dismissNotice: () => setNotice(null)}}>
     {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
-    : publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage start={{ signedIn: false, onSignIn: login, onSignInIntent: prepareLogin, busy }} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title={productName} /><div className="stack" style={{maxWidth: 520}}>
+    : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage start={{ signedIn: false, onSignIn: login, onSignInIntent: prepareLogin, busy }} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title={productName} /><div className="stack" style={{maxWidth: 520}}>
       {signedOut ? <>
         <h2>Sign in to {productName}</h2>
         {authNotice}
@@ -366,15 +364,14 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Api 
 // /v1/me when signed in, else from /health, never the page's own Host. null until known; foreign when the page is
 // open at another address.
 export function useCanonicalOrigin() {
-  const demo = useContext(ApiContext)?.mode === 'demo'
   const identity = useContext(SessionContext)?.identity?.origin ?? null
-  const instance = useQuery({ queryKey: ['instance-origin'], enabled: !demo && !identity, staleTime: Infinity, gcTime: Infinity, retry: 2,
+  const instance = useQuery({ queryKey: ['instance-origin'], enabled: !identity, staleTime: Infinity, gcTime: Infinity, retry: 2,
     queryFn: async ({ signal }) => {
       const response = await fetch('/health', { signal, headers: { Accept: 'application/json' } })
       if (!response.ok) throw new Error('Couldn’t load this installation’s address.')
       return ((await response.json()) as { origin?: string }).origin ?? null
     } })
-  return { ...canonicalOrigin({ identity, instance: instance.data, demo, page: window.location.origin }), error: identity ? null : instance.error, retry: () => void instance.refetch() }
+  return { ...canonicalOrigin({ identity, instance: instance.data, page: window.location.origin }), error: identity ? null : instance.error, retry: () => void instance.refetch() }
 }
 export function usePublicOrigin(): string | null { return useCanonicalOrigin().origin }
 export function useApi() {
@@ -391,8 +388,8 @@ export function useApiQuery<T>(key: readonly unknown[], read: (api: Api, signal:
   const api = useApi()
   const interval = poll?.interval
   const keep = poll?.keepPrevious
-  return useQuery({ queryKey: ['nightmail', api.mode, ...key], queryFn: ({ signal }) => read(api, signal), enabled: poll?.enabled, refetchInterval: typeof interval === 'function' ? query => interval(query.state.data) : interval ?? false, refetchIntervalInBackground: false,
-    placeholderData: keep ? (previous, previousQuery) => keep === true || (previousQuery && keep(previousQuery.queryKey.slice(2))) ? previous : undefined : undefined })
+  return useQuery({ queryKey: ['nightmail', ...key], queryFn: ({ signal }) => read(api, signal), enabled: poll?.enabled, refetchInterval: typeof interval === 'function' ? query => interval(query.state.data) : interval ?? false, refetchIntervalInBackground: false,
+    placeholderData: keep ? (previous, previousQuery) => keep === true || (previousQuery && keep(previousQuery.queryKey.slice(1))) ? previous : undefined : undefined })
 }
 export function useApiDef<T>(query: QueryDef<T>, poll?: Poll<T>) { return useApiQuery(query.key, query.read, poll) }
 /** `target`: what the write acts on when its function closes over it rather than taking it as input (a thread, a

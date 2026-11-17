@@ -2,8 +2,7 @@
 # Usage: pulumi-has-work.sh <stage> <sha>. Writes pulumi=true|false to $GITHUB_OUTPUT (stdout when unset) and the
 # reason to the step summary (stderr when unset). Runs from a full-history checkout of the stage branch.
 #
-# The base is the commit of this stage's newest successful Deploy job, read from the job's own name (a rollback's job
-# names the commit it deployed, not the branch tip in the run's title). Deploy runs only after Pulumi succeeded or
+# The base is the head SHA of this stage's newest healthy main Worker deployment. Deploy runs only after Pulumi succeeded or
 # was skipped because nothing it reads had changed since such a commit, so the stack matches the base. Not the
 # previous tip or first parent (N12): a superseded run stops at its tip check and never counts, so the next run still
 # sees the infrastructure change it carried.
@@ -28,7 +27,7 @@ fi
 # A stack settings file is only read by the selected stack. Shared changes since
 # the actual deployed base still count, not merely changes introduced by the PR.
 other=dev; [[ $stage == dev ]] && other=production
-inputs=$(grep -E '^(infra/|api/src/mail-controls\.ts$|\.github/scripts/(check-gateway-plan\.py|copy-pulumi-backend\.py|receiving-rule-set\.sh)$|\.github/actions/cloudflare-token/)' <<< "$changed" | grep -v '\.md$' | grep -Fxv "infra/pulumi/Pulumi.$other.yaml" || true)
+inputs=$(grep -E '^(infra/|api/src/mail-controls\.ts$|\.github/scripts/receiving-rule-set\.sh$|\.github/actions/cloudflare-token/)' <<< "$changed" | grep -v '\.md$' | grep -Fxv "infra/pulumi/Pulumi.$other.yaml" || true)
 
 # The Pulumi job itself, aliases expanded and Require guards removed: a guard only stops a run, never changes what
 # Pulumi applies. A change anywhere else in deploy.yml (the Worker deploy, the E2E) is not Pulumi's.

@@ -1,12 +1,13 @@
 import { productName } from '../../../api/src/brand.js'
+import type { Grade, Step } from '../../../api/src/standing-model.js'
 export type RegionId = string
 export type ISODate = string
 export type Stream = 'transactional' | 'marketing'
 export type AutoValidationMode = 'inherit' | 'off' | 'managed' | 'medium' | 'high' | 'unknown'
 export type EmailStatus = 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'complaint' | 'deferred' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated'
 export type ContactStatus = 'unknown' | 'subscribed' | 'unsubscribed' | 'suppressed'
-// API campaign states, plus 'sent' which only the demo data uses.
-export type CampaignStatus = 'draft' | 'preparing' | 'scheduled' | 'sending' | 'paused' | 'done' | 'failed' | 'canceled' | 'sent'
+// The API's campaign states.
+export type CampaignStatus = 'draft' | 'preparing' | 'scheduled' | 'sending' | 'paused' | 'done' | 'failed' | 'canceled'
 // Editable, deletable and launchable from scratch: a draft, or a failed launch that released nothing. A failed launch that
 // already released recipients can only resume from its cursor or be canceled (it still holds its reservation).
 export const campaignEditable = (campaign: Pick<Campaign, 'status' | 'delivery'>) => campaign.status === 'draft' || (campaign.status === 'failed' && !(campaign.delivery?.expanded ?? 0))
@@ -57,11 +58,11 @@ export interface EmailPreviewRequest { source: { emailId: string } | { html: str
 export interface Email { contact?: {id:string; suppressed:boolean} | null; campaignId?: string | null; text?: string | null; eventsNextCursor?: string | null; fromName?: string; simulated?: boolean; attachments?: string[]; id: string; regionId: RegionId; to: string; from: string; subject: string; stream: Stream; status: EmailStatus; sentAt: ISODate; html: string; events: EmailEvent[] }
 export interface ChartPoint { at: ISODate; sent: number; delivered: number; bounced: number; complaints: number }
 /** GET /v1/sender-score: the workspace's reputation grade, computed by the API. */
-export type SenderGrade = 'A+' | 'A' | 'B' | 'C' | 'D' | 'F'
+export type SenderGrade = Grade
 export interface SenderScoreFactor { key: 'complaints' | 'content' | 'bounces' | 'hygiene' | 'auth' | 'engagement'; label: string; weight: number; value: number | null; score: number | null; points: number | null; source: 'measured' | 'neutral'; basis: string }
 /** Hosted only: the daily limit the score sets (rolling 24 hours, recipients) and what changes it. */
 export interface SenderLimit { daily: number | null; source: 'calibrating' | 'score' | 'override' | 'exempt'; band: number; next: { limit: number; atScore: number } | null; override: { daily: number; expiresAt: ISODate | null } | null; restore: { daily: number; until: ISODate } | null; strikeCapUntil: ISODate | null; perMinute: number; marketingPerHour: number; transactionalReserve: number }
-export type StandingStep = 'ok' | 'notice' | 'warn' | 'restrict' | 'pause'
+export type StandingStep = Step
 export interface StandingReason { code: string; metric: 'complaints' | 'bounces' | 'marketing_bounces' | 'transactional_bounces' | 'screen' | 'external'; value: number; count: number; threshold: number; minimum: number; window: '24h' | '7d' | null; step: StandingStep; message: string }
 /** Hosted only: the enforcement step, why, and what an owner may release from the dashboard. */
 export interface SenderStanding { step: StandingStep; reasons: StandingReason[]; since: ISODate; pauseKind: 'bounce' | 'full' | null; marketingHeld: boolean; marketingRelease: { percent: number; until: ISODate } | null; strikes: number; selfService: { available: boolean; action: 'release_marketing' | 'resume_sending' | null; reason: string | null; availableAt: ISODate | null }; version: number; sequence: number }
@@ -69,15 +70,14 @@ export interface SenderScore { state: 'warmup' | 'graded'; emails: { firstEmails
 /** POST /v1/sender-score/release: the fix checklist an owner confirms before releasing a restrict or a bounce-only pause. */
 export interface StandingReleaseInput { checklist: { bouncedRemoved: true; listSourceConfirmed: true } }
 export interface Overview { periodStart: ISODate; periodEnd: ISODate; sent: number; delivered: number; bounced: number; complaints: number; deferred: number; previousSent: number; points: ChartPoint[]; recentCampaigns: Campaign[] }
-export interface Contact { properties?: Record<string, string | number | boolean | null>; id: string; email: string; name: string; country: string; status: ContactStatus; listIds: string[]; createdAt: ISODate; lastOpenedAt: ISODate | null; consent: { source: string; at: ISODate | null }; suppressionReason?: string }
+export interface Contact { properties?: Record<string, string | number | boolean | null>; id: string; email: string; name: string; country: string; status: ContactStatus; listIds: string[]; createdAt: ISODate; lastOpenedAt: ISODate | null; suppressionReason?: string }
 export interface ContactInput { id?: string; email: string; name: string; country: string; status: ContactStatus; listIds: string[] }
 export interface AudienceList { unknown?: number; id: string; name: string; total: number; subscribed: number; unsubscribed: number; suppressed: number; createdAt: ISODate }
-export interface SegmentRule { id: string; field: 'status' | 'country' | 'listId' | 'lastOpenedAt'; operator: 'is' | 'is_not' | 'within_days'; value: string }
-export interface Segment { rule?: Record<string, unknown>; id: string; name: string; match: 'all' | 'any'; rules: SegmentRule[]; matched: number; eligible: number; updatedAt: ISODate }
-export type SegmentInput = Pick<Segment, 'name' | 'match' | 'rules' | 'rule'> & { id?: string }
+export interface Segment { rule: Record<string, unknown>; id: string; name: string; updatedAt: ISODate }
+export type SegmentInput = Pick<Segment, 'name' | 'rule'> & { id?: string }
 export interface AudiencePreview { matched: number; suppressed: number; unsubscribed: number; eligible: number; contacts: Contact[] }
 export type CampaignPreview = { html: string; text: string }
-export interface Campaign { counts?: { total: number; byStatus: Record<string, number> }; delivery?: CampaignDelivery | null; archivedAt?: ISODate | null; revision?: number; draft?: Record<string, any>; attachments?: string[]; sourceTemplateId?: string | null; sourceTemplateRevision?: number | null; id: string; regionId: RegionId; name: string; subject: string; previewText: string; fromName: string; fromEmail: string; replyTo: string[]; listId: string; segmentId: string | null; html: string; status: CampaignStatus; createdAt: ISODate; updatedAt: ISODate; scheduledAt: ISODate | null; timezone: string; recipients: number; delivered: number; bounced: number; complaints: number }
+export interface Campaign { counts?: { total: number; byStatus: Record<string, number> }; delivery?: CampaignDelivery | null; archivedAt?: ISODate | null; revision?: number; draft?: Record<string, any>; attachments?: string[]; sourceTemplateId?: string | null; sourceTemplateRevision?: number | null; id: string; regionId: RegionId; name: string; subject: string; previewText: string; fromName: string; fromEmail: string; replyTo: string[]; listId: string; segmentId: string | null; html: string; status: CampaignStatus; createdAt: ISODate; updatedAt: ISODate; scheduledAt: ISODate | null; recipients: number; delivered: number; bounced: number; complaints: number }
 // pacing, pausedAt, pauseReason, waiting, and rateShare are optional so older API responses still type-check.
 // rateShare is the fraction (0.05–1) of the SES per-second send rate the campaign may use; 1 is the full rate.
 export interface CampaignPacing { perDay: number | null; autoPause: boolean; rateShare?: number; windowStartedAt: ISODate | null; windowExpanded: number; nextWindowAt: ISODate | null }
@@ -89,7 +89,7 @@ export interface CampaignStats { tracking: boolean; totals: { accepted: number; 
 // defaults are the fallback values for {{placeholders}} a contact has no value for (the API's draft.defaults).
 export type CampaignInput = Pick<Campaign, 'regionId' | 'name' | 'subject' | 'previewText' | 'fromName' | 'fromEmail' | 'listId' | 'segmentId' | 'html'> & { replyTo?: string[]; id?: string; revision?: number; draft?: Record<string, any>; attachments?: string[]; defaults?: Record<string, string>; templateId?: string; idempotencyKey?: string }
 export interface CampaignState { id: string; revision: number; updatedAt: ISODate; status: CampaignStatus; scheduledAt: ISODate | null; archivedAt: ISODate | null }
-export interface SendCampaignInput { revision?: number; id: string; mode: 'now' | 'schedule'; scheduledAt?: ISODate; timezone: string; pacing?: { perDay?: number | null; autoPause?: boolean; rateShare?: number } }
+export interface SendCampaignInput { revision?: number; id: string; mode: 'now' | 'schedule'; scheduledAt?: ISODate; pacing?: { perDay?: number | null; autoPause?: boolean; rateShare?: number } }
 export type KeyPermission = 'read' | 'send' | 'manage'
 /** What a key limited to mail may do there: read, send (reply and start conversations), modify (mark read, archive,
  *  label) and create (make agent inboxes and use the ones it made). */
@@ -133,20 +133,6 @@ export interface MailAddress { name: string | null; address: string }
 export const inboundEventTypes = ['message.received', 'message.junk', 'message.stored', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'thread.updated', 'address.created', 'address.deleted', 'inbox.created', 'inbox.deleted', 'message.held', 'inbox.quota_exceeded'] as const
 export type MailboxEventType = typeof inboundEventTypes[number]
 export interface MailboxWebhookDelivery { id: string; webhookId: string; eventId: string; status: 'pending' | 'delivered' | 'failed' | 'paused'; attemptCount: number; lastStatusCode: number | null; lastError: string | null; createdAt: ISODate; updatedAt: ISODate }
-export type MailboxThreadView = 'inbox' | 'starred' | 'archive' | 'spam' | 'trash' | 'all'
-export interface MailboxThread {
-  id: string; mailboxId: string; subject: string; snippet: string; participants: MailAddress[]; messageCount: number; unreadCount: number
-  lastMessageAt: ISODate; lastInboundAt: ISODate | null; archived: boolean; starred: boolean; spam: boolean; trashed: boolean; labels: string[]
-}
-export interface MailboxMessage {
-  id: string; threadId: string; mailboxId: string; direction: 'inbound' | 'outbound'; status: string; errorCode: string | null; read: boolean; labels: string[]
-  from: MailAddress; to: MailAddress[]; cc: MailAddress[]; bcc: MailAddress[]; replyTo: MailAddress[]; subject: string; snippet: string; sentAt: ISODate | null; receivedAt: ISODate
-  attachmentCount: number; spam: boolean; automated: boolean; messageId: string | null; inReplyTo: string | null; references: string[]
-  text: string; replyText: string; html: string | null; bodyTruncated: boolean
-  attachments: { id: string; filename: string; contentType: string; size: number; contentId: string | null; disposition: 'attachment' | 'inline' }[]
-  verdicts: { spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string }
-}
-export interface MailboxThreadDetail extends MailboxThread { messages: MailboxMessage[] }
 // Agent inboxes: expiring addresses for agents and tests (`/v1/inboxes`). The ID also works as an addressId.
 export type InboxStatus = 'active' | 'expired' | 'deleting'
 export interface Inbox {
@@ -167,7 +153,7 @@ export interface InboxMessagePage { data: InboxMessage[]; cursor: string; hasMor
 export type InboundAddress = Mailbox
 export interface InboundAddressInput { address: string; displayName?: string | null; aliases?: string[]; publicAddress?: string; ttlSeconds?: number }
 export interface InboundAddressPatch { displayName?: string | null; aliases?: string[] }
-export type InboundThreadView = MailboxThreadView
+export type InboundThreadView = 'inbox' | 'starred' | 'archive' | 'spam' | 'trash' | 'all'
 /** from: the newest visible message's sender (absent on older API responses). */
 export interface InboundThread { id: string; subject: string; snippet: string; from?: MailAddress; lastMessageAt: ISODate; addressIds: string[]; messageCount: number }
 export interface InboundMessage {
@@ -250,42 +236,43 @@ const friendlyErrors: Record<string, (detail: string) => string> = {
   AUDIENCE_PLAN_EXPIRED: () => 'This count is more than 15 minutes old. Count again, then confirm.',
   STALE_AUDIENCE_PLAN: () => 'Some of these contacts changed after they were counted. Count again, then confirm.',
 }
+/**
+ * A failed API call. `message` is what to show a person: plain language with a next step, so any `error.message`
+ * renders correctly. The server's own wording is `detail`; the code and request ID are `reference`, for support and
+ * logs (Contact support also sends the last few failed request IDs).
+ */
 export class ApiError extends Error {
   /** The server's own message. */
   readonly detail: string
-  /** What to show a person: plain language with a next step. */
-  readonly text: string
   /** The code and request ID, for support and logs. */
   readonly reference: string
   /** Every problem, when the API reports several (ritual diagnostics). */
   details?: Record<string, unknown>[]
-  constructor(message: string, public code: string = 'validation', public fields: Record<string, string> = {}, public requestId?: string, public status?: number) {
-    super(`${message} [${code}]${requestId ? ` · Request ${requestId}` : ''}`)
+  constructor(detail: string, public code: string = 'validation', public fields: Record<string, string> = {}, public requestId?: string, public status?: number) {
+    super(friendlyErrors[code]?.(detail) ?? detail)
     this.name = 'ApiError'
-    this.detail = message
-    this.text = friendlyErrors[code]?.(message) ?? message
+    this.detail = detail
     this.reference = `${code}${requestId ? ` · Request ${requestId}` : ''}`
   }
 }
 /** The generic retry line for an error without its own text. */
 export const tryAgain = 'Something went wrong. Try again.'
-/** What to show for an error: an ApiError's plain-language text, another error's message, or the retry line. */
-export const errorText = (error: unknown) => error instanceof ApiError ? error.text : error instanceof Error ? error.message : tryAgain
+/** What to show for an error as plain text (a toast, a status line): its message, or `fallback` for a non-Error. */
+export const errorText = (error: unknown, fallback = tryAgain) => error instanceof Error ? error.message : typeof error === 'string' && error ? error : fallback
 
 // The UI depends on this boundary, never on fixture data or a transport implementation.
 // Dates cross the boundary as ISO-8601 strings; rates are ratios, not formatted percentages.
 export type CursorItems<T> = T[] & { nextCursor?: string | null }
 export interface Api {
   consentHistory: (id: string, cursor?: string) => Promise<{items: ConsentEvent[]; nextCursor: string | null}>
-  emailEvents?: (id: string, cursor?: string) => Promise<{items: EmailEvent[]; nextCursor: string | null}>
+  emailEvents: (id: string, cursor?: string) => Promise<{items: EmailEvent[]; nextCursor: string | null}>
   attachments: AttachmentApi
   templateAssets: AttachmentApi
   imports: { preview(input: {csv: string; mapping: Record<string, string>; listId?: string}): Promise<ImportPreview>; commit(id: string, input?: ImportCommitInput): Promise<ImportPreview> }
   consent: (id: string, input: ConsentInput) => Promise<Contact>
   /** AudienceQL bulk changes: plan counts and samples the contacts a statement changes; apply changes exactly those. */
   audienceQuery: { plan(statement: string): Promise<AudiencePlan>; apply(input: { planId: string; confirmResubscribe?: boolean; evidence?: string }): Promise<{ affected: number }> }
-  webhookDeliveries?: (id: string, cursor?: string) => Promise<{items: WebhookDelivery[]; nextCursor: string | null}>
-  readonly mode: 'demo' | 'live'
+  webhookDeliveries: (id: string, cursor?: string) => Promise<{items: WebhookDelivery[]; nextCursor: string | null}>
   regions: { list(signal?: AbortSignal): Promise<RegionCatalog>; configure(region: string, input: RegionConfigureInput, signal?: AbortSignal): Promise<RegionCatalog>; discover(region: string, options?: { refresh?: boolean }, signal?: AbortSignal): Promise<SesDiscovery>; provision(region: string, signal?: AbortSignal): Promise<RegionProvisionReceipt>; updateAutoValidation(region: string, stream: Stream, mode: Exclude<AutoValidationMode, 'inherit' | 'unknown'>, signal?: AbortSignal): Promise<{stream: Stream; mode: AutoValidationMode}> }
   workspace: { get(signal?: AbortSignal): Promise<Workspace>; update(input: { name: string }, signal?: AbortSignal): Promise<Workspace> }
   overview: { get(input: { regionId: string; range: TimeRange; stream?: Stream }, signal?: AbortSignal): Promise<Overview>; setup(signal?: AbortSignal): Promise<OverviewSetup> }
@@ -296,7 +283,7 @@ export interface Api {
   templates: { list(input?: PageRequest & { archived?: boolean; publishedOnly?: boolean }, signal?: AbortSignal): Promise<PageResult<CampaignTemplateSummary>>; get(id: string, signal?: AbortSignal): Promise<CampaignTemplate>; create(input: {name: string; description?: string}, signal?: AbortSignal): Promise<CampaignTemplate>; update(id: string, revision: number, draft: CampaignTemplateDraft, signal?: AbortSignal): Promise<CampaignTemplate>; publish(id: string, revision: number, signal?: AbortSignal): Promise<CampaignTemplate>; archive(id: string, archived: boolean, signal?: AbortSignal): Promise<CampaignTemplate>; remove(id: string, signal?: AbortSignal): Promise<void>; preview(id: string, published?: boolean, signal?: AbortSignal): Promise<CampaignPreview> }
   contacts: { list(input: PageRequest & { email?: string }, signal?: AbortSignal): Promise<PageResult<Contact>>; get(id: string, signal?: AbortSignal): Promise<Contact>; save(input: ContactInput, signal?: AbortSignal): Promise<Contact> }
   lists: { list(input?: PageRequest & { counts?: boolean }, signal?: AbortSignal): Promise<PageResult<AudienceList>>; get(id: string, signal?: AbortSignal): Promise<AudienceList>; create(input: { name: string }, signal?: AbortSignal): Promise<AudienceList>; remove(id: string, signal?: AbortSignal): Promise<void> }
-  segments: { list(input?: PageRequest, signal?: AbortSignal): Promise<PageResult<Segment>>; get(id: string, signal?: AbortSignal): Promise<Segment>; save(input: SegmentInput, signal?: AbortSignal): Promise<Segment>; preview(input: SegmentInput & { listId?: string }, signal?: AbortSignal): Promise<AudiencePreview> }
+  segments: { list(input?: PageRequest, signal?: AbortSignal): Promise<PageResult<Segment>>; get(id: string, signal?: AbortSignal): Promise<Segment>; save(input: SegmentInput, signal?: AbortSignal): Promise<Segment>; preview(input: { id: string; listId?: string }, signal?: AbortSignal): Promise<AudiencePreview> }
   /** Every API key, workspace-wide or limited to addresses or an inbox, in one cursor list (100 a page). */
   keys: { list(signal?: AbortSignal, cursor?: string, includeRevoked?: boolean): Promise<CursorItems<ApiKey>>; create(input: ApiKeyInput, signal?: AbortSignal): Promise<CreatedApiKey>; revoke(id: string, signal?: AbortSignal): Promise<void> }
   /** Agent tokens (connected agents and the tokens they made) and app passwords. */
@@ -310,7 +297,7 @@ export interface Api {
     createAppPassword(input: AppPasswordInput, signal?: AbortSignal): Promise<CreatedAppPassword>
     revokeAppPassword(inboxId: string, id: string, signal?: AbortSignal): Promise<void>
   }
-  domains: { list(input: PageRequest & { refresh?: boolean }, signal?: AbortSignal): Promise<PageResult<Domain>>; get(id: string, signal?: AbortSignal): Promise<Domain>; create(input: { regionId: string; name: string }, signal?: AbortSignal): Promise<Domain>; configureMailFrom(id: string, mailFromDomain: string, signal?: AbortSignal): Promise<Domain>; verify(id: string, signal?: AbortSignal): Promise<Domain>; chooseReceivingHost?(id: string, input: { host: string | null; confirm?: boolean }, signal?: AbortSignal): Promise<Domain>; remove(id: string, signal?: AbortSignal): Promise<void> }
+  domains: { list(input: PageRequest & { refresh?: boolean }, signal?: AbortSignal): Promise<PageResult<Domain>>; get(id: string, signal?: AbortSignal): Promise<Domain>; create(input: { regionId: string; name: string }, signal?: AbortSignal): Promise<Domain>; configureMailFrom(id: string, mailFromDomain: string, signal?: AbortSignal): Promise<Domain>; verify(id: string, signal?: AbortSignal): Promise<Domain>; chooseReceivingHost(id: string, input: { host: string | null; confirm?: boolean }, signal?: AbortSignal): Promise<Domain>; remove(id: string, signal?: AbortSignal): Promise<void> }
   mailboxes: { domains(signal?: AbortSignal): Promise<MailboxDomain[]>; domain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; enableDomain(id: string, input: { force?: boolean }, signal?: AbortSignal): Promise<MailboxDomain>; disableDomain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; checkDomain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; receivedEmail(id: string, signal?: AbortSignal, delivery?: boolean): Promise<ReceivedEmailDetail> }
   inboxes: {
     folders(id:string,signal?:AbortSignal):Promise<{data:{id:string;role:string|null;path:string;subscribed:boolean;total:number;unseen:number}[]}>

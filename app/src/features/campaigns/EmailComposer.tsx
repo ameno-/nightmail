@@ -12,6 +12,7 @@ import { blockHtmlToDocument, documentToBlockHtml, isBlockDocumentEmpty, type Ed
 import '@react-email/editor/themes/default.css'
 import './composer.css'
 import { productName } from '../../../../api/src/brand'
+import { errorText } from '../../data/types'
 
 // The composer edits block HTML: the same document agents read and write through the
 // API. Opening converts block HTML to editor blocks; saving converts blocks back.
@@ -160,7 +161,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
       cidBySource.current = new Map([...result.sources].map(([cid, url]) => [url, cid]))
       setContent(replaceEditorImageSources(blockHtmlToDocument(initialSnapshot.html), result.sources) as EditorNode)
       setHydrating(false); setReady(false); setGeneration(value => value + 1)
-    }).catch(cause => { if (!controller.signal.aborted) { setError(cause instanceof Error ? cause.message : 'Couldn’t load inline images.'); setContent(blockHtmlToDocument(initialSnapshot.html)); setHydrating(false); setReady(false); setGeneration(value => value + 1) } })
+    }).catch(cause => { if (!controller.signal.aborted) { setError(errorText(cause, 'Couldn’t load inline images.')); setContent(blockHtmlToDocument(initialSnapshot.html)); setHydrating(false); setReady(false); setGeneration(value => value + 1) } })
     return () => controller.abort()
   }, [attachmentApi, initialSnapshot])
 
@@ -218,7 +219,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     setBusy(true)
     busyListener.current?.(true)
     try { return await prepareLocalImage(file) }
-    catch (cause) { const message = cause instanceof Error ? cause.message : 'Couldn’t load this image.'; setError(message); throw new Error(message) }
+    catch (cause) { const message = errorText(cause, 'Couldn’t load this image.'); setError(message); throw new Error(message) }
     finally { uploads.current -= 1; if (!uploads.current) { setBusy(false); busyListener.current?.(false) } }
   }, [])
   async function insertImage(file?: File) {
@@ -316,7 +317,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
           <Inspector.Root ref={inspector} className="composer-inspector" hidden={!inspectorOpen}>
             <div className="composer-inspector-header"><strong>Design</strong><IconButton size="sm" label="Close design panel" onClick={() => setInspectorOpen(false)}><X size={16} /></IconButton></div>
             <Inspector.Breadcrumb />
-            {/* Styles are per block (block-style.ts): no document-wide controls, and a text selection offers its block's. */}
+            {/* Styles are per block (api/src/block-style.ts): no document-wide controls, and a text selection offers its block's. */}
             <Inspector.Document>{() => <p className="composer-inspector-hint">No block selected</p>}</Inspector.Document>
             <Inspector.Node />
             <Inspector.Text>{() => <Inspector.Breadcrumb>{segments => { const block = segments.at(-1); return block && block.node.nodeType !== 'body' ? <Button size="sm" variant="secondary" className="composer-inspector-action" onClick={block.focus}>Style this block</Button> : null }}</Inspector.Breadcrumb>}</Inspector.Text>

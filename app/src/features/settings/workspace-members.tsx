@@ -1,12 +1,11 @@
 import { useState, type FormEvent } from 'react'
 import { Share } from 'lucide-react'
-import { Button, ConfirmDialog, CopyButton, SecretCode, DataTable, Dialog, Disclosure, DropdownMenu, EmptyState, ErrorState, Field, Input, SectionHeader, Select, useToast } from '../../components/ui'
+import { Button, ConfirmDialog, CopyButton, SecretCode, DataTable, Dialog, Disclosure, DropdownMenu, EmptyState, ErrorState, Field, Input, SectionHeader, Select, useCopy, useToast, fieldError, MutationError } from '../../components/ui'
 import { useApiMutation, useApiDef, useSession } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { WorkspaceInvitation, WorkspaceMember, WorkspaceRole } from '../../data/types'
 import { roleLabel, workspaceApi } from '../../data/workspaces'
 import { date } from '../../lib/format'
-import { fieldError, MutationError } from './shared'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { settingsColumns } from './skeletons'
 import { productName } from '../../../../api/src/brand'
@@ -15,9 +14,6 @@ import { productName } from '../../../../api/src/brand'
 const canShare = () => typeof navigator.share === 'function'
 async function shareLink(url: string, toast: ReturnType<typeof useToast>) {
   try { await navigator.share({ title: `Join the workspace on ${productName}`, url }) } catch (error) { if (!(error instanceof DOMException && error.name === 'AbortError')) toast('Couldn’t open sharing.', 'error') }
-}
-async function copyLink(url: string, toast: ReturnType<typeof useToast>) {
-  try { await navigator.clipboard.writeText(url); toast('Invitation link copied', 'success') } catch { toast('Couldn’t copy to clipboard.', 'error') }
 }
 const roleOptions = (owner: boolean) => (owner ? ['owner', 'admin', 'member'] as const : ['admin', 'member'] as const).map(role => ({ value: role, label: roleLabel[role] }))
 // One line per role, behind "What each role can do" where a role is chosen for someone new (the invitation); a change
@@ -74,7 +70,7 @@ export function Members({ owner, onInvite }: { owner: boolean; onInvite: () => v
 }
 
 export function Invitations({ owner }: { owner: boolean }) {
-  const toast = useToast()
+  const toast = useToast(), { copy } = useCopy()
   const invitations = useApiDef(queries.workspaceInvitations())
   const revoke = useApiMutation((_api, id: string) => workspaceApi.revokeInvitation(id), 'Invitation revoked')
   const [revoking, setRevoking] = useState<WorkspaceInvitation | null>(null)
@@ -87,7 +83,7 @@ export function Invitations({ owner }: { owner: boolean }) {
       { ...inviteActions, render: invitation => <span className="cluster settings-row-actions"><CopyButton value={invitation.acceptUrl} label="Copy invitation link" />{(owner || invitation.role !== 'owner') && <Button variant="danger" onClick={() => setRevoking(invitation)}>Revoke</Button>}</span>,
         cardRender: invitation => <DropdownMenu label="Actions for this invitation" title="Invitation" items={[
           ...canShare() ? [{ label: 'Share invitation link', onSelect: () => void shareLink(invitation.acceptUrl, toast) }] : [],
-          { label: 'Copy invitation link', onSelect: () => void copyLink(invitation.acceptUrl, toast) },
+          { label: 'Copy invitation link', onSelect: () => void copy(invitation.acceptUrl, 'Invitation link copied') },
           ...owner || invitation.role !== 'owner' ? [{ label: 'Revoke invitation', destructive: true, onSelect: () => setRevoking(invitation) }] : [],
         ]} /> },
     ]} />}
@@ -113,7 +109,7 @@ export function InviteDialog({ open, owner, onOpenChange }: { open: boolean; own
   function close() { onOpenChange(false); setCreated(null); setEmail(''); setRole('member'); setEmailError(''); create.reset() }
   // The link works only for the invited address; its expiry is in Invitations, where it can be copied again.
   if (created) return <Dialog sensitive open={open} onOpenChange={next => { if (!next) close() }} title="Share this invitation link" footer={<Button variant="primary" onClick={close}>Done</Button>}>
-    <div className="settings-secret"><SecretCode>{created.acceptUrl}</SecretCode><CopyButton value={created.acceptUrl} label="Copy invitation link" /></div>
+    <div className="ui-secret"><SecretCode>{created.acceptUrl}</SecretCode><CopyButton value={created.acceptUrl} label="Copy invitation link" /></div>
     {canShare() && <Button className="settings-share" onClick={() => void shareLink(created.acceptUrl, toast)}><Share size={16} />Share link</Button>}
   </Dialog>
   // Nothing is emailed: the button says it makes a link, and the next step shows it to share.

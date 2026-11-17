@@ -5,15 +5,15 @@ import { useApi, useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { Email, EmailEvent, EmailEventDetail } from '../../data/types'
 import { Alert, Button, CopyButton, ErrorState, PageHeader, Sheet, StatusBadge, Tooltip, type Tone } from '../../components/ui'
-import { htmlToText, useEmailDocument } from '../../components/EmailPreview'
+import { useEmailDocument } from '../../components/EmailPreview'
 import { EmailViews, SendabilityChip, SendabilityDetails, SendabilityTitle, SendabilityToggle, useSendability, type InsightSource } from '../../components/EmailInsight'
-import { AddressList, NameText, PrivateAddress } from '../../components/PrivateAddress'
+import { AddressList, Sender } from '../../components/PrivateAddress'
 import { AddressText } from '../../components/AddressText'
-import { nameParts } from '../../lib/private-address'
 import { date, label, shortDateTime, time } from '../../lib/format'
 import { EmailDetailSkeleton } from './skeletons'
 import { useDetailLayout } from './detail-layout'
 import { productName } from '../../../../api/src/brand'
+import { errorText } from '../../data/types'
 
 // A sent email, in the order people come for: did it arrive (the status and its delivery), what it looked like (the
 // preview: as sent and in each client, side by side where there is room), and how to do better (the score, the fixes to
@@ -29,14 +29,8 @@ export function EmailDetailPage() {
   return query.data ? <EmailDetail email={query.data} /> : null
 }
 
-// "Name <address>": the name wraps as one piece and the address, with its brackets, stays together on the next line when it doesn't fit.
-export function Sender({ name, address }: { name?: string | null; address: string }) {
-  const parts = nameParts(name, address)
-  return parts ? <span className="email-sender"><span><NameText parts={parts} /></span><span className="email-sender__address">&lt;<PrivateAddress value={address} />&gt;</span></span> : <PrivateAddress value={address} />
-}
 
 function EmailDetail({ email }: { email: Email }) {
-  const api = useApi()
   const { mode, roomy } = useDetailLayout()
   const [panel, setPanel] = useState(false)
   // A phone or tablet opens the delivery and the facts, and the score, in sheets; each returns focus to its opener.
@@ -47,7 +41,7 @@ function EmailDetail({ email }: { email: Email }) {
   const panelRef = useRef<HTMLElement>(null)
   useEffect(() => { if (panel) panelRef.current?.focus() }, [panel])
   const hasHtml = email.html.trim().length > 0
-  const text = email.text ?? (api.mode === 'demo' && hasHtml ? htmlToText(email.html) : '')
+  const text = email.text ?? ''
   const source = useMemo<InsightSource>(() => ({ kind: 'email', id: email.id, html: hasHtml }), [email.id, hasHtml])
   const check = useSendability(source)
   // The email as its recipients saw it: its own fonts, styles and image sizes, and its remote images (tracking pixels removed).
@@ -238,8 +232,8 @@ function Delivery({ email, vertical }: { email: Email; vertical: boolean }) {
   const times = steps.map((step, index) => { const at = step.at ? stamp(step.at, day) : ''; if (!at || at === previous) return ''; previous = at; lastShown = index; return at })
   const more = async () => {
     setBusy(true); setError('')
-    try { const next = await api.emailEvents!(email.id, cursor!); setEvents(previous => [...previous, ...next.items]); setCursor(next.nextCursor) }
-    catch (cause) { setError(cause instanceof Error ? cause.message : 'Couldn’t load events.') } finally { setBusy(false) }
+    try { const next = await api.emailEvents(email.id, cursor!); setEvents(previous => [...previous, ...next.items]); setCursor(next.nextCursor) }
+    catch (cause) { setError(errorText(cause, 'Couldn’t load events.')) } finally { setBusy(false) }
   }
   return <div className="delivery" data-vertical={vertical || undefined}>
     <ol className="delivery__steps ui-scroll-fade" aria-label="Delivery">
@@ -262,7 +256,7 @@ function Delivery({ email, vertical }: { email: Email; vertical: boolean }) {
         <Link className="delivery__fact delivery__contact" to={`/audience/contacts/${encodeURIComponent(contact!.id)}`}><span className="delivery__dot ui-tone--danger" aria-hidden="true" /><span className="delivery__name">Suppressed</span><ArrowUpRight size={12} aria-hidden="true" /></Link>
       </Tooltip></li>}
     </ol>
-    {cursor && api.emailEvents && <Button variant="ghost" size="sm" loading={busy} onClick={() => void more()}>More events</Button>}
+    {cursor && <Button variant="ghost" size="sm" loading={busy} onClick={() => void more()}>More events</Button>}
     {error && <Alert tone="danger">{error}</Alert>}
   </div>
 }

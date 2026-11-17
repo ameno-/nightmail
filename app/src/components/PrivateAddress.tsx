@@ -107,6 +107,17 @@ export function NamedAddress({ name, address }: { name?: string | null; address:
   const parts = nameParts(name, address)
   return parts ? <><NameText parts={parts} /> &lt;<PrivateAddress value={address} />&gt;</> : <PrivateAddress value={address} />
 }
+/**
+ * A sender. On a detail page, the display name and then the address with its brackets, which wraps to its own line as
+ * one piece. `nameOnly` (a list): the display name alone. Either way the masked address when there is no name, or the
+ * name only repeats the address.
+ */
+export function Sender({ name, address, nameOnly = false }: { name?: string | null; address: string; nameOnly?: boolean }) {
+  const parts = nameParts(name, address)
+  if (!parts) return <PrivateAddress value={address} />
+  if (nameOnly) return <NameText parts={parts} />
+  return <span className="email-sender"><span><NameText parts={parts} /></span><span className="email-sender__address">&lt;<PrivateAddress value={address} />&gt;</span></span>
+}
 /** A list of addresses, each masked. */
 export function AddressList({ values }: { values: string[] }) {
   return <>{values.map((value, i) => <span key={`${i}:${value}`}>{i > 0 && ', '}<PrivateAddress value={value} /></span>)}</>

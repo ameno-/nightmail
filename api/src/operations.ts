@@ -14,7 +14,7 @@ import { chargeManualDelivery, claimedWithWebhooks, enqueue, JobDeferred, WEBHOO
 import { applyClaim, connectionReady, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type IdentityFacts, type TenantState, PROOF_LABELS, proofRecordName, type ProofLabel } from './states.js';
 import { jobs } from './db/core.js';
 import { contacts, mergeSuppression } from './db/audience.js';
-import { SuppressionEventData, webhookUrlHint, WebhookUrlHint, readCursor, nextCursor } from './core.js';
+import { lasting, SuppressionEventData, WEBHOOK_CHANGE, webhookUrlHint, WebhookUrlHint, readCursor, nextCursor } from './core.js';
 import { workspaces } from './db/workspaces.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
@@ -87,7 +87,7 @@ export function workspaceActor(c: Ctx, permission: Permission = 'read') { const 
 // secrets.
 function webhookManager(c: Ctx) {
   const a = workspaceActor(c, 'manage');
-  if (a.credential === 'agentToken') throw new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Temporary agent tokens cannot create, change or delete webhooks or read their signing secrets.');
+  lasting(c, WEBHOOK_CHANGE);
   return a;
 }
 // A webhook that an approval sets up, changes or rotates the signing secret of is tied to the approval, like the keys it

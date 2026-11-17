@@ -1,8 +1,8 @@
 import { useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 
-// Query keys are ['nightmail', mode, resource, ...args]; the resource names what a query reads.
-export const resourceOf = (queryKey: readonly unknown[]) => String(queryKey[2])
+// Query keys are ['nightmail', resource, ...args]; the resource names what a query reads.
+export const resourceOf = (queryKey: readonly unknown[]) => String(queryKey[1])
 // Lists and details backed by SES or other slow external reads: an ordinary write leaves them alone, and the
 // mutations that change them (domains, regions) pass refreshSes to refresh everything.
 const external = new Set(['regions', 'region-discovery', 'domain', 'domains', 'campaign-options'])

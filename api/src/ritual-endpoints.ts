@@ -1,9 +1,9 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, and, eq } from 'drizzle-orm';
-import { ApiError, digest, errors, id, json, randomSecret, response, security, webhookUrlHint, type App, type Ctx, type ClaimedWebhook, type DbExecutor, type Runtime } from './core.js';
+import { ApiError, digest, errors, id, json, randomSecret, receivingAdmin, response, security, webhookUrlHint, type App, type Ctx, type ClaimedWebhook, type DbExecutor, type Runtime } from './core.js';
 import { claimSends } from './states.js';
 import { mailboxes, mailMessages, mailboxWebhooks, retainedMail } from './db/mailbox.js';
-import { ritualAdmin, ownReceiving, resumeNeedsUrl } from './rituals.js';
+import { ownReceiving, resumeNeedsUrl } from './rituals.js';
 import { recordAudit } from './audit.js';
 import { encrypt, decrypt, encryptWebhookHeaders, postWebhook, WebhookHeaders, webhookSecret, webhookUrl } from './operations.js';
 import { webhookSecretBinding } from './mailbox-events.js';
@@ -186,12 +186,13 @@ async function requestConfirmation(c: Ctx, tx: DbExecutor, w: string, row: { hoo
 }
 
 export function registerEndpoints(app: App) {
+  const manage = 'create, change, test or delete endpoints';
   app.openapi(createRoute({ ...meta, method: 'get', path: base, operationId: 'listEndpoints', summary: 'List endpoints rituals can call', request: { query: z.object({ type: z.enum(types).optional(), cursor: z.string().max(64).optional(), limit: z.coerce.number().int().min(1).max(200).default(100) }) }, responses: { 200: response(z.object({ data: z.array(Endpoint), nextCursor: z.string().nullable() }).openapi('EndpointPage')), ...errors } }), async c => {
-    const w = ritualAdmin(c).workspaceId, q = c.req.valid('query'), rows = await endpointRows(c.env.db, w, q);
+    const w = receivingAdmin(c).workspaceId, q = c.req.valid('query'), rows = await endpointRows(c.env.db, w, q);
     return c.json({ data: await Promise.all(rows.slice(0, q.limit).map(r => endpointView(c.env, w, r))), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.name : null }, 200);
   });
   app.openapi(createRoute({ ...meta, method: 'get', path: `${base}/{name}`, operationId: 'getEndpoint', summary: 'Read one endpoint, its status and the next step', request: { params: NameParam }, responses: { 200: response(Endpoint), ...errors } }), async c => {
-    const w = ritualAdmin(c).workspaceId;
+    const w = receivingAdmin(c).workspaceId;
     return c.json(await endpointView(c.env, w, await findEndpoint(c.env.db, w, c.req.valid('param').name)), 200);
   });
   app.openapi(createRoute({
@@ -199,7 +200,7 @@ export function registerEndpoints(app: App) {
     description: 'Slack and Discord URLs are credentials: stored encrypted, pinned to the provider host and never returned. A webhook endpoint is a route-only inbound webhook; its signing secret is returned once. A forward emails its recipient a single-use confirmation link (24 hours); it stays pending until they choose Allow. With preverify, an address on a domain this workspace has verified is ready at once.',
     request: { body: json(CreateEndpoint) }, responses: { 201: response(Endpoint.extend({ secret: z.string().optional().describe('Webhook signing secret, shown once.') }).openapi('CreatedEndpoint')), ...errors },
   }), async c => {
-    const a = ritualAdmin(c, true), q = c.req.valid('json'), w = a.workspaceId;
+    const a = receivingAdmin(c, manage), q = c.req.valid('json'), w = a.workspaceId;
     let secret: string | undefined;
     await c.env.db.transaction(async tx => {
       await lockMailboxLane(tx, w, 'address');
@@ -236,7 +237,7 @@ export function registerEndpoints(app: App) {
   app.openapi(createRoute({ ...meta, method: 'patch', path: `${base}/{name}`, operationId: 'updateEndpoint', summary: 'Edit an endpoint: its name, type, URL, pause state, rate or retry policy',
     description: 'Send only what changes. URLs and headers are write-only: an omitted url keeps the current one, and none is ever returned. A forward’s address is fixed (its recipient confirmed it); create a new forward instead.',
     request: { params: NameParam, body: json(UpdateEndpoint) }, responses: { 200: response(Endpoint), ...errors } }), async c => {
-    const w = ritualAdmin(c, true).workspaceId, name = c.req.valid('param').name, q = c.req.valid('json');
+    const w = receivingAdmin(c, manage).workspaceId, name = c.req.valid('param').name, q = c.req.valid('json');
     let current = name;
     await c.env.db.transaction(async tx => {
       await lockMailboxLane(tx, w, 'address');
@@ -295,7 +296,7 @@ export function registerEndpoints(app: App) {
     return c.json(await endpointView(c.env, w, await findEndpoint(c.env.db, w, current)), 200);
   });
   app.openapi(createRoute({ ...meta, method: 'delete', path: `${base}/{name}`, operationId: 'deleteEndpoint', summary: 'Delete an endpoint no ritual or route uses', request: { params: NameParam }, responses: { 200: response(z.object({ name: Name, deleted: z.literal(true) }).openapi('DeletedEndpoint')), ...errors } }), async c => {
-    const w = ritualAdmin(c, true).workspaceId, name = c.req.valid('param').name;
+    const w = receivingAdmin(c, manage).workspaceId, name = c.req.valid('param').name;
     await c.env.db.transaction(async tx => {
       await lockMailboxLane(tx, w, 'address');
       const row = await findEndpoint(tx, w, name);
@@ -308,7 +309,7 @@ export function registerEndpoints(app: App) {
     return c.json({ name, deleted: true as const }, 200);
   });
   app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{name}/verification`, operationId: 'sendEndpointVerification', summary: 'Email a forward recipient a new confirmation link', description: 'For a pending, expired or (after 30 days) declined forward. The recipient must open the link and choose Allow; no API call can confirm on their behalf.', request: { params: NameParam, body: json(z.object({ from: z.string().max(254).optional() }).strict()) }, responses: { 202: response(Endpoint), ...errors } }), async c => {
-    const w = ritualAdmin(c, true).workspaceId, name = c.req.valid('param').name, q = c.req.valid('json');
+    const w = receivingAdmin(c, manage).workspaceId, name = c.req.valid('param').name, q = c.req.valid('json');
     await c.env.db.transaction(async tx => {
       await lockMailboxLane(tx, w, 'address');
       const row = await findEndpoint(tx, w, name);
@@ -320,7 +321,7 @@ export function registerEndpoints(app: App) {
     return c.json(await endpointView(c.env, w, await findEndpoint(c.env.db, w, name)), 202);
   });
   app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{name}/test`, operationId: 'testEndpoint', summary: 'Post a fixed test message to a Slack, Discord or webhook endpoint now', description: 'Bypasses rituals and queues: one synchronous post, counted against the endpoint rate. Forwards send real mail, so they are not tested this way; use testRituals for a dry run.', request: { params: NameParam }, responses: { 200: response(z.object({ ok: z.boolean(), status: z.number().int().nullable(), error: z.string().nullable() }).openapi('EndpointTest')), ...errors } }), async c => {
-    const w = ritualAdmin(c, true).workspaceId, name = c.req.valid('param').name, row = await findEndpoint(c.env.db, w, name);
+    const w = receivingAdmin(c, manage).workspaceId, name = c.req.valid('param').name, row = await findEndpoint(c.env.db, w, name);
     if (row.type === 'forward') throw new ApiError(422, 'FORWARD_TEST_UNAVAILABLE', 'Forwards send real mail. Dry-run the ritual with testRituals instead.');
     if (needsUrl(row)) throw resumeNeedsUrl(); // Nothing is posted to a held endpoint, a test included.
     await debit(c.env.db, w, 'endpoint-test:' + row.hook_id, 10, 'hour', 'At most 10 endpoint tests per hour.');

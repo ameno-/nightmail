@@ -4,7 +4,7 @@ import { ChevronRight, MoreHorizontal } from 'lucide-react'
 import { Link, Navigate, useNavigate, useParams } from 'react-router'
 import { useApiDef, useApiMutation, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
-import { total, usd } from '../../data/billing'
+import { priceUc, total, usd } from '../../data/billing'
 import { useRefreshListsOnChange } from '../../data/invalidation'
 import { useRegionCatalog } from '../../data/regions'
 import { campaignEditable, errorText, campaignResumable, type Campaign, type CampaignInput, type SendCampaignInput } from '../../data/types'
@@ -15,7 +15,7 @@ import {
 } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
 import { EmailInsight, LOW_SENDABILITY, SendabilityWarning, useSendability } from '../../components/EmailInsight'
-import { date, number, time } from '../../lib/format'
+import { date, number } from '../../lib/format'
 import { CampaignAudienceSkeleton, CampaignRouteSkeleton } from './skeletons'
 import { CampaignPacing, CampaignProgress, campaignDisplayStatus, campaignPollInterval, maxPerDay, maxRatePercent, minPerDay, minRatePercent, perDayError, ratePercentError } from './CampaignProgress'
 import { CampaignArchiveButton } from './CampaignArchiveButton'
@@ -37,7 +37,6 @@ import { useSingleFlight } from '../../lib/single-flight'
 import { usePhone } from '../../lib/media'
 import { useLeaveGuard } from '../../lib/leave-guard'
 
-const message = errorText
 // {{placeholders}} the campaign uses; email always resolves, everything else needs a contact value or a fallback.
 const placeholderPattern = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g
 export const placeholders = (...sources: (string | undefined)[]) => [...new Set(sources.flatMap(source => [...(source ?? '').matchAll(placeholderPattern)].map(match => match[1]!)))]
@@ -223,7 +222,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
     try {
       const latest = await api.campaigns.get(acceptedRef.current.id, controller.signal)
       if (!controller.signal.aborted) applyRemote(latest)
-    } catch (cause) { if (!controller.signal.aborted) toast(message(cause), 'error') }
+    } catch (cause) { if (!controller.signal.aborted) toast(errorText(cause), 'error') }
     finally { if (!controller.signal.aborted) { setLoadingLatest(false); busyRef.current = false } }
   }
   const syncLabel = autosaving || preparing || saveMutation.isPending ? 'Saving…' : remote ? 'Update available' : autosavePaused ? 'Save failed' : error ? 'Check draft' : unavailable ? 'Unavailable' : readOnly ? 'Read only' : sync.connection === 'offline' ? 'Sync interrupted' : dirty ? form.name.trim() ? 'Unsaved changes' : 'Name required' : accepted ? 'Saved' : 'New draft'
@@ -270,8 +269,8 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
         }
       }
       const saved = await saveMutation.mutateAsync(submitted)
-      cache.setQueryData(['nightmail', api.mode, 'campaign', saved.id], saved)
-      void cache.invalidateQueries({queryKey: ['nightmail', api.mode, 'campaigns'], refetchType: 'none'})
+      cache.setQueryData(['nightmail', 'campaign', saved.id], saved)
+      void cache.invalidateQueries({queryKey: ['nightmail', 'campaigns'], refetchType: 'none'})
       if (!mounted.current) return
       creation.current = null
       const changedWhileSaving = editVersion.current !== version
@@ -297,8 +296,8 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
         else creation.current.ambiguous = true
       }
       setAutosavePaused(true)
-      if (automatic) setError(message(cause))
-      else reportError(message(cause))
+      if (automatic) setError(errorText(cause))
+      else reportError(errorText(cause))
       sync.checkNow()
     } finally {
       guard.current = false
@@ -405,7 +404,7 @@ function TestEmailDialog({ campaign, open, onOpenChange }: { campaign: Campaign;
       const result = await mutation.mutateAsync({ id: campaign.id, to: to.trim(), data: Object.fromEntries(samples.map(key => [key, data[key]!.trim()])) })
       if (!result.accepted) { setError('The test wasn’t accepted. Try again.'); return }
       setSent({ to: to.trim(), id: result.id })
-    } catch (cause) { setError(message(cause)) }
+    } catch (cause) { setError(errorText(cause)) }
     finally { guard.current = false }
   }
   return <Dialog open={open} onOpenChange={value => { if (!mutation.isPending) { setError(''); onOpenChange(value) } }} title="Send test email">
@@ -459,9 +458,8 @@ const sampleValue = (key: string) => key === 'email' ? 'sam@example.com' : key =
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, char => `&#${char.charCodeAt(0)};`)
 
 function useCampaignCache() {
-  const api = useApi()
   const cache = useQueryClient()
-  return (next: Campaign) => { cache.setQueryData(['nightmail', api.mode, 'campaign', next.id], next); void cache.invalidateQueries({ queryKey: ['nightmail', api.mode, 'campaigns'], refetchType: 'none' }) }
+  return (next: Campaign) => { cache.setQueryData(['nightmail', 'campaign', next.id], next); void cache.invalidateQueries({ queryKey: ['nightmail', 'campaigns'], refetchType: 'none' }) }
 }
 
 function ScheduledBanner({ campaign }: { campaign: Campaign }) {
@@ -503,7 +501,7 @@ function RescheduleDialog({ campaign, onClose }: { campaign: Campaign; onClose: 
   const reschedule = useSingleFlight('campaigns.reschedule', async (at: string) => {
     setPending(true)
     try { const next = await api.campaigns.reschedule(campaign.id, at); accept(next); toast(`Rescheduled for ${utcLabel(next.scheduledAt!)}`, 'success'); onClose() }
-    catch (cause) { setError(message(cause)) }
+    catch (cause) { setError(errorText(cause)) }
     finally { setPending(false) }
   }, campaign.id)
   function submit(event: FormEvent) {
@@ -529,7 +527,7 @@ function CancelCampaignButton({ campaign }: { campaign: Campaign }) {
   const [open, setOpen] = useState(false)
   return <>
     <Button variant="ghost" disabled={!canAdminister} title={canAdminister ? 'Stop releasing recipients and cancel queued emails' : 'Only owners and admins can cancel campaigns.'} onClick={() => setOpen(true)}>Cancel campaign</Button>
-    <ConfirmDialog open={open} onOpenChange={setOpen} danger title="Cancel this campaign?" description="Queued emails are canceled and remaining recipients won’t get it. Sent emails stay sent. You can’t undo this." confirmLabel="Cancel campaign" onConfirm={async () => { const result = await api.campaigns.cancel(campaign.id); toast(`Campaign canceled · ${number(result.canceled)} not sent`, 'success'); await cache.invalidateQueries({ queryKey: ['nightmail', api.mode, 'campaign', campaign.id] }); void cache.invalidateQueries({ queryKey: ['nightmail', api.mode, 'campaigns'], refetchType: 'none' }) }} />
+    <ConfirmDialog open={open} onOpenChange={setOpen} danger title="Cancel this campaign?" description="Queued emails are canceled and remaining recipients won’t get it. Sent emails stay sent. You can’t undo this." confirmLabel="Cancel campaign" onConfirm={async () => { const result = await api.campaigns.cancel(campaign.id); toast(`Campaign canceled · ${number(result.canceled)} not sent`, 'success'); await cache.invalidateQueries({ queryKey: ['nightmail', 'campaign', campaign.id] }); void cache.invalidateQueries({ queryKey: ['nightmail', 'campaigns'], refetchType: 'none' }) }} />
   </>
 }
 
@@ -599,7 +597,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   // Hosted and enforced: what the send costs beyond the free allowance, against the balance, read while the page opens.
   const billing = useApiDef(queries.billing(), { enabled: draft && multiTenant && canAdminister }).data
   const cost = billing && billing.enforcement === 'enforce' && billing.mode === 'prepaid' && billing.balance && audience.data ? (() => {
-    const beyond = Math.max(0, audience.data.eligible - billing.free.sent.left), uc = BigInt(beyond) * 20_000n
+    const beyond = Math.max(0, audience.data.eligible - billing.free.sent.left), uc = BigInt(beyond) * priceUc(billing.prices.emailPerThousand) / 1000n
     return ` Estimated cost ${usd(uc)} (${number(beyond)} ${beyond === 1 ? 'recipient' : 'recipients'} beyond your free sends). Balance ${usd(total(billing.balance))}.${BigInt(billing.balance.available) < uc ? ' The campaign pauses when the balance runs out and resumes after you add credit.' : ''}`
   })() : ''
   function requestConfirmation() {
@@ -609,7 +607,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
     if (audience.data && audience.data.eligible < 1) { setError('Nobody on this list can receive campaigns yet. Mark contacts as subscribed or choose another list.'); return }
     if (paceError) { setError(`Recipients per day: ${paceError}`); return }
     if (shareError) { setError(`Sending speed limit: ${shareError}`); return }
-    const input: SendCampaignInput = { id: campaign.id, mode, timezone: 'UTC', revision: campaign.revision }
+    const input: SendCampaignInput = { id: campaign.id, mode, revision: campaign.revision }
     // Defaults (no daily limit, auto-pause on, full send rate) need no pacing object.
     if (pace.limit || !pace.autoPause || sharePercent < 100) input.pacing = { perDay: pace.limit ? perDay : null, autoPause: pace.autoPause, rateShare: sharePercent / 100 }
     if (mode === 'schedule') {
@@ -626,7 +624,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
     guard.current = true
     setError('')
     try { const result = await sendMutation.mutateAsync(confirmation); setReceipt('queued' in result && !result.scheduledAt ? `Sending started · ${number(result.queued)} ${result.queued === 1 ? 'recipient' : 'recipients'}${result.simulated ? ' · simulation mode, no real email is sent' : ''}` : ''); setConfirmation(null) }
-    catch (cause) { setError(message(cause)); setConfirmation(null) }
+    catch (cause) { setError(errorText(cause)); setConfirmation(null) }
     finally { guard.current = false }
   }
   const scheduledView = !draft && !campaign.archivedAt && unreleasedSchedule(campaign)

@@ -13,7 +13,7 @@ import { useApiDef, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { request } from '../../data/live'
 import { staleAfterWrite } from '../../data/invalidation'
 import { queries } from '../../data/queries'
-import { ApiError } from '../../data/types'
+import { ApiError, errorText } from '../../data/types'
 import { useSingleFlight } from '../../lib/single-flight'
 import { ritualRecipes } from '../../../../api/src/ritual-schema'
 import { concepts } from './concepts'
@@ -27,7 +27,6 @@ import './receiving.css'
 import './recipes.css'
 
 const RitualsPage = lazy(() => import('./rituals').then(m => ({ default: m.RitualsPage })))
-const errorText = (e: unknown) => e instanceof ApiError ? e.text : (e as Error).message
 const LIST = '/receiving?tab=rituals'
 
 // listRitualRecipes, as the add screen and the form read it.

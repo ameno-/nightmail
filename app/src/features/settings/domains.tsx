@@ -1,8 +1,8 @@
 import { useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router'
-import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, StatusBadge, StatusDot } from '../../components/ui'
-import { useApi, useApiMutation, useApiDef, useApiQuery, useRegion, useSession, useWorkspaceAccess } from '../../data/context'
+import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, StatusBadge, StatusDot, fieldError, MutationError } from '../../components/ui'
+import { useApiMutation, useApiDef, useApiQuery, useRegion, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { usePrefetchQueries } from '../../data/prefetch'
 import { label } from '../../lib/format'
@@ -12,10 +12,10 @@ import { domainPattern, normalizeDomain } from '../../lib/domain'
 import { catchAllLabel, mxTone, receivingStatus } from '../inbound/status'
 import { receivingIssueReason, receivingIssueTitle } from './receiving-issue-title'
 import { catchAllSetting } from '../inbound/concepts'
-import { fieldError, MutationError } from './shared'
 import { AdminOnlyPage } from './admin-only'
 import { DomainDetailSkeleton, domainColumns } from './skeletons'
 import { DnsRecordTable, DnsWaitNote, DomainRecords, domainState, recordsFor, useDnsSetup, useDomain, zoneLines } from './domain-records'
+import { resourceOf } from '../../data/invalidation'
 
 function downloadDnsRecords(domain: string, records: DnsRecord[]) {
   const text = `; DNS records for ${domain}\n; Import into your DNS provider or add each record manually.\n${zoneLines(records)}\n`
@@ -136,7 +136,6 @@ function DomainDetail() {
   const { regionId, setRegionId } = useRegion()
   const { multiTenant } = useWorkspaceAccess()
   const hosted = useSession()?.identity?.connection?.kind === 'shared'
-  const chooseSupported = !!useApi().domains.chooseReceivingHost
   const [recheckUntil, setRecheckUntil] = useState(0)
   const domain = useDomain(id, recheckUntil)
   const receiving = useApiQuery(['mailbox-domain', id], (api, signal) => api.mailboxes.domain(id, signal), { enabled: multiTenant })
@@ -162,8 +161,8 @@ function DomainDetail() {
   // Nightmail's own names or a host in use elsewhere is refused; a host another provider receives for asks before moving its mail.
   const [moveMail, setMoveMail] = useState<{ host: string; message: string } | null>(null)
   const choose = useApiMutation(async (api, input: { host: string | null; confirm?: boolean }) => {
-    const updated = await api.domains.chooseReceivingHost!(id, input)
-    client.setQueryData(['nightmail', api.mode, 'domain', id], updated)
+    const updated = await api.domains.chooseReceivingHost(id, input)
+    client.setQueryData(['nightmail', 'domain', id], updated)
     return updated
   }, undefined, false, true, id)
   async function chooseHost(host: string | null) {
@@ -184,7 +183,7 @@ function DomainDetail() {
   const onRoot = receivingRecord?.name === current.name
   // Check MX now also stays for a live host whose DNS changed (receivingIssue); choosing another host only before it receives.
   const receivingActions = multiTenant && (receivingPending || current.receivingIssue) ? <>
-    {receivingPending && chooseSupported && <Button loading={choose.isPending} onClick={() => void chooseHost(onRoot ? null : current.name)}>{onRoot ? 'Use a subdomain instead' : `Use ${current.name} instead`}</Button>}
+    {receivingPending && <Button loading={choose.isPending} onClick={() => void chooseHost(onRoot ? null : current.name)}>{onRoot ? 'Use a subdomain instead' : `Use ${current.name} instead`}</Button>}
     <Button loading={verify.isPending} onClick={() => void checkNow()} title="Added the MX record? Check it now instead of waiting for the hourly check.">Check MX now</Button>
   </> : undefined
   const sesUrl = `https://${current.regionId}.console.aws.amazon.com/ses/home?region=${encodeURIComponent(current.regionId)}#/identities/${encodeURIComponent(current.name)}`
@@ -219,7 +218,7 @@ function DomainDetail() {
     <ConfirmDialog open={!!moveMail} onOpenChange={open => { if (!open) setMoveMail(null) }} title={`Move mail for ${moveMail?.host ?? current.name}?`}
       description={`${moveMail?.message ?? ''} Mail stops arriving there once the MX record changes.`} confirmLabel={`Use ${moveMail?.host ?? current.name} anyway`} danger
       onConfirm={() => choose.mutateAsync({ host: moveMail!.host, confirm: true })} />
-    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${current.name}?`} description="Sending from it stops. Its DNS records stay at your DNS provider until you remove them." confirmLabel="Delete domain" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(id); navigate('/domains', { replace: true }); client.removeQueries({ predicate: query => query.queryKey[0] === 'nightmail' && query.queryKey[2] === 'domain' && query.queryKey[3] === id }); void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && query.queryKey[2] === 'domains' }) }} />
+    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${current.name}?`} description="Sending from it stops. Its DNS records stay at your DNS provider until you remove them." confirmLabel="Delete domain" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(id); navigate('/domains', { replace: true }); client.removeQueries({ predicate: query => query.queryKey[0] === 'nightmail' && resourceOf(query.queryKey) === 'domain' && query.queryKey[2] === id }); void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && resourceOf(query.queryKey) === 'domains' }) }} />
     <Dialog open={mailFromOpen} onOpenChange={next => {if (!configureMailFrom.isPending) setMailFromOpen(next)}} title={current.mailFromDomain ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} footer={<><Button disabled={configureMailFrom.isPending} onClick={() => setMailFromOpen(false)}>Cancel</Button><Button variant="primary" loading={configureMailFrom.isPending} type="submit" form="configure-mail-from">Save</Button></>}>
       <form id="configure-mail-from" className="stack" onSubmit={submitMailFrom} noValidate>
         <MutationError error={configureMailFrom.error} />
@@ -239,7 +238,7 @@ function MailboxReceiving({ domainId, domainName }: { domainId: string; domainNa
   const [disableOpen, setDisableOpen] = useState(false)
   async function start() {
     try { await enable.mutateAsync(false) }
-    catch (error) { if (error instanceof ApiError && error.code === 'MX_CONFLICT') { enable.reset(); setConflict(error.message.replace(/ Retry with force=true to continue anyway\. \[MX_CONFLICT\].*$/, '')) } }
+    catch (error) { if (error instanceof ApiError && error.code === 'MX_CONFLICT') { enable.reset(); setConflict(error.detail.replace(/ Retry with force=true to continue anyway\.$/, '')) } }
   }
   if (receiving.error) return <section className="section stack"><SectionHeader title="Receiving" /><ErrorState error={receiving.error} onRetry={() => void receiving.refetch()} /></section>
   const state = receiving.data

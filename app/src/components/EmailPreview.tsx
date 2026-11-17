@@ -1,18 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { AttachmentApi } from '../data/types';
+import { errorText, type AttachmentApi } from '../data/types';
 import { useApi } from '../data/context';
 import { cidImageSources, isRasterDataUrl, loadInlineAttachments } from '../features/campaigns/composer-content';
 import { mentionsRemoteImage, withoutFontStyles } from '../lib/html-scan';
 import DOMPurify from 'dompurify';
 import { Alert, Button } from './ui';
-
-export function htmlToText(html: string): string {
-  const clean = DOMPurify.sanitize(html, { FORBID_TAGS: ['style', 'script'] });
-  const email = new DOMParser().parseFromString(clean, 'text/html');
-  email.querySelectorAll('br').forEach(node => node.replaceWith('\n'));
-  email.querySelectorAll('p, div, h1, h2, h3, h4, li, tr, blockquote').forEach(node => node.append('\n'));
-  return (email.body.textContent ?? '').replace(/[\t ]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-}
 
 // Known open-tracking endpoints (ESP pixels, SES open tracking) and generic pixel paths.
 const TRACKING_URL = /(?:awstrack\.me|list-manage\.com\/track|\/wf\/open|sendgrid\.net\/wf|mandrillapp\.com\/track|pstmrk\.it|pmtrk|track\.customer\.io\/e\/o|mailgun\.[a-z]+\/o\/|emltrk\.com|sidekickopen|hubspotlinks|mixmax\.com\/api\/track|mailtrack\.io|getnotify\.com|bananatag|yesware)/i;
@@ -145,7 +137,7 @@ export function useEmailDocument({ html, attachmentIds = [], attachmentApi: prov
       if (controller.signal.aborted) return;
       setResolved({html, attachmentKey, api: attachmentApi, sources: result.sources});
       if (result.sources.size < needed.size) setError('Couldn’t resolve some inline images from this message’s attachments.');
-    }).catch(cause => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Inline image preview is unavailable.'); });
+    }).catch(cause => { if (!controller.signal.aborted) setError(errorText(cause, 'Inline image preview is unavailable.')); });
     return () => controller.abort();
   }, [html, attachmentKey, attachmentApi, needed]);
   const sources = resolved?.html === html && resolved.attachmentKey === attachmentKey && resolved.api === attachmentApi ? resolved.sources : undefined;

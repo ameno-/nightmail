@@ -1,7 +1,7 @@
 import { skipToken, useQuery } from '@tanstack/react-query'
 import { Link, Outlet, useMatch } from 'react-router'
 import { Skeleton, SkeletonText } from '../../components/ui'
-import { useApi, useOnboardingStage } from '../../data/context'
+import { useOnboardingStage } from '../../data/context'
 import { ChunkFallback } from '../../lib/preloadable'
 import './frame.css'
 import { productName, sdkPackage } from '../../../../api/src/brand'
@@ -12,12 +12,11 @@ import { productName, sdkPackage } from '../../../../api/src/brand'
 export type DocsAudience = 'shell' | 'standalone' | 'checking'
 export function useDocsAudience(): DocsAudience | null {
   const onDocs = useMatch('/docs/*') !== null
-  const demo = useApi().mode === 'demo'
   // Observes the session check ApiProvider runs (/v1/me) without starting another.
   const identity = useQuery({ queryKey: ['identity'], queryFn: skipToken })
   const stage = useOnboardingStage()
   if (!onDocs) return null
-  if (demo || (identity.data && !identity.isError)) return stage ? 'standalone' : 'shell'
+  if (identity.data && !identity.isError) return stage ? 'standalone' : 'shell'
   return identity.isPending ? 'checking' : 'standalone'
 }
 

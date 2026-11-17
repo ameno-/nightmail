@@ -1,6 +1,6 @@
 import { Archive, ArchiveRestore } from 'lucide-react'
 import { useApiMutation } from '../../data/context'
-import { campaignActive, type Campaign } from '../../data/types'
+import { campaignActive, type Campaign, errorText } from '../../data/types'
 import { Button, IconButton, useToast } from '../../components/ui'
 
 export function CampaignArchiveButton({ campaign, compact = false, onSuccess }: { campaign: Campaign; compact?: boolean; onSuccess?: () => void }) {
@@ -14,7 +14,7 @@ export function CampaignArchiveButton({ campaign, compact = false, onSuccess }: 
   async function update() {
     if (active || mutation.isPending) return
     try { await mutation.mutateAsync(!archived); onSuccess?.() }
-    catch (error) { toast(error instanceof Error ? error.message : 'Couldn’t update this campaign.', 'error') }
+    catch (error) { toast(errorText(error, 'Couldn’t update this campaign.'), 'error') }
   }
   return compact
     ? <IconButton label={`${archived ? 'Restore' : 'Archive'} ${campaign.name}`} title={title} disabled={active} loading={mutation.isPending} onClick={event => { event.stopPropagation(); void update() }}>{archived ? <ArchiveRestore size={16} /> : <Archive size={16} />}</IconButton>

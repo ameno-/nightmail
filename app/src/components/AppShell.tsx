@@ -1,7 +1,7 @@
 import { Component, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate, useNavigationType } from 'react-router'
 import { BookOpen, Ellipsis, Globe, Inbox, KeyRound, LayoutGrid, Lock, ScrollText, Send, Settings, ShieldCheck, Users } from 'lucide-react'
-import { useApi, useRegion, useSession, useWorkspaceAccess } from '../data/context'
+import { useRegion, useSession, useWorkspaceAccess } from '../data/context'
 import { sidebarPaths, usePrefetchQueries, usePrefetchRoute, useRouteIntent } from '../data/prefetch'
 import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
 import { label, number, percent } from '../lib/format'
@@ -44,7 +44,6 @@ const tabs = ['/overview', '/logs', '/receiving', '/campaigns']
 const icons: Record<string, ReactNode> = { '/overview': <LayoutGrid />, '/logs': <ScrollText />, '/receiving': <Inbox />, '/campaigns': <Send />, '/audience': <Users />, '/domains': <Globe />, '/api-keys': <KeyRound />, '/docs': <BookOpen />, '/settings': <Settings />, '/operator': <ShieldCheck /> }
 const current = (path: string, pathname: string) => pathname === path || pathname.startsWith(`${path}/`)
 export function AppShell() {
-  const api = useApi()
   const { regionId, setRegionId } = useRegion()
   const session = useSession()
   const access = useWorkspaceAccess()
@@ -52,11 +51,11 @@ export function AppShell() {
   const scoreAbout = useScoreAbout()
   // The support chat: Help in the page's bottom-right corner (in the top bar on a phone or tablet), one conversation for
   // the whole visit that stays open across pages.
-  const support = useSupportChat({ demoApi: api.mode === 'demo', hosted: access.multiTenant, staff: Boolean(session?.identity?.operator || session?.identity?.billing?.free) })
+  const support = useSupportChat({ hosted: access.multiTenant, staff: Boolean(session?.identity?.operator || session?.identity?.billing?.free) })
   const [scoreAboutMounted, setScoreAboutMounted] = useState(false)
   const toast = useToast()
   // Only for the people the API allows (GET /v1/me uiNotes): nobody else gets the shortcut, its listeners or its code.
-  const canNote = api.mode === 'live' && session?.identity?.uiNotes === true
+  const canNote = session?.identity?.uiNotes === true
   const notesOn = useUiNotesMode(canNote)
   useUiNotesShortcut(canNote, useCallback((on: boolean) => toast(on ? `UI notes on. ${notesModifierLabel}-click anything to leave a note.` : 'UI notes off.'), [toast]))
   useEffect(() => { if (scoreAbout.open) setScoreAboutMounted(true) }, [scoreAbout.open])
@@ -82,16 +81,16 @@ export function AppShell() {
   // The page in front of the user: its first-screen requests start with its code, not after it, on a cold load too.
   useEffect(() => {
     const path = latest.current.pathname
-    if (api.mode === 'live' && regionReady && (sidebarPaths as readonly string[]).includes(path)) void latest.current.prefetchRoute(path)
-    if (api.mode === 'live' && access.multiTenant) { void score.preload().catch(() => {}); void prefetchQueries([queries.senderScore()]) }
-  }, [api.mode, regionReady])
+    if (regionReady && (sidebarPaths as readonly string[]).includes(path)) void latest.current.prefetchRoute(path)
+    if (access.multiTenant) { void score.preload().catch(() => {}); void prefetchQueries([queries.senderScore()]) }
+  }, [regionReady])
   // Once the page in front of the user has settled, warm every other sidebar page one at a time (its code and
   // first-screen queries, one request set per page, nothing already fresh). Hovering a link does the same at once.
   const warming = useRef(false)
   const content = useRef<HTMLElement>(null)
   useEffect(() => {
     const saveData = (navigator as { connection?: { saveData?: boolean } }).connection?.saveData
-    if (warming.current || api.mode !== 'live' || !regionReady || saveData) return
+    if (warming.current || !regionReady || saveData) return
     warming.current = true
     let stopped = false
     let release: (() => void) | undefined
@@ -115,7 +114,7 @@ export function AppShell() {
       }
     })()
     return () => { stopped = true; release?.(); warming.current = false }
-  }, [api.mode, regionReady])
+  }, [regionReady])
   // Scroll: a new page starts at the top (filter and tab changes on the same page keep their place); Back and Forward
   // restore where that entry was left, waiting a moment for its (usually cached) content to be tall enough again.
   // The page card scrolls on a desktop; on a phone or tablet the document does, so the browser's bars collapse.
@@ -198,7 +197,6 @@ export function AppShell() {
     {access.multiTenant && <AccountSwitcher />}
     {access.canAdminister && !access.multiTenant && <Select id="sidebar-view-region" aria-label="Viewing region" value={current?.region ?? ''} onValueChange={changeRegion} options={enabled.map(region => ({ value: region.region, label: region.region }))} disabled={regions.isPending || !enabled.length} placeholder={regions.isPending ? 'Loading regions…' : 'No enabled regions'} />}
     {access.canAdminister && !access.multiTenant && regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
-    {api.mode === 'demo' && <span className="demo-indicator" title="Sample data; no external requests.">Demo mode</span>}
   </>
   // The links and privacy mode first, so the last item (the sender score card, or SES's quota) ends on the main panel's bottom edge.
   const footer = <>

@@ -2,7 +2,7 @@
 // decision. BillingSummary, LedgerEntry, PaymentView and AutoRechargeSettings mirror the public API (routes.ts).
 // Money fields are integer micro-cents as strings (see money.ts).
 export type Enforcement = 'off' | 'shadow' | 'enforce';
-export type AccountMode = 'prepaid' | 'invoiced' | 'exempt';
+export type AccountMode = 'prepaid' | 'exempt';
 export type BillingMeter = 'send' | 'receive' | 'omen' | 'storage' | 'byo_send' | 'byo_receive';
 export type LedgerKind = 'topup' | 'usage' | 'grant' | 'refund_hold' | 'refund_release' | 'dispute' | 'dispute_reversal' | 'write_off' | 'adjustment' | 'expire';
 export type NoticeKind = 'low_balance' | 'sends_paused' | 'receive_hold_soon' | 'receive_held' | 'recharge_failed' | 'credit_expiring';

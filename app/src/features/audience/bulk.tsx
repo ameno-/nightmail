@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { useApiMutation, useApiQuery } from '../../data/context'
-import { Button, Checkbox, Dialog, Field, Input, LoadingRegion, SkeletonText, Alert, useToast } from '../../components/ui'
+import { Button, Checkbox, Dialog, Field, Input, LoadingRegion, SkeletonText, Alert, useToast, MutationError } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { aqlString, evidenceRequired, MutationError, number } from './shared'
+import { aqlString, evidenceRequired, number } from './shared'
 
 // "Mark as subscribed…" for contacts with no consent decision (Unknown), on one list or in the whole audience. AudienceQL
 // plans the change first (count, sample, warnings); the person attests consent and says how it was given; apply then

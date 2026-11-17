@@ -11,7 +11,6 @@ import { McpClientSetup, mcpAccess, useMcpScope, useMcpUrl, type McpAccess } fro
 import './developer.css'
 import { apiKeyEnv, productName, productSlug, sdkPackage } from '../../../../api/src/brand'
 
-// The canonical public origin from /v1/me; the page origin stands in for demo mode.
 function receivingMx(domain: Domain) {
   const record = recordsFor(domain, 'receiving').find(row => row.type === 'MX')
   const match = record?.value.match(/^(\d+)\s+(\S+)$/)

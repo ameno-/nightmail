@@ -1,13 +1,12 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, SecretInput, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, StatusBadge, DropdownMenu } from '../../components/ui'
+import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, SecretInput, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, StatusBadge, DropdownMenu, fieldError, MutationError, SecretDialog } from '../../components/ui'
 import { useApiMutation, useApiDef, useApiQuery, useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { RegionCatalogEntry, Webhook, WebhookDelivery, WebhookEvent, WebhookInput } from '../../data/types'
 import { useRegionCatalog } from '../../data/regions'
 import { date, label, number, time } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
-import { fieldError, MutationError, SecretDialog } from './shared'
 import { AdminOnlyPage } from './admin-only'
 import { deliveryColumns, SettingsRouteSkeleton, WebhookBodySkeleton, webhookColumns } from './skeletons'
 import { headerDraftErrors, HeaderNames, headerPayload, WebhookHeadersField, type HeaderDraft } from './webhook-headers'
@@ -151,7 +150,6 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
 
   const currentHistoryCursor = history ? history.nextCursor : webhook.nextCursor
   async function changeHistoryPage(nextPage: number) {
-    if (!api.webhookDeliveries) return
     const cursor = historyPagination.cursorForPage(nextPage, currentHistoryCursor)
     if (nextPage === 1) { historyPagination.onPageChange(nextPage, currentHistoryCursor); setHistory(null); return }
     setHistoryBusy(true); setHistoryError(null)
@@ -192,7 +190,7 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
             { label: 'Inspect', onSelect: () => setInspected(delivery) },
           ]} /> },
       ]} />
-      <MutationError error={historyError} />{api.webhookDeliveries && (historyBusy ? <PaginationSkeleton /> : <Pagination page={historyPagination.page} pageSize={20} nextCursor={currentHistoryCursor} onPageChange={next => void changeHistoryPage(next)} />)}
+      <MutationError error={historyError} />{historyBusy ? <PaginationSkeleton /> : <Pagination page={historyPagination.page} pageSize={20} nextCursor={currentHistoryCursor} onPageChange={next => void changeHistoryPage(next)} />}
     </section>
     <div><Button variant="danger" disabled={pending} onClick={() => setAction('delete')}>Delete webhook</Button></div>
     <ConfirmDialog open={action !== null} onOpenChange={open => { if (!open) setAction(null) }} title={actionTitle} description={actionDescription} confirmLabel={action === 'rotate' ? 'Rotate secret' : action === 'delete' ? 'Delete webhook' : action === 'pause' ? 'Pause webhook' : 'Resume webhook'} danger={action === 'delete' || action === 'rotate'} pending={pending} onConfirm={confirm} />

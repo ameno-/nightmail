@@ -1,14 +1,9 @@
 .settings-region-scope.stack { min-height: 102px; gap: 8px; }
 .settings-loading-body { display: contents; }
 .settings-loading-body > .section { margin-block: 0; }
-.settings-account { min-height: 50px; }
-.settings-account > .ui-control-skeleton { flex-shrink: 0; }
-.settings-account > .ui-skeleton-line > .ui-skeleton-block { max-width: 270px; }
-.settings-inline-skeleton { display: inline-block; vertical-align: middle; }
 .settings-copy-cell > .ui-skeleton-line { flex: 1; }
 .settings-copy-cell > .ui-control-skeleton { flex-shrink: 0; }
 
-.settings-secret,
 .settings-copy-cell {
   display: flex;
   align-items: center;
@@ -16,28 +11,16 @@
   gap: 12px;
   min-width: 0;
 }
-.settings-secret code,
 .settings-copy-cell code,
 .settings-break {
   overflow-wrap: anywhere;
   white-space: normal;
 }
 .ui-table .settings-copy-cell code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.settings-copy-cell > .cluster,
-.settings-secret > .cluster {
+.settings-copy-cell > .cluster {
   flex-shrink: 0;
 }
-.settings-account {
-  display: flex;
-  align-items: center;
-  gap: 24px;
-  padding-block: 8px;
-}
-.settings-account > :first-child {
-  flex: 1;
-}
 .settings-ses { font-family: var(--font-body); }
-.settings-discovery-state { min-height: 20px; }
 .settings-discovery-section { gap: var(--space-16); min-width: 0; }
 .settings-discovery-section + .settings-discovery-section { border-top: 1px solid var(--color-border); padding-top: var(--space-20); }
 .settings-discovery-section h3 { font-size: var(--text-sm); line-height: var(--leading-sm); }
@@ -97,8 +80,6 @@
 .settings-choices.settings-choices--events { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-12) var(--space-24); }
 @media (max-width: 1100px) { .settings-choices.settings-choices--events { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 640px) { .settings-choices.settings-choices--events { grid-template-columns: minmax(0, 1fr); } }
-.settings-job-state { display: flex; flex-wrap: wrap; gap: var(--space-8) var(--space-20); font-size: var(--text-xs); }
-.settings-job-error { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-danger); font-size: var(--text-xs); }
 .settings-choices {
   display: flex;
   flex-wrap: wrap;
@@ -108,7 +89,6 @@
   justify-content: flex-end;
   flex-wrap: nowrap;
 }
-.settings-region-actions { gap: var(--space-8); }
 .settings-cell-stack { display: flex; flex-direction: column; align-items: flex-start; }
 .settings-payload {
   max-height: 55vh;
@@ -174,8 +154,6 @@
 }
 @media (max-width: 560px) {
   .reputation-panels { grid-template-columns: 1fr; }
-  .settings-account { flex-wrap: wrap; }
-  .settings-account > :first-child { flex-basis: 100%; }
   /* One fact per row, label beside value, split by hairlines: a detail page reads like a phone's settings list. */
   .settings-facts { grid-template-columns: 1fr; gap: 0; border-top: 1px solid var(--color-border-muted); }
   .settings-facts > div { display: grid; grid-template-columns: minmax(96px, 36%) minmax(0, 1fr); align-items: center; gap: var(--space-12); min-height: 53px; padding-block: var(--space-4); border-bottom: 1px solid var(--color-border-muted); }
@@ -184,11 +162,8 @@
   .settings-facts dd > :is(.ui-select-trigger, select) { width: 100%; }
 }
 
-.settings-section-note { margin: 0; font-size: var(--text-sm); }
 /* A heading with its docs guide beside it, the guide link quiet like the keys page's. */
 .settings-guide-title { display: inline-flex; align-items: baseline; gap: var(--space-12); }
-.mailbox-key-permissions { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--space-12) var(--space-24); margin: 0; padding: 0; border: 0; }
-.mailbox-key-permissions legend { margin-bottom: var(--space-8); padding: 0; }
 .settings-row-actions { justify-content: flex-end; flex-wrap: nowrap; }
 
 .page-surface > .settings-page.stack { gap: var(--space-24); }

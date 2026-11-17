@@ -139,7 +139,8 @@ export const LADDER = {
   screen: { warn: [{ rate: 0.02, count: 3 }], restrict: [{ rate: 0.05, count: 10 }], pause: [{ rate: 0.1, count: 25 }] },
   notice: { complaints: 1, bounces: 3, bounceRate: 0.01 },
 } as const;
-const pct = (v: number) => `${(100 * v).toFixed(2).replace(/\.?0+$/, '')}%`;
+/** A rate as the published lines write it: 0.0005 is 0.05%. */
+export const pct = (v: number) => `${(100 * v).toFixed(2).replace(/\.?0+$/, '')}%`;
 
 /** The highest ladder line the windows cross, and every line crossed. `pause_kind` says what a pause is for. */
 export function evaluateLadder(input: LadderInput): { level: Step; reasons: Reason[]; pauseKind: 'bounce' | 'full' | null } {

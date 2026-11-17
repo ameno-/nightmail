@@ -8,6 +8,8 @@ import { noteKinds, noteSeverities, noteStatuses, statusLabel, uiNotesApi, uiNot
 import { relativeTime, shortDateTime } from '../../lib/format'
 import { setUiNotesMode, useUiNotesMode } from '../../lib/ui-notes-mode'
 import { NotesToolbar, noteColumnDefs, useOperatorTabs } from './skeletons'
+import { errorText } from '../../data/types'
+import { useDebounced } from '../../lib/pagination'
 
 // Every UI note across the dashboard (staff's ⌘-click notes, features/ui-notes): filter by status, type and text, open
 // one for its screenshot and everything captured with it, change status in bulk, and make the key an agent uses to fetch
@@ -17,11 +19,6 @@ const def = (key: string) => noteColumnDefs.find(column => column.key === key)!
 const kindLabel = (kind: string) => kind[0]!.toUpperCase() + kind.slice(1)
 const statusTone: Record<NoteStatus, Tone> = { open: 'warning', in_progress: 'info', fixed: 'success', wontfix: 'neutral' }
 const Status = ({ status }: { status: NoteStatus }) => <StatusBadge status={statusLabel[status]} tone={statusTone[status]} />
-function useDebounced<T>(value: T, ms = 250) {
-  const [debounced, setDebounced] = useState(value)
-  useEffect(() => { const timer = setTimeout(() => setDebounced(value), ms); return () => clearTimeout(timer) }, [value, ms])
-  return debounced
-}
 type NotesPage = Awaited<ReturnType<typeof uiNotesApi.list>>
 const Thumb = ({ note }: { note: UiNote }) => <span className="op-shot">{note.screenshot && <img src={note.screenshot.url} alt="" loading="lazy" decoding="async" />}</span>
 
@@ -66,7 +63,7 @@ export function OperatorNotesPage() {
     { ...def('created'), render: note => <span className="op-cell" title={`${shortDateTime(note.createdAt)} UTC`}>{relativeTime(note.createdAt)}{note.author?.name ? ` · ${note.author.name.split(' ')[0]}` : ''}</span>, cardRender: note => relativeTime(note.createdAt) },
     { ...def('actions'), render: note => <DropdownMenu label="Note actions" title={note.body.slice(0, 60)} items={[
       { label: 'Open on its page', onSelect: () => openOnPage(note) },
-      ...canAct ? noteStatuses.filter(value => value !== note.status).map((value): MenuItem => ({ label: `Mark ${statusLabel[value].toLowerCase()}`, onSelect: () => void uiNotesApi.update(note.id, { status: value }).then(refresh, error => toast(error instanceof Error ? error.message : 'Couldn’t update the note.', 'error')) })) : [],
+      ...canAct ? noteStatuses.filter(value => value !== note.status).map((value): MenuItem => ({ label: `Mark ${statusLabel[value].toLowerCase()}`, onSelect: () => void uiNotesApi.update(note.id, { status: value }).then(refresh, error => toast(errorText(error, 'Couldn’t update the note.'), 'error')) })) : [],
       ...canAct ? [{ label: 'Delete…', destructive: true, onSelect: () => setOpen(note.id) }] : [],
     ]} /> },
   ]
@@ -105,7 +102,7 @@ function NoteDialog({ noteId, initial, canAct, onClose, onChanged, onOpenOnPage 
   useEffect(() => { if (!note) return; setBody(note.body); setKind(note.kind); setSeverity(note.severity ?? ''); setStatus(note.status); setPrUrl(note.prUrl ?? ''); setResolution(note.resolution ?? '') }, [note?.updatedAt]) // eslint-disable-line react-hooks/exhaustive-deps
   async function run(work: () => Promise<unknown>) {
     setBusy(true); setError(null)
-    try { await work(); onChanged(); onClose() } catch (cause) { setError(cause instanceof Error ? cause.message : 'Couldn’t save the note.') } finally { setBusy(false) }
+    try { await work(); onChanged(); onClose() } catch (cause) { setError(errorText(cause, 'Couldn’t save the note.')) } finally { setBusy(false) }
   }
   function save(event: FormEvent) {
     event.preventDefault()
@@ -158,7 +155,7 @@ function KeysDialog({ onClose }: { onClose: () => void }) {
     event.preventDefault()
     setBusy(true); setError(null)
     try { setSecret((await uiNotesApi.keys.create({ name: name.trim(), expiresInDays: Number(days) })).secret); await client.invalidateQueries({ queryKey: [...uiNotesKey, 'keys'] }) }
-    catch (cause) { setError(cause instanceof Error ? cause.message : 'Couldn’t create the key.') } finally { setBusy(false) }
+    catch (cause) { setError(errorText(cause, 'Couldn’t create the key.')) } finally { setBusy(false) }
   }
   // ConfirmDialog shows a failure in the dialog and keeps it open.
   const revoke = async (keyId: string) => { await uiNotesApi.keys.revoke(keyId); await client.invalidateQueries({ queryKey: [...uiNotesKey, 'keys'] }) }

@@ -2,12 +2,11 @@ import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import { ChevronRight } from 'lucide-react'
-import { Button, Checkbox, Dialog, Disclosure, Field, Input } from '../../components/ui'
+import { Button, Checkbox, Dialog, Disclosure, Field, Input, fieldError, MutationError } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApi, useApiDef, useApiMutation, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { ApiKeyInput, AppPasswordInput, AppPasswordProtocol, Inbox, KeyPermission, MailPermission, PageRequest } from '../../data/types'
-import { fieldError, MutationError } from './shared'
 import '../inbound/inbound.css'
 import './api-keys.css'
 
@@ -65,7 +64,7 @@ export function CreateKeyDialog({ open, onOpenChange, onCreated, onConnectAgent,
 function useInboxOptions(key: string, filter: { type?: Inbox['type'] }, enabled: boolean) {
   const api = useApi()
   return useInfiniteQuery({
-    queryKey: ['nightmail', api.mode, 'agent-inboxes', key],
+    queryKey: ['nightmail', 'agent-inboxes', key],
     enabled,
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam, signal }) => api.inboxes.list({ ...filter, status: 'active', cursor: pageParam }, signal),
@@ -113,11 +112,11 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormP
   const pending = create.isPending
   useEffect(() => onPending(pending), [pending, onPending])
   const domainOptions = useInfiniteQuery({
-    queryKey: ['nightmail', api.mode, 'domains', 'key-options'],
+    queryKey: ['nightmail', 'domains', 'key-options'],
     enabled: open && workspace,
     initialPageParam: { page: 1 } as Pick<PageRequest, 'page' | 'cursor'>,
     queryFn: ({ pageParam, signal }) => api.domains.list({ ...pageParam, pageSize: 10 }, signal),
-    getNextPageParam: last => last.nextCursor ? { cursor: last.nextCursor } : api.mode === 'demo' && last.total !== undefined && last.page * last.pageSize < last.total ? { page: last.page + 1 } : undefined,
+    getNextPageParam: last => last.nextCursor ? { cursor: last.nextCursor } : undefined,
     staleTime: 60_000,
     retry: false,
   })

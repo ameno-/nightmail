@@ -1,11 +1,10 @@
 // Routes: the route editor ("Goes to"), opened from a route row or an address's page.
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
-import { Alert, Button, Checkbox, ConfirmDialog, Dialog, ErrorState, Field, Input, Select, Switch } from '../../components/ui'
+import { Alert, Button, Checkbox, ConfirmDialog, Dialog, ErrorState, Field, Input, Select, Switch, fieldError, MutationError } from '../../components/ui'
 import { useApiDef, useApiMutation } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { InboundAddress, InboundWebhook, MailRoute } from '../../data/types'
-import { fieldError, MutationError } from '../settings/shared'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { CreatedEndpointDialog, EndpointDialog, type Endpoint } from './ritual-connections'
 import '../settings/settings.css'

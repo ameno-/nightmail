@@ -125,13 +125,6 @@
 .page-surface .email-detail-page > .ui-page-header > .cluster:first-child { flex: 1 1 0; flex-wrap: nowrap; align-items: flex-start; min-width: 0; max-width: none; }
 .page-surface .email-detail-page > .ui-page-header > .cluster:last-child:not(:first-child) { flex: none; align-items: center; min-height: var(--control-height); }
 .page-surface .email-detail-page > .ui-page-header h1 { --title-line: 24px; min-width: 0; padding-block: calc((var(--control-height) - var(--title-line)) / 2); line-height: var(--title-line); overflow-wrap: anywhere; }
-/* A sender: the name, then the address with its brackets, which wraps to its own line as one piece. */
-.email-sender { display: flex; flex-wrap: wrap; column-gap: .3em; }
-.email-sender > span { min-width: 0; max-width: 100%; }
-.email-sender__address { display: flex; }
-.email-sender__address > .private-address { min-width: 0; }
-.email-sender .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
-.email-sender .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
 /* The surface is a fixed-height flex column; headers, notices and toolbars keep their height when content overflows. */
 .page-surface .email-detail-page > :not(.email-detail-grid), .page-surface .logs-page > :not(.logs-table) { flex-shrink: 0; }
 .page-surface .logs-page .search-box { min-width: 0; }

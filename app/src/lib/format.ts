@@ -6,16 +6,15 @@ export function date(value: string | null | undefined, options?: Intl.DateTimeFo
   if (Number.isNaN(parsed.getTime())) return '—'
   return new Intl.DateTimeFormat('en-US', options ?? { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }).format(parsed)
 }
+/** A file or mailbox size in binary units: 512 B, 1.5 KB, 12.0 MB. */
+export const fileSize = (bytes: number) => bytes < 1024 ? `${number(bytes)} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
 export const time = (value: string) => date(value, { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })
 export function shortDateTime(value: string) {
   const sameYear = new Date(value).getUTCFullYear() === new Date().getUTCFullYear()
   return date(value, { month: 'short', day: 'numeric', ...(sameYear ? {} : { year: 'numeric' }), hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })
 }
 export const label = (value: string) => value.replaceAll('_', ' ').replace(/^./, c => c.toUpperCase())
-export const formatNumber = number
-export const formatPercent = percent
 export const formatDate = date
-export const formatTime = time
 // Coarse, human-readable distance from now ("in 5 hours", "2 minutes ago"); best for estimates, not exact times.
 /** How long ago, the way tables say it: 5m, 3h, 2d. The column names the time, so no row repeats "ago". */
 export function ago(value: string | null | undefined, now = Date.now()) {

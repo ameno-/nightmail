@@ -172,7 +172,7 @@ export const listAgentTokens = <ThrowOnError extends boolean = false>(options?: 
 });
 
 /**
- * A short-lived, nonrefreshable token for temporary scripts. Requires an MCP approval and never exceeds it; manage tokens cannot administer credentials.
+ * A short-lived, nonrefreshable token for temporary scripts. Requires an MCP approval and never exceeds it. A manage token makes no change that outlasts it: no API keys, webhooks, endpoints, routes, rituals, mail client passwords or inbox connections.
  */
 export const createAgentToken = <ThrowOnError extends boolean = false>(options: Options<CreateAgentTokenData, ThrowOnError>): RequestResult<CreateAgentTokenResponses, CreateAgentTokenErrors, ThrowOnError> => (options.client ?? client).post<CreateAgentTokenResponses, CreateAgentTokenErrors, ThrowOnError>({
     security: [

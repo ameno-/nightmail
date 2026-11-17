@@ -3,12 +3,11 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useGuardedMutation } from '../../lib/single-flight'
 import { ArrowUpRight } from 'lucide-react'
 import { useLocation } from 'react-router'
-import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, Field, Input, SectionHeader, Select, StatusBadge } from '../../components/ui'
+import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, Field, Input, SectionHeader, Select, StatusBadge, fieldError, MutationError } from '../../components/ui'
 import { useApi, useRegion } from '../../data/context'
 import { regionCatalogKey, regionDiscoveryKey, useRegionAccess, useRegionCatalog, useRegionDiscovery } from '../../data/regions'
 import type { AutoValidationMode, RegionCatalog, RegionCatalogEntry, SesDiscovery, Stream } from '../../data/types'
 import { date, label, number } from '../../lib/format'
-import { fieldError, MutationError } from './shared'
 import { RegionDiscoverySkeleton, settingsColumns } from './skeletons'
 import { awaitingConfirmationOnly, SetupChecklist } from './setup-checklist'
 import { ReputationSection } from './reputation'
@@ -124,7 +123,7 @@ function RegionDetail({entry, inspected}: {entry: RegionCatalogEntry; inspected:
     {!confirmOpen && <MutationError error={provision.error} />}
     {ready ? <details className="settings-provisioning-details"><summary>Provisioning details</summary><div className="stack">{actions}{checklist}</div></details> : checklist}
     {!report && (discovery.isFetching || discovering) ? <RegionDiscoverySkeleton /> : report ? <DiscoveryReport report={report} entry={entry} /> : null}
-    <ConfirmDialog open={confirmOpen} onOpenChange={setConfirmOpen} title={`Provision ${entry.region}?`} description={api.mode === 'demo' ? 'Simulates SES configuration sets and SNS feedback. No real AWS resources or email are changed.' : `Creates or repairs SES configuration sets and SNS feedback in ${entry.region} of AWS account ${report?.account?.id ?? '(not identified)'}: real changes, even in Test. Email, DNS and production access don’t change.`} confirmLabel="Provision resources" pending={provision.isPending} onConfirm={() => provision.mutateAsync()} />
+    <ConfirmDialog open={confirmOpen} onOpenChange={setConfirmOpen} title={`Provision ${entry.region}?`} description={`Creates or repairs SES configuration sets and SNS feedback in ${entry.region} of AWS account ${report?.account?.id ?? '(not identified)'}: real changes, even in Test. Email, DNS and production access don’t change.`} confirmLabel="Provision resources" pending={provision.isPending} onConfirm={() => provision.mutateAsync()} />
   </section>
 }
 

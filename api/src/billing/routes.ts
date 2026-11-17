@@ -27,7 +27,7 @@ const Prices = z.object({ emailPerThousand: z.string().describe('USD per 1,000 e
   freeStorageBytes: z.number().int(), topUpMinCents: z.number().int(), currency: z.literal('USD') });
 export const BillingSummarySchema = z.object({
   enforcement: z.enum(['off', 'shadow', 'enforce']).describe('off: nothing is metered for billing. shadow: usage is recorded and priced but nothing is charged. enforce: usage is taken from the balance hourly.'),
-  mode: z.enum(['prepaid', 'invoiced', 'exempt']),
+  mode: z.enum(['prepaid', 'exempt']).describe('prepaid: usage is taken from the balance. exempt: the workspace is free (see freePlan).'),
   state: z.object({
     sending: z.enum(['ok', 'low', 'paused']).describe('paused: sends get 402 BALANCE_EXHAUSTED until credit is added.'),
     receiving: z.enum(['ok', 'grace', 'held']).describe('grace: the balance is below $0 and received mail is still accepted until grace.receiveHoldAt; held: new received mail is stored but not delivered until a top-up. While the installation doesn’t hold received mail, receiving stays ok.'),
@@ -263,9 +263,9 @@ const Mutation = z.object({ 'Idempotency-Key': z.string().min(1).max(200).option
 // Money moves only under a key: a retried request (a lost response, a timeout) returns the first answer instead of
 // crediting, debiting or refunding through Stripe a second time.
 const MoneyMutation = z.object({ 'Idempotency-Key': z.string().min(1).max(200).describe('Required: a retry with the same key moves no money twice.') });
-type Account = { mode: string; paid_mode: string; balance_uc: string; promo_uc: string; unpaid_since: string | null; free_via: string | null; free_until: string | null; free_reason: string | null };
-const accountOf = async (tx: DbExecutor, wid: string, lock = false) => (await tx.execute<Account>(sql`SELECT mode,paid_mode,balance_uc::text,promo_uc::text,unpaid_since::text,free_via,free_until::text,free_reason
-  FROM billing_accounts WHERE workspace_id=${wid} ${lock ? sql`FOR UPDATE` : sql``}`)).rows[0] ?? { mode: 'prepaid', paid_mode: 'prepaid', balance_uc: '0', promo_uc: '0', unpaid_since: null, free_via: null, free_until: null, free_reason: null };
+type Account = { mode: string; balance_uc: string; promo_uc: string; unpaid_since: string | null; free_via: string | null; free_until: string | null; free_reason: string | null };
+const accountOf = async (tx: DbExecutor, wid: string, lock = false) => (await tx.execute<Account>(sql`SELECT mode,balance_uc::text,promo_uc::text,unpaid_since::text,free_via,free_until::text,free_reason
+  FROM billing_accounts WHERE workspace_id=${wid} ${lock ? sql`FOR UPDATE` : sql``}`)).rows[0] ?? { mode: 'prepaid', balance_uc: '0', promo_uc: '0', unpaid_since: null, free_via: null, free_until: null, free_reason: null };
 const FreeUntil = z.iso.datetime({ offset: true }).nullable().optional().describe('When it ends (in the future, at most 5 years ahead); omit or null for no end.');
 function futureUntil(until: string | null | undefined) {
   if (!until) return null;
@@ -375,11 +375,11 @@ function registerOperatorBilling(app: App) {
   });
 
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'put', path: '/v1/operator/billing/{wid}/mode', operationId: 'operatorSetBillingMode',
-    request: { params: WorkspaceParam, headers: Mutation, body: json(z.object({ mode: z.enum(['prepaid', 'invoiced', 'exempt']), reason: Reason, ticketRef: z.string().trim().min(1).max(200).optional() }).strict()) },
+    request: { params: WorkspaceParam, headers: Mutation, body: json(z.object({ mode: z.enum(['prepaid', 'exempt']), reason: Reason, ticketRef: z.string().trim().min(1).max(200).optional() }).strict()) },
     responses: { 200: response(Done), ...errors } }), async c => {
     const wid = c.req.valid('param').wid, body = c.req.valid('json');
-    // exempt is the workspace's free flag (no end); prepaid or invoiced is what it pays as, and clears that flag. A free
-    // owner's account still keeps it free (see /free and /people/{userId}/free).
+    // exempt turns the workspace's free flag on with no end; prepaid turns it off. A free owner's account still keeps
+    // it free (see /free and /people/{userId}/free).
     return c.json(await moneyChange(c, wid, body, 'billing-mode', async (tx, before, who) => {
       await tx.execute(sql`SELECT billing_set_mode(${wid}, ${body.mode}, ${body.reason}, ${who})`);
       return before;

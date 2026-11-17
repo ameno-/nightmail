@@ -2,7 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { createHmac, hkdfSync, randomBytes } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { auditContext, auditInsert } from './audit.js';
-import { actorMailAccess, ApiError, errors, id, isoTime, json, response, security, type App, type Ctx, type MailboxAccess } from './core.js';
+import { actorMailAccess, ApiError, errors, id, isoTime, json, lasting, response, security, type App, type Ctx, type MailboxAccess } from './core.js';
 
 export function passwordDigest(pepper: string, value: string) {
   return createHmac('sha256', hkdfSync('sha256', pepper, '', 'bane:protocol-password:v1', 32))
@@ -15,13 +15,12 @@ const base = '/v1/inboxes/{id}/app-passwords',
   params = z.object({ id: z.string().min(1).max(120) }),
   meta = { tags: ['Agent inboxes'], security };
 export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAccess) {
-  const manager = (c: Ctx, issue = false) => {
+  const manager = (c: Ctx, change = false) => {
     const v = access(c);
     if (!v.admin || v.mailboxIds || c.get('actor')?.role === 'member')
       throw new ApiError(403, 'ADMIN_REQUIRED', 'An unrestricted workspace manager must grant mail client access.');
     // A password outlives the token that asks for it, like an API key or an inbound key.
-    if (issue && c.get('actor')?.credential === 'agentToken')
-      throw new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Temporary agent tokens cannot create mail client passwords.');
+    if (change) lasting(c, 'create or revoke mail client passwords');
     return v.workspaceId;
   };
   app.openapi(
@@ -122,7 +121,7 @@ export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAcce
       responses: { 200: response(z.object({ revoked: z.boolean() })), ...errors },
     }),
     async (c) => {
-      const wid = manager(c),
+      const wid = manager(c, true),
         { id, passwordId } = c.req.valid('param');
       const { rows } = await c.env.db.execute<{ ok: boolean }>(
         sql`WITH revoked AS MATERIALIZED (SELECT inbox_revoke_password(${wid},${id},${passwordId}) ok),

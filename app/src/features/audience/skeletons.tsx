@@ -56,9 +56,6 @@ export function AudienceMembersSkeleton() {
 export function ListDetailBodySkeleton() {
   return <LoadingRegion label="Loading list"><AudienceMembersSkeleton /></LoadingRegion>
 }
-export function AudiencePreviewSkeleton() {
-  return <LoadingRegion label="Loading audience preview"><AudienceSummarySkeleton /><TableSkeleton columns={memberColumns} rows={8} /></LoadingRegion>
-}
 export function ContactDetailBodySkeleton() {
   return <><div className="audience-summary cluster"><SkeletonText width={240} /><SkeletonText width={94} /></div>
     <div className="section audience-properties"><section><SectionHeader title="Properties" /><dl>{['Full name', 'Country', 'Created', 'Last opened'].map(label => <Fragment key={label}><dt>{label}</dt><dd><SkeletonText width="65%" /></dd></Fragment>)}</dl></section></div>
