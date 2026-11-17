@@ -5409,6 +5409,9 @@ describe('Hosted MCP OAuth and tools', () => {
   });
 
   test('Support request logs: Workers Logs lines of the grant’s workspaces only, allow-listed, grouped, weighted, and unavailable without Cloudflare', async t => {
+    // One clock for the whole test, as Postgres's now() is one for its transaction: the default window ends at the next
+    // whole minute and keys the 60-second cache, so two reads either side of a minute boundary missed it (dev, Nov 17).
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start' }, observability: undefined });
       const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
