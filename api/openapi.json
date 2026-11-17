@@ -55937,6 +55937,7 @@
           }
         ],
         "operationId": "listInboundAddresses",
+        "deprecated": true,
         "summary": "List receivable addresses",
         "description": "An address key sees only addresses it can access.",
         "parameters": [
@@ -56146,6 +56147,7 @@
           }
         ],
         "operationId": "createInboundAddress",
+        "deprecated": true,
         "summary": "Create a receivable address",
         "description": "Admin only. The domain must be verified for this workspace; mail arrives once its receiving MX record is active. Permanent addresses claim earlier unrouted mail for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.",
         "requestBody": {
@@ -56301,6 +56303,7 @@
           }
         ],
         "operationId": "getInboundAddress",
+        "deprecated": true,
         "summary": "Read a receivable address",
         "parameters": [
           {
@@ -56457,6 +56460,7 @@
           }
         ],
         "operationId": "updateInboundAddress",
+        "deprecated": true,
         "description": "Admin only. Only supplied fields change. The address, public sender and expiry are immutable.",
         "parameters": [
           {
@@ -56623,6 +56627,7 @@
           }
         ],
         "operationId": "deleteInboundAddress",
+        "deprecated": true,
         "description": "Admin only. Releases this address and removes its per-address state. Stored messages are kept; future mail follows normal routing. If a route delivers to this inbox, pass detach=true to remove it from those routes in the same change.",
         "parameters": [
           {
