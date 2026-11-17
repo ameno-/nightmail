@@ -7,7 +7,8 @@ import {mimeIndex} from './mailbox-mime-index.js';
 import { attachmentLinks, attachments as sendingAttachments, emails } from './db/sending.js';
 import { splitThreadingHeaders } from './custom-headers.js';
 import { domains } from './db/operations.js';
-import { lockedSettings, regionalSender, regionalSending, unverifiedSender, verifiedClaim } from './domain-claims.js';
+import { regionalSender, regionalSending, unverifiedSender, verifiedClaim } from './domain-claims.js';
+import { claimsOnly, lockedSettings, lockSendScope, type ClaimsOnly, type SendScope } from './send-scope.js';
 import { claimReceives, connectionReady } from './states.js';
 import { mailAttachments, mailboxAddresses, mailboxDomains, mailboxes, mailboxMessages, mailMessages, mailThreads, type MailAddress, type SendLimits } from './db/mailbox.js';
 import { recordEvents, mailboxEventCtes } from './mailbox-events.js';
@@ -31,14 +32,14 @@ const ownsUpload = (wid: string, file: ResolvedAttachment) => file.sourceTemplat
   : file.storageKey === uploadKey(wid, file.id) || file.storageKey === `${wid}/attachments/${file.id}` || file.storageKey === `${wid}/live/attachments/${file.id}`;
 type MailboxRow = typeof mailboxes.$inferSelect;
 type MessageRow = typeof mailMessages.$inferSelect;
-const mailboxSender = (runtime:Runtime,from:string,wid:SQL=sql`d.workspace_id`) => regionalSending(runtime)
-  ? sql`EXISTS (SELECT FROM ${regionalSender(runtime,wid,from.split('@')[1]!.toLowerCase())} r WHERE r.verified AND r.connection IS NOT NULL)`
+const mailboxSender = (runtime:Runtime,locks:SendScope|ClaimsOnly,from:string,wid:SQL=sql`d.workspace_id`) => regionalSending(runtime)
+  ? sql`EXISTS (SELECT FROM ${regionalSender(runtime,locks,wid,from.split('@')[1]!.toLowerCase())} r WHERE r.verified AND r.connection IS NOT NULL)`
   : verifiedClaim(wid,sql`d.region`,sql`${from.split('@')[1]!.toLowerCase()}::text`);
 
 /** Resolve to immutable sending uploads before admission, never inside a message transaction. */
 export async function resolveAttachments(runtime:Runtime, mailbox:Pick<MailboxRow,'id'|'workspaceId'|'domainId'>, items:AttachmentInput[],from:string):Promise<ResolvedAttachment[]> {
   const scope={workspaceId:mailbox.workspaceId}, out:ResolvedAttachment[]=[];
-  if(items.length && runtime.config.multiTenant && !(await runtime.db.execute(sql`SELECT 1 FROM mailbox_domains d WHERE d.id=${mailbox.domainId} AND d.workspace_id=${scope.workspaceId} AND ${mailboxSender(runtime,from)}`)).rowCount)throw unverifiedSender();
+  if(items.length && runtime.config.multiTenant && !(await runtime.db.execute(sql`SELECT 1 FROM mailbox_domains d WHERE d.id=${mailbox.domainId} AND d.workspace_id=${scope.workspaceId} AND ${mailboxSender(runtime,claimsOnly,from)}`)).rowCount)throw unverifiedSender();
   for(const item of items){
     if ('content' in item){
       const { storeAttachmentBytes } = await wrapModuleLoad(() => import('./sending.js'));
@@ -204,12 +205,10 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
       LEFT JOIN provider_pool_regions p ON p.region=c.region AND p.aws_account_id=c.aws_account_id
       LEFT JOIN mailbox_regions r ON r.region=c.region AND r.workspace_id=c.workspace_id AND r.account_id=c.aws_account_id
       WHERE c.workspace_id=d.workspace_id AND c.region=d.region AND ${connectionReady(sql`c`)})` : sql`(SELECT r.bucket FROM mailbox_regions r WHERE r.region=d.region AND r.workspace_id=d.workspace_id)`;
-  const { queueMailboxEmail, lockAdmission } = await wrapModuleLoad(() => import('./sending.js'));
-  // Admission, then settings, then the sender's claim: the order of every reservation, connection change and send.
-  // The claim check reads the workspace through the settings row, so its claim lock waits behind that row's lock.
-  await lockAdmission(tx, message.actor);
+  const { queueMailboxEmail } = await wrapModuleLoad(() => import('./sending.js'));
+  const held = await lockSendScope(tx, message.scope.workspaceId);
   const mx=runtime.config.multiTenant;
-  const domain=(await tx.execute<{id:string;region:string;bucket:string|null;verified:boolean}>(sql`${mx ? sql`WITH ${lockedSettings(message.scope.workspaceId)} ` : sql``}SELECT d.id,d.region,${bucket} AS bucket,${mx ? mailboxSender(runtime,message.from,sql`s.workspace_id`) : sql`true`} AS verified
+  const domain=(await tx.execute<{id:string;region:string;bucket:string|null;verified:boolean}>(sql`${mx ? sql`WITH ${lockedSettings(held)} ` : sql``}SELECT d.id,d.region,${bucket} AS bucket,${mx ? mailboxSender(runtime,held,message.from,sql`s.workspace_id`) : sql`true`} AS verified
     FROM mailbox_domains d ${mx ? sql`LEFT JOIN settings s ON s.workspace_id=d.workspace_id ` : sql``}WHERE d.id=${message.mailbox.domainId} AND d.workspace_id=${message.scope.workspaceId}`)).rows[0];
   if (domain && !domain.verified) throw unverifiedSender(); // Before any attachment is written outside PostgreSQL.
   if (!domain?.bucket) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_READY', 'The mailbox domain has no receiving setup; enable it again.');
@@ -228,7 +227,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
     ...message.headers.map(header => ({ Name: header.name, Value: header.value })),
   ];
   const fromName = message.fromName ?? message.mailbox.displayName;
-  const { emailId } = await queueMailboxEmail(runtime, tx, message.actor, { protocolEnvelope:!!message.protocolArchive,from: message.from, fromName: fromName ?? undefined, to: message.to, cc: message.cc, bcc: message.bcc, replyTo: message.replyTo, region: regionalSending(runtime)?message.region:domain.region, subject: message.subject, html: message.html, text: message.text, attachments: sendingIds, headers, tracking: message.tracking, screen: message.screen, sealed: message.sealed }, locked.replyAuthors);
+  const { emailId } = await queueMailboxEmail(runtime, tx, held, message.actor, { protocolEnvelope:!!message.protocolArchive,from: message.from, fromName: fromName ?? undefined, to: message.to, cc: message.cc, bcc: message.bcc, replyTo: message.replyTo, region: regionalSending(runtime)?message.region:domain.region, subject: message.subject, html: message.html, text: message.text, attachments: sendingIds, headers, tracking: message.tracking, screen: message.screen, sealed: message.sealed }, locked.replyAuthors);
   const now = new Date().toISOString();
   let threadId = message.threadId;
   if (!threadId) { threadId = id('thr'); await tx.insert(mailThreads).values({ id: threadId, ...message.scope, subject: normalizeSubject(message.subject).slice(0, 998), messageCount: 0, lastMessageAt: now }); }

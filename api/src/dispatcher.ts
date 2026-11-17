@@ -6,6 +6,7 @@ import { approvedOriginUser, campaignVerdicts, checkedDispatchAttachments, forma
 import { receivingPolicy } from './mailbox-ingest-input.js';
 import { principal } from './mail-gateway.js';
 import { regionalSender, sendingConnections, verifiedClaim } from './domain-claims.js';
+import { claimsOnly } from './send-scope.js';
 import { heldStream } from './hosted-sending.js';
 import { countScreened, finishCampaigns, reopenQueuedCampaigns, type TenantState } from './states.js';
 import { credentialFingerprint, discoveryTarget } from './ses-region-state.js';
@@ -554,7 +555,7 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
       WHERE me.id IN (SELECT workspace_id FROM input) AND me.quota_sponsor IS NOT NULL AND NOT me.exempt_hosted_quotas ORDER BY sp.id FOR SHARE OF sp
     ), ` : sql``}pinned_routes AS MATERIALIZED (
       ${runtime.config.multiTenant ? sql`SELECT keys.*,r.* FROM (SELECT DISTINCT workspace_id,split_part(sender,'@',2) AS host FROM input WHERE binding IS NOT NULL) keys
-        CROSS JOIN LATERAL ${regionalSender(runtime,sql`keys.workspace_id`,sql`keys.host`)} r` : sql`SELECT 1`}
+        CROSS JOIN LATERAL ${regionalSender(runtime,claimsOnly,sql`keys.workspace_id`,sql`keys.host`)} r` : sql`SELECT 1`}
     ), eligibility AS MATERIALIZED (
       SELECT x.id,
         CASE WHEN starts_with(x.actor_key_id, 'mcp_') THEN x.mcp_allowed

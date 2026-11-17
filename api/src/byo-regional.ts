@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { z } from '@hono/zod-openapi';
 import { createHash } from 'node:crypto';
-import { ApiError, id, ModuleLoadError, notFound, wrapModuleLoad, type Runtime, type DbExecutor, type JobHandler } from './core.js';
+import { ApiError, id, ModuleLoadError, notFound, type Runtime, type DbExecutor, type JobHandler } from './core.js';
 import { assume, loadStsSdk } from './provider-credentials.js';
 import { requirePlatformAccount } from './config.js';
 import {TAG_PREFIX} from './resource-tags.js';
@@ -10,6 +10,7 @@ import { JobDeferred, retryDatabaseFailures } from './jobs.js';
 import { acquireRegionProvisioning, campaignReserved, finishRegionProvisioning, verifyImportedClaims } from './states.js';
 import { claimNameAllowed, releaseConnectionClaims } from './domain-claims.js';
 import { getRegionSettings } from './ses-region-state.js';
+import { lockSendScope } from './send-scope.js';
 import { byoEnabled } from './byo-pilot.js';
 
 export const regionLabels:Record<string,string>={'us-east-2':'Ohio','us-east-1':'N. Virginia','us-west-1':'N. California','us-west-2':'Oregon','af-south-1':'Cape Town','ap-south-1':'Mumbai','ap-south-2':'Hyderabad','ap-southeast-1':'Singapore','ap-southeast-2':'Sydney','ap-southeast-3':'Jakarta','ap-southeast-4':'Melbourne','ap-southeast-5':'Malaysia','ap-southeast-6':'New Zealand','ap-southeast-7':'Thailand','ap-northeast-1':'Tokyo','ap-northeast-2':'Seoul','ap-northeast-3':'Osaka','ca-central-1':'Canada Central','ca-west-1':'Calgary','eu-central-1':'Frankfurt','eu-central-2':'Zurich','eu-west-1':'Ireland','eu-west-2':'London','eu-west-3':'Paris','eu-south-1':'Milan','eu-south-2':'Spain','eu-north-1':'Stockholm','il-central-1':'Tel Aviv','mx-central-1':'Mexico Central','me-south-1':'Bahrain','me-central-1':'UAE','sa-east-1':'São Paulo'};
@@ -368,9 +369,8 @@ const bind=runV5(async(r,c,p,attempt)=>{
 const disconnectId=(c:V5Connection)=>'byo.disconnect:'+c.id;
 export async function disconnectV5(r:Runtime,wid:string,connectionId:string) {
   await writable(r,wid);
-  const { lockAdmission } = await wrapModuleLoad(() => import('./sending.js'));
   return r.db.transaction(async db=>{
-    await lockAdmission(db,{workspaceId:wid});await getRegionSettings(db,wid,'update');
+    await lockSendScope(db,wid,{settings:'update'});
     const c=await connection(db,wid,true);if (!c || c.id!==connectionId) throw stale();
     if (c.state!=='disconnecting') {
       const busy=()=>conflict('CONNECTION_IN_USE','Finish outstanding mail, campaigns and running setup jobs before disconnecting.');
