@@ -702,15 +702,9 @@ export async function sendToEndpoint(runtime: Runtime, w: string, h: ClaimedWebh
   await runtime.db.transaction(async tx => {
     await checkExternal(tx, w, value);
     const [m] = await tx.select().from(mailMessages).where(and(eq(mailMessages.workspaceId, w), eq(mailMessages.id, event.messageId), eq(mailMessages.direction, 'inbound'), retainedMail()));
-    // Whether it may be forwarded never changes after ingest (forwardEligibility); only whether it is still kept does.
-    let eligible = m?.verdicts.forwardEligible;
-    if (m && eligible === undefined) {
-      // Stored without it (by the Worker this release replaces): decide by the same rule now. The answer is kept with
-      // the message when the forward goes ahead; a refusal rolls back and is decided again on a retry.
-      eligible = (await import('./mailbox-ingest.js')).storedForwardEligibility(m);
-      await tx.execute(sql`UPDATE mail_messages SET verdicts=verdicts||jsonb_build_object('forwardEligible',${eligible}::boolean) WHERE workspace_id=${w} AND id=${m.id} AND NOT verdicts ? 'forwardEligible'`);
-    }
-    if (!m || eligible !== true)
+    // Whether it may be forwarded is decided once at ingest (forwardEligibility); only whether it is still kept changes.
+    // A message stored without the verdict (sandbox mail, an IMAP append) is never forwarded.
+    if (!m || m.verdicts.forwardEligible !== true)
       throw new ApiError(422, 'FORWARD_BLOCKED', 'Automated, junk, unparsed, looped or unscanned mail is never forwarded.');
     const recipient = event.data.recipients![0]!;
     const [box] = await tx.select().from(mailboxes).where(and(eq(mailboxes.workspaceId, w), sql`id=(SELECT mailbox_id FROM mailbox_addresses WHERE workspace_id=${w} AND address IN (${recipient},regexp_replace(${recipient},'[+][^@]*@','@')) ORDER BY (address=${recipient}) DESC LIMIT 1)`));

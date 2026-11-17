@@ -102,13 +102,6 @@ export function forwardEligibility(message: { status?: string; automated?: boole
   return message.status === 'received' && !message.automated && !message.spam && message.verdicts?.virus === 'PASS' && message.verdicts.dmarc !== 'FAIL'
     && headerNames.length < 200 && !headerNames.some(name => FORWARD_BLOCKING_HEADERS.has(name)) && headerNames.filter(name => name === 'received').length < 25;
 }
-/**
- * The same rule for a message stored without forwardEligible (before this release, or by the Worker it replaces while
- * it rolls out), over its stored columns: its stored headers are capped at 200 (so 200 count as incomplete), and an
- * earlier forwardSafe refusal stands. Migration 321 applies this to the messages stored before it.
- */
-export const storedForwardEligibility = (message: { status: string; automated: boolean; spam: boolean; verdicts: Verdicts; headers: MailHeader[] }) =>
-  (message.verdicts as { forwardSafe?: boolean }).forwardSafe !== false && forwardEligibility(message, message.headers.map(h => h.name.toLowerCase()));
 export function headersOf(email: Email | null): MailHeader[] {
   const out: MailHeader[] = []; let size = 0;
   for (const header of email?.headers ?? []) { if (header.key==='bcc' || header.key==='resent-bcc') continue; size += header.originalKey.length + header.value.length; if (size > HEADER_LIMIT || out.length >= 200) break; out.push({ name: header.originalKey, value: header.value }); }

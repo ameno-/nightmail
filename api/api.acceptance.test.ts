@@ -18546,36 +18546,73 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(await disconnected,'SCAN_STALE',`${first} first: the disconnect gets past its locks (no connection to disconnect here).`);
     }
   });
-  // Migration 321 adds forwardEligible to stored mail before the new Worker serves; the Worker it replaces keeps storing
-  // mail without it until then. A message it commits after the migration ran is decided by the same rule on read.
-  test('forward rollout: mail the replaced Worker commits after migration 321 is decided on read, not refused',async t=>{
-    const [{nodeRuntime},{sendToEndpoint},{encrypt}]=await Promise.all([import('./src/adapters/node.js'),import('./src/endpoints.js'),import('./src/operations.js')]);
-    const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
-    const a=await fixtureDatabase(t),b=await fixtureDatabase(t),w=unique('fwdroll'),hook='con_'+randomUUID().replaceAll('-',''),thread=unique('thr'),mid=unique('msg');
-    cleanup(t,async()=>{
-      for (const table of ['mail_messages','mail_threads','mail_endpoints','mailbox_webhooks']) await a.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[w]);
-      await a.query('DELETE FROM workspaces WHERE id=$1',[w]);
-    });
-    await a.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[w]);
-    // The forward endpoint as the replaced Worker writes one (migration 322 copies it onto its row).
-    await a.query("INSERT INTO mailbox_webhooks(id,workspace_id,name,url,event_types,encrypted_secret) VALUES($1,$2,'forward:team','https://ritual.invalid/','[]','synthetic')",[hook,w]);
-    await a.query("INSERT INTO mail_endpoints(workspace_id,ref,hook_id,encrypted_value,verified) VALUES($1,'forward:team',$2,$3,true)",[w,hook,await encrypt(runtime,'teammate@example.net',`${w}:endpoint:${hook}`)]);
-    await a.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[thread,w]);
-    // The migration's own statement, limited to this workspace so it leaves the other tests' mail alone.
-    const migration=await readFile(new URL('./migrations/321_forward_eligibility.sql',import.meta.url),'utf8'),scoped=migration.replace("WHERE m.direction = 'inbound'","WHERE m.workspace_id = $1 AND m.direction = 'inbound'");
-    assert.notEqual(scoped,migration);
-    // The replaced Worker stores a clean message with forwardSafe only, and commits after the migration ran.
-    await b.query('BEGIN');
+  // Migration 332 rewrites verdicts on mail_messages, a large hot table, while the previous release keeps ingesting and
+  // forwarding: one committed page at a time, resumable, and never over an answer a live forward stored meanwhile. It
+  // runs here on a copy of the table in its own schema, so two connections can take row locks on committed rows.
+  test('forward contract: 332 pages through every message, resumes after a lock timeout and keeps what a live writer stored', async t => {
+    const source = await readFile(new URL('./migrations/332_forward_eligible_only.sql', import.meta.url), 'utf8');
+    assert.match(source, /^-- bane:batched\n/);
+    const schema = 'c332_' + randomUUID().replaceAll('-', '').slice(0, 12), [admin, migrator, live] = await Promise.all([fixtureDatabase(t), fixtureDatabase(t), fixtureDatabase(t)]);
+    await admin.query(`CREATE SCHEMA ${schema}; CREATE TABLE ${schema}.mail_messages (LIKE public.mail_messages INCLUDING ALL)`);
     try {
-      await b.query("INSERT INTO mail_messages(id,workspace_id,direction,thread_id,status,verdicts,headers,lifecycle) VALUES($1,$2,'inbound',$3,'received',$4,$5,'default')",
-        [mid,w,thread,JSON.stringify({spf:'PASS',dkim:'PASS',dmarc:'PASS',spam:'PASS',virus:'PASS',forwardSafe:true}),JSON.stringify([{name:'Subject',value:'Rollout'}])]);
-      await a.query(scoped,[w]);
-      await b.query('COMMIT');
-    } finally { await b.query('ROLLBACK'); }
-    assert.equal((await a.query("SELECT verdicts ? 'forwardEligible' AS decided FROM mail_messages WHERE id=$1",[mid])).rows[0].decided,false,'The migration never saw it.');
-    // It passes the forward rule and stops at the next check: this fixture has no sending address.
-    const delivery={type:'forward',webhook_id:hook,payload:{messageId:mid,type:'message.received',data:{recipients:[`box@${w}.example`],junk:false}}} as unknown as import('./src/core.js').ClaimedWebhook;
-    await assert.rejects(sendToEndpoint(runtime,w,delivery),{code:'FORWARD_SENDER_REQUIRED'});
+      for (const c of [admin, migrator, live]) await c.query(`SET search_path TO ${schema}, public`);
+      // As migrate.ts runs a batched file: from cursor '', one committed page per call, until the cursor is NULL.
+      const migrate = async () => { let cursor = '', pages = 0; for (;;) { const next = (await migrator.query(source, [cursor])).rows[0].cursor; pages++; if (next === null) return pages; assert.notEqual(next, cursor); cursor = next; } };
+      // 4,500 messages (three pages), each of one kind (in subject), by g % 6.
+      const clean = '{"spf":"PASS","dkim":"PASS","dmarc":"PASS","spam":"PASS","virus":"PASS"}', headers = '[{"name":"From","value":"a@example.org"},{"name":"Received","value":"relay"}]';
+      await admin.query(`INSERT INTO mail_messages(id,workspace_id,thread_id,direction,status,subject,verdicts,headers)
+        SELECT 'm'||lpad(g::text,5,'0'),'contract-332','thr',CASE WHEN g%6=4 THEN 'outbound' ELSE 'inbound' END,CASE WHEN g%6=4 THEN 'sent' ELSE 'received' END,k,
+          CASE k WHEN 'legacy-allowed' THEN $1::jsonb||'{"forwardSafe":true}' WHEN 'legacy-refused' THEN $1::jsonb||'{"forwardSafe":false}'
+            WHEN 'decided-by-321' THEN $1::jsonb||'{"forwardSafe":false,"forwardEligible":true}' WHEN 'current' THEN $1::jsonb||'{"forwardEligible":false}'
+            WHEN 'outbound' THEN '{}'::jsonb ELSE '{"origin":"client-append"}'::jsonb END,
+          CASE WHEN g%6=4 THEN '[]'::jsonb ELSE $2::jsonb END
+        FROM generate_series(1,4500) g, LATERAL (SELECT (ARRAY['legacy-allowed','legacy-refused','decided-by-321','current','outbound','appended'])[g%6+1] AS k) kind`, [clean, headers]);
+      const state = async () => (await admin.query(`SELECT subject AS kind,count(*)::int AS n,count(*) FILTER (WHERE verdicts ? 'forwardSafe')::int AS safe,
+        count(*) FILTER (WHERE verdicts->'forwardEligible'='true')::int AS eligible,count(*) FILTER (WHERE verdicts->'forwardEligible'='false')::int AS refused FROM mail_messages GROUP BY 1 ORDER BY 1`)).rows;
+      const fingerprint = async () => (await admin.query('SELECT md5(string_agg(id||verdicts::text,\',\' ORDER BY id)) AS f FROM mail_messages')).rows[0].f;
+      const row = async (id: string) => (await admin.query('SELECT verdicts FROM mail_messages WHERE id=$1', [id])).rows[0].verdicts;
+      // The live Worker: a forward decides a legacy message on read (its own answer) and holds the row in page two, and
+      // ingest stores new mail on both sides of the cursor, as every message it stores now: forwardEligible, no forwardSafe.
+      assert.deepEqual(await row('m02496'), { ...JSON.parse(clean), forwardSafe: true });
+      await live.query('BEGIN');
+      let committed = false;
+      try {
+        await live.query(`UPDATE mail_messages SET verdicts=verdicts||jsonb_build_object('forwardEligible',false) WHERE id='m02496' AND NOT verdicts ? 'forwardEligible'`);
+        await live.query(`INSERT INTO mail_messages(id,workspace_id,thread_id,direction,subject,verdicts,headers) VALUES('m00000a','contract-332','thr','inbound','new',$1::jsonb||'{"forwardEligible":true}',$2),
+          ('m04999a','contract-332','thr','inbound','new',$1::jsonb||'{"forwardEligible":false}',$2)`, [clean, headers]);
+        // A page that waits longer than lock_timeout fails; the pages before it stay committed.
+        await migrator.query("SET lock_timeout='200ms'");
+        await assert.rejects(migrate(), (e: Json) => e.code === '55P03');
+        assert.deepEqual(await row('m00006'), { ...JSON.parse(clean), forwardEligible: true }, 'Page one committed.');
+        // Run again (migrate.ts starts over from the first page): it waits for the forward, then finishes.
+        await migrator.query("SET lock_timeout='4s'");
+        const rerun = migrate(); rerun.catch(() => {});
+        const livePid = (await live.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+        for (let i = 0; !(await admin.query('SELECT FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))', [livePid])).rowCount; i++) {
+          assert.ok(i < 200, 'The rerun never reached the row the forward holds.'); await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        await live.query('COMMIT'); committed = true;
+        assert.equal(await rerun, 3);
+      } finally { if (!committed) await live.query('ROLLBACK'); }
+      // The forward's answer stands and forwardSafe is gone; ingest's new mail is as it stored it.
+      assert.deepEqual(await row('m02496'), { ...JSON.parse(clean), forwardEligible: false });
+      assert.deepEqual([await row('m00000a'), await row('m04999a')], [{ ...JSON.parse(clean), forwardEligible: true }, { ...JSON.parse(clean), forwardEligible: false }]);
+      // Every kind: legacy mail decided by 321's rule (an earlier refusal stands), an answer already stored kept, nothing
+      // else changed, and no forwardSafe left anywhere. Appended mail has no virus verdict, so the rule refuses it.
+      assert.deepEqual(await state(), [
+        { kind: 'appended', n: 750, safe: 0, eligible: 0, refused: 750 },
+        { kind: 'current', n: 750, safe: 0, eligible: 0, refused: 750 },
+        { kind: 'decided-by-321', n: 750, safe: 0, eligible: 750, refused: 0 },
+        { kind: 'legacy-allowed', n: 750, safe: 0, eligible: 749, refused: 1 },
+        { kind: 'legacy-refused', n: 750, safe: 0, eligible: 0, refused: 750 },
+        { kind: 'new', n: 2, safe: 0, eligible: 1, refused: 1 },
+        { kind: 'outbound', n: 750, safe: 0, eligible: 0, refused: 0 },
+      ]);
+      // Run once more: nothing changes.
+      const done = await fingerprint();
+      assert.equal(await migrate(), 3);
+      assert.equal(await fingerprint(), done);
+    } finally { await admin.query(`DROP SCHEMA ${schema} CASCADE`); }
   });
   // Recheck 2 of #57 (tear witness, 5 steps: accept m1 a, claim, accept m1 ac, lose, legacy-fail -> the previous
   // Worker's unfenced terminal write failed the receipt its reopen had expanded). Lease exhaustion retires a job
@@ -20168,7 +20205,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           assert.equal((await db.query('SELECT FROM mail_forward_once WHERE message_id=$1 AND endpoint=$2',[m.id,hookId])).rowCount,1);
         }finally{await call('PUT','/v1/rituals',{});}
       });
-      await t.test('rituals: one forward rule, recorded at ingest for every message, added to older mail and decided on read for mail stored without it',async()=>{
+      await t.test('rituals: one forward rule, recorded at ingest for every message and added to older mail; mail stored without it is never forwarded',async()=>{
         // tear/delivery witnesses: ingest m1 z, strip m1, rituals forward, ingest m1 b+z, run K m1:F (and the loop variant).
         const {mailboxEventJobs}=await import('./src/mailbox-events.js');
         const hookId=(await db.query("SELECT id AS hook_id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='team' AND type='forward' AND verified",[wid])).rows[0].hook_id;
@@ -20182,31 +20219,34 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         for(const [mid,extra] of cases){raw.set(mid,Buffer.from(`From: Agent <a@example.org>\r\n${extra}Subject: Test ${mid}\r\nMessage-ID: <${mid}@example.org>\r\n\r\nHello`));await submit(mid,['late@receive.example'],'Mail');await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);}
         // Recorded at ingest for every message, though nothing routes this address yet.
         assert.deepEqual(Object.fromEntries(Object.entries(await verdicts()).map(([mid,v])=>[mid,v.forwardEligible])),Object.fromEntries(cases.map(([mid,,ok])=>[mid,ok])));
-        // As stored by earlier deployments: no verdict, or the earlier ingest's forwardSafe (it let List-Id and 25 hops
-        // through). The backfill (migration 321) applies the same rule, keeps an earlier refusal, and runs twice the same.
-        await db.query("UPDATE mail_messages SET verdicts=verdicts-'forwardEligible'-'ritualVerified' WHERE workspace_id=$1 AND ses_message_id=ANY($2)",[wid,cases.map(c=>c[0])]);
-        await db.query(`UPDATE mail_messages SET verdicts=verdicts||'{"forwardSafe":true}' WHERE workspace_id=$1 AND ses_message_id IN ('fwd-list','fwd-hops-25','fwd-old')`,[wid]);
+        // As stored by earlier deployments: no verdict, the earlier ingest's forwardSafe (it let List-Id and 25 hops
+        // through), or both once migration 321 decided it. Migration 332, run as migrate.ts runs a batched file, decides
+        // the first two by the same rule (an earlier refusal stands), keeps an answer already stored, removes forwardSafe
+        // and changes nothing else; a second run changes nothing.
+        await db.query("UPDATE mail_messages SET verdicts=verdicts-'forwardEligible'-'ritualVerified' WHERE workspace_id=$1 AND ses_message_id=ANY($2) AND ses_message_id<>'fwd-hops-24'",[wid,cases.map(c=>c[0])]);
+        await db.query(`UPDATE mail_messages SET verdicts=verdicts-'ritualVerified'||'{"forwardSafe":true}' WHERE workspace_id=$1 AND ses_message_id IN ('fwd-list','fwd-hops-25','fwd-old','fwd-hops-24')`,[wid]);
         await db.query(`UPDATE mail_messages SET verdicts=verdicts||'{"forwardSafe":false}' WHERE workspace_id=$1 AND ses_message_id='fwd-was-refused'`,[wid]);
-        const before=await verdicts(),backfill=await readFile(new URL('./migrations/321_forward_eligibility.sql',import.meta.url),'utf8');
-        await db.query(backfill);const once=await verdicts();await db.query(backfill);assert.deepEqual(await verdicts(),once);
+        const before=await verdicts(),page=await readFile(new URL('./migrations/332_forward_eligible_only.sql',import.meta.url),'utf8');
+        const migrate=async()=>{let cursor='';for(;;){const next=(await db.query(page,[cursor])).rows[0].cursor;if(next===null)return;assert.notEqual(next,cursor);cursor=next;}};
+        await migrate();const once=await verdicts();await migrate();assert.deepEqual(await verdicts(),once);
         assert.deepEqual(Object.fromEntries(Object.entries(once).map(([mid,v])=>[mid,v.forwardEligible])),Object.fromEntries(cases.map(([mid,,ok])=>[mid,ok&&mid!=='fwd-was-refused'])));
-        // It only adds: the Worker it replaces still reads forwardSafe during the rollout, and an explicit refusal stays one.
-        for(const [mid,v] of Object.entries(once)) assert.deepEqual({...v,forwardEligible:undefined},{...before[mid],forwardEligible:undefined},mid);
-        assert.equal(once['fwd-was-refused']!.forwardSafe,false);
-        // Mail the replaced Worker stores during the rollout has no forwardEligible: a forward decides it by the same rule.
-        await db.query("UPDATE mail_messages SET verdicts=verdicts-'forwardEligible' WHERE workspace_id=$1 AND ses_message_id IN ('fwd-old','fwd-old-loop','fwd-was-refused')",[wid]);
+        const others=(v:Json)=>Object.fromEntries(Object.entries(v).filter(([key])=>key!=='forwardSafe'&&key!=='forwardEligible'));
+        for(const [mid,v] of Object.entries(once)) assert.deepEqual(others(v),others(before[mid]),mid);
+        assert.ok(Object.values(once).every(v=>!('forwardSafe' in v)),'No forwardSafe is left.');
+        // Nothing decides a message stored without forwardEligible on read any more: it is never forwarded.
+        await db.query("UPDATE mail_messages SET verdicts=verdicts-'forwardEligible' WHERE workspace_id=$1 AND ses_message_id='fwd-old'",[wid]);
         await call('PUT','/v1/rituals',{rituals:[{key:'forward',source:'export default function route(email,ctx){endpoints.team() }'}],attachments:[{ritual:'forward',target:box.id}]});
         try{
           for(const [mid,,ok] of cases){
-            const [status,error]=ok&&mid!=='fwd-was-refused'?['delivered',null]:['failed','FORWARD_BLOCKED'];
+            const [status,error]=ok&&mid!=='fwd-was-refused'&&mid!=='fwd-old'?['delivered',null]:['failed','FORWARD_BLOCKED'];
             await submit(mid,['late@receive.example',box.address],'Mail');await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);
             const m=(await db.query('SELECT id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];
             const d=(await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,m.id])).rows[0];
             await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:d.id},{id:unique('job'),workspaceId:wid,attempts:1}).catch(()=>{});
             assert.deepEqual((await db.query('SELECT status,last_error FROM mailbox_webhook_deliveries WHERE id=$1',[d.id])).rows[0],{status,last_error:error},mid);
           }
-          assert.equal((await verdicts())['fwd-old']!.forwardEligible,true,'A forward that goes ahead keeps the answer it decided.');
-          const forwarded=(await db.query("SELECT headers FROM mail_messages WHERE workspace_id=$1 AND direction='outbound' AND subject='Fwd: Test fwd-old'",[wid])).rows[0];
+          assert.equal('forwardEligible' in (await verdicts())['fwd-old']!,false,'A refused forward stores no verdict.');
+          const forwarded=(await db.query("SELECT headers FROM mail_messages WHERE workspace_id=$1 AND direction='outbound' AND subject='Fwd: Test fwd-hops-24'",[wid])).rows[0];
           assert.ok(forwarded?.headers.some((h:Json)=>h.name==='X-Nightmail-Loop' && h.value.startsWith('v1.1.')),'A forward carries X-Nightmail-Loop.');
         }finally{await call('PUT','/v1/rituals',{});}
       });
