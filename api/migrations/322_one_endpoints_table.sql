@@ -6,16 +6,20 @@ SET LOCAL lock_timeout='2s';
 -- the policy. Every ID stays (con_ for Slack, Discord and forward endpoints, mwh_ for webhooks), and a non-webhook
 -- endpoint's name moves to key, which webhooks already use, so one unique index covers every endpoint name.
 --
--- Expand only. The migration runs before the new Worker replaces the old one, and the old Worker keeps reading and
--- writing mail_endpoints and mail_action_policies until it is gone:
---   * mail_endpoint_from_legacy and mail_policy_from_legacy copy each of its writes onto the row, so the new code
---     reads only mailbox_webhooks, also for rows the old Worker creates or changes during the deploy;
---   * mail_endpoint_to_legacy copies the new code's writes back to the old tables, so the old Worker still delivers,
---     confirms and stops what the new one created or changed while it drains.
--- Each copy runs only for a write made by a caller (pg_trigger_depth), so the two directions never loop.
+-- Expand only. The migration runs before the new Worker replaces the old one (#357's, which must be deployed first),
+-- and the old Worker keeps reading and writing mail_endpoints and mail_action_policies until it is gone. Both copies
+-- are needed for the few minutes the two overlap:
+--   * mail_endpoint_from_legacy and mail_policy_from_legacy copy each of its writes onto the row. Without them a Slack,
+--     Discord or forward endpoint it creates would read as a webhook, and a recipient's confirm or stop through it would
+--     not reach the new code.
+--   * mail_endpoint_to_legacy copies the new code's writes back. Without it the old Worker would keep forwarding to a
+--     recipient who stopped forwards through the new one, and fail deliveries to endpoints the new one created or confirmed.
+-- Each copy runs only for a write made by a caller (pg_trigger_depth), so the two directions never loop. A copy runs in
+-- the writer's transaction, which is safe because every writer of either Worker locks an endpoint's mailbox_webhooks row
+-- before its mail_endpoints row (#357): no two writes wait on each other in a cycle.
 -- A later release drops mail_endpoints, mail_action_policies and these triggers.
 --
--- Locks are taken in the writers' order: mailbox_webhooks first, then mail_endpoints and mail_action_policies.
+-- This migration takes its locks in the same order: mailbox_webhooks first, then mail_endpoints and mail_action_policies.
 -- Idempotent: IF NOT EXISTS, CREATE OR REPLACE and DROP ... IF EXISTS throughout; the backfill sets the same values again.
 
 ALTER TABLE mailbox_webhooks

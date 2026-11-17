@@ -4234,8 +4234,8 @@ describe('Hosted MCP OAuth and tools', () => {
   // mailbox_webhooks row before its mail_endpoints row, so no old write and new write wait on each other in a cycle.
   // The replaced Worker's statements below are #357's, verbatim, one per call so the test can stop between them.
   test('endpoint rollout overlap (migration 322): the replaced Worker’s and this release’s confirms, stops, edits and dispatch checks never deadlock', async t => {
-    const [{ nodeRuntime }, { answerForward, forwardStopUrl }, { createApp }, { encrypt }, { digest }, { receivingPolicy }] = await Promise.all([import('./src/adapters/node.js'),
-      import('./src/endpoints.js'), import('./src/app.js'), import('./src/operations.js'), import('./src/core.js'), import('./src/mailbox-ingest-input.js')]);
+    const [{ nodeRuntime }, { answerForward, forwardStopUrl }, { forwardStillAllowed }, { createApp }, { encrypt }, { digest }, { receivingPolicy }, { sql }] = await Promise.all([import('./src/adapters/node.js'),
+      import('./src/endpoints.js'), import('./src/dispatcher.js'), import('./src/app.js'), import('./src/operations.js'), import('./src/core.js'), import('./src/mailbox-ingest-input.js'), import('drizzle-orm')]);
     const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL }); cleanup(t, close);
     const db = await fixtureDatabase(t), w = unique('overlap'), app = createApp();
     cleanup(t, async () => {
@@ -4330,6 +4330,21 @@ describe('Hosted MCP OAuth and tools', () => {
       await waitingOn(decliner.pid);
     });
     assert.equal((await decided!).rows[0].ok, false, 'It waited for the decline and saw it.');
+
+    // 5. And the other way: the replaced Worker declines while this release's dispatcher decides.
+    const queuedNew = await forward(false), messageNew = unique('msg'), emailNew = unique('em'), oldDecliner = await connection();
+    await db.query("INSERT INTO mail_messages(id,workspace_id,direction,thread_id,status,lifecycle) VALUES($1,$2,'inbound',$3,'received','default')", [messageNew, w, thread]);
+    await db.query('INSERT INTO mail_forward_once(workspace_id,message_id,endpoint,email_id) VALUES($1,$2,$3,$4)', [w, messageNew, queuedNew.hook, emailNew]);
+    const newCheck = async () => (await runtime.db.execute<{ ok: boolean }>(sql`SELECT ${forwardStillAllowed(runtime, sql`x`)} AS ok FROM (SELECT ${emailNew}::text AS id,${w}::text AS workspace_id,${'forward:' + queuedNew.hook}::text AS actor_key_id) x`)).rows[0]!.ok;
+    assert.equal(await newCheck(), true);
+    let decidedNew: Promise<boolean> | undefined;
+    await inTransaction(oldDecliner.c, async () => {
+      await lockEndpointRow(oldDecliner.c, queuedNew.hook);
+      await oldDecliner.c.query('UPDATE mail_endpoints SET verified=false,proof_hash=NULL,declined_at=now() WHERE workspace_id=$1 AND hook_id=$2', [w, queuedNew.hook]);
+      decidedNew = started(newCheck());
+      await waitingOn(oldDecliner.pid);
+    });
+    assert.equal(await decidedNew!, false, 'It waited for the decline and saw it.');
   });
   test('endpoints and webhooks are one model: one name space, and the same caps through /v1/endpoints and /v1/inbound/webhooks, on create and on resume', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
