@@ -15,7 +15,10 @@ export type DbExecutor = Pick<Database, 'select' | 'insert' | 'update' | 'delete
 export type Permission = 'read' | 'send' | 'manage';
 export interface Actor {
   workspaceId: string; permissions: Permission[]; domains: string[]; keyId: string; credential?: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken' | 'operatorService' | 'support' | 'uiNotesKey'; email?: string; name?: string;
-  /** A UI notes key (src/ui-notes.ts): the operator who made it. It has no workspace and no permissions. */
+  /**
+   * The person behind a credential that is not a session: whose MCP approval this is (for the approval itself, its
+   * agent tokens and the keys it created), or the operator who made a UI notes key (src/ui-notes.ts).
+   */
   userId?: string;
   role?: string; receivingConsent?:boolean; grantId?:string; tokenId?:string;
   // Number of emails queued per region, for a bounded post-commit wake.
@@ -158,6 +161,17 @@ export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody
   principal?: { type: string; workspace?: string }; support?: SupportScope } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;
+/** Who sent a request: its ID, and the client's address and user agent as the entry point (server.ts, worker.ts) set them. */
+export type RequestOrigin = { requestId: string; clientIp: string | null; userAgent: string | null };
+// An in-process call (an MCP tool) is part of its outer request and keeps that request's ID, client and user agent.
+// It rides on the runtime under a private symbol, like the delegated actor, so no header can supply it.
+const outerRequest = Symbol('outerRequest');
+export const withOuterRequest = <R extends Runtime>(runtime: R, origin: RequestOrigin): R => ({ ...runtime, [outerRequest]: origin });
+const outerOf = (runtime: Runtime | undefined) => (runtime as (Runtime & { [outerRequest]?: RequestOrigin }) | undefined)?.[outerRequest];
+/** A new request's ID: the outer request's for an in-process call. */
+export const newRequestId = (runtime: Runtime | undefined) => outerOf(runtime)?.requestId ?? `req_${crypto.randomUUID().replaceAll('-', '')}`;
+export const requestOrigin = (c: Ctx): RequestOrigin => outerOf(c.env)
+  ?? { requestId: c.get('requestId'), clientIp: c.req.header('x-bane-client-ip') ?? null, userAgent: c.req.header('user-agent') ?? null };
 export type ClaimedWebhook = { routed?:boolean;format?:string;name?:string;include?:string[];timeout_seconds?:number;retry_attempts?:number; delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null; owned?: boolean };
 export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, job: { id: string; attempts: number; workspaceId: string;
   /** The claim's lease (lease_until as claimed): the job is still this runner's while it matches. Absent when a handler is called directly. */

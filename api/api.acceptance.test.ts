@@ -3592,7 +3592,7 @@ describe('Hosted MCP OAuth and tools', () => {
         for(const [name,op] of buildMcpCatalog(api)){
           if(op.method!=='get')continue;gets++;
           const path=op.path.replace(/\{([^}]+)\}/g,(_,field:string)=>encodeURIComponent(dummy((spec.paths[op.path].get.parameters??[]).find((p:Json)=>p.in==='path'&&p.name===field)?.schema)));
-          const status=(await dispatchAsActor(app,new Request(`${PUBLIC_ORIGIN}${path}`,{headers:{accept:'application/json'}}),runtime,grantActor)).status;
+          const status=(await dispatchAsActor(app,new Request(`${PUBLIC_ORIGIN}${path}`,{headers:{accept:'application/json'}}),runtime,grantActor,{requestId:`req_${'0'.repeat(32)}`,clientIp:null,userAgent:null})).status;
           assert.equal(receiving.has(name),status!==401&&status!==403,`${name}: listed=${receiving.has(name)}, REST ${status}`);
         }
         assert.ok(gets>=80,String(gets));
@@ -3632,7 +3632,7 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.deepEqual(await offered(read.token), [false, false]);
       const [{ createApp }, { dispatchAsActor }, { getMcpGrantActor }] = await Promise.all([import('./src/app.js'), import('./src/auth.js'), import('./src/mcp-auth.js')]);
       const reader = (await getMcpGrantActor(runtime, 'mcp_' + read.consentId, runtime.config.workspaceId))!; assert.ok(reader?.receivingConsent);
-      const refused = await dispatchAsActor(createApp(), new Request(`${PUBLIC_ORIGIN}/v1/inbound/overview`, { headers: { accept: 'application/json' } }), runtime, reader);
+      const refused = await dispatchAsActor(createApp(), new Request(`${PUBLIC_ORIGIN}/v1/inbound/overview`, { headers: { accept: 'application/json' } }), runtime, reader, { requestId: `req_${'0'.repeat(32)}`, clientIp: null, userAgent: null });
       assert.equal(refused.status, 403);
     });
   });
@@ -4433,6 +4433,28 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.deepEqual(reads.map(r => [r.workspace_id, r.user_id, r.actor_id, r.internal]), [[wid, null, operator.userId, true], [null, manager!.userId, operator.userId, true], [null, manager!.userId, operator.userId, true]]);
       error(await send('GET', '/v1/operator/no-such-route', session(operator)), 404);
       error(await send('GET', `/v1/operator/workspaces/${unique('missing')}/audit`, session(operator)), 404);
+      // An MCP tool call, a key the approval made and an agent token act for the person who approved the connection: each
+      // row names them with the client's network and user agent (a tool call: the /mcp request's, and its request ID), and
+      // the operator's per-user trail lists them.
+      const client = { 'x-bane-client-ip': '198.51.100.23', 'user-agent': 'acceptance-agent/2.1 (synthetic)' }, requestOf = (reply: Reply) => reply.headers.get('x-request-id')!;
+      const viaMcp = await send('POST', '/mcp?codemode=true', { ...rpcHeaders, ...bearer(mcpToken), ...client },
+        { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'createApiKey', arguments: { body: { name: 'made over MCP', permissions: ['read', 'send', 'manage'] }, confirm: true } } });
+      const mcpKey = ok(viaMcp).result; assert.equal(mcpKey.isError, false, redact(mcpKey)); secrets.add(mcpKey.structuredContent.secret);
+      assert.equal(mcpKey._meta.requestId, requestOf(viaMcp), 'A tool call answers with the /mcp request ID.');
+      const byKey = await send('POST', '/v1/api-keys', { ...bearer(mcpKey.structuredContent.secret), ...client }, { name: 'made by an MCP key', permissions: ['read'] });
+      secrets.add(ok(byKey, 201).secret);
+      const managing = (await rpc('tools/call', { name: 'createAgentToken', arguments: { body: { permissions: ['read', 'manage'], expiresInSeconds: 600, purpose: 'audit attribution' }, confirm: true } })).structuredContent.token as string;
+      secrets.add(managing);
+      const tokenList = ok(await send('POST', '/v1/lists', bearer(managing), { name: unique('agent-audit-list') }), 201);
+      const tokenPlan = ok(await send('POST', '/v1/audience-query/plan', bearer(managing), { statement: `ADD contacts TO LIST '${tokenList.id}' WHERE name CONTAINS '${unique('nobody')}'` }), 201);
+      const byToken = await send('POST', '/v1/audience-query/apply', { ...bearer(managing), ...client }, { planId: tokenPlan.id });
+      ok(byToken);
+      const attributed = (await db.query(`SELECT request_id, action, actor_type, user_id, ip_network, user_agent FROM audit_events WHERE request_id = ANY($1) ORDER BY id`, [[viaMcp, byKey, byToken].map(requestOf)])).rows;
+      const person = [manager!.userId, '198.51.100.0/24', userAgentFamily(client['user-agent'])];
+      assert.deepEqual(attributed.map(r => [r.request_id, r.action, r.actor_type, r.user_id, r.ip_network, r.user_agent]), [
+        [requestOf(viaMcp), 'api_key.create', 'mcp_grant', ...person], [requestOf(byKey), 'api_key.create', 'api_key', ...person], [requestOf(byToken), 'audience.bulk_apply', 'agent_token', ...person]]);
+      const personal = ok(await send('GET', `/v1/operator/users/${manager!.userId}/audit?limit=100`, session(operator))).data as Json[];
+      for (const reply of [viaMcp, byKey, byToken]) assert.ok(personal.some(e => e.requestId === requestOf(reply) && e.network === person[1] && e.client === person[2]), `${requestOf(reply)} is on the per-user trail`);
       // Owners and admins see their own workspace's Activity, without operator internals; members don't.
       const activity = ok(await local('GET', '/v1/activity?limit=100')).data.map((e: Json) => e.action);
       assert.ok(activity.includes('api_key.create') && !activity.includes('audit.read'), activity.join());
@@ -5298,7 +5320,7 @@ describe('Hosted MCP OAuth and tools', () => {
         const args = name === 'getInboundMessage' ? { messageId:'msg_probe' } : {};
         assert.equal((await tool(name,{...args,includeDelivery:'true'})).structuredContent.error.code,'INVALID_ARGUMENTS');
         const url=`${PUBLIC_ORIGIN}${base}/messages${args.messageId ? '/'+args.messageId : ''}?includeDelivery=true`;
-        const denied=await dispatchAsActor(app,new Request(url),runtime,{...scope,keyId:'mcp_probe',credential:'mcp',permissions:['manage'],domains:[]});
+        const denied=await dispatchAsActor(app,new Request(url),runtime,{...scope,keyId:'mcp_probe',credential:'mcp',permissions:['manage'],domains:[]},{requestId:`req_${'0'.repeat(32)}`,clientIp:null,userAgent:null});
         assert.equal(denied.status,403);assert.equal((await denied.json() as Json).error.code,'ADMIN_REQUIRED');
       }
       for (const name of ['createInboundAddress','updateInboundAddress','listInboundAddresses','getInboundAddress','listInboundThreads','getInboundThread','listInboundMessages','getInboundMessage','createInboundThread','replyToInboundThread','deleteInboundAddress']) assert.ok(tools.includes(name),name);
