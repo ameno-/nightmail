@@ -97,7 +97,9 @@ export type MailPermission = 'read' | 'send' | 'modify' | 'create'
 /** One API key type. workspace: permissions and domains. addresses: only mail at chosen receiving addresses (null: every
  *  address, including new ones; [] with create: only the inboxes it creates). inbox: one agent inbox. */
 export interface ApiKeyAccess { type: 'workspace' | 'addresses' | 'inbox'; addressIds: string[] | null; inboxId: string | null; mail: MailPermission[] }
-export interface ApiKey { id: string; name: string; prefix: string; permissions: KeyPermission[]; domains: string[]; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null; expiresAt: ISODate | null; access: ApiKeyAccess }
+export interface ApiKey { id: string; name: string; prefix: string; permissions: KeyPermission[]; domains: string[]; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null; expiresAt: ISODate | null; access: ApiKeyAccess; approval: ApprovalTie | null }
+/** The MCP approvals a key or webhook is tied to: it works only while every one of them is active (active), until the earliest end (endsAt). */
+export interface ApprovalTie { active: boolean; endsAt: ISODate; owners: { id: string; endsAt: ISODate; active: boolean }[] }
 export type CreateApiKeyAccess = { type: 'workspace' } | { type: 'addresses'; addressIds?: string[]; mail?: MailPermission[] } | { type: 'inbox'; inboxId: string; mail?: Exclude<MailPermission, 'create'>[] }
 /** A limited access takes its abilities in access.mail, without permissions or domains. */
 export interface ApiKeyInput { name: string; permissions?: KeyPermission[]; domains?: string[]; access?: CreateApiKeyAccess }
@@ -182,7 +184,7 @@ export interface WebhookHeaderView { name: string; hint?: string; updatedAt?: IS
 /** Omitted on update to keep the current headers; any list replaces them all, and [] removes them. */
 export interface WebhookHeaderInput { name: string; value: string }
 export type InboundWebhookFormat = 'nightmail' | 'inbound'
-export interface InboundWebhook { id: string; key?: string | null; name?: string | null; url: string; description: string; eventTypes: MailboxEventType[]; addressIds: string[] | null; paused: boolean; headers: WebhookHeaderView[]; format?: InboundWebhookFormat; junk?: 'skip' | 'include'; createdAt: ISODate; updatedAt: ISODate }
+export interface InboundWebhook { id: string; key?: string | null; name?: string | null; url: string; description: string; eventTypes: MailboxEventType[]; addressIds: string[] | null; paused: boolean; headers: WebhookHeaderView[]; format?: InboundWebhookFormat; junk?: 'skip' | 'include'; createdAt: ISODate; updatedAt: ISODate; approval: ApprovalTie | null }
 /** eventTypes [] is a route-only webhook: it gets only the mail a route sends to it. */
 export interface InboundWebhookInput { url: string; description: string; eventTypes: MailboxEventType[]; addressIds: string[] | null; headers?: WebhookHeaderInput[]; format?: InboundWebhookFormat; junk?: 'skip' | 'include' }
 /** A recipient → destinations rule. to: [] keeps mail without an inbox; 'drop' discards it. */
