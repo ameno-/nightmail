@@ -12,7 +12,7 @@ import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
 import { withRegionSettings } from './ses-region-state.js';
 import { countEnqueued } from './jobs.js';
 import { authenticatedCreates } from './idempotency.js';
-import { headerPrefix, productName, requestHeaderNames } from './brand.js';
+import { clientIpHeader, headerPrefix, healthService, productName, requestHeaderNames } from './brand.js';
 
 type RouteGroup = 'auth-ui' | 'mcp' | 'auth' | 'operator' | 'support' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview' | 'billing';
 // Internal areas: /v1/operator/* answers only Nightmail operators and /v1/support/* only support grants (src/support.ts).
@@ -287,7 +287,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
       : keyTaken ? new ApiError(409, 'KEY_TAKEN', `Another ${database.constraint === 'mailboxes_key' ? 'address' : 'webhook'} in this workspace already uses that key. Choose another.`, 'key')
       : new ApiError(500, 'INTERNAL_ERROR', 'Unexpected server failure. Use the request ID to locate the server log.');
     if(invalidJson && c.req.path==='/v1/events/ses') {
-      const peer=c.req.header('x-bane-client-ip')??'unknown';
+      const peer=c.req.header(clientIpHeader)??'unknown';
       if(!allowMalformedSns(peer) || c.env.allowMalformedSns && !await c.env.allowMalformedSns(peer)) responseError=new ApiError(429,'PUBLIC_RATE_LIMITED','Too many malformed requests.',undefined,true);
     }
     // Messages, record keys and unsupported keys are caller text: log only the schema's own top-level field names.
@@ -301,7 +301,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   });
   app.notFound(c => { c.set('failure', { code: 'NOT_FOUND', unmatched: true }); return c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
   // origin is PUBLIC_URL's, never the request's Host: the dashboard and Docs build every example and connection URL from it.
-  app.get('/health', c => c.json({status:'ok',service:'bane',multiTenant:c.env.config.multiTenant,origin:new URL(c.env.config.publicUrl).origin}));
+  app.get('/health', c => c.json({status:'ok',service:healthService,multiTenant:c.env.config.multiTenant,origin:new URL(c.env.config.publicUrl).origin}));
   app.get('/health/receiving', async c => {const h=await (await import('./receiving-health.js')).cachedHealth(c.env);return c.json(h,h.status==='ok'?200:503);});
   app.get('/openapi.json', async c => { const { doc } = await loadDocs(); c.header('cache-control', 'public, max-age=300'); return c.json(doc); });
   const markdown = (c: Ctx, value: string) => { c.header('content-type', 'text/markdown; charset=utf-8'); c.header('cache-control', 'public, max-age=300'); return c.body(value); };

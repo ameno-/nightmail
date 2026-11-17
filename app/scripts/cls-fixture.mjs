@@ -409,8 +409,8 @@ export async function seed(fx) {
   };
   // An API key limited to several addresses: API keys' Access column lists each of them, masked.
   await dana.api('POST', '/v1/api-keys', { name: 'Triage agent', access: { type: 'addresses', addressIds: [A.support.id, A.billing.id, A.sales.id], mail: ['read', 'send'] } }, 201);
-  const crm = await dana.api('POST', '/v1/inbound/webhooks', { description: 'CRM intake', url: 'https://hooks.northwind.example/crm', eventTypes: [], addressIds: null, format: 'bane' }, 201);
-  await dana.api('POST', '/v1/inbound/webhooks', { description: 'Helpdesk', url: 'https://helpdesk.northwind.example/inbound', eventTypes: ['message.received'], addressIds: [A.support.id], format: 'bane' }, 201);
+  const crm = await dana.api('POST', '/v1/inbound/webhooks', { description: 'CRM intake', url: 'https://hooks.northwind.example/crm', eventTypes: [], addressIds: null, format: 'nightmail' }, 201);
+  await dana.api('POST', '/v1/inbound/webhooks', { description: 'Helpdesk', url: 'https://helpdesk.northwind.example/inbound', eventTypes: ['message.received'], addressIds: [A.support.id], format: 'nightmail' }, 201);
   const crmId = crm.webhook?.id ?? crm.id;
   await dana.api('POST', '/v1/routing/routes', { match: 'refunds@northwind.example', to: [A.billing.id, crmId] }, 201);
   await dana.api('POST', '/v1/routing/routes', { match: 'noreply@northwind.example', to: 'drop' }, 201);

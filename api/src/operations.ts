@@ -35,7 +35,7 @@ import { mailboxDomains, mailboxWebhooks, type MxReport } from './db/mailbox.js'
 import { checkMx,expectedMx } from './mailbox-dns.js';
 import { baneRecordIssue, baneRecordUse, defaultReceivingHost, inspectReceivingHost, observeReceiving, takenIssue, type ReceivingObservation } from './receiving-host.js';
 import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, webhookSecretAudit, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
-import { productName, requestHeaderNames, webhookTestHeaders, webhookUserAgent } from './brand.js';
+import { clientIpHeader, productName, requestHeaderNames, webhookTestHeaders, webhookUserAgent } from './brand.js';
 import { hasTags, tagKey, TAG_PREFIX } from './resource-tags.js';
 export type { PublishedEvent } from './db/operations.js';
 
@@ -765,7 +765,7 @@ const domainMx:JobHandler=async(runtime,payload,job)=>{
     if(retainedIdentity!==undefined)await db.execute(sql`UPDATE domain_claims SET receiving_identity_at=CASE WHEN ${retainedIdentity} THEN now() END WHERE workspace_id=${job.workspaceId} AND token=${row.token} AND connection_id=${row.connection.id}`);
     // Never grant receiving rights (notably to a Virginia sending binding) from a DMARC check.
     if(!observation) { await db.execute(sql`UPDATE domain_claims SET identity=jsonb_set(identity,'{dmarc}',${JSON.stringify(dmarc)}::jsonb) WHERE workspace_id=${job.workspaceId} AND name=${current.name} AND token=${current.token}`); return; }
-    // Without BANE_PLATFORM_DOMAIN_WORKSPACE nothing renews the platform attestation: receiving ends with the usual proof grace.
+    // Without NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE nothing renews the platform attestation: receiving ends with the usual proof grace.
     const attested=!current.identity.adopted || platformClaim(runtime.config,job.workspaceId,current);
     await saveObservation(db,current,job.workspaceId,current.identity.ses,observation,{sending:undefined,identityVerified:current.identity.ses.VerificationStatus==='SUCCESS',proven:proof??(current.identity.proven && attested)},dmarc);
   });
@@ -1319,7 +1319,7 @@ function registerPublicEvents(app: App) {
     // Prove AWS signed this exact topic before looking up its tenant. A valid
     // signature is NOT topic authorization: all binding checks below still apply.
     // Both entry points overwrite this header with the socket/edge peer (IPv6 /64).
-    const trusted = await verifySns(envelope, c.env, c.req.header('x-bane-client-ip') ?? 'unknown');
+    const trusted = await verifySns(envelope, c.env, c.req.header(clientIpHeader) ?? 'unknown');
     // Region settings may come from a 30 s cache: a topic or account provisioned since then is re-checked fresh.
     let stack: Awaited<ReturnType<typeof import('./provider-connections.js').byoStackTopic>>;
     let binding:TopicBinding|undefined;

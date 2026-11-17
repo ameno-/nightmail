@@ -6,7 +6,7 @@ import { safeForwardHtml } from './mailbox-send.js';
 import { readableMailboxKey } from './mailbox-setup.js';
 import { withMailObjects } from './mail-objects.js';
 import { decrypt, hmac, postWebhook, webhookSecret, webhookUrl } from './operations.js';
-import { productName, webhookUserAgent } from './brand.js';
+import { legacyWebhookFormat, productName, webhookUserAgent } from './brand.js';
 
 const s3commands = lazyModule(() => import('@aws-sdk/client-s3'));
 const POST_LIMIT=512*1024, RAW_INLINE_LIMIT = POST_LIMIT,
@@ -188,7 +188,7 @@ async function loadMessage(runtime: Runtime, w: string, messageId: string, withR
 }
 async function send(runtime: Runtime, w: string, h: ClaimedWebhook, secret: string, example?: typeof EXAMPLE) {
   const event = h.payload as Event,
-    format = h.format ?? 'bane',
+    format = h.format ?? legacyWebhookFormat,
     include = h.include ?? [];
   const headers: Record<string, string> = { 'User-Agent': webhookUserAgent };
   let payload: unknown = event;

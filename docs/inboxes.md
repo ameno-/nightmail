@@ -110,12 +110,12 @@ Every snippet here was run against a local Nightmail on 2026-11-11 (isolated har
 ### curl
 
 ```sh
-export BANE_URL=https://bane.mx        # or your installation's URL
+export NIGHTMAIL_URL=https://bane.mx        # or your installation's URL
 export NIGHTMAIL_API_KEY=nm_…             # a workspace manage key, or an API key that creates inboxes
 AUTH="Authorization: Bearer $NIGHTMAIL_API_KEY"
 
 # 1. Create an inbox. Defaults: a random address on your oldest active receiving host, 24 hours.
-curl -sS "$BANE_URL/v1/inboxes" -H "$AUTH" -H 'Content-Type: application/json' \
+curl -sS "$NIGHTMAIL_URL/v1/inboxes" -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"name":"Sign-up test","clientId":"signup-run-42","ttlSeconds":3600}' > inbox.json
 INBOX=$(jq -r .id inbox.json); ADDRESS=$(jq -r .address inbox.json)
 jq '{id, address, status, expiresAt, deleteAfter}' inbox.json
@@ -133,7 +133,7 @@ jq '{id, address, status, expiresAt, deleteAfter}' inbox.json
 
 ```sh
 # 2. Give $ADDRESS to the sign-up form, then wait. Returns as soon as mail arrives (up to 30 s).
-curl -sS "$BANE_URL/v1/inboxes/$INBOX/messages?wait=30&extract=codes,links" -H "$AUTH" > page.json
+curl -sS "$NIGHTMAIL_URL/v1/inboxes/$INBOX/messages?wait=30&extract=codes,links" -H "$AUTH" > page.json
 jq '.data[0] | {id, from, subject, auth, extract}' page.json
 CODE=$(jq -r '.data[0].extract.codes[0]' page.json); MESSAGE=$(jq -r '.data[0].id' page.json)
 ```
@@ -155,10 +155,10 @@ The wait call returned 4 seconds after it started: the message landed at 3 secon
 
 ```sh
 # 3. Read the whole message: visible text, verdicts, attachment links.
-curl -sS "$BANE_URL/v1/inboxes/$INBOX/messages/$MESSAGE" -H "$AUTH" | jq '{subject, text, hiddenContent, attachments}'
+curl -sS "$NIGHTMAIL_URL/v1/inboxes/$INBOX/messages/$MESSAGE" -H "$AUTH" | jq '{subject, text, hiddenContent, attachments}'
 
 # 4. Done: delete it. The address stops receiving now; the mail is erased within the hour.
-curl -sS -X DELETE "$BANE_URL/v1/inboxes/$INBOX" -H "$AUTH" | jq .
+curl -sS -X DELETE "$NIGHTMAIL_URL/v1/inboxes/$INBOX" -H "$AUTH" | jq .
 ```
 
 ```json
@@ -195,7 +195,7 @@ const { extract } = await waitForMessage({ client, inboxId: inbox.id, subjectCon
 `NIGHTMAIL_INBOX_KEY` is an API key that creates inboxes, created once:
 
 ```sh
-curl -sS "$BANE_URL/v1/api-keys" -H "$AUTH" -H 'Content-Type: application/json' \
+curl -sS "$NIGHTMAIL_URL/v1/api-keys" -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"name":"agents","access":{"type":"addresses","addressIds":[],"mail":["create","read","modify"]}}' | jq -r .secret
 ```
 
@@ -249,16 +249,16 @@ tools/list → listInboxes, getInbox, createInbox, deleteInbox, listInboxMessage
 A sandbox inbox needs no domain or DNS, so you can wire up an agent or CI before receiving is set up. Its `.invalid` address can never receive real mail, and it never sends.
 
 ```sh
-curl -sS "$BANE_URL/v1/inboxes" -H "$AUTH" -H 'Content-Type: application/json' \
+curl -sS "$NIGHTMAIL_URL/v1/inboxes" -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"type":"sandbox","name":"CI smoke test","ttlSeconds":3600}' > sandbox.json
 SANDBOX=$(jq -r .id sandbox.json); jq '{id, type, address}' sandbox.json
 
 # Deliver test mail through the same store as real mail (no SMTP, no DNS, no SES).
-curl -sS "$BANE_URL/v1/inboxes/$SANDBOX/simulate" -H "$AUTH" -H 'Content-Type: application/json' \
+curl -sS "$NIGHTMAIL_URL/v1/inboxes/$SANDBOX/simulate" -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"from":"qa@ci.example.com","subject":"Your sign-in code","text":"Your sign-in code is 905117."}'
 
 # Wait and read it exactly like real mail.
-curl -sS "$BANE_URL/v1/inboxes/$SANDBOX/messages?wait=30&extract=codes" -H "$AUTH" \
+curl -sS "$NIGHTMAIL_URL/v1/inboxes/$SANDBOX/messages?wait=30&extract=codes" -H "$AUTH" \
   | jq '.data[0] | {subject, simulated, auth, codes: .extract.codes}'
 ```
 

@@ -45,7 +45,7 @@ type PlatformConfig = Pick<Runtime['config'],'multiTenant'|'regionalSending'|'pl
 export const platformDomainOwner = (config:Omit<PlatformConfig,'publicUrl'>,workspace:string) =>
   config.multiTenant && config.regionalSending===true && !!config.platformDomainWorkspace && config.platformDomainWorkspace===workspace;
 /** The sender policy every regional_sender call applies (migration 107): read from the running configuration, so
- * changing or removing BANE_PLATFORM_DOMAIN_WORKSPACE takes effect on the next send and the next dispatch. */
+ * changing or removing NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE takes effect on the next send and the next dispatch. */
 export const platformPolicy = (config:PlatformConfig) => config.multiTenant ? JSON.stringify({host:platformHost(config.publicUrl),
   owner:config.regionalSending===true ? config.platformDomainWorkspace ?? null : null,reserved:platformLabel.source,fixtures:fixtureLabel.source}) : null;
 export async function claimNameAllowed(name:string,config:PlatformOrigins,platformOwner=false) {

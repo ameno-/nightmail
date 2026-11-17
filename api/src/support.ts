@@ -362,7 +362,7 @@ export function registerSupportOperator(app: App) {
     responses: { 302: { description: 'To return?staff=<token>: a signed staff token that lives 2 minutes.' }, ...errors } }), async c => {
     const operator = await requireOperator(c, 'operator:read'), support = c.env.config.support;
     if (operator.via !== 'console' || !operator.userId) throw operatorRequired();
-    if (!support?.url || !support.signingKey) throw new ApiError(503, 'SUPPORT_NOT_CONFIGURED', 'Set BANE_SUPPORT_URL and BANE_SUPPORT_SIGNING_KEY to sign staff in to the support site.');
+    if (!support?.url || !support.signingKey) throw new ApiError(503, 'SUPPORT_NOT_CONFIGURED', 'Set NIGHTMAIL_SUPPORT_URL and NIGHTMAIL_SUPPORT_SIGNING_KEY to sign staff in to the support site.');
     const callback = `${new URL(support.url).origin}/staff/callback`;
     let target: URL | null = null;
     try { target = new URL(c.req.valid('query').return); } catch { /* refused below */ }

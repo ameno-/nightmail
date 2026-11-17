@@ -46,7 +46,7 @@ export function assertMailKey(wid: string, key: string) {
 }
 
 /**
- * Hosted mail goes to R2 when `BANE_MAIL_STORE=r2`. Inbox mail always goes to R2 when `MAIL` is
+ * Hosted mail goes to R2 when `NIGHTMAIL_MAIL_STORE=r2`. Inbox mail always goes to R2 when `MAIL` is
  * bound, so erasing it never needs an S3 delete grant, including after a rollback of the switch.
  */
 export function hostedMailBucket(runtime: Runtime, cls: MailClass) {

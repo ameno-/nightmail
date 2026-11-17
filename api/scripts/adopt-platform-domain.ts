@@ -6,6 +6,7 @@ import { SESv2Client, CreateTenantResourceAssociationCommand, DeleteTenantResour
 import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
 import { postgresConnection } from '../src/adapters/node.js';
 import { requirePlatformAccount } from '../src/config.js';
+import { setting } from '../src/brand.js';
 import { id } from '../src/core.js';
 import { adoptionFacts, adoptionFingerprint, matchesAdoption } from '../src/adopted-identity.js';
 import { claimNameAllowed, platformHost, releasedClaimCleanup } from '../src/domain-claims.js';
@@ -25,7 +26,7 @@ function mutationReason(apply: boolean | undefined, reason: string | undefined) 
 // Checks shared by adoption and revocation: the Hosted configuration, the platform account and a signed-in operator.
 function platform(operator: string, env: Env) {
   if (env.MULTI_TENANT !== 'true' || !env.PUBLIC_URL) throw new Error('Run with the Hosted MULTI_TENANT=true and PUBLIC_URL configuration.');
-  const account = requirePlatformAccount(env.BANE_PLATFORM_AWS_ACCOUNT ?? env.MX_PLATFORM_AWS_ACCOUNT);
+  const account = requirePlatformAccount(setting(env, 'PLATFORM_AWS_ACCOUNT'));
   if (!operator.startsWith(`arn:aws:sts::${account}:assumed-role/`)) throw new Error('Use a signed-in operator role in the platform account, never the runtime principal.');
   const name = platformHost(env.PUBLIC_URL);
   return { account, name, publicUrl: env.PUBLIC_URL, arn: `arn:aws:ses:${region}:${account}:identity/${name}` };
@@ -40,14 +41,14 @@ function membership(client: SESv2Client, arn: string) {
 
 // No API endpoint. The platform domain's SES identity (PUBLIC_URL's host) was created by hand before any claim, so it
 // has no bane:domain-claim tag: Bane never creates, changes or deletes it, and the runtime IAM policy can't either.
-// This operator tool attests it for the one workspace named by BANE_PLATFORM_DOMAIN_WORKSPACE, associates it with
+// This operator tool attests it for the one workspace named by NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE, associates it with
 // that workspace's Ohio tenant and records the adoption. A dry run prints the identity's fingerprint; --apply needs
 // that reviewed fingerprint and refuses anything else. Run both again after any deliberate change to the identity
 // (DKIM, MAIL FROM, default set): until then the changed identity neither sends nor receives.
 export async function adoptPlatformDomain(db: Client, client: SESv2Client, wid: string, operator: string, options: { apply?: boolean; fingerprint?: string; reason?: string }, env: Env = process.env) {
   const reason = mutationReason(options.apply, options.reason);
   const { account, name, arn, publicUrl } = platform(operator, env);
-  if (!/^ws_[0-9a-f]{32}$/.test(wid) || (env.BANE_PLATFORM_DOMAIN_WORKSPACE ?? env.MX_PLATFORM_DOMAIN_WORKSPACE) !== wid) throw new Error('BANE_PLATFORM_DOMAIN_WORKSPACE must name this exact workspace, as deployed.');
+  if (!/^ws_[0-9a-f]{32}$/.test(wid) || setting(env, 'PLATFORM_DOMAIN_WORKSPACE') !== wid) throw new Error('NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE must name this exact workspace, as deployed.');
   if (!await claimNameAllowed(name, { publicUrl }, true)) throw new Error('PUBLIC_URL does not name a claimable platform domain.');
   const read = async () => {
     const s = await client.send(new GetEmailIdentityCommand({ EmailIdentity: name }));

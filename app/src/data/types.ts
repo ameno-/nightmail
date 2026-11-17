@@ -177,7 +177,7 @@ export interface InboundThreadInput { addressId: string; to: string[]; subject: 
 export interface WebhookHeaderView { name: string; hint?: string; updatedAt?: ISODate }
 /** Omitted on update to keep the current headers; any list replaces them all, and [] removes them. */
 export interface WebhookHeaderInput { name: string; value: string }
-export type InboundWebhookFormat = 'bane' | 'inbound'
+export type InboundWebhookFormat = 'nightmail' | 'inbound'
 export interface InboundWebhook { id: string; key?: string | null; name?: string | null; url: string; description: string; eventTypes: MailboxEventType[]; addressIds: string[] | null; paused: boolean; headers: WebhookHeaderView[]; format?: InboundWebhookFormat; junk?: 'skip' | 'include'; createdAt: ISODate; updatedAt: ISODate }
 /** eventTypes [] is a route-only webhook: it gets only the mail a route sends to it. */
 export interface InboundWebhookInput { url: string; description: string; eventTypes: MailboxEventType[]; addressIds: string[] | null; headers?: WebhookHeaderInput[]; format?: InboundWebhookFormat; junk?: 'skip' | 'include' }

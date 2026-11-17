@@ -13468,10 +13468,10 @@
           "format": {
             "type": "string",
             "enum": [
-              "bane",
+              "nightmail",
               "inbound"
             ],
-            "description": "bane (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key."
+            "description": "nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key."
           },
           "junk": {
             "type": "string",
@@ -13479,7 +13479,7 @@
               "skip",
               "include"
             ],
-            "description": "include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for bane and include for inbound."
+            "description": "include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for nightmail and include for inbound."
           },
           "include": {
             "type": "array",
@@ -13491,7 +13491,7 @@
               ]
             },
             "maxItems": 2,
-            "description": "bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL."
+            "description": "nightmail format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL."
           },
           "timeoutSeconds": {
             "type": "integer",
@@ -13503,7 +13503,7 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 10,
-            "description": "Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for bane, 3 for inbound."
+            "description": "Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for nightmail, 3 for inbound."
           }
         },
         "required": [
@@ -13547,10 +13547,11 @@
           "format": {
             "type": "string",
             "enum": [
-              "bane",
-              "inbound"
+              "nightmail",
+              "inbound",
+              "bane"
             ],
-            "description": "bane (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key."
+            "description": "nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key. bane is the earlier name of nightmail, still accepted."
           },
           "junk": {
             "type": "string",
@@ -13558,7 +13559,7 @@
               "skip",
               "include"
             ],
-            "description": "include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for bane and include for inbound."
+            "description": "include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for nightmail and include for inbound."
           },
           "include": {
             "type": "array",
@@ -13570,7 +13571,7 @@
               ]
             },
             "maxItems": 2,
-            "description": "bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL."
+            "description": "nightmail format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL."
           },
           "timeoutSeconds": {
             "type": "integer",
@@ -13582,7 +13583,7 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 10,
-            "description": "Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for bane, 3 for inbound."
+            "description": "Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for nightmail, 3 for inbound."
           },
           "url": {
             "type": "string",
@@ -13718,10 +13719,11 @@
           "format": {
             "type": "string",
             "enum": [
-              "bane",
-              "inbound"
+              "nightmail",
+              "inbound",
+              "bane"
             ],
-            "description": "bane (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key."
+            "description": "nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key. bane is the earlier name of nightmail, still accepted."
           },
           "junk": {
             "type": "string",
@@ -13729,7 +13731,7 @@
               "skip",
               "include"
             ],
-            "description": "include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for bane and include for inbound."
+            "description": "include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for nightmail and include for inbound."
           },
           "include": {
             "type": "array",
@@ -13741,7 +13743,7 @@
               ]
             },
             "maxItems": 2,
-            "description": "bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL."
+            "description": "nightmail format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL."
           },
           "timeoutSeconds": {
             "type": "integer",
@@ -13753,7 +13755,7 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 10,
-            "description": "Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for bane, 3 for inbound."
+            "description": "Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for nightmail, 3 for inbound."
           },
           "url": {
             "type": "string",
@@ -13854,10 +13856,11 @@
           "format": {
             "type": "string",
             "enum": [
-              "bane",
-              "inbound"
+              "nightmail",
+              "inbound",
+              "bane"
             ],
-            "description": "bane (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key."
+            "description": "nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key. bane is the earlier name of nightmail, still accepted."
           },
           "overrideUrl": {
             "type": "string",
@@ -61300,7 +61303,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request GET \\\n  --url \"${BANE_ORIGIN}/v1/workspaces\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\""
+            "source": "curl --request GET \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/workspaces\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\""
           }
         ]
       },
@@ -61460,7 +61463,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url \"${BANE_ORIGIN}/v1/workspaces\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"name\": \"Example\"\n}'"
+            "source": "curl --request POST \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/workspaces\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"name\": \"Example\"\n}'"
           }
         ]
       }
@@ -61621,7 +61624,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request PATCH \\\n  --url \"${BANE_ORIGIN}/v1/workspaces/current\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"name\": \"Example\"\n}'"
+            "source": "curl --request PATCH \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/workspaces/current\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"name\": \"Example\"\n}'"
           }
         ]
       }
@@ -61772,7 +61775,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request GET \\\n  --url \"${BANE_ORIGIN}/v1/workspaces/current/members\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\""
+            "source": "curl --request GET \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/workspaces/current/members\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\""
           }
         ]
       },
@@ -61921,7 +61924,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url \"${BANE_ORIGIN}/v1/workspaces/current/members\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"email\": \"recipient@example.com\",\n  \"role\": \"owner\"\n}'"
+            "source": "curl --request POST \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/workspaces/current/members\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"email\": \"recipient@example.com\",\n  \"role\": \"owner\"\n}'"
           }
         ]
       }
@@ -62072,7 +62075,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url \"${BANE_ORIGIN}/v1/workspaces/current/invitations\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"email\": \"recipient@example.com\",\n  \"role\": \"owner\"\n}'"
+            "source": "curl --request POST \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/workspaces/current/invitations\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"email\": \"recipient@example.com\",\n  \"role\": \"owner\"\n}'"
           }
         ]
       },
@@ -62222,7 +62225,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request GET \\\n  --url \"${BANE_ORIGIN}/v1/workspaces/current/invitations\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\""
+            "source": "curl --request GET \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/workspaces/current/invitations\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\""
           }
         ]
       },
@@ -62387,7 +62390,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request DELETE \\\n  --url \"${BANE_ORIGIN}/v1/workspaces/current/invitations?id=resource_123\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\""
+            "source": "curl --request DELETE \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/workspaces/current/invitations?id=resource_123\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\""
           }
         ]
       }
@@ -62580,7 +62583,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request PATCH \\\n  --url \"${BANE_ORIGIN}/v1/workspaces/current/members/resource_123\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"role\": \"owner\"\n}'"
+            "source": "curl --request PATCH \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/workspaces/current/members/resource_123\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"role\": \"owner\"\n}'"
           }
         ]
       },
@@ -62745,7 +62748,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request DELETE \\\n  --url \"${BANE_ORIGIN}/v1/workspaces/current/members/resource_123\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\""
+            "source": "curl --request DELETE \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/workspaces/current/members/resource_123\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\""
           }
         ]
       }
@@ -62898,7 +62901,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request GET \\\n  --url \"${BANE_ORIGIN}/v1/workspaces/invitations/resource_123\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\""
+            "source": "curl --request GET \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/workspaces/invitations/resource_123\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\""
           }
         ]
       }
@@ -63058,7 +63061,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url \"${BANE_ORIGIN}/v1/workspaces/invitations/resource_123/accept\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\""
+            "source": "curl --request POST \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/workspaces/invitations/resource_123/accept\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\""
           }
         ]
       }
@@ -63214,7 +63217,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request GET \\\n  --url \"${BANE_ORIGIN}/v1/connection\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\""
+            "source": "curl --request GET \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/connection\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\""
           }
         ]
       },
@@ -63392,7 +63395,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url \"${BANE_ORIGIN}/v1/connection\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"kind\": \"shared\"\n}'"
+            "source": "curl --request POST \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/connection\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"kind\": \"shared\"\n}'"
           }
         ]
       },
@@ -63560,7 +63563,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request DELETE \\\n  --url \"${BANE_ORIGIN}/v1/connection\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\""
+            "source": "curl --request DELETE \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/connection\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\""
           }
         ]
       }
@@ -63701,7 +63704,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request GET \\\n  --url \"${BANE_ORIGIN}/v1/connection/regions\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\""
+            "source": "curl --request GET \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/connection/regions\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\""
           }
         ]
       }
@@ -63854,7 +63857,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url \"${BANE_ORIGIN}/v1/connection/scan\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\""
+            "source": "curl --request POST \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/connection/scan\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\""
           }
         ]
       }
@@ -64048,7 +64051,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url \"${BANE_ORIGIN}/v1/connection/imports\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"revision\": 1,\n  \"candidateIds\": [\n    \"candidate_123\"\n  ],\n  \"confirm\": true\n}'"
+            "source": "curl --request POST \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/connection/imports\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"revision\": 1,\n  \"candidateIds\": [\n    \"candidate_123\"\n  ],\n  \"confirm\": true\n}'"
           }
         ]
       }
@@ -64405,7 +64408,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request GET \\\n  --url \"${BANE_ORIGIN}/v1/connection/regions/status\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\""
+            "source": "curl --request GET \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/connection/regions/status\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\""
           }
         ]
       }
@@ -64567,7 +64570,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url \"${BANE_ORIGIN}/v1/connection/verify\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"awsAccountId\": \"123456789012\"\n}'"
+            "source": "curl --request POST \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/connection/verify\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"awsAccountId\": \"123456789012\"\n}'"
           }
         ]
       }
@@ -65032,7 +65035,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request GET \\\n  --url \"${BANE_ORIGIN}/v1/activity\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\""
+            "source": "curl --request GET \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/activity\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\""
           }
         ]
       }
@@ -65220,7 +65223,7 @@
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url \"${BANE_ORIGIN}/v1/contact-support\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"kind\": \"support\",\n  \"requestIds\": [],\n  \"shareContent\": false\n}'"
+            "source": "curl --request POST \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/contact-support\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"kind\": \"support\",\n  \"requestIds\": [],\n  \"shareContent\": false\n}'"
           }
         ]
       }

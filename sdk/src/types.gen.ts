@@ -3969,15 +3969,15 @@ export type InboundWebhook = {
      */
     name: string | null;
     /**
-     * bane (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key.
+     * nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key.
      */
-    format: 'bane' | 'inbound';
+    format: 'nightmail' | 'inbound';
     /**
-     * include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for bane and include for inbound.
+     * include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for nightmail and include for inbound.
      */
     junk: 'skip' | 'include';
     /**
-     * bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL.
+     * nightmail format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL.
      */
     include: Array<'message' | 'raw'>;
     /**
@@ -3985,7 +3985,7 @@ export type InboundWebhook = {
      */
     timeoutSeconds: number;
     /**
-     * Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for bane, 3 for inbound.
+     * Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for nightmail, 3 for inbound.
      */
     retryAttempts: number;
 };
@@ -4000,15 +4000,15 @@ export type CreateInboundWebhook = {
      */
     name?: string | null;
     /**
-     * bane (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key.
+     * nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key. bane is the earlier name of nightmail, still accepted.
      */
-    format?: 'bane' | 'inbound';
+    format?: 'nightmail' | 'inbound' | 'bane';
     /**
-     * include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for bane and include for inbound.
+     * include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for nightmail and include for inbound.
      */
     junk?: 'skip' | 'include';
     /**
-     * bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL.
+     * nightmail format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL.
      */
     include?: Array<'message' | 'raw'>;
     /**
@@ -4016,7 +4016,7 @@ export type CreateInboundWebhook = {
      */
     timeoutSeconds?: number;
     /**
-     * Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for bane, 3 for inbound.
+     * Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for nightmail, 3 for inbound.
      */
     retryAttempts?: number;
     url: string;
@@ -4054,15 +4054,15 @@ export type UpdateInboundWebhook = {
      */
     name?: string | null;
     /**
-     * bane (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key.
+     * nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key. bane is the earlier name of nightmail, still accepted.
      */
-    format?: 'bane' | 'inbound';
+    format?: 'nightmail' | 'inbound' | 'bane';
     /**
-     * include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for bane and include for inbound.
+     * include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for nightmail and include for inbound.
      */
     junk?: 'skip' | 'include';
     /**
-     * bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL.
+     * nightmail format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL.
      */
     include?: Array<'message' | 'raw'>;
     /**
@@ -4070,7 +4070,7 @@ export type UpdateInboundWebhook = {
      */
     timeoutSeconds?: number;
     /**
-     * Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for bane, 3 for inbound.
+     * Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for nightmail, 3 for inbound.
      */
     retryAttempts?: number;
     url?: string;
@@ -4099,9 +4099,9 @@ export type InboundWebhookTestResult = {
 
 export type TestInboundWebhook = {
     /**
-     * bane (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key.
+     * nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key. bane is the earlier name of nightmail, still accepted.
      */
-    format?: 'bane' | 'inbound';
+    format?: 'nightmail' | 'inbound' | 'bane';
     overrideUrl?: string;
 };
 

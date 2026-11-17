@@ -108,7 +108,7 @@ export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
   const from = runtime.config.notifyFrom, sender = runtime.config.platformDomainWorkspace;
   if (!from || !sender) {
     await settle('failed');
-    log('info', { code: 'BILLING_NOTIFY_SKIPPED', workspaceId: job.workspaceId, kind: notice.kind, reason: 'BANE_NOTIFY_FROM or the platform workspace is not configured' });
+    log('info', { code: 'BILLING_NOTIFY_SKIPPED', workspaceId: job.workspaceId, kind: notice.kind, reason: 'NIGHTMAIL_NOTIFY_FROM or the platform workspace is not configured' });
     return;
   }
   // Workspace names are the customer's: one line, bounded, so the subject is always a valid header.

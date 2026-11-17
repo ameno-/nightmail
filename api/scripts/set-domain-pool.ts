@@ -2,14 +2,14 @@ import { parseArgs } from 'node:util';
 import { Client } from 'pg';
 import { postgresConnection } from '../src/adapters/node.js';
 import { claimNameAllowed, domainName } from '../src/domain-claims.js';
-import { publicOrigin } from '../src/brand.js';
+import { publicOrigin, setting } from '../src/brand.js';
 import { poolTenantName } from '../src/ses-setup.js';
 import { requirePlatformAccount } from '../src/config.js';
 import { id } from '../src/core.js';
 
 export function requirePoolFlags(env:Record<string,string|undefined>) {
-  if ([env.MULTI_TENANT,env.BANE_REGIONAL_SENDING ?? env.MX_REGIONAL_SENDING,env.BANE_TRUSTED_POOL ?? env.MX_TRUSTED_POOL].some(v=>v!=='true')) throw new Error('Hosted regional sending and trusted-pool enrollment must both be enabled.');
-  return requirePlatformAccount(env.BANE_PLATFORM_AWS_ACCOUNT ?? env.MX_PLATFORM_AWS_ACCOUNT);
+  if ([env.MULTI_TENANT,setting(env,'REGIONAL_SENDING'),setting(env,'TRUSTED_POOL')].some(v=>v!=='true')) throw new Error('Hosted regional sending and trusted-pool enrollment must both be enabled.');
+  return requirePlatformAccount(setting(env, 'PLATFORM_AWS_ACCOUNT'));
 }
 // This only sets initial placement. Never silently move live mail, reset proof, or join the
 // two sending regions' DNS. A graduation requires a staged identity, drain and reviewed cutover.
