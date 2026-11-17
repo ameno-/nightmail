@@ -18546,10 +18546,42 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(await disconnected,'SCAN_STALE',`${first} first: the disconnect gets past its locks (no connection to disconnect here).`);
     }
   });
+  // Migration 332 decides the inbound mail stored without forwardEligible; a message committed after the page that
+  // would have seen it is never decided on read any more: a forward refuses it.
+  test('forward rollout: mail committed without forwardEligible after migration 332 ran is refused, not decided on read',async t=>{
+    const [{nodeRuntime},{sendToEndpoint},{encrypt}]=await Promise.all([import('./src/adapters/node.js'),import('./src/endpoints.js'),import('./src/operations.js')]);
+    const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
+    const a=await fixtureDatabase(t),b=await fixtureDatabase(t),w=unique('fwdroll'),hook='con_'+randomUUID().replaceAll('-',''),thread=unique('thr'),mid=unique('msg');
+    cleanup(t,async()=>{
+      for (const table of ['mail_messages','mail_threads','mail_endpoints','mailbox_webhooks']) await a.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[w]);
+      await a.query('DELETE FROM workspaces WHERE id=$1',[w]);
+    });
+    await a.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[w]);
+    // The forward endpoint as the replaced Worker writes one (migration 322 copies it onto its row).
+    await a.query("INSERT INTO mailbox_webhooks(id,workspace_id,name,url,event_types,encrypted_secret) VALUES($1,$2,'forward:team','https://ritual.invalid/','[]','synthetic')",[hook,w]);
+    await a.query("INSERT INTO mail_endpoints(workspace_id,ref,hook_id,encrypted_value,verified) VALUES($1,'forward:team',$2,$3,true)",[w,hook,await encrypt(runtime,'teammate@example.net',`${w}:endpoint:${hook}`)]);
+    await a.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[thread,w]);
+    // Migration 332, limited to this workspace so it leaves the other tests' mail alone, run as migrate.ts runs it.
+    const migration=await readFile(new URL('./migrations/332_forward_eligible_only.sql',import.meta.url),'utf8'),scoped=migration.replace('WHERE id > $1','WHERE workspace_id = $2 AND id > $1');
+    assert.notEqual(scoped,migration);
+    // A clean message stored without forwardEligible (as only the Worker before #347 stored one) commits after the migration ran.
+    await b.query('BEGIN');
+    try {
+      await b.query("INSERT INTO mail_messages(id,workspace_id,direction,thread_id,status,verdicts,headers,lifecycle) VALUES($1,$2,'inbound',$3,'received',$4,$5,'default')",
+        [mid,w,thread,JSON.stringify({spf:'PASS',dkim:'PASS',dmarc:'PASS',spam:'PASS',virus:'PASS',forwardSafe:true}),JSON.stringify([{name:'Subject',value:'Rollout'}])]);
+      for(let cursor='';;){const next=(await a.query(scoped,[cursor,w])).rows[0].cursor;if(next===null)break;cursor=next;}
+      await b.query('COMMIT');
+    } finally { await b.query('ROLLBACK'); }
+    assert.equal((await a.query("SELECT verdicts ? 'forwardEligible' AS decided FROM mail_messages WHERE id=$1",[mid])).rows[0].decided,false,'The migration never saw it.');
+    // The forward refuses it and decides nothing.
+    const delivery={type:'forward',webhook_id:hook,payload:{messageId:mid,type:'message.received',data:{recipients:[`box@${w}.example`],junk:false}}} as unknown as import('./src/core.js').ClaimedWebhook;
+    await assert.rejects(sendToEndpoint(runtime,w,delivery),{code:'FORWARD_BLOCKED'});
+    assert.equal((await a.query("SELECT verdicts ? 'forwardEligible' AS decided FROM mail_messages WHERE id=$1",[mid])).rows[0].decided,false);
+  });
   // Migration 332 rewrites verdicts on mail_messages, a large hot table, while the previous release keeps ingesting and
   // forwarding: one committed page at a time, resumable, and never over an answer a live forward stored meanwhile. It
   // runs here on a copy of the table in its own schema, so two connections can take row locks on committed rows.
-  test('forward contract: 332 pages through every message, resumes after a lock timeout and keeps what a live writer stored', async t => {
+  test('forward contract: 332 pages through every message, resumes after a lock timeout, keeps what a live writer stored and never changes a row twice', async t => {
     const source = await readFile(new URL('./migrations/332_forward_eligible_only.sql', import.meta.url), 'utf8');
     assert.match(source, /^-- bane:batched\n/);
     const schema = 'c332_' + randomUUID().replaceAll('-', '').slice(0, 12), [admin, migrator, live] = await Promise.all([fixtureDatabase(t), fixtureDatabase(t), fixtureDatabase(t)]);
@@ -18567,15 +18599,80 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
             WHEN 'outbound' THEN '{}'::jsonb ELSE '{"origin":"client-append"}'::jsonb END,
           CASE WHEN g%6=4 THEN '[]'::jsonb ELSE $2::jsonb END
         FROM generate_series(1,4500) g, LATERAL (SELECT (ARRAY['legacy-allowed','legacy-refused','decided-by-321','current','outbound','appended'])[g%6+1] AS k) kind`, [clean, headers]);
+      // Every shape the columns allow (verdicts and headers are any JSON), in the last page. [id, direction, status,
+      // automated, spam, verdicts, headers]
+      const ok = JSON.parse(clean), hdr = JSON.parse(headers), named = (...names: string[]) => names.map(name => ({ name, value: 'synthetic' }));
+      const shapes: [string, 'inbound' | 'outbound', string, boolean, boolean, unknown, unknown][] = [
+        ['s-safe-true', 'inbound', 'received', false, false, { ...ok, forwardSafe: true }, hdr],
+        ['s-safe-false', 'inbound', 'received', false, false, { ...ok, forwardSafe: false }, hdr],
+        ['s-safe-string', 'inbound', 'received', false, false, { ...ok, forwardSafe: 'false' }, hdr],
+        ['s-safe-null', 'inbound', 'received', false, false, { ...ok, forwardSafe: null }, hdr],
+        ['s-both', 'inbound', 'received', false, false, { ...ok, forwardSafe: true, forwardEligible: false }, hdr],
+        ['s-both-refused', 'inbound', 'received', false, false, { ...ok, forwardSafe: false, forwardEligible: true }, hdr],
+        ['s-eligible-only', 'inbound', 'received', false, false, { ...ok, forwardEligible: true }, hdr],
+        ['s-eligible-malformed', 'inbound', 'received', false, false, { ...ok, forwardEligible: 'yes', forwardSafe: true }, hdr],
+        ['s-eligible-null', 'inbound', 'received', false, false, { ...ok, forwardEligible: null }, hdr],
+        ['s-neither-clean', 'inbound', 'received', false, false, ok, hdr],
+        ['s-neither-empty', 'inbound', 'received', false, false, {}, hdr],
+        ['s-neither-sandbox', 'inbound', 'received', false, false, { simulated: true, spf: 'NONE', dkim: 'NONE', dmarc: 'NONE' }, hdr],
+        ['s-list', 'inbound', 'received', false, false, ok, named('From', 'List-Id')],
+        ['s-loop', 'inbound', 'received', false, false, ok, named('X-Bane-Loop')],
+        ['s-hops-24', 'inbound', 'received', false, false, ok, named(...Array(24).fill('Received'))],
+        ['s-hops-25', 'inbound', 'received', false, false, ok, named(...Array(25).fill('Received'))],
+        ['s-headers-199', 'inbound', 'received', false, false, ok, named(...Array(199).fill('X-Fixture'))],
+        ['s-headers-200', 'inbound', 'received', false, false, ok, named(...Array(200).fill('X-Fixture'))],
+        ['s-dmarc-fail', 'inbound', 'received', false, false, { ...ok, dmarc: 'FAIL' }, hdr],
+        ['s-no-virus', 'inbound', 'received', false, false, { ...ok, virus: undefined }, hdr],
+        ['s-unparsed', 'inbound', 'unparsed', false, false, ok, hdr],
+        ['s-automated', 'inbound', 'received', true, false, ok, hdr],
+        ['s-spam', 'inbound', 'received', false, true, ok, hdr],
+        ['s-json-null', 'inbound', 'received', false, false, null, hdr],
+        ['s-number', 'inbound', 'received', false, false, 5, hdr],
+        ['s-boolean', 'inbound', 'received', false, false, true, hdr],
+        ['s-array-empty', 'inbound', 'received', false, false, [], hdr],
+        ['s-array-key', 'inbound', 'received', false, false, ['forwardSafe', 'forwardEligible'], hdr],
+        ['s-array-object', 'inbound', 'received', false, false, [{ forwardSafe: true }], hdr],
+        ['s-string', 'inbound', 'received', false, false, 'forwardSafe', hdr],
+        ['s-headers-object', 'inbound', 'received', false, false, { ...ok, forwardSafe: true }, { name: 'From' }],
+        ['s-headers-string', 'inbound', 'received', false, false, ok, 'From: a@example.org'],
+        ['s-headers-nameless', 'inbound', 'received', false, false, ok, [{ value: 'x' }]],
+        ['s-headers-scalar-item', 'inbound', 'received', false, false, ok, ['From']],
+        ['s-headers-number-name', 'inbound', 'received', false, false, ok, [{ name: 5, value: 'x' }]],
+        ['s-headers-bad-refused', 'inbound', 'received', false, false, { ...ok, forwardSafe: false }, { name: 'From' }],
+        ['s-out-safe', 'outbound', 'sent', false, false, { forwardSafe: true }, []],
+        ['s-out-scalar', 'outbound', 'sent', false, false, 'forwardSafe', []],
+        ['s-out-array', 'outbound', 'sent', false, false, ['forwardSafe'], []],
+        ['s-out-null', 'outbound', 'sent', false, false, null, []],
+      ];
+      for (const [id, direction, status, automated, spam, verdicts, hs] of shapes)
+        await admin.query(`INSERT INTO mail_messages(id,workspace_id,thread_id,direction,status,automated,spam,subject,verdicts,headers) VALUES($1,'contract-332','thr',$2,$3,$4,$5,'shape',$6::jsonb,$7::jsonb)`,
+          [id, direction, status, automated, spam, JSON.stringify(verdicts), JSON.stringify(hs)]);
+      // The read #347 shipped (sendToEndpoint, then storedForwardEligibility for a message without forwardEligible), on
+      // each stored row: its answer, or that it threw.
+      const { forwardEligibility } = await import('./src/mailbox-ingest.js');
+      type Stored = { id: string; direction: string; status: string; automated: boolean; spam: boolean; verdicts: any; headers: any };
+      const shipped = (m: Stored): { value: unknown } | 'threw' => {
+        try {
+          let eligible = m.verdicts.forwardEligible;
+          if (eligible === undefined) eligible = m.verdicts.forwardSafe !== false && forwardEligibility(m, m.headers.map((h: { name: string }) => h.name.toLowerCase()));
+          return { value: eligible };
+        } catch { return 'threw'; }
+      };
+      // The read now: forwardEligible true, or refused.
+      const forwards = (m: Stored) => { try { return m.verdicts.forwardEligible === true; } catch { return false; } };
+      const stored = async (where = "subject='shape'") => new Map((await admin.query(`SELECT id,direction,status,automated,spam,verdicts,headers,xmin::text AS xmin FROM mail_messages WHERE ${where} ORDER BY id`)).rows.map((r: Stored & { xmin: string }) => [r.id, r]));
+      const seeded = await stored();
+      const versions = async () => new Map((await admin.query('SELECT id,xmin::text AS xmin FROM mail_messages')).rows.map((r: { id: string; xmin: string }) => [r.id, r.xmin]));
+      const inserted = await versions();
       const state = async () => (await admin.query(`SELECT subject AS kind,count(*)::int AS n,count(*) FILTER (WHERE verdicts ? 'forwardSafe')::int AS safe,
-        count(*) FILTER (WHERE verdicts->'forwardEligible'='true')::int AS eligible,count(*) FILTER (WHERE verdicts->'forwardEligible'='false')::int AS refused FROM mail_messages GROUP BY 1 ORDER BY 1`)).rows;
+        count(*) FILTER (WHERE verdicts->'forwardEligible'='true')::int AS eligible,count(*) FILTER (WHERE verdicts->'forwardEligible'='false')::int AS refused FROM mail_messages WHERE subject<>'shape' GROUP BY 1 ORDER BY 1`)).rows;
       const fingerprint = async () => (await admin.query('SELECT md5(string_agg(id||verdicts::text,\',\' ORDER BY id)) AS f FROM mail_messages')).rows[0].f;
       const row = async (id: string) => (await admin.query('SELECT verdicts FROM mail_messages WHERE id=$1', [id])).rows[0].verdicts;
       // The live Worker: a forward decides a legacy message on read (its own answer) and holds the row in page two, and
       // ingest stores new mail on both sides of the cursor, as every message it stores now: forwardEligible, no forwardSafe.
       assert.deepEqual(await row('m02496'), { ...JSON.parse(clean), forwardSafe: true });
       await live.query('BEGIN');
-      let committed = false;
+      let committed = false, pageOne: Map<string, string>;
       try {
         await live.query(`UPDATE mail_messages SET verdicts=verdicts||jsonb_build_object('forwardEligible',false) WHERE id='m02496' AND NOT verdicts ? 'forwardEligible'`);
         await live.query(`INSERT INTO mail_messages(id,workspace_id,thread_id,direction,subject,verdicts,headers) VALUES('m00000a','contract-332','thr','inbound','new',$1::jsonb||'{"forwardEligible":true}',$2),
@@ -18584,6 +18681,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await migrator.query("SET lock_timeout='200ms'");
         await assert.rejects(migrate(), (e: Json) => e.code === '55P03');
         assert.deepEqual(await row('m00006'), { ...JSON.parse(clean), forwardEligible: true }, 'Page one committed.');
+        pageOne = await versions();
         // Run again (migrate.ts starts over from the first page): it waits for the forward, then finishes.
         await migrator.query("SET lock_timeout='4s'");
         const rerun = migrate(); rerun.catch(() => {});
@@ -18594,6 +18692,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await live.query('COMMIT'); committed = true;
         assert.equal(await rerun, 3);
       } finally { if (!committed) await live.query('ROLLBACK'); }
+      // The rerun changed no row the interrupted run had already changed (page one): not even rewritten.
+      const after = await versions();
+      for (const [id, xmin] of pageOne!) if (id <= 'm02000') assert.equal(after.get(id), xmin, id);
       // The forward's answer stands and forwardSafe is gone; ingest's new mail is as it stored it.
       assert.deepEqual(await row('m02496'), { ...JSON.parse(clean), forwardEligible: false });
       assert.deepEqual([await row('m00000a'), await row('m04999a')], [{ ...JSON.parse(clean), forwardEligible: true }, { ...JSON.parse(clean), forwardEligible: false }]);
@@ -18608,10 +18709,42 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         { kind: 'new', n: 2, safe: 0, eligible: 1, refused: 1 },
         { kind: 'outbound', n: 750, safe: 0, eligible: 0, refused: 0 },
       ]);
-      // Run once more: nothing changes.
-      const done = await fingerprint();
+      // Rows that needed nothing were never written, and the differential: each shape against the read #347 shipped.
+      for (const kind of ['current', 'outbound']) {
+        const ids = [...(await stored(`subject='${kind}'`)).keys()];
+        assert.ok(ids.every(id => after.get(id) === inserted.get(id)), `${kind} rows were never written.`);
+      }
+      const migrated = await stored();
+      for (const [id, before] of seeded) {
+        const now = migrated.get(id)!, old = shipped(before), object = before.verdicts !== null && typeof before.verdicts === 'object' && !Array.isArray(before.verdicts);
+        const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+        if (!object) {
+          // Not an object: left exactly as stored (never written), and the read refuses it as before (false, or threw on JSON null).
+          assert.equal(now.xmin, before.xmin, `${id}: written`);
+          assert.ok(old === 'threw' ? before.verdicts === null : old.value === false, `${id}: the shipped read allowed it`);
+        } else if (before.direction === 'outbound') {
+          // Outbound: forwardSafe removed, nothing added.
+          const { forwardSafe: _, ...rest } = before.verdicts;
+          assert.deepEqual(now.verdicts, rest, id);
+        } else {
+          // Inbound object: forwardEligible is what the shipped read returned (kept when it was stored), false where the
+          // read threw on malformed headers; forwardSafe removed; every other key as stored.
+          const { forwardSafe: _, ...rest } = before.verdicts;
+          const expected = old === 'threw' ? false : old.value;
+          assert.ok(same(now.verdicts.forwardEligible, expected), `${id}: ${JSON.stringify(now.verdicts.forwardEligible)} vs ${JSON.stringify(old)}`);
+          assert.deepEqual({ ...now.verdicts, forwardEligible: undefined }, { ...rest, forwardEligible: undefined }, id);
+          if (!('forwardSafe' in before.verdicts) && 'forwardEligible' in before.verdicts) assert.equal(now.xmin, before.xmin, `${id}: written`);
+        }
+        // Whatever the shape, a forward goes ahead now exactly when the shipped read let it.
+        assert.equal(forwards(now), old !== 'threw' && old.value === true, `${id}: forward decision changed`);
+      }
+      assert.equal(shipped(seeded.get('s-headers-object')!), 'threw');
+      assert.equal(shipped(seeded.get('s-json-null')!), 'threw');
+      // Run once more: nothing changes, and no row is written again.
+      const done = await fingerprint(), versionsDone = await versions();
       assert.equal(await migrate(), 3);
       assert.equal(await fingerprint(), done);
+      assert.deepEqual(await versions(), versionsDone);
     } finally { await admin.query(`DROP SCHEMA ${schema} CASCADE`); }
   });
   // Recheck 2 of #57 (tear witness, 5 steps: accept m1 a, claim, accept m1 ac, lose, legacy-fail -> the previous
