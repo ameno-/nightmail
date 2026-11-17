@@ -36,7 +36,8 @@ try {
   if (!rotation && rootSecret !== undefined) {
     for (const table of ['operation_webhooks','mailbox_webhooks']) {
       if (!(await client.query('SELECT to_regclass($1) AS t',[table])).rows[0].t) continue;
-      const sample=(await client.query(`SELECT id,workspace_id,encrypted_secret,coalesce(to_jsonb(w)->>'environment','live') AS env FROM ${table} w LIMIT 1`)).rows[0];
+      // Slack, Discord and forward endpoints have no signing secret (migration 322).
+      const sample=(await client.query(`SELECT id,workspace_id,encrypted_secret,coalesce(to_jsonb(w)->>'environment','live') AS env FROM ${table} w WHERE encrypted_secret IS NOT NULL LIMIT 1`)).rows[0];
       if (!sample) continue;
       const binding=`${sample.workspace_id}:${sample.env}:${table==='mailbox_webhooks'?'mailbox:':''}${sample.id}`;
       try { await decrypt({config:{encryptionKey:deriveEncryptionKey(rootSecret)}},sample.encrypted_secret,binding); }

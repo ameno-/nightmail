@@ -2,9 +2,10 @@
 import { useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useSearchParams } from 'react-router'
-import { Check } from 'lucide-react'
-import { Button, ConfirmDialog, DataTable, DropdownMenu, EmptyState, ErrorState, LoadingRegion, PageHeader, Pagination, SearchField, Select, StatusBadge, Tabs, useToast } from '../../components/ui'
-import { useWorkspaceAccess } from '../../data/context'
+import { Check, X } from 'lucide-react'
+import { Button, ConfirmDialog, DataTable, DropdownMenu, EmptyState, ErrorState, IconButton, LoadingRegion, PageHeader, Pagination, SearchField, Select, StatusBadge, Tabs, useToast } from '../../components/ui'
+import { useApiDef, useWorkspaceAccess } from '../../data/context'
+import { queries } from '../../data/queries'
 import { request } from '../../data/live'
 import { errorText } from '../../data/types'
 import { number } from '../../lib/format'
@@ -13,7 +14,7 @@ import { CreateAddressDialog } from './addresses'
 import { concepts, kindNote, kinds, type KindFilter } from './concepts'
 import { NewInboxDialog } from './inboxes'
 import { ConnectAgentButton } from '../docs/connect-agent'
-import { ago, expiresIn, receivingDomains, typeLabel, useOverview, type Overview, type OverviewEndpoint, type RouteEntry } from './overview'
+import { ago, expiresIn, receivingDomains, typeLabel, useEndpointPage, useOverview, type Overview, type OverviewEndpoint, type RouteEntry } from './overview'
 import { Chain, Match, RouteIcon, TargetIcon, Targets, targetName } from './parts'
 import { RitualsTab } from './recipes'
 import { CreatedEndpointDialog, EndpointDialog, endpointStatusLabel, endpointStatusTone, type EditableEndpoint, type Endpoint } from './ritual-connections'
@@ -113,8 +114,20 @@ function RoutesTab({ overview, fetching, filters, setFilter, page, onPage, onCre
   </div>
 }
 
+const ENDPOINT_PAGE = 50
 function EndpointsTab({ overview, refresh }: { overview: Overview; refresh: () => void }) {
-  const toast = useToast(), navigate = useNavigate()
+  const toast = useToast(), navigate = useNavigate(), client = useQueryClient()
+  // Every endpoint, a page at a time; ?address= keeps the webhooks that get that address's received mail (an address's "more webhooks" link).
+  const [params, setParams] = useSearchParams(), address = params.get('address') ?? undefined
+  const pagination = useCursorPagination()
+  // With nothing to list the overview already says so, and the empty state shows at once.
+  const none = !address && !overview.endpoints.length && !overview.endpointsTruncated
+  const list = useEndpointPage({ addressId: address, cursor: pagination.cursor, limit: ENDPOINT_PAGE }, !none)
+  const addresses = useApiDef(queries.inboundAddressOptions(), { enabled: !!address })
+  const reload = () => { refresh(); void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && resourceOf(query.queryKey) === 'inbound-endpoints' }) }
+  const showAll = () => { setParams(previous => { const next = new URLSearchParams(previous); next.delete('address'); return next }, { replace: true }); pagination.reset() }
+  // The first page holds as many rows as the overview counted, so the list keeps its height while it loads.
+  const expected = address ? 2 : Math.max(1, Math.min(ENDPOINT_PAGE, overview.endpoints.length))
   const [creating, setCreating] = useState(false)
   const [created, setCreated] = useState<(Endpoint & { secret?: string }) | null>(null)
   // Kept after closing, so the dialog's title and fields don't change while it animates out.
@@ -124,33 +137,39 @@ function EndpointsTab({ overview, refresh }: { overview: Overview; refresh: () =
     try {
       const result = await request<{ ok?: boolean; error?: string | null }>(`/v1/endpoints/${encodeURIComponent(e.name)}${path}`, { method, ...(body === undefined ? {} : { body }) })
       toast(result.ok === false ? `${e.name} answered ${result.error ?? 'an error'}.` : done, result.ok === false ? 'error' : 'success')
-      refresh()
+      reload()
     } catch (error) { toast(errorText(error), 'error') }
   }
+  // A webhook opens its own page (events, deliveries, headers, secret), named or not.
+  const webhookPage = (e: OverviewEndpoint) => e.type === 'webhook' ? `/receiving/webhooks/${e.id}` : null
   const used = (e: OverviewEndpoint) => [e.routes ? `${number(e.routes)} ${e.routes === 1 ? 'route' : 'routes'}` : null, e.rituals.length ? `ritual ${e.rituals.join(', ')}` : null, e.eventTypes.length ? `${e.eventTypes.length === 1 ? e.eventTypes[0] : `${e.eventTypes.length} events`}` : null].filter(Boolean).join(' · ')
   return <div className="stack rcv-tab">
-    <div className="rcv-kindline"><div className="cluster"><Link className="ui-button ui-button--ghost ui-button--sm" to="/receiving/webhooks">Event webhooks</Link><Button size="sm" onClick={() => setCreating(true)}>New endpoint</Button></div></div>
-    <DataTable className="rcv-table" rows={overview.endpoints} rowKey={e => e.id} rowHref={e => e.source === 'inbound_webhook' ? `/receiving/webhooks/${e.id}` : null}
-      empty={<EmptyState title="No endpoints yet" action={<Button onClick={() => setCreating(true)}>New endpoint</Button>} />}
+    <div className="rcv-kindline">
+      {address && <span className="rcv-filter-chip">{(a => a ? <PrivateAddress value={a} /> : 'One address')(addresses.data?.find(item => item.id === address)?.address)}<IconButton size="sm" label="Show every endpoint" onClick={showAll}><X size={14} aria-hidden="true" /></IconButton></span>}
+      <div className="cluster"><Button size="sm" onClick={() => setCreating(true)}>New endpoint</Button></div>
+    </div>
+    {list.error && !list.data ? <ErrorState error={list.error} onRetry={() => void list.refetch()} /> : <DataTable className="rcv-table" rows={none ? [] : list.data?.data ?? []} rowKey={e => e.id} rowHref={webhookPage}
+      loading={!none && !list.data} skeletonRows={expected} minRows={none ? 0 : Math.min(expected, list.data?.data.length ?? expected)}
+      empty={address ? <EmptyState title="No webhook gets this address’s mail" /> : <EmptyState title="No endpoints yet" action={<Button onClick={() => setCreating(true)}>New endpoint</Button>} />}
       columns={[
         { key: 'name', label: 'Endpoint', width: '30%', render: e => <div className="rcv-cell"><TargetIcon type={e.type} /><div className="settings-cell-stack"><span className="receiving-clip" title={e.call ?? e.name}>{e.call ? <code>{e.call}</code> : e.name}</span><span className="muted receiving-clip"><PrivateAddress value={e.target} /></span></div></div>,
           cardRender: e => <span className="rcv-cell"><TargetIcon type={e.type} />{e.call ? <code>{e.call}</code> : e.name}</span> },
         { key: 'target', label: 'Target', table: false, card: 'line', render: e => <PrivateAddress value={e.target} /> },
-        { key: 'type', label: 'Type', width: '14%', card: 'hide', render: e => e.source === 'inbound_webhook' ? 'Inbound webhook' : { webhook: 'Webhook', slack: 'Slack', discord: 'Discord', forward: 'Forward' }[e.type] },
+        { key: 'type', label: 'Type', width: '14%', card: 'hide', render: e => ({ webhook: 'Webhook', slack: 'Slack', discord: 'Discord', forward: 'Forward' }[e.type]) },
         { key: 'used', label: 'Used by', width: '30%', card: 'line', render: e => used(e) || <span className="muted">Nothing yet</span> },
         { key: 'status', label: 'Status', width: '16%', card: 'aside', render: e => <StatusBadge status={endpointStatusLabel[e.status]} tone={endpointStatusTone[e.status]} /> },
-        { key: 'actions', label: '', width: 52, align: 'right', render: e => e.source === 'inbound_webhook' ? <DropdownMenu label={`Actions for ${e.name}`} items={[{ label: 'Open', onSelect: () => navigate(`/receiving/webhooks/${e.id}`) }]} /> : <DropdownMenu label={`Actions for ${e.name}`} items={[
+        { key: 'actions', label: '', width: 52, align: 'right', render: e => e.source === 'inbound_webhook' ? <DropdownMenu label={`Actions for ${e.name}`} items={[{ label: 'Open', onSelect: () => navigate(webhookPage(e)!) }]} /> : <DropdownMenu label={`Actions for ${e.name}`} items={[
+          ...(e.type === 'webhook' ? [{ label: 'Open', onSelect: () => navigate(webhookPage(e)!) }] : []),
           { label: 'Edit', onSelect: () => { setEditing(e); setEditOpen(true) } },
           ...(e.type !== 'forward' ? [{ label: 'Send a test message', onSelect: () => void act(e, '/test', 'POST', undefined, `Test posted to ${e.call}.`) }] : []),
           ...(e.type === 'forward' && e.status !== 'ready' ? [{ label: 'Resend confirmation', onSelect: () => void act(e, '/verification', 'POST', {}, 'Confirmation email queued.') }] : []),
           { label: e.status === 'paused' ? 'Resume' : 'Pause', onSelect: () => void act(e, '', 'PATCH', { paused: e.status !== 'paused' }, e.status === 'paused' ? 'Resumed.' : 'Paused. Calls wait until you resume.') },
           { label: 'Delete', destructive: true, onSelect: () => { setDeleting(e); setDeleteOpen(true) } },
         ]} /> },
-      ]} />
-    {/* The overview reads up to 100 of each; the rest are on the webhooks page (an endpoint list past 100 is API-only). */}
-    {overview.endpointsTruncated && <div className="rcv-foot"><span className="muted">{number(overview.endpoints.length)}+ endpoints</span><Link to="/receiving/webhooks">See every webhook</Link></div>}
-    <EndpointDialog open={creating} onOpenChange={setCreating} onCreated={e => { setCreating(false); setCreated(e); refresh() }} />
-    <EndpointDialog open={editOpen} editing={editing} onOpenChange={setEditOpen} onSaved={e => { setEditOpen(false); toast(`Saved ${e.name}.`, 'success'); refresh() }} />
+      ]} />}
+    {list.data && <Pagination page={pagination.page} pageSize={ENDPOINT_PAGE} nextCursor={list.data.nextCursor} count={list.data.data.length} onPageChange={next => pagination.onPageChange(next, list.data?.nextCursor)} />}
+    <EndpointDialog open={creating} onOpenChange={setCreating} onCreated={e => { setCreating(false); setCreated(e); reload() }} />
+    <EndpointDialog open={editOpen} editing={editing} onOpenChange={setEditOpen} onSaved={e => { setEditOpen(false); toast(`Saved ${e.name}.`, 'success'); reload() }} />
     <CreatedEndpointDialog created={created} onClose={() => setCreated(null)} />
     <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} danger title={`Delete ${deleting?.name ?? 'this endpoint'}?`} description="Rituals and routes that send to it stop delivering. This can’t be undone." confirmLabel="Delete endpoint"
       onConfirm={() => deleting ? act(deleting, '', 'DELETE', undefined, `${deleting.name} deleted.`) : undefined} />
@@ -183,7 +202,7 @@ export function ReceivingPage() {
   const client = useQueryClient(), toast = useToast()
   useLiveVersion(manage && !!data, change => {
     if (change.first) return
-    void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && resourceOf(query.queryKey) === 'inbound-overview' })
+    void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && ['inbound-overview', 'inbound-endpoints'].includes(resourceOf(query.queryKey)) })
     if (change.actor?.self && change.actor.type === 'member') return
     toast(`${change.versionMoved ? 'Routes and rituals' : 'Endpoints'} updated by ${actorText(change.actor)}${change.versionMoved ? ` · version ${change.version}` : ''}`, 'info')
   }, { endpoints: true })
@@ -197,7 +216,7 @@ export function ReceivingPage() {
       <Link className={`ui-button ui-button--${firstAddress ? 'secondary' : 'primary'} ui-button--md`} to="/receiving/inbox">Inbox</Link>
     </>} />
     {overview.error && !data ? <ErrorState error={overview.error} onRetry={() => void overview.refetch()} /> : !data || !counts ? <LoadingRegion label="Loading receiving"><div className="rcv-skeleton" aria-hidden="true"><span /><span /><span /><span /></div></LoadingRegion> : <div className="rcv-page">
-      <Tabs label="Receiving" value={tab} onValueChange={value => update({ tab: value, kind: null })}
+      <Tabs label="Receiving" value={tab} onValueChange={value => update({ tab: value, kind: null, address: null })}
         items={[{ value: 'routes', label: concepts.routes.title, count: counts.routes }, ...(data.manage ? [{ value: 'rituals', label: concepts.rituals.title, count: counts.rituals }, { value: 'endpoints', label: concepts.endpoints.title, count: counts.endpoints }] : [])]} />
       {tab === 'rituals' && data.manage ? <RitualsTab overview={data} refresh={() => overview.refetch()} />
         : tab === 'endpoints' && data.manage ? <EndpointsTab overview={data} refresh={() => void overview.refetch()} />

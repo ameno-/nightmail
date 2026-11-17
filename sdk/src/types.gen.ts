@@ -3684,7 +3684,7 @@ export type InboundOverviewTarget = {
      */
     type: 'inbox' | 'webhook' | 'slack' | 'discord' | 'forward' | 'store' | 'drop' | 'create_address';
     /**
-     * Address ID for an inbox, webhook ID (mwh_…) for an endpoint or inbound webhook; null for store, drop and create_address.
+     * Address ID for an inbox, endpoint ID (mwh_… for a webhook, con_… for Slack, Discord or a forward); null for store, drop and create_address.
      */
     id: string | null;
     /**
@@ -3707,11 +3707,11 @@ export type InboundOverviewTarget = {
 
 export type InboundOverviewEndpoint = {
     /**
-     * Webhook ID (mwh_…) that delivers for it.
+     * Endpoint ID: mwh_… for a webhook, con_… for Slack, Discord or a forward.
      */
     id: string;
     /**
-     * endpoint: a named endpoint rituals call (and routes can name). inbound_webhook: a webhook created with createInboundWebhook.
+     * endpoint: a named endpoint, which rituals call (listEndpoints). inbound_webhook: a webhook without a name (listInboundWebhooks lists every webhook, named or not).
      */
     source: 'endpoint' | 'inbound_webhook';
     name: string;
@@ -3726,7 +3726,7 @@ export type InboundOverviewEndpoint = {
      */
     call: string | null;
     /**
-     * Events an inbound webhook subscribes to; empty for endpoints and route-only webhooks.
+     * Events a webhook subscribes to; empty for a route-only webhook and for Slack, Discord and forward endpoints.
      */
     eventTypes: Array<string>;
     /**
@@ -3750,6 +3750,11 @@ export type InboundOverviewDomain = {
     name: string;
     status: 'off' | 'provisioning' | 'waiting_for_mx' | 'active' | 'disabling' | 'disabled' | 'failed';
     catchAll: 'create_address' | 'store';
+};
+
+export type InboundEndpointPage = {
+    data: Array<InboundOverviewEndpoint>;
+    nextCursor: string | null;
 };
 
 export type UpdateInboundThread = {
@@ -3961,7 +3966,7 @@ export type InboundWebhook = {
     updatedAt: string;
     addressIds: Array<string> | null;
     /**
-     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     * Its endpoint name: rituals call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names.
      */
     key: string | null;
     /**
@@ -3992,7 +3997,7 @@ export type InboundWebhook = {
 
 export type CreateInboundWebhook = {
     /**
-     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     * Its endpoint name: rituals call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names.
      */
     key?: string | null;
     /**
@@ -4046,7 +4051,7 @@ export type InboundWebhookList = {
 
 export type UpdateInboundWebhook = {
     /**
-     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     * Its endpoint name: rituals call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names.
      */
     key?: string | null;
     /**
@@ -20648,6 +20653,77 @@ export type GetInboundOverviewResponses = {
 };
 
 export type GetInboundOverviewResponse = GetInboundOverviewResponses[keyof GetInboundOverviewResponses];
+
+export type ListInboundEndpointsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * nextCursor from the previous page.
+         */
+        cursor?: string;
+        limit?: number;
+        /**
+         * Only webhooks that get this address's received mail.
+         */
+        addressId?: string;
+    };
+    url: '/v1/inbound/endpoints';
+};
+
+export type ListInboundEndpointsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListInboundEndpointsError = ListInboundEndpointsErrors[keyof ListInboundEndpointsErrors];
+
+export type ListInboundEndpointsResponses = {
+    /**
+     * Success
+     */
+    200: InboundEndpointPage;
+};
+
+export type ListInboundEndpointsResponse = ListInboundEndpointsResponses[keyof ListInboundEndpointsResponses];
 
 export type ReplyToInboundThreadData = {
     body: ReplyToInboundThread;

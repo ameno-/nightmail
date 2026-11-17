@@ -225,6 +225,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `getInboundAttachment` | `attachments` · `getInbound` · inboxes |
 | `listLogs` | `logs` · `all` · sending |
 | `getInboundOverview` | `addresses` · `overview` · inboxes |
+| `listInboundEndpoints` | `endpoints` · `listAll` · endpoints |
 | `replyToInboundThread` | `reply` · `reply` · inboxes |
 | `listInboundEvents` | `messages` · `events` · inboxes |
 | `createInboundKey` | `keys` · `createInbound` · admin |

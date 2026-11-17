@@ -31,7 +31,7 @@ import type { FeedbackItem } from './core.js';
 import { realDestination } from './hosted-sending.js';
 import { webhookSecretBinding as mailboxSecretBinding } from './mailbox-events.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
-import { mailboxDomains, mailboxWebhooks, type MxReport } from './db/mailbox.js';
+import { mailboxDomains, endpoints, type MxReport } from './db/mailbox.js';
 import { checkMx,expectedMx } from './mailbox-dns.js';
 import { baneRecordIssue, baneRecordUse, defaultReceivingHost, inspectReceivingHost, observeReceiving, takenIssue, type ReceivingObservation } from './receiving-host.js';
 import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, webhookSecretAudit, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
@@ -217,17 +217,21 @@ export async function reencryptWebhookSecrets(db: Database, config: Config): Pro
   const counts = { scanned: 0, reencrypted: 0, skipped: 0, conflicted: 0 };
   const currentEnvelope = new RegExp(`^v1\\.${current.id}\\.[a-f0-9]{24}\\.(?:[a-f0-9]{2}){16,}$`, 'i');
   const rewrap = async (ciphertext: string | null, aad: string) => ciphertext !== null && !currentEnvelope.test(ciphertext) ? encrypt(runtime, await decrypt(runtime, ciphertext, aad), aad) : undefined;
-  for (const table of [webhooks, mailboxWebhooks]) {
+  const same = (column: AnyPgColumn, value: string | null) => value === null ? isNull(column) : eq(column, value);
+  for (const table of [webhooks, endpoints]) {
     let cursor: string | undefined;
     for (;;) {
-      const rows = await db.select({ id: table.id, workspaceId: table.workspaceId, encryptedSecret: table.encryptedSecret, encryptedHeaders: table.encryptedHeaders }).from(table).where(cursor ? lt(table.id, cursor) : undefined).orderBy(desc(table.id)).limit(100);
+      const rows = await db.select({ id: table.id, workspaceId: table.workspaceId, encryptedSecret: table.encryptedSecret, encryptedHeaders: table.encryptedHeaders, encryptedTarget: table === endpoints ? endpoints.encryptedTarget : sql<null>`NULL` }).from(table).where(cursor ? lt(table.id, cursor) : undefined).orderBy(desc(table.id)).limit(100);
       for (const row of rows) {
         counts.scanned++;
         const binding = table === webhooks ? secretBinding(row, row.id) : mailboxSecretBinding(row.workspaceId, row.id);
-        const encryptedSecret = await rewrap(row.encryptedSecret, binding), encryptedHeaders = await rewrap(row.encryptedHeaders, `${binding}:headers`);
-        if (!encryptedSecret && !encryptedHeaders) { counts.skipped++; continue; }
-        // Neither a concurrent secret rotation nor a header replacement may be overwritten.
-        const updated = await db.update(table).set({ encryptedSecret, encryptedHeaders, updatedAt: now() }).where(and(eq(table.id, row.id), scoped(table, row), eq(table.encryptedSecret, row.encryptedSecret), row.encryptedHeaders === null ? isNull(table.encryptedHeaders) : eq(table.encryptedHeaders, row.encryptedHeaders))).returning({ id: table.id });
+        // An endpoint's Slack or Discord URL or forward address (encrypted_target) is rewrapped with its secret and headers.
+        const encryptedSecret = await rewrap(row.encryptedSecret, binding), encryptedHeaders = await rewrap(row.encryptedHeaders, `${binding}:headers`), encryptedTarget = await rewrap(row.encryptedTarget, `${row.workspaceId}:endpoint:${row.id}`);
+        if (!encryptedSecret && !encryptedHeaders && !encryptedTarget) { counts.skipped++; continue; }
+        // Neither a concurrent secret rotation nor a header or URL replacement may be overwritten.
+        const updated = table === webhooks
+          ? await db.update(webhooks).set({ encryptedSecret, encryptedHeaders, updatedAt: now() }).where(and(eq(webhooks.id, row.id), scoped(webhooks, row), same(webhooks.encryptedSecret, row.encryptedSecret), same(webhooks.encryptedHeaders, row.encryptedHeaders))).returning({ id: webhooks.id })
+          : await db.update(endpoints).set({ encryptedSecret, encryptedHeaders, encryptedTarget, updatedAt: now() }).where(and(eq(endpoints.id, row.id), scoped(endpoints, row), same(endpoints.encryptedSecret, row.encryptedSecret), same(endpoints.encryptedHeaders, row.encryptedHeaders), same(endpoints.encryptedTarget, row.encryptedTarget))).returning({ id: endpoints.id });
         if (updated.length) counts.reencrypted++; else counts.conflicted++;
       }
       if (rows.length < 100) break;

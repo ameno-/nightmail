@@ -1,24 +1,21 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
-import { Alert, Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, IconButton, Input, SecretInput, PageHeader, Pagination, SectionHeader, Select, SkeletonText, StatusBadge, type Tone, fieldError, MutationError, SecretDialog } from '../../components/ui'
+import { useNavigate, useParams } from 'react-router'
+import { Alert, Button, Checkbox, ConfirmDialog, DataTable, EmptyState, ErrorState, Field, Input, SecretInput, PageHeader, SectionHeader, Select, SkeletonText, StatusBadge, type Tone, fieldError, MutationError, SecretDialog } from '../../components/ui'
 import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { inboundEventTypes, type InboundAddress, type InboundWebhook, type InboundWebhookInput, type MailboxEventType, type MailboxWebhookDelivery } from '../../data/types'
 import { date, time } from '../../lib/format'
-import { useCursorPagination } from '../../lib/pagination'
-import { headerDraftErrors, HeaderNames, headerPayload, headersChanged, WebhookHeadersField, type HeaderDraft } from '../settings/webhook-headers'
+import { headerDraftErrors, headerPayload, headersChanged, WebhookHeadersField, type HeaderDraft } from '../settings/webhook-headers'
 import '../settings/settings.css'
 import './inbound.css'
 import './receiving.css'
-import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
-import { X } from 'lucide-react'
+import { PrivateAddress } from '../../components/PrivateAddress'
 import { productName } from '../../../../api/src/brand'
 
 // paused: held by a paused webhook until it resumes.
 const deliveryStatus: Record<MailboxWebhookDelivery['status'], { label: string; tone: Tone }> = { pending: { label: 'Retrying', tone: 'warning' }, delivered: { label: 'Delivered', tone: 'success' }, failed: { label: 'Failed', tone: 'danger' }, paused: { label: 'Held', tone: 'neutral' } }
 // routeOnly is form state: a webhook that subscribes to no events and only gets mail a route sends to it.
 type Draft = InboundWebhookInput & { routeOnly: boolean }
-const blank: Draft = { url: '', description: '', eventTypes: ['message.received'], addressIds: null, format: 'nightmail', routeOnly: false }
 // A webhook a ritual endpoint created has no description: its endpoint name says what it is, not its masked URL.
 const webhookTitle = (webhook: InboundWebhook) => webhook.description || (webhook.name ? `endpoints.${webhook.name}` : webhook.url)
 const draftOf = (webhook: InboundWebhook): Draft => ({ url: '', description: webhook.description, eventTypes: [...webhook.eventTypes].sort(), addressIds: webhook.addressIds, format: webhook.format ?? 'nightmail', junk: webhook.junk, routeOnly: !webhook.eventTypes.length })
@@ -34,7 +31,6 @@ function validate(input: Draft, editing = false) {
   if (input.addressIds && !input.addressIds.length) errors.addressIds = 'Choose at least one address, or send events for every address.'
   return errors
 }
-const scopeText = (webhook: InboundWebhook, addresses?: InboundAddress[]) => !webhook.eventTypes.length ? 'Routed mail only' : webhook.addressIds ? <AddressList values={webhook.addressIds.map(id => addresses?.find(item => item.id === id)?.address ?? id)} /> : 'All addresses'
 
 // Editing never shows the saved URL: its field is Replace URL, with the saved one masked as its placeholder, and left
 // empty it keeps it. What each event and payload carries is in the API reference, not under each box.
@@ -68,61 +64,14 @@ function WebhookFields({ input, urlHint, onChange, addresses, errors, apiError, 
   </div>
 }
 
-// Inbound webhooks are admin-only; members get a calm notice instead of requests that would be refused.
+// Webhooks are admin-only; members get a calm notice instead of requests that would be refused.
 function AdminOnly({ title, backTo }: { title: string; backTo: string }) {
   return <div className="stack inbound-stack"><PageHeader title={title} backTo={backTo} /><EmptyState title="Owners and admins manage webhooks" /></div>
 }
-export function InboundWebhooksPage() { return useWorkspaceAccess().canAdminister ? <WebhooksList /> : <AdminOnly title="Inbound webhooks" backTo="/receiving" /> }
-export function InboundWebhookDetailPage() { return useWorkspaceAccess().canAdminister ? <WebhookDetail /> : <AdminOnly title="Inbound webhook" backTo="/receiving" /> }
+export function InboundWebhookDetailPage() { return useWorkspaceAccess().canAdminister ? <WebhookDetail /> : <AdminOnly title="Webhook" backTo="/receiving" /> }
 
-function WebhooksList() {
-  const navigate = useNavigate()
-  // ?address= keeps the webhooks that get that address's received mail: the full list a route's "Goes to" links to.
-  const [params] = useSearchParams()
-  const addressId = params.get('address') ?? undefined
-  const pagination = useCursorPagination()
-  const webhooks = useApiQuery(['inbound-webhooks', 'page', addressId ?? '', pagination.cursor ?? ''], (api, signal) => api.inbound.webhookPage({ cursor: pagination.cursor, addressId }, signal), { keepPrevious: true })
-  const addresses = useApiDef(queries.inboundAddressOptions())
-  const create = useApiMutation((api, input: InboundWebhookInput) => api.inbound.createWebhook(input), 'Webhook created')
-  const [open, setOpen] = useState(false)
-  const [input, setInput] = useState<Draft>(blank)
-  const [headers, setHeaders] = useState<HeaderDraft>([])
-  const [errors, setErrors] = useState<Record<string, string>>({})
-  const [secret, setSecret] = useState<{ value: string; id: string } | null>(null)
-  function openCreate() { create.reset(); setInput(blank); setHeaders([]); setErrors({}); setOpen(true) }
-  async function submit(event: FormEvent) {
-    event.preventDefault()
-    const next = { ...validate(input), ...headerDraftErrors(headers) }; setErrors(next)
-    if (Object.keys(next).length) return
-    try { const result = await create.mutateAsync({ ...payloadOf(input), headers: headerPayload(headers) }); setOpen(false); setSecret({ value: result.secret, id: result.webhook.id }) } catch { /* Shown in the form. */ }
-  }
-  return <div className="stack inbound-stack">
-    {/* Sent mail's webhooks live in Settings, one click away from here. */}
-    <PageHeader title="Inbound webhooks" backTo="/receiving?tab=endpoints" actions={<><Link className="ui-button ui-button--secondary ui-button--md" to="/settings#webhooks">Sent mail webhooks</Link><Button variant="primary" onClick={openCreate}>Add webhook</Button></>} />
-    {/* ?address= narrows the list to the webhooks that get that address's mail, active or paused; the chip clears it. */}
-    {addressId && <div className="cluster"><span className="rcv-filter-chip">{(a => a ? <PrivateAddress value={a} /> : 'One address')(addresses.data?.find(item => item.id === addressId)?.address)}<IconButton size="sm" label="Show every webhook" onClick={() => navigate('/receiving/webhooks')}><X size={14} aria-hidden="true" /></IconButton></span></div>}
-    {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable loading={webhooks.isPending || (addresses.isPending && !addresses.error)} skeletonRows={2} minRows={2} rows={webhooks.data?.data ?? []} rowKey={row => row.id} rowHref={row => `/receiving/webhooks/${row.id}`}
-      empty={addressId ? <EmptyState title="No webhook gets this address’s mail" /> : <EmptyState title="No inbound webhooks" action={<Button onClick={openCreate}>Add webhook</Button>} />}
-      columns={[
-        // A webhook's card: its name and status, its URL, then the addresses and events it gets.
-        { key: 'endpoint', label: 'Endpoint', width: '34%', render: row => <div className="settings-cell-stack"><span>{webhookTitle(row)}</span>{webhookTitle(row) !== row.url && <span className="muted settings-break">{row.url}</span>}</div>, cardRender: webhookTitle },
-        { key: 'url', label: 'URL', table: false, card: 'line', render: row => row.url },
-        { key: 'addresses', label: 'Addresses', width: '20%', card: 'line', render: row => <span className="settings-break">{scopeText(row, addresses.data)}</span> },
-        { key: 'events', label: 'Events', width: '14%', card: 'inline', render: row => <span title={row.eventTypes.join(', ')}>{!row.eventTypes.length ? <span className="muted">None</span> : row.eventTypes.length === 1 ? row.eventTypes[0] : row.eventTypes.length}</span>, cardRender: row => !row.eventTypes.length ? 'No events' : row.eventTypes.length === 1 ? row.eventTypes[0] : `${row.eventTypes.length} events` },
-        { key: 'headers', label: 'Headers', width: '16%', card: 'hide', render: row => <HeaderNames headers={row.headers} /> },
-        { key: 'status', label: 'Status', card: 'aside', render: row => <StatusBadge status={row.paused ? 'Paused' : 'Active'} tone={row.paused ? 'neutral' : 'success'} /> },
-      ]} />}
-    {webhooks.data && <Pagination page={pagination.page} pageSize={50} nextCursor={webhooks.data.nextCursor} onPageChange={next => pagination.onPageChange(next, webhooks.data?.nextCursor)} />}
-    <Dialog open={open} onOpenChange={next => { if (!create.isPending) setOpen(next) }} title="Add inbound webhook" footer={<><Button disabled={create.isPending} onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="create-mailbox-webhook">Add webhook</Button></>}>
-      <form id="create-mailbox-webhook" className="stack" onSubmit={submit} noValidate>
-        <MutationError error={create.error} />
-        <WebhookFields input={input} onChange={setInput} addresses={addresses.data} errors={errors} apiError={create.error} disabled={create.isPending} headers={{ current: [], draft: headers, onChange: setHeaders }} />
-      </form>
-    </Dialog>
-    <SecretDialog secret={secret?.value ?? null} title="Signing secret" onClose={() => { const target = secret?.id; setSecret(null); if (target) navigate(`/receiving/webhooks/${target}`) }} />
-  </div>
-}
-
+// Webhooks are endpoints: their list is Receiving's Endpoints tab.
+const list = '/receiving?tab=endpoints'
 function WebhookDetail() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
@@ -138,7 +87,7 @@ function WebhookDetail() {
   const [secret, setSecret] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<'rotate' | 'delete' | null>(null)
   useEffect(() => { if (webhook.data && !input) setInput(draftOf(webhook.data)) }, [webhook.data, input])
-  if (webhook.error) return <><PageHeader title="Inbound webhook" backTo="/receiving/webhooks" /><ErrorState error={webhook.error} onRetry={() => void webhook.refetch()} /></>
+  if (webhook.error) return <><PageHeader title="Webhook" backTo={list} /><ErrorState error={webhook.error} onRetry={() => void webhook.refetch()} /></>
   const current = webhook.data
   // The saved response is newer than the cached endpoint until the refetch lands.
   const currentHeaders = save.data?.headers ?? current?.headers ?? []
@@ -151,7 +100,7 @@ function WebhookDetail() {
     try { const saved = await save.mutateAsync({ ...patch, ...(url ? { url } : {}), headers: headerPayload(headers, currentHeaders) }); setInput(draftOf(saved)); setHeaders(null) } catch { /* Shown in the form. */ }
   }
   return <div className="stack inbound-stack">
-    <PageHeader title={current ? webhookTitle(current) : <SkeletonText width={220} lineHeight={28} />} backTo="/receiving/webhooks" actions={current && <>
+    <PageHeader title={current ? webhookTitle(current) : <SkeletonText width={220} lineHeight={28} />} backTo={list} actions={current && <>
       <Button onClick={() => void save.mutateAsync({ paused: !current.paused }).catch(() => undefined)} loading={save.isPending && !dirty}>{current.paused ? 'Resume' : 'Pause'}</Button>
       <Button onClick={() => setConfirm('rotate')}>Rotate secret</Button>
       <Button variant="danger" onClick={() => setConfirm('delete')}>Delete</Button>
@@ -183,7 +132,7 @@ function WebhookDetail() {
       </section>
     </>}
     <ConfirmDialog open={confirm === 'rotate'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Rotate signing secret?" description="The old secret stops working at once. Update your endpoint with the new one." confirmLabel="Rotate secret" pending={rotate.isPending} onConfirm={async () => { setSecret((await rotate.mutateAsync()).secret) }} />
-    <ConfirmDialog open={confirm === 'delete'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Delete this webhook?" description="Pending deliveries are dropped and routes stop delivering to it. Events stay readable through the events API." confirmLabel="Delete webhook" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/receiving/webhooks') }} />
+    <ConfirmDialog open={confirm === 'delete'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Delete this webhook?" description="Pending deliveries are dropped and routes stop delivering to it. Events stay readable through the events API." confirmLabel="Delete webhook" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate(list) }} />
     <SecretDialog secret={secret} title="New signing secret" onClose={() => setSecret(null)} />
   </div>
 }

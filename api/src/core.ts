@@ -173,7 +173,8 @@ const outerOf = (runtime: Runtime | undefined) => (runtime as (Runtime & { [oute
 export const newRequestId = (runtime: Runtime | undefined) => outerOf(runtime)?.requestId ?? `req_${crypto.randomUUID().replaceAll('-', '')}`;
 export const requestOrigin = (c: Ctx): RequestOrigin => outerOf(c.env)
   ?? { requestId: c.get('requestId'), clientIp: c.req.header(clientIpHeader) ?? null, userAgent: c.req.header('user-agent') ?? null };
-export type ClaimedWebhook = { routed?:boolean;format?:string;name?:string;include?:string[];timeout_seconds?:number;retry_attempts?:number; delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null; owned?: boolean };
+/** One claimed delivery and what its endpoint needs to post it. `type` is the endpoint's (absent for sent-mail webhooks); url and encrypted_secret are a webhook's. */
+export type ClaimedWebhook = { type?: 'webhook' | 'slack' | 'discord' | 'forward'; routed?:boolean;format?:string;name?:string;include?:string[];timeout_seconds?:number;retry_attempts?:number; delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null; owned?: boolean };
 export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, job: { id: string; attempts: number; workspaceId: string;
   /** The claim's lease (lease_until as claimed): the job is still this runner's while it matches. Absent when a handler is called directly. */
   leaseFence?: string;
@@ -299,7 +300,7 @@ export const mailboxRoute = (path: string) => /^\/v1\/(?:inbound|inboxes)(?:\/|$
 const appPasswordRoute = (path: string) => /^\/v1\/(?:inboxes\/[^/]+\/)?app-passwords(?:\/|$)/.test(path);
 /** requireReceivingConsent: an MCP grant without explicit receiving consent is refused. */
 export const receivingConsentRoute = (path: string) =>
-  appPasswordRoute(path) || /^\/v1\/(?:routing|rituals|endpoints|inbound\/(?:retired|domains|addresses|keys|webhooks|overview))(?:\/|$)|^\/v1\/(?:inbox-connections|inbound\/policy|domains\/[^/]+\/receiving-host|inbound\/messages\/[^/]+\/redeliver)$/.test(path);
+  appPasswordRoute(path) || /^\/v1\/(?:routing|rituals|endpoints|inbound\/(?:retired|domains|addresses|keys|webhooks|overview|endpoints))(?:\/|$)|^\/v1\/(?:inbox-connections|inbound\/policy|domains\/[^/]+\/receiving-host|inbound\/messages\/[^/]+\/redeliver)$/.test(path);
 /** notMember: workspace members are refused these areas whatever their scopes. */
 export const ownerRoute = (method: string, path: string) => {
   const verb = method.toUpperCase();

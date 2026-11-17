@@ -33,8 +33,8 @@ const resources: Record<string, { label: string; actions: Record<string, string>
   rituals: { label: 'Inbound mail scripts', actions: {
     get: 'getRitual', save: 'saveRitual', delete: 'deleteRitual', check: 'checkRitual', typings: 'getRitualTypings', templates: 'listRitualTemplates', recipes: 'listRitualRecipes', createFromRecipe: 'createRitualFromRecipe', updateFromRecipe: 'updateRitualFromRecipe', update: 'updateRitual', attach: 'attachRituals', config: 'getRituals', apply: 'applyRituals', test: 'testRituals', versions: 'listRitualVersions', restore: 'restoreRitualVersion', omens: 'setOmenOptIns',
   } },
-  endpoints: { label: 'Named ritual destinations', actions: {
-    list: 'listEndpoints', get: 'getEndpoint', create: 'createEndpoint', update: 'updateEndpoint', delete: 'deleteEndpoint', verify: 'sendEndpointVerification', test: 'testEndpoint',
+  endpoints: { label: 'Endpoints: Slack, Discord, webhooks and forwards', actions: {
+    list: 'listEndpoints', listAll: 'listInboundEndpoints', get: 'getEndpoint', create: 'createEndpoint', update: 'updateEndpoint', delete: 'deleteEndpoint', verify: 'sendEndpointVerification', test: 'testEndpoint',
   } },
   inboundWebhooks: { label: 'Inbound webhooks', actions: {
     list: 'listInboundWebhooks', get: 'getInboundWebhook', create: 'createInboundWebhook', update: 'updateInboundWebhook', delete: 'deleteInboundWebhook', test: 'testInboundWebhook', redeliver: 'redeliverInboundMessage', rotateSecret: 'rotateInboundWebhookSecret', retry: 'retryInboundWebhookDelivery', deliveries: 'listInboundWebhookDeliveries',

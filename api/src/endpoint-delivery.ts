@@ -6,7 +6,7 @@ import type { EndpointType } from './ritual-schema.js';
 export { ActionRetry } from './ritual-retry.js';
 
 type Sent = { status: number; retryAfter?: string | null; parked?: true };
-type Gate = { type: EndpointType | null; per_minute: number | null; retry_on_timeout: boolean | null; idempotent: boolean | null; paused: boolean; current: boolean };
+type Gate = { type: EndpointType; per_minute: number | null; retry_on_timeout: boolean | null; idempotent: boolean | null; paused: boolean; current: boolean };
 /**
  * The fence every delivery passes before it may send, in one statement: it holds the endpoint and
  * the delivery row FOR SHARE, so a pause, a delete or another runner's settle either commits first
@@ -17,11 +17,9 @@ type Gate = { type: EndpointType | null; per_minute: number | null; retry_on_tim
  */
 type Claim = { id: string; attempts: number; leaseFence?: string };
 const gate = async (db: DbExecutor, w: string, h: ClaimedWebhook, claim?: Claim) => (await db.execute<Gate>(sql`WITH g AS MATERIALIZED (
-    SELECT nullif(split_part(d.ref,':',1),'') AS type,p.per_minute,p.retry_on_timeout,p.idempotent,h.paused,(q.status='pending' AND q.generation=${h.generation}
+    SELECT h.type,h.per_minute,h.retry_on_timeout,h.idempotent,h.paused,(q.status='pending' AND q.generation=${h.generation}
       AND (${claim?.leaseFence ?? null}::text IS NULL OR EXISTS(SELECT FROM jobs j WHERE j.id=${claim?.id ?? ''} AND j.attempts=${claim?.attempts ?? 0} AND j.status='running' AND j.lease_until=${claim?.leaseFence ?? null}::timestamptz))) AS current
     FROM mailbox_webhooks h JOIN mailbox_webhook_deliveries q ON q.workspace_id=h.workspace_id AND q.id=${h.delivery_id} AND q.webhook_id=h.id
-    LEFT JOIN mail_endpoints d ON d.workspace_id=h.workspace_id AND d.hook_id=h.id
-    LEFT JOIN mail_action_policies p ON p.workspace_id=h.workspace_id AND p.hook_id=h.id
     WHERE h.workspace_id=${w} AND h.id=${h.webhook_id} FOR SHARE OF h,q),
   parked AS (UPDATE mailbox_webhook_deliveries x SET status='paused',last_error='ENDPOINT_PAUSED',updated_at=now() FROM g
     WHERE g.paused AND g.current AND x.workspace_id=${w} AND x.id=${h.delivery_id} AND x.generation=${h.generation} AND x.status='pending')
@@ -35,8 +33,8 @@ const notSent = (e: unknown) => e instanceof Error && NOT_SENT.has(String((e as 
 /** A transport deferral (the timeout breaker) happens before anything leaves: it keeps the attempts already spent. */
 const keepAttempts = (e: unknown) => e instanceof JobDeferred ? new JobDeferred(e.availableAt, e.payload, true) : e;
 /**
- * The one delivery path for every mailbox delivery: ritual endpoint calls (Slack, Discord, webhook,
- * forward), routed webhooks and plain event subscriptions.
+ * The one delivery path for every endpoint delivery: ritual endpoint calls (Slack, Discord, webhook,
+ * forward), routed webhooks and plain event subscriptions. `send` posts it (sendToEndpoint, endpoints.ts).
  * Order: grant still active → the gate (pause, stale claim) → per-action fence → per-endpoint rate slot → send.
  * The claim checks the pause too, but a pause can commit between the claim and the send; every
  * delivery passes the gate just before it sends.
@@ -45,7 +43,7 @@ const keepAttempts = (e: unknown) => e instanceof JobDeferred ? new JobDeferred(
  * idempotent or opted in to retryOnTimeout. Plain event subscriptions keep their webhook semantics
  * (at-least-once with Webhook-Id, no attempt row or rate slot), so their gate is one autocommit statement.
  */
-export async function ritualDelivery(runtime: Runtime, w: string, h: ClaimedWebhook, send: () => Promise<Sent>, claim?: Claim): Promise<Sent> {
+export async function deliverEndpoint(runtime: Runtime, w: string, h: ClaimedWebhook, send: () => Promise<Sent>, claim?: Claim): Promise<Sent> {
   const grants = (h.payload as { grants?: string[] }).grants;
   if (grants?.length) {
     const { getMcpGrantActor } = await import('./mcp-auth.js');
@@ -63,7 +61,7 @@ export async function ritualDelivery(runtime: Runtime, w: string, h: ClaimedWebh
   const fence = await runtime.db.transaction(async tx => {
     const row = await gate(tx, w, h, claim);
     if (!row) throw new ApiError(422, 'UNKNOWN_DESTINATION', 'Endpoint no longer exists.');
-    const policy = endpointPolicy(row.type ?? 'webhook', row);
+    const policy = endpointPolicy(row.type, row);
     // Paused (the gate parked it), or the claim went stale: the delivery is no longer this runner's to attempt.
     if (!row.current || row.paused) return { policy, done: true, parked: true as const };
     // The action ID (the delivery ID) is stable across retries: it fences replays here and is the Idempotency-Key a webhook receives.

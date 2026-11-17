@@ -1,21 +1,19 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
-import { actorMailAccess, mailboxRoute, receivingConsentRoute, workspaceMailAccess, ApiError, digest, errors, getSes, id, isoTime, json, KEY_CHANGE, lasting, lazyModule, log, ModuleLoadError, response, WEBHOOK_CHANGE, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { actorMailAccess, mailboxRoute, receivingConsentRoute, workspaceMailAccess, ApiError, digest, errors, getSes, id, isoTime, json, KEY_CHANGE, lasting, lazyModule, log, ModuleLoadError, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { authenticate, chargeCredential, checkBudget, delegatedInbox, requireReceivingConsent } from './auth.js';
 import { boundRequestBody } from './request-body.js';
 import { auditContext, auditInsert, recordAudit } from './audit.js';
 import { domains } from './db/operations.js';
 import { claimReceivable, claimReceives, claimSends, connectionReady } from './states.js';
-import { mailboxAddresses, mailboxDomains, mailboxes, mailboxKeys, mailboxMessages, mailboxThreads, mailboxWebhookDeliveries, mailboxWebhooks, mailMessages, mailUnrouted, type MailboxPermission } from './db/mailbox.js';
+import { mailboxAddresses, mailboxDomains, mailboxes, mailboxKeys, mailboxMessages, mailboxThreads, mailMessages, mailUnrouted, type MailboxPermission } from './db/mailbox.js';
 import { expectedMx, checkMx, mxBlocksEnable } from './mailbox-dns.js';
-import { eventView, inboundEventTypes, latestCursor, readEvents, recordEvents, webhookSecretBinding } from './mailbox-events.js';
+import { eventView, inboundEventTypes, latestCursor, readEvents, recordEvents } from './mailbox-events.js';
 import { queueReconcile,saveMailboxMx } from './mailbox-setup.js';
 import { attachToMailboxes, checkRuleCapacity, checkTemporaryMailboxRouting, createMailbox, htmlToPlain, lockMailboxLane, ruleMatches, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
-import { encrypt, encryptWebhookHeaders, webhookHeaderViews, WebhookHeaders, WebhookHeaderViews, webhookSecret, webhookUrl } from './operations.js';
-import { webhookUrlHint, WebhookUrlHint, readCursor, nextCursor } from './core.js';
-import { chargeManualDelivery, JobDeferred } from './jobs.js';
-import { detachDestination, enableRouting, registerRouting, RoutingKey } from './routing.js';
-import {registerRituals,ownReceiving,resumeNeedsUrl} from './rituals.js';
+import { detachDestination, registerRouting, RoutingKey } from './routing.js';
+import { registerRituals } from './rituals.js';
+import { Ok, registerInboundWebhooks } from './endpoints.js';
 import { AttachmentContentId, AttachmentContentType, AttachmentDisposition, AttachmentFilename, MAX_ATTACHMENT_BASE64 } from './outbound-content.js';
 import { CustomHeaders, splitThreadingHeaders } from './custom-headers.js';
 import { assertRegisteredSender, assertReplyable, DEFAULT_SEND_LIMITS, safeForwardHtml, replyParentId, replyRecipients, replyReferences, replySubject, resolveAttachments, sendLimitsFor } from './mailbox-send.js';
@@ -24,7 +22,7 @@ import { mailboxCreates } from './idempotency.js';
 import { registerLogs } from './logs.js';
 import { registerInboundOverview } from './inbound-overview.js';
 import { AddressState, assertInboundRecipients, createInboundThreadRoute, InboundAddressId, inboundReplyTarget, queueInboundThreadMessage, registerInboundThreadReads, replyToInboundThreadRoute, visibleThreadAddresses } from './inbound-threads.js';
-import { legacyWebhookFormat, productName, webhookFormat } from './brand.js';
+import { productName } from './brand.js';
 
 const security: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
 const loadMailboxSesv2 = lazyModule(() => import('@aws-sdk/client-sesv2'));
@@ -108,26 +106,9 @@ const InboundAddressSchema = z.object({
 const InboundEventSchema = z.object({ id: z.string(), cursor: z.string(), type: z.enum(inboundEventTypes), createdAt: z.string(), threadId: z.string().nullable(), messageId: z.string().nullable(), data: SuppressionEventData,
   addressId: z.string().nullable().describe('Receiving address ID at the time of the event; null for workspace events.') }).openapi('InboundEvent');
 const KeySchema = z.object({ id: z.string(), name: z.string(), prefix: z.string(), addressIds: z.array(z.string()).nullable(), permissions: z.array(z.enum(['read', 'send', 'modify','create'])), createdAt: z.string(), lastUsedAt: z.string().nullable(), revokedAt: z.string().nullable() }).openapi('InboundKey');
-// The native format is called nightmail. Requests may still name it bane (brand.ts legacyWebhookFormat), and webhooks store
-// it as bane: the database constrains and compares the stored value, so every existing webhook delivers as before.
-type StoredFormat = typeof mailboxWebhooks.$inferSelect['format'];
-export const storedFormat = (format: typeof webhookFormat | typeof legacyWebhookFormat | 'inbound'): StoredFormat => format === 'inbound' ? 'inbound' : legacyWebhookFormat;
-const shownFormat = (format: StoredFormat): typeof webhookFormat | 'inbound' => format === 'inbound' ? 'inbound' : webhookFormat;
-const formatHelp = `${webhookFormat} (default): ${productName}'s thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus ${productName}'s signature headers. Attachment downloadUrl and rawUrl need an admin API key.`;
-const FormatInput = z.enum([webhookFormat, 'inbound', legacyWebhookFormat]).describe(`${formatHelp} ${legacyWebhookFormat} is the earlier name of ${webhookFormat}, still accepted.`);
-// Delivery settings a route webhook needs. The inbound format replays inbound.new's email.received for receivers moved from it.
-const hookOptions={key:RoutingKey.nullable(),name:z.string().max(120).nullable().describe('Display name; sent as endpoint.name in the inbound format.'),
-  format:z.enum([webhookFormat,'inbound']).describe(formatHelp),
-  junk:z.enum(['skip','include']).describe(`include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for ${webhookFormat} and include for inbound.`),
-  include:z.array(z.enum(['message','raw'])).max(2).describe(`${webhookFormat} format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL.`),
-  timeoutSeconds:z.number().int().min(1).max(30).describe('Seconds to wait for a 2xx response. Default 5.'),
-  retryAttempts:z.number().int().min(0).max(10).describe(`Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for ${webhookFormat}, 3 for inbound.`)};
-const InboundWebhookSchema = z.object({ id: z.string(), url: WebhookUrlHint, description: z.string(), eventTypes: z.array(z.enum(inboundEventTypes)), paused: z.boolean(), headers: WebhookHeaderViews, createdAt: z.string(), updatedAt: z.string(), addressIds: z.array(z.string()).nullable() }).extend(hookOptions).openapi('InboundWebhook');
-const DeliverySchema = z.object({ id: z.string(), webhookId: z.string(), eventId: z.string(), status: z.enum(['pending', 'delivered', 'failed','paused']), attemptCount: z.number().int(), lastStatusCode: z.number().nullable(), lastError: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('InboundWebhookDelivery');
 const pageOf = <T extends z.ZodType>(item: T, name: string) => z.object({ data: z.array(item), nextCursor: z.string().nullable() }).openapi(name);
 const Limit = z.coerce.number().int().min(1).max(100).default(25);
 const IdParam = z.object({ id: z.string().min(1).max(120) });
-const Ok = z.object({ ok: z.literal(true) }).openapi('InboundOk');
 
 // ---------- views ----------
 async function domainViews(c: Ctx, rows: (typeof domains.$inferSelect)[]) {
@@ -190,7 +171,6 @@ async function mailboxViews(runtime: Runtime, rows: MailboxRow[]) {
 }
 type MessageRow = typeof mailMessages.$inferSelect;
 const keyView = (row: typeof mailboxKeys.$inferSelect) => ({ id: row.id, name: row.name, prefix: row.prefix, addressIds: row.mailboxIds, permissions: row.permissions, createdAt: iso(row.createdAt)!, lastUsedAt: iso(row.lastUsedAt), revokedAt: iso(row.revokedAt) });
-const webhookView = async (c: Ctx, row: typeof mailboxWebhooks.$inferSelect) => ({key:row.key,name:row.name,format:shownFormat(row.format),junk:row.junk,include:row.include,timeoutSeconds:row.timeoutSeconds,retryAttempts:row.retryAttempts, id: row.id, url: webhookUrlHint(row.url), description: row.description, eventTypes: row.eventTypes as (typeof inboundEventTypes[number])[], addressIds: row.mailboxIds, paused: row.paused, headers: await webhookHeaderViews(c.env, row.encryptedHeaders, webhookSecretBinding(row.workspaceId, row.id), access(c).admin), createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)! });
 async function refreshThread(tx: Runtime['db'] | Parameters<Parameters<Runtime['db']['transaction']>[0]>[0], mailboxId: string, threadId: string) {
   await tx.execute(sql`UPDATE mailbox_threads SET unread_count = (SELECT count(*) FROM mailbox_messages WHERE mailbox_id = ${mailboxId} AND thread_id = ${threadId} AND NOT read AND direction = 'inbound') WHERE mailbox_id = ${mailboxId} AND thread_id = ${threadId}`);
 }
@@ -687,7 +667,7 @@ export function registerMailbox(app: App) {
   });
 
   registerInboundKeys(app);
-  registerInboundWebhooks(app);
+  registerInboundWebhooks(app, { access, admin });
 }
 
 // Deprecated aliases: an inbound key is an API key limited to receiving addresses (POST /v1/api-keys with access).
@@ -716,180 +696,5 @@ function registerInboundKeys(app: App) {
     const revoked = await (await import('./address-keys.js')).revokeLimitedKey(c, value.workspaceId, c.req.valid('param').id);
     if (!revoked?.fresh) throw new ApiError(404, 'NOT_FOUND', 'Key was not found or is already revoked.');
     return c.json(keyView(revoked.row), 200);
-  });
-}
-
-function registerInboundWebhooks(app: App) {
-  const path = '/v1/inbound/webhooks', tags = ['Inbound webhooks'];
-  const idFilter = z.array(z.string().min(1).max(120)).min(1).max(500).nullable().describe('Only events for these receiving addresses; null for all.');
-  const readAccess = (c: Ctx) => c.get('actor')?.credential === 'apiKey' ? access(c) : admin(c);
-  const getWebhook = async (c: Ctx, webhookId: string, value = admin(c), tx?: Parameters<Parameters<Runtime['db']['transaction']>[0]>[0]) => {
-    if(webhookId.startsWith('con_'))throw new ApiError(404,'NOT_FOUND','Webhook was not found.');
-    const query = (tx ?? c.env.db).select().from(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, value.workspaceId), eq(mailboxWebhooks.id, webhookId)));
-    const [row] = await (tx ? query.for('update') : query);
-    if (!row) throw new ApiError(404, 'NOT_FOUND', 'Webhook was not found.');
-    return { value, row };
-  };
-  // A webhook outlives the credential that sets it up (requireReceivingConsent already refused approvals without consent).
-  const manageHook=(c:Ctx)=>{const value=admin(c);lasting(c,WEBHOOK_CHANGE);return value;};
-  const webhookFields = { ...z.object(hookOptions).partial().shape, format: FormatInput.optional(), url: z.string().url().max(2048), description: z.string().max(500), eventTypes: z.array(z.enum(inboundEventTypes)).max(inboundEventTypes.length).describe('Events to subscribe to. [] makes a route-only webhook: it receives only mail a route sends to it.'), paused: z.boolean(), headers: WebhookHeaders.optional() };
-  const createFields = { ...webhookFields, description: webhookFields.description.default(''), eventTypes: webhookFields.eventTypes.default(['message.received']), paused: webhookFields.paused.default(false) };
-  const create = z.object({ ...createFields, addressIds: idFilter.default(null) }).strict();
-  const patch = z.object({ ...webhookFields, addressIds: idFilter }).partial().strict();
-  const hookCapacity=async(tx:import('./core.js').DbExecutor,wid:string,routeOnly:boolean,except='')=>{
-    await lockMailboxLane(tx,wid,'address');
-    if((await tx.execute(sql`SELECT FROM mailbox_webhooks WHERE workspace_id=${wid} AND NOT paused AND id<>${except} AND (event_types='[]')=${routeOnly} LIMIT 1 OFFSET ${routeOnly?499:31}`)).rowCount)
-      throw new ApiError(409,'MAILBOX_HOOK_LIMIT',routeOnly?'At most 500 route-only webhooks can be active. Pause or delete one first.':'At most 32 webhooks with event subscriptions can be active. Pause or delete one, or use eventTypes [] for a route-only webhook.');
-  };
-  // Charge actual queued copies, not API requests. A rejected charge rolls the requeue and its jobs back.
-  const chargeManual=chargeManualDelivery;
-  const requeue=(wid:string,condition:ReturnType<typeof sql>)=>sql`WITH resumed AS (UPDATE mailbox_webhook_deliveries SET last_redelivery_at=now(),status='pending',generation=generation+1,last_error=NULL,updated_at=now() WHERE workspace_id=${wid} AND ${condition} RETURNING *), reset_success AS (DELETE FROM mail_action_attempts a USING resumed r WHERE a.workspace_id=r.workspace_id AND a.delivery_id=r.id AND a.state='delivered') INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id,'generation',generation) FROM resumed`;
-  const checkScope = (ids: string[] | null, types: string[], format: string) => {
-    if (ids !== null && types.includes('message.stored')) throw new ApiError(422, 'INVALID_EVENT_SCOPE', 'message.stored requires a workspace webhook without an addressIds filter.', 'addressIds');
-    if (format === 'inbound' && types.some(t => t !== 'message.received' && t !== 'message.junk')) throw new ApiError(422, 'INVALID_EVENT_SCOPE', 'The inbound format carries received mail only. Use eventTypes ["message.received"], or [] for a route-only webhook.', 'eventTypes');
-  };
-  const defaultJunk = (format: StoredFormat) => format === 'inbound' ? 'include' as const : 'skip' as const;
-  const inboundToken = async (format: string, secret: string) => format === 'inbound' ? { verificationToken: await (await import('./inbound-webhook.js')).verificationToken(secret) } : {};
-
-  app.openapi(createRoute({ method: 'post', path, operationId: 'createInboundWebhook', security, tags, summary: 'Subscribe to inbound events', description: 'Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret, and for the inbound format its verification token, are returned once.', request: { body: json(create.openapi('CreateInboundWebhook')) }, responses: { 201: response(InboundWebhookSchema.extend({ secret: z.string(), verificationToken: z.string().optional().describe('inbound format: the X-Webhook-Verification-Token value.') }).openapi('InboundWebhookSecret')), ...errors } }), async c => {
-    const value = manageHook(c), input = c.req.valid('json');
-    const format = storedFormat(input.format ?? webhookFormat), junk = input.junk ?? defaultJunk(format);
-    checkScope(input.addressIds, input.eventTypes, format);
-    const webhookId = id('mwh'), secret = webhookSecret(), binding = webhookSecretBinding(value.workspaceId, webhookId);
-    const values = { id: webhookId, workspaceId: value.workspaceId, key: input.key, name: input.name, url: webhookUrl(c.env, input.url), description: input.description, eventTypes: [...new Set(input.eventTypes)], mailboxIds: input.addressIds, paused: input.paused,
-      format, junk, include: input.include, timeoutSeconds: input.timeoutSeconds, retryAttempts: input.retryAttempts ?? (format === 'inbound' ? 3 : 9), encryptedSecret: await encrypt(c.env, secret, binding), encryptedHeaders: await encryptWebhookHeaders(c.env, input.headers, binding) };
-    const [row] = await c.env.db.transaction(async tx => {
-      if (!input.paused) await hookCapacity(tx, value.workspaceId, !input.eventTypes.length);
-      // Junk delivery needs the routed store, which emits message.junk.
-      if (junk === 'include') await enableRouting(tx, value.workspaceId);
-      // A keyed webhook is also an endpoint; its key must not collide with a Slack, Discord or forward endpoint name.
-      if (input.key) { await lockMailboxLane(tx, value.workspaceId, 'address'); await (await import('./ritual-endpoints.js')).assertEndpointName(tx, value.workspaceId, input.key, '', false); }
-      const r=await tx.insert(mailboxWebhooks).values(values).returning();await ownReceiving(tx,c,'endpoint',webhookId);
-      await recordAudit(tx,c,{action:'inbound_webhook.create',workspaceId:value.workspaceId,target:{type:'inbound_webhook',id:webhookId},after:{url:webhookUrlHint(values.url),key:input.key ?? null,name:input.name ?? null,eventTypes:values.eventTypes,addressIds:input.addressIds,format:shownFormat(format),paused:input.paused,headerNames:input.headers?.map(h=>h.name)}});
-      return r;
-    });
-    c.header('Cache-Control', 'no-store');
-    return c.json({ ...await webhookView(c, row!), secret, ...await inboundToken(format, secret) }, 201);
-  });
-  app.openapi(createRoute({ method: 'get', path, operationId: 'listInboundWebhooks', security, tags,
-    summary: 'List inbound webhooks a page at a time, in a stable ID order',
-    description: 'Pass nextCursor back as cursor until it is null to read every webhook. addressId and eventType narrow the list to the webhooks that get that address\'s events (subscribed to it or to every address); getInboundOverview links a route\'s full list of subscribers this way.',
-    request: { query: z.object({
-      cursor: z.string().max(200).optional().describe('nextCursor from the previous page.'),
-      limit: z.coerce.number().int().min(1).max(100).default(100),
-      addressId: InboundAddressId.optional().describe('Only webhooks that get events for this address: subscribed to it, or to every address.'),
-      eventType: z.enum(inboundEventTypes).optional().describe('Only webhooks subscribed to this event type.'),
-    }) },
-    responses: { 200: response(pageOf(InboundWebhookSchema, 'InboundWebhookList')), ...errors } }), async c => {
-    const value = readAccess(c), q = c.req.valid('query');
-    const rows = await c.env.db.select().from(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, value.workspaceId), sql`NOT starts_with(${mailboxWebhooks.id},'con_')`,
-      q.addressId ? sql`(${mailboxWebhooks.mailboxIds} IS NULL OR ${mailboxWebhooks.mailboxIds} ? ${q.addressId})` : undefined,
-      q.eventType ? sql`${mailboxWebhooks.eventTypes} ? ${q.eventType}` : undefined,
-      q.cursor ? lt(mailboxWebhooks.id, q.cursor) : undefined)).orderBy(desc(mailboxWebhooks.id)).limit(q.limit + 1);
-    const page = rows.slice(0, q.limit);
-    return c.json({ data: await Promise.all(page.map(row => webhookView(c, row))), nextCursor: rows.length > q.limit ? page.at(-1)!.id : null }, 200);
-  });
-  app.openapi(createRoute({ method: 'get', path: `${path}/{id}`, operationId: 'getInboundWebhook', security, tags, request: { params: IdParam }, responses: { 200: response(InboundWebhookSchema), ...errors } }), async c => c.json(await webhookView(c, (await getWebhook(c, c.req.valid('param').id, readAccess(c))).row), 200));
-  app.openapi(createRoute({ method: 'patch', path: `${path}/{id}`, operationId: 'updateInboundWebhook', security, tags, description: 'Only supplied fields change. Changing format resets junk to that format\'s default unless junk is supplied too.', request: { params: IdParam, body: json(patch.openapi('UpdateInboundWebhook')) }, responses: { 200: response(InboundWebhookSchema), ...errors } }), async c => {
-    const input = c.req.valid('json'), webhookId = c.req.valid('param').id;
-    const updated = await c.env.db.transaction(async tx => {
-      // Serialize partial updates: two independently valid changes must not combine into a scoped message.stored subscription.
-      const access = manageHook(c);
-      // Same lock order as endpoint writes: the address lane before the webhook row.
-      if (input.key !== undefined) await lockMailboxLane(tx, access.workspaceId, 'address');
-      // The approval is held before the webhook row is locked, the order a removal takes them in. The row stays
-      // locked until the update, so a removal that lands meanwhile holds the webhook again afterwards.
-      await ownReceiving(tx,c,'endpoint',webhookId);
-      const { row } = await getWebhook(c, webhookId, access, tx);
-      if (row.paused && row.reconfirm && input.paused === false && !input.url) throw resumeNeedsUrl();
-      const eventTypes = input.eventTypes && [...new Set(input.eventTypes)], types = eventTypes ?? row.eventTypes;
-      const format = input.format ? storedFormat(input.format) : row.format, junk = input.junk ?? (format !== row.format ? defaultJunk(format) : row.junk);
-      checkScope(input.addressIds === undefined ? row.mailboxIds : input.addressIds, types, format);
-      if (!(input.paused ?? row.paused) && (row.paused || !row.eventTypes.length !== !types.length)) await hookCapacity(tx, row.workspaceId, !types.length, row.id);
-      if (junk === 'include') await enableRouting(tx, row.workspaceId);
-      if(row.paused && input.paused===false){
-        await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES('job_'||gen_random_uuid(),'mailbox.resumeDeliveries',${row.workspaceId},jsonb_build_object('hook',${row.id}::text))`);
-        c.get('actor').wakeJobs=1;
-      }
-      const url = input.url ? webhookUrl(c.env, input.url) : undefined;
-      if (input.key !== undefined && input.key !== row.key) {
-        // Its key is its endpoint name: an attached ritual calling the old one must not lose it.
-        const endpoints = await import('./ritual-endpoints.js');
-        await endpoints.assertEndpointUnused(tx, row.workspaceId, { name: row.key, hookId: row.id }, 'rename', 'key');
-        if (input.key) await endpoints.assertEndpointName(tx, row.workspaceId, input.key, row.id, false);
-      }
-      const [result] = await tx.update(mailboxWebhooks).set({ key: input.key, name: input.name, mailboxIds: input.addressIds, description: input.description, paused: input.paused, reconfirm: url ? false : undefined, url, eventTypes, format, junk, include: input.include, timeoutSeconds: input.timeoutSeconds, retryAttempts: input.retryAttempts,
-        encryptedSecret: url && url!==row.url && (format==='inbound'||row.format==='inbound') ? await encrypt(c.env,webhookSecret(),webhookSecretBinding(row.workspaceId,row.id)):undefined, encryptedHeaders: await encryptWebhookHeaders(c.env, input.headers ?? (url && url !== row.url ? [] : undefined), webhookSecretBinding(row.workspaceId, webhookId)), updatedAt: new Date().toISOString() }).where(eq(mailboxWebhooks.id, webhookId)).returning();
-      // Changed field names and non-secret values: a URL hint, never header values.
-      await recordAudit(tx, c, { action: 'inbound_webhook.update', workspaceId: row.workspaceId, target: { type: 'inbound_webhook', id: row.id }, details: { fields: Object.keys(input) },
-        before: { url: url ? webhookUrlHint(row.url) : undefined, paused: input.paused !== undefined ? row.paused : undefined, eventTypes: eventTypes ? row.eventTypes : undefined },
-        after: { url: url ? webhookUrlHint(url) : undefined, paused: input.paused, eventTypes, addressIds: input.addressIds, key: input.key, format: input.format && shownFormat(storedFormat(input.format)), junk: input.junk, headerNames: input.headers?.map(h => h.name) } });
-      return result!;
-    });
-    return c.json(await webhookView(c, updated), 200);
-  });
-  const detach = z.object({ detach: z.enum(['true', 'false']).optional().describe('Also remove it from every route that delivers to it, as one routing version. Without it, a referenced webhook is not deleted.') });
-  app.openapi(createRoute({ method: 'delete', path: `${path}/{id}`, operationId: 'deleteInboundWebhook', security, tags, request: { params: IdParam, query: detach }, responses: { 200: response(Ok), ...errors } }), async c => {
-    const value = manageHook(c), webhookId = c.req.valid('param').id;
-    await c.env.db.transaction(async tx => {
-      // The address lane before the webhook row, as endpoint writes take them; the row's key is read under both.
-      await lockMailboxLane(tx, value.workspaceId, 'address');
-      const { row } = await getWebhook(c, webhookId, value, tx);
-      await detachDestination(tx, c, row.workspaceId, row.id);
-      await (await import('./ritual-endpoints.js')).assertEndpointUnused(tx, row.workspaceId, { name: row.key, hookId: row.id }, 'delete');
-      await tx.delete(mailboxWebhooks).where(eq(mailboxWebhooks.id, row.id));
-      await recordAudit(tx, c, { action: 'inbound_webhook.delete', workspaceId: row.workspaceId, target: { type: 'inbound_webhook', id: row.id }, before: { url: webhookUrlHint(row.url), key: row.key, name: row.name, eventTypes: row.eventTypes } }); });
-    return c.json({ ok: true as const }, 200);
-  });
-  app.openapi(createRoute({ method: 'post', path: `${path}/{id}/test`, operationId: 'testInboundWebhook', security, tags, summary: 'Send a test delivery',
-    description: 'Posts a synthetic message.received for an example message, in the webhook\'s format or the one given, and returns the response status. overrideUrl sends it elsewhere, signed with a throwaway secret and without the webhook\'s custom headers.',
-    request: { params: IdParam, body: json(z.object({ format: FormatInput.optional(), overrideUrl: z.string().max(2048).optional() }).strict().openapi('TestInboundWebhook')) }, responses: { 200: response(z.object({ statusCode: z.number().int() }).openapi('InboundWebhookTestResult')), ...errors } }), async c => {
-    const { row } = await getWebhook(c, c.req.valid('param').id), input = c.req.valid('json');
-    // Nothing is posted to a held webhook's saved URL, a test included; a test to another URL is not affected.
-    if (row.paused && row.reconfirm && !input.overrideUrl) throw resumeNeedsUrl();
-    await chargeManual(c.env.db,row.workspaceId,1);
-    const { sendTestWebhook } = await import('./inbound-webhook.js');
-    try { return c.json({ statusCode: (await sendTestWebhook(c.env, row, { ...input, format: input.format && storedFormat(input.format) })).status }, 200); }
-    catch (error) {
-      if (error instanceof JobDeferred) throw new ApiError(503, 'WEBHOOK_COOLING_DOWN', `This endpoint timed out three times in a row; ${productName} tries it again after ${error.availableAt}.`, undefined, true);
-      if (error instanceof ApiError) throw error;
-      // The receiver timed out, refused the connection or failed its TLS handshake: the test's result, not a server failure (a 500).
-      // Node reports a socket or certificate code; a Worker's fetch reports a TypeError. Anything else is a bug and stays a 500.
-      const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError'), code = (error as { code?: unknown }).code;
-      if (!timedOut && !(error instanceof TypeError) && !(typeof code === 'string' && /^(?:E[A-Z]+|ERR_TLS_\w+|CERT_\w+|UNABLE_TO_\w+|DEPTH_ZERO_\w+|SELF_SIGNED_\w+)$/.test(code))) throw error;
-      throw new ApiError(503, 'WEBHOOK_UNREACHABLE', timedOut ? `The endpoint did not answer within ${row.timeoutSeconds} seconds.` : 'The endpoint could not be reached.', undefined, true);
-    }
-  });
-  app.openapi(createRoute({ method: 'post', path: '/v1/inbound/messages/{messageId}/redeliver', operationId: 'redeliverInboundMessage', security, tags, summary: 'Redeliver a message to its route webhooks',
-    description: 'Queues this message again for every route webhook that already finished with it (delivered or failed), or only destination. Returns how many deliveries were queued; 0 means none are eligible. Previously redelivered successes have a 10-minute cooldown. The workspace gets 60 manual posts per hour. Receivers deduplicate by Webhook-Id.',
-    request: { params: z.object({ messageId: z.string().max(120) }), body: json(z.object({ destination: z.string().max(128).optional().describe('A webhook ID: redeliver to that webhook only.') }).strict().openapi('RedeliverInboundMessage')) }, responses: { 202: response(z.object({ queued: z.number().int() }).openapi('InboundRedelivery')), ...errors } }), async c => {
-    const { workspaceId: w } = admin(c), { messageId } = c.req.valid('param'), { destination } = c.req.valid('json');
-    const queued=await c.env.db.transaction(async tx=>{
-    const n = (await tx.execute(requeue(w, sql`routed AND payload->>'messageId'=${messageId} AND status IN ('delivered','failed') AND (status='failed' OR last_redelivery_at IS NULL OR last_redelivery_at<=now()-interval '10 minutes') AND webhook_id IN (SELECT id FROM mailbox_webhooks WHERE workspace_id=${w} AND NOT paused ${destination ? sql`AND id=${destination}` : sql``})`))).rowCount ?? 0;
-      await chargeManual(tx,w,n);return n;
-    });
-    c.get('actor').wakeJobs = queued;
-    return c.json({ queued }, 202);
-  });
-  app.openapi(createRoute({ method: 'post', path: `${path}/{id}/rotate-secret`, operationId: 'rotateInboundWebhookSecret', security, tags, request: { params: IdParam }, responses: { 200: response(z.object({ secret: z.string(), verificationToken: z.string().optional().describe('inbound format: the new X-Webhook-Verification-Token, which changes with the secret.') }).openapi('InboundWebhookRotatedSecret')), ...errors } }), async c => {
-    const access=manageHook(c), secret=webhookSecret();
-    const row=await c.env.db.transaction(async tx=>{
-      await ownReceiving(tx,c,'endpoint',c.req.valid('param').id);
-      const {row}=await getWebhook(c,c.req.valid('param').id,access,tx);
-      await tx.update(mailboxWebhooks).set({encryptedSecret:await encrypt(c.env,secret,webhookSecretBinding(access.workspaceId,row.id)),updatedAt:new Date().toISOString()}).where(eq(mailboxWebhooks.id,row.id));
-      await recordAudit(tx,c,{action:'inbound_webhook.secret_rotate',workspaceId:access.workspaceId,target:{type:'inbound_webhook',id:row.id},details:{url:webhookUrlHint(row.url)}});
-      return row;
-    });
-    c.header('Cache-Control', 'no-store');
-    return c.json({ secret, ...await inboundToken(row.format, secret) }, 200);
-  });
-  app.openapi(createRoute({method:'post',path:`${path}/{id}/deliveries/{deliveryId}/retry`,operationId:'retryInboundWebhookDelivery',security,tags,description:'Retry a failed delivery to its original active endpoint. Receivers must deduplicate by Webhook-Id.',request:{params:IdParam.extend({deliveryId:z.string().max(200)})},responses:{202:response(Ok),...errors}}),async c=>{
-    const p=c.req.valid('param');await c.env.db.transaction(async tx=>{const {row}=await getWebhook(c,p.id,admin(c),tx);if(row.paused)throw new ApiError(409,'ENDPOINT_PAUSED','Resume the webhook before retrying.');if(!(await tx.execute(requeue(row.workspaceId,sql`webhook_id=${row.id} AND id=${p.deliveryId} AND status='failed'`))).rowCount)throw new ApiError(409,'DELIVERY_NOT_FAILED','No failed delivery on this endpoint.');await chargeManual(tx,row.workspaceId,1);});c.get('actor').wakeJobs=1;return c.json({ok:true as const},202);
-  });
-  app.openapi(createRoute({ method: 'get', path: `${path}/{id}/deliveries`, operationId: 'listInboundWebhookDeliveries', security, tags, request: { params: IdParam, query: z.object({ cursor: z.string().max(200).optional(), limit: Limit }) }, responses: { 200: response(pageOf(DeliverySchema, 'InboundWebhookDeliveryPage')), ...errors } }), async c => {
-    // Newest first by creation time: delivery IDs are random, so ordering by ID showed an arbitrary sample, not the latest.
-    const { value, row } = await getWebhook(c, c.req.valid('param').id); const q = c.req.valid('query'), binding = `inbound-webhook-deliveries:${row.id}`, cursor = readCursor(q.cursor, binding);
-    const rows = await c.env.db.select().from(mailboxWebhookDeliveries).where(and(eq(mailboxWebhookDeliveries.workspaceId, value.workspaceId), eq(mailboxWebhookDeliveries.webhookId, row.id), cursor ? sql`(${mailboxWebhookDeliveries.createdAt},${mailboxWebhookDeliveries.id})<(${cursor.at}::timestamptz,${cursor.id})` : undefined)).orderBy(desc(mailboxWebhookDeliveries.createdAt), desc(mailboxWebhookDeliveries.id)).limit(q.limit + 1);
-    return c.json({ data: rows.slice(0, q.limit).map(item => ({ id: item.id, webhookId: item.webhookId, eventId: String(item.payload.id), status: item.status, attemptCount: item.attemptCount, lastStatusCode: item.lastStatusCode, lastError: item.lastError, createdAt: iso(item.createdAt)!, updatedAt: iso(item.updatedAt)! })), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
 }

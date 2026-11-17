@@ -24,7 +24,7 @@ import { compileRitual, type Diagnostic } from './ritual-engine.js';
 import { buildRecipe, closest, endpointCall, endpointPayloads, recipeGroups, ritualCompletions, ritualRecipes, ritualTemplates, ritualTypings, type EndpointType, type RecipeParams } from './ritual-schema.js';
 import { RATES } from './billing/money.js';
 import type { RoutingInput } from './routing-match.js';
-import { registerEndpoints } from './ritual-endpoints.js';
+import { registerEndpoints } from './endpoints.js';
 import { registerRitualVersion } from './ritual-version.js';
 
 const path = '/v1/rituals',
@@ -83,12 +83,11 @@ async function analyze(tx: DbExecutor, w: string, c: Config, unchanged: Readonly
   const refs = [...new Set(Object.values(p.rituals).flatMap(ir => ir.refs))];
   const found = refs.length ? (await tx.execute<Resolved>(sql`WITH refs AS (SELECT ref,split_part(ref,':',2) AS key FROM jsonb_array_elements_text(${JSON.stringify(refs)}::jsonb) ref)
     SELECT ref,b.id,'inbox' AS type,true AS ready FROM refs JOIN mailboxes b ON b.workspace_id=${w} AND b.key=refs.key WHERE starts_with(ref,'inbox:')
-    UNION ALL SELECT ref,h.id,'webhook',true FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.key=refs.key AND NOT starts_with(h.id,'con_') WHERE starts_with(ref,'endpoint:')
-    UNION ALL SELECT refs.ref,d.hook_id,split_part(d.ref,':',1),d.verified AND d.declined_at IS NULL FROM refs JOIN mail_endpoints d ON d.workspace_id=${w} AND split_part(d.ref,':',2)=refs.key WHERE starts_with(refs.ref,'endpoint:')`)).rows : [];
+    UNION ALL SELECT ref,h.id,h.type,h.verified AND h.declined_at IS NULL FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.key=refs.key WHERE starts_with(ref,'endpoint:')`)).rows : [];
   const byRef = new Map(found.map(r => [r.ref, r])), diagnostics: Diagnostic[] = [];
   let names: { endpoints: string[]; inboxes: string[] } | null = null;
   const known = async () => names ??= {
-    endpoints: (await tx.execute<{ name: string }>(sql`SELECT split_part(ref,':',2) AS name FROM mail_endpoints WHERE workspace_id=${w} UNION ALL SELECT key FROM mailbox_webhooks WHERE workspace_id=${w} AND key IS NOT NULL AND NOT starts_with(id,'con_') LIMIT 1000`)).rows.map(r => r.name),
+    endpoints: (await tx.execute<{ name: string }>(sql`SELECT key AS name FROM mailbox_webhooks WHERE workspace_id=${w} AND key IS NOT NULL LIMIT 1000`)).rows.map(r => r.name),
     inboxes: (await tx.execute<{ key: string }>(sql`SELECT key FROM mailboxes WHERE workspace_id=${w} AND key IS NOT NULL LIMIT 1000`)).rows.map(r => r.key),
   };
   for (const [ritual, ir] of Object.entries(p.rituals))
@@ -131,8 +130,7 @@ async function prepare(tx: DbExecutor, w: string, c: Config, unchanged?: Readonl
 }
 /** Endpoint name → type in this workspace: what a recipe's endpoint fields may name. */
 async function endpointKinds(tx: DbExecutor, w: string) {
-  const rows = (await tx.execute<{ name: string; type: EndpointType }>(sql`SELECT split_part(ref,':',2) AS name,split_part(ref,':',1) AS type FROM mail_endpoints WHERE workspace_id=${w}
-    UNION ALL SELECT key,'webhook' FROM mailbox_webhooks WHERE workspace_id=${w} AND key IS NOT NULL AND NOT starts_with(id,'con_')`)).rows;
+  const rows = (await tx.execute<{ name: string; type: EndpointType }>(sql`SELECT key AS name,type FROM mailbox_webhooks WHERE workspace_id=${w} AND key IS NOT NULL`)).rows;
   const kinds = new Map(rows.map(r => [r.name, r.type]));
   return (name: string) => kinds.get(name);
 }
@@ -235,8 +233,8 @@ export function registerRituals(app: App) {
   const workspaceSymbols = async (c: Ctx) => {
     const w = receivingAdmin(c).workspaceId;
     const [endpoints, inboxes, saved] = await Promise.all([
-      c.env.db.execute<{ name: string; type: EndpointType; status: string }>(sql`SELECT split_part(ref,':',2) AS name,split_part(ref,':',1) AS type,CASE WHEN declined_at IS NOT NULL THEN 'declined' WHEN verified THEN 'ready' ELSE 'pending' END AS status FROM mail_endpoints WHERE workspace_id=${w}
-        UNION ALL SELECT key,'webhook','ready' FROM mailbox_webhooks WHERE workspace_id=${w} AND key IS NOT NULL AND NOT starts_with(id,'con_') ORDER BY 1 LIMIT 1000`),
+      c.env.db.execute<{ name: string; type: EndpointType; status: string }>(sql`SELECT key AS name,type,CASE WHEN declined_at IS NOT NULL THEN 'declined' WHEN verified THEN 'ready' ELSE 'pending' END AS status FROM mailbox_webhooks
+        WHERE workspace_id=${w} AND key IS NOT NULL ORDER BY key LIMIT 1000`),
       c.env.db.execute<{ key: string }>(sql`SELECT key FROM mailboxes WHERE workspace_id=${w} AND key IS NOT NULL ORDER BY key LIMIT 1000`),
       current(c.env.db, w),
     ]);

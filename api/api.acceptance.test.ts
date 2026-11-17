@@ -4085,10 +4085,10 @@ describe('Hosted MCP OAuth and tools', () => {
       // A forward has no URL to send again: it is paused without the mark and resumes as any paused endpoint does.
       const forward = await endpoint('escalate');
       assert.equal(forward.status, 'paused'); assert.match(forward.nextStep, /^Deliveries are held\. Resume with updateEndpoint \{ "paused": false \}\./);
-      assert.deepEqual((await db.query("SELECT paused,reconfirm FROM mailbox_webhooks WHERE workspace_id=$1 AND name='forward:escalate'", [wid])).rows, [{ paused: true, reconfirm: false }]);
+      assert.deepEqual((await db.query("SELECT paused,reconfirm FROM mailbox_webhooks WHERE workspace_id=$1 AND key='escalate'", [wid])).rows, [{ paused: true, reconfirm: false }]);
       error(await local('PATCH', '/v1/endpoints/escalate', { url: 'https://example.com/hooks/escalate', paused: false }), 422, 'FORWARD_ADDRESS_FIXED');
       assert.equal(ok(await local('PATCH', '/v1/endpoints/escalate', { paused: false })).status, 'ready');
-      assert.deepEqual((await db.query("SELECT paused,reconfirm FROM mailbox_webhooks WHERE workspace_id=$1 AND name='forward:escalate'", [wid])).rows, [{ paused: false, reconfirm: false }]);
+      assert.deepEqual((await db.query("SELECT paused,reconfirm FROM mailbox_webhooks WHERE workspace_id=$1 AND key='escalate'", [wid])).rows, [{ paused: false, reconfirm: false }]);
       for (const path of ['/v1/endpoints/helpdesk', '/v1/endpoints/alerts', `/v1/inbound/webhooks/${hook.id}`]) {
         assert.equal(error(await local('PATCH', path, { paused: false }), 409, 'ENDPOINT_URL_REQUIRED').field, 'url');
         // Nothing is posted to a held endpoint, a test included.
@@ -4119,7 +4119,8 @@ describe('Hosted MCP OAuth and tools', () => {
       const query = pg.Client.prototype.query as (...args: unknown[]) => Promise<unknown>; let removed = false;
       const wire = t.mock.method(pg.Client.prototype, 'query', function (this: pg.Client, ...args: unknown[]) {
         const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
-        if (this !== db || removed || !/FROM mail_endpoints d JOIN mailbox_webhooks h/.test(text)) return query.apply(this, args);
+        // The endpoint's first read, by name, before its approval is held and its row locked.
+        if (this !== db || removed || !/^select "id" from "mailbox_webhooks" where/.test(text)) return query.apply(this, args);
         removed = true;
         return query.apply(this, args).then(async rows => { await query.call(this, 'DELETE FROM nightmail_resource_grants WHERE grant_key=$1', [second.consentId]); return rows; });
       } as typeof pg.Client.prototype.query);
@@ -4165,7 +4166,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const slack = 'https://hooks.slack.com/services/T0EDIT/B0EDIT/editfixtureslack0001', discord = 'https://discord.com/api/webhooks/4242/editfixturediscord0002';
       const first = 'https://example.com/hooks/edit-first-0003', second = 'https://example.com/hooks/edit-second-0004';
       const seen: Json[] = [], keep = (body: Json) => { seen.push(body); return body; };
-      const hookOf = async (name: string) => (await db.query("SELECT hook_id,ref,encrypted_value FROM mail_endpoints WHERE workspace_id=$1 AND split_part(ref,':',2)=$2", [w, name])).rows[0];
+      const hookOf = async (name: string) => (await db.query("SELECT id AS hook_id,type||':'||key AS ref,encrypted_target AS encrypted_value FROM mailbox_webhooks WHERE workspace_id=$1 AND key=$2", [w, name])).rows[0];
       const chatUrl = async (name: string) => { const r = await hookOf(name); return decrypt(runtime, r.encrypted_value, `${w}:endpoint:${r.hook_id}`); };
       const webhook = async (name: string) => (await db.query('SELECT url,timeout_seconds,retry_attempts FROM mailbox_webhooks WHERE workspace_id=$1 AND key=$2', [w, name])).rows[0];
       keep(ok(await local('POST', '/v1/endpoints', { type: 'slack', name: 'alerts', url: slack }), 201));
@@ -4228,19 +4229,21 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
-  // Migration 322 copies each endpoint table's writes to the other, in the writer's transaction. Before it runs, every
-  // endpoint write takes the endpoint's mailbox_webhooks row before its mail_endpoints row, so no two wait in a cycle.
-  test('endpoint writes take one lock order: a recipient’s confirm, decline or stop and a forward’s dispatch wait for an edit holding the endpoint, never the reverse', async t => {
-    const [{ nodeRuntime }, { answerForward, forwardStopUrl }, { forwardStillAllowed }, { createApp }, { encrypt }, { digest }, { sql }] = await Promise.all([import('./src/adapters/node.js'),
-      import('./src/ritual-endpoints.js'), import('./src/dispatcher.js'), import('./src/app.js'), import('./src/operations.js'), import('./src/core.js'), import('drizzle-orm')]);
+  // Migration 322 runs while #357's Worker still serves, and the two Workers overlap for minutes. 322's triggers copy each
+  // write between mailbox_webhooks and mail_endpoints inside the writer's transaction. Both Workers lock an endpoint's
+  // mailbox_webhooks row before its mail_endpoints row, so no old write and new write wait on each other in a cycle.
+  // The replaced Worker's statements below are #357's, verbatim, one per call so the test can stop between them.
+  test('endpoint rollout overlap (migration 322): the replaced Worker’s and this release’s confirms, stops, edits and dispatch checks never deadlock', async t => {
+    const [{ nodeRuntime }, { answerForward, forwardStopUrl }, { forwardStillAllowed }, { createApp }, { encrypt }, { digest }, { receivingPolicy }, { sql }] = await Promise.all([import('./src/adapters/node.js'),
+      import('./src/endpoints.js'), import('./src/dispatcher.js'), import('./src/app.js'), import('./src/operations.js'), import('./src/core.js'), import('./src/mailbox-ingest-input.js'), import('drizzle-orm')]);
     const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL }); cleanup(t, close);
-    const db = await fixtureDatabase(t), w = unique('lockorder'), app = createApp();
+    const db = await fixtureDatabase(t), w = unique('overlap'), app = createApp();
     cleanup(t, async () => {
       for (const table of ['mail_forward_once', 'mail_messages', 'mail_threads', 'mailbox_webhooks']) await db.query(`DELETE FROM ${table} WHERE workspace_id=$1`, [w]);
       await db.query('DELETE FROM workspaces WHERE id=$1', [w]);
     });
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [w]);
-    // A forward as createEndpoint leaves it: pending with a confirmation link, or confirmed.
+    // A forward as the replaced Worker creates it (322 copies it onto its row): pending with a confirmation link, or confirmed.
     const forward = async (pending: boolean) => {
       const hook = 'con_' + randomUUID().replaceAll('-', ''), token = 'fwd_' + randomUUID().replaceAll('-', '') + randomUUID().replaceAll('-', ''), ref = 'forward:f' + hook.slice(4, 16);
       await db.query("INSERT INTO mailbox_webhooks(id,workspace_id,name,url,event_types,encrypted_secret) VALUES($1,$2,$3,'https://ritual.invalid/','[]','synthetic')", [hook, w, ref]);
@@ -4248,45 +4251,195 @@ describe('Hosted MCP OAuth and tools', () => {
         [w, ref, hook, await encrypt(runtime, 'teammate@example.net', `${w}:endpoint:${hook}`), !pending, pending ? await digest(token) : null]);
       return { hook, token };
     };
-    const state = async (hook: string) => (await db.query('SELECT verified,declined_at IS NOT NULL AS declined FROM mail_endpoints WHERE hook_id=$1', [hook])).rows[0];
-    // An edit holds the endpoint row, then writes its mail_endpoints row, as updateEndpoint does. `act` has to wait for the
-    // endpoint row holding nothing the edit needs next: had it locked the mail_endpoints row first, the edit's write would
-    // wait for it (here a lock_timeout; once 322's triggers copy writes across, a deadlock).
-    const whileEditing = async <T>(hook: string, act: () => Promise<T>, write = 'ref=ref') => {
-      const edit = await fixtureDatabase(t), holder = (await edit.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
-      await edit.query('BEGIN'); await edit.query("SET LOCAL lock_timeout='3s'");
-      let pending: Promise<T> | undefined;
-      try {
-        await edit.query('SELECT FROM mailbox_webhooks WHERE id=$1 FOR UPDATE', [hook]);
-        pending = act(); pending.catch(() => {});
-        for (let i = 0; !(await db.query('SELECT FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))', [holder])).rowCount; i++) {
-          assert.ok(i < 250, 'It never waited for the endpoint row the edit holds.'); await new Promise(resolve => setTimeout(resolve, 20));
-        }
-        await edit.query(`UPDATE mail_endpoints SET ${write} WHERE hook_id=$1`, [hook]);
-        await edit.query('COMMIT');
-      } catch (cause) { await edit.query('ROLLBACK'); throw cause; }
-      return pending!;
+    // Both tables agree after every overlap.
+    const state = async (hook: string) => (await db.query(`SELECT h.verified,h.declined_at IS NOT NULL AS declined,h.key,d.verified=h.verified AND (d.declined_at IS NULL)=(h.declined_at IS NULL)
+      AND d.ref='forward:'||h.key AS copied FROM mailbox_webhooks h JOIN mail_endpoints d ON d.hook_id=h.id WHERE h.id=$1`, [hook])).rows[0];
+    const connection = async () => { const c = await fixtureDatabase(t); return { c, pid: (await c.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number }; };
+    const waitingOn = async (pid: number) => {
+      for (let i = 0; !(await db.query('SELECT FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))', [pid])).rowCount; i++) {
+        assert.ok(i < 250, 'The other Worker never waited.'); await new Promise(resolve => setTimeout(resolve, 20));
+      }
     };
-    // The recipient allows, or declines, from the emailed link.
-    const allow = await forward(true);
-    assert.equal((await whileEditing(allow.hook, () => answerForward(runtime, allow.token, 'allow'))).address, 'teammate@example.net');
-    assert.deepEqual(await state(allow.hook), { verified: true, declined: false });
-    const refuse = await forward(true);
-    await whileEditing(refuse.hook, () => answerForward(runtime, refuse.token, 'decline'));
-    assert.deepEqual(await state(refuse.hook), { verified: false, declined: true });
-    // The stop link in a forwarded message.
-    const stop = await forward(false), path = new URL(await forwardStopUrl(runtime, stop.hook)).pathname;
-    const stopped = await whileEditing(stop.hook, async () => app.fetch(new Request(runtime.config.publicUrl.replace(/\/$/, '') + path, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'choice=decline' }), runtime));
-    assert.equal(stopped.status, 200);
-    assert.deepEqual(await state(stop.hook), { verified: false, declined: true });
-    // A forward's queued email: the dispatcher's check waits for the endpoint row too, then sees the decline that commits meanwhile.
-    const sent = await forward(false), thread = unique('thr'), message = unique('msg'), email = unique('em');
+    const inTransaction = async <T>(c: pg.Client, work: () => Promise<T>) => {
+      await c.query('BEGIN');
+      try { const result = await work(); await c.query('COMMIT'); return result; } catch (cause) { await c.query('ROLLBACK'); throw cause; }
+    };
+    const started = <T>(p: Promise<T>) => { p.catch(() => {}); return p; };
+    const lockEndpointRow = (c: pg.Client, hook: string) => c.query('SELECT FROM mailbox_webhooks WHERE workspace_id=$1 AND id=$2 FOR UPDATE', [w, hook]);
+
+    // 1. The review's reproduction: the replaced Worker's confirm stops once it holds the endpoint row; this release's confirm
+    //    of the same link waits for it, then finds the link used. Before #357 the old one held mail_endpoints first: 40P01.
+    const both = await forward(true), old = await connection();
+    let fresh: Promise<unknown> | undefined;
+    const oldAnswered = await inTransaction(old.c, async () => {
+      const proof = await digest(both.token), found = (await old.c.query('SELECT workspace_id,hook_id FROM mail_endpoints WHERE proof_hash=$1', [proof])).rows[0];
+      await lockEndpointRow(old.c, found.hook_id);
+      fresh = started(answerForward(runtime, both.token, 'allow'));
+      await waitingOn(old.pid);
+      const row = (await old.c.query('SELECT hook_id FROM mail_endpoints WHERE workspace_id=$1 AND hook_id=$2 AND proof_hash=$3 AND NOT verified AND declined_at IS NULL AND expires_at>now() FOR UPDATE', [w, found.hook_id, proof])).rows[0];
+      await old.c.query('UPDATE mail_endpoints SET verified=true,proof_hash=NULL,confirmed_at=now() WHERE workspace_id=$1 AND hook_id=$2', [w, row.hook_id]);
+      return true;
+    });
+    assert.equal(oldAnswered, true);
+    await assert.rejects(fresh!, { code: 'CONFIRMATION_UNAVAILABLE' });
+    assert.deepEqual(await state(both.hook), { verified: true, declined: false, key: 'f' + both.hook.slice(4, 16), copied: true });
+
+    // 2. The replaced Worker edits (renames) a forward while this release's stop link declines it.
+    const edited = await forward(false), editor = await connection();
+    let stop: Promise<Response> | undefined;
+    await inTransaction(editor.c, async () => {
+      await lockEndpointRow(editor.c, edited.hook);
+      const path = new URL(await forwardStopUrl(runtime, edited.hook)).pathname;
+      stop = started(Promise.resolve(app.fetch(new Request(runtime.config.publicUrl.replace(/\/$/, '') + path, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'choice=decline' }), runtime)));
+      await waitingOn(editor.pid);
+      await editor.c.query("UPDATE mail_endpoints SET ref='forward:renamed-old' WHERE workspace_id=$1 AND hook_id=$2", [w, edited.hook]);
+    });
+    assert.equal((await stop!).status, 200);
+    assert.deepEqual(await state(edited.hook), { verified: false, declined: true, key: 'renamed-old', copied: true });
+
+    // 3. This release edits (renames) a forward while the replaced Worker's stop link declines it.
+    const renamed = await forward(false), fresher = await connection(), oldStop = await connection();
+    let stopped: Promise<void> | undefined;
+    await inTransaction(fresher.c, async () => {
+      await fresher.c.query("UPDATE mailbox_webhooks SET key='renamed-new',updated_at=now() WHERE workspace_id=$1 AND id=$2", [w, renamed.hook]);
+      stopped = started(inTransaction(oldStop.c, async () => {
+        await lockEndpointRow(oldStop.c, renamed.hook);
+        await oldStop.c.query('UPDATE mail_endpoints SET verified=false,proof_hash=NULL,declined_at=now() WHERE workspace_id=$1 AND hook_id=$2', [w, renamed.hook]);
+      }));
+      await waitingOn(fresher.pid);
+    });
+    await stopped;
+    assert.deepEqual(await state(renamed.hook), { verified: false, declined: true, key: 'renamed-new', copied: true });
+
+    // 4. This release declines a forward while the replaced Worker's dispatcher decides whether its queued email may go.
+    const queued = await forward(false), thread = unique('thr'), message = unique('msg'), email = unique('em'), decliner = await connection(), dispatcher = await connection();
     await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)', [thread, w]);
     await db.query("INSERT INTO mail_messages(id,workspace_id,direction,thread_id,status,lifecycle) VALUES($1,$2,'inbound',$3,'received','default')", [message, w, thread]);
-    await db.query('INSERT INTO mail_forward_once(workspace_id,message_id,endpoint,email_id) VALUES($1,$2,$3,$4)', [w, message, sent.hook, email]);
-    const allowed = async () => (await runtime.db.execute<{ ok: boolean }>(sql`SELECT ${forwardStillAllowed(runtime, sql`x`)} AS ok FROM (SELECT ${email}::text AS id,${w}::text AS workspace_id,${'forward:' + sent.hook}::text AS actor_key_id) x`)).rows[0]!.ok;
-    assert.equal(await allowed(), true);
-    assert.equal(await whileEditing(sent.hook, allowed, 'declined_at=now()'), false);
+    await db.query('INSERT INTO mail_forward_once(workspace_id,message_id,endpoint,email_id) VALUES($1,$2,$3,$4)', [w, message, queued.hook, email]);
+    const oldCheck = () => dispatcher.c.query(`SELECT EXISTS (
+      SELECT FROM mail_forward_once f JOIN mailbox_webhooks h ON h.workspace_id=f.workspace_id AND h.id=f.endpoint
+      JOIN mail_endpoints d ON d.workspace_id=h.workspace_id AND d.hook_id=h.id
+      WHERE f.email_id=x.id AND f.workspace_id=x.workspace_id AND x.actor_key_id='forward:'||f.endpoint AND starts_with(d.ref,'forward:')
+      AND d.verified AND d.declined_at IS NULL AND NOT h.paused AND NOT EXISTS(SELECT FROM jsonb_array_elements_text(f.grants) gid WHERE NOT mail_receiving_grant(f.workspace_id,gid,$4::jsonb))
+      FOR SHARE OF f, h, d) AS ok FROM (SELECT $1::text AS id,$2::text AS workspace_id,$3::text AS actor_key_id) x`, [email, w, 'forward:' + queued.hook, receivingPolicy(runtime.config)]);
+    assert.equal((await oldCheck()).rows[0].ok, true);
+    let decided: Promise<{ rows: { ok: boolean }[] }> | undefined;
+    await inTransaction(decliner.c, async () => {
+      await decliner.c.query('UPDATE mailbox_webhooks SET verified=false,proof_hash=NULL,declined_at=now() WHERE workspace_id=$1 AND id=$2', [w, queued.hook]);
+      decided = started(oldCheck());
+      await waitingOn(decliner.pid);
+    });
+    assert.equal((await decided!).rows[0].ok, false, 'It waited for the decline and saw it.');
+
+    // 5. And the other way: the replaced Worker declines while this release's dispatcher decides.
+    const queuedNew = await forward(false), messageNew = unique('msg'), emailNew = unique('em'), oldDecliner = await connection();
+    await db.query("INSERT INTO mail_messages(id,workspace_id,direction,thread_id,status,lifecycle) VALUES($1,$2,'inbound',$3,'received','default')", [messageNew, w, thread]);
+    await db.query('INSERT INTO mail_forward_once(workspace_id,message_id,endpoint,email_id) VALUES($1,$2,$3,$4)', [w, messageNew, queuedNew.hook, emailNew]);
+    const newCheck = async () => (await runtime.db.execute<{ ok: boolean }>(sql`SELECT ${forwardStillAllowed(runtime, sql`x`)} AS ok FROM (SELECT ${emailNew}::text AS id,${w}::text AS workspace_id,${'forward:' + queuedNew.hook}::text AS actor_key_id) x`)).rows[0]!.ok;
+    assert.equal(await newCheck(), true);
+    let decidedNew: Promise<boolean> | undefined;
+    await inTransaction(oldDecliner.c, async () => {
+      await lockEndpointRow(oldDecliner.c, queuedNew.hook);
+      await oldDecliner.c.query('UPDATE mail_endpoints SET verified=false,proof_hash=NULL,declined_at=now() WHERE workspace_id=$1 AND hook_id=$2', [w, queuedNew.hook]);
+      decidedNew = started(newCheck());
+      await waitingOn(oldDecliner.pid);
+    });
+    assert.equal(await decidedNew!, false, 'It waited for the decline and saw it.');
+  });
+  test('endpoints and webhooks are one model: one name space, and the same caps through /v1/endpoints and /v1/inbound/webhooks, on create and on resume', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const w = runtime.config.workspaceId;
+      ok(await local('POST', '/v1/endpoints', { type: 'slack', name: 'ops', url: 'https://hooks.slack.com/services/T0ONE/B0ONE/onemodelfixture0001' }), 201);
+      // A webhook's key is its endpoint name, in the name space every type shares.
+      assert.equal(error(await local('POST', '/v1/inbound/webhooks', { url: 'https://example.com/hooks/ops', key: 'ops', eventTypes: [] }), 409, 'ENDPOINT_NAME_TAKEN').field, 'key');
+      const crm = ok(await local('POST', '/v1/inbound/webhooks', { url: 'https://example.com/hooks/crm', key: 'crm', eventTypes: ['message.received'] }), 201);
+      const named = ok(await local('GET', '/v1/endpoints/crm'));
+      assert.deepEqual([named.type, named.status], ['webhook', 'ready']);
+      error(await local('POST', '/v1/endpoints', { type: 'discord', name: 'crm', url: 'https://discord.com/api/webhooks/77/onemodelfixture0002' }), 409, 'ENDPOINT_NAME_TAKEN');
+      assert.equal(error(await local('PATCH', `/v1/inbound/webhooks/${crm.id}`, { key: 'ops' }), 409, 'ENDPOINT_NAME_TAKEN').field, 'key');
+      // The overview lists it once, as the endpoint it is, with the events it subscribes to; a Slack endpoint is no webhook.
+      const overview = ok(await local('GET', '/v1/inbound/overview'));
+      assert.deepEqual(overview.endpoints.filter((e: Json) => e.id === crm.id).map((e: Json) => [e.source, e.type, e.call, e.eventTypes]), [['endpoint', 'webhook', 'endpoints.crm', ['message.received']]]);
+      assert.ok(!ok(await local('GET', '/v1/inbound/webhooks')).data.some((h: Json) => h.key === 'ops'));
+      // Caps count webhooks of one kind, whatever API made them, and never a Slack, Discord or forward endpoint.
+      await db.query("INSERT INTO mailbox_webhooks(id,workspace_id,url,event_types,encrypted_secret) SELECT 'mwh_cap'||lpad(n::text,3,'0'),$1,'https://hooks.example.org/cap'||n,'[]','synthetic' FROM generate_series(1,498) n", [w]);
+      const spare = ok(await local('POST', '/v1/inbound/webhooks', { url: 'https://example.com/hooks/spare', key: 'spare', eventTypes: [], paused: true }), 201);
+      ok(await local('POST', '/v1/endpoints', { type: 'webhook', name: 'last', url: 'https://example.com/hooks/last' }), 201);
+      ok(await local('POST', '/v1/inbound/webhooks', { url: 'https://example.com/hooks/full', eventTypes: [] }), 201);
+      // 500 active route-only webhooks: no more through either API, and none resumes through either.
+      error(await local('POST', '/v1/endpoints', { type: 'webhook', name: 'over', url: 'https://example.com/hooks/over' }), 409, 'MAILBOX_HOOK_LIMIT');
+      error(await local('POST', '/v1/inbound/webhooks', { url: 'https://example.com/hooks/over', eventTypes: [] }), 409, 'MAILBOX_HOOK_LIMIT');
+      error(await local('PATCH', `/v1/inbound/webhooks/${spare.id}`, { paused: false }), 409, 'MAILBOX_HOOK_LIMIT');
+      error(await local('PATCH', '/v1/endpoints/spare', { paused: false }), 409, 'MAILBOX_HOOK_LIMIT');
+      ok(await local('PATCH', '/v1/endpoints/last', { paused: true }));
+      assert.equal(ok(await local('PATCH', '/v1/endpoints/spare', { paused: false })).status, 'ready');
+      error(await local('PATCH', `/v1/inbound/webhooks/${(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='last'", [w])).rows[0].id}`, { paused: false }), 409, 'MAILBOX_HOOK_LIMIT');
+      // The Endpoints list pages through every one of the 500-odd, named ones first by name, each once.
+      const seen: Json[] = [];
+      for (let cursor: string | null = null, n = 0; n === 0 || cursor; n++) {
+        assert.ok(n < 20, 'The list never ended.');
+        const page = ok(await local('GET', `/v1/inbound/endpoints?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`));
+        seen.push(...page.data); cursor = page.nextCursor;
+      }
+      const all = (await db.query('SELECT id,key FROM mailbox_webhooks WHERE workspace_id=$1 ORDER BY key IS NULL, coalesce(key,\'\'), id', [w])).rows;
+      assert.deepEqual(seen.map(e => e.id), all.map(r => r.id));
+      assert.deepEqual(seen.filter(e => e.source === 'endpoint').map(e => e.name), ['crm', 'last', 'ops', 'spare']);
+      assert.deepEqual(seen.find(e => e.id === crm.id), { id: crm.id, source: 'endpoint', name: 'crm', type: 'webhook', status: 'ready', target: '\u2022\u2022\u2022\u2022/crm', call: 'endpoints.crm', eventTypes: ['message.received'], routes: 0, rituals: [] });
+      // An address's filter keeps the webhooks that get its received mail: crm subscribes for every address.
+      assert.deepEqual(ok(await local('GET', '/v1/inbound/endpoints?addressId=mbx_any')).data.map((e: Json) => e.id), [crm.id]);
+      error(await local('GET', '/v1/inbound/endpoints?cursor=forged'), 422, 'INVALID_CURSOR');
+      // Every endpoint is a row of one kind: no Slack endpoint carries a URL or a signing secret any more.
+      assert.deepEqual((await db.query("SELECT type,url,encrypted_secret,encrypted_target IS NOT NULL AS target FROM mailbox_webhooks WHERE workspace_id=$1 AND key='ops'", [w])).rows, [{ type: 'slack', url: null, encrypted_secret: null, target: true }]);
+    });
+  });
+
+  // Migration 322 runs before the new Worker replaces the old one. The old Worker keeps writing and reading
+  // mail_endpoints and mail_action_policies until it is gone; the new code reads and writes only the one table.
+  test('endpoint rollout (migration 322): what the replaced Worker writes reaches the one table, what this release writes reaches the tables it reads, and the backfill repeats', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const w = runtime.config.workspaceId, { encrypt, decrypt } = await import('./src/operations.js');
+      const slack = 'https://hooks.slack.com/services/T0ROLL/B0ROLL/rolloutfixture0001', discord = 'https://discord.com/api/webhooks/4343/rolloutfixture0002';
+      const row = async (id: string) => (await db.query('SELECT type,key,name,url,encrypted_secret,encrypted_target,verified,per_minute,retry_on_timeout,idempotent FROM mailbox_webhooks WHERE id=$1', [id])).rows[0];
+      const legacyRow = async (id: string) => (await db.query('SELECT e.ref,e.encrypted_value,e.verified,e.declined_at IS NOT NULL AS declined,p.per_minute FROM mail_endpoints e LEFT JOIN mail_action_policies p ON p.hook_id=e.hook_id WHERE e.hook_id=$1', [id])).rows[0];
+      // 1. The replaced Worker creates a Slack endpoint as it always did: a placeholder webhook row, its mail_endpoints row and a policy.
+      const legacy = 'con_' + randomUUID().replaceAll('-', '');
+      await db.query("INSERT INTO mailbox_webhooks(id,workspace_id,name,url,event_types,encrypted_secret) VALUES($1,$2,'slack:legacy','https://ritual.invalid/','[]','synthetic')", [legacy, w]);
+      await db.query("INSERT INTO mail_endpoints(workspace_id,ref,hook_id,encrypted_value,verified) VALUES($1,'slack:legacy',$2,$3,true)", [w, legacy, await encrypt(runtime, slack, `${w}:endpoint:${legacy}`)]);
+      await db.query('INSERT INTO mail_action_policies(workspace_id,hook_id,per_minute,retry_on_timeout,idempotent) VALUES($1,$2,12,true,false)', [w, legacy]);
+      const copied = await row(legacy);
+      assert.equal(await decrypt(runtime, copied.encrypted_target, `${w}:endpoint:${legacy}`), slack);
+      assert.deepEqual({ ...copied, encrypted_target: undefined }, { type: 'slack', key: 'legacy', name: null, url: null, encrypted_secret: null, encrypted_target: undefined, verified: true, per_minute: 12, retry_on_timeout: true, idempotent: false });
+      const read = ok(await local('GET', '/v1/endpoints/legacy'));
+      assert.deepEqual([read.type, read.status, read.policy], ['slack', 'ready', { perMinute: 12, retryOnTimeout: true, idempotent: false }]);
+      assert.ok(!ok(await local('GET', '/v1/inbound/webhooks')).data.some((h: Json) => h.id === legacy));
+      // It renames it its way: mail_endpoints first, then the placeholder's name.
+      await db.query("UPDATE mail_endpoints SET ref='slack:renamed' WHERE hook_id=$1", [legacy]);
+      await db.query("UPDATE mailbox_webhooks SET name='slack:renamed' WHERE id=$1", [legacy]);
+      assert.equal(ok(await local('GET', '/v1/endpoints/renamed')).type, 'slack');
+      error(await local('GET', '/v1/endpoints/legacy'), 404, 'NOT_FOUND');
+      // 2. This release writes the one table, and the replaced Worker still finds what it reads while it drains.
+      ok(await local('POST', '/v1/endpoints', { type: 'discord', name: 'fresh', url: discord }), 201);
+      const fresh = (await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='fresh'", [w])).rows[0].id as string;
+      assert.ok(fresh.startsWith('con_'), 'Slack, Discord and forward endpoints keep the con_ prefix the replaced Worker dispatches on.');
+      let back = await legacyRow(fresh);
+      assert.deepEqual([back.ref, await decrypt(runtime, back.encrypted_value, `${w}:endpoint:${fresh}`), back.verified, back.declined, back.per_minute], ['discord:fresh', discord, true, false, null]);
+      ok(await local('PATCH', '/v1/endpoints/fresh', { name: 'fresher', perMinute: 5 }));
+      back = await legacyRow(fresh);
+      assert.deepEqual([back.ref, back.per_minute], ['discord:fresher', 5]);
+      // A decline (the stop link's statement) reaches it too, so the replaced Worker forwards nothing more.
+      await db.query('UPDATE mailbox_webhooks SET verified=false,proof_hash=NULL,declined_at=now() WHERE id=$1', [fresh]);
+      assert.deepEqual([(await legacyRow(fresh)).verified, (await legacyRow(fresh)).declined], [false, true]);
+      ok(await local('DELETE', '/v1/endpoints/fresher'));
+      assert.equal(await legacyRow(fresh), undefined);
+      // 3. The backfill: the legacy row as it was before the migration, then the migration's own statements, twice.
+      await db.query("UPDATE mailbox_webhooks SET type='webhook',key=NULL,name='slack:renamed',url='https://ritual.invalid/',encrypted_secret='synthetic',encrypted_target=NULL,per_minute=NULL,retry_on_timeout=NULL,idempotent=NULL WHERE id=$1", [legacy]);
+      const migration = await readFile(new URL('./migrations/322_one_endpoints_table.sql', import.meta.url), 'utf8');
+      const backfill = [...migration.matchAll(/^UPDATE mailbox_webhooks h SET[^;]*;/gm)].map(m => m[0].replace(/;$/, ' AND h.workspace_id=$1'));
+      assert.equal(backfill.length, 2);
+      for (let pass = 0; pass < 2; pass++) for (const statement of backfill) await db.query(statement, [w]);
+      assert.deepEqual({ ...await row(legacy), encrypted_target: undefined }, { type: 'slack', key: 'renamed', name: null, url: null, encrypted_secret: null, encrypted_target: undefined, verified: true, per_minute: 12, retry_on_timeout: true, idempotent: false });
+      assert.equal(ok(await local('GET', '/v1/endpoints/renamed')).target.endsWith(slack.slice(-4)), true);
+    });
   });
 
   test('a removal waits for a receiving write under way, then holds what the write changed', async t => {
@@ -16963,12 +17116,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   // receipt in opposite orders and deadlocked.
   test('a routed inbound webhook whose connection was refused retries instead of failing as an unknown outcome', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db }) => {
-      const { ritualDelivery, ActionRetry } = await import('./src/ritual-delivery.js'), wid = runtime.config.workspaceId;
+      const { deliverEndpoint, ActionRetry } = await import('./src/endpoint-delivery.js'), wid = runtime.config.workspaceId;
       const hook = ok(await local('POST', '/v1/inbound/webhooks', { url: `https://${unique('routed')}.example.org/hook`, eventTypes: [] }), 201);
       const fence = async (id: string) => (await db.query('SELECT state FROM mail_action_attempts WHERE workspace_id=$1 AND delivery_id=$2', [wid, id])).rows[0]?.state;
       const attempt = async (id: string, send: () => Promise<{ status: number }>) => {
         await db.query("INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,payload,routed) VALUES($1,$2,$3,$4,true) ON CONFLICT DO NOTHING", [id, wid, hook.id, { id: 'mev_' + id, type: 'message.received' }]);
-        return ritualDelivery(runtime, wid, { delivery_id: id, generation: 0, routed: true, webhook_id: hook.id, payload: { id: 'mev_' + id, type: 'message.received' } } as unknown as import('./src/core.js').ClaimedWebhook, send);
+        return deliverEndpoint(runtime, wid, { delivery_id: id, generation: 0, routed: true, webhook_id: hook.id, payload: { id: 'mev_' + id, type: 'message.received' } } as unknown as import('./src/core.js').ClaimedWebhook, send);
       };
       // Nothing left the box (Node's connect and DNS errors): a known outcome, retried like a 503.
       for (const code of ['ECONNREFUSED', 'ENOTFOUND']) {
@@ -17235,7 +17388,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   // Migration 321 adds forwardEligible to stored mail before the new Worker serves; the Worker it replaces keeps storing
   // mail without it until then. A message it commits after the migration ran is decided by the same rule on read.
   test('forward rollout: mail the replaced Worker commits after migration 321 is decided on read, not refused',async t=>{
-    const [{nodeRuntime},{deliverConnector},{encrypt}]=await Promise.all([import('./src/adapters/node.js'),import('./src/ritual-endpoints.js'),import('./src/operations.js')]);
+    const [{nodeRuntime},{sendToEndpoint},{encrypt}]=await Promise.all([import('./src/adapters/node.js'),import('./src/endpoints.js'),import('./src/operations.js')]);
     const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
     const a=await fixtureDatabase(t),b=await fixtureDatabase(t),w=unique('fwdroll'),hook='con_'+randomUUID().replaceAll('-',''),thread=unique('thr'),mid=unique('msg');
     cleanup(t,async()=>{
@@ -17243,6 +17396,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await a.query('DELETE FROM workspaces WHERE id=$1',[w]);
     });
     await a.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[w]);
+    // The forward endpoint as the replaced Worker writes one (migration 322 copies it onto its row).
     await a.query("INSERT INTO mailbox_webhooks(id,workspace_id,name,url,event_types,encrypted_secret) VALUES($1,$2,'forward:team','https://ritual.invalid/','[]','synthetic')",[hook,w]);
     await a.query("INSERT INTO mail_endpoints(workspace_id,ref,hook_id,encrypted_value,verified) VALUES($1,'forward:team',$2,$3,true)",[w,hook,await encrypt(runtime,'teammate@example.net',`${w}:endpoint:${hook}`)]);
     await a.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[thread,w]);
@@ -17259,8 +17413,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     } finally { await b.query('ROLLBACK'); }
     assert.equal((await a.query("SELECT verdicts ? 'forwardEligible' AS decided FROM mail_messages WHERE id=$1",[mid])).rows[0].decided,false,'The migration never saw it.');
     // It passes the forward rule and stops at the next check: this fixture has no sending address.
-    const delivery={webhook_id:hook,payload:{messageId:mid,type:'message.received',data:{recipients:[`box@${w}.example`],junk:false}}} as unknown as import('./src/core.js').ClaimedWebhook;
-    await assert.rejects(deliverConnector(runtime,w,delivery),{code:'FORWARD_SENDER_REQUIRED'});
+    const delivery={type:'forward',webhook_id:hook,payload:{messageId:mid,type:'message.received',data:{recipients:[`box@${w}.example`],junk:false}}} as unknown as import('./src/core.js').ClaimedWebhook;
+    await assert.rejects(sendToEndpoint(runtime,w,delivery),{code:'FORWARD_SENDER_REQUIRED'});
   });
   // Recheck 2 of #57 (tear witness, 5 steps: accept m1 a, claim, accept m1 ac, lose, legacy-fail -> the previous
   // Worker's unfenced terminal write failed the receipt its reopen had expanded). Lease exhaustion retires a job
@@ -18351,6 +18505,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           error(await local('POST', '/v1/routing/test', config(['webhook:route-slack'])), 422, 'UNKNOWN_DESTINATION');
           // Its ID was never a destination: routes take mbx_ and mwh_ IDs only.
           error(await local('POST', '/v1/routing/routes', { match: 'route-check@receive.example', to: [con] }), 422, 'VALIDATION_FAILED');
+          // The replaced Worker's resolver (#357), verbatim, doesn't resolve it either, so no route saved during the overlap can.
+          const oldResolver = await db.query(`WITH refs AS MATERIALIZED (SELECT ref,split_part(ref,':',2) AS key FROM jsonb_array_elements_text($2::jsonb) ref)
+            SELECT ref,h.id FROM refs JOIN mailbox_webhooks h ON h.workspace_id=$1 AND h.key=refs.key AND NOT starts_with(h.id,'con_') WHERE starts_with(ref,'webhook:')`, [wid, JSON.stringify(['webhook:route-slack', 'webhook:support-hook'])]);
+          assert.deepEqual(oldResolver.rows, [{ ref: 'webhook:support-hook', id: hook.id }]);
           // A webhook's name still resolves, and the exported config names only webhooks.
           assert.deepEqual((await call('POST', '/v1/routing/test', config(['webhook:support-hook']))).recipients[0].webhooks, [hook.id]);
           assert.ok(!JSON.stringify(await call('GET', '/v1/routing?format=config')).includes('route-slack'));
@@ -18510,10 +18668,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await db.query("INSERT INTO mailbox_webhooks(id,workspace_id,url,event_types,mailbox_ids,paused,encrypted_secret,description) VALUES ('mwh_zzactive',$1,'https://hooks.example.org/active','[\"message.received\"]'::jsonb,jsonb_build_array($2::text),false,'synthetic','Active subscriber')", [wid, sub.id]);
         try {
           const all = await read('/v1/inbound/webhooks');
-          const every = (await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND NOT starts_with(id,'con_') ORDER BY id DESC", [wid])).rows.map(r => r.id);
+          const every = (await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND type='webhook' ORDER BY id DESC", [wid])).rows.map(r => r.id);
           assert.ok(every.length >= 201 && all.pages >= 3, `${every.length} webhooks in ${all.pages} pages`);
           assert.deepEqual(all.ids, every, 'every webhook, once, by following nextCursor');
-          const subscribers = (await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND NOT starts_with(id,'con_') AND event_types ? 'message.received' AND (mailbox_ids IS NULL OR mailbox_ids ? $2) ORDER BY id DESC", [wid, sub.id])).rows.map(r => r.id);
+          const subscribers = (await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND type='webhook' AND event_types ? 'message.received' AND (mailbox_ids IS NULL OR mailbox_ids ? $2) ORDER BY id DESC", [wid, sub.id])).rows.map(r => r.id);
           const route = await entry(), ids = route.to.map((x: Json) => x.id), firstPaused = route.to.findIndex((x: Json) => x.status === 'paused');
           assert.ok(ids.includes('mwh_zzactive'), 'the active subscriber is listed though 200 paused ones sort before it');
           assert.ok(firstPaused > ids.indexOf('mwh_zzactive') && route.to.slice(firstPaused).every((x: Json) => x.status === 'paused'), 'active subscribers come before paused ones');
@@ -18598,9 +18756,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         // From the other address, so its confirmation email isn't the one the forward tests below read for box.
         await call('POST', '/v1/endpoints', { type: 'forward', name: 'recipe-fwd', address: 'recipes@example.net', from: other.id }, 201);
         error(await local('POST', recipes, { recipe: 'forward', params: { to: 'recipe-fwd' }, addresses: [box.id] }), 422, 'UNKNOWN_ENDPOINT');
-        await db.query("UPDATE mail_endpoints SET verified=true WHERE workspace_id=$1 AND ref='forward:recipe-fwd'", [wid]);
+        await db.query("UPDATE mailbox_webhooks SET verified=true WHERE workspace_id=$1 AND key='recipe-fwd'", [wid]);
         const forward = await call('POST', recipes, { recipe: 'forward', params: { to: 'recipe-fwd' }, addresses: [box.id] }, 201);
-        await db.query("UPDATE mail_endpoints SET verified=false,declined_at=now() WHERE workspace_id=$1 AND ref='forward:recipe-fwd'", [wid]);
+        await db.query("UPDATE mailbox_webhooks SET verified=false,declined_at=now() WHERE workspace_id=$1 AND key='recipe-fwd'", [wid]);
         assert.equal(ritual((await call('PATCH', path + '/scripts/loose', { enabled: false })).config, 'loose').enabled, false);
         assert.ok(ritual((await call('GET', path)).config, forward.key));
         error(await local('POST', recipes, { recipe: 'forward', params: { to: 'recipe-fwd' }, addresses: [other.id] }), 422, 'UNKNOWN_ENDPOINT');
@@ -18622,8 +18780,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         }finally{stub.mock.restore();runtime.config.screen=prior;await call('PUT',path,{})}
       });
       await t.test('rituals: chat credentials are pinned and write-only; durable posts disable mentions',async()=>{
-        const {renderChat}=await import('./src/ritual-endpoints.js');assert.deepEqual(renderChat('discord',{content:'# Notice\n- [site](https://example.invalid)'}),{content:'\\# Notice\n\\- \\[site\\]\\(https://example.invalid\\)',allowed_mentions:{parse:[]},flags:4});
-        const path='/v1/rituals',dest='/v1/endpoints';error(await local('POST',dest,{type:'slack',name:'bad',url:'https://other.example.org/services/T/B/fake'}),422,'INVALID_CONNECTOR');const value='https://discord.com/api/webhooks/123/synthetic';const d=await call('POST',dest,{type:'discord',name:'triage',url:value},201);assert.equal(d.status,'ready');assert.equal(d.call,'endpoints.triage');assert.ok(!JSON.stringify(d).includes('/api/webhooks/'));error(await local('POST',dest,{type:'slack',name:'triage',url:'https://hooks.slack.com/services/T/B/x'}),409,'ENDPOINT_NAME_TAKEN');error(await local('POST',dest,{type:'webhook',name:'support-hook',url:'https://example.com/x'}),409,'ENDPOINT_NAME_TAKEN');const row=(await db.query('SELECT hook_id,encrypted_value FROM mail_endpoints WHERE workspace_id=$1 AND ref=$2',[wid,'discord:triage'])).rows[0];
+        const {renderChat}=await import('./src/endpoints.js');assert.deepEqual(renderChat('discord',{content:'# Notice\n- [site](https://example.invalid)'}),{content:'\\# Notice\n\\- \\[site\\]\\(https://example.invalid\\)',allowed_mentions:{parse:[]},flags:4});
+        const path='/v1/rituals',dest='/v1/endpoints';error(await local('POST',dest,{type:'slack',name:'bad',url:'https://other.example.org/services/T/B/fake'}),422,'INVALID_CONNECTOR');const value='https://discord.com/api/webhooks/123/synthetic';const d=await call('POST',dest,{type:'discord',name:'triage',url:value},201);assert.equal(d.status,'ready');assert.equal(d.call,'endpoints.triage');assert.ok(!JSON.stringify(d).includes('/api/webhooks/'));error(await local('POST',dest,{type:'slack',name:'triage',url:'https://hooks.slack.com/services/T/B/x'}),409,'ENDPOINT_NAME_TAKEN');error(await local('POST',dest,{type:'webhook',name:'support-hook',url:'https://example.com/x'}),409,'ENDPOINT_NAME_TAKEN');const row=(await db.query("SELECT id AS hook_id,encrypted_target AS encrypted_value FROM mailbox_webhooks WHERE workspace_id=$1 AND key=$2 AND type='discord'",[wid,'triage'])).rows[0];
           const bad=error(await local('PUT',path,{rituals:[{key:'notify',source:'export default function route(email,ctx){endpoints.triage({text:"x"});endpoints.triag({content:"x"})}'}]}),422,'UNKNOWN_ENDPOINT');assert.equal(bad.details.length,2);assert.match(bad.details[0].message,/discord endpoint: call it as endpoints\.triage\(\{ content \}\)/);assert.match(bad.details[1].hint,/Did you mean endpoints\.triage\?/);
           const check=await call('POST',path+'/check',{source:'export default function route(email,ctx){if(lists.has("vip",email.from.address))endpoints.triage({content:email.subject})}'});assert.equal(check.ok,false);assert.match(check.diagnostics[0].message,/No sender list named vip/);assert.deepEqual(check.calls,['endpoints.triage']);
           const typings=await call('GET',path+'/typings');assert.match(typings.typescript,/triage\(message: \{ content: string \}\): void/);assert.ok(typings.completions.some((x:Json)=>x.label==='endpoints.triage'));const templates=(await call('GET',path+'/templates')).data;assert.equal(templates.find((x:Json)=>x.id==='discord-alert').endpoint,'triage');assert.ok(!row.encrypted_value.includes('https://'));const prev=runtime.webhookFetch;let count=0;try{runtime.webhookFetch=async(url,init)=>{assert.equal(url,value);const body=JSON.parse(String(init.body));assert.deepEqual(body.allowed_mentions,{parse:[]});assert.equal(body.content,'@everyone');count++;return {status:200}};
@@ -18659,19 +18817,19 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const view=await page('GET',`/v1/forwarding/confirm/${token}`);assert.equal(view.status,200);assert.match(await view.text(),new RegExp(`forward the email it receives to <strong>${address}`));assert.equal((await call('GET',`${dest}/team`)).status,'pending');
         assert.equal((await page('POST',`/v1/forwarding/confirm/${token}`,'choice=allow',{origin:'https://attacker.example'})).status,403);
         const allowed=await page('POST',`/v1/forwarding/confirm/${token}`,'choice=allow',{origin:PUBLIC_ORIGIN});assert.equal(allowed.status,200);assert.match(await allowed.text(),/Forwarding allowed/);assert.equal((await page('POST',`/v1/forwarding/confirm/${token}`,'choice=decline')).status,410);assert.equal((await call('GET',`${dest}/team`)).status,'ready');
-        const hookId=(await db.query('SELECT hook_id FROM mail_endpoints WHERE workspace_id=$1 AND ref=$2 AND verified',[wid,'forward:team'])).rows[0].hook_id;await call('PUT',root,config);
+        const hookId=(await db.query("SELECT id AS hook_id FROM mailbox_webhooks WHERE workspace_id=$1 AND key=$2 AND type='forward' AND verified",[wid,'team'])).rows[0].hook_id;await call('PUT',root,config);
         const send=async(mid:string)=>{const row=(await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,mid])).rows[0];await mailboxEventJobs['mailbox.webhook'](runtime,{deliveryId:row.id},{id:row.id,workspaceId:wid,attempts:1});return row.id};
         const m=await ingest('forward-handler',[box.address]);await send(m.id);await send(m.id);const rows=(await db.query("SELECT from_address,from_name,text FROM mail_messages WHERE workspace_id=$1 AND direction='outbound' AND subject='Fwd: Test forward-handler'",[wid])).rows;assert.equal(rows.length,1);assert.equal(rows[0].from_address,box.address);assert.match(rows[0].from_name,/ via /);
         await (await import('./src/dispatcher.js')).dispatchDue(runtime,REGION);
         assert.equal((await db.query('SELECT e.status FROM sending_emails e JOIN mail_forward_once f ON f.email_id=e.id WHERE f.message_id=$1 AND f.endpoint=$2',[m.id,hookId])).rows[0].status,'accepted');
         // Every forward carries a signed stop link; a forged one is refused and stopping blocks new requests for 30 days.
-        const stop=new URL(/Stop these forwards: (\S+)/.exec(rows[0].text)![1]).pathname;assert.equal((await page('GET',stop.replace(/\.[^.]+$/,'.forged'))).status,404);assert.equal((await page('POST',stop,'choice=decline',{origin:PUBLIC_ORIGIN})).status,200);assert.equal((await call('GET',`${dest}/team`)).status,'declined');error(await local('POST',`${dest}/team/verification`,{}),409,'FORWARD_DECLINED');await db.query('DELETE FROM mail_forward_declines WHERE workspace_id=$1',[wid]);await db.query("UPDATE mail_endpoints SET verified=true,declined_at=NULL WHERE workspace_id=$1 AND ref='forward:team'",[wid]);
+        const stop=new URL(/Stop these forwards: (\S+)/.exec(rows[0].text)![1]).pathname;assert.equal((await page('GET',stop.replace(/\.[^.]+$/,'.forged'))).status,404);assert.equal((await page('POST',stop,'choice=decline',{origin:PUBLIC_ORIGIN})).status,200);assert.equal((await call('GET',`${dest}/team`)).status,'declined');error(await local('POST',`${dest}/team/verification`,{}),409,'FORWARD_DECLINED');await db.query('DELETE FROM mail_forward_declines WHERE workspace_id=$1',[wid]);await db.query("UPDATE mailbox_webhooks SET verified=true,declined_at=NULL WHERE workspace_id=$1 AND key='team' AND type='forward'",[wid]);
         const mid='forward-loop';raw.set(mid,Buffer.from(`From: Agent <a@example.org>\r\nX-Bane-Loop: synthetic\r\nSubject: Loop\r\n\r\nHello`));await submit(mid,[box.address]);await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);const loop=(await db.query('SELECT id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];await assert.rejects(send(loop.id));assert.equal((await db.query('SELECT FROM mail_forward_once WHERE message_id=$1',[loop.id])).rowCount,0);await call('PUT',root,{});
       });
       await t.test('rituals: a forward queued by a reopened receipt sends mail first stored before any ritual ran',async()=>{
         // tear/delivery witness: ingest m1 z, rituals forward, ingest m1 b+z, run K m1:F.
         const {mailboxEventJobs}=await import('./src/mailbox-events.js');
-        const hookId=(await db.query("SELECT hook_id FROM mail_endpoints WHERE workspace_id=$1 AND ref='forward:team' AND verified",[wid])).rows[0].hook_id;
+        const hookId=(await db.query("SELECT id AS hook_id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='team' AND type='forward' AND verified",[wid])).rows[0].hook_id;
         await ingest('fwd-late',['late@receive.example']);
         await call('PUT','/v1/rituals',{rituals:[{key:'forward',source:'export default function route(email,ctx){endpoints.team() }'}],attachments:[{ritual:'forward',target:box.id}]});
         try{
@@ -18685,7 +18843,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await t.test('rituals: one forward rule, recorded at ingest for every message, added to older mail and decided on read for mail stored without it',async()=>{
         // tear/delivery witnesses: ingest m1 z, strip m1, rituals forward, ingest m1 b+z, run K m1:F (and the loop variant).
         const {mailboxEventJobs}=await import('./src/mailbox-events.js');
-        const hookId=(await db.query("SELECT hook_id FROM mail_endpoints WHERE workspace_id=$1 AND ref='forward:team' AND verified",[wid])).rows[0].hook_id;
+        const hookId=(await db.query("SELECT id AS hook_id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='team' AND type='forward' AND verified",[wid])).rows[0].hook_id;
         const hops=(n:number)=>'Received: from relay.example.org by mx.example.org\r\n'.repeat(n);
         // [message, extra headers, forwardable]: the strictest of the three earlier checks (ingest, the stored-column
         // fallback and the send transaction), so nothing is forwarded that one of them refused.

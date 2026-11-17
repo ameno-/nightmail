@@ -12544,7 +12544,7 @@
               "string",
               "null"
             ],
-            "description": "Address ID for an inbox, webhook ID (mwh_…) for an endpoint or inbound webhook; null for store, drop and create_address."
+            "description": "Address ID for an inbox, endpoint ID (mwh_… for a webhook, con_… for Slack, Discord or a forward); null for store, drop and create_address."
           },
           "name": {
             "type": "string",
@@ -12594,7 +12594,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "description": "Webhook ID (mwh_…) that delivers for it."
+            "description": "Endpoint ID: mwh_… for a webhook, con_… for Slack, Discord or a forward."
           },
           "source": {
             "type": "string",
@@ -12602,7 +12602,7 @@
               "endpoint",
               "inbound_webhook"
             ],
-            "description": "endpoint: a named endpoint rituals call (and routes can name). inbound_webhook: a webhook created with createInboundWebhook."
+            "description": "endpoint: a named endpoint, which rituals call (listEndpoints). inbound_webhook: a webhook without a name (listInboundWebhooks lists every webhook, named or not)."
           },
           "name": {
             "type": "string"
@@ -12642,7 +12642,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Events an inbound webhook subscribes to; empty for endpoints and route-only webhooks."
+            "description": "Events a webhook subscribes to; empty for a route-only webhook and for Slack, Discord and forward endpoints."
           },
           "routes": {
             "type": "integer",
@@ -12705,6 +12705,27 @@
           "name",
           "status",
           "catchAll"
+        ]
+      },
+      "InboundEndpointPage": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InboundOverviewEndpoint"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data",
+          "nextCursor"
         ]
       },
       "UpdateInboundThread": {
@@ -13455,7 +13476,7 @@
               "null"
             ],
             "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
-            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
+            "description": "Its endpoint name: rituals call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names."
           },
           "name": {
             "type": [
@@ -13534,7 +13555,7 @@
               "null"
             ],
             "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
-            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
+            "description": "Its endpoint name: rituals call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names."
           },
           "name": {
             "type": [
@@ -13706,7 +13727,7 @@
               "null"
             ],
             "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
-            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
+            "description": "Its endpoint name: rituals call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names."
           },
           "name": {
             "type": [
@@ -58587,6 +58608,187 @@
         ]
       }
     },
+    "/v1/inbound/endpoints": {
+      "get": {
+        "operationId": "listInboundEndpoints",
+        "tags": [
+          "Endpoints"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "summary": "List every endpoint a page at a time, with the routes and rituals that use it",
+        "description": "Named endpoints of every type (Slack, Discord, webhook, forward) by name, then webhooks without a name. Pass nextCursor back as cursor until it is null. addressId lists only the webhooks that get that address's received mail (subscribed to it or to every address), the full list a route's toMore points to.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 400,
+              "description": "nextCursor from the previous page."
+            },
+            "required": false,
+            "description": "nextCursor from the previous page.",
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "description": "Only webhooks that get this address's received mail."
+            },
+            "required": false,
+            "description": "Only webhooks that get this address's received mail.",
+            "name": "addressId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboundEndpointPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { listInboundEndpoints } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await listInboundEndpoints({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/inbound/endpoints' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
+          }
+        ]
+      }
+    },
     "/v1/inbound/threads/{threadId}/reply": {
       "post": {
         "operationId": "replyToInboundThread",
@@ -59496,7 +59698,7 @@
           "Inbound webhooks"
         ],
         "summary": "Subscribe to inbound events",
-        "description": "Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret, and for the inbound format its verification token, are returned once.",
+        "description": "Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret, and for the inbound format its verification token, are returned once. A webhook with a key is also a named endpoint (listEndpoints).",
         "requestBody": {
           "required": true,
           "content": {
@@ -59649,7 +59851,7 @@
           "Inbound webhooks"
         ],
         "summary": "List inbound webhooks a page at a time, in a stable ID order",
-        "description": "Pass nextCursor back as cursor until it is null to read every webhook. addressId and eventType narrow the list to the webhooks that get that address's events (subscribed to it or to every address); getInboundOverview links a route's full list of subscribers this way.",
+        "description": "Every webhook endpoint, named or not. Pass nextCursor back as cursor until it is null to read every webhook. addressId and eventType narrow the list to the webhooks that get that address's events (subscribed to it or to every address); getInboundOverview links a route's full list of subscribers this way.",
         "parameters": [
           {
             "schema": {
