@@ -8,8 +8,8 @@ import { forceMask } from '../../lib/privacy'
 // the page in full: text, labels, the URL and the screenshot are masked by the dashboard's one rule
 // (lib/private-address.ts), revealed addresses included.
 
-declare const __BANE_BUILD__: string
-export const build = typeof __BANE_BUILD__ === 'string' ? __BANE_BUILD__ : 'unknown'
+declare const __NIGHTMAIL_BUILD__: string
+export const build = typeof __NIGHTMAIL_BUILD__ === 'string' ? __NIGHTMAIL_BUILD__ : 'unknown'
 // The layer itself and its sheets (portalled to the body on a phone) are never noted or drawn.
 const OWN = '[data-ui-notes], .uin-sheet'
 export const ownElement = (node: EventTarget | null) => node instanceof Element && Boolean(node.closest(OWN))

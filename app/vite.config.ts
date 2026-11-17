@@ -6,13 +6,13 @@ import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import { MAX_RULES, withFileRules } from './asset-headers.ts'
 import { renderLegal } from './legal-markdown.ts'
-import { publicOrigin as hostedOrigin } from '../api/src/brand.ts'
+import { headerPrefix, publicOrigin as hostedOrigin } from '../api/src/brand.ts'
 
 // @react-email/editor's own "react-email" imports resolve to a slim shim (src/features/campaigns/react-email-shim.ts
 // explains why); everything else, the shim included, gets the real package.
 const reactEmailShim = fileURLToPath(new URL('./src/features/campaigns/react-email-shim.ts', import.meta.url))
 const slimReactEmail: Plugin = {
-  name: 'bane:slim-react-email', enforce: 'pre',
+  name: 'nightmail:slim-react-email', enforce: 'pre',
   resolveId(source, importer) { return source === 'react-email' && importer?.includes('/node_modules/@react-email/editor/') ? reactEmailShim : null },
 }
 
@@ -22,7 +22,7 @@ const slimReactEmail: Plugin = {
 const fileHeaders = (): Plugin => {
   let publicDir = '', outDir = ''
   return {
-    name: 'bane:file-headers', apply: 'build',
+    name: 'nightmail:file-headers', apply: 'build',
     configResolved(config) { publicDir = config.publicDir; outDir = resolve(config.root, config.build.outDir) },
     writeBundle(_options, bundle) {
       const first = new Set<string>()
@@ -44,7 +44,7 @@ const fileHeaders = (): Plugin => {
 // The legal pages' Markdown becomes { title, description, updated, effective, html, headings } at build time
 // (legal-markdown.ts), so the page ships HTML and no Markdown parser.
 const legalMarkdown: Plugin = {
-  name: 'bane:legal-markdown',
+  name: 'nightmail:legal-markdown',
   transform(source, id) {
     if (!id.endsWith('.md')) return null
     return { code: `export default ${JSON.stringify(renderLegal(source, id))}`, map: null }
@@ -53,20 +53,40 @@ const legalMarkdown: Plugin = {
 
 // The commit a build was made from, recorded with each UI note (features/ui-notes). Only that lazy chunk reads it.
 const buildSha = (() => {
-  const named = process.env.BANE_BUILD_SHA ?? process.env.GITHUB_SHA
+  const named = process.env.NIGHTMAIL_BUILD_SHA ?? process.env.GITHUB_SHA
   if (named) return named.slice(0, 12)
   try { return execFileSync('git', ['rev-parse', '--short=12', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() } catch { return 'unknown' }
 })()
 
 // Link-preview images need an absolute URL: the deploy sets VITE_PUBLIC_URL per stage; other builds name the hosted origin.
 const publicOrigin: Plugin = {
-  name: 'bane:public-origin',
-  transformIndexHtml: html => html.replaceAll('%BANE_ORIGIN%', (process.env.VITE_PUBLIC_URL || hostedOrigin).replace(/\/$/, '')),
+  name: 'nightmail:public-origin',
+  transformIndexHtml: html => html.replaceAll('%PUBLIC_ORIGIN%', (process.env.VITE_PUBLIC_URL || hostedOrigin).replace(/\/$/, '')),
+}
+
+// public/theme.js runs before the app's modules and is served as written, so the request header names it shares with the
+// app and the API come from brand.ts here: %HEADER_PREFIX% becomes X-Nightmail-, in the dev server and in the build.
+const brandedBootScript = (): Plugin => {
+  const file = 'theme.js'
+  let publicDir = '', outDir = ''
+  const filled = () => readFileSync(resolve(publicDir, file), 'utf8').replaceAll('%HEADER_PREFIX%', headerPrefix)
+  return {
+    name: 'nightmail:branded-boot-script',
+    configResolved(config) { publicDir = config.publicDir; outDir = resolve(config.root, config.build.outDir) },
+    configureServer(server) {
+      server.middlewares.use((request, response, next) => {
+        if (request.url?.split('?')[0] !== `/${file}`) return next()
+        response.setHeader('Content-Type', 'text/javascript; charset=utf-8')
+        response.end(filled())
+      })
+    },
+    writeBundle() { writeFileSync(resolve(outDir, file), filled()) },
+  }
 }
 
 export default defineConfig({
-  define: { __BANE_BUILD__: JSON.stringify(buildSha) },
-  plugins: [slimReactEmail, legalMarkdown, react(), fileHeaders(), publicOrigin],
+  define: { __NIGHTMAIL_BUILD__: JSON.stringify(buildSha) },
+  plugins: [slimReactEmail, legalMarkdown, react(), fileHeaders(), publicOrigin, brandedBootScript()],
   server: {
     host: '127.0.0.1', port: 5173, strictPort: true,
     proxy: Object.fromEntries(['/v1', '/api/auth', '/mcp', '/.well-known', '/unsubscribe', '/health', '/openapi.json'].map(path => [path, {target: 'http://127.0.0.1:8793', changeOrigin: false}])),

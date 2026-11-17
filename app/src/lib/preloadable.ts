@@ -6,8 +6,8 @@ export const ChunkFallback = createContext<ReactNode>(null)
 // A deploy since this page loaded removes the chunks it hasn't fetched yet, and the server answers one with the
 // dashboard's HTML, so the import fails (a teammate joining from an invitation link met it: Overview's code was first
 // needed after Join). Load the page again for the current build, once a minute at most: a failure right after a reload
-// isn't a stale build and goes to the error boundary. 'bane:reloading' lets the toasts on screen survive it.
-const RELOADED = 'bane.chunk-reload'
+// isn't a stale build and goes to the error boundary. 'nightmail:reloading' lets the toasts on screen survive it.
+const RELOADED = 'nightmail.chunk-reload'
 let reloading = false
 function reloadForNewBuild() {
   if (reloading) return true
@@ -17,7 +17,7 @@ function reloadForNewBuild() {
     sessionStorage.setItem(RELOADED, String(Date.now()))
   } catch { return false }
   reloading = true
-  window.dispatchEvent(new Event('bane:reloading'))
+  window.dispatchEvent(new Event('nightmail:reloading'))
   window.location.reload()
   return true
 }

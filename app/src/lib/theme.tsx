@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useState, type ReactNode } from 'react'
 
 type Theme = 'light' | 'dark'
-const storageKey = 'bane.theme'
+const storageKey = 'nightmail.theme'
 const ThemeContext = createContext<{ theme: Theme; toggleTheme: () => void } | null>(null)
 const parseTheme = (value: string | null): Theme | null => value === 'light' || value === 'dark' ? value : null
 function savedTheme() {

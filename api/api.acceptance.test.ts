@@ -322,6 +322,51 @@ test('review PR #84 P2: examples use the server’s canonical origin, never the 
   assert.deepEqual(canonicalOrigin({ identity: null, instance: 'javascript:alert(1)', page: 'https://bane.mx' }), { origin: null, foreign: false });
   assert.equal(originOf('https://bane.mx/'), 'https://bane.mx');
 });
+// The dashboard's boot script (app/public/theme.js) and sign-in popup (app/public/signed-in/signed-in.js) are served as
+// written, so they run here in a bare context with this browser's storage, as a tab does before the app loads.
+const memoryStorage = (entries: Record<string, string>) => {
+  const map = new Map(Object.entries(entries));
+  return { map, get length() { return map.size; }, key: (i: number) => [...map.keys()][i] ?? null, getItem: (k: string) => map.get(k) ?? null, setItem: (k: string, v: string) => void map.set(k, String(v)), removeItem: (k: string) => void map.delete(k) };
+};
+test('review PR #342 P1: after the storage rename a tab keeps its own workspace; an old-build tab’s choice never replaces it', async () => {
+  const { runInNewContext } = await import('node:vm'), { headerPrefix } = await import('./src/brand.js');
+  const script = (await readFile(new URL('../app/public/theme.js', import.meta.url), 'utf8')).replaceAll('%HEADER_PREFIX%', headerPrefix);
+  const boot = (local: Record<string, string>, session: Record<string, string>) => {
+    const requests: { url: string; headers: Record<string, string> }[] = [], storage = { local: memoryStorage(local), session: memoryStorage(session) };
+    const tab: Record<string, unknown> = { localStorage: storage.local, sessionStorage: storage.session, location: { pathname: '/overview', search: '' }, URLSearchParams, matchMedia: () => ({ matches: false }),
+      document: { documentElement: { dataset: {}, style: {} }, querySelectorAll: () => [] }, fetch: (url: string, init: { headers: Record<string, string> }) => { requests.push({ url, headers: init.headers }); return Promise.resolve(new Response('{}')); } };
+    tab.window = tab;
+    runInNewContext(script, tab);
+    return { local: Object.fromEntries(storage.local.map), session: Object.fromEntries(storage.session.map), workspace: requests[0]?.headers[`${headerPrefix}Workspace`] ?? null, account: requests[0]?.headers[`${headerPrefix}Account`] ?? null };
+  };
+  // The review's case: an old-build tab wrote ws_fresh, then this (new-build) tab chose ws_northwind and reloads.
+  const reload = boot({ 'bane.workspace:user_dana': 'ws_fresh', 'nightmail.workspace:user_dana': 'ws_northwind', 'nightmail.theme': 'light', 'bane.theme': 'dark' }, { 'nightmail.account': 'user_dana' });
+  assert.equal(reload.workspace, 'ws_northwind', 'The boot request names the workspace this tab chose.');
+  assert.deepEqual(reload.local, { 'nightmail.workspace:user_dana': 'ws_northwind', 'nightmail.theme': 'light' }, 'A nightmail.* key wins and the old one is dropped.');
+  // The first load of the new build: the theme, privacy mode and the tab's account carry over; the workspace is picked
+  // as on a first visit (no header: the server's choice), never taken from a bane.* key an old tab may still rewrite.
+  const first = boot({ 'bane.workspace:user_dana': 'ws_fresh', 'bane.theme': 'dark', 'bane.privacy': 'off', 'bane.support.last.ws_fresh': 'conv_1' }, { 'bane.account': 'user_dana' });
+  assert.equal(first.workspace, null);
+  assert.equal(first.account, 'user_dana');
+  assert.deepEqual(first.local, { 'nightmail.theme': 'dark', 'nightmail.privacy': 'off', 'bane.support.last.ws_fresh': 'conv_1' });
+  assert.deepEqual(first.session, { 'nightmail.account': 'user_dana' });
+});
+test('review PR #342 P1: the deployed sign-in popup reaches a tab still running the build before the rename', async () => {
+  // A tab opens /signed-in/ and hears the result over a BroadcastChannel; the popup is always the deployed build, the
+  // tab may be one loaded before a deploy. Those builds listen on bane.accounts.
+  const { runInNewContext } = await import('node:vm');
+  const script = await readFile(new URL('../app/public/signed-in/signed-in.js', import.meta.url), 'utf8');
+  const opened: BroadcastChannel[] = [], olderTab = new BroadcastChannel('bane.accounts'), heard: unknown[] = [];
+  try {
+    const received = new Promise<void>(resolve => olderTab.addEventListener('message', event => { heard.push((event as MessageEvent).data); resolve(); }));
+    const status = { textContent: '' };
+    runInNewContext(script, { URLSearchParams, URL, location: { search: '?tab=review-popup&account=user_nia', origin: 'https://bane.mx' }, document: { getElementById: () => status },
+      BroadcastChannel: class extends BroadcastChannel { constructor(name: string) { super(name); opened.push(this); } }, setTimeout: () => 0, window: { close() {} } });
+    await Promise.race([received, new Promise(resolve => setTimeout(resolve, 2000))]);
+    assert.deepEqual(heard, [{ type: 'signed-in', tab: 'review-popup', account: 'user_nia', auth: null }]);
+    assert.equal(status.textContent, 'Account added. You can close this window.');
+  } finally { olderTab.close(); for (const channel of opened) channel.close(); }
+});
 test('review PR #84 P3: an inbox key never goes on a command line; with a key every MCP client gets a JSON config', async () => {
   // A bearer in a shell command stays in shell history and the process list.
   const { mcpClients, mcpClientSteps, mcpSnippet, claudeAddCommand } = await import('./src/mcp-clients.js');

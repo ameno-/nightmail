@@ -7,7 +7,7 @@ import './api-keys.css'
 
 // Which key do I need: one quiet line, closed until asked for, and left the way it was last time in this browser. The
 // route skeleton renders it too, so the table below never moves when the page arrives.
-const guideKey = 'bane.keys-guide'
+const guideKey = 'nightmail.keys-guide'
 export function KeysGuide() {
   const [open, setOpen] = useState(() => { try { return localStorage.getItem(guideKey) === 'open' } catch { return false } })
   const toggle = () => {

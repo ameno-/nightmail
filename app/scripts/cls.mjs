@@ -342,9 +342,9 @@ async function measure(browser, job, fx) {
       else Object.defineProperty(navigator, 'connection', { value: { saveData: true }, configurable: true });
     });
     // The support chat's scripted demo (components/SupportChat.tsx), so the open chat is measured without a support Worker.
-    if (job.support) await context.addInitScript(() => sessionStorage.setItem('bane.support', 'demo'));
+    if (job.support) await context.addInitScript(() => sessionStorage.setItem('nightmail.support', 'demo'));
     // UI notes mode, as an operator turns it on (lib/ui-notes-mode.ts).
-    if (job.notes) await context.addInitScript(() => localStorage.setItem('bane.ui-notes', 'on'));
+    if (job.notes) await context.addInitScript(() => localStorage.setItem('nightmail.ui-notes', 'on'));
     page = await context.newPage();
     net = network(page);
     page.on('request', request => { const url = request.url(); if (/^https?:\/\//i.test(url) && !url.startsWith(origin)) problems.push(`external request ${url}`); });

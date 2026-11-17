@@ -183,7 +183,7 @@ export function ReceivingPage() {
   const client = useQueryClient(), toast = useToast()
   useLiveVersion(manage && !!data, change => {
     if (change.first) return
-    void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && resourceOf(query.queryKey) === 'inbound-overview' })
+    void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && resourceOf(query.queryKey) === 'inbound-overview' })
     if (change.actor?.self && change.actor.type === 'member') return
     toast(`${change.versionMoved ? 'Routes and rituals' : 'Endpoints'} updated by ${actorText(change.actor)}${change.versionMoved ? ` · version ${change.version}` : ''}`, 'info')
   }, { endpoints: true })

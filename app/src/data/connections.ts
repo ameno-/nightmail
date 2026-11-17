@@ -17,7 +17,7 @@ export const retryableConnectionErrors = new Set(['CONNECTION_BUSY', 'SNS_CONFIR
 export function useConnectionCache() {
   const client = useQueryClient()
   return (connection: ProviderConnection | null) => {
-    client.setQueryData(['bane', 'connection'], connection)
+    client.setQueryData(['nightmail', 'connection'], connection)
     client.setQueryData<Identity>(['identity'], old => old && { ...old, connection: connection && { kind: connection.kind, region: connection.region, state: connection.state, tenant: connection.tenant } })
   }
 }
