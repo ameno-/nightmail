@@ -120,3 +120,7 @@ export const legacyWebhookFormat = 'bane';
 export const legacySdkErrors = ['BaneUploadError', 'OpenSendUploadError'] as const;
 /** Earlier names of clientIpHeader. Never read: the entry point removes them from every request it receives. */
 export const legacyClientIpHeaders = ['x-bane-client-ip', 'x-opensend-client-ip'] as const;
+/** The address routes and SDK methods, deprecated aliases since every address became an inbox (migration addresses_are_inboxes). Read an
+ *  address's mail with the inbox routes. The cutover removes these and lets /v1/inboxes list and create addresses, which its
+ *  Inbox schema (replyOnly, retention mode) can't describe without a breaking change. */
+export const legacyAddressOperations = ['listInboundAddresses', 'createInboundAddress', 'getInboundAddress', 'updateInboundAddress', 'deleteInboundAddress'] as const;
