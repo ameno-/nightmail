@@ -1,14 +1,20 @@
-// The dashboard's storage keys were bane.* before the rename. Move each to its nightmail.* name before anything reads
-// it, so the theme, privacy mode, region, workspace and this tab's account carry over. A bane.* key that appears again
-// was written since by a tab still on an older build, so it is the newer value. The support panel (features/support)
-// still keeps its conversations under bane.support.*.
+// The dashboard's storage keys were bane.* before the rename. Before anything reads them, each moves to its nightmail.*
+// name, so the theme, privacy mode, region and this tab's account carry over. Once the nightmail.* name exists it wins:
+// a bane.* key seen later was written by a tab still on the old build, and is dropped. The workspace choice is never
+// carried over, so a stale one can't send this tab's requests to another workspace: the tab picks it as on a first
+// visit (the server's choice, then remembered). features/support still keeps its conversations under bane.support.*.
+// Remove after rename cleanup.
 ;(() => {
   for (const area of ['localStorage', 'sessionStorage']) {
     let storage, old = []
     try { storage = window[area]; for (let i = 0; i < storage.length; i++) old.push(storage.key(i)) } catch { continue }
     for (const key of old) {
       if (!key?.startsWith('bane.') || key.startsWith('bane.support.')) continue
-      try { storage.setItem('nightmail.' + key.slice('bane.'.length), storage.getItem(key)); storage.removeItem(key) } catch {}
+      const name = 'nightmail.' + key.slice('bane.'.length)
+      try {
+        if (!key.startsWith('bane.workspace') && storage.getItem(name) === null) storage.setItem(name, storage.getItem(key))
+        storage.removeItem(key)
+      } catch {}
     }
   }
 })()

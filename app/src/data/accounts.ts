@@ -35,7 +35,9 @@ export function takeExpectedAccount() {
 
 // Tabs tell each other about sign-ins and sign-outs, so a tab showing an account that was just signed out leaves it at once.
 export type AccountEvent = { type: 'signed-in'; tab: string | null; account: string | null; auth: string | null } | { type: 'add-started'; tab: string | null } | { type: 'signed-out'; accounts: string[] | 'all' }
-const channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('nightmail.accounts')
+// Still named bane.accounts: tabs on the build before the rename listen there, and the sign-in popup they open is always
+// the deployed one (public/signed-in/signed-in.js, which must use the same name). Rename after rename cleanup.
+const channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('bane.accounts')
 export const announce = (event: AccountEvent) => channel?.postMessage(event)
 export function onAccountEvent(listener: (event: AccountEvent) => void) {
   const handle = (message: MessageEvent<AccountEvent>) => listener(message.data)

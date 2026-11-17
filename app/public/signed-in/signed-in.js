@@ -6,7 +6,9 @@
   const query = new URLSearchParams(location.search), tab = query.get('tab')
   const status = document.getElementById('status')
   let channel = null
-  try { channel = new BroadcastChannel('nightmail.accounts') } catch {}
+  // The same name as data/accounts.ts, kept from before the rename so open tabs of an older build hear it too. Rename
+  // after rename cleanup.
+  try { channel = new BroadcastChannel('bane.accounts') } catch {}
   const finish = (account, auth) => {
     channel?.postMessage({ type: 'signed-in', tab, account, auth })
     status.textContent = auth ? 'Sign-in didn’t finish. Close this window and try again.' : 'Account added. You can close this window.'
