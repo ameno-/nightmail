@@ -33,7 +33,13 @@ export interface SupportPlatform {
 }
 
 export class BaneError extends Error {
-  constructor(readonly status: number, readonly code: string, message: string, readonly requestId: string | null = null) { super(message); }
+  readonly retryAt: number | null;
+  constructor(readonly status: number, readonly code: string, message: string, readonly requestId: string | null = null, retryAfter: string | null = null) {
+    super(message);
+    const now = Date.now(), value = retryAfter?.trim() ?? '';
+    const at = /^\d+$/.test(value) ? now + Number(value) * 1000 : /^[A-Za-z]{3}, /.test(value) ? Date.parse(value) : NaN;
+    this.retryAt = at > now ? Math.min(at, now + 86_400_000) : null;
+  }
 }
 
 /**
@@ -52,7 +58,7 @@ export function baneApi(env: Env, which: 'support' | 'intake' = 'support') {
     let parsed: unknown = null; try { parsed = text ? JSON.parse(text) : null; } catch { /* not JSON */ }
     if (!response.ok) {
       const error = (parsed as { error?: { code?: string; message?: string; requestId?: string } } | null)?.error;
-      throw new BaneError(response.status, error?.code ?? 'BANE_ERROR', error?.message ?? `${productName} answered ${response.status}`, error?.requestId ?? response.headers.get('x-request-id'));
+      throw new BaneError(response.status, error?.code ?? 'BANE_ERROR', error?.message ?? `${productName} answered ${response.status}`, error?.requestId ?? response.headers.get('x-request-id'), response.headers.get('retry-after'));
     }
     return parsed as T;
   }
@@ -68,7 +74,7 @@ export function baneApi(env: Env, which: 'support' | 'intake' = 'support') {
       // Mail stored in R2 is served by Nightmail itself: stay on the binding for Nightmail's origin, and fetch other storage directly.
       // Workers have no redirect: 'error'; a redirect is not followed, and fails the ok check below.
       const response = new URL(url).origin === new URL(env.BANE_ORIGIN).origin ? await env.BANE_API.fetch(url, { redirect: 'manual' }) : await fetch(url, { redirect: 'manual' });
-      if (!response.ok) throw new BaneError(response.status, 'ATTACHMENT_UNAVAILABLE', `Storage answered ${response.status} for an attachment`);
+      if (!response.ok) throw new BaneError(response.status, 'ATTACHMENT_UNAVAILABLE', `Storage answered ${response.status} for an attachment`, null, response.headers.get('retry-after'));
       if (Number(response.headers.get('content-length') ?? 0) > limit) { await response.body?.cancel(); return null; }
       return readCapped(response.body, limit);
     },
