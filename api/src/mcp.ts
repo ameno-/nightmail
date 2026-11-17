@@ -124,21 +124,25 @@ const authorized = (op: McpOperation, actor: Actor) => !op.dashboardOnly
   && !(op.lasting && lastingRefusal(actor, 'make lasting changes')) && permits(actor, op.permission);
 
 /**
- * A hash of every tool this build can list, in both listings. /mcp keeps no session state, so it cannot push
- * tools/list_changed; instead each legacy session ID carries the catalog it started on, and a release that changes the
- * catalog answers older sessions with 404, which a client must meet by initializing again (and listing the tools anew).
+ * The hash of one listing: exactly the tools tools/list returns to this credential, in this mode and toolset. /mcp keeps
+ * no session state, so it cannot push tools/list_changed; instead each legacy session ID carries the listing it started
+ * on, and a request whose listing has since changed (a release, or the credential's own access) is answered 404, which a
+ * client must meet by initializing again and listing the tools anew. The catalog is fixed for an isolate's life, so a
+ * listing is a pure function of its kind, mode and visible operations: hash each one once per isolate.
  */
-async function catalogVersion(catalog: ReadonlyMap<string, McpOperation>): Promise<string> {
-  const tools = [...workspaceTools, workspaceResource, ...[...catalog.values()].map(op => op.tool), ...resourceTools(catalog)];
-  return (await digest(JSON.stringify(tools))).slice(0, 16);
+const listingVersions = new Map<string, Promise<string>>();
+function listingVersion(shape: string, tools: () => Tool[]): Promise<string> {
+  let version = listingVersions.get(shape);
+  if (!version) {
+    if (listingVersions.size >= 256) listingVersions.clear();
+    version = digest(JSON.stringify(tools())).then(hash => hash.slice(0, 16));
+    listingVersions.set(shape, version);
+  }
+  return version;
 }
 
-async function serve(app: App, request: Request, runtime: Runtime, principal: Principal, catalog: ReadonlyMap<string, McpOperation>, version: string, origin: RequestOrigin): Promise<Response> {
+async function serve(app: App, request: Request, runtime: Runtime, principal: Principal, catalog: ReadonlyMap<string, McpOperation>, origin: RequestOrigin): Promise<Response> {
   const session = request.headers.get('mcp-session-id');
-  if (session !== null && !session.startsWith(`${version}.`)) {
-    await request.body?.cancel();
-    return rpcError(404, -32001, 'Session not found: the tool catalog changed. Initialize a new session and list the tools again.');
-  }
   const base = new URL(runtime.config.publicUrl);
   const inbox = 'inbox' in principal ? principal.inbox : null;
   const connection = 'connection' in principal ? principal.connection : null;
@@ -156,12 +160,17 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
   const selected = requested.filter(x => (TOOLSETS as readonly string[]).includes(x));
   // Toolsets narrow listings, not calls. Scoped inbox connections always see their allowed inbox operations.
   const listed = (op: McpOperation) => !(inbox && op.tool.name === 'createInboundThread') && (inbox || requested.includes('all') || !selected.length || selected.includes(op.toolset));
+  const visible = new Map([...operations].filter(([, op]) => listed(op)));
   function listTools() {
-    const visible = new Map([...operations].filter(([, op]) => listed(op)));
     // A key or an inbox key acts in its own workspace: its tools take no workspace.
     if (!connection) return codeMode ? [...visible.values()].map(op => op.tool) : resourceTools(visible);
     return codeMode ? [...workspaceTools, ...[...visible.values()].map(op => withWorkspace(op.tool))]
       : [workspaceResource, ...resourceTools(visible).map(tool => tool.name === describeTool.name ? tool : withWorkspace(tool, { type: 'string' }))];
+  }
+  const version = await listingVersion(`${connection ? 'connection' : 'key'}|${codeMode}|${[...visible.keys()].join(',')}`, listTools);
+  if (session !== null && !session.startsWith(`${version}.`)) {
+    await request.body?.cancel();
+    return rpcError(404, -32001, 'Session not found: the tools this connection can use changed. Initialize a new session and list the tools again.');
   }
   /** The workspaces tool: the person's workspaces, this connection's access in each, and the default. */
   function workspaceList() {
@@ -383,7 +392,6 @@ export function registerMcp(app: App): void {
   // This app-local cache contains only immutable schemas/validators, never actors,
   // bearer credentials, runtimes, database pools or active protocol servers.
   let catalog: ReadonlyMap<string, McpOperation> | undefined;
-  let version: Promise<string> | undefined;
   app.all('/mcp', async c => {
     const origin = c.req.header('origin');
     const canonicalOrigin = new URL(c.env.config.publicUrl).origin;
@@ -396,8 +404,7 @@ export function registerMcp(app: App): void {
       c.set('principal', 'connection' in principal ? { type: 'mcp', workspace: principal.connection.defaultWorkspace?.id }
         : 'key' in principal ? { type: principal.key.credential!, workspace: principal.key.workspaceId } : { type: 'inboxKey', workspace: principal.inbox.workspaceId });
       catalog ??= buildMcpCatalog(app);
-      version ??= catalogVersion(catalog);
-      return serve(app, c.req.raw, c.env, principal, catalog, await version, requestOrigin(c));
+      return serve(app, c.req.raw, c.env, principal, catalog, requestOrigin(c));
     };
     // Three kinds of bearer: a key limited to addresses or an inbox, a workspace API key or agent token (authenticated
     // exactly as REST authenticates it: the /mcp request counts against its minute budget, and so does each tool call,
