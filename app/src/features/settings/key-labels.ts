@@ -1,5 +1,6 @@
 // Plain words for what a credential can do, shared by API keys, Create key, Settings → Account and the rituals page.
-import type { Agent, AppPasswordProtocol, MailPermission } from '../../data/types'
+import type { Agent, AppPasswordProtocol, ApprovalTie, MailPermission } from '../../data/types'
+import { shortDateTime } from '../../lib/format'
 
 // No serial comma, like the rest of the dashboard: "Read, reply and organize".
 const list = new Intl.ListFormat('en-GB', { type: 'conjunction' })
@@ -26,3 +27,9 @@ export const agentAccess = (permissions: string[]) => permissions.includes('mana
 /** A connected agent's client, and the label of its entry (`?profile=` on its MCP URL), so a personal and a work entry of
  *  one client are easy to tell apart. The label is display only. */
 export const connectionTitle = (agent: Pick<Agent, 'name' | 'clientId' | 'profile'>) => `${agent.name || agent.clientId}${agent.profile ? ` · ${agent.profile}` : ''}`
+
+/** A key or webhook tied to MCP approvals: whether all of them are active, and until the earliest end. */
+export function approvalLabel(tie: ApprovalTie) {
+  if (tie.active) return `Active until ${shortDateTime(tie.endsAt)} UTC`
+  return Date.parse(tie.endsAt) <= Date.now() ? `Ended ${shortDateTime(tie.endsAt)} UTC` : 'Inactive'
+}
