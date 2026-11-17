@@ -7069,7 +7069,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       let first: Promise<Reply> | undefined;
       try {
         first = send();
-        for (let i = 0; !(await db.query(`SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query ~* 'idempotency|key_admission_decision|send_admission|api_request_budgets'`, [holder])).rowCount; i++) {
+        for (let i = 0; !(await db.query(`SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query ~* 'idempotency|send_admission|api_request_budgets'`, [holder])).rowCount; i++) {
           assert.ok(i < 250, 'The first send never reached the admission lock.'); await new Promise(resolve => setTimeout(resolve, 20));
         }
         // Before this change the duplicate waited on the first request's unique insert (or its API key's budget row) until it committed.
@@ -7085,7 +7085,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     const key = await keyFixture(t), selfHosted = mail(), headers = { 'Idempotency-Key': unique('in-flight') };
     const wid = (await db.query('SELECT workspace_id FROM api_keys WHERE id=$1', [key.id])).rows[0].workspace_id;
     await whileInFlight(wid, () => http('POST', '/v1/emails/send', key.secret, selfHosted, headers, 10_000));
-    // Hosted: the one-statement admission claims the key in direct_admission_state, first for a key the API has not
+    // Hosted: the one-statement admission claims the key in send_admission, first for a key the API has not
     // seen yet (it authenticates separately), then for a warm key, whose statement also charges the key's budget.
     const [{ createApp }, { nodeRuntime }, { digest }] = await Promise.all([import('./src/app.js'), import('./src/adapters/node.js'), import('./src/core.js')]);
     const instance = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL, MULTI_TENANT: 'true', ENABLE_LIVE_SES: 'false' }), app = createApp();
@@ -13889,9 +13889,29 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         zone.set(`reply.${split.name}`, { mx: [ses, '10 mx.backup.example.'] });
         await recheck(split); let d = await read(split);
         assert.equal(d.receiving, 'verified', 'Additional MX records are not proof that the verified record disappeared.');
-        assert.equal(d.receivingIssue.code, 'split'); assert.match(d.receivingIssue.message, /same or a better priority than Amazon SES, so mail for reply\..* is split/);
+        assert.deepEqual([d.receivingIssue.code, d.receivingIssue.message], ['split', 'Mail is split with mx.backup.example.']);
         zone.set(`reply.${split.name}`, { mx: [ses, '20 mx.backup.example.'] });
-        await recheck(split); d = await read(split); assert.equal(d.receivingIssue.code, 'split'); assert.match(d.receivingIssue.message, /as a backup/);
+        await recheck(split); d = await read(split);
+        assert.deepEqual([d.receivingIssue.code, d.receivingIssue.message], ['split', 'mx.backup.example is the backup.']);
+        // Staged behind another provider (theirs ahead of ours): the same code, and the message says how to finish the move.
+        zone.set(`reply.${split.name}`, { mx: ['5 mx.backup.example.', ses] });
+        await recheck(split); d = await read(split);
+        assert.deepEqual([d.receivingIssue.code, d.receivingIssue.blocking, d.receivingIssue.message], ['split', false, 'Mail goes to mx.backup.example first. Remove its MX records to finish the move.']);
+        // Several providers on one host: the sentence names only the ones that decide the order.
+        for (const [mx, message] of [
+          [['5 mx.a.example.', ses, '20 mx.b.example.'], 'Mail goes to mx.a.example first. Remove its MX records to finish the move.'],
+          [['10 mx.a.example.', ses, '20 mx.b.example.'], 'Mail is split with mx.a.example.'],
+          [['5 aspmx.l.google.com.', ses, '20 tenant.mail.protection.outlook.com.'], 'Mail goes to Google Workspace first. Remove its MX records to finish the move.'],
+          [['5 mx.a.example.', '10 mx.b.example.', ses, '20 mx.c.example.'], 'Mail goes to mx.a.example first. Remove its MX records to finish the move.'],
+          [['5 mx.a.example.', '5 mx.b.example.', ses], 'Mail goes to mx.a.example, mx.b.example first. Remove their MX records to finish the move.'],
+          [[ses, '20 mx.a.example.', '30 mx.b.example.'], 'mx.a.example, mx.b.example are the backups.'],
+        ] as const) {
+          zone.set(`reply.${split.name}`, { mx: [...mx] }); await recheck(split);
+          assert.deepEqual([(await read(split)).receivingIssue.message], [message], mx.join(' '));
+        }
+        const staged = await claim(`${unique('rx-staged')}.example`);
+        zone.set(`inbound.${staged.name}`, { mx: ['5 mx.backup.example.', ses] });
+        assert.match(error(await choose(staged, `inbound.${staged.name}`), 409, 'RECEIVING_HOST_IN_USE').message, /^Move mail for inbound\..*\? Mail goes to mx\.backup\.example first\./, 'Taking over a host with a foreign MX still asks first.');
         zone.set(`reply.${split.name}`, { mx: [ses] }); await recheck(split); assert.equal((await read(split)).receivingIssue, null);
 
         const wild = await claim(`${unique('rx-wildcard')}.example`);
@@ -14060,12 +14080,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(inbox.name, `inbox.${name}`);
 
         // Nightmail's MX goes on the root at a lower priority first, beside the provider's (backup-MX staging): it receives
-        // whatever mail reaches it, and says how the mail is split.
+        // whatever fails over to it, and says the provider still gets mail first.
         zone.set(name, { mx: ['5 mx.other.example.', ses] });
         await recheck(d);
         assert.deepEqual(await states(), { [`reply.${name}`]: 'active', [name]: 'mixed', [`inbox.${name}`]: 'active' });
         const mixed = (await hosts()).find(h => h.name === name)!;
-        assert.deepEqual([mixed.issue.code, mixed.mx.state], ['split', 'mixed']);
+        assert.deepEqual([mixed.issue.code, mixed.mx.state, mixed.mx.split, mixed.issue.message], ['split', 'mixed', true, 'Mail goes to mx.other.example first. Remove its MX records to finish the move.']);
         const domain = await read(d);
         assert.deepEqual(domain.dns.filter((r: Json) => r.purpose === 'receiving').map((r: Json) => [r.name, r.status]), [[`reply.${name}`, 'verified'], [name, 'verified'], [`inbox.${name}`, 'verified']]);
         assert.equal(domain.receiving, 'verified');
@@ -22820,6 +22840,27 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await send('hosted-campaign-test',3,`/v1/campaigns/${hostedDraft.id}/test`,{to:address()},auth);
       t.diagnostic(`ADMISSION-BUDGETS ${JSON.stringify(budgets)}`);
     });
+  });
+  // Contract step for #361: migration 329 drops the admission the Worker before send_admission called. It runs while
+  // the previous release (already on send_admission) serves, so nothing left in the database may call what it drops.
+  test('send admission contract: 329 drops every signature of the pre-send_admission functions, and nothing calls them',async t=>{
+    const db=await fixtureDatabase(t),migration=await readFile(new URL('./migrations/329_drop_key_admission.sql',import.meta.url),'utf8');
+    const remaining=async()=>(await db.query("SELECT p.oid::regprocedure::text AS f FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname IN ('key_admission_decision','direct_admission_state') ORDER BY 1")).rows.map(r=>r.f);
+    assert.deepEqual(await remaining(),[],'The fixture database applied 329.');
+    // No function, trigger function or view in the migrated schema names them (PL/pgSQL calls are not dependencies Postgres tracks).
+    assert.deepEqual((await db.query(`SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.prosrc ~ '\\m(key_admission_decision|direct_admission_state)\\M'
+      UNION ALL SELECT viewname FROM pg_views WHERE schemaname='public' AND definition ~ '\\m(key_admission_decision|direct_admission_state)\\M'`)).rows,[]);
+    // A database upgraded from the previous release has them (here with an older overload too): 329 drops each one.
+    await db.query('BEGIN');
+    try {
+      await db.query(`CREATE FUNCTION direct_admission_state(text,text,text,text,text,jsonb,jsonb,jsonb,boolean,integer,integer,integer,integer,integer,numeric) RETURNS jsonb LANGUAGE sql AS 'SELECT NULL::jsonb';
+        CREATE FUNCTION key_admission_decision(text,text,jsonb,text,text,text,jsonb,jsonb,jsonb,boolean,integer,integer,integer,integer,integer,numeric,boolean,boolean,boolean,boolean,jsonb,integer) RETURNS jsonb LANGUAGE sql AS 'SELECT direct_admission_state($1,$2,$4,$5,$6,$3,$7,$8,$10,$11,$12,$13,$14,$15,$16)';
+        CREATE FUNCTION key_admission_decision(text,text,jsonb) RETURNS jsonb LANGUAGE sql AS 'SELECT NULL::jsonb'`);
+      assert.equal((await remaining()).length,3);
+      await db.query(migration);
+      assert.deepEqual(await remaining(),[]);
+      await db.query(migration); // Applying it again changes nothing.
+    } finally { await db.query('ROLLBACK'); }
   });
   // Review of #361, round 1: a retried campaign test answered from the draft as it is now (422 after an edit, 409 once
   // archived) instead of replaying the test it already sent.
