@@ -46,7 +46,18 @@ export interface McpOperation {
   readonly dashboardOnly: boolean;
   /** Members and invitations (memberAdminRoute): an owner's or admin's own sign-in, never a key or agent token. */
   readonly memberAdmin: boolean;
+  /** What the tool returns in place of the REST response, where they differ (INVITATIONS). */
+  readonly view?: (response: ObjectValue) => ObjectValue;
 }
+// Over MCP an invitation is named by its address. Its ID is the secret in its link, which createWorkspaceInvitation
+// returns once, to a caller allowed to make it: listing shows the rest, and revoking takes the address (a workspace has
+// at most one pending invitation per address; mcp.ts finds it).
+const INVITATION = { type: 'object', required: ['email', 'role', 'expiresAt'], properties: { email: { type: 'string' }, role: { enum: ['owner', 'admin', 'member'] }, expiresAt: { type: 'string' } } };
+const INVITATIONS: Record<string, { output: Tool['inputSchema']; view?: (response: ObjectValue) => ObjectValue }> = {
+  listWorkspaceInvitations: { output: { type: 'object', required: ['data'], properties: { data: { type: 'array', items: INVITATION } } },
+    view: response => ({ data: (response.data as ObjectValue[]).map(({ email, role, expiresAt }) => ({ email, role, expiresAt })) }) },
+  revokeWorkspaceInvitation: { output: { type: 'object', required: ['email', 'deleted'], properties: { email: { type: 'string' }, deleted: { const: true } } } },
+};
 // Provider-signed notifications are never agent calls, and REST refuses revealWebhookSecret to every delegated credential
 // (an approval, the API keys it makes, agent tokens). Everything else with bearer auth becomes a tool, and so do members
 // and invitations (memberAdminRoute): session routes that an owner's or admin's own sign-in may also call.
@@ -247,7 +258,9 @@ const DESCRIPTIONS: Record<string, string> = {
   createBillingTopUpLink: 'Returns a Stripe Checkout link for a person to open and pay; agents cannot pay. Share the link with an owner or admin. Amount in whole cents, $20 to $10,000, excluding tax; the link expires in 23 hours and credit appears once Stripe confirms the payment.',
   createApiKey: 'Create an API key: for the workspace (permissions, sender domains), or limited to receiving addresses or one agent inbox. The secret is returned once. Created over MCP it works only while this approval is active and is revoked with it (approval.endsAt); a lasting key is made in the dashboard. Prefer createAgentToken for short scripts.',
   updateApiKey: 'Change what an existing API key can reach and keep its secret: access.addAddressIds or removeAddressIds for a key limited to addresses, access.mail, or a workspace key\'s permissions and domains. Signed in as yourself, any key your role lets you change in the dashboard. Takes effect at once.',
-  createWorkspaceInvitation: 'Invite an email address to this workspace as admin or member (an owner invitation is made in the dashboard). No email is sent: share the returned acceptUrl with the invitee yourself. They join after signing in with that verified address; it expires in 7 days.',
+  createWorkspaceInvitation: 'Invite an email address as admin or member (owners are invited in the dashboard). No email is sent: share the returned acceptUrl with the invitee yourself; it is shown only here. They join by signing in with that verified address within 7 days.',
+  listWorkspaceInvitations: 'List pending invitations: address, role and expiry. An invitation\'s link is shown only when it is made.',
+  revokeWorkspaceInvitation: 'Revoke the pending invitation for an email address; its link stops working. Only an owner revokes an owner invitation.',
   createWebhook: 'Subscribe a public HTTPS URL to sending events. Set up over MCP it delivers only while this approval is active and is paused when the approval is removed (approval.endsAt); a lasting webhook is made in the dashboard.',
   createInboundWebhook: 'Subscribe a public HTTPS URL to inbound mail events, signed with Standard Webhooks headers. Set up over MCP it delivers only while this approval is active and is paused when the approval is removed (approval.endsAt); a lasting webhook is made in the dashboard.',
 };
@@ -328,13 +341,20 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
         delete props.body; delete props.idempotencyKey; delete input.$defs;
         input.required = ['domainId', 'confirm'];
       }
+      if (name === 'revokeWorkspaceInvitation') {
+        if (!props.id) invalid('Expected an invitation ID.');
+        delete props.id; props.email = { type: 'string', format: 'email', maxLength: 320 };
+        input.required = ['email', 'confirm'];
+      }
       const apiArgs = (args: ObjectValue) => {
         const result = { ...args };
         for (const [api, mcp] of Object.entries(aliases)) { result[api] = args[mcp]; delete result[mcp]; }
         if (name === 'enableInboundDomain') result.body = { force: false };
         return result;
       };
-      const { outputSchema, validateOutput } = successSchemas(spec, operation, pollPage);
+      let { outputSchema, validateOutput } = successSchemas(spec, operation, pollPage);
+      const invitations = Object.hasOwn(INVITATIONS, name) ? INVITATIONS[name] : undefined;
+      if (invitations) { const check = validator(invitations.output); outputSchema = invitations.output; validateOutput = (status, value) => status === 200 && check(value); }
       const tag = operation.tags?.[0], toolset = TAG_TOOLSET[tag] ?? invalid(`Unknown toolset for ${name}`);
       const receiving = ['routing', 'rituals', 'endpoints'].includes(toolset) || (toolset === 'admin' && tag.startsWith('Inbound ')) || tag === 'Inbound addresses' || name === 'createInboxConnection';
       const tool: Tool = { name, description: descriptionFor(name, operation), inputSchema: input, outputSchema, annotations: { readOnlyHint: !write, destructiveHint: write && (method === 'delete' || /^(?:delete|remove|revoke|cancel|disable|rotate|restore|apply|release)/.test(name)), idempotentHint: !write || method === 'put', openWorldHint: true } };
@@ -345,7 +365,7 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
       const ownerOnly = receiving || ownerRoute(method, path);
       operations.set(name, Object.freeze({ tool, method, path, queryParameters, write, confirm, apiArgs, pollPage, toolset, receiving, inbound: receiving || toolset === 'inboxes', inbox: INBOX_PERMISSIONS[name], untrustedContent: UNTRUSTED_READS.has(name), permission, ownerOnly, mailbox,
         receivingConsent: receivingConsentRoute(path), unrestricted: unrestrictedRoute(path), keyAdmin: keyAdminRoute(method, path), agentTokenMint: agentTokenMintRoute(method, path),
-        receivingAdmin: receivingAdminRoute(path), lasting: lastingRoute(method, path), dashboardOnly: DASHBOARD_ONLY.has(name), memberAdmin: memberAdminRoute(method, path), validate: validator(input), validateOutput }));
+        receivingAdmin: receivingAdminRoute(path), lasting: lastingRoute(method, path), dashboardOnly: DASHBOARD_ONLY.has(name), memberAdmin: memberAdminRoute(method, path), view: invitations?.view, validate: validator(input), validateOutput }));
     }
   }
   // The sole non-REST primitive is a constrained long poll of the inbox message operation.
@@ -376,7 +396,7 @@ export const HUMAN_STEPS: Record<string, string> = {
   deleteBillingPaymentMethod: 'Human step: a signed-in owner or admin removes the saved card in the dashboard.',
   releaseSenderStanding: 'Human step: an owner or admin confirms the fix checklist in the dashboard. Agents read the standing with getSenderScore.',
   getRitualVersion: 'Dashboard step: the rituals page’s long poll, so a person sees an agent’s saves live. Agents read the version from rituals · config (getRituals).',
-  inviteWorkspaceMember: 'The dashboard’s older name for createWorkspaceInvitation, which agents use (members · invite).',
+  inviteWorkspaceMember: 'The dashboard’s older name for createWorkspaceInvitation, which agents use (settings · invite).',
   revealWebhookSecret: 'Human step: a signing secret is read back only in the dashboard or with an API key a person made, and every read is recorded. Agents can rotate it (webhooks · rotateSecret).',
 };
 /** Internal routes (Nightmail operators and support grants): never tools, and not listed in the customer coverage document. */

@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, sql } from 'drizzle-orm';
 import { auditContext, auditInsert, recordAudit, type AuditContext } from './audit.js';
-import { ApiError, dashboardSession, errors, id, IdParams, json, memberAdminRefusal, notFound, response, type App, type Ctx, type DbExecutor } from './core.js';
+import { ApiError, dashboardSession, errors, id, IdParams, json, memberAdminRefusal, notFound, response, wrapModuleLoad, type App, type Ctx, type DbExecutor } from './core.js';
 import { baneUsers } from './db/users.js';
 import { workspaceMembers, workspaces } from './db/workspaces.js';
 import { invitationRecipient, verifiedDashboardUser } from './dashboard-auth.js';
@@ -100,11 +100,18 @@ export async function memberships(db: DbExecutor, userId: string) {
 
 // Serialize governance writes per workspace. Read the caller and owner count *after* locking:
 // concurrent demotions cannot authorize each other on an old snapshot or remove both owners.
-function administer<T>(c: Ctx, action: (db: DbExecutor, workspaceId: string, userId: string, role: 'owner' | 'admin') => Promise<T>, { workspaceId, userId }: { workspaceId: string; userId: string } = dashboardSession(c, true)) {
+function administer<T>(c: Ctx, action: (db: DbExecutor, workspaceId: string, userId: string, role: 'owner' | 'admin') => Promise<T>, { workspaceId, userId, signIn = false }: { workspaceId: string; userId: string; signIn?: boolean } = dashboardSession(c, true)) {
   return c.env.db.transaction(async db => {
     await db.select({ id: workspaces.id }).from(workspaces).where(eq(workspaces.id, workspaceId)).for('no key update');
     const [member] = await db.select({ role: workspaceMembers.role }).from(workspaceMembers).where(and(eq(workspaceMembers.workspaceId, workspaceId), eq(workspaceMembers.userId, userId)));
     if (member?.role !== 'owner' && member?.role !== 'admin') throw new ApiError(403, 'PERMISSION_DENIED', 'Workspace administration requires an owner or admin.');
+    // An owner's or admin's own MCP sign-in (every such write needs manage): the approval as it is now, read after the
+    // workspace lock (the order a member's removal takes the two in) and held, shared, until commit. One revoked,
+    // expired, narrowed or no longer this person's while the request waited refuses the write.
+    if (signIn) {
+      const grant = await (await wrapModuleLoad(() => import('./mcp-auth.js'))).getMcpGrantActor(c.env, c.get('actor').keyId, workspaceId, db);
+      if (grant?.userId !== userId || !grant.permissions.includes('manage')) throw new ApiError(401, 'AUTH_INVALID', 'The MCP approval behind this request was revoked or changed while it ran. Nothing was changed.');
+    }
     return action(db, workspaceId, userId, member.role);
   });
 }

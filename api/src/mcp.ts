@@ -260,6 +260,17 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
       if (!response.ok && status !== 303) throw new ApiFailure({ status, requestId: apiRequestId, error: object(data) && object(data.error) ? data.error : { code: 'API_ERROR', message: 'API request failed.' } });
       return { status, requestId: apiRequestId, response: data };
   }
+  // Over MCP an invitation is revoked by its address (mcp-catalog.ts INVITATIONS): find the workspace's pending one, then
+  // revoke it by ID. REST checks both requests as this actor, and the revoke again under the workspace lock.
+  async function revokeInvitation(op: McpOperation, args: ObjectValue, actor: Actor) {
+    if (args.confirm !== true) fail('CONFIRMATION_REQUIRED', 'Writes require a writable authorization and literal confirm=true.');
+    if (!op.validate(args)) fail('INVALID_ARGUMENTS', 'Arguments do not match the tool input schema. No API request was made.');
+    const email = (args.email as string).toLowerCase(), pending = (await invoke(catalog.get('listWorkspaceInvitations')!, {}, actor)).response;
+    const invitation = object(pending) && Array.isArray(pending.data) ? (pending.data as ObjectValue[]).find(i => i?.email === email) : undefined;
+    if (typeof invitation?.id !== 'string') fail('NOT_FOUND', 'No pending invitation for that address in this workspace.', 404);
+    const value = await invoke({ ...op, validate: () => true }, { id: invitation.id, confirm: true }, actor);
+    return { ...value, response: { email, deleted: true } };
+  }
   function resolveAction(resource: string, action: unknown) {
     const actions = resourceActions(resource);
     if (!actions || !Object.values(actions).some(id => operations.has(id))) fail('TOOL_UNAVAILABLE', 'Tool or action is unavailable for this connection.');
@@ -310,7 +321,7 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
         const { workspace, ...rest } = args; args = rest;
         if (workspace !== key.key.workspaceId) fail('WORKSPACE_ACCESS_DENIED', 'An API key or agent token acts only in its own workspace. Omit workspace.', 403);
       }
-      const value = await invoke(op, args, actor);
+      const value = id === 'revokeWorkspaceInvitation' ? await revokeInvitation(op, args, actor as Actor) : await invoke(op, args, actor);
       status = value.status; apiRequestId = value.requestId;
       if (!object(value.response)) fail('INVALID_API_RESPONSE', 'Expected a JSON object from the API. Reconcile an uncertain write before retrying.');
       let payload = value.response;
@@ -321,6 +332,7 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
         image = { data, mimeType: metadata.contentType }; payload = metadata;
       }
       if (op.pollPage) payload = { data: payload.data, nextCursor: payload.cursor };
+      if (op.view) payload = op.view(payload);
       const output = result(payload, false, image, status, apiRequestId);
       if (!op.validateOutput(status, output.structuredContent)) fail('INVALID_API_RESPONSE', 'API response does not match the tool output schema. The operation may already have completed; reconcile before retrying.');
       const notice = op.untrustedContent && object(output.structuredContent) && untrustedNotice(output.structuredContent);

@@ -249,11 +249,11 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `listWorkspaces` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `createWorkspace` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `renameCurrentWorkspace` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
-| `listWorkspaceMembers` | `members` · `list` · admin |
-| `inviteWorkspaceMember` | The dashboard’s older name for createWorkspaceInvitation, which agents use (members · invite). |
-| `createWorkspaceInvitation` | `members` · `invite` · admin |
-| `listWorkspaceInvitations` | `members` · `invitations` · admin |
-| `revokeWorkspaceInvitation` | `members` · `revokeInvitation` · admin |
+| `listWorkspaceMembers` | `settings` · `members` · admin |
+| `inviteWorkspaceMember` | The dashboard’s older name for createWorkspaceInvitation, which agents use (settings · invite). |
+| `createWorkspaceInvitation` | `settings` · `invite` · admin |
+| `listWorkspaceInvitations` | `settings` · `invitations` · admin |
+| `revokeWorkspaceInvitation` | `settings` · `revokeInvitation` · admin |
 | `updateWorkspaceMember` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `removeWorkspaceMember` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `getWorkspaceInvitation` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
