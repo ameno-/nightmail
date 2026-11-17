@@ -208,6 +208,10 @@ export type ApiKeyAccess = {
      * addresses and inbox: read (mail, events, attachments), send (reply and start conversations from those addresses only), modify (mark read, archive, star, label, delete an inbox), create (create agent inboxes and use the ones it created). Empty for workspace keys.
      */
     mail: Array<'read' | 'send' | 'modify' | 'create'>;
+    /**
+     * With create: the live agent inboxes the key created, which it reaches as well as addressIds (up to 1,000, by ID). Empty otherwise.
+     */
+    createdInboxIds: Array<string>;
 };
 
 export type ApiKey = {
@@ -286,7 +290,7 @@ export type UpdateApiKey = {
          */
         addAddressIds?: Array<string>;
         /**
-         * A key for addresses: removes these. Requests with the key lose them at once, and replies it queued from them are not sent.
+         * A key for addresses: removes these. Requests with the key lose them at once, and replies it queued from them are not sent. An inbox the key created stays reachable while it has create, so removing one is refused (409 CREATED_INBOX_REACHABLE) unless mail drops create too.
          */
         removeAddressIds?: Array<string>;
         /**

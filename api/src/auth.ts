@@ -203,6 +203,7 @@ const KeyAccess = z.object({
   addressIds: z.array(z.string()).nullable().describe('addresses: the receiving addresses it may use, or null for every address including ones added later. inbox: the inbox. Null for workspace keys.'),
   inboxId: z.string().nullable().describe('inbox: the agent inbox the key belongs to.'),
   mail: z.array(MailPermission).describe('addresses and inbox: read (mail, events, attachments), send (reply and start conversations from those addresses only), modify (mark read, archive, star, label, delete an inbox), create (create agent inboxes and use the ones it created). Empty for workspace keys.'),
+  createdInboxIds: z.array(z.string()).describe('With create: the live agent inboxes the key created, which it reaches as well as addressIds (up to 1,000, by ID). Empty otherwise.'),
 }).openapi('ApiKeyAccess');
 const KeySchema = z.object({ id: z.string(), name: z.string(),
   permissions: z.array(z.enum(['read', 'send', 'manage'])).describe('Workspace permissions. Empty for a key limited to addresses or an inbox: see access.'),
@@ -231,7 +232,7 @@ const KeyUpdate = z.object({ name: KeyName.optional(),
   access: z.object({
     addressIds: AddressIds.nullable().optional().describe('A key for addresses: replaces its addresses. null for every address, including ones added later.'),
     addAddressIds: AddressIds.min(1).optional().describe('A key for addresses: adds these and keeps the others. An address it already has is left as it is, so a retry changes nothing.'),
-    removeAddressIds: AddressIds.min(1).optional().describe('A key for addresses: removes these. Requests with the key lose them at once, and replies it queued from them are not sent.'),
+    removeAddressIds: AddressIds.min(1).optional().describe('A key for addresses: removes these. Requests with the key lose them at once, and replies it queued from them are not sent. An inbox the key created stays reachable while it has create, so removing one is refused (409 CREATED_INBOX_REACHABLE) unless mail drops create too.'),
     mail: z.array(MailPermission).min(1).max(4).optional().describe('A key for addresses or an inbox: replaces what it may do with that mail. An inbox key takes read, send and modify.'),
   }).strict().optional().describe('A key limited to addresses or an inbox. Its type never changes, nor does an inbox key\'s inbox.'),
 }).strict().openapi('UpdateApiKey');
@@ -241,7 +242,11 @@ export function manageKeys(c: Parameters<typeof actor>[0]) {
   if (refusal) throw refusal;
   return value;
 }
-const workspaceAccess = { type: 'workspace' as const, addressIds: null, inboxId: null, mail: [] };
+const workspaceAccess = { type: 'workspace' as const, addressIds: null, inboxId: null, mail: [], createdInboxIds: [] };
+/** The creator grant: a key with create also reaches the live agent inboxes it created, the first 1,000 by ID. Read here
+ *  by authentication (mailbox.ts authorizeInboxKey), the key list and updateApiKey, so all three report one access. */
+export const createdInboxes = (workspaceId: SQL, keyId: SQL) => sql`to_jsonb(ARRAY(SELECT b.id FROM mailboxes b WHERE b.workspace_id=${workspaceId} AND b.created_by=${keyId}
+  AND b.kind='inbox' AND b.delete_after>now() ORDER BY b.id LIMIT 1000))`;
 const keyView = (key: typeof apiKeys.$inferSelect) => ({ id: key.id, name: key.name, permissions: key.permissions, domains: key.domains, prefix: key.prefix,
   createdAt: isoTime(key.createdAt)!, lastUsedAt: isoTime(key.lastUsedAt), revokedAt: isoTime(key.revokedAt), access: workspaceAccess, expiresAt: null });
 // Keys limited to addresses or an inbox live in mailbox_keys (address-keys.ts); loaded only when a request names one.
@@ -257,17 +262,45 @@ export async function approvalMadeKey(tx: DbExecutor, a: Actor, kind: 'api_key' 
   const { rows } = await tx.execute(sql`SELECT 1 FROM mail_grant_objects WHERE grant_id = ${a.grantId} AND workspace_id = ${a.workspaceId} AND kind = ${kind} AND resource = ${keyId}`);
   if (!rows.length) throw new ApiError(403, 'PERMISSION_DENIED', 'An MCP approval changes only the keys it created. Change this key in the dashboard or with a key that has manage permission.');
 }
+/**
+ * Key administration, checked again inside the transaction that writes a key: manageKeys judged the caller as the request
+ * authenticated, and that authority can be narrowed or revoked while the request waits (updateApiKey, revokeApiKey, an
+ * approval's or a member's removal). This reads it as it is now and holds it until commit, so the write happens either
+ * before the narrowing, or after it and is refused. One lock order for every key write:
+ *   1. who is behind the request: the MCP approval (a sign-in, or the approval that made the calling key) or the signed-in
+ *      member's membership, shared, as their removal takes them first;
+ *   2. the key rows: the calling API key (shared) and the key being changed (for update), in ascending ID order. Two keys
+ *      editing each other then take their rows in the same order: one waits for the other, and reads its new access.
+ * `receiving`: the write is a key limited to addresses or an inbox, which an approval needs receiving consent for.
+ * Returns the locked target row.
+ */
+export async function holdKeyAdmin<T>(tx: DbExecutor, c: Ctx, receiving: boolean, target?: { id: string; lock: () => Promise<T | undefined> }): Promise<T | undefined> {
+  const a = c.get('actor'), changed = (who: string) => new ApiError(401, 'AUTH_INVALID', `${who} was revoked or changed while this request ran. Nothing was changed.`);
+  if (a.grantId) {
+    const grant = await (await wrapModuleLoad(() => import('./mcp-auth.js'))).getMcpGrantActor(c.env, 'mcp_' + a.grantId, a.workspaceId, tx);
+    if (grant?.workspaceId !== a.workspaceId || !grant.permissions.includes('manage') || receiving && !grant.receivingConsent) throw changed('The MCP approval behind this request');
+  } else if (a.credential === 'dashboard') {
+    const { rows: [member] } = await tx.execute<{ role: string }>(sql`SELECT role FROM workspace_members WHERE workspace_id = ${a.workspaceId} AND user_id = ${a.keyId.slice('user_'.length)} FOR SHARE`);
+    if (member?.role !== 'owner' && member?.role !== 'admin') throw new ApiError(403, 'PERMISSION_DENIED', 'Key administration requires a workspace owner or admin.');
+  }
+  const caller = a.credential === 'apiKey' ? a.keyId : null;
+  let row: T | undefined;
+  for (const id of [caller, target?.id].filter((x): x is string => !!x).sort()) {
+    if (id !== caller) { row = await target!.lock(); continue; }
+    const { rows: [now] } = await tx.execute<Pick<Actor, 'permissions' | 'domains'>>(sql`SELECT permissions, domains FROM api_keys
+      WHERE id = ${id} AND workspace_id = ${a.workspaceId} AND revoked_at IS NULL FOR SHARE`);
+    if (!now) throw changed('The API key behind this request');
+    const refusal = keyAdminRefusal({ ...a, ...now });
+    if (refusal) throw refusal;
+  }
+  return row;
+}
 const keySummary = (k: Pick<typeof apiKeys.$inferSelect, 'name' | 'permissions' | 'domains'>) => ({ name: k.name, permissions: k.permissions, domains: k.domains });
 /** A workspace key's name, permissions and sender domains, in place. Requests and queued mail use the new ones at once:
  *  both read the key's row when they authenticate and when the mail is dispatched. */
 async function updateWorkspaceKey(tx: DbExecutor, c: Ctx, a: Actor, keyId: string, input: z.infer<typeof KeyUpdate>) {
   if (input.access) throw new ApiError(422, 'VALIDATION_FAILED', 'A workspace key takes permissions and domains; access is for a key limited to addresses or an inbox, and a key\'s type never changes.', 'access');
-  // The approval first, held (shared) until commit: the order its removal takes the approval and its keys in.
-  if (a.grantId) {
-    const grant = await (await wrapModuleLoad(() => import('./mcp-auth.js'))).getMcpGrantActor(c.env, 'mcp_' + a.grantId, a.workspaceId, tx);
-    if (grant?.workspaceId !== a.workspaceId || !grant.permissions.includes('manage')) throw new ApiError(401, 'AUTH_INVALID', 'The MCP approval behind this request was revoked while it ran. Nothing was changed.');
-  }
-  const [row] = await tx.select().from(apiKeys).where(and(eq(apiKeys.workspaceId, a.workspaceId), eq(apiKeys.id, keyId))).for('update');
+  const row = await holdKeyAdmin(tx, c, false, { id: keyId, lock: async () => (await tx.select().from(apiKeys).where(and(eq(apiKeys.workspaceId, a.workspaceId), eq(apiKeys.id, keyId))).for('update'))[0] });
   if (!row) throw new ApiError(404, 'NOT_FOUND', 'API key was not found.');
   if (row.revokedAt) throw inactiveKey();
   await approvalMadeKey(tx, a, 'api_key', row.id);
@@ -326,6 +359,7 @@ export function registerAuth(app: App) {
     const permissions = input.permissions ?? ['send'], domains = input.domains ?? [];
     const secret = randomSecret(secretPrefixes.apiKey);
     const [key] = await c.env.db.transaction(async tx => {
+      await holdKeyAdmin(tx, c, false);
       const rows = await tx.insert(apiKeys).values({ id: id('key'), workspaceId: auth.workspaceId, name: input.name, permissions, domains, hash: await digest(secret), prefix: shownPrefix(secret) }).returning();
       // A key created by an MCP agent lives only as long as the approval that created it.
       if (auth.grantId) await tx.execute(sql`INSERT INTO mail_grant_objects VALUES(${auth.grantId},${auth.workspaceId},'api_key',${rows[0]!.id})`);
@@ -340,15 +374,16 @@ export function registerAuth(app: App) {
     const auth = manageKeys(c); const q = c.req.valid('query'), w = auth.workspaceId, active = q.includeRevoked === 'false', after = q.cursor ? sql`AND id > ${q.cursor}` : sql``;
     // One cursor over both tables. A limited key has no workspace permissions or domains: its access says what it may do.
     const { rows } = await c.env.db.execute<{ id: string; name: string; prefix: string; permissions: ('read' | 'send' | 'manage')[]; domains: string[]; created_at: string; last_used_at: string | null; revoked_at: string | null;
-      expires_at: string | null; address_ids: string[] | null; inbox_id: string | null; mail: ('read' | 'send' | 'modify' | 'create')[]; limited: boolean }>(sql`
-      SELECT * FROM (SELECT id, name, prefix, permissions, domains, created_at::text, last_used_at::text, revoked_at::text, NULL::text AS expires_at, NULL::jsonb AS address_ids, NULL::text AS inbox_id, '[]'::jsonb AS mail, false AS limited
+      expires_at: string | null; address_ids: string[] | null; inbox_id: string | null; mail: ('read' | 'send' | 'modify' | 'create')[]; created_inbox_ids: string[]; limited: boolean }>(sql`
+      SELECT * FROM (SELECT id, name, prefix, permissions, domains, created_at::text, last_used_at::text, revoked_at::text, NULL::text AS expires_at, NULL::jsonb AS address_ids, NULL::text AS inbox_id, '[]'::jsonb AS mail, '[]'::jsonb AS created_inbox_ids, false AS limited
           FROM api_keys WHERE workspace_id = ${w} ${active ? sql`AND revoked_at IS NULL` : sql``} ${after}
-        UNION ALL SELECT id, name, prefix, '[]'::jsonb, '[]'::jsonb, created_at::text, last_used_at::text, revoked_at::text, expires_at::text, mailbox_ids, inbox_id, permissions, true
+        UNION ALL SELECT id, name, prefix, '[]'::jsonb, '[]'::jsonb, created_at::text, last_used_at::text, revoked_at::text, expires_at::text, mailbox_ids, inbox_id, permissions,
+            CASE WHEN permissions ? 'create' THEN ${createdInboxes(sql`mailbox_keys.workspace_id`, sql`mailbox_keys.id`)} ELSE '[]'::jsonb END, true
           FROM mailbox_keys WHERE workspace_id = ${w} ${active ? sql`AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())` : sql``} ${after}) k
       ORDER BY id LIMIT ${q.limit + 1}`);
     const data = rows.slice(0, q.limit).map(r => ({ id: r.id, name: r.name, permissions: r.permissions, domains: r.domains, prefix: r.prefix,
       createdAt: isoTime(r.created_at)!, lastUsedAt: isoTime(r.last_used_at), revokedAt: isoTime(r.revoked_at), expiresAt: isoTime(r.expires_at),
-      access: r.limited ? { type: r.inbox_id ? 'inbox' as const : 'addresses' as const, addressIds: r.address_ids, inboxId: r.inbox_id, mail: r.mail } : workspaceAccess }));
+      access: r.limited ? { type: r.inbox_id ? 'inbox' as const : 'addresses' as const, addressIds: r.address_ids, inboxId: r.inbox_id, mail: r.mail, createdInboxIds: r.created_inbox_ids } : workspaceAccess }));
     return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/api-keys/{id}/revoke', operationId: 'revokeApiKey', tags: ['ApiKeys'], security, description: 'Revokes any API key, including one limited to addresses or an inbox. Requests with it fail at once, and mail it queued is not sent.',
@@ -368,7 +403,7 @@ export function registerAuth(app: App) {
     return c.json({ id: key.id, revoked: true as const }, 200);
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/api-keys/{id}', operationId: 'updateApiKey', tags: ['ApiKeys'], security,
-    description: 'Changes what a key can reach and keeps its secret, so nothing has to be redeployed. A workspace key takes name, permissions and domains. A key for addresses takes name and access: add or remove addresses (addAddressIds, removeAddressIds), replace them (addressIds) or change access.mail. An inbox key takes name and access.mail. A key\'s type and secret never change. Takes effect at once: requests already waiting lose a removed address, and mail the key queued is sent only within its new access. Needs the access createApiKey needs, and no key changes itself; over MCP, only keys that approval created. Revoked and ended keys can\'t be changed.',
+    description: 'Changes what a key can reach and keeps its secret, so nothing has to be redeployed. A workspace key takes name, permissions and domains. A key for addresses takes name and access: add or remove addresses (addAddressIds, removeAddressIds), replace them (addressIds) or change access.mail. An inbox key takes name and access.mail. A key\'s type and secret never change. Takes effect at once: requests already waiting lose a removed address, and mail the key queued is sent only within its new access. Needs the access createApiKey needs, checked again as the change is written, and no key changes itself; over MCP, only keys that approval created. Revoked and ended keys can\'t be changed.',
     request: { params: IdParams, headers: IdempotencyHeaders, body: json(KeyUpdate) }, responses: { 200: response(KeySchema), ...errors } }), async c => {
     const auth = manageKeys(c), keyId = c.req.valid('param').id, input = c.req.valid('json');
     if (input.name === undefined && !input.permissions && !input.domains && !input.access) throw new ApiError(422, 'VALIDATION_FAILED', 'Change at least one of name, permissions, domains or access.');
@@ -376,7 +411,7 @@ export function registerAuth(app: App) {
     if (auth.keyId === keyId) throw new ApiError(403, 'PERMISSION_DENIED', 'A key can\'t change itself. Change it in the dashboard or with another key that has manage permission.');
     const limited = keyId.startsWith('mbk_') ? await addressKeys() : null;
     const view = await idempotent(c.env.db, { ...idempotentRequest(c), workspaceId: auth.workspaceId, actorKeyId: auth.keyId }, input,
-      async tx => limited ? limited.limitedKeyView(await limited.updateLimitedKey(tx, c, auth, keyId, input)) : keyView(await updateWorkspaceKey(tx, c, auth, keyId, input)));
+      async tx => limited ? limited.updateLimitedKey(tx, c, auth, keyId, input) : keyView(await updateWorkspaceKey(tx, c, auth, keyId, input)));
     return c.json(view, 200);
   });
 }
