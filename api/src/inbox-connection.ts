@@ -1,7 +1,7 @@
 import {createRoute,z} from '@hono/zod-openapi';
 import {sql} from 'drizzle-orm';
-import {ApiError,digest,errors,id,json,randomSecret,response,security,type App} from './core.js';
-import {ritualAdmin,ownReceiving} from './rituals.js';
+import {ApiError,digest,errors,id,json,randomSecret,receivingAdmin,response,security,type App} from './core.js';
+import {ownReceiving} from './rituals.js';
 import {recordAudit} from './audit.js';
 import {mailboxKeys} from './db/mailbox.js';
 import {mcpClientConfig,mcpClientNames,mcpClients,mcpServerUrl} from './mcp-clients.js';
@@ -11,7 +11,7 @@ import { secretPrefixes, shownPrefix } from './brand.js';
 export function registerInboxConnection(app:App){
  const body=z.object({inboxes:z.array(z.string().min(1).max(120)).min(1).max(20),client:z.enum(mcpClients).describe('opencode, claude (Claude Code), cursor, or generic for any other MCP client.'),auth:z.enum(['key','oauth']),reply:z.boolean().default(false)}).strict();
  app.openapi(createRoute({method:'post',path:'/v1/inbox-connections',operationId:'createInboxConnection',tags:['Agent inboxes'],security,summary:'Generate client config for selected inboxes. Key shown once; OAuth requires human selection at consent.',request:{body:json(body)},responses:{201:response(z.object({id:z.string().nullable(),inboxes:z.array(z.string()),config:z.record(z.string(),z.unknown()),nextStep:z.string()})),...errors}}),async c=>{
-  const a=ritualAdmin(c,true),q=c.req.valid('json'),w=a.workspaceId,url=mcpServerUrl(c.env.config.publicUrl);
+  const a=receivingAdmin(c,'create inbox connections'),q=c.req.valid('json'),w=a.workspaceId,url=mcpServerUrl(c.env.config.publicUrl);
   const ids=[...new Set(q.inboxes)],key=q.auth==='key'?randomSecret(secretPrefixes.addressKey):null,kid=key?id('mbk'):null;
   await c.env.db.transaction(async tx=>{
    const found=await tx.execute<{expires:string|null;label:string}>(sql`SELECT delete_after::text AS expires,coalesce(nullif(display_name,''),address) AS label FROM mailboxes WHERE workspace_id=${w} AND id=ANY(${sql.param(ids)}::text[]) AND kind='inbox' AND (delete_after IS NULL OR delete_after>now()) ORDER BY delete_after DESC FOR SHARE`);

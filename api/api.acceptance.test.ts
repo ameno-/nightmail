@@ -3362,10 +3362,46 @@ describe('Hosted MCP OAuth and tools', () => {
     });
     await t.test('routing H2: delegated manage cannot create durable hooks or repoint a content destination',async()=>{
       const path='/v1/inbound/webhooks',url='https://example.com/synthetic',headers={'x-bane-environment':'live'};
-      for(const fields of [{},{format:'inbound'},{include:['message','raw']}])error(await http('POST',path,managed.token,{url,...fields},headers),403,'ADMIN_REQUIRED');
+      for(const fields of [{},{format:'inbound'},{include:['message','raw']}])error(await http('POST',path,managed.token,{url,...fields},headers),403,'CREDENTIAL_DELEGATION_FORBIDDEN');
       const owned=ok(await http('POST',path,MANAGER,{url,format:'inbound',paused:true},headers),201);
-      error(await http('PATCH',`${path}/${owned.id}`,managed.token,{url:'https://example.org/synthetic'},headers),403,'ADMIN_REQUIRED');
+      error(await http('PATCH',`${path}/${owned.id}`,managed.token,{url:'https://example.org/synthetic'},headers),403,'CREDENTIAL_DELEGATION_FORBIDDEN');
       assert.equal(ok(await http('GET',`${path}/${owned.id}`,MANAGER,undefined,headers)).url,'••••'+url.slice(-4));ok(await http('DELETE',`${path}/${owned.id}`,MANAGER,undefined,headers));
+    });
+    await t.test('a temporary manage token reads and previews receiving configuration but makes no lasting change, routes included', async () => {
+      // Its own token: the shared one above lasts 30 seconds. Every refusal is the same rule (lasting in core.ts) and code.
+      const agent = await callTool(token, 'createAgentToken', { body: { permissions: ['read', 'manage'], expiresInSeconds: 600, domains: [], purpose: 'Synthetic lasting-change fixture' }, confirm: true }, 201);
+      secrets.add(agent.token);
+      const hook = ok(await http('POST', '/v1/inbound/webhooks', MANAGER, { url: 'https://example.com/synthetic-lasting', paused: true }), 201);
+      try {
+        const before = ok(await http('GET', '/v1/routing', MANAGER)).version;
+        const writes: [string, string, unknown?][] = [
+          ['PUT', '/v1/routing', { routes: [] }], ['POST', '/v1/routing/routes', { match: 'fixture@example.com', to: [hook.id] }],
+          ['PATCH', '/v1/routing/routes/billing', { to: [] }], ['DELETE', '/v1/routing/routes/billing'], ['POST', '/v1/routing/versions/1/restore'],
+          ['PUT', '/v1/rituals', {}], ['PUT', '/v1/rituals/scripts/fixture', { key: 'fixture', source: 'export default function route(email){}' }],
+          ['PATCH', '/v1/rituals/scripts/fixture', { enabled: false }], ['DELETE', '/v1/rituals/scripts/fixture'], ['POST', '/v1/rituals/restore', { version: 1 }],
+          ['PUT', '/v1/rituals/omens', {}], ['POST', '/v1/rituals/recipes', { recipe: 'fixture', addresses: ['fixture@example.com'] }], ['PUT', '/v1/rituals/scripts/fixture/recipe', {}],
+          ['POST', '/v1/endpoints', { type: 'slack', name: 'agent-fixture', url: 'https://hooks.slack.com/services/T0AGENT/B0AGENT/synthetic' }],
+          ['PATCH', '/v1/endpoints/agent-fixture', { paused: true }], ['DELETE', '/v1/endpoints/agent-fixture'],
+          ['POST', '/v1/endpoints/agent-fixture/verification', {}], ['POST', '/v1/endpoints/agent-fixture/test'],
+          ['POST', '/v1/inbound/webhooks', { url: 'https://example.com/synthetic-agent' }], ['PATCH', `/v1/inbound/webhooks/${hook.id}`, { paused: false }],
+          ['DELETE', `/v1/inbound/webhooks/${hook.id}`], ['POST', `/v1/inbound/webhooks/${hook.id}/rotate-secret`],
+          ['POST', '/v1/inbound/keys', { name: 'agent fixture' }], ['GET', '/v1/inbound/keys'], ['POST', '/v1/inbound/keys/mbk_fixture/revoke'],
+          ['DELETE', '/v1/inboxes/fixture/app-passwords/fixture'], ['POST', '/v1/inbox-connections', { inboxes: ['fixture'], client: 'generic', auth: 'key' }],
+        ];
+        for (const [method, path, body] of writes) {
+          const reply = await http(method, path, agent.token, body, path === '/v1/routing' ? { 'if-match': '*' } : {});
+          assert.equal(reply.status, 403, `${method} ${path}: ${redact(reply.body)}`);
+          assert.equal(reply.body?.error?.code, 'CREDENTIAL_DELEGATION_FORBIDDEN', `${method} ${path}`);
+        }
+        assert.equal(ok(await http('GET', '/v1/routing', MANAGER)).version, before, 'No refused write saved a routing version.');
+        assert.equal(ok(await http('GET', `/v1/inbound/webhooks/${hook.id}`, MANAGER)).paused, true);
+        // Reads and previews stay open: routing, its dry run, rituals, endpoints and a webhook's deliveries.
+        for (const path of ['/v1/routing', '/v1/routing/routes', '/v1/rituals', '/v1/endpoints', `/v1/inbound/webhooks/${hook.id}`, `/v1/inbound/webhooks/${hook.id}/deliveries`]) ok(await http('GET', path, agent.token));
+        assert.ok(Array.isArray(ok(await http('POST', '/v1/routing/test', agent.token, { envelope: { to: ['fixture@example.com'] } })).recipients));
+      } finally {
+        ok(await http('DELETE', `/v1/inbound/webhooks/${hook.id}`, MANAGER));
+        ok(await http('POST', `/v1/agent-tokens/${agent.id}/revoke`, MANAGER, undefined, { 'x-bane-environment': 'live' }));
+      }
     });
     await t.test('PR92 P2: a webhook signing secret is never read back through a delegated credential, every hand-out is recorded, and reads have a small budget', async () => {
       const hook = await resource(t, MANAGER, '/v1/webhooks', { url: `https://example.com/hooks/${unique('reveal')}`, paused: true }), path = `/v1/webhooks/${hook.id}/secret`;

@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
-import { actorMailAccess, mailboxRoute, receivingConsentRoute, ApiError, digest, errors, getSes, id, isoTime, json, lazyModule, log, ModuleLoadError, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { actorMailAccess, mailboxRoute, receivingConsentRoute, ApiError, digest, errors, getSes, id, isoTime, json, KEY_CHANGE, lasting, lazyModule, log, ModuleLoadError, response, WEBHOOK_CHANGE, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { authenticate, chargeCredential, checkBudget, delegatedInbox, requireReceivingConsent } from './auth.js';
 import { boundRequestBody } from './request-body.js';
 import { auditContext, auditInsert, recordAudit } from './audit.js';
@@ -700,18 +700,18 @@ function registerInboundKeys(app: App) {
     request: { body: json(body) }, responses: { 201: response(KeySchema.extend({ secret: z.string() }).openapi('InboundKeySecret')), ...errors } }), async c => {
     const value = admin(c); const input = c.req.valid('json');
     // An MCP agent may create one only with explicit receiving consent; the key is then revoked with that approval.
-    if (!['apiKey', 'dashboard', 'mcp'].includes(c.get('actor')?.credential ?? '')) throw new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Create inbound keys with a live API key, the dashboard or an MCP approval with receiving consent.');
+    lasting(c, KEY_CHANGE);
     const { createLimitedKey } = await import('./address-keys.js');
     const { row, secret } = await createLimitedKey(c, value.workspaceId, input.name, { type: 'addresses', addressIds: input.addressIds ?? null, mail: input.permissions }, { addresses: 'addressIds', inbox: 'addressIds', mail: 'permissions' });
     return c.json({ ...keyView(row), secret }, 201);
   });
   app.openapi(createRoute({ method: 'get', path: base, operationId: 'listInboundKeys', tags, security, deprecated, description: 'Deprecated: listApiKeys lists these with every other API key.', request: { query: z.object({ includeRevoked: z.enum(['true', 'false']).default('false'), cursor: z.string().max(200).optional(), limit: Limit }) }, responses: { 200: response(pageOf(KeySchema, 'InboundKeyPage')), ...errors } }), async c => {
-    const value = admin(c); const q = c.req.valid('query');
+    const value = admin(c); lasting(c, KEY_CHANGE); const q = c.req.valid('query');
     const rows = await c.env.db.select().from(mailboxKeys).where(and(eq(mailboxKeys.workspaceId, value.workspaceId), q.includeRevoked === 'false' ? isNull(mailboxKeys.revokedAt) : undefined, q.cursor ? lt(mailboxKeys.id, q.cursor) : undefined)).orderBy(desc(mailboxKeys.id)).limit(q.limit + 1);
     return c.json({ data: rows.slice(0, q.limit).map(keyView), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: `${base}/{id}/revoke`, operationId: 'revokeInboundKey', tags, security, deprecated, description: 'Deprecated: revokeApiKey revokes any API key.', request: { params: IdParam }, responses: { 200: response(KeySchema), ...errors } }), async c => {
-    const value = admin(c);
+    const value = admin(c); lasting(c, KEY_CHANGE);
     const revoked = await (await import('./address-keys.js')).revokeLimitedKey(c, value.workspaceId, c.req.valid('param').id);
     if (!revoked?.fresh) throw new ApiError(404, 'NOT_FOUND', 'Key was not found or is already revoked.');
     return c.json(keyView(revoked.row), 200);
@@ -729,8 +729,8 @@ function registerInboundWebhooks(app: App) {
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Webhook was not found.');
     return { value, row };
   };
-  // Endpoint subscriptions outlive the credential. Only non-delegated workspace administrators can manage them.
-  const manageHook=(c:Ctx)=>{const value=admin(c);if(c.get('actor').credential==='agentToken'||(c.get('actor').grantId&&!c.get('actor').receivingConsent))throw new ApiError(403,'ADMIN_REQUIRED','Use a workspace admin session or a management credential with receiving authority.');return value;};
+  // A webhook outlives the credential that sets it up (requireReceivingConsent already refused approvals without consent).
+  const manageHook=(c:Ctx)=>{const value=admin(c);lasting(c,WEBHOOK_CHANGE);return value;};
   const webhookFields = { ...z.object(hookOptions).partial().shape, url: z.string().url().max(2048), description: z.string().max(500), eventTypes: z.array(z.enum(inboundEventTypes)).max(inboundEventTypes.length).describe('Events to subscribe to. [] makes a route-only webhook: it receives only mail a route sends to it.'), paused: z.boolean(), headers: WebhookHeaders.optional() };
   const createFields = { ...webhookFields, description: webhookFields.description.default(''), eventTypes: webhookFields.eventTypes.default(['message.received']), paused: webhookFields.paused.default(false) };
   const create = z.object({ ...createFields, addressIds: idFilter.default(null) }).strict();
@@ -876,7 +876,7 @@ function registerInboundWebhooks(app: App) {
   });
   app.openapi(createRoute({ method: 'get', path: `${path}/{id}/deliveries`, operationId: 'listInboundWebhookDeliveries', security, tags, request: { params: IdParam, query: z.object({ cursor: z.string().max(200).optional(), limit: Limit }) }, responses: { 200: response(pageOf(DeliverySchema, 'InboundWebhookDeliveryPage')), ...errors } }), async c => {
     // Newest first by creation time: delivery IDs are random, so ordering by ID showed an arbitrary sample, not the latest.
-    const { value, row } = await getWebhook(c, c.req.valid('param').id,manageHook(c)); const q = c.req.valid('query'), binding = `inbound-webhook-deliveries:${row.id}`, cursor = readCursor(q.cursor, binding);
+    const { value, row } = await getWebhook(c, c.req.valid('param').id); const q = c.req.valid('query'), binding = `inbound-webhook-deliveries:${row.id}`, cursor = readCursor(q.cursor, binding);
     const rows = await c.env.db.select().from(mailboxWebhookDeliveries).where(and(eq(mailboxWebhookDeliveries.workspaceId, value.workspaceId), eq(mailboxWebhookDeliveries.webhookId, row.id), cursor ? sql`(${mailboxWebhookDeliveries.createdAt},${mailboxWebhookDeliveries.id})<(${cursor.at}::timestamptz,${cursor.id})` : undefined)).orderBy(desc(mailboxWebhookDeliveries.createdAt), desc(mailboxWebhookDeliveries.id)).limit(q.limit + 1);
     return c.json({ data: rows.slice(0, q.limit).map(item => ({ id: item.id, webhookId: item.webhookId, eventId: String(item.payload.id), status: item.status, attemptCount: item.attemptCount, lastStatusCode: item.lastStatusCode, lastError: item.lastError, createdAt: iso(item.createdAt)!, updatedAt: iso(item.updatedAt)! })), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
