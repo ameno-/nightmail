@@ -5271,7 +5271,7 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
-  test('Hosted MCP members and invitations: an approval revoked, expired or narrowed to read while an invitation or a revocation waits for the workspace lock refuses it, and nothing changes', async t => {
+  test('Hosted MCP members and invitations: an approval revoked, expired (set, or its own deadline passing) or narrowed to read while an invitation or a revocation waits for the workspace lock refuses it, and nothing changes', async t => {
     // Committed rows and a second connection: the write waits on the workspace lock that connection holds while the
     // approval changes, then reads the approval again inside its transaction.
     const db = await fixtureDatabase(t), locker = await fixtureDatabase(t);
@@ -5286,14 +5286,16 @@ describe('Hosted MCP OAuth and tools', () => {
     const admin = await sessionFixture(t);
     await db.query("INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'admin')", [unique('mem'), wid, admin.userId]);
     const request: typeof http = (method, path, key, body, headers, timeout) => http(method, path, key, body, headers, timeout, PUBLIC_ORIGIN, req => app.fetch(req, runtime));
-    const signIn = async () => {
-      const issued = mintResourceToken(resourceUrl, admin.userId, writableScope);
+    const signIn = async (ttl?: number) => {
+      const issued = mintResourceToken(resourceUrl, admin.userId, writableScope, { ttl });
       ok(await request('POST', '/mcp', issued.token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders));
       return issued;
     };
     const call = async (token: string, name: string, args: Json) => ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { workspace: wid, ...args } } }, rpcHeaders)).result;
-    const race = async (write: (token: string) => Promise<Json>, change: string) => {
-      const issued = await signIn();
+    // change: how the approval changes while the write waits; null leaves it alone and lets the signed token's own
+    // short deadline (its exp, stored as the approval's expiry) pass during the wait.
+    const race = async (write: (token: string) => Promise<Json>, change: string | null) => {
+      const issued = await signIn(change === null ? 3 : undefined);
       let pending: Promise<Json> | undefined;
       await locker.query('BEGIN');
       try {
@@ -5305,20 +5307,26 @@ describe('Hosted MCP OAuth and tools', () => {
           if (!waiting) await new Promise(resolve => setTimeout(resolve, 20));
         }
         assert.ok(waiting, 'The write waits for the workspace lock.');
-        await db.query(`UPDATE nightmail_resource_grants SET ${change} WHERE grant_key=$1`, [issued.consentId]);
+        if (change !== null) await db.query(`UPDATE nightmail_resource_grants SET ${change} WHERE grant_key=$1`, [issued.consentId]);
+        else {
+          const live = async () => (await db.query('SELECT expires_at > clock_timestamp() AS live FROM nightmail_resource_grants WHERE grant_key=$1', [issued.consentId])).rows[0].live as boolean;
+          assert.equal(await live(), true, 'The approval was live when the write reached the lock.');
+          for (let i = 0; i < 250 && await live(); i++) await new Promise(resolve => setTimeout(resolve, 20));
+          assert.equal(await live(), false, 'The approval expired while the write waited.');
+        }
       } finally { await locker.query('COMMIT'); }
       const result = await pending!;
       assert.equal(result.isError, true, redact(result)); assert.equal(result._meta.status, 401, redact(result)); assert.equal(result.structuredContent.error.code, 'AUTH_INVALID', redact(result));
     };
     const inviter = await signIn();
-    for (const change of ['revoked=true', "expires_at=now()-interval '1 second'", "permissions=ARRAY['read']::text[],issued_at=issued_at+1"]) {
+    for (const change of ['revoked=true', "expires_at=now()-interval '1 second'", "permissions=ARRAY['read']::text[],issued_at=issued_at+1", null]) {
       const email = `${unique('race-invite')}@example.com`;
       await race(token => call(token, 'createWorkspaceInvitation', { body: { email, role: 'member' }, confirm: true }), change);
-      assert.equal((await db.query('SELECT count(*)::int AS n FROM workspace_invitations WHERE workspace_id=$1 AND email=$2', [wid, email])).rows[0].n, 0, change);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM workspace_invitations WHERE workspace_id=$1 AND email=$2', [wid, email])).rows[0].n, 0, String(change));
       const target = await call(inviter.token, 'createWorkspaceInvitation', { body: { email: `${unique('race-revoke')}@example.com`, role: 'member' }, confirm: true });
       assert.equal(target._meta.status, 201, redact(target));
       await race(token => call(token, 'revokeWorkspaceInvitation', { email: target.structuredContent.email, confirm: true }), change);
-      assert.equal((await db.query('SELECT status FROM workspace_invitations WHERE id=$1', [target.structuredContent.id])).rows[0].status, 'pending', change);
+      assert.equal((await db.query('SELECT status FROM workspace_invitations WHERE id=$1', [target.structuredContent.id])).rows[0].status, 'pending', String(change));
     }
   });
 
