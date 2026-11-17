@@ -4694,27 +4694,19 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(await decided!, false, 'It waited for the decline and saw it.');
   });
   // Contract step for 322: 331 drops the two tables 322 kept for the Worker before it, and the triggers that copied
-  // writes between them and mailbox_webhooks. It refuses, changing nothing, if a copy never reached its endpoint row.
-  test('endpoint mirror contract: 331 drops mail_endpoints, mail_action_policies and their triggers, keeps every endpoint row, and refuses untouched if a copy is missing', async t => {
+  // writes between them and mailbox_webhooks, once every legacy row is proven to be on its endpoint row. It runs here on
+  // committed rows in a schema of their own (322's tables, triggers and functions, rebuilt), as migrate.ts runs it: one
+  // transaction, rolled back on any error.
+  test('endpoint mirror contract: 331 drops the legacy tables exactly when every legacy row is on its endpoint row, and a refusal changes nothing', async t => {
     const db = await fixtureDatabase(t), source = (file: string) => readFile(new URL(`./migrations/${file}`, import.meta.url), 'utf8');
     const migration = await source('331_drop_endpoint_mirror.sql'), m322 = await source('322_one_endpoints_table.sql');
-    const mirror = async () => (await db.query(`SELECT (SELECT count(*)::int FROM pg_class WHERE relnamespace='public'::regnamespace AND relname IN ('mail_endpoints','mail_action_policies')) AS tables,
-      (SELECT count(*)::int FROM pg_proc WHERE proname IN ('mail_endpoint_from_legacy','mail_policy_from_legacy','mail_endpoint_to_legacy')) AS functions,
-      (SELECT count(*)::int FROM pg_trigger WHERE tgname IN ('mail_endpoint_from_legacy','mail_policy_from_legacy','mail_endpoint_to_legacy')) AS triggers`)).rows[0];
-    assert.deepEqual(await mirror(), { tables: 0, functions: 0, triggers: 0 }, 'The fixture database applied 331.');
-    assert.deepEqual((await db.query(`SELECT proname FROM pg_proc WHERE prosrc ~ '\\m(mail_endpoints|mail_action_policies)\\M'`)).rows, [], 'No function reads or writes them.');
-    const w = unique('mirror'), id = () => 'con_' + randomUUID().replaceAll('-', '');
-    const rows = async () => (await db.query('SELECT * FROM mailbox_webhooks WHERE workspace_id=$1 ORDER BY id', [w])).rows;
-    // The listing query the refusal names, run as written.
-    const listed = async (cause: unknown) => {
-      const query = /List them with: (SELECT [^;]+);/.exec((cause as Error).message)?.[1];
-      assert.ok(query, (cause as Error).message);
-      return (await db.query(`SELECT * FROM (${query}) listed WHERE workspace_id=$1`, [w])).rows;
-    };
-    await db.query('BEGIN');
+    const schema = 'c331_' + randomUUID().replaceAll('-', '').slice(0, 12), w = 'ws-331', other = 'ws-331-other';
+    await db.query(`CREATE SCHEMA ${schema}`);
     try {
-      // A database upgraded from the previous release: both tables, 322's triggers, and the copies they made.
-      await db.query(`CREATE TABLE mail_endpoints(workspace_id text NOT NULL, ref text NOT NULL, hook_id text NOT NULL UNIQUE REFERENCES mailbox_webhooks(id) ON DELETE CASCADE,
+      await db.query(`SET search_path TO ${schema}, public`);
+      // The pre-331 schema: the endpoint table as it is, and 322's legacy tables, triggers and functions.
+      await db.query(`CREATE TABLE mailbox_webhooks (LIKE public.mailbox_webhooks INCLUDING ALL);
+        CREATE TABLE mail_endpoints(workspace_id text NOT NULL, ref text NOT NULL, hook_id text NOT NULL UNIQUE REFERENCES mailbox_webhooks(id) ON DELETE CASCADE,
           encrypted_value text NOT NULL, verified boolean NOT NULL DEFAULT false, proof_hash text UNIQUE, expires_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(),
           requested_at timestamptz, request_from text, confirmed_at timestamptz, declined_at timestamptz, preverified_by text, PRIMARY KEY (workspace_id, ref));
         CREATE UNIQUE INDEX mail_endpoints_name ON mail_endpoints(workspace_id, split_part(ref, ':', 2));
@@ -4723,47 +4715,138 @@ describe('Hosted MCP OAuth and tools', () => {
       const statements = [...m322.matchAll(/^CREATE OR REPLACE FUNCTION mail_\w+_legacy\(\)[\s\S]*?^END \$\$;|^CREATE TRIGGER mail_\w+_legacy [^;]*;/gm)].map(m => m[0]);
       assert.equal(statements.length, 6);
       for (const statement of statements) await db.query(statement);
-      assert.deepEqual(await mirror(), { tables: 2, functions: 3, triggers: 3 });
-      await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [w]);
-      // This release's writes: a Slack endpoint with a policy, a pending forward, and a webhook (never copied).
-      const [slack, pending, hook] = [id(), id(), 'mwh_' + randomUUID().replaceAll('-', '')];
-      await db.query(`INSERT INTO mailbox_webhooks(id,workspace_id,type,key,encrypted_target,event_types,per_minute,retry_on_timeout,idempotent) VALUES($1,$2,'slack','ops','enc-slack','[]',12,true,false)`, [slack, w]);
-      await db.query(`INSERT INTO mailbox_webhooks(id,workspace_id,type,key,encrypted_target,event_types,verified,proof_hash,expires_at,request_from)
-        VALUES($1,$2,'forward','team','enc-forward','[]',false,$3,now()+interval '1 hour','box@example.org')`, [pending, w, unique('proof')]);
-      await db.query(`INSERT INTO mailbox_webhooks(id,workspace_id,url,event_types,encrypted_secret) VALUES($1,$2,'https://example.com/hook','["message.received"]','enc-secret')`, [hook, w]);
-      assert.deepEqual((await db.query('SELECT ref,encrypted_value,verified FROM mail_endpoints WHERE workspace_id=$1 ORDER BY ref', [w])).rows,
-        [{ ref: 'forward:team', encrypted_value: 'enc-forward', verified: false }, { ref: 'slack:ops', encrypted_value: 'enc-slack', verified: true }]);
-      assert.equal((await db.query('SELECT per_minute FROM mail_action_policies WHERE hook_id=$1', [slack])).rows[0].per_minute, 12);
+      const inTransaction = async (work: () => Promise<void>) => { await db.query('BEGIN'); try { await work(); await db.query('COMMIT'); } catch (e) { await db.query('ROLLBACK'); throw e; } };
+      // The replaced Worker's create: its placeholder row, the legacy row (copied onto it by 322's trigger) and a policy.
+      let n = 0;
+      const legacy = async (type: string, fields: Record<string, unknown> = {}, policy?: [number, boolean, boolean]) => {
+        const id = `con_331_${++n}`, ref = `${type}:old-${n}`;
+        await inTransaction(async () => {
+          await db.query("INSERT INTO mailbox_webhooks(id,workspace_id,name,url,event_types,encrypted_secret) VALUES($1,$2,$3,'https://ritual.invalid/','[]','synthetic')", [id, w, ref]);
+          const values: Record<string, unknown> = { workspace_id: w, ref, hook_id: id, encrypted_value: `enc-${n}`, verified: type !== 'forward', ...fields };
+          await db.query(`INSERT INTO mail_endpoints(${Object.keys(values)}) VALUES(${Object.keys(values).map((_, i) => `$${i + 1}`)})`, Object.values(values));
+          if (policy) await db.query('INSERT INTO mail_action_policies(workspace_id,hook_id,per_minute,retry_on_timeout,idempotent) VALUES($1,$2,$3,$4,$5)', [w, id, ...policy]);
+        });
+        return id;
+      };
+      // This release's create: the endpoint row, copied back by 322's trigger.
+      const fresh = async (type: string, fields: Record<string, unknown> = {}) => {
+        const id = `con_331_${++n}`, columns = ['id', 'workspace_id', 'type', 'key', 'encrypted_target', 'event_types', ...Object.keys(fields)];
+        await db.query(`INSERT INTO mailbox_webhooks(${columns}) VALUES(${columns.map((_, i) => `$${i + 1}`)})`, [id, w, type, `new-${n}`, `enc-${n}`, '[]', ...Object.values(fields)]);
+        return id;
+      };
+      const hour = (h: number) => new Date(Date.UTC(2026, 10, 1, h)).toISOString();
+      // Every shape: Slack and Discord; forwards pending, confirmed, declined and preverified; paused and reconfirm;
+      // every retry/idempotency combination at both policy limits; one hard-deleted; edits made on either side after
+      // the upgrade; an ordinary webhook; and a legacy row whose created_at was edited by hand (not carried; see 331).
+      const ids: Record<string, string> = {};
+      ids.slack = await legacy('slack', {}, [1, false, false]);
+      ids.discord = await legacy('discord', {}, [6000, true, false]);
+      ids.pending = await legacy('forward', { proof_hash: 'proof-331', expires_at: hour(5), requested_at: hour(1), request_from: 'box@example.org' }, [1, false, true]);
+      ids.confirmed = await legacy('forward', { verified: true, confirmed_at: hour(2) }, [6000, true, true]);
+      ids.declined = await legacy('forward', { declined_at: hour(3), requested_at: hour(1), request_from: 'box@example.org' });
+      ids.preverified = await legacy('forward', { verified: true, preverified_by: 'key_331' });
+      ids.paused = await legacy('slack'); ids.reconfirm = await legacy('discord');
+      await db.query('UPDATE mailbox_webhooks SET paused=true WHERE id=$1', [ids.paused]);
+      await db.query('UPDATE mailbox_webhooks SET paused=true,reconfirm=true WHERE id=$1', [ids.reconfirm]);
+      for (const [i, [retry, idem]] of ([[false, false], [true, false], [false, true], [true, true]] as const).entries()) {
+        await legacy('slack', {}, [i % 2 ? 6000 : 1, retry, idem]);
+        await db.query('UPDATE mailbox_webhooks SET per_minute=$2,retry_on_timeout=$3,idempotent=$4 WHERE id=$1', [await fresh('discord'), i % 2 ? 1 : 6000, retry, idem]);
+      }
+      await db.query('DELETE FROM mailbox_webhooks WHERE id=$1', [await legacy('slack', {}, [5, true, true])]);
+      ids.legacyEdited = await legacy('forward', { requested_at: hour(1), request_from: 'box@example.org', proof_hash: 'proof-edit', expires_at: hour(6) }, [3, false, false]);
+      await db.query("UPDATE mail_endpoints SET ref='forward:old-renamed',verified=true,proof_hash=NULL,confirmed_at=$2 WHERE hook_id=$1", [ids.legacyEdited, hour(4)]);
+      await db.query('UPDATE mail_action_policies SET per_minute=7 WHERE hook_id=$1', [ids.legacyEdited]);
+      ids.freshEdited = await fresh('forward', { verified: false, proof_hash: 'proof-new', expires_at: hour(7), requested_at: hour(2), request_from: 'box@example.org' });
+      await db.query("UPDATE mailbox_webhooks SET key='new-renamed',verified=false,proof_hash=NULL,declined_at=$2,per_minute=9,retry_on_timeout=true,idempotent=false WHERE id=$1", [ids.freshEdited, hour(8)]);
+      ids.webhook = 'mwh_331';
+      await db.query(`INSERT INTO mailbox_webhooks(id,workspace_id,url,event_types,encrypted_secret) VALUES($1,$2,'https://example.com/hook','["message.received"]','enc-secret')`, [ids.webhook, w]);
+      ids.created = await legacy('slack', {}, [2, true, false]);
+      await db.query("UPDATE mail_endpoints SET created_at='2026-02-01' WHERE hook_id=$1", [ids.created]);
+      assert.deepEqual((await db.query("SELECT d.created_at<>h.created_at AS differs FROM mail_endpoints d JOIN mailbox_webhooks h ON h.id=d.hook_id WHERE d.hook_id=$1", [ids.created])).rows, [{ differs: true }]);
+      assert.deepEqual((await db.query('SELECT (SELECT count(*)::int FROM mail_endpoints) AS endpoints, (SELECT count(*)::int FROM mail_action_policies) AS policies')).rows, [{ endpoints: 19, policies: 15 }]);
+
+      const state = async () => (await db.query(`SELECT md5(concat_ws('|',
+          (SELECT string_agg(to_jsonb(h)::text, ',' ORDER BY id) FROM mailbox_webhooks h),
+          (SELECT string_agg(to_jsonb(d)::text, ',' ORDER BY workspace_id, ref) FROM mail_endpoints d),
+          (SELECT string_agg(to_jsonb(p)::text, ',' ORDER BY workspace_id, hook_id) FROM mail_action_policies p),
+          (SELECT string_agg(c.relname || '.' || t.tgname || ':' || t.tgenabled::text, ',' ORDER BY 1) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid WHERE c.relnamespace = $1::regnamespace AND NOT t.tgisinternal),
+          (SELECT string_agg(proname, ',' ORDER BY proname) FROM pg_proc WHERE pronamespace = $1::regnamespace),
+          (SELECT string_agg(relname, ',' ORDER BY relname) FROM pg_class WHERE relnamespace = $1::regnamespace))) AS f`, [schema])).rows[0].f as string;
+      const migrate = () => inTransaction(async () => { await db.query(migration); });
+      // A legacy row changed without its copy (the copy trigger off), as a write that never reached the endpoint row.
+      const uncopied = async (table: 'mail_endpoints' | 'mail_action_policies', change: () => Promise<unknown>) => {
+        const trigger = table === 'mail_endpoints' ? 'mail_endpoint_from_legacy' : 'mail_policy_from_legacy';
+        await db.query(`ALTER TABLE ${table} DISABLE TRIGGER ${trigger}`);
+        try { await change(); } finally { await db.query(`ALTER TABLE ${table} ENABLE TRIGGER ${trigger}`); }
+      };
+      // Refused, unchanged, and the listing queries the refusal names return exactly the expected rows.
+      const refused = async (label: string, expected: { endpoints: Json[]; policies: Json[] }) => {
+        const before = await state();
+        const cause = await migrate().then(() => assert.fail(`${label}: 331 dropped the legacy tables.`), (e: unknown) => e as Error);
+        assert.match(cause.message, new RegExp(`^ENDPOINT_MIRROR_DIFFERS: ${expected.endpoints.length} legacy endpoint row\\(s\\) and ${expected.policies.length} legacy policy row\\(s\\) .*No data was changed\\.`), label);
+        assert.equal(await state(), before, `${label}: the refusal changed nothing.`);
+        const [endpoints, policies] = [...cause.message.matchAll(/(?:List them with|and): (SELECT \* FROM \(.*?\) x WHERE differs <> '');/gs)].map(m => m[1]!);
+        assert.ok(endpoints && policies, cause.message);
+        const listed = async (query: string) => (await db.query(`${query} ORDER BY 1, 2`)).rows;
+        assert.deepEqual({ endpoints: await listed(endpoints), policies: await listed(policies) }, expected, label);
+      };
+
+      // Every legacy row is on its endpoint row: 331 passes. Rolled back here, to try each difference on the same rows.
+      const upgraded = await state();
+      await db.query('BEGIN');
+      try {
+        await db.query(migration);
+        assert.deepEqual((await db.query(`SELECT count(*)::int AS n FROM pg_class WHERE relnamespace=$1::regnamespace AND relname IN ('mail_endpoints','mail_action_policies')`, [schema])).rows, [{ n: 0 }]);
+      } finally { await db.query('ROLLBACK'); }
+      assert.equal(await state(), upgraded);
+
+      // Review fixture A: a policy row in another workspace for the same hook (the legacy key allows it); never copied.
+      await db.query('INSERT INTO mail_action_policies(workspace_id,hook_id,per_minute,retry_on_timeout,idempotent) VALUES($1,$2,99,false,false)', [other, ids.confirmed]);
+      await refused('policy in another workspace', { endpoints: [], policies: [{ workspace_id: other, hook_id: ids.confirmed, differs: 'unmatched' }] });
+      await db.query('DELETE FROM mail_action_policies WHERE workspace_id=$1', [other]);
+      // A legacy endpoint row in another workspace, on an ordinary webhook's hook: never copied.
+      await db.query("INSERT INTO mail_endpoints(workspace_id,ref,hook_id,encrypted_value,verified) VALUES($1,'slack:ghost',$2,'enc-ghost',true)", [other, ids.webhook]);
+      await refused('endpoint in another workspace', { endpoints: [{ workspace_id: other, hook_id: ids.webhook, differs: 'unmatched' }], policies: [] });
+      await db.query('DELETE FROM mail_endpoints WHERE workspace_id=$1', [other]);
+      // Each field 322 moved, one at a time, null-safely (a value where the endpoint row has none, and the reverse).
+      // ids.created also carries the hand-edited created_at: only the field that differs is named.
+      const endpointCases: [string, string, string, unknown][] = [
+        ['type', ids.slack!, 'ref', `discord:old-${ids.slack!.split('_').at(-1)}`], ['key', ids.discord!, 'ref', 'discord:other-name'],
+        ['encrypted_target', ids.paused!, 'encrypted_value', 'enc-stale'], ['verified', ids.confirmed!, 'verified', false],
+        ['proof_hash', ids.confirmed!, 'proof_hash', 'proof-stale'], ['proof_hash', ids.pending!, 'proof_hash', null],
+        ['expires_at', ids.pending!, 'expires_at', hour(9)], ['requested_at', ids.declined!, 'requested_at', null],
+        ['request_from', ids.created!, 'request_from', 'stale@example.org'], ['confirmed_at', ids.legacyEdited!, 'confirmed_at', hour(9)],
+        ['declined_at', ids.freshEdited!, 'declined_at', null], ['preverified_by', ids.preverified!, 'preverified_by', 'key_stale'],
+      ];
+      for (const [differs, hook, column, value] of endpointCases) {
+        const was = (await db.query(`SELECT ${column} AS v FROM mail_endpoints WHERE hook_id=$1`, [hook])).rows[0].v;
+        await uncopied('mail_endpoints', () => db.query(`UPDATE mail_endpoints SET ${column}=$2 WHERE hook_id=$1`, [hook, value]));
+        await refused(`${differs} (${column})`, { endpoints: [{ workspace_id: w, hook_id: hook, differs }], policies: [] });
+        await uncopied('mail_endpoints', () => db.query(`UPDATE mail_endpoints SET ${column}=$2 WHERE hook_id=$1`, [hook, was]));
+      }
+      for (const [column, hook, value] of [['per_minute', ids.slack!, 2], ['retry_on_timeout', ids.discord!, false], ['idempotent', ids.legacyEdited!, true]] as const) {
+        const was = (await db.query(`SELECT ${column} AS v FROM mail_action_policies WHERE hook_id=$1`, [hook])).rows[0].v;
+        await uncopied('mail_action_policies', () => db.query(`UPDATE mail_action_policies SET ${column}=$2 WHERE hook_id=$1`, [hook, value]));
+        await refused(column, { endpoints: [], policies: [{ workspace_id: w, hook_id: hook, differs: column }] });
+        await uncopied('mail_action_policies', () => db.query(`UPDATE mail_action_policies SET ${column}=$2 WHERE hook_id=$1`, [hook, was]));
+      }
+      assert.equal(await state(), upgraded, 'Every difference was undone.');
+
+      // As migrate.ts applies it: dropped, and every endpoint row exactly as it was (the hand-edited created_at is not
+      // copied over the endpoint row's own).
+      const rows = async () => (await db.query('SELECT * FROM mailbox_webhooks ORDER BY id')).rows;
       const before = await rows();
-      await db.query('SAVEPOINT upgraded');
-      await db.query(migration);
-      assert.deepEqual(await mirror(), { tables: 0, functions: 0, triggers: 0 });
-      assert.deepEqual(await rows(), before, 'Every endpoint row is as it was.');
-      await db.query('ROLLBACK TO SAVEPOINT upgraded');
-      // A Slack endpoint whose copy never reached its row (written with the copy trigger off): it still reads as a webhook.
-      const uncopied = id();
-      await db.query(`INSERT INTO mailbox_webhooks(id,workspace_id,name,url,event_types,encrypted_secret) VALUES($1,$2,'slack:lost','https://ritual.invalid/','[]','synthetic')`, [uncopied, w]);
-      await db.query('ALTER TABLE mail_endpoints DISABLE TRIGGER mail_endpoint_from_legacy');
-      await db.query(`INSERT INTO mail_endpoints(workspace_id,ref,hook_id,encrypted_value,verified) VALUES($1,'slack:lost',$2,'enc-lost',true)`, [w, uncopied]);
-      await db.query('ALTER TABLE mail_endpoints ENABLE TRIGGER mail_endpoint_from_legacy');
-      await db.query('SAVEPOINT refused');
-      const refusal = await db.query(migration).then(() => assert.fail('331 dropped an endpoint whose copy is missing.'), (cause: unknown) => cause);
-      assert.match((refusal as Error).message, /^ENDPOINT_COPY_MISSING: .*No data was changed\./);
-      await db.query('ROLLBACK TO SAVEPOINT refused');
-      assert.deepEqual(await mirror(), { tables: 2, functions: 3, triggers: 3 }, 'The refusal changed nothing.');
-      assert.deepEqual(await listed(refusal), [{ workspace_id: w, hook_id: uncopied, ref: 'slack:lost' }]);
-      await db.query('DELETE FROM mailbox_webhooks WHERE id=$1', [uncopied]);
-      // A policy whose copy never reached its row.
-      await db.query('ALTER TABLE mail_action_policies DISABLE TRIGGER mail_policy_from_legacy');
-      await db.query('INSERT INTO mail_action_policies(workspace_id,hook_id,per_minute,retry_on_timeout,idempotent) VALUES($1,$2,30,false,true)', [w, pending]);
-      await db.query('ALTER TABLE mail_action_policies ENABLE TRIGGER mail_policy_from_legacy');
-      await db.query('SAVEPOINT refused');
-      const policy = await db.query(migration).then(() => assert.fail('331 dropped a policy whose copy is missing.'), (cause: unknown) => cause);
-      assert.match((policy as Error).message, /^ENDPOINT_POLICY_COPY_MISSING: .*No data was changed\./);
-      await db.query('ROLLBACK TO SAVEPOINT refused');
-      assert.deepEqual(await mirror(), { tables: 2, functions: 3, triggers: 3 });
-      assert.deepEqual(await listed(policy), [{ workspace_id: w, hook_id: pending, per_minute: 30 }]);
-    } finally { await db.query('ROLLBACK'); }
+      await migrate();
+      assert.deepEqual(await rows(), before);
+      assert.deepEqual((await db.query(`SELECT (SELECT count(*)::int FROM pg_class WHERE relnamespace=$1::regnamespace AND relname IN ('mail_endpoints','mail_action_policies')) AS tables,
+        (SELECT count(*)::int FROM pg_proc WHERE pronamespace=$1::regnamespace) AS functions,
+        (SELECT count(*)::int FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid WHERE c.relnamespace=$1::regnamespace AND NOT t.tgisinternal) AS triggers`, [schema])).rows,
+        [{ tables: 0, functions: 0, triggers: 0 }]);
+    } finally { await db.query('RESET search_path'); await db.query(`DROP SCHEMA ${schema} CASCADE`); }
+    // The fixture database applied 331, and nothing left in it names the legacy tables.
+    assert.deepEqual((await db.query(`SELECT (SELECT count(*)::int FROM pg_class WHERE relnamespace='public'::regnamespace AND relname IN ('mail_endpoints','mail_action_policies')) AS tables,
+      (SELECT count(*)::int FROM pg_proc WHERE proname IN ('mail_endpoint_from_legacy','mail_policy_from_legacy','mail_endpoint_to_legacy') OR prosrc ~ '\\m(mail_endpoints|mail_action_policies)\\M') AS functions`)).rows,
+      [{ tables: 0, functions: 0 }]);
   });
   test('endpoints and webhooks are one model: one name space, and the same caps through /v1/endpoints and /v1/inbound/webhooks, on create and on resume', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
