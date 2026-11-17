@@ -33,5 +33,3 @@ export function webhookHeaderErrors(headers: { name: string; value: string }[], 
   return errors
 }
 
-/** The API's masked hint: the last four characters of values longer than eight, otherwise fully masked. */
-export const webhookHeaderHint = (value: string) => '••••' + (value.length > 8 ? value.slice(-4) : '')

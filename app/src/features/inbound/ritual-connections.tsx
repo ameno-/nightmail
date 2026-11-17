@@ -136,5 +136,4 @@ export function CreatedEndpointDialog({ created, onClose, writeRitual = true }: 
     </div>}
   </Dialog>
 }
-export const endpointTypeLabel = typeLabel
 export { statusLabel as endpointStatusLabel, statusTone as endpointStatusTone }

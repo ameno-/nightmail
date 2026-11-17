@@ -35,7 +35,7 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
 .gauge-needle[data-rest] { opacity: .4; animation: none; }
 @keyframes gauge-sweep { from { transform: rotate(0deg); } }
 
-.gauge-eyebrow, .gauge-head { color: var(--color-muted); font-family: var(--font-mono); font-size: 10px; line-height: 14px; letter-spacing: .12em; text-transform: uppercase; }
+.gauge-eyebrow { color: var(--color-muted); font-family: var(--font-mono); font-size: 10px; line-height: 14px; letter-spacing: .12em; text-transform: uppercase; }
 .gauge-grade { font-family: var(--font-mono); font-size: 11px; line-height: 14px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
 
 /* Compact: the sidebar card, full sidebar width and 56px tall. */

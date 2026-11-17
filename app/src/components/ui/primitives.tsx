@@ -337,9 +337,6 @@ export function Alert({ tone = 'neutral', title, children, onDismiss, timer, ...
 export function EmptyState({ title, description, action, headingAs: Heading = 'h3' }: { title: string; description?: string; action?: ReactNode; headingAs?: 'h1' | 'h3' }) {
   return <div data-component="EmptyState" className="ui-empty-state"><Heading>{title}</Heading>{description && <p className="muted">{description}</p>}{action && <div>{action}</div>}</div>;
 }
-export function LoadingState({ rows = 5 }: { rows?: number }) {
-  return <div className="ui-loading" role="status" aria-label="Loading"><span className="sr-only">Loading…</span>{Array.from({ length: rows }, (_, index) => <div key={index} className="ui-skeleton-row" aria-hidden="true"><span className="ui-skeleton" /><span className="ui-skeleton" /><span className="ui-skeleton" /></div>)}</div>;
-}
 // An API error's message is plain language; its `reference` (code and request ID) follows as secondary detail for support.
 export function ErrorText({ error, fallback = tryAgain }: { error: unknown; fallback?: string }) {
   if (error instanceof ApiError) return <><span>{error.message}</span><span className="ui-error-reference">{error.reference}</span></>;

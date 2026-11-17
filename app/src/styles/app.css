@@ -107,18 +107,7 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 .fatal-error { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-20); min-height: 100dvh; padding: var(--space-40) var(--space-24); text-align: center; }
 .between { justify-content: space-between; }
 .nowrap { white-space: nowrap; }
-.cell-caption { font-size: var(--text-xs); line-height: var(--leading-xs); margin-top: var(--space-4); }
-.ui-table .cell-caption { margin-top: 2px; }
-.text-accent { color: var(--color-accent); }
-.text-success { color: var(--color-success); }
 .text-warning { color: var(--color-warning); }
-.text-danger { color: var(--color-danger); }
-.metrics-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--color-border); }
-.overview-content { display: flex; flex: 1; flex-direction: column; }
-.metric { min-width: 0; padding: var(--space-16) var(--space-20) 0; min-height: 98px; border-left: 1px solid var(--color-border); }
-.metric:first-child { border-left: 0; padding-left: 0; }
-.metric-value { font-size: var(--text-xl); line-height: var(--leading-xl); font-weight: 500; letter-spacing: -.04em; margin: var(--space-4) 0; white-space: nowrap; }
-.metric .cell-caption { font-size: var(--text-xs); }
 .chart-legend { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-20); color: var(--color-muted); font-size: var(--text-xs); }
 .chart-legend > span { display: flex; align-items: center; gap: var(--space-6); }
 .chart-legend i { width: 8px; height: 8px; border-radius: 2px; }
@@ -206,8 +195,6 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 .identifier { color: var(--color-text); }
 @media (max-width: 1200px) {
   .page-surface { padding-inline: var(--space-24); }
-  .metric { padding-inline: var(--space-16); }
-  .metric-value { font-size: 28px; }
 }
 /* A small laptop or a landscape tablet: a narrower sidebar leaves the page room for its tables. */
 @media (max-width: 1100px) and (min-width: 900px) {
@@ -216,8 +203,6 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
   .sidebar .nightmail-wordmark { --logo-cap: 11px; }
 }
 @media (max-width: 850px) {
-  .metrics-grid { grid-template-columns: repeat(2, 1fr); }
-  .metric:nth-child(3) { border-left: 0; padding-left: 0; }
   .email-detail-grid { grid-template-columns: minmax(0, 1fr); }
   .email-detail-grid { flex: none; min-height: 0; }
   .delivery-timeline { overflow-y: visible; }
