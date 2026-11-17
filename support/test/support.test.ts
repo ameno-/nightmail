@@ -31,6 +31,20 @@ function worker(name: string, env: Record<string, unknown>) {
     exports: { SupportConversation: { type: 'durable-object' as const, storage: 'sqlite' as const }, SupportIntake: { type: 'durable-object' as const, storage: 'sqlite' as const } } } };
 }
 
+// The built bundle with one test-only route: intake mail queued the way earlier versions queued it, without the address
+// it was sent to (the column is added in place, so such rows have none).
+const LEGACY_ENTRY = `
+import worker from './worker.js';
+export * from './worker.js';
+export default {
+  ...worker,
+  async fetch(request, env, ctx) {
+    if (new URL(request.url).pathname !== '/__legacy-intake') return worker.fetch(request, env, ctx);
+    const body = await request.json();
+    return Response.json(await env.INTAKE.get(env.INTAKE.idFromName(body.threadId)).enqueue(body));
+  },
+};`;
+
 const baseEnv = (overrides: Record<string, unknown> = {}) => ({
   STAGE: text('dev'), PUBLIC_URL: text(SUPPORT), DASHBOARD_ORIGINS: text(`${ORIGIN},http://localhost:5173`), BANE_ORIGIN: text(ORIGIN),
   SUPPORT_ADDRESS: text('support@dev.bane.mx'), SUPPORT_ADDRESS_ID: text('adr_support'), TICKET_TO: text('ryan@anoma.ly'), GATEWAY_URL: text('https://opencode.ai/inference/anthropic/v1'),
@@ -399,7 +413,7 @@ describe('support Worker', () => {
       assert.ok(await db.prepare("SELECT id FROM tickets WHERE type = 'legal' AND title = 'Subpoena 2'").first(), 'legal@ is not starved by abuse@.');
       const held = await db.prepare("SELECT channel, reason, sender, dmarc FROM overflow WHERE message_id = 'msg_abuse_s3'").first<any>();
       assert.deepEqual(held, { channel: 'abuse', reason: 'tickets for abuse@', sender: 's3@spoof.test', dmarc: 'FAIL' }, 'Kept, not dropped.');
-      assert.equal((await replies('thr_s3', caps))[0][3].text, "Hi,\n\nThanks for writing to abuse@bane.mx. We've received your message. A person at Nightmail will reply by email.\n\nNightmail");
+      assert.equal((await replies('thr_s3', caps))[0][3].text, "Hi,\n\nThanks for writing to abuse@dev.bane.mx. We've received your message. A person at Nightmail will reply by email.\n\nNightmail");
       const buckets = (await db.prepare("SELECT key, n FROM daily_counters WHERE key LIKE '%:mail' ORDER BY key").all<{ key: string; n: number }>()).results;
       assert.ok(buckets.some(b => b.key === 'unauthenticated:abuse:mail' && b.n === 3) && !buckets.some(b => b.key.startsWith('sender:') && b.n === 3), `Spoofed senders share one bucket: ${JSON.stringify(buckets)}`);
       const open = async () => {
@@ -456,6 +470,22 @@ describe('support Worker', () => {
     } finally { await caps.dispose(); }
   }, 180_000);
 
+  test('a message queued before its address was kept is acknowledged for the team, never an address it may not have been sent to', async () => {
+    const support = worker('support', baseEnv());
+    Object.assign(support.config.manifest.modules, { 'legacy.js': { type: 'esm', contents: LEGACY_ENTRY } });
+    support.config.manifest.mainModule = 'legacy.js';
+    const legacy = new Miniflare({ cf: false, telemetry: { enabled: false }, workers: [support,
+      { config: { name: 'fake-bane', compatibilityDate: '2026-09-08', manifest: { mainModule: 'bane.js', modules: { 'bane.js': { type: 'esm', contents: FAKE_BANE } } }, env: {} } }] } as never);
+    try {
+      await migrate(legacy);
+      const queued = await legacy.dispatchFetch(`${SUPPORT}/__legacy-intake`, { method: 'POST', body: JSON.stringify({ threadId: 'thr_legal_legacy', messageId: 'msg_legal_legacy_1', mailbox: 'legal' }) });
+      assert.deepEqual(await queued.json(), { ok: true });
+      const ack = await eventually(async () => (await replies('thr_legal_legacy', legacy))[0]);
+      assert.deepEqual([ack?.[3].subject, ack?.[3].addressId], ['Re: your message to Nightmail’s legal team', undefined]);
+      assert.match(ack[3].text, /^Hi,\n\nThanks for writing to Nightmail’s legal team\. We've received your message and logged it as tkt_/);
+    } finally { await legacy.dispose(); }
+  }, 120_000);
+
   test('abuse@, privacy@, legal@: straight to typed tickets, no model, the team emailed, one fixed acknowledgement', async () => {
     const before = recorded.length;
     assert.equal((await signedHook('msg_abuse_1', 'thr_abuse', 'reporter@isp.test', { intake: true, to: 'abuse@dev.bane.mx' })).status, 200);
@@ -464,8 +494,8 @@ describe('support Worker', () => {
     const db = await mf.getD1Database('DB', 'support');
     const ticket = await db.prepare("SELECT * FROM tickets WHERE type = 'abuse_report' ORDER BY created_at DESC").first<any>();
     assert.deepEqual([ticket.title, ticket.severity, JSON.parse(ticket.details).topic, JSON.parse(ticket.customer)], ['Spam from your customer', 'P3', 'abuse', { verified: false, sender: 'reporter@isp.test', dmarc: 'PASS' }]);
-    assert.equal(ack[3].text, `Hi,\n\nThanks for writing to abuse@bane.mx. We've received your message and logged it as ${ticket.id}. A person at Nightmail will reply by email.\n\nNightmail`);
-    assert.equal(ack[3].subject, 'Re: your message to abuse@bane.mx'); assert.equal(ack[3].addressId, undefined, 'Replies from the address it came in on.');
+    assert.equal(ack[3].text, `Hi,\n\nThanks for writing to abuse@dev.bane.mx. We've received your message and logged it as ${ticket.id}. A person at Nightmail will reply by email.\n\nNightmail`);
+    assert.equal(ack[3].subject, 'Re: your message to abuse@dev.bane.mx', 'Named for the address it was sent to.'); assert.equal(ack[3].addressId, undefined, 'Replies from the address it came in on.');
     assert.equal(ack[4], `Bearer bane_mbx_${'8'.repeat(64)}`, 'With the intake key, not the support key.');
     const team = (await fakeCalls()).find(c => c[0] === 'api' && c[2] === '/v1/inbound/threads' && c[3].subject === `[Nightmail abuse] ${ticket.id}: Spam from your customer (P3)`);
     assert.ok(team, 'The team gets "[Nightmail abuse] …".');
@@ -479,7 +509,7 @@ describe('support Worker', () => {
     // legal@ without a DMARC pass: P2, marked unverified everywhere.
     assert.equal((await signedHook('msg_legal_nodmarc_1', 'thr_legal', 'lawyer@firm.test', { intake: true, to: 'legal@dev.bane.mx' })).status, 200);
     const legalAck = await eventually(async () => (await replies('thr_legal'))[0]);
-    assert.match(legalAck[3].text, /^Hi,\n\nThanks for writing to legal@bane\.mx\./);
+    assert.match(legalAck[3].text, /^Hi,\n\nThanks for writing to legal@dev\.bane\.mx\./);
     const legal = await db.prepare("SELECT * FROM tickets WHERE type = 'legal'").first<any>();
     assert.equal(legal.severity, 'P2');
     const legalMail = (await fakeCalls()).find(c => c[0] === 'api' && c[2] === '/v1/inbound/threads' && c[3].subject === `[Nightmail legal] [UNVERIFIED] ${legal.id}: Subpoena (P2)`);
