@@ -1,7 +1,8 @@
 SET LOCAL lock_timeout='2s';
 -- Billing step 1 of 3 (code review billing-1, billing-2): whether usage is charged becomes a fact about the hour it was
 -- metered in, recorded as an append-only history. Nothing reads it yet: today's settler still prices by the mode when it
--- runs. The next step prices each hour from it.
+-- runs. The next step prices each hour from it. This migration records workspaces; 320 records the installation, in
+-- its own transaction, so neither holds one of billing_accounts and billing_config while it waits for the other.
 --
 -- Only billing_accounts is locked (for its trigger), first and alone, so this waits for a settlement or money post in
 -- flight and then waits for nothing else.
@@ -22,10 +23,8 @@ CREATE TABLE IF NOT EXISTS billing_mode_changes (
 CREATE INDEX IF NOT EXISTS billing_mode_changes_scope ON billing_mode_changes (workspace_id, id);
 CREATE OR REPLACE FUNCTION billing_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE EXCEPTION '% is append-only', TG_TABLE_NAME USING ERRCODE='42501'; END $$;
-DROP TRIGGER IF EXISTS billing_mode_changes_append_only ON billing_mode_changes;
-CREATE TRIGGER billing_mode_changes_append_only BEFORE UPDATE OR DELETE ON billing_mode_changes FOR EACH ROW EXECUTE FUNCTION billing_append_only();
-DROP TRIGGER IF EXISTS billing_mode_changes_no_truncate ON billing_mode_changes;
-CREATE TRIGGER billing_mode_changes_no_truncate BEFORE TRUNCATE ON billing_mode_changes FOR EACH STATEMENT EXECUTE FUNCTION billing_append_only();
+CREATE OR REPLACE TRIGGER billing_mode_changes_append_only BEFORE UPDATE OR DELETE ON billing_mode_changes FOR EACH ROW EXECUTE FUNCTION billing_append_only();
+CREATE OR REPLACE TRIGGER billing_mode_changes_no_truncate BEFORE TRUNCATE ON billing_mode_changes FOR EACH STATEMENT EXECUTE FUNCTION billing_append_only();
 
 -- Whether usage metered in hour h is charged: the latest decision in effect by then, for the installation (none: not
 -- charged) and for the workspace (none: prepaid, charged).
@@ -35,9 +34,8 @@ CREATE OR REPLACE FUNCTION billing_charged(wid text, h timestamptz) RETURNS bool
 $$;
 
 -- Records a change of the installation's (wid NULL) or a workspace's charging when it differs from the latest decision.
--- Callers run it under the lock that orders their mode changes: a workspace's account row (the trigger below), the
--- installation's billing_config row (set-billing-enforcement). They may name themselves with
--- set_config('billing.actor' / 'billing.reason', ..., true).
+-- Its callers are triggers on the mode columns, so they run under the row lock that orders those changes (the account
+-- row, or billing_config's). A caller may name itself with set_config('billing.actor' / 'billing.reason', ..., true).
 CREATE OR REPLACE FUNCTION billing_mode_note(wid text, want boolean, actor text, reason text) RETURNS void LANGUAGE plpgsql AS $$
 DECLARE latest boolean; h timestamptz := date_trunc('hour', clock_timestamp(), 'UTC');
 BEGIN
@@ -55,15 +53,11 @@ BEGIN
     CASE WHEN NEW.mode = 'exempt' THEN 'free (' || coalesce(NEW.free_via, 'set directly') || ')' ELSE 'not free' END);
   RETURN NULL;
 END $$;
-DROP TRIGGER IF EXISTS billing_accounts_mode ON billing_accounts;
-CREATE TRIGGER billing_accounts_mode AFTER INSERT OR UPDATE OF mode ON billing_accounts FOR EACH ROW EXECUTE FUNCTION billing_accounts_mode();
+CREATE OR REPLACE TRIGGER billing_accounts_mode AFTER INSERT OR UPDATE OF mode ON billing_accounts FOR EACH ROW EXECUTE FUNCTION billing_accounts_mode();
 
--- The state now, as if it had always been so: the installation charged if it is enforced, every exempt workspace not
--- charged. What happened before this is settled already, and the next step settles and freezes it before it prices any
--- hour from this history. Each scope is written only while it has no history yet.
-INSERT INTO billing_mode_changes(workspace_id, charged, effective_hour, actor, reason)
-  SELECT NULL, true, '-infinity', 'migration', 'enforced at 318'
-  FROM billing_config WHERE singleton AND mode = 'enforce' AND NOT EXISTS (SELECT FROM billing_mode_changes WHERE workspace_id IS NULL);
+-- The state now, as if it had always been so: every exempt workspace not charged (a workspace with no history is
+-- prepaid). What happened before this is settled already, and the next step settles and freezes it before it prices any
+-- hour from this history. A workspace is written only while it has no history yet.
 INSERT INTO billing_mode_changes(workspace_id, charged, effective_hour, actor, reason)
   SELECT workspace_id, false, '-infinity', 'migration', 'exempt at 318' FROM billing_accounts a
   WHERE mode = 'exempt' AND NOT EXISTS (SELECT FROM billing_mode_changes m WHERE m.workspace_id = a.workspace_id) ORDER BY workspace_id;

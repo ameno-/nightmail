@@ -6994,7 +6994,7 @@ describe('Billing: metering, gate and settlement', () => {
     });
   });
 
-  test('mode history: a free flag or billing switch stops charging from its own hour and starts it from the next one, whoever writes a workspace\'s mode, and the history is append-only', async t => {
+  test('mode history: a free flag or billing switch stops charging from its own hour and starts it from the next one, whoever writes the mode, and the history is append-only', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
       const { setBillingEnforcement } = await import('./scripts/set-billing-enforcement.js');
       const wid = unique('billing-history'), other = unique('billing-history-other');
@@ -7029,8 +7029,11 @@ describe('Billing: metering, gate and settlement', () => {
       await setBillingEnforcement(db, ['enforce', '--reason', 'Billing back on after the check']);
       assert.deepEqual([await charged(unique('any'), 0), await charged(unique('any'), 1)], [false, true]);
       assert.deepEqual((await changes(null)).slice(1), [
-        { charged: false, shift: 0, actor: 'script', reason: 'Shadow while the settler is checked' },
-        { charged: true, shift: 1, actor: 'script', reason: 'Billing back on after the check' }]);
+        { charged: false, shift: 0, actor: 'system', reason: 'billing shadow' },
+        { charged: true, shift: 1, actor: 'system', reason: 'billing enforce' }]);
+      // An operator's SQL is recorded too.
+      await db.query(`UPDATE billing_config SET mode='off' WHERE singleton`);
+      assert.deepEqual((await changes(null)).slice(3).map(c => [c.charged, c.shift, c.reason]), [[false, 0, 'billing off']]);
       // Nothing rewrites history.
       for (const statement of ['UPDATE billing_mode_changes SET charged=true WHERE workspace_id=$1', 'DELETE FROM billing_mode_changes WHERE workspace_id=$1', 'TRUNCATE billing_mode_changes']) {
         await db.query('SAVEPOINT history');
@@ -7040,10 +7043,11 @@ describe('Billing: metering, gate and settlement', () => {
     });
   });
 
-  test('migration 318 starts the history from the modes now: the installation charged if enforced, exempt workspaces not charged, and running it again adds nothing', { skip: DATABASE_FIXTURE_SKIP }, async t => {
-    // The tables 318 reads, as 315 left them, in a schema of their own inside a transaction that rolls back.
+  test('migrations 318 and 320 start the history from the modes now: exempt workspaces not charged, the installation charged if enforced, and running them again adds nothing', { skip: DATABASE_FIXTURE_SKIP }, async t => {
+    // The tables 318 and 320 read, as 317 left them, in a schema of their own inside a transaction that rolls back.
     const db = await fixtureDatabase(t), schema = 'billing318_' + randomUUID().replaceAll('-', '');
-    const migration = await readFile(new URL('./migrations/318_billing_mode_history.sql', import.meta.url), 'utf8');
+    const files = await Promise.all(['318_billing_mode_history.sql', '320_billing_mode_installation.sql'].map(f => readFile(new URL(`./migrations/${f}`, import.meta.url), 'utf8')));
+    const migrate = async () => { for (const file of files) await db.query(file); };
     const history = async () => (await db.query(`SELECT workspace_id, charged, effective_hour::text AS h, reason FROM billing_mode_changes ORDER BY id`)).rows;
     await db.query('BEGIN');
     try {
@@ -7052,17 +7056,18 @@ describe('Billing: metering, gate and settlement', () => {
         CREATE TABLE billing_accounts (workspace_id text PRIMARY KEY, mode text NOT NULL DEFAULT 'prepaid', free_via text, free_by text);
         INSERT INTO billing_config VALUES (true, 'enforce');
         INSERT INTO billing_accounts VALUES ('w-exempt','exempt','workspace','script'),('w-prepaid','prepaid',NULL,NULL)`);
-      await db.query(migration);
+      await migrate();
       const expected = [
-        { workspace_id: null, charged: true, h: '-infinity', reason: 'enforced at 318' },
-        { workspace_id: 'w-exempt', charged: false, h: '-infinity', reason: 'exempt at 318' }];
+        { workspace_id: 'w-exempt', charged: false, h: '-infinity', reason: 'exempt at 318' },
+        { workspace_id: null, charged: true, h: '-infinity', reason: 'enforced at 320' }];
       assert.deepEqual(await history(), expected);
       assert.deepEqual((await db.query(`SELECT billing_charged('w-exempt', now()) AS e, billing_charged('w-prepaid', now()) AS p, billing_charged('w-new', '2020-01-01') AS n`)).rows[0], { e: false, p: true, n: true });
-      // Running it again adds nothing, also once the modes have moved on.
+      // Both mode columns are recorded from then on, and running the files again adds nothing.
       await db.query(`UPDATE billing_accounts SET mode='exempt' WHERE workspace_id='w-prepaid'`);
+      await db.query(`UPDATE billing_config SET mode='shadow'`);
       const moved = await history();
-      assert.equal(moved.length, 3);
-      await db.query(migration);
+      assert.deepEqual(moved.slice(2).map(r => [r.workspace_id, r.charged, r.reason]), [['w-prepaid', false, 'free (set directly)'], [null, false, 'billing shadow']]);
+      await migrate();
       assert.deepEqual(await history(), moved);
     } finally { await db.query('ROLLBACK'); }
   });

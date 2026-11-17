@@ -21,8 +21,7 @@ const flag = (value: string | undefined, name: string) => {
  * settled under the old one (billing_settle_all), so nothing metered while billing was off or in shadow is charged
  * later. That waits for meter writes in flight and holds new ones until the switch commits (migration 314's fence).
  * Switching to off doesn't settle (the kill-switch never waits on the settler or the writers); what it leaves open is
- * settled at $0 when billing comes back on. The change is also recorded in the mode history (billing_mode_changes,
- * migration 318) with this reason: charging stops from the current hour, or starts from the next.
+ * settled at $0 when billing comes back on.
  */
 export async function setBillingEnforcement(db: Client, args: string[]) {
   const { positionals, values } = parseArgs({ args, allowPositionals: true, options: {
@@ -49,8 +48,6 @@ export async function setBillingEnforcement(db: Client, args: string[]) {
     SELECT 'installation','set-billing-enforcement',jsonb_build_object('old',(SELECT to_jsonb(p) FROM previous p),'new',to_jsonb(c),'reason',$5::text,'via','script') FROM changed c
     RETURNING details`, [mode, receiveHold, billSimulated, storage ?? null, reason]);
   if (!audit) throw new Error('billing_config has no row: run the migrations first.');
-  // The installation's charging history (migration 318), under the config row this transaction holds.
-  await db.query(`SELECT billing_mode_note(NULL, $1 = 'enforce', 'script', $2)`, [mode, reason]);
   log('info', { code: 'BILLING_ENFORCEMENT_CHANGED', ...audit.details });
   return audit.details as { old: Record<string, unknown>; new: Record<string, unknown> };
 }
