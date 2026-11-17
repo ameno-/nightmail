@@ -14012,7 +14012,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(ok(await api('GET', `/v1/inbound/domains/${d.id}`)).status, 'off');
         const enabled = await enable(d);
         assert.deepEqual([enabled.status, enabled.name, enabled.lastError], ['provisioning', host, null]);
-        const provisioning = { status: 'provisioning', listed: 'provisioning', lastError: null, hosts: [[host, 'provisioning']], receiving: 'provisioning', listedReceiving: 'provisioning' };
+        // The host and the domain's DNS readiness keep their existing pending (its MX not yet seen) meanwhile.
+        const provisioning = { status: 'provisioning', listed: 'provisioning', lastError: null, hosts: [[host, 'pending']], receiving: 'pending', listedReceiving: 'pending' };
         assert.deepEqual(await views(d), provisioning);
         // Enabling again while it runs is the same request: one check, unchanged, and nothing else written.
         const queued = async () => (await db.query('SELECT status,available_at,payload,attempts FROM jobs WHERE id=$1', [job(d)])).rows;

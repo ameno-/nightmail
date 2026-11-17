@@ -19,7 +19,7 @@ import { productName } from './brand.js';
 
 type Row = typeof mailboxDomains.$inferSelect;
 type Domain = typeof domains.$inferSelect;
-export type HostStatusView = 'pending' | 'provisioning' | 'active' | 'mixed' | 'lost' | 'failed' | 'removed';
+export type HostStatusView = 'pending' | 'active' | 'mixed' | 'lost' | 'failed' | 'removed';
 export type CatchAll = 'create_address' | 'store';
 /** `beside`: always a host of its own, never the domain's own row taking it over (the subdomain operations). */
 type AddInput = { name: string; catchAll?: CatchAll; metadata?: Record<string, unknown>; confirm?: boolean; beside?: boolean };
@@ -45,9 +45,9 @@ export function hostView(row: Row, addressCount: number, claim?: ClaimFacts | nu
   const host = row.receivingHost ?? row.name, own = row.parentId === null;
   const issue: ReceivingIssue | null = removed(row.status) ? null : own && claim ? (claim.identity?.issue?.host === host ? claim.identity.issue : null) : row.issue;
   const lost = row.status === 'active' && !!(claim ? hostGraceStart(claim, { host, lost_since: row.lostSince }) : row.lostSince);
-  // Hosted, the domain's own host shows the setup enableInboundDomain asked for until it routes.
-  const setup = own && row.status === 'waiting_for_mx' ? claim?.receiving_setup?.status : undefined;
-  const status: HostStatusView = removed(row.status) ? 'removed' : setup ?? (row.status === 'failed' ? 'failed' : row.status === 'provisioning' ? 'provisioning' : row.status !== 'active' ? 'pending' : lost ? 'lost' : row.mx?.state === 'mixed' ? 'mixed' : 'active');
+  // Hosted, the domain's own host is pending while the setup enableInboundDomain asked for runs, and failed if it gave up.
+  const failed = row.status === 'failed' || (own && row.status === 'waiting_for_mx' && claim?.receiving_setup?.status === 'failed');
+  const status: HostStatusView = removed(row.status) ? 'removed' : failed ? 'failed' : row.status !== 'active' ? 'pending' : lost ? 'lost' : row.mx?.state === 'mixed' ? 'mixed' : 'active';
   return { id: row.id, domainId: row.domainId, name: host, status, catchAll: row.catchAll, dns: [expectedMx(host, row.region)], mx: row.mx ?? null, issue, addressCount, metadata: row.metadata,
     createdAt: new Date(row.createdAt).toISOString(), updatedAt: new Date(row.updatedAt).toISOString() };
 }

@@ -10,7 +10,7 @@ import { settingsColumns } from './skeletons'
 import { relativeHost } from './domain-records'
 
 const hostStatus: Record<ReceivingHost['status'], { label: string; tone: Tone }> = {
-  pending: { label: 'Waiting for MX', tone: 'warning' }, provisioning: { label: 'Setting up', tone: 'warning' }, active: { label: 'Receiving', tone: 'success' }, mixed: { label: 'Receiving, MX shared', tone: 'warning' },
+  pending: { label: 'Waiting for MX', tone: 'warning' }, active: { label: 'Receiving', tone: 'success' }, mixed: { label: 'Receiving, MX shared', tone: 'warning' },
   lost: { label: 'MX missing', tone: 'danger' }, failed: { label: 'Failed', tone: 'danger' }, removed: { label: 'Removed', tone: 'neutral' },
 }
 const path = (domainId: string, hostId?: string) => `/v1/inbound/domains/${encodeURIComponent(domainId)}/hosts${hostId ? `/${encodeURIComponent(hostId)}` : ''}`

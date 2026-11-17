@@ -1459,10 +1459,7 @@ export type DomainReadiness = {
     } | null;
     ready: boolean;
     sending: 'pending' | 'verified';
-    /**
-     * provisioning (hosted): receiving was enabled and its check is still running; it ends verified, or pending until the MX record is published.
-     */
-    receiving: 'pending' | 'provisioning' | 'verified';
+    receiving: 'pending' | 'verified';
     mailFromDomain: string | null;
     mailFromStatus: string | null;
     dnsStatus: 'available' | 'unavailable';
@@ -3159,9 +3156,9 @@ export type InboundHost = {
      */
     name: string;
     /**
-     * pending: its MX record isn’t seen yet. provisioning: receiving is being set up (enableInboundDomain); it ends active, pending or failed. active: it receives. mixed: it receives, and another provider’s MX record shares its mail (a backup MX, or one with a better priority while mail moves over). lost: its MX record disappeared; it keeps receiving for two hours. failed: receiving setup failed. removed: it no longer receives; its addresses and mail are kept, and adding it again restores it.
+     * pending: its MX record isn’t seen yet. active: it receives. mixed: it receives, and another provider’s MX record shares its mail (a backup MX, or one with a better priority while mail moves over). lost: its MX record disappeared; it keeps receiving for two hours. failed: receiving setup failed. removed: it no longer receives; its addresses and mail are kept, and adding it again restores it.
      */
-    status: 'pending' | 'provisioning' | 'active' | 'mixed' | 'lost' | 'failed' | 'removed';
+    status: 'pending' | 'active' | 'mixed' | 'lost' | 'failed' | 'removed';
     catchAll: 'create_address' | 'store';
     /**
      * The MX record to publish on this host.
