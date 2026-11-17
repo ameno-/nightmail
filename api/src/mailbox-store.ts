@@ -115,15 +115,34 @@ export async function createMailbox(tx: DbExecutor, scope: Scope, input: { key?:
   return row!;
 }
 
-/** Adds a stored message to mailboxes and updates each mailbox's thread summary. Returns mailboxes that newly received it. */
+/**
+ * Holds these mailboxes as they are: whether each has inbox_state (its mail filed in folders) can't change until the
+ * caller commits. An address gains inbox_state once, while the release that makes every address an inbox converts it
+ * under its workspace's ingest lane and a FOR UPDATE lock on its row; this KEY SHARE lock waits for that and holds it off.
+ * Read inbox_state in a later statement, whose snapshot is taken after the wait. Rows in ID order.
+ */
+export async function holdMailboxes(tx: DbExecutor, workspaceId: string, mailboxIds: string[]) {
+  await tx.execute(sql`SELECT FROM mailboxes WHERE workspace_id=${workspaceId} AND id=ANY(${sql.param(mailboxIds)}::text[]) ORDER BY id FOR KEY SHARE`);
+}
+/**
+ * Adds a stored message to mailboxes and updates each mailbox's thread summary. Returns mailboxes that newly received it.
+ * In a mailbox with inbox_state, received mail is counted and filed in its folders, as ingest does (sent mail is filed by
+ * the inbox_file_sent trigger).
+ */
 export async function attachToMailboxes(tx: DbExecutor, scope: Scope, message: typeof mailMessages.$inferSelect, mailboxIds: string[]) {
   if (!mailboxIds.length) return [];
   const inbound = message.direction === 'inbound';
-  const result=await tx.execute<{mailbox_id:string}>(sql`WITH states AS MATERIALIZED (SELECT inbox_id FROM inbox_state WHERE workspace_id=${scope.workspaceId} AND inbox_id=ANY(${sql.param(mailboxIds)}::text[]) ORDER BY inbox_id FOR UPDATE), added AS (
+  if (inbound) await holdMailboxes(tx, scope.workspaceId, mailboxIds);
+  const result=await tx.execute<{mailbox_id:string;filed:boolean}>(sql`WITH states AS MATERIALIZED (SELECT inbox_id FROM inbox_state WHERE workspace_id=${scope.workspaceId} AND inbox_id=ANY(${sql.param(mailboxIds)}::text[]) ORDER BY inbox_id FOR UPDATE), added AS (
     INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at)
     SELECT box,${message.id},${scope.workspaceId},${message.threadId},${message.direction},${!inbound},${message.receivedAt}::timestamptz FROM jsonb_array_elements_text(${JSON.stringify(mailboxIds)}::jsonb) b(box) WHERE (SELECT count(*) FROM states)>=0 ORDER BY box ON CONFLICT DO NOTHING RETURNING *
   ) INSERT INTO mailbox_threads AS t(mailbox_id,thread_id,workspace_id,message_count,unread_count,last_message_at,last_inbound_at,spam,labels)
     SELECT mailbox_id,thread_id,workspace_id,1,${inbound?1:0},received_at,CASE WHEN ${inbound} THEN received_at END,${message.spam},CASE WHEN ${message.spam} THEN ARRAY['spam'] ELSE ARRAY[]::text[] END FROM added ORDER BY mailbox_id
-    ON CONFLICT(mailbox_id,thread_id) DO UPDATE SET message_count=t.message_count+1,unread_count=t.unread_count+excluded.unread_count,last_message_at=greatest(t.last_message_at,excluded.last_message_at),last_inbound_at=greatest(t.last_inbound_at,excluded.last_inbound_at),archived=CASE WHEN excluded.last_inbound_at IS NOT NULL THEN false ELSE t.archived END RETURNING mailbox_id`);
+    ON CONFLICT(mailbox_id,thread_id) DO UPDATE SET message_count=t.message_count+1,unread_count=t.unread_count+excluded.unread_count,last_message_at=greatest(t.last_message_at,excluded.last_message_at),last_inbound_at=greatest(t.last_inbound_at,excluded.last_inbound_at),archived=CASE WHEN excluded.last_inbound_at IS NOT NULL THEN false ELSE t.archived END RETURNING mailbox_id,mailbox_id IN (SELECT inbox_id FROM states) AS filed`);
+  const filed = result.rows.filter(row => row.filed).map(row => row.mailbox_id).sort();
+  if (inbound && filed.length) {
+    await tx.execute(sql`UPDATE inbox_state SET messages=messages+1,bytes=bytes+${message.sizeBytes ?? 0} WHERE inbox_id=ANY(${sql.param(filed)}::text[])`);
+    await tx.execute(sql`SELECT inbox_file_delivery(box,${message.id},NULL) FROM unnest(${sql.param(filed)}::text[]) box ORDER BY box`);
+  }
   return result.rows.map(row=>row.mailbox_id);
 }

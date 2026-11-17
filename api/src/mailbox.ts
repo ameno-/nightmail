@@ -10,7 +10,7 @@ import { mailboxAddresses, mailboxDomains, mailboxes, mailboxKeys, mailboxMessag
 import { expectedMx, checkMx, mxBlocksEnable } from './mailbox-dns.js';
 import { eventView, inboundEventTypes, latestCursor, readEvents, recordEvents } from './mailbox-events.js';
 import { queueReconcile,saveMailboxMx } from './mailbox-setup.js';
-import { attachToMailboxes, checkRuleCapacity, checkTemporaryMailboxRouting, createMailbox, htmlToPlain, lockMailboxLane, ruleMatches, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
+import { attachToMailboxes, checkRuleCapacity, checkTemporaryMailboxRouting, createMailbox, holdMailboxes, htmlToPlain, lockMailboxLane, ruleMatches, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
 import { detachDestination, registerRouting, RoutingKey } from './routing.js';
 import { registerRituals } from './rituals.js';
 import { Ok, registerInboundWebhooks } from './endpoints.js';
@@ -184,7 +184,10 @@ type ThreadPatchInput = Omit<z.infer<typeof UpdateInboundThread>, 'addressId'>;
 async function patchThread(c: Ctx, mailboxId: string, threadId: string, patch: ThreadPatchInput) {
   const { scope,mailbox } = await mailboxFor(c, mailboxId, 'modify');
   const runnable = await c.env.db.transaction(async tx => {
-    if(mailbox.kind==='inbox'){
+    // A mailbox with inbox_state (an agent inbox, and from the next release every address) has one writer: the SQL one,
+    // which keeps its folders, flags and thread summary in step. Decided under holdMailboxes, so it can't change meanwhile.
+    await holdMailboxes(tx, scope.workspaceId, [mailboxId]);
+    if (mailbox.kind === 'inbox' || (await tx.execute(sql`SELECT FROM inbox_state WHERE workspace_id=${scope.workspaceId} AND inbox_id=${mailboxId}`)).rowCount) {
       if(!((await tx.execute<{ok:boolean}>(sql`SELECT inbox_patch_thread(${scope.workspaceId},${mailboxId},${threadId},${JSON.stringify(patch)}::jsonb) ok`)).rows[0]?.ok))throw new ApiError(404,'NOT_FOUND','Thread was not found in this inbox.');
       return recordEvents(tx,scope.workspaceId,[{type:'thread.updated',mailboxId,threadId,data:{changes:patch}}]);
     }
@@ -480,7 +483,12 @@ function registerAddresses(app: App) {
     admin(c); const { mailbox, scope } = await mailboxFor(c, c.req.valid('param').addressId);
     if(mailbox.kind==='inbox'){await endInbox(c.env.db,sql`b.workspace_id=${scope.workspaceId} AND b.id=${mailbox.id}`,auditContext(c));return c.json({ok:true as const},200);}
     const runnable = await c.env.db.transaction(async tx => {
+      // inbox_end's lock order, as the address may have inbox_state: lanes (ingest, then address), the row, its inbox_state,
+      // then its threads. Ingest takes the lane before inbox_state, and the SQL writer inbox_state before threads.
+      await lockMailboxLane(tx, scope.workspaceId, 'ingest');
       await detachDestination(tx,c,scope.workspaceId,mailbox.id);
+      await tx.execute(sql`SELECT FROM mailboxes WHERE workspace_id=${scope.workspaceId} AND id=${mailbox.id} FOR UPDATE`);
+      await tx.execute(sql`SELECT FROM inbox_state WHERE workspace_id=${scope.workspaceId} AND inbox_id=${mailbox.id} FOR UPDATE`);
       await tx.delete(mailboxThreads).where(eq(mailboxThreads.mailboxId, mailbox.id));
       await tx.delete(mailboxes).where(eq(mailboxes.id, mailbox.id));
       if (mailbox.expiresAt === null) await recordAudit(tx, c, { action: 'address.delete', workspaceId: scope.workspaceId, target: { type: 'address', id: mailbox.id }, before: { address: mailbox.address, key: mailbox.key } });
