@@ -48,7 +48,7 @@ Install [`@nightmail/sdk`](https://www.npmjs.com/package/@nightmail/sdk) from np
 npm install @nightmail/sdk
 ```
 
-See the [SDK guide](sdk/README.md) for usage examples, or [connect an MCP client](mcp/README.md).
+See the [SDK guide](sdk/README.md) for usage examples, or [connect an MCP client](docs/mcp.md).
 
 ## CI and deployments
 

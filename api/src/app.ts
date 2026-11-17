@@ -5,7 +5,7 @@ import { allowMalformedSns } from './core.js';
 import { boundRequestBody } from './request-body.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
-import { mailboxRoute, memberRefused, receivingConsentRoute, ApiError, databaseCodeOf, databaseConflict, databaseUnavailable, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, newRequestId, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
+import { mailboxRoute, memberRefused, receivingConsentRoute, unrestrictedRoute, ApiError, databaseCodeOf, databaseConflict, databaseUnavailable, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, newRequestId, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
@@ -227,15 +227,12 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     }
     await next();
   });
-  // Audience records have no sender domain. Guard mutations as well: their responses can contain the saved record.
-  for (const area of ['contacts', 'lists', 'segments', 'contact-imports', 'audience-query']) app.use(`/v1/${area}/*`, (c, next) => {
-    if (c.get('actor').domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.');
-    return next();
-  });
-  // A sender-domain grant can edit untargeted drafts, not operate on a workspace audience.
-  // Check before idempotency: recorded launch responses also contain audience counts.
-  app.use('/v1/campaigns/:id/:action', (c, next) => {
-    if (c.get('actor').domains.length && !['state', 'preview', 'preview-image', 'archive'].includes(c.req.param('action'))) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Campaign audience and delivery operations require an unrestricted credential.');
+  // Audience records have no sender domain; guard mutations as well, since their responses can contain the saved record.
+  // A sender-domain grant can edit untargeted drafts, not operate on a workspace audience. Check before idempotency:
+  // recorded launch responses also contain audience counts. The MCP listing uses the same predicate (core.ts).
+  app.use('/v1/*', (c, next) => {
+    if (unrestrictedRoute(c.req.path) && c.get('actor')?.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', c.req.path.startsWith('/v1/campaigns/')
+      ? 'Campaign audience and delivery operations require an unrestricted credential.' : 'Workspace-wide operations require a key without domain restrictions.');
     return next();
   });
   // Path guards are shared with the MCP listing (core.ts). Mailbox paths check receiving consent after mailboxAuth.

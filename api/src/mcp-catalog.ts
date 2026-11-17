@@ -1,6 +1,6 @@
 import { Validator, type Schema } from '@cfworker/json-schema';
 import type { Tool } from '@modelcontextprotocol/server';
-import { mailboxRoute, ownerRoute, receivingConsentRoute, type App } from './core.js';
+import { agentTokenMintRoute, keyAdminRoute, lastingRoute, mailboxRoute, ownerRoute, receivingAdminRoute, receivingConsentRoute, unrestrictedRoute, type App } from './core.js';
 import { resourceInventory } from './mcp-resources.js';
 import { productName } from './brand.js';
 
@@ -24,14 +24,24 @@ export interface McpOperation {
   readonly untrustedContent?: boolean;
   readonly toolset: Toolset;
   /** The permission REST requires of a workspace credential (manage implies every permission;
-   *  any: no permission check, every authenticated actor). */
+   *  any: no permission check, every authenticated actor). On a mailbox path, mailboxAuth decides instead. */
   readonly permission: 'any' | 'read' | 'send' | 'manage';
   /** REST refuses workspace members (owner/admin areas and receiving administration). */
   readonly ownerOnly: boolean;
-  /** Under mailboxAuth: a workspace credential needs actorMailAccess (manage). */
+  /** Under mailboxAuth: a workspace credential needs the mail access workspaceMailAccess gives it there. */
   readonly mailbox: boolean;
   /** Under requireReceivingConsent: a grant needs explicit receiving consent. */
   readonly receivingConsent: boolean;
+  /** Refused to a credential limited to sender domains (UNRESTRICTED_KEY_REQUIRED). */
+  readonly unrestricted: boolean;
+  /** Key administration (keyAdminRoute): unrestricted manage, never a temporary agent token. */
+  readonly keyAdmin: boolean;
+  /** Minting an agent token (agentTokenMintRoute): an MCP approval only. */
+  readonly agentTokenMint: boolean;
+  /** Receiving configuration (receivingAdminRoute): receivingAdminRefusal decides, a change for a write. */
+  readonly receivingAdmin: boolean;
+  /** A change that outlives its credential (lastingRoute): never a temporary agent token's. */
+  readonly lasting: boolean;
   /** Only a signed-in dashboard session may call it; never listed to an MCP connection. */
   readonly dashboardOnly: boolean;
 }
@@ -165,8 +175,7 @@ function localSchema(spec: ObjectValue, root: Tool['inputSchema']): Tool['inputS
 }
 function validator(schema: Tool['inputSchema'] | NonNullable<Tool['outputSchema']>): (value: unknown) => boolean {
   const copy = structuredClone(schema) as Schema;
-  // Preserve the stdio server's validateFormats:false behavior. Advertise formats,
-  // but let the API enforce them: cfworker's URL/email formats are not Zod's.
+  // Advertise formats, but let the API enforce them: cfworker's URL/email formats are not Zod's.
   // Only visit schema positions, never properties named "format" or enum/const data.
   function annotations(value: Schema | boolean): void {
     if (!object(value)) return;
@@ -324,11 +333,13 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
       const receiving = ['routing', 'rituals', 'endpoints'].includes(toolset) || (toolset === 'admin' && tag.startsWith('Inbound ')) || tag === 'Inbound addresses' || name === 'createInboxConnection';
       const tool: Tool = { name, description: descriptionFor(name, operation), inputSchema: input, outputSchema, annotations: { readOnlyHint: !write, destructiveHint: write && (method === 'delete' || /^(?:delete|remove|revoke|cancel|disable|rotate|restore|apply|release)/.test(name)), idempotentHint: !write || method === 'put', openWorldHint: true } };
       freeze(tool);
-      // The path guards are REST's own predicates (core.ts); mailbox paths need manage of a workspace credential.
+      // The path guards are REST's own predicates (core.ts). On a mailbox path mailboxAuth, not a permission, decides.
       const mailbox = mailboxRoute(path);
-      const permission = ANY_AUTHENTICATED.has(name) ? 'any' : mailbox || MANAGE_LEVEL_READS.has(name) ? 'manage' : SEND_LEVEL.has(name) ? 'send' : READ_LEVEL_WRITES.has(name) ? 'read' : write ? 'manage' : 'read';
+      const permission = ANY_AUTHENTICATED.has(name) || mailbox ? 'any' : MANAGE_LEVEL_READS.has(name) ? 'manage' : SEND_LEVEL.has(name) ? 'send' : READ_LEVEL_WRITES.has(name) ? 'read' : write ? 'manage' : 'read';
       const ownerOnly = receiving || ownerRoute(method, path);
-      operations.set(name, Object.freeze({ tool, method, path, queryParameters, write, confirm, apiArgs, pollPage, toolset, receiving, inbound: receiving || toolset === 'inboxes', inbox: INBOX_PERMISSIONS[name], untrustedContent: UNTRUSTED_READS.has(name), permission, ownerOnly, mailbox, receivingConsent: receivingConsentRoute(path), dashboardOnly: DASHBOARD_ONLY.has(name), validate: validator(input), validateOutput }));
+      operations.set(name, Object.freeze({ tool, method, path, queryParameters, write, confirm, apiArgs, pollPage, toolset, receiving, inbound: receiving || toolset === 'inboxes', inbox: INBOX_PERMISSIONS[name], untrustedContent: UNTRUSTED_READS.has(name), permission, ownerOnly, mailbox,
+        receivingConsent: receivingConsentRoute(path), unrestricted: unrestrictedRoute(path), keyAdmin: keyAdminRoute(method, path), agentTokenMint: agentTokenMintRoute(method, path),
+        receivingAdmin: receivingAdminRoute(path), lasting: lastingRoute(method, path), dashboardOnly: DASHBOARD_ONLY.has(name), validate: validator(input), validateOutput }));
     }
   }
   // The sole non-REST primitive is a constrained long poll of the inbox message operation.

@@ -1,8 +1,7 @@
 /**
  * The product's public identity in one place: its name, the hosted origin, the addresses people write to, and the
  * names integrations see. The API, dashboard and support Worker import this file; `bun run sdk` (in api/) copies it
- * verbatim to sdk/src/brand.ts and mcp/src/brand.ts, so edit only api/src/brand.ts. It imports nothing, so every
- * package compiles it.
+ * verbatim to sdk/src/brand.ts, so edit only api/src/brand.ts. It imports nothing, so every package compiles it.
  *
  * Bane is becoming Nightmail (nightmail.com). Until that domain is live the hosted service stays on bane.mx: the
  * switch is `hostedDomain`, with bane.mx moving to `previousDomains` so it stays served. A name a customer may already
@@ -48,6 +47,8 @@ export const addresses = {
  * in, and the server name MCP client configs save. */
 export const sdkPackage = '@nightmail/sdk';
 export const apiKeyEnv = 'NIGHTMAIL_API_KEY';
+/** Where an agent's config reads a key limited to an inbox or addresses from. */
+export const inboxKeyEnv = 'NIGHTMAIL_INBOX_KEY';
 export const mcpServerName = 'nightmail';
 /** /health names the service by its slug. */
 export const healthService = productSlug;

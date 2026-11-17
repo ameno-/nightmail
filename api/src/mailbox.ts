@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
-import { actorMailAccess, mailboxRoute, receivingConsentRoute, ApiError, digest, errors, getSes, id, isoTime, json, KEY_CHANGE, lasting, lazyModule, log, ModuleLoadError, response, WEBHOOK_CHANGE, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { actorMailAccess, mailboxRoute, receivingConsentRoute, workspaceMailAccess, ApiError, digest, errors, getSes, id, isoTime, json, KEY_CHANGE, lasting, lazyModule, log, ModuleLoadError, response, WEBHOOK_CHANGE, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { authenticate, chargeCredential, checkBudget, delegatedInbox, requireReceivingConsent } from './auth.js';
 import { boundRequestBody } from './request-body.js';
 import { auditContext, auditInsert, recordAudit } from './audit.js';
@@ -65,15 +65,9 @@ async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
     return next();
   }
   return authenticate(c, async () => {
-    const actor = c.get('actor');
-    if (actor.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Use an address-scoped inbound key or an unrestricted live manage credential.');
-    // An unrestricted read API key can inspect endpoint metadata, not mail or delivery history.
-    if (!actor.permissions.includes('manage') && actor.credential === 'apiKey' && actor.permissions.includes('read') && c.req.method === 'GET' && /^\/v1\/inbound\/webhooks(?:\/[^/]+)?$/.test(c.req.path)) {
-      c.set('mailboxAccess', { keyId: actor.keyId, workspaceId: actor.workspaceId, admin: false, mailboxIds: null, permissions: [] });
-      return next();
-    }
-    const value = actorMailAccess(actor);
-    if (!value) throw new ApiError(403, 'ADMIN_REQUIRED', 'Inbound requires an address-scoped key or an unrestricted live manage credential.');
+    const value = workspaceMailAccess(c.get('actor'), c.req.method, c.req.path);
+    if (value === 'UNRESTRICTED_KEY_REQUIRED') throw new ApiError(403, value, 'Use an address-scoped inbound key or an unrestricted live manage credential.');
+    if (value === 'ADMIN_REQUIRED') throw new ApiError(403, value, 'Inbound requires an address-scoped key or an unrestricted live manage credential.');
     c.set('mailboxAccess', value);
     await next();
   });

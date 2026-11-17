@@ -345,14 +345,16 @@ async function regionalSend() {
 async function mcpChallenge() {
   const trace = ctx.getStore()!;
   const get = async <T>(url: URL) => { trace.last = `GET ${url.href}`; trace.requestId = null; const res = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(12000) }); trace.requestId = res.headers.get('x-request-id'); check(res.ok, `${url.pathname} returned ${res.status}`); return await res.json() as T; };
-  // /mcp accepts an access token from the account service (ES256 JWT), not the API's keys or agent tokens. OpenCode adds
-  // ?codemode=false to the URL; both ask for every Bane scope, since clients request what the challenge names.
+  // Without a credential, /mcp challenges for an access token from the account service (ES256 JWT). OpenCode adds
+  // ?codemode=false to the URL; both ask for every scope, since clients request what the challenge names. A workspace
+  // API key is a credential of its own there: it lists the key's tools, in the key's workspace (no workspaces tool).
   for (const [path, bearer] of [['/mcp', null], ['/mcp?codemode=false', null], ['/mcp', key]] as const) {
     trace.last = `POST ${path}${bearer ? ' (API key)' : ''}`; trace.requestId = null;
     const res = await fetch(new URL(path, base), { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(12000), headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) });
     trace.requestId = res.headers.get('x-request-id');
     const challenge = res.headers.get('www-authenticate') ?? '';
-    const rpc = await res.json() as { jsonrpc?: string; error?: { code: number } };
+    const rpc = await res.json() as { jsonrpc?: string; error?: { code: number }; result?: { tools?: { name: string }[] } };
+    if (bearer) { check(res.status === 200 && rpc.jsonrpc === '2.0' && !!rpc.result?.tools?.some(tool => tool.name === 'describe_tool') && !rpc.result.tools.some(tool => tool.name === 'workspaces'), 'MCP no longer lists an API key\'s tools'); continue; }
     check(res.status === 401 && rpc.jsonrpc === '2.0' && rpc.error?.code === -32000 && challenge.includes(`resource_metadata="${base.origin}/.well-known/oauth-protected-resource/mcp"`)
       && /scope="(nightmail|bane):read \1:send \1:manage"/.test(challenge), 'MCP OAuth discovery challenge changed');
   }

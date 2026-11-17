@@ -6,10 +6,11 @@ import { Alert, Button, Checkbox, Dialog, Field, Select, Tabs } from '../../comp
 import { CopyAction } from '../../components/motion'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApiQuery, usePublicOrigin, useSession, useWorkspaceAccess } from '../../data/context'
-import { requestedScopes } from '../../../../api/src/brand'
+import { inboxKeyEnv, requestedScopes } from '../../../../api/src/brand'
 import { request } from '../../data/live'
 import { errorText } from '../../data/types'
-import { mcpClientNames, mcpClients, mcpClientSteps, mcpServerUrl, mcpSnippet, type McpClient } from '../../../../api/src/mcp-clients'
+import { mcpClientNames, mcpClients, mcpClientSteps, mcpServerUrl, mcpSnippet, type McpAuth, type McpClient } from '../../../../api/src/mcp-clients'
+import { SecretField } from '../inbound/shared'
 import './developer.css'
 import { useSingleFlight } from '../../lib/single-flight'
 
@@ -33,8 +34,8 @@ export function useMcpUrl() { const origin = usePublicOrigin(); return origin ? 
 
 
 /** Client tabs, the snippet with its copy button and the steps after it. Every tab shares one cell, so the height holds. */
-export function McpClientSetup({ client, onClient, url, auth, label = 'MCP client' }: { client: McpClient; onClient: (client: McpClient) => void; url: string | null; auth: { bearer: string } | { scope?: string }; label?: string }) {
-  const kind = 'bearer' in auth ? 'key' : 'oauth'
+export function McpClientSetup({ client, onClient, url, auth, label = 'MCP client' }: { client: McpClient; onClient: (client: McpClient) => void; url: string | null; auth: McpAuth; label?: string }) {
+  const kind = 'key' in auth || 'bearer' in auth ? 'key' : 'oauth'
   if (!url) return <p className="muted developer-copy" role="status">Loading this installation’s address…</p>
   return <div className="stack">
     <Tabs label={label} value={client} onValueChange={value => onClient(value as McpClient)} items={clientTabs} />
@@ -45,10 +46,17 @@ export function McpClientSetup({ client, onClient, url, auth, label = 'MCP clien
           <pre className={snippet.startsWith('claude ') ? 'developer-code developer-code--wrap' : 'developer-code'} tabIndex={0} aria-label={`${mcpClientNames[value]} setup`}><code>{snippet}</code></pre>
           <CopyAction key={`${value}:${snippet.length}`} value={snippet} label={`Copy ${mcpClientNames[value]} setup`} variant="ghost" size="sm" compact className="developer-copy-icon developer-snippet__copy" />
         </div>
-        <ol className="developer-steps">{mcpClientSteps(value, kind).map(step => <li key={step}>{step}</li>)}</ol>
+        <ol className="developer-steps">{mcpClientSteps(value, auth).map(step => <li key={step}>{step}</li>)}</ol>
       </div>
     })}</div>
   </div>
+}
+
+/** A key shown once beside this (an API key of any access), set up for each MCP client: the configs read it from `env`,
+ *  so the key never sits in a file a project can commit (mcp-clients.ts). No second secret to mint. */
+export function McpKeySetup({ secret, env }: { secret: string; env: string }) {
+  const [client, setClient] = useState<McpClient>('opencode')
+  return <div className="stack"><strong className="connect-agent__title">Use it with an agent</strong><McpClientSetup client={client} onClient={setClient} url={useMcpUrl()} auth={{ key: secret, env }} label="Agent" /></div>
 }
 
 type Inbox = { id: string; address: string; name: string | null; status: string; type: 'ephemeral' | 'sandbox' }
@@ -56,14 +64,15 @@ type Connection = { id: string | null; config: object; nextStep: string; key: st
 
 /**
  * Connect an agent: as you over OAuth (it gets the access you approve in the browser, and you can narrow it to chosen
- * inboxes there), or to one agent inbox with an API key for that inbox that can't reach anything else. Opened from an
- * inbox, that inbox is chosen. Every open starts fresh.
+ * inboxes there), with a workspace API key (exactly that key's access, no browser), or to one agent inbox with an API
+ * key for that inbox that can't reach anything else. Opened from an inbox, that inbox is chosen. Every open starts
+ * fresh. `onCreateKey` opens Create key in place (the API keys page); elsewhere the option links there.
  */
-export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: boolean; onOpenChange: (open: boolean) => void; inboxId?: string }) {
+export function ConnectAgentDialog({ open, onOpenChange, inboxId, onCreateKey }: { open: boolean; onOpenChange: (open: boolean) => void; inboxId?: string; onCreateKey?: () => void }) {
   const { canAdminister } = useWorkspaceAccess()
   const url = useMcpUrl()
   const [client, setClient] = useState<McpClient>('opencode')
-  const [mode, setMode] = useState<'oauth' | 'key'>('oauth')
+  const [mode, setMode] = useState<'oauth' | 'apiKey' | 'key'>('oauth')
   const [access, setAccess] = useState<McpAccess>('read')
   const [inbox, setInbox] = useState('')
   const [reply, setReply] = useState(false)
@@ -94,13 +103,15 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
   const close = () => { if (!busy) onOpenChange(false) }
   // The options say what the agent gets; a client other than OpenCode asks for read, so its access shows Read only.
   return <Dialog open={open} onOpenChange={next => { if (!next) close() }} title="Connect an agent" className="connect-agent-dialog"
-    footer={mode === 'key' && !result ? <><Button disabled={busy} onClick={close}>Cancel</Button><Button variant="primary" loading={busy} disabled={!chosen} onClick={() => void create()}>Create API key</Button></> : <Button variant="primary" onClick={close}>Done</Button>}>
+    footer={mode === 'key' && !result ? <><Button disabled={busy} onClick={close}>Cancel</Button><Button variant="primary" loading={busy} disabled={!chosen} onClick={() => void create()}>Create API key</Button></>
+      : mode === 'apiKey' ? <><Button onClick={close}>Cancel</Button>{onCreateKey ? <Button variant="primary" onClick={() => { onOpenChange(false); onCreateKey() }}>Create API key</Button>
+        : <Link className="ui-button ui-button--primary ui-button--md" to="/api-keys?create=read_send" onClick={close}>Create API key</Link>}</> : <Button variant="primary" onClick={close}>Done</Button>}>
     <div className="stack">
       {!result && <>
         <Field label="What it can reach">
-          <Select value={mode} onValueChange={value => { setMode(value as typeof mode); setError('') }} options={[{ value: 'oauth', label: 'Sign in as me' }, ...(canAdminister ? [{ value: 'key', label: 'One agent inbox, with its own key' }] : [])]} />
+          <Select value={mode} onValueChange={value => { setMode(value as typeof mode); setError('') }} options={[{ value: 'oauth', label: 'Sign in as me' }, ...(canAdminister ? [{ value: 'apiKey', label: 'This workspace, with an API key' }, { value: 'key', label: 'One agent inbox, with its own key' }] : [])]} />
         </Field>
-        {mode === 'oauth' ? <Field label="Access it asks for">
+        {mode === 'apiKey' ? null : mode === 'oauth' ? <Field label="Access it asks for">
           <Select value={client === 'opencode' ? access : 'read'} onValueChange={value => setAccess(value as McpAccess)} disabled={client !== 'opencode'} options={mcpAccess.map(({ value, label }) => ({ value, label }))} />
         </Field> : <>
           {inboxes.isPending || active.length ? <Field label="Inbox">
@@ -111,9 +122,10 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
           <Field label="MCP client"><Select value={client} onValueChange={value => setClient(value as McpClient)} options={clientTabs} /></Field>
         </>}
       </>}
-      {result && <Alert tone="success" title="API key created">Copy the setup now: the key is shown only once.</Alert>}
+      {result && <Alert tone="success" title="API key created">Copy the key now: it’s shown only once.</Alert>}
       {error && <Alert tone="danger">{error}</Alert>}
-      {(mode === 'oauth' || result) && <McpClientSetup client={client} onClient={setClient} url={url} auth={result?.key ? { bearer: result.key } : { scope }} />}
+      {result?.key && <SecretField label="API key" value={result.key} copyLabel="Copy API key" />}
+      {(mode === 'oauth' || result) && <McpClientSetup client={client} onClient={setClient} url={url} auth={result?.key ? { key: result.key, env: inboxKeyEnv } : { scope }} />}
     </div>
   </Dialog>
 }
