@@ -13441,9 +13441,20 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         zone.set(`reply.${split.name}`, { mx: [ses, '10 mx.backup.example.'] });
         await recheck(split); let d = await read(split);
         assert.equal(d.receiving, 'verified', 'Additional MX records are not proof that the verified record disappeared.');
-        assert.equal(d.receivingIssue.code, 'split'); assert.match(d.receivingIssue.message, /same or a better priority than Amazon SES, so mail for reply\..* is split/);
+        assert.equal(d.receivingIssue.code, 'split'); assert.match(d.receivingIssue.message, /same priority as Amazon SES, so mail for reply\..* is split between them\. Remove the other MX records\./);
         zone.set(`reply.${split.name}`, { mx: [ses, '20 mx.backup.example.'] });
-        await recheck(split); d = await read(split); assert.equal(d.receivingIssue.code, 'split'); assert.match(d.receivingIssue.message, /as a backup/);
+        await recheck(split); d = await read(split); assert.equal(d.receivingIssue.code, 'split');
+        assert.match(d.receivingIssue.message, /^MX lists Amazon SES ahead of mx\.backup\.example, so mx\.backup\.example is now the backup: /);
+        // Staged behind another provider (theirs ahead of ours): not split, nothing to fix, and removing theirs finishes the move.
+        zone.set(`reply.${split.name}`, { mx: ['5 mx.backup.example.', ses] });
+        await recheck(split); d = await read(split);
+        assert.deepEqual([d.receivingIssue.code, d.receivingIssue.blocking, d.receivingIssue.provider], ['backup', false, 'mx.backup.example']);
+        assert.match(d.receivingIssue.message, /^MX lists mx\.backup\.example ahead of Amazon SES, so mail for reply\..* goes there first and reaches Amazon SES only when it fails over\. Removing mx\.backup\.example’s MX records completes the move\.$/);
+        assert.doesNotMatch(d.receivingIssue.message, /is split|Remove the other/);
+        const staged = await claim(`${unique('rx-staged')}.example`);
+        zone.set(`inbound.${staged.name}`, { mx: ['5 mx.backup.example.', ses] });
+        assert.match(error(await choose(staged, `inbound.${staged.name}`), 409, 'RECEIVING_HOST_IN_USE').message, /^Move mail for inbound\..*\? MX lists mx\.backup\.example ahead of Amazon SES/, 'Taking over a host with a foreign MX still asks first.');
+        assert.equal(ok(await choose(staged, `inbound.${staged.name}`, true)).receivingIssue.code, 'backup');
         zone.set(`reply.${split.name}`, { mx: [ses] }); await recheck(split); assert.equal((await read(split)).receivingIssue, null);
 
         const wild = await claim(`${unique('rx-wildcard')}.example`);
@@ -13612,12 +13623,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(inbox.name, `inbox.${name}`);
 
         // Nightmail's MX goes on the root at a lower priority first, beside the provider's (backup-MX staging): it receives
-        // whatever mail reaches it, and says how the mail is split.
+        // whatever fails over to it, and says the provider still gets mail first.
         zone.set(name, { mx: ['5 mx.other.example.', ses] });
         await recheck(d);
         assert.deepEqual(await states(), { [`reply.${name}`]: 'active', [name]: 'mixed', [`inbox.${name}`]: 'active' });
         const mixed = (await hosts()).find(h => h.name === name)!;
-        assert.deepEqual([mixed.issue.code, mixed.mx.state], ['split', 'mixed']);
+        assert.deepEqual([mixed.issue.code, mixed.mx.state], ['backup', 'mixed']);
         const domain = await read(d);
         assert.deepEqual(domain.dns.filter((r: Json) => r.purpose === 'receiving').map((r: Json) => [r.name, r.status]), [[`reply.${name}`, 'verified'], [name, 'verified'], [`inbox.${name}`, 'verified']]);
         assert.equal(domain.receiving, 'verified');

@@ -1482,9 +1482,9 @@ export type DomainReadiness = {
      */
     receivingIssue?: {
         /**
-         * cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Nightmail’s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. claimed: another workspace claimed it, or a name between it and this domain, in any scope. delegated: it is a delegated zone with its own NS records. claimed and delegated hosts never receive here. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail. proof_stale / identity_stale: the ownership TXT proof or the SES verification is out of date.
+         * cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: another provider’s MX shares its mail (same priority, or a backup behind ours). backup: another provider’s MX is ahead of ours, so this host only gets mail that fails over (a move in progress); removing that MX completes it. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Nightmail’s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. claimed: another workspace claimed it, or a name between it and this domain, in any scope. delegated: it is a delegated zone with its own NS records. claimed and delegated hosts never receive here. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail. proof_stale / identity_stale: the ownership TXT proof or the SES verification is out of date.
          */
-        code: 'cname' | 'foreign_mx' | 'split' | 'wildcard' | 'bane_record' | 'host_taken' | 'claimed' | 'delegated' | 'mx_missing' | 'wrong_region' | 'null_mx' | 'proof_stale' | 'identity_stale';
+        code: 'cname' | 'foreign_mx' | 'split' | 'backup' | 'wildcard' | 'bane_record' | 'host_taken' | 'claimed' | 'delegated' | 'mx_missing' | 'wrong_region' | 'null_mx' | 'proof_stale' | 'identity_stale';
         host: string;
         /**
          * True when receiving there cannot work until DNS or the choice changes.
@@ -3184,9 +3184,9 @@ export type InboundHost = {
  */
 export type ReceivingIssue = {
     /**
-     * cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Nightmail’s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. claimed: another workspace claimed it, or a name between it and this domain, in any scope. delegated: it is a delegated zone with its own NS records. claimed and delegated hosts never receive here. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail. proof_stale / identity_stale: the ownership TXT proof or the SES verification is out of date.
+     * cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: another provider’s MX shares its mail (same priority, or a backup behind ours). backup: another provider’s MX is ahead of ours, so this host only gets mail that fails over (a move in progress); removing that MX completes it. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Nightmail’s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. claimed: another workspace claimed it, or a name between it and this domain, in any scope. delegated: it is a delegated zone with its own NS records. claimed and delegated hosts never receive here. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail. proof_stale / identity_stale: the ownership TXT proof or the SES verification is out of date.
      */
-    code: 'cname' | 'foreign_mx' | 'split' | 'wildcard' | 'bane_record' | 'host_taken' | 'claimed' | 'delegated' | 'mx_missing' | 'wrong_region' | 'null_mx' | 'proof_stale' | 'identity_stale';
+    code: 'cname' | 'foreign_mx' | 'split' | 'backup' | 'wildcard' | 'bane_record' | 'host_taken' | 'claimed' | 'delegated' | 'mx_missing' | 'wrong_region' | 'null_mx' | 'proof_stale' | 'identity_stale';
     host: string;
     /**
      * True when receiving there cannot work until DNS or the choice changes.

@@ -92,7 +92,7 @@ async function addHosted(c: Ctx, wid: string, row: HostedDomain, input: AddInput
   if (issue?.code === 'host_taken') throw new ApiError(409, 'RECEIVING_HOST_TAKEN', issue.message, 'name');
   if (issue?.code === 'claimed') throw new ApiError(409, 'RECEIVING_HOST_CLAIMED', issue.message, 'name');
   if (issue?.code === 'delegated') throw new ApiError(409, 'RECEIVING_HOST_DELEGATED', issue.message, 'name');
-  if (issue && ['foreign_mx', 'split', 'wrong_region', 'null_mx'].includes(issue.code) && !input.confirm)
+  if (issue && ['foreign_mx', 'split', 'backup', 'wrong_region', 'null_mx'].includes(issue.code) && !input.confirm)
     throw new ApiError(409, 'RECEIVING_HOST_IN_USE', `Move mail for ${host}? ${issue.message} Send confirm: true to choose it anyway.`, 'name');
   const saved = await c.env.db.transaction(async db => {
     // The claim first, then its hosts: the order every receiving write takes. DNS was read before; the write is fenced on the token.

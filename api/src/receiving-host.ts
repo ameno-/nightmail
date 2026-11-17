@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import type { DbExecutor } from './core.js';
 import type { MxReport } from './db/mailbox.js';
-import { checkMx, delegatedZone } from './mailbox-dns.js';
+import { checkMx, delegatedZone, mxShare } from './mailbox-dns.js';
 import { isProofRecord, type IdentityFacts } from './states.js';
 import { productName } from './brand.js';
 
@@ -13,7 +13,7 @@ import { productName } from './brand.js';
 export const receivingLabels = ['reply', 'inbound', 'mail', 'inbox', 'incoming', 'replies'] as const;
 export const receivingCandidates = (domain: string) => receivingLabels.map(label => `${label}.${domain}`);
 
-export type ReceivingIssueCode = 'cname' | 'foreign_mx' | 'split' | 'wildcard' | 'bane_record' | 'host_taken' | 'claimed' | 'delegated' | 'mx_missing' | 'wrong_region' | 'null_mx';
+export type ReceivingIssueCode = 'cname' | 'foreign_mx' | 'split' | 'backup' | 'wildcard' | 'bane_record' | 'host_taken' | 'claimed' | 'delegated' | 'mx_missing' | 'wrong_region' | 'null_mx';
 /** Why receiving at `host` needs the owner's attention. `blocking` issues can't work until DNS changes. */
 export type ReceivingIssue = { code: ReceivingIssueCode; host: string; blocking: boolean; message: string; provider?: string | null; target?: string | null; suggestion?: string | null };
 export type ReceivingObservation = { mx: MxReport; note?: string; issue: ReceivingIssue | null };
@@ -48,7 +48,8 @@ export function issueFor(host: string, mx: MxReport, suggestion: string | null, 
     case 'cname': return { code: 'cname', host, blocking: true, target: mx.target ?? null, suggestion, message: `${host} is a CNAME${mx.target ? ` to ${mx.target}` : ''}, so it can’t also have an MX record (RFC 1034).${instead}` };
     case 'conflict': return { code: 'foreign_mx', host, blocking: false, provider: providerOf(mx), suggestion,
       message: `${providerOf(mx) ?? 'Another mail server'} receives mail for ${host}${mx.split ? ` through ${mx.records.length} MX records` : ''}. Publishing ${productName}’s MX there moves that mail to ${productName}; remove the other MX records only if that’s what you want.${instead}` };
-    case 'mixed': return { code: 'split', host, blocking: false, provider: providerOf(mx), suggestion: null, message: mx.message };
+    // A host staged behind another provider (theirs ahead of ours) only gets failover mail: `backup`, not `split`.
+    case 'mixed': return { code: mxShare(mx) === 'backup' ? 'backup' : 'split', host, blocking: false, provider: providerOf(mx), suggestion: null, message: mx.message };
     case 'wrong_region': return { code: 'wrong_region', host, blocking: false, suggestion: null, message: mx.message };
     case 'null_mx': return { code: 'null_mx', host, blocking: false, suggestion, message: `${host} publishes a null MX, which tells senders it accepts no mail.${instead || ` Replace it with ${mx.expected.value}.`}` };
     case 'missing': return established ? { code: 'mx_missing', host, blocking: false, suggestion: null, message: `The MX record on ${host} is gone, so mail to it isn’t reaching ${productName}. Publish it again: ${mx.expected.value}, priority ${mx.expected.priority}.` } : null;
