@@ -187,6 +187,7 @@ const throttle = { offline: false, latency: 150, downloadThroughput: 1.6 * 1024 
 // webhook on a phone, 2 of 3 dev runs on Nov 12). CLS_FONTS=late measures that swap instead: every font arrives 1.8 s
 // late, after the slowest API response, so text first paints in its local fallback (tokens.css).
 const lateFonts = process.env.CLS_FONTS === 'late', FONT_DELAY_MS = 1800;
+const chromeThrottle = process.env.CLS_THROTTLE === 'chrome'; // DIAG A/B
 const density = process.env.CLS_DENSITY ? await import('./density.mjs') : null, densityOnly = process.env.CLS_DENSITY === 'only';
 
 // Runs in the page before its own scripts.
@@ -354,7 +355,8 @@ async function measure(browser, job, fx) {
     const cdp = await context.newCDPSession(page);
     await cdp.send('Network.enable');
     if (lateFonts) await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
-    await cdp.send('Network.emulateNetworkConditionsByRule', {
+    await context.setExtraHTTPHeaders({ 'x-cls-page': String(job.index) });
+    if (chromeThrottle) await cdp.send('Network.emulateNetworkConditionsByRule', {
       offline: false,
       matchedNetworkConditions: [
         ...(lateFonts ? [] : [{ urlPattern: `${origin}/fonts/*`, offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }]),
@@ -371,7 +373,7 @@ async function measure(browser, job, fx) {
     await page.goto(origin + (job.mode === 'in-app' ? job.from : job.path), { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(async error => {
       const state = await Promise.race([cdp.send('Runtime.evaluate', { expression: 'JSON.stringify({rs: document.readyState, url: location.href, now: Math.round(performance.now()), scripts: performance.getEntriesByType("resource").length})', returnByValue: true }).then(r => r.result.value, e => `eval error ${e.message}`), new Promise(r => setTimeout(() => r('eval timed out'), 5000))]);
       const { loadavg } = await import('node:os');
-      throw new Error(`${error.message.split('\n')[0]} DIAG ${JSON.stringify({ load: loadavg().map(n => n.toFixed(1)), state, sinceGoto: Date.now() - gotoAt, proxy: fx.proxyPending().filter(x => x.startsWith(origin.split(':').pop()) && !x.includes('/v1/')).slice(0, 40), agent: fx.agentState(), requests: [...diag.values()].map(d => `${d.url} ${d.type} ${d.st}`) })} PW ${net.pending().join(',')}`);
+      throw new Error(`${error.message.split('\n')[0]} DIAG ${JSON.stringify({ load: loadavg().map(n => n.toFixed(1)), state, sinceGoto: Date.now() - gotoAt, pageLog: fx.pageLog(String(job.index)), proxy: fx.proxyPending().filter(x => x.startsWith(origin.split(':').pop()) && !x.includes('/v1/')).slice(0, 40), agent: fx.agentState(), requests: [...diag.values()].map(d => `${d.url} ${d.type} ${d.st}`) })} PW ${net.pending().join(',')}`);
     });
     // With late fonts, the fallbacks only keep text still if this machine has one of their local fonts (tokens.css).
     const missing = !lateFonts ? [] : await page.evaluate(() => Promise.all([...document.fonts].filter(f => f.family.includes('Fallback')).map(f => f.load().then(() => null, () => `${f.family} ${f.weight} ${f.unicodeRange}`))));
@@ -506,9 +508,10 @@ function summarize(results, seconds) {
 
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
-const browserPromise = chromium.launch(process.env.CLS_CHROME ? { executablePath: process.env.CLS_CHROME } : { channel: 'chrome' });
+// No request leaves the machine: every host but the fixture's fails to resolve.
+const browserPromise = chromium.launch({ ...process.env.CLS_CHROME ? { executablePath: process.env.CLS_CHROME } : { channel: 'chrome' }, args: ['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1'] });
 browserPromise.catch(() => {});
-const fx = await start(repo, { servers: Math.min(2, Math.ceil(workers / 8)), delay: densityOnly ? null : apiDelay, fontDelay: lateFonts ? FONT_DELAY_MS : 0, log: message => console.log(`${elapsed()} ${message}`) }).catch(async error => {
+const fx = await start(repo, { servers: Math.min(2, Math.ceil(workers / 8)), delay: densityOnly ? null : apiDelay, fontDelay: lateFonts ? FONT_DELAY_MS : 0, throttle: densityOnly || chromeThrottle ? null : { latency: throttle.latency, bytesPerSecond: throttle.downloadThroughput }, log: message => console.log(`${elapsed()} ${message}`) }).catch(async error => {
   await browserPromise.then(b => b.close(), () => {});
   throw error;
 });
