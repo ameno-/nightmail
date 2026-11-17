@@ -210,6 +210,24 @@ export type ApiKeyAccess = {
     mail: Array<'read' | 'send' | 'modify' | 'create'>;
 };
 
+/**
+ * Set when this is tied to an MCP approval: created, or for a webhook set up or changed, over MCP with a person’s sign-in or with a key that is tied. It works only while that approval is active. Null: it lasts, not tied to any approval.
+ */
+export type ApprovalTie = {
+    /**
+     * The agent sign-in (mcp_…) it is tied to, as listAgents lists it.
+     */
+    id: string;
+    /**
+     * When the approval ends unless its agent connects again: each new sign-in token moves it later. It also ends when it is revoked.
+     */
+    endsAt: string;
+    /**
+     * False once the approval has ended, lost the manage scope, or its person is no longer an owner or admin here: a key is refused and a webhook is not delivered to until it is active again.
+     */
+    active: boolean;
+} | null;
+
 export type ApiKey = {
     id: string;
     name: string;
@@ -227,6 +245,7 @@ export type ApiKey = {
      * When a key limited to an expiring inbox stops working (the inbox's deletion time). Null otherwise.
      */
     expiresAt: string | null;
+    approval: ApprovalTie;
 };
 
 export type CreateApiKey = {
@@ -1560,6 +1579,7 @@ export type Webhook = {
     }>;
     createdAt: string;
     updatedAt: string;
+    approval: ApprovalTie;
 };
 
 export type CreatedWebhook = Webhook & {
@@ -1567,6 +1587,10 @@ export type CreatedWebhook = Webhook & {
      * The signing secret, whsec_ followed by 32 base64 bytes. Read it again with revealWebhookSecret.
      */
     secret: string;
+    /**
+     * Only for a webhook tied to an MCP approval: what it depends on and how to make a lasting one.
+     */
+    nextStep?: string;
 };
 
 export type CreateWebhook = {
@@ -4038,6 +4062,10 @@ export type InboundWebhookSecret = InboundWebhook & {
      * inbound format: the X-Webhook-Verification-Token value.
      */
     verificationToken?: string;
+    /**
+     * Only for a webhook tied to an MCP approval: what it depends on and how to make a lasting one.
+     */
+    nextStep?: string;
 };
 
 export type InboundWebhook = {
@@ -4060,6 +4088,7 @@ export type InboundWebhook = {
     createdAt: string;
     updatedAt: string;
     addressIds: Array<string> | null;
+    approval: ApprovalTie;
     /**
      * Its endpoint name: rituals call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names.
      */
@@ -6720,6 +6749,10 @@ export type CreateApiKeyResponses = {
      */
     201: ApiKey & {
         secret: string;
+        /**
+         * Only for a key tied to an MCP approval: what it depends on and how to make a lasting one.
+         */
+        nextStep?: string;
     };
 };
 

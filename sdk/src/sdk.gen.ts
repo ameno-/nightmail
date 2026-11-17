@@ -236,7 +236,7 @@ export const listApiKeys = <ThrowOnError extends boolean = false>(options?: Opti
 });
 
 /**
- * One key type with permissions. By default a workspace key (permissions, optional sender domains). With access, a key limited to receiving addresses or to one agent inbox (bearer nm_mbx_…): it reads and, with send, replies only there, and never reaches the rest of the workspace. The secret is returned once.
+ * One key type with permissions. By default a workspace key (permissions, optional sender domains). With access, a key limited to receiving addresses or to one agent inbox (bearer nm_mbx_…): it reads and, with send, replies only there, and never reaches the rest of the workspace. The secret is returned once. A key created over MCP, or with a key that was, is tied to that approval: approval and nextStep in the result say until when.
  */
 export const createApiKey = <ThrowOnError extends boolean = false>(options: Options<CreateApiKeyData, ThrowOnError>): RequestResult<CreateApiKeyResponses, CreateApiKeyErrors, ThrowOnError> => (options.client ?? client).post<CreateApiKeyResponses, CreateApiKeyErrors, ThrowOnError>({
     security: [
@@ -2192,7 +2192,7 @@ export const listWebhooks = <ThrowOnError extends boolean = false>(options?: Opt
 });
 
 /**
- * Create an endpoint for email events. The response includes the signing secret (whsec_…) used for the Webhook-Signature header; store it on your server. Deliveries follow Standard Webhooks: Webhook-Signature is v1,<base64 HMAC-SHA256 of "{Webhook-Id}.{Webhook-Timestamp}.{raw body}"> keyed with the base64 bytes after whsec_.
+ * Create an endpoint for email events. The response includes the signing secret (whsec_…) used for the Webhook-Signature header; store it on your server. Deliveries follow Standard Webhooks: Webhook-Signature is v1,<base64 HMAC-SHA256 of "{Webhook-Id}.{Webhook-Timestamp}.{raw body}"> keyed with the base64 bytes after whsec_. Set up over MCP, or with a key that was, it is tied to that approval: approval and nextStep in the result say until when.
  */
 export const createWebhook = <ThrowOnError extends boolean = false>(options: Options<CreateWebhookData, ThrowOnError>): RequestResult<CreateWebhookResponses, CreateWebhookErrors, ThrowOnError> => (options.client ?? client).post<CreateWebhookResponses, CreateWebhookErrors, ThrowOnError>({
     security: [
@@ -4976,7 +4976,7 @@ export const listInboundWebhooks = <ThrowOnError extends boolean = false>(option
 /**
  * Subscribe to inbound events
  *
- * Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret, and for the inbound format its verification token, are returned once. A webhook with a key is also a named endpoint (listEndpoints).
+ * Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret, and for the inbound format its verification token, are returned once. A webhook with a key is also a named endpoint (listEndpoints). Set up over MCP, or with a key that was, it is tied to that approval: approval and nextStep in the result say until when.
  */
 export const createInboundWebhook = <ThrowOnError extends boolean = false>(options: Options<CreateInboundWebhookData, ThrowOnError>): RequestResult<CreateInboundWebhookResponses, CreateInboundWebhookErrors, ThrowOnError> => (options.client ?? client).post<CreateInboundWebhookResponses, CreateInboundWebhookErrors, ThrowOnError>({
     security: [

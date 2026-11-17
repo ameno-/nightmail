@@ -8,6 +8,7 @@ import { mailboxKeys } from './db/mailbox.js';
 import { auditContext, auditInsert, recordAudit } from './audit.js';
 import { secretPrefixes, shownPrefix } from './brand.js';
 import { idempotencyGate, validIdempotencyKey } from './idempotency.js';
+import { approvalField, approvalTie, approvalTies, tiedNextStep } from './approval-ties.js';
 
 // A private symbol carries server-authorized identity through request-cloning middleware.
 // HTTP headers/cookies cannot supply it, and every internal dispatch gets a fresh runtime.
@@ -185,6 +186,7 @@ const KeySchema = z.object({ id: z.string(), name: z.string(),
   permissions: z.array(z.enum(['read', 'send', 'manage'])).describe('Workspace permissions. Empty for a key limited to addresses or an inbox: see access.'),
   domains: z.array(z.string()), prefix: z.string(), createdAt: z.string(), lastUsedAt: z.string().nullable(), revokedAt: z.string().nullable(),
   access: KeyAccess, expiresAt: z.string().nullable().describe('When a key limited to an expiring inbox stops working (the inbox\'s deletion time). Null otherwise.'),
+  approval: approvalField,
 }).openapi('ApiKey');
 export const AgentTokenRecord = z.object({ id: z.string(), grantId: z.string(), permissions: z.array(z.enum(['read', 'send', 'manage'])), domains: z.array(z.string()), purpose: z.string(), expiresAt: z.string(), createdAt: z.string(), lastUsedAt: z.string().nullable(), revokedAt: z.string().nullable() }).openapi('AgentTokenRecord');
 const KeyAccessInput = z.discriminatedUnion('type', [
@@ -247,14 +249,19 @@ export function registerAuth(app: App) {
     return c.json({ id: row.id, revoked: true as const }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/api-keys', operationId: 'createApiKey', tags: ['ApiKeys'], security,
-    description: 'One key type with permissions. By default a workspace key (permissions, optional sender domains). With access, a key limited to receiving addresses or to one agent inbox (bearer nm_mbx_…): it reads and, with send, replies only there, and never reaches the rest of the workspace. The secret is returned once.',
-    request: { body: json(KeyInput) }, responses: { 201: response(KeySchema.extend({ secret: z.string() })), ...errors } }), async c => {
+    description: 'One key type with permissions. By default a workspace key (permissions, optional sender domains). With access, a key limited to receiving addresses or to one agent inbox (bearer nm_mbx_…): it reads and, with send, replies only there, and never reaches the rest of the workspace. The secret is returned once. A key created over MCP, or with a key that was, is tied to that approval: approval and nextStep in the result say until when.',
+    request: { body: json(KeyInput) }, responses: { 201: response(KeySchema.extend({ secret: z.string(), nextStep: z.string().optional().describe('Only for a key tied to an MCP approval: what it depends on and how to make a lasting one.') })), ...errors } }), async c => {
     const auth = manageKeys(c); const input = c.req.valid('json'), access = input.access ?? { type: 'workspace' as const };
+    // Read after the key's transaction commits: the tie it recorded, with the approval's current end.
+    const tied = async (keyId: string) => {
+      const approval = auth.grantId ? await approvalTie(c.env, auth.workspaceId, ['api_key', 'key'], keyId) : null;
+      return approval ? { approval, nextStep: tiedNextStep('key', approval) } : { approval };
+    };
     if (access.type !== 'workspace') {
       if (input.permissions || input.domains?.length) throw new ApiError(422, 'VALIDATION_FAILED', 'A key for addresses or an inbox takes its permissions in access.mail and has no sender domains.', input.permissions ? 'permissions' : 'domains');
       const { createLimitedKey, limitedKeyView } = await addressKeys();
       const { row, secret } = await createLimitedKey(c, auth.workspaceId, input.name, access, { addresses: 'access.addressIds', inbox: 'access.inboxId', mail: 'access.mail' });
-      return c.json({ ...limitedKeyView(row), secret }, 201);
+      return c.json({ ...limitedKeyView(row), ...await tied(row.id), secret }, 201);
     }
     const permissions = input.permissions ?? ['send'], domains = input.domains ?? [];
     const secret = randomSecret(secretPrefixes.apiKey);
@@ -266,7 +273,7 @@ export function registerAuth(app: App) {
         after: { name: input.name, permissions, domains, prefix: rows[0]!.prefix.slice(0, 9), mcpGrant: auth.grantId ?? undefined } });
       return rows;
     });
-    return c.json({ ...keyView(key!), secret }, 201);
+    return c.json({ ...keyView(key!), ...await tied(key!.id), secret }, 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/api-keys', operationId: 'listApiKeys', tags: ['ApiKeys'], security, description: 'Every API key in the workspace, ordered by ID: workspace keys and keys limited to addresses or an inbox. includeRevoked=false also leaves out keys whose inbox was deleted or whose lease ended.',
     request: { query: PageQuery.extend({ includeRevoked: z.enum(['true', 'false']).default('true') }) }, responses: { 200: response(page(KeySchema)), ...errors } }), async c => {
@@ -279,9 +286,11 @@ export function registerAuth(app: App) {
         UNION ALL SELECT id, name, prefix, '[]'::jsonb, '[]'::jsonb, created_at::text, last_used_at::text, revoked_at::text, expires_at::text, mailbox_ids, inbox_id, permissions, true
           FROM mailbox_keys WHERE workspace_id = ${w} ${active ? sql`AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())` : sql``} ${after}) k
       ORDER BY id LIMIT ${q.limit + 1}`);
-    const data = rows.slice(0, q.limit).map(r => ({ id: r.id, name: r.name, permissions: r.permissions, domains: r.domains, prefix: r.prefix,
+    const shown = rows.slice(0, q.limit), ties = await approvalTies(c.env, w, ['api_key', 'key'], shown.map(r => r.id));
+    const data = shown.map(r => ({ id: r.id, name: r.name, permissions: r.permissions, domains: r.domains, prefix: r.prefix,
       createdAt: isoTime(r.created_at)!, lastUsedAt: isoTime(r.last_used_at), revokedAt: isoTime(r.revoked_at), expiresAt: isoTime(r.expires_at),
-      access: r.limited ? { type: r.inbox_id ? 'inbox' as const : 'addresses' as const, addressIds: r.address_ids, inboxId: r.inbox_id, mail: r.mail } : workspaceAccess }));
+      access: r.limited ? { type: r.inbox_id ? 'inbox' as const : 'addresses' as const, addressIds: r.address_ids, inboxId: r.inbox_id, mail: r.mail } : workspaceAccess,
+      approval: ties.get(r.id) ?? null }));
     return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/api-keys/{id}/revoke', operationId: 'revokeApiKey', tags: ['ApiKeys'], security, description: 'Revokes any API key, including one limited to addresses or an inbox. Requests with it fail at once, and mail it queued is not sent.',

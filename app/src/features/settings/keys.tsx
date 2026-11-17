@@ -3,13 +3,13 @@ import { useSearchParams } from 'react-router'
 import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, PageHeader, Pagination, Tabs, useToast, SecretDialog } from '../../components/ui'
 import { useApiMutation, useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
-import type { Agent, AgentTokenSummary, ApiKey, AppPassword } from '../../data/types'
+import type { Agent, AgentTokenSummary, ApiKey, AppPassword, ApprovalTie } from '../../data/types'
 import { date, shortDateTime } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { AdminOnlyPage } from './admin-only'
 import { KeySendExample } from '../docs/first-send'
 import { CreateKeyDialog, type CreatedSecret, type Purpose } from './create-key'
-import { accessLabel, agentAccess, connectionTitle, domainScope, mailLabel, protocolLabel } from './key-labels'
+import { accessLabel, agentAccess, approvalLabel, connectionTitle, domainScope, mailLabel, protocolLabel } from './key-labels'
 import { keyTypes, settingsColumns, type KeyTypeFilter } from './skeletons'
 import { KeysGuide } from './keys-guide'
 import './api-keys.css'
@@ -135,10 +135,12 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
     if (row.kind === 'token') return expiry(row.token)
     return `Created ${date(row.password.createdAt)}`
   }
+  // A key created over MCP works only while that agent's approval is active.
+  const tiedTo = (tie: ApprovalTie) => { const agent = agents.data?.find(item => item.id === tie.id); return agent ? `${connectionTitle(agent)} · ${approvalLabel(tie)}` : approvalLabel(tie) }
   // Everything a row shows, in full: the table and the phone's cards clip long names, scopes and address lists.
   const details = (row: Row): [string, ReactNode][] => {
     const { first, second } = access(row)
-    if (row.kind === 'key') return [['Type', typeName.key], ['Access', first], [row.key.access.type === 'workspace' ? 'Domains' : 'Mail', second], ['Key prefix', <code>{row.key.prefix}</code>], ['Created', date(row.key.createdAt)], ...(row.key.expiresAt ? [[past(row.key.expiresAt) ? 'Ended' : 'Ends', date(row.key.expiresAt)] as [string, ReactNode]] : []), ['Last used', lastUsed(row.key.lastUsedAt)], ...(row.key.revokedAt ? [['Revoked', date(row.key.revokedAt)] as [string, ReactNode]] : [])]
+    if (row.kind === 'key') return [['Type', typeName.key], ['Access', first], [row.key.access.type === 'workspace' ? 'Domains' : 'Mail', second], ['Key prefix', <code>{row.key.prefix}</code>], ['Created', date(row.key.createdAt)], ...(row.key.expiresAt ? [[past(row.key.expiresAt) ? 'Ended' : 'Ends', date(row.key.expiresAt)] as [string, ReactNode]] : []), ['Last used', lastUsed(row.key.lastUsedAt)], ...(row.key.approval ? [['Agent approval', tiedTo(row.key.approval)] as [string, ReactNode]] : []), ...(row.key.revokedAt ? [['Revoked', date(row.key.revokedAt)] as [string, ReactNode]] : [])]
     if (row.kind === 'agent') return [['Type', typeName.agent], ['Access', first], ['Client', row.agent.clientId], ['Account', row.agent.own ? 'You' : <PrivateAddress value={row.agent.userEmail} />], ['Signed in', date(row.agent.createdAt)], ['Last used', lastUsed(row.agent.lastUsedAt)], ['Status', agentState(row.agent) ?? 'Active']]
     if (row.kind === 'token') return [['Type', typeName.token], ['Access', first], ['Domains', second], ['Expires', tokenState(row.token) ?? `${shortDateTime(row.token.expiresAt)} UTC`], ['Last used', lastUsed(row.token.lastUsedAt)]]
     return [['Type', typeName.app], ['Access', first], ['Inbox', second], ['Created', date(row.password.createdAt)]]

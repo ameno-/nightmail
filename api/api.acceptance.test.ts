@@ -4218,6 +4218,47 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  test('a key or webhook created over MCP says it is tied to the approval and until when, reads show it, and it is refused once the approval ends', async t => {
+    await simulatedSesFixture(t, async ({ db, local, request }) => {
+      const { token, consentId } = await oauthGrant(t, db, writableScope, request), approvalId = `mcp_${consentId}`;
+      const tool = async (name: string, body: Json) => { const r = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { confirm: true, body } } }, rpcHeaders)).result; assert.equal(r.isError, false, redact(r)); return r.structuredContent; };
+      const endsAt = (await db.query('SELECT expires_at FROM nightmail_resource_grants WHERE grant_key=$1', [consentId])).rows[0].expires_at.toISOString();
+      const tie = { id: approvalId, endsAt, active: true };
+      // Over MCP: a workspace key, a key limited to receiving addresses, a sending webhook and an inbound webhook.
+      const key = await tool('createApiKey', { name: 'tied fixture', permissions: ['send'] }); secrets.add(key.secret);
+      const limited = await tool('createApiKey', { name: 'tied limited fixture', access: { type: 'addresses', mail: ['read'] } }); secrets.add(limited.secret);
+      const hook = await tool('createWebhook', { url: 'https://example.com/hooks/tied-sending', eventTypes: ['email.sent'] });
+      const inbound = await tool('createInboundWebhook', { url: 'https://example.com/hooks/tied-inbound' });
+      for (const created of [key, limited, hook, inbound]) {
+        assert.deepEqual(created.approval, tie);
+        assert.match(created.nextStep, new RegExp(`^This (key|webhook) is tied to the MCP approval ${approvalId}: .* until ${endsAt}, .* For a lasting \\1, create it in the dashboard`));
+      }
+      // In the dashboard: nothing is tied, and there is no nextStep.
+      const lasting = ok(await local('POST', '/v1/api-keys', { name: 'lasting fixture', permissions: ['send'] }), 201); secrets.add(lasting.secret);
+      const lastingHook = ok(await local('POST', '/v1/inbound/webhooks', { url: 'https://example.com/hooks/lasting' }), 201);
+      for (const created of [lasting, lastingHook]) assert.deepEqual([created.approval, 'nextStep' in created], [null, false]);
+      // Reads show the tie, so an owner can find what ends with an agent's approval before it does.
+      const keys = async () => new Map<string, Json>(ok(await local('GET', '/v1/api-keys?limit=100')).data.map((k: Json) => [k.id, k]));
+      let listed = await keys();
+      assert.deepEqual([key, limited, lasting].map(k => listed.get(k.id)!.approval), [tie, tie, null]);
+      assert.deepEqual(ok(await local('GET', `/v1/webhooks/${hook.id}`)).approval, tie);
+      assert.deepEqual([ok(await local('GET', `/v1/inbound/webhooks/${inbound.id}`)).approval, ok(await local('GET', `/v1/inbound/webhooks/${lastingHook.id}`)).approval], [tie, null]);
+      // The approval ends when its newest sign-in token expires and the agent does not connect again: the tied key is
+      // refused (not revoked) and reads say the approval is no longer active. The dashboard's key keeps working.
+      ok(await request('GET', '/v1/me', key.secret));
+      await db.query("UPDATE nightmail_resource_grants SET expires_at=now()-interval '1 second' WHERE grant_key=$1", [consentId]);
+      error(await request('GET', '/v1/me', key.secret), 401, 'AUTH_INVALID');
+      ok(await request('GET', '/v1/me', lasting.secret));
+      listed = await keys();
+      assert.deepEqual([listed.get(key.id)!.approval.active, listed.get(key.id)!.revokedAt], [false, null]);
+      assert.equal(ok(await local('GET', `/v1/inbound/webhooks/${inbound.id}`)).approval.active, false);
+      // Removing the approval revokes the key for good; it is no longer tied to anything.
+      ok(await local('POST', `/v1/mcp-connections/${approvalId}/revoke`));
+      listed = await keys();
+      assert.deepEqual([listed.get(key.id)!.approval, listed.get(key.id)!.revokedAt !== null, listed.get(limited.id)!.revokedAt !== null], [null, true, true]);
+    });
+  });
+
   test('an endpoint edits in place: name, type, URL and pause; a blank URL keeps it, none is returned, and other workspaces are refused', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const w = runtime.config.workspaceId, { decrypt } = await import('./src/operations.js');

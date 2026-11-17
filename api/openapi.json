@@ -631,6 +631,32 @@
           "mail"
         ]
       },
+      "ApprovalTie": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The agent sign-in (mcp_…) it is tied to, as listAgents lists it."
+          },
+          "endsAt": {
+            "type": "string",
+            "description": "When the approval ends unless its agent connects again: each new sign-in token moves it later. It also ends when it is revoked."
+          },
+          "active": {
+            "type": "boolean",
+            "description": "False once the approval has ended, lost the manage scope, or its person is no longer an owner or admin here: a key is refused and a webhook is not delivered to until it is active again."
+          }
+        },
+        "required": [
+          "id",
+          "endsAt",
+          "active"
+        ],
+        "description": "Set when this is tied to an MCP approval: created, or for a webhook set up or changed, over MCP with a person’s sign-in or with a key that is tied. It works only while that approval is active. Null: it lasts, not tied to any approval."
+      },
       "ApiKey": {
         "type": "object",
         "properties": {
@@ -685,6 +711,9 @@
               "null"
             ],
             "description": "When a key limited to an expiring inbox stops working (the inbox's deletion time). Null otherwise."
+          },
+          "approval": {
+            "$ref": "#/components/schemas/ApprovalTie"
           }
         },
         "required": [
@@ -697,7 +726,8 @@
           "lastUsedAt",
           "revokedAt",
           "access",
-          "expiresAt"
+          "expiresAt",
+          "approval"
         ]
       },
       "CreateApiKey": {
@@ -5775,6 +5805,9 @@
           },
           "updatedAt": {
             "type": "string"
+          },
+          "approval": {
+            "$ref": "#/components/schemas/ApprovalTie"
           }
         },
         "required": [
@@ -5786,7 +5819,8 @@
           "paused",
           "headers",
           "createdAt",
-          "updatedAt"
+          "updatedAt",
+          "approval"
         ]
       },
       "CreatedWebhook": {
@@ -5800,6 +5834,10 @@
               "secret": {
                 "type": "string",
                 "description": "The signing secret, whsec_ followed by 32 base64 bytes. Read it again with revealWebhookSecret."
+              },
+              "nextStep": {
+                "type": "string",
+                "description": "Only for a webhook tied to an MCP approval: what it depends on and how to make a lasting one."
               }
             },
             "required": [
@@ -13615,6 +13653,10 @@
               "verificationToken": {
                 "type": "string",
                 "description": "inbound format: the X-Webhook-Verification-Token value."
+              },
+              "nextStep": {
+                "type": "string",
+                "description": "Only for a webhook tied to an MCP approval: what it depends on and how to make a lasting one."
               }
             },
             "required": [
@@ -13701,6 +13743,9 @@
               "type": "string"
             }
           },
+          "approval": {
+            "$ref": "#/components/schemas/ApprovalTie"
+          },
           "key": {
             "type": [
               "string",
@@ -13768,6 +13813,7 @@
           "createdAt",
           "updatedAt",
           "addressIds",
+          "approval",
           "key",
           "name",
           "format",
@@ -21271,7 +21317,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "One key type with permissions. By default a workspace key (permissions, optional sender domains). With access, a key limited to receiving addresses or to one agent inbox (bearer nm_mbx_…): it reads and, with send, replies only there, and never reaches the rest of the workspace. The secret is returned once.",
+        "description": "One key type with permissions. By default a workspace key (permissions, optional sender domains). With access, a key limited to receiving addresses or to one agent inbox (bearer nm_mbx_…): it reads and, with send, replies only there, and never reaches the rest of the workspace. The secret is returned once. A key created over MCP, or with a key that was, is tied to that approval: approval and nextStep in the result say until when.",
         "requestBody": {
           "required": true,
           "content": {
@@ -21297,6 +21343,10 @@
                       "properties": {
                         "secret": {
                           "type": "string"
+                        },
+                        "nextStep": {
+                          "type": "string",
+                          "description": "Only for a key tied to an MCP approval: what it depends on and how to make a lasting one."
                         }
                       },
                       "required": [
@@ -37370,7 +37420,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Create an endpoint for email events. The response includes the signing secret (whsec_…) used for the Webhook-Signature header; store it on your server. Deliveries follow Standard Webhooks: Webhook-Signature is v1,<base64 HMAC-SHA256 of \"{Webhook-Id}.{Webhook-Timestamp}.{raw body}\"> keyed with the base64 bytes after whsec_.",
+        "description": "Create an endpoint for email events. The response includes the signing secret (whsec_…) used for the Webhook-Signature header; store it on your server. Deliveries follow Standard Webhooks: Webhook-Signature is v1,<base64 HMAC-SHA256 of \"{Webhook-Id}.{Webhook-Timestamp}.{raw body}\"> keyed with the base64 bytes after whsec_. Set up over MCP, or with a key that was, it is tied to that approval: approval and nextStep in the result say until when.",
         "requestBody": {
           "required": true,
           "content": {
@@ -60608,7 +60658,7 @@
           "Inbound webhooks"
         ],
         "summary": "Subscribe to inbound events",
-        "description": "Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret, and for the inbound format its verification token, are returned once. A webhook with a key is also a named endpoint (listEndpoints).",
+        "description": "Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret, and for the inbound format its verification token, are returned once. A webhook with a key is also a named endpoint (listEndpoints). Set up over MCP, or with a key that was, it is tied to that approval: approval and nextStep in the result say until when.",
         "requestBody": {
           "required": true,
           "content": {

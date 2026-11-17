@@ -2,6 +2,7 @@ import { DASHBOARD_CACHE_NOTE, dashboardRead } from './dashboard-cache.js';
 import { registerSenderScore } from './sender-score.js';
 import { auditContext, auditInsert, recordAudit } from './audit.js';
 import { registerUsage } from './usage.js';
+import { approvalField, approvalTie, tiedNextStep } from './approval-ties.js';
 import { matchesAdoption } from './adopted-identity.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, gte, inArray, isNull, like, lt, or, sql, type SQL } from 'drizzle-orm';
@@ -57,7 +58,7 @@ export const WebhookHeaders = z.array(z.object({
   if (headers.reduce((size, h) => size + h.name.length + Buffer.byteLength(h.value), 0) > 8192) ctx.addIssue({ code: 'custom', message: 'Header names and values exceed 8 KiB.' });
 }).describe(`Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and ${productName} delivery headers are reserved.`);
 export const WebhookHeaderViews = z.array(z.object({ name: z.string(), hint: z.string().optional(), updatedAt: z.string().datetime().optional() })).describe('Configured names only for readers. Managers also see a masked hint and the time the header list was last replaced.');
-const webhookSchema = z.object({ id: z.string(), url: WebhookUrlHint, description: z.string(), eventTypes: z.array(z.enum(eventTypes)), regions: z.array(z.string()).nullable(), paused: z.boolean(), headers: WebhookHeaderViews, createdAt: z.string(), updatedAt: z.string() }).openapi('Webhook');
+const webhookSchema = z.object({ id: z.string(), url: WebhookUrlHint, description: z.string(), eventTypes: z.array(z.enum(eventTypes)), regions: z.array(z.string()).nullable(), paused: z.boolean(), headers: WebhookHeaderViews, createdAt: z.string(), updatedAt: z.string(), approval: approvalField }).openapi('Webhook');
 const webhookInput = z.object({ url: z.string().url().max(2048), description: z.string().max(500).default(''), eventTypes: z.array(z.enum(eventTypes)).min(1).max(eventTypes.length).default(['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed']), regions: z.array(z.string()).min(1).max(40).nullable().optional(), paused: z.boolean().default(false), headers: WebhookHeaders.optional() }).openapi('CreateWebhook');
 const webhookPatch = webhookInput.partial().extend({ description: z.string().max(500).optional(), eventTypes: z.array(z.enum(eventTypes)).min(1).max(eventTypes.length).optional(), paused: z.boolean().optional() }).openapi('UpdateWebhook');
 const secretSchema = z.object({ secret: z.string() }).openapi('WebhookSecret');
@@ -130,7 +131,8 @@ const recordSecret = (db: Pick<Database, 'insert'>, a: Actor, webhookId: string,
   db.insert(webhookSecretAudit).values({ workspaceId: a.workspaceId, id: id('wsa'), webhookId, action, actorKeyId: a.keyId, credential: a.credential ?? 'apiKey', actorEmail: a.email ?? null });
 async function metadata(runtime: Runtime, row: typeof webhooks.$inferSelect, a: Actor) {
   const { encryptedSecret: _, encryptedHeaders, workspaceId: _w, reconfirm: _r, ...value } = row;
-  return { ...value, url: webhookUrlHint(value.url), headers: await webhookHeaderViews(runtime, encryptedHeaders, secretBinding(row, row.id), a.permissions.includes('manage')) };
+  return { ...value, url: webhookUrlHint(value.url), headers: await webhookHeaderViews(runtime, encryptedHeaders, secretBinding(row, row.id), a.permissions.includes('manage')),
+    approval: await approvalTie(runtime, row.workspaceId, ['webhook'], row.id) };
 }
 
 // The single endpoint rule for sending and inbound webhooks: public HTTPS DNS names only, never
@@ -1100,7 +1102,7 @@ export function registerOperations(app: App) {
   });
   // The signing secret comes back once with the new endpoint, like an API key, so a first delivery can be verified
   // without a rotation; revealWebhookSecret reads it again later and rotateWebhookSecret replaces it.
-  app.openapi(createRoute({ method: 'post', path: '/v1/webhooks', operationId: 'createWebhook', tags: ['Webhooks'], security, description: 'Create an endpoint for email events. The response includes the signing secret (whsec_…) used for the Webhook-Signature header; store it on your server. Deliveries follow Standard Webhooks: Webhook-Signature is v1,<base64 HMAC-SHA256 of "{Webhook-Id}.{Webhook-Timestamp}.{raw body}"> keyed with the base64 bytes after whsec_.', request: { body: json(webhookInput) }, responses: { 201: response(webhookSchema.extend({ secret: z.string().describe('The signing secret, whsec_ followed by 32 base64 bytes. Read it again with revealWebhookSecret.') }).openapi('CreatedWebhook')), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/webhooks', operationId: 'createWebhook', tags: ['Webhooks'], security, description: 'Create an endpoint for email events. The response includes the signing secret (whsec_…) used for the Webhook-Signature header; store it on your server. Deliveries follow Standard Webhooks: Webhook-Signature is v1,<base64 HMAC-SHA256 of "{Webhook-Id}.{Webhook-Timestamp}.{raw body}"> keyed with the base64 bytes after whsec_. Set up over MCP, or with a key that was, it is tied to that approval: approval and nextStep in the result say until when.', request: { body: json(webhookInput) }, responses: { 201: response(webhookSchema.extend({ secret: z.string().describe('The signing secret, whsec_ followed by 32 base64 bytes. Read it again with revealWebhookSecret.'), nextStep: z.string().optional().describe('Only for a webhook tied to an MCP approval: what it depends on and how to make a lasting one.') }).openapi('CreatedWebhook')), ...errors } }), async c => {
     const a = webhookManager(c), { headers, ...body } = c.req.valid('json'), webhookId = id('wh'); const url = webhookUrl(c.env, body.url), binding = secretBinding(a, webhookId), secret = webhookSecret();
     if (body.regions?.length) { const runtime = await withRegionSettings(c.env, a.workspaceId); body.regions.forEach(r => region(runtime, r)); }
     const values = { ...body, id: webhookId, workspaceId: a.workspaceId, url, regions: body.regions ?? null, encryptedSecret: await encrypt(c.env, secret, binding), encryptedHeaders: await encryptWebhookHeaders(c.env, headers, binding) };
@@ -1114,7 +1116,8 @@ export function registerOperations(app: App) {
       return created;
     });
     c.header('Cache-Control', 'no-store');
-    return c.json({ ...await metadata(c.env, row!, a), secret }, 201);
+    const view = await metadata(c.env, row!, a);
+    return c.json({ ...view, ...view.approval ? { nextStep: tiedNextStep('webhook', view.approval) } : {}, secret }, 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}', operationId: 'getWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(webhookSchema), ...errors } }), async c => {
     const a = workspaceActor(c); return c.json(await metadata(c.env, await getWebhook(c.env, a, c.req.valid('param').id), a), 200);

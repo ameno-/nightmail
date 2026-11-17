@@ -10,6 +10,7 @@ import { claimSends } from './states.js';
 import { endpoints, mailboxes, mailboxWebhookDeliveries, mailMessages, retainedMail, type EndpointRecord } from './db/mailbox.js';
 import { ownReceiving, resumeNeedsUrl } from './rituals.js';
 import { recordAudit } from './audit.js';
+import { approvalField, approvalTie, tiedNextStep } from './approval-ties.js';
 import { encrypt, decrypt, encryptWebhookHeaders, postWebhook, webhookHeaderViews, WebhookHeaders, WebhookHeaderViews, webhookSecret, webhookUrl } from './operations.js';
 import { inboundEventTypes, webhookSecretBinding } from './mailbox-events.js';
 import { InboundAddressId } from './inbound-threads.js';
@@ -452,7 +453,7 @@ const hookOptions={key:RoutingKey.nullable().describe('Its endpoint name: ritual
   include:z.array(z.enum(['message','raw'])).max(2).describe(`${webhookFormat} format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL.`),
   timeoutSeconds:z.number().int().min(1).max(30).describe('Seconds to wait for a 2xx response. Default 5.'),
   retryAttempts:z.number().int().min(0).max(10).describe(`Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for ${webhookFormat}, 3 for inbound.`)};
-const InboundWebhookSchema = z.object({ id: z.string(), url: WebhookUrlHint, description: z.string(), eventTypes: z.array(z.enum(inboundEventTypes)), paused: z.boolean(), headers: WebhookHeaderViews, createdAt: z.string(), updatedAt: z.string(), addressIds: z.array(z.string()).nullable() }).extend(hookOptions).openapi('InboundWebhook');
+const InboundWebhookSchema = z.object({ id: z.string(), url: WebhookUrlHint, description: z.string(), eventTypes: z.array(z.enum(inboundEventTypes)), paused: z.boolean(), headers: WebhookHeaderViews, createdAt: z.string(), updatedAt: z.string(), addressIds: z.array(z.string()).nullable(), approval: approvalField }).extend(hookOptions).openapi('InboundWebhook');
 const DeliverySchema = z.object({ id: z.string(), webhookId: z.string(), eventId: z.string(), status: z.enum(['pending', 'delivered', 'failed','paused']), attemptCount: z.number().int(), lastStatusCode: z.number().nullable(), lastError: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('InboundWebhookDelivery');
 const pageOf = <T extends z.ZodType>(item: T, name: string) => z.object({ data: z.array(item), nextCursor: z.string().nullable() }).openapi(name);
 const Limit = z.coerce.number().int().min(1).max(100).default(25);
@@ -472,7 +473,8 @@ export function registerInboundWebhooks(app: App, deps: Access) {
   const lockWebhook = async (tx: DbExecutor, c: Ctx, w: string, webhookId: string, hold = true) => { const row = await lockEndpoint(tx, c, w, { id: webhookId }, hold); if (!row || row.type !== 'webhook') throw notFound(); return row; };
   const webhookView = async (c: Ctx, row: EndpointRecord) => ({ key: row.key, name: row.name, format: shownFormat(row.format), junk: row.junk, include: row.include, timeoutSeconds: row.timeoutSeconds, retryAttempts: row.retryAttempts,
     id: row.id, url: webhookUrlHint(row.url!), description: row.description, eventTypes: row.eventTypes as (typeof inboundEventTypes[number])[], addressIds: row.mailboxIds, paused: row.paused,
-    headers: await webhookHeaderViews(c.env, row.encryptedHeaders, webhookSecretBinding(row.workspaceId, row.id), deps.access(c).admin), createdAt: isoTime(row.createdAt)!, updatedAt: isoTime(row.updatedAt)! });
+    headers: await webhookHeaderViews(c.env, row.encryptedHeaders, webhookSecretBinding(row.workspaceId, row.id), deps.access(c).admin), createdAt: isoTime(row.createdAt)!, updatedAt: isoTime(row.updatedAt)!,
+    approval: await approvalTie(c.env, row.workspaceId, ['endpoint'], row.id) });
   const webhookFields = { ...z.object(hookOptions).partial().shape, format: FormatInput.optional(), url: z.string().url().max(2048), description: z.string().max(500), eventTypes: z.array(z.enum(inboundEventTypes)).max(inboundEventTypes.length).describe('Events to subscribe to. [] makes a route-only webhook: it receives only mail a route sends to it.'), paused: z.boolean(), headers: WebhookHeaders.optional() };
   const createFields = { ...webhookFields, description: webhookFields.description.default(''), eventTypes: webhookFields.eventTypes.default(['message.received']), paused: webhookFields.paused.default(false) };
   const create = z.object({ ...createFields, addressIds: idFilter.default(null) }).strict();
@@ -481,7 +483,7 @@ export function registerInboundWebhooks(app: App, deps: Access) {
   const requeue=(wid:string,condition:ReturnType<typeof sql>)=>sql`WITH resumed AS (UPDATE mailbox_webhook_deliveries SET last_redelivery_at=now(),status='pending',generation=generation+1,last_error=NULL,updated_at=now() WHERE workspace_id=${wid} AND ${condition} RETURNING *), reset_success AS (DELETE FROM mail_action_attempts a USING resumed r WHERE a.workspace_id=r.workspace_id AND a.delivery_id=r.id AND a.state='delivered') INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id,'generation',generation) FROM resumed`;
   const inboundToken = async (format: string, secret: string) => format === 'inbound' ? { verificationToken: await (await import('./inbound-webhook.js')).verificationToken(secret) } : {};
 
-  app.openapi(createRoute({ method: 'post', path, operationId: 'createInboundWebhook', security, tags, summary: 'Subscribe to inbound events', description: 'Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret, and for the inbound format its verification token, are returned once. A webhook with a key is also a named endpoint (listEndpoints).', request: { body: json(create.openapi('CreateInboundWebhook')) }, responses: { 201: response(InboundWebhookSchema.extend({ secret: z.string(), verificationToken: z.string().optional().describe('inbound format: the X-Webhook-Verification-Token value.') }).openapi('InboundWebhookSecret')), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path, operationId: 'createInboundWebhook', security, tags, summary: 'Subscribe to inbound events', description: 'Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret, and for the inbound format its verification token, are returned once. A webhook with a key is also a named endpoint (listEndpoints). Set up over MCP, or with a key that was, it is tied to that approval: approval and nextStep in the result say until when.', request: { body: json(create.openapi('CreateInboundWebhook')) }, responses: { 201: response(InboundWebhookSchema.extend({ secret: z.string(), verificationToken: z.string().optional().describe('inbound format: the X-Webhook-Verification-Token value.'), nextStep: z.string().optional().describe('Only for a webhook tied to an MCP approval: what it depends on and how to make a lasting one.') }).openapi('InboundWebhookSecret')), ...errors } }), async c => {
     const w = manageHook(c).workspaceId, input = c.req.valid('json'), format = storedFormat(input.format ?? webhookFormat);
     const { row, secret } = await c.env.db.transaction(async tx => {
       const created = await createEndpointRecord(tx, c, w, { type: 'webhook', key: input.key ?? null, name: input.name ?? null, url: input.url, description: input.description, eventTypes: input.eventTypes, addressIds: input.addressIds,
@@ -490,7 +492,8 @@ export function registerInboundWebhooks(app: App, deps: Access) {
       return created;
     });
     c.header('Cache-Control', 'no-store');
-    return c.json({ ...await webhookView(c, row), secret: secret!, ...await inboundToken(format, secret!) }, 201);
+    const view = await webhookView(c, row);
+    return c.json({ ...view, ...view.approval ? { nextStep: tiedNextStep('webhook', view.approval) } : {}, secret: secret!, ...await inboundToken(format, secret!) }, 201);
   });
   app.openapi(createRoute({ method: 'get', path, operationId: 'listInboundWebhooks', security, tags,
     summary: 'List inbound webhooks a page at a time, in a stable ID order',

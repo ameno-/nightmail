@@ -5,6 +5,7 @@ import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../.
 import { queries } from '../../data/queries'
 import { inboundEventTypes, type InboundAddress, type InboundWebhook, type InboundWebhookInput, type MailboxEventType, type MailboxWebhookDelivery } from '../../data/types'
 import { date, time } from '../../lib/format'
+import { approvalLabel } from '../settings/key-labels'
 import { headerDraftErrors, headerPayload, headersChanged, WebhookHeadersField, type HeaderDraft } from '../settings/webhook-headers'
 import '../settings/settings.css'
 import './inbound.css'
@@ -109,6 +110,7 @@ function WebhookDetail() {
       <dl className="settings-facts">
         <div><dt>Status</dt><dd><StatusBadge status={current.paused ? 'Paused' : 'Active'} tone={current.paused ? 'neutral' : 'success'} /></dd></div>
         <div><dt>Created</dt><dd>{date(current.createdAt)}</dd></div>
+        {current.approval && <div><dt>Agent approval</dt><dd>{approvalLabel(current.approval)}</dd></div>}
       </dl>
       {current.paused && <Alert tone="info">No new deliveries are queued. Events keep recording and stay readable through the events API.</Alert>}
       <section className="section section--bordered stack">
