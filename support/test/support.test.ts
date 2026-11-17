@@ -105,7 +105,8 @@ function signedHook(messageId: string, threadId: string, from = 'ada@acme.test',
 }
 const CONFIRM_TEMPLATE = /^Hi,\n\nThanks for writing to Nightmail support\. Before I can look at a Nightmail account, I need to confirm that this email came from you\. Open this link and press Confirm \(it works once, within 24 hours\):\n\nhttps:\/\/support\.dev\.bane\.mx\/confirm\/\S+\n\nOr sign in to Nightmail and press Help\.\n\nIf you didn't write to Nightmail support, ignore this email\.\n\nNightmail support \(AI\)$/;
 const NO_ACCOUNT = 'Hi,\n\nThanks for writing to Nightmail support. I couldn’t find a Nightmail account for this email address, so I can’t look anything up. Please write from the address you sign in to Nightmail with, or sign in and press Help.\n\nNightmail support (AI)';
-const replies = async (thread: string, instance?: Miniflare) => (await fakeCalls(instance)).filter(c => c[0] === 'api' && c[2] === `/v1/inbound/threads/${thread}/reply`);
+// The replies Nightmail accepted (a refused one, such as a 409, never reaches the customer).
+const replies = async (thread: string, instance?: Miniflare) => (await fakeCalls(instance)).filter(c => c[0] === 'api' && c[2] === `/v1/inbound/threads/${thread}/reply` && c[6] < 300);
 async function eventually<T>(read: () => Promise<T | undefined>, ms = 30_000): Promise<T | undefined> {
   for (let waited = 0; waited < ms; waited += 250) { const value = await read(); if (value) return value; await new Promise(r => setTimeout(r, 250)); }
   return undefined;
@@ -297,10 +298,28 @@ describe('support Worker', () => {
     assert.match(await (await mf.dispatchFetch(`${SUPPORT}/confirm/${link}`, { method: 'POST' })).text(), /Already confirmed/);
     const magic = (await fakeCalls()).find(c => c[0] === 'verifyEmail' && c[1].evidence?.kind === 'magic_link');
     assert.equal(magic[1].email, 'ada@acme.test');
-    const answered = await eventually(async () => (await fakeCalls()).filter(c => c[0] === 'api' && c[2] === '/v1/inbound/threads/thr_nodmarc/reply').length >= 2 || undefined);
+    // The link and the answer are two sends for one message, each under its own key: Nightmail accepts both.
+    assert.equal(first[5], 'confirm-msg_nodmarc_1');
+    const answered = await eventually(async () => (await replies('thr_nodmarc')).find(c => /61 of 1,000/.test(c[3].text)));
     assert.ok(answered, 'The held message is answered after confirmation.');
+    assert.deepEqual([answered[5], answered[6], answered[3].replyToMessageId], ['reply-msg_nodmarc_1', 202, 'msg_nodmarc_1']);
     assert.ok((await fakeCalls()).some(c => c[0] === 'mintGrant' && c[1].verification === 'magic_link'));
     assert.equal((await mf.dispatchFetch(`${SUPPORT}/confirm/${link.slice(0, -4)}AAAA`)).status, 410, 'A tampered link is refused.');
+  }, 180_000);
+
+  test('a confirmation whose link was sent as reply-<messageId> (before links had their own key) is still answered', async () => {
+    // Nightmail already holds the earlier link under the answer's key, with another body.
+    await (await mf.getWorker('fake-bane')).fetch('http://fake-bane/__used', { method: 'POST', body: JSON.stringify({ authorization: `Bearer bane_mbx_${'7'.repeat(64)}`,
+      path: '/v1/inbound/threads/thr_nodmarc_old/reply', key: 'reply-msg_nodmarc_old', body: { text: 'An earlier confirm link' } }) });
+    assert.equal((await signedHook('msg_nodmarc_old', 'thr_nodmarc_old')).status, 200);
+    const link = await eventually(async () => (await replies('thr_nodmarc_old')).find(c => CONFIRM_TEMPLATE.test(c[3].text)));
+    assert.ok(link, 'A confirm link.');
+    assert.equal((await mf.dispatchFetch(`${SUPPORT}/confirm/${String(link[3].text).match(/\/confirm\/(\S+)/)![1]}`, { method: 'POST' })).status, 200);
+    const answered = await eventually(async () => (await replies('thr_nodmarc_old')).find(c => /61 of 1,000/.test(c[3].text)));
+    assert.ok(answered, 'Answered after confirming, though its usual key is taken.');
+    assert.equal(answered[5], 'answer-msg_nodmarc_old');
+    const tried = (await fakeCalls()).filter(c => c[0] === 'api' && c[2] === '/v1/inbound/threads/thr_nodmarc_old/reply' && /61 of 1,000/.test(c[3].text));
+    assert.deepEqual(tried.map(c => [c[5], c[6]]), [['reply-msg_nodmarc_old', 409], ['answer-msg_nodmarc_old', 202]], 'One refused try, then the answer under its own key.');
   }, 180_000);
 
   test('automatic mail is never answered', async () => {
