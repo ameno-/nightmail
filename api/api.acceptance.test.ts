@@ -6602,6 +6602,78 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       await db.query('DELETE FROM provider_pool_regions WHERE aws_account_id=$1', [acct]); await db.query('DELETE FROM workspaces WHERE id=$1', [hosted]);
     }
   });
+  // Review of #361, round 2: a stored-template send or a campaign test only looked for a finished request with its key
+  // before it rendered, and claimed the key afterwards: a duplicate sent meanwhile rendered again and got 202. Both now
+  // claim it first (idempotent's prepare). A committed self-hosted live workspace; only the AWS SDK transport is mocked.
+  async function claimFirstFixture(t: TestContext) {
+    const db = await fixtureDatabase(t);
+    const [{ createApp }, { nodeRuntime }, { digest }, { credentialFingerprint, discoveryTarget }, { SESv2Client, TestRenderEmailTemplateCommand }] = await Promise.all([
+      import('./src/app.js'), import('./src/adapters/node.js'), import('./src/core.js'), import('./src/ses-region-state.js'), import('@aws-sdk/client-sesv2')]);
+    const instance = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL, MULTI_TENANT: 'false', ENABLE_LIVE_SES: 'true' }), app = createApp(), runtime = instance.runtime;
+    const w = unique('ws-claim-first'), secret = `nm_${randomUUID().replaceAll('-', '')}${randomUUID().replaceAll('-', '')}`, topic = `arn:aws:sns:${REGION}:111122223333:claim-first`;
+    Object.assign(runtime.config, { workspaceId: w, liveEnabled: true, aws: { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' } });
+    cleanup(t, async () => {
+      await instance.close();
+      const tables = (await db.query(`SELECT c.table_name FROM information_schema.columns c JOIN information_schema.tables x USING (table_schema, table_name)
+        WHERE c.table_schema='public' AND c.column_name='workspace_id' AND x.table_type='BASE TABLE'`)).rows.map(r => r.table_name as string);
+      for (let pass = 0; pass < 3; pass++) for (const table of tables) await db.query(`DELETE FROM "${table}" WHERE workspace_id=$1`, [w]).catch(() => {});
+      await db.query('DELETE FROM workspaces WHERE id=$1', [w]);
+    });
+    await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [w]);
+    await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$1,$2,jsonb_build_array($2::text))`, [w, REGION]);
+    await db.query(`INSERT INTO ses_region_discovery(workspace_id,region,report,credentials_fingerprint,public_url,trusted_account_id,trusted_topic_arn) VALUES($1,$2,$3,$4,$5,'111122223333',$6)`, [w, REGION,
+      { provisioned: true, account: { id: '111122223333', sendingEnabled: true }, resources: { topic: { arn: topic }, transactional: { sendingEnabled: true }, marketing: { sendingEnabled: true } } },
+      await credentialFingerprint(runtime.config), discoveryTarget(runtime.config), topic]);
+    await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,$1,'fixture',$2,'fixture','["send","read","manage"]','[]')`, [w, await digest(secret)]);
+    // SES: the first template render waits until released.
+    const gate = { renders: 0, reached: undefined as unknown as Promise<void>, release: () => {} };
+    let reached = () => {}; gate.reached = new Promise<void>(resolve => { reached = resolve; }); const released = new Promise<void>(resolve => { gate.release = resolve; });
+    t.mock.method(SESv2Client.prototype, 'send', async (command: unknown) => {
+      if (command instanceof TestRenderEmailTemplateCommand) { if (++gate.renders === 1) { reached(); await released; } return { RenderedTemplate: 'Subject: fixture\r\n\r\nFixture.' }; }
+      return { TemplateContent: { Subject: 'fixture' } };
+    });
+    const post = (path: string, body: Json, key?: string) => http('POST', path, secret, body, key ? { 'Idempotency-Key': key } : {}, 10_000, PUBLIC_ORIGIN, request => app.fetch(request, runtime));
+    // From an independent connection: the claims with no result yet.
+    const pending = async () => (await db.query('SELECT count(*)::int AS n FROM sending_idempotency WHERE workspace_id=$1 AND result IS NULL', [w])).rows[0].n as number;
+    const promptly = (reply: Promise<Reply>) => Promise.race([reply, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('no answer within 2 s')), 2_000))]);
+    return { db, w, gate, post, pending, promptly };
+  }
+  test('a stored-template send claims its Idempotency-Key before SES renders: a duplicate is IN_PROGRESS and renders nothing', async t => {
+    const { gate, post, pending, promptly } = await claimFirstFixture(t);
+    const body = { from: 'orders@example.com', to: 'customer@example.invalid', region: REGION, template: { name: 'fixture', data: {} } }, key = 'claim-first-template';
+    const first = post('/v1/emails/send', body, key);
+    try {
+      await gate.reached;
+      assert.equal(await pending(), 1, 'While SES renders, the first request owns a committed pending claim.');
+      error(await promptly(post('/v1/emails/send', body, key)), 409, 'IDEMPOTENCY_IN_PROGRESS');
+      assert.equal(gate.renders, 1, 'The duplicate rendered nothing.');
+    } finally { gate.release(); }
+    const queued = ok(await first, 202);
+    assert.equal(ok(await post('/v1/emails/send', body, key), 202).id, queued.id); assert.equal(gate.renders, 1);
+    error(await post('/v1/emails/send', { ...body, template: { name: 'fixture', data: { other: true } } }, key), 409, 'IDEMPOTENCY_CONFLICT');
+  });
+  test('a campaign test claims its Idempotency-Key before it reads its draft: a duplicate is IN_PROGRESS and renders nothing', async t => {
+    const { db, w, post, pending, promptly } = await claimFirstFixture(t);
+    const draft = ok(await post('/v1/campaigns', { name: 'claim-first', from: 'orders@example.com', subject: 'Claim first', html: '<p>Claim first</p>' }), 201);
+    const path = `/v1/campaigns/${draft.id}/test`, body = { to: 'tester@example.invalid' }, key = 'claim-first-test';
+    // The draft cannot be read while another connection holds its table: the first request waits there.
+    const lock = await fixtureDatabase(t), holder = (await lock.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+    await lock.query('BEGIN'); await lock.query(`SET LOCAL lock_timeout='2s'`); await lock.query('LOCK TABLE sending_campaigns IN ACCESS EXCLUSIVE MODE');
+    let first: Promise<Reply> | undefined;
+    try {
+      first = post(path, body, key);
+      for (let i = 0; !(await db.query(`SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, [holder])).rowCount; i++) {
+        assert.ok(i < 250, 'The first campaign test never reached its draft.'); await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      assert.equal(await pending(), 1, 'While it reads its draft, the first request owns a committed pending claim.');
+      // An answer while the draft is unreadable is one that read and rendered nothing.
+      error(await promptly(post(path, body, key)), 409, 'IDEMPOTENCY_IN_PROGRESS');
+    } finally { await lock.query('COMMIT'); }
+    const queued = ok(await first!, 202);
+    assert.equal(ok(await post(path, body, key), 202).id, queued.id);
+    error(await post(path, { to: 'other@example.invalid' }, key), 409, 'IDEMPOTENCY_CONFLICT');
+    assert.equal((await db.query(`SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1 AND snapshot->>'testCampaignId'=$2`, [w, draft.id])).rows[0].n, 1);
+  });
   test('sends on a simulated deployment use the provider-parity lifecycle; exact retries reuse identity and conflicts do not create mail', async t => {
     const key = await keyFixture(t);
     const liveKey = await keyFixture(t, { permissions: ['read'] });

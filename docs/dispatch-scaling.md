@@ -43,7 +43,7 @@ The previous audit-fix build took **46** calls for campaign dispatch and finish.
 
 ### Send admission: one decision (2026-11-17)
 
-Every kind of send is decided by one SQL function, `send_admission` (migration 323): direct and batch sends, self-hosted and stored-template sends, mailbox sends, campaign tests, campaign launch, preparation and release. It returns the first rule that refuses, with its code and item, so TypeScript (`api/src/admission.ts`) only turns that into the API's error; no rule is re-run to explain a refusal. A campaign test or stored-template send with an Idempotency-Key reads its key first (`priorResult`), before it reads or renders the draft or template, so a retry replays its receipt even after that source changed; that read is the extra call. Its limits come from `api/src/send-limits.ts` as parameters. The query-budget fixture `every kind of send is admitted by one statement after authentication` asserts the direct-send rows below; the campaign and inbound rows come from the existing fixtures. Calls include authentication.
+Every kind of send is decided by one SQL function, `send_admission` (migration 323): direct and batch sends, self-hosted and stored-template sends, mailbox sends, campaign tests, campaign launch, preparation and release. It returns the first rule that refuses, with its code and item, so TypeScript (`api/src/admission.ts`) only turns that into the API's error; no rule is re-run to explain a refusal. A campaign test or stored-template send with an Idempotency-Key claims it first, pending and committed, before it reads or renders the draft or template (`idempotent` with `prepare`); the transaction that writes the email runs the admission statement and completes the claim. A duplicate meanwhile is `IDEMPOTENCY_IN_PROGRESS`, and a retry replays the receipt even after the source changed. The claim, BEGIN, the completion and COMMIT are the extra calls. Its limits come from `api/src/send-limits.ts` as parameters. The query-budget fixture `every kind of send is admitted by one statement after authentication` asserts the direct-send rows below; the campaign and inbound rows come from the existing fixtures. Calls include authentication.
 
 | Path | Calls before → after |
 |---|---:|
@@ -53,8 +53,8 @@ Every kind of send is decided by one SQL function, `send_admission` (migration 3
 | Self-hosted send, API key | 6 → **2** |
 | Self-hosted batch, 100 | 6 → **2** |
 | Self-hosted, dashboard session | 6 → **2** |
-| Campaign test, self-hosted and Hosted | 9 → **3** (4 with an Idempotency-Key; its replay 2) |
-| Stored-template send, dashboard session (after only) | 3 (4 with an Idempotency-Key; its replay 2) |
+| Campaign test, self-hosted and Hosted | 9 → **3** (7 with an Idempotency-Key, incl. BEGIN/COMMIT; its replay 2) |
+| Stored-template send, dashboard session (after only) | 3 (7 with an Idempotency-Key, incl. BEGIN/COMMIT; its replay 2) |
 | Inbound reply (mailbox send) | 23 → **21** |
 | Campaign launch incl. capture | 16 → **15** |
 | Campaign preparation | 11 → **10** |

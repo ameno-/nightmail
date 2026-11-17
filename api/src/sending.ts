@@ -30,7 +30,7 @@ import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_AT
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { headerPrefix, requestHeader } from './brand.js';
-import { canonical, idempotencyGate, idempotencyKey, idempotent, IdempotencyHeaders, idempotentRequest, priorResult, replay, requestHash, validIdempotencyKey, type ClaimState, type IdempotentRequest } from './idempotency.js';
+import { canonical, idempotencyGate, idempotencyKey, idempotent, IdempotencyHeaders, idempotentRequest, replay, requestHash, validIdempotencyKey, type ClaimState, type IdempotentRequest } from './idempotency.js';
 import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, registerPreviewImages, renderPreview } from './preview-images.js';
 import { actorJson, admission, admitted, charges, duplicateAttachment, type AdmissionMail, type Admitted, type Refused, type Released } from './admission.js';
 import { contentBytes, estimatedMimeBytes, SEND_LIMITS } from './send-limits.js';
@@ -759,7 +759,7 @@ async function directMessages(runtime: Runtime, mails: SendRequest[], batch: boo
   return out;
 }
 /** A send request without the Hono context: internal senders (sendSystemEmail) build one directly. */
-type SendCall = IdempotentRequest & { runtime: Runtime };
+type SendCall = IdempotentRequest & { runtime: Runtime; db?: DbExecutor };
 const sendCall = (c: Ctx): SendCall => ({ runtime: c.env, ...idempotentRequest(c) });
 // used is null for an uncharged duplicate of a request that still holds its key.
 type Principal = { id:string;workspace_id:string;permissions:Actor['permissions'];domains:string[];used:number|null;max_requests:number };
@@ -771,30 +771,12 @@ const admissionMails = (out: Outgoing[]): AdmissionMail[] => out.map(({ snapshot
 /**
  * Admits a send in one statement: the API key's authentication and budget (a warm key), the idempotency claim, the
  * send locks, the decision (send_admission) and every row the send writes. Direct and batch sends, self-hosted and
- * template sends, dashboard and platform notices and campaign tests all come here. A stored template is rendered by
- * SES first, in the region a check-only decision resolves, once a retry has been answered from its key; the screen's
- * measure runs here too, and the decision refuses it only for mail the screen would read.
+ * template sends, dashboard and platform notices and campaign tests all come here (template sends and campaign tests
+ * through claimedSend);
+ * the screen's measure runs here too, and the decision refuses it only for mail the screen would read.
  */
-async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identity: Identity, options: { batch: boolean; campaign?: { id: string; revision: number }; replayed?: (receipt: SendReceipt) => Promise<void> }): Promise<SendReceipt | { data: SendReceipt[] }> {
+async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identity: Identity, options: { batch: boolean; campaign?: { id: string; revision: number } }): Promise<SendReceipt | { data: SendReceipt[] }> {
   const runtime = call.runtime, cfg = runtime.config, sim = isSimulatedSes(runtime), key = call.key, batch = options.batch;
-  if (out.some(m => m.template)) {
-    if (!('actor' in identity)) throw new Error('A template send authenticates before admission.');
-    const a = identity.actor;
-    // A retry replays before the template is rendered again or any rule is checked: it may have changed since.
-    if (key !== undefined) {
-      const previous = await priorResult<SendReceipt | { data: SendReceipt[] }>(runtime.db, { workspaceId: a.workspaceId, actorKeyId: a.keyId, path: call.path, key }, body);
-      if (previous) { if ('id' in previous) await options.replayed?.(previous); return previous; }
-    }
-    const check = await admission(runtime, a.workspaceId, actorJson(a), { stage: 'send', locks: 'none', mails: admissionMails(out), ...charges(runtime, out) },
-      undefined, actorAssets(a, out.flatMap(m => m.snapshot.attachments)));
-    const decided = admitted(runtime, (await runtime.db.execute<{ s: Admitted | Refused }>(sql`SELECT ${check} AS s`)).rows[0]!.s, a.workspaceId,
-      { batch, invalid: i => out[i]!.invalid, oversize: i => out[i]!.oversize });
-    for (const [i, m] of out.entries()) if (m.template) {
-      const route = decided.mails[i]!, scoped = { ...runtime, config: { ...cfg, workspaceId: a.workspaceId, regions: [route.region] } };
-      m.snapshot.region = route.region;
-      await renderTemplate(scoped, m.snapshot, m.template, route.connection).catch(e => { throw atItem(e, batch ? i : undefined); });
-    }
-  }
   let expanded = 0;
   for (const [i, m] of out.entries()) {
     if (cfg.screen && !sim && cfg.hostedScreen) m.oversize = await screenRefusal(runtime, m.snapshot, batch ? i : undefined);
@@ -812,7 +794,7 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
     : { workspace: sql`k.workspace_id`, uploader: sql`${identity.actor.tokenId ?? identity.actor.keyId}::text`, domains: sql`k.domains`, mailboxAccess: sql`${actorMailAccess(identity.actor) !== null}::boolean` });
   const decision = await admission(runtime, sql`k.workspace_id`, sql`jsonb_build_object('id',k.id,'domains',k.domains)`, { stage: 'send', locks: 'take', mails: admissionMails(out),
     ...charges(runtime, out), ...(key !== undefined ? { claim: { path: call.path, key, hash: hash!, receipt } } : {}), ...(options.campaign ? { campaign: options.campaign } : {}) }, undefined, assets);
-  const { rows: [result] } = await runtime.db.execute<Principal & { s: Admitted | Refused | ClaimState | null }>(sql`WITH ${'credential' in identity ? sql`${identity.credential},` : sql``} state AS MATERIALIZED (
+  const { rows: [result] } = await (call.db ?? runtime.db).execute<Principal & { s: Admitted | Refused | ClaimState | null }>(sql`WITH ${'credential' in identity ? sql`${identity.credential},` : sql``} state AS MATERIALIZED (
     SELECT k.*, CASE WHEN k.used IS NULL THEN jsonb_build_object('previous',NULL,'busy',true) WHEN k.used<=k.max_requests AND k.permissions ?| ARRAY['manage','send'] THEN ${decision} END s FROM (${principal}) k
   ), submitted AS MATERIALIZED (SELECT k.workspace_id,k.id AS actor_id,m.id,m.hash,m.email,
       m.snapshot||jsonb_build_object('region',x->>'region')||CASE WHEN jsonb_typeof(x->'binding')='object' THEN jsonb_build_object('binding',x->'binding') ELSE '{}' END AS snapshot
@@ -827,7 +809,7 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
   const a = 'actor' in identity ? identity.actor : identity.authorize(result);
   const state = result.s!;
   // The statement's claim is idempotency_claim: the one replay rule answers a key it did not get.
-  if ('previous' in state) { const previous = replay<typeof receipt>(state, hash!); if ('id' in previous) await options.replayed?.(previous); return previous; }
+  if ('previous' in state) return replay<typeof receipt>(state, hash!);
   const decided = admitted(runtime, state as Admitted | Refused, a.workspaceId, { batch, invalid: i => out[i]!.invalid, oversize: i => out[i]!.oversize });
   for (const [i, m] of out.entries()) {
     const route = decided.mails[i]!;
@@ -836,10 +818,37 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
   }
   return receipt;
 }
+/**
+ * A send that reads or renders something mutable before it is admitted: a stored template (SES renders it) or a
+ * campaign test (its draft). Its Idempotency-Key is claimed first, pending, and committed before that work, so a
+ * duplicate is IDEMPOTENCY_IN_PROGRESS and renders nothing; the claim is completed in the transaction that writes the
+ * email and released only if nothing was written (idempotent's prepare). No send lock is held while it renders: the
+ * transaction runs the one admission statement after the work.
+ */
+async function claimedSend(call: SendCall, a: Actor, body: unknown, work: () => Promise<{ out: Outgoing[]; campaign?: { id: string; revision: number } }>, options: { batch: boolean; replayed?: (db: DbExecutor, receipt: SendReceipt) => Promise<void> }) {
+  let prepared: Awaited<ReturnType<typeof work>> | undefined;
+  const admit = (db?: DbExecutor) => admitSends({ ...call, key: undefined, db }, body, prepared!.out, { actor: a }, { batch: options.batch, campaign: prepared!.campaign });
+  if (call.key === undefined) { prepared = await work(); return admit(); }
+  return idempotent<SendReceipt | { data: SendReceipt[] }>(call.runtime.db, { path: call.path, key: call.key, workspaceId: a.workspaceId, actorKeyId: a.keyId }, body, admit,
+    { prepare: async () => { prepared = await work(); }, replayed: options.replayed && ((db, receipt) => 'id' in receipt ? options.replayed!(db, receipt) : Promise.resolve()) });
+}
+/** Renders each stored template through SES in the region a check-only decision resolves (no lock is held). */
+async function renderTemplates(runtime: Runtime, a: Actor, out: Outgoing[], batch: boolean) {
+  const cfg = runtime.config, check = await admission(runtime, a.workspaceId, actorJson(a), { stage: 'send', locks: 'none', mails: admissionMails(out), ...charges(runtime, out) },
+    undefined, actorAssets(a, out.flatMap(m => m.snapshot.attachments)));
+  const decided = admitted(runtime, (await runtime.db.execute<{ s: Admitted | Refused }>(sql`SELECT ${check} AS s`)).rows[0]!.s, a.workspaceId,
+    { batch, invalid: i => out[i]!.invalid, oversize: i => out[i]!.oversize });
+  for (const [i, m] of out.entries()) if (m.template) {
+    const route = decided.mails[i]!, scoped = { ...runtime, config: { ...cfg, workspaceId: a.workspaceId, regions: [route.region] } };
+    m.snapshot.region = route.region;
+    await renderTemplate(scoped, m.snapshot, m.template, route.connection).catch(e => { throw atItem(e, batch ? i : undefined); });
+  }
+}
 /** POST /v1/emails/send and /batch after authentication, the dashboard's test email and the platform's notices. */
 async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emails: SendRequest[] }) {
-  const batch = 'emails' in input, mails = batch ? input.emails : [input];
-  return admitSends(call, input, await directMessages(call.runtime, mails, batch), { actor: a }, { batch });
+  const batch = 'emails' in input, mails = batch ? input.emails : [input], out = await directMessages(call.runtime, mails, batch);
+  if (!out.some(m => m.template)) return admitSends(call, input, out, { actor: a }, { batch });
+  return claimedSend(call, a, input, async () => { await renderTemplates(call.runtime, a, out, batch); return { out }; }, { batch });
 }
 // Auth middleware calls this only for ordinary bearer keys, after the request size gate. Malformed inputs, mailbox
 // tracking and provider-rendered templates keep their normal authenticated handler (including error ordering).
@@ -1268,20 +1277,15 @@ export function registerSending(app: App) {
     return c.json({ id: campaignId, deleted: true as const }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/test', operationId: 'testCampaign', description: 'Send the current draft, personalized with data, to one address as a transactional test. On Hosted sending a test is screened on its own, with the campaign limit (49,152 bytes of screened text by default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } over it).', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(TestCampaign) }, responses: { 202: response(Receipt), ...errors } }), async c => {
-    const a = actor(c, 'send'), input = c.req.valid('json'), campaignId = c.req.valid('param').id, call = sendCall(c);
-    const replayed = (receipt: SendReceipt) => campaignReplay(a, campaignId)(c.env.db, receipt);
-    // A retry replays before the draft is read: a finished test answers even after its draft changed or was archived.
-    if (call.key !== undefined) {
-      const previous = await priorResult<SendReceipt>(c.env.db, { workspaceId: a.workspaceId, actorKeyId: a.keyId, path: call.path, key: call.key }, input);
-      if (previous) { await replayed(previous); return c.json(Receipt.parse(previous), 202); }
-    }
-    // Read and render the draft, then admit the test in one statement that locks the campaign and requires the
-    // revision it rendered.
-    const row = await findCampaign(c.env.db, a, campaignId);
-    if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.');
-    const snapshot = { ...await campaignMessage(c.env, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true, null), testCampaignId: campaignId };
-    const result = await admitSends(call, input, [{ snapshot, recipients: hostedCost(input.to), marketing: false }], { actor: a },
-      { batch: false, campaign: { id: campaignId, revision: row.revision }, replayed });
+    const a = actor(c, 'send'), input = c.req.valid('json'), campaignId = c.req.valid('param').id;
+    // With its key claimed, read and render the draft, then admit the test in one statement that locks the campaign
+    // and requires the revision it rendered. A replay rechecks that the caller may still read the campaign.
+    const result = await claimedSend(sendCall(c), a, input, async () => {
+      const row = await findCampaign(c.env.db, a, campaignId);
+      if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.');
+      const snapshot = { ...await campaignMessage(c.env, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true, null), testCampaignId: campaignId };
+      return { out: [{ snapshot, recipients: hostedCost(input.to), marketing: false }], campaign: { id: campaignId, revision: row.revision } };
+    }, { batch: false, replayed: (db, receipt) => campaignReplay(a, campaignId)(db, receipt) });
     return c.json(Receipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/send', operationId: 'sendCampaign', description: 'Accept the current revision for durable background delivery: the audience is frozen now, every message is validated in the background, then recipients are released into the dispatch queue. The 202 count is accepted recipient intents, not SES acceptance or delivery; poll the campaign for its state. ' + CAMPAIGN_SCREEN_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSend) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {

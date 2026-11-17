@@ -4,9 +4,9 @@ import { ApiError, digest, webhookUrlHint, type Ctx, type Database, type DbExecu
 
 /**
  * Idempotency-Key: one protocol on sending_idempotency for every caller. The create middleware below, idempotent()
- * (campaigns, uploads, mailbox and thread sends) and the one-statement send admission (send_admission: direct, batch
- * and template sends, campaign tests, internal notices) all claim a key with the SQL function idempotency_claim
- * (migration 317), and all answer
+ * (campaigns, uploads, mailbox and thread sends, stored-template sends and campaign tests) and the one-statement send
+ * admission (send_admission: direct and batch sends, internal notices) all claim a key with the SQL function
+ * idempotency_claim (migration 317), and all answer
  * with the one replay rule in replay():
  *
  * - a finished request replays its stored result;
@@ -56,18 +56,6 @@ const claimKey = (s: IdempotencyScope, hash: string) => sql`idempotency_claim(${
 const where = (s: IdempotencyScope) => sql`workspace_id = ${s.workspaceId} AND actor_key_id = ${s.actorKeyId} AND path = ${s.path} AND request_key = ${s.key}`;
 async function claim(db: DbExecutor, s: IdempotencyScope, hash: string) {
   return (await db.execute<{ state: ClaimState | null }>(sql`SELECT ${claimKey(s, hash)} AS state`)).rows[0]!.state;
-}
-/**
- * The answer to a retry, read before the request claims its key and before it reads or renders anything mutable it
- * names (a campaign test's draft, a stored template): a finished request replays its result even after its source
- * changed, and one still running is IDEMPOTENCY_IN_PROGRESS. Undefined when the key is free; the request then claims
- * it as usual. The key's try-lock, if taken here, is released when this statement ends.
- */
-export async function priorResult<T>(db: DbExecutor, s: IdempotencyScope, body: unknown): Promise<T | undefined> {
-  const [row] = (await db.execute<{ state: ClaimState | null }>(sql`SELECT coalesce(
-    (SELECT jsonb_build_object('previous', result, 'hash', request_hash, 'createdAt', created_at) FROM sending_idempotency WHERE ${where(s)}),
-    CASE WHEN NOT idempotency_lock(${s.workspaceId}, ${s.actorKeyId}, ${s.path}, ${s.key}) THEN '{"previous":null,"busy":true}'::jsonb END) AS state`)).rows;
-  return row?.state ? replay<T>(row.state, await requestHash(body)) : undefined;
 }
 const complete = (db: DbExecutor, s: IdempotencyScope, result: unknown) => db.execute(sql`UPDATE sending_idempotency SET result = ${JSON.stringify(result)}::jsonb WHERE ${where(s)}`);
 // Frees a claim that has no result: one whose request was refused or never wrote.
