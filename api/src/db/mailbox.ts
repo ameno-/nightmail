@@ -52,7 +52,7 @@ export const mailboxDomains = pgTable('mailbox_domains', {
   parentId: text('parent_id'), acceptSubdomains: boolean('accept_subdomains').notNull().default(false),
   metadata: jsonb('metadata').$type<Record<string, unknown>>().notNull().default({}),
   createdAt: ts('created_at').notNull().defaultNow(), updatedAt: ts('updated_at').notNull().defaultNow(),
-}, t => [unique('mailbox_domains_name').on(t.workspaceId, t.name), uniqueIndex('mailbox_domains_domain').on(t.workspaceId, t.domainId).where(sql`${t.parentId} IS NULL`),uniqueIndex('mailbox_domains_receiving_host').on(t.workspaceId,t.receivingHost).where(sql`${t.receivingHost} IS NOT NULL AND ${t.status} IN ('active','provisioning')`),
+}, t => [unique('mailbox_domains_name').on(t.workspaceId, t.name), uniqueIndex('mailbox_domains_domain').on(t.workspaceId, t.domainId).where(sql`${t.parentId} IS NULL`),
   uniqueIndex('mailbox_domains_routing_host').on(t.receivingHost).where(sql`${t.receivingHost} IS NOT NULL AND ${t.status} IN ('active','provisioning')`), index('mailbox_domains_region').on(t.workspaceId, t.region, t.status)]);
 
 export const mailboxes = pgTable('mailboxes', {

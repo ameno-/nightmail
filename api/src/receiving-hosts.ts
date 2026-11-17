@@ -139,7 +139,7 @@ async function addHosted(c: Ctx, wid: string, row: HostedDomain, input: AddInput
     return { row: saved, created: true };
   }).catch((e: unknown) => {
     const cause = ((e as { cause?: unknown })?.cause ?? e) as { code?: string; constraint?: string };
-    if (cause?.code === '23505' && ['mailbox_domains_receiving_host', 'mailbox_domains_routing_host'].includes(cause.constraint ?? '')) throw taken(host, row.name);
+    if (cause?.code === '23505' && cause.constraint === 'mailbox_domains_routing_host') throw taken(host, row.name);
     throw e;
   });
   if (saved.created) wake(c);
