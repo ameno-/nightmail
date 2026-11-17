@@ -1,5 +1,5 @@
 name: Deploy
-run-name: Deploy ${{ github.ref_name }} ${{ inputs.auto_run && inputs.ref || github.sha }}
+run-name: Deploy ${{ github.ref_name }} ${{ github.sha }}
 
 # One workflow per stage. The branch picks the stage (dev or production), and
 # the stage picks the environment, the AWS role, the Pulumi stack and the
@@ -8,7 +8,7 @@ run-name: Deploy ${{ github.ref_name }} ${{ inputs.auto_run && inputs.ref || git
 # write can never race the E2E as it could when pulumi.yml was separate.
 #
 # A dev deploy starts on the push itself, alongside that push's CI. Production
-# deploys only a commit with passing CI (queue tree or dev push) and a passing
+# deploys only a pushed commit with passing dev push CI and a passing
 # live dev E2E for that SHA (dev-proof.sh), and needs no
 # reviewer: the proof, the production branch's ruleset and its fast-forward
 # history gate it (docs/ci.md).
@@ -16,16 +16,8 @@ on:
   push:
     branches: [dev, production]
   workflow_dispatch:
+    # Dev operations only; production deploys the commit pushed to its branch.
     inputs:
-      auto_run:
-        description: 'Automation only: dev push run that proved ref'
-        required: false
-        type: string
-      ref:
-        description: 'Production only: branch, tag or SHA on production to deploy instead of its tip'
-        required: false
-        default: production
-        type: string
       init:
         description: Create the Pulumi stack with its KMS secrets provider if it does not exist
         type: boolean
@@ -39,7 +31,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy-${{ github.ref_name }}
+  # A rejected dispatch must not evict a pending production push from its lock.
+  group: deploy-${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/dev' && github.run_id || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -51,40 +44,24 @@ jobs:
     permissions:
       contents: read
       actions: read
-      deployments: read
       pull-requests: read
     outputs:
       stage: ${{ steps.stage.outputs.stage }}
-      sha: ${{ steps.pin.outputs.sha }}
-      attempt: ${{ steps.pin.outputs.attempt }}
+      sha: ${{ github.sha }}
+      attempt: ${{ steps.stage.outputs.attempt }}
       pulumi: ${{ steps.paths.outputs.pulumi }}
       tenant_status: ${{ steps.paths.outputs.tenant_status }}
     steps:
-      - name: Authenticate the automatic release request
-        if: inputs.auto_run != ''
-        id: source
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN: ${{ inputs.auto_run }}
-          SHA: ${{ inputs.ref }}
-          PUSHER: ${{ github.actor }}
-          ACTOR: ${{ github.triggering_actor }}
-          AUTO_SHIP: ${{ vars.AUTO_SHIP }}
+      - id: stage
+        name: Pick the stage from the branch
         run: |
-          set -euo pipefail
-          [[ $GITHUB_EVENT_NAME == workflow_dispatch && $GITHUB_REF == refs/heads/production && ${AUTO_SHIP,,} != off ]]
-          [[ $PUSHER == 'github-actions[bot]' && $ACTOR =~ ^(github-actions\[bot\]|thdxr|R44VC0RP)$ ]]
-          [[ $RUN =~ ^[1-9][0-9]*$ && $SHA =~ ^[0-9a-f]{40}$ ]]
-          [[ ${{ inputs.init || false }} == false && ${{ inputs.preview || false }} == false ]]
-          repo="repos/$GITHUB_REPOSITORY"
-          gh api "$repo/actions/runs/$RUN" | jq -e --arg sha "$SHA" --arg repo "$GITHUB_REPOSITORY" '
-            .path == ".github/workflows/deploy.yml" and .event == "push" and .head_branch == "dev" and
-            .head_sha == $sha and .head_repository.full_name == $repo' >/dev/null
-          # Authorize checked the original dev pusher (including the queue enqueuer) and the live E2E ran for this SHA.
-          gh api "$repo/actions/runs/$RUN/jobs?filter=latest&per_page=100" | jq -e --arg job "Deploy dev $SHA" '
-            any(.jobs[]; .name == "Authorize" and .conclusion == "success") and
-            any(.jobs[]; .name == $job and .conclusion == "success" and any(.steps[]; .name == "Live dev E2E" and .conclusion == "success"))' >/dev/null
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          case "$GITHUB_EVENT_NAME:$GITHUB_REF" in
+            push:refs/heads/production|push:refs/heads/dev|workflow_dispatch:refs/heads/dev) ;;
+            *) echo "::error::Cannot deploy $GITHUB_REF via $GITHUB_EVENT_NAME. Push production to release."; exit 1 ;;
+          esac
+          echo "stage=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
       # github.actor pushed or dispatched; a rerun keeps it and makes the
       # rerunner github.triggering_actor, so both are checked. The merge queue
       # pushes dev as github-merge-queue[bot] on behalf of whoever added the
@@ -92,7 +69,6 @@ jobs:
       # so for that pusher the pull request merged at exactly this commit must
       # have been merged by an authorized actor.
       - name: Require an authorized actor
-        if: steps.source.outputs.sha == ''
         env:
           EVENT: ${{ github.event_name }}
           ACTOR: ${{ github.triggering_actor }}
@@ -129,24 +105,12 @@ jobs:
           require actor "$ACTOR"
           if [[ $PUSHER != "$ACTOR" ]]; then require 'original actor' "$PUSHER"; fi
 
-      - id: stage
-        name: Pick the stage from the branch
-        run: |
-          case "$GITHUB_REF" in
-            refs/heads/dev|refs/heads/production) echo "stage=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT" ;;
-            *) echo "::error::Invalid deployment branch $GITHUB_REF"; exit 1 ;;
-          esac
-
-      # Check the triggering commit, not a production rollback's explicitly
-      # authorized ancestor. Reuse this live check in each privileged job
-      # (including on failed-job reruns).
+      # Reuse this live check in each privileged job, including on failed-job reruns.
       - &stage-tip
         name: Require the triggering commit to still be the stage branch tip
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_SHA: ${{ github.sha }}
-          AUTO_SHA: ${{ inputs.auto_run && inputs.ref || '' }}
-          AUTO_SHIP: ${{ vars.AUTO_SHIP }}
         run: |
           if [[ $GITHUB_REF_NAME == production && $GITHUB_JOB != authorize && ${AUTHORIZED_ATTEMPT:-} != "$GITHUB_RUN_ATTEMPT" ]]; then
             echo '::error::Re-run all jobs to recheck the deployed SHA under the stage lock.'; exit 1
@@ -157,33 +121,8 @@ jobs:
             echo "::error::Deployment stopped: $GITHUB_REF_NAME advanced from $EXPECTED_SHA to $tip."
             exit 1
           fi
-          if [[ -n $AUTO_SHA ]]; then
-            [[ ${AUTO_SHIP,,} != off && $AUTO_SHA == "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/dev" --jq .object.sha)" ]] || { echo '::error::Auto-ship stopped: disabled or dev advanced.'; exit 1; }
-          fi
 
-      - id: pin
-        name: Pin the commit to deploy
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT: ${{ github.event_name }}
-          STAGE: ${{ steps.stage.outputs.stage }}
-          INPUT_REF: ${{ inputs.ref }}
-          EVENT_SHA: ${{ github.sha }}
-        run: |
-          if [[ $EVENT == workflow_dispatch && $STAGE == production && -n $INPUT_REF && $INPUT_REF != production ]]; then
-            ref=$(jq -rn --arg ref "$INPUT_REF" '$ref | @uri')
-            sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$ref" --jq .sha)
-          else
-            sha=$EVENT_SHA
-          fi
-          [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not resolve a commit to deploy."; exit 1; }
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
-
-      # Full history of every branch: the production ancestry check needs
-      # origin/production, and the changed-path check needs the deployed
-      # commit. The stage branch is what gets checked out; the commit to
-      # deploy is pinned separately.
+      # The ancestry and changed-path checks need the last successfully deployed commit.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ github.sha }}
@@ -194,33 +133,11 @@ jobs:
         if: steps.stage.outputs.stage == 'production'
         env:
           GH_TOKEN: ${{ github.token }}
-          SHA: ${{ steps.pin.outputs.sha }}
-          INPUT_REF: ${{ inputs.ref }}
-          AUTO_SHA: ${{ steps.source.outputs.sha }}
         run: |
-          [[ $SHA =~ ^[0-9a-f]{40}$ ]]
-          # Rollbacks deploy an older production commit, so the ref must be an
-          # ancestor of production rather than necessarily its tip.
-          if ! git cat-file -e "$SHA^{commit}" 2>/dev/null; then
-            echo "::error::$SHA is not a commit in this repository."; exit 1
-          fi
-          if ! git rev-parse --verify --quiet refs/remotes/origin/production >/dev/null; then
-            echo "::error::origin/production is missing from the checkout."; exit 1
-          fi
-          if [[ -z ${AUTO_SHA:-} ]] && ! git merge-base --is-ancestor "$SHA" origin/production; then
-            echo "::error::$SHA is not reachable from origin/production; production is fast-forward only, so deploy a commit it already contains."; exit 1
-          fi
-          gh api "repos/$GITHUB_REPOSITORY/compare/$SHA...dev?per_page=1" | jq -e --arg sha "$SHA" '.merge_base_commit.sha == $sha' >/dev/null || { echo "::error::$SHA is not reachable from dev"; exit 1; }
-          # Only an explicit production dispatch may roll back. Manual pushes share this same lock and forward check.
-          if [[ -n ${AUTO_SHA:-} || $GITHUB_EVENT_NAME != workflow_dispatch || -z $INPUT_REF || $INPUT_REF == production ]]; then
-            live=$(bash .github/scripts/deployed-sha.sh production)
-            git merge-base --is-ancestor "$live" "$SHA" || { echo "::error::$SHA would roll back production from $live"; exit 1; }
-            echo "DEPLOYED_BASE=$live" >> "$GITHUB_ENV"
-          fi
-          # The branch hosts the trusted workflow, not the live app ref. Never silently ship with obsolete gates.
-          if [[ -n $AUTO_SHA ]] && ! git diff --quiet "$GITHUB_SHA" "$SHA" -- .github/workflows/deploy.yml .github/scripts/dev-proof.sh .github/scripts/deployed-sha.sh; then
-            echo '::error::Release controls changed; install them on production with a normal proven manual push.'; exit 1
-          fi
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/dev || { echo "::error::$GITHUB_SHA is not reachable from dev"; exit 1; }
+          live=$(bash .github/scripts/deployed-sha.sh production)
+          git merge-base --is-ancestor "$live" "$GITHUB_SHA" || { echo "::error::$GITHUB_SHA would roll back production from $live"; exit 1; }
+          echo "DEPLOYED_BASE=$live" >> "$GITHUB_ENV"
 
       # The dev deploy no longer waits for dev CI, so production checks both
       # halves of dev's proof itself, waiting for a CI that is still running.
@@ -228,24 +145,21 @@ jobs:
         if: steps.stage.outputs.stage == 'production'
         env:
           GH_TOKEN: ${{ github.token }}
-          SHA: ${{ steps.pin.outputs.sha }}
-        run: bash .github/scripts/dev-proof.sh "$SHA"
+        run: bash .github/scripts/dev-proof.sh "$GITHUB_SHA"
 
       - id: paths
         name: Decide whether Pulumi has work
         env:
           EVENT: ${{ github.event_name }}
-          SHA: ${{ steps.pin.outputs.sha }}
           STAGE: ${{ steps.stage.outputs.stage }}
-          AUTO_SHA: ${{ steps.source.outputs.sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [[ $EVENT == workflow_dispatch && -z $AUTO_SHA ]]; then
+          if [[ $EVENT == workflow_dispatch ]]; then
             echo 'pulumi=true' >> "$GITHUB_OUTPUT"
             echo 'tenant_status=true' >> "$GITHUB_OUTPUT"
             echo 'Dispatch always runs Pulumi.' >> "$GITHUB_STEP_SUMMARY"
           else
-            bash .github/scripts/pulumi-has-work.sh "$STAGE" "$SHA"
+            bash .github/scripts/pulumi-has-work.sh "$STAGE" "$GITHUB_SHA"
           fi
 
   pulumi:
@@ -604,25 +518,6 @@ jobs:
             api/e2e-report.json
             api/e2e-worker-logs.json
           if-no-files-found: warn
-
-  promote:
-    name: Request production deployment
-    needs: [authorize, deploy]
-    if: >-
-      !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/dev' &&
-      needs.deploy.result == 'success' && needs.deploy.outputs.e2e == 'success' && vars.AUTO_SHIP != 'off'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
-    permissions:
-      contents: read
-      actions: write
-    steps:
-      - name: Dispatch the protected production workflow for this SHA
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tip=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/dev" --jq .object.sha)
-          if [[ $tip != "$GITHUB_SHA" ]]; then echo "Dev advanced to $tip; not shipping $GITHUB_SHA."; exit 0; fi
-          gh workflow run deploy.yml -R "$GITHUB_REPOSITORY" --ref production -f ref="$GITHUB_SHA" -f auto_run="$GITHUB_RUN_ID"
 
   # A failed live dev E2E opens (or comments on) one issue with the failed steps, their request IDs and the Worker's
   # log lines for those requests. Production stays blocked exactly as before: it requires a passing dev E2E for its SHA.

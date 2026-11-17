@@ -2,8 +2,7 @@
 # Usage: pulumi-has-work.sh <stage> <sha>. Writes pulumi=true|false to $GITHUB_OUTPUT (stdout when unset) and the
 # reason to the step summary (stderr when unset). Runs from a full-history checkout of the stage branch.
 #
-# The base is the commit of this stage's newest successful Deploy job, read from the job's own name (a rollback's job
-# names the commit it deployed, not the branch tip in the run's title). Deploy runs only after Pulumi succeeded or
+# The base is the head SHA of this stage's newest healthy main Worker deployment. Deploy runs only after Pulumi succeeded or
 # was skipped because nothing it reads had changed since such a commit, so the stack matches the base. Not the
 # previous tip or first parent (N12): a superseded run stops at its tip check and never counts, so the next run still
 # sees the infrastructure change it carried.
