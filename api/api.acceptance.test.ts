@@ -10016,11 +10016,15 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     const token = url.pathname.split('/').at(-1)!;
     assert.ok(content.html.includes(token) && content.text.includes(token), 'Manage-authorized content retrieval must preserve the usable HTML and text capability.');
     const redacted = ok(await http('GET', `/v1/emails/${source.id}/content`, reader.secret));
+    // The runner dispatches this message meanwhile, writing its events: compare detail and listEmailEvents once it has
+    // settled, or a dispatch between the two reads makes them differ (dev, Nov 17: detail [] and two listed events).
+    await poll(`/v1/emails/${source.id}`, reader.secret, body => body.status === 'delivered');
     const detail=ok(await http('GET',`/v1/emails/${source.id}/detail`,reader.secret));
     assert.deepEqual(detail.contact,{id:contact.id,suppressed:false});
     assert.deepEqual(detail.content,{html:redacted.html,text:redacted.text,attachments:redacted.attachments});
     assert.equal(detail.email.id,source.id); assert.ok(!JSON.stringify(detail).includes(token));
     const listedEvents=page(await http('GET',`/v1/emails/${source.id}/events`,reader.secret)) as {id:string}[];
+    assert.ok(listedEvents.length > 0, 'A delivered message has events.');
     assert.deepEqual((detail.events.data as {id:string}[]).map(e=>e.id),listedEvents.map(e=>e.id),'Detail must return the same events as listEmailEvents.');
     assert.equal(redacted.raw, null, 'Read-only access must not expose an unredacted MIME alternative.');
     assert.ok(!JSON.stringify(redacted).includes(token), 'Read-only content must not disclose the valid unsubscribe token anywhere in its response.');
