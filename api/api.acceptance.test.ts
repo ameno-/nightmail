@@ -13456,6 +13456,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.deepEqual(await rows(), [{ host: `reply.${name}`, status: 'active', lost: false }, { host: name, status: 'active', lost: false }, { host: `inbox.${name}`, status: 'active', lost: false }]);
         assert.deepEqual(await deliver(`a@reply.${name}`, `b@${name}`, `c@inbox.${name}`), [`a@reply.${name}`, `b@${name}`, `c@inbox.${name}`].sort());
         assert.deepEqual(await claimRow(), { receiving_state: 'active', receiving_host: `reply.${name}`, lost: false }, 'The claim mirrors the first host, as a claim with one host always read.');
+        // Choosing a host here never moves or adds one beside those: the hosts stay as the next release left them.
+        const choice = async () => (await db.query("SELECT identity->'receivingChoice' AS choice FROM domain_claims WHERE name=$1", [name])).rows[0].choice;
+        error(await choose(d, `more.${name}`), 409, 'RECEIVING_HOST_ACTIVE');
+        error(await choose(d, `reply.${name}`), 409, 'DOMAIN_CHANGED');
         // A host whose MX went missing over two hours ago is held; once its MX answers again it routes, its grace cleared.
         zone.delete(`inbox.${name}`); await recheck(d);
         assert.deepEqual((await rows())[2], { host: `inbox.${name}`, status: 'active', lost: true });
@@ -13470,12 +13474,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await recheck(d); await recheck(d);
         assert.deepEqual((await rows()).map(r => r.status), ['disabled', 'active', 'active']);
         assert.deepEqual(await claimRow(), { receiving_state: 'active', receiving_host: name, lost: false });
+        error(await choose(d, name), 409, 'RECEIVING_HOST_ACTIVE'); error(await choose(d, null), 409, 'DOMAIN_CHANGED');
         assert.deepEqual(await deliver(`a@reply.${name}`, `b@${name}`), [`b@${name}`]);
         // Every host removed: nothing routes, and a check brings none back.
         await db.query("UPDATE mailbox_domains SET status='disabled' WHERE domain_id=$1", [d.id]);
         await recheck(d);
         assert.deepEqual((await rows()).map(r => r.status), ['disabled', 'disabled', 'disabled']);
         assert.deepEqual(await claimRow(), { receiving_state: 'pending', receiving_host: null, lost: false });
+        error(await choose(d, `more.${name}`), 409, 'DOMAIN_CHANGED');
+        assert.equal(await choice(), null, 'No refused choice was saved.');
         assert.deepEqual(await deliver(`a@reply.${name}`, `b@${name}`, `c@inbox.${name}`), []);
       });
 

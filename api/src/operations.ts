@@ -860,6 +860,9 @@ export async function domainPage(c: Ctx, a: Actor, q: DomainQuery): Promise<z.in
   return { data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.row.id : null };
 }
 
+/** Hosts beside the domain's own, or its own removed: state only the next release's hosts operations make. */
+const severalHosts=(row:{hosts:ReceivingHostRow[]})=>row.hosts.some(h=>h.own===(h.status==='disabled' || h.status==='disabling'));
+const changedHosts=()=>new ApiError(409,'DOMAIN_CHANGED','The receiving hosts of this domain changed. Reload it and try again.',undefined,true);
 export function registerOperations(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/workspace', operationId: 'getWorkspaceSettings', tags: ['Settings'], security, responses: { 200: response(settingsSchema), ...errors } }), async c => {
     const a = workspaceActor(c); const [row] = c.env.config.multiTenant
@@ -977,9 +980,11 @@ export function registerOperations(app: App) {
     const row=await hostedDomain(c.env.db,a.workspaceId,domainId) ?? notFound('Domain'); allowedDomain(a,row.name);
     if (host!==null && host!==row.name && !host.endsWith(`.${row.name}`)) throw new ApiError(422,'RECEIVING_HOST_INVALID',`Use ${row.name} or one of its subdomains.`,'host');
     if (host!==null && reservedPlatformName(host,c.env.config)) throw new ApiError(409,'RECEIVING_HOST_RESERVED',`${host} is one of ${productName}’s own hosts, so it can’t receive mail for ${row.name}.`,'host');
-    // One host per domain until every Worker understands several (the next release adds hosts beside it).
-    const established=establishedHost(row);
-    if (established && host!==established) throw new ApiError(409,'RECEIVING_HOST_ACTIVE',`${established} already receives mail for ${row.name}. Remove its MX record first; you can choose another host once it stops resolving.`,'host');
+    // One host per domain until every Worker understands several: the next release adds hosts beside the domain's own
+    // and removes them. A domain it left with other hosts, or with its own host removed, keeps them as they are here.
+    const established=establishedHost(row), receives=established ?? row.hosts.find(h=>!h.own && (h.status==='active' || h.status==='provisioning'))?.host;
+    if (receives && host!==established) throw new ApiError(409,'RECEIVING_HOST_ACTIVE',`${receives} already receives mail for ${row.name}. Remove its MX record first; you can choose another host once it stops resolving.`,'host');
+    if (severalHosts(row)) throw changedHosts();
     let facts:Partial<IdentityFacts>={receivingChoice:null,issue:null};
     if (host!==null) {
       const {mx,issue}=await inspectReceivingHost(c.env.db,row,a.workspaceId,host,dnsUnavailable);
@@ -996,6 +1001,7 @@ export function registerOperations(app: App) {
       const current=await hostedDomain(db,a.workspaceId,domainId,true);
       const now=current && establishedHost(current);
       if (!current || current.token!==row.token || (now && host!==now)) throw new ApiError(409,'DOMAIN_CHANGED','The domain changed while its DNS was checked. Try again.',undefined,true);
+      if (severalHosts(current)) throw changedHosts();
       const identity:IdentityFacts={...(current.identity ?? identityOnly({VerificationStatus:'PENDING'})),...facts,...(host===null ? {mx:current.identity?.mx?.expected.name===now ? current.identity?.mx ?? null : null} : {})};
       await db.execute(sql`UPDATE domain_claims SET identity=${JSON.stringify(identity)}::jsonb WHERE workspace_id=${a.workspaceId} AND name=${current.name} AND token=${current.token}`);
       await recordAudit(db,c,{action:'domain.receiving_host',workspaceId:a.workspaceId,target:{type:'domain',id:domainId},before:{receivingChoice:current.identity?.receivingChoice ?? null},after:{name:current.name,receivingChoice:host}});
