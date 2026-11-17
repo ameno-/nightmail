@@ -1,5 +1,6 @@
-// The sorter's materials. Each is four flat tones of one colour, by how a surface faces the light: lit from above, the
-// front, grazing, and shade (which is also what a cast shadow is). `floor` is the page itself, the dark the slab stands in. Night: one hue (268°, the brand's) at low chroma and
+// The sorter's materials. Each is four tones of one colour, by how a surface faces the lamp over the machine: lit from
+// above, the front, grazing, and shade (which is also what a cast shadow is). The renderer passes smoothly between
+// them round a curve and adds the rest of the light to them (gl.ts); the page's own boxes use them as they are. `floor` is the page itself, the dark the slab stands in. Night: one hue (268°, the brand's) at low chroma and
 // its opposite, a warm paper white, for letters and whatever is lit; red only where something burns. Day is the same
 // machine in pale enamel on a pale floor, its sorting frame still dark so the letters in it stay paper.
 // A row is [lit, front, grazing, shade] lightness, chroma, hue, alpha (OKLCH); night first, then day.
@@ -7,7 +8,7 @@ type Row = [number, number, number, number, number, number, number]
 const flat = (l: number, c: number, h: number, a = 1): Row => [l, l, l, l, c, h, a]
 const TABLE = {
   floor:   [flat(.158, .014, 268), flat(.948, .01, 262)],
-  slab:    [[.228, .192, .184, .178, .017, 268, 1], [.99, .905, .9, .928, .008, 262, 1]],
+  slab:    [[.3, .2, .184, .178, .017, 268, 1], [.99, .905, .9, .928, .008, 262, 1]],
   body:    [[.365, .272, .242, .214, .018, 268, 1], [.985, .905, .86, .805, .008, 262, 1]],
   plinth:  [[.3, .212, .19, .168, .016, 268, 1], [.955, .868, .825, .775, .012, 262, 1]],
   wall:    [[.365, .272, .242, .214, .018, 268, 1], [.66, .565, .52, .46, .03, 262, 1]],
@@ -44,8 +45,21 @@ const TABLE = {
   // The sides of the wordmark's lit letters at the head of the frame (sorter/name.ts): never as pale as their faces,
   // by night or by day, so a letter's face stays the outline's own shape.
   rim:     [[.5, .39, .33, .27, .02, 268, 1], [.63, .52, .46, .39, .03, 262, 1]],
+  // The fitters' arms: a paler enamel than the machine's own, so they are seen at work against it and against the dark.
+  arm:     [[.8, .66, .56, .44, .016, 85, 1], [.97, .88, .79, .69, .02, 85, 1]],
+  // What a glass tube throws on the slab under it: a veil of the dark.
+  umbra:   [flat(.1, .014, 268, .34), flat(.5, .02, 262, .2)],
+  // The wordmark's faces: by night lit from within, as the price's windows are; by day the letters' own paper.
+  lit:     [flat(.955, .014, 92), [.995, .985, .93, .84, .01, 92, 1]],
 } as const
 export type Mat = keyof typeof TABLE
+// How each takes the light besides its tones: how rough it is (0 a mirror, 1 chalk), how much it shines, and how
+// much of its own light it gives by night (a lamp, a lens, a lit window). What is not listed is matt and unlit.
+const SURFACE: Partial<Record<Mat, [number, number, number]>> = {
+  slab: [.4, .55, 0], body: [.5, .3, 0], plinth: [.5, .3, 0], wall: [.6, .15, 0], trim: [.36, .5, 0], steel: [.24, 1, 0], dark: [.6, .1, 0], bay: [.55, .15, 0], rubber: [.8, .08, 0],
+  cell: [.7, .1, 0], cell2: [.7, .1, 0], brand: [.45, .3, 0], red: [.3, 0, 1], redzone: [.6, .1, 0], ember: [1, 0, 1], glass: [.08, .5, 0], sheen: [.08, .8, 0], pane: [.1, .8, 0], crack: [.3, 0, .3],
+  tube: [.1, 1, 0], lampOff: [.25, .7, 0], lampOn: [.3, 0, 1], dial: [.5, .25, 0], slot: [.3, .3, 0], screen: [.2, .5, 0], rim: [.5, .25, 0], lit: [.9, 0, 1], arm: [.4, .5, 0],
+}
 export const MAT = Object.fromEntries(Object.keys(TABLE).map((name, index) => [name, index])) as Record<Mat, number>
 
 /** OKLCH to 8-bit sRGB, clipped. */
@@ -65,14 +79,17 @@ export function paletteBytes(dark: boolean, rows: number) {
   const bytes = new Uint8Array(rows * 16)
   Object.values(TABLE).forEach((pair, index) => {
     const row = pair[dark ? 0 : 1]
-    for (let t = 0; t < 4; t++) { const [r, g, b] = oklch(row[t], row[4], row[5]); bytes.set([r, g, b, Math.round(row[6] * 255)], index * 16 + t * 4) }
+    // (A tone's fourth byte: the material's alpha in the first, then its roughness, its shine and its own light.)
+    const surface = [row[6], ...(SURFACE[Object.keys(TABLE)[index] as Mat] ?? [.9, 0, 0])]
+    for (let t = 0; t < 4; t++) { const [r, g, b] = oklch(row[t], row[4], row[5]); bytes.set([r, g, b, Math.round(surface[t] * 255)], index * 16 + t * 4) }
   })
   return bytes
 }
 /** A glass tube over the page, as the page draws it below the machine: the renderer draws a tube's far wall (in
  * shade) and then its near wall (in the tone its facing gives), each at the tube's alpha, over what is behind. */
-export function glass(index: 0 | 1 | 2 | 3, dark: boolean) {
-  const t = TABLE.tube[dark ? 0 : 1], f = TABLE.floor[dark ? 0 : 1], near = oklch(t[index], t[4], t[5]), far = oklch(t[3], t[4], t[5]), under = oklch(f[0], f[4], f[5]), a = t[6]
+export function glass(index: 0 | 1 | 2 | 3, dark: boolean, behind: Mat = 'floor') {
+  // (`behind`: what the tube is seen against, the page's floor unless it is a channel in the machine's front by day.)
+  const t = TABLE.tube[dark ? 0 : 1], f = TABLE[behind][dark ? 0 : 1], near = oklch(t[index], t[4], t[5]), far = oklch(t[3], t[4], t[5]), under = oklch(f[behind === 'floor' ? 0 : 1], f[4], f[5]), a = t[6]
   return `rgb(${near.map((v, i) => Math.round(v * a + (far[i] * a + under[i] * (1 - a)) * (1 - a))).join(' ')})`
 }
 /** The same glass in two layers, for a tube the page draws with a capsule in it: its far wall over the page, and its
@@ -91,6 +108,8 @@ export function toneVars(dark: boolean): Record<string, string> {
     '--srt-floor': tone('floor', 0, dark), '--srt-body': tone('body', 1, dark), '--srt-body-top': tone('body', 0, dark), '--srt-body-side': tone('body', 3, dark), '--srt-plinth': tone('plinth', 1, dark), '--srt-trim': tone('trim', 1, dark),
     '--srt-steel': tone('steel', 1, dark), '--srt-steel-top': tone('steel', 0, dark), '--srt-steel-graze': tone('steel', 2, dark), '--srt-steel-side': tone('steel', 3, dark), '--srt-paper-dim': tone('dim', 2, dark), '--srt-bay': tone('bay', 0, dark), '--srt-bay-side': tone('bay', 3, dark), '--srt-screen': tone('screen', 1, dark), '--srt-slot': tone('slot', 0, dark), '--srt-lamp-off': tone('lampOff', 1, dark),
     '--srt-tube-0': glass(0, dark), '--srt-tube-1': glass(1, dark), '--srt-tube-2': glass(2, dark), '--srt-tube-3': glass(3, dark),
-    '--srt-glass-back': glassBack(dark), '--srt-glass-0': glassVeil(0, dark, .7), '--srt-glass-1': glassVeil(1, dark), '--srt-glass-2': glassVeil(2, dark), '--srt-glass-3': glassVeil(3, dark),
+    '--srt-glass-back': glassBack(dark), '--srt-glass-0': glassVeil(0, dark, .7), '--srt-glass-1': glassVeil(1, dark, .6), '--srt-glass-2': glassVeil(2, dark), '--srt-glass-3': glassVeil(3, dark),
+    '--srt-lit': tone('lit', 1, dark), '--srt-rim': tone('rim', dark ? 1 : 2, dark),
+    '--srt-glass-rim': glassVeil(0, dark, 1.3), '--srt-glass-glint': dark ? 'rgb(255 255 255 / 46%)' : 'rgb(255 255 255 / 90%)',
   }
 }
