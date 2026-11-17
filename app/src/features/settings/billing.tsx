@@ -21,7 +21,7 @@ const final = (payment: Payment | undefined) => !!payment && !['created', 'pendi
 function useBillingRefresh() {
   const client = useQueryClient()
   return () => {
-    void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && String(query.queryKey[2]).startsWith('billing') })
+    void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && String(query.queryKey[2]).startsWith('billing') })
     void client.invalidateQueries({ queryKey: ['identity'] })
   }
 }

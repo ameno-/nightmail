@@ -5,7 +5,7 @@ import type { Identity } from './types'
 // Stored per workspace so a reload returns to the same step: '' before a domain is added, then its ID,
 // then `agent:<ID>` once the user continues to the agent setup, and `done` once they finish or skip.
 // Without a stored step (another browser, cleared storage) the server decides: no domain yet opens Add domain.
-const stepKey = (workspaceId: string) => `bane.onboarding.domain.${workspaceId}`
+const stepKey = (workspaceId: string) => `nightmail.onboarding.domain.${workspaceId}`
 const listeners = new Set<() => void>()
 const memory = new Map<string, string | null>()
 export function readDomainStep(workspaceId: string) {
@@ -39,7 +39,7 @@ export const identityOnboardingStage = (identity: Identity | null | undefined) =
 
 // Remembers which workspace last opened the dashboard, so boot only prefetches dashboard data
 // alongside /v1/me when that workspace is unlikely to need onboarding.
-const readyKey = 'bane.dashboard-ready'
+const readyKey = 'nightmail.dashboard-ready'
 const readyValue = (workspaceId: string | null) => workspaceId ?? '*'
 export function rememberDashboardReady(workspaceId: string | null, ready: boolean) {
   try { if (ready) localStorage.setItem(readyKey, readyValue(workspaceId)); else if (localStorage.getItem(readyKey) === readyValue(workspaceId)) localStorage.removeItem(readyKey) } catch { /* Boot then waits for /v1/me. */ }

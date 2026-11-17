@@ -6,7 +6,7 @@
   const query = new URLSearchParams(location.search), tab = query.get('tab')
   const status = document.getElementById('status')
   let channel = null
-  try { channel = new BroadcastChannel('bane.accounts') } catch {}
+  try { channel = new BroadcastChannel('nightmail.accounts') } catch {}
   const finish = (account, auth) => {
     channel?.postMessage({ type: 'signed-in', tab, account, auth })
     status.textContent = auth ? 'Sign-in didn’t finish. Close this window and try again.' : 'Account added. You can close this window.'

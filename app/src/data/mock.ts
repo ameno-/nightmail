@@ -1,5 +1,5 @@
 import { ApiError } from './types'
-import type { ApiKey, Inbox, LogEntry, SenderScoreFactor, MailRoute, RoutedRecipient, AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, InboundMessage, InboundThread, InboundWebhook, WebhookHeaderInput, WebhookHeaderView, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, BaneApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
+import type { ApiKey, Inbox, LogEntry, SenderScoreFactor, MailRoute, RoutedRecipient, AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, InboundMessage, InboundThread, InboundWebhook, WebhookHeaderInput, WebhookHeaderView, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, Api, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
 import { ownAddressesOf, replyRecipients, senderOf } from '../lib/reply-recipients'
 import { webhookHeaderErrors, webhookHeaderHint } from '../lib/webhook-headers'
 import { createSeed, demoInboundLinks, demoMailboxAccess, demoMailboxes, demoMailboxThreads, demoReceived, demoRoutes } from './seed'
@@ -24,7 +24,7 @@ function demoCheck(mail: { subject: string; html: string; text?: string | null; 
 // Demo webhook signing secrets, so revealing one shows the same value until it is rotated.
 const demoSecrets = new Map<string, string>()
 
-const STORAGE_KEY = 'bane.demo.v1'
+const STORAGE_KEY = 'nightmail.demo.v1'
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
 const ATTACHMENT_EXTENSIONS = ['pdf', 'txt', 'csv', 'json', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'ics', 'docx', 'xlsx', 'pptx']
 const ATTACHMENT_FILENAME = /^[^\x00-\x1f\x7f/\\]+$/
@@ -517,7 +517,7 @@ function checkDemoRoute(state: DemoState, input: { match: string; to: MailRoute[
   if ((state.mailRoutes ??= demoRoutes()).routes.some(route => route.match === match && route.id !== except)) throw new ApiError(`A route already matches ${match}. Add the destinations to that route instead.`, 'ROUTE_CONFLICT', { match: 'A route already matches this.' })
   return match
 }
-export function createMockApi(): BaneApi {
+export function createMockApi(): Api {
   let state: DemoState | undefined
   let storage: Storage | undefined
   let storageError = false

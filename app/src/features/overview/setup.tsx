@@ -24,7 +24,7 @@ function useSendingLimitRead() {
   const hosted = identity?.multiTenant === true && identity.connection?.kind === 'shared'
   // Seeded with the session's own /v1/me, so opening Overview doesn't ask again; it refreshes each minute.
   // An identity without the limit (the connection cache keeps only a summary) is not a seed: the limit is read.
-  const live = useQuery({ queryKey: ['bane', api.mode, 'sending-limit', identity?.workspaceId], enabled: hosted && api.mode === 'live', refetchInterval: 60_000, refetchIntervalInBackground: false,
+  const live = useQuery({ queryKey: ['nightmail', api.mode, 'sending-limit', identity?.workspaceId], enabled: hosted && api.mode === 'live', refetchInterval: 60_000, refetchIntervalInBackground: false,
     initialData: identity?.connection?.sendingLimit !== undefined ? identity ?? undefined : undefined, staleTime: 60_000, queryFn: ({ signal }) => request<Identity>('/v1/me', { signal }) })
   return { limit: hosted ? (live.data ?? identity)?.connection?.sendingLimit ?? null : null, pending: hosted && api.mode === 'live' && live.isPending }
 }
@@ -74,7 +74,7 @@ export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; 
   // The new email shows in Latest emails, the facts and the next steps without a reload.
   const sentTest = (id: string) => {
     setTestId(id)
-    void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && ['overview', 'overview-setup', 'logs', 'emails', 'sender-score', 'sending-limit'].includes(String(query.queryKey[2])) }).catch(() => {})
+    void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && ['overview', 'overview-setup', 'logs', 'emails', 'sender-score', 'sending-limit'].includes(String(query.queryKey[2])) }).catch(() => {})
   }
   if (!enabled) return { loading: false, steps: null }
   if (setup.isPending) return { loading: true, steps: null }

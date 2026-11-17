@@ -5,7 +5,7 @@ import { flushSync } from 'react-dom'
 // remembered per browser; off, every address renders in full at once, everywhere. The root element carries
 // data-privacy="off" while it is off. Anything that leaves the browser (a UI note's capture) calls forceMask(), which
 // masks again whatever this browser's setting, until it is released.
-const storageKey = 'bane.privacy'
+const storageKey = 'nightmail.privacy'
 const listeners = new Set<() => void>()
 const saved = () => { try { return localStorage.getItem(storageKey) !== 'off' } catch { return true } }
 let preference = saved(), forced = 0

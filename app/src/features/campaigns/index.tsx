@@ -270,8 +270,8 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
         }
       }
       const saved = await saveMutation.mutateAsync(submitted)
-      cache.setQueryData(['bane', api.mode, 'campaign', saved.id], saved)
-      void cache.invalidateQueries({queryKey: ['bane', api.mode, 'campaigns'], refetchType: 'none'})
+      cache.setQueryData(['nightmail', api.mode, 'campaign', saved.id], saved)
+      void cache.invalidateQueries({queryKey: ['nightmail', api.mode, 'campaigns'], refetchType: 'none'})
       if (!mounted.current) return
       creation.current = null
       const changedWhileSaving = editVersion.current !== version
@@ -461,7 +461,7 @@ const escapeHtml = (value: string) => value.replace(/[&<>"']/g, char => `&#${cha
 function useCampaignCache() {
   const api = useApi()
   const cache = useQueryClient()
-  return (next: Campaign) => { cache.setQueryData(['bane', api.mode, 'campaign', next.id], next); void cache.invalidateQueries({ queryKey: ['bane', api.mode, 'campaigns'], refetchType: 'none' }) }
+  return (next: Campaign) => { cache.setQueryData(['nightmail', api.mode, 'campaign', next.id], next); void cache.invalidateQueries({ queryKey: ['nightmail', api.mode, 'campaigns'], refetchType: 'none' }) }
 }
 
 function ScheduledBanner({ campaign }: { campaign: Campaign }) {
@@ -529,7 +529,7 @@ function CancelCampaignButton({ campaign }: { campaign: Campaign }) {
   const [open, setOpen] = useState(false)
   return <>
     <Button variant="ghost" disabled={!canAdminister} title={canAdminister ? 'Stop releasing recipients and cancel queued emails' : 'Only owners and admins can cancel campaigns.'} onClick={() => setOpen(true)}>Cancel campaign</Button>
-    <ConfirmDialog open={open} onOpenChange={setOpen} danger title="Cancel this campaign?" description="Queued emails are canceled and remaining recipients won’t get it. Sent emails stay sent. You can’t undo this." confirmLabel="Cancel campaign" onConfirm={async () => { const result = await api.campaigns.cancel(campaign.id); toast(`Campaign canceled · ${number(result.canceled)} not sent`, 'success'); await cache.invalidateQueries({ queryKey: ['bane', api.mode, 'campaign', campaign.id] }); void cache.invalidateQueries({ queryKey: ['bane', api.mode, 'campaigns'], refetchType: 'none' }) }} />
+    <ConfirmDialog open={open} onOpenChange={setOpen} danger title="Cancel this campaign?" description="Queued emails are canceled and remaining recipients won’t get it. Sent emails stay sent. You can’t undo this." confirmLabel="Cancel campaign" onConfirm={async () => { const result = await api.campaigns.cancel(campaign.id); toast(`Campaign canceled · ${number(result.canceled)} not sent`, 'success'); await cache.invalidateQueries({ queryKey: ['nightmail', api.mode, 'campaign', campaign.id] }); void cache.invalidateQueries({ queryKey: ['nightmail', api.mode, 'campaigns'], refetchType: 'none' }) }} />
   </>
 }
 

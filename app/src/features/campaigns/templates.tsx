@@ -125,8 +125,8 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
   const { start, pending: starting, unavailable } = useStartFromTemplate()
   const archived = Boolean(template.archivedAt)
   const subjectHint = placeholderHint(draft.subject), previewHint = placeholderHint(draft.previewText)
-  const refreshLists = () => cache.invalidateQueries({queryKey: ['bane', api.mode, 'templates'], refetchType: 'none'})
-  const remember = (value: CampaignTemplate) => cache.setQueryData(['bane', api.mode, 'template', value.id], value)
+  const refreshLists = () => cache.invalidateQueries({queryKey: ['nightmail', api.mode, 'templates'], refetchType: 'none'})
+  const remember = (value: CampaignTemplate) => cache.setQueryData(['nightmail', api.mode, 'template', value.id], value)
   const changed = useCallback(() => { version.current++; setDirty(true); setError('') }, [])
   function change<K extends keyof CampaignTemplateDraft>(key: K, value: CampaignTemplateDraft[K]) { const next = {...draftRef.current, [key]: value}; draftRef.current = next; setDraft(next); changed() }
   useEffect(() => {
@@ -205,7 +205,7 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
       <CampaignAttachments ref={attachments} attachmentApi={api.templateAssets} ids={draft.attachments} persisted={template.draft.attachments} onChange={ids => change('attachments', ids)} onBusy={setAssetBusy} disabled={archived || saving || composerBusy} />
     </div></div></section>
     {previewOpen && <TemplatePreviewDialog template={template} onOpenChange={setPreviewOpen} />}
-    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete template?" description="Campaigns already created from this template will not change." confirmLabel="Delete template" danger onConfirm={async () => { await api.templates.remove(template.id); cache.removeQueries({queryKey: ['bane', api.mode, 'template', template.id], exact: true}); await refreshLists(); navigate('/campaigns/templates') }} />
+    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete template?" description="Campaigns already created from this template will not change." confirmLabel="Delete template" danger onConfirm={async () => { await api.templates.remove(template.id); cache.removeQueries({queryKey: ['nightmail', api.mode, 'template', template.id], exact: true}); await refreshLists(); navigate('/campaigns/templates') }} />
   </div>
 }
 

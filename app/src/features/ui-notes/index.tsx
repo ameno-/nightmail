@@ -21,7 +21,7 @@ type Shot = Awaited<ReturnType<typeof screenshot>>
 type Draft = { target: Element; info: ReturnType<typeof describe>; shot: Promise<Shot> }
 type Anchor = () => DOMRect | null
 const LONG_PRESS_MS = 500
-const KIND_KEY = 'bane.ui-notes.kind'
+const KIND_KEY = 'nightmail.ui-notes.kind'
 const lastKind = (): NoteKind => { try { const value = localStorage.getItem(KIND_KEY); return (noteKinds as readonly string[]).includes(value ?? '') ? value as NoteKind : 'alignment' } catch { return 'alignment' } }
 const kindLabel = (kind: string) => kind[0]!.toUpperCase() + kind.slice(1)
 // The thing a click lands on inside an icon is a path; the note belongs to the icon.

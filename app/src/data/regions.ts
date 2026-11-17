@@ -1,10 +1,10 @@
 import { useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useApi, useSession } from './context'
-import { ApiError, type BaneApi, type RegionCatalog, type RegionCatalogEntry, type SesDiscovery } from './types'
+import { ApiError, type Api, type RegionCatalog, type RegionCatalogEntry, type SesDiscovery } from './types'
 
-export const regionCatalogKey = (api: BaneApi) => ['bane', api.mode, 'regions'] as const
-export const regionDiscoveryKey = (api: BaneApi, region: string) => ['bane', api.mode, 'region-discovery', region] as const
+export const regionCatalogKey = (api: Api) => ['nightmail', api.mode, 'regions'] as const
+export const regionDiscoveryKey = (api: Api, region: string) => ['nightmail', api.mode, 'region-discovery', region] as const
 export const regionJobActive = (entry?: RegionCatalogEntry) => entry?.discoveryStatus === 'discovering' || entry?.provisionStatus === 'pending' || entry?.provisionStatus === 'running'
 
 export function useRegionAccess() {

@@ -356,7 +356,7 @@ export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () =>
 type ToastTone = 'success' | 'error' | 'info';
 type ToastFn = (message: string, tone?: ToastTone) => void;
 const ToastContext = createContext<ToastFn | null>(null);
-const KEPT_TOASTS = 'bane.kept-toasts';
+const KEPT_TOASTS = 'nightmail.kept-toasts';
 const TOAST_MS = 6000;
 // A toast stays 6 s, and the time stops while a pointer rests on it or focus is inside it.
 function Toast({ id, tone, message, dismiss }: { id: number; tone: ToastTone; message: string; dismiss: (id: number) => void }) {
@@ -380,8 +380,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     try { const kept = sessionStorage.getItem(KEPT_TOASTS); sessionStorage.removeItem(KEPT_TOASTS); if (kept) for (const { message, tone } of JSON.parse(kept) as { message: string; tone: ToastTone }[]) toast(message, tone); } catch { /* Nothing to restore. */ }
     const keep = () => { try { sessionStorage.setItem(KEPT_TOASTS, JSON.stringify(shown.current.map(({ message, tone }) => ({ message, tone })))); } catch { /* The toasts go with the page. */ } };
-    window.addEventListener('bane:reloading', keep);
-    return () => window.removeEventListener('bane:reloading', keep);
+    window.addEventListener('nightmail:reloading', keep);
+    return () => window.removeEventListener('nightmail:reloading', keep);
   }, [toast]);
   return <ToastContext.Provider value={toast}>{children}<div className="ui-toasts" aria-label="Notifications">{toasts.map(item => <Toast key={item.id} id={item.id} tone={item.tone} message={item.message} dismiss={dismiss} />)}</div></ToastContext.Provider>;
 }

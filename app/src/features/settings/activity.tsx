@@ -79,7 +79,7 @@ export function ActivitySection() {
   const [area, setArea] = useState('')
   const [open, setOpen] = useState<AuditEntry | null>(null)
   const activity = useInfiniteQuery({
-    queryKey: ['bane', api.mode, 'activity', area],
+    queryKey: ['nightmail', api.mode, 'activity', area],
     queryFn: ({ pageParam, signal }) => activityApi.list({ action: area || undefined, cursor: pageParam }, signal),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: page => page.nextCursor ?? undefined,

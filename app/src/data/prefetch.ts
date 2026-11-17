@@ -4,7 +4,7 @@ import { rememberedPageSize } from '../lib/pagination'
 import { useApi, useRegion, useWorkspaceAccess } from './context'
 import { queries, type QueryDef } from './queries'
 import { firstOverview, overviewQuery } from '../features/inbound/overview'
-import type { BaneApi } from './types'
+import type { Api } from './types'
 import { openApiQuery } from '../features/docs/openapi'
 import { latestRowCount } from '../features/overview/latest'
 
@@ -35,8 +35,8 @@ function firstScreen(path: string, { regionId, multiTenant, canAdminister }: Sco
   }
 }
 
-export function prefetchQueries(cache: QueryClient, api: BaneApi, defs: QueryDef<unknown>[]) {
-  return Promise.allSettled(defs.map(query => cache.prefetchQuery({ queryKey: ['bane', api.mode, ...query.key], queryFn: ({ signal }) => query.read(api, signal), staleTime: FRESH })))
+export function prefetchQueries(cache: QueryClient, api: Api, defs: QueryDef<unknown>[]) {
+  return Promise.allSettled(defs.map(query => cache.prefetchQuery({ queryKey: ['nightmail', api.mode, ...query.key], queryFn: ({ signal }) => query.read(api, signal), staleTime: FRESH })))
 }
 
 // Warms a few queries for the current API (GET only; anything fresh or in flight is skipped).

@@ -163,7 +163,7 @@ function DomainDetail() {
   const [moveMail, setMoveMail] = useState<{ host: string; message: string } | null>(null)
   const choose = useApiMutation(async (api, input: { host: string | null; confirm?: boolean }) => {
     const updated = await api.domains.chooseReceivingHost!(id, input)
-    client.setQueryData(['bane', api.mode, 'domain', id], updated)
+    client.setQueryData(['nightmail', api.mode, 'domain', id], updated)
     return updated
   }, undefined, false, true, id)
   async function chooseHost(host: string | null) {
@@ -219,7 +219,7 @@ function DomainDetail() {
     <ConfirmDialog open={!!moveMail} onOpenChange={open => { if (!open) setMoveMail(null) }} title={`Move mail for ${moveMail?.host ?? current.name}?`}
       description={`${moveMail?.message ?? ''} Mail stops arriving there once the MX record changes.`} confirmLabel={`Use ${moveMail?.host ?? current.name} anyway`} danger
       onConfirm={() => choose.mutateAsync({ host: moveMail!.host, confirm: true })} />
-    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${current.name}?`} description="Sending from it stops. Its DNS records stay at your DNS provider until you remove them." confirmLabel="Delete domain" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(id); navigate('/domains', { replace: true }); client.removeQueries({ predicate: query => query.queryKey[0] === 'bane' && query.queryKey[2] === 'domain' && query.queryKey[3] === id }); void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && query.queryKey[2] === 'domains' }) }} />
+    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${current.name}?`} description="Sending from it stops. Its DNS records stay at your DNS provider until you remove them." confirmLabel="Delete domain" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(id); navigate('/domains', { replace: true }); client.removeQueries({ predicate: query => query.queryKey[0] === 'nightmail' && query.queryKey[2] === 'domain' && query.queryKey[3] === id }); void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && query.queryKey[2] === 'domains' }) }} />
     <Dialog open={mailFromOpen} onOpenChange={next => {if (!configureMailFrom.isPending) setMailFromOpen(next)}} title={current.mailFromDomain ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} footer={<><Button disabled={configureMailFrom.isPending} onClick={() => setMailFromOpen(false)}>Cancel</Button><Button variant="primary" loading={configureMailFrom.isPending} type="submit" form="configure-mail-from">Save</Button></>}>
       <form id="configure-mail-from" className="stack" onSubmit={submitMailFrom} noValidate>
         <MutationError error={configureMailFrom.error} />

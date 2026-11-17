@@ -56,7 +56,7 @@ function useConnectionMutation<T>(write: (input: T) => Promise<ProviderConnectio
       if (connection?.state !== 'ready') return
       refreshIdentity()
       // Regions, discovery and limits now come from the new connection.
-      void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && query.queryKey[2] !== 'connection' }).catch(() => {})
+      void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && query.queryKey[2] !== 'connection' }).catch(() => {})
     },
   })
 }
@@ -124,7 +124,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   const [queued, setQueued] = useState(false)
   // Polls every 3 s while a BYO setup waits on AWS (only while the page is visible) and on focus.
   const connection = useQuery({
-    queryKey: ['bane', api.mode, 'connection'],
+    queryKey: ['nightmail', api.mode, 'connection'],
     queryFn: ({ signal }) => connectionApi.get(signal),
     enabled: sending || choosingDomain,
     // /v1/me already says there is no connection yet, so the choice shows without another request.
@@ -157,7 +157,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
     shared.reset(); byo.reset()
     setPicked(next)
     if (pending?.state === 'provisioning' || pending?.state === 'failed') toast(`If you made the ${productName} stack, delete it in AWS.`, 'info')
-    void client.cancelQueries({ queryKey: ['bane', api.mode, 'connection'] })
+    void client.cancelQueries({ queryKey: ['nightmail', api.mode, 'connection'] })
     void (async () => {
       try { if (pending) await connectionApi.remove() }
       catch (error) { if (!(error instanceof ApiError && error.status === 404)) { toast(message(error), 'error'); setDropped(null); setPicked(pending ? 'byo' : null); return } }
@@ -394,7 +394,7 @@ function AddDomain({ draft, onDraftChange, queued, onQueuedChange, ready, onAdde
     if (!ready) { onQueuedChange(true); return }
     try {
       const domain = await create.mutateAsync(value)
-      client.setQueryData(['bane', api.mode, 'domain', domain.id], domain)
+      client.setQueryData(['nightmail', api.mode, 'domain', domain.id], domain)
       onAdded(domain.id)
     } catch { /* Shown inline. */ }
   }

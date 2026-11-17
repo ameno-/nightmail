@@ -1,17 +1,19 @@
-import { ApiError, type MailRoute, type RoutingTestResult, type BaneApi, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxWebhookDelivery, type ReceivedEmail, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity, type OverviewSetup } from './types'
+import { ApiError, type MailRoute, type RoutingTestResult, type Api, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxWebhookDelivery, type ReceivedEmail, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity, type OverviewSetup } from './types'
 
 import type { Agent, ApiKey, AppPassword, CreatedAppPassword } from './types'
 import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogEntry, SenderScore } from './types'
-import { productName } from '../../../api/src/brand'
+import { headerPrefix, productName } from '../../../api/src/brand'
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
 // The account this tab acts as (a browser can connect several, data/accounts.ts), sent as X-Nightmail-Account. It is per tab
 // (sessionStorage), so two tabs can show two accounts; unknown in a new tab until /v1/me answers as the browser default.
-const accountStorageKey = 'bane.account'
+const accountStorageKey = 'nightmail.account'
 let accountSelection: string | null = (() => { try { return sessionStorage.getItem(accountStorageKey) } catch { return null } })()
 export const selectedAccount = () => accountSelection
-// The dashboard's selected workspace (multi-tenant installations only). Sent with every request. Remembered per account.
-const workspaceKey = (account: string | null) => account ? `bane.workspace:${account}` : 'bane.workspace'
+// The dashboard's selected workspace (multi-tenant installations only), sent with every request as X-Nightmail-Workspace:
+// without it the API acts in the workspace the account selected last, in whichever tab. Remembered per account.
+const accountHeader = `${headerPrefix}Account`, workspaceHeader = `${headerPrefix}Workspace`
+const workspaceKey = (account: string | null) => account ? `nightmail.workspace:${account}` : 'nightmail.workspace'
 export const rememberedWorkspace = (account: string | null) => { try { return localStorage.getItem(workspaceKey(account)) } catch { return null } }
 let workspaceSelection: string | null = accountSelection ? rememberedWorkspace(accountSelection) : null
 export const selectedWorkspace = () => workspaceSelection
@@ -30,7 +32,7 @@ type EarlyRequests = { account?: string | null; workspace: string | null; at: nu
 const aborted = () => new DOMException('The operation was aborted.', 'AbortError')
 // A request that is aborted before it reads the response (React StrictMode's first mount) puts it back for the next one.
 async function takeEarly(path: string, signal?: AbortSignal) {
-  const early = (window as { __baneEarly?: EarlyRequests }).__baneEarly
+  const early = (window as { __nightmailEarly?: EarlyRequests }).__nightmailEarly
   const pending = early?.responses[path]
   if (!early || !pending) return null
   delete early.responses[path]
@@ -60,7 +62,7 @@ export async function request<T = Json>(path: string, options: { method?: string
   try {
     const early = options.method === undefined && options.body === undefined ? takeEarly(path, options.signal) : null
     response = (early && await early) ?? await fetch(path, { method: options.method ?? 'GET', credentials: 'include', signal: options.signal,
-      headers: { Accept: 'application/json', ...(options.ifMatch===undefined?{}:{'If-Match':String(options.ifMatch)}), ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(account ? { 'X-Nightmail-Account': account } : {}), ...(workspaceSelection ? { 'X-Bane-Workspace': workspaceSelection } : {}) },
+      headers: { Accept: 'application/json', ...(options.ifMatch===undefined?{}:{'If-Match':String(options.ifMatch)}), ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(account ? { [accountHeader]: account } : {}), ...(workspaceSelection ? { [workspaceHeader]: workspaceSelection } : {}) },
       body: options.body === undefined ? undefined : JSON.stringify(options.body) })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error
@@ -81,7 +83,7 @@ export async function request<T = Json>(path: string, options: { method?: string
     const error = data?.error
     const code = typeof error?.code === 'string' ? error.code : `HTTP_${response.status}`
     const message = typeof error?.message === 'string' ? error.message : 'Couldn’t complete the request.'
-    if (response.status === 401 && path.startsWith('/v1/') && path !== '/v1/me') window.dispatchEvent(new Event(code === 'ACCOUNT_SIGNED_OUT' ? 'bane:account-signed-out' : 'bane:unauthorized'))
+    if (response.status === 401 && path.startsWith('/v1/') && path !== '/v1/me') window.dispatchEvent(new Event(code === 'ACCOUNT_SIGNED_OUT' ? 'nightmail:account-signed-out' : 'nightmail:unauthorized'))
     const failure = new ApiError(message, code, error?.field ? { [error.field]: message } : {}, error?.requestId ?? response.headers.get('x-request-id') ?? undefined, response.status)
     if (failure.requestId) rememberFailedRequest(failure.requestId)
     if (Array.isArray(error?.details)) failure.details = error.details
@@ -122,7 +124,7 @@ function regionCatalog(value: unknown): RegionCatalog {
   return value as RegionCatalog
 }
 
-export function createLiveApi(): BaneApi {
+export function createLiveApi(): Api {
   const call = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => request<T>(`/v1${path}`, { method, body, signal })
   const inboundCall = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => call<T>(`/inbound${path}`, method, body, signal)
   // Page numbers are local navigation only. The API owns cursors and never supplies fictional totals.
