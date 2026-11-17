@@ -62768,9 +62768,6 @@
         ],
         "security": [
           {
-            "bearerAuth": []
-          },
-          {
             "dashboardSession": []
           },
           {
@@ -63073,9 +63070,6 @@
         ],
         "security": [
           {
-            "bearerAuth": []
-          },
-          {
             "dashboardSession": []
           },
           {
@@ -63223,9 +63217,6 @@
           "Workspaces"
         ],
         "security": [
-          {
-            "bearerAuth": []
-          },
           {
             "dashboardSession": []
           },
@@ -63376,9 +63367,6 @@
           "Workspaces"
         ],
         "security": [
-          {
-            "bearerAuth": []
-          },
           {
             "dashboardSession": []
           },

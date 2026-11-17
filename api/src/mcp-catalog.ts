@@ -48,7 +48,8 @@ export interface McpOperation {
   readonly memberAdmin: boolean;
 }
 // Provider-signed notifications are never agent calls, and REST refuses revealWebhookSecret to every delegated credential
-// (an approval, the API keys it makes, agent tokens). Everything else with bearer auth becomes a tool.
+// (an approval, the API keys it makes, agent tokens). Everything else with bearer auth becomes a tool, and so do members
+// and invitations (memberAdminRoute): session routes that an owner's or admin's own sign-in may also call.
 // Money moves only from a signed-in owner or admin: charging the saved card, auto-recharge and the payment method are
 // never agent calls (an agent may create a top-up link that a person opens and pays: createBillingTopUpLink).
 export const DASHBOARD_MONEY = ['createBillingTopUp', 'updateBillingAutoRecharge', 'createBillingCardSetup', 'deleteBillingPaymentMethod'] as const;
@@ -303,7 +304,7 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
       const name = operation.operationId;
       if (typeof name !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name)) invalid('Invalid OpenAPI operationId.');
       if (EXCLUDED.has(name)) continue;
-      if (!operation.security?.some((entry: unknown) => object(entry) && Array.isArray(entry.bearerAuth))) continue;
+      if (!operation.security?.some((entry: unknown) => object(entry) && Array.isArray(entry.bearerAuth)) && !memberAdminRoute(method, path)) continue;
       if (operations.has(name) || operations.size >= 256) invalid('Duplicate operationId or too many tools.');
       const write = method !== 'get' && !READ_ONLY_POSTS.has(name);
       const confirm = write && !NO_CONFIRM.has(name);

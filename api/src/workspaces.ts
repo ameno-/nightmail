@@ -18,10 +18,9 @@ const CreatedInvitation = Invitation.extend({ nextStep: z.string().describe('Wha
 const InvitationPreview = z.object({ id: z.string(), workspaceId: z.string(), workspaceName: z.string(), workspaceSlug: z.string(), inviterName: z.string(), inviterEmail: z.string(), role: WorkspaceRole, expiresAt: z.string(), status: z.enum(['pending', 'accepted']) }).openapi('WorkspaceInvitationPreview');
 const Invite = z.object({ email: z.email().toLowerCase(), role: WorkspaceRole }).strict().openapi('InviteWorkspaceMember');
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) });
+// Members and invitations also take an owner's or admin's own MCP sign-in (memberAdminRefusal), which reaches REST
+// only through /mcp; no bearer credential is accepted here, so the catalog lists them by memberAdminRoute.
 const security: Record<string, string[]>[] = [{ dashboardSession: [] }, { secureDashboardSession: [] }];
-// Members and invitations also take an owner's or admin's own MCP sign-in (memberAdminRefusal), so they are MCP tools.
-// REST still refuses API keys and agent tokens.
-const signedIn: Record<string, string[]>[] = [{ bearerAuth: [] }, ...security];
 const tags = ['Workspaces'];
 const base = '/v1/workspaces/current';
 
@@ -191,14 +190,14 @@ export function registerWorkspaces(app: App) {
     return c.json(row, 200);
   });
   const inPerson = 'Owners and admins, in the dashboard or over their own MCP sign-in; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED.';
-  app.openapi(createRoute({ method: 'get', path: `${base}/members`, operationId: 'listWorkspaceMembers', tags, security: signedIn, description: `List the workspace's members and their roles. ${inPerson}`, responses: { 200: response(z.object({ data: z.array(Member) })), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: `${base}/members`, operationId: 'listWorkspaceMembers', tags, security, description: `List the workspace's members and their roles. ${inPerson}`, responses: { 200: response(z.object({ data: z.array(Member) })), ...errors } }), async c => {
     const a = memberAdmin(c, false);
     const rows = await c.env.db.select({ id: workspaceMembers.id, userId: workspaceMembers.userId, role: workspaceMembers.role, email: sql<string>`coalesce(${baneUsers.email}, '')`, name: baneUsers.name }).from(workspaceMembers).innerJoin(baneUsers, eq(baneUsers.id, workspaceMembers.userId)).where(eq(workspaceMembers.workspaceId, a.workspaceId)).orderBy(baneUsers.email,workspaceMembers.id);
     return c.json({ data: rows.map(row => Member.parse(row)) }, 200);
   });
   // inviteWorkspaceMember is the dashboard's older name for createWorkspaceInvitation; agents use the latter.
   for (const [resource, operationId] of [['members', 'inviteWorkspaceMember'], ['invitations', 'createWorkspaceInvitation']] as const) {
-    app.openapi(createRoute({ method: 'post', path: `${base}/${resource}` as const, operationId, description: `Invite an email address. Membership starts only after acceptance by the verified address. Share the returned URL; no email is sent. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard.${resource === 'invitations' ? ` ${inPerson}` : ''}`, tags, security: resource === 'invitations' ? signedIn : security, request: { body: json(Invite) }, responses: { 201: response(CreatedInvitation), ...errors } }), async c => c.json(await invite(c, c.req.valid('json')), 201));
+    app.openapi(createRoute({ method: 'post', path: `${base}/${resource}` as const, operationId, description: `Invite an email address. Membership starts only after acceptance by the verified address. Share the returned URL; no email is sent. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard.${resource === 'invitations' ? ` ${inPerson}` : ''}`, tags, security, request: { body: json(Invite) }, responses: { 201: response(CreatedInvitation), ...errors } }), async c => c.json(await invite(c, c.req.valid('json')), 201));
   }
   app.openapi(createRoute({ method: 'patch', path: `${base}/members/{id}`, operationId: 'updateWorkspaceMember', tags, security, request: { params: IdParams, body: json(z.object({ role: WorkspaceRole }).strict()) }, responses: { 200: response(z.object({ id: z.string(), role: WorkspaceRole })), ...errors } }), async c => {
     const { id } = c.req.valid('param'), { role } = c.req.valid('json'); await changeMember(c, id, role); return c.json({ id, role }, 200);
@@ -206,12 +205,12 @@ export function registerWorkspaces(app: App) {
   app.openapi(createRoute({ method: 'delete', path: `${base}/members/{id}`, operationId: 'removeWorkspaceMember', tags, security, request: { params: IdParams }, responses: { 200: response(Removed), ...errors } }), async c => {
     const { id } = c.req.valid('param'); await changeMember(c, id); return c.json({ id, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'get', path: `${base}/invitations`, operationId: 'listWorkspaceInvitations', tags, security: signedIn, description: `List pending, unexpired workspace invitations. ${inPerson}`, responses: { 200: response(z.object({ data: z.array(Invitation) })), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: `${base}/invitations`, operationId: 'listWorkspaceInvitations', tags, security, description: `List pending, unexpired workspace invitations. ${inPerson}`, responses: { 200: response(z.object({ data: z.array(Invitation) })), ...errors } }), async c => {
     const a = memberAdmin(c, false);
     const result = await c.env.db.execute<InviteRow>(sql`SELECT id, workspace_id AS "workspaceId", email, role, expires_at AS "expiresAt" FROM workspace_invitations WHERE workspace_id = ${a.workspaceId} AND status = 'pending' AND expires_at > now() ORDER BY email`);
     return c.json({ data: result.rows.map(row => invitationView(c, row)) }, 200);
   });
-  app.openapi(createRoute({ method: 'delete', path: `${base}/invitations`, operationId: 'revokeWorkspaceInvitation', tags, security: signedIn, description: `Revoke a pending invitation; its link stops working. Only an owner revokes an owner invitation. ${inPerson}`, request: { query: IdParams }, responses: { 200: response(Removed), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'delete', path: `${base}/invitations`, operationId: 'revokeWorkspaceInvitation', tags, security, description: `Revoke a pending invitation; its link stops working. Only an owner revokes an owner invitation. ${inPerson}`, request: { query: IdParams }, responses: { 200: response(Removed), ...errors } }), async c => {
     const { id } = c.req.valid('query'), caller = memberAdmin(c, true);
     await administer(c, async (db, wid, _uid, role) => {
       const result = await db.execute(sql`WITH revoked AS (UPDATE workspace_invitations SET status = 'canceled' WHERE id = ${id} AND workspace_id = ${wid} AND status = 'pending' AND (role <> 'owner' OR ${role} = 'owner') RETURNING id, email, role),
