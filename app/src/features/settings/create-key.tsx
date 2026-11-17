@@ -64,7 +64,7 @@ export function CreateKeyDialog({ open, onOpenChange, onCreated, onConnectAgent,
 function useInboxOptions(key: string, filter: { type?: Inbox['type'] }, enabled: boolean) {
   const api = useApi()
   return useInfiniteQuery({
-    queryKey: ['bane', 'agent-inboxes', key],
+    queryKey: ['nightmail', 'agent-inboxes', key],
     enabled,
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam, signal }) => api.inboxes.list({ ...filter, status: 'active', cursor: pageParam }, signal),
@@ -112,7 +112,7 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormP
   const pending = create.isPending
   useEffect(() => onPending(pending), [pending, onPending])
   const domainOptions = useInfiniteQuery({
-    queryKey: ['bane', 'domains', 'key-options'],
+    queryKey: ['nightmail', 'domains', 'key-options'],
     enabled: open && workspace,
     initialPageParam: { page: 1 } as Pick<PageRequest, 'page' | 'cursor'>,
     queryFn: ({ pageParam, signal }) => api.domains.list({ ...pageParam, pageSize: 10 }, signal),

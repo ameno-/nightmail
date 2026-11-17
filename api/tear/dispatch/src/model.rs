@@ -11,7 +11,8 @@
 //!       row in flight at cancel that is throttled, requeued and then canceled by the next claim.
 //! - [x] Cancel between a claim and its send (in flight: sent, reported as inFlight).
 //! - [x] Pause with rows queued (they still dispatch) and with rows unreleased (held).
-//! - [x] Two concurrent sends with one Idempotency-Key (dupk: one row, both get its receipt).
+//! - [x] Two concurrent sends with one Idempotency-Key (dupk: one row; an overlapping duplicate answers 409
+//!   IDEMPOTENCY_IN_PROGRESS and the host retries it once both settle, so both get its receipt).
 //! - [x] The runner's drain is a whole run: it leases pages until one comes back short (25 sends
 //!       need two pages), and with two owners and two-row leases the owner cursor lands on the
 //!       last owner and the run must wrap (the original owner-cursor bug, caught by the drain

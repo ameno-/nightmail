@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { SQL, sql } from 'drizzle-orm';
 import type { OperatorRole } from './operator-identity.js';
-import { ApiError, dashboardSession, errors, notFound, response, webhookUrlHint, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
+import { ApiError, dashboardSession, errors, notFound, requestOrigin, response, webhookUrlHint, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
 import { productName } from './brand.js';
 
 // The per-account audit trail (migration 260): one append-only table, written by recordAudit() inside the
@@ -16,10 +16,8 @@ export type AuditActor = {
   type: AuditActorType; id: string | null; via: AuditVia;
   /** A short display label (a key's name, a client): never an email address or a secret. */
   label?: string | null;
-  /** The person behind the actor, for the per-user trail. */
+  /** The person behind the actor, for the per-user trail: the member, or whose MCP approval made the credential. */
   userId?: string | null;
-  /** The MCP approval (mcp_<consent>) behind an MCP, agent-token or MCP-created key actor; its user is resolved in SQL. */
-  grantId?: string | null;
 };
 /** Who, from where: derived once per request by auditContext(), or built for jobs, scripts and Stripe. */
 export type AuditContext = { actor: AuditActor; requestId: string | null; ipNetwork: string | null; userAgent: string | null };
@@ -46,13 +44,6 @@ export type AuditEvent = {
  * The hourly maintenance purge deletes only rows past retain_until; the table refuses anything else.
  */
 export const RETENTION = { standard: '1 year', billing: '7 years', access: '90 days' } as const;
-// Hooks for work in flight (exact calls in the PR that added this file):
-// - Billing: in the transaction that posts a ledger entry, recordAudit(tx, systemContext('webhook', { type: 'stripe', id: event.id }),
-//   { action: 'billing.topup' | 'billing.refund' | 'billing.dispute' | …, workspaceId, retention: 'billing', … }); members' and operators'
-//   billing changes pass `c` or operatorContext(c, operator) instead.
-// - Sign-in (#89): recordAudit(tx, { actor: { type: 'member', id: userId, userId, via: 'dashboard' }, requestId, ipNetwork, userAgent },
-//   { action: 'auth.sign_in', workspaceId: null, userId, … }); then port userEmail() below to nightmail_users.
-// - Reputation (#111/#115): operator actions arrive through the hosted_operator_audit trigger (migration 262); nothing to call.
 
 const SECRET_KEY = /secret|password|passwd|token|api[_-]?key|private|credential|authorization|cookie|signature|hash|^dkim|^headers?$/i;
 const CONTENT_KEY = /^(?:html|text|body|bodies|content|raw|mime|snippet|preview|source|attachments?)$/i;
@@ -91,9 +82,6 @@ function summaryJson(event: AuditEvent): SQL {
     FROM jsonb_strip_nulls(jsonb_build_object(${sql.join(parts, sql`, `)})) s)`;
 }
 const text = (value: Value<string | null | undefined>, max: number) => value instanceof SQL ? sql`left(${value}, ${max})` : value == null ? sql`NULL` : sql`${value.slice(0, max)}`;
-/** The grant behind an MCP or agent-token actor is an OAuth consent; its user is the person who approved it. */
-const grantUser = (actor: AuditActor) => actor.userId ? sql`${actor.userId}` : actor.grantId?.startsWith('mcp_')
-  ? sql`(SELECT user_id FROM oauth_consent WHERE id = ${actor.grantId.slice(4)})` : sql`NULL`;
 
 /**
  * The INSERT for one audit row, to compose into the caller's own statement (a data-modifying CTE) so a change and
@@ -103,7 +91,7 @@ const grantUser = (actor: AuditActor) => actor.userId ? sql`${actor.userId}` : a
 export function auditInsert(context: AuditContext, event: AuditEvent, options: { from?: SQL; where?: SQL } = {}): SQL {
   const { actor } = context;
   const internal = event.internal ?? (actor.type === 'operator' || actor.type === 'system');
-  const userId = event.userId === undefined ? grantUser(actor) : text(event.userId, 200);
+  const userId = text(event.userId === undefined ? actor.userId : event.userId, 200);
   return sql`INSERT INTO audit_events(workspace_id, user_id, actor_type, actor_id, actor_label, via, action, target_type, target_id, summary, reason, ticket_ref,
       request_id, ip_network, user_agent, internal, retain_until)
     SELECT ${text(event.workspaceId, 200)}, ${userId}, ${actor.type}, ${actor.id?.slice(0, 200) ?? null}, ${actor.label?.slice(0, 120) ?? null}, ${actor.via}, ${event.action},
@@ -146,19 +134,24 @@ export function userAgentFamily(agent: string | null | undefined): string | null
   return product ? `${product[1]}${product[2] ? ` ${product[2]}` : ''}`.slice(0, 80) : null;
 }
 
-/** Who is acting on this request, as the audit trail names it. */
+/**
+ * Who is acting on this request, as the audit trail names it. The person behind an MCP approval, its agent tokens and
+ * the keys it made comes with the credential (authenticate checks the approval live). An MCP tool call reports the
+ * /mcp request's ID, network and client (requestOrigin).
+ */
 export function auditContext(c: Ctx): AuditContext {
   const a = c.get('actor'), box = c.get('mailboxAccess');
   let actor: AuditActor;
   if (a?.credential === 'dashboard') actor = { type: 'member', id: a.keyId.slice(5), userId: a.keyId.slice(5), via: 'dashboard' };
-  else if (a?.credential === 'apiKey') actor = { type: 'api_key', id: a.keyId, via: 'api', grantId: a.grantId ? `mcp_${a.grantId}` : null };
-  else if (a?.credential === 'mcp') actor = { type: 'mcp_grant', id: a.keyId, via: 'mcp', grantId: a.keyId };
-  else if (a?.credential === 'agentToken') actor = { type: 'agent_token', id: a.tokenId ?? null, via: 'api', grantId: a.keyId };
+  else if (a?.credential === 'apiKey') actor = { type: 'api_key', id: a.keyId, via: 'api', userId: a.userId };
+  else if (a?.credential === 'mcp') actor = { type: 'mcp_grant', id: a.keyId, via: 'mcp', userId: a.userId };
+  else if (a?.credential === 'agentToken') actor = { type: 'agent_token', id: a.tokenId ?? null, via: 'api', userId: a.userId };
   else if (a?.credential === 'uiNotesKey') actor = { type: 'operator', id: a.userId ?? null, userId: a.userId ?? null, via: 'script', label: `UI notes key ${a.keyId}` };
   else if (box) actor = { type: 'inbox_key', id: box.keyId, via: box.grantId ? 'mcp' : 'api' };
   else if (a?.credential === 'operatorService') actor = { type: 'operator', id: a.keyId, via: 'support' };
   else actor = { type: 'system', id: null, via: 'job' };
-  return { actor, requestId: c.get('requestId') ?? null, ipNetwork: ipNetwork(c.req.header('x-bane-client-ip')), userAgent: userAgentFamily(c.req.header('user-agent')) };
+  const origin = requestOrigin(c);
+  return { actor, requestId: origin.requestId, ipNetwork: ipNetwork(origin.clientIp), userAgent: userAgentFamily(origin.userAgent) };
 }
 /** Background jobs, scripts and provider webhooks (Stripe): no request, no client. */
 export const systemContext = (via: AuditVia = 'job', actor: Partial<AuditActor> = {}): AuditContext =>

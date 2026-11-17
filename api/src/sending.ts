@@ -28,11 +28,12 @@ import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { CustomHeaders } from './custom-headers.js';
 import { assertBilling, billingGate } from './billing/gate.js';
 import type { BillingGate } from './billing/types.js';
-import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
+import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BASE64, MAX_ATTACHMENT_BYTES, senderDisplayName, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { headerPrefix, requestHeader } from './brand.js';
+import { canonical, idempotencyGate, idempotencyKey, idempotent, IdempotencyHeaders, idempotentRequest, replay, requestHash, validIdempotencyKey, type ClaimState, type IdempotentRequest } from './idempotency.js';
 import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, registerPreviewImages, renderPreview } from './preview-images.js';
 
 type HtmlParser = typeof import('parse5').parse;
@@ -450,56 +451,15 @@ function readyCampaign(draft: CampaignDraft) {
   }
   return parsed.data;
 }
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
-  if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical((value as Record<string, unknown>)[k])).join(',') + '}';
-  return JSON.stringify(value) ?? 'null';
-}
-// Documents the optional header read by idempotent() in the OpenAPI reference and SDK types. The
-// length/pattern constraints are OpenAPI metadata only, so idempotent() still validates the key and
-// keeps returning INVALID_IDEMPOTENCY_KEY rather than a generic validation error.
-export const IdempotencyHeaders = z.object({
-  'Idempotency-Key': z.string().optional().openapi({
-    minLength: 1, maxLength: 200, pattern: '^[\\x21-\\x7E]+$', example: 'order-4821-receipt',
-    description: 'Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.',
-  }),
-});
-export async function idempotent<T extends Record<string, unknown>>(c: Ctx, a: Actor, body: unknown, work: (db: DbExecutor) => Promise<T>, admissionReceipt?: T,prepareOutside?:()=>Promise<void>): Promise<T> {
-  const key = c.req.header('Idempotency-Key');
-  if (key === undefined) { await prepareOutside?.();return c.env.db.transaction(async db => { if (admissionReceipt) await lockAdmission(db, a); return work(db); }); }
-  if (key.length > 200 || !/^[\x21-\x7e]+$/.test(key)) throw new ApiError(422, 'INVALID_IDEMPOTENCY_KEY', 'Idempotency-Key must contain 1–200 printable ASCII characters.');
-  const requestHash = await digest(canonical(body));
-  const where = and(scope(sendingIdempotency, a), eq(sendingIdempotency.actorKeyId, a.keyId), eq(sendingIdempotency.path, c.req.path), eq(sendingIdempotency.requestKey, key));
-  if(prepareOutside){
-    const [existing]=await c.env.db.select().from(sendingIdempotency).where(where);
-    if(existing){if(existing.requestHash!==requestHash)throw new ApiError(409,'IDEMPOTENCY_CONFLICT','This idempotency key was already used with a different request.');if(existing.result)return existing.result as T;}
-    await prepareOutside(); // The unique insert below still arbitrates concurrent first attempts.
-  }
-  return c.env.db.transaction(async db => {
-    const identity = { workspaceId: a.workspaceId, actorKeyId: a.keyId, path: c.req.path, requestKey: key };
-    const claim = db.insert(sendingIdempotency).values({ ...identity, requestHash, result: admissionReceipt }).onConflictDoNothing().returning({ claimed: sql`1` });
-    // Direct receipts contain only preallocated IDs. Claim the final result and lock admission only for the winner.
-    const inserted = admissionReceipt ? (await lockAdmission(db, a, claim.getSQL())).rows : await claim;
-    if (!inserted.length) {
-      const [previous] = await db.select().from(sendingIdempotency).where(where);
-      if (!previous || previous.requestHash !== requestHash) throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This idempotency key was already used with a different request.');
-      // The unique insert waits for the other transaction; its result commits atomically with the row.
-      if (!previous.result) throw new ApiError(500, 'IDEMPOTENCY_RESULT_MISSING', 'The stored idempotency result is unavailable.');
-      // A replay is a read, too. A draft can have changed sender since the receipt was saved,
-      // and a temporary token may share its parent grant's receipt with a narrower domain scope.
-      if (a.domains.length && (c.req.path === '/v1/campaigns' || c.req.path.startsWith('/v1/campaigns/'))) {
-        const receipt = previous.result as { id: string; draft?: CampaignDraft };
-        if (receipt.draft && (Object.keys(receipt.draft.audience).length || !senderDomainAllowed(a.domains, receipt.draft.from.split('@')[1] ?? ''))) notFound('Campaign');
-        const [visible] = await db.select({ id: campaigns.id }).from(campaigns).where(campaignWhere(a, c.req.param('id') ?? receipt.id));
-        if (!visible) notFound('Campaign');
-      }
-      return previous.result as T;
-    }
-    const result = await work(db);
-    if (!admissionReceipt) await db.update(sendingIdempotency).set({ result }).where(where);
-    return result;
-  });
-}
+const keyed = (c: Ctx, a: Actor) => ({ ...idempotentRequest(c), workspaceId: a.workspaceId, actorKeyId: a.keyId });
+// A replay is a read, too. A draft can have changed sender since the receipt was saved, and a temporary token may
+// share its parent grant's receipt with a narrower domain scope.
+const campaignReplay = (a: Actor, campaignId?: string) => async (db: DbExecutor, receipt: { id?: unknown; draft?: CampaignDraft }) => {
+  if (!a.domains.length) return;
+  if (receipt.draft && (Object.keys(receipt.draft.audience).length || !senderDomainAllowed(a.domains, receipt.draft.from.split('@')[1] ?? ''))) notFound('Campaign');
+  const [visible] = await db.select({ id: campaigns.id }).from(campaigns).where(campaignWhere(a, campaignId ?? String(receipt.id)));
+  if (!visible) notFound('Campaign');
+};
 async function findEmail(db: DbExecutor, a: Actor, emailId: string) {
   const [row] = await db.select({ ...getTableColumns(emails), untrustedContent: sentUntrustedContent }).from(emails).where(mailWhere(a, emailId));
   if (!row) notFound('Email');
@@ -897,7 +857,7 @@ function checkSender(runtime: Runtime, a: Actor, state: AdmissionState, mail: Se
 // Auth middleware calls this only for ordinary bearer keys, after the request size gate.
 // Malformed inputs, mailbox tracking and provider-rendered templates keep their normal
 // authenticated handler (including error ordering). No external I/O before admission.
-export async function tryAtomicKeyAdmission(c:Ctx,credential:SQL) {
+export async function tryAtomicKeyAdmission(c:Ctx,credentialCtes:(charge?:SQL)=>SQL) {
   if(!/^application\/json(?:\s*;|$)/i.test(c.req.header('content-type')??''))return;
   await boundRequestBody(c);
   const body=await c.req.json().catch(()=>undefined), batch=c.req.path==='/v1/emails/batch';
@@ -905,22 +865,30 @@ export async function tryAtomicKeyAdmission(c:Ctx,credential:SQL) {
   if(!parsed.success)return;
   const input=parsed.data,mails='emails' in input?input.emails:[input];
   if(('replyAddressId' in input && input.replyAddressId)||('replyMailboxId' in input && input.replyMailboxId)||mails.some(m=>m.template || m.attachments.some(a=>a.includes('\0'))))return;
-  const key=c.req.header('Idempotency-Key');if(key!==undefined && (key.length>200 || !/^[\x21-\x7e]+$/.test(key)))return;
+  const key=c.req.header('Idempotency-Key');if(key!==undefined && !validIdempotencyKey(key))return;
   if(batch && mails.reduce((n,m)=>n+(m.html?.length??0)+(m.text?.length??0),0)>2*1024*1024)return;
-  return c.json(await atomicAdmission(c,input,{credential}),202);
+  // The statement authenticates the key and answers 401, 429 and 403 before any admission answer. A duplicate of a
+  // request still holding its Idempotency-Key is refused before it waits on the key's budget row, uncharged.
+  const credential=credentialCtes(key===undefined?undefined:idempotencyGate(c.req.path,key));
+  const authorize=(k:Principal):Actor=>{if(k.used!==null)checkBudget(c,k.used,k.max_requests);const a:Actor={keyId:k.id,workspaceId:k.workspace_id,permissions:k.permissions,domains:k.domains,credential:'apiKey'};c.set('actor',a);return actor(c,'send');};
+  return c.json(await atomicAdmission({runtime:c.env,path:c.req.path,key},input,{credential,authorize}),202);
 }
+/** A send request without the Hono context: internal senders (sendSystemEmail) build one directly. */
+type SendCall = IdempotentRequest & { runtime: Runtime };
+const sendCall = (c: Ctx): SendCall => ({ runtime: c.env, ...idempotentRequest(c) });
+// used is null for an uncharged duplicate of a request that still holds its key.
+type Principal = { id:string;workspace_id:string;permissions:Actor['permissions'];domains:string[];used:number|null;max_requests:number };
 
-async function atomicAdmission(c:Ctx,input:SendRequest|{emails:SendRequest[]},identity:{credential:SQL}|{actor:Actor},screenChecked=false):Promise<{id:string;status:'queued';simulated:boolean}|{data:{id:string;status:'queued';simulated:boolean}[]}> {
-  const batch='emails' in input,mails=batch?input.emails:[input],key=c.req.header('Idempotency-Key');
-  if(key!==undefined && (key.length>200 || !/^[\x21-\x7e]+$/.test(key)))throw new ApiError(422,'INVALID_IDEMPOTENCY_KEY','Idempotency-Key must contain 1–200 printable ASCII characters.');
-  const hash=key===undefined?null:await digest(canonical(input)),sim=isSimulatedSes(c.env),regional=regionalSending(c.env);
+async function atomicAdmission(call:SendCall,input:SendRequest|{emails:SendRequest[]},identity:{credential:SQL;authorize:(key:Principal)=>Actor}|{actor:Actor},screenChecked=false):Promise<{id:string;status:'queued';simulated:boolean}|{data:{id:string;status:'queued';simulated:boolean}[]}> {
+  const runtime=call.runtime,batch='emails' in input,mails=batch?input.emails:[input],key=call.key;
+  const hash=key===undefined?null:await requestHash(input),sim=isSimulatedSes(runtime),regional=regionalSending(runtime);
   const data=mails.map(()=>({id:id('email'),status:'queued' as const,simulated:sim})),receipt=batch?{data}:data[0]!;
   const rows:{id:string;snapshot:EmailSnapshot;hash?:string;email?:string}[]=[],wanted=[];
   let prepError:unknown,cost=0,marketing=0,expanded=0,billable=0;
   const bulk=bulkFlags(mails);
   // Whether a message is screened depends on its sender's connection, which the admission statement reads: measure any
   // message the screen may read now, and decide on a refusal only if the statement denies the request.
-  const oversize:(ApiError|undefined)[]=[],screens=!screenChecked && !!c.env.config.screen && !sim;
+  const oversize:(ApiError|undefined)[]=[],screens=!screenChecked && !!runtime.config.screen && !sim;
   for(const [i,m] of mails.entries()){
     const snapshot=structuredSnapshot({...m,region:m.region??''});let token:{hash:string;email:string}|undefined;
     if(bulk[i])snapshot.bulk=true;
@@ -930,7 +898,7 @@ async function atomicAdmission(c:Ctx,input:SendRequest|{emails:SendRequest[]},id
       if(m.kind==='marketing'){
         // Only the token/hash and destination come from local preparation. Every DB
         // row (including this token) gets its workspace from the authenticated key.
-        const link=await (await loadOpsUnsub()).createUnsubscribeLink(c.env,'',snapshot.to[0]!);
+        const link=await (await loadOpsUnsub()).createUnsubscribeLink(runtime,'',snapshot.to[0]!);
         marketingFooter(snapshot,link.url);token={hash:link.record.tokenHash,email:link.record.email};
       }
       sizeCheck(snapshot,[]);
@@ -938,11 +906,11 @@ async function atomicAdmission(c:Ctx,input:SendRequest|{emails:SendRequest[]},id
       if(batch && expanded>SENDING_LIMITS.expandedCampaignBytes)throw new ApiError(413,'BATCH_CONTENT_TOO_LARGE','Expanded batch content exceeds the installation limit.');
     }catch(e){if(e instanceof ModuleLoadError)throw e;prepError??=atItem(e,batch?i:undefined);}
     rows.push({id:data[i]!.id,snapshot,...token});
-    if(screens && c.env.config.hostedScreen)oversize[i]=await screenRefusal(c.env,snapshot,batch?i:undefined);
+    if(screens && runtime.config.hostedScreen)oversize[i]=await screenRefusal(runtime,snapshot,batch?i:undefined);
     wanted.push({host:m.from.split('@')[1]!.toLowerCase(),region:m.region,kind:m.kind,attachments:m.attachments,bodyBytes:Buffer.byteLength((snapshot.html??'')+(snapshot.text??'')+snapshot.subject)});
     const all=hostedCost(m.to,m.cc,m.bcc),n=sim?0:all;cost+=n;billable+=all;if(m.kind==='marketing'||bulk[i])marketing+=n;
   }
-  const assetIds=[...new Set(mails.flatMap(m=>m.attachments))],cfg=c.env.config,caps=cfg.hostedSendCaps;
+  const assetIds=[...new Set(mails.flatMap(m=>m.attachments))],cfg=runtime.config,caps=cfg.hostedSendCaps;
   const requestedAssets = sql`${JSON.stringify(assetIds)}::jsonb`;
   // The decision compares each message's original IDs to the locked metadata for these visible IDs.
   // The same rule as scopedAttachment: every upload for a sender with mailbox access, otherwise the reader rule for its kind.
@@ -953,11 +921,11 @@ async function atomicAdmission(c:Ctx,input:SendRequest|{emails:SendRequest[]},id
     AND CASE WHEN k.domains='[]'::jsonb THEN ${sharedAttachmentAccess(uploader)} ELSE ${domainAttachmentAccess(uploader, sql`k.domains`)} END
   ) END` : requestedAssets;
   type State=AdmissionState & {allowed:boolean;invalidMime?:boolean;bulk?:BulkFacts};
-  const principal='credential' in identity?sql`SELECT k.*,b.used FROM credential k,budget b`:sql`SELECT ${identity.actor.keyId}::text AS id,${identity.actor.workspaceId}::text AS workspace_id,
+  const principal='credential' in identity?sql`SELECT k.*,b.used FROM credential k LEFT JOIN budget b ON true`:sql`SELECT ${identity.actor.keyId}::text AS id,${identity.actor.workspaceId}::text AS workspace_id,
     ${JSON.stringify(identity.actor.permissions)}::jsonb AS permissions,${JSON.stringify(identity.actor.domains)}::jsonb AS domains,0 AS used,0 AS max_requests`;
-  const {rows:[result]}=await c.env.db.execute<{id:string;workspace_id:string;permissions:Actor['permissions'];domains:string[];used:number;max_requests:number;s:State|{previous:typeof receipt;hash:string}|null}>(sql`WITH ${'credential' in identity?sql`${identity.credential},`:sql``} state AS MATERIALIZED (
-    SELECT k.*, CASE WHEN k.used<=k.max_requests AND k.permissions ?| ARRAY['manage','send'] THEN
-      key_admission_decision(k.workspace_id,k.id,k.domains,${c.req.path},${key??null},${hash},${JSON.stringify(receipt)}::jsonb,${JSON.stringify(wanted)}::jsonb,${admissibleAssets},
+  const {rows:[result]}=await runtime.db.execute<Principal & {s:State|ClaimState|null}>(sql`WITH ${'credential' in identity?sql`${identity.credential},`:sql``} state AS MATERIALIZED (
+    SELECT k.*, CASE WHEN k.used IS NULL THEN jsonb_build_object('previous',NULL,'busy',true) WHEN k.used<=k.max_requests AND k.permissions ?| ARRAY['manage','send'] THEN
+      key_admission_decision(k.workspace_id,k.id,k.domains,${call.path},${key??null},${hash},${JSON.stringify(receipt)}::jsonb,${JSON.stringify(wanted)}::jsonb,${admissibleAssets},
         ${sim},${cost},${marketing},${caps.firstWeek},${caps.secondWeek},${caps.mature},${cfg.dispatch.dailyHeadroomPercent},${regional},${!!cfg.trustedPool},${!!cfg.requireDmarcForBulk},${!prepError && !oversize.some(Boolean)},${platformPolicy(cfg)}::jsonb,
         CASE WHEN k.workspace_id IS NOT DISTINCT FROM ${cfg.platformDomainWorkspace??null}::text THEN 0 ELSE ${billable}::int END) END s FROM (${principal}) k
     ), submitted AS MATERIALIZED (SELECT workspace_id,k.id AS actor_id,m.id,m.hash,m.email,
@@ -970,15 +938,10 @@ async function atomicAdmission(c:Ctx,input:SendRequest|{emails:SendRequest[]},id
     tokens AS (INSERT INTO operation_unsubscribe_tokens(workspace_id,token_hash,email) SELECT workspace_id,hash,email FROM submitted WHERE hash IS NOT NULL)
     SELECT id,workspace_id,permissions,domains,used,max_requests,s FROM state`);
   if(!result)throw new ApiError(401,'AUTH_INVALID','The API key is invalid or has been revoked.');
-  checkBudget(c,result.used,result.max_requests);
-  const a:Actor='actor' in identity?identity.actor:{keyId:result.id,workspaceId:result.workspace_id,permissions:result.permissions,domains:result.domains,credential:'apiKey'};
-  c.set('actor',a);actor(c,'send');
+  const a='actor' in identity?identity.actor:identity.authorize(result);
   const state=result.s!;
-  if('previous' in state){
-    if(state.hash!==hash)throw new ApiError(409,'IDEMPOTENCY_CONFLICT','This idempotency key was already used with a different request.');
-    if(!state.previous)throw new ApiError(500,'IDEMPOTENCY_RESULT_MISSING','The stored idempotency result is unavailable.');
-    return state.previous;
-  }
+  // The statement's claim is idempotency_claim: the one replay rule answers a key it did not get.
+  if('previous' in state)return replay<typeof receipt>(state,hash!);
   // Billing first: an enforced empty balance is a 402 whatever else failed; shadow only logs the would-be denial.
   assertBilling(state.billing,state.hosted,{workspaceId:a.workspaceId,config:cfg});
   if(!state.allowed){
@@ -986,17 +949,17 @@ async function atomicAdmission(c:Ctx,input:SendRequest|{emails:SendRequest[]},id
     checkCapacity(state,cost,marketing);
     if(state.invalidMime)throw new ApiError(422,'ATTACHMENT_METADATA_INVALID','SES attachment metadata exceeds its MIME limits.','attachments');
     for(const [i,m] of mails.entries()) try{
-      checkSender(c.env,a,state,m,state.bulk,cost);
+      checkSender(runtime,a,state,m,state.bulk,cost);
       const assets=(state.assets??[]).filter(asset=>m.attachments.includes(asset.id));validateAttachmentRows(distinctAttachmentIds(m.attachments),assets);
       sizeCheck(rows[i]!.snapshot,assets);
     }catch(e){throw atItem(e,batch?i:undefined);}
     if(prepError)throw prepError;
     for(const [i,refused] of oversize.entries()){
       const connection=state.routes?.[wanted[i]!.host]?.connection??state.connection;
-      if(refused && screenedAtDispatch(c.env,connection?.kind==='shared'))throw refused;
+      if(refused && screenedAtDispatch(runtime,connection?.kind==='shared'))throw refused;
     }
     // Only messages the screen never reads were over its limit: admit the request without measuring.
-    if(oversize.some(Boolean))return atomicAdmission(c,input,'actor' in identity?identity:{actor:a},true);
+    if(oversize.some(Boolean))return atomicAdmission(call,input,{actor:a},true);
     throw new ApiError(409,'ADMISSION_DENIED','The send did not pass the installation admission policy.');
   }
   for(const [i,m] of mails.entries()){
@@ -1007,30 +970,31 @@ async function atomicAdmission(c:Ctx,input:SendRequest|{emails:SendRequest[]},id
   return receipt;
 }
 
-async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: SendRequest[] }) {
+async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emails: SendRequest[] }) {
+  const env = call.runtime;
   const batch = 'emails' in input, mails = batch ? input.emails : [input];
   const assetIds = [...new Set(mails.flatMap(mail => mail.attachments))];
-  if (c.env.config.multiTenant && mails.every(m => !m.template) && !assetIds.some(id => id.includes('\0'))) return atomicAdmission(c,input,{actor:a});
+  if (env.config.multiTenant && mails.every(m => !m.template) && !assetIds.some(id => id.includes('\0'))) return atomicAdmission(call,input,{actor:a});
   for (const [i, mail] of mails.entries()) if (mail.html) await validateHtmlUrls(mail.html).catch(error => { throw atItem(error, batch ? i : undefined); });
-  const data = mails.map(() => ({ id: id('email'), status: 'queued' as const, simulated: isSimulatedSes(c.env) }));
+  const data = mails.map(() => ({ id: id('email'), status: 'queued' as const, simulated: isSimulatedSes(env) }));
   const receipt = batch ? { data } : data[0]!;
-  const mx = c.env.config.multiTenant, simulated = isSimulatedSes(c.env);
-  const regional=regionalSending(c.env), hosts=mails.map(m=>m.from.split('@')[1]!.toLowerCase());
-  const bulk=bulkColumns(c.env,a.workspaceId,hosts);
+  const mx = env.config.multiTenant, simulated = isSimulatedSes(env);
+  const regional=regionalSending(env), hosts=mails.map(m=>m.from.split('@')[1]!.toLowerCase());
+  const bulk=bulkColumns(env,a.workspaceId,hosts);
   let cost = 0, marketing = 0, billable = 0;
   const bulkMail = bulkFlags(mails);
   if (mx) for (const [i, mail] of mails.entries()) {
     const all = hostedCost(mail.to, mail.cc, mail.bcc), n = simulated ? 0 : all; cost += n; billable += all; if (mail.kind === 'marketing' || bulkMail[i]) marketing += n;
   }
-  return idempotent(c, a, input, async db => {
+  return idempotent(env.db, { ...call, workspaceId: a.workspaceId, actorKeyId: a.keyId }, input, async db => {
     const attachmentIds = assetIds.filter(id => !id.includes('\0'));
     // A new READ COMMITTED statement after the workspace lock sees the previous sender's committed rows.
     // Lock settings against disablement; read only readiness (not discovery reports) and lock each asset once.
-    const ready = !mx && !isSimulatedSes(c.env) ? sql`ARRAY(SELECT wanted.region || ':' || wanted.kind FROM (
+    const ready = !mx && !isSimulatedSes(env) ? sql`ARRAY(SELECT wanted.region || ':' || wanted.kind FROM (
       SELECT DISTINCT coalesce(m.region, settings.default_region) AS region, m.kind FROM settings,
         jsonb_to_recordset(${JSON.stringify(mails.filter(m => m.region === undefined || regionPattern.test(m.region)).map(({ region, kind }) => ({ region, kind })))}::jsonb) m(region text, kind text)
     ) wanted JOIN ses_region_discovery d ON d.workspace_id = ${a.workspaceId} AND d.region = wanted.region
-      WHERE d.credentials_fingerprint = ${await credentialFingerprint(c.env.config)} AND d.public_url = ${discoveryTarget(c.env.config)}
+      WHERE d.credentials_fingerprint = ${await credentialFingerprint(env.config)} AND d.public_url = ${discoveryTarget(env.config)}
         AND d.report->'provisioned' = 'true'::jsonb AND d.report#>'{account,sendingEnabled}' = 'true'::jsonb
         AND d.report#>'{account,id}' = coalesce(to_jsonb(d.trusted_account_id), 'null'::jsonb)
         AND d.report#>'{resources,topic,arn}' = coalesce(to_jsonb(d.trusted_topic_arn), 'null'::jsonb)
@@ -1044,25 +1008,25 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
       WHERE ${verifiedClaim(sql`settings.workspace_id`, sql`coalesce(m.region, settings.default_region)`, sql`m.host`)})` : sql`ARRAY[]::text[]`;
     const state = (await db.execute<AdmissionState & {ready:string[];connection:SenderRoute['connection'];bulk?:BulkFacts}>(sql`
       WITH ${lockedSettings(a.workspaceId)}
-      SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified, ${mx && !regional ? sql`to_jsonb(pc)` : sql`NULL`} AS connection ${regional ? sql`,${senderRoutes(c.env,a.workspaceId,hosts)} AS routes` : sql``} ${bulk}
-      FROM (${pendingCounts(c.env, a, cost, marketing, mails.length, mails.filter(m => m.kind === 'marketing').length, billable, simulated)}) counts LEFT JOIN settings ON true ${mx && !regional ? sql`LEFT JOIN ${sendingConnections(c.env)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
-    assertBilling(state.billing, state.hosted, { workspaceId: a.workspaceId, config: c.env.config });
+      SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified, ${mx && !regional ? sql`to_jsonb(pc)` : sql`NULL`} AS connection ${regional ? sql`,${senderRoutes(env,a.workspaceId,hosts)} AS routes` : sql``} ${bulk}
+      FROM (${pendingCounts(env, a, cost, marketing, mails.length, mails.filter(m => m.kind === 'marketing').length, billable, simulated)}) counts LEFT JOIN settings ON true ${mx && !regional ? sql`LEFT JOIN ${sendingConnections(env)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
+    assertBilling(state.billing, state.hosted, { workspaceId: a.workspaceId, config: env.config });
     checkCapacity(state, cost, marketing);
-    const runtime = { ...c.env, config: { ...c.env.config, workspaceId: a.workspaceId, regions: state.enabled_regions } };
+    const runtime = { ...env, config: { ...env.config, workspaceId: a.workspaceId, regions: state.enabled_regions } };
     const locked = new Map(state.assets?.map(row => [row.id, row]));
     const rows = []; let expandedBytes = 0;
     for (const [i, mail] of mails.entries()) try {
-      const region = checkSender(c.env, a, state, mail,state.bulk,cost);
-      if (!mx && !isSimulatedSes(c.env) && !state.ready.includes(`${region}:${mail.kind}`)) throw new ApiError(409, 'SES_SETUP_REQUIRED', 'Run discovery and complete provisioning for this region before live sending.', 'region');
+      const region = checkSender(env, a, state, mail,state.bulk,cost);
+      if (!mx && !isSimulatedSes(env) && !state.ready.includes(`${region}:${mail.kind}`)) throw new ApiError(409, 'SES_SETUP_REQUIRED', 'Run discovery and complete provisioning for this region before live sending.', 'region');
       if (!mx) keySender(a, mail.from);
       const ids = distinctAttachmentIds(mail.attachments);
       // PostgreSQL cannot bind NUL as text. Defer that invalid lookup to its own message, after domain/duplicate checks.
       const attached = ids.some(id => id.includes('\0')) ? await attachmentRows(db, a, ids, true) : ids.flatMap(id => locked.get(id) ?? []);
       validateAttachmentRows(mail.attachments, attached);
-      const link = mail.kind === 'marketing' ? await (await loadOpsUnsub()).createUnsubscribeLink(c.env, a.workspaceId, Array.isArray(mail.to) ? mail.to[0]! : mail.to) : undefined;
+      const link = mail.kind === 'marketing' ? await (await loadOpsUnsub()).createUnsubscribeLink(env, a.workspaceId, Array.isArray(mail.to) ? mail.to[0]! : mail.to) : undefined;
       const route=state.routes?.[hosts[i]!];
       const snapshot = await prepare(runtime, db, a, { ...mail, region }, false, attached, true, true, link?.url, route?.connection ?? state.connection ?? undefined);
-      await assertScreenable(c.env, snapshot, (route?.connection ?? state.connection)?.kind === 'shared', batch ? i : undefined);
+      await assertScreenable(env, snapshot, (route?.connection ?? state.connection)?.kind === 'shared', batch ? i : undefined);
       if (bulkMail[i]) snapshot.bulk = true;
       if (route) snapshot.binding=route.binding;
       if (batch) {
@@ -1082,14 +1046,14 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
     if (state.connection) a.dispatchAccount = { aws_account_id: state.connection.aws_account_id, kind: state.connection.kind };
     for (const row of rows) noteDispatch(a, row.snapshot);
     return receipt;
-  }, receipt);
+  }, { receipt: { result: receipt, lock: (tx, claimed) => lockAdmission(tx, a, claimed) } });
 }
 async function saveAttachment(c: Ctx, a: Actor, metadata: AttachmentMetadataInput, bytes: Uint8Array) {
   sesAttachment(metadata);
   const input = validateAttachment(metadata, bytes);
   const checksum = await bytesDigest(bytes);
   const upload=attachmentUpload(c.env,a,input,bytes,checksum,a.tokenId ?? a.keyId);
-  try { return await idempotent(c,a,{...input,size:bytes.length,checksum},async db=>AttachmentInfo.parse(await upload.finish(db)),undefined,upload.put); }
+  try { return await idempotent(c.env.db,keyed(c,a),{...input,size:bytes.length,checksum},async db=>AttachmentInfo.parse(await upload.finish(db)),{prepare:upload.put}); }
   finally { await upload.refund(); }
 }
 const UPLOAD_PUT_MS=10*60_000;
@@ -1213,7 +1177,7 @@ async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft
 /** The dashboard's test email (POST /v1/domains/{id}/test-send): fixed content from hello@<domain> to the signed-in user only. */
 export async function admitTestEmail(c: Ctx, a: Actor, domain: string, to: string) {
   const from = `hello@${domain}`;
-  return Receipt.parse(await admitEmails(c, a, SingleSendInput.parse({ from, to: [to], subject: `Test email from ${productName}`, text: `This is a test email from the ${productName} dashboard, sent from ${from}. You can reply to it or ignore it.` })));
+  return Receipt.parse(await admitEmails(sendCall(c), a, SingleSendInput.parse({ from, to: [to], subject: `Test email from ${productName}`, text: `This is a test email from the ${productName} dashboard, sent from ${from}. You can reply to it or ignore it.` })));
 }
 
 export function registerSending(app: App) {
@@ -1254,17 +1218,17 @@ export function registerSending(app: App) {
       if (input.html) await validateHtmlUrls(input.html);
       const { finishMailboxArchive, trackedAttachments, queueTrackedMailboxSend } = await wrapModuleLoad(() => import('./mailbox-send.js'));
       let files:Awaited<ReturnType<typeof trackedAttachments>>=[];
-      const result = await idempotent(c, a, input, tx => queueTrackedMailboxSend(c.env, tx, a, replyAddressId, input, input.replyAddressId ? 'replyAddressId' : 'replyMailboxId',files),undefined,input.attachments.length ? async()=>{files=await trackedAttachments(c.env,a,replyAddressId,input);} : undefined);
+      const result = await idempotent(c.env.db, keyed(c, a), input, tx => queueTrackedMailboxSend(c.env, tx, a, replyAddressId, input, input.replyAddressId ? 'replyAddressId' : 'replyMailboxId',files),{prepare:input.attachments.length ? async()=>{files=await trackedAttachments(c.env,a,replyAddressId,input);} : undefined});
       if(input.attachments.length)await finishMailboxArchive(c.env,a.workspaceId,result.mailboxMessageId);
       return c.json(SingleReceipt.parse({ ...result, inboundMessageId: result.mailboxMessageId }), 202);
     }
-    const result = await admitEmails(c, a, input);
+    const result = await admitEmails(sendCall(c), a, input);
     return c.json(Receipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/emails/batch', operationId: 'sendEmailBatch', description: SCREEN_LIMIT_NOTE, tags: ['Emails'], security, request: { headers: IdempotencyHeaders, body: json(BatchInput) }, responses: { 202: response(BatchReceipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     if (input.emails.reduce((n, e) => n + (e.html?.length ?? 0) + (e.text?.length ?? 0), 0) > 2 * 1024 * 1024) throw new ApiError(413, 'BATCH_CONTENT_TOO_LARGE', 'Combined batch body content may not exceed 2 MiB.');
-    const result = await admitEmails(c, a, input);
+    const result = await admitEmails(sendCall(c), a, input);
     return c.json(BatchReceipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/emails/preview', operationId: 'previewEmail', tags: ['Emails'], security,
@@ -1377,14 +1341,14 @@ export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns', operationId: 'createCampaign', description: 'Create a campaign draft; only a name is required. templateId copies an active published global template, including its content and assets, into this workspace. With regional MX delivery, drafts can be edited before sender setup is complete; the sender and region are checked when sending a test or launching. Returns a dashboard URL so an agent and user can continue editing together.', tags: ['Campaigns'], security, request: { headers: IdempotencyHeaders, body: json(CampaignCreate) }, responses: { 201: response(Campaign), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     await assertBlockContent(input.html);
-    const result = await idempotent(c, a, input, async db => {
+    const result = await idempotent(c.env.db, keyed(c, a), input, async db => {
       const campaignId = id('campaign'); const source = input.templateId ? await (await wrapModuleLoad(() => import('./templates.js'))).instantiateTemplate(c.env, db, a, input.templateId) : null;
       const draft = { name: input.name, from: input.from, ...(input.fromName ?? source?.draft.fromName ? { fromName: input.fromName ?? source?.draft.fromName } : {}), ...(input.previewText ?? source?.draft.previewText ? { previewText: input.previewText ?? source?.draft.previewText } : {}), replyTo: input.replyTo.length ? input.replyTo : source?.draft.replyTo ?? [], ...await draftRegion(c.env,db,a,input), subject: input.subject || source?.draft.subject || '', attachments: [...new Set([...(source?.draft.attachments ?? []), ...input.attachments])], tracking: input.tracking ?? source?.draft.tracking ?? true, audience: input.audience, defaults: { ...(source?.draft.defaults ?? {}), ...input.defaults }, ...(input.html ?? source?.draft.html ? { html: input.html ?? source?.draft.html } : {}) };
       draftSender(c.env, a, draft);
       await linkAttachments(db, a, draft.attachments, 'campaign', campaignId);
       const [row] = await db.insert(campaigns).values({ id: campaignId, workspaceId: a.workspaceId, draft, sourceTemplateId: source?.templateId ?? null, sourceTemplateRevision: source?.templateRevision ?? null }).returning();
       return { ...row!, counts: emptyCounts() };
-    });
+    }, { replayed: campaignReplay(a) });
     return c.json(Campaign.parse({ ...result, archivedAt: result.archivedAt ?? null, url: campaignUrl(c.env, result), delivery: null }), 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns', operationId: 'listCampaigns', description: 'Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, defaults, attachments and audience exclusions. Dashboard list counts may be cached for up to 60 seconds; API credentials and campaign detail remain exact.', tags: ['Campaigns'], security, request: { query: CampaignQuery }, responses: { 200: response(page(CampaignSummary)), ...errors } }), async c => {
@@ -1485,26 +1449,26 @@ export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/test', operationId: 'testCampaign', description: 'Send the current draft, personalized with data, to one address as a transactional test. On Hosted sending a test is screened on its own, with the campaign limit (49,152 bytes of screened text by default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } over it).', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(TestCampaign) }, responses: { 202: response(Receipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id;
     // checkPending reads the queue under the admission lock, taken after the campaign row as launch, resume and release do.
-    const result = await idempotent(c, a, input, async db => { const row = await findCampaign(db, a, campaignId, true); if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.'); await lockAdmission(db, a); await checkPending(c.env, db, a, hostedCost(input.to)); const snapshot = await campaignMessage(c.env, db, a, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true); await assertScreenable(c.env, { ...snapshot, testCampaignId: campaignId }, a.dispatchAccount?.kind === 'shared'); return queueEmail(c.env, db, a, { ...snapshot, testCampaignId: campaignId }, undefined, undefined, c.get('requestId')); });
+    const result = await idempotent(c.env.db, keyed(c, a), input, async db => { const row = await findCampaign(db, a, campaignId, true); if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.'); await lockAdmission(db, a); await checkPending(c.env, db, a, hostedCost(input.to)); const snapshot = await campaignMessage(c.env, db, a, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true); await assertScreenable(c.env, { ...snapshot, testCampaignId: campaignId }, a.dispatchAccount?.kind === 'shared'); return queueEmail(c.env, db, a, { ...snapshot, testCampaignId: campaignId }, undefined, undefined, c.get('requestId')); }, { replayed: campaignReplay(a, campaignId) });
     return c.json(Receipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/send', operationId: 'sendCampaign', description: 'Accept the current revision for durable background delivery: the audience is frozen now, every message is validated in the background, then recipients are released into the dispatch queue. The 202 count is accepted recipient intents, not SES acceptance or delivery; poll the campaign for its state. ' + CAMPAIGN_SCREEN_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSend) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
-    const a = actor(c, 'send'); const input = c.req.valid('json'); const result = await idempotent(c, a, input, db => launch(c.env, db, a, c.req.valid('param').id, input, c.get('requestId'))); return c.json(CampaignQueued.parse(result), 202);
+    const a = actor(c, 'send'); const input = c.req.valid('json'); const result = await idempotent(c.env.db, keyed(c, a), input, db => launch(c.env, db, a, c.req.valid('param').id, input, c.get('requestId')), { replayed: campaignReplay(a, c.req.valid('param').id) }); return c.json(CampaignQueued.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/schedule', operationId: 'scheduleCampaign', description: 'Accept the current revision for durable scheduled delivery. The audience is frozen and validated now; no recipient is materialized or sent before scheduledAt. The 202 count is accepted recipient intents. ' + CAMPAIGN_SCREEN_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSchedule) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
-    const result = await idempotent(c, a, input, db => launch(c.env, db, a, c.req.valid('param').id, input, c.get('requestId'))); return c.json(CampaignQueued.parse(result), 202);
+    const result = await idempotent(c.env.db, keyed(c, a), input, db => launch(c.env, db, a, c.req.valid('param').id, input, c.get('requestId')), { replayed: campaignReplay(a, c.req.valid('param').id) }); return c.json(CampaignQueued.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/cancel', operationId: 'cancelCampaign', description: 'Stop a preparing, scheduled, sending, paused or failed campaign: unreleased recipients are never materialized and queued mail is canceled; mail already attempting or accepted is reported as inFlight.', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders }, responses: { 200: response(CampaignCanceled), ...errors } }), async c => {
     const a = actor(c, 'send'); const campaignId = c.req.valid('param').id;
-    const result = await idempotent(c, a, {}, async db => {
+    const result = await idempotent(c.env.db, keyed(c, a), {}, async db => {
       const row = await findCampaign(db, a, campaignId, true); draftSender(c.env, a, row.draft);
       if (row.state === 'done') throw new ApiError(409, 'CAMPAIGN_ALREADY_DISPATCHED', 'This campaign has already finished dispatching.');
       if (row.state === 'draft') throw new ApiError(409, 'CAMPAIGN_NOT_SENDING', 'Only a campaign that was sent or scheduled can be canceled.');
       const canceled = await cancelCampaignWork(db, a, row);
       await recordAudit(db, c, { action: 'campaign.cancel', workspaceId: a.workspaceId, target: { type: 'campaign', id: row.id }, before: { state: row.state } });
       return canceled;
-    });
+    }, { replayed: campaignReplay(a, campaignId) });
     if (a.wakeJobs) { await wakeWebhooks(c.env,a.wakeJobs); a.wakeJobs=0; }
     return c.json(CampaignCanceled.parse(result), 200);
   });
@@ -2583,9 +2547,6 @@ export async function sendSystemEmail(runtime: Runtime, workspaceId: string, mai
   // The origin names the committed row the notice is about: a standing event, or a billing notice (billing_notices).
   const origin = 'standingEvent' in mail ? `standing:${mail.standingEvent}` : `billing:${mail.billingNotice}`;
   const a: Actor = { workspaceId, keyId: origin, permissions: ['send'], domains: [], credential: 'apiKey' };
-  const values = new Map<string, unknown>([['actor', a]]);
-  const c = { env: runtime, req: { path: '/v1/emails/batch', header: (name: string) => name.toLowerCase() === 'idempotency-key' ? mail.idempotencyKey : undefined },
-    get: (key: string) => values.get(key), set: (key: string, value: unknown) => { values.set(key, value); } } as unknown as Ctx;
   const input = BatchInput.parse({ emails: mail.to.map(to => ({ from: mail.from, to: [to], subject: mail.subject, text: mail.text, kind: 'transactional' })) });
-  return admitEmails(c, a, input);
+  return admitEmails({ runtime, path: '/v1/emails/batch', key: idempotencyKey(mail.idempotencyKey) }, a, input);
 }

@@ -3,7 +3,7 @@ import { useEffect, useSyncExternalStore } from 'react'
 // UI notes mode (Nightmail staff with the operator role): while it is on, ⌘-click (Ctrl-click off a Mac) or a long press
 // on a touch screen leaves a note on whatever is under it (features/ui-notes). Off, nothing of it is on the page and
 // every click behaves normally. Remembered per browser; ⇧N or the account menu toggles it.
-const KEY = 'bane.ui-notes'
+const KEY = 'nightmail.ui-notes'
 const listeners = new Set<() => void>()
 const read = () => { try { return localStorage.getItem(KEY) === 'on' } catch { return false } }
 let on = typeof window !== 'undefined' && read()

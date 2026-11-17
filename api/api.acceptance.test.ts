@@ -322,6 +322,51 @@ test('review PR #84 P2: examples use the server’s canonical origin, never the 
   assert.deepEqual(canonicalOrigin({ identity: null, instance: 'javascript:alert(1)', page: 'https://bane.mx' }), { origin: null, foreign: false });
   assert.equal(originOf('https://bane.mx/'), 'https://bane.mx');
 });
+// The dashboard's boot script (app/public/theme.js) and sign-in popup (app/public/signed-in/signed-in.js) are served as
+// written, so they run here in a bare context with this browser's storage, as a tab does before the app loads.
+const memoryStorage = (entries: Record<string, string>) => {
+  const map = new Map(Object.entries(entries));
+  return { map, get length() { return map.size; }, key: (i: number) => [...map.keys()][i] ?? null, getItem: (k: string) => map.get(k) ?? null, setItem: (k: string, v: string) => void map.set(k, String(v)), removeItem: (k: string) => void map.delete(k) };
+};
+test('review PR #342 P1: after the storage rename a tab keeps its own workspace; an old-build tab’s choice never replaces it', async () => {
+  const { runInNewContext } = await import('node:vm'), { headerPrefix } = await import('./src/brand.js');
+  const script = (await readFile(new URL('../app/public/theme.js', import.meta.url), 'utf8')).replaceAll('%HEADER_PREFIX%', headerPrefix);
+  const boot = (local: Record<string, string>, session: Record<string, string>) => {
+    const requests: { url: string; headers: Record<string, string> }[] = [], storage = { local: memoryStorage(local), session: memoryStorage(session) };
+    const tab: Record<string, unknown> = { localStorage: storage.local, sessionStorage: storage.session, location: { pathname: '/overview', search: '' }, URLSearchParams, matchMedia: () => ({ matches: false }),
+      document: { documentElement: { dataset: {}, style: {} }, querySelectorAll: () => [] }, fetch: (url: string, init: { headers: Record<string, string> }) => { requests.push({ url, headers: init.headers }); return Promise.resolve(new Response('{}')); } };
+    tab.window = tab;
+    runInNewContext(script, tab);
+    return { local: Object.fromEntries(storage.local.map), session: Object.fromEntries(storage.session.map), workspace: requests[0]?.headers[`${headerPrefix}Workspace`] ?? null, account: requests[0]?.headers[`${headerPrefix}Account`] ?? null };
+  };
+  // The review's case: an old-build tab wrote ws_fresh, then this (new-build) tab chose ws_northwind and reloads.
+  const reload = boot({ 'bane.workspace:user_dana': 'ws_fresh', 'nightmail.workspace:user_dana': 'ws_northwind', 'nightmail.theme': 'light', 'bane.theme': 'dark' }, { 'nightmail.account': 'user_dana' });
+  assert.equal(reload.workspace, 'ws_northwind', 'The boot request names the workspace this tab chose.');
+  assert.deepEqual(reload.local, { 'nightmail.workspace:user_dana': 'ws_northwind', 'nightmail.theme': 'light' }, 'A nightmail.* key wins and the old one is dropped.');
+  // The first load of the new build: the theme, privacy mode and the tab's account carry over; the workspace is picked
+  // as on a first visit (no header: the server's choice), never taken from a bane.* key an old tab may still rewrite.
+  const first = boot({ 'bane.workspace:user_dana': 'ws_fresh', 'bane.theme': 'dark', 'bane.privacy': 'off', 'bane.support.last.ws_fresh': 'conv_1' }, { 'bane.account': 'user_dana' });
+  assert.equal(first.workspace, null);
+  assert.equal(first.account, 'user_dana');
+  assert.deepEqual(first.local, { 'nightmail.theme': 'dark', 'nightmail.privacy': 'off', 'bane.support.last.ws_fresh': 'conv_1' });
+  assert.deepEqual(first.session, { 'nightmail.account': 'user_dana' });
+});
+test('review PR #342 P1: the deployed sign-in popup reaches a tab still running the build before the rename', async () => {
+  // A tab opens /signed-in/ and hears the result over a BroadcastChannel; the popup is always the deployed build, the
+  // tab may be one loaded before a deploy. Those builds listen on bane.accounts.
+  const { runInNewContext } = await import('node:vm');
+  const script = await readFile(new URL('../app/public/signed-in/signed-in.js', import.meta.url), 'utf8');
+  const opened: BroadcastChannel[] = [], olderTab = new BroadcastChannel('bane.accounts'), heard: unknown[] = [];
+  try {
+    const received = new Promise<void>(resolve => olderTab.addEventListener('message', event => { heard.push((event as MessageEvent).data); resolve(); }));
+    const status = { textContent: '' };
+    runInNewContext(script, { URLSearchParams, URL, location: { search: '?tab=review-popup&account=user_nia', origin: 'https://bane.mx' }, document: { getElementById: () => status },
+      BroadcastChannel: class extends BroadcastChannel { constructor(name: string) { super(name); opened.push(this); } }, setTimeout: () => 0, window: { close() {} } });
+    await Promise.race([received, new Promise(resolve => setTimeout(resolve, 2000))]);
+    assert.deepEqual(heard, [{ type: 'signed-in', tab: 'review-popup', account: 'user_nia', auth: null }]);
+    assert.equal(status.textContent, 'Account added. You can close this window.');
+  } finally { olderTab.close(); for (const channel of opened) channel.close(); }
+});
 test('review PR #84 P3: an inbox key never goes on a command line; with a key every MCP client gets a JSON config', async () => {
   // A bearer in a shell command stays in shell history and the process list.
   const { mcpClients, mcpClientSteps, mcpSnippet, claudeAddCommand } = await import('./src/mcp-clients.js');
@@ -3592,7 +3637,7 @@ describe('Hosted MCP OAuth and tools', () => {
         for(const [name,op] of buildMcpCatalog(api)){
           if(op.method!=='get')continue;gets++;
           const path=op.path.replace(/\{([^}]+)\}/g,(_,field:string)=>encodeURIComponent(dummy((spec.paths[op.path].get.parameters??[]).find((p:Json)=>p.in==='path'&&p.name===field)?.schema)));
-          const status=(await dispatchAsActor(app,new Request(`${PUBLIC_ORIGIN}${path}`,{headers:{accept:'application/json'}}),runtime,grantActor)).status;
+          const status=(await dispatchAsActor(app,new Request(`${PUBLIC_ORIGIN}${path}`,{headers:{accept:'application/json'}}),runtime,grantActor,{requestId:`req_${'0'.repeat(32)}`,clientIp:null,userAgent:null})).status;
           assert.equal(receiving.has(name),status!==401&&status!==403,`${name}: listed=${receiving.has(name)}, REST ${status}`);
         }
         assert.ok(gets>=80,String(gets));
@@ -3632,7 +3677,7 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.deepEqual(await offered(read.token), [false, false]);
       const [{ createApp }, { dispatchAsActor }, { getMcpGrantActor }] = await Promise.all([import('./src/app.js'), import('./src/auth.js'), import('./src/mcp-auth.js')]);
       const reader = (await getMcpGrantActor(runtime, 'mcp_' + read.consentId, runtime.config.workspaceId))!; assert.ok(reader?.receivingConsent);
-      const refused = await dispatchAsActor(createApp(), new Request(`${PUBLIC_ORIGIN}/v1/inbound/overview`, { headers: { accept: 'application/json' } }), runtime, reader);
+      const refused = await dispatchAsActor(createApp(), new Request(`${PUBLIC_ORIGIN}/v1/inbound/overview`, { headers: { accept: 'application/json' } }), runtime, reader, { requestId: `req_${'0'.repeat(32)}`, clientIp: null, userAgent: null });
       assert.equal(refused.status, 403);
     });
   });
@@ -4433,6 +4478,28 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.deepEqual(reads.map(r => [r.workspace_id, r.user_id, r.actor_id, r.internal]), [[wid, null, operator.userId, true], [null, manager!.userId, operator.userId, true], [null, manager!.userId, operator.userId, true]]);
       error(await send('GET', '/v1/operator/no-such-route', session(operator)), 404);
       error(await send('GET', `/v1/operator/workspaces/${unique('missing')}/audit`, session(operator)), 404);
+      // An MCP tool call, a key the approval made and an agent token act for the person who approved the connection: each
+      // row names them with the client's network and user agent (a tool call: the /mcp request's, and its request ID), and
+      // the operator's per-user trail lists them.
+      const client = { 'x-bane-client-ip': '198.51.100.23', 'user-agent': 'acceptance-agent/2.1 (synthetic)' }, requestOf = (reply: Reply) => reply.headers.get('x-request-id')!;
+      const viaMcp = await send('POST', '/mcp?codemode=true', { ...rpcHeaders, ...bearer(mcpToken), ...client },
+        { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'createApiKey', arguments: { body: { name: 'made over MCP', permissions: ['read', 'send', 'manage'] }, confirm: true } } });
+      const mcpKey = ok(viaMcp).result; assert.equal(mcpKey.isError, false, redact(mcpKey)); secrets.add(mcpKey.structuredContent.secret);
+      assert.equal(mcpKey._meta.requestId, requestOf(viaMcp), 'A tool call answers with the /mcp request ID.');
+      const byKey = await send('POST', '/v1/api-keys', { ...bearer(mcpKey.structuredContent.secret), ...client }, { name: 'made by an MCP key', permissions: ['read'] });
+      secrets.add(ok(byKey, 201).secret);
+      const managing = (await rpc('tools/call', { name: 'createAgentToken', arguments: { body: { permissions: ['read', 'manage'], expiresInSeconds: 600, purpose: 'audit attribution' }, confirm: true } })).structuredContent.token as string;
+      secrets.add(managing);
+      const tokenList = ok(await send('POST', '/v1/lists', bearer(managing), { name: unique('agent-audit-list') }), 201);
+      const tokenPlan = ok(await send('POST', '/v1/audience-query/plan', bearer(managing), { statement: `ADD contacts TO LIST '${tokenList.id}' WHERE name CONTAINS '${unique('nobody')}'` }), 201);
+      const byToken = await send('POST', '/v1/audience-query/apply', { ...bearer(managing), ...client }, { planId: tokenPlan.id });
+      ok(byToken);
+      const attributed = (await db.query(`SELECT request_id, action, actor_type, user_id, ip_network, user_agent FROM audit_events WHERE request_id = ANY($1) ORDER BY id`, [[viaMcp, byKey, byToken].map(requestOf)])).rows;
+      const person = [manager!.userId, '198.51.100.0/24', userAgentFamily(client['user-agent'])];
+      assert.deepEqual(attributed.map(r => [r.request_id, r.action, r.actor_type, r.user_id, r.ip_network, r.user_agent]), [
+        [requestOf(viaMcp), 'api_key.create', 'mcp_grant', ...person], [requestOf(byKey), 'api_key.create', 'api_key', ...person], [requestOf(byToken), 'audience.bulk_apply', 'agent_token', ...person]]);
+      const personal = ok(await send('GET', `/v1/operator/users/${manager!.userId}/audit?limit=100`, session(operator))).data as Json[];
+      for (const reply of [viaMcp, byKey, byToken]) assert.ok(personal.some(e => e.requestId === requestOf(reply) && e.network === person[1] && e.client === person[2]), `${requestOf(reply)} is on the per-user trail`);
       // Owners and admins see their own workspace's Activity, without operator internals; members don't.
       const activity = ok(await local('GET', '/v1/activity?limit=100')).data.map((e: Json) => e.action);
       assert.ok(activity.includes('api_key.create') && !activity.includes('audit.read'), activity.join());
@@ -5298,7 +5365,7 @@ describe('Hosted MCP OAuth and tools', () => {
         const args = name === 'getInboundMessage' ? { messageId:'msg_probe' } : {};
         assert.equal((await tool(name,{...args,includeDelivery:'true'})).structuredContent.error.code,'INVALID_ARGUMENTS');
         const url=`${PUBLIC_ORIGIN}${base}/messages${args.messageId ? '/'+args.messageId : ''}?includeDelivery=true`;
-        const denied=await dispatchAsActor(app,new Request(url),runtime,{...scope,keyId:'mcp_probe',credential:'mcp',permissions:['manage'],domains:[]});
+        const denied=await dispatchAsActor(app,new Request(url),runtime,{...scope,keyId:'mcp_probe',credential:'mcp',permissions:['manage'],domains:[]},{requestId:`req_${'0'.repeat(32)}`,clientIp:null,userAgent:null});
         assert.equal(denied.status,403);assert.equal((await denied.json() as Json).error.code,'ADMIN_REQUIRED');
       }
       for (const name of ['createInboundAddress','updateInboundAddress','listInboundAddresses','getInboundAddress','listInboundThreads','getInboundThread','listInboundMessages','getInboundMessage','createInboundThread','replyToInboundThread','deleteInboundAddress']) assert.ok(tools.includes(name),name);
@@ -6127,6 +6194,58 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     });
   });
 
+  test('a duplicate Idempotency-Key sent while the first send is in flight gets 409 IDEMPOTENCY_IN_PROGRESS at once, then replays the first', async t => {
+    const db = await fixtureDatabase(t);
+    // The first send claims its key, then waits on its workspace's admission lock, which this connection holds.
+    const whileInFlight = async (wid: string, send: () => Promise<Reply>, duplicate = send) => {
+      await db.query('INSERT INTO job_schedule(workspace_id) VALUES($1) ON CONFLICT DO NOTHING', [wid]);
+      const lock = await fixtureDatabase(t), holder = (await lock.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+      await lock.query('BEGIN'); await lock.query('SELECT 1 FROM job_schedule WHERE workspace_id=$1 FOR UPDATE', [wid]);
+      let first: Promise<Reply> | undefined;
+      try {
+        first = send();
+        for (let i = 0; !(await db.query(`SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query ~* 'idempotency|key_admission_decision|api_request_budgets'`, [holder])).rowCount; i++) {
+          assert.ok(i < 250, 'The first send never reached the admission lock.'); await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        // Before this change the duplicate waited on the first request's unique insert (or its API key's budget row) until it committed.
+        const busy = await Promise.race([duplicate(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('no answer within 2 s')), 2_000))])
+          .catch(cause => assert.fail(`The duplicate waited for the first request: ${cause}`));
+        assert.equal(error(busy, 409, 'IDEMPOTENCY_IN_PROGRESS').retryable, true); assert.equal(busy.headers.get('retry-after'), '1');
+      } finally { await lock.query('COMMIT'); }
+      const queued = ok(await first!, 202);
+      assert.equal(ok(await send(), 202).id, queued.id, 'Once the first commits, the same key replays its receipt.');
+      return queued;
+    };
+    // Self-hosted: idempotent() claims the key and takes the admission lock in one statement.
+    const key = await keyFixture(t), selfHosted = mail(), headers = { 'Idempotency-Key': unique('in-flight') };
+    const wid = (await db.query('SELECT workspace_id FROM api_keys WHERE id=$1', [key.id])).rows[0].workspace_id;
+    await whileInFlight(wid, () => http('POST', '/v1/emails/send', key.secret, selfHosted, headers, 10_000));
+    // Hosted: the one-statement admission claims the key in direct_admission_state, first for a key the API has not
+    // seen yet (it authenticates separately), then for a warm key, whose statement also charges the key's budget.
+    const [{ createApp }, { nodeRuntime }, { digest }] = await Promise.all([import('./src/app.js'), import('./src/adapters/node.js'), import('./src/core.js')]);
+    const instance = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL, MULTI_TENANT: 'true', ENABLE_LIVE_SES: 'false' }), app = createApp();
+    const hosted = unique('ws-in-flight'), region = 'ap-south-2', acct = '123450000456', secret = `nm_${randomUUID().replaceAll('-', '')}${randomUUID().replaceAll('-', '')}`;
+    try {
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [hosted]);
+      await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$1,$2,jsonb_build_array($2::text))`, [hosted, region]);
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3) ON CONFLICT DO NOTHING`, [region, acct, `arn:aws:sns:${region}:${acct}:fixture`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,tenant_state,region,aws_account_id) VALUES($1,$1,'shared','ready','ready',$2,$3)`, [hosted, region, acct]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('in-flight.example.invalid',$1,$1,'verified')`, [hosted]);
+      await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,$1,'fixture',$2,'fixture','["send"]','[]')`, [hosted, await digest(secret)]);
+      const message = { from: 'orders@in-flight.example.invalid', to: 'customer@example.invalid', subject: 'In flight', text: 'Fixture' };
+      const post = (key: string) => () => http('POST', '/v1/emails/send', secret, message, { 'Idempotency-Key': key }, 10_000, PUBLIC_ORIGIN, request => app.fetch(request, instance.runtime));
+      await whileInFlight(hosted, post('in-flight-cold'));
+      await whileInFlight(hosted, post('in-flight-warm'));
+      // The duplicate reaches another isolate, where the key is cold: its separate authentication must not wait on the
+      // budget row the warm first request holds. A minute later this process's fingerprint has expired, as there.
+      const elsewhere = (send: () => Promise<Reply>) => async () => { const now = Date.now.bind(Date), skew = t.mock.method(Date, 'now', () => now() + 61_000); try { return await send(); } finally { skew.mock.restore(); } };
+      await whileInFlight(hosted, post('in-flight-isolate'), elsewhere(post('in-flight-isolate')));
+    } finally {
+      await instance.close();
+      for (const table of ['sending_email_events', 'operation_events', 'sending_emails', 'sending_idempotency', 'api_request_budgets', 'job_schedule', 'sending_stream_depth', 'domain_claims', 'provider_connections', 'api_keys', 'ses_installation_settings']) await db.query(`DELETE FROM ${table} WHERE workspace_id=$1`, [hosted]);
+      await db.query('DELETE FROM provider_pool_regions WHERE aws_account_id=$1', [acct]); await db.query('DELETE FROM workspaces WHERE id=$1', [hosted]);
+    }
+  });
   test('sends on a simulated deployment use the provider-parity lifecycle; exact retries reuse identity and conflicts do not create mail', async t => {
     const key = await keyFixture(t);
     const liveKey = await keyFixture(t, { permissions: ['read'] });
@@ -18376,7 +18495,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const first=await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1');assert.equal(first.status,201);const again=await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1');assert.equal(again.status,201,JSON.stringify(again.body));assert.equal(again.body.id,first.body.id);assert.equal(again.headers.get('idempotent-replayed'),'true');
         error(await post('/v1/inbound/addresses',{address:'other@receive.example'},'addr-1'),409,'IDEMPOTENCY_CONFLICT');
         await db.query("UPDATE sending_idempotency SET result=NULL WHERE request_key='addr-1'");
-        error(await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1'),409,'IDEMPOTENCY_IN_PROGRESS');
+        const running=await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1');
+        assert.equal(error(running,409,'IDEMPOTENCY_IN_PROGRESS').retryable,true);assert.equal(running.headers.get('retry-after'),'1');
         await db.query("UPDATE sending_idempotency SET created_at=now()-interval '11 minutes' WHERE request_key='addr-1'");
         error(await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1'),409,'IDEMPOTENCY_OUTCOME_UNKNOWN');
         const route=await post('/v1/routing/routes',{match:'replay-route@receive.example',to:[box.id]},'route-1');assert.equal(route.status,201);assert.equal((await post('/v1/routing/routes',{match:'replay-route@receive.example',to:[box.id]},'route-1')).body.id,route.body.id);
@@ -18414,22 +18534,6 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal(again.status,201,diagnostic(again));assert.equal(again.body.id,first.id);assert.equal(again.headers.get('idempotent-replayed'),'true');
         error(await request('POST','/v1/inboxes',key.secret,{type:'sandbox',name:'another'},{'idempotency-key':'provision-1'}),409,'IDEMPOTENCY_CONFLICT');
         ok(await local('POST',`/v1/inbound/keys/${key.id}/revoke`),200);
-      });
-      // tear witness (9 steps): two requests on one key; the holder fails and releases between the other's claim and lookup -> IDEMPOTENCY_CONFLICT.
-      await t.test('create idempotency: a duplicate whose holder failed and released the key gets a retryable answer',async st=>{
-        const query=pg.Client.prototype.query as (...args:unknown[])=>Promise<unknown>;let stage=0;
-        const wire=st.mock.method(pg.Client.prototype,'query',function(this:pg.Client,...args:unknown[]){
-          const text=typeof args[0]==='string'?args[0]:(args[0] as {text?:string})?.text??'';
-          if(this!==db)return query.apply(this,args);
-          // A concurrent holder claims the key first; this request's claim then conflicts with it.
-          if(stage===0&&/^insert into "sending_idempotency"/i.test(text)){stage=1;return query.apply(this,args).then(()=>query.apply(this,args));}
-          // The holder is refused (4xx) and releases the key just before this request reads it.
-          if(stage===1&&/^select .*from "sending_idempotency"/i.test(text)){stage=2;return query.call(this,"DELETE FROM sending_idempotency WHERE request_key='released-1'").then(()=>query.apply(this,args));}
-          return query.apply(this,args);} as typeof pg.Client.prototype.query);
-        const post=()=>local('POST','/v1/lists',{name:'tear released'},'live',{'idempotency-key':'released-1'});
-        let reply:Reply;try{reply=await post();}finally{wire.mock.restore();}
-        assert.equal(stage,2);assert.equal(error(reply,409,'IDEMPOTENCY_IN_PROGRESS').retryable,true);assert.equal(reply.headers.get('retry-after'),'1');
-        assert.equal(ok(await post(),201).name,'tear released');
       });
       await t.test('routing: declarative apply previews a diff, rejects stale versions and round-trips by key', async () => {
         const read = await local('GET', '/v1/routing?format=config'),

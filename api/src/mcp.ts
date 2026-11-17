@@ -1,7 +1,7 @@
 import { createMcpHandler, Server, type CallToolResult, type Tool } from '@modelcontextprotocol/server';
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/server/validators/cf-worker';
 import { dispatchAsActor,dispatchAsMailboxAccess } from './auth.js';
-import { actorMailAccess, ModuleLoadError, type Actor, type MailboxAccess, type App, type Runtime } from './core.js';
+import { actorMailAccess, ModuleLoadError, requestOrigin, type Actor, type MailboxAccess, type App, type RequestOrigin, type Runtime } from './core.js';
 import { getMcpGrantActor, withMcpAuthorization } from './mcp-auth.js';
 import { chooseWorkspace, setDefaultWorkspace, WorkspaceChoice, type McpConnection } from './oidc-resource.js';
 import { buildMcpCatalog, TOOLSETS, EMAIL_SEND_CONFIRMATION, EMAIL_SEND_ROUTING, type McpOperation } from './mcp-catalog.js';
@@ -99,7 +99,7 @@ const workspaceTools: Tool[] = [
 const workspaceResource: Tool = { name: 'workspaces', description: 'Your workspaces, your role and access in each, and the default (list), or set the default (setDefault). Every tool takes workspace, an ID or name; without it, the default.',
   inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['list', 'setDefault'] }, workspace: { type: 'string' } }, required: ['action'] }, annotations: { idempotentHint: true, openWorldHint: false } };
 
-async function serve(app: App, request: Request, runtime: Runtime, principal: McpConnection|MailboxAccess, catalog: ReadonlyMap<string, McpOperation>): Promise<Response> {
+async function serve(app: App, request: Request, runtime: Runtime, principal: McpConnection|MailboxAccess, catalog: ReadonlyMap<string, McpOperation>, origin: RequestOrigin): Promise<Response> {
   const base = new URL(runtime.config.publicUrl);
   const inbox='admin' in principal?principal:null;
   const connection='listing' in principal?principal:null;
@@ -193,13 +193,14 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Mc
         url.searchParams.set(field, String(value));
       }
       // The trusted in-process dispatch still traverses API validation, permissions,
-      // region/domain rules, rate limits and durable jobs. No credential is forwarded.
+      // region/domain rules, rate limits and durable jobs. No credential is forwarded; the
+      // /mcp request's ID, client network and user agent are (origin), for the audit trail.
       const headers = new Headers({ Accept: 'application/json' });
       if (args.body !== undefined) headers.set('Content-Type', 'application/json');
       if (typeof args.idempotencyKey === 'string') headers.set('Idempotency-Key', args.idempotencyKey);
       if (typeof args.ifMatch === 'string') headers.set('If-Match', /^".*"$/.test(args.ifMatch) ? args.ifMatch : `"${args.ifMatch}"`);
       const internal = new Request(url, { method: op.method.toUpperCase(), headers, redirect: 'manual', ...(args.body !== undefined ? { body: JSON.stringify(args.body) } : {}) });
-      const response='admin' in actor?await dispatchAsMailboxAccess(app,internal,runtime,actor):await dispatchAsActor(app,internal,runtime,actor);
+      const response='admin' in actor?await dispatchAsMailboxAccess(app,internal,runtime,actor,origin):await dispatchAsActor(app,internal,runtime,actor,origin);
       const status = response.status;
       let apiRequestId = response.headers.get('x-request-id');
       const text = await boundedText(response, RESPONSE_LIMIT);
@@ -343,7 +344,7 @@ export function registerMcp(app: App): void {
       authenticated = true;
       c.set('principal', { type: token ? 'inboxKey' : 'mcp', workspace: 'listing' in actor ? actor.defaultWorkspace?.id : actor.workspaceId });
       catalog ??= buildMcpCatalog(app);
-      return serve(app, c.req.raw, c.env, actor, catalog);
+      return serve(app, c.req.raw, c.env, actor, catalog, requestOrigin(c));
     };
     const token=c.req.header('authorization')?.match(/^Bearer ((?:nm|bane)_mbx_[0-9a-f]{64})$/i)?.[1]; // bane_: remove after rename cleanup
     const response=preflight?new Response(null,{status:204}):token?await handler(await (await import('./mailbox.js')).authorizeInboxKey(c,token)):await withMcpAuthorization(c.env,c.req.raw,handler);

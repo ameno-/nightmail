@@ -27,7 +27,7 @@ export function useAccounts(enabled = true) {
 export const POPUP_PATH = '/signed-in/'
 // A sign-in returns with ?account=<id>, and a provider return can too. The tab follows it only after a sign-in or setup
 // that the person started in this tab (within 15 minutes), never because a link said so.
-const expectKey = 'bane.expect-account'
+const expectKey = 'nightmail.expect-account'
 export function expectAccount() { try { sessionStorage.setItem(expectKey, String(Date.now())) } catch { /* Then the tab stays as it is. */ } }
 export function takeExpectedAccount() {
   try { const at = Number(sessionStorage.getItem(expectKey)); sessionStorage.removeItem(expectKey); return at > 0 && Date.now() - at < 15 * 60_000 } catch { return false }
@@ -35,6 +35,8 @@ export function takeExpectedAccount() {
 
 // Tabs tell each other about sign-ins and sign-outs, so a tab showing an account that was just signed out leaves it at once.
 export type AccountEvent = { type: 'signed-in'; tab: string | null; account: string | null; auth: string | null } | { type: 'add-started'; tab: string | null } | { type: 'signed-out'; accounts: string[] | 'all' }
+// Still named bane.accounts: tabs on the build before the rename listen there, and the sign-in popup they open is always
+// the deployed one (public/signed-in/signed-in.js, which must use the same name). Rename after rename cleanup.
 const channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('bane.accounts')
 export const announce = (event: AccountEvent) => channel?.postMessage(event)
 export function onAccountEvent(listener: (event: AccountEvent) => void) {

@@ -63,9 +63,9 @@ function ReleaseDialog({ open, onOpenChange, action }: { open: boolean; onOpenCh
     mutationFn: () => api.senderScore.release({ checklist: { bouncedRemoved: true, listSourceConfirmed: true } }),
     onSuccess: report => {
       // The response is the new score and standing: show it now, then reread the session's summary (the banner).
-      client.setQueryData(['bane', 'sender-score'], report)
+      client.setQueryData(['nightmail', 'sender-score'], report)
       void client.invalidateQueries({ queryKey: ['identity'] })
-      void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && ['sending-limit', 'campaigns'].includes(resourceOf(query.queryKey)) })
+      void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && ['sending-limit', 'campaigns'].includes(resourceOf(query.queryKey)) })
       toast(releaseCopy[action].done, 'success')
       onOpenChange(false)
     },

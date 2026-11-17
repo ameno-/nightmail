@@ -15,7 +15,7 @@ import { IconButton } from './ui'
 // panel on that conversation.
 const panel = chunk(() => import('../features/support'))
 const Panel = panel.page(module => module.SupportPanel)
-const modeKey = 'bane.support'
+const modeKey = 'nightmail.support'
 export type SupportMode = 'demo' | 'live'
 
 function readMode(hosted: boolean, staff: boolean) {

@@ -50,7 +50,7 @@ async function sorterCard(browser) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: scale, colorScheme: 'dark' });
   try {
     // Night, and the shorter day of a returning visitor.
-    await context.addInitScript(() => { localStorage.setItem('bane.theme', 'dark'); localStorage.setItem('sorter.seen', '1') });
+    await context.addInitScript(() => { localStorage.setItem('nightmail.theme', 'dark'); localStorage.setItem('sorter.seen', '1') });
     const page = await context.newPage();
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
     await page.waitForFunction(() => document.querySelector('.srt-page')?.dataset.phase === 'rest', null, { timeout: 90_000 });
