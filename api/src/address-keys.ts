@@ -105,17 +105,18 @@ export async function updateLimitedKey(tx: DbExecutor, c: Ctx, a: Actor, keyId: 
   }
   // A key with create reaches every inbox it created (authorizeInboxKey), whatever its addresses say. Taking one of those
   // away while create stays would report a removal that didn't happen, so it is refused: the key keeps create for
-  // future inboxes, and dropping create in the same request (or deleting the inbox) is what ends its reach.
+  // future inboxes, and dropping create in the same request (or deleting the inbox) is what ends its reach. A replacement
+  // names everything the key keeps, so a live inbox it created that the new list leaves out is taken away too.
+  const created = row.permissions.includes('create') || mail.includes('create')
+    ? (await tx.execute<{ ids: string[] }>(sql`SELECT ${createdInboxes(sql`${a.workspaceId}`, sql`${row.id}`)} AS ids`)).rows[0]!.ids : [];
   const removed = ids === null ? [] : row.mailboxIds?.filter(id => !ids.includes(id)) ?? [];
-  const taken = [...new Set([...removed, ...remove])];
+  const taken = [...new Set([...removed, ...remove, ...access.addressIds ? created.filter(id => !access.addressIds!.includes(id)) : []])];
   if (mail.includes('create') && taken.length) {
     const { rows: kept } = await tx.execute<{ id: string }>(sql`SELECT id FROM mailboxes WHERE workspace_id = ${a.workspaceId} AND created_by = ${row.id}
       AND kind = 'inbox' AND delete_after > now() AND id = ANY(${sql.param(taken)}::text[]) ORDER BY id`);
     if (kept.length) throw new ApiError(409, 'CREATED_INBOX_REACHABLE', `This key created ${kept.map(k => k.id).join(', ')}, and a key with create reaches every inbox it created, so removing it here would leave it reachable. Remove create from access.mail in the same request, or delete the inbox.`,
       remove.length ? 'access.removeAddressIds' : 'access.addressIds');
   }
-  const created = row.permissions.includes('create') || mail.includes('create')
-    ? (await tx.execute<{ ids: string[] }>(sql`SELECT ${createdInboxes(sql`${a.workspaceId}`, sql`${row.id}`)} AS ids`)).rows[0]!.ids : [];
   const reach = (permissions: MailboxPermission[]) => permissions.includes('create') ? created : [];
   const name = change.name ?? row.name;
   if (name === row.name && JSON.stringify(ids) === JSON.stringify(row.mailboxIds) && JSON.stringify(mail) === JSON.stringify(row.permissions)) return limitedKeyView(row, reach(mail));

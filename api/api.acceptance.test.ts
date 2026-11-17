@@ -18663,6 +18663,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const ownMail = (query = '') => request('GET', `/v1/inboxes/${own.id}/messages${query}`, maker.secret, undefined, {}, 15_000);
       assert.deepEqual(ok(await local('GET', '/v1/api-keys?limit=100')).data.find((k: Json) => k.id === maker.id).access, access([], ['read', 'create'], [own.id]));
       error(await change(maker.id, { access: { removeAddressIds: [own.id] } }), 409, 'CREATED_INBOX_REACHABLE');
+      // A replacement that leaves out an inbox the key created, never one of its listed addresses, is refused too.
+      assert.equal(error(await change(maker.id, { access: { addressIds: [first.id] } }), 409, 'CREATED_INBOX_REACHABLE').field, 'access.addressIds');
+      assert.deepEqual((await db.query('SELECT mailbox_ids FROM mailbox_keys WHERE id = $1', [maker.id])).rows[0].mailbox_ids, []);
       assert.deepEqual(ok(await change(maker.id, { access: { addAddressIds: [own.id] } })).access, access([own.id], ['read', 'create'], [own.id]));
       for (const [body, field] of [[{ access: { removeAddressIds: [own.id] } }, 'access.removeAddressIds'], [{ access: { addressIds: [first.id] } }, 'access.addressIds']] as const)
         assert.equal(error(await change(maker.id, body), 409, 'CREATED_INBOX_REACHABLE').field, field);
