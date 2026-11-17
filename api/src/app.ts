@@ -296,7 +296,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     c.set('failure', { code: responseError.code, field, databaseCode: databaseCodeOf(error) });
     if (!known && responseError.status >= 500) logError(error, { requestId, route: routeOf(c), code: responseError.code, status: responseError.status });
     if (responseError.resetAt) c.header('Retry-After', new Date(responseError.resetAt).toUTCString());
-    else if (transient || conflict) c.header('Retry-After', '1');
+    else if (transient || conflict || responseError.code === 'IDEMPOTENCY_IN_PROGRESS') c.header('Retry-After', '1');
     return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}), ...(responseError.details ? { details: responseError.details } : {}) } }, responseError.status as ContentfulStatusCode);
   });
   app.notFound(c => { c.set('failure', { code: 'NOT_FOUND', unmatched: true }); return c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404); });

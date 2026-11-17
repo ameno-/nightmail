@@ -7,6 +7,7 @@ import { agentTokens, apiKeys } from './db/core.js';
 import { mailboxKeys } from './db/mailbox.js';
 import { auditContext, auditInsert, recordAudit } from './audit.js';
 import { secretPrefixes, shownPrefix } from './brand.js';
+import { idempotencyGate, validIdempotencyKey } from './idempotency.js';
 
 // A private symbol carries server-authorized identity through request-cloning middleware.
 // HTTP headers/cookies cannot supply it, and every internal dispatch gets a fresh runtime.
@@ -32,10 +33,11 @@ export async function dispatchAsActor(app: Pick<App, 'fetch'>, request: Request,
 
 // `credential` returns at most one authorized row. Charge the originating principal
 // (the grant for agent tokens), but touch only the credential actually presented.
-function credentialCtes(table: typeof agentTokens | typeof apiKeys | typeof mailboxKeys, credential: SQL) {
+// `charge` is evaluated before the budget row is locked: false leaves the request uncharged, with no budget row.
+function credentialCtes(table: typeof agentTokens | typeof apiKeys | typeof mailboxKeys, credential: SQL, charge?: SQL) {
   return sql`credential AS MATERIALIZED (${credential}), budget AS (
       INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
-      SELECT workspace_id, key_id, date_trunc('minute', now()), 1 FROM credential
+      SELECT workspace_id, key_id, date_trunc('minute', now()), 1 FROM credential ${charge ? sql`WHERE ${charge}` : sql``}
       ON CONFLICT (workspace_id, key_id) DO UPDATE SET
         used = CASE WHEN api_request_budgets.window_start = excluded.window_start THEN least(api_request_budgets.used + 1, (SELECT max_requests + 1 FROM credential)) ELSE 1 END,
         window_start = excluded.window_start RETURNING used
@@ -45,10 +47,11 @@ function credentialCtes(table: typeof agentTokens | typeof apiKeys | typeof mail
         ${table === mailboxKeys ? sql`AND budget.used <= credential.max_requests` : sql``}
     )`;
 }
-export async function chargeCredential<T extends Record<string, unknown>>(c: Ctx, table: typeof agentTokens | typeof apiKeys | typeof mailboxKeys, credential: SQL) {
-  const result = await c.env.db.execute<T & { used: number; max_requests: number }>(sql`WITH ${credentialCtes(table,credential)} SELECT credential.*,budget.used FROM credential,budget`);
+// With `charge`, a request it refuses authenticates uncharged (used is null); its own handler answers it.
+export async function chargeCredential<T extends Record<string, unknown>>(c: Ctx, table: typeof agentTokens | typeof apiKeys | typeof mailboxKeys, credential: SQL, charge?: SQL) {
+  const result = await c.env.db.execute<T & { used: number | null; max_requests: number }>(sql`WITH ${credentialCtes(table,credential,charge)} SELECT credential.*,budget.used FROM credential ${charge ? sql`LEFT JOIN budget ON true` : sql`,budget`}`);
   const row = result.rows[0];
-  if (row) checkBudget(c, row.used, row.max_requests);
+  if (row && row.used !== null) checkBudget(c, row.used, row.max_requests);
   return row;
 }
 export function checkBudget(c: Ctx, used: number, maxRequests: number) {
@@ -106,10 +109,12 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
         WHERE k.hash = ${hash} AND k.revoked_at IS NULL`;
       if((verifiedFingerprints.get(hash)??0)>Date.now() && c.env.config.multiTenant && c.req.method==='POST' && ['/v1/emails/send','/v1/emails/batch'].includes(c.req.path)) {
         const {tryAtomicKeyAdmission}=await wrapModuleLoad(()=>import('./sending.js'));
-        const response=await tryAtomicKeyAdmission(c,credentialCtes(apiKeys,sql`${credential} AND g.grant_id IS NULL`));
+        const response=await tryAtomicKeyAdmission(c,charge=>credentialCtes(apiKeys,sql`${credential} AND g.grant_id IS NULL`,charge));
         if(response){rememberFingerprint(hash);return response;}
       }
-      const key = await timed(c, 'budget-db', () => chargeCredential<Pick<Actor, 'permissions' | 'domains'> & { id: string; workspace_id: string; grant_id:string|null }>(c, apiKeys,credential));
+      // A send's duplicate that reaches another isolate (a cold fingerprint) must not wait on the budget row either.
+      const idem = c.req.method==='POST' && ['/v1/emails/send','/v1/emails/batch'].includes(c.req.path) ? c.req.header('Idempotency-Key') : undefined;
+      const key = await timed(c, 'budget-db', () => chargeCredential<Pick<Actor, 'permissions' | 'domains'> & { id: string; workspace_id: string; grant_id:string|null }>(c, apiKeys,credential,idem!==undefined && validIdempotencyKey(idem) ? idempotencyGate(c.req.path,idem) : undefined));
       if (!key) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
       let grant:Actor|null=null;
       if (key.grant_id) {

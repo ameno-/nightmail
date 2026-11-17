@@ -123,7 +123,7 @@ function inputSchema(spec: ObjectValue, item: ObjectValue, operation: ObjectValu
   }
   if (write) {
     properties.confirm = { type: 'boolean', const: true, description: 'Explicit authorization to perform this write. Required; not a dry run.' };
-    properties.idempotencyKey = { type: 'string', minLength: 1, maxLength: 200, pattern: '^[\\x21-\\x7E]+$', description: 'Reuse only for an identical retry.' };
+    properties.idempotencyKey = { type: 'string', minLength: 1, maxLength: 200, pattern: '^[\\x21-\\x7E]+$', description: 'Reuse only for an identical retry. 409 IDEMPOTENCY_IN_PROGRESS: the first is still running; retry after Retry-After with the same key.' };
     required.push('confirm');
     if (operation.operationId === 'createInboundThread' || operation.operationId === 'replyToInboundThread') required.push('idempotencyKey');
   }

@@ -149,7 +149,7 @@ function inputSchema(spec: ObjectValue, item: ObjectValue, operation: ObjectValu
   }
   if (confirm) {
     properties.confirm = { type: 'boolean', const: true, description: 'Explicit authorization to perform this write. Required; not a dry run.' };
-    properties.idempotencyKey = { type: 'string', minLength: 1, maxLength: 200, pattern: '^[\\x21-\\x7E]+$', description: 'Forwarded as Idempotency-Key. Reuse the same value when reconciling an uncertain write; the API decides which operations support it.' };
+    properties.idempotencyKey = { type: 'string', minLength: 1, maxLength: 200, pattern: '^[\\x21-\\x7E]+$', description: 'Forwarded as Idempotency-Key. Reuse the same value when reconciling an uncertain write; the API decides which operations support it. 409 IDEMPOTENCY_IN_PROGRESS means the first request with this value is still running: wait Retry-After seconds and retry with the same value.' };
     required.push('confirm');
     if (THREAD_SENDS.has(operation.operationId)) required.push('idempotencyKey');
   }
