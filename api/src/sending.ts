@@ -33,7 +33,7 @@ import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_AT
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { headerPrefix, requestHeader } from './brand.js';
-import { canonical, idempotencyKey, idempotencyLock, idempotent, IdempotencyHeaders, idempotentRequest, replay, requestHash, validIdempotencyKey, type ClaimState, type IdempotentRequest } from './idempotency.js';
+import { canonical, idempotencyGate, idempotencyKey, idempotent, IdempotencyHeaders, idempotentRequest, replay, requestHash, validIdempotencyKey, type ClaimState, type IdempotentRequest } from './idempotency.js';
 import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, registerPreviewImages, renderPreview } from './preview-images.js';
 
 type HtmlParser = typeof import('parse5').parse;
@@ -869,7 +869,7 @@ export async function tryAtomicKeyAdmission(c:Ctx,credentialCtes:(charge?:SQL)=>
   if(batch && mails.reduce((n,m)=>n+(m.html?.length??0)+(m.text?.length??0),0)>2*1024*1024)return;
   // The statement authenticates the key and answers 401, 429 and 403 before any admission answer. A duplicate of a
   // request still holding its Idempotency-Key is refused before it waits on the key's budget row, uncharged.
-  const credential=credentialCtes(key===undefined?undefined:sql`NOT (credential.permissions ?| ARRAY['manage','send']) OR ${idempotencyLock(sql`credential.workspace_id`,sql`credential.id`,c.req.path,key)}`);
+  const credential=credentialCtes(key===undefined?undefined:idempotencyGate(c.req.path,key));
   const authorize=(k:Principal):Actor=>{if(k.used!==null)checkBudget(c,k.used,k.max_requests);const a:Actor={keyId:k.id,workspaceId:k.workspace_id,permissions:k.permissions,domains:k.domains,credential:'apiKey'};c.set('actor',a);return actor(c,'send');};
   return c.json(await atomicAdmission({runtime:c.env,path:c.req.path,key},input,{credential,authorize}),202);
 }

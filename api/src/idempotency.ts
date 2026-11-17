@@ -43,8 +43,13 @@ export const requestHash = (value: unknown) => digest(canonical(value));
 export type IdempotencyScope = { workspaceId: string; actorKeyId: string; path: string; key: string };
 /** What idempotency_claim returns for a key this request did not get. */
 export type ClaimState = { previous: Record<string, unknown> | null; hash?: string; createdAt?: string; busy?: true };
-/** The key's try-lock, for a statement that must refuse a duplicate before it takes any other lock (see tryAtomicKeyAdmission). */
-export const idempotencyLock = (workspaceId: SQL, actorKeyId: SQL, path: string, key: string) => sql`idempotency_lock(${workspaceId}, ${actorKeyId}, ${path}, ${key})`;
+/**
+ * For the `credential` row of an API key's authentication (auth.ts credentialCtes): whether the request may charge
+ * the key's request budget. A Hosted send holds that budget row until its admission statement commits, so a
+ * duplicate of a request still holding its key is refused before it would wait there, and is not charged.
+ */
+export const idempotencyGate = (path: string, key: string) => sql`CASE WHEN credential.grant_id IS NOT NULL OR NOT (credential.permissions ?| ARRAY['manage','send']) THEN true
+  ELSE idempotency_admits(credential.workspace_id, credential.id, ${path}, ${key}) END`;
 /** The claim, an expression: NULL when this request now owns the key, otherwise its ClaimState. receipt is stored with it. */
 const claimKey = (s: IdempotencyScope, hash: string, receipt?: unknown) =>
   sql`idempotency_claim(${s.workspaceId}, ${s.actorKeyId}, ${s.path}, ${s.key}, ${hash}, ${receipt === undefined ? null : JSON.stringify(receipt)}::jsonb)`;

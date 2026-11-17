@@ -9,6 +9,14 @@ CREATE FUNCTION idempotency_lock(wid text, actor text, route text, idem text) RE
   SELECT pg_try_advisory_xact_lock(hashtextextended(jsonb_build_array(wid, actor, route, idem)::text, 71953))
 $$;
 
+-- Whether a request may take its API key's request-budget row: its key already has a committed claim (the claim
+-- answers it), or the key's try-lock is free. A Hosted send charges that row in the statement that admits it, so a
+-- duplicate must be refused before it waits there (sending.ts tryAtomicKeyAdmission, auth.ts).
+CREATE FUNCTION idempotency_admits(wid text, actor text, route text, idem text) RETURNS boolean LANGUAGE sql VOLATILE AS $$
+  SELECT CASE WHEN EXISTS (SELECT FROM sending_idempotency WHERE workspace_id = wid AND actor_key_id = actor AND path = route AND request_key = idem)
+    THEN true ELSE idempotency_lock(wid, actor, route, idem) END
+$$;
+
 -- Returns NULL when this request now owns the key. Otherwise {previous, hash, createdAt} of the committed claim
 -- (previous is its stored result, NULL while a multi-step request is still running), or {previous: null, busy: true}
 -- while another open transaction holds the key. A committed claim is read before the lock, so replays never contend.
@@ -27,8 +35,8 @@ BEGIN
       VALUES (wid, actor, route, idem, body_hash, receipt) ON CONFLICT DO NOTHING;
     IF FOUND THEN RETURN NULL; END IF;
   END LOOP;
-  -- The request's own hash: a Worker from before this migration compares it and answers a retryable 500, never a
-  -- permanent IDEMPOTENCY_CONFLICT that could make a client retry with a new key.
+  -- The request's own hash: a Worker from before this migration, still running during the deploy, compares it and
+  -- answers 500 IDEMPOTENCY_RESULT_MISSING rather than IDEMPOTENCY_CONFLICT, which tells a client to use a new key.
   RETURN jsonb_build_object('previous', NULL, 'hash', body_hash, 'busy', true);
 END $$;
 

@@ -6095,7 +6095,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
   test('a duplicate Idempotency-Key sent while the first send is in flight gets 409 IDEMPOTENCY_IN_PROGRESS at once, then replays the first', async t => {
     const db = await fixtureDatabase(t);
     // The first send claims its key, then waits on its workspace's admission lock, which this connection holds.
-    const whileInFlight = async (wid: string, send: () => Promise<Reply>) => {
+    const whileInFlight = async (wid: string, send: () => Promise<Reply>, duplicate = send) => {
       await db.query('INSERT INTO job_schedule(workspace_id) VALUES($1) ON CONFLICT DO NOTHING', [wid]);
       const lock = await fixtureDatabase(t), holder = (await lock.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
       await lock.query('BEGIN'); await lock.query('SELECT 1 FROM job_schedule WHERE workspace_id=$1 FOR UPDATE', [wid]);
@@ -6106,7 +6106,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
           assert.ok(i < 250, 'The first send never reached the admission lock.'); await new Promise(resolve => setTimeout(resolve, 20));
         }
         // Before this change the duplicate waited on the first request's unique insert (or its API key's budget row) until it committed.
-        const busy = await Promise.race([send(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('no answer within 2 s')), 2_000))])
+        const busy = await Promise.race([duplicate(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('no answer within 2 s')), 2_000))])
           .catch(cause => assert.fail(`The duplicate waited for the first request: ${cause}`));
         assert.equal(error(busy, 409, 'IDEMPOTENCY_IN_PROGRESS').retryable, true); assert.equal(busy.headers.get('retry-after'), '1');
       } finally { await lock.query('COMMIT'); }
@@ -6134,6 +6134,10 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       const post = (key: string) => () => http('POST', '/v1/emails/send', secret, message, { 'Idempotency-Key': key }, 10_000, PUBLIC_ORIGIN, request => app.fetch(request, instance.runtime));
       await whileInFlight(hosted, post('in-flight-cold'));
       await whileInFlight(hosted, post('in-flight-warm'));
+      // The duplicate reaches another isolate, where the key is cold: its separate authentication must not wait on the
+      // budget row the warm first request holds. A minute later this process's fingerprint has expired, as there.
+      const elsewhere = (send: () => Promise<Reply>) => async () => { const now = Date.now.bind(Date), skew = t.mock.method(Date, 'now', () => now() + 61_000); try { return await send(); } finally { skew.mock.restore(); } };
+      await whileInFlight(hosted, post('in-flight-isolate'), elsewhere(post('in-flight-isolate')));
     } finally {
       await instance.close();
       for (const table of ['sending_email_events', 'operation_events', 'sending_emails', 'sending_idempotency', 'api_request_budgets', 'job_schedule', 'sending_stream_depth', 'domain_claims', 'provider_connections', 'api_keys', 'ses_installation_settings']) await db.query(`DELETE FROM ${table} WHERE workspace_id=$1`, [hosted]);
