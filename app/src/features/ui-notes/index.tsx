@@ -10,6 +10,7 @@ import { isMac, notesModifier, notesModifierLabel, setUiNotesMode } from '../../
 import { noteKinds, noteSeverities, noteStatuses, resolved, statusLabel, uiNotesApi, uiNotesKey, type NoteKind, type NoteSeverity, type NoteStatus, type UiNote } from '../../data/ui-notes'
 import { describe, locate, ownElement, routeOf, screenshot, sensitiveElement } from './capture'
 import './notes.css'
+import { errorText } from '../../data/types'
 
 // UI notes mode, for Nightmail staff (lazy; the shell mounts it only while the mode is on, lib/ui-notes-mode.ts). ⌘-click
 // (Ctrl-click off a Mac) any element, or long-press it on a touch screen, to leave a note on it: the click is taken
@@ -207,7 +208,7 @@ function Composer({ draft, onClose, onSaved }: { draft: Draft; onClose: () => vo
     setBusy(true); setError(null)
     try { localStorage.setItem(KIND_KEY, kind) } catch { /* Next note starts on the default. */ }
     try { onSaved(await uiNotesApi.create({ body: body.trim(), kind, severity, url: draft.info.url, route: draft.info.route, context: draft.info.context, element: draft.info.element }), draft.shot) }
-    catch (cause) { setError(cause instanceof Error ? cause.message : 'Couldn’t save the note.'); setBusy(false) }
+    catch (cause) { setError(errorText(cause, 'Couldn’t save the note.')); setBusy(false) }
   }
   return <form className="uin-form" onSubmit={event => { event.preventDefault(); void submit() }} onKeyDown={event => submitKeys(event, () => void submit())}>
     <div className="uin-head"><span className="uin-where" title={draft.info.element.selector}>{where}</span><span className="uin-route">{draft.info.route}</span></div>
@@ -229,7 +230,7 @@ function Viewer({ note, number, moved, onChange, onDelete, onClose }: { note: Ui
   async function run(name: string, work: () => Promise<void>) {
     if (busy) return
     setBusy(name); setError(null)
-    try { await work() } catch (cause) { setError(cause instanceof Error ? cause.message : 'Couldn’t save the change.') } finally { setBusy(null) }
+    try { await work() } catch (cause) { setError(errorText(cause, 'Couldn’t save the change.')) } finally { setBusy(null) }
   }
   const patch = (name: string, change: Parameters<typeof uiNotesApi.update>[1]) => run(name, async () => { onChange(await uiNotesApi.update(note.id, change)); setEditing(false) })
   const here = `${location.pathname}${location.search}` === note.page.path

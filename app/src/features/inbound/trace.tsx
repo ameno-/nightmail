@@ -8,7 +8,7 @@ import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApiDef, useApiQuery } from '../../data/context'
 import { queries } from '../../data/queries'
 import { request } from '../../data/live'
-import { ApiError } from '../../data/types'
+import { errorText } from '../../data/types'
 import { concepts, outcomes } from './concepts'
 import { useOverview, type Overview } from './overview'
 import { Match, RitualIcon, TargetIcon } from './parts'
@@ -27,7 +27,6 @@ export type TraceRecipient = { address: string; tier?: string; route?: string | 
 export type DryRun = { version: number; steps: number; trace: TraceRow[]; recipients: TraceRecipient[] }
 export type EmailChoice = { mode: 'recent'; messageId: string | null; to?: string } | { mode: 'sample'; to: string } | { mode: 'paste'; mime: string }
 
-const errorText = (e: unknown) => e instanceof ApiError ? e.text : (e as Error).message
 export const sampleMime = (to: string) => [
   'From: Dana Customer <dana@example.net>', `To: ${to}`, 'Subject: Refund for order 4821', 'Message-ID: <sample-4821@example.net>', 'Content-Type: text/plain; charset=utf-8', '',
   'Hi, the blender arrived broken. Could I get a refund? Order 4821.', '', 'Thanks, Dana',

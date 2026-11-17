@@ -5,7 +5,7 @@ import { ArrowUpRight, ChevronRight, CreditCard } from 'lucide-react'
 import { Alert, Button, ConfirmDialog, ControlSkeleton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Input, Pagination, SectionHeader, Skeleton, StatusBadge, Switch, Tabs, useToast, type Column } from '../../components/ui'
 import { useApiDef, useApiQuery, useSession } from '../../data/context'
 import { queries } from '../../data/queries'
-import { ApiError } from '../../data/types'
+import { ApiError, errorText } from '../../data/types'
 import { balanceState, billingApi, cardBrand, centsUsd, declineText, fullDay, monthDay, parseDollars, total, usd, type AutoRechargeInput, type BillingSummary, type LedgerEntry, type Payment } from '../../data/billing'
 import { useCursorPagination } from '../../lib/pagination'
 import { date } from '../../lib/format'
@@ -13,7 +13,6 @@ import './billing.css'
 import { productName } from '../../../../api/src/brand'
 
 type RowProps = { title: ReactNode; error?: ReactNode; children: ReactNode }
-const errorText = (error: unknown) => error instanceof ApiError ? error.text : error instanceof Error ? error.message : 'Something went wrong. Try again.'
 const cardLabel = (card: { brand: string; last4: string }) => `${cardBrand(card.brand)}\u00a0••••\u00a0${card.last4}`
 const final = (payment: Payment | undefined) => !!payment && !['created', 'pending', 'requires_action'].includes(payment.status)
 

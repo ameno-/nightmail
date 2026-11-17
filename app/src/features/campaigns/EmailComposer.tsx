@@ -12,6 +12,7 @@ import { blockHtmlToDocument, documentToBlockHtml, isBlockDocumentEmpty, type Ed
 import '@react-email/editor/themes/default.css'
 import './composer.css'
 import { productName } from '../../../../api/src/brand'
+import { errorText } from '../../data/types'
 
 // The composer edits block HTML: the same document agents read and write through the
 // API. Opening converts block HTML to editor blocks; saving converts blocks back.
@@ -160,7 +161,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
       cidBySource.current = new Map([...result.sources].map(([cid, url]) => [url, cid]))
       setContent(replaceEditorImageSources(blockHtmlToDocument(initialSnapshot.html), result.sources) as EditorNode)
       setHydrating(false); setReady(false); setGeneration(value => value + 1)
-    }).catch(cause => { if (!controller.signal.aborted) { setError(cause instanceof Error ? cause.message : 'Couldn’t load inline images.'); setContent(blockHtmlToDocument(initialSnapshot.html)); setHydrating(false); setReady(false); setGeneration(value => value + 1) } })
+    }).catch(cause => { if (!controller.signal.aborted) { setError(errorText(cause, 'Couldn’t load inline images.')); setContent(blockHtmlToDocument(initialSnapshot.html)); setHydrating(false); setReady(false); setGeneration(value => value + 1) } })
     return () => controller.abort()
   }, [attachmentApi, initialSnapshot])
 
@@ -218,7 +219,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     setBusy(true)
     busyListener.current?.(true)
     try { return await prepareLocalImage(file) }
-    catch (cause) { const message = cause instanceof Error ? cause.message : 'Couldn’t load this image.'; setError(message); throw new Error(message) }
+    catch (cause) { const message = errorText(cause, 'Couldn’t load this image.'); setError(message); throw new Error(message) }
     finally { uploads.current -= 1; if (!uploads.current) { setBusy(false); busyListener.current?.(false) } }
   }, [])
   async function insertImage(file?: File) {

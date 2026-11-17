@@ -32,7 +32,6 @@ async function retrying<T>(run: () => Promise<T>) {
 }
 const createStack = 'Create stack in AWS'
 const code = (error: unknown) => error instanceof ApiError ? error.code : undefined
-const message = errorText
 
 // The connection cache keeps only a short summary on the identity; a fresh /v1/me brings back the rest (the daily
 // limit, standing, domain counts) that Overview reads.
@@ -160,7 +159,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
     void client.cancelQueries({ queryKey: ['bane', api.mode, 'connection'] })
     void (async () => {
       try { if (pending) await connectionApi.remove() }
-      catch (error) { if (!(error instanceof ApiError && error.status === 404)) { toast(message(error), 'error'); setDropped(null); setPicked(pending ? 'byo' : null); return } }
+      catch (error) { if (!(error instanceof ApiError && error.status === 404)) { toast(errorText(error), 'error'); setDropped(null); setPicked(pending ? 'byo' : null); return } }
       sync(null)
       if (next === 'shared') shared.mutate(undefined, { onError: () => setPicked(null) })
     })()
@@ -244,7 +243,7 @@ function connectionError(error: unknown) {
   if (code(error) === 'AWS_NOT_CONFIGURED') return 'Hosted mail isn’t available on this installation.'
   if (code(error) === 'BYO_NOT_CONFIGURED') return 'Sending through your own AWS account isn’t available on this installation.'
   if (code(error) === 'CONNECTION_EXISTS') return 'Another setup is already started. Reload to continue it.'
-  return message(error)
+  return errorText(error)
 }
 
 // Each option is its name and the one fact that decides between them; the setup itself shows on the next step.
@@ -291,7 +290,7 @@ function verifyError(error: unknown, region: string) {
     case 'EXTERNAL_ID_REQUIRED': return 'The role is missing this setup’s external ID. Delete the stack in AWS, then open the link again.'
     case 'AWS_ACCOUNT_IN_USE': return 'This AWS account is already connected to another workspace.'
     case 'AWS_ACCOUNT_MISMATCH': return 'This setup is tied to a different AWS account. Start over to use this one.'
-    default: return message(error)
+    default: return errorText(error)
   }
 }
 

@@ -5,12 +5,12 @@ import { Check, ChevronDown, LifeBuoy, LogOut, Plus, StickyNote, UserPlus } from
 import { sectionPath, useApiMutation, useSession } from '../data/context'
 import { accountApi, accountsKey, initials, useAccounts, type ConnectedAccount } from '../data/accounts'
 import { useMembershipCache, workspaceApi } from '../data/workspaces'
-import { fieldError, MutationError } from '../features/settings/shared'
 import { usePhone } from '../lib/media'
 import { PrivateAddress } from './PrivateAddress'
-import { Button, Dialog, Field, Input, Sheet, useToast } from './ui'
+import { Button, Dialog, Field, Input, Sheet, useToast, fieldError, MutationError } from './ui'
 import { ContactSupportDialog } from './ContactSupport'
 import { toggleUiNotesMode, useUiNotesMode } from '../lib/ui-notes-mode'
+import { errorText } from '../data/types'
 
 // One menu for who and where: the accounts this browser connected, each with its workspaces, then Add account,
 // Contact support and sign-out. Picking a workspace of another account switches account and workspace together. Multi-tenant only; shown
@@ -65,7 +65,7 @@ export function AccountSwitcher() {
   const workspace = self.workspaces.find(item => item.id === identity.workspaceId)
   async function run(action: () => Promise<void> | void, failure: string) {
     setOpen(false); setBusy(true)
-    try { await action() } catch (error) { toast(error instanceof Error ? error.message : failure, 'error'); void memberships.refresh() } finally { setBusy(false) }
+    try { await action() } catch (error) { toast(errorText(error, failure), 'error'); void memberships.refresh() } finally { setBusy(false) }
   }
   const sections: Entry[][] = accounts.map(account => {
     const active = account.id === self.id

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'rea
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { Plus } from 'lucide-react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Alert, Button, Checkbox, ControlSkeleton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, Input, PageHeader, SectionHeader, Select, SkeletonText, StatusBadge, Switch, Tabs, Textarea, useToast, type Column, type MenuItem, type Tone } from '../../components/ui'
+import { Alert, Button, Checkbox, ControlSkeleton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, Input, PageHeader, SectionHeader, Select, SkeletonText, StatusBadge, Switch, Tabs, Textarea, useToast, type Column, type MenuItem, type Tone, ErrorText, MutationError } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useSession } from '../../data/context'
 import { ApiError, type SenderScoreFactor, type StandingReason, type StandingStep } from '../../data/types'
@@ -93,7 +93,7 @@ function Actions() {
     {actions.isError && !actions.data ? <ErrorState error={actions.error} onRetry={() => void actions.refetch()} /> : <>
       <DataTable className="op-table" loading={actions.isPending} skeletonRows={6} rows={rows} rowKey={row => `${row.at}:${row.workspaceId}:${row.action}:${row.requestId ?? ''}`} onRowClick={setShown} empty={<EmptyState title="No operator actions yet" />} columns={actionColumns} />
       {actions.hasNextPage && <Button className="op-more" loading={actions.isFetchingNextPage} onClick={() => void actions.fetchNextPage()}>Load more</Button>}
-      {actions.isError && actions.data && <Alert tone="danger">{actions.error instanceof Error ? actions.error.message : 'Couldn’t load more actions.'}</Alert>}
+      {actions.isError && actions.data && <Alert tone="danger"><ErrorText error={actions.error} /></Alert>}
     </>}
     {shown && <DetailDialog title={actionLabel(shown)} onClose={() => setShown(null)} rows={[
       ['When', when(shown.at)], ['Workspace', <Link to={`/operator/workspaces/${encodeURIComponent(shown.workspaceId)}`}>{shown.workspaceId}</Link>],
@@ -268,7 +268,7 @@ function Timeline({ workspaceId }: { workspaceId: string }) {
       <DataTable className="op-table" loading={timeline.isPending} skeletonRows={5} rows={rows} rowKey={row => row.key} onRowClick={setShown} columns={timelineColumns} empty={<EmptyState title="No events yet" />} />
       {shown && <DetailDialog title="Event" onClose={() => setShown(null)} rows={[['Event', shown.title], ['Kind', <StatusBadge status={label(shown.kind)} tone={kindTone[shown.kind] ?? 'neutral'} />], ['When', when(shown.at)], ['Detail', detailText(shown)]]} />}
       {timeline.hasNextPage && <Button className="op-more" loading={timeline.isFetchingNextPage} onClick={() => void timeline.fetchNextPage()}>Load more</Button>}
-      {timeline.isError && timeline.data && <Alert tone="danger">{timeline.error instanceof Error ? timeline.error.message : 'Couldn’t load more events.'}</Alert>}
+      {timeline.isError && timeline.data && <Alert tone="danger"><ErrorText error={timeline.error} /></Alert>}
     </>}
   </section>
 }
@@ -327,7 +327,7 @@ function FreeForm({ action, workspaceId, onClose }: { action: FreeAction; worksp
     <Field label={reasonLabel} error={tried ? reasonError : ''}><Textarea value={reason} maxLength={1000} onChange={event => setReason(event.target.value)} /></Field>
     <Field label={ticketLabel}><Input value={ticket} maxLength={200} onChange={event => setTicket(event.target.value)} /></Field>
     {action.on && <OptionalDate add="Add an end date" label="Ends" value={until} onChange={setUntil} error={tried ? untilError : ''} />}
-    {mutation.error && <Alert tone="danger">{mutation.error instanceof Error ? mutation.error.message : 'Couldn’t complete the action.'}</Alert>}
+    <MutationError error={mutation.error} />
     <div className="ui-dialog__footer"><Button disabled={mutation.isPending} onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" loading={mutation.isPending}>{action.on ? 'Make free' : 'Bill again'}</Button></div>
   </form>
 }
@@ -382,7 +382,7 @@ function ActionForm({ action, workspace, onClose }: { action: PendingAction; wor
     <Field label={reasonLabel} error={tried ? reasonError : ''}><Textarea value={reason} maxLength={1000} onChange={event => setReason(event.target.value)} /></Field>
     <Field label={ticketLabel} error={tried ? ticketError : ''}><Input value={ticket} maxLength={200} onChange={event => setTicket(event.target.value)} /></Field>
     {action.kind === 'limit' && <OptionalDate add="Add an expiry" label="Expires" value={expires} onChange={setExpires} error={tried ? expiresError : ''} disabled={clear} />}
-    {mutation.error && <Alert tone="danger">{mutation.error instanceof Error ? mutation.error.message : 'Couldn’t complete the action.'}</Alert>}
+    <MutationError error={mutation.error} />
     <div className="ui-dialog__footer"><Button disabled={mutation.isPending} onClick={onClose}>Cancel</Button><Button type="submit" variant={copy.danger ? 'danger' : 'primary'} loading={mutation.isPending}>{copy.confirm}</Button></div>
   </form>
 }

@@ -5,6 +5,7 @@ import { cidImageSources, isRasterDataUrl, loadInlineAttachments } from '../feat
 import { mentionsRemoteImage, withoutFontStyles } from '../lib/html-scan';
 import DOMPurify from 'dompurify';
 import { Alert, Button } from './ui';
+import { errorText } from '../data/types'
 
 export function htmlToText(html: string): string {
   const clean = DOMPurify.sanitize(html, { FORBID_TAGS: ['style', 'script'] });
@@ -145,7 +146,7 @@ export function useEmailDocument({ html, attachmentIds = [], attachmentApi: prov
       if (controller.signal.aborted) return;
       setResolved({html, attachmentKey, api: attachmentApi, sources: result.sources});
       if (result.sources.size < needed.size) setError('Couldn’t resolve some inline images from this message’s attachments.');
-    }).catch(cause => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Inline image preview is unavailable.'); });
+    }).catch(cause => { if (!controller.signal.aborted) setError(errorText(cause, 'Inline image preview is unavailable.')); });
     return () => controller.abort();
   }, [html, attachmentKey, attachmentApi, needed]);
   const sources = resolved?.html === html && resolved.attachmentKey === attachmentKey && resolved.api === attachmentApi ? resolved.sources : undefined;

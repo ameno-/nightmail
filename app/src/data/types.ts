@@ -250,27 +250,29 @@ const friendlyErrors: Record<string, (detail: string) => string> = {
   AUDIENCE_PLAN_EXPIRED: () => 'This count is more than 15 minutes old. Count again, then confirm.',
   STALE_AUDIENCE_PLAN: () => 'Some of these contacts changed after they were counted. Count again, then confirm.',
 }
+/**
+ * A failed API call. `message` is what to show a person: plain language with a next step, so any `error.message`
+ * renders correctly. The server's own wording is `detail`; the code and request ID are `reference`, for support and
+ * logs (Contact support also sends the last few failed request IDs).
+ */
 export class ApiError extends Error {
   /** The server's own message. */
   readonly detail: string
-  /** What to show a person: plain language with a next step. */
-  readonly text: string
   /** The code and request ID, for support and logs. */
   readonly reference: string
   /** Every problem, when the API reports several (ritual diagnostics). */
   details?: Record<string, unknown>[]
-  constructor(message: string, public code: string = 'validation', public fields: Record<string, string> = {}, public requestId?: string, public status?: number) {
-    super(`${message} [${code}]${requestId ? ` · Request ${requestId}` : ''}`)
+  constructor(detail: string, public code: string = 'validation', public fields: Record<string, string> = {}, public requestId?: string, public status?: number) {
+    super(friendlyErrors[code]?.(detail) ?? detail)
     this.name = 'ApiError'
-    this.detail = message
-    this.text = friendlyErrors[code]?.(message) ?? message
+    this.detail = detail
     this.reference = `${code}${requestId ? ` · Request ${requestId}` : ''}`
   }
 }
 /** The generic retry line for an error without its own text. */
 export const tryAgain = 'Something went wrong. Try again.'
-/** What to show for an error: an ApiError's plain-language text, another error's message, or the retry line. */
-export const errorText = (error: unknown) => error instanceof ApiError ? error.text : error instanceof Error ? error.message : tryAgain
+/** What to show for an error as plain text (a toast, a status line): its message, or `fallback` for a non-Error. */
+export const errorText = (error: unknown, fallback = tryAgain) => error instanceof Error ? error.message : typeof error === 'string' && error ? error : fallback
 
 // The UI depends on this boundary, never on fixture data or a transport implementation.
 // Dates cross the boundary as ISO-8601 strings; rates are ratios, not formatted percentages.

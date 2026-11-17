@@ -6,7 +6,7 @@ import { Check } from 'lucide-react'
 import { Button, ConfirmDialog, DataTable, DropdownMenu, EmptyState, ErrorState, LoadingRegion, PageHeader, Pagination, SearchField, Select, StatusBadge, Tabs, useToast } from '../../components/ui'
 import { useWorkspaceAccess } from '../../data/context'
 import { request } from '../../data/live'
-import { ApiError } from '../../data/types'
+import { errorText } from '../../data/types'
 import { number } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { CreateAddressDialog } from './addresses'
@@ -32,7 +32,6 @@ const kindQuery: Record<KindFilter, { kind?: string; origin?: 'api' | 'auto' }> 
 }
 const kindCount = (counts: Overview['counts'], kind: KindFilter) => kind === 'all' ? counts.address + counts.auto + counts.route + counts.pattern + counts.catch_all + counts.inbox
   : kind === 'address' ? counts.address + counts.route : counts[kind]
-const errorText = (e: unknown) => e instanceof ApiError ? e.text : (e as Error).message
 
 // Under each route's address: what it is, in a few words.
 function note(r: RouteEntry) {

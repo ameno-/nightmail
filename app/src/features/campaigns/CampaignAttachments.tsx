@@ -10,7 +10,6 @@ import './attachments.css'
 export type CampaignAttachmentsRef = { open: () => void }
 type Props = { ids: string[]; persisted: string[]; attachmentApi?: AttachmentApi; onChange: (ids: string[]) => void; onBusy: (busy: boolean) => void; disabled: boolean }
 const size = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
-const message = errorText
 
 export const CampaignAttachments = forwardRef<CampaignAttachmentsRef, Props>(function CampaignAttachments({ ids, persisted, attachmentApi: providedAttachmentApi, onChange, onBusy, disabled }, ref) {
   const api = useApi()
@@ -22,7 +21,7 @@ export const CampaignAttachments = forwardRef<CampaignAttachmentsRef, Props>(fun
   const [busy, setBusy] = useState(false)
   const metadata = useApiQuery(['attachments', attachmentApi === api.templateAssets ? 'templates' : 'campaigns', ids], async (_api, signal) => Promise.all(ids.map(id => attachmentApi.get(id, signal))))
   useEffect(() => { metadata.data?.forEach(item => known.current.set(item.id, item)) }, [metadata.data])
-  useEffect(() => { if (metadata.isError) toast(message(metadata.error), 'error') }, [metadata.isError, metadata.error, toast])
+  useEffect(() => { if (metadata.isError) toast(errorText(metadata.error), 'error') }, [metadata.isError, metadata.error, toast])
   useImperativeHandle(ref, () => ({ open() {
     if (busy || disabled) return
     input.current?.click()
@@ -40,7 +39,7 @@ export const CampaignAttachments = forwardRef<CampaignAttachmentsRef, Props>(fun
     try {
       const item = await attachmentApi.upload(file)
       owned.current.add(item.id); known.current.set(item.id, item); onChange([...ids, item.id])
-    } catch (cause) { toast(message(cause), 'error') }
+    } catch (cause) { toast(errorText(cause), 'error') }
     finally { setBusy(false); onBusy(false) }
   }
   async function remove(id: string) {
@@ -49,7 +48,7 @@ export const CampaignAttachments = forwardRef<CampaignAttachmentsRef, Props>(fun
     try {
       if (owned.current.has(id) && !persisted.includes(id)) { await attachmentApi.remove(id); owned.current.delete(id) }
       onChange(ids.filter(value => value !== id))
-    } catch (cause) { toast(message(cause), 'error') }
+    } catch (cause) { toast(errorText(cause), 'error') }
     finally { setBusy(false); onBusy(false) }
   }
   const files = ids.map(id => metadata.data?.find(item => item.id === id) ?? known.current.get(id)).filter((item): item is Attachment => Boolean(item && item.disposition !== 'inline'))

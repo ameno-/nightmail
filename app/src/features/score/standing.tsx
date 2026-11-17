@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Alert, Button, Checkbox, Dialog, useToast } from '../../components/ui'
+import { Button, Checkbox, Dialog, MutationError, useToast } from '../../components/ui'
 import { useApi, useWorkspaceAccess } from '../../data/context'
 import type { SenderScore, SenderStanding } from '../../data/types'
 import { shortDateTime } from '../../lib/format'
@@ -77,7 +77,7 @@ function ReleaseDialog({ open, onOpenChange, action }: { open: boolean; onOpenCh
     <div className="standing-release">
       <Checkbox checked={removed} onCheckedChange={setRemoved} label="Contacts that bounced or complained are removed." />
       <Checkbox checked={confirmed} onCheckedChange={setConfirmed} label="Every contact subscribed; no bought or old lists." />
-      {release.error && <Alert tone="danger">{release.error instanceof Error ? release.error.message : 'Couldn’t release. Try again.'}</Alert>}
+      <MutationError error={release.error} />
     </div>
   </Dialog>
 }

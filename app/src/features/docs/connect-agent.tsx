@@ -8,7 +8,7 @@ import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApiQuery, usePublicOrigin, useSession, useWorkspaceAccess } from '../../data/context'
 import { requestedScopes } from '../../../../api/src/brand'
 import { request } from '../../data/live'
-import { ApiError } from '../../data/types'
+import { errorText } from '../../data/types'
 import { mcpClientNames, mcpClients, mcpClientSteps, mcpServerUrl, mcpSnippet, type McpClient } from '../../../../api/src/mcp-clients'
 import './developer.css'
 import { useSingleFlight } from '../../lib/single-flight'
@@ -53,7 +53,6 @@ export function McpClientSetup({ client, onClient, url, auth, label = 'MCP clien
 
 type Inbox = { id: string; address: string; name: string | null; status: string; type: 'ephemeral' | 'sandbox' }
 type Connection = { id: string | null; config: object; nextStep: string; key: string | null; client: McpClient }
-const errorText = (e: unknown) => e instanceof ApiError ? e.text : (e as Error).message
 
 /**
  * Connect an agent: as you over OAuth (it gets the access you approve in the browser, and you can narrow it to chosen

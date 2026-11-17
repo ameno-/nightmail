@@ -2,8 +2,8 @@ import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { Check, ChevronDown } from 'lucide-react'
 import { useApiDef, useApiQuery } from '../../data/context'
 import { queries } from '../../data/queries'
-import { ApiError, type AudienceList, type Contact } from '../../data/types'
-import { Alert, DataTable, ErrorText, Input, SkeletonText, StatusBadge } from '../../components/ui'
+import type { AudienceList, Contact } from '../../data/types'
+import { DataTable, Input, SkeletonText, StatusBadge } from '../../components/ui'
 import { contactColumns, memberColumns } from './skeletons'
 import { date as formatDate, number } from '../../lib/format'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -18,8 +18,6 @@ export { number }
 export { ConsentLegend, consentTitle, evidenceRequired, noUnknown, statusOptions } from './consent'
 /** A contact name is free text: addresses in it are masked (AddressText), so it is a tooltip only when it holds none. */
 export const nameTitle = (name?: string) => name && !addressParts(name).some(part => part.address) ? name : undefined
-export function fieldError(error: unknown, field: string) { return error instanceof ApiError ? error.fields[field] : undefined }
-export function MutationError({ error }: { error: unknown }) { return error ? <Alert tone="danger"><ErrorText error={error} fallback="Couldn’t complete the request." /></Alert> : null }
 export function useAudienceLists(search = '', cursor?: string) {
   return useApiDef(queries.audienceLists(search, cursor), { keepPrevious: true })
 }
