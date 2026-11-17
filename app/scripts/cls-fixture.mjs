@@ -28,7 +28,7 @@ function pgBin(name) {
 // marks each request with its page (`x-cls-page`); a request without one (the gate's own seeding) is not shaped.
 // Chrome's own throttling (Network.emulateNetworkConditionsByRule) stalled now and then on CI's 4-core runner: a
 // page's script and stylesheet responses sat in it for the whole 60 s page.goto, headers received or not even that,
-// long after this proxy had sent them (Nov 17: 6 of 24 shard runs).
+// long after this proxy had sent them (Nov 17: 12 of 36 CI shard runs; none of 24 with this link instead).
 function pageLink({ latency, bytesPerSecond }) {
   const streams = [];
   let timer = null, last = 0, budget = 0, turn = 0;
@@ -167,7 +167,6 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
     const agent = new Agent({ keepAlive: true, maxSockets: 128 });
     cleanups.push(() => agent.destroy());
     let serverLog = '';
-    const proxied = new Map(), pageLog = new Map(); let proxiedSeq = 0; // DIAG
     const serve = async () => {
       const apiPort = await freePort(), proxyPort = await freePort();
       const apiOrigin = `http://127.0.0.1:${apiPort}`, origin = `http://127.0.0.1:${proxyPort}`;
@@ -183,16 +182,12 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
       }
       const proxy = createHttpServer(async (req, res) => {
         const rawUrl = req.url || '/', q = rawUrl.indexOf('?'), pathname = q === -1 ? rawUrl : rawUrl.slice(0, q);
-        const diagId = ++proxiedSeq, diag = { port: proxyPort, url: rawUrl, at: Date.now(), st: 'in' }; proxied.set(diagId, diag); res.once('close', () => proxied.delete(diagId)); res.once('finish', () => proxied.delete(diagId));
-        res.diag = diag;
         const page = req.headers['x-cls-page'];
         delete req.headers['x-cls-page'];
         // Fonts skip the page's network unless they are meant to arrive late (CLS_FONTS=late).
         if (page && throttle && (fontDelay > 0 || !pathname.startsWith('/fonts/'))) {
           (links.get(page) ?? links.set(page, pageLink(throttle)).get(page))(res, performance.now());
-          diag.page = page;
         }
-        if (page) { const list = pageLog.get(page) ?? pageLog.set(page, []).get(page); const at = Date.now(); res.once('finish', () => list.push(`${rawUrl} finished ${Date.now() - at}ms`)); res.once('close', () => { if (!res.writableFinished) list.push(`${rawUrl} closed unfinished ${Date.now() - at}ms`); }); }
         const sleep = ms => new Promise(done => { const t = setTimeout(done, ms); res.once('close', () => { clearTimeout(t); done(); }); });
         if (pathname.startsWith('/fonts/')) {
           if (fontDelay > 0) { await sleep(fontDelay); if (res.destroyed || res.writableEnded) return; }
@@ -230,20 +225,17 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
             });
             assetCache.set(key, entry);
           }
-          res.diag.st = 'asset-wait';
           const cached = await entry;
           if (res.destroyed || res.writableEnded) return;
           if (cached) { res.writeHead(cached.status, cached.headers); res.end(req.method === 'HEAD' ? undefined : cached.body); return; }
         }
-        if (pathname.startsWith('/v1/') && delay) { res.diag.st = 'sleep'; await sleep(delay(rawUrl)); if (res.destroyed || res.writableEnded) return; }
+        if (pathname.startsWith('/v1/') && delay) { await sleep(delay(rawUrl)); if (res.destroyed || res.writableEnded) return; }
         // A kept-alive socket the API closed for idling (Node's 5 s keepAliveTimeout) just as it was reused resets
         // before any response: a GET or HEAD has no body to lose, so it goes again once on a fresh socket. Without this
         // the page saw an empty response (ERR_EMPTY_RESPONSE), now and then, on whichever load drew that socket.
         const forward = (retry) => {
-          res.diag.st = retry ? 'upstream' : 'upstream-retry';
           const up = httpRequest({ hostname: '127.0.0.1', port: apiPort, method: req.method, path: rawUrl, headers: req.headers, agent }, upRes => {
             answered = true;
-            res.diag.st = 'piping ' + upRes.statusCode;
             res.writeHead(upRes.statusCode ?? 502, upRes.headers);
             if (req.method === 'HEAD') { upRes.resume(); res.end(); return; }
             upRes.pipe(res);
@@ -290,8 +282,7 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
       };
       return (sessions[key] = { cookie, api: call });
     }
-    const proxyPending = () => [...proxied.values()].map(d => `${d.port}${d.url} ${d.st} ${Date.now() - d.at}ms`);
-    return { origin, origins, apiOrigin, db, signIn, sessions, stop, serverLog: () => serverLog, proxyPending, pageLog: page => pageLog.get(page) ?? [], agentState: () => Object.fromEntries(Object.entries(agent.sockets).map(([k, v]) => [k, v.length]).concat(Object.entries(agent.requests).map(([k, v]) => ['queued ' + k, v.length]))) };
+    return { origin, origins, apiOrigin, db, signIn, sessions, stop, serverLog: () => serverLog };
   } catch (error) { await stop(); throw error; }
 }
 
