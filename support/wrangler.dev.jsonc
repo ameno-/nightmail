@@ -45,12 +45,12 @@
     "PUBLIC_URL": "https://support.dev.nightmail.dev",
     "DASHBOARD_ORIGINS": "https://dev.nightmail.dev,https://dev.bane.mx,http://localhost:5173",
     "BANE_ORIGIN": "https://dev.nightmail.dev",
-    "SUPPORT_ADDRESS": "support@dev.nightmail.dev",
+    "SUPPORT_ADDRESS": "support@dev.bane.mx",
     // The inbound address ID (mbx_…) of SUPPORT_ADDRESS in dev's platform workspace; set after creating it.
     "SUPPORT_ADDRESS_ID": "",
     "TICKET_TO": "ryan@anoma.ly",
     // Straight to tickets, never to the agent (src/intake.ts): their own webhook and API key.
-    "INTAKE_ADDRESSES": "abuse@dev.nightmail.dev,privacy@dev.nightmail.dev,legal@dev.nightmail.dev",
+    "INTAKE_ADDRESSES": "abuse@dev.bane.mx,privacy@dev.bane.mx,legal@dev.bane.mx",
     // Console's inference gateway (Anthropic Messages API). The key is the CONSOLE_GATEWAY_KEY secret.
     "GATEWAY_URL": "https://opencode.ai/inference/anthropic/v1"
   },

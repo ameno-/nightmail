@@ -35,12 +35,13 @@ export const docsUrl = `${publicOrigin}/docs`;
 export const mcpUrl = `${publicOrigin}/mcp`;
 export const repositoryUrl = 'https://github.com/anomalyco/nightmail';
 
-/** Where people write to the hosted service. */
+/** Where people write to the hosted service. Still bane.mx: the addresses move to hostedDomain once they exist there. */
+const mailDomain = 'bane.mx';
 export const addresses = {
-  support: `support@${hostedDomain}`,
-  abuse: `abuse@${hostedDomain}`,
-  privacy: `privacy@${hostedDomain}`,
-  legal: `legal@${hostedDomain}`,
+  support: `support@${mailDomain}`,
+  abuse: `abuse@${mailDomain}`,
+  privacy: `privacy@${mailDomain}`,
+  legal: `legal@${mailDomain}`,
 } as const;
 
 /** The npm package (@banemx/sdk before the rename, now deprecated), the environment variable examples keep an API key
