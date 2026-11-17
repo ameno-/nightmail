@@ -73,12 +73,10 @@ export async function checkMx(domain: string, region: string, signal?: AbortSign
   if (ours.length === records.length) return { ...base, state: 'active', records, providers, message: 'MX points to Amazon SES in this region. Mail is being received.' };
   const others = records.filter(record => record.host !== expected.value), named = [...new Set(others.map(record => record.provider ?? record.host))].join(', ');
   if (ours.length) {
+    // Senders try the lowest preference first: the same best priority splits the mail; otherwise the better one gets it first.
     const share = mxShare({ records, expected });
-    return share === 'split'
-      ? { ...base, state: 'mixed', records, providers, split: true, message: `MX also lists ${named} at the same priority as Amazon SES, so mail for ${domain} is split between them. Remove the other MX records.` }
-      : share === 'backup'
-        ? { ...base, state: 'mixed', records, providers, message: `MX lists ${named} ahead of Amazon SES, so mail for ${domain} goes there first and reaches Amazon SES only when it fails over. Removing ${named}’s MX records completes the move.` }
-        : { ...base, state: 'mixed', records, providers, message: `MX lists Amazon SES ahead of ${named}, so ${named} is now the backup: it gets mail for ${domain} only when Amazon SES can’t take it.` };
+    return { ...base, state: 'mixed', records, providers, ...(share === 'split' ? { split: true } : {}),
+      message: share === 'split' ? `Mail is split with ${named}.` : share === 'backup' ? `Mail goes to ${named} first. Remove its MX records to finish the move.` : `${named} is the backup.` };
   }
   if (records.every(record => /^inbound-smtp\.[a-z0-9-]+\.amazonaws\.com$/.test(record.host))) return { ...base, state: 'wrong_region', records, providers, message: `MX points to Amazon SES in another region. Change it to ${expected.value}.` };
   const split = records.length > 1;
@@ -86,11 +84,10 @@ export async function checkMx(domain: string, region: string, signal?: AbortSign
 }
 
 /**
- * How a mixed MX shares mail (senders try the lowest preference first): `split` when another host has the same best
- * priority as Amazon SES, `backup` when another host's is better (a staged move: SES only gets what fails over),
- * `primary` when SES's is better (the other host is the backup).
+ * How a mixed MX shares mail: `split` when another host has the same best priority as Amazon SES, `backup` when
+ * another host's is better (a staged move: SES only gets what fails over), `primary` when SES's is better.
  */
-export function mxShare(report: Pick<MxReport, 'records' | 'expected'>): 'split' | 'backup' | 'primary' {
+function mxShare(report: Pick<MxReport, 'records' | 'expected'>): 'split' | 'backup' | 'primary' {
   const best = (mine: boolean) => Math.min(...report.records.filter(record => (record.host === report.expected.value) === mine).map(record => record.priority));
   const ours = best(true), theirs = best(false);
   return theirs === ours ? 'split' : theirs < ours ? 'backup' : 'primary';
