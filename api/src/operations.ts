@@ -11,7 +11,7 @@ import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
 import { actor, ApiError, assertSesConfigured, chargeBudget, assertSharedAccount, isSimulatedSes, digest, errors, getSes, id, IdParams, json, lazyModule, log, logError, ModuleLoadError, notFound, PageQuery, preloadSesTransport, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, wrapModuleLoad, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
 import { chargeManualDelivery, claimedWithWebhooks, enqueue, JobDeferred, WEBHOOK_ATTEMPTS, retryDatabaseFailures, webhookClaimCtes } from './jobs.js';
-import { applyClaim, connectionReady, hostGraceStart, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type HostEvidence, type HostStatus, type HostWrite, type IdentityFacts, type TenantState, PROOF_LABELS, proofRecordName, type ProofLabel } from './states.js';
+import { applyClaim, connectionReady, domainHosts, hostGraceStart, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type HostEvidence, type HostStatus, type HostWrite, type IdentityFacts, type TenantState, PROOF_LABELS, proofRecordName, type ProofLabel } from './states.js';
 import { jobs } from './db/core.js';
 import { contacts, mergeSuppression } from './db/audience.js';
 import { lasting, SuppressionEventData, WEBHOOK_CHANGE, webhookUrlHint, WebhookUrlHint, readCursor, nextCursor } from './core.js';
@@ -279,9 +279,6 @@ type DomainRef = Pick<Readiness,'id'|'name'|'region'>;
 type ProofTimes={receiving_proved_at?:Date|string|null;receiving_identity_at?:Date|string|null;receiving_proof_missed_at?:Date|string|null};
 export type HostedDomain = DomainRef & ClaimState & ProofTimes & { connection: ReadyConnection & { tenant_state: TenantState;legacy?:boolean }; token: string; proof_label: ProofLabel; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean; dns_first:boolean; hosts: ReceivingHostRow[] };
 /** The domain's receiving hosts, its own row first: what every hosted read of a claim carries. `d` is operation_domains. */
-export const domainHosts = (d: SQL = sql`d`) => sql`(SELECT coalesce(jsonb_agg(jsonb_build_object('id',m.id,'host',coalesce(m.receiving_host,m.name),'own',m.parent_id IS NULL,'status',m.status,
-    'lost_since',m.lost_since,'mx',m.mx,'issue',m.issue,'catch_all',m.catch_all) ORDER BY m.parent_id IS NOT NULL,m.created_at,m.id),'[]'::jsonb)
-  FROM mailbox_domains m WHERE m.workspace_id=${d}.workspace_id AND m.domain_id=${d}.id)`;
 const unavailableDomain = () => new ApiError(409, 'DOMAIN_UNAVAILABLE', 'This SES identity is unavailable for this domain claim.');
 const ownsIdentity = (identity: GetEmailIdentityCommandOutput, token: string) => hasTags(identity.Tags, [{ Key: claimTag, Value: token }]);
 function hostedDomainSelect(wid:string, domainId:string, lock:SQL=sql``) {
@@ -460,7 +457,7 @@ async function saveObservation(db:DbExecutor,row:HostedDomain,wid:string,ses:Ide
     // The ownership grace preserves hosts still bound to their MX only. It cannot activate another host, revive a
     // disconnected claim, or overrule a negative SES observation.
     if(!evidence.proven && evidence.identityVerified && !evidence.definitive && !evidence.unavailable && regionReceives && ['active','lost'].includes(row.receiving_state) && proofUntil(row)>Date.now()
-      && input.some(h=>h.status==='active' && h.live)) return transitionClaim(row,{...evidence,proven:true,regionReceives,byo},input.map(h=>({...h,live:h.live===undefined ? undefined : h.live && h.status==='active'})));
+      && input.some(h=>h.status==='active' && h.live)) return transitionClaim(row,{...evidence,proven:true,regionReceives,byo},input.map(h=>({...h,live:h.status==='provisioning' ? false : h.live===undefined ? undefined : h.live && h.status==='active'})));
     return n;
   };
   let next=transition();

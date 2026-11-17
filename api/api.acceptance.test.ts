@@ -13486,8 +13486,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.deepEqual(await deliver(`a@reply.${name}`, `b@${name}`, `c@inbox.${name}`), []);
       });
 
-      await t.test('BYO: the receipt rule lists every live host of a domain, each by name, and drops a removed one', async () => {
-        const [{ reconcileRegion }, { ensureRegionSettings }, { feedbackUrl }] = await Promise.all([import('./src/mailbox-setup.js'), import('./src/ses-region-state.js'), import('./src/ses-setup.js')]);
+      await t.test('BYO: the receipt rule lists every live host of a domain, each by name, and drops a removed one; each activates on its own', async () => {
+        const [{ reconcileRegion }, { ensureRegionSettings }, { feedbackUrl }, { acceptInboundNotification }] = await Promise.all([import('./src/mailbox-setup.js'), import('./src/ses-region-state.js'), import('./src/ses-setup.js'), import('./src/mailbox-ingest.js')]);
         const [{ STSClient }, { S3Client }, { SNSClient }, { SESClient }] = await Promise.all([import('@aws-sdk/client-sts'), import('@aws-sdk/client-s3'), import('@aws-sdk/client-sns'), import('@aws-sdk/client-ses')]);
         const bw = unique('rx-byo'), bc = `conn_${bw}`, bd = unique('dom'), bname = `${bw}.example`, baccount = '4' + randomUUID().replace(/\D/g, '').padEnd(11, '7').slice(0, 11);
         await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [bw]);
@@ -13535,6 +13535,48 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await db.query('UPDATE domain_claims SET receiving_host=$2 WHERE name=$1', [bname, bname]);
         await reconcileRegion(br, REGION, bw); await check();
         assert.deepEqual([recipients(), (await rows()).map(r => r.status)], [[bname], ['disabled', 'active']]);
+
+        // Each host activates on its own: a new host the rule lists routes while the domain's other host is in its MX grace
+        // (the claim `lost`, mirroring it), and the claim then mirrors the new host.
+        const { mailboxResources } = await import('./src/mailbox-setup.js'), { getRegionSettings } = await import('./src/ses-region-state.js');
+        const names = mailboxResources((await getRegionSettings(br.db, bw)).installationId, REGION, baccount), topicArn = `arn:aws:sns:${REGION}:${baccount}:${names.topicName}`;
+        const deliver = async (to: string) => { const mid = unique('byo');
+          await acceptInboundNotification(br, { topicArn, region: REGION, message: { notificationType: 'Received', mail: { messageId: mid, source: 'sender@example.org' },
+            receipt: { ...cleanScans, timestamp: new Date().toISOString(), recipients: [to], action: { type: 'S3', bucketName: names.bucket, topicArn, objectKey: `staging/${mid}` } } } });
+          return (await db.query('SELECT recipients FROM mail_receipts WHERE ses_message_id=$1', [mid])).rows[0]?.recipients ?? [];
+        };
+        const claimRow = async () => (await db.query('SELECT receiving_state,receiving_host,receiving_lost_since IS NOT NULL AS lost FROM domain_claims WHERE name=$1', [bname])).rows[0];
+        const states = async () => (await db.query('SELECT status,lost_since IS NOT NULL AS lost FROM mailbox_domains WHERE domain_id=$1 ORDER BY parent_id IS NOT NULL,created_at', [bd])).rows.map(r => `${r.status}${r.lost ? '+grace' : ''}`);
+        zone.delete(bname); await check();
+        assert.deepEqual([await claimRow(), await states()], [{ receiving_state: 'lost', receiving_host: bname, lost: true }, ['disabled', 'active+grace']]);
+        const added = async (host: string) => db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,parent_id,name,region,receiving_host,status,created_at) VALUES ($1,$2,$3,$4,$1,$5,$6,'waiting_for_mx',clock_timestamp())", [unique('mdom'), bw, bd, own, REGION, host]);
+        await added(`new.${bname}`); zone.set(`new.${bname}`, { mx: [ses] }); await check();
+        assert.deepEqual((await states())[2], 'provisioning');
+        await reconcileRegion(br, REGION, bw);
+        assert.deepEqual([recipients(), await states()], [[bname, `new.${bname}`].sort(), ['disabled', 'active+grace', 'active']]);
+        assert.deepEqual(await claimRow(), { receiving_state: 'active', receiving_host: `new.${bname}`, lost: false }, 'The claim mirrors the host that routes outside any grace.');
+        assert.deepEqual([await deliver(`x@new.${bname}`), await deliver(`y@${bname}`)], [[`x@new.${bname}`], [`y@${bname}`]]);
+        // The root's grace stays its own (on its row), and the next check keeps all of it.
+        await check(); await reconcileRegion(br, REGION, bw);
+        assert.deepEqual([await claimRow(), await states()], [{ receiving_state: 'active', receiving_host: `new.${bname}`, lost: false }, ['disabled', 'active+grace', 'active']]);
+
+        // A missing ownership proof authorizes nothing new: within its deadline the hosts that route keep routing, and a host
+        // waiting for the rule waits for its MX again, so the rule activates none. Past it, mail is held; once the claim's
+        // grace ends, every host stops.
+        zone.set(bname, { mx: [ses] }); await added(`late.${bname}`); zone.set(`late.${bname}`, { mx: [ses] }); await check();
+        assert.deepEqual(await states(), ['disabled', 'active', 'active', 'provisioning']);
+        await db.query("UPDATE domain_claims SET identity=jsonb_set(identity,'{proven}','false') WHERE name=$1", [bname]);
+        await check(); await reconcileRegion(br, REGION, bw);
+        assert.deepEqual([(await claimRow()).receiving_state, await states()], ['active', ['disabled', 'active', 'active', 'waiting_for_mx']]);
+        assert.deepEqual([await deliver(`x@new.${bname}`), await deliver(`z@late.${bname}`)], [[`x@new.${bname}`], []]);
+        await db.query("UPDATE domain_claims SET receiving_proved_at=now()-interval '73 hours' WHERE name=$1", [bname]);
+        await check(); await reconcileRegion(br, REGION, bw);
+        assert.deepEqual([(await claimRow()).receiving_state, await states()], ['lost', ['disabled', 'active', 'active', 'waiting_for_mx']]);
+        assert.deepEqual([await deliver(`x@new.${bname}`), await deliver(`z@late.${bname}`)], [[], []]);
+        await db.query("UPDATE domain_claims SET receiving_lost_since=now()-interval '3 hours' WHERE name=$1", [bname]);
+        await check(); await reconcileRegion(br, REGION, bw);
+        assert.deepEqual([(await claimRow()).receiving_state, await states()], ['off', ['disabled', 'waiting_for_mx', 'waiting_for_mx', 'waiting_for_mx']]);
+        assert.deepEqual([await deliver(`x@new.${bname}`), await deliver(`y@${bname}`)], [[], []]);
       });
 
       // Migrations 324 and 325 run before this release replaces the Worker before it, which keeps writing the claim's one

@@ -147,20 +147,21 @@ export function transitionClaim(current: ClaimState, e: ClaimEvidence, hosts: Ho
   const next = hosts.map((h): HostState => {
     if (h.status === 'disabled') return { status: 'disabled', lost_since: null };
     if (mode === 'off') return { status: 'waiting_for_mx', lost_since: null };
-    if (mode === 'grace' || h.live === undefined) return { status: h.status, lost_since: h.lost_since };
+    // An ownership grace keeps what routes and authorizes nothing new: a host waiting for its BYO rule waits for its MX
+    // again. So a host is `provisioning` only while the claim's last check observed ownership (activateReceiving).
+    if (mode === 'grace') return h.status === 'provisioning' ? { status: 'waiting_for_mx', lost_since: null } : { status: h.status, lost_since: h.lost_since };
+    if (h.live === undefined) return { status: h.status, lost_since: h.lost_since };
     // BYO activates only after its receipt rule lists the host; the shared catch-all already covers it.
     if (h.live) return { status: h.status === 'active' || !e.byo ? 'active' : 'provisioning', lost_since: null };
     if (h.status === 'active' && !expired(h.lost_since)) return { status: 'active', lost_since: h.lost_since ?? stamp };
     return { status: 'waiting_for_mx', lost_since: null };
   });
-  const primary = projectedHost(hosts.map((h, i) => ({ host: h.host, ...next[i]! })));
   const since = (next: boolean, was: boolean, before: string | null) => next ? (was ? before : stamp) : null;
-  let receiving: ReceivingState, lostSince: string | null = null;
-  if (mode === 'off') receiving = 'off';
-  else if (mode === 'grace') { receiving = primary?.status === 'active' ? 'lost' : 'off'; lostSince = since(receiving === 'lost', current.receiving_state === 'lost', current.receiving_lost_since); }
-  else ({ receiving_state: receiving, receiving_lost_since: lostSince } = mirror(primary));
-  return { claim: { sending_state: sending, receiving_state: receiving, receiving_host: receiving === 'off' ? null : primary?.host ?? null,
-    lost_since: since(sending === 'lost', current.sending_state === 'lost', current.lost_since), receiving_lost_since: lostSince }, hosts: next };
+  let receiving: Pick<ClaimState, 'receiving_state' | 'receiving_host' | 'receiving_lost_since'> = fromHosts(hosts.map((h, i) => ({ host: h.host, ...next[i]! })));
+  if (mode === 'off') receiving = { receiving_state: 'off', receiving_host: null, receiving_lost_since: null };
+  else if (mode === 'grace') receiving = receiving.receiving_state === 'active' || receiving.receiving_state === 'lost'
+    ? { ...receiving, receiving_state: 'lost', receiving_lost_since: since(true, current.receiving_state === 'lost', current.receiving_lost_since) } : { receiving_state: 'off', receiving_host: null, receiving_lost_since: null };
+  return { claim: { sending_state: sending, ...receiving, lost_since: since(sending === 'lost', current.sending_state === 'lost', current.lost_since) }, hosts: next };
 }
 type Projected = { host: string; status: string; lost_since?: string | null };
 /**
@@ -170,20 +171,28 @@ type Projected = { host: string; status: string; lost_since?: string | null };
  * the claim's receiving_lost_since, which every Worker keeps.
  */
 export const projectedHost = <T extends Projected>(hosts: T[]) => hosts.find(h => h.status === 'active' && !h.lost_since) ?? hosts.find(h => h.status === 'active') ?? hosts.find(h => h.status === 'provisioning');
-const mirror = (primary: Projected | undefined): Pick<ClaimState, 'receiving_state' | 'receiving_lost_since'> => primary?.status === 'active'
-  ? { receiving_state: primary.lost_since ? 'lost' : 'active', receiving_lost_since: primary.lost_since ?? null } : { receiving_state: 'pending', receiving_lost_since: null };
+/** The claim's receiving fields as its hosts make them (each with its effective MX grace), while the claim may receive: its primary host, mirrored. */
+const fromHosts = (hosts: Projected[]): Pick<ClaimState, 'receiving_state' | 'receiving_host' | 'receiving_lost_since'> => {
+  const primary = projectedHost(hosts);
+  return primary?.status === 'active' ? { receiving_state: primary.lost_since ? 'lost' : 'active', receiving_host: primary.host, receiving_lost_since: primary.lost_since ?? null }
+    : { receiving_state: 'pending', receiving_host: primary?.host ?? null, receiving_lost_since: null };
+};
 /** A host's MX grace started here, or null. The domain's primary host (the claim's receiving_host) keeps it on the claim; every other host on its row. */
 export const hostGraceStart = (claim: Pick<ClaimState, 'receiving_state' | 'receiving_host' | 'receiving_lost_since'>, host: { host: string; lost_since: string | null }) =>
   host.host === claim.receiving_host ? (claim.receiving_state === 'lost' ? claim.receiving_lost_since : null) : host.lost_since;
+type ClaimReceiving = Pick<ClaimState, 'receiving_state' | 'receiving_host' | 'receiving_lost_since'>;
+/** The claim's receiving fields from a domain's host rows (own row first), each host's MX grace where it is kept. */
+const hostsProjection = (claim: ClaimReceiving, hosts: Projected[]) =>
+  fromHosts(hosts.map(h => ({ ...h, lost_since: h.status === 'active' ? hostGraceStart(claim, { host: h.host, lost_since: h.lost_since ?? null }) : null })));
 /**
- * The claim's receiving fields after hosts were added or removed outside a check. Eligibility doesn't change: an
- * ownership grace (`lost` while hosts still route) holds until the next check, which recomputes everything.
+ * The claim's receiving fields after hosts were added or removed outside a check. Eligibility doesn't change: a claim
+ * that may not receive stays off, and an ownership grace (`lost` while a host routes outside any MX grace) holds until
+ * the next check, which decides it.
  */
-export function claimProjection(claim: Pick<ClaimState, 'receiving_state' | 'receiving_host' | 'receiving_lost_since'>, hosts: Projected[]): Pick<ClaimState, 'receiving_state' | 'receiving_host' | 'receiving_lost_since'> {
+export function claimProjection(claim: ClaimReceiving, hosts: Projected[]): ClaimReceiving {
   if (claim.receiving_state === 'off') return { receiving_state: 'off', receiving_host: null, receiving_lost_since: null };
-  const primary = projectedHost(hosts.map(h => ({ ...h, lost_since: h.status === 'active' ? hostGraceStart(claim, { host: h.host, lost_since: h.lost_since ?? null }) : null })));
-  if (claim.receiving_state === 'lost' && primary?.status === 'active') return { receiving_state: 'lost', receiving_host: primary.host, receiving_lost_since: primary.lost_since ?? claim.receiving_lost_since };
-  return { ...mirror(primary), receiving_host: primary?.host ?? null };
+  const next = hostsProjection(claim, hosts);
+  return claim.receiving_state === 'lost' && next.receiving_state === 'active' ? { ...next, receiving_state: 'lost', receiving_lost_since: claim.receiving_lost_since } : next;
 }
 
 type ClaimRef = { name: string; token: string; connectionId: string; workspaceId: string; domainId: string; region: string };
@@ -231,18 +240,32 @@ export const identityOnly = (ses: IdentityFacts['ses']): IdentityFacts => ({ ses
 export const verifyImportedClaims = (connection: string, domains: {name: string; ses: IdentityFacts['ses']}[]) => sql`UPDATE domain_claims dc SET sending_state=CASE WHEN d.ses->'DkimAttributes' @> '{"SigningEnabled":true,"Status":"SUCCESS"}' THEN 'verified' ELSE 'pending' END,
   identity=jsonb_build_object('ses',d.ses,'proven',true,'imported',true,'mx',NULL,'note',NULL)
   FROM jsonb_to_recordset(${JSON.stringify(domains)}::jsonb) d(name text,ses jsonb) WHERE dc.connection_id=${connection} AND dc.name=d.name`;
-/** BYO only: the receipt rule now lists these hosts, so hosts waiting on it start routing, and so do their claims. */
+/**
+ * BYO only: the receipt rule now lists these hosts, so hosts waiting on it start routing, each on its own. A host waits
+ * in `provisioning` only while its claim's last check observed ownership (transitionClaim), so it activates whatever MX
+ * grace the domain's other hosts are in; a claim that lost its proof or identity has no such host, and one that may not
+ * receive (`off`) is never touched. Each claim is then what its hosts make it, as the next check would write it.
+ */
 export async function activateReceiving(db: Pick<import('./core.js').Database, 'transaction'>, workspaceId: string, connectionId: string, region: string, hosts: string[]) {
   // Claims first, then their hosts: the order every receiving write takes.
-  await db.transaction(async tx => { await tx.execute(sql`SELECT FROM domain_claims dc WHERE dc.workspace_id=${workspaceId} AND dc.connection_id=${connectionId} AND dc.receiving_state IN ('pending','active') ORDER BY dc.name FOR UPDATE`);
-  await tx.execute(sql`WITH activated AS (UPDATE mailbox_domains m SET status='active',last_error=NULL,enabled_at=now(),updated_at=now()
+  await db.transaction(async tx => { await tx.execute(sql`SELECT FROM domain_claims dc WHERE dc.workspace_id=${workspaceId} AND dc.connection_id=${connectionId} AND dc.receiving_state<>'off' ORDER BY dc.name FOR UPDATE`);
+    const activated = (await tx.execute<{ name: string }>(sql`UPDATE mailbox_domains m SET status='active',last_error=NULL,enabled_at=now(),updated_at=now()
       FROM operation_domains d JOIN domain_claims dc ON dc.workspace_id=d.workspace_id AND dc.name=d.name
       WHERE m.workspace_id=${workspaceId} AND m.region=${region} AND m.status='provisioning' AND m.receiving_host IN (SELECT jsonb_array_elements_text(${JSON.stringify(hosts)}::jsonb))
-        AND d.id=m.domain_id AND d.workspace_id=m.workspace_id AND d.region=${region} AND dc.connection_id=${connectionId} AND dc.receiving_state IN ('pending','active')
-      RETURNING dc.name,m.receiving_host AS host,m.parent_id IS NULL AS own)
-    UPDATE domain_claims dc SET receiving_state='active',receiving_host=(SELECT a.host FROM activated a WHERE a.name=dc.name ORDER BY a.own DESC,a.host LIMIT 1)
-    WHERE dc.workspace_id=${workspaceId} AND dc.connection_id=${connectionId} AND dc.receiving_state='pending' AND dc.name IN (SELECT name FROM activated)`); });
+        AND d.id=m.domain_id AND d.workspace_id=m.workspace_id AND d.region=${region} AND dc.connection_id=${connectionId} AND dc.receiving_state<>'off'
+      RETURNING dc.name`)).rows;
+    if (!activated.length) return;
+    const claims = (await tx.execute<ClaimReceiving & { name: string; hosts: Projected[] }>(sql`SELECT dc.name,dc.receiving_state,dc.receiving_host,dc.receiving_lost_since,${domainHosts()} AS hosts
+      FROM domain_claims dc JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name
+      WHERE dc.workspace_id=${workspaceId} AND dc.connection_id=${connectionId} AND dc.name IN (SELECT jsonb_array_elements_text(${JSON.stringify([...new Set(activated.map(a => a.name))])}::jsonb))`)).rows;
+    await tx.execute(sql`UPDATE domain_claims dc SET receiving_state=c.receiving_state,receiving_host=c.receiving_host,receiving_lost_since=c.receiving_lost_since
+      FROM jsonb_to_recordset(${JSON.stringify(claims.map(c => ({ name: c.name, ...hostsProjection(c, c.hosts) })))}::jsonb) c(name text,receiving_state text,receiving_host text,receiving_lost_since timestamptz)
+      WHERE dc.workspace_id=${workspaceId} AND dc.connection_id=${connectionId} AND dc.name=c.name`); });
 }
+/** A domain's receiving hosts as JSON, its own row first, then in the order they were added: the order every projection reads. */
+export const domainHosts = (d: SQL = sql`d`) => sql`(SELECT coalesce(jsonb_agg(jsonb_build_object('id',m.id,'host',coalesce(m.receiving_host,m.name),'own',m.parent_id IS NULL,'status',m.status,
+    'lost_since',m.lost_since,'mx',m.mx,'issue',m.issue,'catch_all',m.catch_all) ORDER BY m.parent_id IS NOT NULL,m.created_at,m.id),'[]'::jsonb)
+  FROM mailbox_domains m WHERE m.workspace_id=${d}.workspace_id AND m.domain_id=${d}.id)`;
 /** Disconnecting keeps the claim (other workspaces still cannot take the name) but every state returns to its start. */
 export const detachedClaim = sql`connection_id=NULL,sending_state='pending',receiving_state='off',receiving_host=NULL,lost_since=NULL,receiving_lost_since=NULL,identity=NULL`;
 /** MX: a failed BYO reconcile is recorded on the projection without inventing a receiving state (the claim stays pending and the job retries). */
