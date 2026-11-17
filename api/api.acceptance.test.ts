@@ -3462,6 +3462,11 @@ describe('Hosted MCP OAuth and tools', () => {
           ['DELETE', `/v1/inbound/webhooks/${hook.id}`], ['POST', `/v1/inbound/webhooks/${hook.id}/rotate-secret`],
           ['POST', '/v1/inbound/keys', { name: 'agent fixture' }], ['GET', '/v1/inbound/keys'], ['POST', '/v1/inbound/keys/mbk_fixture/revoke'],
           ['DELETE', '/v1/inboxes/fixture/app-passwords/fixture'], ['POST', '/v1/inbox-connections', { inboxes: ['fixture'], client: 'generic', auth: 'key' }],
+          // Receiving hosts: choosing one, its subdomains, turning receiving on or off and its catch-all.
+          ['POST', '/v1/inbound/domains/dom_fixture/subdomains', { name: 'acme' }], ['PATCH', '/v1/inbound/domains/dom_fixture/subdomains/mdom_fixture', { catchAll: 'store' }],
+          ['DELETE', '/v1/inbound/domains/dom_fixture/subdomains/mdom_fixture'],
+          ['POST', '/v1/domains/dom_fixture/receiving-host', { host: 'reply.example.com' }], ['PATCH', '/v1/inbound/domains/dom_fixture', { catchAll: 'store' }],
+          ['POST', '/v1/inbound/domains/dom_fixture/enable', {}], ['POST', '/v1/inbound/domains/dom_fixture/disable'],
         ];
         for (const [method, path, body] of writes) {
           const reply = await http(method, path, agent.token, body, path === '/v1/routing' ? { 'if-match': '*' } : {});
@@ -3471,8 +3476,16 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.equal(ok(await http('GET', '/v1/routing', MANAGER)).version, before, 'No refused write saved a routing version.');
         assert.equal(ok(await http('GET', `/v1/inbound/webhooks/${hook.id}`, MANAGER)).paused, true);
         // Reads and previews stay open: routing, its dry run, rituals, endpoints and a webhook's deliveries.
-        for (const path of ['/v1/routing', '/v1/routing/routes', '/v1/rituals', '/v1/endpoints', `/v1/inbound/webhooks/${hook.id}`, `/v1/inbound/webhooks/${hook.id}/deliveries`]) ok(await http('GET', path, agent.token));
+        for (const path of ['/v1/routing', '/v1/routing/routes', '/v1/rituals', '/v1/endpoints', `/v1/inbound/webhooks/${hook.id}`, `/v1/inbound/webhooks/${hook.id}/deliveries`, '/v1/inbound/domains']) ok(await http('GET', path, agent.token));
         assert.ok(Array.isArray(ok(await http('POST', '/v1/routing/test', agent.token, { envelope: { to: ['fixture@example.com'] } })).recipients));
+        // Reading a domain's subdomains stays allowed: an unknown domain is not found, not refused.
+        error(await http('GET', '/v1/inbound/domains/dom_fixture/subdomains', agent.token), 404, 'NOT_FOUND');
+        // MCP discovery asks the same predicate (lastingRoute), so it hides exactly these writes from a temporary token.
+        const { lastingRoute } = await import('./src/core.js'), spec = JSON.parse(await readFile(new URL('./openapi.json', import.meta.url), 'utf8'));
+        const hostRoutes = Object.entries(spec.paths as Record<string, Json>).filter(([path]) => /^\/v1\/inbound\/domains|^\/v1\/domains\/\{id\}\/receiving-host$/.test(path))
+          .flatMap(([path, ops]) => Object.keys(ops).map(method => [method.toUpperCase(), path, ops[method].operationId] as const));
+        assert.deepEqual(hostRoutes.filter(([method, path]) => lastingRoute(method, path)).map(([, , op]) => op).sort(), ['chooseReceivingHost', 'createInboundSubdomain', 'disableInboundDomain',
+          'enableInboundDomain', 'removeInboundSubdomain', 'updateInboundDomain', 'updateInboundSubdomain']);
       } finally {
         ok(await http('DELETE', `/v1/inbound/webhooks/${hook.id}`, MANAGER));
         ok(await http('POST', `/v1/agent-tokens/${agent.id}/revoke`, MANAGER, undefined, { 'x-bane-environment': 'live' }));
