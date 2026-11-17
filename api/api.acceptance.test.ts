@@ -1222,12 +1222,13 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
     }
     assert.equal(await who(as(personal)), personal.id, 'A refused sign-out leaves the session');
     assert.equal(store(await at(origin,'/api/auth/accounts/switch','POST',{account:personal.id})).status,200);
-    // No sign-in flow starts on the old host: the page (or the add popup, started again) opens on the new origin.
-    for (const [from, to] of [['/campaigns?view=sent#top', '/campaigns?view=sent#top'], ['/signed-in/?tab=fixture', '/signed-in/?tab=fixture&start=1']]) {
-      const moved = await at(origin,'/api/auth/sign-in/account','POST',{callbackURL:origin+from,prompt:'select_account'});
-      assert.deepEqual([moved.status, await moved.json(), moved.headers.getSetCookie()],[200, {url:next+to}, []]);
+    // No sign-in flow starts on the old host: it sends the tab to the new origin's root, whatever it asked to return to.
+    for (const callbackURL of [origin+'//attacker.invalid/phish', origin+'///attacker.invalid/phish', origin+'//bane.mx/overview', origin+'/\\attacker.invalid',
+      origin+'/%2F%2Fattacker.invalid', origin+'/@attacker.invalid', 'https://attacker.invalid/', origin+'/?return=https://attacker.invalid/&callbackURL=https://attacker.invalid/#https://attacker.invalid/',
+      origin+'/signed-in/?tab=fixture', origin+'/campaigns?view=sent#top']) {
+      const moved = await at(origin,'/api/auth/sign-in/account','POST',{callbackURL,prompt:'select_account'});
+      assert.deepEqual([moved.status, await moved.json(), moved.headers.getSetCookie()],[200, {url:next+'/'}, []],callbackURL);
     }
-    assert.equal((await at(origin,'/api/auth/sign-in/account','POST',{callbackURL:next+'/'})).status,403,'Only a return to the old host itself is moved');
     assert.equal(store(await at(origin,'/api/auth/sign-out','POST',{},as(personal))).status,200);
     assert.equal(await code(await at(origin,'/v1/me','GET',undefined,as(personal))),'ACCOUNT_SIGNED_OUT');
   } finally { runtime.config = switchedFrom; }

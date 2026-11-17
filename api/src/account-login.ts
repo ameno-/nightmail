@@ -359,16 +359,10 @@ export async function accountBrowserRoute(c: Ctx) {
   if (path === '/api/auth/sign-in/account' && c.req.method === 'POST') {
     const input = z.object({ callbackURL:z.url().max(2048), prompt:z.literal('select_account').optional() }).strict().safeParse(await c.req.json().catch(()=>null));
     if (!input.success) throw new ApiError(422,'AUTH_INPUT_INVALID','Supply the dashboard return URL.');
-    // A tab on an earlier origin signs in on the current one: it goes to the same page there (a popup add starts again
-    // there), which starts the sign-in. No flow starts on the earlier origin. Remove after rename cleanup.
-    const served = servedOrigin(runtime, c.req.url);
-    if (served !== origin) {
-      const back = new URL(input.data.callbackURL);
-      if (back.origin !== served || back.username || back.password) throw loginFailed();
-      const target = new URL(back.pathname + back.search + back.hash, origin);
-      if (target.pathname === POPUP_PATH) target.searchParams.set('start', '1');
-      return c.json({url:target.href});
-    }
+    // A tab on an earlier origin signs in on the current one: it goes to the current origin's root, a constant built
+    // from config alone (nothing of the request, so it can't be steered elsewhere). No flow starts on the earlier
+    // origin. Remove after rename cleanup.
+    if (servedOrigin(runtime, c.req.url) !== origin) return c.json({url:`${origin}/`});
     // A sixth account is refused before the account service is asked, on every sign-in; the callback checks again.
     if ((await connectedAccounts(runtime, await jar())).accounts.length >= MAX_ACCOUNTS) throw new ApiError(409,'ACCOUNT_LIMIT',`A browser can connect at most ${MAX_ACCOUNTS} accounts. Sign out of one to add another.`);
     const start = await beginAccountLogin(runtime,new URL(input.data.callbackURL),c.req.header(clientIpHeader) ?? 'unknown',input.data.prompt).catch(error=>{
