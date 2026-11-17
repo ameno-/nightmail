@@ -105,7 +105,8 @@ function signedHook(messageId: string, threadId: string, from = 'ada@acme.test',
 }
 const CONFIRM_TEMPLATE = /^Hi,\n\nThanks for writing to Nightmail support\. Before I can look at a Nightmail account, I need to confirm that this email came from you\. Open this link and press Confirm \(it works once, within 24 hours\):\n\nhttps:\/\/support\.dev\.bane\.mx\/confirm\/\S+\n\nOr sign in to Nightmail and press Help\.\n\nIf you didn't write to Nightmail support, ignore this email\.\n\nNightmail support \(AI\)$/;
 const NO_ACCOUNT = 'Hi,\n\nThanks for writing to Nightmail support. I couldn’t find a Nightmail account for this email address, so I can’t look anything up. Please write from the address you sign in to Nightmail with, or sign in and press Help.\n\nNightmail support (AI)';
-const replies = async (thread: string, instance?: Miniflare) => (await fakeCalls(instance)).filter(c => c[0] === 'api' && c[2] === `/v1/inbound/threads/${thread}/reply`);
+// The replies Nightmail accepted (a refused one, such as a 409, never reaches the customer).
+const replies = async (thread: string, instance?: Miniflare) => (await fakeCalls(instance)).filter(c => c[0] === 'api' && c[2] === `/v1/inbound/threads/${thread}/reply` && c[6] < 300);
 async function eventually<T>(read: () => Promise<T | undefined>, ms = 30_000): Promise<T | undefined> {
   for (let waited = 0; waited < ms; waited += 250) { const value = await read(); if (value) return value; await new Promise(r => setTimeout(r, 250)); }
   return undefined;
@@ -297,10 +298,31 @@ describe('support Worker', () => {
     assert.match(await (await mf.dispatchFetch(`${SUPPORT}/confirm/${link}`, { method: 'POST' })).text(), /Already confirmed/);
     const magic = (await fakeCalls()).find(c => c[0] === 'verifyEmail' && c[1].evidence?.kind === 'magic_link');
     assert.equal(magic[1].email, 'ada@acme.test');
-    const answered = await eventually(async () => (await fakeCalls()).filter(c => c[0] === 'api' && c[2] === '/v1/inbound/threads/thr_nodmarc/reply').length >= 2 || undefined);
+    // The link and the answer are two sends for one message, each under its own key: Nightmail accepts both.
+    assert.equal(first[5], 'confirm-msg_nodmarc_1');
+    const answered = await eventually(async () => (await replies('thr_nodmarc')).find(c => /61 of 1,000/.test(c[3].text)));
     assert.ok(answered, 'The held message is answered after confirmation.');
+    assert.deepEqual([answered[5], answered[6], answered[3].replyToMessageId], ['reply-msg_nodmarc_1', 202, 'msg_nodmarc_1']);
     assert.ok((await fakeCalls()).some(c => c[0] === 'mintGrant' && c[1].verification === 'magic_link'));
     assert.equal((await mf.dispatchFetch(`${SUPPORT}/confirm/${link.slice(0, -4)}AAAA`)).status, 410, 'A tampered link is refused.');
+  }, 180_000);
+
+  test('an answer that committed but whose response was lost: the retry’s different answer is refused, never sent a second time', async () => {
+    assert.equal((await signedHook('msg_nodmarc_lost', 'thr_nodmarc_lost')).status, 200);
+    const link = await eventually(async () => (await replies('thr_nodmarc_lost')).find(c => CONFIRM_TEMPLATE.test(c[3].text)));
+    assert.ok(link, 'A confirm link.');
+    // Nightmail already holds a first answer under the answer's key (committed; its response never reached the Worker),
+    // and the retry's model turn writes a different one.
+    await (await mf.getWorker('fake-bane')).fetch('http://fake-bane/__used', { method: 'POST', body: JSON.stringify({ authorization: `Bearer bane_mbx_${'7'.repeat(64)}`,
+      path: '/v1/inbound/threads/thr_nodmarc_lost/reply', key: 'reply-msg_nodmarc_lost', body: { text: 'The first answer' } }) });
+    assert.equal((await mf.dispatchFetch(`${SUPPORT}/confirm/${String(link[3].text).match(/\/confirm\/(\S+)/)![1]}`, { method: 'POST' })).status, 200);
+    const tried = async () => (await fakeCalls()).filter(c => c[0] === 'api' && c[2] === '/v1/inbound/threads/thr_nodmarc_lost/reply' && !CONFIRM_TEMPLATE.test(c[3].text));
+    assert.ok(await eventually(async () => (await tried()).length || undefined), 'The answer was tried.');
+    await new Promise(r => setTimeout(r, 1500));
+    // One answer per message: the changed body is a 409 under the same key, and nothing is sent under any other key. The
+    // message stays in the inbox and is retried (each a 409) until it is marked failed after six tries, as before.
+    assert.deepEqual((await tried()).map(c => [c[5], c[6]]), [['reply-msg_nodmarc_lost', 409]]);
+    assert.deepEqual((await replies('thr_nodmarc_lost')).map(c => c[5]), ['confirm-msg_nodmarc_lost'], 'Only the confirm link was accepted in this run.');
   }, 180_000);
 
   test('automatic mail is never answered', async () => {

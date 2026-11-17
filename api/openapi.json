@@ -21981,7 +21981,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Changes what a key can reach and keeps its secret, so nothing has to be redeployed. A workspace key takes name, permissions and domains. A key for addresses takes name and access: add or remove addresses (addAddressIds, removeAddressIds), replace them (addressIds) or change access.mail. An inbox key takes name and access.mail. A key's type and secret never change. Takes effect at once: requests already waiting lose a removed address, and mail the key queued is sent only within its new access. Needs the access createApiKey needs, checked again as the change is written, and no key changes itself; over MCP, only keys that approval created. Revoked and ended keys can't be changed.",
+        "description": "Changes what a key can reach and keeps its secret, so nothing has to be redeployed. A workspace key takes name, permissions and domains. A key for addresses takes name and access: add or remove addresses (addAddressIds, removeAddressIds), replace them (addressIds) or change access.mail. An inbox key takes name and access.mail. A key's type and secret never change. Takes effect at once: requests already waiting lose a removed address, and mail the key queued is sent only within its new access. Needs the access createApiKey needs, checked again as the change is written, and no key changes itself. An agent signed in over MCP as a person changes any key that person could change in the dashboard; a key an MCP approval created changes only keys that approval created. Revoked and ended keys can't be changed.",
         "parameters": [
           {
             "schema": {
