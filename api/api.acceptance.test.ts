@@ -1198,6 +1198,40 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
   assert.equal((store(await request('/api/auth/sign-out','POST',undefined,as(work)))).status,200);
   assert.equal(await code(await request('/v1/me','GET',undefined,as(work))),'ACCOUNT_SIGNED_OUT');
   assert.equal(await who(as(personal)), personal.id);
+
+  // After a domain switch (PUBLIC_URL moves, the old origin in PREVIOUS_PUBLIC_URLS) a tab still open on the old host
+  // keeps its session there: it reads, writes, switches and signs out with its own Origin. Neither host's page acts
+  // through the other, API keys need no Origin on either, and a new sign-in started there goes to the new origin.
+  const next = 'https://next.example.org', switchedFrom = runtime.config;
+  runtime.config = {...switchedFrom, publicUrl:next, previousOrigins:[origin]};
+  try {
+    const at = (host: string, path: string, method = 'GET', body?: object, headers: Record<string,string> = {}) => app.fetch(new Request(host+path,{method,
+      headers:{origin:host,cookie:cookie(),'content-type':'application/json','x-nightmail-client-ip':`192.0.2.${peer}`,...headers},body:body?JSON.stringify(body):undefined}),runtime);
+    const email = () => `old-host-${randomUUID()}@example.net`;
+    assert.equal((await at(origin,'/v1/me','GET',undefined,as(personal))).status,200);
+    assert.equal((await at(origin,'/v1/contacts','POST',{email:email()},as(personal))).status,201);
+    const key = await at(origin,'/v1/api-keys','POST',{name:'old-host',permissions:['manage']},as(personal));
+    assert.equal(key.status,201);
+    const {secret} = await key.json() as {secret:string};
+    for (const [host, foreign] of [[origin, next], [next, origin]] as const) {
+      for (const [path, body] of [['/v1/contacts', {email:email()}], ['/api/auth/accounts/switch', {account:personal.id}], ['/api/auth/sign-out', {}]] as const) {
+        const refused = await at(host, path, 'POST', body, {...as(personal), origin:foreign});
+        assert.equal(refused.status,403,`${path} on ${host} from ${foreign}`); assert.equal(await code(refused),'CSRF_ORIGIN_INVALID');
+      }
+      for (const sent of [foreign, 'https://attacker.invalid']) assert.equal((await at(host,'/v1/contacts','POST',{email:email()},{authorization:`Bearer ${secret}`,origin:sent})).status,201,'API keys need no Origin');
+    }
+    assert.equal(await who(as(personal)), personal.id, 'A refused sign-out leaves the session');
+    assert.equal(store(await at(origin,'/api/auth/accounts/switch','POST',{account:personal.id})).status,200);
+    // No sign-in flow starts on the old host: it sends the tab to the new origin's root, whatever it asked to return to.
+    for (const callbackURL of [origin+'//attacker.invalid/phish', origin+'///attacker.invalid/phish', origin+'//bane.mx/overview', origin+'/\\attacker.invalid',
+      origin+'/%2F%2Fattacker.invalid', origin+'/@attacker.invalid', 'https://attacker.invalid/', origin+'/?return=https://attacker.invalid/&callbackURL=https://attacker.invalid/#https://attacker.invalid/',
+      origin+'/signed-in/?tab=fixture', origin+'/campaigns?view=sent#top']) {
+      const moved = await at(origin,'/api/auth/sign-in/account','POST',{callbackURL,prompt:'select_account'});
+      assert.deepEqual([moved.status, await moved.json(), moved.headers.getSetCookie()],[200, {url:next+'/'}, []],callbackURL);
+    }
+    assert.equal(store(await at(origin,'/api/auth/sign-out','POST',{},as(personal))).status,200);
+    assert.equal(await code(await at(origin,'/v1/me','GET',undefined,as(personal))),'ACCOUNT_SIGNED_OUT');
+  } finally { runtime.config = switchedFrom; }
   assert.equal(store(await request('/api/auth/sign-out','POST',{all:true})).status,200);
   assert.equal([...jar.keys()].filter(k=>k.includes('session_token')).length,0);
   assert.equal((await request('/v1/me')).status,401);

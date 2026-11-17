@@ -169,7 +169,7 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
     const dashboard = await timed(c,'session-db',()=>getDashboardActor(c.env,c.req.raw.headers));
     if (!dashboard) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in or supply a bearer API key.');
     migrateLegacyCookies(c); settleDefaultAccount(c, dashboard.keyId.slice('user_'.length));
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) requireDashboardOrigin(c.env, c.req.raw.headers);
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) requireDashboardOrigin(c.env, c.req.raw);
     c.set('actor', dashboard);
   }
   await next();
