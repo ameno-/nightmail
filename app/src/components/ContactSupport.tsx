@@ -2,8 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { ArrowUpRight } from 'lucide-react'
 import { supportApi, type SupportHandoff } from '../data/support'
-import { MutationError } from '../features/settings/shared'
-import { Button, Checkbox, CopyButton, Dialog, Field, Textarea } from './ui'
+import { Button, Checkbox, CopyButton, Dialog, Field, Textarea, MutationError } from './ui'
 import { addresses } from '../../../api/src/brand'
 
 const MAX = 2000

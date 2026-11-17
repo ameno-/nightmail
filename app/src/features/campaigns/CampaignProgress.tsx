@@ -70,7 +70,6 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
   </div>
 }
 
-const message = errorText
 
 // Pause, resume, and daily-limit controls for a send that is still releasing recipients.
 export function CampaignPacing({ campaign }: { campaign: Campaign }) {
@@ -102,7 +101,7 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
     try { accept(await action()) }
     catch (cause) {
       if (isDuplicateSubmission(cause)) return
-      setError(message(cause))
+      setError(errorText(cause))
       // A conflict means the send moved on (finished, paused elsewhere); show its real state.
       void cache.invalidateQueries({ queryKey: campaignKey })
     }

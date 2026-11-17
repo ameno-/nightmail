@@ -1,12 +1,11 @@
 import { useState, type FormEvent } from 'react'
 import { Share } from 'lucide-react'
-import { Button, ConfirmDialog, CopyButton, SecretCode, DataTable, Dialog, Disclosure, DropdownMenu, EmptyState, ErrorState, Field, Input, SectionHeader, Select, useToast } from '../../components/ui'
+import { Button, ConfirmDialog, CopyButton, SecretCode, DataTable, Dialog, Disclosure, DropdownMenu, EmptyState, ErrorState, Field, Input, SectionHeader, Select, useToast, fieldError, MutationError } from '../../components/ui'
 import { useApiMutation, useApiDef, useSession } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { WorkspaceInvitation, WorkspaceMember, WorkspaceRole } from '../../data/types'
 import { roleLabel, workspaceApi } from '../../data/workspaces'
 import { date } from '../../lib/format'
-import { fieldError, MutationError } from './shared'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { settingsColumns } from './skeletons'
 import { productName } from '../../../../api/src/brand'
@@ -113,7 +112,7 @@ export function InviteDialog({ open, owner, onOpenChange }: { open: boolean; own
   function close() { onOpenChange(false); setCreated(null); setEmail(''); setRole('member'); setEmailError(''); create.reset() }
   // The link works only for the invited address; its expiry is in Invitations, where it can be copied again.
   if (created) return <Dialog sensitive open={open} onOpenChange={next => { if (!next) close() }} title="Share this invitation link" footer={<Button variant="primary" onClick={close}>Done</Button>}>
-    <div className="settings-secret"><SecretCode>{created.acceptUrl}</SecretCode><CopyButton value={created.acceptUrl} label="Copy invitation link" /></div>
+    <div className="ui-secret"><SecretCode>{created.acceptUrl}</SecretCode><CopyButton value={created.acceptUrl} label="Copy invitation link" /></div>
     {canShare() && <Button className="settings-share" onClick={() => void shareLink(created.acceptUrl, toast)}><Share size={16} />Share link</Button>}
   </Dialog>
   // Nothing is emailed: the button says it makes a link, and the next step shows it to share.

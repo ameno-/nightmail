@@ -1,13 +1,12 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { X } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { Alert, Button, ConfirmDialog, Dialog, Disclosure, ErrorState, Field, IconButton, Input, LoadingRegion, PageHeader, SectionHeader, Select, SkeletonText, useToast } from '../../components/ui'
+import { Alert, Button, ConfirmDialog, Dialog, Disclosure, ErrorState, Field, IconButton, Input, LoadingRegion, PageHeader, SectionHeader, Select, SkeletonText, useToast, fieldError, MutationError } from '../../components/ui'
 import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { date, number } from '../../lib/format'
 import { request } from '../../data/live'
-import { ApiError, type InboundAddress, type InboundAddressInput, type InboundAddressPatch, type MailboxDomain } from '../../data/types'
-import { fieldError, MutationError } from '../settings/shared'
+import { errorText, type InboundAddress, type InboundAddressInput, type InboundAddressPatch, type MailboxDomain } from '../../data/types'
 import { AliasEditor, aliasState, commitAliases, type AliasState } from './aliases'
 import { steps } from './concepts'
 import { typeLabel, useOverview } from './overview'
@@ -82,7 +81,6 @@ const formOf = (address: InboundAddress): AddressForm => ({ base: address, displ
 const sameList = (a: string[], b: string[]) => a.length === b.length && [...a].sort().join('\n') === [...b].sort().join('\n')
 
 type RitualConfig = { version: number; config: { attachments: { ritual: string; target: string; continue: boolean }[] } }
-const errorText = (e: unknown) => e instanceof ApiError ? e.text : (e as Error).message
 
 /** Route → Rituals → Goes to for one address, with what can be done at each step right there. */
 function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address: InboundAddress; overview: ReturnType<typeof useOverview>; onAddAlias: () => void; onAddPattern: () => void }) {

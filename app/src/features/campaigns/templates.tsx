@@ -20,7 +20,6 @@ import './campaigns.css'
 import { useSingleFlight } from '../../lib/single-flight'
 import { usePhone } from '../../lib/media'
 
-const errorMessage = errorText
 // Templates hold concrete example content; personalization belongs to the campaign made from them.
 const placeholder = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/
 const placeholderHint = (value: string | undefined) => { const match = value ? placeholder.exec(value) : null; return match ? `Templates use example text, not {{${match[1]}}}. Write an example here; add personalization in the campaign.` : '' }
@@ -37,7 +36,7 @@ export function useStartFromTemplate() {
   const mutation = useApiMutation((client, template: {id: string; name: string}) => client.campaigns.save({ templateId: template.id, idempotencyKey: crypto.randomUUID(), regionId, name: template.name, subject: '', previewText: '', fromName: '', fromEmail: '', listId: '', segmentId: null, html: '' }), undefined, false, true, regionId)
   async function start(template: {id: string; name: string}) {
     try { const campaign = await mutation.mutateAsync(template); navigate(`/campaigns/${encodeURIComponent(campaign.id)}/edit`) }
-    catch (error) { toast(errorMessage(error), 'error') }
+    catch (error) { toast(errorText(error), 'error') }
   }
   return { start, pending: mutation.isPending ? mutation.variables?.id ?? '' : null, unavailable: !regionId && !multiTenant }
 }
@@ -73,7 +72,7 @@ export function TemplatesPage() {
   async function createTemplate() {
     if (!name.trim()) return
     try { const result = await create.mutateAsync(name.trim()); navigate(`/campaigns/templates/${encodeURIComponent(result.id)}`) }
-    catch (error) { toast(errorMessage(error), 'error') }
+    catch (error) { toast(errorText(error), 'error') }
   }
   return <>
     <CampaignsHeader actions={<Button variant="primary" onClick={() => setCreateOpen(true)}>Create template</Button>} />
@@ -153,7 +152,7 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
       await refreshLists()
       setTemplate(updated); draftRef.current = version.current === submittedVersion ? updated.draft : draftRef.current; if (version.current === submittedVersion) { setDraft(updated.draft); setDirty(false) }
       return updated
-    } catch (cause) { fail(errorMessage(cause)); return null }
+    } catch (cause) { fail(errorText(cause)); return null }
     finally { savingRef.current = false; setSaving(false) }
   }
   // Publish and Archive run one at a time per action: a second press before the first answers would send the same revision again.
@@ -161,11 +160,11 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
     const current = dirty || error ? await save() : template
     if (!current) return
     try { const updated = await api.templates.publish(current.id, current.revision); setTemplate(updated); remember(updated); await refreshLists(); toast('Template published. Use it to start a campaign.', 'success') }
-    catch (cause) { toast(errorMessage(cause), 'error') }
+    catch (cause) { toast(errorText(cause), 'error') }
   }, template.id)
   const archive = useSingleFlight('templates.archive', async () => {
     try { const updated = await api.templates.archive(template.id, !archived); setTemplate(updated); remember(updated); await refreshLists(); toast(archived ? 'Template restored' : 'Template archived', 'success') }
-    catch (cause) { toast(errorMessage(cause), 'error') }
+    catch (cause) { toast(errorText(cause), 'error') }
   }, template.id)
   const published = template.publishedRevision !== null && !archived
   const upToDate = template.publishedRevision === template.revision && !dirty

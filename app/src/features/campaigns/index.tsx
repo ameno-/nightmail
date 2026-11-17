@@ -37,7 +37,6 @@ import { useSingleFlight } from '../../lib/single-flight'
 import { usePhone } from '../../lib/media'
 import { useLeaveGuard } from '../../lib/leave-guard'
 
-const message = errorText
 // {{placeholders}} the campaign uses; email always resolves, everything else needs a contact value or a fallback.
 const placeholderPattern = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g
 export const placeholders = (...sources: (string | undefined)[]) => [...new Set(sources.flatMap(source => [...(source ?? '').matchAll(placeholderPattern)].map(match => match[1]!)))]
@@ -223,7 +222,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
     try {
       const latest = await api.campaigns.get(acceptedRef.current.id, controller.signal)
       if (!controller.signal.aborted) applyRemote(latest)
-    } catch (cause) { if (!controller.signal.aborted) toast(message(cause), 'error') }
+    } catch (cause) { if (!controller.signal.aborted) toast(errorText(cause), 'error') }
     finally { if (!controller.signal.aborted) { setLoadingLatest(false); busyRef.current = false } }
   }
   const syncLabel = autosaving || preparing || saveMutation.isPending ? 'Saving…' : remote ? 'Update available' : autosavePaused ? 'Save failed' : error ? 'Check draft' : unavailable ? 'Unavailable' : readOnly ? 'Read only' : sync.connection === 'offline' ? 'Sync interrupted' : dirty ? form.name.trim() ? 'Unsaved changes' : 'Name required' : accepted ? 'Saved' : 'New draft'
@@ -297,8 +296,8 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
         else creation.current.ambiguous = true
       }
       setAutosavePaused(true)
-      if (automatic) setError(message(cause))
-      else reportError(message(cause))
+      if (automatic) setError(errorText(cause))
+      else reportError(errorText(cause))
       sync.checkNow()
     } finally {
       guard.current = false
@@ -405,7 +404,7 @@ function TestEmailDialog({ campaign, open, onOpenChange }: { campaign: Campaign;
       const result = await mutation.mutateAsync({ id: campaign.id, to: to.trim(), data: Object.fromEntries(samples.map(key => [key, data[key]!.trim()])) })
       if (!result.accepted) { setError('The test wasn’t accepted. Try again.'); return }
       setSent({ to: to.trim(), id: result.id })
-    } catch (cause) { setError(message(cause)) }
+    } catch (cause) { setError(errorText(cause)) }
     finally { guard.current = false }
   }
   return <Dialog open={open} onOpenChange={value => { if (!mutation.isPending) { setError(''); onOpenChange(value) } }} title="Send test email">
@@ -503,7 +502,7 @@ function RescheduleDialog({ campaign, onClose }: { campaign: Campaign; onClose: 
   const reschedule = useSingleFlight('campaigns.reschedule', async (at: string) => {
     setPending(true)
     try { const next = await api.campaigns.reschedule(campaign.id, at); accept(next); toast(`Rescheduled for ${utcLabel(next.scheduledAt!)}`, 'success'); onClose() }
-    catch (cause) { setError(message(cause)) }
+    catch (cause) { setError(errorText(cause)) }
     finally { setPending(false) }
   }, campaign.id)
   function submit(event: FormEvent) {
@@ -626,7 +625,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
     guard.current = true
     setError('')
     try { const result = await sendMutation.mutateAsync(confirmation); setReceipt('queued' in result && !result.scheduledAt ? `Sending started · ${number(result.queued)} ${result.queued === 1 ? 'recipient' : 'recipients'}${result.simulated ? ' · simulation mode, no real email is sent' : ''}` : ''); setConfirmation(null) }
-    catch (cause) { setError(message(cause)); setConfirmation(null) }
+    catch (cause) { setError(errorText(cause)); setConfirmation(null) }
     finally { guard.current = false }
   }
   const scheduledView = !draft && !campaign.archivedAt && unreleasedSchedule(campaign)

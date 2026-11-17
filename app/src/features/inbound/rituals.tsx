@@ -11,7 +11,7 @@ import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/lang
 import { tags } from '@lezer/highlight'
 import { Alert, Button, Checkbox, ConfirmDialog, DataTable, Disclosure, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, SectionHeader, Select, Textarea, useToast, type Column } from '../../components/ui'
 import { request } from '../../data/live'
-import { ApiError } from '../../data/types'
+import { ApiError, errorText } from '../../data/types'
 import { useApiDef, useWorkspaceAccess } from '../../data/context'
 import { staleAfterWrite } from '../../data/invalidation'
 import { queries } from '../../data/queries'
@@ -30,7 +30,6 @@ import { maskedParts } from '../../lib/private-address'
 const runNext = 'Run the next one too'
 const savedMeanwhile = (version: number) => `Version ${version} was saved meanwhile: load theirs or keep yours.`
 
-const errorText = (e: unknown): string => e instanceof ApiError ? e.text : (e as Error).message
 type Binding = { ritual: string; target: string; continue: boolean }
 type Config = { rituals: { key: string; source: string; recipe?: { id: string; params: unknown }; enabled?: boolean }[]; attachments: Binding[]; senderLists: Record<string, string[]>; evaluateDomains: string[]; evaluateRoutes: string[] }
 type Saved = { version: number; config: Config }

@@ -14,6 +14,7 @@ import { date, label, shortDateTime, time } from '../../lib/format'
 import { EmailDetailSkeleton } from './skeletons'
 import { useDetailLayout } from './detail-layout'
 import { productName } from '../../../../api/src/brand'
+import { errorText } from '../../data/types'
 
 // A sent email, in the order people come for: did it arrive (the status and its delivery), what it looked like (the
 // preview: as sent and in each client, side by side where there is room), and how to do better (the score, the fixes to
@@ -239,7 +240,7 @@ function Delivery({ email, vertical }: { email: Email; vertical: boolean }) {
   const more = async () => {
     setBusy(true); setError('')
     try { const next = await api.emailEvents!(email.id, cursor!); setEvents(previous => [...previous, ...next.items]); setCursor(next.nextCursor) }
-    catch (cause) { setError(cause instanceof Error ? cause.message : 'Couldn’t load events.') } finally { setBusy(false) }
+    catch (cause) { setError(errorText(cause, 'Couldn’t load events.')) } finally { setBusy(false) }
   }
   return <div className="delivery" data-vertical={vertical || undefined}>
     <ol className="delivery__steps ui-scroll-fade" aria-label="Delivery">

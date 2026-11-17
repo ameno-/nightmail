@@ -2,7 +2,7 @@ import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffe
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation, useNavigate } from 'react-router'
 import { createMockApi } from './mock'
-import { ApiError, type Identity, type BaneApi, type WorkspaceInvitationPreview } from './types'
+import { ApiError, type Identity, type BaneApi, type WorkspaceInvitationPreview, errorText } from './types'
 import { roleLabel, workspaceApi } from './workspaces'
 import { createLiveApi, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace } from './live'
 import { accountApi, accountsKey, announce, expectAccount, onAccountEvent, POPUP_PATH, takeExpectedAccount, type AccountList } from './accounts'
@@ -77,7 +77,7 @@ async function loadIdentity(signal?: AbortSignal) {
 }
 function invitationError(error: unknown) {
   if (error instanceof ApiError && error.status === 404) return 'This invitation is invalid, expired or for another email address. Ask for a new one.'
-  return `Couldn’t open the invitation. ${error instanceof Error ? error.message : 'Try the link again.'}`
+  return `Couldn’t open the invitation. ${errorText(error, 'Try the link again.')}`
 }
 const expiry = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 // Shown before anything changes: the question, its facts and the two answers. The slug tells apart workspaces that
@@ -243,7 +243,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     const callback = new URL(window.location.pathname, window.location.origin)
     callback.search = window.location.search; callback.searchParams.delete('auth')
     try { const url = await accountApi.signIn(callback.href, true); expectAccount(); window.location.assign(url) }
-    catch (error) { toast(error instanceof ApiError && error.code === 'ACCOUNT_LIMIT' ? authMessages.account_limit : error instanceof Error ? error.message : 'Couldn’t add an account.', 'error') }
+    catch (error) { toast(error instanceof ApiError && error.code === 'ACCOUNT_LIMIT' ? authMessages.account_limit : errorText(error, 'Couldn’t add an account.'), 'error') }
   }
   useEffect(() => onAccountEvent(event => {
     if (event.type === 'add-started') { if (event.tab && event.tab === adding.current?.tab) window.clearTimeout(adding.current.fallback); return }
