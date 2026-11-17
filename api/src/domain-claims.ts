@@ -3,7 +3,7 @@ import { z } from '@hono/zod-openapi';
 import { ApiError, assertSesConfigured, id, isSimulatedSes, type Runtime, type DbExecutor } from './core.js';
 import type { ReadyConnection } from './provider-credentials.js';
 import { placementRoot } from './domain-registry.js';
-import { assertTenantReady, connectionReady, detachedClaim, PROOF_LABELS, verifyImportedClaims, type ClaimState, type IdentityFacts, type ProofLabel, type TenantState } from './states.js';
+import { connectionReady, detachedClaim, PROOF_LABELS, verifyImportedClaims, type ClaimState, type IdentityFacts, type ProofLabel, type TenantState } from './states.js';
 import { productName } from './brand.js';
 import type { ClaimsOnly, SendScope } from './send-scope.js';
 
@@ -120,20 +120,8 @@ export type SendingBinding = { domain: string; connection: string; generation: n
 export type SenderRoute = { region: string; verified: boolean; binding: SendingBinding; connection: (ReadyConnection & { region:string; tenant_state:TenantState; pause_reason:string|null }) | null; platform_refused?: boolean };
 /** Every sender check (admission, campaigns, mailbox replies, dispatch) reads its closest claim through this call,
  * which also applies the running platform-domain policy; a refused route is never verified. It locks that claim, so a
- * send transaction reads it only under its send locks (SendScope, after lockedSettings in the same statement). */
+ * send transaction reads it only under its send locks (send_admission takes the settings row before it, migration 323). */
 export const regionalSender = (runtime:Runtime,_locks:SendScope|ClaimsOnly,wid:SQL|string,host:SQL|string) => sql`regional_sender(${wid},${host},${isSimulatedSes(runtime)},${platformPolicy(runtime.config)}::jsonb)`;
-export const senderRoutes = (runtime:Runtime,held:SendScope,hosts:string[]) => sql`(SELECT coalesce(jsonb_object_agg(h.host,to_jsonb(r)),'{}'::jsonb)
-  FROM jsonb_array_elements_text(${JSON.stringify([...new Set(hosts)])}::jsonb) h(host) CROSS JOIN LATERAL ${regionalSender(runtime,held,held.workspaceId,sql`h.host`)} r)`;
-export function checkRoute(runtime: Runtime, route: SenderRoute | undefined, requested?: string) {
-  if (route?.platform_refused) throw new ApiError(403,'PLATFORM_SENDER_REFUSED',`Only the workspace configured to own ${productName}’s own domain sends from it, and never from ${productName}’s platform hosts.`,'from');
-  if (!route?.verified) throw unverifiedSender();
-  if (requested !== undefined && requested !== route.region) throw new ApiError(422,'SENDER_REGION_MISMATCH','The requested region does not match this sender domain.', 'region');
-  if (!route.connection) throw new ApiError(409,'CONNECTION_REQUIRED','The sending connection is not ready in the bound region.');
-  if (route.connection.pool_tenant_name && route.connection.pool_tier==='trusted' && !runtime.config.trustedPool) throw new ApiError(409,'TRUSTED_POOL_DISABLED','New trusted-pool admissions are disabled.');
-  if (route.connection.pause_reason) throw new ApiError(409,'HOSTED_SENDING_PAUSED',route.connection.pause_reason);
-  assertTenantReady(route.connection,isSimulatedSes(runtime));
-  return route;
-}
 export const verifiedClaim = (workspace: SQL, region: SQL, host: SQL) =>
   sql`EXISTS (SELECT FROM verified_sending_domains v WHERE v.workspace_id=${workspace} AND v.region=${region} AND ${within(host,sql`v.name`)})`;
 export const unverifiedSender = () => new ApiError(403, 'SENDER_DOMAIN_NOT_VERIFIED', 'The from address must use a domain verified in this workspace and region, or a subdomain of one. Add the domain with POST /v1/domains, publish its DNS records, and send once GET /v1/domains/{id} reports sending: "verified".', 'from');

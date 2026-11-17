@@ -3,7 +3,7 @@
  * names integrations see. The API, dashboard and support Worker import this file; `bun run sdk` (in api/) copies it
  * verbatim to sdk/src/brand.ts, so edit only api/src/brand.ts. It imports nothing, so every package compiles it.
  *
- * Bane is becoming Nightmail (nightmail.com). Until that domain is live the hosted service stays on bane.mx: the
+ * Bane is becoming Nightmail (nightmail.dev). Until that domain is live the hosted service stays on bane.mx: the
  * switch is `hostedDomain`, with bane.mx moving to `previousDomains` so it stays served. A name a customer may already
  * have (key prefix, DNS proof, header, scope, cookie) stays accepted until the cutover, which removes them all at once
  * (each site is marked "remove after rename cleanup"). Infrastructure names (Workers, buckets, SES resources) are not here.
@@ -15,7 +15,7 @@ export const productSlug = 'nightmail';
 export const legacySlugs = ['bane', 'opensend'] as const;
 
 /** The product's own domain. The hosted service moves to it once it is live. */
-export const productDomain = 'nightmail.com';
+export const productDomain = 'nightmail.dev';
 /** The hosted service's domain: dashboard, API, docs and /mcp, with support.<domain> beside it and dev.<domain>. */
 export const hostedDomain = 'bane.mx';
 /** Domains the hosted service answered on before `hostedDomain`, still served. Empty until the switch. */
@@ -120,3 +120,7 @@ export const legacyWebhookFormat = 'bane';
 export const legacySdkErrors = ['BaneUploadError', 'OpenSendUploadError'] as const;
 /** Earlier names of clientIpHeader. Never read: the entry point removes them from every request it receives. */
 export const legacyClientIpHeaders = ['x-bane-client-ip', 'x-opensend-client-ip'] as const;
+/** The address routes and SDK methods, deprecated aliases since every address became an inbox (migration addresses_are_inboxes). Read an
+ *  address's mail with the inbox routes. The cutover removes these and lets /v1/inboxes list and create addresses, which its
+ *  Inbox schema (replyOnly, retention mode) can't describe without a breaking change. */
+export const legacyAddressOperations = ['listInboundAddresses', 'createInboundAddress', 'getInboundAddress', 'updateInboundAddress', 'deleteInboundAddress'] as const;
