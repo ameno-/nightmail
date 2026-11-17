@@ -362,7 +362,17 @@ async function measure(browser, job, fx) {
         { urlPattern: 'http*://*', offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 },
       ],
     });
-    await page.goto(origin + (job.mode === 'in-app' ? job.from : job.path), { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    const diag = new Map();
+    cdp.on('Network.requestWillBeSent', e => diag.set(e.requestId, { url: e.request.url.replace(origin, ''), type: e.type, t0: e.timestamp, st: 'sent' }));
+    cdp.on('Network.responseReceived', e => { const d = diag.get(e.requestId); if (d) d.st = `resp ${e.response.status} @${(e.timestamp - d.t0).toFixed(1)}`; });
+    cdp.on('Network.loadingFinished', e => { const d = diag.get(e.requestId); if (d) d.st = 'done'; });
+    cdp.on('Network.loadingFailed', e => { const d = diag.get(e.requestId); if (d) d.st = `failed ${e.errorText}`; });
+    const gotoAt = Date.now();
+    await page.goto(origin + (job.mode === 'in-app' ? job.from : job.path), { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(async error => {
+      const state = await Promise.race([cdp.send('Runtime.evaluate', { expression: 'JSON.stringify({rs: document.readyState, url: location.href, now: Math.round(performance.now()), scripts: performance.getEntriesByType("resource").length})', returnByValue: true }).then(r => r.result.value, e => `eval error ${e.message}`), new Promise(r => setTimeout(() => r('eval timed out'), 5000))]);
+      const { loadavg } = await import('node:os');
+      throw new Error(`${error.message.split('\n')[0]} DIAG ${JSON.stringify({ load: loadavg().map(n => n.toFixed(1)), state, sinceGoto: Date.now() - gotoAt, requests: [...diag.values()].map(d => `${d.url} ${d.type} ${d.st}`) })} PW ${net.pending().join(',')}`);
+    });
     // With late fonts, the fallbacks only keep text still if this machine has one of their local fonts (tokens.css).
     const missing = !lateFonts ? [] : await page.evaluate(() => Promise.all([...document.fonts].filter(f => f.family.includes('Fallback')).map(f => f.load().then(() => null, () => `${f.family} ${f.weight} ${f.unicodeRange}`))));
     for (const face of missing.filter(Boolean)) problems.push(`no local font for ${face}: install fonts-liberation and fonts-dejavu-core, or measure on a machine with Arial and Menlo`);
