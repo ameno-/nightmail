@@ -518,6 +518,25 @@ describe('support Worker', () => {
     const sends = async (key: string) => (await fakeCalls(instance)).filter(c => c[5] === key);
     const counters = async () => (await (await instance.getD1Database('DB', 'support')).prepare('SELECT key,n FROM daily_counters ORDER BY key').all()).results;
 
+    test.each([['missing', 404, 1], ['unavailable', 503, 3]] as const)('%s image does not prevent a ticket, ack or team email', async (scenario, status, attempts) => {
+      const message = `msg_image_${scenario}`, thread = `thr_image_${scenario}`, path = `/v1/inbound/messages/${message}/attachments/part_png`;
+      await outage(path, status, status === 404 ? 'NOT_FOUND' : 'UNAVAILABLE');
+      let run = await drive(thread, { message, tick: true });
+      for (let i = 1; i < attempts; i++) {
+        assert.equal(run.rows.find(r => r.kind === 'message')?.state, 'pending');
+        run = await drive(thread, { expire: `msg:${message}`, tick: true });
+      }
+      const db = await instance.getD1Database('DB', 'support');
+      const ticket = await db.prepare('SELECT id,attachments,recommendation,notified_at FROM tickets WHERE followup_thread_id=?').bind(thread)
+        .first<{ id: string; attachments: string; recommendation: string; notified_at: number }>();
+      assert.ok(ticket, 'The ticket is filed even though the image is still unavailable.');
+      assert.deepEqual(JSON.parse(ticket.attachments), []); assert.match(ticket.recommendation, /one attachment could not be stored/i);
+      assert.equal(run.rows.find(r => r.kind === 'message')?.state, 'done'); assert.ok(ticket.notified_at);
+      assert.equal((await replies(thread, instance)).length, 1);
+      const sent = await sends(`ticket-${ticket.id}`); assert.deepEqual(sent.map(c => c[6]), [202]);
+      assert.doesNotMatch(sent[0][3].text, /bounce screenshot\.png|\/attachments\//);
+    });
+
     test('a retry that finds the ticket still emails the team, then acks once', async () => {
       const thread = 'thr_s1', message = 'msg_abuse_s1';
       const initial = await drive(thread, { message, tick: true, interruptTicket: true });
