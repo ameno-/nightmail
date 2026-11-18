@@ -20,4 +20,23 @@ export type Manifest = {
   segments: Segment[]
 }
 
+/** The layout bundled with the page: what its first paint is laid out from (frame, button, boards, poster). */
 export const MANIFEST = data as Manifest
+
+// What plays comes from the renders' host, not the bundle: each render set is uploaded under its own version
+// (`<media>/<version>/...`, never changed afterwards) and `<media>/current.json` names the one the page plays, with its
+// manifest. Publishing or replacing segments is an upload and a new current.json (app/scripts/factory-media.mjs); only
+// a set whose layout differs from the bundle's needs a deploy, and until it has one the page keeps its poster.
+const layout = (m: Manifest) => JSON.stringify([m.fps, m.width, m.height, m.button, m.boards.speedPxPerSec, m.boards.gapPx, m.boards.y, m.boards.w, m.boards.h, m.boards.periodPx])
+
+/** The set to play from `media` (its base URL, ending in a slash): where its files are and its manifest. Null where there
+ *  is none, it cannot be read, or its layout is not the one this page was built with. */
+export async function published(media: string): Promise<{ base: string; manifest: Manifest } | null> {
+  try {
+    const root = new URL(media, location.href), response = await fetch(new URL('current.json', root), { credentials: 'omit' })
+    if (!response.ok) return null
+    const current = await response.json() as Manifest & { version?: unknown }
+    if (typeof current.version !== 'string' || !/^[\w.-]+$/.test(current.version) || !Array.isArray(current.segments) || !current.segments.length || layout(current) !== layout(MANIFEST)) return null
+    return { base: new URL(`${current.version}/`, root).href, manifest: current }
+  } catch { return null }
+}

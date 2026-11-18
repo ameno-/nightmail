@@ -7,8 +7,8 @@ import { DashboardLink, StartButton } from './start'
 import { plan, type Plan } from './sorter/plan'
 import { toneVars } from './sorter/tones'
 import { Stations } from './sorter-stations'
-import { MANIFEST as m } from './factory/manifest'
-import { alphaFormat, mountPlayer } from './factory/player'
+import { MANIFEST as m, published } from './factory/manifest'
+import { alphaFormat, mountPlayer, type Player } from './factory/player'
 import poster from './factory/poster.jpg'
 import './factory-home.css'
 
@@ -19,7 +19,7 @@ import './factory-home.css'
 // with reduced motion, without the renders' host (VITE_FACTORY_MEDIA), or where alpha video cannot play, the poster
 // is what is seen. Under it the tubes run on down the page to each place mail can go, as under the sorter.
 
-/** Where the renders are, ending in a slash: a build without them shows the poster alone. */
+/** Where the render sets are published (their current.json and versions), ending in a slash: a build without it shows the poster alone. */
 const MEDIA = (import.meta.env.VITE_FACTORY_MEDIA as string | undefined)?.replace(/\/*$/, '/') || null
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches
 const saveData = () => (navigator as Navigator & { connection?: { saveData?: boolean } }).connection?.saveData === true
@@ -54,19 +54,23 @@ export function FactoryHome({ start, notice }: HomeProps) {
     return () => observer.disconnect()
   }, [])
 
-  // After the first paint: the videos, where they can play. (720p where the frame is shown no wider than that has pixels for.)
+  // After the first paint: the set published on the renders' host, and its videos where they can play. (720p where the
+  // frame is shown no wider than that has pixels for.)
   useEffect(() => {
     const format = alphaFormat()
     if (!MEDIA || !format || reducedMotion() || saveData()) return
-    const height = frame.current!.getBoundingClientRect().width * devicePixelRatio > 1280 ? 1080 : 720
-    const player = mountPlayer({ stage: stage.current!, bg: bg.current!, boards: boards.current!, fg: fg.current! }, { base: MEDIA, manifest: m, format, height })
+    let player: Player | null = null, seen = true, gone = false
     // Off screen, or in a hidden tab, it stands still.
-    let seen = true
-    const update = () => player.setShown(seen && document.visibilityState === 'visible')
+    const update = () => player?.setShown(seen && document.visibilityState === 'visible')
     const observer = new IntersectionObserver(([entry]) => { seen = entry.isIntersecting; update() }, { threshold: .02 })
-    observer.observe(stage.current!)
-    document.addEventListener('visibilitychange', update)
-    return () => { observer.disconnect(); document.removeEventListener('visibilitychange', update); player.destroy() }
+    void published(MEDIA).then(set => {
+      if (!set || gone) return
+      const height = frame.current!.getBoundingClientRect().width * devicePixelRatio > 1280 ? 1080 : 720
+      player = mountPlayer({ stage: stage.current!, bg: bg.current!, boards: boards.current!, fg: fg.current! }, { ...set, format, height })
+      observer.observe(stage.current!)
+      document.addEventListener('visibilitychange', update)
+    })
+    return () => { gone = true; observer.disconnect(); document.removeEventListener('visibilitychange', update); player?.destroy() }
   }, [])
 
   return <div className="srt-page fac-page" data-visitor={visitor ? '' : undefined} style={toneVars(dark) as CSSProperties}>
