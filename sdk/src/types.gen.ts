@@ -556,7 +556,7 @@ export type CampaignTemplateDraft = {
     html?: string;
     attachments?: Array<string>;
     /**
-     * Your own unsubscribe or preference page: HTTPS, no user name or password. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.
+     * Your own unsubscribe or preference page: HTTPS, no user name, password, whitespace or unsubscribe_token parameter, at most 1,000 characters. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.
      */
     unsubscribePageUrl?: string;
 };
@@ -1036,7 +1036,7 @@ export type CampaignDraft = {
         [key: string]: string | number | boolean | null;
     };
     /**
-     * Your own unsubscribe or preference page: HTTPS, no user name or password. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.
+     * Your own unsubscribe or preference page: HTTPS, no user name, password, whitespace or unsubscribe_token parameter, at most 1,000 characters. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.
      */
     unsubscribePageUrl?: string;
     html?: string;
@@ -1147,7 +1147,7 @@ export type CreateCampaignInput = {
         [key: string]: string | number | boolean | null;
     };
     /**
-     * Your own unsubscribe or preference page: HTTPS, no user name or password. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.
+     * Your own unsubscribe or preference page: HTTPS, no user name, password, whitespace or unsubscribe_token parameter, at most 1,000 characters. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.
      */
     unsubscribePageUrl?: string;
     /**
@@ -1414,7 +1414,7 @@ export type CampaignUpdateInput = {
             [key: string]: string | number | boolean | null;
         };
         /**
-         * Your own unsubscribe or preference page: HTTPS, no user name or password. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.
+         * Your own unsubscribe or preference page: HTTPS, no user name, password, whitespace or unsubscribe_token parameter, at most 1,000 characters. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.
          */
         unsubscribePageUrl?: string;
         /**

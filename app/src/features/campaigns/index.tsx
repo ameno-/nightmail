@@ -47,7 +47,10 @@ const replyToError = (value: string) => { const addresses = replyToAddresses(val
 const unsubscribePageError = (value = '') => {
   const text = value.trim()
   if (!text) return ''
-  try { const url = new URL(text); if (/^https:\/\//i.test(text) && text.length <= 1000 && !/\s/.test(text) && !url.username && !url.password && !/^[^/?#]*@/.test(text.slice(8))) return '' } catch { /* not a URL */ }
+  try {
+    const url = new URL(text)
+    if (/^https:\/\//i.test(text) && text.length <= 1000 && !/\s/.test(text) && !url.username && !url.password && !/^[^/?#]*@/.test(text.slice(8))) return url.searchParams.has('unsubscribe_token') ? 'Remove unsubscribe_token from the address.' : ''
+  } catch { /* not a URL */ }
   return 'Enter an https:// address without a user name or password.'
 }
 const campaignRoute = (campaign: Pick<Campaign, 'id'>, view: 'edit' | 'review') => `/campaigns/${encodeURIComponent(campaign.id)}/${view}`

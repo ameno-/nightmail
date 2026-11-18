@@ -12129,6 +12129,11 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     const keyed = screenedAs(runtime, customer, own);
     assert.ok(keyed.text!.endsWith(`unsubscribe_token=u_${'0'.repeat(64)}#top`) && keyed.headers[0]!.Value === `<https://mail.example/unsubscribe/u_${'0'.repeat(64)}>`);
     assert.equal(withUnsubscribe(runtime, customer, url, 'https://brand.example').text!.split('Unsubscribe: ')[1], `https://brand.example/?unsubscribe_token=${token}`);
+    // A page carrying an unsubscribe_token of its own, plain or percent-encoded (refused on input), still gets exactly one,
+    // the recipient's, with every other parameter as written and the fragment kept.
+    const stale = withUnsubscribe(runtime, customer, url, `https://brand.example/prefs?unsubscribe_token=u_${'cd'.repeat(32)}&list=a%20b+c&unsubscribe%5Ftoken=x#top`).text!.split('Unsubscribe: ')[1]!;
+    assert.equal(stale, `https://brand.example/prefs?list=a%20b+c&unsubscribe_token=${token}#top`);
+    assert.deepEqual(new URL(stale).searchParams.getAll('unsubscribe_token'), [token]);
   });
 
   test('a campaign’s own unsubscribe page: validated, frozen with the launch, one-click still recorded here, the confirmation continues there, and later campaigns skip the opt-outs', async t => {
@@ -12139,8 +12144,12 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     for (let i = 0; i < 3; i++) { const contact = await resource(t, key.secret, '/v1/contacts', { email: address() }); ok(await consent(key.secret, contact.id, 'subscribed')); contacts.push(contact); }
     ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: contacts.map(contact => contact.id) }));
     // Only an HTTPS page without credentials or spaces, of at most 1,000 characters, on campaigns and templates alike.
+    // The rules apply to the value as sent: surrounding whitespace, an embedded CR, LF or TAB, or a length padded with
+    // them is refused rather than normalized away; so is an unsubscribe_token of the page's own, in any encoding.
     const refused = ['http://brand.example/unsubscribe', 'javascript:alert(1)', 'https://user:secret@brand.example/unsubscribe', 'https://user@brand.example/unsubscribe',
-      'https://@brand.example/unsubscribe', 'https://brand.example/un subscribe', `https://brand.example/${'a'.repeat(1000)}`, 'brand.example/unsubscribe', ''];
+      'https://@brand.example/unsubscribe', 'https://brand.example/un subscribe', `https://brand.example/${'a'.repeat(1000)}`, 'brand.example/unsubscribe', '',
+      ' https://brand.example/unsubscribe', 'https://brand.example/unsubscribe ', 'https://brand.example/un\nsubscribe', 'https://brand.example/unsubscribe\r\n', 'https://brand.\texample/unsubscribe',
+      `https://brand.example/unsubscribe${'\n'.repeat(1000)}`, `https://brand.example/prefs?unsubscribe_token=u_${'a'.repeat(64)}`, 'https://brand.example/prefs?list=news&unsubscribe%5Ftoken=x', 'https://brand.example/prefs?%75nsubscribe_token'];
     for (const value of refused) error(await http('POST', '/v1/campaigns', key.secret, { name: unique('refused'), unsubscribePageUrl: value }), 422, 'VALIDATION_FAILED');
     const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { unsubscribePageUrl: own });
     assert.equal(campaign.draft.unsubscribePageUrl, own);
@@ -12199,6 +12208,52 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     assert.equal(ok(await http('POST', `/v1/campaigns/${later.id}/send`, key.secret, { revision: later.revision }), 202).queued, 1);
     await poll(`/v1/campaigns/${later.id}`, key.secret, row => row.state === 'done' && row.counts.byStatus.delivered === 1);
     assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${later.id}`, key.secret)).map(message => message.to[0].toLowerCase()), [third.email.toLowerCase()]);
+  });
+
+  test('a page copied from another recipient’s link: its unsubscribe_token is refused, and even a stored one leaves Ben’s footer unsubscribing Ben, not Anna', async t => {
+    const key = await keyFixture(t), db = await fixtureDatabase(t), own = 'https://a.example/prefs?list=news';
+    const form = { 'content-type': 'application/x-www-form-urlencoded' };
+    const person = async () => {
+      const contact = await resource(t, key.secret, '/v1/contacts', { email: address() }), list = await resource(t, key.secret, '/v1/lists', { name: unique('own-unsubscribe-person') });
+      ok(await consent(key.secret, contact.id, 'subscribed'));
+      ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
+      return { contact, list };
+    };
+    const sentToken = async (campaignId: string) => {
+      const [message] = page(await http('GET', `/v1/emails?campaignId=${campaignId}`, key.secret));
+      const [stored] = (await db.query('SELECT snapshot FROM sending_emails WHERE id = $1', [message.id])).rows;
+      const token = stored.snapshot.unsubscribeUrl.slice(stored.snapshot.unsubscribeUrl.lastIndexOf('/') + 1);
+      secrets.add(token);
+      return { message, token };
+    };
+    const consentOf = async (contact: Json) => ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).marketingConsent;
+    const anna = await person(), ben = await person();
+    const first = await campaignFixture(t, key.secret, { listId: anna.list.id }, { unsubscribePageUrl: own });
+    ok(await http('POST', `/v1/campaigns/${first.id}/send`, key.secret, { revision: first.revision }), 202);
+    await poll(`/v1/campaigns/${first.id}`, key.secret, row => row.state === 'done' && row.counts.byStatus.delivered === 1);
+    const annas = (await sentToken(first.id)).token;
+    // Anna's footer link, pasted as Ben's campaign's page, is refused, plain or percent-encoded.
+    const copied = `${own}&unsubscribe_token=${annas}`;
+    for (const value of [copied, `${own}&unsubscribe%5Ftoken=${annas}`]) error(await http('POST', '/v1/campaigns', key.secret, { name: unique('copied-page'), unsubscribePageUrl: value }), 422, 'VALIDATION_FAILED');
+    // Even stored in the frozen review (as a value saved by another path would be), the link carries only Ben's token.
+    const second = await campaignFixture(t, key.secret, { listId: ben.list.id }, { unsubscribePageUrl: own });
+    ok(await http('POST', `/v1/campaigns/${second.id}/schedule`, key.secret, { revision: second.revision, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 202);
+    assert.equal((await db.query(`UPDATE sending_campaign_reviews SET draft = jsonb_set(draft, '{unsubscribePageUrl}', to_jsonb($2::text)) WHERE campaign_id = $1`, [second.id, copied])).rowCount, 1);
+    await db.query('UPDATE sending_campaigns SET scheduled_at = now() WHERE id = $1', [second.id]);
+    await db.query('UPDATE jobs SET available_at = now() WHERE id = $1', [`campaign.run:${second.id}`]);
+    await poll(`/v1/campaigns/${second.id}`, key.secret, row => row.state === 'done' && row.counts.byStatus.delivered === 1);
+    const { message, token: bens } = await sentToken(second.id);
+    const link = new URL(ok(await http('GET', `/v1/emails/${message.id}/content`, key.secret)).text.split('Unsubscribe: ').at(-1));
+    assert.deepEqual(link.searchParams.getAll('unsubscribe_token'), [bens], 'Ben’s footer carries exactly one token, his own.');
+    assert.equal(link.searchParams.get('list'), 'news');
+    // The customer's page reads the token and records the opt-out: Ben is unsubscribed, Anna is not.
+    assert.match(ok(await http('POST', `/unsubscribe/${link.searchParams.get('unsubscribe_token')}`, undefined, 'List-Unsubscribe=One-Click', form)), /unsubscribed/i);
+    assert.deepEqual([await consentOf(ben.contact), await consentOf(anna.contact)], ['unsubscribed', 'subscribed']);
+    // The hosted confirmation continues to the same page with Ben's token alone.
+    const confirmed = await http('POST', `/unsubscribe/${bens}`, undefined, 'confirm=footer', form);
+    ok(confirmed, 303);
+    assert.deepEqual(new URL(confirmed.headers.get('location')!).searchParams.getAll('unsubscribe_token'), [bens]);
+    assert.equal(await consentOf(anna.contact), 'subscribed');
   });
 });
 
