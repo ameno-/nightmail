@@ -10,7 +10,7 @@ import { queries } from '../../data/queries'
 import { McpApproval, Row } from './hosted'
 import { agentAccess, connectionTitle } from './key-labels'
 
-// One connected agent (/settings/mcp/<id>), linked from Settings and the rituals page. One agent is one account: the
+// One connected agent (/settings/mcp/<id>), linked from Settings and the rules page. One agent is one account: the
 // account its client signed in as at the account service. The page lists this browser's connected accounts with that one
 // marked, and acts only as the account you pick, never silently as the tab's account; with the right one active, its
 // default workspace follows. "Use another account" adds an account through the account service's chooser. What the agent

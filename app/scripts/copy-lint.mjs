@@ -54,7 +54,7 @@ const GLOSSARY = [
   { use: 'balance, add credit', not: /\b(funds|top[- ]?ups?|wallet)\b/i },
   { use: 'address (receiving address when ambiguous)', not: /\binbound address(es)?\b|(?<!(current|existing|other|your own) )\bmailbox(es)?\b(?! (providers?|hosted))/i },
   { use: 'agent inbox', not: /\b(sandbox mailbox|temp(orary)? inbox|disposable inbox|throwaway inbox)\b/i },
-  { use: 'endpoint (or route, ritual, omen: the API’s names)', not: /\b(destinations?|AI questions?)\b/i, in: /^features\/inbound\// },
+  { use: 'endpoint (or route, rule, AI decision: the API’s names)', not: /\b(destinations?|AI questions?|rituals?|omens?)\b/i, in: /^features\/inbound\// },
   { use: 'webhook', not: /\bcallbacks?\b/i },
   { use: 'suppressed', not: /\b(blacklist(ed)?|blocklist(ed)?)\b/i },
   { use: 'subscribed', not: /\b(opted[- ]in|opt[- ]in)\b/i },
@@ -81,8 +81,8 @@ const NUMBER_WORDS = /\b(two|three|four|five|six|seven|eight|nine|ten|eleven|twe
 // Words that keep their capital inside a sentence-case label: names, brands, formats, page names and months.
 const PROPER = new Set(('Bane Nightmail Amazon SES AWS Anomaly Slack Discord Stripe Google GitHub Gmail Outlook Yahoo Hotmail iCloud Microsoft Windows Apple Samsung Cloudflare Hosted ' +
   'Test Live OpenCode Claude Cursor Zapier JavaScript TypeScript Markdown Node Docker Visa Mastercard I OK Inbox Overview Logs Receiving Campaigns ' +
-  'Templates Audience Contacts Lists Segments Domains Settings Docs Operator Billing Members Webhooks Activity Help Trace Rituals Routes Endpoints Omens ' +
-  'Jev Monday Tuesday Wednesday Thursday Friday Saturday Sunday January February March April May June July August September October November December ' +
+  'Templates Audience Contacts Lists Segments Domains Settings Docs Operator Billing Members Webhooks Activity Help Trace Rules Routes Endpoints ' +
+  'Monday Tuesday Wednesday Thursday Friday Saturday Sunday January February March April May June July August September October November December ' +
   'Jan Feb Mar Apr Jun Jul Aug Sep Sept Oct Nov Dec Mon Tue Wed Thu Fri Sat Sun').split(' '));
 const STOP = new Set('a an and are as at be by for from has have in into is it its of on or that the their this to was were will with you your'.split(' '));
 

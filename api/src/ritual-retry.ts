@@ -1,10 +1,10 @@
 import { ApiError } from './core.js';
 import type { EndpointType } from './ritual-schema.js';
 
-/** A ritual action that should run again later. Every endpoint type schedules retries through this one class. */
+/** A rule action that should run again later. Every endpoint type schedules retries through this one class. */
 export class ActionRetry extends ApiError {
   constructor(code: string, readonly afterMs: number = 0) {
-    super(503, code, 'Ritual delivery will be retried.', undefined, true);
+    super(503, code, 'Rule delivery will be retried.', undefined, true);
   }
 }
 /** Exponential backoff from 15 s to 12 h with ±25% jitter, never sooner than the endpoint's Retry-After. */

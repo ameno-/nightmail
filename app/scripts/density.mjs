@@ -314,7 +314,7 @@ const pageKey = r => `${r.page} · ${r.device}`;
 const slug = text => text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
 // Waits out what the CLS gate's settle doesn't: a debounced request that starts after the network went quiet (the
-// rituals check), and sheets and dialogs still sliding in. Both modes then measure the same finished page.
+// rules check), and sheets and dialogs still sliding in. Both modes then measure the same finished page.
 async function calm(page) {
   for (let round = 0; round < 2; round++) {
     await page.waitForTimeout(400);

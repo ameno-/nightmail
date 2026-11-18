@@ -20,13 +20,14 @@ export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; child
   const query = useApiDef(queries.usage(), { interval: 60_000 })
   const billing = useApiDef(queries.billing(), { interval: 60_000 })
   const { canAdminister } = useWorkspaceAccess()
-  const omens = useApiDef(queries.billingMonth(), { enabled: canAdminister })
+  const month = useApiDef(queries.billingMonth(), { enabled: canAdminister })
   const usage = query.data, b = billing.data
   const free = useSession()?.identity?.billing?.free === true
   if (query.isError && !usage) return <><SectionHeader title="Plan & usage" /><ErrorState error={query.error} onRetry={() => void query.refetch()} /></>
   const value = (ready: unknown, render: () => ReactNode, width = 120) => ready ? render() : <Skeleton width={width} height={20} />
   const enforced = b?.enforcement === 'enforce', state = b ? balanceState(b) : null
-  const omenCount = Number(omens.data?.data.filter(p => p.meter === 'omen').reduce((sum, p) => sum + BigInt(p.quantity), 0n) ?? 0n)
+  // The omen meter counts AI decisions; it keeps its name from before the rename in the API.
+  const decisionCount = Number(month.data?.data.filter(p => p.meter === 'omen').reduce((sum, p) => sum + BigInt(p.quantity), 0n) ?? 0n)
   const aged = b ? Number(BigInt(b.free.storage.agedBytes)) : 0
   // Three steps reserve their space while loading.
   const steps = usage ? usage.steps : [null, null, null]
@@ -60,7 +61,7 @@ export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; child
       <Row title="Free sends">{value(b, () => <Meter used={b!.free.sent.used} cap={b!.free.sent.limit} label="Free sends used" />, 160)}</Row>
       <Row title="Free received">{value(b, () => b!.free.received ? <Meter used={b!.free.received.used} cap={b!.free.received.limit} label="Free received used" /> : <span className="muted">Owners and admins</span>, 160)}</Row>
       <Row title="Stored past 90 days">{value(b, () => `${gigabytes(aged)} of ${gigabytes(b!.free.storage.limitBytes)} free`, 140)}</Row>
-      <Row title="This month">{value(usage && (!canAdminister || omens.data || omens.isError), () => [`${number(usage!.month.sent)}\u00a0emails sent`, usage!.month.received === null ? null : `${number(usage!.month.received)}\u00a0received`, canAdminister && !omens.isError ? `${number(omenCount)}\u00a0Omens` : null].filter(Boolean).join(' · '), 200)}</Row>
+      <Row title="This month">{value(usage && (!canAdminister || month.data || month.isError), () => [`${number(usage!.month.sent)}\u00a0sent`, usage!.month.received === null ? null : `${number(usage!.month.received)}\u00a0received`, canAdminister && !month.isError ? `${number(decisionCount)}\u00a0AI decisions` : null].filter(Boolean).join(' · '), 200)}</Row>
       {/* This month's cost; the prices it is worked out from open from it, like the limit's steps. */}
       <details className="usage-limit">
         <summary className="settings-row">

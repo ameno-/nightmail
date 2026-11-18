@@ -1,4 +1,4 @@
-// Shared billing shapes. BillingPosition mirrors billing_position() (migration 293); BillingGate adds billing_gate()'s
+// Shared billing shapes. BillingPosition mirrors billing_position() (migration 333); BillingGate adds billing_gate()'s
 // decision. BillingSummary, LedgerEntry, PaymentView and AutoRechargeSettings mirror the public API (routes.ts).
 // Money fields are integer micro-cents as strings (see money.ts).
 export type Enforcement = 'off' | 'shadow' | 'enforce';
@@ -20,11 +20,15 @@ export interface BillingPosition {
   freeSentLeft: number;
   /** Free received messages left this month. */
   freeReceivedLeft: number;
+  /** This month's usage cost, settled or not. */
+  monthCostUc: string;
+  /** What this month's usage would cost if every hour were charged (a free workspace's usage is still measured). */
+  monthWouldBeUc: string;
   unpaidSince: string | null;
   /** Receive holds are on for the installation (billing_config.receive_hold). */
   receiveHold: boolean;
   receiveHeld: boolean;
-  /** Whether Omens may run (false only when enforced, prepaid and nothing is available). */
+  /** Whether AI decisions may run (false only when enforced, prepaid and nothing is available). */
   omens: boolean;
   canRecharge: boolean;
   thresholdUc: string;
@@ -47,7 +51,7 @@ export interface BillingSummary {
   grace: { unpaidSince: string | null; receiveHoldAt: string | null; writeOffAt: string | null };
   autoRecharge: (AutoRechargeSettings & { monthTotalCents: number; disabledReason: string | null; pending: boolean }) | null;
   paymentMethod: { brand: string; last4: string; expMonth: number; expYear: number } | null;
-  prices: { emailPerThousand: string; omenPerThousand: string; storagePerGbMonth: string; freeEmails: number; freeSentEmails: number; freeReceivedEmails: number; freeStorageBytes: number; topUpMinCents: number; currency: 'USD' };
+  prices: { emailPerThousand: string; decisionPerThousand: string; omenPerThousand: string; storagePerGbMonth: string; freeEmails: number; freeSentEmails: number; freeReceivedEmails: number; freeStorageBytes: number; topUpMinCents: number; currency: 'USD' };
   topUpUrl: string;
 }
 

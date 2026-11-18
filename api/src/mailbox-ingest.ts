@@ -102,13 +102,6 @@ export function forwardEligibility(message: { status?: string; automated?: boole
   return message.status === 'received' && !message.automated && !message.spam && message.verdicts?.virus === 'PASS' && message.verdicts.dmarc !== 'FAIL'
     && headerNames.length < 200 && !headerNames.some(name => FORWARD_BLOCKING_HEADERS.has(name)) && headerNames.filter(name => name === 'received').length < 25;
 }
-/**
- * The same rule for a message stored without forwardEligible (before this release, or by the Worker it replaces while
- * it rolls out), over its stored columns: its stored headers are capped at 200 (so 200 count as incomplete), and an
- * earlier forwardSafe refusal stands. Migration 321 applies this to the messages stored before it.
- */
-export const storedForwardEligibility = (message: { status: string; automated: boolean; spam: boolean; verdicts: Verdicts; headers: MailHeader[] }) =>
-  (message.verdicts as { forwardSafe?: boolean }).forwardSafe !== false && forwardEligibility(message, message.headers.map(h => h.name.toLowerCase()));
 export function headersOf(email: Email | null): MailHeader[] {
   const out: MailHeader[] = []; let size = 0;
   for (const header of email?.headers ?? []) { if (header.key==='bcc' || header.key==='resent-bcc') continue; size += header.originalKey.length + header.value.length; if (size > HEADER_LIMIT || out.length >= 200) break; out.push({ name: header.originalKey, value: header.value }); }
@@ -503,7 +496,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const keptReceipt={...receipt,delivery:{...receipt.delivery!,lifecycle:'kept'}};
   const possibleKept=!!receipt.routing?.programs&&Object.values(receipt.routing.boxes??{}).some(b=>b.kept);
   const stores=(input:typeof receipt)=>receivedMailStore(runtime,scope.workspaceId,input!,s3,{messageId:messageRowId,sesMessageId},possibleKept);
-  // Rituals see parsed mail. Until they have run use the expiring class, not forever
+  // Rules see parsed mail. Until they have run use the expiring class, not forever
   // storage for a speculative destination. Ordinary direct deliveries write raw once.
   const initiallyKept=!receipt.routing?.programs && keptRoute(plan);
   // A route can point at an existing persistent inbox after a BYO connection is
@@ -535,7 +528,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
         throw new ApiError(422,'MAILBOX_BYTE_BUDGET','Receipt exceeds the workspace byte budget.');
       }
       const billing=bill.position=reserved.rows[0]!.billing;
-      // BYO workspaces pay SES themselves and are never held; their storage and Omens still bill and stop.
+      // BYO workspaces pay SES themselves and are never held; their storage and AI decisions still bill and stop.
       if(billing?.receiveHeld && receipt.binding?.kind!=='byo')throw new BillingHold();
     }, store.r2 ? store.objects : undefined);
   } catch (error) {
@@ -598,8 +591,8 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
       };
   const verifiedAuthor=replyAuthorVerified(email,from.address,notification.mail,verdicts);
   // A forward can be queued later than this first store (a reopened receipt, another receipt of the same email,
-  // rituals saved meanwhile) and reads these verdicts from the stored message. Forward eligibility is recorded for
-  // every message; the author check by any workspace that routes, not only one whose rituals already run.
+  // rules saved meanwhile) and reads these verdicts from the stored message. Forward eligibility is recorded for
+  // every message; the author check by any workspace that routes, not only one whose rules already run.
   verdicts.forwardEligible=forwardEligibility(message,email?.headers.map(h=>h.key)??[]);
   try {
     if(receipt.routing)Object.assign(verdicts,{ritualVerified:verifiedAuthor});

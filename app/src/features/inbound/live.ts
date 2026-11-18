@@ -1,5 +1,5 @@
-// Live view of rituals, routes and endpoints: while one of their pages is open, it learns of a save made elsewhere
-// (an agent over MCP, an API key, another tab) without a reload. One long poll on GET /v1/rituals/version
+// Live view of rules, routes and endpoints: while one of their pages is open, it learns of a save made elsewhere
+// (an agent over MCP, an API key, another tab) without a reload. One long poll on GET /v1/rules/version
 // (api/src/ritual-version.ts), paused while the tab is hidden; if long requests are cut short on the way, it polls
 // every 4 s instead.
 import { useEffect, useRef } from 'react'
@@ -46,7 +46,7 @@ export function useLiveVersion(enabled: boolean, onChange: (change: LiveChange) 
         const query: string = known ? `?after=${known.version}${endpoints ? `&endpoints=${known.endpoints}` : ''}&wait=${wait}` : ''
         controller = new AbortController()
         try {
-          const next: LiveVersion = await request<LiveVersion>(`/v1/rituals/version${query}`, { signal: controller.signal })
+          const next: LiveVersion = await request<LiveVersion>(`/v1/rules/version${query}`, { signal: controller.signal })
           if (stopped) return
           const versionMoved = !!known && next.version !== known.version, endpointsMoved = !!known && next.endpoints !== known.endpoints
           if (!known || versionMoved || endpointsMoved) latest.current({ ...next, first: !known, versionMoved, endpointsMoved })

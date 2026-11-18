@@ -252,7 +252,7 @@ export class ApiError extends Error {
   readonly detail: string
   /** The code and request ID, for support and logs. */
   readonly reference: string
-  /** Every problem, when the API reports several (ritual diagnostics). */
+  /** Every problem, when the API reports several (rule diagnostics). */
   details?: Record<string, unknown>[]
   constructor(detail: string, public code: string = 'validation', public fields: Record<string, string> = {}, public requestId?: string, public status?: number) {
     super(friendlyErrors[code]?.(detail) ?? detail)

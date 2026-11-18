@@ -24,14 +24,14 @@ const resources: Record<string, { label: string; actions: Record<string, string>
   addresses: { label: 'Receiving addresses', actions: {
     list: 'listInboundAddresses', overview: 'getInboundOverview', get: 'getInboundAddress', create: 'createInboundAddress', update: 'updateInboundAddress', delete: 'deleteInboundAddress', release: 'releaseRetiredAddress',
   } },
-  routes: { label: 'Inbound routing rules', actions: {
+  routes: { label: 'Inbound routes', actions: {
     list: 'listRoutes', get: 'getRoute', create: 'createRoute', update: 'updateRoute', delete: 'deleteRoute',
   } },
   routing: { label: 'Workspace routing', actions: {
     get: 'getRouting', apply: 'applyRouting', test: 'testRouting', audit: 'getRoutingAudit', versions: 'listRoutingVersions', version: 'getRoutingVersion', restore: 'restoreRoutingVersion',
   } },
-  rituals: { label: 'Inbound mail scripts', actions: {
-    get: 'getRitual', save: 'saveRitual', delete: 'deleteRitual', check: 'checkRitual', typings: 'getRitualTypings', templates: 'listRitualTemplates', recipes: 'listRitualRecipes', createFromRecipe: 'createRitualFromRecipe', updateFromRecipe: 'updateRitualFromRecipe', update: 'updateRitual', attach: 'attachRituals', config: 'getRituals', apply: 'applyRituals', test: 'testRituals', versions: 'listRitualVersions', restore: 'restoreRitualVersion', omens: 'setOmenOptIns',
+  rules: { label: 'Inbound mail rules', actions: {
+    get: 'getRule', save: 'saveRule', delete: 'deleteRule', check: 'checkRule', typings: 'getRuleTypings', templates: 'listRuleTemplates', recipes: 'listRuleRecipes', createFromRecipe: 'createRuleFromRecipe', updateFromRecipe: 'updateRuleFromRecipe', update: 'updateRule', attach: 'attachRules', config: 'getRules', apply: 'applyRules', test: 'testRules', versions: 'listRuleVersions', restore: 'restoreRuleVersion', decisions: 'setDecisionOptIns',
   } },
   endpoints: { label: 'Endpoints: Slack, Discord, webhooks and forwards', actions: {
     list: 'listEndpoints', listAll: 'listInboundEndpoints', get: 'getEndpoint', create: 'createEndpoint', update: 'updateEndpoint', delete: 'deleteEndpoint', verify: 'sendEndpointVerification', test: 'testEndpoint',
@@ -79,8 +79,9 @@ const resources: Record<string, { label: string; actions: Record<string, string>
     get: 'getBilling', usage: 'getBillingUsage', ledger: 'listBillingLedger', payments: 'listBillingPayments', payment: 'getBillingPayment', topUpLink: 'createBillingTopUpLink',
   } },
   usage: { label: 'Sending and engagement metrics, plan and limits', actions: { metrics: 'getMetrics', senderScore: 'getSenderScore', plan: 'getUsage' } },
-  settings: { label: 'Workspace settings', actions: {
+  settings: { label: 'Workspace settings and members', actions: {
     identity: 'getCurrentIdentity', setup: 'getOverviewSetup', get: 'getWorkspaceSettings', update: 'updateWorkspaceSettings', ses: 'getSesSettings', inboundPolicy: 'getInboundScanPolicy', updateInboundPolicy: 'updateInboundScanPolicy',
+    members: 'listWorkspaceMembers', invitations: 'listWorkspaceInvitations', invite: 'createWorkspaceInvitation', revokeInvitation: 'revokeWorkspaceInvitation',
   } },
   connections: { label: 'Connected agents (MCP sign-ins) and inbox connections', actions: {
     list: 'listMcpConnections', revoke: 'revokeMcpConnection', bind: 'bindMcpConnection', createInbox: 'createInboxConnection', agents: 'listAgents', revokeAgent: 'revokeAgent',
@@ -110,6 +111,17 @@ function actionSummary(id: string) {
 
 export function resourceActions(name: string): Readonly<Record<string, string>> | undefined {
   return Object.hasOwn(resources, name) ? resources[name].actions : undefined;
+}
+
+// Resources under their names before the rename, with their earlier actions: never listed, still callable (and
+// described), each action naming a hidden alias tool (mcp-catalog.ts mcpAliases), so a saved plain call keeps working.
+const earlierResources: Record<string, Record<string, string>> = {
+  rituals: {
+    get: 'getRitual', save: 'saveRitual', delete: 'deleteRitual', check: 'checkRitual', typings: 'getRitualTypings', templates: 'listRitualTemplates', recipes: 'listRitualRecipes', createFromRecipe: 'createRitualFromRecipe', updateFromRecipe: 'updateRitualFromRecipe', update: 'updateRitual', attach: 'attachRituals', config: 'getRituals', apply: 'applyRituals', test: 'testRituals', versions: 'listRitualVersions', restore: 'restoreRitualVersion', omens: 'setOmenOptIns',
+  },
+};
+export function earlierResourceActions(name: string): Readonly<Record<string, string>> | undefined {
+  return Object.hasOwn(earlierResources, name) ? earlierResources[name] : undefined;
 }
 
 // Optional pagination is uniform across resources; list it once at the tool level.
@@ -170,6 +182,17 @@ export function resourceTools(operations: ReadonlyMap<string, McpOperation>): To
     return [{ name, description, inputSchema: { type: 'object' as const, properties: { action: { enum: visible.map(x => x.action) },...shared }, required: ['action'], oneOf },
       annotations: { readOnlyHint: visible.every(x => x.op.tool.annotations?.readOnlyHint), destructiveHint: visible.some(x => x.op.tool.annotations?.destructiveHint), openWorldHint: true } }];
   }).concat([describeTool]);
+}
+
+// MCP 2025-11-25 ToolAnnotations: readOnlyHint, idempotentHint default false and openWorldHint true; destructiveHint stays explicit.
+const DEFAULT_HINTS: Record<string, boolean> = { readOnlyHint: false, idempotentHint: false, openWorldHint: true };
+/** A tool as tools/list sends it: without the hints that equal the spec's defaults, which saves about 2 KB per listing.
+ *  destructiveHint is kept wherever it is set, for clients that don't apply the defaults. */
+export function listedTool(tool: Tool): Tool {
+  if (!tool.annotations) return tool;
+  const { annotations, ...rest } = tool;
+  const hints = Object.fromEntries(Object.entries(annotations).filter(([key, value]) => !Object.hasOwn(DEFAULT_HINTS, key) || DEFAULT_HINTS[key] !== value));
+  return Object.keys(hints).length ? { ...rest, annotations: hints } : rest;
 }
 
 export function resourceInventory() {

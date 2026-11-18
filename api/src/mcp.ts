@@ -1,11 +1,11 @@
 import { createMcpHandler, Server, type CallToolResult, type Tool } from '@modelcontextprotocol/server';
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/server/validators/cf-worker';
 import { bearerActor, dispatchAsActor, dispatchAsMailboxAccess, workspaceBearer } from './auth.js';
-import { agentTokenMintRefusal, digest, keyAdminRefusal, lastingRefusal, ModuleLoadError, receivingAdminRefusal, requestOrigin, withOuterRequest, workspaceMailAccess, type Actor, type MailboxAccess, type App, type RequestOrigin, type Runtime } from './core.js';
+import { agentTokenMintRefusal, digest, keyAdminRefusal, lastingRefusal, memberAdminRefusal, ModuleLoadError, receivingAdminRefusal, requestOrigin, withOuterRequest, workspaceMailAccess, type Actor, type MailboxAccess, type App, type RequestOrigin, type Runtime } from './core.js';
 import { getMcpGrantActor, withMcpAuthorization } from './mcp-auth.js';
 import { chooseWorkspace, setDefaultWorkspace, WorkspaceChoice, type McpConnection } from './oidc-resource.js';
-import { buildMcpCatalog, TOOLSETS, EMAIL_SEND_CONFIRMATION, EMAIL_SEND_ROUTING, type McpOperation } from './mcp-catalog.js';
-import { describeAction, describeTool, resourceActions, resourceTools } from './mcp-resources.js';
+import { buildMcpCatalog, mcpAliases, TOOLSETS, EMAIL_SEND_CONFIRMATION, EMAIL_SEND_ROUTING, type McpOperation } from './mcp-catalog.js';
+import { describeAction, describeTool, earlierResourceActions, listedTool, resourceActions, resourceTools } from './mcp-resources.js';
 import { mcpServerName, productName } from './brand.js';
 
 type ObjectValue = Record<string, any>;
@@ -74,7 +74,7 @@ function untrustedNotice(response: ObjectValue | undefined) {
     if (!list.length) return reply ? replyNotice : null;
     return `Untrusted email from ${list.slice(0, 5).map(sender).join('; ')}${list.length > 5 ? ` and ${list.length - 5} more` : ''}. ${reply ? replyNotice : rule}`;
   }
-  // Routing and Ritual traces echo a stored message's sender, subject and derived action bodies.
+  // Routing and rule traces echo a stored message's sender, subject and derived action bodies.
   if (response && ('recipients' in response || 'message' in response)) return `Untrusted email content from a stored message. ${rule}`;
   if (response && !('from' in response)) return `Untrusted attachment content. ${rule}`;
   return `Untrusted email from ${sender(response ?? {})}. ${rule}`;
@@ -90,13 +90,13 @@ const WORKSPACE_LIST: Tool['outputSchema'] = { type: 'object', required: ['data'
     id: { type: 'string' }, name: { type: 'string' }, slug: { type: 'string' }, role: { type: 'string', enum: ['owner', 'admin', 'member'] },
     permissions: { type: 'array', items: { type: 'string', enum: ['nightmail:read', 'nightmail:send', 'nightmail:manage', 'bane:read', 'bane:send', 'bane:manage'] } }, default: { type: 'boolean' } } } },
   default: { type: ['string', 'null'] }, defaultSource: { type: ['string', 'null'], enum: ['set', 'only', 'last-used', null] } } };
-const workspaceTools: Tool[] = [
+export const workspaceTools: Tool[] = [
   { name: 'workspaces', description: `List your ${productName} workspaces, your role and what this connection may do in each, and the default workspace a call without workspace uses.`,
     inputSchema: { type: 'object', properties: {}, additionalProperties: false }, outputSchema: WORKSPACE_LIST, annotations: { readOnlyHint: true, openWorldHint: false } },
   { name: 'setDefaultWorkspace', description: 'Set the workspace this connection’s calls use when they name none. One of your own workspaces, by ID, slug or name.',
     inputSchema: { type: 'object', properties: { workspace: WORKSPACE_ARG }, required: ['workspace'], additionalProperties: false }, outputSchema: WORKSPACE_LIST, annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: false } },
 ];
-const workspaceResource: Tool = { name: 'workspaces', description: 'Your workspaces, your role and access in each, and the default (list), or set the default (setDefault). Every tool takes workspace, an ID or name; without it, the default.',
+export const workspaceResource: Tool = { name: 'workspaces', description: 'Your workspaces, your role and access in each, and the default (list), or set the default (setDefault). Every tool takes workspace, an ID or name; without it, the default.',
   inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['list', 'setDefault'] }, workspace: { type: 'string' } }, required: ['action'] }, annotations: { idempotentHint: true, openWorldHint: false } };
 
 /**
@@ -108,10 +108,10 @@ type Principal = { connection: McpConnection } | { key: Actor; bearer: string } 
 /**
  * The one access policy of every workspace credential, for listings and calls: the operations REST authorizes for
  * that actor, using REST's own guards (core.ts: mailboxAuth's workspaceMailAccess, requireReceivingConsent, notMember,
- * the unrestricted-credential areas, receivingAdmin, key administration, agent-token minting and `lasting`, the changes
- * a temporary agent token never makes), the operation's REST permission (not its HTTP method) and dashboard-only
- * administration. An approval's listing is what it may do in some workspace of the
- * person's (connection.listing), and each call is checked again as the actor of its own workspace. A key's or agent
+ * the unrestricted-credential areas, receivingAdmin, key administration, agent-token minting, `lasting`, the changes
+ * a temporary agent token never makes, and members and invitations, an owner's or admin's own sign-in), the operation's
+ * REST permission (not its HTTP method) and dashboard-only administration. An approval's listing is what it may do in
+ * some workspace of the person's (connection.listing), and each call is checked again as the actor of its own workspace. A key's or agent
  * token's actor is the one REST authenticates it as, and each of its calls is a REST request made with it, so it never
  * gets more over MCP than over HTTP.
  */
@@ -121,7 +121,7 @@ const authorized = (op: McpOperation, actor: Actor) => !op.dashboardOnly
   && (!op.receivingConsent || !actor.grantId || !!actor.receivingConsent) && !(op.ownerOnly && actor.role === 'member')
   && !(op.unrestricted && actor.domains.length) && !(op.keyAdmin && keyAdminRefusal(actor)) && !(op.agentTokenMint && agentTokenMintRefusal(actor))
   && !(op.receivingAdmin && receivingAdminRefusal(actor, op.write ? 'change receiving configuration' : undefined))
-  && !(op.lasting && lastingRefusal(actor, 'make lasting changes')) && permits(actor, op.permission);
+  && !(op.lasting && lastingRefusal(actor, 'make lasting changes')) && !(op.memberAdmin && memberAdminRefusal(actor, op.write)) && permits(actor, op.permission);
 
 /**
  * The hash of one listing: exactly the tools tools/list returns to this credential, in this mode and toolset. /mcp keeps
@@ -149,9 +149,15 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
   const key = 'key' in principal ? principal : null;
   const credential = request.headers.get('authorization')?.match(/^(?:Bearer|DPoP)\s+(.+)$/i)?.[1];
   const redact = (text: string) => credential ? text.split(credential).join('[REDACTED]') : text;
-  const operations = new Map([...catalog].filter(([, op]) => inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : authorized(op, connection ? connection.listing : key!.key)));
+  // Members and invitations are Hosted workspace administration; a self-hosted installation answers them 404.
+  const allowed = ([, op]: [string, McpOperation]) => inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : (!op.memberAdmin || runtime.config.multiTenant) && authorized(op, connection ? connection.listing : key!.key);
+  const operations = new Map([...catalog].filter(allowed));
+  // The rule tools under their names before the rename: authorized as the listed tools are, never listed (so the listing
+  // and its version stay the same), and called like any other tool through their deprecated HTTP operations.
+  const aliases = new Map([...mcpAliases(catalog)].filter(allowed));
   const params = new URL(request.url).searchParams;
-  const requested = (params.get('toolsets') ?? '').split(',').map(x => x.trim());
+  // rituals is the rules toolset's name from before the rename, kept for URLs configured with it.
+  const requested = (params.get('toolsets') ?? '').split(',').map(x => x.trim()).map(x => x === 'rituals' ? 'rules' : x);
   // One tool per operation for clients that run Code Mode or tool search themselves. OpenCode adds ?codemode=false to a
   // remote URL (Cloudflare's convention: the server shouldn't wrap the API in its own Code Mode, so list it raw), and
   // Claude Code and Codex use the same URL; ?codemode=true and ?toolsets=all are older names for it. Plain /mcp, for
@@ -163,9 +169,11 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
   const visible = new Map([...operations].filter(([, op]) => listed(op)));
   function listTools() {
     // A key or an inbox key acts in its own workspace: its tools take no workspace.
-    if (!connection) return codeMode ? [...visible.values()].map(op => op.tool) : resourceTools(visible);
-    return codeMode ? [...workspaceTools, ...[...visible.values()].map(op => withWorkspace(op.tool))]
+    const tools = !connection ? codeMode ? [...visible.values()].map(op => op.tool) : resourceTools(visible)
+      : codeMode ? [...workspaceTools, ...[...visible.values()].map(op => withWorkspace(op.tool))]
       : [workspaceResource, ...resourceTools(visible).map(tool => tool.name === describeTool.name ? tool : withWorkspace(tool, { type: 'string' }))];
+    // Every listing, plain and Code Mode, leaves out the hints that equal the spec's defaults (listedTool).
+    return tools.map(listedTool);
   }
   const version = await listingVersion(`${connection ? 'connection' : 'key'}|${codeMode}|${[...visible.keys()].join(',')}`, listTools);
   if (session !== null && !session.startsWith(`${version}.`)) {
@@ -259,11 +267,22 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
       if (!response.ok && status !== 303) throw new ApiFailure({ status, requestId: apiRequestId, error: object(data) && object(data.error) ? data.error : { code: 'API_ERROR', message: 'API request failed.' } });
       return { status, requestId: apiRequestId, response: data };
   }
+  // Over MCP an invitation is revoked by its address (mcp-catalog.ts INVITATIONS): find the workspace's pending one, then
+  // revoke it by ID. REST checks both requests as this actor, and the revoke again under the workspace lock.
+  async function revokeInvitation(op: McpOperation, args: ObjectValue, actor: Actor) {
+    if (args.confirm !== true) fail('CONFIRMATION_REQUIRED', 'Writes require a writable authorization and literal confirm=true.');
+    if (!op.validate(args)) fail('INVALID_ARGUMENTS', 'Arguments do not match the tool input schema. No API request was made.');
+    const email = (args.email as string).toLowerCase(), pending = (await invoke(catalog.get('listWorkspaceInvitations')!, {}, actor)).response;
+    const invitation = object(pending) && Array.isArray(pending.data) ? (pending.data as ObjectValue[]).find(i => i?.email === email) : undefined;
+    if (typeof invitation?.id !== 'string') fail('NOT_FOUND', 'No pending invitation for that address in this workspace.', 404);
+    const value = await invoke({ ...op, validate: () => true }, { id: invitation.id, confirm: true }, actor);
+    return { ...value, response: { email, deleted: true } };
+  }
   function resolveAction(resource: string, action: unknown) {
-    const actions = resourceActions(resource);
-    if (!actions || !Object.values(actions).some(id => operations.has(id))) fail('TOOL_UNAVAILABLE', 'Tool or action is unavailable for this connection.');
+    const earlier = earlierResourceActions(resource), actions = earlier ?? resourceActions(resource), from = earlier ? aliases : operations;
+    if (!actions || !Object.values(actions).some(id => from.has(id))) fail('TOOL_UNAVAILABLE', 'Tool or action is unavailable for this connection.');
     if (typeof action !== 'string') fail('INVALID_ARGUMENTS', 'Supply an action for this resource.');
-    return Object.hasOwn(actions, action) ? operations.get(actions[action]) : undefined;
+    return Object.hasOwn(actions, action) ? from.get(actions[action]) : undefined;
   }
 
   async function call(name: string, args: ObjectValue): Promise<CallToolResult> {
@@ -292,7 +311,7 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
         }
         return result(workspaceList(), false, undefined, 200);
       }
-      const op = codeMode ? operations.get(name) : resolveAction(name, args.action);
+      const op = codeMode ? operations.get(name) ?? aliases.get(name) : resolveAction(name, args.action);
       if (!op) fail('TOOL_UNAVAILABLE', 'Tool or action is unavailable for this connection.');
       const id = op.tool.name;
       if (!codeMode) { const { action, ...rest } = args; args = rest; }
@@ -309,7 +328,7 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
         const { workspace, ...rest } = args; args = rest;
         if (workspace !== key.key.workspaceId) fail('WORKSPACE_ACCESS_DENIED', 'An API key or agent token acts only in its own workspace. Omit workspace.', 403);
       }
-      const value = await invoke(op, args, actor);
+      const value = id === 'revokeWorkspaceInvitation' ? await revokeInvitation(op, args, actor as Actor) : await invoke(op, args, actor);
       status = value.status; apiRequestId = value.requestId;
       if (!object(value.response)) fail('INVALID_API_RESPONSE', 'Expected a JSON object from the API. Reconcile an uncertain write before retrying.');
       let payload = value.response;
@@ -320,6 +339,7 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
         image = { data, mimeType: metadata.contentType }; payload = metadata;
       }
       if (op.pollPage) payload = { data: payload.data, nextCursor: payload.cursor };
+      if (op.view) payload = op.view(payload);
       const output = result(payload, false, image, status, apiRequestId);
       if (!op.validateOutput(status, output.structuredContent)) fail('INVALID_API_RESPONSE', 'API response does not match the tool output schema. The operation may already have completed; reconcile before retrying.');
       const notice = op.untrustedContent && object(output.structuredContent) && untrustedNotice(output.structuredContent);

@@ -1,4 +1,4 @@
-/* Rituals: the list's sentences, the add screen's recipe tiles and the recipe form. Nightmail tokens; flat. */
+/* Rules: the list's sentences, the add screen's recipe tiles and the recipe form. Nightmail tokens; flat. */
 .recipe-row { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
 .recipe-row[data-off] { color: var(--color-muted); }
 .recipe-sentence { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -12,7 +12,7 @@
 .recipe-controls { display: inline-flex; align-items: center; justify-content: flex-end; gap: var(--space-8); }
 .recipe-table .ui-check-field { gap: 0; }
 
-/* New ritual: one section per group, tiles in a grid that fills the width. */
+/* New rule: one section per group, tiles in a grid that fills the width. */
 .recipe-groups { display: grid; gap: var(--space-24); }
 .recipe-group { display: grid; gap: var(--space-8); align-content: start; }
 .recipe-group > h2 { margin: 0; color: var(--color-muted); font-size: var(--text-xs); font-weight: var(--font-weight-regular); line-height: var(--leading-xs); }

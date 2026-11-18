@@ -20,7 +20,7 @@ import { productName } from '../brand.js';
 
 const MicroCents = MicroCentsJson;
 const FreeAllowance = z.object({ limit: z.number().int(), used: z.number().int().describe('Used this month, settled and unsettled.'), left: z.number().int() });
-const Prices = z.object({ emailPerThousand: z.string().describe('USD per 1,000 emails, sent (per recipient) or received (per message).'), omenPerThousand: z.string(), storagePerGbMonth: z.string().describe('USD per GB-month for received mail older than 90 days, beyond the free GB.'),
+const Prices = z.object({ emailPerThousand: z.string().describe('USD per 1,000 emails, sent (per recipient) or received (per message).'), decisionPerThousand: z.string().describe('USD per 1,000 emails an AI decision checks.'), omenPerThousand: z.string().openapi({ deprecated: true, description: 'Deprecated: decisionPerThousand.' }), storagePerGbMonth: z.string().describe('USD per GB-month for received mail older than 90 days, beyond the free GB.'),
   freeEmails: z.number().int().describe('Free emails each calendar month (UTC) in each direction, counted separately (freeSentEmails, freeReceivedEmails).'),
   freeSentEmails: z.number().int().describe('Sent emails (each recipient) free each calendar month (UTC).'),
   freeReceivedEmails: z.number().int().describe('Received messages free each calendar month (UTC), separate from the sent allowance.'),
@@ -63,7 +63,7 @@ const Payment = z.object({
   failure: z.object({ code: z.string(), message: z.string() }).nullable(),
 }).openapi('BillingPayment');
 const UsagePoint = z.object({ start: z.string().describe('Start of the period, UTC.'), meter: z.enum(['send', 'receive', 'omen', 'storage', 'byo_send', 'byo_receive']),
-  quantity: z.string().describe('send: recipients; receive: messages; omen: evaluations; storage: billable byte-days beyond the free GB; byo_*: reported only, $0.') }).openapi('BillingUsagePoint');
+  quantity: z.string().describe('send: recipients; receive: messages; omen: emails checked by AI decisions (the meter keeps its name from before the rename); storage: billable byte-days beyond the free GB; byo_*: reported only, $0.') }).openapi('BillingUsagePoint');
 const TopUpAmount = z.number().int().min(2000).max(1_000_000).describe('Whole US cents, $20 to $10,000, excluding tax.');
 const Cursor = z.string().regex(/^\d{1,19}$/).optional();
 
@@ -106,7 +106,7 @@ function describe(kind: LedgerKind, detail: Record<string, unknown>) {
     case 'usage': {
       const meters = (typeof detail.meters === 'object' && detail.meters ? detail.meters : detail) as Record<string, MeterDetail | undefined>;
       const q = (m: string) => Number(meters[m]?.quantity ?? 0);
-      const parts = [q('send') + q('receive') ? `${count(q('send') + q('receive'))} emails` : '', q('omen') ? `${count(q('omen'))} Omens` : '', q('storage') ? 'stored mail' : '',
+      const parts = [q('send') + q('receive') ? `${count(q('send') + q('receive'))} emails` : '', q('omen') ? `${count(q('omen'))} AI decisions` : '', q('storage') ? 'stored mail' : '',
         q('byo_send') + q('byo_receive') ? `${count(q('byo_send') + q('byo_receive'))} emails on your AWS` : ''].filter(Boolean);
       return `Usage${period(detail.from, detail.to)}: ${parts.join(', ') || 'none'}${detail.charged === false ? ' (not charged)' : ''}`;
     }
@@ -148,22 +148,22 @@ export function registerBilling(app: App) {
   });
 
   app.openapi(createRoute({ method: 'get', path: '/v1/billing/usage', operationId: 'getBillingUsage', tags: ['Billing'], security, summary: 'Metered usage by day, hour or month',
-    description: 'Hosted only. Metered quantities per meter and period, UTC, the same counts billing prices (sent recipients, received messages, Omen evaluations, stored bytes). Received mail and Omens are listed only for credentials that may read every received message (owners, admins and manage credentials). At most 400 days, or 31 days by the hour.',
+    description: 'Hosted only. Metered quantities per meter and period, UTC, the same counts billing prices (sent recipients, received messages, emails checked by AI decisions, stored bytes). Received mail and AI decisions are listed only for credentials that may read every received message (owners, admins and manage credentials). At most 400 days, or 31 days by the hour.',
     request: { query: z.object({ from: z.iso.date().optional().describe('First day, UTC (default: the first of this month).'), to: z.iso.date().optional().describe('Last day, inclusive (default: today).'),
-      granularity: z.enum(['hour', 'day', 'month']).default('day'), meter: z.enum(['send', 'receive', 'omen', 'storage', 'byo_send', 'byo_receive']).optional() }) },
+      granularity: z.enum(['hour', 'day', 'month']).default('day'), meter: z.enum(['send', 'receive', 'omen', 'decision', 'storage', 'byo_send', 'byo_receive']).optional().describe('decision is the omen meter: AI decisions.') }) },
     responses: { 200: response(z.object({ data: z.array(UsagePoint) })), ...errors } }), async c => {
-    const a = billingActor(c, 'read'), q = c.req.valid('query'), today = new Date().toISOString().slice(0, 10);
+    const a = billingActor(c, 'read'), { meter: asked, ...q } = c.req.valid('query'), meter = asked === 'decision' ? 'omen' : asked, today = new Date().toISOString().slice(0, 10);
     const from = q.from ?? `${today.slice(0, 7)}-01`, to = q.to ?? today, days = (Date.parse(to) - Date.parse(from)) / 86_400_000;
     if (days < 0) throw new ApiError(422, 'VALIDATION_FAILED', 'from must be on or before to.', 'from');
     if (days >= (q.granularity === 'hour' ? 31 : 400)) throw new ApiError(422, 'VALIDATION_FAILED', q.granularity === 'hour' ? 'By the hour, ask for at most 31 days.' : 'Ask for at most 400 days.', 'from');
-    // Received volume (and the Omens it triggers) belongs to whoever may list every received message, the same rule
+    // Received volume (and the AI decisions it triggers) belongs to whoever may list every received message, the same rule
     // as GET /v1/usage: anyone else could poll it around a probe to learn which addresses take mail.
     const hidden = actorMailAccess(a)?.admin === true ? [] : ['receive', 'byo_receive', 'omen'];
-    if (q.meter && hidden.includes(q.meter)) return c.json({ data: [] }, 200);
+    if (meter && hidden.includes(meter)) return c.json({ data: [] }, 200);
     const unit = q.granularity;
     const { rows } = await c.env.db.execute<z.infer<typeof UsagePoint>>(sql`SELECT to_char(date_trunc(${unit},hour,'UTC') AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS start,meter,sum(quantity)::text AS quantity
       FROM billing_usage_hourly WHERE workspace_id=${a.workspaceId} AND hour>=(${from}::date)::timestamp AT TIME ZONE 'UTC' AND hour<(${to}::date+1)::timestamp AT TIME ZONE 'UTC'
-        ${q.meter ? sql`AND meter=${q.meter}` : sql``} ${hidden.length ? sql`AND meter NOT IN ('receive','byo_receive','omen')` : sql``}
+        ${meter ? sql`AND meter=${meter}` : sql``} ${hidden.length ? sql`AND meter NOT IN ('receive','byo_receive','omen')` : sql``}
       GROUP BY 1,2 HAVING sum(quantity)<>0 ORDER BY 1,2`);
     return c.json({ data: rows }, 200);
   });

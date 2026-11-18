@@ -16,8 +16,8 @@ import { DX, DY, type Plan } from './plan'
 export type Letter = { subject: string; from: string; addr: string; snippet: string; route: number; scam: boolean }
 /** The lanes, left to right, by the dataset's route names; a scam's route is 7. */
 export const LANES = ['thread', 'webhook', 'agent', 'inbox', 'imap', 'ritual', 'campaign'] as const
-/** How many letters the page's name for each has (Threads, Endpoints, Agents, Inbox, IMAP, Rituals, Campaigns). */
-const NAMED = [7, 9, 6, 5, 4, 7, 9]
+/** How many letters the page's name for each has (Threads, Endpoints, Agents, Inbox, IMAP, Rules, Campaigns). */
+const NAMED = [7, 9, 6, 5, 4, 5, 9]
 export type Phase = 'boot' | 'run' | 'overload' | 'boom' | 'rest' | 'rebuild'
 /** What the page may play a sound for, each at the moment it happens (`Hooks.sound`). */
 export type Sound = 'drop' | 'scan' | 'tube' | 'chute' | 'slide' | 'land' | 'cable' | 'arm' | 'seat' | 'dock' | 'wake' | 'laser' | 'cannon' | 'steam' | 'burst' | 'paper' | 'rebuild' | 'lamp' | 'press'
@@ -152,7 +152,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
   // Pressed mid-build, the gauge hurries the build (`rush`: how much faster it goes) and overloads it once it is whole.
   let rush = 1
   // Mail coming to each lane (1 as a letter goes down its chute, dying away): its unit on the tower's side shows it.
-  // `reel`, `dial`, `stepAt`: a thread's reels, a ritual's clock hand, and which of its lamps is lit.
+  // `reel`, `dial`, `stepAt`: a thread's reels, a rule's clock hand, and which of its lamps is lit.
   // (`got`: whether an inbox's unit has had its letter; `podOf`: which unit each lane has, if any; `armOf`: which
   // fitter fits each lane.)
   const arrived = new Float32Array(7), reel = new Float32Array(6), dial = new Float32Array(6), dialV = new Float32Array(6), dialTo = new Float32Array(6), stepAt = new Uint8Array(6), got = new Uint8Array(6), podOf = new Int8Array(7), armOf = new Int8Array(7)
@@ -744,7 +744,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     add(mx, my, from[2] - 1, 0, 0, 0, .02, length / 2, 1.05 * thin, angle, colour.spark, 4)
     if (Math.random() < .3) sparks(tx, ty, tz, 1, 160, colour.ember)
   }
-  /** The tube a lane's mail leaves by (plan.ts has the eight in their own order: inbox, agents, endpoints, threads; IMAP, rituals, campaigns, logs). */
+  /** The tube a lane's mail leaves by (plan.ts has the eight in their own order: inbox, agents, endpoints, threads; IMAP, rules, campaigns, logs). */
   const tubeOf = (lane: number) => [3, 2, 1, 0, 4, 5, 6][p.routes[lane]]
   function launch(tube: number) {
     if (tube >= p.tubes.length) return
@@ -1102,7 +1102,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
       pose(parts[P.fingers[0]].m, S, put(AT, wx - ox, wy, wz - oz), turnY(turn)); pose(parts[P.fingers[1]].m, S, put(AT, wx + ox, wy, wz + oz), turnY(turn))
     }
     // The units on the tower's sides: each lit once its lane works, and blinking off for a moment as a letter comes
-    // to it; a thread's reels turned as its mail comes, a ritual's hand stepped round and its lamps along, an agent's
+    // to it; a thread's reels turned as its mail comes, a rule's hand stepped round and its lamps along, an agent's
     // aerial lit, an inbox given its letter, a mail app's new line lit.
     for (let k = 0; k < m.pods.length; k++) {
       const unit = m.pods[k], a = arrived[unit.lane], working = deck[unit.lane].stage === FITTED && pod[k] >= 1

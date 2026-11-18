@@ -69,12 +69,18 @@ export class SupportPlatform extends WorkerEntrypoint {
 // Idempotency-Key as Nightmail applies it (api/src/idempotency.ts): scoped to the API key and the path; the same key with
 // the same body replays the stored result, with a different body it is 409 IDEMPOTENCY_CONFLICT; a refusal stores nothing.
 const keys = new Map();
+const outages = new Map();
 const canonical = value => Array.isArray(value) ? '[' + value.map(canonical).join(',') + ']'
   : value && typeof value === 'object' ? '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical(value[k])).join(',') + '}' : JSON.stringify(value) ?? 'null';
 export default {
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === '/__calls') return Response.json(calls);
+    if (url.pathname === '/__outage') {
+      const { path, status, code, retryAfter } = await request.json();
+      if (status) outages.set(path, { status, code, retryAfter }); else outages.delete(path);
+      return new Response(null, { status: 204 });
+    }
     // Test setup: a key already used for another body (a send that committed but whose response never arrived).
     if (url.pathname === '/__used') { const { authorization, path, key, body } = await request.json(); keys.set(authorization + ' ' + path + ' ' + key, { hash: canonical(body), status: 202, result: { id: 'msg_earlier', threadId: path.split('/')[4] } }); return new Response(null, { status: 204 }); }
     const body = request.method === 'POST' ? await request.json() : null;
@@ -92,6 +98,8 @@ export default {
 };
 async function route(request, url, body) {
   {
+    const outage = outages.get(url.pathname);
+    if (outage) return Response.json({ error: { code: outage.code } }, { status: outage.status, headers: outage.retryAfter ? { 'retry-after': outage.retryAfter } : {} });
     // Like Nightmail: inbox keys get an attachment as a short-lived signed link (on Nightmail's origin for R2-stored mail), and
     // never the admin-only parts route.
     if (request.method === 'GET' && /^\\/v1\\/inbound\\/messages\\/[^/]+\\/attachments\\/part_png$/.test(url.pathname)) return Response.json({ url: url.origin + '/v1/objects/fixture-png.sig', expiresAt: new Date(Date.now() + 300_000).toISOString() });
@@ -116,10 +124,11 @@ async function route(request, url, body) {
         msg_abuse_s3: ['thr_s3', 's3@spoof.test', 'FAIL', 'abuse@dev.bane.mx', 'Spam 3', 'spam'], msg_legal_pass_1: ['thr_legal_pass', 'counsel@firm.test', 'PASS', 'legal@dev.bane.mx', 'Subpoena 2', 'Preserve records.'],
         msg_privacy_bcc_1: ['thr_privacy', 'dpo@corp.test', 'PASS', 'someone@corp.test', 'Data request', 'Please export my data.'],
         msg_legal_legacy_1: ['thr_legal_legacy', 'counsel@old.test', 'PASS', 'legal@dev.bane.mx', 'Old request', 'Queued before the address was kept.'],
+        msg_image_missing: ['thr_image_missing', 'missing@example.test'], msg_image_unavailable: ['thr_image_unavailable', 'unavailable@example.test'],
       }[id] ?? [];
       const [threadId = 'thr_other', from = 'ada@acme.test', dmarc = 'PASS', to = 'support@dev.bane.mx', subject = 'Bounces from Gmail?', body = 'Why are Gmail bounces up this week?'] = table.map(v => v ?? undefined);
       const auto = id.includes('auto');
-      const attachments = id === 'msg_image_1' || id === 'msg_abuse_1' ? [{ id: 'part_png', filename: 'bounce screenshot.png', contentType: 'image/png', size: 300, disposition: 'attachment' }, { id: 'part_pdf', filename: 'invoice.pdf', contentType: 'application/pdf', size: 900, disposition: 'attachment' }] : [];
+      const attachments = id.startsWith('msg_image_') || id === 'msg_abuse_1' ? [{ id: 'part_png', filename: 'bounce screenshot.png', contentType: 'image/png', size: 300, disposition: 'attachment' }, { id: 'part_pdf', filename: 'invoice.pdf', contentType: 'application/pdf', size: 900, disposition: 'attachment' }] : [];
       const authentication = url.searchParams.get('includeAuthentication') === 'true' ? { authentication: { spf: 'PASS', dkim: null, dmarc }, automated: auto } : {};
       return Response.json({ id, threadId, direction: 'inbound', subject, from: { name: null, address: from }, to: [to], text: body, replyText: body, messageId: '<' + id + '@mail.test>', ...authentication, attachments });
     }
@@ -137,7 +146,7 @@ export const recorded: Recorded[] = [];
 export const control = { failStatus: 0 };
 
 const sse = (events: Array<[string, unknown]>) => new Response(events.map(([type, data]) => `event: ${type}\ndata: ${JSON.stringify({ type, ...(data as object) })}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } });
-const start = (id: string): [string, unknown] => ['message_start', { message: { id, type: 'message', role: 'assistant', model: 'claude-sonnet-5-5', content: [], stop_reason: null, usage: { input_tokens: 1200, output_tokens: 1 } } }];
+const start = (id: string): [string, unknown] => ['message_start', { message: { id, type: 'message', role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, usage: { input_tokens: 1200, output_tokens: 1 } } }];
 const toolUse = (id: string, name: string, input: object) => sse([
   start('msg_tool'), ['content_block_start', { index: 0, content_block: { type: 'tool_use', id, name, input: {} } }],
   ['content_block_delta', { index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } }], ['content_block_stop', { index: 0 }],
@@ -164,6 +173,8 @@ export async function fakeGateway(request: Request): Promise<Response> {
   const body = request.method === 'POST' ? await request.json().catch(() => undefined) as any : undefined;
   recorded.push({ url: request.url, headers: Object.fromEntries(request.headers), body });
   if (!new URL(request.url).pathname.endsWith('/messages')) return new Response('not found', { status: 404 });
+  // Like a key allowed only the pinned model: anything else is refused.
+  if (body?.model !== 'claude-opus-5-5' || body?.output_config?.effort !== 'medium') return Response.json({ type: 'error', error: { type: 'permission_error', message: 'Model access is disabled' } }, { status: 403 });
   if (control.failStatus) return Response.json({ type: 'error', error: { type: 'overloaded_error', message: 'fake failure' } }, { status: control.failStatus });
   const said = lastUserText(body), answered = blocks(body?.messages?.at(-1)).some(b => b.type === 'tool_result');
   const lastUser = [...(body?.messages ?? [])].reverse().find((m: any) => m.role === 'user' && blocks(m).some(b => b.type === 'text'));

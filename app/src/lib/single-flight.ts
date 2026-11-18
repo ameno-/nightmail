@@ -34,7 +34,7 @@ export function useGuardedMutation<TData = unknown, TError = DefaultError, TVari
 }
 
 /**
- * The same guard for a write sent with request() or the API from a handler (the ritual editor's saves, New endpoint, an
+ * The same guard for a write sent with request() or the API from a handler (the rule editor's saves, New endpoint, an
  * inbox key, template Publish): a call with the same operation, target and arguments as one in flight isn't run again;
  * it gets that run's promise, so the write and what it shows happen once and the caller still gets the result. Other
  * arguments or another target still run.

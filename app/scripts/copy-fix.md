@@ -93,7 +93,7 @@ loading lines and accessibility text are never secondary.
 | balance, add credit | funds, top up, wallet |
 | address (receiving address when ambiguous) | inbound address, mailbox |
 | agent inbox | sandbox mailbox, temp inbox |
-| route, ritual, endpoint, omen, catch-all, trace | rule, script, destination, AI question |
+| route, rule, endpoint, AI decision, catch-all, trace | ritual, omen, script, destination, AI question |
 | webhook | callback, hook |
 | suppressed | blocked, blacklisted |
 | subscribed / unsubscribed / unknown consent | opted in, confirmed |

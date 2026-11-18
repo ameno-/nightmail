@@ -57,7 +57,7 @@ const masked = (email: string | null) => {
   return `${local.slice(0, 1)}…@${domain}`;
 };
 
-export async function fileTicket(env: Env, ctx: TicketContext, input: TicketInput, now = Date.now()): Promise<FiledTicket> {
+export async function fileTicket(env: Env, ctx: TicketContext, input: TicketInput, now = Date.now(), ticketId?: string): Promise<FiledTicket> {
   const existing = await env.DB.prepare('SELECT id, due_at, notes FROM tickets WHERE conversation_id = ?').bind(ctx.conversationId).first<{ id: string; due_at: number; notes: string }>();
   if (existing) {
     // One ticket per conversation: later facts are appended.
@@ -66,7 +66,7 @@ export async function fileTicket(env: Env, ctx: TicketContext, input: TicketInpu
     await env.DB.prepare('UPDATE tickets SET notes = ?, attachments = ?, updated_at = ? WHERE id = ?').bind(JSON.stringify(notes.slice(-20)), JSON.stringify(ctx.attachments.map(a => a.id)), now, existing.id).run();
     return { id: existing.id, created: false, dueAt: existing.due_at, replyTo: masked(ctx.customer.email) };
   }
-  const id = newId('tkt'), due = dueAt(input.details.topic, input.severity, now);
+  const id = ticketId ?? newId('tkt'), due = dueAt(input.details.topic, input.severity, now);
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO tickets (id, conversation_id, channel, category, type, title, details, attachments, severity, due_at, customer, summary, ask, tried, recommendation, evidence, followup_thread_id, cost_usd, model, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (conversation_id) DO NOTHING`).bind(id, ctx.conversationId, ctx.channel, input.details.topic ?? input.type, input.type, input.title, JSON.stringify(input.details),

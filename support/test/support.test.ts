@@ -31,17 +31,40 @@ function worker(name: string, env: Record<string, unknown>) {
     exports: { SupportConversation: { type: 'durable-object' as const, storage: 'sqlite' as const }, SupportIntake: { type: 'durable-object' as const, storage: 'sqlite' as const } } } };
 }
 
-// The built bundle with one test-only route: intake mail queued the way earlier versions queued it, without the address
-// it was sent to (the column is added in place, so such rows have none).
-const LEGACY_ENTRY = `
-import worker from './worker.js';
+// Test-only entrypoint: seed the pre-address schema before the production constructor, and drive its real
+// alarm handler deterministically. Letting a retry become due doesn't change its payload, state or attempts.
+const INTAKE_ENTRY = `
+import worker, { SupportIntake as Intake } from './worker.js';
 export * from './worker.js';
+export class SupportIntake extends Intake {
+  constructor(ctx, env) {
+    for (const [thread, id, state] of [['thr_legal_legacy','msg_legal_legacy_1','new'], ['thr_failed','msg_abuse_s2','failed']]) {
+      if (ctx.id.equals(env.INTAKE.idFromName(thread)) && !ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE name='intake_inbox'").toArray().length) {
+        ctx.storage.sql.exec('CREATE TABLE intake_inbox (message_id TEXT PRIMARY KEY,thread_id TEXT NOT NULL,mailbox TEXT NOT NULL,state TEXT NOT NULL,attempts INTEGER NOT NULL,received_at INTEGER NOT NULL)');
+        ctx.storage.sql.exec('INSERT INTO intake_inbox VALUES(?,?,?,?,?,?)', id, thread, 'legal', state, state === 'failed' ? 6 : 0, 1);
+      }
+    }
+    super(ctx, env);
+  }
+  async alarm() {} // Tests call super.alarm() at the chosen instant.
+  async fixture({ expire, tick, input, changeRoute, interruptTicket }) {
+    if (interruptTicket === true) this.ctx.storage.sql.exec("CREATE TRIGGER interrupt_ticket BEFORE INSERT ON _support_work WHEN NEW.kind='notify' BEGIN SELECT RAISE(ABORT,'fixture'); END");
+    if (interruptTicket === false) this.ctx.storage.sql.exec('DROP TRIGGER interrupt_ticket');
+    if (expire) this.ctx.storage.sql.exec('UPDATE _support_work SET due_at=1 WHERE id=?', expire);
+    if (changeRoute) { this.env.SUPPORT_ADDRESS_ID='adr_changed'; this.env.TICKET_TO='changed@example.test'; }
+    const before = Date.now();
+    if (input) await this.enqueue(input);
+    if (tick) await super.alarm();
+    return { rows: this.ctx.storage.sql.exec('SELECT id,kind,state,attempts,due_at,last_error FROM _support_work').toArray(), before, alarm: await this.ctx.storage.getAlarm(),
+      legacy: this.ctx.storage.sql.exec('SELECT message_id,state FROM intake_inbox').toArray() };
+  }
+}
 export default {
   ...worker,
   async fetch(request, env, ctx) {
-    if (new URL(request.url).pathname !== '/__legacy-intake') return worker.fetch(request, env, ctx);
+    if (new URL(request.url).pathname !== '/__intake') return worker.fetch(request, env, ctx);
     const body = await request.json();
-    return Response.json(await env.INTAKE.get(env.INTAKE.idFromName(body.threadId)).enqueue(body));
+    return Response.json(await env.INTAKE.get(env.INTAKE.idFromName(body.threadId)).fixture(body));
   },
 };`;
 
@@ -175,7 +198,7 @@ describe('support Worker', () => {
     const firstRequest = recorded[before]!;
     assert.equal(firstRequest.headers.authorization, `Bearer ${GATEWAY_KEY}`);
     assert.equal(firstRequest.headers['x-api-key'], undefined);
-    assert.equal(firstRequest.body.model, 'claude-sonnet-5-5');
+    assert.equal(firstRequest.body.model, 'claude-opus-5-5');
     assert.deepEqual(firstRequest.body.output_config, { effort: 'medium' });
     assert.ok(firstRequest.url.startsWith('https://opencode.ai/inference/anthropic/v1/messages'));
     const tools = firstRequest.body.tools.map((t: any) => t.name).sort();
@@ -470,21 +493,140 @@ describe('support Worker', () => {
     } finally { await caps.dispose(); }
   }, 180_000);
 
-  test('a message queued before its address was kept is acknowledged for the team, never an address it may not have been sent to', async () => {
-    const support = worker('support', baseEnv());
-    Object.assign(support.config.manifest.modules, { 'legacy.js': { type: 'esm', contents: LEGACY_ENTRY } });
-    support.config.manifest.mainModule = 'legacy.js';
-    const legacy = new Miniflare({ cf: false, telemetry: { enabled: false }, workers: [support,
-      { config: { name: 'fake-bane', compatibilityDate: '2026-09-08', manifest: { mainModule: 'bane.js', modules: { 'bane.js': { type: 'esm', contents: FAKE_BANE } } }, env: {} } }] } as never);
-    try {
-      await migrate(legacy);
-      const queued = await legacy.dispatchFetch(`${SUPPORT}/__legacy-intake`, { method: 'POST', body: JSON.stringify({ threadId: 'thr_legal_legacy', messageId: 'msg_legal_legacy_1', mailbox: 'legal' }) });
-      assert.deepEqual(await queued.json(), { ok: true });
-      const ack = await eventually(async () => (await replies('thr_legal_legacy', legacy))[0]);
+  describe('intake work queue', () => {
+    let instance: Miniflare;
+    beforeAll(async () => {
+      const support = worker('support', baseEnv());
+      Object.assign(support.config.manifest.modules, { 'intake-test.js': { type: 'esm', contents: INTAKE_ENTRY } });
+      support.config.manifest.mainModule = 'intake-test.js';
+      instance = new Miniflare({ cf: false, telemetry: { enabled: false }, workers: [support,
+        { config: { name: 'fake-bane', compatibilityDate: '2026-09-08', manifest: { mainModule: 'bane.js', modules: { 'bane.js': { type: 'esm', contents: FAKE_BANE } } }, env: {} } }] } as never);
+      await migrate(instance);
+    });
+    afterAll(() => instance?.dispose());
+    type Row = { id: string; kind: string; state: string; attempts: number; due_at: number; last_error: string | null };
+    async function drive(threadId: string, options: { message?: string; tick?: boolean; expire?: string; changeRoute?: boolean; interruptTicket?: boolean } = {}) {
+      const input = options.message ? { threadId, messageId: options.message, mailbox: 'abuse', address: 'abuse@dev.bane.mx' } : undefined;
+      const res = await instance.dispatchFetch(`${SUPPORT}/__intake`, { method: 'POST', body: JSON.stringify({ threadId, ...options, input }) });
+      assert.equal(res.status, 200);
+      return await res.json() as { rows: Row[]; legacy: { message_id: string; state: string }[]; alarm: number | null; before: number };
+    }
+    async function outage(path: string, status = 0, code = 'UNAVAILABLE', retryAfter?: string) {
+      const res = await (await instance.getWorker('fake-bane')).fetch('http://fake-bane/__outage', { method: 'POST', body: JSON.stringify({ path, status, code, retryAfter }) });
+      assert.equal(res.status, 204);
+    }
+    const sends = async (key: string) => (await fakeCalls(instance)).filter(c => c[5] === key);
+    const counters = async () => (await (await instance.getD1Database('DB', 'support')).prepare('SELECT key,n FROM daily_counters ORDER BY key').all()).results;
+
+    test.each([['missing', 404, 1], ['unavailable', 503, 3]] as const)('%s image does not prevent a ticket, ack or team email', async (scenario, status, attempts) => {
+      const message = `msg_image_${scenario}`, thread = `thr_image_${scenario}`, path = `/v1/inbound/messages/${message}/attachments/part_png`;
+      await outage(path, status, status === 404 ? 'NOT_FOUND' : 'UNAVAILABLE');
+      let run = await drive(thread, { message, tick: true });
+      for (let i = 1; i < attempts; i++) {
+        assert.equal(run.rows.find(r => r.kind === 'message')?.state, 'pending');
+        run = await drive(thread, { expire: `msg:${message}`, tick: true });
+      }
+      const db = await instance.getD1Database('DB', 'support');
+      const ticket = await db.prepare('SELECT id,attachments,recommendation,notified_at FROM tickets WHERE followup_thread_id=?').bind(thread)
+        .first<{ id: string; attachments: string; recommendation: string; notified_at: number }>();
+      assert.ok(ticket, 'The ticket is filed even though the image is still unavailable.');
+      assert.deepEqual(JSON.parse(ticket.attachments), []); assert.match(ticket.recommendation, /one attachment could not be stored/i);
+      assert.equal(run.rows.find(r => r.kind === 'message')?.state, 'done'); assert.ok(ticket.notified_at);
+      assert.equal((await replies(thread, instance)).length, 1);
+      const sent = await sends(`ticket-${ticket.id}`); assert.deepEqual(sent.map(c => c[6]), [202]);
+      assert.doesNotMatch(sent[0][3].text, /bounce screenshot\.png|\/attachments\//);
+    });
+
+    test('a retry that finds the ticket still emails the team, then acks once', async () => {
+      const thread = 'thr_s1', message = 'msg_abuse_s1';
+      const initial = await drive(thread, { message, tick: true, interruptTicket: true });
+      const ticket = initial.rows.find(r => r.kind === 'ticket')!;
+      assert.equal(ticket.state, 'blocked');
+      const db = await instance.getD1Database('DB', 'support');
+      const stored = await db.prepare("SELECT id,notified_at FROM tickets WHERE title='Spam 1'").first<{ id: string; notified_at: number | null }>();
+      assert.ok(stored && stored.notified_at === null);
+      await drive(thread, { expire: ticket.id, interruptTicket: false, tick: true });
+      await drive(thread, { message, tick: true });
+      const receipt = await db.prepare('SELECT notes,notified_at FROM tickets WHERE id=?').bind(stored.id).first<{ notes: string; notified_at: number }>();
+      assert.ok(receipt?.notified_at); assert.deepEqual(JSON.parse(receipt.notes), []);
+      assert.equal((await sends(`ticket-${stored.id}`)).length, 1); assert.equal((await sends(`ack-${message}`)).length, 1);
+    });
+
+    test("an unreadable first message never blocks a readable later one, and a new webhook doesn't reset its backoff", async () => {
+      const thread = 'thr_legal', message = 'msg_unreadable', path = `/v1/inbound/messages/${message}`;
+      await outage(path, 404, 'NOT_FOUND');
+      const first = (await drive(thread, { message, tick: true })).rows[0]!;
+      assert.equal(first.state, 'blocked');
+      assert.equal((await signedHook('msg_legal_nodmarc_1', thread, 'lawyer@firm.test', { intake: true, to: 'legal@dev.bane.mx', instance })).status, 200);
+      const later = await drive(thread, { tick: true });
+      assert.deepEqual(later.rows.find(r => r.id === first.id), first); assert.equal(later.alarm, first.due_at);
+      assert.equal((await replies(thread, instance)).length, 1);
+      await outage(path);
+    });
+
+    test('21+ failed notifies never hold the message or re-charge the cap, and the email goes out after the repair', async () => {
+      const path = '/v1/inbound/threads', thread = 'thr_abuse';
+      await outage(path, 403, 'FORBIDDEN');
+      const initial = await drive(thread, { message: 'msg_abuse_1', tick: true });
+      const notify = initial.rows.find(r => r.kind === 'notify')!, key = notify.id.replace('notify:', 'ticket-');
+      assert.equal(initial.rows.find(r => r.kind === 'message')?.state, 'done');
+      assert.equal(initial.rows.find(r => r.kind === 'ack')?.state, 'done');
+      const charged = await counters();
+      for (let n = 2; n <= 21; n++) {
+        const retried = await drive(thread, { expire: notify.id, tick: true });
+        const row = retried.rows.find(r => r.id === notify.id)!;
+        assert.deepEqual([row.state, row.attempts], ['blocked', n]);
+      }
+      await outage(path);
+      const repaired = await drive(thread, { expire: notify.id, tick: true, changeRoute: true });
+      assert.equal(repaired.rows.find(r => r.id === notify.id)?.state, 'done');
+      assert.deepEqual(await counters(), charged);
+      const attempts = await sends(key); assert.equal(attempts.length, 22); assert.equal(attempts.filter(c => c[6] === 202).length, 1);
+      for (const c of attempts) assert.deepEqual(c.slice(1, 6), attempts[0].slice(1, 6));
+      assert.match(attempts[0][3].text, /bounce screenshot\.png/);
+    });
+
+    test('a legacy row without an address names the team', async () => {
+      await drive('thr_legal_legacy', { tick: true });
+      const ack = (await replies('thr_legal_legacy', instance))[0];
       assert.deepEqual([ack?.[3].subject, ack?.[3].addressId], ['Re: your message to Nightmail’s legal team', undefined]);
       assert.match(ack[3].text, /^Hi,\n\nThanks for writing to Nightmail’s legal team\. We've received your message and logged it as tkt_/);
-    } finally { await legacy.dispose(); }
-  }, 120_000);
+    });
+
+    test('an ack is resent after a failed first send', async () => {
+      const thread = 'thr_privacy', message = 'msg_privacy_bcc_1', path = `/v1/inbound/threads/${thread}/reply`;
+      await outage(path, 429, 'RATE_LIMITED', '7200');
+      const first = await drive(thread, { message, tick: true }), ack = first.rows.find(r => r.kind === 'ack')!;
+      assert.equal(ack.state, 'pending'); assert.ok(ack.due_at >= first.before + 7_200_000);
+      const charged = await counters(); await outage(path);
+      const retried = await drive(thread, { expire: ack.id, tick: true });
+      assert.equal(retried.rows.find(r => r.id === ack.id)?.state, 'done');
+      assert.deepEqual(await counters(), charged);
+      const attempted = await sends(`ack-${message}`); assert.deepEqual(attempted.map(c => c[6]), [429, 202]);
+      assert.deepEqual(attempted[1].slice(1, 6), attempted[0].slice(1, 6));
+    });
+
+    test('a legacy failed row is retried after deploy', async () => {
+      const thread = 'thr_failed', message = 'msg_abuse_s2';
+      assert.deepEqual((await drive(thread)).legacy, [{ message_id: message, state: 'failed' }]);
+      const run = await drive(thread, { tick: true }), row = run.rows.find(r => r.kind === 'message')!;
+      assert.deepEqual([row.state, row.attempts, run.legacy[0]?.state], ['done', 7, 'done']);
+      assert.equal((await sends(`ack-${message}`)).length, 1);
+    });
+
+    test('the alarm is the earliest due item, never in the past', async () => {
+      const thread = 'thr_alarm', a = 'msg_alarm_a', b = 'msg_alarm_b';
+      const later = new Date(Date.now() + 7_200_000).toUTCString();
+      await outage(`/v1/inbound/messages/${a}`, 404, 'NOT_FOUND', later);
+      await outage(`/v1/inbound/messages/${b}`, 503);
+      await drive(thread, { message: a });
+      const run = await drive(thread, { message: b, tick: true });
+      assert.deepEqual(run.rows.map(r => r.state), ['blocked', 'pending']);
+      assert.equal(run.rows[0]!.due_at, Date.parse(later)); assert.equal(run.alarm, Math.min(...run.rows.map(r => r.due_at)));
+      const overdue = await drive(thread, { expire: `msg:${b}`, message: b });
+      assert.ok(overdue.alarm !== null && overdue.alarm >= overdue.before);
+    });
+  });
 
   test('abuse@, privacy@, legal@: straight to typed tickets, no model, the team emailed, one fixed acknowledgement', async () => {
     const before = recorded.length;

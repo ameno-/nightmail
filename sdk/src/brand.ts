@@ -97,7 +97,7 @@ export const requestHeader = (headers: { get(name: string): string | null }, nam
   for (const candidate of requestHeaderNames(name)) { const value = headers.get(candidate); if (value !== null) return value; }
   return null;
 };
-/** Added to mail a ritual forwards; any accepted name on incoming mail stops a forwarding loop. */
+/** Added to mail a rule forwards; any accepted name on incoming mail stops a forwarding loop. */
 export const loopHeader = `${headerPrefix}Loop`;
 export const loopHeaderNames = requestHeaderNames('loop');
 

@@ -191,7 +191,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       const claimStarted = Date.now();
       // The claim already charged the attempt before the isolate died. Retire exhausted
       // leases separately from this batch's slots so healthy jobs can run in the same claim.
-      // A fenced delivery (routed or a ritual action) counts the attempts that passed its fence. If
+      // A fenced delivery (routed or a rule action) counts the attempts that passed its fence. If
       // its last claim never got there (the runner was lost before anything left), one more claim is
       // allowed instead of dead-lettering mail that was never sent.
       const exhausted=sql`j.attempts >= CASE WHEN j.type='mailbox.webhook' THEN coalesce((j.payload->>'maxAttempts')::int,${WEBHOOK_ATTEMPTS}::int) WHEN j.type='operation.webhook' THEN ${WEBHOOK_ATTEMPTS}::int ELSE ${MAX_ATTEMPTS}::int END AND j.last_error IS DISTINCT FROM 'JOB_FINALIZATION_FAILED'
