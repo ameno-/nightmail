@@ -92,6 +92,16 @@ preview text and HTML must contain literal example content and cannot contain \`
 syntax. After creating a campaign from a template, replace its example content and add campaign
 personalization only when the specific campaign needs it.
 
+## Unsubscribe
+
+${productName} adds an Unsubscribe link at the end of every campaign email and the one-click
+\`List-Unsubscribe\` headers. To send people to your own unsubscribe or preference page, set the
+campaign's or template's \`unsubscribePageUrl\` (HTTPS). The footer link then opens that page with
+\`unsubscribe_token=<token>\` added; your page records the opt-out by POSTing the token to
+\`/unsubscribe/<token>\` on this API. Mail clients' one-click unsubscribes still reach ${productName}.
+Every opt-out marks the contact \`unsubscribed\`, stops later campaigns to them and sends a
+\`contact.subscription_changed\` webhook event.
+
 ## Not allowed
 
 Any other element (\`div\` without \`data-columns\`/\`data-column\`, \`table\`,

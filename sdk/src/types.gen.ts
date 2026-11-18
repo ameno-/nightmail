@@ -555,6 +555,10 @@ export type CampaignTemplateDraft = {
      */
     html?: string;
     attachments?: Array<string>;
+    /**
+     * Your own unsubscribe or preference page: HTTPS, no user name, password, whitespace or unsubscribe_token parameter, at most 1,000 characters. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.
+     */
+    unsubscribePageUrl?: string;
 };
 
 export type CreateCampaignTemplate = {
@@ -1031,6 +1035,10 @@ export type CampaignDraft = {
     defaults?: {
         [key: string]: string | number | boolean | null;
     };
+    /**
+     * Your own unsubscribe or preference page: HTTPS, no user name, password, whitespace or unsubscribe_token parameter, at most 1,000 characters. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.
+     */
+    unsubscribePageUrl?: string;
     html?: string;
 };
 
@@ -1138,6 +1146,10 @@ export type CreateCampaignInput = {
     defaults?: {
         [key: string]: string | number | boolean | null;
     };
+    /**
+     * Your own unsubscribe or preference page: HTTPS, no user name, password, whitespace or unsubscribe_token parameter, at most 1,000 characters. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.
+     */
+    unsubscribePageUrl?: string;
     /**
      * Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, buttons, columns and styled sections with inline formatting. A constrained email-safe style attribute supports color, typography, spacing, borders, radius and dimensions; arbitrary CSS remains rejected. No wrappers, tables, class or id. Call getContentGuide in MCP or GET /v1/campaign-content-guide for the full vocabulary and examples.
      */
@@ -1401,6 +1413,10 @@ export type CampaignUpdateInput = {
         defaults?: {
             [key: string]: string | number | boolean | null;
         };
+        /**
+         * Your own unsubscribe or preference page: HTTPS, no user name, password, whitespace or unsubscribe_token parameter, at most 1,000 characters. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.
+         */
+        unsubscribePageUrl?: string;
         /**
          * Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, buttons, columns and styled sections with inline formatting. A constrained email-safe style attribute supports color, typography, spacing, borders, radius and dimensions; arbitrary CSS remains rejected. No wrappers, tables, class or id. Call getContentGuide in MCP or GET /v1/campaign-content-guide for the full vocabulary and examples.
          */

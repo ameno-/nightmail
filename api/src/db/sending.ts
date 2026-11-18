@@ -36,7 +36,7 @@ export type CampaignDraft = {
   /** Only stored in the internal, immutable launch review. */
   binding?: SendingBinding;
   name: string; from: string; fromName?: string; previewText?: string; replyTo?: string[]; region: string; subject: string; html?: string;
-  attachments: string[]; tracking: boolean;
+  attachments: string[]; tracking: boolean; unsubscribePageUrl?: string;
   audience: { listId?: string; segmentId?: string; excludeListIds?: string[]; excludeSegmentIds?: string[] };
   defaults: Record<string, string | number | boolean | null>;
 };

@@ -37,6 +37,7 @@ import { baneRecordIssue, baneRecordUse, defaultReceivingHost, establishedHost, 
 import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, webhookSecretAudit, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
 import { clientIpHeader, productName, requestHeaderNames, webhookTestHeaders, webhookUserAgent } from './brand.js';
 import { hasTags, tagKey, TAG_PREFIX } from './resource-tags.js';
+import { unsubscribePageLink } from './outbound-content.js';
 export type { PublishedEvent } from './db/operations.js';
 
 const RegionalAccepted = z.object({ operationId: z.string(), regions: z.array(z.string()) });
@@ -1481,15 +1482,21 @@ function registerPublicEvents(app: App) {
     await next();
   });
   const tokenParams = z.object({ token: z.string().regex(/^u_[a-f0-9]{64}$/) }).openapi('UnsubscribeToken');
-  for (const method of ['get', 'post'] as const) app.openapi(createRoute({ method, path: '/unsubscribe/{token}', operationId: method === 'get' ? 'unsubscribeByLink' : 'unsubscribeOneClick', tags: ['Consent'], security: [], request: { params: tokenParams }, responses: { 200: { description: method === 'get' ? 'Confirmation page; GET never changes consent (link scanners prefetch footer links).' : 'Marketing consent is now unsubscribed (RFC 8058 one-click or the confirmation form).', content: { 'text/html': { schema: z.string().openapi('UnsubscribeConfirmationHtml') } } }, ...errors } }), async c => {
-    c.header('Cache-Control', 'no-store, max-age=0'); c.header('Referrer-Policy', 'no-referrer'); c.header('X-Robots-Tag', 'noindex, nofollow'); c.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
-    const [token] = await c.env.db.select().from(unsubscribeTokens).where(eq(unsubscribeTokens.tokenHash, await digest(c.req.valid('param').token))); if (!token) return notFound('Unsubscribe link');
+  const pageRedirect = { 303: { description: 'The confirmation form of a campaign with its own unsubscribe page: the opt-out is recorded, then the browser continues to that page with unsubscribe_token. A one-click POST is never redirected (RFC 8058 section 3.1).', headers: { Location: { schema: { type: 'string' as const } } } } };
+  for (const method of ['get', 'post'] as const) app.openapi(createRoute({ method, path: '/unsubscribe/{token}', operationId: method === 'get' ? 'unsubscribeByLink' : 'unsubscribeOneClick', tags: ['Consent'], security: [], request: { params: tokenParams }, responses: { 200: { description: method === 'get' ? 'Confirmation page; GET never changes consent (link scanners prefetch footer links).' : 'Marketing consent is now unsubscribed (RFC 8058 one-click or the confirmation form).', content: { 'text/html': { schema: z.string().openapi('UnsubscribeConfirmationHtml') } } }, ...(method === 'post' ? pageRedirect : {}), ...errors } }), async c => {
+    const raw = c.req.valid('param').token;
+    const [token] = await c.env.db.select().from(unsubscribeTokens).where(eq(unsubscribeTokens.tokenHash, await digest(raw)));
+    // The confirmation form may continue to the campaign's own page: browsers apply form-action to that redirect too.
+    c.header('Cache-Control', 'no-store, max-age=0'); c.header('Referrer-Policy', 'no-referrer'); c.header('X-Robots-Tag', 'noindex, nofollow'); c.header('Content-Security-Policy', `default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self'${token?.pageUrl ? ` ${new URL(token.pageUrl).origin}` : ''}; frame-ancestors 'none'; base-uri 'none'`);
+    if (!token) return notFound('Unsubscribe link');
     // Link scanners and mail security gateways fetch every link in a message, so a footer GET only asks for
     // confirmation. Mailbox one-click (RFC 8058, List-Unsubscribe-Post) and the confirmation form are POSTs.
     if (method === 'get') return c.html(unsubscribePage('Unsubscribe from marketing emails?', '<p>You will no longer receive marketing emails from this workspace.</p><form method="post"><input type="hidden" name="confirm" value="footer"><button type="submit" style="font:inherit;font-weight:600;padding:10px 18px;border:0;border-radius:8px;background:#111;color:#fff;cursor:pointer">Unsubscribe</button></form>'), 200);
     const form = await c.req.parseBody().catch(() => ({} as Record<string, unknown>));
     // The audience helper commits consent, audit, and the subscription event outbox atomically.
     await (await wrapModuleLoad(() => import('./audience.js'))).recordUnsubscribe(c.env, token.workspaceId, token.email, form.confirm === 'footer' ? 'footer-confirm' : 'rfc8058-post');
+    // Only a person confirming in a browser continues to the campaign's own page; RFC 8058 forbids redirecting one-click.
+    if (form.confirm === 'footer' && token.pageUrl) return c.redirect(unsubscribePageLink(token.pageUrl, raw), 303);
     return c.html(unsubscribePage('You’re unsubscribed', '<p>You will no longer receive marketing emails from this workspace.</p>'), 200);
   });
 }

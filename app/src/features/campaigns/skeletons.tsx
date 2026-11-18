@@ -48,7 +48,7 @@ export function CampaignEditorSkeleton() {
   return <LoadingRegion label="Loading campaign editor" className="campaign-compose-workspace">
     <div className="campaign-compose-scroll"><div className="campaign-compose-sheet">
       <div className="campaign-compose-metadata" aria-hidden="true">
-        {['Name', 'From', 'Reply to', 'To', 'Segment'].map(label => <div className="campaign-compose-row" key={label}><span className="muted">{label}</span><ControlSkeleton /></div>)}
+        {['Name', 'From', 'Reply to', 'Unsubscribe', 'To', 'Segment'].map(label => <div className="campaign-compose-row" key={label}><span className="muted">{label}</span><ControlSkeleton /></div>)}
         <div className="campaign-compose-row campaign-audience-line"><span /><span className="campaign-audience-line__text"><SkeletonText width="60%" /></span></div>
         <div className="campaign-compose-row campaign-compose-subject"><span className="muted">Subject</span><ControlSkeleton /><Button className="campaign-preview-toggle" variant="ghost" size="sm" disabled>Inbox preview</Button></div>
       </div>

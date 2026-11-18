@@ -1,6 +1,6 @@
 import { index, integer, jsonb, pgTable, primaryKey, text, timestamp } from 'drizzle-orm/pg-core';
 
-export type TemplateDraft = { name: string; description: string; subject: string; previewText?: string; fromName?: string; replyTo: string[]; html?: string; attachments: string[] };
+export type TemplateDraft = { name: string; description: string; subject: string; previewText?: string; fromName?: string; replyTo: string[]; html?: string; attachments: string[]; unsubscribePageUrl?: string };
 const time = (name: string) => timestamp(name, { withTimezone: true, mode: 'string' });
 export const templates = pgTable('campaign_templates', {
   id: text('id').primaryKey(), workspaceId: text('workspace_id').notNull(), revision: integer('revision').notNull().default(1), draft: jsonb('draft').$type<TemplateDraft>().notNull(),
