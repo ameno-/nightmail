@@ -80,13 +80,13 @@ Don't:
 - **IMAP and SMTP fair use.** Normal mail-client use is free. Downloads above 5 GB a day or 30 GB a month per inbox are slowed down. SMTP submission follows the same sending rules and limits as the API.
 - **Other people's mail.** Don't read or keep someone else's mail through Nightmail without the right to do so, for example by pointing a domain you don't own at Nightmail.
 
-## 8. AI agents, MCP and Omens
+## 8. AI agents, MCP and AI decisions
 
 - **You're responsible for your agents.** An AI agent using your credentials is you. Give agents the narrowest keys that work, and watch what they send.
-- **Omens give scores, not facts.** They can be wrong. Don't use an Omen alone to make decisions with legal or similarly significant effects on a person, such as refusing a service, a job or credit.
-- **No sensitive guesses.** Don't ask Omens to infer a person's health, sexuality, religion, political views, ethnicity, union membership or other sensitive traits.
+- **AI decisions give scores, not facts.** They can be wrong. Don't use an AI decision alone to make decisions with legal or similarly significant effects on a person, such as refusing a service, a job or credit.
+- **No sensitive guesses.** Don't ask AI decisions to infer a person's health, sexuality, religion, political views, ethnicity, union membership or other sensitive traits.
 - **No attacks on the classifier.** Don't try to extract, copy or reverse-engineer the classifier or its instructions, use its outputs to train a competing model, or plant instructions in mail to manipulate it.
-- **No secrets in questions.** Omen questions are sent to the classifier. Don't put passwords, keys or personal data in them.
+- **No secrets in questions.** AI decision questions are sent to the classifier. Don't put passwords, keys or personal data in them.
 
 ## 9. How we enforce this policy
 

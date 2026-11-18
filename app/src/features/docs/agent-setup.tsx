@@ -88,7 +88,7 @@ export function AgentPrompt({ prompt, compact = false }: { prompt: string | null
 const accessHints: Record<McpAccess, string> = {
   read: 'Reads mail, logs and settings. Can’t send or change anything.',
   send: 'Also sends email, which may reach real recipients.',
-  manage: 'Also changes configuration: domains, routes, rituals and keys.',
+  manage: 'Also changes configuration: domains, routes, rules and keys.',
 }
 
 // The hosted MCP server, set up with OAuth: the same snippets as Connect an agent in the dashboard (connect-agent.tsx).

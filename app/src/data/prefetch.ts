@@ -21,7 +21,7 @@ function firstScreen(path: string, { regionId, multiTenant, canAdminister }: Sco
   switch (path) {
     case '/overview': return scoped ? [queries.overview(regionId, '24h', 'all'), queries.senderScore(), queries.logs({ regionId, direction: 'all', page: 1, pageSize: latestRowCount() }), ...(canAdminister ? [queries.overviewSetup()] : [])] : []
     case '/logs': { const pageSize = rememberedPageSize('logs'); return scoped && pageSize ? [queries.logs({ regionId, direction: 'all', search: '', status: undefined, stream: undefined, page: 1, pageSize })] : [] }
-    // Receiving is one read: routes, counts, rituals, endpoints and domains.
+    // Receiving is one read: routes, counts, rules, endpoints and domains.
     case '/receiving': return [overviewQuery(firstOverview) as QueryDef<unknown>]
     case '/receiving/inbox': return [queries.inboundAddressOptions(), queries.inboundThreads(undefined, 'inbox', '', undefined)]
     case '/campaigns': return [queries.campaigns({ search: '', archived: false, status: undefined, page: 1, pageSize: 10 })]

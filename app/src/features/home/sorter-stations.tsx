@@ -16,7 +16,7 @@ const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').match
 // last button is on, past the appliances that send (they tee into it), to the slab, where the machine's cannon fires
 // what it carries off the page. One mail system from the hopper to the footer. As the page scrolls, the letter in
 // each appliance arrives the way it does in the product: a pigeonhole fills and a row appears in the Inbox, a mail
-// app on a monitor gets the message, a teleprinter prints an agent's turn, a ritual's lamps come on line by line, a
+// app on a monitor gets the message, a teleprinter prints an agent's turn, a rule's lamps come on line by line, a
 // switchboard posts a webhook, a press runs a campaign off, a thread grows, a ledger tape prints the logs. That is
 // driven by how far the page has scrolled (--q on each unit, 0 to 1), with transforms, opacity and clipping only, so
 // nothing shifts; the capsules are transform animations the compositor runs, stopped while the section is off screen;
@@ -30,7 +30,7 @@ const STATIONS: Station[] = [
   { kind: 'inbox', tube: 0, name: 'Inbox', line: 'Every address keeps its own threads.', plate: 'Inbox', w: 430, h: 296, up: 0, down: 0, port: .18 },
   { kind: 'imap', tube: 4, name: 'IMAP and SMTP', line: 'Or open the same inbox in a mail app.', plate: 'IMAP', w: 408, h: 240, up: 0, down: 40, port: .5 },
   { kind: 'agent', tube: 1, name: 'Agent inboxes', line: 'Addresses your agents read and answer over MCP.', plate: 'Agents', w: 420, h: 96, up: 168, down: 0, port: .5 },
-  { kind: 'ritual', tube: 5, name: 'Rituals', line: 'Short scripts that run on mail as it arrives.', plate: 'Rituals', w: 446, h: 226, up: 0, down: 0, port: .5 },
+  { kind: 'ritual', tube: 5, name: 'Rules', line: 'Short scripts that run on mail as it arrives.', plate: 'Rules', w: 446, h: 226, up: 0, down: 0, port: .5 },
   { kind: 'endpoint', tube: 2, name: 'Endpoints', line: 'Slack, Discord, a webhook or a forward.', plate: 'Endpoints', w: 446, h: 262, up: 0, down: 0, port: .5 },
   { kind: 'campaign', tube: 6, name: 'Campaigns', line: 'One send to a whole audience, at the same price.', plate: 'Campaigns', w: 430, h: 246, up: 34, down: 0, port: .5 },
   { kind: 'thread', tube: 3, name: 'Threads', line: 'Reply from the address the mail came to.', plate: 'Threads', w: 384, h: 262, up: 64, down: 0, port: .5 },
@@ -101,7 +101,7 @@ export function Stations({ plan: p, start }: { plan: Plan | null; start: HomeSta
   let top = phone ? 52 : 110
   // (On a narrow phone what is printed and what is said wraps more: the paper and the thread's screen are longer for it.)
   const narrow = phone && p.W < 380, feed = narrow ? 232 : 168
-  // (Stacked the printed paper is narrower, so longer, and the ritual's call takes three lines: nothing is cut short.)
+  // (Stacked the printed paper is narrower, so longer, and the rule's call takes three lines: nothing is cut short.)
   const units = STATIONS.map(spec => {
     const station = phone ? { ...spec, h: spec.kind === 'inbox' ? 339 : spec.kind === 'thread' ? (narrow ? 288 : 262) : spec.kind === 'ritual' ? 262 : spec.kind === 'endpoint' ? 280 : spec.h, up: spec.kind === 'agent' ? feed : spec.up, down: spec.kind === 'logs' ? 272 : spec.down } : spec
     const w = Math.min(station.w, room), left = station.tube < 4
@@ -385,7 +385,7 @@ const APPLIANCES: Record<Kind, ReactNode> = {
     </div></div>
     <div className="srt-keys">{Array.from({ length: 22 }, (_, i) => <i key={i} />)}</div>
   </div>,
-  // A console: the ritual on its screen, and a lamp for each thing it does, lit as the line runs.
+  // A console: the rule on its screen, and a lamp for each thing it does, lit as the line runs.
   ritual: <div className="srt-a" aria-hidden="true">
     <div className="srt-screen srt-v-ritual">
       <pre><span>export default function route(email) {'{'}</span>

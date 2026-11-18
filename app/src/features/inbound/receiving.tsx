@@ -1,5 +1,5 @@
-// Receiving: Routes, Rituals and Endpoints, the words the API uses. One read (getInboundOverview) per screen.
-import { useState, type ReactNode } from 'react'
+// Receiving: Routes, Rules and Endpoints, the words the API uses. One read (getInboundOverview) per screen.
+import { useEffect, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { Check, X } from 'lucide-react'
@@ -16,7 +16,7 @@ import { NewInboxDialog } from './inboxes'
 import { ConnectAgentButton } from '../docs/connect-agent'
 import { ago, expiresIn, receivingDomains, typeLabel, useEndpointPage, useOverview, type Overview, type OverviewEndpoint, type RouteEntry } from './overview'
 import { Chain, Match, RouteIcon, TargetIcon, Targets, targetName } from './parts'
-import { RitualsTab } from './recipes'
+import { RulesTab } from './recipes'
 import { CreatedEndpointDialog, EndpointDialog, endpointStatusLabel, endpointStatusTone, type EditableEndpoint, type Endpoint } from './ritual-connections'
 import { RouteEditor } from './routing'
 import { actorText, useLiveVersion } from './live'
@@ -27,7 +27,7 @@ import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
 import { isMailbox } from '../../lib/private-address'
 import { resourceOf } from '../../data/invalidation'
 
-type Tab = 'routes' | 'rituals' | 'endpoints'
+type Tab = 'routes' | 'rules' | 'endpoints'
 const PAGE = 50
 const kindQuery: Record<KindFilter, { kind?: string; origin?: 'api' | 'auto' }> = {
   all: {}, address: { kind: 'address,route', origin: 'api' }, pattern: { kind: 'pattern' }, catch_all: { kind: 'catch_all' }, inbox: { kind: 'inbox' }, auto: { kind: 'address', origin: 'auto' },
@@ -65,7 +65,7 @@ function GettingStarted({ overview, onCreate }: { overview: Overview; onCreate: 
   return <ol className="rcv-steps">
     {step(1, live.length > 0, 'Receive on a domain', !live.length && <Link className="ui-button ui-button--secondary ui-button--md" to={sendOnly[0] ? `/domains/${sendOnly[0].id}` : '/domains'}>Set up receiving</Link>)}
     {step(2, false, 'Create an address', <Button disabled={!live.length} onClick={onCreate}>New address</Button>)}
-    {step(3, false, 'Choose what happens', <div className="cluster"><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving/rituals/new">New ritual</Link><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving?tab=endpoints">Add an endpoint</Link></div>)}
+    {step(3, false, 'Choose what happens', <div className="cluster"><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving/rules/new">New rule</Link><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving?tab=endpoints">Add an endpoint</Link></div>)}
     <li className="rcv-steps__aside"><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving/inboxes">Try an agent inbox</Link></li>
   </ol>
 }
@@ -99,9 +99,9 @@ function RoutesTab({ overview, fetching, filters, setFilter, page, onPage, onCre
         { key: 'match', label: 'Route', width: '33%', render: r => <div className="rcv-cell"><RouteIcon entry={r} /><div className="settings-cell-stack"><Match value={r.match} host={!filters.domain} /><span className="muted receiving-clip" title={noteTitle(r)}>{note(r)}</span></div></div>,
           cardRender: r => <span className="rcv-cell"><RouteIcon entry={r} /><Match value={r.match} host={!filters.domain} /></span> },
         { key: 'note', label: 'Kind', table: false, card: 'line', render: r => note(r) },
-        { key: 'rituals', label: 'Rituals', width: '17%', card: 'hide', render: r => <Chain keys={r.rituals} empty={overview.manage && r.address && r.kind !== 'pattern'
-          ? <Link className="rcv-add" to={`/receiving/addresses/${r.address.id}#rituals`} onClick={e => e.stopPropagation()}>No ritual · add</Link> : <span className="muted">—</span>} /> },
-        { key: 'to', label: 'Goes to', width: '32%', card: 'line', render: r => <span className="rcv-to" title={targetsTitle(r)}><Targets to={r.to} total={r.toTotal} ownId={r.address?.id} /></span>, cardRender: r => <span className="rcv-card-to">{r.rituals.length > 0 && <><code className="rcv-card-to__ritual">{r.rituals[0]}</code>{r.rituals.length > 1 && <span className="muted">+{r.rituals.length - 1}</span>}<span aria-hidden="true">→</span></>}<Targets to={r.to} total={r.toTotal} ownId={r.address?.id} max={2} /></span> },
+        { key: 'rules', label: 'Rules', width: '17%', card: 'hide', render: r => <Chain keys={r.rules} empty={overview.manage && r.address && r.kind !== 'pattern'
+          ? <Link className="rcv-add" to={`/receiving/addresses/${r.address.id}#rules`} onClick={e => e.stopPropagation()}>No rule · add</Link> : <span className="muted">—</span>} /> },
+        { key: 'to', label: 'Goes to', width: '32%', card: 'line', render: r => <span className="rcv-to" title={targetsTitle(r)}><Targets to={r.to} total={r.toTotal} ownId={r.address?.id} /></span>, cardRender: r => <span className="rcv-card-to">{r.rules.length > 0 && <><code className="rcv-card-to__ritual">{r.rules[0]}</code>{r.rules.length > 1 && <span className="muted">+{r.rules.length - 1}</span>}<span aria-hidden="true">→</span></>}<Targets to={r.to} total={r.toTotal} ownId={r.address?.id} max={2} /></span> },
         { key: 'unread', label: 'Unread', align: 'right', width: '8%', card: 'hide', render: r => r.address && r.kind !== 'pattern' ? (r.address.stats.unreadThreads ? <strong>{number(r.address.stats.unreadThreads)}</strong> : <span className="muted">0</span>) : <span className="muted">—</span> },
         { key: 'last', label: 'Last mail', align: 'right', card: 'aside', render: r => r.address?.stats.lastMessageAt && r.kind !== 'pattern' ? ago(r.address.stats.lastMessageAt) : <span className="muted">—</span>,
           cardRender: r => r.address && r.kind !== 'pattern' ? <>{r.address.stats.unreadThreads > 0 && <strong className="rcv-unread">{number(r.address.stats.unreadThreads)} new</strong>}{r.address.stats.lastMessageAt ? ago(r.address.stats.lastMessageAt) : null}</> : null },
@@ -142,7 +142,7 @@ function EndpointsTab({ overview, refresh }: { overview: Overview; refresh: () =
   }
   // A webhook opens its own page (events, deliveries, headers, secret), named or not.
   const webhookPage = (e: OverviewEndpoint) => e.type === 'webhook' ? `/receiving/webhooks/${e.id}` : null
-  const used = (e: OverviewEndpoint) => [e.routes ? `${number(e.routes)} ${e.routes === 1 ? 'route' : 'routes'}` : null, e.rituals.length ? `ritual ${e.rituals.join(', ')}` : null, e.eventTypes.length ? `${e.eventTypes.length === 1 ? e.eventTypes[0] : `${e.eventTypes.length} events`}` : null].filter(Boolean).join(' · ')
+  const used = (e: OverviewEndpoint) => [e.routes ? `${number(e.routes)} ${e.routes === 1 ? 'route' : 'routes'}` : null, e.rules.length ? `rule ${e.rules.join(', ')}` : null, e.eventTypes.length ? `${e.eventTypes.length === 1 ? e.eventTypes[0] : `${e.eventTypes.length} events`}` : null].filter(Boolean).join(' · ')
   return <div className="stack rcv-tab">
     <div className="rcv-kindline">
       {address && <span className="rcv-filter-chip">{(a => a ? <PrivateAddress value={a} /> : 'One address')(addresses.data?.find(item => item.id === address)?.address)}<IconButton size="sm" label="Show every endpoint" onClick={showAll}><X size={14} aria-hidden="true" /></IconButton></span>}
@@ -171,7 +171,7 @@ function EndpointsTab({ overview, refresh }: { overview: Overview; refresh: () =
     <EndpointDialog open={creating} onOpenChange={setCreating} onCreated={e => { setCreating(false); setCreated(e); reload() }} />
     <EndpointDialog open={editOpen} editing={editing} onOpenChange={setEditOpen} onSaved={e => { setEditOpen(false); toast(`Saved ${e.name}.`, 'success'); reload() }} />
     <CreatedEndpointDialog created={created} onClose={() => setCreated(null)} />
-    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} danger title={`Delete ${deleting?.name ?? 'this endpoint'}?`} description="Rituals and routes that send to it stop delivering. This can’t be undone." confirmLabel="Delete endpoint"
+    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} danger title={`Delete ${deleting?.name ?? 'this endpoint'}?`} description="Rules and routes that send to it stop delivering. This can’t be undone." confirmLabel="Delete endpoint"
       onConfirm={() => deleting ? act(deleting, '', 'DELETE', undefined, `${deleting.name} deleted.`) : undefined} />
   </div>
 }
@@ -179,7 +179,10 @@ function EndpointsTab({ overview, refresh }: { overview: Overview; refresh: () =
 export function ReceivingPage() {
   const [params, setParams] = useSearchParams()
   const { canAdminister } = useWorkspaceAccess()
-  const tab = (['routes', 'rituals', 'endpoints'].includes(params.get('tab') ?? '') ? params.get('tab') : 'routes') as Tab
+  // tab=rituals is the Rules tab's link from before the rename: shown at once, and the address bar says rules.
+  const asked = params.get('tab') === 'rituals' ? 'rules' : params.get('tab')
+  const tab = (['routes', 'rules', 'endpoints'].includes(asked ?? '') ? asked : 'routes') as Tab
+  useEffect(() => { if (params.get('tab') === 'rituals') setParams(previous => { const next = new URLSearchParams(previous); next.set('tab', 'rules'); return next }, { replace: true }) }, [params, setParams])
   const kind = (params.get('kind') ?? 'all') as KindFilter
   const filters = { kind: kind in kinds ? kind : 'all' as KindFilter, domain: params.get('domain') ?? '', q: params.get('q') ?? '' }
   const pagination = useCursorPagination()
@@ -197,17 +200,17 @@ export function ReceivingPage() {
   }
   const data = overview.data
   const manage = data?.manage ?? canAdminister
-  // Live: a route, ritual or endpoint saved elsewhere (an agent over MCP, an API key, another tab) refreshes the lists
+  // Live: a route, rule or endpoint saved elsewhere (an agent over MCP, an API key, another tab) refreshes the lists
   // in place and says who saved it. This person's own saves refresh through their mutations and say nothing here.
   const client = useQueryClient(), toast = useToast()
   useLiveVersion(manage && !!data, change => {
     if (change.first) return
     void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && ['inbound-overview', 'inbound-endpoints'].includes(resourceOf(query.queryKey)) })
     if (change.actor?.self && change.actor.type === 'member') return
-    toast(`${change.versionMoved ? 'Routes and rituals' : 'Endpoints'} updated by ${actorText(change.actor)}${change.versionMoved ? ` · version ${change.version}` : ''}`, 'info')
+    toast(`${change.versionMoved ? 'Routes and rules' : 'Endpoints'} updated by ${actorText(change.actor)}${change.versionMoved ? ` · version ${change.version}` : ''}`, 'info')
   }, { endpoints: true })
   const firstAddress = manage && !!data && data.counts.address + data.counts.route === 0
-  const counts = data && { routes: kindCount(data.counts, 'all'), rituals: data.rituals.length, endpoints: data.endpoints.length }
+  const counts = data && { routes: kindCount(data.counts, 'all'), rules: data.rules.length, endpoints: data.endpoints.length }
   return <div className="stack inbound-stack">
     <PageHeader title="Receiving" actions={<>
       {manage && <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/trace">Trace</Link>}
@@ -217,8 +220,8 @@ export function ReceivingPage() {
     </>} />
     {overview.error && !data ? <ErrorState error={overview.error} onRetry={() => void overview.refetch()} /> : !data || !counts ? <LoadingRegion label="Loading receiving"><div className="rcv-skeleton" aria-hidden="true"><span /><span /><span /><span /></div></LoadingRegion> : <div className="rcv-page">
       <Tabs label="Receiving" value={tab} onValueChange={value => update({ tab: value, kind: null, address: null })}
-        items={[{ value: 'routes', label: concepts.routes.title, count: counts.routes }, ...(data.manage ? [{ value: 'rituals', label: concepts.rituals.title, count: counts.rituals }, { value: 'endpoints', label: concepts.endpoints.title, count: counts.endpoints }] : [])]} />
-      {tab === 'rituals' && data.manage ? <RitualsTab overview={data} refresh={() => overview.refetch()} />
+        items={[{ value: 'routes', label: concepts.routes.title, count: counts.routes }, ...(data.manage ? [{ value: 'rules', label: concepts.rules.title, count: counts.rules }, { value: 'endpoints', label: concepts.endpoints.title, count: counts.endpoints }] : [])]} />
+      {tab === 'rules' && data.manage ? <RulesTab overview={data} refresh={() => overview.refetch()} />
         : tab === 'endpoints' && data.manage ? <EndpointsTab overview={data} refresh={() => void overview.refetch()} />
         : <RoutesTab overview={data} fetching={overview.isFetching} filters={filters} onCreate={() => setCreating(true)} onEditRoute={setEditing}
           page={pagination.page} onPage={next => pagination.onPageChange(next, data.routes.nextCursor)} setFilter={patch => update(patch)} />}

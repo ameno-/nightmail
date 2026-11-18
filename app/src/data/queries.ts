@@ -41,7 +41,7 @@ export const queries = {
   overviewSetup: () => def(['overview-setup'], (api, signal) => api.overview.setup(signal)),
   domains: (regionId: string, page: number) => def(['domains', regionId, page], (api, signal) => api.domains.list({ regionId, page, pageSize: 10 }, signal)),
   keys: (cursor: string | undefined, showRevoked: boolean) => def(['keys', cursor, showRevoked], (api, signal) => api.keys.list(signal, cursor, showRevoked)),
-  // Connected agents with the tokens they made here. With inactive ones: Settings → Account and the rituals page read
+  // Connected agents with the tokens they made here. With inactive ones: Settings → Account and the rules page read
   // the same list (your own sign-ins, `own`), so they share the cache.
   agents: (includeInactive: boolean) => def(['agents', includeInactive], (api, signal) => api.credentials.agents(includeInactive, signal)),
   /** One of your own sign-ins (another account's is not in your list). */
@@ -57,7 +57,7 @@ export const queries = {
   billing: () => def(['billing'], (_api, signal) => billingApi.get(signal)),
   billingLedger: (cursor: string | undefined) => def(['billing-ledger', cursor ?? null], (_api, signal) => billingApi.ledger(cursor, signal)),
   billingPayments: (cursor: string | undefined) => def(['billing-payments', cursor ?? null], (_api, signal) => billingApi.payments(cursor, signal)),
-  // This month by meter (UTC): Plan & usage's Omen count.
+  // This month by meter (UTC): Plan & usage's AI decision count.
   billingMonth: () => def(['billing-usage', 'month'], (_api, signal) => billingApi.usage({ granularity: 'month' }, signal)),
   workspaceMembers: () => def(['workspace-members'], (_api, signal) => workspaceApi.members(signal)),
   workspaceInvitations: () => def(['workspace-invitations'], (_api, signal) => workspaceApi.invitations(signal)),

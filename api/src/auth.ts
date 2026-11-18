@@ -315,7 +315,7 @@ async function updateWorkspaceKey(tx: DbExecutor, c: Ctx, a: Actor, keyId: strin
   return updated!;
 }
 export function registerAuth(app: App) {
-  app.openapi(createRoute({ method: 'post', path: '/v1/agent-tokens', operationId: 'createAgentToken', tags: ['Auth'], security, description: 'A short-lived, nonrefreshable token for temporary scripts. Requires an MCP approval and never exceeds it. A manage token makes no change that outlasts it: no API keys, webhooks, endpoints, routes, rituals, mail client passwords or inbox connections.', request: { body: json(z.object({
+  app.openapi(createRoute({ method: 'post', path: '/v1/agent-tokens', operationId: 'createAgentToken', tags: ['Auth'], security, description: 'A short-lived, nonrefreshable token for temporary scripts. Requires an MCP approval and never exceeds it. A manage token makes no change that outlasts it: no API keys, webhooks, endpoints, routes, rules, mail client passwords or inbox connections.', request: { body: json(z.object({
     permissions: z.array(z.enum(['read', 'send', 'manage'])).min(1).max(3).refine(value => value[0] === 'read' && new Set(value).size === value.length, 'Start with read and do not repeat permissions.'),
     expiresInSeconds: z.number().int().min(30).max(86400), domains: SenderDomains.default([]),
     purpose: z.string().trim().min(1).max(200),

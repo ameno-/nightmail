@@ -214,4 +214,4 @@ Routing version details are paginated (`nextCursor`). The latest 256 versions ar
 
 ## Receiving handlers
 
-Use `putRitualEntry` to save a script, `setRitualAttachments` to attach it to receiving addresses or inbox IDs, and `testRituals` to run a read-only preview. `listRitualVersions` / `restoreRitualVersion` read and restore snapshots. `createInboxConnection` returns agent config (a bearer secret is shown once for `auth:'key'`). See [Rituals](../docs/rituals.md) and [agent inbox over MCP](../docs/inboxes.md#agent-inbox-over-mcp).
+Use `saveRule` to save a rule, `attachRules` to attach it to receiving addresses or inbox IDs, and `testRules` to run a read-only preview. `listRuleVersions` / `restoreRuleVersion` read and restore snapshots. The earlier `…Ritual…` functions remain as deprecated aliases. `createInboxConnection` returns agent config (a bearer secret is shown once for `auth:'key'`). See [Rules](../docs/rules.md) and [agent inbox over MCP](../docs/inboxes.md#agent-inbox-over-mcp).

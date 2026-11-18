@@ -3,7 +3,7 @@
 // the same way every run; CLS_FONTS=late delays them instead); the main pages again on a
 // phone (390 × 844, touch: the tab bar, cards and native selects). Fails when any page's CLS
 // exceeds 0.001 (or a page errors). The longest task during each in-app navigation is reported, not gated: on CI's
-// shared runner the composer and rituals chunks measured 105–179 ms between runs of the same page, too close to a
+// shared runner the composer and rules chunks measured 105–179 ms between runs of the same page, too close to a
 // 200 ms budget to fail on without flakes.
 //
 // From app/: bun run cls (builds first), or node scripts/cls.mjs against an existing build.
@@ -19,10 +19,10 @@
 // Writes .cls/report.json (every shift with its source elements), .cls/summary.md (also appended to
 // $GITHUB_STEP_SUMMARY) and a screenshot per failing page with the shifted elements outlined.
 //
-// Live rituals (`live`): on Driftwood's rituals page, an agent's API key saves the open ritual once the page has settled
+// Live rules (`live`): on Driftwood's rules page, an agent's API key saves the open rule once the page has settled
 // (`apply`: the change lands in the editor and the save bar names who made it), or after a keystroke in the editor
 // (`conflict`: the card offering their version or yours opens above the save bar). The pages' long poll on
-// /v1/rituals/version is always open by design, so it is left out of the network-idle wait.
+// /v1/rules/version is always open by design, so it is left out of the network-idle wait.
 //
 // Support chat: the page loads, then the Help button opens the chat (the scripted demo conversation) and the agent's
 // greeting streams in to its end; in-app, the chat stays open on Overview while the sidebar link goes to Logs (on a
@@ -87,16 +87,16 @@ const pages = ids => [
   ['Receiving · address', `/receiving/addresses/${ids.address}`, { from: '/receiving' }],
   ['Receiving · inbox', '/receiving/inbox', { from: '/receiving' }],
   ['Receiving · trace', '/receiving/trace', { from: '/receiving' }],
-  // Rituals: the list (the Receiving tab), New ritual's recipes, a recipe's form new and saved, and the script editor.
-  ['Receiving · rituals', '/receiving?tab=rituals', { from: '/receiving', click: 'Rituals' }],
-  ['Receiving · new ritual', '/receiving/rituals/new', { from: '/receiving?tab=rituals', click: 'New ritual' }],
-  ['Receiving · new ritual · new workspace', '/receiving/rituals/new', { user: 'nia' }],
-  ['Receiving · recipe form', '/receiving/rituals/new/slack', { from: '/receiving/rituals/new', click: 'Post to Slack' }],
-  ['Receiving · recipe ritual', '/receiving/rituals/label-by-meaning-support', { from: '/receiving?tab=rituals', row: 'a refund request' }],
-  ['Receiving · ritual editor', '/receiving/rituals/triage/code', { from: '/receiving?tab=rituals', row: 'triage' }],
-  ['Receiving · ritual editor · new script', '/receiving/rituals/new/script', { user: 'nia', from: '/receiving/rituals/new', click: 'Write a script' }],
-  ['Receiving · rituals · live update', '/receiving/rituals/triage/code', { user: 'kai', live: 'apply' }],
-  ['Receiving · rituals · live conflict', '/receiving/rituals/triage/code', { user: 'kai', live: 'conflict' }],
+  // Rules: the list (the Receiving tab), New rule's recipes, a recipe's form new and saved, and the script editor.
+  ['Receiving · rules', '/receiving?tab=rules', { from: '/receiving', click: 'Rules' }],
+  ['Receiving · new rule', '/receiving/rules/new', { from: '/receiving?tab=rules', click: 'New rule' }],
+  ['Receiving · new rule · new workspace', '/receiving/rules/new', { user: 'nia' }],
+  ['Receiving · recipe form', '/receiving/rules/new/slack', { from: '/receiving/rules/new', click: 'Post to Slack' }],
+  ['Receiving · recipe rule', '/receiving/rules/label-by-meaning-support', { from: '/receiving?tab=rules', row: 'a refund request' }],
+  ['Receiving · rule editor', '/receiving/rules/triage/code', { from: '/receiving?tab=rules', row: 'triage' }],
+  ['Receiving · rule editor · new script', '/receiving/rules/new/script', { user: 'nia', from: '/receiving/rules/new', click: 'Write a script' }],
+  ['Receiving · rules · live update', '/receiving/rules/triage/code', { user: 'kai', live: 'apply' }],
+  ['Receiving · rules · live conflict', '/receiving/rules/triage/code', { user: 'kai', live: 'conflict' }],
   ['Receiving · agent inboxes', '/receiving/inboxes', { from: '/receiving' }],
   ['Receiving · agent inbox', `/receiving/inboxes/${ids.inbox}`, { from: '/receiving/inboxes' }],
   ['Receiving · webhook', `/receiving/webhooks/${ids.inboundWebhook}`, { from: '/receiving?tab=endpoints' }],
@@ -139,7 +139,7 @@ const pages = ids => [
   ['Campaigns · restricted', '/campaigns', { user: 'rae', from: '/overview' }],
   // The docs: inside the dashboard signed in (a guide from the contents, an operation, a deep-linked overview section),
   // in their own layout signed out.
-  ['Docs · guide', '/docs/rituals', { from: '/docs', click: 'Rituals and omens' }],
+  ['Docs · guide', '/docs/rules', { from: '/docs', click: 'Rules and AI decisions' }],
   ['Docs · MCP guide', '/docs/mcp', { from: '/overview' }],
   ['Docs · operation', '/docs/api/sendEmail', { from: '/docs/receiving' }],
   ['Docs · section', '/docs#sending-limits', { from: '/api-keys' }],
@@ -163,7 +163,7 @@ const pages = ids => [
   ['API keys · create key dialog', '/api-keys', { dialog: 'Create key' }],
   ['Receiving · new address dialog', '/receiving', { dialog: 'New address' }],
   ['Receiving · new agent inbox dialog', '/receiving/inboxes', { dialog: 'New agent inbox' }],
-  ['Receiving · ask your agent dialog', '/receiving/rituals/new', { dialog: 'Ask your agent' }],
+  ['Receiving · ask your agent dialog', '/receiving/rules/new', { dialog: 'Ask your agent' }],
   ['Audience · import dialog', '/audience', { dialog: 'Import contacts' }],
   ['Settings · invite dialog', '/settings#members', { dialog: 'Invite teammate' }],
   ['Settings · new webhook', '/settings/webhooks/new', {}],
@@ -171,7 +171,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Overview · range', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Receiving', 'Receiving · rituals', 'Receiving · new ritual', 'Receiving · recipe form', 'Receiving · recipe ritual', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · endpoints', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'API keys · create key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
+const phonePages = new Set(['Overview', 'Overview · range', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · endpoints', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'API keys · create key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -224,7 +224,7 @@ const probe = () => {
   // a request started in the last frame can't slip past the network events, and a body the app never reads (which
   // Chrome never reports finished) doesn't hold the measurement open.
   const track = pending => { state.fetches++; pending.finally(() => state.fetches--).catch(() => {}); return pending; };
-  const original = window.fetch, held = url => String(url).includes('/v1/rituals/version');
+  const original = window.fetch, held = url => String(url).includes('/v1/rules/version');
   window.fetch = function (...args) { const pending = original.apply(this, args); return held(args[0] instanceof Request ? args[0].url : args[0]) ? pending : track(pending); };
   for (const method of ['arrayBuffer', 'blob', 'bytes', 'formData', 'json', 'text']) {
     const read = Response.prototype[method];
@@ -259,7 +259,7 @@ async function settle(page, net) {
 }
 const sharp = n => Math.round(n * 10000) / 10000;
 // The live view's long poll (features/inbound/live.ts) stays open while its page does; it never counts as loading.
-const LONG_POLL = '/v1/rituals/version';
+const LONG_POLL = '/v1/rules/version';
 let liveSaves = 0;
 
 // Masked addresses, in the page. A seeded mailbox address (cls-fixture.mjs) may be spelled out only where it is typed or
@@ -308,7 +308,7 @@ async function masking(page, hover) {
   const count = await page.evaluate(() => document.querySelectorAll('.private-address').length);
   if (!count) return problems;
   const states = async () => { const all = []; for (let i = 0; i < Math.min(count, 5); i++) all.push(await page.evaluate(maskedState, i)); return all; };
-  // ⇧P is ignored while typing (the support chat's box, a ritual's editor), so leave whatever field has focus first.
+  // ⇧P is ignored while typing (the support chat's box, a rule's editor), so leave whatever field has focus first.
   await page.evaluate(() => document.activeElement?.blur());
   const before = await states();
   await page.keyboard.press('Shift+P'); await frame();
@@ -419,7 +419,7 @@ async function measure(browser, job, fx) {
         await page.keyboard.press('End'); await page.keyboard.type(' // mine');
         await page.waitForFunction(() => document.querySelector('.ritual-savebar')?.textContent.includes('Unsaved changes'), null, { timeout: 10_000 });
       }
-      const saved = await fetch(fx.apiOrigin + '/v1/rituals/scripts/triage', { method: 'PUT', headers: { authorization: `Bearer ${fx.liveKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ key: 'triage', source: liveSource(++liveSaves) }) });
+      const saved = await fetch(fx.apiOrigin + '/v1/rules/scripts/triage', { method: 'PUT', headers: { authorization: `Bearer ${fx.liveKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ key: 'triage', source: liveSource(++liveSaves) }) });
       if (!saved.ok) problems.push(`the agent's save failed: ${saved.status}`);
       else await page.waitForSelector(job.live === 'conflict' ? '.ritual-incoming' : '.ritual-savebar__text--remote', { timeout: 30_000 }).catch(() => problems.push(`no ${job.live === 'conflict' ? 'conflict card' : 'live update'} after the agent's save`));
       await settle(page, net);
@@ -518,7 +518,7 @@ try {
     jobs.push(load);
     if (from && !densityOnly) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
   }
-  // Multi-step jobs (Support chat, live rituals, Overview's full warm-up) start first so none trails alone at the end.
+  // Multi-step jobs (Support chat, live rules, Overview's full warm-up) start first so none trails alone at the end.
   const weight = job => (job.support ? 4 : 0) + (job.live ? 2 : 0) + (job.name === 'Overview' && job.mode === 'load' ? 3 : 0);
   const shard = /^(\d+)\/(\d+)$/.exec(process.env.CLS_SHARD ?? '1/1');
   if (!shard || +shard[1] < 1 || +shard[1] > +shard[2] || +shard[2] > jobs.length) throw Error('Invalid CLS_SHARD: expected index/count within the measurement set');

@@ -182,7 +182,7 @@ export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, jo
   deleteBinding?:ReadyConnection|null; webhook?: ClaimedWebhook | null; recordWithSettlement?: (ctes: import('drizzle-orm').SQL) => void }) => Promise<void>;
 
 export class ApiError extends Error {
-  /** Structured detail for errors that have several parts, such as ritual compile diagnostics. */
+  /** Structured detail for errors that have several parts, such as rule compile diagnostics. */
   details?: Record<string, unknown>[];
   /** The field names a log line may name: the schema's own, never a key the caller sent (app.ts invalidFields). */
   logField?: string;
@@ -206,7 +206,7 @@ export function lazyModule<T>(load: () => Promise<T>): () => Promise<T> {
   let pending: Promise<T> | undefined;
   return () => pending ??= wrapModuleLoad(load).catch(error => { pending = undefined; throw error; });
 }
-export const ErrorSchema = z.object({ error: z.object({ code: z.string(), message: z.string(), requestId: z.string(), field: z.string().optional(), retryable: z.boolean(), resetAt: z.iso.datetime().optional().describe('Next capacity change for a Hosted rolling send limit.'), details: z.array(z.record(z.string(), z.unknown())).optional().describe('Every problem found, when there is more than one part, such as ritual diagnostics with ritual, line, column, message and hint, or a measurement, such as CONTENT_TOO_LARGE_TO_SCREEN with screenedBytes and limitBytes (and index in a batch).') }) }).openapi('ApiError');
+export const ErrorSchema = z.object({ error: z.object({ code: z.string(), message: z.string(), requestId: z.string(), field: z.string().optional(), retryable: z.boolean(), resetAt: z.iso.datetime().optional().describe('Next capacity change for a Hosted rolling send limit.'), details: z.array(z.record(z.string(), z.unknown())).optional().describe('Every problem found, when there is more than one part, such as rule diagnostics with rule, line, column, message and hint, or a measurement, such as CONTENT_TOO_LARGE_TO_SCREEN with screenedBytes and limitBytes (and index in a batch).') }) }).openapi('ApiError');
 export const errors = Object.fromEntries([400, 401, 403, 404, 409, 413, 422, 429, 500, 503].map(status => [status, { description: 'Request failed; use error.code and requestId to diagnose.', content: { 'application/json': { schema: ErrorSchema } } }]));
 export const security: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
 export const IdParams = z.object({ id: z.string().min(1).max(120) });
@@ -248,7 +248,7 @@ export function actor(c: Ctx, action: Permission | 'editContent' = 'read'): Acto
 }
 /**
  * The one rule for changes that outlive the credential making them: API keys, sending and receiving webhooks, endpoints,
- * routes, rituals, inbound keys, mail client passwords and inbox connections. A temporary agent token lasts at most a
+ * routes, rules, inbound keys, mail client passwords and inbox connections. A temporary agent token lasts at most a
  * day, so it reads and tests these but never creates, changes or removes them. Every such write calls this; the MCP
  * listing asks lastingRefusal of the same routes (keyAdminRoute, receivingAdminRoute, lastingRoute).
  */
@@ -263,7 +263,7 @@ export const WEBHOOK_CHANGE = 'create, change or delete webhooks or read their s
 /** What `lasting` refuses on receiving hosts: adding, changing or removing one, turning receiving on or off, or its catch-all. */
 export const RECEIVING_HOST_CHANGE = 'add, change or remove receiving hosts';
 /**
- * Receiving configuration (routing, rituals, endpoints, inbox connections) covers every address in the workspace: an
+ * Receiving configuration (routing, rules, endpoints, inbox connections) covers every address in the workspace: an
  * owner or admin, an API key with manage on all domains, or an MCP approval with receiving consent, which reads with
  * read. A change (`change` says what, for the error) needs manage, receiving consent and a lasting credential.
  */
@@ -302,7 +302,7 @@ export const mailboxRoute = (path: string) => /^\/v1\/(?:inbound|inboxes)(?:\/|$
 const appPasswordRoute = (path: string) => /^\/v1\/(?:inboxes\/[^/]+\/)?app-passwords(?:\/|$)/.test(path);
 /** requireReceivingConsent: an MCP grant without explicit receiving consent is refused. */
 export const receivingConsentRoute = (path: string) =>
-  appPasswordRoute(path) || /^\/v1\/(?:routing|rituals|endpoints|inbound\/(?:retired|domains|addresses|keys|webhooks|overview|endpoints))(?:\/|$)|^\/v1\/(?:inbox-connections|inbound\/policy|domains\/[^/]+\/receiving-host|inbound\/messages\/[^/]+\/redeliver)$/.test(path);
+  appPasswordRoute(path) || /^\/v1\/(?:routing|rules|rituals|endpoints|inbound\/(?:retired|domains|addresses|keys|webhooks|overview|endpoints))(?:\/|$)|^\/v1\/(?:inbox-connections|inbound\/policy|domains\/[^/]+\/receiving-host|inbound\/messages\/[^/]+\/redeliver)$/.test(path);
 /** notMember: workspace members are refused these areas whatever their scopes. */
 export const ownerRoute = (method: string, path: string) => {
   const verb = method.toUpperCase();
@@ -314,8 +314,8 @@ export const ownerRoute = (method: string, path: string) => {
 export const unrestrictedRoute = (path: string) => /^\/v1\/(?:contacts|lists|segments|contact-imports|audience-query|settings|webhooks|metrics|sender-score|usage|billing|regions|app-passwords)(?:\/|$)/.test(path)
   || !['state', 'preview', 'preview-image', 'archive', undefined].includes(/^\/v1\/campaigns\/[^/]+\/([^/]+)$/.exec(path)?.[1]);
 // The routes of the guards above that handlers call, for the MCP listing (each verified against REST's answers for reads).
-/** receivingAdmin's routes: routing, rituals, endpoints and inbox connections. */
-export const receivingAdminRoute = (path: string) => /^\/v1\/(?:routing|rituals|endpoints|inbox-connections)(?:\/|$)/.test(path);
+/** receivingAdmin's routes: routing, rules (and their deprecated /v1/rituals aliases), endpoints and inbox connections. */
+export const receivingAdminRoute = (path: string) => /^\/v1\/(?:routing|rules|rituals|endpoints|inbox-connections)(?:\/|$)/.test(path);
 /** keyAdminRefusal's routes: API keys, listing and revoking agent tokens, and the deprecated inbound key aliases. */
 export const keyAdminRoute = (method: string, path: string) => /^\/v1\/(?:api-keys|agent-tokens|inbound\/keys)(?:\/|$)/.test(path) && !agentTokenMintRoute(method, path);
 /** agentTokenMintRefusal's route: createAgentToken. */

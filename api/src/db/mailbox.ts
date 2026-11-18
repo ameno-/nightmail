@@ -164,7 +164,7 @@ export const mailboxEvents = pgTable('mailbox_events', {
 export const endpoints = pgTable('mailbox_webhooks', {
   id: text('id').primaryKey(), ...scope(),
   type: text('type').$type<'webhook' | 'slack' | 'discord' | 'forward'>().notNull().default('webhook'),
-  /** The endpoint name rituals call and routes can name (endpoints.<key>); unique in the workspace across every type. Optional for a webhook. */
+  /** The endpoint name rules call and routes can name (endpoints.<key>); unique in the workspace across every type. Optional for a webhook. */
   key: text('key'),
   // Webhooks: where and how they post, and the events they subscribe to (none for a route-only webhook).
   url: text('url'), encryptedSecret: text('encrypted_secret'), encryptedHeaders: text('encrypted_headers'),

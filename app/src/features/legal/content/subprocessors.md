@@ -15,7 +15,7 @@ These providers process personal data for Nightmail on behalf of **Anomaly Innov
 | **Cloudflare** | Runs the API, website and dashboard (Workers, Durable Objects and Queues); stores received mail and attachments (R2); connects to the database (Hyperdrive); renders campaign previews (Browser Rendering); request logs; DNS and edge network; DNS lookups about customer domains | All | Received-mail storage: Eastern North America. Request processing: Cloudflare's global network. |
 | **PlanetScale** | Main database (Postgres): accounts, workspaces, logs, contacts, received message text and billing | All | United States: AWS Ohio (us-east-2) |
 | **Stripe** | Card payments, receipts, saved cards and fraud checks (Radar) | Billing contact and payment data | United States |
-| **TypeSafe AI** | Jev classifier: the spam screen and Omens. Doesn't retain or train on the content. | Parts of message content ([Privacy Policy, section 5.1](/legal/privacy#what-is-screened)) | United States |
+| **TypeSafe AI** | Jev classifier: the spam screen and AI decisions. Doesn't retain or train on the content. | Parts of message content ([Privacy Policy, section 5.1](/legal/privacy#what-is-screened)) | United States |
 
 ## Other recipients
 

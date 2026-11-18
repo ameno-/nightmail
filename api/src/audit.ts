@@ -309,7 +309,7 @@ const OperatorQuery = AuditFilters.extend({ include: z.string().regex(/^(?:billi
 
 export function registerAudit(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/activity', operationId: 'listActivity', tags: ['Workspaces'], security: sessionOnly,
-    description: `What happened in this workspace and who did it: members, roles and invitations, API keys, inbox keys and app passwords, domains, webhooks, endpoints, routes and rituals, settings, exports and deletions, and each time ${productName} support viewed the workspace with a support grant. Newest first. Owners and admins only; secrets and message content are never recorded.`,
+    description: `What happened in this workspace and who did it: members, roles and invitations, API keys, inbox keys and app passwords, domains, webhooks, endpoints, routes and rules, settings, exports and deletions, and each time ${productName} support viewed the workspace with a support grant. Newest first. Owners and admins only; secrets and message content are never recorded.`,
     request: { query: AuditFilters }, responses: { 200: response(AuditPage), ...errors } }), async c => {
     const a = dashboardSession(c, true);
     return c.json(await customerTrail(c.env.db, [a.workspaceId], c.req.valid('query')), 200);
