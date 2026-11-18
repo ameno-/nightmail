@@ -116,16 +116,17 @@ export async function billingDaily(runtime: Runtime): Promise<void> {
 export async function settleClosedHours(runtime: Runtime, cutoff?: string): Promise<{ workspaces: number; entries: number; busy: number }> {
   const started = Date.now(), deadline = started + SETTLE_BUDGET_MS;
   const at = cutoff ? sql`${cutoff}::timestamptz` : CLOSED_HOURS;
-  let workspaces = 0, entries = 0, busy = 0;
-  const seen = new Set<string>();
+  let workspaces = 0, entries = 0, busy = 0, after = '';
+  // Pages by workspace: one the settler skips this run (busy, or every row held by a writer) never keeps the next
+  // page from being reached.
   while (Date.now() < deadline) {
     const { rows } = await runtime.db.execute<{ workspace_id: string }>(sql`SELECT DISTINCT workspace_id FROM billing_usage_hourly
-      WHERE (quantity <> settled_quantity OR refunds <> '{}') AND hour<${at} LIMIT ${SETTLE_PAGE}`);
-    const queue = rows.map(r => r.workspace_id).filter(w => !seen.has(w));
+      WHERE (quantity <> settled_quantity OR refunds <> '{}') AND hour<${at} AND workspace_id>${after} ORDER BY workspace_id LIMIT ${SETTLE_PAGE}`);
+    const queue = rows.map(r => r.workspace_id);
     if (!queue.length) break;
+    after = queue[queue.length - 1]!;
     await Promise.all(Array.from({ length: Math.min(SETTLE_CONCURRENCY, queue.length) }, async () => {
       for (let wid = queue.shift(); wid !== undefined && Date.now() < deadline; wid = queue.shift()) {
-        seen.add(wid);
         try {
           const { rows: [r] } = await runtime.db.execute<{ s: { busy?: boolean; entries?: number } }>(sql`SELECT billing_settle(${wid}, ${at}) AS s`);
           if (r?.s.busy) busy++; else { workspaces++; entries += Number(r?.s.entries ?? 0); }
