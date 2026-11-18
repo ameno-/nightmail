@@ -36,6 +36,62 @@
   "w": 254,
   "h": 48
  },
+ "pipes": [
+  {
+   "label": "INBOX",
+   "x": 358.7,
+   "w": 12.8,
+   "yEnd": 1057
+  },
+  {
+   "label": "AGENTS",
+   "x": 509.0,
+   "w": 12.8,
+   "yEnd": 1057
+  },
+  {
+   "label": "ENDPOINTS",
+   "x": 659.4,
+   "w": 12.8,
+   "yEnd": 1057
+  },
+  {
+   "label": "THREADS",
+   "x": 809.7,
+   "w": 12.8,
+   "yEnd": 1057
+  },
+  {
+   "label": "OUTBOUND",
+   "x": 960.0,
+   "w": 12.8,
+   "yEnd": 1057
+  },
+  {
+   "label": "IMAP",
+   "x": 1110.3,
+   "w": 12.8,
+   "yEnd": 1057
+  },
+  {
+   "label": "RITUALS",
+   "x": 1260.6,
+   "w": 12.8,
+   "yEnd": 1057
+  },
+  {
+   "label": "CAMPAIGNS",
+   "x": 1411.0,
+   "w": 12.8,
+   "yEnd": 1057
+  },
+  {
+   "label": "LOGS",
+   "x": 1561.3,
+   "w": 12.8,
+   "yEnd": 1057
+  }
+ ],
  "segments": [
   {
    "name": "steady",

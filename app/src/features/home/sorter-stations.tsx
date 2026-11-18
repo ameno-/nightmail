@@ -37,10 +37,23 @@ const STATIONS: Station[] = [
   { kind: 'logs', tube: 7, name: 'Logs', line: 'And every message, sent or received, is on record.', plate: 'Logs', w: 420, h: 88, up: 0, down: 186, port: .5 },
 ]
 
+// Under the factory (factory-home.tsx) the tubes come out of the hero's own pipes, one under each pipe's label. Its
+// left four run, from the outside in, Inbox, Agents, Endpoints, Threads: the reverse of the order above, where the
+// innermost tube (the one nearest the appliances) is Inbox's. The innermost must turn in first or it crosses the
+// others, so on the left the appliances come in the hero's order from the inside: Threads first, Inbox last (the
+// right four already run that way). `tube` is the place from the inside, as above.
+const LABELS: Record<Kind | 'main', string> = { inbox: 'INBOX', agent: 'AGENTS', endpoint: 'ENDPOINTS', thread: 'THREADS', imap: 'IMAP', ritual: 'RITUALS', campaign: 'CAMPAIGNS', logs: 'LOGS', main: 'OUTBOUND' }
+const UNDER_HERO: Station[] = (['thread', 'imap', 'endpoint', 'ritual', 'agent', 'campaign', 'inbox', 'logs'] as const).map(kind => {
+  const spec = STATIONS.find(station => station.kind === kind)!
+  return spec.tube < 4 ? { ...spec, tube: 3 - spec.tube } : spec
+})
+/** The hero's pipes as they reach the section's top edge: each one's x by its label, and their width. */
+export type HeroPipes = { x: Record<string, number>; w: number; clear: number }
+
 /** A window of a unit's progress: the element's own --t runs 0 to 1 while --v goes from `from` to `to`. */
 const step = (from: number, to: number, extra?: CSSProperties) => ({ '--from': from, '--to': to, ...extra }) as CSSProperties
 
-export function Stations({ plan: p, start }: { plan: Plan | null; start: HomeStart }) {
+export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: HomeStart; hero?: HeroPipes | null }) {
   const root = useRef<HTMLElement>(null), traffic = useRef<HTMLDivElement>(null), flows = useRef<Flow[]>([])
   // One pass per frame while scrolling: how far each unit has come up the page.
   useEffect(() => {
@@ -92,17 +105,44 @@ export function Stations({ plan: p, start }: { plan: Plan | null; start: HomeSta
   }, [p])
 
   if (!p) return <section className="srt-stations" ref={root} aria-label="Where mail goes" />
-  const phone = p.phone, r = p.tubeR, wide = r * 2, depth = phone ? 40 : 60, dx = -DX * depth, dy = DY * depth
+  // (Under the factory every tube is as wide as the hero's pipes, so each reads on from its own.)
+  const pipes = !p.phone && hero ? hero : null
+  const phone = p.phone, r = pipes ? pipes.w / 2 : p.tubeR, wide = r * 2, depth = phone ? 40 : 60, dx = -DX * depth, dy = DY * depth
   // Each appliance stands between the two fours of tubes, a little towards the side its own tube comes from: those on
   // the left share one left edge, those on the right another, so their names stand in two columns down the page.
   // (sorter/plan.ts has the column's width and its middle: under the machine's front, or on a phone the page's own.)
   const { room, widest, lean, sx } = p
   const captionH = phone ? 58 : 66, gap = phone ? 96 : 128
-  let top = phone ? 52 : 110
+  // Under the factory each tube comes straight down out of its hero pipe (past what signing in agrees to, `clear`),
+  // then steps across to its place beside the appliances' column: one step to a row, the next row lower, in an
+  // order where no step crosses a tube still standing (`jog`, by tube; the outbound main's under `main`). Steps
+  // that cross different stretches of the page share a row. The appliances begin under the last row.
+  const bend0 = (phone ? 10 : wide) * 1.5, pitch = Math.round(wide * 1.5 + 16), jog = new Map<number | 'main', number>()
+  let jogEnd = 0
+  if (pipes) {
+    const moves = [...[0, 1, 2, 3, 4, 5, 6, 7].map(tube => ({ id: tube as number | 'main', from: pipes.x[LABELS[UNDER_HERO.find(station => station.tube === tube)!.kind]], to: p.drops[tube] })),
+      { id: 'main' as const, from: pipes.x.OUTBOUND, to: p.sx + p.out }]
+    const at = new Map(moves.map(move => [move.id, move.from])), pending = moves.filter(move => Math.abs(move.to - move.from) > .5), clearance = wide + 8
+    const span = (move: typeof moves[number]) => [Math.min(move.from, move.to) - clearance, Math.max(move.from, move.to) + clearance]
+    let row = pipes.clear + 24 + bend0
+    while (pending.length) {
+      const taken: number[][] = []
+      for (const move of [...pending]) {
+        const [a, b] = span(move)
+        if (moves.some(other => other !== move && at.get(other.id)! > a && at.get(other.id)! < b) || taken.some(([c, d]) => a < d && b > c)) continue
+        jog.set(move.id, row); taken.push([a, b]); pending.splice(pending.indexOf(move), 1)
+      }
+      // (None can step without crossing: the nearest goes anyway.)
+      if (!taken.length) { const move = pending.sort((m, n) => Math.abs(m.to - m.from) - Math.abs(n.to - n.from)).shift()!; jog.set(move.id, row) }
+      for (const [id, y] of jog) if (y === row) at.set(id, moves.find(move => move.id === id)!.to)
+      jogEnd = row; row += pitch
+    }
+  }
+  let top = phone ? 52 : Math.max(110, jogEnd + bend0 + 56)
   // (On a narrow phone what is printed and what is said wraps more: the paper and the thread's screen are longer for it.)
   const narrow = phone && p.W < 380, feed = narrow ? 232 : 168
   // (Stacked the printed paper is narrower, so longer, and the ritual's call takes three lines: nothing is cut short.)
-  const units = STATIONS.map(spec => {
+  const units = (pipes ? UNDER_HERO : STATIONS).map(spec => {
     const station = phone ? { ...spec, h: spec.kind === 'inbox' ? 339 : spec.kind === 'thread' ? (narrow ? 288 : 262) : spec.kind === 'ritual' ? 262 : spec.kind === 'endpoint' ? 280 : spec.h, up: spec.kind === 'agent' ? feed : spec.up, down: spec.kind === 'logs' ? 272 : spec.down } : spec
     const w = Math.min(station.w, room), left = station.tube < 4
     const boxLeft = Math.round(sx - widest / 2 + (left ? -lean : lean) + dx / 2), boxTop = top + captionH + dy + 18 + station.up
@@ -125,10 +165,12 @@ export function Stations({ plan: p, start }: { plan: Plan | null; start: HomeSta
   const pw = phone ? 10 : wide, bend = pw * 1.5
   const runs: { key: string; points: Pt[]; wide: number; rings: Ring[] }[] = [], ways: Pt[][] = [], sleeve = (x: number): Ring => ({ at: [x, 12], across: false, tall: 30 })
   if (!phone) units.forEach(({ station, left, port, end }, k) => {
-    const side = left ? 0 : 4, n = station.tube - side, slot = (j: number) => p.drops[side + j], points: Pt[] = [[slot(n), 0]]
+    const side = left ? 0 : 4, n = station.tube - side, slot = (j: number) => p.drops[side + j], row = jog.get(station.tube), from = pipes?.x[LABELS[station.kind]]
+    const points: Pt[] = row !== undefined && from !== undefined ? [[from, 0], [from, row], [slot(n), row]] : [[slot(n), 0]]
     for (let m = 0; m < n; m++) { const y = units.find(u => u.station.tube === side + m)!.port + 78 + (n - m - 1) * (wide + 16); points.push([slot(n - m), y], [slot(n - m - 1), y]) }
     points.push([points.at(-1)![0], port], [end, port])
-    runs.push({ key: `t${station.tube}`, points, wide, rings: [sleeve(points[0][0]), ...rings(points, bend, left ? dx / 2 + 5 : 17, !left).slice(1)] }); ways[k] = points
+    // (A tube out of the hero's pipe is that pipe going on through the floor's edge: no coupling where it comes out.)
+    runs.push({ key: `t${station.tube}`, points, wide, rings: [...pipes ? [] : [sleeve(points[0][0])], ...rings(points, bend, left ? dx / 2 + 5 : 17, !left).slice(1)] }); ways[k] = points
   })
   else for (const side of [0, 1]) {
     const mine = units.filter(u => u.left === (side === 0)), last = mine.at(-1)!, x = Math.round(p.drops[side]), out = 0, towards = side ? -1 : 1
@@ -146,19 +188,24 @@ export function Stations({ plan: p, start }: { plan: Plan | null; start: HomeSta
   // The outbound main: from the plate's top straight up the page to the slab (behind the appliances that lean right,
   // beside those that lean left). On a wide page the appliances on the left that send tee into it from their right
   // side; the others it passes behind.
-  const main: Pt[] = [[mainX, 0], [mainX, plate.top - dy * .5]], senders = units.filter(u => ['agent', 'campaign', 'thread'].includes(u.station.kind)), mainRings: Ring[] = [sleeve(mainX)]
-  for (let y = 300; y < main[1][1] - 120; y += 380) if (units.every(u => !(!u.left || phone) || y < u.top + u.boxTop - dy - 30 || y > u.top + u.boxTop + u.station.h + 40)) mainRings.push({ at: [mainX, y], across: false })
+  // (Under the factory it comes down out of the hero's OUTBOUND pipe and steps across to its place first.)
+  const mainRow = jog.get('main'), heroMain = pipes?.x.OUTBOUND, stepped = mainRow !== undefined && heroMain !== undefined
+  const main: Pt[] = stepped ? [[heroMain, 0], [heroMain, mainRow], [mainX, mainRow], [mainX, plate.top - dy * .5]] : [[mainX, 0], [mainX, plate.top - dy * .5]]
+  const senders = units.filter(u => ['agent', 'campaign', 'thread'].includes(u.station.kind)), mainRings: Ring[] = [...pipes ? [] : [sleeve(main[0][0])], ...stepped ? rings(main.slice(0, 3).concat([[mainX, mainRow + 2 * bend + 40]]), bend, 0).slice(1) : []]
+  // What comes back up the main goes on up it to its top: through its step, where it has one.
+  const upMain = (points: Pt[]): Pt[] => stepped ? [...points.slice(0, -1), [mainX, mainRow], [heroMain, mainRow], [heroMain, 16]] : points
+  for (let y = stepped ? mainRow + 300 : 300; y < main.at(-1)![1] - 120; y += 380) if (units.every(u => !(!u.left || phone) || y < u.top + u.boxTop - dy - 30 || y > u.top + u.boxTop + u.station.h + 40)) mainRings.push({ at: [mainX, y], across: false })
   for (const unit of units) if (phone || !unit.left) {
     const over = unit.top + unit.boxTop - dy - 9 - (unit.station.kind === 'campaign' && !phone ? 34 : unit.station.kind === 'thread' ? unit.station.up : unit.station.kind === 'agent' ? unit.station.up : 0), under = unit.top + unit.boxTop + unit.station.h + (unit.station.kind === 'imap' ? 62 : unit.station.kind === 'logs' ? unit.station.down + 10 : 34)
-    for (const y of [over, under]) if (y > 60 && y < main[1][1] - 30 && mainRings.every(ring => Math.abs(ring.at[1] - y) > 22)) mainRings.push({ at: [mainX, y], across: false, tall: 7 })
+    for (const y of [over, under]) if (y > (stepped ? mainRow + 60 : 60) && y < main.at(-1)![1] - 30 && mainRings.every(ring => Math.abs(ring.at[1] - y) > 22)) mainRings.push({ at: [mainX, y], across: false, tall: 7 })
   }
-  const outWays: Pt[][] = [[[mainX, plate.top - dy * .5 + 14], [mainX, 16]]]
+  const outWays: Pt[][] = [upMain([[mainX, plate.top - dy * .5 + 14], [mainX, 16]])]
   for (const unit of senders) {
-    if (phone || !unit.left) { outWays.push([[mainX, unit.top + unit.boxTop + unit.station.h * .5], [mainX, 16]]); continue }
+    if (phone || !unit.left) { outWays.push(upMain([[mainX, unit.top + unit.boxTop + unit.station.h * .5], [mainX, 16]])); continue }
     const from = unit.boxLeft + unit.w - 4
     runs.push({ key: `send${unit.station.tube}`, points: [[from, unit.sends], [mainX - (wide / 2 - 1), unit.sends]], wide, rings: [{ at: [from + 9, unit.sends], across: true }, { at: [mainX - wide / 2 - 3.5, unit.sends], across: true }] })
     mainRings.push({ at: [mainX, unit.sends - wide / 2 - 4.5], across: false }, { at: [mainX, unit.sends + wide / 2 + 4.5], across: false })
-    outWays.push([[from + 4, unit.sends], [mainX, unit.sends], [mainX, 16]])
+    outWays.push(upMain([[from + 4, unit.sends], [mainX, unit.sends], [mainX, 16]]))
   }
   runs.push({ key: 'main', points: main, wide, rings: mainRings })
   // Every capsule's way: down each tube from under its sleeve into its appliance; up the main from each that sends.

@@ -8,7 +8,7 @@
 // The billboards are sprites at twice the frame's resolution that the page moves along their rail at
 // `speedPxPerSec`, `gapPx` apart, each at its `y` (its top edge: the hanger on the rail, over the board's face) and
 // `w` × `h` where the manifest says (else half its sprite's size); `button` is the blank plate on the machine's front
-// that the page writes its button on.
+// that the page writes its button on; `pipes` are the plinth's pipes the section under the hero carries on.
 import data from './manifest.json'
 
 export type Segment = { name: string; kind: 'loop' | 'rare'; frames: number; bg?: string; fg?: string; then?: string; after?: string; boardLight?: number[] }
@@ -18,6 +18,8 @@ export type Manifest = {
   boards: { speedPxPerSec: number; gapPx: number; y: number[]; w?: number[]; h?: number[]; files?: string[]; periodPx?: number }
   button: Box
   segments: Segment[]
+  /** The plinth's labelled pipes, left to right: each one's centre and width, and the row where it goes into the floor. */
+  pipes?: { label: string; x: number; w: number; yEnd: number }[]
 }
 
 /** The layout bundled with the page: what its first paint is laid out from (frame, button, boards, poster). */

@@ -1,16 +1,17 @@
 /* The factory homepage (factory-home.tsx), on a desktop. Under the header, the hero: the stage, and under it (for a
    visitor) a strip with what signing in agrees to. On the stage, the frame: the renders' picture, as large as covers
    the stage and still shows, whatever the window's shape, the boards and the machine down to its button (the safe
-   box: factory-home.tsx). It is placed by CSS alone (the stage's container units), so the poster is in its place in
-   the first paint and nothing moves after it. Everything on the frame is placed in the frame's own pixels, as
-   percentages of it, and the button's type is sized by the frame's width. */
+   box: factory-home.tsx), and never with its foot below the floor line, where the plinth's pipes end (the section
+   under it carries them on from the stage's foot). It is placed by CSS alone (the stage's container units), so the
+   poster is in its place in the first paint and nothing moves after it. Everything on the frame is placed in the
+   frame's own pixels, as percentages of it, and the button's type is sized by the frame's width. */
 .fac-hero { position: relative; display: flex; flex: none; flex-direction: column; height: calc(100svh - var(--srt-head)); }
 /* The stage's own dark is the hall's, for where a window too wide or too narrow for the frame shows it smaller. */
 .fac-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; container-type: size; background: rgb(36 40 46); }
 .fac-frame {
-  --fac-fw: min(max(100cqw, 100cqh * var(--fac-w) / var(--fac-h)), 100cqh * var(--fac-w) / var(--fac-safe-h), 100cqw * var(--fac-w) / var(--fac-safe-w));
+  --fac-fw: min(max(100cqw, 100cqh * var(--fac-w) / var(--fac-floor)), 100cqh * var(--fac-w) / var(--fac-safe-h), 100cqw * var(--fac-w) / var(--fac-safe-w));
   --fac-fh: calc(var(--fac-fw) * var(--fac-h) / var(--fac-w));
-  position: absolute; top: clamp(min(100cqh - var(--fac-fh), (100cqh - var(--fac-fh)) / 2), 50cqh - var(--fac-fw) * var(--fac-mid) / var(--fac-w), max(0px, (100cqh - var(--fac-fh)) / 2));
+  position: absolute; top: clamp(min(100cqh - var(--fac-fw) * var(--fac-floor) / var(--fac-w), (100cqh - var(--fac-fh)) / 2), 50cqh - var(--fac-fw) * var(--fac-mid) / var(--fac-w), max(0px, (100cqh - var(--fac-fh)) / 2));
   left: calc((100cqw - var(--fac-fw)) / 2); width: var(--fac-fw); height: var(--fac-fh); container-type: inline-size; }
 .fac-poster, .fac-layer, .fac-video { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
 .fac-poster { user-select: none; pointer-events: none; }
@@ -43,8 +44,11 @@
 .fac-cta:focus-visible { outline: none; }
 .fac-cta:focus-visible::after { content: ''; position: absolute; inset: -6px; border: var(--focus-width) solid var(--color-focus); pointer-events: none; }
 
-.fac-under { display: grid; flex: none; place-items: center; height: 52px; padding: 0 var(--space-16); }
-.fac-consent { margin: 0; color: var(--srt-text-2); font-size: 12px; line-height: 16px; text-align: center; text-wrap: balance; }
+/* What signing in agrees to: over the top of the section under the hero (pulled up under it, so its tubes start at the
+   stage's foot, out of the hero's pipes), on a plate of the page's own floor so the tubes pass behind it. */
+.fac-under { position: relative; z-index: 1; display: grid; flex: none; place-items: center; height: 52px; padding: 0 var(--space-16); pointer-events: none; }
+.fac-page[data-visitor] .srt-stations { margin-top: -52px; }
+.fac-consent { margin: 0; padding: 4px 12px; border-radius: 6px; background: var(--srt-floor); color: var(--srt-text-2); font-size: 12px; line-height: 16px; text-align: center; text-wrap: balance; pointer-events: auto; }
 .fac-consent a:hover { color: var(--srt-text); }
 
 @media (prefers-reduced-motion: reduce) { .fac-cta::before, .fac-cta .srt-cta-label, .fac-cta .srt-cta-arrow { transition: none; } }

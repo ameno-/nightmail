@@ -6,7 +6,7 @@ import { HomeHeader } from './home-header'
 import { DashboardLink, StartButton } from './start'
 import { plan, type Plan } from './sorter/plan'
 import { toneVars } from './sorter/tones'
-import { Stations } from './sorter-stations'
+import { Stations, type HeroPipes } from './sorter-stations'
 import { MANIFEST as m, published } from './factory/manifest'
 import { alphaFormat, mountPlayer, type Player } from './factory/player'
 import poster from './factory/poster.jpg'
@@ -28,10 +28,13 @@ const saveData = () => (navigator as Navigator & { connection?: { saveData?: boo
 // third is its hanger) to a little under the button, and the machine's width. The frame covers the stage, cropped
 // about the middle of that; a window too wide or too narrow for it to be seen whole shows the frame smaller, on the
 // stage's own dark.
+// And the stage's foot is never below the floor line, where the plinth's pipes go into the hall's floor (`--fac-floor`):
+// the section under the hero carries every pipe on from the stage's foot (sorter-stations.tsx), so there is always pipe
+// down to it.
 const faces = Math.min(...m.boards.y.map((y, k) => y + (m.boards.h?.[k] ?? 0) / 3))
-const safeTop = faces - 16, safeBottom = m.button.y + m.button.h + 40, MACHINE_W = 1120
+const safeTop = faces - 16, safeBottom = m.button.y + m.button.h + 40, MACHINE_W = 1120, floor = Math.min(m.height, ...(m.pipes ?? []).map(pipe => pipe.yEnd))
 const frameVars = {
-  '--fac-w': m.width, '--fac-h': m.height, '--fac-safe-h': safeBottom - safeTop, '--fac-safe-w': MACHINE_W, '--fac-mid': (safeTop + safeBottom) / 2,
+  '--fac-w': m.width, '--fac-h': m.height, '--fac-safe-h': safeBottom - safeTop, '--fac-safe-w': MACHINE_W, '--fac-mid': (safeTop + safeBottom) / 2, '--fac-floor': floor,
 } as CSSProperties
 const pct = (value: number, of: number) => `${value / of * 100}%`
 const buttonBox = { left: pct(m.button.x, m.width), top: pct(m.button.y, m.height), width: pct(m.button.w, m.width), height: pct(m.button.h, m.height) }
@@ -39,14 +42,18 @@ const buttonBox = { left: pct(m.button.x, m.width), top: pct(m.button.y, m.heigh
 export function FactoryHome({ start, notice }: HomeProps) {
   const visitor = start.signedIn ? null : start
   const dark = useTheme().theme === 'dark'
-  const scene = useRef<HTMLElement>(null), probe = useRef<HTMLDivElement>(null), stage = useRef<HTMLDivElement>(null), frame = useRef<HTMLDivElement>(null)
+  const scene = useRef<HTMLElement>(null), probe = useRef<HTMLDivElement>(null), stage = useRef<HTMLDivElement>(null), frame = useRef<HTMLDivElement>(null), under = useRef<HTMLDivElement>(null)
   const bg = useRef<HTMLDivElement>(null), boards = useRef<HTMLDivElement>(null), fg = useRef<HTMLDivElement>(null)
-  // The tubes under the hero are placed as the sorter's page would place them for this window (sorter/plan.ts).
-  const [p, setP] = useState<Plan | null>(null)
+  // The tubes under the hero are placed as the sorter's page would place them for this window (sorter/plan.ts), and
+  // each comes out of its own pipe in the hero: where the frame puts that pipe across the page, and as wide.
+  const [p, setP] = useState<Plan | null>(null), [pipes, setPipes] = useState<HeroPipes | null>(null)
   useLayoutEffect(() => {
     const measure = () => {
       const fold = probe.current!, safe = getComputedStyle(fold), next = plan(scene.current!.clientWidth, fold.offsetHeight, { left: parseFloat(safe.paddingLeft) || 0, right: parseFloat(safe.paddingRight) || 0, bottom: parseFloat(safe.paddingBottom) || 0 }, !start.signedIn)
       setP(now => now && now.W === next.W && now.H === next.H && now.fold === next.fold && now.ox === next.ox ? now : next)
+      const box = frame.current!.getBoundingClientRect(), left = box.left - scene.current!.getBoundingClientRect().left, scale = box.width / m.width
+      const x = Object.fromEntries((m.pipes ?? []).map(pipe => [pipe.label, left + pipe.x * scale])), w = (m.pipes?.[0]?.w ?? 0) * scale, clear = under.current?.offsetHeight ?? 0
+      setPipes(now => m.pipes && !(now && now.w === w && now.clear === clear && Object.keys(x).every(label => now.x[label] === x[label])) ? { x, w, clear } : now)
     }
     measure()
     const observer = new ResizeObserver(measure)
@@ -90,11 +97,12 @@ export function FactoryHome({ start, notice }: HomeProps) {
             <StartButton start={start} className="fac-cta" style={buttonBox} />
           </div>
         </div>
-        {/* Directly under the button, off the frame: what signing in agrees to. */}
-        {visitor && <div className="fac-under"><SignInConsent className="fac-consent" /></div>}
+        {/* Directly under the button, off the frame: what signing in agrees to, on a plate of its own over the pipes
+            coming down out of the hero. */}
+        {visitor && <div className="fac-under" ref={under}><SignInConsent className="fac-consent" /></div>}
         {notice && <div className="srt-notice">{notice}</div>}
       </section>
-      <Stations plan={p} start={start} />
+      <Stations plan={p} start={start} hero={pipes} />
     </main>
   </div>
 }
