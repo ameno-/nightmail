@@ -1,7 +1,7 @@
 import { cachedDashboardRead } from './dashboard-cache.js';
 import { boundRequestBody } from './request-body.js';
 import { checkBudget } from './auth.js';
-import { recordAudit } from './audit.js';
+import { recordAudit, type AuditContext } from './audit.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, getTableColumns, gte, inArray, isNull, isNotNull, lt, or, sql, SQL } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
@@ -422,6 +422,27 @@ async function findCampaign(db: DbExecutor, a: Actor, campaignId: string, lock: 
   if (!row) notFound('Campaign');
   return row;
 }
+// Paced delivery controls. Pausing stops releasing new recipients; mail already queued (a few seconds of
+// the send rate) still dispatches. Resume continues from the same frozen position.
+type CampaignChange = (db: DbExecutor, a: Actor, campaign: typeof campaigns.$inferSelect) => Promise<void>;
+const sendingOnly = (campaign: typeof campaigns.$inferSelect) => { if (!(CAMPAIGN_ACTIVE as readonly string[]).includes(campaign.state) && !campaignResumable(campaign)) throw new ApiError(409, 'CAMPAIGN_NOT_SENDING', 'Only a preparing, scheduled, sending or paused campaign can be paused, resumed or paced.'); };
+/** A delivery control in the caller's transaction: the campaign locked, its sender and state checked, then changed. */
+async function controlCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: string, change: CampaignChange, allowed = sendingOnly) {
+  const campaign = await findCampaign(db, a, campaignId, true); draftSender(runtime, a, campaign.draft);
+  allowed(campaign);
+  await change(db, a, campaign);
+}
+const pausing = (audit: AuditContext | Ctx): CampaignChange => async (db, a, campaign) => {
+  if (campaign.state === 'paused') throw new ApiError(409, 'CAMPAIGN_NOT_PAUSABLE', 'This campaign is already paused.');
+  if (campaign.state === 'failed') throw new ApiError(409, 'CAMPAIGN_NOT_PAUSABLE', 'This campaign failed; resume or cancel it.');
+  if (campaign.expanded >= campaign.total) throw new ApiError(409, 'CAMPAIGN_NOT_PAUSABLE', 'Only a campaign that is still releasing recipients can be paused.');
+  const ref = { workspaceId: a.workspaceId, id: campaign.id };
+  await db.execute(pauseCampaign(ref, { code: 'PAUSED_BY_USER', message: 'Paused from the dashboard or API.' }));
+  await db.execute(retireCampaignRun(ref, 'CAMPAIGN_PAUSED'));
+  await recordAudit(db, audit, { action: 'campaign.pause', workspaceId: a.workspaceId, target: { type: 'campaign', id: campaign.id }, before: { state: campaign.state } });
+};
+/** Pausing a campaign (POST /v1/campaigns/{id}/pause, and a support action the customer confirmed signed in), in the caller's transaction. */
+export const pauseSendingCampaign = (runtime: Runtime, db: DbExecutor, a: Actor, campaignId: string, audit: AuditContext | Ctx) => controlCampaign(runtime, db, a, campaignId, pausing(audit));
 type AttachmentSize = Pick<typeof attachments.$inferSelect, 'id' | 'size' | 'contentId'>;
 function sesAttachment(metadata: { contentId?: string | null; contentType?: string }) {
   const max = SEND_LIMITS.mimeFieldChars;
@@ -1609,28 +1630,13 @@ export function registerSending(app: App) {
     if (a.wakeJobs) { await wakeWebhooks(c.env,a.wakeJobs); a.wakeJobs=0; }
     return c.json(CampaignCanceled.parse(result), 200);
   });
-  // Paced delivery controls. Pausing stops releasing new recipients; mail already queued (a few seconds of
-  // the send rate) still dispatches. Resume continues from the same frozen position.
-  const sendingOnly = (campaign: typeof campaigns.$inferSelect) => { if (!(CAMPAIGN_ACTIVE as readonly string[]).includes(campaign.state) && !campaignResumable(campaign)) throw new ApiError(409, 'CAMPAIGN_NOT_SENDING', 'Only a preparing, scheduled, sending or paused campaign can be paused, resumed or paced.'); };
-  const control = async (c: Ctx, change: (db: DbExecutor, a: Actor, campaign: typeof campaigns.$inferSelect) => Promise<void>, allowed = sendingOnly) => {
+  const control = async (c: Ctx, change: CampaignChange, allowed = sendingOnly) => {
     const a = actor(c, 'send'), campaignId = c.req.param('id')!;
-    await c.env.db.transaction(async db => {
-      const campaign = await findCampaign(db, a, campaignId, true); draftSender(c.env, a, campaign.draft);
-      allowed(campaign);
-      await change(db, a, campaign);
-    });
+    await c.env.db.transaction(db => controlCampaign(c.env, db, a, campaignId, change, allowed));
     const row = await findCampaign(c.env.db, a, campaignId);
     return c.json(Campaign.parse((await campaignViews(c.env, a, [row]))[0]!), 200);
   };
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/pause', operationId: 'pauseCampaign', description: 'Stop releasing new recipients. Queued mail (a few seconds of the send rate) still dispatches. Resume continues from the same position; cancel still works while paused.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({}).strict()) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, async (db, a, campaign) => {
-    if (campaign.state === 'paused') throw new ApiError(409, 'CAMPAIGN_NOT_PAUSABLE', 'This campaign is already paused.');
-    if (campaign.state === 'failed') throw new ApiError(409, 'CAMPAIGN_NOT_PAUSABLE', 'This campaign failed; resume or cancel it.');
-    if (campaign.expanded >= campaign.total) throw new ApiError(409, 'CAMPAIGN_NOT_PAUSABLE', 'Only a campaign that is still releasing recipients can be paused.');
-    const ref = { workspaceId: a.workspaceId, id: campaign.id };
-    await db.execute(pauseCampaign(ref, { code: 'PAUSED_BY_USER', message: 'Paused from the dashboard or API.' }));
-    await db.execute(retireCampaignRun(ref, 'CAMPAIGN_PAUSED'));
-    await recordAudit(db, c, { action: 'campaign.pause', workspaceId: a.workspaceId, target: { type: 'campaign', id: campaign.id }, before: { state: campaign.state } });
-  }));
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/pause', operationId: 'pauseCampaign', description: 'Stop releasing new recipients. Queued mail (a few seconds of the send rate) still dispatches. Resume continues from the same position; cancel still works while paused.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({}).strict()) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, pausing(c)));
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/resume', operationId: 'resumeCampaign', description: 'Continue releasing recipients from where a paused campaign stopped, or where a campaign that failed after releasing some recipients stopped (it continues on the same frozen snapshot, never a new one). After an automatic pause, the next health check runs 30 minutes later.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({}).strict()) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, async (db, a, campaign) => {
     if (!campaignResumable(campaign)) throw new ApiError(409, 'CAMPAIGN_NOT_PAUSED', 'Only a paused campaign, or one that failed after releasing recipients, can be resumed.');
     if (campaign.state === 'paused' && campaign.quarantines >= 2 && ['LIST_QUALITY', 'BOUNCE_RATE_HIGH', 'COMPLAINT_RATE_HIGH'].includes(campaign.pauseReason?.code ?? ''))

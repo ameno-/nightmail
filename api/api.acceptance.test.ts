@@ -7480,6 +7480,216 @@ describe('Hosted MCP OAuth and tools', () => {
         error(await send('GET', `/v1/operator/support/notes?userId=${writer.userId}`, session(writer, gamma)), 403, 'OPERATOR_REQUIRED');
         error(reply(await platform.call('GET', `/v1/operator/support/notes?userId=${writer.userId}`)), 404);
       });
+
+      // Support actions (src/support-actions.ts). Shop has an owner, an admin and a member, a sending and two inbound
+      // webhooks with deliveries, a received message and a campaign that is releasing recipients.
+      const boss = await sessionFixture(t), deputy = await sessionFixture(t), clerk = await sessionFixture(t), shop = unique('shop-ws');
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [shop]);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$2,$5,'admin'),($6,$2,$7,'member')`,
+        [unique('mem'), shop, boss.userId, unique('mem'), deputy.userId, unique('mem'), clerk.userId]);
+      await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[boss, deputy, clerk].map(f => f.userId)]);
+      await (await import('./src/ses-region-state.js')).ensureRegionSettings(runtime.db, { ...runtime.config, workspaceId: shop });
+      const hook = unique('whk'), acmeHook = unique('whk');
+      await db.query(`INSERT INTO operation_webhooks(id, workspace_id, url, event_types, encrypted_secret) VALUES ($1, $2, 'https://example.com/hooks/shop-7a1f', '[]', 'fixture'), ($3, $4, 'https://example.com/hooks/acme', '[]', 'fixture')`, [hook, shop, acmeHook, acme]);
+      /** A sending-webhook delivery of Shop's webhook. */
+      const delivery = async (status: string) => {
+        const id = unique('whd'), event = unique('evt');
+        await db.query(`INSERT INTO operation_events(id, workspace_id, type, region, data, created_at) VALUES ($1, $2, 'email.delivered', $3, '{}', now())`, [event, shop, REGION]);
+        await db.query(`INSERT INTO operation_deliveries(id, workspace_id, webhook_id, event_id, payload, status, attempt_count, last_status_code) VALUES ($1, $2, $3, $4, $5, $6, 3, 500)`,
+          [id, shop, hook, event, JSON.stringify({ id: event, type: 'email.delivered' }), status]);
+        return id;
+      };
+      const inbound = async (key: string) => ok(await send('POST', '/v1/inbound/webhooks', session(boss, shop), { url: `https://example.com/hooks/${key}`, eventTypes: ['message.received'] }), 201) as Json;
+      const live = await inbound('in-live'), held = await inbound('in-held');
+      ok(await send('PATCH', `/v1/inbound/webhooks/${held.id}`, session(boss, shop), { paused: true }));
+      const shopThread = unique('thread'), received = `msg_${hex().slice(0, 32)}`;
+      await db.query('INSERT INTO mail_threads(id, workspace_id) VALUES ($1, $2)', [shopThread, shop]);
+      await db.query(`INSERT INTO mail_messages(id, workspace_id, direction, thread_id, region, subject, from_address, envelope_to) VALUES ($1, $2, 'inbound', $3, $4, 'Order 1001', 'buyer@example.org', '[]')`, [received, shop, shopThread, REGION]);
+      /** An inbound-webhook delivery; `of` a message, routed. */
+      const inboundDelivery = async (webhook: string, status: string, of?: string) => {
+        const id = unique('mwd');
+        await db.query('INSERT INTO mailbox_webhook_deliveries(id, workspace_id, webhook_id, payload, status, attempt_count, routed) VALUES ($1, $2, $3, $4, $5, 2, $6)',
+          [id, shop, webhook, JSON.stringify({ id: `mev_${id}`, type: 'message.received', ...(of ? { messageId: of } : {}) }), status, !!of]);
+        return id;
+      };
+      const campaign = unique('cmp');
+      await db.query(`INSERT INTO sending_campaigns(id, workspace_id, draft, state, total, prepared, expanded, review_id) VALUES ($1, $2, $3, 'sending', 10, 10, 2, 'synthetic-review')`,
+        [campaign, shop, JSON.stringify({ name: 'Winter sale', from: 'news@shop.example', region: REGION, subject: 'Sale', html: '<p>Sale</p>', audience: {}, attachments: [], tracking: false })]);
+      const propose = async (id: string, body: Json, status = 201) => ok(await stamped(id, 'POST', '/v1/support/actions', body), status);
+      const confirm = (actionId: string, who: SessionFixture = boss, headers: Record<string, string> = {}) => send('POST', `/v1/support-actions/${actionId}/confirm`, { ...session(who), ...headers });
+      const decline = (actionId: string, who: SessionFixture = boss) => send('POST', `/v1/support-actions/${actionId}/decline`, session(who));
+      const charged = async () => (await db.query('SELECT coalesce(sum(used), 0)::int AS n FROM mailbox_manual_delivery_budget WHERE workspace_id = $1', [shop])).rows[0].n as number;
+      const decisions = async (actionId: string) => (await db.query(`SELECT actor_type, actor_id, via, internal, ticket_ref, summary->>'outcome' AS outcome FROM audit_events WHERE action = 'support.action' AND target_id = $1 ORDER BY id`, [actionId])).rows;
+
+      await t.test('11 actions, proposing: only the six kinds, a target in scope, a role that may make it there, the summary from Nightmail’s records, at most 3 open', async () => {
+        const id = await chat(boss, shop), failed = await delivery('failed'), retry = { kind: 'retry_webhook_delivery', webhookId: hook, deliveryId: failed };
+        const proposed = await propose(id, retry);
+        assert.deepEqual([proposed.status, proposed.kind, proposed.workspaceId, proposed.target, proposed.url, proposed.result, proposed.error],
+          ['proposed', 'retry_webhook_delivery', shop, { webhookId: hook, deliveryId: failed }, `${PUBLIC_ORIGIN}/support/actions/${proposed.id}`, null, null]);
+        assert.equal(proposed.summary, `Retry the email.delivered webhook delivery ${failed} to your sending webhook ending ••••7a1f, in the workspace “${shop}”. It is failed after 3 attempts.`);
+        assert.equal(Date.parse(proposed.expiresAt) - Date.parse(proposed.createdAt), 24 * 3_600_000);
+        assert.deepEqual((await db.query('SELECT conversation_id, user_id, workspace_id FROM support_actions WHERE id = $1', [proposed.id])).rows[0], { conversation_id: id, user_id: boss.userId, workspace_id: shop });
+        assert.equal((await propose(id, retry, 200)).id, proposed.id, 'Proposing the same change again answers the open proposal.');
+        // The support platform names a kind and the IDs, nothing else: no summary, workspace or seventh kind.
+        error(await stamped(id, 'POST', '/v1/support/actions', { ...retry, summary: 'Retry one delivery (and nothing else).' }), 422);
+        error(await stamped(id, 'POST', '/v1/support/actions', { ...retry, workspaceId: shop }), 422);
+        for (const other of [{ kind: 'delete_domain', domainId: 'dom_x' }, { kind: 'resume_campaign', campaignId: campaign }, { kind: 'rotate_webhook_secret', webhookId: hook }])
+          error(await stamped(id, 'POST', '/v1/support/actions', other), 422);
+        // Targets must be in the conversation's scope: another workspace's webhook, or a delivery of another webhook, are not found.
+        error(await stamped(id, 'POST', '/v1/support/actions', { kind: 'test_webhook', webhookId: acmeHook }), 404);
+        error(await stamped(id, 'POST', '/v1/support/actions', { kind: 'retry_webhook_delivery', webhookId: acmeHook, deliveryId: failed }), 404);
+        error(await stamped(id, 'POST', '/v1/support/actions', { kind: 'redeliver_message', messageId: received, webhookId: acmeHook }), 404);
+        const ownerElsewhere = await chat(owner, acme);
+        error(await stamped(ownerElsewhere, 'POST', '/v1/support/actions', { kind: 'test_webhook', webhookId: hook }), 404, 'NOT_FOUND');
+        // A member's conversation proposes nothing, whatever the body: members get explanations.
+        const memberChat = await chat(clerk, shop);
+        for (const body of [retry, { kind: 'pause_campaign', campaignId: campaign }, { kind: 'test_inbound_webhook', webhookId: live.id }, {}]) error(await stamped(memberChat, 'POST', '/v1/support/actions', body), 404);
+        // Every summary is Nightmail's, from its own rows.
+        const summaries = [
+          [await propose(id, { kind: 'test_webhook', webhookId: hook }), `Send a test email.delivered event to your sending webhook ending ••••7a1f, in the workspace “${shop}”. No email is sent.`],
+          [await propose(id, { kind: 'pause_campaign', campaignId: campaign }), `Pause the campaign “Winter sale” (${campaign}) in the workspace “${shop}”. It stops releasing new recipients (2 of 10 released so far); resuming continues from the same place.`],
+        ];
+        for (const [action, summary] of summaries) assert.equal(action.summary, summary);
+        // At most 3 open: the fourth waits until one is confirmed, declined or expires.
+        const fourth = { kind: 'retry_inbound_delivery', webhookId: live.id, deliveryId: await inboundDelivery(live.id, 'failed') };
+        error(await stamped(id, 'POST', '/v1/support/actions', fourth), 409, 'SUPPORT_ACTIONS_OPEN');
+        await db.query(`UPDATE support_actions SET expires_at = now() - interval '1 second' WHERE id = $1`, [proposed.id]);
+        const opened = await propose(id, fourth);
+        assert.equal(opened.summary, `Retry delivery ${fourth.deliveryId} of received mail to your inbound webhook ending ••••live, in the workspace “${shop}”. It is failed after 2 attempts.`);
+        assert.equal(ok(await stamped(id, 'GET', `/v1/support/actions/${proposed.id}`)).status, 'expired');
+        // A conversation reads only its own proposals.
+        error(await stamped(await chat(boss, shop), 'GET', `/v1/support/actions/${opened.id}`), 404);
+        error(await stamped(memberChat, 'GET', `/v1/support/actions/${opened.id}`), 404);
+        const redeliver = await propose(await chat(deputy, shop), { kind: 'redeliver_message', messageId: received });
+        assert.match(redeliver.summary, new RegExp(`^Redeliver the message ${received}, received \\d{4}-\\d\\d-\\d\\dT[\\d:.]+Z, to every route webhook that already finished with it, in the workspace “${shop}”\\.$`));
+        for (const done of [id, ownerElsewhere, memberChat]) ok(reply(await platform.closeConversation(done)));
+      });
+
+      await t.test('12 actions, who confirms: only the person it was proposed to, from their own dashboard session', async () => {
+        const id = await chat(boss, shop), action = await propose(id, { kind: 'test_webhook', webhookId: hook }), path = `/v1/support-actions/${action.id}`;
+        for (const who of [deputy, clerk, outsider, operator]) {
+          error(await confirm(action.id, who, { 'x-nightmail-workspace': shop }), 404);
+          error(await decline(action.id, who), 404);
+          error(await send('GET', path, session(who)), 404);
+        }
+        error(await send('POST', `${path}/confirm`, {}), 401);
+        error(await send('POST', `${path}/confirm`, { cookie: boss.cookie }), 403, 'CSRF_ORIGIN_INVALID');
+        error(await confirm(action.id, boss, { authorization: `Bearer nm_${hex()}` }), 403, 'DASHBOARD_AUTH_REQUIRED');
+        // The binding cannot: not on its allow-list, nor through request(), nor on its runtime with the person's cookie.
+        error(reply(await platform.call('POST', `${path}/confirm`, {})), 404);
+        error(await stamped(id, 'POST', `${path}/confirm`), 404);
+        for (const stamp of [platformRuntime(), platformRuntime(id)]) {
+          const forged = await app.fetch(new Request(`${PUBLIC_ORIGIN}${path}/confirm`, { method: 'POST', headers: { cookie: boss.cookie, origin: PUBLIC_ORIGIN } }), { ...runtime, ...stamp });
+          assert.equal(forged.status, 403);
+        }
+        assert.equal((await db.query(`SELECT count(*)::int AS n FROM operation_deliveries WHERE webhook_id = $1 AND synthetic`, [hook])).rows[0].n, 0, 'Nothing ran.');
+        // The person sees Nightmail's summary, then confirms.
+        assert.deepEqual(ok(await send('GET', path, session(boss))), action);
+        const done = ok(await confirm(action.id));
+        assert.deepEqual([done.status, done.result.status, done.error], ['done', 'pending', null]);
+        assert.deepEqual(ok(await stamped(id, 'GET', `/v1/support/actions/${action.id}`)), done, 'The conversation reads the outcome from Nightmail.');
+        ok(reply(await platform.closeConversation(id)));
+      });
+
+      await t.test('13 actions, running: the public route’s own function, once; its refusals as the route answers them; the role checked again; expired and declined proposals refuse', async () => {
+        const id = await chat(boss, shop), publicly = (path: string, body: Json = {}) => send('POST', path, session(boss, shop), body);
+        // A retry runs once and is charged once, however often it is confirmed; the public route does the same.
+        const failed = await delivery('failed'), before = await charged();
+        const retry = await propose(id, { kind: 'retry_webhook_delivery', webhookId: hook, deliveryId: failed });
+        const first = ok(await confirm(retry.id)), again = ok(await confirm(retry.id));
+        assert.deepEqual(again, first, 'Confirming again answers the same.');
+        assert.deepEqual([first.status, first.result, first.error], ['done', { id: failed, status: 'pending' }, null]);
+        assert.equal(await charged(), before + 1);
+        assert.deepEqual((await db.query('SELECT status, generation FROM operation_deliveries WHERE id = $1', [failed])).rows[0], { status: 'pending', generation: 1 });
+        assert.equal((await db.query(`SELECT count(*)::int AS n FROM jobs WHERE type = 'operation.webhook' AND payload->>'deliveryId' = $1`, [failed])).rows[0].n, 1);
+        const other = await delivery('failed');
+        assert.deepEqual(ok(await publicly(`/v1/webhooks/${hook}/deliveries/${other}/retry`), 202), { id: other, status: 'pending' });
+        assert.equal(await charged(), before + 2);
+        assert.deepEqual(await decisions(retry.id), [{ actor_type: 'member', actor_id: boss.userId, via: 'dashboard', internal: true, ticket_ref: id, outcome: 'done' }]);
+        // A refusal is the public route's own, recorded, and changes nothing: DELIVERY_PENDING, ENDPOINT_PAUSED, CAMPAIGN_NOT_PAUSABLE.
+        const pending = await delivery('pending'), parked = await inboundDelivery(held.id, 'failed'), charges = await charged();
+        error(await publicly(`/v1/webhooks/${hook}/deliveries/${pending}/retry`), 409, 'DELIVERY_PENDING');
+        error(await publicly(`/v1/inbound/webhooks/${held.id}/deliveries/${parked}/retry`), 409, 'ENDPOINT_PAUSED');
+        const refusals = [[await propose(id, { kind: 'retry_webhook_delivery', webhookId: hook, deliveryId: pending }), 'DELIVERY_PENDING'],
+          [await propose(id, { kind: 'retry_inbound_delivery', webhookId: held.id, deliveryId: parked }), 'ENDPOINT_PAUSED']] as const;
+        for (const [action, code] of refusals) {
+          const refused = ok(await confirm(action.id));
+          assert.deepEqual([refused.status, refused.error.code, refused.result], ['failed', code, null]);
+          assert.deepEqual(ok(await confirm(action.id)), refused);
+          assert.deepEqual(await decisions(action.id), [{ actor_type: 'member', actor_id: boss.userId, via: 'dashboard', internal: true, ticket_ref: id, outcome: 'failed' }]);
+        }
+        assert.equal(await charged(), charges, 'A refused change charges nothing.');
+        assert.deepEqual((await db.query('SELECT status, generation FROM operation_deliveries WHERE id = $1', [pending])).rows[0], { status: 'pending', generation: 0 });
+        assert.equal((await db.query('SELECT status FROM mailbox_webhook_deliveries WHERE id = $1', [parked])).rows[0].status, 'failed');
+        // Pausing a campaign writes the route's own customer-visible row, with the person as the actor.
+        const pause = await propose(id, { kind: 'pause_campaign', campaignId: campaign });
+        assert.deepEqual([ok(await confirm(pause.id)).status, ok(await confirm(pause.id)).result], ['done', { id: campaign, state: 'paused' }]);
+        assert.equal((await db.query('SELECT state FROM sending_campaigns WHERE id = $1', [campaign])).rows[0].state, 'paused');
+        assert.deepEqual((await db.query(`SELECT actor_type, actor_id, via, internal FROM audit_events WHERE action = 'campaign.pause' AND target_id = $1`, [campaign])).rows,
+          [{ actor_type: 'member', actor_id: boss.userId, via: 'dashboard', internal: false }]);
+        error(await publicly(`/v1/campaigns/${campaign}/pause`), 409, 'CAMPAIGN_NOT_PAUSABLE');
+        const twice = ok(await confirm((await propose(id, { kind: 'pause_campaign', campaignId: campaign })).id));
+        assert.deepEqual([twice.status, twice.error], ['failed', { code: 'CAMPAIGN_NOT_PAUSABLE', message: 'This campaign is already paused.' }]);
+        // An inbound retry, a redelivery and a test of an inbound webhook, each as its route does.
+        const retried = await inboundDelivery(live.id, 'failed'), finished = await inboundDelivery(live.id, 'delivered', received);
+        assert.deepEqual(ok(await confirm((await propose(id, { kind: 'retry_inbound_delivery', webhookId: live.id, deliveryId: retried })).id)).result, { ok: true });
+        assert.equal((await db.query('SELECT status FROM mailbox_webhook_deliveries WHERE id = $1', [retried])).rows[0].status, 'pending');
+        assert.deepEqual(ok(await confirm((await propose(id, { kind: 'redeliver_message', messageId: received, webhookId: live.id })).id)).result, { queued: 1 });
+        assert.deepEqual(ok(await publicly(`/v1/inbound/messages/${received}/redeliver`, { destination: live.id }), 202), { queued: 0 }, 'Within the cooldown the route queues nothing either.');
+        assert.equal((await db.query('SELECT status FROM mailbox_webhook_deliveries WHERE id = $1', [finished])).rows[0].status, 'pending');
+        const posted: string[] = [], transport = runtime.webhookFetch;
+        runtime.webhookFetch = async url => { posted.push(url); return { status: 204 }; };
+        try {
+          const test = await propose(id, { kind: 'test_inbound_webhook', webhookId: live.id });
+          const tested = ok(await confirm(test.id));
+          assert.deepEqual([tested.status, tested.result], ['done', { statusCode: 204 }]);
+          assert.deepEqual(ok(await confirm(test.id)), tested);
+          assert.deepEqual(ok(await publicly(`/v1/inbound/webhooks/${live.id}/test`)), { statusCode: 204 });
+          assert.deepEqual(posted, ['https://example.com/hooks/in-live', 'https://example.com/hooks/in-live'], 'One post for the action, one for the route.');
+          assert.deepEqual((await decisions(test.id)).map(d => d.outcome), ['running']);
+        } finally { runtime.webhookFetch = transport; }
+        // The role is checked again when the person confirms, and the membership.
+        const theirs = await chat(deputy, shop), demoted = await propose(theirs, { kind: 'test_webhook', webhookId: hook });
+        await db.query(`UPDATE workspace_members SET role = 'member' WHERE workspace_id = $1 AND user_id = $2`, [shop, deputy.userId]);
+        error(await confirm(demoted.id, deputy), 403, 'PERMISSION_DENIED');
+        await db.query(`DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2`, [shop, deputy.userId]);
+        error(await confirm(demoted.id, deputy), 404);
+        error(await send('GET', `/v1/support-actions/${demoted.id}`, session(deputy)), 404);
+        await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'admin')`, [unique('mem'), shop, deputy.userId]);
+        assert.equal(ok(await send('GET', `/v1/support-actions/${demoted.id}`, session(deputy))).status, 'proposed', 'Nothing ran.');
+        // Declined and expired proposals refuse; a decision is final.
+        const declined = ok(await decline(demoted.id, deputy));
+        assert.deepEqual([declined.status, ok(await decline(demoted.id, deputy)).status], ['declined', 'declined']);
+        error(await confirm(demoted.id, deputy), 409, 'SUPPORT_ACTION_DECLINED');
+        assert.deepEqual((await decisions(demoted.id)).map(d => [d.actor_id, d.outcome]), [[deputy.userId, 'declined']]);
+        error(await decline(retry.id), 409, 'SUPPORT_ACTION_CONFIRMED');
+        const stale = await propose(theirs, { kind: 'test_webhook', webhookId: hook });
+        await db.query(`UPDATE support_actions SET expires_at = now() - interval '1 second' WHERE id = $1`, [stale.id]);
+        error(await confirm(stale.id, deputy), 409, 'SUPPORT_ACTION_EXPIRED');
+        error(await decline(stale.id, deputy), 409, 'SUPPORT_ACTION_EXPIRED');
+        assert.equal((await db.query(`SELECT count(*)::int AS n FROM operation_deliveries WHERE webhook_id = $1 AND synthetic`, [hook])).rows[0].n, 1, 'Only the test confirmed in 12 posted.');
+        for (const done of [id, theirs]) ok(reply(await platform.closeConversation(done)));
+      });
+
+      await t.test('14 DNS re-check: an owner or admin’s domain, at once, without a confirmation, on the trail', async () => {
+        const name = `dns-${hex().slice(0, 8)}.example`, domainId = unique('dom'), elsewhere = unique('dom');
+        await db.query(`INSERT INTO provider_connections(id, workspace_id, kind, region, state) VALUES ($1, $1, 'shared', $2, 'ready')`, [shop, REGION]);
+        await db.query(`INSERT INTO domain_claims(workspace_id, name, connection_id, sending_state) VALUES ($1, $2, $1, 'pending')`, [shop, name]);
+        await db.query('INSERT INTO operation_domains(id, workspace_id, name, region) VALUES ($1, $2, $3, $4), ($5, $6, $7, $4)', [domainId, shop, name, REGION, elsewhere, acme, `else-${hex().slice(0, 8)}.example`]);
+        const id = await chat(deputy, shop), checked = ok(await stamped(id, 'POST', `/v1/support/domains/${domainId}/verify`));
+        assert.deepEqual([checked.id, checked.workspaceId, checked.name, checked.verified, checked.recheckQueued], [domainId, shop, name, false, true]);
+        assert.equal((await db.query(`SELECT count(*)::int AS n FROM jobs WHERE type = 'domain.verify' AND payload->>'domainId' = $1`, [domainId])).rows[0].n, 1);
+        const own = ok(await send('POST', `/v1/domains/${domainId}/verify`, session(deputy, shop)));
+        assert.deepEqual([checked.verificationStatus, checked.dkimStatus, checked.sending, checked.receiving, checked.mailFromStatus], [own.verificationStatus, own.dkimStatus, own.sending, own.receiving, own.mailFromStatus],
+          'The same stored status as the customer’s own Verify.');
+        assert.deepEqual((await db.query(`SELECT actor_type, actor_id, user_id, via, internal, ticket_ref, workspace_id, summary FROM audit_events WHERE action = 'support.action' AND target_id = $1`, [domainId])).rows,
+          [{ actor_type: 'support', actor_id: id, user_id: deputy.userId, via: 'support', internal: true, ticket_ref: id, workspace_id: shop, summary: { kind: 'verify_domain', domain: name, queued: true } }]);
+        // A member's conversation cannot, another workspace's domain is not found, and nothing else is a write.
+        error(await stamped(await chat(clerk, shop), 'POST', `/v1/support/domains/${domainId}/verify`), 404);
+        error(await stamped(id, 'POST', `/v1/support/domains/${elsewhere}/verify`), 404);
+        error(await stamped(id, 'POST', `/v1/support/domains/${domainId}/health`), 404);
+        ok(reply(await platform.closeConversation(id)));
+      });
     });
   });
 
