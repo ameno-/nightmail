@@ -16,19 +16,22 @@ SET LOCAL lock_timeout='2s';
 --
 -- lock order: begin
 -- This migration takes its locks first, in this order; every live path takes a subsequence of them in the same order:
---   billing_config (its row) > the meter fence (314: advisory 31401, exclusive) > billing_accounts (EXCLUSIVE)
+--   billing_config (its row) > the meter fence (314: advisory 31401), taken and released > billing_accounts (EXCLUSIVE)
 -- - set-billing-enforcement: the config row, then billing_settle_all: the fence, then each account.
 -- - Meter writes (sends, refunds, received mail, Omens): the fence (shared), then usage rows. The storage day takes the
 --   config row before the fence.
 -- - The settler and money posts: an account, then usage rows, the ledger, lots and jobs.
 -- So it waits for a mode switch in flight (its decision is recorded before the cutover below reads anything, and the
--- cutover writes no decisions of its own), then for every meter write in flight (the cutover sees and settles its usage),
--- then for a settlement or money post in flight; and holds them all off until it commits. Plain reads (the position, the
--- gate, the dashboard) go on. A writer whose transaction began before and writes after it meters into an hour already
--- frozen, and that usage is not charged.
+-- cutover writes no decisions of its own), then for every meter write in flight (so the cutover sees and settles its
+-- usage), then for a settlement or money post in flight, and holds the switches and money off until it commits. The
+-- fence is released at once: a send may hold its workspace's recharge job (the gate queues it) when it reaches the
+-- fence, and the settlement below can wait for that job. Meter writes after it go on, into the current hour; one whose
+-- transaction began before the hour meters into an hour already priced as settled, and that usage is not charged.
+-- Plain reads (the position, the gate, the dashboard) go on throughout.
 -- lock order: end
 SELECT 1 FROM billing_config WHERE singleton FOR UPDATE;
-SELECT pg_advisory_xact_lock(31401, 0);
+SELECT pg_advisory_lock(31401, 0);
+SELECT pg_advisory_unlock(31401, 0);
 LOCK TABLE billing_accounts IN EXCLUSIVE MODE;
 
 -- What settlement has taken into account for each workspace and month, written only by the settler: the units and
@@ -58,11 +61,6 @@ CREATE TABLE IF NOT EXISTS billing_forgiven (
   units bigint NOT NULL CHECK (units >= 0),
   PRIMARY KEY (workspace_id, hour, meter));
 
--- Installation-simulated sends metered when they were written (billing_config.bill_simulated): a refund of simulated
--- mail gives back only what was metered, whatever the setting is when it comes. Hosted installations send no
--- simulated mail, so this stays empty there.
-CREATE TABLE IF NOT EXISTS billing_simulated_sends (email_id text PRIMARY KEY);
-
 -- The cutover, once (below): hours before `hour` are priced as the settler before this migration settled them, and
 -- not charged by this model. -infinity on an installation that had metered nothing.
 CREATE TABLE IF NOT EXISTS billing_owed_from (
@@ -83,17 +81,17 @@ CREATE OR REPLACE FUNCTION billing_charged(wid text, h timestamptz) RETURNS bool
 $$;
 
 -- The cutover, once, by the settler before this migration (it is replaced below). Every closed hour is settled now, as
--- its next hourly run would (one billing was off for settles at $0, as it would when billing came back on): the locks
--- above have drained every meter write, so nothing is missed. Every hour before the current one is then priced as it
--- settled, and a refund written into one later gives nothing back. That is exact only while no usage has ever been
--- charged money, which was so in production when this shipped (the read-only preflight on the PR), so it is checked:
--- if any usage settlement moved money, or any hour holds charged units a refund could give back, the migration stops
--- instead. It is one transaction: stopped or interrupted, it leaves nothing behind, and the next run starts over.
+-- its next hourly run would (one billing was off for settles at $0, as it would when billing came back on): every
+-- meter write in flight has committed (the fence above), and a row a later writer holds is waited for. Every hour
+-- before the current one is then priced as it settled, and a refund written into one later gives nothing back. That is
+-- exact only while no usage has ever been charged money, which was so in production when this shipped (the read-only
+-- preflight on the PR), so it is checked, also on an installation with no hourly rows left: if any usage settlement
+-- moved money, or any hour holds charged units a refund could give back, the migration stops instead. It is one
+-- transaction: stopped or interrupted, it leaves nothing behind, and the next run starts over.
 DO $$
 DECLARE cut timestamptz := date_trunc('hour', now(), 'UTC'); w text; paid_ws text[];
 BEGIN
   IF EXISTS (SELECT FROM billing_owed_from) THEN RETURN; END IF;
-  IF NOT EXISTS (SELECT FROM billing_usage_hourly) THEN INSERT INTO billing_owed_from(hour) VALUES ('-infinity'); RETURN; END IF;
   FOR w IN SELECT DISTINCT workspace_id FROM billing_usage_hourly WHERE (quantity <> settled_quantity OR refunds <> '{}') AND hour < cut ORDER BY 1 LOOP
     PERFORM 1 FROM billing_usage_hourly WHERE workspace_id = w AND (quantity <> settled_quantity OR refunds <> '{}') AND hour < cut
       ORDER BY hour, meter, rate_version FOR UPDATE;
@@ -106,6 +104,8 @@ BEGIN
     RAISE EXCEPTION '% workspace(s) were charged money for usage before the owed model', cardinality(paid_ws) USING
       HINT = 'Pricing past hours as settled would change what their refunds give back. Workspaces: ' || array_to_string(paid_ws[1:20], ', ');
   END IF;
+  -- Nothing metered (a new installation): every hour is priced by the owed model.
+  IF NOT EXISTS (SELECT FROM billing_usage_hourly) THEN INSERT INTO billing_owed_from(hour) VALUES ('-infinity'); RETURN; END IF;
   INSERT INTO billing_owed_from(hour) VALUES (cut);
   -- What has settled, month by month: none of it was charged money, so every month is posted at its cost, $0.
   INSERT INTO billing_months (workspace_id, month, sent, received, other_uc, uncharged_sent, uncharged_received, uncharged_other_uc)
@@ -305,10 +305,8 @@ $$;
 
 -- Send meters write a send into the hour it was created in (the hour its refund notes), after the workspace's
 -- send-meter lock (31403): a statement's refunds can write several hours' rows (the current one, earlier months' last
--- ones), and with the lock two transactions never take a workspace's rows in opposite orders. Installation-simulated
--- mail metered is recorded (billing_simulated_sends).
+-- ones), and with the lock two transactions never take a workspace's rows in opposite orders.
 CREATE OR REPLACE FUNCTION billing_meter_sends() RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE sim boolean := (SELECT bill_simulated FROM billing_config WHERE singleton);
 BEGIN
   PERFORM billing_meter_fence(w) FROM (SELECT DISTINCT workspace_id AS w FROM new_mail ORDER BY 1) x;
   PERFORM pg_advisory_xact_lock(31403, h) FROM (SELECT DISTINCT hashtext(workspace_id) AS h FROM new_mail ORDER BY 1) x;
@@ -320,45 +318,31 @@ BEGIN
          1, sum(jsonb_array_length(n.to_addresses||n.cc_addresses||n.bcc_addresses))
   FROM new_mail n
   CROSS JOIN LATERAL (SELECT kind FROM provider_connections WHERE workspace_id=n.workspace_id ORDER BY kind LIMIT 1) pc
-  WHERE (NOT n.simulated OR sim) AND hosted_charged(n.status,n.provider_id,n.error_code)
+  CROSS JOIN (SELECT bill_simulated FROM billing_config WHERE singleton) cfg
+  WHERE (NOT n.simulated OR cfg.bill_simulated) AND hosted_charged(n.status,n.provider_id,n.error_code)
   GROUP BY 1,2,3 ORDER BY 1,2,3
   ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity;
-  IF sim THEN
-    INSERT INTO billing_simulated_sends(email_id) SELECT n.id FROM new_mail n
-      WHERE n.simulated AND hosted_charged(n.status,n.provider_id,n.error_code) AND EXISTS (SELECT FROM provider_connections c WHERE c.workspace_id=n.workspace_id)
-      ORDER BY 1 ON CONFLICT DO NOTHING;
-  END IF;
   RETURN NULL;
 END $$;
 
 -- 314's change of a send between charged and not (a cancellation, a rejection before SES, a validation suppression,
 -- or a later delivery): a refund goes into the current hour, or an earlier month's mail into that month's last hour,
 -- noting the hour its mail was metered in (where billing_row_deltas counts it); settlement takes it once that hour has
--- closed, as before. Two changes:
--- - A send charged again counts now, in the current hour, as before; one of an earlier month's mail isn't charged (it
---   was priced against that month under today's mode). The send path never refunds a send after that: cancellations
---   are of queued mail, and a delivery is kept over a later suppression (migration 153).
--- - Simulated mail is refunded only if it was metered (billing_simulated_sends); mail written before this migration as
---   before, by today's bill_simulated.
+-- closed, as before. Installation-simulated mail is refunded or charged by today's bill_simulated, as before. One
+-- change: a send charged again counts now, in the current hour, as before, but one of an earlier month's mail isn't
+-- charged (it was priced against that month under today's mode). The send path never refunds a send after that:
+-- cancellations are of queued mail, and a delivery is kept over a later suppression (migration 153).
 CREATE OR REPLACE FUNCTION billing_adjust_sends() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE d bigint; m text; h timestamptz; k text; now_hour timestamptz := date_trunc('hour',now(),'UTC');
   earlier boolean := date_trunc('month',NEW.created_at,'UTC') < date_trunc('month',now(),'UTC');
-  sim boolean := (SELECT bill_simulated FROM billing_config WHERE singleton);
 BEGIN
+  IF NEW.simulated AND NOT (SELECT bill_simulated FROM billing_config WHERE singleton) THEN RETURN NULL; END IF;
   d := (hosted_charged(NEW.status,NEW.provider_id,NEW.error_code)::int - hosted_charged(OLD.status,OLD.provider_id,OLD.error_code)::int)
        * jsonb_array_length(NEW.to_addresses||NEW.cc_addresses||NEW.bcc_addresses);
   m := CASE WHEN EXISTS (SELECT FROM provider_pool_regions p WHERE p.feedback_topic_arn=NEW.feedback_topic_arn) THEN 'send'
     ELSE (SELECT CASE WHEN NEW.feedback_topic_arn IS NULL AND kind='shared' THEN 'send' ELSE 'byo_send' END
           FROM provider_connections WHERE workspace_id=NEW.workspace_id ORDER BY kind LIMIT 1) END;
   IF d=0 OR m IS NULL OR (d > 0 AND earlier) THEN RETURN NULL; END IF;
-  IF NEW.simulated THEN
-    IF d < 0 THEN
-      DELETE FROM billing_simulated_sends WHERE email_id=NEW.id;
-      IF NOT FOUND AND NOT (sim AND NEW.created_at < (SELECT migrated_at FROM billing_owed_from)) THEN RETURN NULL; END IF;
-    ELSIF sim THEN INSERT INTO billing_simulated_sends(email_id) VALUES (NEW.id) ON CONFLICT DO NOTHING;
-    ELSE RETURN NULL;
-    END IF;
-  END IF;
   PERFORM billing_meter_fence(NEW.workspace_id);
   PERFORM pg_advisory_xact_lock(31403, hashtext(NEW.workspace_id));
   -- Month arithmetic on UTC wall-clock timestamps: timestamptz + interval '1 month' would follow the session TimeZone.

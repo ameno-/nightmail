@@ -8558,27 +8558,26 @@ describe('Billing: metering, gate and settlement', () => {
     });
   });
 
-  test('canceling simulated mail that was never billed gives nothing back, also once simulated mail is billed (review of #393, finding 3)', async t => {
+  test('simulated mail is refunded by today\'s bill_simulated, as before 333: with it off nothing comes back, with it on even mail never billed is refunded (review of #393, finding 3, kept as before on installations that simulate SES)', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
       await db.query(`UPDATE billing_config SET bill_simulated=false`);
       const at = await clock(db, '2027-03-03T09:00:00Z'), w = await hosted(db, 'billing-r1-simulated');
+      const refunds = async () => Number((await db.query(`SELECT coalesce(sum(quantity),0)::int AS n FROM billing_usage_hourly WHERE workspace_id=$1 AND refunds <> '{}'`, [w.wid])).rows[0].n);
       // Not billed: 1,000 simulated recipients at 10:00 and 1,000 at 11:00. Billed: 4,000 real ones at 11:00, $0.20, unpaid.
       await at('2027-03-03T10:00:00Z'); const alone = await w.mail(1000, '2027-03-03T10:00:00Z', true);
       await at('2027-03-03T11:00:00Z'); const beside = await w.mail(1000, '2027-03-03T11:00:00Z', true); await w.mail(4000, '2027-03-03T11:00:00Z');
       await at('2027-03-03T12:07:00Z'); await settle(db, w.wid);
       assert.equal((await w.totals()).balance, '-20000000');
-      // Simulated mail is billed from 12:30: 1,000 more simulated recipients cost $0.20. The 2,000 never billed are
-      // canceled: nothing comes back, in its own hour or in one with paid mail (before 334 that mail's charge came back).
+      // Canceled while simulated mail isn't billed: nothing is refunded.
+      await at('2027-03-03T12:10:00Z'); await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [alone]);
+      assert.equal(await refunds(), 0);
+      // Canceled once it is billed: refunded, though it was never billed (known; only where SES is simulated). Its
+      // month's charged total drops by 1,000, so the $0.20 comes back.
       await db.query(`UPDATE billing_config SET bill_simulated=true`);
-      await at('2027-03-03T12:30:00Z');
-      const billed = await w.mail(1000, '2027-03-03T12:30:00Z', true);
-      await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=ANY($1)`, [[alone, beside]]);
+      await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [beside]);
+      assert.equal(await refunds(), -1000);
       await at('2027-03-03T13:07:00Z'); await settle(db, w.wid);
-      assert.equal((await w.totals()).balance, '-40000000');
-      // Canceling the billed simulated mail gives its price back.
-      await at('2027-03-03T13:10:00Z'); await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [billed]);
-      await at('2027-03-03T14:07:00Z'); await settle(db, w.wid);
-      assert.equal((await w.totals()).balance, '-20000000');
+      assert.equal((await w.totals()).balance, '0');
     });
   });
 
@@ -8600,9 +8599,9 @@ describe('Billing: metering, gate and settlement', () => {
     });
   });
 
-  test('the owed model\'s cutover waits for a send in flight and for an operator\'s switch, and a refused run changes nothing (review of #393, findings 5 and 6)', { skip: DATABASE_FIXTURE_SKIP }, async t => {
-    // Every migration before the owed model's, in a schema of its own, then the owed model's while a second connection
-    // holds a send or a switch open.
+  // Every migration before the owed model's, in a schema of its own (dropped afterwards), and two connections on it: A
+  // runs the owed model's migration while B holds a send, a switch or a job open.
+  const preOwedSchema = async (t: TestContext) => {
     const a = await fixtureDatabase(t), b = await fixtureDatabase(t), schema = 'billing_cut_' + randomUUID().replaceAll('-', '');
     const { readdir } = await import('node:fs/promises'), dir = new URL('./migrations/', import.meta.url);
     const files = (await readdir(dir)).filter(f => /^\d+_[a-z_]+\.sql$/.test(f)).sort(), owed = files.findIndex(f => f.endsWith('_billing_owed_model.sql'));
@@ -8626,12 +8625,26 @@ describe('Billing: metering, gate and settlement', () => {
         await new Promise(resolve => setTimeout(resolve, 20));
       }
     };
-    const send = (c: pg.Client, wid: string, recipients: number, age: string) => c.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
-      VALUES ($1,$2,$3,'fixture','hello@billing.example',(SELECT jsonb_agg('r'||n||'@example.net') FROM generate_series(1,$4::int) n),'[]','[]','Cutover','{}',false,date_trunc('hour',now(),'UTC')-$5::interval)`, [unique('mail'), wid, REGION, recipients, age]);
-    for (const wid of ['w-committed', 'w-flight']) {
+    const hosted = async (wid: string) => {
       await a.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [wid]);
       await a.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared','222233334444','ready')`, [wid, REGION]);
-    }
+    };
+    const send = (c: pg.Client, wid: string, recipients: number, age: string) => c.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+      VALUES ($1,$2,$3,'fixture','hello@billing.example',(SELECT jsonb_agg('r'||n||'@example.net') FROM generate_series(1,$4::int) n),'[]','[]','Cutover','{}',false,date_trunc('hour',now(),'UTC')-$5::interval)`, [unique('mail'), wid, REGION, recipients, age]);
+    return { a, b, schema, migration, migrate, waiting, hosted, send };
+  };
+
+  test('the owed model\'s cutover waits for a send in flight and for an operator\'s switch, refuses whenever usage moved money, and a refused run changes nothing (review of #393, findings 5 and 6, and round 2 D)', { skip: DATABASE_FIXTURE_SKIP }, async t => {
+    const { a, b, schema, migration, migrate, waiting, hosted, send } = await preOwedSchema(t);
+    await t.test('round 2 D: usage that moved money stops the migration also when no hourly rows are left', async () => {
+      await a.query('BEGIN');
+      await a.query(`SELECT billing_post('w-restored','usage','usage:restored',-20000000,0,'{"meters":{},"charged":true}','system')`);
+      assert.equal((await a.query('SELECT count(*)::int AS n FROM billing_usage_hourly')).rows[0].n, 0);
+      await assert.rejects(a.query(migration), /charged money for usage/);
+      await a.query('ROLLBACK');
+      assert.equal((await a.query(`SELECT to_regclass('billing_owed_from') AS t`)).rows[0].t, null);
+    });
+    for (const wid of ['w-committed', 'w-flight']) await hosted(wid);
     // Enforced, with 2,000 recipients metered two hours ago (free, so the cutover has hours to settle and freeze).
     assert.equal((await a.query('SELECT mode FROM billing_config')).rows[0].mode, 'enforce');
     await a.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ('w-committed',date_trunc('hour',now(),'UTC')-interval '2 hours','send',2000)`);
@@ -8675,6 +8688,26 @@ describe('Billing: metering, gate and settlement', () => {
       await migrate();
       assert.deepEqual([await state(), await charged()], [before, { before: false, now: false, next: true }]);
     });
+  });
+
+  test('the cutover never waits on a send\'s recharge job while holding the meter fence: a send that queues auto-recharge and the migration both complete (review of #393, round 2 C)', { skip: DATABASE_FIXTURE_SKIP }, async t => {
+    const { a, b, migrate, waiting, hosted, send } = await preOwedSchema(t);
+    // Prepaid, auto-recharge on and $1 below its $5 threshold, with one free recipient in the last closed hour, which the
+    // cutover settles (and so queues the recharge).
+    await hosted('w-recharge');
+    await a.query(`SELECT billing_post('w-recharge','topup','attempt:w-recharge',100000000,0,'{}','stripe')`);
+    await a.query(`UPDATE billing_accounts SET recharge_enabled=true, recharge_threshold_uc=500000000, stripe_payment_method='pm_fixture' WHERE workspace_id='w-recharge'`);
+    await a.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ('w-recharge',date_trunc('hour',now(),'UTC')-interval '1 hour','send',1)`);
+    // B is a send: the gate admits it and queues the recharge job, which B holds until it commits.
+    await b.query('BEGIN');
+    assert.equal((await b.query(`SELECT billing_gate('w-recharge', 1) AS g`)).rows[0].g.ok, true);
+    const run = migrate();
+    await waiting();   // the cutover's settlement waits for B's recharge job
+    await send(b, 'w-recharge', 1, '0 minutes');   // B meters the send: the fence was released, so it doesn't wait
+    await b.query('COMMIT');
+    await run;
+    assert.deepEqual((await a.query(`SELECT (SELECT count(*)::int FROM sending_emails WHERE workspace_id='w-recharge') AS sent,
+      (SELECT count(*)::int FROM jobs WHERE id='billing.recharge:w-recharge') AS jobs, (SELECT count(*)::int FROM billing_owed_from) AS cutover`)).rows[0], { sent: 1, jobs: 1, cutover: 1 });
   });
 
   test('the hourly run settles every workspace with work due: hundreds of fresh cancellations don\'t hide a closed hour (review of #393, finding 7)', async t => {
