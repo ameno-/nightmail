@@ -72,7 +72,7 @@ const Detail = z.object({
     workspaces: z.array(z.object({ id: z.string(), name: z.string(), role: z.string(), joinedAt: z.string(), createdAt: z.string(), members: z.number().int(),
       inScope: z.boolean(), contentShared: z.boolean(), sending: z.object({ kind: z.string(), region: z.string().nullable(), paused: z.boolean() }).nullable(), standing: z.string().nullable() })),
     conversations: z.array(z.object({ id: z.string(), channel: z.string(), mode: z.string(), verification: z.string(), status: z.string(), subject: z.string().nullable(), ticket: Ticket.nullable(),
-      createdAt: z.string(), lastMessageAt: z.string().nullable() })).describe('Their other support conversations (the same person, or the same sender address), newest first.'),
+      createdAt: z.string(), lastMessageAt: z.string().nullable() })).describe('Their other support conversations, newest first: the same person’s; for a conversation bound to nobody, the others from its address that are bound to nobody either.'),
     activity: z.array(z.object({ id: z.string(), at: z.string(), action: z.string(), workspaceId: z.string().nullable(), actorType: z.string(), via: z.string(), internal: z.boolean(),
       summary: z.record(z.string(), z.unknown()) })).describe('Their latest 20 audit entries, without support’s own per-request reads.'),
     notes: z.array(z.object({ id: z.string(), text: z.string(), author: z.enum(['agent', 'staff']), workspaceId: z.string().nullable(), conversationId: z.string(), createdAt: z.string() }))
@@ -337,7 +337,8 @@ export function registerSupportInbox(app: App) {
           FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id WHERE m.user_id = conv.user_id ORDER BY w.name, w.id LIMIT 50) x) AS workspaces,
         (SELECT coalesce(json_agg(x ORDER BY x.activity DESC, x.id DESC), '[]') FROM (SELECT o.id, o.channel, o.mode, o.verification, o.status, o.subject, o.ticket_id, o.ticket_type, o.ticket_severity,
             o.ticket_resolved_at, o.created_at AS "createdAt", o.last_message_at AS "lastMessageAt", coalesce(o.last_message_at, o.created_at) AS activity FROM support_conversations o
-          WHERE o.id <> conv.id AND ((conv.user_id IS NOT NULL AND o.user_id = conv.user_id) OR (conv.pending_address IS NOT NULL AND lower(o.pending_address) = lower(conv.pending_address)))
+          WHERE o.id <> conv.id AND CASE WHEN conv.user_id IS NOT NULL THEN o.user_id = conv.user_id
+            ELSE o.user_id IS NULL AND lower(o.pending_address) = lower(conv.pending_address) END
           ORDER BY coalesce(o.last_message_at, o.created_at) DESC, o.id DESC LIMIT 20) x) AS conversations,
         (SELECT coalesce(json_agg(x ORDER BY x.at DESC, x.n DESC), '[]') FROM (SELECT 'aud_' || e.id AS id, e.id AS n, e.at, e.action, e.workspace_id AS "workspaceId", e.actor_type AS "actorType", e.via,
             e.internal, e.summary FROM audit_events e WHERE e.user_id = conv.user_id AND e.action <> 'support.read' ORDER BY e.at DESC, e.id DESC LIMIT 20) x) AS activity,

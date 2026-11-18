@@ -6515,7 +6515,42 @@ describe('Hosted MCP OAuth and tools', () => {
           error(await send('GET', `${inbox}?limit=1&view=paused&cursor=${pageOne.nextCursor}`, session(reader)), 422, 'INVALID_CURSOR');
         });
 
-        await t.test('7 purge: a transcript and its subject go 90 days after the conversation closed', async () => {
+        await t.test('7 related conversations: only the same bound person’s; an address that changed hands never joins two people, and a sender bound to nobody never sees a bound customer’s history', async () => {
+          // Real email registrations at a support address, from one address that belongs to Alice and later to Bob.
+          const box = `mbx_${hex().slice(0, 32)}`, domainName = `sup-${hex().slice(0, 10)}.example`, domain = unique('mdom'), thread = unique('thread'), address = `reassigned-${hex().slice(0, 8)}@example.invalid`;
+          await db.query("INSERT INTO mailbox_domains(id, workspace_id, domain_id, name, region, status) VALUES ($1, $2, $1, $3, $4, 'active')", [domain, home, domainName, REGION]);
+          await db.query('INSERT INTO mailboxes(id, workspace_id, domain_id, address) VALUES ($1, $2, $3, $4)', [box, home, domain, `support@${domainName}`]);
+          await db.query('INSERT INTO mail_threads(id, workspace_id) VALUES ($1, $2)', [thread, home]);
+          const register = async (dmarc = 'PASS') => {
+            const messageId = `msg_${hex().slice(0, 32)}`, id = conversation();
+            await db.query(`INSERT INTO mail_messages(id, workspace_id, direction, thread_id, region, subject, from_address, envelope_to, verdicts, headers) VALUES ($1, $2, 'inbound', $3, $4, 'Help', $5, '[]', $6, $7)`,
+              [messageId, home, thread, REGION, address, JSON.stringify({ dmarc, dkim: 'PASS', spf: 'PASS' }), JSON.stringify([{ name: 'From', value: `<${address}>` }, { name: 'DKIM-Signature', value: `v=1; a=rsa-sha256; d=example.invalid; s=s1; bh=x; b=y` }])]);
+            await db.query("INSERT INTO mailbox_messages(mailbox_id, message_id, workspace_id, thread_id, direction, received_at) VALUES ($1, $2, $3, $4, 'inbound', now())", [box, messageId, home, thread]);
+            const body = ok(reply(await platform.registerConversation({ conversationId: id, evidence: { kind: 'email', messageId } })), 201);
+            return { id, mode: body.mode as string, userId: (await db.query('SELECT user_id FROM support_conversations WHERE id = $1', [id])).rows[0].user_id as string | null };
+          };
+          const related = async (id: string) => ok(await send('GET', `${inbox}/${id}`, session(reader))).customer.conversations.map((o: Json) => o.id).sort();
+          const configured = runtime.config.support!.addressIds;
+          runtime.config.support!.addressIds = [box];
+          try {
+            const alice = await sessionFixture(t), bob = await sessionFixture(t);
+            await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'member'),($4,$5,$6,'member')`, [unique('mem'), acme, alice.userId, unique('mem'), beta, bob.userId]);
+            await db.query('UPDATE nightmail_users SET email = $2 WHERE id = $1', [alice.userId, address]);
+            const fromAlice = await register();
+            await db.query('UPDATE nightmail_users SET email = $2 WHERE id = $1', [alice.userId, `moved-${hex().slice(0, 8)}@example.invalid`]);
+            await db.query('UPDATE nightmail_users SET email = $2 WHERE id = $1', [bob.userId, address]);
+            const fromBob = await register(), againFromBob = await register();
+            assert.deepEqual([fromAlice.mode, fromAlice.userId, fromBob.mode, fromBob.userId], ['member', alice.userId, 'member', bob.userId]);
+            ok(reply(await platform.mirrorState(fromBob.id, { subject: 'Bob private account question', ticket: { id: ticketId(), type: 'account', severity: 'P2' } })));
+            const unproven = await register('FAIL'), alsoUnproven = await register('FAIL');
+            assert.deepEqual([unproven.mode, unproven.userId], ['pending_signin', null]);
+            assert.deepEqual(await related(fromAlice.id), [], 'Bob’s conversations are not Alice’s history.');
+            assert.deepEqual(await related(fromBob.id), [againFromBob.id]);
+            assert.deepEqual(await related(unproven.id), [alsoUnproven.id], 'Mail that proved nothing sees no bound customer’s history.');
+          } finally { runtime.config.support!.addressIds = configured; }
+        });
+
+        await t.test('8 purge: a transcript and its subject go 90 days after the conversation closed', async () => {
           const old = await stranger(), recent = await stranger();
           for (const id of [old, recent]) {
             ok(reply(await platform.mirrorMessages(id, [{ id: msg(), author: 'customer', text: 'Hello' }])));
