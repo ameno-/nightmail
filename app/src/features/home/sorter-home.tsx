@@ -26,12 +26,12 @@ const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').match
 // API's acceptance time as measured on 2026-11-15.
 const SEEN = 'sorter.seen'
 /** The seven routes by the names the product uses (a phone's machine has a lane for four of them: sorter/plan.ts); a scam's route is the laser. */
-export const LANE_NAMES = ['Threads', 'Endpoints', 'Agents', 'Inbox', 'IMAP', 'Rituals', 'Campaigns'] as const
+export const LANE_NAMES = ['Threads', 'Endpoints', 'Agents', 'Inbox', 'IMAP', 'Rules', 'Campaigns'] as const
 /** The same where a lane's plate is too narrow for its name. */
-const LANE_CODES = ['Thr', 'End', 'Agt', 'Inb', 'IMAP', 'Rit', 'Cmp'] as const
+const LANE_CODES = ['Thr', 'End', 'Agt', 'Inb', 'IMAP', 'Rule', 'Cmp'] as const
 /** Where each of the eight tubes leads, in the tubes' own order (sorter/plan.ts). */
-const TUBE_NAMES = ['Inbox', 'Agents', 'Endpoints', 'Threads', 'IMAP', 'Rituals', 'Campaigns', 'Logs'] as const
-const TUBE_CODES = ['Inb', 'Agt', 'End', 'Thr', 'IMAP', 'Rit', 'Cmp', 'Logs'] as const
+const TUBE_NAMES = ['Inbox', 'Agents', 'Endpoints', 'Threads', 'IMAP', 'Rules', 'Campaigns', 'Logs'] as const
+const TUBE_CODES = ['Inb', 'Agt', 'End', 'Thr', 'IMAP', 'Rule', 'Cmp', 'Logs'] as const
 const KONAMI = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'b', 'a']
 
 export function SorterHome({ start, notice }: HomeProps) {

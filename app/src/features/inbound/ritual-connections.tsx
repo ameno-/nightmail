@@ -60,7 +60,7 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
   const targetRequired = !editing || retyped
   const targetError = !value ? (tried && targetRequired && !(editing?.type === 'forward') ? (retyped ? `Enter the ${typeLabel[type]} webhook URL to switch to ${typeLabel[type]}.` : `Enter the ${targetLabel[type].replace(/^HTTPS URL$/, 'URL').toLowerCase()}.`) : '')
     : targetProblem(type, value)
-  const nameError = name && !nameValid ? `Use lowercase letters, digits and hyphens, like ${name.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '') || 'support'}.` : !name && tried ? 'Name it, like support. Rituals call it by this name.' : ''
+  const nameError = name && !nameValid ? `Use lowercase letters, digits and hyphens, like ${name.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '') || 'support'}.` : !name && tried ? 'Name it, like support. Rules call it by this name.' : ''
   // Only what changed goes to the API; an empty URL field is left out, so the stored URL stays.
   const changes = editing ? {
     ...(name.trim() !== editing.name ? { name: name.trim() } : {}),
@@ -125,13 +125,13 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
   </Dialog>
 }
 
-/** Shown once after creating an endpoint: how rituals call it, and a webhook's signing secret, which is never shown again. */
-export function CreatedEndpointDialog({ created, onClose, writeRitual = true }: { created: (Endpoint & { secret?: string }) | null; onClose: () => void; writeRitual?: boolean }) {
+/** Shown once after creating an endpoint: how rules call it, and a webhook's signing secret, which is never shown again. */
+export function CreatedEndpointDialog({ created, onClose, writeRule = true }: { created: (Endpoint & { secret?: string }) | null; onClose: () => void; writeRule?: boolean }) {
   const call = created ? `${created.call}${created.type === 'slack' ? '({ text: `New mail from ${email.from.address}` })' : created.type === 'discord' ? '({ content: `New mail from ${email.from.address}` })' : created.type === 'webhook' ? '({ subject: email.subject })' : '()'}` : ''
   return <Dialog sensitive={Boolean(created?.secret)} open={!!created} onOpenChange={next => { if (!next) onClose() }} title={created?.status === 'pending' ? 'Confirmation sent' : 'Endpoint created'}
-    footer={<><Button onClick={onClose}>Done</Button>{writeRitual && created?.status !== 'pending' && <Link className="ui-button ui-button--primary ui-button--md" to="/receiving/rituals/new" onClick={onClose}>New ritual</Link>}</>}>
+    footer={<><Button onClick={onClose}>Done</Button>{writeRule && created?.status !== 'pending' && <Link className="ui-button ui-button--primary ui-button--md" to="/receiving/rules/new" onClick={onClose}>New rule</Link>}</>}>
     {created && <div className="stack">
-      <Field label="Call it from a ritual"><div className="settings-copy-cell"><code>{call}</code><CopyButton value={call} label="Copy call" /></div></Field>
+      <Field label="Call it from a rule"><div className="settings-copy-cell"><code>{call}</code><CopyButton value={call} label="Copy call" /></div></Field>
       {created.secret && <SecretField label="Signing secret" value={created.secret} copyLabel="Copy secret" />}
     </div>}
   </Dialog>

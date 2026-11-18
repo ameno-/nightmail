@@ -66,9 +66,10 @@ Object.assign(SKIP, {
   listSupportEvents: supportInternal, listSupportWebhookDeliveries: supportInternal, getSupportStanding: supportInternal, getSupportBilling: supportInternal, listSupportAudit: supportInternal,
   getSupportRequest: supportInternal, listSupportRequests: supportInternal, getSupportDeliveryMetrics: supportInternal, getSupportBounceReasons: supportInternal, getSupportDomainHealth: supportInternal, getSupportScreen: supportInternal,
   listSupportCampaigns: supportInternal, getSupportCampaign: supportInternal, getSupportEmailLint: supportInternal, getSupportCampaignLint: supportInternal, getSupportAudienceHealth: supportInternal,
+  getSupportScope: 'Internal: needs a support conversation the support platform registered through its service binding; covered by isolated acceptance.', updateSupportScope: 'Internal: needs a support conversation the support platform registered through its service binding; covered by isolated acceptance.',
 });
 SKIP.retryInboundWebhookDelivery='Requires an exhausted run-owned inbound delivery; retries and leases are exercised offline.';
-// The receiving MVP (routing, rituals, endpoints, agent inboxes) is exercised end to end by the isolated acceptance
+// The receiving MVP (routing, rules, endpoints, agent inboxes) is exercised end to end by the isolated acceptance
 // suite. Live steps need a run-owned receiving host and the R2 mail store on dev; until then each operation is
 // listed here by ID so the report shows it as skipped, never silently covered.
 // Billing: reads run in the plan-usage step. Moving money needs a signed-in owner (or, for a top-up link, a Stripe
@@ -82,6 +83,9 @@ Object.assign(SKIP, {
   getBillingPayment: 'Needs a run-owned payment; the E2E workspace never pays. Covered by isolated acceptance.',
 });
 const receivingMvp = 'Receiving MVP: covered by isolated acceptance; live steps follow the dev R2 mail-store rollout.';
+// The rule operations' deprecated /v1/rituals aliases (src/rule-names.ts): the same handlers, covered by isolated acceptance.
+const ruleAlias = 'Deprecated alias of a rule operation (src/rule-names.ts); the same handler, covered by isolated acceptance.';
+Object.assign(SKIP, Object.fromEntries(['getRituals','applyRituals','attachRituals','testRituals','getRitual','saveRitual','deleteRitual','updateRitual','checkRitual','getRitualTypings','listRitualTemplates','listRitualRecipes','createRitualFromRecipe','updateRitualFromRecipe','listRitualVersions','restoreRitualVersion','getRitualVersion','setOmenOptIns'].map(op => [op, ruleAlias])));
 Object.assign(SKIP, {
   getRouting: receivingMvp,
   applyRouting: receivingMvp,
@@ -95,10 +99,10 @@ Object.assign(SKIP, {
   getRoutingVersion: receivingMvp,
   restoreRoutingVersion: receivingMvp,
   testRouting: receivingMvp,
-  listRitualVersions: receivingMvp,
-  getRitualVersion: receivingMvp,
-  restoreRitualVersion: receivingMvp,
-  setOmenOptIns: receivingMvp,
+  listRuleVersions: receivingMvp,
+  getRuleVersion: receivingMvp,
+  restoreRuleVersion: receivingMvp,
+  setDecisionOptIns: receivingMvp,
   listEndpoints: receivingMvp,
   createEndpoint: receivingMvp,
   getEndpoint: receivingMvp,
@@ -107,20 +111,20 @@ Object.assign(SKIP, {
   sendEndpointVerification: receivingMvp,
   testEndpoint: receivingMvp,
   createInboxConnection: receivingMvp,
-  checkRitual: receivingMvp,
-  getRitualTypings: receivingMvp,
-  listRitualTemplates: receivingMvp,
-  listRitualRecipes: receivingMvp,
-  createRitualFromRecipe: receivingMvp,
-  updateRitualFromRecipe: receivingMvp,
-  updateRitual: receivingMvp,
-  getRitual: receivingMvp,
-  saveRitual: receivingMvp,
-  deleteRitual: receivingMvp,
-  attachRituals: receivingMvp,
-  getRituals: receivingMvp,
-  applyRituals: receivingMvp,
-  testRituals: receivingMvp,
+  checkRule: receivingMvp,
+  getRuleTypings: receivingMvp,
+  listRuleTemplates: receivingMvp,
+  listRuleRecipes: receivingMvp,
+  createRuleFromRecipe: receivingMvp,
+  updateRuleFromRecipe: receivingMvp,
+  updateRule: receivingMvp,
+  getRule: receivingMvp,
+  saveRule: receivingMvp,
+  deleteRule: receivingMvp,
+  attachRules: receivingMvp,
+  getRules: receivingMvp,
+  applyRules: receivingMvp,
+  testRules: receivingMvp,
   createInbox: receivingMvp,
   listInboxes: receivingMvp,
   ...(!destructive?{createInboxFolder:receivingMvp,updateInboxFolder:receivingMvp,deleteInboxFolder:receivingMvp,listInboxAppPasswords:receivingMvp,createInboxAppPassword:'A real password starts a billable day. Isolated positive test; dev probes a nonexistent inbox.',revokeInboxAppPassword:receivingMvp}:{}),

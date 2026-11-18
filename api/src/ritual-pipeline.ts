@@ -12,41 +12,70 @@ import { loopHeaderNames } from './brand.js';
 
 const key = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/),
   bounded = z.string().min(1).max(254);
-export const RecipeRef = z
+const recipeRef = z
   .object({
-    id: z.string().max(40).describe('Recipe ID from listRitualRecipes.'),
+    id: z.string().max(40).describe('Recipe ID from listRuleRecipes.'),
     params: z.record(z.string().max(32), z.union([z.string().max(500), z.array(z.string().max(254)).max(100)])).default({}).describe('The recipe’s fields by name, normalized.'),
   })
-  .strict()
-  .openapi('RitualRecipeRef');
-export const Ritual = z
+  .strict();
+const item = (ref: typeof recipeRef) => z
   .object({
     key,
     source: z.string().max(65536),
-    recipe: RecipeRef.optional().describe('Set while the source is exactly what this recipe writes. Saving a different source makes the ritual a script and drops it.'),
+    recipe: ref.optional().describe('Set while the source is what this recipe writes. Saving a different source makes the rule a script and drops it.'),
     enabled: z.boolean().optional().describe('false: saved and attached, but not run. Omitted or true: runs.'),
   })
   .strict();
-export const Binding = z
-  .object({
-    ritual: key,
-    target: bounded.describe('A mailbox ID (mbx_…) or an existing recipient address.'),
-    continue: z.boolean().default(false).describe('Run the next attached ritual even after this one took an action.'),
-  })
-  .strict();
+const target = bounded.describe('A mailbox ID (mbx_…) or an existing recipient address.'),
+  next = z.boolean().default(false).describe('Run the next attached rule even after this one took an action.'),
+  senderLists = z.record(key, z.array(bounded.toLowerCase()).max(500)).default({}).describe('Named address lists for lists.has(name, address). Entries are addresses or @domain.'),
+  evaluateDomains = z.array(bounded.toLowerCase()).max(100).default([]).describe('Receiving domains whose mail may be sent to the AI for decisions.'),
+  evaluateRoutes = z.array(bounded).max(100).default([]).describe('Route IDs opted in to AI decisions, in addition to the receiving domains.');
+// The stored config, and the deprecated /v1/rituals operations, keep the names from before the rename: rituals, and
+// attachments that name their ritual. The public shapes below say rules and rule.
+export const RecipeRef = recipeRef.openapi('RitualRecipeRef');
+export const Ritual = item(RecipeRef);
+export const Binding = z.object({ ritual: key, target, continue: next }).strict();
 export const RitualConfig = z
   .object({
     rituals: z.array(Ritual).max(50).default([]),
     attachments: z.array(Binding).max(256).default([]),
-    senderLists: z.record(key, z.array(bounded.toLowerCase()).max(500)).default({}).describe('Named address lists for lists.has(name, address). Entries are addresses or @domain.'),
-    evaluateDomains: z.array(bounded.toLowerCase()).max(100).default([]),
-    evaluateRoutes: z
-      .array(bounded)
-      .max(100)
-      .default([])
-      .describe('Route IDs opted in to Jev, in addition to the receiving domains.'),
+    senderLists,
+    evaluateDomains,
+    evaluateRoutes,
   })
   .strict();
+export const RuleRecipeRef = recipeRef.openapi('RuleRecipeRef');
+export const Rule = item(RuleRecipeRef);
+export const RuleBinding = z.object({ rule: key, target, continue: next }).strict();
+export const RuleConfig = z.object({ rules: z.array(Rule).max(50).default([]), attachments: z.array(RuleBinding).max(256).default([]), senderLists, evaluateDomains, evaluateRoutes }).strict();
+/** An attachment as written: it names its rule, or (deprecated) its ritual, not both. */
+export const RuleBindingInput = z
+  .object({ rule: key.optional().describe('The rule to run.'), ritual: key.optional().openapi({ deprecated: true, description: 'The earlier name for rule.' }), target, continue: next })
+  .strict()
+  .superRefine((b, ctx) => { if (!b.rule === !b.ritual) ctx.addIssue({ code: 'custom', path: ['rule'], message: b.rule ? 'Send rule or ritual, not both.' : 'Name the rule to attach.' }); });
+/** A config as written: rules, or (deprecated) rituals, not both. Stored and compiled as RitualConfig. */
+export const RuleConfigInput = z
+  .object({
+    rules: z.array(Rule).max(50).optional().describe('Every rule, by key.'),
+    rituals: z.array(Rule).max(50).optional().openapi({ deprecated: true, description: 'The earlier name for rules.' }),
+    attachments: z.array(RuleBindingInput).max(256).default([]),
+    senderLists,
+    evaluateDomains,
+    evaluateRoutes,
+  })
+  .strict()
+  .superRefine((c, ctx) => { if (c.rules && c.rituals) ctx.addIssue({ code: 'custom', path: ['rules'], message: 'Send rules or rituals, not both.' }); });
+export type RuleBindingWrite = z.infer<typeof RuleBindingInput>;
+/** The stored form of attachments as written. */
+export const bindingsFrom = (list: RuleBindingWrite[]) => list.map(({ rule, ritual, target, continue: next }) => ({ ritual: (rule ?? ritual)!, target, continue: next }));
+/** The stored form of a config as written. */
+export const configFrom = (c: z.infer<typeof RuleConfigInput>) =>
+  RitualConfig.parse({ rituals: c.rules ?? c.rituals ?? [], attachments: bindingsFrom(c.attachments), senderLists: c.senderLists, evaluateDomains: c.evaluateDomains, evaluateRoutes: c.evaluateRoutes });
+/** A stored config under the public names. */
+export const asRules = (c: Config): z.infer<typeof RuleConfig> => ({
+  rules: c.rituals, attachments: c.attachments.map(({ ritual, ...b }) => ({ rule: ritual, ...b })), senderLists: c.senderLists, evaluateDomains: c.evaluateDomains, evaluateRoutes: c.evaluateRoutes,
+});
 export type Config = z.infer<typeof RitualConfig>;
 export type Programs = {
   owners?: Record<string,string|null>;
@@ -60,19 +89,19 @@ export type Programs = {
   /** ref → endpoint type, for payload checks while running. */
   types?: Record<string, EndpointType | 'inbox'>;
 };
-/** Every compile problem in a config, each tied to its ritual and source position. */
+/** Every compile problem in a config, each tied to its rule and source position. */
 export class RitualConfigError extends Error {
   constructor(readonly diagnostics: Diagnostic[]) {
     super(diagnostics.map(formatDiagnostic).join('\n'));
   }
 }
-export const formatDiagnostic = (d: Diagnostic) => `${d.ritual ? `Ritual ${d.ritual}, l` : 'L'}ine ${d.line}, column ${d.column}: ${d.message}${d.hint ? ` ${d.hint}` : ''}`;
+export const formatDiagnostic = (d: Diagnostic) => `${d.ritual ? `Rule ${d.ritual}, l` : 'L'}ine ${d.line}, column ${d.column}: ${d.message}${d.hint ? ` ${d.hint}` : ''}`;
 const at = (ritual: string, message: string, hint?: string, line = 1, column = 1): Diagnostic => ({ ritual, line, column, endLine: line, endColumn: column, message, ...(hint ? { hint } : {}) });
 export function compileConfig(c: Config): Programs {
   const diagnostics: Diagnostic[] = [], rituals: Record<string, RitualIR> = Object.create(null);
-  if(c.rituals.reduce((n,r)=>n+Buffer.byteLength(r.source),0)>256*1024)throw new RitualConfigError([at('','Workspace ritual sources exceed 256 KiB.')]);
+  if(c.rituals.reduce((n,r)=>n+Buffer.byteLength(r.source),0)>256*1024)throw new RitualConfigError([at('','Workspace rule sources exceed 256 KiB.')]);
   for (const h of c.rituals) {
-    if (Object.hasOwn(rituals, h.key)) { diagnostics.push(at(h.key, `Two rituals use the key ${h.key}.`, 'Keys must be unique.')); continue; }
+    if (Object.hasOwn(rituals, h.key)) { diagnostics.push(at(h.key, `Two rules use the key ${h.key}.`, 'Keys must be unique.')); continue; }
     try { rituals[h.key] = compileRitual(h.source); }
     catch (e) { if (e instanceof RitualError) diagnostics.push({ ...e.diagnostic, ritual: h.key }); else throw e; }
   }
@@ -84,14 +113,14 @@ export function compileConfig(c: Config): Programs {
         diagnostics.push(at(name, `No sender list named ${list.name}.`, guess ? `Did you mean "${guess}"?` : 'Add it to senderLists, for example { "vip": ["ceo@example.com", "@partner.com"] }.', list.line, list.column));
       }
   const known = Object.keys(rituals).concat(c.rituals.map(r => r.key));
-  // A ritual turned off keeps its attachments in the config; the plan leaves them out, so it never runs.
+  // A rule turned off keeps its attachments in the config; the plan leaves them out, so it never runs.
   const off = new Set(c.rituals.filter(r => r.enabled === false).map(r => r.key)), running = c.attachments.filter(a => !off.has(a.ritual));
   const prompts=new Set(running.flatMap(b=>Object.values(rituals[b.ritual]?.omens??{}).map(o=>o.prompt)));
-  if(prompts.size>10&&(c.evaluateDomains.length||c.evaluateRoutes.length))diagnostics.push(at('','Opted-in attachments may reference at most ten distinct Omen questions in total.'));
+  if(prompts.size>10&&(c.evaluateDomains.length||c.evaluateRoutes.length))diagnostics.push(at('','Opted-in attachments may reference at most ten distinct decision questions in total.'));
   for (const a of c.attachments) {
-    if (!known.includes(a.ritual)) { const guess = closest(a.ritual, known); diagnostics.push(at(a.ritual, `Attachment to ${a.target} names ritual ${a.ritual}, which does not exist.`, guess ? `Did you mean ${guess}?` : undefined)); continue; }
+    if (!known.includes(a.ritual)) { const guess = closest(a.ritual, known); diagnostics.push(at(a.ritual, `Attachment to ${a.target} names rule ${a.ritual}, which does not exist.`, guess ? `Did you mean ${guess}?` : undefined)); continue; }
     if (c.attachments.filter(x => x.target === a.target && x.ritual === a.ritual).length > 1) diagnostics.push(at(a.ritual, `${a.ritual} is attached to ${a.target} twice.`));
-    if (c.attachments.filter(x => x.target === a.target).length > RITUALS_PER_ADDRESS) diagnostics.push(at(a.ritual, `${a.target} has more than ${RITUALS_PER_ADDRESS} rituals attached.`, `Combine them, or attach at most ${RITUALS_PER_ADDRESS} per inbox or address.`));
+    if (c.attachments.filter(x => x.target === a.target).length > RITUALS_PER_ADDRESS) diagnostics.push(at(a.ritual, `${a.target} has more than ${RITUALS_PER_ADDRESS} rules attached.`, `Combine them, or attach at most ${RITUALS_PER_ADDRESS} per inbox or address.`));
   }
   if (diagnostics.length) throw new RitualConfigError([...new Map(diagnostics.map(d => [formatDiagnostic(d), d])).values()].slice(0, 50));
   const p = {
@@ -102,10 +131,10 @@ export function compileConfig(c: Config): Programs {
     senderLists: c.senderLists,
     refs: {},
   };
-  if (Buffer.byteLength(JSON.stringify(p)) > 256 * 1024) throw new RitualConfigError([at('', 'The workspace ritual plan exceeds 256 KiB.', 'Shorten rituals or sender lists.')]);
+  if (Buffer.byteLength(JSON.stringify(p)) > 256 * 1024) throw new RitualConfigError([at('', 'The workspace rule plan exceeds 256 KiB.', 'Shorten rules or sender lists.')]);
   return p;
 }
-/** What a ritual may hand an endpoint while running; a literal payload was already checked when saved. */
+/** What a rule may hand an endpoint while running; a literal payload was already checked when saved. */
 export function payloadProblem(type: EndpointType | 'inbox' | undefined, body: unknown): string | null {
   if (type === 'slack' || type === 'discord') {
     const k = type === 'slack' ? 'text' : 'content';
@@ -187,7 +216,7 @@ export function projectEmail(
 }
 type Email = ReturnType<typeof projectEmail>;
 const cache = new Map<string, { at: number; values: Record<string, number> }>();
-/** The workspace's Omen answers, and how many Jev calls that took (0 on a cache hit or failure before the call). */
+/** The workspace's decision answers, and how many Jev calls that took (0 on a cache hit or failure before the call). */
 async function evaluate(runtime: Runtime, w: string, email: Email, prompts: string[], calls: { n: number }) {
   const conf = runtime.config.screen;
   if (!conf || !prompts.length) return {};
@@ -245,7 +274,7 @@ export async function ritualPipeline(
   receiptCreatedAt?: string,
   options: { omens?: boolean } = {},
 ) {
-  // Billing: with an enforced empty balance Omens are not evaluated; each returns its onError value (a deferral
+  // Billing: with an enforced empty balance decisions are not evaluated; each returns its onError value (a deferral
   // becomes the type's default instead, since a top-up can take longer than the deferral window).
   const skipOmens = options.omens === false && !preview && !recorded, calls = { n: 0 };
   const base = matchRouting(input, email.envelope.to, email.spam.junk, email.auth.dmarc.toUpperCase(), email.receivedAt),
@@ -274,7 +303,7 @@ export async function ritualPipeline(
   let answers: Record<string, number> = recorded ?? {},
     steps = 0,
     bytes = 0;
-  // Rituals that took an action on this message (ingest records them as verdicts.ritualsActed for "last matched").
+  // Rules that took an action on this message (ingest records them as verdicts.ritualsActed for "last matched").
   const acted = new Set<string>();
   const changes: Record<string, RitualDecision> = Object.create(null),
     trace: {
@@ -295,14 +324,14 @@ export async function ritualPipeline(
       labels: [],
       junk: r.junk,
       dropped: r.dropped,
-      warnings: skipped.has(r.address)?['Skipped a ritual whose receiving approval is no longer active.']:[],
+      warnings: skipped.has(r.address)?['Skipped a rule whose receiving approval is no longer active.']:[],
     });
     let failed=false;
     const fail=(why:string)=>{failed=true;d.junk=true;d.refs=[];d.actions={};d.bodies={};d.labels=['ritual-error'];d.warnings.push(why);};
     const execute = (ir: RitualIR, key: string, kind: string,binding:Config['attachments'][number]) => {
       const opt=optIn(r.address,r.route), deps=['ritual:'+key,bindingKey(binding),...inputsFor(ir,opt)];
       if(deps.some(k=>!active(k))){
-        const error='A sender list or Omen opt-in required by this ritual lost receiving approval.';
+        const error='A sender list or decision opt-in required by this rule lost receiving approval.';
         fail(error);if(preview)trace.push({recipient:r.address,kind,key,scores:{},steps:0,lines:[],error,actions:[],timeline:[]});return false;
       }
       const grants=[...new Set(deps.map(owner).filter((id):id is string=>id!==null))];
@@ -316,9 +345,9 @@ export async function ritualPipeline(
              if (!preview) {
                const deadline=Date.parse(receiptCreatedAt??'')+30*60000;
                if (Date.now()<deadline && prompts.length<=10)throw new JobDeferred(new Date(Math.min(deadline,Date.now()+60000)).toISOString());
-               fail('Omen unavailable after the deferral limit.');return false;
+               fail('Decision unavailable after the deferral limit.');return false;
              }
-            d.warnings.push('Omen requested deferral.');
+            d.warnings.push('Decision requested deferral.');
           }
         }
         scores[name] =
@@ -400,9 +429,9 @@ export async function ritualPipeline(
     trace,
     steps,
     answers,
-    /** Jev calls made for this message: the Omen meter (verdicts.omenCalls). */
+    /** Jev calls made for this message: the decision meter (omen; verdicts.omenCalls). */
     omenCalls: calls.n,
-    /** Keys of the rituals that took an action (verdicts.ritualsActed). */
+    /** Keys of the rules that took an action (verdicts.ritualsActed). */
     acted: [...acted],
   };
 }

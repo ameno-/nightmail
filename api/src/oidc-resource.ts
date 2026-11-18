@@ -195,7 +195,7 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   const profile = profileLabel(new URL(request.url).searchParams.get('profile'));
   // Revoked in Nightmail, an approval refuses the tokens of the consents it had. A token of a new consent (the person
   // connected the client again at the account service) starts it again under a new key, so nothing tied to the revoked
-  // one comes back: its credentials, objects, ritual parts and scheduled mail stay ended. (Clients with a fixed
+  // one comes back: its credentials, objects, rule parts and scheduled mail stay ended. (Clients with a fixed
   // client_id, such as OpenCode's metadata document, could otherwise never reconnect that account.)
   if (consent) await runtime.db.execute(sql`UPDATE nightmail_resource_grants SET id=${'mcp_at_' + await digest(JSON.stringify([userId, claims.client_id, consent]))},
       revoked=false, issuer_grant=${consent}, permissions=${sql.param(allowed)}::text[], expires_at=to_timestamp(${claims.exp}), issued_at=${claims.iat},

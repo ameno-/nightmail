@@ -1,4 +1,4 @@
-/* Receiving: Routes, Rituals, Endpoints and Trace. Nightmail tokens only; addresses and code in OpenTUI Mono. */
+/* Receiving: Routes, Rules, Endpoints and Trace. Nightmail tokens only; addresses and code in OpenTUI Mono. */
 .rcv-icon { flex: none; color: var(--color-faint); }
 .rcv-page { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; }
 .rcv-tab { gap: var(--space-12); }
@@ -55,7 +55,7 @@
 .rcv-step__body p { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
 .rcv-steps__aside { grid-column: 1 / -1; padding-top: var(--space-12); border-top: 1px solid var(--color-border-muted); }
 
-/* An address's path: Route → Rituals → Goes to, each step with its actions. */
+/* An address's path: Route → Rules → Goes to, each step with its actions. */
 .addr-path { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr); border-block: 1px solid var(--color-border-muted); }
 .addr-step { display: grid; grid-template-rows: auto 1fr auto; align-content: start; gap: var(--space-8); min-width: 0; padding: var(--space-16) var(--space-16) var(--space-16) 0; scroll-margin-top: var(--space-24); }
 .addr-step + .addr-arrow + .addr-step { padding-left: var(--space-16); }
@@ -173,7 +173,7 @@ html:not([data-privacy='off']) .trace-to.private-field:not(:hover, :focus)::plac
 .ritual-try__score { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .rcv-filter-chip { display: inline-flex; align-items: center; gap: 2px; min-width: 0; max-width: 100%; height: var(--control-height); padding: 0 2px 0 10px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: var(--text-sm); }
 /* Phone: the kind filters scroll sideways in one row, the domain picker and search take full rows, and a route's card
-   shows its rituals then where its mail goes. */
+   shows its rules then where its mail goes. */
 @media (max-width: 640px) {
   .rcv-toolbar { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: var(--space-8); }
   .rcv-filters { flex-wrap: nowrap; margin: calc(-1 * var(--focus-reach)) calc(-1 * var(--bleed, 0px)); padding: var(--focus-reach) var(--bleed, 0px) var(--focus-reach) calc(var(--bleed, 0px) - 8px); overflow-x: auto; }
@@ -183,7 +183,7 @@ html:not([data-privacy='off']) .trace-to.private-field:not(:hover, :focus)::plac
   .rcv-kindline { flex-wrap: wrap; gap: var(--space-8); }
   .rcv-foot { flex-wrap: wrap; }
 }
-/* A card's one line: its first ritual (+ how many more), then where its mail goes; it clips at the card's edge. */
+/* A card's one line: its first rule (+ how many more), then where its mail goes; it clips at the card's edge. */
 .rcv-card-to { display: inline-flex; align-items: center; gap: var(--space-8); min-width: 0; overflow: hidden; mask-image: linear-gradient(90deg, #000 calc(100% - 20px), transparent); }
 .rcv-card-to__ritual { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--text-sm); }
 .rcv-card-to > span[aria-hidden] { color: var(--color-faint); }

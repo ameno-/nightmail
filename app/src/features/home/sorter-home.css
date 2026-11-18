@@ -434,7 +434,7 @@
 .srt-counter b { font-weight: 600; }
 .srt-counter span { color: var(--srt-screen-dim); font-size: 11px; }
 
-/* Rituals and Endpoints: a screen and, beside it, a panel of lamps or lines out. */
+/* Rules and Endpoints: a screen and, beside it, a panel of lamps or lines out. */
 .srt-unit[data-kind='ritual'] .srt-screen { right: 112px; }
 .srt-unit[data-kind='endpoint'] .srt-screen { right: 122px; }
 .srt-panel { position: absolute; top: 14px; right: 14px; bottom: 44px; display: grid; align-content: space-evenly; width: 84px; padding-left: 12px; color: var(--srt-text-3); font-family: var(--font-mono); font-size: 10.5px; line-height: 1; letter-spacing: .03em; text-transform: uppercase; }
@@ -586,7 +586,7 @@
 .srt-stations[data-phone] .srt-unit[data-kind='endpoint'] .srt-screen { right: 10px; bottom: 92px; }
 .srt-stations[data-phone] .srt-panel { top: auto; right: 44px; bottom: 44px; left: 10px; grid-auto-flow: column; align-content: center; justify-content: start; column-gap: 14px; width: auto; height: 24px; padding: 0; font-size: 11px; letter-spacing: .01em; }
 .srt-stations[data-phone] .srt-jacks { grid-auto-flow: row; grid-template-columns: repeat(2, max-content); gap: 9px 18px; height: 42px; }
-/* (Nothing on an appliance is set smaller than 11 px. The ritual's longest line is forty characters: where the screen
+/* (Nothing on an appliance is set smaller than 11 px. The rule's longest line is forty characters: where the screen
    is narrower than that, its letters stand a little closer, never its size smaller.) */
 .srt-stations[data-phone] .srt-v-ritual { container-type: inline-size; }
 .srt-stations[data-phone] .srt-v-ritual pre { --pad: clamp(7px, calc((100cqw - 40 * .6 * 11px) / 2), 13px); font-size: 11px; line-height: 18px; letter-spacing: clamp(-.8px, calc((100cqw - 2 * var(--pad) - 40 * .6 * 11px) / 40), 0px); }

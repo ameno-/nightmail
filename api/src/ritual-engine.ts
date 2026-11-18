@@ -15,16 +15,16 @@ export type Omen = {
   onError: number | boolean | 'defer';
 };
 type I = { op: string; l: number; k?: string; v?: string | number | boolean | null; a?: I[]; p?: [number, number, number, number] };
-/** One endpoint call in the source. Checked against the endpoint's type when the ritual is saved. */
+/** One endpoint call in the source. Checked against the endpoint's type when the rule is saved. */
 export type CallSite = { ref: string; line: number; column: number; args: number; fields: string[] | null };
 export type ListSite = { name: string; line: number; column: number };
 export type RitualIR = { v: 1; root: I; refs: string[]; omens: Record<string, Omen>; sites?: CallSite[]; lists?: ListSite[] };
 export type Intent = { op: string; ref?: string; body?: unknown; value?: string };
-/** One step of a dry run, in the order it happened: a condition and what it evaluated to, the omen answers a ritual read,
+/** One step of a dry run, in the order it happened: a condition and what it evaluated to, the decision answers a rule read,
  * an action it took, or the return that ended it. Positions are 1-based like diagnostics. Recorded only when asked. */
 export type TimelineStep =
   | { kind: 'condition'; line: number; column: number; endLine: number; endColumn: number; result: boolean }
-  | { kind: 'omens'; line: number; scores: Record<string, number | boolean> }
+  | { kind: 'decisions'; line: number; scores: Record<string, number | boolean> }
   | { kind: 'action'; line: number; op: string; ref?: string; value?: string }
   | { kind: 'return'; line: number };
 export const TIMELINE_STEPS = 128;
@@ -47,7 +47,7 @@ const reserved = (k: string) => ['__proto__', 'constructor', 'prototype'].includ
 // pattern needs more, runs the whole text again on a simulation that advances one thread per
 // instruction. The step budget counted neither. Each test therefore runs on its own small DFA
 // and nothing else: the state it builds is charged as steps, and a pattern that needs more than
-// the allowance for this text is a ritual error, like any other budget. These are re2js
+// the allowance for this text is a rule error, like any other budget. These are re2js
 // internals, so the version is pinned and a build without them compiles no regex at all.
 export const REGEX_STATE_BYTES = 512 * 1024;
 type Dfa = { stateBudget: number; memBudget: number; clearCache(): void; resetCache(state: unknown): unknown };
@@ -131,22 +131,22 @@ function props(n: N) {
     return [k, p.value] as const;
   });
 }
-const callable = ['block', 'drop', 'junk', 'allow', 'label', 'inbox.deliver', 'endpoints.<name>', 'omens', 'lists.has', 'addr.matches', 'text.snippet', 'email.headers.get', 'email.headers.has', 'email.headers.getAll'];
+const callable = ['block', 'drop', 'junk', 'allow', 'label', 'inbox.deliver', 'endpoints.<name>', 'decisions', 'lists.has', 'addr.matches', 'text.snippet', 'email.headers.get', 'email.headers.has', 'email.headers.getAll'];
 const UNSUPPORTED: Record<string, string> = {
-  ForStatement: 'Loops are not available; a ritual runs once per recipient within a fixed step budget.',
-  ForOfStatement: 'Loops are not available; a ritual runs once per recipient within a fixed step budget.',
-  ForInStatement: 'Loops are not available; a ritual runs once per recipient within a fixed step budget.',
-  WhileStatement: 'Loops are not available; a ritual runs once per recipient within a fixed step budget.',
-  DoWhileStatement: 'Loops are not available; a ritual runs once per recipient within a fixed step budget.',
+  ForStatement: 'Loops are not available; a rule runs once per recipient within a fixed step budget.',
+  ForOfStatement: 'Loops are not available; a rule runs once per recipient within a fixed step budget.',
+  ForInStatement: 'Loops are not available; a rule runs once per recipient within a fixed step budget.',
+  WhileStatement: 'Loops are not available; a rule runs once per recipient within a fixed step budget.',
+  DoWhileStatement: 'Loops are not available; a rule runs once per recipient within a fixed step budget.',
   FunctionDeclaration: 'Only the default export may be a function.',
   FunctionExpression: 'Only the default export may be a function.',
   ArrowFunctionExpression: 'Only the default export may be a function.',
   AssignmentExpression: 'Bindings cannot change. Declare a new const instead.',
   UpdateExpression: 'Bindings cannot change. Declare a new const instead.',
-  TryStatement: 'try/catch is not available. A failed ritual takes no actions and records a ritual-error label.',
+  TryStatement: 'try/catch is not available. A failed rule takes no actions and records a ritual-error label.',
   ThrowStatement: 'throw is not available. Call block(), drop() or junk() instead.',
   NewExpression: 'Constructors are not available.',
-  AwaitExpression: 'Rituals are synchronous; endpoint calls are queued and delivered after the ritual returns.',
+  AwaitExpression: 'Rules are synchronous; endpoint calls are queued and delivered after the rule returns.',
   SwitchStatement: 'Use if / else if instead of switch.',
   SpreadElement: 'Spread is not available. List the fields you want.',
   SequenceExpression: 'Write one expression per statement.',
@@ -176,16 +176,18 @@ export function compileRitual(source: string): RitualIR {
     omens: Record<string, Omen> = Object.create(null),
     globals = new Map<string, N>(),
     omenBindings = new Map<string, string[]>();
+  // decisions(…) is the documented name; omens(…), its name before the rename, compiles to the same plan.
+  const asks = (name: string) => name === 'decisions' || name === 'omens';
   let entry: N | undefined;
   for (const n of ast.body) {
     if (n.type === 'ExportDefaultDeclaration' && n.declaration.type === 'FunctionDeclaration' && !entry) entry = n.declaration;
     else if (n.type === 'VariableDeclaration' && n.kind === 'const') {
       for (const d of n.declarations) {
-        if (d.id.type !== 'Identifier' || !d.init || d.init.type !== 'ObjectExpression') diagnostic(d, 'Top-level constants may only hold literal omen questions.', 'Example: const QUESTIONS = { refund: "Is this a refund request?" }');
+        if (d.id.type !== 'Identifier' || !d.init || d.init.type !== 'ObjectExpression') diagnostic(d, 'Top-level constants may only hold literal decision questions.', 'Example: const QUESTIONS = { refund: "Is this a refund request?" }');
         globals.set(d.id.name, d.init);
       }
     } else if (n.type === 'ExportDefaultDeclaration' && entry) diagnostic(n, 'Export only one default function.');
-    else diagnostic(n, 'A ritual exports one default function: export default function route(email, ctx) { … }');
+    else diagnostic(n, 'A rule exports one default function: export default function route(email, ctx) { … }');
   }
   if (!entry || entry.type !== 'FunctionDeclaration')
     diagnostic(ast, 'Missing the entry point.', 'Start with: export default function route(email, ctx) { … }');
@@ -226,7 +228,7 @@ export function compileRitual(source: string): RitualIR {
         if (env.has(d.id.name) || globals.has(d.id.name)) diagnostic(d.id, `${d.id.name} is already defined.`, 'Choose a new name.');
         if (reserved(d.id.name)) diagnostic(d.id, `${d.id.name} is a reserved name.`);
         const val = sub(d.init);
-        if (d.init.type === 'CallExpression' && dotted(d.init.callee) === 'omens') omenBindings.set(d.id.name, val.a!.map(x => x.k!));
+        if (d.init.type === 'CallExpression' && asks(dotted(d.init.callee))) omenBindings.set(d.id.name, val.a!.map(x => x.k!));
         env.add(d.id.name);
         return ir('bind', d.id.name, [val]);
       }
@@ -264,7 +266,7 @@ export function compileRitual(source: string): RitualIR {
         }
         if (path && path.length === 2 && omenBindings.has(path[0]!) && !omenBindings.get(path[0]!)!.includes(path[1]!)) {
           const names = omenBindings.get(path[0]!)!, guess = closest(path[1]!, names);
-          diagnostic(n.property, `${path[0]} has no omen named ${path[1]}.`, guess ? `Did you mean ${path[0]}.${guess}?` : `Omens: ${names.join(', ')}.`);
+          diagnostic(n.property, `${path[0]} has no decision named ${path[1]}.`, guess ? `Did you mean ${path[0]}.${guess}?` : `Decisions: ${names.join(', ')}.`);
         }
         return ir('get', k, [sub(n.object)]);
       }
@@ -290,7 +292,7 @@ export function compileRitual(source: string): RitualIR {
       case 'CallExpression':
         return call(n, env, ir, sub);
     }
-    return diagnostic(n, UNSUPPORTED[n.type] ?? `${n.type.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()} is not available in rituals.`);
+    return diagnostic(n, UNSUPPORTED[n.type] ?? `${n.type.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()} is not available in rules.`);
   }
   function call(n: Extract<N, { type: 'CallExpression' }>, env: Set<string>, ir: (op: string, k?: string, a?: I[], v?: I['v']) => I, sub: (x: N) => I): I {
     const callee = n.callee as N, args = n.arguments as N[];
@@ -304,7 +306,7 @@ export function compileRitual(source: string): RitualIR {
       try { regex(pattern, flags); } catch { diagnostic(callee.object, 'This pattern is not supported by RE2.', 'Lookarounds and backreferences are not available.'); }
       return ir('regex', flags, [sub(args[0]!)], pattern);
     }
-    // endpoints.<name>(payload?) — the endpoint is syntax, resolved and type-checked when the ritual is saved.
+    // endpoints.<name>(payload?) — the endpoint is syntax, resolved and type-checked when the rule is saved.
     if (callee.type === 'MemberExpression' && callee.object.type === 'Identifier' && callee.object.name === 'endpoints') {
       const endpoint = callee.computed ? str(callee.property as N, 'a literal endpoint name') : callee.property.type === 'Identifier' ? callee.property.name : '';
       if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(endpoint) || reserved(endpoint)) diagnostic(callee.property as N, 'Endpoint names use lowercase letters, digits and hyphens.', 'Hyphenated names are called with quotes: endpoints["support-hook"](…).');
@@ -327,29 +329,29 @@ export function compileRitual(source: string): RitualIR {
       sites.push({ ref, line: args[0]!.loc!.start.line, column: args[0]!.loc!.start.column + 1, args: 1, fields: null });
       return ir('action', name, [ir('literal', undefined, undefined, ref)]);
     }
-    if (name === 'omens') {
-      arity(n, name, args, builtins.omens!.args, builtins.omens!.signature);
-      if (dotted(args[0]!) !== 'email') diagnostic(args[0]!, 'The first argument to omens() is email.');
-      const defs = props(args[1]!.type === 'Identifier' ? globals.get(args[1]!.name) ?? diagnostic(args[1]!, `Unknown omen set ${args[1]!.name}.`, 'Declare it at the top level as a literal const.') : args[1]!);
+    if (asks(name)) {
+      arity(n, name, args, builtins.decisions!.args, builtins.decisions!.signature);
+      if (dotted(args[0]!) !== 'email') diagnostic(args[0]!, `The first argument to ${name}() is email.`);
+      const defs = props(args[1]!.type === 'Identifier' ? globals.get(args[1]!.name) ?? diagnostic(args[1]!, `Unknown question set ${args[1]!.name}.`, 'Declare it at the top level as a literal const.') : args[1]!);
       if (!defs.length) diagnostic(args[1]!, 'Ask at least one question.');
       for (const [key, val] of defs) {
-        if (!/^[a-z][a-zA-Z0-9_]{0,39}$/.test(key)) diagnostic(val, `Omen name ${key} must start with a lowercase letter and use letters, digits or _.`);
+        if (!/^[a-z][a-zA-Z0-9_]{0,39}$/.test(key)) diagnostic(val, `Decision name ${key} must start with a lowercase letter and use letters, digits or _.`);
         const opts: Record<string, unknown> =
           val.type === 'Literal'
             ? { prompt: str(val, 'a literal question') }
             : Object.fromEntries(props(val).map(([k, v]) => {
-                if (!['prompt', 'type', 'threshold', 'onError'].includes(k)) diagnostic(v, `Unknown omen option ${k}.`, 'Options: prompt, type, threshold, onError.');
-                if (v.type !== 'Literal') diagnostic(v, `Omen option ${k} must be a literal.`, 'Questions are fixed so the email cannot change what is asked.');
+                if (!['prompt', 'type', 'threshold', 'onError'].includes(k)) diagnostic(v, `Unknown decision option ${k}.`, 'Options: prompt, type, threshold, onError.');
+                if (v.type !== 'Literal') diagnostic(v, `Decision option ${k} must be a literal.`, 'Questions are fixed so the email cannot change what is asked.');
                 return [k, v.value];
               }));
         const { prompt, type = 'score', threshold = 0.5, onError = type === 'score' ? 0 : false } = opts;
-        if (typeof prompt !== 'string' || prompt.length < 8 || prompt.length > 500) diagnostic(val, 'An omen question needs 8–500 characters.');
-        if (type !== 'score' && type !== 'boolean') diagnostic(val, 'Omen type is "score" or "boolean".');
-        if (typeof threshold !== 'number' || threshold < 0.05 || threshold > 0.95) diagnostic(val, 'Omen threshold is a number from 0.05 to 0.95.');
+        if (typeof prompt !== 'string' || prompt.length < 8 || prompt.length > 500) diagnostic(val, 'A decision question needs 8–500 characters.');
+        if (type !== 'score' && type !== 'boolean') diagnostic(val, 'Decision type is "score" or "boolean".');
+        if (typeof threshold !== 'number' || threshold < 0.05 || threshold > 0.95) diagnostic(val, 'Decision threshold is a number from 0.05 to 0.95.');
         if (!(onError === 'defer' || (type === 'boolean' ? typeof onError === 'boolean' : typeof onError === 'number' && onError >= 0 && onError <= 1)))
-          diagnostic(val, type === 'boolean' ? 'onError for a boolean omen is true, false or "defer".' : 'onError for a score omen is a number from 0 to 1, or "defer".');
+          diagnostic(val, type === 'boolean' ? 'onError for a boolean decision is true, false or "defer".' : 'onError for a score decision is a number from 0 to 1, or "defer".');
         const ev: Omen = { prompt, type, threshold, onError: onError as Omen['onError'] };
-        if (omens[key] && JSON.stringify(omens[key]) !== JSON.stringify(ev)) diagnostic(val, `Omen ${key} is already defined with a different question or options.`);
+        if (omens[key] && JSON.stringify(omens[key]) !== JSON.stringify(ev)) diagnostic(val, `Decision ${key} is already defined with a different question or options.`);
         omens[key] = ev;
       }
       return ir('scores', undefined, defs.map(([k]) => ir('key', k)));
@@ -381,12 +383,12 @@ export function compileRitual(source: string): RitualIR {
       diagnostic(callee.property, `${method}() is not available.`, guess ? `Did you mean ${guess}()?` : `Text methods: ${Object.keys(stringMethods).join(', ')}.`);
     }
     const guess = closest(name || '?', callable);
-    diagnostic(callee, `Unknown function ${name || 'call'}().`, guess ? `Did you mean ${guess}()?` : `Rituals can call ${callable.join(', ')}.`);
+    diagnostic(callee, `Unknown function ${name || 'call'}().`, guess ? `Did you mean ${guess}()?` : `Rules can call ${callable.join(', ')}.`);
   }
   const root = compile(entry.body, new Set(['email', 'ctx']));
-  if (Object.keys(omens).length > 10) diagnostic(entry, 'A ritual can ask at most 10 omens.');
+  if (Object.keys(omens).length > 10) diagnostic(entry, 'A rule can ask at most 10 decisions.');
   const ir: RitualIR = { v: 1, root, refs: [...refs], omens, sites, lists };
-  if (Buffer.byteLength(JSON.stringify(ir)) > 131072) diagnostic(entry, 'The compiled ritual exceeds 128 KiB.');
+  if (Buffer.byteLength(JSON.stringify(ir)) > 131072) diagnostic(entry, 'The compiled rule exceeds 128 KiB.');
   return ir;
 }
 
@@ -504,7 +506,7 @@ export function runRitual(
       }
       case 'scores': {
         const answered = Object.fromEntries(a.map(e => [e.k!, scores[e.k!]]));
-        record({ kind: 'omens', line: i.l, scores: answered as Record<string, number | boolean> });
+        record({ kind: 'decisions', line: i.l, scores: answered as Record<string, number | boolean> });
         return answered;
       }
       case 'regex': {
@@ -571,7 +573,7 @@ export function runRitual(
     }
   }
   try {
-    if(ir.v!==1)throw Error('Unsupported ritual instruction version');
+    if(ir.v!==1)throw Error('Unsupported rule instruction version');
     visit(ir.root);
     return { intents, steps, bytes, trace, error: null };
   } catch (e) {
@@ -580,7 +582,7 @@ export function runRitual(
       steps,
       bytes: 0,
       trace,
-      error: `Line ${line}: ${e instanceof Error ? e.message : 'Ritual failed'}`,
+      error: `Line ${line}: ${e instanceof Error ? e.message : 'Rule failed'}`,
     };
   }
 }

@@ -34,33 +34,42 @@ const INGEST_OUTAGE_MS = 48 * 3600_000; // Below the 3-day staging lifecycle (ma
 export const flatten = (list: Address[] | Address | undefined): MailAddress[] => (Array.isArray(list) ? list : list ? [list] : []).flatMap(item => item.group ? item.group : [item])
   .filter(item => typeof item.address === 'string' && item.address.includes('@')).map(item => ({ name: item.name?.trim() || null, address: item.address!.trim().toLowerCase() }));
 const verdict = (value: { status?: string } | undefined) => typeof value?.status === 'string' ? value.status : undefined;
+/**
+ * Whether a From field is exactly `address` (lowercase): one literal addr-spec, optionally with a display name. The
+ * display parser recovers addresses from malformed text (even multiple angle addresses); identity evidence must not.
+ * Support registration (src/support-conversations.ts) applies it to the stored headers too.
+ */
+export function literalFrom(value: string, address: string) {
+  if (!withinFieldLimit(value)) return false;
+  const field = value.trim().toLowerCase(), angle = `<${address}>`;
+  if (field === address) return true;
+  if (!field.endsWith(angle)) return false;
+  const display = field.slice(0,-angle.length).trim();
+  return !/[()<>@,;:\\"\[\]\x00-\x1f]/.test(display) || /^"(?:[^"\\\r\n]|\\[^\r\n])*"$/.test(display);
+}
+/**
+ * Whether an aggregate DKIM PASS can be attributed to `domain`: SES does not say which signature passed, so only a sole
+ * DKIM-Signature whose one d= tag is that domain counts. Support registration records it as dkimAligned.
+ */
+export function soleAlignedSignature(signatures: string[], domain: string) {
+  return signatures.length===1 && withinFieldLimit(signatures[0]!) && (()=>{
+    const tags=signatures[0]!.split(';').map(t=>t.trim()).filter(t=>/^d\s*=/i.test(t));
+    return tags.length===1 && /^d[ \t]*=[ \t]*([^\s]+)$/i.exec(tags[0]!)?.[1]?.toLowerCase()===domain;
+  })();
+}
 function singleFrom(email:Email,address:string,mail:ReceivedNotification['mail']) {
   const from = email.headers.filter(h => h.key === 'from');
   const sesFrom = mail?.commonHeaders?.from;
-  const matches = (value: string) => {
-    if (!withinFieldLimit(value)) return false;
-    // The display parser recovers addresses from malformed text (even multiple angle addresses).
-    // Identity evidence must instead be one literal addr-spec, optionally with a display name.
-    const field = value.trim().toLowerCase(), angle = `<${address}>`;
-    if (field === address) return true;
-    if (!field.endsWith(angle)) return false;
-    const display = field.slice(0,-angle.length).trim();
-    return !/[()<>@,;:\\"\[\]\x00-\x1f]/.test(display) || /^"(?:[^"\\\r\n]|\\[^\r\n])*"$/.test(display);
-  };
-  return from.length===1 && matches(from[0]!.value) && (!sesFrom || (sesFrom.length===1 && matches(sesFrom[0]!)));
+  return from.length===1 && literalFrom(from[0]!.value,address) && (!sesFrom || (sesFrom.length===1 && literalFrom(sesFrom[0]!,address)));
 }
 // SES authenticates domains, not display names or Reply-To. An aggregate DKIM
 // PASS cannot identify which of several differently aligned signatures passed.
 function replyAuthorVerified(email:Email|null,address:string,mail:ReceivedNotification['mail'],v:Verdicts){
   if(!email || !ADDRESS.test(address) || !singleFrom(email,address,mail))return false;
   if(v.dmarc==='PASS')return true;
-  const domain=address.split('@')[1],source=mail?.source?.toLowerCase();
+  const domain=address.split('@')[1]!,source=mail?.source?.toLowerCase();
   if(v.spf==='PASS' && source && ADDRESS.test(source) && source.split('@')[1]===domain)return true;
-  const signatures=email.headers.filter(h=>h.key==='dkim-signature');
-  return v.dkim==='PASS' && signatures.length===1 && withinFieldLimit(signatures[0].value) && (()=>{
-    const tags=signatures[0].value.split(';').map(t=>t.trim()).filter(t=>/^d\s*=/i.test(t));
-    return tags.length===1 && /^d[ \t]*=[ \t]*([^\s]+)$/i.exec(tags[0])?.[1]?.toLowerCase()===domain;
-  })();
+  return v.dkim==='PASS' && soleAlignedSignature(email.headers.filter(h=>h.key==='dkim-signature').map(h=>h.value),domain);
 }
 function authenticatedFrom(email: Email | null, address: string, mail: ReceivedNotification['mail'], verdicts: Verdicts) {
   const dmarcPass = verdicts.dmarc === 'PASS', noDmarc = verdicts.dmarc === undefined || verdicts.dmarc === 'GRAY';
@@ -496,7 +505,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const keptReceipt={...receipt,delivery:{...receipt.delivery!,lifecycle:'kept'}};
   const possibleKept=!!receipt.routing?.programs&&Object.values(receipt.routing.boxes??{}).some(b=>b.kept);
   const stores=(input:typeof receipt)=>receivedMailStore(runtime,scope.workspaceId,input!,s3,{messageId:messageRowId,sesMessageId},possibleKept);
-  // Rituals see parsed mail. Until they have run use the expiring class, not forever
+  // Rules see parsed mail. Until they have run use the expiring class, not forever
   // storage for a speculative destination. Ordinary direct deliveries write raw once.
   const initiallyKept=!receipt.routing?.programs && keptRoute(plan);
   // A route can point at an existing persistent inbox after a BYO connection is
@@ -528,7 +537,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
         throw new ApiError(422,'MAILBOX_BYTE_BUDGET','Receipt exceeds the workspace byte budget.');
       }
       const billing=bill.position=reserved.rows[0]!.billing;
-      // BYO workspaces pay SES themselves and are never held; their storage and Omens still bill and stop.
+      // BYO workspaces pay SES themselves and are never held; their storage and AI decisions still bill and stop.
       if(billing?.receiveHeld && receipt.binding?.kind!=='byo')throw new BillingHold();
     }, store.r2 ? store.objects : undefined);
   } catch (error) {
@@ -591,8 +600,8 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
       };
   const verifiedAuthor=replyAuthorVerified(email,from.address,notification.mail,verdicts);
   // A forward can be queued later than this first store (a reopened receipt, another receipt of the same email,
-  // rituals saved meanwhile) and reads these verdicts from the stored message. Forward eligibility is recorded for
-  // every message; the author check by any workspace that routes, not only one whose rituals already run.
+  // rules saved meanwhile) and reads these verdicts from the stored message. Forward eligibility is recorded for
+  // every message; the author check by any workspace that routes, not only one whose rules already run.
   verdicts.forwardEligible=forwardEligibility(message,email?.headers.map(h=>h.key)??[]);
   try {
     if(receipt.routing)Object.assign(verdicts,{ritualVerified:verifiedAuthor});

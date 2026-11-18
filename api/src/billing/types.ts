@@ -28,7 +28,7 @@ export interface BillingPosition {
   /** Receive holds are on for the installation (billing_config.receive_hold). */
   receiveHold: boolean;
   receiveHeld: boolean;
-  /** Whether Omens may run (false only when enforced, prepaid and nothing is available). */
+  /** Whether AI decisions may run (false only when enforced, prepaid and nothing is available). */
   omens: boolean;
   canRecharge: boolean;
   thresholdUc: string;
@@ -51,7 +51,7 @@ export interface BillingSummary {
   grace: { unpaidSince: string | null; receiveHoldAt: string | null; writeOffAt: string | null };
   autoRecharge: (AutoRechargeSettings & { monthTotalCents: number; disabledReason: string | null; pending: boolean }) | null;
   paymentMethod: { brand: string; last4: string; expMonth: number; expYear: number } | null;
-  prices: { emailPerThousand: string; omenPerThousand: string; storagePerGbMonth: string; freeEmails: number; freeSentEmails: number; freeReceivedEmails: number; freeStorageBytes: number; topUpMinCents: number; currency: 'USD' };
+  prices: { emailPerThousand: string; decisionPerThousand: string; omenPerThousand: string; storagePerGbMonth: string; freeEmails: number; freeSentEmails: number; freeReceivedEmails: number; freeStorageBytes: number; topUpMinCents: number; currency: 'USD' };
   topUpUrl: string;
 }
 

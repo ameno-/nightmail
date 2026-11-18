@@ -1,4 +1,4 @@
-// "Ask your agent": the add screen's one quiet way to have an agent write a ritual. The dialog holds the setup for a
+// "Ask your agent": the add screen's one quiet way to have an agent write a rule. The dialog holds the setup for a
 // client that isn't connected yet (the same one Connect an agent shows, asking for full access) and prompts written for
 // the workspace's first address.
 import { useState, type ReactNode } from 'react'
@@ -23,13 +23,13 @@ function prompts(address: string | null, workspace: string | null): Prompt[] {
   const at = address ?? 'my support address', shown = address ? <PrivateAddress value={address} /> : at
   const mine = workspace ? `my ${productName} workspace '${workspace}'` : productName, shownMine = workspace ? <>my {productName} workspace ‘{workspace}’</> : productName
   return [
-    { text: `In ${mine}, add a ritual on ${at} that labels refund requests and posts them to Slack.`, shown: <>In {shownMine}, add a ritual on {shown} that labels refund requests and posts them to Slack.</> },
-    { text: `In ${mine}, list my rituals and explain what each one does to mail at ${at}.`, shown: <>In {shownMine}, list my rituals and explain what each one does to mail at {shown}.</> },
-    { text: `In ${mine}, write a ritual for ${at} and try it on the last 5 emails before you save it.`, shown: <>In {shownMine}, write a ritual for {shown} and try it on the last 5 emails before you save it.</> },
+    { text: `In ${mine}, add a rule on ${at} that labels refund requests and posts them to Slack.`, shown: <>In {shownMine}, add a rule on {shown} that labels refund requests and posts them to Slack.</> },
+    { text: `In ${mine}, list my rules and explain what each one does to mail at ${at}.`, shown: <>In {shownMine}, list my rules and explain what each one does to mail at {shown}.</> },
+    { text: `In ${mine}, write a rule for ${at} and try it on the last 5 emails before you save it.`, shown: <>In {shownMine}, write a rule for {shown} and try it on the last 5 emails before you save it.</> },
   ]
 }
 
-/** A connected agent that can edit rituals here: active with full access (manage), for an owner or admin of this
+/** A connected agent that can edit rules here: active with full access (manage), for an owner or admin of this
  * workspace. Its calls name the workspace they act in, so any of the account's agents can work in this one. */
 const canEdit = (app: Agent, admin: boolean) => app.status === 'active' && admin && app.permissions.includes('manage')
 
@@ -55,15 +55,15 @@ function AgentSetup({ address }: { address: string | null }) {
   const scope = useMcpScope('manage')
   const active = (apps.data ?? []).filter(app => app.own && app.status === 'active')
   const connected = active.find(app => canEdit(app, admin))
-  // Connected but not able to edit rituals here: read or send access only, or a member of this workspace.
+  // Connected but not able to edit rules here: read or send access only, or a member of this workspace.
   const limited = !connected ? active[0] ?? null : null
   const status = apps.isPending ? 'Looking for a connected agent…'
     : connected ? <>Connected as <strong>{connectionTitle(connected)}</strong>.</>
-    : limited ? <><strong>{connectionTitle(limited)}</strong> is connected but can’t change rituals in this workspace yet.</>
+    : limited ? <><strong>{connectionTitle(limited)}</strong> is connected but can’t change rules in this workspace yet.</>
     : 'No agent is connected yet.'
   return <div className="stack ritual-agent__content">
     <p className="ritual-agent__status muted"><span className="ritual-agent__mark" data-connected={connected ? true : undefined} aria-hidden="true" />{status}</p>
-    {limited && <p className="ritual-agent__note">{admin ? <>Connect it again and approve full access, or <Link to={`/settings/mcp/${encodeURIComponent(limited.id)}`}>revoke it in Settings</Link> first.</> : 'Rituals need an owner or admin of this workspace.'}</p>}
+    {limited && <p className="ritual-agent__note">{admin ? <>Connect it again and approve full access, or <Link to={`/settings/mcp/${encodeURIComponent(limited.id)}`}>revoke it in Settings</Link> first.</> : 'Rules need an owner or admin of this workspace.'}</p>}
     {/* The setup opens from its heading, so the prompts stay in view under it. */}
     {!connected && <Disclosure className="ritual-agent__setup" title="Connect it, with full access">
       <McpClientSetup client={client} onClient={setClient} url={url} auth={{ scope }} />

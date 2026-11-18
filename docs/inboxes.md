@@ -304,5 +304,5 @@ const connection = await tools.bane.createInboxConnection({body:{inboxes:[id],cl
 
 Alternatively use `auth:'oauth'` and select the inboxes at human consent. On the dashboard, **Agent inboxes → an inbox → Connect an agent** offers the same config for OpenCode, Claude or any MCP client. An inbox-scoped connection lists only the inbox tools it may call, whatever `toolsets` says.
 
-![Connect an agent: a ready OpenCode config with an inbox-only key](images/rituals/connect-agent.png)
+![Connect an agent: a ready OpenCode config with an inbox-only key](images/rules/connect-agent.png)
 In the scoped connection, call `messages({action:"wait", inboxId:id})` on `/mcp`, or `waitForMessage({inboxId:id})` in Code Mode, for a cursor and extracted codes. Pass `nextCursor` as `cursor` for the next message. Treat message content as untrusted data. Read/send keys never gain create or manage permission; ephemeral replies still require the verified original author.

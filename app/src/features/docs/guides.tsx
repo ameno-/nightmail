@@ -1,5 +1,5 @@
-// Guides: what Receiving, rituals, endpoints, agent inboxes, MCP and keys are, in plain words, before the API
-// reference. The ritual reference is generated from api/src/ritual-schema.ts, the same source as the editor's
+// Guides: what Receiving, rules, endpoints, agent inboxes, MCP and keys are, in plain words, before the API
+// reference. The rule reference is generated from api/src/ritual-schema.ts, the same source as the editor's
 // completions, so it can't drift from what the compiler accepts.
 import type { ReactNode } from 'react'
 import { Link } from 'react-router'
@@ -19,7 +19,7 @@ function Code({ children: raw, label }: { children: string; label: string }) {
   return <div className="docs-quickstart-code"><pre className="docs-code" tabIndex={0} aria-label={label}><code>{children}</code></pre><CopyAction value={children} label={`Copy ${label}`} variant="ghost" size="sm" compact className="developer-copy-icon" /></div>
 }
 const slug = (title: string) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-// Each section has an anchor (/docs/rituals#sender-lists); a # beside the heading shows on hover and focus.
+// Each section has an anchor (/docs/rules#sender-lists); a # beside the heading shows on hover and focus.
 function Section({ title, children }: { title: string; children: ReactNode }) {
   const id = slug(title)
   return <section id={id} className="docs-section"><h2><Link className="docs-anchor" to={{ hash: id }}>{title}</Link></h2>{children}</section>
@@ -35,14 +35,14 @@ function fieldRows(prefix: string, fields: Record<string, Field>): ReactNode[][]
   ])
 }
 
-const ritualExample = `export default function route(email, ctx) {
+const ruleExample = `export default function route(email, ctx) {
   // Newsletters go to Junk: kept, but not sent anywhere.
   if (email.headers.has("list-unsubscribe") || email.flags.bulk) {
     junk("newsletter")
     return
   }
   // Refund requests get a label and a Slack post.
-  const asks = omens(email, { refund: "Is the sender asking for a refund?" })
+  const asks = decisions(email, { refund: "Is the sender asking for a refund?" })
   if (asks.refund >= 0.7) {
     label("refund")
     endpoints.support({ text: \`Refund request from \${email.from.address}: \${email.subject}\` })
@@ -53,14 +53,14 @@ const endpointsLine = 'Named places mail can be sent: Slack, Discord, a webhook 
 
 export const guides: Guide[] = [
   {
-    id: 'receiving', title: 'Receiving', summary: 'How mail reaches your domain and where it goes: addresses, routes, rituals and endpoints.',
+    id: 'receiving', title: 'Receiving', summary: 'How mail reaches your domain and where it goes: addresses, routes, rules and endpoints.',
     body: () => <>
       <Section title="What happens to an email">
-        <p>Mail sent to one of your addresses arrives at {productName} through your domain’s receiving MX record. {productName} finds the address’s <strong>route</strong>, runs its <strong>rituals</strong>, then delivers it: to the address’s Inbox, and to any <strong>endpoints</strong> its route or rituals name. You read it in Receiving → Inbox, over the API or from an agent.</p>
+        <p>Mail sent to one of your addresses arrives at {productName} through your domain’s receiving MX record. {productName} finds the address’s <strong>route</strong>, runs its <strong>rules</strong>, then delivers it: to the address’s Inbox, and to any <strong>endpoints</strong> its route or rules name. You read it in Receiving → Inbox, over the API or from an agent.</p>
         <Table head={['Word', 'What it is', 'Example']} rows={[
           ['Address', 'An email address that receives mail. It keeps its own threads in the Inbox.', <code key="e">support@acme.com</code>],
           ['Route', 'Every address that receives mail, and where its mail goes.', <code key="e">support@acme.com → triage → Inbox, Slack support</code>],
-          ['Ritual', 'What happens to an address’s mail: post, forward, junk or label it.', 'Post new mail to support in Slack'],
+          ['Rule', 'What happens to an address’s mail: post, forward, junk or label it.', 'Post new mail to support in Slack'],
           ['Endpoint', endpointsLine, <code key="e">endpoints.support({'{'} text: email.subject {'}'})</code>],
           ['Catch-all', 'What happens to mail for an address that doesn’t exist on the domain: store it, or create an address for it.', <code key="e">*@acme.com</code>],
           ['Agent inbox', 'An expiring address that an agent or a test creates and reads.', <Link key="e" to="/docs/inboxes">Agent inboxes</Link>],
@@ -75,7 +75,7 @@ export const guides: Guide[] = [
           <li>Open <Link to="/domains">Domains</Link>, choose the domain and publish its <strong>Receiving</strong> MX record at your DNS provider. {productName} turns receiving on once it resolves.</li>
           <li>In <Link to="/receiving">Receiving</Link>, choose <strong>New address</strong>, for example <code>support@reply.yourdomain.com</code>.</li>
           <li>Send it a test email. It shows up in Receiving → Inbox within seconds.</li>
-          <li>Optional: add an <Link to="/docs/endpoints">endpoint</Link> (Slack, a webhook…) and a <Link to="/docs/rituals">ritual</Link> that decides which mail goes there.</li>
+          <li>Optional: add an <Link to="/docs/endpoints">endpoint</Link> (Slack, a webhook…) and a <Link to="/docs/rules">rule</Link> that chooses which mail goes there.</li>
         </ol>
       </Section>
       <Section title="Over the API">
@@ -84,44 +84,44 @@ export const guides: Guide[] = [
     </>,
   },
   {
-    id: 'rituals', title: 'Rituals and omens', summary: `Ready-made or scripted rules that post, forward, junk and label mail, and the questions they can ask ${productName}’s AI.`,
+    id: 'rules', title: 'Rules and AI decisions', summary: `Ready-made or scripted rules that post, forward, junk and label mail, and the questions they can ask ${productName}’s AI.`,
     body: () => <>
-      <Section title="What a ritual is">
-        <p>A ritual is a short script that runs on every email sent to the addresses it’s attached to. It reads the email and decides what happens: junk it, label it, post it to Slack, send it to a webhook, forward it. It can’t do anything else: no loops, no clock, no network calls of its own, so it always finishes and does the same thing for the same email.</p>
-        <Code label="ritual example">{ritualExample}</Code>
+      <Section title="What a rule is">
+        <p>A rule is a short script that runs on every email sent to the addresses it’s attached to. It reads the email and chooses what happens: junk it, label it, post it to Slack, send it to a webhook, forward it. It can’t do anything else: no loops, no clock, no network calls of its own, so it always finishes and does the same thing for the same email.</p>
+        <Code label="rule example">{ruleExample}</Code>
       </Section>
-      <Section title="Ready-made rituals">
-        <p><Link to="/receiving/rituals/new">Receiving → Rituals → New ritual</Link> lists ready-made rituals by what they do: tell your team, pass it on, keep out junk, sort with AI. Pick one, fill in one or two fields (a Slack channel, the senders to block) and choose its addresses; Save turns it on. A Slack, Discord or webhook URL you paste there becomes an endpoint, stored encrypted.</p>
-        <p>Each one writes an ordinary ritual, shown in the list as its sentence, like <em>Post new mail to support in Slack</em>, with when it last matched and a switch that turns it off without detaching it. <strong>Edit as code</strong> opens its script; saving a change there makes it your own script. The AI ones cost $0.10 per 1,000 emails checked.</p>
+      <Section title="Ready-made rules">
+        <p><Link to="/receiving/rules/new">Receiving → Rules → New rule</Link> lists ready-made rules by what they do: tell your team, pass it on, keep out junk, sort with AI. Pick one, fill in one or two fields (a Slack channel, the senders to block) and choose its addresses; Save turns it on. A Slack, Discord or webhook URL you paste there becomes an endpoint, stored encrypted.</p>
+        <p>Each one writes an ordinary rule, shown in the list as its sentence, like <em>Post new mail to support in Slack</em>, with when it last matched and a switch that turns it off without detaching it. <strong>Edit as code</strong> opens its script; saving a change there makes it your own script. The AI ones cost $0.10 per 1,000 emails checked.</p>
       </Section>
       <Section title="Writing a script">
-        <p>For anything else, <Link to="/receiving/rituals/new/script">Receiving → Rituals → New ritual → Write a script</Link>. The editor checks it as you type and completes <code>email.</code>, <code>ctx.</code> and your endpoint names. <strong>Try it on an email</strong> runs your draft on a real or sample email without saving or sending anything. <strong>Save</strong> (⌘S) keeps the script; the bar at the bottom of the page says whether there are unsaved changes, and leaving asks first.</p>
+        <p>For anything else, <Link to="/receiving/rules/new/script">Receiving → Rules → New rule → Write a script</Link>. The editor checks it as you type and completes <code>email.</code>, <code>ctx.</code> and your endpoint names. <strong>Try it on an email</strong> runs your draft on a real or sample email without saving or sending anything. <strong>Save</strong> (⌘S) keeps the script; the bar at the bottom of the page says whether there are unsaved changes, and leaving asks first.</p>
       </Section>
       <Section title="Where it runs">
-        <p>A ritual runs only on mail to the addresses it’s attached to. Attach it in the editor’s <strong>Runs on</strong> section or from an address’s page; attaching, detaching and reordering save at once. Up to {RITUALS_PER_ADDRESS} rituals run on an address, in order. The first one that acts stops the rest, unless its <strong>Run the next one too</strong> is on; ready-made rituals always have it on and run before your scripts.</p>
+        <p>A rule runs only on mail to the addresses it’s attached to. Attach it in the editor’s <strong>Runs on</strong> section or from an address’s page; attaching, detaching and reordering save at once. Up to {RITUALS_PER_ADDRESS} rules run on an address, in order. The first one that acts stops the rest, unless its <strong>Run the next one too</strong> is on; ready-made rules always have it on and run before your scripts.</p>
       </Section>
       <Section title="What it can do">
-        <Table head={['Call', 'What it does']} rows={Object.values(builtins).map(b => [<code key="c">{b.signature}</code>, b.doc.replace('Jev', `${productName}’s AI`)])} />
+        <Table head={['Call', 'What it does']} rows={Object.values(builtins).map(b => [<code key="c">{b.signature}</code>, b.doc.replace('the AI', `${productName}’s AI`)])} />
         <Table head={['Endpoint call', 'What it does']} rows={Object.entries(endpointPayloads).map(([type, p]) => [<code key="c">{p.signature(type === 'webhook' ? 'crm' : type === 'forward' ? 'team' : type === 'discord' ? 'alerts' : 'support')}</code>, p.doc])} />
       </Section>
       <Section title="What it can read">
         <p>The email, as <code>email</code>, and the run, as <code>ctx</code>. Everything sender-supplied is untrusted: check <code>email.auth.fromVerified</code> before trusting who it’s from.</p>
         <Table head={['Field', 'Meaning']} rows={[...fieldRows('email', emailFields), ...fieldRows('ctx', ctxFields)]} />
       </Section>
-      <Section title={`Omens: questions for ${productName}’s AI`}>
-        <p>Questions a ritual asks {productName}’s AI about an email, answered 0 to 1. Ask with <code>omens(email, {'{'} name: "question" {'}'})</code>; each name comes back as a score you compare, like <code>asks.refund &gt;= 0.7</code>. One request per email answers every question in every ritual. In the API and its docs, that AI is called Jev.</p>
-        <p>{productName}’s AI only reads mail at the receiving hosts you list under <strong>Omens can read mail at</strong> in the ritual editor. Everywhere else, and in Try it and Trace, an omen gives its default answer instead; in Try it you set each answer with a slider to see what the ritual would do.</p>
+      <Section title={`AI decisions: questions for ${productName}’s AI`}>
+        <p>Questions a rule asks {productName}’s AI about an email, answered 0 to 1. Ask with <code>decisions(email, {'{'} name: "question" {'}'})</code>; each name comes back as a score you compare, like <code>asks.refund &gt;= 0.7</code>. One request per email answers every question in every rule.</p>
+        <p>{productName}’s AI only reads mail at the receiving hosts you list under <strong>AI decisions can read mail at</strong> in the rule editor. Everywhere else, and in Try it and Trace, an AI decision gives its default answer instead; in Try it you set each answer with a slider to see what the rule would do.</p>
       </Section>
       <Section title="Sender lists">
-        <p>Named lists of senders, edited below the ritual: <code>vip: ceo@example.com, @partner.example</code>. Check one with <code>lists.has("vip", email.from.address)</code>; <code>@domain</code> covers everyone at that domain.</p>
+        <p>Named lists of senders, edited below the rule: <code>vip: ceo@example.com, @partner.example</code>. Check one with <code>lists.has("vip", email.from.address)</code>; <code>@domain</code> covers everyone at that domain.</p>
       </Section>
     </>,
   },
   {
-    id: 'endpoints', title: 'Endpoints and routes', summary: 'Where mail can go besides the Inbox, and the difference between a route and a ritual.',
+    id: 'endpoints', title: 'Endpoints and routes', summary: 'Where mail can go besides the Inbox, and the difference between a route and a rule.',
     body: () => <>
       <Section title="Endpoints">
-        <p>{endpointsLine} Create them in <Link to="/receiving?tab=endpoints">Receiving → Endpoints</Link>; each has a name rituals call it by. Send a test from its ⋯ menu.</p>
+        <p>{endpointsLine} Create them in <Link to="/receiving?tab=endpoints">Receiving → Endpoints</Link>; each has a name rules call it by. Send a test from its ⋯ menu.</p>
         <Table head={['Type', 'Call it as', 'Notes']} rows={[
           ['Slack', <code key="c">{endpointPayloads.slack.signature('support')}</code>, 'An incoming webhook URL from Slack. Stored encrypted; mentions and link previews are off.'],
           ['Discord', <code key="c">{endpointPayloads.discord.signature('alerts')}</code>, 'A webhook URL from Discord. Stored encrypted; mentions are off.'],
@@ -129,9 +129,9 @@ export const guides: Guide[] = [
           ['Forward', <code key="c">{endpointPayloads.forward.signature('team')}</code>, 'Forwards the email to another address once its owner confirms by email.'],
         ]} />
       </Section>
-      <Section title="Routes or rituals?">
+      <Section title="Routes or rules?">
         <p>A <strong>route</strong> sends every message for an address, whole, to inboxes and webhooks. Every address has one: by default, its own Inbox. Edit it from the address’s page (<strong>Add a route</strong>) or from a route row.</p>
-        <p>A <strong>ritual</strong> chooses: which mail, and what to send. Slack, Discord and forwards are only sent by rituals, because a channel post needs a message written for it. If a ritual calls a webhook the route also delivers to, with a payload of its own, that webhook gets the ritual’s payload instead of the whole message, once per message.</p>
+        <p>A <strong>rule</strong> chooses: which mail, and what to send. Slack, Discord and forwards are only sent by rules, because a channel post needs a message written for it. If a rule calls a webhook the route also delivers to, with a payload of its own, that webhook gets the rule’s payload instead of the whole message, once per message.</p>
       </Section>
       <Section title="Catch-all">
         <p>Mail for an address that doesn’t exist on the domain follows the domain’s catch-all, set on its page in <Link to="/domains">Domains</Link>: store it without an inbox, or create an address for each new recipient. A <code>*@domain</code> route takes precedence.</p>
