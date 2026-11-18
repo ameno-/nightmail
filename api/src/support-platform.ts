@@ -31,8 +31,11 @@ const OPERATOR_ROUTES: [method: string, path: RegExp][] = [
 ];
 const SUPPORT_READ = /^\/v1\/support\/[A-Za-z0-9_./-]{1,200}$/;
 const SUPPORT_GRANT = /^(?:nm|bane)_support_[0-9a-f]{64}$/; // bane_: remove after rename cleanup
-/** The one write a conversation makes: narrowing its scope to one workspace. */
-const STAMPED_WRITES: [method: string, path: RegExp][] = [['POST', /^\/v1\/support\/scope$/]];
+/** The writes a conversation makes: narrowing its scope to one workspace, and keeping a note about its person. */
+const STAMPED_WRITES: [method: string, path: RegExp][] = [
+  ['POST', /^\/v1\/support\/scope$/],
+  ['POST', /^\/v1\/support\/notes$/],
+];
 
 /** Whether the binding may make this call: the operator support routes, or a grant's GET under /v1/support. */
 export function supportPlatformAllows(method: string, path: string) {
@@ -40,7 +43,7 @@ export function supportPlatformAllows(method: string, path: string) {
   if (method === 'GET' && SUPPORT_READ.test(path)) return true;
   return OPERATOR_ROUTES.some(([m, p]) => m === method && p.test(path));
 }
-/** Whether request() may make this call for a conversation: a GET under /v1/support, or its scope write. */
+/** Whether request() may make this call for a conversation: a GET under /v1/support, or one of its writes. */
 export function stampedAllows(method: string, path: string) {
   if (path.includes('..') || path.includes('//')) return false;
   return (method === 'GET' && SUPPORT_READ.test(path)) || STAMPED_WRITES.some(([m, p]) => m === method && p.test(path));
@@ -190,7 +193,7 @@ export function supportPlatform(dispatch: (request: Request, conversation?: stri
     /** End a conversation: every later request for it is refused. Repeating it is harmless. */
     closeConversation: (conversationId: string) => call<{ id: string; status: 'closed'; closedAt: string }>('POST', `/v1/operator/support/conversations/${encodeURIComponent(String(conversationId))}/close`, {}),
     /**
-     * A /v1/support request for one registered conversation: a GET, or the scope write (POST /v1/support/scope). The
+     * A /v1/support request for one registered conversation: a GET, or a write (POST /v1/support/scope or notes). The
      * conversation rides on the runtime, never in the request; Nightmail derives the customer from its row and answers
      * for their live memberships, within its scope, while it is open.
      */

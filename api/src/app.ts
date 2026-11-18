@@ -84,7 +84,8 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
       case 'operator':
       case 'support': {
         const [{ registerOperator }, { registerAudit }, { registerSupport, registerSupportOperator }, { registerSupportConversations }, { registerUiNotes }] = await Promise.all([import('./operator.js'), import('./audit.js'), import('./support.js'), import('./support-conversations.js'), import('./ui-notes.js')]);
-        return (target: App) => { registerOperator(target); registerAudit(target); registerSupport(target); registerSupportOperator(target); registerSupportConversations(target); registerUiNotes(target); };
+        const { registerSupportNotes } = await import('./support-notes.js');
+        return (target: App) => { registerOperator(target); registerAudit(target); registerSupport(target); registerSupportOperator(target); registerSupportConversations(target); registerUiNotes(target); registerSupportNotes(target); };
       }
       case 'billing': {
         const [{ registerBilling }, { registerStripeWebhook }] = await Promise.all([import('./billing/routes.js'), import('./billing/stripe-webhook.js')]);
@@ -333,6 +334,8 @@ export async function createOpenApiApp(): Promise<App> {
   registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full); registerOverviewSetup(full); registerOperator(full);
   registerAudit(full); registerSupport(full); registerSupportOperator(full); registerSupportConversations(full); registerUiNotes(full);
   registerBilling(full); registerStripeWebhook(full);
+  const { registerSupportNotes } = await wrapModuleLoad(() => import('./support-notes.js'));
+  registerSupportNotes(full);
   return full;
 }
 

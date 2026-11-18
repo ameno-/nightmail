@@ -6377,6 +6377,18 @@ export type BillingAutoRecharge = {
     monthlyCapCents: number;
 };
 
+export type SupportNote = {
+    id: string;
+    text: string;
+    author: 'agent' | 'staff';
+    /**
+     * The workspace the conversation was scoped to when the note was written; null when none was chosen.
+     */
+    workspaceId: string | null;
+    conversationId: string;
+    createdAt: string;
+};
+
 export type ListMcpConnectionsData = {
     body?: never;
     path?: never;
@@ -28355,3 +28367,129 @@ export type CreateBillingCardSetupResponses = {
 };
 
 export type CreateBillingCardSetupResponse = CreateBillingCardSetupResponses[keyof CreateBillingCardSetupResponses];
+
+export type ListSupportNotesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/support/notes';
+};
+
+export type ListSupportNotesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListSupportNotesError = ListSupportNotesErrors[keyof ListSupportNotesErrors];
+
+export type ListSupportNotesResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<SupportNote>;
+    };
+};
+
+export type ListSupportNotesResponse = ListSupportNotesResponses[keyof ListSupportNotesResponses];
+
+export type CreateSupportNoteData = {
+    body: {
+        text: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/support/notes';
+};
+
+export type CreateSupportNoteErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateSupportNoteError = CreateSupportNoteErrors[keyof CreateSupportNoteErrors];
+
+export type CreateSupportNoteResponses = {
+    /**
+     * Success
+     */
+    201: SupportNote;
+};
+
+export type CreateSupportNoteResponse = CreateSupportNoteResponses[keyof CreateSupportNoteResponses];
