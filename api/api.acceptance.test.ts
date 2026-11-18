@@ -6129,6 +6129,78 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.deepEqual((await db.query(`SELECT user_id FROM audit_events WHERE action = 'support.claim' AND target_id = $1`, [waiting.id])).rows.map(r => r.user_id), [lonely.userId]);
         assert.deepEqual(ok(await stamped(waiting.id, 'GET', '/v1/support/scope')).workspaces, []);
       });
+
+      await t.test('10 notes: written only through the stamp, for its person and the conversation’s workspace; read back only for that person while they belong to it; 50 kept', async () => {
+        // The writer owns Gamma and is a member of Delta; a colleague administers Gamma.
+        const writer = await sessionFixture(t), colleague = await sessionFixture(t), gamma = unique('gamma-ws'), delta = unique('delta-ws');
+        await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2)', [gamma, delta]);
+        await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$5,$3,'member'),($6,$2,$7,'admin')`,
+          [unique('mem'), gamma, writer.userId, unique('mem'), delta, unique('mem'), colleague.userId]);
+        await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[writer.userId, colleague.userId]]);
+        const notes = async (id: string) => ok(await stamped(id, 'GET', '/v1/support/notes')).data.map((n: Json) => [n.text, n.workspaceId]);
+        const write = async (id: string, text: string) => ok(await stamped(id, 'POST', '/v1/support/notes', { text }), 201);
+
+        // The person comes from the conversation and the workspace from its scope at that moment, never from the request.
+        const inGamma = await chat(writer, gamma);
+        const first = await write(inGamma, '  Prefers short answers.  ');
+        assert.deepEqual([first.text, first.workspaceId, first.author, first.conversationId], ['Prefers short answers.', gamma, 'agent', inGamma]);
+        assert.equal((await db.query('SELECT user_id FROM support_notes WHERE id = $1', [first.id])).rows[0].user_id, writer.userId);
+        error(await stamped(inGamma, 'POST', '/v1/support/notes', { text: 'Tag it elsewhere.', workspaceId: delta }), 422);
+        error(await stamped(inGamma, 'POST', '/v1/support/notes', { text: 'For someone else.', userId: colleague.userId }), 422);
+        assert.equal(ok(await stamped(inGamma, 'POST', `/v1/support/notes?userId=${colleague.userId}&conversationId=${conversation()}`, { text: 'Query ignored.' }), 201).workspaceId, gamma);
+        error(await stamped(inGamma, 'POST', `/v1/support/notes?workspaceId=${delta}`, { text: 'Outside the scope.' }), 404);
+        const mailed = await email(writer.email);
+        assert.equal((await write(mailed.id, 'Asked about DKIM.')).workspaceId, null, 'An email with no workspace chosen writes an untagged note.');
+        ok(await stamped(mailed.id, 'POST', '/v1/support/scope', { workspaceId: delta }));
+        assert.equal((await write(mailed.id, 'Delta sends receipts.')).workspaceId, delta);
+        // Text: 1 to 1,000 characters.
+        error(await stamped(inGamma, 'POST', '/v1/support/notes', { text: '   ' }), 422);
+        error(await stamped(inGamma, 'POST', '/v1/support/notes', { text: 'x'.repeat(1001) }), 422);
+        assert.equal((await write(inGamma, 'y'.repeat(1000))).text.length, 1000);
+        // Nothing but the binding's stamp writes or reads them: no session, no grant, no closed conversation.
+        error(await send('POST', '/v1/support/notes', session(writer, gamma), { text: 'From the dashboard.' }), 403, 'SUPPORT_GRANT_REQUIRED');
+        error(await send('GET', '/v1/support/notes', session(colleague, gamma)), 403, 'SUPPORT_GRANT_REQUIRED');
+        const grant = ok(await mint({ userId: writer.userId, verification: 'dmarc', workspaceIds: [gamma] }), 201); secrets.add(grant.token);
+        error(reply(await platform.read('/v1/support/notes', grant.token)), 403, 'SUPPORT_CONVERSATION_REQUIRED');
+        error(await send('POST', '/v1/support/notes', { authorization: `Bearer ${grant.token}` }, { text: 'With a grant.' }), 403, 'SUPPORT_READ_ONLY');
+
+        // Shown to the same person in any of their conversations, never to another member of the workspace.
+        const expected = [['Prefers short answers.', gamma], ['Query ignored.', gamma], ['Asked about DKIM.', null], ['Delta sends receipts.', delta], ['y'.repeat(1000), gamma]];
+        assert.deepEqual(await notes(inGamma), expected);
+        assert.deepEqual(await notes(mailed.id), expected);
+        const colleagues = await chat(colleague, gamma);
+        assert.deepEqual(await notes(colleagues), []);
+        await write(colleagues, 'The colleague’s own note.');
+        assert.deepEqual(await notes(inGamma), expected);
+        // Once the person leaves Delta, its notes disappear; the others remain.
+        await db.query('DELETE FROM workspace_members WHERE user_id = $1 AND workspace_id = $2', [writer.userId, delta]);
+        assert.deepEqual(await notes(inGamma), expected.filter(([, workspace]) => workspace !== delta));
+        ok(reply(await platform.closeConversation(mailed.id)));
+        error(await stamped(mailed.id, 'POST', '/v1/support/notes', { text: 'After the end.' }), 403, 'SUPPORT_GRANT_REQUIRED');
+
+        // 50 live notes per person: another retires the oldest.
+        const live = async () => (await db.query('SELECT id, text FROM support_notes WHERE user_id = $1 AND deleted_at IS NULL ORDER BY created_at, id', [writer.userId])).rows;
+        await db.query(`INSERT INTO support_notes(id, user_id, workspace_id, conversation_id, author, text, created_at)
+          SELECT 'snt_' || md5(random()::text || g), $1, $2, $3, 'agent', 'Filler ' || g, now() - interval '1 hour' + g * interval '1 second' FROM generate_series(1, $4::int) g`,
+          [writer.userId, gamma, inGamma, 50 - (await live()).length]);
+        assert.equal((await live()).length, 50);
+        await write(inGamma, 'The fifty-first.');
+        const kept = await live();
+        assert.deepEqual([kept.length, kept.some(n => n.text === 'Filler 1'), kept.at(-1)!.text], [50, false, 'The fifty-first.']);
+        assert.equal((await db.query(`SELECT count(*)::int AS n FROM support_notes WHERE user_id = $1 AND text = 'Filler 1' AND deleted_at IS NOT NULL`, [writer.userId])).rows[0].n, 1);
+        await db.query(`UPDATE support_notes SET created_at = now() - interval '2 hours' WHERE id = $1`, [first.id]);
+        await write(inGamma, 'The fifty-second.');
+        assert.ok(!(await live()).some(n => n.id === first.id), 'The oldest note retires, whenever it was written.');
+        assert.equal((await notes(inGamma)).length, 49, 'Delta’s note still counts among the 50 while hidden.');
+
+        // Staff read every live note from the inbox, whatever the person's memberships; nobody else does.
+        const staff = ok(await send('GET', `/v1/operator/support/notes?userId=${writer.userId}`, session(operator))).data;
+        assert.deepEqual([staff.length, staff[0].text, staff.some((n: Json) => n.workspaceId === delta), staff.some((n: Json) => n.text === 'The colleague’s own note.')], [50, 'The fifty-second.', true, false]);
+        assert.deepEqual(ok(await send('GET', `/v1/operator/support/notes?conversationId=${colleagues}`, session(operator))).data.map((n: Json) => n.text), ['The colleague’s own note.']);
+        error(await send('GET', '/v1/operator/support/notes', session(operator)), 422, 'VALIDATION_FAILED');
+        error(await send('GET', `/v1/operator/support/notes?userId=${writer.userId}`, session(writer, gamma)), 403, 'OPERATOR_REQUIRED');
+        error(reply(await platform.call('GET', `/v1/operator/support/notes?userId=${writer.userId}`)), 404);
+      });
     });
   });
 

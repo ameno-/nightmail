@@ -53,6 +53,9 @@ export const SUPPORT_CEILINGS: Ceiling[] = [
   { method: 'GET', path: '/v1/support/audience/health', roles: EVERYONE, counterpart: 'GET /v1/lists' },
   { method: 'GET', path: '/v1/support/scope', roles: EVERYONE, counterpart: 'GET /v1/workspaces', views: false },
   { method: 'POST', path: '/v1/support/scope', roles: EVERYONE, counterpart: 'GET /v1/workspaces', views: false },
+  // Notes are the person's own (src/support-notes.ts), filtered by their memberships, never a workspace's data.
+  { method: 'GET', path: '/v1/support/notes', roles: EVERYONE, counterpart: 'GET /v1/workspaces', views: false },
+  { method: 'POST', path: '/v1/support/notes', roles: EVERYONE, counterpart: 'GET /v1/workspaces', views: false },
 ];
 /** The parts of GET /v1/support/context that follow another counterpart than the route's own. */
 export const CONTEXT_SECTIONS = {

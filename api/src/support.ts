@@ -134,7 +134,7 @@ async function conversationGate(c: Ctx, next: () => Promise<void>) {
   if (!c.env.config.multiTenant || c.env.platformCaller !== 'bane-support' || !CONVERSATION_ID.test(conversationId) || c.req.header('authorization') !== undefined || hasSessionCookie(c.req.raw.headers)) throw supportRequired();
   const ceiling = ceilingFor(c.req.method, c.req.path);
   if (!ceiling) {
-    if (c.req.method !== 'GET' && c.req.method !== 'HEAD') throw new ApiError(403, 'SUPPORT_READ_ONLY', 'A support conversation can only read, and choose its workspace.');
+    if (c.req.method !== 'GET' && c.req.method !== 'HEAD') throw new ApiError(403, 'SUPPORT_READ_ONLY', 'A support conversation can only read, choose its workspace and keep notes.');
     return notFound('Endpoint');
   }
   const filter = c.req.query('workspaceId') ?? null, context = auditContext(c), limit = SUPPORT_RATE_PER_MINUTE, weight = supportWeight(c.req.path), label = `${productName} support`;
