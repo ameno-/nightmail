@@ -1,0 +1,46 @@
+{
+ "fps": 24,
+ "loopFrames": 192,
+ "width": 1920,
+ "height": 1080,
+ "boards": {
+  "speedPxPerSec": 44.0,
+  "gapPx": 800,
+  "y": [
+   33,
+   33,
+   33
+  ],
+  "files": [
+   "boards/board0.png",
+   "boards/board1.png",
+   "boards/board2.png"
+  ],
+  "w": [
+   410,
+   404,
+   410
+  ],
+  "h": [
+   276,
+   276,
+   276
+  ],
+  "scale": 2,
+  "periodPx": 2400,
+  "direction": 1
+ },
+ "button": {
+  "x": 833,
+  "y": 872,
+  "w": 254,
+  "h": 48
+ },
+ "segments": [
+  {
+   "name": "L7a",
+   "kind": "loop",
+   "frames": 192
+  }
+ ]
+}

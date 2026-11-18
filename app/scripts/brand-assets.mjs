@@ -52,7 +52,8 @@ async function sorterCard(browser) {
     // Night, and the shorter day of a returning visitor.
     await context.addInitScript(() => { localStorage.setItem('nightmail.theme', 'dark'); localStorage.setItem('sorter.seen', '1') });
     const page = await context.newPage();
-    await page.goto(`http://127.0.0.1:${server.address().port}/`);
+    // (A desktop window gets the factory: the card is the sorter's, asked for by name.)
+    await page.goto(`http://127.0.0.1:${server.address().port}/?home=sorter`);
     await page.waitForFunction(() => document.querySelector('.srt-page')?.dataset.phase === 'rest', null, { timeout: 90_000 });
     // The smoke clears and the last letters settle.
     await page.waitForTimeout(7000);

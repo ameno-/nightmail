@@ -1,0 +1,45 @@
+/* The factory homepage (factory-home.tsx), on a desktop. Under the header, the hero: the stage, and under it (for a
+   visitor) a strip with what signing in agrees to. On the stage, the frame: the renders' picture, as large as covers
+   the stage and still shows, whatever the window's shape, the boards and the machine down to its button (the safe
+   box: factory-home.tsx). It is placed by CSS alone (the stage's container units), so the poster is in its place in
+   the first paint and nothing moves after it. Everything on the frame is placed in the frame's own pixels, as
+   percentages of it, and the button's type is sized by the frame's width. */
+.fac-hero { position: relative; display: flex; flex: none; flex-direction: column; height: calc(100svh - var(--srt-head)); }
+/* The stage's own dark is the hall's, for where a window too wide or too narrow for the frame shows it smaller. */
+.fac-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; container-type: size; background: rgb(36 40 46); }
+.fac-frame {
+  --fac-fw: min(max(100cqw, 100cqh * var(--fac-w) / var(--fac-h)), 100cqh * var(--fac-w) / var(--fac-safe-h), 100cqw * var(--fac-w) / var(--fac-safe-w));
+  --fac-fh: calc(var(--fac-fw) * var(--fac-h) / var(--fac-w));
+  position: absolute; top: clamp(min(100cqh - var(--fac-fh), (100cqh - var(--fac-fh)) / 2), 50cqh - var(--fac-fw) * var(--fac-mid) / var(--fac-w), max(0px, (100cqh - var(--fac-fh)) / 2));
+  left: calc((100cqw - var(--fac-fw)) / 2); width: var(--fac-fw); height: var(--fac-fh); container-type: inline-size; }
+.fac-poster, .fac-layer, .fac-video { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+.fac-poster { user-select: none; pointer-events: none; }
+.fac-layer { pointer-events: none; }
+/* A pair of videos is seen once it has put its first frame up (factory/player.ts), over the poster it starts on. */
+.fac-video { object-fit: fill; opacity: 0; }
+.fac-video[data-on] { opacity: 1; }
+/* The boards are in the poster where they start; on their rail they are seen once the videos run, and never past the
+   frame's edges. */
+.fac-boards { overflow: hidden; opacity: 0; }
+.fac-stage[data-playing] .fac-boards { opacity: 1; }
+.fac-rail { position: absolute; inset: 0; will-change: transform; }
+.fac-board { position: absolute; left: 0; height: auto; }
+
+/* The button: the page's words on the machine's blank plate. Pointed at, the plate is lit brighter; pressed, it dims
+   and the words go in with it. */
+.fac-cta { position: absolute; z-index: 1; display: flex; align-items: center; justify-content: center; padding: 0; border: 0; background: none; color: var(--srt-on-cta); font-family: var(--font-body); font-size: max(13px, 100cqw * 19 / var(--fac-w)); font-weight: 600; line-height: 1; letter-spacing: -.012em; text-decoration: none; cursor: pointer; }
+.fac-cta::before { content: ''; position: absolute; inset: 0; background: rgb(255 255 255); opacity: 0; pointer-events: none; transition: opacity 150ms var(--srt-ease), background-color 90ms var(--srt-ease); }
+.fac-cta svg { width: 1em; height: 1em; }
+@media (hover: hover) and (pointer: fine) { .fac-cta:hover:not(:disabled)::before { opacity: .35; } .fac-cta:hover:not(:disabled) .srt-cta-arrow { translate: .25em 0; } }
+.fac-cta:active:not(:disabled)::before { background: rgb(0 0 0); opacity: .08; }
+.fac-cta:active:not(:disabled) .srt-cta-label { translate: 0 1px; }
+.fac-cta:disabled { opacity: 1; }
+.fac-cta[data-busy] { cursor: progress; }
+.fac-cta:focus-visible { outline: none; }
+.fac-cta:focus-visible::after { content: ''; position: absolute; inset: -6px; border: var(--focus-width) solid var(--color-focus); pointer-events: none; }
+
+.fac-under { display: grid; flex: none; place-items: center; height: 52px; padding: 0 var(--space-16); }
+.fac-consent { margin: 0; color: var(--srt-text-2); font-size: 12px; line-height: 16px; text-align: center; text-wrap: balance; }
+.fac-consent a:hover { color: var(--srt-text); }
+
+@media (prefers-reduced-motion: reduce) { .fac-cta::before, .fac-cta .srt-cta-label, .fac-cta .srt-cta-arrow { transition: none; } }
