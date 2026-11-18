@@ -129,7 +129,14 @@ export function mountPlayer(layers: Layers, { base, manifest: m, format, height 
     if ('requestVideoFrameCallback' in v) v.requestVideoFrameCallback(done)
     else requestAnimationFrame(() => requestAnimationFrame(done))
   })
-  const show = (deck: Deck, on: boolean) => { for (const v of both(deck)) v.toggleAttribute('data-on', on) }
+  // Once a pair is shown: both its videos have put a frame up and the page has painted since. (A video turned from
+  // transparent to shown can take a frame to reach the screen: until this resolves, whatever is under it shows.)
+  const painted = async (deck: Deck) => {
+    await Promise.all(both(deck).map(presented))
+    await new Promise(next => requestAnimationFrame(() => requestAnimationFrame(next)))
+  }
+  // A pair is shown over the other one (`data-top`), so the one going is only uncovered by the one coming.
+  const show = (deck: Deck, on: boolean) => { for (const v of both(deck)) { v.toggleAttribute('data-on', on); v.toggleAttribute('data-top', on) } }
   const hold = (deck: Deck) => { for (const v of both(deck)) if (!v.paused) v.pause() }
   const go = (deck: Deck) => {
     if (Math.abs(deck.fg.currentTime - deck.bg.currentTime) > frame) deck.fg.currentTime = deck.bg.currentTime
@@ -155,10 +162,16 @@ export function mountPlayer(layers: Layers, { base, manifest: m, format, height 
     }
     swapping = true
     to.fg.playbackRate = 1
+    // The coming pair goes on over the going one (which holds the same picture), starts, and the going pair is
+    // hidden only once the coming one is on the screen: there is never a frame with neither, which would show the
+    // stage (or, before the poster is hidden, its boards) through.
+    for (const v of both(from)) v.removeAttribute('data-top')
+    show(to, true)
     await Promise.all(both(to).map(v => v.play().catch(() => {})))
-    await presented(to.bg)
+    await painted(to)
     if (destroyed) return
-    show(to, true); show(from, false); hold(from)
+    for (const v of both(from)) v.removeAttribute('data-on')
+    hold(from)
     if (!shown) hold(to)
     active = 1 - active
     // (The pair just left is free: it loads whatever follows this segment.)
@@ -199,8 +212,14 @@ export function mountPlayer(layers: Layers, { base, manifest: m, format, height 
     if (!played.every(Boolean)) { hold(first); return }
     await presented(first.bg)
     if (destroyed) return
+    // The first pair and the boards come on over the poster (where the poster has the boards, so nothing moves);
+    // once the pair is on the screen the poster is hidden, so its baked boards can never show through again, and
+    // the boards set off.
     show(first, true)
     layers.stage.toggleAttribute('data-playing', true)
+    await painted(first)
+    if (destroyed) return
+    layers.stage.toggleAttribute('data-live', true)
     started = true
     if (shown) for (const board of boards) board.motion?.play()
     else hold(first)
@@ -222,7 +241,7 @@ export function mountPlayer(layers: Layers, { base, manifest: m, format, height 
       for (const deck of decks) { deck.loading?.abort(); for (const v of both(deck)) { v.pause(); v.removeAttribute('src'); v.load(); v.remove() } }
       for (const board of boards) { board.motion?.cancel(); board.rail.remove() }
       layers.boards.style.filter = ''
-      layers.stage.removeAttribute('data-playing')
+      layers.stage.removeAttribute('data-playing'); layers.stage.removeAttribute('data-live')
     },
   }
 }

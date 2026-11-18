@@ -14,10 +14,15 @@
   left: calc((100cqw - var(--fac-fw)) / 2); width: var(--fac-fw); height: var(--fac-fh); container-type: inline-size; }
 .fac-poster, .fac-layer, .fac-video { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
 .fac-poster { user-select: none; pointer-events: none; }
-.fac-layer { pointer-events: none; }
-/* A pair of videos is seen once it has put its first frame up (factory/player.ts), over the poster it starts on. */
+/* Each layer is its own stack, so the video put over the other one in it (`data-top`) stays under the next layer. */
+.fac-layer { isolation: isolate; pointer-events: none; }
+/* A pair of videos is seen once it has put its first frame up (factory/player.ts), over the poster it starts on; at a
+   change of segment the coming pair is on over the going one until it has painted. Once the first pair is on the
+   screen the poster is hidden (its boards are baked in, and must never show through). */
 .fac-video { object-fit: fill; opacity: 0; }
 .fac-video[data-on] { opacity: 1; }
+.fac-video[data-top] { z-index: 1; }
+.fac-stage[data-live] .fac-poster { visibility: hidden; }
 /* The boards are in the poster where they start; on their rail they are seen once the videos run, and never past the
    frame's edges. */
 .fac-boards { overflow: hidden; opacity: 0; }
