@@ -19,11 +19,11 @@ export function alphaFormat(): AlphaFormat | null {
 
 /** The order segments play in. The first loop segment is the machine's ordinary running, and plays between every two
  *  others; those are the other loop segments in a shuffled turn, with a rare one in place of every fourth (each rare
- *  one once before any comes round again). A segment's `next` always comes straight after it, and is never picked
- *  on its own. */
+ *  one once before any comes round again). A segment's `then` always comes straight after it, and it and any
+ *  segment marked `after` are never picked on their own. */
 export function schedule(segments: Segment[], random = Math.random) {
   const named = new Map(segments.map(segment => [segment.name, segment]))
-  const followers = new Set(segments.flatMap(segment => segment.next && named.has(segment.next) ? [segment.next] : []))
+  const followers = new Set(segments.flatMap(segment => [...segment.then && named.has(segment.then) ? [segment.then] : [], ...segment.after ? [segment.name] : []]))
   const free = segments.filter(segment => !followers.has(segment.name))
   const home = free.find(segment => segment.kind === 'loop') ?? free[0] ?? segments[0]
   const events = free.filter(segment => segment.kind === 'loop' && segment !== home), rares = free.filter(segment => segment.kind === 'rare' && segment !== home)
@@ -32,7 +32,7 @@ export function schedule(segments: Segment[], random = Math.random) {
   return {
     first: home,
     after(segment: Segment): Segment {
-      const then = segment.next ? named.get(segment.next) : undefined
+      const then = segment.then ? named.get(segment.then) : undefined
       if (then) return then
       if (segment !== home) return home
       count++
@@ -53,7 +53,10 @@ export type Layers = { stage: HTMLElement; bg: HTMLElement; boards: HTMLElement;
  *  of their sizes. The stage gets `data-playing` when the videos are up. */
 export function mountPlayer(layers: Layers, { base, manifest: m, format, height }: { base: string; manifest: Manifest; format: AlphaFormat; height: 720 | 1080 }): Player {
   const order = schedule(m.segments), frame = 1 / m.fps
-  const url = (segment: Segment, layer: 'bg' | 'fg') => `${base}${segment.name}/${layer === 'bg' ? `bg-${height}.mp4` : format === 'hevc' ? `fg-${height}-hevc.mov` : `fg-${height}.webm`}`
+  // (A layer one segment shares with another is the other's file: rush's hall is steady's bg-1080.mp4, so it is
+  // downloaded once.)
+  const url = (segment: Segment, layer: 'bg' | 'fg') => new URL(layer === 'bg' ? `${segment.bg ?? segment.name}/bg-${height}.mp4`
+    : `${segment.fg ?? segment.name}/${format === 'hevc' ? `fg-${height}-hevc.mov` : `fg-${height}.webm`}`, new URL(base, location.href)).href
   const video = (parent: HTMLElement) => {
     const v = document.createElement('video')
     v.muted = true; v.defaultMuted = true; v.playsInline = true; v.preload = 'auto'; v.disablePictureInPicture = true; v.tabIndex = -1
@@ -63,7 +66,7 @@ export function mountPlayer(layers: Layers, { base, manifest: m, format, height 
   }
   const decks: Deck[] = [0, 1].map(() => ({ bg: video(layers.bg), fg: video(layers.fg), segment: null, ready: false, loading: null }))
   const both = (deck: Deck) => [deck.bg, deck.fg]
-  let active = 0, upcoming: Segment | null = null, started = false, shown = true, destroyed = false, swapping = false, raf = 0, last = 0
+  let active = 0, upcoming: Segment | null = null, started = false, shown = true, destroyed = false, swapping = false, raf = 0, last = 0, light = 1
 
   // The boards: each a sprite on a rail as wide as the frame, slid by the rail's transform from just off the frame's
   // left edge across it and off its right (`gapPx` times the number of boards in all), the next one `gapPx` behind.
@@ -96,12 +99,24 @@ export function mountPlayer(layers: Layers, { base, manifest: m, format, height 
     v.addEventListener('error', () => resolve(false), { once: true, signal })
     signal.addEventListener('abort', () => resolve(false), { once: true })
   })
+  // A video that already has the file (steady coming round again in the same pair, or the hall a segment shares with
+  // the last one there) is wound back to its start rather than loaded again.
+  const rewound = (v: HTMLVideoElement, signal: AbortSignal) => new Promise<boolean>(resolve => {
+    v.addEventListener('seeked', () => resolve(playable(v, signal)), { once: true, signal })
+    signal.addEventListener('abort', () => resolve(false), { once: true })
+    v.currentTime = 0
+  })
   const load = (deck: Deck, segment: Segment) => {
     deck.loading?.abort()
     const loading = deck.loading = new AbortController()
     deck.segment = segment; deck.ready = false
-    for (const v of both(deck)) { v.loop = false; v.src = url(segment, v === deck.bg ? 'bg' : 'fg') }
-    return Promise.all(both(deck).map(v => playable(v, loading.signal))).then(ok => {
+    return Promise.all(both(deck).map(v => {
+      const src = url(segment, v === deck.bg ? 'bg' : 'fg')
+      v.loop = false
+      if (v.src === src && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && !v.error) return rewound(v, loading.signal)
+      v.src = src
+      return playable(v, loading.signal)
+    })).then(ok => {
       if (loading.signal.aborted) return false
       deck.loading = null; deck.ready = ok.every(Boolean)
       return deck.ready
@@ -156,6 +171,9 @@ export function mountPlayer(layers: Layers, { base, manifest: m, format, height 
     raf = requestAnimationFrame(tick)
     if (!started || !shown || swapping) return
     const deck = decks[active], { bg, fg } = deck, end = deck.segment!.frames / m.fps
+    // Where the hall dims, the boards dim with it, frame by frame.
+    const lights = deck.segment!.boardLight, level = lights ? lights[Math.min(lights.length - 1, Math.floor(bg.currentTime * m.fps))] ?? 1 : 1
+    if (level !== light) { light = level; layers.boards.style.filter = level === 1 ? '' : `brightness(${level})` }
     if (bg.loop) {
       // Round again: the next time through has begun.
       if (bg.currentTime < last - end / 2) plan()
@@ -203,6 +221,7 @@ export function mountPlayer(layers: Layers, { base, manifest: m, format, height 
       cancelAnimationFrame(raf)
       for (const deck of decks) { deck.loading?.abort(); for (const v of both(deck)) { v.pause(); v.removeAttribute('src'); v.load(); v.remove() } }
       for (const board of boards) { board.motion?.cancel(); board.rail.remove() }
+      layers.boards.style.filter = ''
       layers.stage.removeAttribute('data-playing')
     },
   }
