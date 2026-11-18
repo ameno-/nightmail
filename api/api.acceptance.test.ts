@@ -4571,11 +4571,51 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
-  test('a key or webhook created over MCP says it is tied to the approval and until when, reads show it, and it is refused once the approval ends', async t => {
+  // Receiving in a simulated fixture workspace: one active domain (receive.example), staged mail served from memory, and
+  // ingest, fanout and webhook delivery run in process. receive() returns one recipient's recorded routing and the
+  // message's deliveries to a webhook; deliver() runs one delivery and returns its outcome.
+  async function receivingFixture(t: TestContext, runtime: import('./src/core.js').Runtime, db: pg.Client) {
+    const { acceptInboundNotification, mailboxIngestJobs } = await import('./src/mailbox-ingest.js'), { mailboxEventJobs } = await import('./src/mailbox-events.js'), { S3Client } = await import('@aws-sdk/client-s3');
+    const wid = runtime.config.workspaceId, bucket = unique('bucket'), topic = `arn:aws:sns:${REGION}:111122223333:inbound`, domain = unique('mdom');
+    runtime.config.aws = { accessKeyId: 'synthetic', secretAccessKey: 'synthetic' };
+    await db.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,$3,$4)', [wid, REGION, bucket, topic]);
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'receive.example',$3,'active','store')", [domain, wid, REGION]);
+    const raw = new Map<string, Buffer>();
+    t.mock.method(S3Client.prototype, 'send', async (cmd: any) => {
+      const mid = String(cmd.input.Key).split('/').pop()!;
+      if (cmd.constructor.name === 'HeadObjectCommand') return { ContentLength: raw.get(mid)!.length, ETag: '"fixture"' };
+      if (cmd.constructor.name === 'GetObjectCommand') return { Body: { transformToByteArray: async () => raw.get(mid)! } };
+      return {};
+    });
+    const posted: string[] = [], transport = runtime.webhookFetch;
+    runtime.webhookFetch = async url => { posted.push(url); return { status: 204 }; };
+    t.after(() => { runtime.webhookFetch = transport; });
+    const receive = async (mid: string, to: string, hookId: string) => {
+      raw.set(mid, Buffer.from(`From: Customer <a@example.org>\r\nSubject: Help ${mid}\r\nMessage-ID: <${mid}@example.org>\r\n\r\nHello`));
+      assert.equal(await acceptInboundNotification(runtime, { region: REGION, topicArn: topic, message: { notificationType: 'Received', mail: { messageId: mid, commonHeaders: { subject: 'Help' } },
+        receipt: { ...cleanScans, dmarcVerdict: { status: 'PASS' }, timestamp: new Date().toISOString(), recipients: [to], action: { type: 'S3', bucketName: bucket, topicArn: topic, objectKey: 'staging/' + mid } } } }), 1);
+      await mailboxIngestJobs['mailbox.ingest']!(runtime, { sesMessageId: mid }, { id: unique('job'), workspaceId: wid, attempts: 1 });
+      await expandFixtureOutbox(runtime, wid);
+      const { id, routing } = (await db.query('SELECT m.id,r.routing FROM mail_receipts r JOIN mail_messages m USING(workspace_id,ses_message_id) WHERE r.workspace_id=$1 AND r.ses_message_id=$2', [wid, mid])).rows[0];
+      const deliveries = (await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2", [hookId, id])).rows.map(d => d.id as string);
+      return { trace: routing.recipients[0] as Json, deliveries };
+    };
+    const deliver = async (deliveryId: string) => {
+      await mailboxEventJobs['mailbox.webhook']!(runtime, { deliveryId }, { id: unique('job'), workspaceId: wid, attempts: 1 }).catch(e => { if (e?.code !== 'GRANT_REVOKED') throw e; });
+      return (await db.query('SELECT status,last_error FROM mailbox_webhook_deliveries WHERE id=$1', [deliveryId])).rows[0];
+    };
+    return { posted, receive, deliver };
+  }
+  // An approval's own end, as nightmail_approval_ends computes it, and the updates that move one past it.
+  const approvalEnds = async (db: pg.Client, consentId: string) => (await db.query('SELECT nightmail_approval_ends(g) AS ends FROM nightmail_resource_grants g WHERE grant_key=$1', [consentId])).rows[0].ends.toISOString() as string;
+  const tokenExpired = "expires_at=now()-interval '1 second'", idle = "issued_at=floor(extract(epoch FROM now()-interval '30 days'))::bigint-1,expires_at=now()-interval '30 days'",
+    approvedLongAgo = "issuer_grant_seen_at=now()-interval '90 days 1 second'";
+
+  test('a key or webhook created over MCP says it is tied to the approval and until when, reads show it, works after the sign-in token expires and is refused once the approval ends', async t => {
     await simulatedSesFixture(t, async ({ db, local, request }) => {
       const { token, consentId } = await oauthGrant(t, db, writableScope, request), approvalId = `mcp_${consentId}`;
       const tool = async (name: string, body: Json) => { const r = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { confirm: true, body } } }, rpcHeaders)).result; assert.equal(r.isError, false, redact(r)); return r.structuredContent; };
-      const endsAt = (await db.query('SELECT expires_at FROM nightmail_resource_grants WHERE grant_key=$1', [consentId])).rows[0].expires_at.toISOString();
+      const endsAt = await approvalEnds(db, consentId);
       const tie = { active: true, endsAt, owners: [{ id: approvalId, endsAt, active: true }] };
       // Over MCP: a workspace key, a key limited to receiving addresses, a sending webhook and an inbound webhook.
       const key = await tool('createApiKey', { name: 'tied fixture', permissions: ['send'] }); secrets.add(key.secret);
@@ -4584,7 +4624,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const inbound = await tool('createInboundWebhook', { url: 'https://example.com/hooks/tied-inbound' });
       for (const created of [key, limited, hook, inbound]) {
         assert.deepEqual(created.approval, tie);
-        assert.match(created.nextStep, new RegExp(`^This (key|webhook) is tied to the MCP approval ${approvalId}: .* until ${endsAt}, .* For a lasting \\1, create it in the dashboard`));
+        assert.match(created.nextStep, new RegExp(`^This (key|webhook) is tied to the MCP approval ${approvalId}: .* until ${endsAt}: 30 days after the agent last connected, at most 90 days after you approved it\\), .* For a lasting \\1, create it in the dashboard`));
       }
       // In the dashboard: nothing is tied, and there is no nextStep.
       const lasting = ok(await local('POST', '/v1/api-keys', { name: 'lasting fixture', permissions: ['send'] }), 201); secrets.add(lasting.secret);
@@ -4596,10 +4636,15 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.deepEqual([key, limited, lasting].map(k => listed.get(k.id)!.approval), [tie, tie, null]);
       assert.deepEqual(ok(await local('GET', `/v1/webhooks/${hook.id}`)).approval, tie);
       assert.deepEqual([ok(await local('GET', `/v1/inbound/webhooks/${inbound.id}`)).approval, ok(await local('GET', `/v1/inbound/webhooks/${lastingHook.id}`)).approval], [tie, null]);
-      // The approval ends when its newest sign-in token expires and the agent does not connect again: the tied key is
-      // refused (not revoked) and reads say the approval is no longer active. The dashboard's key keeps working.
+      // The agent stops connecting and its newest sign-in token expires: the approval is still active, so the tied key
+      // keeps working and reads say so.
       ok(await request('GET', '/v1/me', key.secret));
-      await db.query("UPDATE nightmail_resource_grants SET expires_at=now()-interval '1 second' WHERE grant_key=$1", [consentId]);
+      await db.query(`UPDATE nightmail_resource_grants SET ${tokenExpired} WHERE grant_key=$1`, [consentId]);
+      ok(await request('GET', '/v1/me', key.secret));
+      assert.equal(ok(await local('GET', `/v1/inbound/webhooks/${inbound.id}`)).approval.active, true);
+      // 30 days without a new sign-in token end the approval: the tied key is refused (not revoked) and reads say the
+      // approval is no longer active. The dashboard's key keeps working.
+      await db.query(`UPDATE nightmail_resource_grants SET ${idle} WHERE grant_key=$1`, [consentId]);
       error(await request('GET', '/v1/me', key.secret), 401, 'AUTH_INVALID');
       ok(await request('GET', '/v1/me', lasting.secret));
       listed = await keys();
@@ -4616,7 +4661,7 @@ describe('Hosted MCP OAuth and tools', () => {
     await simulatedSesFixture(t, async ({ db, local, request }) => {
       const { token, consentId } = await oauthGrant(t, db, writableScope, request), approvalId = `mcp_${consentId}`;
       const tool = async (name: string, args: Json) => { const r = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { confirm: true, ...args } } }, rpcHeaders)).result; assert.equal(r.isError, false, redact(r)); return r.structuredContent; };
-      const endsAt = (await db.query('SELECT expires_at FROM nightmail_resource_grants WHERE grant_key=$1', [consentId])).rows[0].expires_at.toISOString();
+      const endsAt = await approvalEnds(db, consentId);
       const tie = { active: true, endsAt, owners: [{ id: approvalId, endsAt, active: true }] };
       const key = await tool('createApiKey', { body: { name: 'edited fixture', permissions: ['send'] } }); secrets.add(key.secret);
       const limited = await tool('createApiKey', { body: { name: 'edited limited fixture', access: { type: 'addresses', mail: ['read'] } } }); secrets.add(limited.secret);
@@ -4629,8 +4674,11 @@ describe('Hosted MCP OAuth and tools', () => {
       let keys = await listed();
       assert.deepEqual([keys.get(key.id)!.approval, keys.get(limited.id)!.approval], [tie, tie]);
       ok(await request('GET', '/v1/me', key.secret));
-      // The approval ends: the edited key is refused, and an edit in the dashboard reports the ended tie.
-      await db.query("UPDATE nightmail_resource_grants SET expires_at=now()-interval '1 second' WHERE grant_key=$1", [consentId]);
+      // Its sign-in token expiring changes nothing. 90 days after the person approved the agent the approval ends: the
+      // edited key is refused, and an edit in the dashboard reports the ended tie.
+      await db.query(`UPDATE nightmail_resource_grants SET ${tokenExpired} WHERE grant_key=$1`, [consentId]);
+      ok(await request('GET', '/v1/me', key.secret));
+      await db.query(`UPDATE nightmail_resource_grants SET ${approvedLongAgo} WHERE grant_key=$1`, [consentId]);
       error(await request('GET', '/v1/me', key.secret), 401, 'AUTH_INVALID');
       assert.equal(ok(await local('PATCH', `/v1/api-keys/${key.id}`, { name: 'edited after the end' })).approval.active, false);
       keys = await listed();
@@ -4642,8 +4690,8 @@ describe('Hosted MCP OAuth and tools', () => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
       const as = (bearer: string) => async (name: string, args: Json) => { const r = ok(await request('POST', '/mcp?codemode=true', bearer, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { confirm: true, ...args } } }, rpcHeaders)).result; assert.equal(r.isError, false, redact(r)); return r.structuredContent; };
       const a = await oauthGrant(t, db, writableScope, request), b = await oauthGrant(t, db, writableScope, request);
-      const ids = [`mcp_${a.consentId}`, `mcp_${b.consentId}`], ends = new Map<string, string>();
-      for (const id of ids) ends.set(id, (await db.query('SELECT expires_at FROM nightmail_resource_grants WHERE id=$1', [id])).rows[0].expires_at.toISOString());
+      const ids = [`mcp_${a.consentId}`, `mcp_${b.consentId}`], issued = new Map<string, string>();
+      for (const id of ids) issued.set(id, (await db.query('SELECT issued_at FROM nightmail_resource_grants WHERE id=$1', [id])).rows[0].issued_at);
       // The review's reproduction: A sets the webhook up, B changes it. Both own it now.
       const hook = await as(a.token)('createWebhook', { body: { url: 'https://example.com/hooks/review-shared', eventTypes: ['email.sent'] } });
       await as(b.token)('updateWebhook', { webhookId: hook.id, body: { description: 'changed by B' } });
@@ -4655,11 +4703,14 @@ describe('Hosted MCP OAuth and tools', () => {
       const posted: string[] = [], transport = runtime.webhookFetch;
       runtime.webhookFetch = async url => { posted.push(url); return { status: 204 }; };
       t.after(() => { runtime.webhookFetch = transport; });
-      const sorted = [...ids].sort(), past = new Date(Date.now() - 1000).toISOString();
-      // Every combination of the two approvals: what getWebhook reports agrees with what the real delivery job does.
+      const sorted = [...ids].sort();
+      // Every combination of the two approvals, both past their sign-in tokens: an ended one had no new token for 30 days.
+      // What getWebhook reports agrees with what the real delivery job does.
       for (const [aLive, bLive] of [[true, true], [true, false], [false, true], [false, false]] as const) {
-        const live = new Map([[ids[0]!, aLive], [ids[1]!, bLive]]), end = (id: string) => live.get(id) ? ends.get(id)! : past;
-        for (const id of ids) await db.query('UPDATE nightmail_resource_grants SET expires_at=$2 WHERE id=$1', [id, end(id)]);
+        const live = new Map([[ids[0]!, aLive], [ids[1]!, bLive]]), ends = new Map<string, string>();
+        for (const id of ids) ends.set(id, (await db.query(`UPDATE nightmail_resource_grants g SET ${tokenExpired},issued_at=CASE WHEN $2 THEN $3::bigint ELSE floor(extract(epoch FROM now()-interval '30 days'))::bigint-1 END
+          WHERE id=$1 RETURNING nightmail_approval_ends(g) AS ends`, [id, live.get(id), issued.get(id)])).rows[0].ends.toISOString());
+        const end = (id: string) => ends.get(id)!;
         const label = `A ${aLive ? 'active' : 'ended'}, B ${bLive ? 'active' : 'ended'}`, both = aLive && bLive;
         const expected = { active: both, endsAt: sorted.map(end).sort()[0], owners: sorted.map(id => ({ id, endsAt: end(id), active: live.get(id) })) };
         const reported = ok(await local('GET', `/v1/webhooks/${hook.id}`)).approval;
@@ -4677,6 +4728,85 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.equal(listedKey.approval.active, aLive, label);
         assert.equal(used.status === 200, listedKey.approval.active, label);
       }
+    });
+  });
+
+  test('a route set up over MCP keeps routing to its webhook after the sign-in token expires, until the approval is removed', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const { token, consentId } = await oauthGrant(t, db, writableScope, request), approvalId = `mcp_${consentId}`;
+      const tool = async (name: string, args: Json) => { const r = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { confirm: true, ...args } } }, rpcHeaders)).result; assert.equal(r.isError, false, redact(r)); return r.structuredContent; };
+      const { posted, receive, deliver } = await receivingFixture(t, runtime, db);
+      // Lasting destinations made in the dashboard; only the route that joins them is made over MCP.
+      const box = ok(await local('POST', '/v1/inbound/addresses', { address: 'help@receive.example' }), 201);
+      const hook = ok(await local('POST', '/v1/inbound/webhooks', { url: 'https://example.com/hooks/route-agent', eventTypes: [] }), 201);
+      assert.equal(hook.approval, null);
+      const route = await tool('createRoute', { body: { match: box.address, to: [box.id, hook.id] } });
+      assert.equal((await db.query("SELECT FROM mail_grant_objects WHERE kind='route' AND resource=$1 AND grant_id=$2", [route.id, consentId])).rowCount, 1);
+      const routed = async (mid: string) => { const { trace, deliveries } = await receive(mid, box.address, hook.id); return { routed: [trace.tier, trace.route, trace.webhooks], deliveries }; };
+      const routedHere = ['exact', route.id, [hook.id]];
+      const live = await routed('route-agent-live');
+      assert.deepEqual(live.routed, routedHere);
+      assert.deepEqual(await deliver(live.deliveries[0]!), { status: 'delivered', last_error: null });
+      // The agent stops connecting: its newest sign-in token expires. The route is the person's routing and keeps working:
+      // ingest routes by it, the webhook delivers, and the dashboard's preview says so.
+      await db.query(`UPDATE nightmail_resource_grants SET ${tokenExpired} WHERE grant_key=$1`, [consentId]);
+      const later = await routed('route-agent-ended');
+      assert.deepEqual(later.routed, routedHere);
+      assert.equal(later.deliveries.length, 1);
+      assert.deepEqual(await deliver(later.deliveries[0]!), { status: 'delivered', last_error: null });
+      assert.deepEqual(posted, ['https://example.com/hooks/route-agent', 'https://example.com/hooks/route-agent']);
+      const preview = ok(await local('POST', '/v1/routing/test', { envelope: { to: [box.address] } })).recipients[0];
+      assert.deepEqual([preview.tier, preview.route, preview.webhooks], routedHere);
+      // Removing the approval disables the route: mail queued through it is not posted, and new mail stays in the inbox.
+      const queued = await routed('route-agent-queued');
+      ok(await local('POST', `/v1/mcp-connections/${approvalId}/revoke`));
+      assert.deepEqual(await deliver(queued.deliveries[0]!), { status: 'failed', last_error: 'GRANT_REVOKED' });
+      assert.equal(posted.length, 2);
+      const removed = await routed('route-agent-removed');
+      assert.deepEqual(removed, { routed: ['address', null, []], deliveries: [] });
+    });
+  });
+
+  test('what an agent makes over MCP lasts like the person\'s own: past its sign-in token, until the approval is removed, ends, or its person loses the role', async t => {
+    // Each case: an agent signed in as the workspace's owner makes a webhook, the route that sends an address's mail to
+    // it, a rule on that inbox and an API key, then the approval changes. lasts: all four work as before; otherwise none does.
+    type Change = (x: { db: pg.Client; consentId: string; wid: string; local: (method: string, path: string) => Promise<Reply> }) => Promise<unknown>;
+    const grantSet = (set: string): Change => ({ db, consentId }) => db.query(`UPDATE nightmail_resource_grants SET ${set} WHERE grant_key=$1`, [consentId]);
+    const cases: [string, boolean, Change][] = [
+      ['its newest sign-in token expired', true, grantSet(tokenExpired)],
+      ['no new sign-in token for 30 days', false, grantSet(idle)],
+      ['90 days since the person approved the agent', false, grantSet(`${tokenExpired},${approvedLongAgo}`)],
+      ['the approval was removed', false, async ({ consentId, local }) => ok(await local('POST', `/v1/mcp-connections/mcp_${consentId}/revoke`))],
+      ['its person was demoted to member', false, ({ db, wid }) => db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2", [wid, manager!.userId])],
+      ['its person left the workspace', false, ({ db, wid }) => db.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [wid, manager!.userId])],
+    ];
+    for (const [label, lasts, change] of cases) await t.test(label, async st => {
+      await simulatedSesFixture(st, async ({ runtime, db, local, request }) => {
+        const wid = runtime.config.workspaceId, { token, consentId } = await oauthGrant(st, db, writableScope, request);
+        const tool = async (name: string, args: Json) => { const r = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { confirm: true, ...args } } }, rpcHeaders)).result; assert.equal(r.isError, false, redact(r)); return r.structuredContent; };
+        const { posted, receive, deliver } = await receivingFixture(st, runtime, db);
+        const box = ok(await local('POST', '/v1/inbound/addresses', { address: 'desk@receive.example' }), 201);
+        const hook = await tool('createInboundWebhook', { body: { url: 'https://example.com/hooks/agent-made', eventTypes: [] } });
+        const route = await tool('createRoute', { body: { match: box.address, to: [box.id, hook.id] } });
+        await tool('applyRules', { body: { rules: [{ key: 'agent-label', source: 'export default function route(email){label("agent-made")}' }], attachments: [{ rule: 'agent-label', target: box.id }] } });
+        const key = await tool('createApiKey', { body: { name: 'agent-made key', permissions: ['send'] } }); secrets.add(key.secret);
+        assert.equal((await db.query("SELECT owners->>'ritual:agent-label' AS owner FROM mail_ritual_configs WHERE workspace_id=$1", [wid])).rows[0].owner, consentId);
+        assert.deepEqual([hook.approval.active, key.approval.active], [true, true]);
+        // When the person approved the agent counts from Nightmail's first sight of the account service's grant.
+        assert.equal((await db.query('SELECT issuer_grant_seen_at<=now() AS seen FROM nightmail_resource_grants WHERE grant_key=$1', [consentId])).rows[0].seen, true);
+        await change({ db, consentId, wid, local });
+        const { trace, deliveries } = await receive(unique('agent-made'), box.address, hook.id);
+        const used = await request('GET', '/v1/me', key.secret);
+        if (lasts) {
+          assert.deepEqual([trace.tier, trace.route, trace.webhooks, trace.labels, used.status], ['exact', route.id, [hook.id], ['agent-made'], 200]);
+          assert.deepEqual(await deliver(deliveries[0]!), { status: 'delivered', last_error: null });
+          assert.deepEqual(posted, ['https://example.com/hooks/agent-made']);
+        } else {
+          assert.deepEqual([trace.tier, trace.route, trace.webhooks, trace.labels ?? [], deliveries, used.status], ['address', null, [], [], [], 401]);
+          assert.match(trace.warnings.join(' '), /Skipped a rule whose receiving approval is no longer active/);
+          assert.deepEqual(posted, []);
+        }
+      });
     });
   });
 

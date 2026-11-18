@@ -223,7 +223,7 @@ export type ApprovalTie = {
      */
     active: boolean;
     /**
-     * The earliest end among its owners: when it stops working unless their agents connect again.
+     * The earliest end among its owners: when it stops working unless their agents connect again before then.
      */
     endsAt: string;
     /**
@@ -238,7 +238,7 @@ export type ApprovalOwner = {
      */
     id: string;
     /**
-     * When this approval ends unless its agent connects again: each new sign-in token moves it later.
+     * When this approval ends: 30 days after its agent last connected, and no later than 90 days after the person approved the agent. Each connection moves it later, up to that limit; removing the approval ends it at once.
      */
     endsAt: string;
     /**

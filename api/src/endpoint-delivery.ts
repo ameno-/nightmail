@@ -48,7 +48,7 @@ export async function deliverEndpoint(runtime: Runtime, w: string, h: ClaimedWeb
   if (grants?.length) {
     const { getMcpGrantActor } = await import('./mcp-auth.js');
     for (const id of grants) {
-      const grant = await getMcpGrantActor(runtime, 'mcp_' + id, w);
+      const grant = await getMcpGrantActor(runtime, 'mcp_' + id, w, undefined, 'lasting');
       if (!grant?.receivingConsent || grant.workspaceId !== w || !grant.permissions.includes('manage')) throw new ApiError(403, 'GRANT_REVOKED', 'The receiving grant is no longer active.');
     }
   }

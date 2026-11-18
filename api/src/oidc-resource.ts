@@ -49,25 +49,35 @@ export function profileLabel(value: string | null) {
 const rolePermissions = (role: string): Permission[] => role === 'owner' || role === 'admin' ? permissions : ['read', 'send'];
 
 /**
- * An MCP approval (one per account and client, as the account service's tokens name them) acting in one workspace,
- * or null. The approval is active (not revoked, its token not expired); the person who made it still belongs to the
- * workspace (and, self-hosted, is an allowlisted owner or admin); it acts with its scopes intersected with their role
- * there. Receiving tools need an owner or admin (receivingConsent), and changing them the manage scope as well, as
- * every write does. Checked on every MCP tool call, and
- * whenever a credential or object the approval created is used in that workspace.
+ * What an approval is checked for. `request`: a request its access token carries, a call by its agent token, or a write
+ * that holds it; the newest access token must not have expired. `lasting`: something it made (a key, a webhook, an
+ * endpoint, a route, a rule, queued mail) being used; the approval itself must be active (nightmail_approval_active,
+ * migration 341), however long ago its agent last connected.
  */
-export async function externalMcpGrant(runtime: Runtime, keyId: string, workspaceId: string, db: DbExecutor = runtime.db): Promise<Actor | null> {
+export type ApprovalUse = 'request' | 'lasting';
+/** A request made with a key the approval created uses what it made; one carried by its sign-in or agent token does not. */
+export const approvalUse = (a: Pick<Actor, 'credential'>): ApprovalUse => a.credential === 'apiKey' ? 'lasting' : 'request';
+
+/**
+ * An MCP approval (one per account and client, as the account service's tokens name them) acting in one workspace,
+ * or null. The approval is not revoked and, by `use`, its token unexpired or the approval active; the person who made it
+ * still belongs to the workspace (and, self-hosted, is an allowlisted owner or admin); it acts with its scopes
+ * intersected with their role there. Receiving tools need an owner or admin (receivingConsent), and changing them the
+ * manage scope as well, as every write does. Checked on every MCP tool call, and whenever a credential or object the
+ * approval created is used in that workspace.
+ */
+export async function externalMcpGrant(runtime: Runtime, keyId: string, workspaceId: string, db: DbExecutor = runtime.db, use: ApprovalUse = 'request'): Promise<Actor | null> {
   // Expiry is judged on the locked row against the wall clock (clock_timestamp()), after the lock: now() is the start of
   // the caller's transaction, so a write that waited inside it would still accept an approval that expired meanwhile.
   const { rows: [grant] } = await db.execute<{role: string; permissions: Permission[]; user_id: string}>(sql`
-    WITH locked AS MATERIALIZED (SELECT m.role, g.permissions, i.user_id, g.expires_at FROM nightmail_resource_grants g
+    WITH locked AS MATERIALIZED (SELECT m.role, g.permissions, i.user_id, g.expires_at, nightmail_approval_active(g) AS active FROM nightmail_resource_grants g
     JOIN nightmail_oidc_identities i ON (g.issuer, g.subject, g.user_id) = (i.issuer, i.subject, i.user_id)
     JOIN nightmail_users u ON u.id=i.user_id
     JOIN workspace_members m ON m.workspace_id = ${workspaceId} AND m.user_id = i.user_id
     WHERE g.id = ${keyId} AND g.issuer = ${runtime.config.accountIssuer} AND NOT g.revoked
       AND m.role IN ('owner','admin','member')
       AND (${runtime.config.multiTenant} OR (m.role IN ('owner','admin') AND ${JSON.stringify(runtime.config.allowedSubjects)}::jsonb ? i.subject)) FOR SHARE OF g, i, m, u)
-    SELECT role, permissions, user_id FROM locked WHERE expires_at > clock_timestamp()`);
+    SELECT role, permissions, user_id FROM locked WHERE ${use === 'lasting' ? sql`active` : sql`expires_at > clock_timestamp()`}`);
   if (!grant) return null;
   const allowed = grant.permissions.filter(p => rolePermissions(grant.role).includes(p));
   return allowed.length ? { keyId, grantId: keyId.slice(4), userId: grant.user_id, receivingConsent: grant.role !== 'member', workspaceId, role: grant.role, permissions: allowed, domains: [], credential: 'mcp' } : null;
@@ -198,15 +208,17 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   // one comes back: its credentials, objects, rule parts and scheduled mail stay ended. (Clients with a fixed
   // client_id, such as OpenCode's metadata document, could otherwise never reconnect that account.)
   if (consent) await runtime.db.execute(sql`UPDATE nightmail_resource_grants SET id=${'mcp_at_' + await digest(JSON.stringify([userId, claims.client_id, consent]))},
-      revoked=false, issuer_grant=${consent}, permissions=${sql.param(allowed)}::text[], expires_at=to_timestamp(${claims.exp}), issued_at=${claims.iat},
+      revoked=false, issuer_grant=${consent}, issuer_grant_seen_at=now(), permissions=${sql.param(allowed)}::text[], expires_at=to_timestamp(${claims.exp}), issued_at=${claims.iat},
       profile=coalesce(${profile}, profile), created_at=now(), updated_at=now(), issuer=${claims.iss}, subject=${claims.sub}
     WHERE user_id=${userId} AND client_id=${claims.client_id} AND revoked AND issuer_grant IS NOT NULL AND NOT ${consent}=ANY(revoked_issuer_grants)`);
   // The approval follows the newest token: its scopes, expiry and consent. It names no workspace: every tool call names
   // one (or uses the connection's default, workspace_id) and is checked against the person's membership and role there.
+  // A consent it has not seen before starts its 90 days (issuer_grant_seen_at, nightmail_approval_ends).
   const { rows: [upserted] } = await runtime.db.execute<{created:boolean}>(sql`INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,permissions,expires_at,issued_at,profile,issuer_grant)
     VALUES (${'mcp_at_' + await digest(JSON.stringify([userId, claims.client_id]))},${claims.iss},${claims.sub},${userId},${claims.client_id},${sql.param(allowed)}::text[],to_timestamp(${claims.exp}),${claims.iat},${profile},${consent})
     ON CONFLICT(user_id,client_id) DO UPDATE SET permissions=excluded.permissions,expires_at=excluded.expires_at,profile=coalesce(excluded.profile,nightmail_resource_grants.profile),
-      issued_at=excluded.issued_at,updated_at=now(),issuer=excluded.issuer,subject=excluded.subject,issuer_grant=coalesce(excluded.issuer_grant,nightmail_resource_grants.issuer_grant)
+      issued_at=excluded.issued_at,updated_at=now(),issuer=excluded.issuer,subject=excluded.subject,issuer_grant=coalesce(excluded.issuer_grant,nightmail_resource_grants.issuer_grant),
+      issuer_grant_seen_at=CASE WHEN excluded.issuer_grant IS DISTINCT FROM nightmail_resource_grants.issuer_grant AND excluded.issuer_grant IS NOT NULL THEN now() ELSE nightmail_resource_grants.issuer_grant_seen_at END
     WHERE NOT nightmail_resource_grants.revoked AND NOT coalesce(excluded.issuer_grant=ANY(nightmail_resource_grants.revoked_issuer_grants), false)
       AND (excluded.issued_at>nightmail_resource_grants.issued_at OR (excluded.issued_at=nightmail_resource_grants.issued_at AND
         excluded.permissions=nightmail_resource_grants.permissions AND excluded.expires_at>nightmail_resource_grants.expires_at))

@@ -3,7 +3,7 @@ import {sql} from 'drizzle-orm';
 import {ApiError,errors,IdParams,page,PageQuery,response,security,type App,type Ctx} from './core.js';
 import {protectedResourceMetadata} from './oidc-resource.js';
 import { productName } from './brand.js';
-export {authorizeResource as withMcpAuthorization,externalMcpGrant as getMcpGrantActor} from './oidc-resource.js';
+export {authorizeResource as withMcpAuthorization,externalMcpGrant as getMcpGrantActor,approvalUse} from './oidc-resource.js';
 import {auditContext,auditInsert} from './audit.js';
 import {AgentTokenRecord} from './auth.js';
 

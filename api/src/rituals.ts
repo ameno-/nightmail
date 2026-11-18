@@ -87,7 +87,8 @@ const TraceRow = traceRow(timeline('decisions').openapi('RuleTimelineStep')).ope
 export async function holdReceiving(tx:DbExecutor,c:Ctx){
   const a=c.get('actor');if(!a.grantId)return;
   if(!a.receivingConsent||!a.permissions.includes('manage'))throw new ApiError(403,'ADMIN_REQUIRED','Explicit manage and receiving consent required.');
-  const grant=await (await import('./mcp-auth.js')).getMcpGrantActor(c.env,'mcp_'+a.grantId,a.workspaceId,tx);
+  const {getMcpGrantActor,approvalUse}=await import('./mcp-auth.js');
+  const grant=await getMcpGrantActor(c.env,'mcp_'+a.grantId,a.workspaceId,tx,approvalUse(a));
   if(grant?.workspaceId!==a.workspaceId||!grant.receivingConsent||!grant.permissions.includes('manage'))throw new ApiError(401,'AUTH_INVALID','The MCP approval behind this request was revoked while it ran. Nothing was changed.');
 }
 export async function ownReceiving(tx:DbExecutor,c:Ctx,kind:'endpoint'|'rituals'|'key'|'route',resource:string|string[]){

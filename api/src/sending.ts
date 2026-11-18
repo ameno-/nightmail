@@ -1779,7 +1779,7 @@ export async function originAllowed(runtime: Runtime, db: DbExecutor, mail: { wo
     return !!owner && (!key.mailboxIds || key.mailboxIds.includes(owner.mailboxId));
   }
   if (mail.actorKeyId.startsWith('mcp_')) {
-    const grant = await (await wrapModuleLoad(() => import('./mcp-auth.js'))).getMcpGrantActor(runtime, mail.actorKeyId, mail.workspaceId, db);
+    const grant = await (await wrapModuleLoad(() => import('./mcp-auth.js'))).getMcpGrantActor(runtime, mail.actorKeyId, mail.workspaceId, db, 'lasting');
     return !!grant && (!mail.campaignId || grant.role !== 'member') && grant.workspaceId === mail.workspaceId &&
       (grant.permissions.includes('manage') || grant.permissions.includes('send')) &&
       senderDomainAllowed(grant.domains, mail.snapshot.from.split('@')[1]!);
