@@ -8,6 +8,8 @@ The deploy role owns the Ohio mail bucket, public access block, bucket policy an
 
 It also **creates** the R2 bucket for hosted received mail, `bane-<stage>-mail` (ENAM, protected), and its lifecycle rules: `d/` raw mail expires after 90 days, `e/` agent-inbox objects after 45 days as a backstop to the app’s erasure, and incomplete multipart uploads after a day. The Worker binds it as `MAIL`; see [mail-store rollout](../../docs/receiving-operations.md#mail-store-rollout-and-rollback).
 
+It also **creates** the homepage's public media bucket, `nightmail-<stage>-media` (ENAM, protected), served only at the stage's media host (`media.dev.nightmail.dev`, `media.nightmail.dev`: an R2 custom domain in the stage's own zone, TLS 1.2+, no r2.dev URL), with CORS for `GET`/`HEAD` from the stage's dashboard origins and a one-day abort of incomplete multipart uploads. It holds render sets under `factory/<set>/<version>/` and the `factory/<set>/current.json` pointer the page reads; `app/scripts/factory-media.mjs` writes them, with each object's own `Cache-Control` (versions immutable for a year, the pointer a minute), and `.github/workflows/media.yml` promotes a version from dev to production.
+
 In addition to existing mail resources identified by the adoption inventory, each stack adopts these existing resources through the `import` options in [index.ts](index.ts), all with `protect: true`. Dev's queues are new in anomaly-dev and are adopted by their new ids; dev's attachments bucket is created rather than adopted:
 
 | Owner | Resources | Import ID |
@@ -25,7 +27,7 @@ Each stack **creates one access key**; AWS cannot return the old key's secret. `
 
 `bane:publishDomainConnectKey` defaults to **false**. Only production may enable it, to **create** two public TXT records at `_dck1.domainconnect.bane.mx`. Verify the [public key in index.ts](index.ts) matches the signing key and the records are still absent first.
 
-**Never manage here:** the Worker code, routes, custom domains (including `100::` AAAAs), other bindings/secrets, queue consumers, or DNS other than the opt-in Domain Connect TXT and mail gateway CNAMEs (including no SES DKIM or `_bane`). The operator activates the receipt rule set, the Worker manages identities, tenants and SES configuration sets; Pulumi owns the catch-all rule inside the reviewed active set. The stack does not own state storage, deploy roles, KMS keys or the old manual IAM key.
+**Never manage here:** the Worker code, routes, Worker custom domains (including `100::` AAAAs; the media bucket's R2 custom domain is the one custom domain this stack owns), other bindings/secrets, queue consumers, or DNS other than the opt-in Domain Connect TXT and mail gateway CNAMEs (including no SES DKIM or `_bane`). The operator activates the receipt rule set, the Worker manages identities, tenants and SES configuration sets; Pulumi owns the catch-all rule inside the reviewed active set. The stack does not own state storage, deploy roles, KMS keys or the old manual IAM key.
 
 ## CI
 

@@ -12,12 +12,15 @@ const stages = {
   dev: {
     account: "905840579680", origin: "https://dev.bane.mx", prefix: "bane-dev", worker: "bane-dev",
     cloudflareAccountId: "d8e944f537ceef3f06a5bd3aec1d7a53",
+    // The homepage's media host, in the stage's own zone, and the dashboard origins that read it.
+    media: { domain: "media.dev.nightmail.dev", zoneId: "941e50c6e0700a28f6f1c5224f165e31", origins: ["https://dev.nightmail.dev", "https://dev.bane.mx"] },
     queues: { work: "b2a85efa75214d8291a61eb0bf4c608a", feedback: "002ff3b09e2040d6a1fe09fa13e36387" },
     extraQueues: { webhooks: "a25aa21928d846c4a5531b7e523901a8", "feedback-dlq": "94a4269c23644e93851be3b28bb55b72" } as Record<string, string>,
   },
   production: {
     account: "009882681002", origin: "https://bane.mx", prefix: "bane-prod", worker: "bane-production",
     cloudflareAccountId: "15d29c8639fd3733b1b5486a2acfd968",
+    media: { domain: "media.nightmail.dev", zoneId: "bf500df4b73f1a5182243551e85019ee", origins: ["https://nightmail.dev", "https://bane.mx"] },
     queues: { work: "753a4b880016464c833b836a63663684", feedback: "34426f99502941fbbed927a059517b7c" },
     extraQueues: {} as Record<string, string>,
   },
@@ -83,6 +86,25 @@ new cf.R2BucketLifecycle("mail-lifecycle", { accountId: cloudflareAccountId, buc
   { id: "ephemeral-safety-45d", enabled: true, conditions: { prefix: "e/" }, deleteObjectsTransition: { condition: { type: "Age", maxAge: 45 * day } } },
   { id: "abort-multipart-1d", enabled: true, conditions: { prefix: "" }, abortMultipartUploadsTransition: { condition: { type: "Age", maxAge: day } } },
 ] }, { provider: cloudflare, protect: true });
+
+// The desktop homepage's render sets, public at the stage's media host (the Worker's build points the page at it:
+// .github/workflows/deploy.yml). app/scripts/factory-media.mjs uploads each set under factory/<set>/<version>/ with a
+// year's immutable Cache-Control and then rewrites factory/<set>/current.json (a minute's), which names the version the
+// page plays; old versions stay for rollback. Only that pointer is fetched by script, so CORS allows GET and HEAD from
+// the stage's dashboard origins; video and images need none. No r2.dev URL: the custom domain is the only public way in.
+const mediaR2 = new cf.R2Bucket("media", { accountId: cloudflareAccountId, name: `${cloudPrefix}-media`, jurisdiction: "default", location: "enam", storageClass: "Standard" }, {
+  provider: cloudflare, protect: true, ignoreChanges: ["location"],
+});
+new cf.R2CustomDomain("media-domain", {
+  accountId: cloudflareAccountId, bucketName: mediaR2.name, jurisdiction: "default", domain: stage.media.domain, zoneId: stage.media.zoneId, enabled: true, minTls: "1.2",
+}, { provider: cloudflare });
+new cf.R2BucketCors("media-cors", { accountId: cloudflareAccountId, bucketName: mediaR2.name, jurisdiction: "default", rules: [
+  { id: "dashboard-read", allowed: { methods: ["GET", "HEAD"], origins: stage.media.origins }, maxAgeSeconds: 86400 },
+] }, { provider: cloudflare });
+new cf.R2BucketLifecycle("media-lifecycle", { accountId: cloudflareAccountId, bucketName: mediaR2.name, jurisdiction: "default", rules: [
+  { id: "abort-multipart-1d", enabled: true, conditions: { prefix: "" }, abortMultipartUploadsTransition: { condition: { type: "Age", maxAge: day } } },
+] }, { provider: cloudflare });
+export const mediaUrl = `https://${stage.media.domain}/factory/desktop/`;
 
 // Keep existing R2 resources protected under the original URNs. Adopt the standby pair in
 // addition; changing either existing physical name would request a bucket replacement.
