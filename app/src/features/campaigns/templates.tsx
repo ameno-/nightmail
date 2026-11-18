@@ -24,7 +24,7 @@ import { usePhone } from '../../lib/media'
 const placeholder = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/
 const placeholderHint = (value: string | undefined) => { const match = value ? placeholder.exec(value) : null; return match ? `Templates use example text, not {{${match[1]}}}. Write an example here; add personalization in the campaign.` : '' }
 // Only the draft schema's fields: the composer also returns inline attachment ids, which the API rejects as unknown keys.
-const templateDraft = (draft: CampaignTemplateDraft): CampaignTemplateDraft => ({ name: draft.name.trim(), description: draft.description ?? '', subject: draft.subject.trim(), previewText: draft.previewText ?? '', fromName: draft.fromName ?? '', replyTo: draft.replyTo ?? [], html: draft.html ?? '', attachments: draft.attachments ?? [] })
+const templateDraft = (draft: CampaignTemplateDraft): CampaignTemplateDraft => ({ name: draft.name.trim(), description: draft.description ?? '', subject: draft.subject.trim(), previewText: draft.previewText ?? '', fromName: draft.fromName ?? '', replyTo: draft.replyTo ?? [], html: draft.html ?? '', attachments: draft.attachments ?? [], ...(draft.unsubscribePageUrl ? { unsubscribePageUrl: draft.unsubscribePageUrl } : {}) })
 
 /** Creates a campaign draft from a published template and opens it in the editor. */
 export function useStartFromTemplate() {

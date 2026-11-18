@@ -26,7 +26,7 @@ import { bulkFlags, hostedCost } from './hosted-sending.js';
 import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { CustomHeaders } from './custom-headers.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
-import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BASE64, MAX_ATTACHMENT_BYTES, senderDisplayName, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
+import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BASE64, MAX_ATTACHMENT_BYTES, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { headerPrefix, requestHeader } from './brand.js';
@@ -141,7 +141,7 @@ const AttachmentInfo = z.object({ id: z.string(), filename: z.string(), contentT
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) }).openapi('DeletedSendingResource');
 const DraftAudience = AudienceSpec.partial({ listId: true }).default({});
 const BlockHtml = z.string().max(MAX_BODY).describe('Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, buttons, columns and styled sections with inline formatting. A constrained email-safe style attribute supports color, typography, spacing, borders, radius and dimensions; arbitrary CSS remains rejected. No wrappers, tables, class or id. Call getContentGuide in MCP or GET /v1/campaign-content-guide for the full vocabulary and examples.');
-const CampaignDraftFields = { name: z.string().trim().min(1).max(200), from: z.union([Address, z.literal('')]).default(''), fromName: FromName.optional(), previewText: PreviewText.optional(), replyTo: z.array(Address).max(10).default([]), region: Region, regionPinned:z.boolean().optional().describe('Regional MX only. False follows the From domain; the displayed region is a hint. A supplied region on create or a changed region on edit pins it. To unpin, pass false and omit region.'), subject: z.union([Subject, z.literal('')]).default(''), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: DraftAudience, defaults: Data };
+const CampaignDraftFields = { name: z.string().trim().min(1).max(200), from: z.union([Address, z.literal('')]).default(''), fromName: FromName.optional(), previewText: PreviewText.optional(), replyTo: z.array(Address).max(10).default([]), region: Region, regionPinned:z.boolean().optional().describe('Regional MX only. False follows the From domain; the displayed region is a hint. A supplied region on create or a changed region on edit pins it. To unpin, pass false and omit region.'), subject: z.union([Subject, z.literal('')]).default(''), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: DraftAudience, defaults: Data, unsubscribePageUrl: unsubscribePageUrl().optional() };
 const CAMPAIGN_INPUT_NOTES = 'Drafts may omit sender, subject, content and audience until review or send, except that domain-restricted keys must supply a From address on one of their domains. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Durable campaign preparation is bounded and runs in background jobs.';
 const CampaignInput = z.object({ ...CampaignDraftFields, html: BlockHtml.optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraftInput');
 // Stored drafts predating block HTML remain readable; they are revalidated when saved or reviewed.
@@ -640,13 +640,17 @@ function renderedMimeHeaders(block:string) {
   }
   return headers;
 }
-function marketingFooter(snapshot: EmailSnapshot, url: string) {
+// `url` is Nightmail's own link for the recipient. A campaign with its own unsubscribe page (`page`) links the footer
+// there, with the same token; List-Unsubscribe keeps Nightmail's link, as RFC 8058 allows the header one HTTPS URI and
+// the one-click POST must reach Nightmail, which records it and redirects a confirming browser to the page.
+function marketingFooter(snapshot: EmailSnapshot, url: string, page?: string) {
+  const link = page ? unsubscribePageLink(page, url.slice(url.lastIndexOf('/') + 1)) : url;
   if (snapshot.html) {
-    const footer = `<p style="font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;color:#595959;margin:24px 0 0"><a href="${escaped(url)}" style="color:#595959;text-decoration:underline">Unsubscribe</a></p>`;
+    const footer = `<p style="font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;color:#595959;margin:24px 0 0"><a href="${escaped(link)}" style="color:#595959;text-decoration:underline">Unsubscribe</a></p>`;
     const close = snapshot.html.search(/<\/td>\s*<\/tr>\s*<\/table>\s*<\/td>\s*<\/tr>\s*<\/table>\s*<\/body>/i);
     snapshot.html = close >= 0 ? snapshot.html.slice(0, close) + footer + snapshot.html.slice(close) : snapshot.html + footer;
   }
-  snapshot.text = (snapshot.text ?? '') + `\n\nUnsubscribe: ${url}`;
+  snapshot.text = (snapshot.text ?? '') + `\n\nUnsubscribe: ${link}`;
   // Keep caller headers; the unsubscribe pair is always Nightmail's own.
   snapshot.headers = [...snapshot.headers.filter(header => !/^list-unsubscribe/i.test(header.Name)), { Name: 'List-Unsubscribe', Value: `<${url}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }];
 }
@@ -1173,7 +1177,7 @@ export function registerSending(app: App) {
     await assertBlockContent(input.html);
     const result = await idempotent(c.env.db, keyed(c, a), input, async db => {
       const campaignId = id('campaign'); const source = input.templateId ? await (await wrapModuleLoad(() => import('./templates.js'))).instantiateTemplate(c.env, db, a, input.templateId) : null;
-      const draft = { name: input.name, from: input.from, ...(input.fromName ?? source?.draft.fromName ? { fromName: input.fromName ?? source?.draft.fromName } : {}), ...(input.previewText ?? source?.draft.previewText ? { previewText: input.previewText ?? source?.draft.previewText } : {}), replyTo: input.replyTo.length ? input.replyTo : source?.draft.replyTo ?? [], ...await draftRegion(c.env,db,a,input), subject: input.subject || source?.draft.subject || '', attachments: [...new Set([...(source?.draft.attachments ?? []), ...input.attachments])], tracking: input.tracking ?? source?.draft.tracking ?? true, audience: input.audience, defaults: { ...(source?.draft.defaults ?? {}), ...input.defaults }, ...(input.html ?? source?.draft.html ? { html: input.html ?? source?.draft.html } : {}) };
+      const draft = { name: input.name, from: input.from, ...(input.fromName ?? source?.draft.fromName ? { fromName: input.fromName ?? source?.draft.fromName } : {}), ...(input.previewText ?? source?.draft.previewText ? { previewText: input.previewText ?? source?.draft.previewText } : {}), replyTo: input.replyTo.length ? input.replyTo : source?.draft.replyTo ?? [], ...await draftRegion(c.env,db,a,input), subject: input.subject || source?.draft.subject || '', attachments: [...new Set([...(source?.draft.attachments ?? []), ...input.attachments])], tracking: input.tracking ?? source?.draft.tracking ?? true, audience: input.audience, defaults: { ...(source?.draft.defaults ?? {}), ...input.defaults }, ...(input.html ?? source?.draft.html ? { html: input.html ?? source?.draft.html } : {}), ...(input.unsubscribePageUrl ?? source?.draft.unsubscribePageUrl ? { unsubscribePageUrl: input.unsubscribePageUrl ?? source?.draft.unsubscribePageUrl } : {}) };
       draftSender(c.env, a, draft);
       await linkAttachments(db, a, draft.attachments, 'campaign', campaignId);
       const [row] = await db.insert(campaigns).values({ id: campaignId, workspaceId: a.workspaceId, draft, sourceTemplateId: source?.templateId ?? null, sourceTemplateRevision: source?.templateRevision ?? null }).returning();
@@ -1804,13 +1808,14 @@ export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail:
   const unsubscribe = reused
     ? { url: reused, record: { tokenHash: await digest(reused.slice(reused.lastIndexOf('/') + 1)), workspaceId: a.workspaceId, email: customer.to[0]!.trim().toLowerCase() } }
     : await (await loadOpsUnsub()).createUnsubscribeLink(runtime, a.workspaceId, customer.to[0]!);
-  const snapshot = withUnsubscribe(runtime, customer, unsubscribe.url);
+  const page = review.draft.unsubscribePageUrl;
+  const snapshot = withUnsubscribe(runtime, customer, unsubscribe.url, page);
   sizeCheck(snapshot, rows);
   // Persist only the compact stub plus the unsubscribe URL: the body is reproducible from the frozen review and
   // recipient (verified by contentHash), so storing ~2-3 KB of rendered HTML per recipient bought nothing.
   const stored = { kind:'marketing' as const,deferredCampaign:true,unsubscribeUrl:unsubscribe.url };
   // `keyed`: the same customer copy with the footer generated for the placeholder link, as campaign screening keys it.
-  return { mail: { ...mail, snapshot }, rows, unsubscribe: unsubscribe.record, stored, keyed: screenedAs(runtime, customer) };
+  return { mail: { ...mail, snapshot }, rows, unsubscribe: { ...unsubscribe.record, page }, stored, keyed: screenedAs(runtime, customer, page) };
 }
 // Bump when interpolation, preheader or footer output changes, and keep the previous renderer for older reviews.
 export const CAMPAIGN_RENDERER_VERSION = 2;
@@ -1832,7 +1837,7 @@ export async function rebuildCampaignEmail(runtime: Runtime, a: Actor, stub: Ema
   if (!stub.unsubscribeUrl) throw new ApiError(409, 'EMAIL_CONTENT_UNAVAILABLE', 'This campaign email has no stored content to rebuild.');
   const snapshot = await campaignMessage(runtime, review.draft, review.recipient, false, rows, review.rendered, true, !review.rendered.html?.includes('{{'), review.renderer_version);
   if (await digest(canonical(snapshot)) !== review.content_hash) throw new ApiError(409, 'CAMPAIGN_CONTENT_UNREPRODUCIBLE', 'The renderer no longer reproduces the message that was sent.');
-  marketingFooter(snapshot, stub.unsubscribeUrl);
+  marketingFooter(snapshot, stub.unsubscribeUrl, review.draft.unsubscribePageUrl);
   return snapshot;
 }
 // Accepted means provider acceptance evidence; bounce and complaint rates are over accepted mail. Suppressed mail
@@ -1887,7 +1892,7 @@ export async function campaignCopy(runtime: Runtime, draft: CampaignDraft, rende
   const copy: EmailSnapshot = { testCampaignId: null, from: draft.from, ...(draft.fromName ? { fromName: draft.fromName } : {}), ...(draft.previewText !== undefined ? { previewText: draft.previewText } : {}),
     to: [], cc: [], bcc: [], replyTo: draft.replyTo ?? [], region: draft.region, kind: 'marketing', subject: draft.subject, html: withPreheader(rendered.html, draft.previewText, parse, version), text: rendered.text,
     attachments: draft.attachments, tracking: draft.tracking, headers: [] };
-  marketingFooter(copy, unsubscribePlaceholder(runtime));
+  marketingFooter(copy, unsubscribePlaceholder(runtime), draft.unsubscribePageUrl);
   return copy;
 }
 export type CampaignScreenRef = { workspaceId: string; campaignId: string; reviewId: string };
@@ -1964,15 +1969,15 @@ export function generatedUnsubscribeUrl(runtime: Runtime, value: string): string
  * (withUnsubscribe), from the same customer copy, so the two differ only there: nothing is ever found or replaced in the
  * customer's content, and the customer's bytes, whatever they hold, are part of the key.
  */
-export function screenedAs(runtime: Runtime, customer: EmailSnapshot): EmailSnapshot {
+export function screenedAs(runtime: Runtime, customer: EmailSnapshot, page?: string): EmailSnapshot {
   const copy = { ...customer, headers: [...customer.headers] };
-  marketingFooter(copy, unsubscribePlaceholder(runtime));
+  marketingFooter(copy, unsubscribePlaceholder(runtime), page);
   return copy;
 }
 /** A campaign copy as delivered: the customer's copy with the footer and headers generated for the recipient's link. */
-export function withUnsubscribe(runtime: Runtime, customer: EmailSnapshot, url: string): EmailSnapshot {
+export function withUnsubscribe(runtime: Runtime, customer: EmailSnapshot, url: string, page?: string): EmailSnapshot {
   const copy = { ...customer, headers: [...customer.headers] };
-  marketingFooter(copy, generatedUnsubscribeUrl(runtime, url));
+  marketingFooter(copy, generatedUnsubscribeUrl(runtime, url), page);
   return copy;
 }
 const SCREEN_AHEAD = 2000, SCREEN_PAGE = 500, SCREEN_BUDGET_MS = 8000, SCREEN_CONCURRENCY = 4, SCREEN_BYTES_IN_FLIGHT = 8 * 1024 * 1024;
@@ -2019,7 +2024,7 @@ async function screenAhead(runtime: Runtime, a: Actor, row: RunRow, state: Campa
   // Copies that are the same up to their recipient share one screen: by a digest of the copy, never the copy itself.
   const forms = new Map<string, Promise<CopyVerdict>>();
   const verdictOf = async (recipient: ReviewedRecipient) => {
-    const keyed = screenedAs(runtime, await campaignMessage(runtime, draft, recipient, false, assets, rendered, true, !rendered.html?.includes('{{'), row.reviewVersion!));
+    const keyed = screenedAs(runtime, await campaignMessage(runtime, draft, recipient, false, assets, rendered, true, !rendered.html?.includes('{{'), row.reviewVersion!), draft.unsubscribePageUrl);
     // The copy as the dispatcher keys it (probation senders' rewritten, src/dispatcher.ts prepareMail).
     const copy = probationCopy ? probationCopy({ ...keyed, to: [] }) : { ...keyed, to: [] };
     const size = Buffer.byteLength(copy.html ?? '') + Buffer.byteLength(copy.text ?? ''), form = await screen.copyKey(runtime, copy);
@@ -2110,7 +2115,7 @@ async function prepareStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
         ? { ...staticSnapshot, to: [recipient.recipient.email], headers: [...staticSnapshot.headers] }
         : await campaignMessage(runtime, review.draft, recipient.recipient, false, lockedAttachments, review.rendered, true, htmlStatic, row.reviewVersion!);
       const contentHash = await digest(canonical(snapshot));
-      marketingFooter(snapshot, unsubscribePlaceholder(runtime));
+      marketingFooter(snapshot, unsubscribePlaceholder(runtime), review.draft.unsubscribePageUrl);
       sizeCheck(snapshot, lockedAttachments);
       const size = Buffer.byteLength(JSON.stringify(snapshot), 'utf8');
       if (prepared.length && bytes + size > CAMPAIGN_PREPARE_BYTES) break;

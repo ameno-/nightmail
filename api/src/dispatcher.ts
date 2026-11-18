@@ -47,7 +47,7 @@ type Owner = { runtime: Runtime; a: Actor; ses: SESv2Client; transport: Dispatch
 type LeaseQuota = { rate: number; max: number; sent: number; checked: string; age_ms: number };
 type Leased = { mail: Mail; contentBytes: number; review: Review | null; owner: Owner | null; rateRetries: number; quota?: LeaseQuota };
 // `screened`: the Hosted content screen judged this mail and passed it (a rejection never reaches sending).
-type Prepared = Leased & { owner: Owner; snapshot: EmailSnapshot; content: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string }; stored?: Partial<EmailSnapshot>; screened?: boolean };
+type Prepared = Leased & { owner: Owner; snapshot: EmailSnapshot; content: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string; page?: string }; stored?: Partial<EmailSnapshot>; screened?: boolean };
 type Outcome = { mail: Mail; type: 'accepted' | 'reject' | 'acceptance_unknown' | 'provider_throttled' | 'dispatch_deferred'; providerId?: string; errorCode?: string; data: Record<string, unknown>; requeueAt?: string; screened?: boolean };
 const requeued = (o: Outcome) => o.type === 'provider_throttled' || o.type === 'dispatch_deferred';
 
@@ -524,11 +524,11 @@ async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<s
     actor_key_id: item.mail.actorKeyId, sender: item.snapshot.from.toLowerCase(), mcp_allowed: item.mail.actorKeyId.startsWith('mcp_') && origins.get(mcpOrigin(item)) === true,
     feedback_topic: item.owner.feedbackTopic, binding:item.review?.draft.binding ?? item.mail.snapshot.binding, destinations: [...item.snapshot.to, ...item.snapshot.cc, ...item.snapshot.bcc].map(email => email.toLowerCase()),
     hosted:!!item.owner.tenantName,marketing: item.snapshot.kind === 'marketing', held_stream: item.snapshot.kind !== 'transactional' || !!item.mail.campaignId || !!item.snapshot.bulk, reply_authors: item.snapshot.replyAuthors, snapshot: item.unsubscribe ? item.stored ?? null : null,
-    token_hash: item.unsubscribe?.tokenHash ?? null, token_email: item.unsubscribe?.email ?? null,
+    token_hash: item.unsubscribe?.tokenHash ?? null, token_email: item.unsubscribe?.email ?? null, token_page: item.unsubscribe?.page ?? null,
     event_id: id('event'), external_id: `attempt-start:${item.mail.id}:${item.mail.dispatchVersion}`, attempt: item.mail.dispatchVersion + 1,
   }));
   const rows = sql`SELECT * FROM jsonb_to_recordset(${JSON.stringify(input)}::jsonb)
-        AS x(id text, workspace_id text, dispatch_version int, campaign_id text, actor_key_id text, sender text, mcp_allowed boolean, hosted boolean, feedback_topic text, binding jsonb, destinations jsonb, marketing boolean, held_stream boolean, reply_authors jsonb, snapshot jsonb, token_hash text, token_email text, event_id text, external_id text, attempt int)`;
+        AS x(id text, workspace_id text, dispatch_version int, campaign_id text, actor_key_id text, sender text, mcp_allowed boolean, hosted boolean, feedback_topic text, binding jsonb, destinations jsonb, marketing boolean, held_stream boolean, reply_authors jsonb, snapshot jsonb, token_hash text, token_email text, token_page text, event_id text, external_id text, attempt int)`;
   const claimed = await db.execute<{ id: string; status: EmailStatus; webhooks:number }>(sql`WITH ${claimCtes(runtime, prepared[0]!.mail.region, rows)} SELECT id,status,(SELECT count(*)::int FROM webhook_jobs) AS webhooks FROM claimed`);
   return {statuses:new Map(claimed.rows.map(row => [row.id, row.status])),webhooks:claimed.rows[0]?.webhooks??0};
 }
@@ -624,8 +624,8 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
           AND NOT EXISTS (SELECT 1 FROM sponsor_state ss WHERE ss.workspace_id=x.workspace_id AND ss.paused)` : sql``}
       RETURNING e.id,e.workspace_id,e.status,e.region,e.simulated,e.error_code,e.suppression_reason,e.dispatch_version
     ), token AS (
-      INSERT INTO operation_unsubscribe_tokens(token_hash, workspace_id, email)
-      SELECT x.token_hash, c.workspace_id, x.token_email FROM claimed c JOIN input x ON x.id = c.id WHERE x.token_hash IS NOT NULL AND c.status = 'attempting'
+      INSERT INTO operation_unsubscribe_tokens(token_hash, workspace_id, email, page_url)
+      SELECT x.token_hash, c.workspace_id, x.token_email, x.token_page FROM claimed c JOIN input x ON x.id = c.id WHERE x.token_hash IS NOT NULL AND c.status = 'attempting'
       ON CONFLICT DO NOTHING
     ), attempt AS (
       INSERT INTO sending_email_events(id, workspace_id, email_id, type, external_id, simulated, data, created_at)

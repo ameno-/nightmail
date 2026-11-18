@@ -1,5 +1,6 @@
 import { z } from '@hono/zod-openapi';
 import { Buffer } from 'node:buffer';
+import { productName } from './brand.js';
 import { ApiError } from './core.js';
 
 // Shared validation for sending, audience/consent and template reply addresses.
@@ -33,6 +34,29 @@ export const foldedDisplayName = (value: string) => skeleton(value).replace(/[\u
   .replace(/[aA]\p{M}*[\u20dd-\u20e0\u20e2-\u20e4]/gu, '@').replace(/\u276c/g, '<').replace(/\u276d/g, '>').replace(/[\p{M}\p{Cf}]/gu, '');
 export const displayNameAllowed = (value: string) => !CONTROL.test(value) && !/[@<>]/.test(foldedDisplayName(value));
 export const senderDisplayName = () => z.string().max(200).refine(displayNameAllowed, 'Sender name cannot contain an address, angle brackets, or control characters.');
+
+// A campaign's own unsubscribe page. It is only ever a link in the message and a redirect target, never fetched, so it
+// needs HTTPS and no credentials; the recipient is named by their unsubscribe token, never by address or internal ID.
+// Checked as sent: nothing (z.string().url() included) may trim or drop whitespace before these rules see it.
+export const UNSUBSCRIBE_PAGE_PARAM = 'unsubscribe_token';
+const unsubscribePageAllowed = (value: string) => {
+  if (!/^https:\/\//i.test(value) || /[\s\x00-\x1f\x7f]/.test(value) || /^[^/?#]*@/.test(value.slice(8))) return false;
+  try { const url = new URL(value); return url.protocol === 'https:' && !!url.hostname && !url.username && !url.password; } catch { return false; }
+};
+// The page's own unsubscribe_token, in any encoding URLSearchParams decodes, would sit beside the recipient's and a page
+// reading the first one would unsubscribe someone else.
+const ownToken = (value: string) => { try { return new URL(value).searchParams.has(UNSUBSCRIBE_PAGE_PARAM); } catch { return false; } };
+export const unsubscribePageUrl = () => z.string().max(1000).refine(unsubscribePageAllowed, 'Use an https:// address without a user name, password or spaces.')
+  .refine(value => !ownToken(value), `Remove ${UNSUBSCRIBE_PAGE_PARAM} from the address: ${productName} adds each recipient's own.`).openapi({ format: 'uri' })
+  .describe(`Your own unsubscribe or preference page: HTTPS, no user name, password, whitespace or ${UNSUBSCRIBE_PAGE_PARAM} parameter, at most 1,000 characters. The footer's Unsubscribe link opens it with ${UNSUBSCRIBE_PAGE_PARAM}=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.`);
+/** The recipient's link to a campaign's own unsubscribe page: the page with exactly one unsubscribe_token, theirs. Any
+ *  other unsubscribe_token is dropped; every other query parameter, as written, and the fragment stay. */
+export function unsubscribePageLink(page: string, token: string): string {
+  const url = new URL(page);
+  const kept = url.search.slice(1).split('&').filter(part => part && !new URLSearchParams(part).has(UNSUBSCRIBE_PAGE_PARAM));
+  url.search = [...kept, `${UNSUBSCRIBE_PAGE_PARAM}=${token}`].join('&');
+  return url.href;
+}
 
 export const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 // Base64 of 8 MiB plus padding and the line breaks MIME tools and SDKs insert.
