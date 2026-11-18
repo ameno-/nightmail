@@ -52,7 +52,7 @@ const rolePermissions = (role: string): Permission[] => role === 'owner' || role
  * What an approval is checked for. `request`: a request its access token carries, a call by its agent token, or a write
  * that holds it; the newest access token must not have expired. `lasting`: something it made (a key, a webhook, an
  * endpoint, a route, a rule, queued mail) being used; the approval itself must be active (nightmail_approval_active,
- * migration 339), however long ago its agent last connected.
+ * migration 341), however long ago its agent last connected.
  */
 export type ApprovalUse = 'request' | 'lasting';
 /** A request made with a key the approval created uses what it made; one carried by its sign-in or agent token does not. */

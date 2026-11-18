@@ -6,7 +6,7 @@ import { receivingPolicy } from './mailbox-ingest-input.js';
 // What an MCP approval made or changed is tied to it (mail_grant_objects): a key it created works, and a webhook it set
 // up or changed delivers, only while the approval is active, and removing the approval revokes the key and holds the
 // webhook. A webhook or endpoint that several approvals changed has several owners, and needs every one of them.
-// Active is nightmail_approval_active (migration 339): not removed, its agent connected within 30 days and at most 90
+// Active is nightmail_approval_active (migration 341): not removed, its agent connected within 30 days and at most 90
 // days after the person approved it, and its person still an owner or admin here.
 export type TiedKind = 'api_key' | 'key' | 'webhook' | 'endpoint';
 
