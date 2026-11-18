@@ -4680,6 +4680,69 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  test('a route set up over MCP keeps routing to its webhook after the sign-in token expires, until the approval is removed', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const { token, consentId } = await oauthGrant(t, db, writableScope, request), approvalId = `mcp_${consentId}`;
+      const tool = async (name: string, args: Json) => { const r = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { confirm: true, ...args } } }, rpcHeaders)).result; assert.equal(r.isError, false, redact(r)); return r.structuredContent; };
+      const { acceptInboundNotification, mailboxIngestJobs } = await import('./src/mailbox-ingest.js'), { mailboxEventJobs } = await import('./src/mailbox-events.js'), { S3Client } = await import('@aws-sdk/client-s3');
+      const wid = runtime.config.workspaceId, bucket = unique('bucket'), topic = `arn:aws:sns:${REGION}:111122223333:inbound`, domain = unique('mdom');
+      runtime.config.aws = { accessKeyId: 'synthetic', secretAccessKey: 'synthetic' };
+      await db.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,$3,$4)', [wid, REGION, bucket, topic]);
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'receive.example',$3,'active','store')", [domain, wid, REGION]);
+      const raw = new Map<string, Buffer>();
+      t.mock.method(S3Client.prototype, 'send', async (cmd: any) => {
+        const mid = String(cmd.input.Key).split('/').pop()!;
+        if (cmd.constructor.name === 'HeadObjectCommand') return { ContentLength: raw.get(mid)!.length, ETag: '"fixture"' };
+        if (cmd.constructor.name === 'GetObjectCommand') return { Body: { transformToByteArray: async () => raw.get(mid)! } };
+        return {};
+      });
+      const posted: string[] = [], transport = runtime.webhookFetch;
+      runtime.webhookFetch = async url => { posted.push(url); return { status: 204 }; };
+      t.after(() => { runtime.webhookFetch = transport; });
+      // Lasting destinations made in the dashboard; only the route that joins them is made over MCP.
+      const box = ok(await local('POST', '/v1/inbound/addresses', { address: 'help@receive.example' }), 201);
+      const hook = ok(await local('POST', '/v1/inbound/webhooks', { url: 'https://example.com/hooks/route-agent', eventTypes: [] }), 201);
+      assert.equal(hook.approval, null);
+      const route = await tool('createRoute', { body: { match: box.address, to: [box.id, hook.id] } });
+      assert.equal((await db.query("SELECT FROM mail_grant_objects WHERE kind='route' AND resource=$1 AND grant_id=$2", [route.id, consentId])).rowCount, 1);
+      const receive = async (mid: string) => {
+        raw.set(mid, Buffer.from(`From: Customer <a@example.org>\r\nSubject: Help ${mid}\r\nMessage-ID: <${mid}@example.org>\r\n\r\nHello`));
+        assert.equal(await acceptInboundNotification(runtime, { region: REGION, topicArn: topic, message: { notificationType: 'Received', mail: { messageId: mid, commonHeaders: { subject: 'Help' } },
+          receipt: { ...cleanScans, dmarcVerdict: { status: 'PASS' }, timestamp: new Date().toISOString(), recipients: [box.address], action: { type: 'S3', bucketName: bucket, topicArn: topic, objectKey: 'staging/' + mid } } } }), 1);
+        await mailboxIngestJobs['mailbox.ingest']!(runtime, { sesMessageId: mid }, { id: unique('job'), workspaceId: wid, attempts: 1 });
+        await expandFixtureOutbox(runtime, wid);
+        const { id, routing } = (await db.query('SELECT m.id,r.routing FROM mail_receipts r JOIN mail_messages m USING(workspace_id,ses_message_id) WHERE r.workspace_id=$1 AND r.ses_message_id=$2', [wid, mid])).rows[0];
+        const deliveries = (await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2", [hook.id, id])).rows;
+        return { routed: [routing.recipients[0].tier, routing.recipients[0].route, routing.recipients[0].webhooks], deliveries: deliveries.map(d => d.id as string) };
+      };
+      const deliver = async (deliveryId: string) => {
+        await mailboxEventJobs['mailbox.webhook']!(runtime, { deliveryId }, { id: unique('job'), workspaceId: wid, attempts: 1 }).catch(e => { if (e?.code !== 'GRANT_REVOKED') throw e; });
+        return (await db.query('SELECT status,last_error FROM mailbox_webhook_deliveries WHERE id=$1', [deliveryId])).rows[0];
+      };
+      const routedHere = ['exact', route.id, [hook.id]];
+      const live = await receive('route-agent-live');
+      assert.deepEqual(live.routed, routedHere);
+      assert.deepEqual(await deliver(live.deliveries[0]!), { status: 'delivered', last_error: null });
+      // The agent stops connecting: its newest sign-in token expires. The route is the person's routing and keeps working:
+      // ingest routes by it, the webhook delivers, and the dashboard's preview says so.
+      await db.query("UPDATE nightmail_resource_grants SET expires_at=now()-interval '1 second' WHERE grant_key=$1", [consentId]);
+      const later = await receive('route-agent-ended');
+      assert.deepEqual(later.routed, routedHere);
+      assert.equal(later.deliveries.length, 1);
+      assert.deepEqual(await deliver(later.deliveries[0]!), { status: 'delivered', last_error: null });
+      assert.deepEqual(posted, ['https://example.com/hooks/route-agent', 'https://example.com/hooks/route-agent']);
+      const preview = ok(await local('POST', '/v1/routing/test', { envelope: { to: [box.address] } })).recipients[0];
+      assert.deepEqual([preview.tier, preview.route, preview.webhooks], routedHere);
+      // Removing the approval disables the route: mail queued through it is not posted, and new mail stays in the inbox.
+      const queued = await receive('route-agent-queued');
+      ok(await local('POST', `/v1/mcp-connections/${approvalId}/revoke`));
+      assert.deepEqual(await deliver(queued.deliveries[0]!), { status: 'failed', last_error: 'GRANT_REVOKED' });
+      assert.equal(posted.length, 2);
+      const removed = await receive('route-agent-removed');
+      assert.deepEqual(removed, { routed: ['address', null, []], deliveries: [] });
+    });
+  });
+
   test('an endpoint edits in place: name, type, URL and pause; a blank URL keeps it, none is returned, and other workspaces are refused', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const w = runtime.config.workspaceId, { decrypt } = await import('./src/operations.js');
