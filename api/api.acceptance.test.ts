@@ -7406,7 +7406,10 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     const db = await fixtureDatabase(t);
     const [{ createApp }, { nodeRuntime }, { digest }, { credentialFingerprint, discoveryTarget }, { SESv2Client, TestRenderEmailTemplateCommand }] = await Promise.all([
       import('./src/app.js'), import('./src/adapters/node.js'), import('./src/core.js'), import('./src/ses-region-state.js'), import('@aws-sdk/client-sesv2')]);
-    const instance = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL, MULTI_TENANT: 'false', ENABLE_LIVE_SES: 'true' }), app = createApp(), runtime = instance.runtime;
+    // This instance's connections carry their own application_name, so a test can tell its requests' lock waits from the
+    // shard's job runner's (its job claims also read sending_campaigns).
+    const appName = unique('claim-first'), url = new URL(FIXTURE_DATABASE_URL!); url.searchParams.set('application_name', appName);
+    const instance = nodeRuntime({ ...process.env, DATABASE_URL: url.toString(), MULTI_TENANT: 'false', ENABLE_LIVE_SES: 'true' }), app = createApp(), runtime = instance.runtime;
     const w = unique('ws-claim-first'), secret = `nm_${randomUUID().replaceAll('-', '')}${randomUUID().replaceAll('-', '')}`, topic = `arn:aws:sns:${REGION}:111122223333:claim-first`;
     Object.assign(runtime.config, { workspaceId: w, liveEnabled: true, aws: { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' } });
     cleanup(t, async () => {
@@ -7433,7 +7436,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     // From an independent connection: the claims with no result yet.
     const pending = async () => (await db.query('SELECT count(*)::int AS n FROM sending_idempotency WHERE workspace_id=$1 AND result IS NULL', [w])).rows[0].n as number;
     const promptly = (reply: Promise<Reply>) => Promise.race([reply, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('no answer within 2 s')), 2_000))]);
-    return { db, w, gate, post, pending, promptly };
+    return { db, w, appName, gate, post, pending, promptly };
   }
   test('a stored-template send claims its Idempotency-Key before SES renders: a duplicate is IN_PROGRESS and renders nothing', async t => {
     const { gate, post, pending, promptly } = await claimFirstFixture(t);
@@ -7450,16 +7453,17 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     error(await post('/v1/emails/send', { ...body, template: { name: 'fixture', data: { other: true } } }, key), 409, 'IDEMPOTENCY_CONFLICT');
   });
   test('a campaign test claims its Idempotency-Key before it reads its draft: a duplicate is IN_PROGRESS and renders nothing', async t => {
-    const { db, w, post, pending, promptly } = await claimFirstFixture(t);
+    const { db, w, appName, post, pending, promptly } = await claimFirstFixture(t);
     const draft = ok(await post('/v1/campaigns', { name: 'claim-first', from: 'orders@example.com', subject: 'Claim first', html: '<p>Claim first</p>' }), 201);
     const path = `/v1/campaigns/${draft.id}/test`, body = { to: 'tester@example.invalid' }, key = 'claim-first-test';
-    // The draft cannot be read while another connection holds its table: the first request waits there.
+    // The draft cannot be read while another connection holds its table: the first request waits there. Only a wait on
+    // this instance's own connections is the first request's: the job runner's claims also queue behind the lock.
     const lock = await fixtureDatabase(t), holder = (await lock.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
     await lock.query('BEGIN'); await lock.query(`SET LOCAL lock_timeout='2s'`); await lock.query('LOCK TABLE sending_campaigns IN ACCESS EXCLUSIVE MODE');
     let first: Promise<Reply> | undefined;
     try {
       first = post(path, body, key);
-      for (let i = 0; !(await db.query(`SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, [holder])).rowCount; i++) {
+      for (let i = 0; !(await db.query(`SELECT 1 FROM pg_stat_activity WHERE application_name = $2 AND $1 = ANY(pg_blocking_pids(pid))`, [holder, appName])).rowCount; i++) {
         assert.ok(i < 250, 'The first campaign test never reached its draft.'); await new Promise(resolve => setTimeout(resolve, 20));
       }
       assert.equal(await pending(), 1, 'While it reads its draft, the first request owns a committed pending claim.');
