@@ -168,6 +168,11 @@ export class SupportPlatform extends WorkerEntrypoint<Env> {
   async registerConversation(body: Parameters<SupportPlatformApi['registerConversation']>[0]) { return (await this.platform()).registerConversation(body); }
   async closeConversation(conversationId: string) { return (await this.platform()).closeConversation(conversationId); }
   async request(conversationId: string, method: string, path: string, body?: unknown) { return (await this.platform()).request(conversationId, method, path, body); }
+  async mirrorMessages(conversationId: string, messages: Parameters<SupportPlatformApi['mirrorMessages']>[1]) { return (await this.platform()).mirrorMessages(conversationId, messages); }
+  async mirrorState(conversationId: string, state: Parameters<SupportPlatformApi['mirrorState']>[1]) { return (await this.platform()).mirrorState(conversationId, state); }
+  async inboxState(conversationId: string) { return (await this.platform()).inboxState(conversationId); }
+  async pullOutbox(conversationId?: string) { return (await this.platform()).pullOutbox(conversationId); }
+  async markDelivery(conversationId: string, messageId: string, status: 'sent' | 'failed') { return (await this.platform()).markDelivery(conversationId, messageId, status); }
   // A plain fetch to the entrypoint answers nothing: the methods above are the whole surface.
   override async fetch() { return new Response(null, { status: 404 }); }
 }

@@ -92,9 +92,10 @@ type Row = { id: string; channel: 'chat' | 'email'; mode: z.infer<typeof Mode>; 
 const view = (row: Row, created: boolean): RegisteredConversation => ({ id: row.id, channel: row.channel, mode: row.mode, verification: row.verification, status: row.status,
   workspaceId: row.workspace_id, contentShared: !!row.content_workspace_id, created });
 const columns = sql`id, channel, mode, verification, status, workspace_id, content_workspace_id, user_id, pending_address`;
-const supportPlatformOnly = async (c: Ctx) => {
+/** The support platform's service binding, and nothing else: an operator's own session gets 403 too. */
+export const supportPlatformOnly = async (c: Ctx) => {
   const operator = await requireOperator(c, 'operator:read');
-  if (operator.via !== 'support') throw new ApiError(403, 'SUPPORT_PLATFORM_REQUIRED', 'Only the support platform registers support conversations.');
+  if (operator.via !== 'support') throw new ApiError(403, 'SUPPORT_PLATFORM_REQUIRED', 'Only the support platform makes this call, through its service binding.');
   return operator;
 };
 const limitReached = () => new ApiError(429, 'SUPPORT_CONVERSATION_LIMIT', `This person already has ${OPEN_CONVERSATIONS} open support conversations. Close one first.`);

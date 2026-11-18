@@ -142,6 +142,11 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   // Support grants live two hours; their trail is in audit_events. Handoffs expire after a week.
   await drain('support_grants', batch(sql`support_grants`, sql`expires_at < ${cutoff}`));
   await drain('support_handoffs', batch(sql`support_handoffs`, sql`expires_at < ${cutoff}`));
+  // Support transcripts (src/support-inbox.ts) and their subjects go 90 days after the conversation closed.
+  const closedLongAgo = sql`SELECT id FROM support_conversations WHERE closed_at < now() - interval '90 days'`;
+  await drain('support_messages', batch(sql`support_messages`, sql`conversation_id IN (${closedLongAgo})`));
+  await drain('support_subjects', () => sql`WITH gone AS (UPDATE support_conversations SET subject = NULL
+      WHERE id IN (${closedLongAgo} AND subject IS NOT NULL LIMIT ${RETENTION_BATCH}) RETURNING 1) SELECT count(*)::int AS n FROM gone`);
   await drain('audience_operation_plans', batch(sql`audience_operation_plans`, sql`expires_at < now() - interval '1 day'`));
   // A preview holds its whole parsed CSV (up to 5 MiB) and is replaced by each re-preview, so abandoned ones pile up.
   // A week leaves room to come back and commit; committed imports stay because deliverability reads them.
