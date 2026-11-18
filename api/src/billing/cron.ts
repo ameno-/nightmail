@@ -116,16 +116,17 @@ export async function billingDaily(runtime: Runtime): Promise<void> {
 export async function settleClosedHours(runtime: Runtime, cutoff?: string): Promise<{ workspaces: number; entries: number; busy: number }> {
   const started = Date.now(), deadline = started + SETTLE_BUDGET_MS;
   const at = cutoff ? sql`${cutoff}::timestamptz` : CLOSED_HOURS;
-  let workspaces = 0, entries = 0, busy = 0;
-  const seen = new Set<string>();
+  let workspaces = 0, entries = 0, busy = 0, after = '';
+  // Pages by workspace: one the settler skips this run (busy, or every row held by a writer) never keeps the next
+  // page from being reached.
   while (Date.now() < deadline) {
     const { rows } = await runtime.db.execute<{ workspace_id: string }>(sql`SELECT DISTINCT workspace_id FROM billing_usage_hourly
-      WHERE (quantity <> settled_quantity OR refunds <> '{}') AND hour<${at} LIMIT ${SETTLE_PAGE}`);
-    const queue = rows.map(r => r.workspace_id).filter(w => !seen.has(w));
+      WHERE (quantity <> settled_quantity OR refunds <> '{}') AND hour<${at} AND workspace_id>${after} ORDER BY workspace_id LIMIT ${SETTLE_PAGE}`);
+    const queue = rows.map(r => r.workspace_id);
     if (!queue.length) break;
+    after = queue[queue.length - 1]!;
     await Promise.all(Array.from({ length: Math.min(SETTLE_CONCURRENCY, queue.length) }, async () => {
       for (let wid = queue.shift(); wid !== undefined && Date.now() < deadline; wid = queue.shift()) {
-        seen.add(wid);
         try {
           const { rows: [r] } = await runtime.db.execute<{ s: { busy?: boolean; entries?: number } }>(sql`SELECT billing_settle(${wid}, ${at}) AS s`);
           if (r?.s.busy) busy++; else { workspaces++; entries += Number(r?.s.entries ?? 0); }
@@ -134,10 +135,7 @@ export async function settleClosedHours(runtime: Runtime, cutoff?: string): Prom
     }));
   }
   log('info', { code: 'BILLING_SETTLED', workspaces, entries, busy, ms: Date.now() - started });
-  // A refund is written into its mail's own hour, which may be long closed: it is due once the hour it was written in
-  // (adjusted_at) has closed.
-  const { rows: [lag] } = await runtime.db.execute<{ oldest: string | null }>(sql`SELECT (extract(epoch FROM min(greatest(hour, coalesce(date_trunc('hour', adjusted_at, 'UTC'), hour))))*1000)::bigint::text AS oldest
-    FROM billing_usage_hourly WHERE quantity <> settled_quantity OR refunds <> '{}'`);
+  const { rows: [lag] } = await runtime.db.execute<{ oldest: string | null }>(sql`SELECT (extract(epoch FROM min(hour))*1000)::bigint::text AS oldest FROM billing_usage_hourly WHERE quantity <> settled_quantity OR refunds <> '{}'`);
   if (lag?.oldest && Date.now() - Number(lag.oldest) > LAG_ALERT_MS) log('error', { code: 'BILLING_SETTLE_LAG', oldestOpenHour: new Date(Number(lag.oldest)).toISOString() });
   return { workspaces, entries, busy };
 }
