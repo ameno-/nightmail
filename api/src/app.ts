@@ -210,6 +210,8 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     if (c.req.method === 'POST' && /^\/v1\/workspaces\/invitations\/[^/]+\/accept$/.test(c.req.path)) return next();
     // Reviewing that invitation before joining authenticates the same way and changes nothing.
     if (c.req.method === 'GET' && /^\/v1\/workspaces\/invitations\/[^/]+$/.test(c.req.path)) return next();
+    // Claiming an emailed support conversation authenticates the same way: a person may have no workspace yet.
+    if (c.req.method === 'POST' && /^\/v1\/support-conversations\/[^/]+\/claim$/.test(c.req.path)) return next();
     // Provider redirects cannot carry a workspace header. This route authenticates the OIDC
     // session itself, then authorizes and selects the workspace from the signed return token.
     if (c.req.method === 'GET' && /^\/v1\/domains\/[^/]+\/dns-setup\/return\/[^/]+$/.test(c.req.path)) return next();

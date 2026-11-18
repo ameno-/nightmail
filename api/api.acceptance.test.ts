@@ -6119,6 +6119,97 @@ describe('Hosted MCP OAuth and tools', () => {
         ok(reply(await platform.closeConversation(id)));
         error(await send('POST', path, session(owner, acme)), 404);
       });
+
+      await t.test('9 claim without a workspace: a signed-in person with no membership binds their own pending email, from the dashboard only, and reads no workspace', async () => {
+        const waiting = await email(lonely.email, { dmarc: 'FAIL' }), path = `/v1/support-conversations/${waiting.id}/claim`;
+        error(await send('POST', path, { cookie: lonely.cookie }), 403, 'CSRF_ORIGIN_INVALID');
+        error(await send('POST', path, { ...session(lonely), authorization: `Bearer nm_${hex()}` }), 403, 'DASHBOARD_AUTH_REQUIRED');
+        assert.deepEqual(ok(await send('POST', path, session(lonely))), { id: waiting.id, mode: 'non_member' });
+        assert.deepEqual([(await row(waiting.id)).user_id, (await row(waiting.id)).verification], [lonely.userId, 'signin']);
+        assert.deepEqual((await db.query(`SELECT user_id FROM audit_events WHERE action = 'support.claim' AND target_id = $1`, [waiting.id])).rows.map(r => r.user_id), [lonely.userId]);
+        assert.deepEqual(ok(await stamped(waiting.id, 'GET', '/v1/support/scope')).workspaces, []);
+      });
+    });
+  });
+
+  // Claims race on committed rows through a real pool: the simulated fixture's one rollback transaction cannot.
+  test('Support conversation claims race: one binding, once, for the address’s current owner; a person’s tenth open conversation is the last even at once', async t => {
+    assert.ok(['localhost', '127.0.0.1', '[::1]'].includes(new URL(FIXTURE_DATABASE_URL!).hostname), 'Racing claims requires an isolated local database.');
+    const [{ createApp }, { nodeRuntime }] = await Promise.all([import('./src/app.js'), import('./src/adapters/node.js')]);
+    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET,
+      ACCOUNT_ISSUER: process.env.ACCOUNT_ISSUER, ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
+      PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
+      S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
+    cleanup(t, instance.close);
+    const runtime = instance.runtime, app = createApp(), db = await fixtureDatabase(t), made: string[] = [];
+    Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
+    cleanup(t, async () => { await db.query('DELETE FROM support_conversations WHERE id = ANY($1)', [made]); });
+    const base32 = 'abcdefghijklmnopqrstuvwxyz234567';
+    const conversation = () => { const id = `conv_${Array.from(crypto.getRandomValues(new Uint8Array(26)), b => base32[b & 31]).join('')}`; made.push(id); return id; };
+    /** An email conversation waiting for its sender to sign in, as registration stores one. */
+    const waiting = async (address: string) => {
+      const id = conversation();
+      await db.query(`INSERT INTO support_conversations(id, channel, pending_address, verification, mode) VALUES ($1, 'email', $2, 'none', 'pending_signin')`, [id, address]);
+      return id;
+    };
+    const claim = async (who: SessionFixture, id: string): Promise<Reply> => {
+      const res = await app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/support-conversations/${id}/claim`, { method: 'POST', headers: { cookie: who.cookie, origin: PUBLIC_ORIGIN } }), runtime);
+      return { status: res.status, body: await res.json(), headers: res.headers };
+    };
+    // Another transaction holds the conversations' rows until every claim waits, then lets them go together.
+    const race = async (claims: [SessionFixture, string][], locked: string[], between?: () => Promise<void>) => {
+      const blocker = await fixtureDatabase(t), pending: Promise<Reply>[] = [];
+      const waitingFor = async (n: number) => {
+        for (const deadline = Date.now() + 10_000; Date.now() < deadline; await new Promise(resolve => setTimeout(resolve, 20))) {
+          if ((await db.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND cardinality(pg_blocking_pids(pid)) > 0
+            AND (query LIKE '%support_conversations%' OR query LIKE '%pg_advisory_xact_lock%39601%')`)).rows[0].n >= n) return;
+        }
+        assert.fail(`Expected ${n} claims waiting.`);
+      };
+      await blocker.query('BEGIN');
+      await blocker.query('SELECT id FROM support_conversations WHERE id = ANY($1) FOR UPDATE', [locked]);
+      try {
+        for (const [i, [who, id]] of claims.entries()) {
+          if (i && between) await between();
+          pending.push(claim(who, id));
+          await waitingFor(i + 1);
+        }
+      } finally { await blocker.query('COMMIT'); }
+      return Promise.all(pending);
+    };
+    const subject = async (id: string) => (await db.query('SELECT user_id FROM support_conversations WHERE id = $1', [id])).rows[0].user_id;
+    const claims = async (id: string) => (await db.query(`SELECT user_id FROM audit_events WHERE action = 'support.claim' AND target_id = $1`, [id])).rows.map(r => r.user_id);
+
+    await t.test('the same person twice: one transition and one claim on the trail; the second answers the state', async () => {
+      const same = await sessionFixture(t), first = await waiting(same.email);
+      const twice = await race([[same, first], [same, first]], [first]);
+      assert.deepEqual(twice.map(r => r.status), [200, 200]);
+      assert.deepEqual(twice[1]!.body, twice[0]!.body);
+      assert.deepEqual(await claims(first), [same.userId]);
+    });
+
+    await t.test('the address moves from A to B while A’s claim waits: one of them binds, and the trail names that one', async () => {
+      const a = await sessionFixture(t), b = await sessionFixture(t), moved = await waiting(a.email);
+      const raced = await race([[a, moved], [b, moved]], [moved], async () => {
+        await db.query('UPDATE nightmail_users SET email = NULL, email_verified = false WHERE id = $1', [a.userId]);
+        await db.query('UPDATE nightmail_users SET email = $2 WHERE id = $1', [b.userId, a.email]);
+        await db.query('UPDATE nightmail_sessions SET verified_email = $2 WHERE user_id = $1', [b.userId, a.email]);
+      });
+      const winner = await subject(moved);
+      assert.deepEqual(raced.map(r => r.status).sort(), [200, 404]);
+      assert.equal([a, b][raced.findIndex(r => r.status === 200)]!.userId, winner);
+      assert.deepEqual(await claims(moved), [winner]);
+    });
+
+    await t.test('nine open conversations and two claims at once: the tenth is the last', async () => {
+      const busy = await sessionFixture(t);
+      for (let i = 0; i < 9; i++) await db.query(`INSERT INTO support_conversations(id, channel, user_id, verification, mode, workspace_id) VALUES ($1, 'chat', $2, 'handoff', 'member', 'default')`, [conversation(), busy.userId]);
+      const open = async () => (await db.query(`SELECT count(*)::int AS n FROM support_conversations WHERE user_id = $1 AND status <> 'closed'`, [busy.userId])).rows[0].n;
+      const p1 = await waiting(busy.email), p2 = await waiting(busy.email);
+      const both = await race([[busy, p1], [busy, p2]], [p1, p2]);
+      assert.deepEqual(both.map(r => r.status).sort(), [200, 429]);
+      error(both.find(r => r.status === 429)!, 429, 'SUPPORT_CONVERSATION_LIMIT');
+      assert.equal(await open(), 10);
     });
   });
 

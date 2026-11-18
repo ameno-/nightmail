@@ -96,6 +96,11 @@ const supportPlatformOnly = async (c: Ctx) => {
 };
 const limitReached = () => new ApiError(429, 'SUPPORT_CONVERSATION_LIMIT', `This person already has ${OPEN_CONVERSATIONS} open support conversations. Close one first.`);
 const openCount = (userId: unknown) => sql`(SELECT count(*)::int FROM support_conversations WHERE user_id = ${userId} AND status <> 'closed')`;
+/**
+ * Serializes admission for one person: every path that sets user_id (handoff, email, claim) takes this lock first, before
+ * any conversation or handoff row, so its count is a later statement that sees every admission committed before it.
+ */
+const admit = (tx: DbExecutor, userId: string) => tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${userId}, 39601))`);
 
 /**
  * What a message Nightmail received at a support address proves: its sender, and whether that From is the one literal
@@ -144,6 +149,7 @@ export function registerSupportConversations(app: App) {
         : new ApiError(422, checked.code, checked.code === 'HANDOFF_EXPIRED' ? 'The handoff expired. The customer can contact support again.' : 'The handoff is not one this installation signed.', 'evidence.token');
       const claims = checked.claims;
       const result = await c.env.db.transaction(async tx => {
+        await admit(tx, claims.userId);
         // A handoff opens one conversation or one grant (it is locked, then marked used in the same statement), for the
         // user and workspace it names, while they are still a member there.
         const { rows: [row] } = await tx.execute<Row & { handoff: boolean; used: boolean; used_by: string | null; is_member: boolean; taken: boolean }>(sql`WITH h AS (
@@ -180,6 +186,7 @@ export function registerSupportConversations(app: App) {
     if (!found) throw new ApiError(404, 'NOT_FOUND', 'Message was not found at a support address.');
     const details = { channel: 'email', message: body.evidence.messageId, dkimAligned: found.evidence.dkimAligned };
     const outcome = await c.env.db.transaction(async tx => {
+      if (found.userId) await admit(tx, found.userId);
       const { rows: [existing] } = await tx.execute<Row>(sql`SELECT ${columns} FROM support_conversations WHERE id = ${conversationId} FOR UPDATE`);
       if (!existing) {
         if (found.userId && (await tx.execute<{ n: number }>(sql`SELECT ${openCount(found.userId)} AS n`)).rows[0]!.n >= OPEN_CONVERSATIONS) throw limitReached();
@@ -224,24 +231,38 @@ export function registerSupportConversations(app: App) {
   app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'post', path: '/v1/support-conversations/{id}/claim', operationId: 'claimSupportConversation',
     description: `Continue an emailed support request signed in: binds the conversation to you when your verified email is the address that wrote to ${productName} support. Anyone else gets 404.`,
     request: { params: ConversationParam }, responses: { 200: response(Claimed), ...errors } }), async c => {
-    const { userId } = dashboardSession(c), conversationId = c.req.valid('param').id;
-    const { rows: [row] } = await c.env.db.execute<{ id: string | null; mode: z.infer<typeof Mode> | null; mine: boolean; mine_mode: z.infer<typeof Mode> | null; matches: boolean; open: number }>(sql`WITH me AS (
-        SELECT id, lower(email) AS email FROM nightmail_users WHERE id = ${userId} AND email_verified AND email IS NOT NULL
-      ), target AS (
-        SELECT s.id, s.user_id, s.mode FROM support_conversations s, me WHERE s.id = ${conversationId} AND s.channel = 'email' AND s.status <> 'closed'
-          AND (s.user_id = me.id OR (s.user_id IS NULL AND lower(s.pending_address) = me.email))
-      ), claimed AS (
-        UPDATE support_conversations s SET user_id = me.id, verification = 'signin', evidence = s.evidence || jsonb_build_object('claimedAt', now()),
-          mode = CASE WHEN EXISTS (SELECT FROM workspace_members WHERE user_id = me.id) THEN 'member' ELSE 'non_member' END
-        FROM me, target t WHERE s.id = t.id AND t.user_id IS NULL AND ${openCount(sql`me.id`)} < ${OPEN_CONVERSATIONS} RETURNING s.id, s.mode, s.user_id
-      ), logged AS (${auditInsert(auditContext(c), { action: 'support.claim', workspaceId: null, target: { type: 'support_conversation', id: conversationId }, ticketRef: conversationId, internal: true },
-        { where: sql`EXISTS (SELECT FROM claimed)` })})
-      SELECT (SELECT id FROM claimed) AS id, (SELECT mode FROM claimed) AS mode, EXISTS (SELECT FROM target WHERE user_id = ${userId}) AS mine, (SELECT mode FROM target WHERE user_id = ${userId}) AS mine_mode,
-        EXISTS (SELECT FROM target) AS matches, ${openCount(userId)} AS open`);
-    if (row?.id) return c.json({ id: row.id, mode: row.mode! }, 200);
-    if (row?.mine) return c.json({ id: conversationId, mode: row.mine_mode! }, 200);
-    if (row?.matches) throw limitReached();
-    return notFound('Support conversation');
+    if (!c.env.config.multiTenant) return notFound('Endpoint');
+    // Like accepting an invitation: a signed-in person whose session's verified email is still theirs, with or without a
+    // workspace, from the dashboard's own origin. Never a bearer credential (refused inside) or the support platform.
+    if (c.env.platformCaller) throw new ApiError(403, 'DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.');
+    const { verifiedDashboardUser, requireDashboardOrigin } = await import('./dashboard-auth.js');
+    const { userId } = await verifiedDashboardUser(c.env, c.req.raw.headers, true);
+    requireDashboardOrigin(c.env, c.req.raw);
+    const conversationId = c.req.valid('param').id;
+    const context = { ...auditContext(c), actor: { type: 'member' as const, id: userId, userId, via: 'dashboard' as const } };
+    const claimed = await c.env.db.transaction(async tx => {
+      await admit(tx, userId);
+      // One binding, once: the row is locked, then changed only while it is still open, unbound and pending this
+      // person's current verified address. A claim that lost the race answers only if it is already theirs.
+      const { rows: [target] } = await tx.execute<Row>(sql`SELECT ${columns} FROM support_conversations WHERE id = ${conversationId} AND channel = 'email' AND status <> 'closed' FOR UPDATE`);
+      if (!target) return null;
+      if (target.user_id) return target.user_id === userId ? { id: target.id, mode: target.mode } : null;
+      const { rows: [row] } = await tx.execute<{ id: string | null; mode: z.infer<typeof Mode> | null; matches: boolean }>(sql`WITH me AS (
+          SELECT id, lower(email) AS email FROM nightmail_users WHERE id = ${userId} AND email_verified AND email IS NOT NULL
+        ), claimed AS (
+          UPDATE support_conversations s SET user_id = me.id, verification = 'signin', evidence = s.evidence || jsonb_build_object('claimedAt', now()),
+            mode = CASE WHEN EXISTS (SELECT FROM workspace_members WHERE user_id = me.id) THEN 'member' ELSE 'non_member' END
+          FROM me WHERE s.id = ${conversationId} AND s.channel = 'email' AND s.status <> 'closed' AND s.user_id IS NULL AND lower(s.pending_address) = me.email
+            AND ${openCount(sql`me.id`)} < ${OPEN_CONVERSATIONS} RETURNING s.id, s.mode
+        ), logged AS (${auditInsert(context, { action: 'support.claim', workspaceId: null, target: { type: 'support_conversation', id: conversationId }, ticketRef: conversationId, internal: true },
+          { where: sql`EXISTS (SELECT FROM claimed)` })})
+        SELECT (SELECT id FROM claimed) AS id, (SELECT mode FROM claimed) AS mode, EXISTS (SELECT FROM me WHERE me.email = lower(${target.pending_address})) AS matches`);
+      if (row?.id) return { id: row.id, mode: row.mode! };
+      if (row?.matches) throw limitReached();
+      return null;
+    });
+    if (!claimed) return notFound('Support conversation');
+    return c.json(claimed!, 200);
   });
 
   app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'post', path: '/v1/support-conversations/{id}/content-access', operationId: 'shareSupportConversationContent',
