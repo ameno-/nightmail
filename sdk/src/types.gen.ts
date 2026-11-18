@@ -39,7 +39,7 @@ export type ApiError = {
          */
         resetAt?: string;
         /**
-         * Every problem found, when there is more than one part, such as ritual diagnostics with ritual, line, column, message and hint, or a measurement, such as CONTENT_TOO_LARGE_TO_SCREEN with screenedBytes and limitBytes (and index in a batch).
+         * Every problem found, when there is more than one part, such as rule diagnostics with rule, line, column, message and hint, or a measurement, such as CONTENT_TOO_LARGE_TO_SCREEN with screenedBytes and limitBytes (and index in a batch).
          */
         details?: Array<{
             [key: string]: unknown;
@@ -2497,11 +2497,27 @@ export type RoutingTest = {
 };
 
 /**
- * Set while the source is exactly what this recipe writes. Saving a different source makes the ritual a script and drops it.
+ * Set while the source is what this recipe writes. Saving a different source makes the rule a script and drops it.
+ */
+export type RuleRecipeRef = {
+    /**
+     * Recipe ID from listRuleRecipes.
+     */
+    id: string;
+    /**
+     * The recipe’s fields by name, normalized.
+     */
+    params?: {
+        [key: string]: string | Array<string>;
+    };
+};
+
+/**
+ * Set while the source is what this recipe writes. Saving a different source makes the rule a script and drops it.
  */
 export type RitualRecipeRef = {
     /**
-     * Recipe ID from listRitualRecipes.
+     * Recipe ID from listRuleRecipes.
      */
     id: string;
     /**
@@ -2519,7 +2535,7 @@ export type EndpointPage = {
 
 export type Endpoint = {
     /**
-     * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+     * Endpoint name, unique in the workspace across every type. Rules call endpoints.<name>(…).
      */
     name: string;
     type: 'slack' | 'discord' | 'webhook' | 'forward';
@@ -2528,7 +2544,7 @@ export type Endpoint = {
      */
     status: 'ready' | 'pending' | 'expired' | 'declined' | 'paused';
     /**
-     * How a ritual calls it.
+     * How a rule calls it.
      */
     call: string;
     /**
@@ -2572,7 +2588,7 @@ export type CreatedEndpoint = Endpoint & {
 export type CreateEndpoint = {
     type: 'slack';
     /**
-     * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+     * Endpoint name, unique in the workspace across every type. Rules call endpoints.<name>(…).
      */
     name: string;
     /**
@@ -2582,7 +2598,7 @@ export type CreateEndpoint = {
 } | {
     type: 'discord';
     /**
-     * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+     * Endpoint name, unique in the workspace across every type. Rules call endpoints.<name>(…).
      */
     name: string;
     /**
@@ -2592,7 +2608,7 @@ export type CreateEndpoint = {
 } | {
     type: 'webhook';
     /**
-     * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+     * Endpoint name, unique in the workspace across every type. Rules call endpoints.<name>(…).
      */
     name: string;
     /**
@@ -2611,7 +2627,7 @@ export type CreateEndpoint = {
 } | {
     type: 'forward';
     /**
-     * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+     * Endpoint name, unique in the workspace across every type. Rules call endpoints.<name>(…).
      */
     name: string;
     /**
@@ -2642,7 +2658,7 @@ export type UpdateEndpoint = {
      */
     idempotent?: boolean;
     /**
-     * Rename it. Refused while an attached ritual calls it by the current name.
+     * Rename it. Refused while an attached rule calls it by the current name.
      */
     name?: string;
     /**
@@ -2676,7 +2692,7 @@ export type UpdateEndpoint = {
 
 export type DeletedEndpoint = {
     /**
-     * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+     * Endpoint name, unique in the workspace across every type. Rules call endpoints.<name>(…).
      */
     name: string;
     deleted: true;
@@ -2688,9 +2704,43 @@ export type EndpointTest = {
     error: string | null;
 };
 
+export type RuleVersion = {
+    /**
+     * The routing version. Routes and rules share it, and it is the If-Match for saving either.
+     */
+    version: number;
+    /**
+     * Marks the latest endpoint change seen. Pass it back as endpoints to wait for the next one.
+     */
+    endpoints: string;
+    /**
+     * version or endpoints moved past what you passed as after and endpoints.
+     */
+    changed: boolean;
+    actor: RuleChangeActor;
+};
+
+/**
+ * Who made the change returned: the save behind version, or else the latest endpoint change. Null when nothing changed.
+ */
+export type RuleChangeActor = {
+    /**
+     * member is a person in the dashboard, api_key an API key, mcp an MCP client (or a temporary token it made).
+     */
+    type: 'member' | 'api_key' | 'mcp';
+    /**
+     * The member’s name, the API key’s name or the MCP client and its profile label; null when it is gone. Never an email address.
+     */
+    name: string | null;
+    /**
+     * The credential making this request made the change (another tab, say).
+     */
+    self: boolean;
+} | null;
+
 export type RitualVersion = {
     /**
-     * The routing version. Routes and rituals share it, and it is the If-Match for saving either.
+     * The routing version. Routes and rules share it, and it is the If-Match for saving either.
      */
     version: number;
     /**
@@ -2722,16 +2772,52 @@ export type RitualChangeActor = {
     self: boolean;
 } | null;
 
+export type RuleCheck = {
+    ok: boolean;
+    diagnostics: Array<RuleDiagnostic>;
+    /**
+     * Endpoints and inboxes the rule calls.
+     */
+    calls: Array<string>;
+    /**
+     * The names of the AI decisions it asks for.
+     */
+    decisions: Array<string>;
+    /**
+     * Decision name → its question. testRules takes scores keyed by question.
+     */
+    questions: {
+        [key: string]: string;
+    };
+    lists: Array<string>;
+};
+
+export type RuleDiagnostic = {
+    /**
+     * The rule the problem is in.
+     */
+    rule?: string;
+    line: number;
+    column: number;
+    endLine: number;
+    endColumn: number;
+    message: string;
+    hint?: string;
+};
+
 export type RitualCheck = {
     ok: boolean;
     diagnostics: Array<RitualDiagnostic>;
     /**
-     * Endpoints and inboxes the ritual calls.
+     * Endpoints and inboxes the rule calls.
      */
     calls: Array<string>;
+    /**
+     * The names of the AI decisions it asks for.
+     */
     omens: Array<string>;
     /**
-     * Omen name → its question. testRituals takes scores keyed by question.
+     * Decision name → its question. testRules takes scores keyed by question.
      */
     questions: {
         [key: string]: string;
@@ -2740,6 +2826,9 @@ export type RitualCheck = {
 };
 
 export type RitualDiagnostic = {
+    /**
+     * The rule the problem is in.
+     */
     ritual?: string;
     line: number;
     column: number;
@@ -2747,6 +2836,24 @@ export type RitualDiagnostic = {
     endColumn: number;
     message: string;
     hint?: string;
+};
+
+export type RuleTypings = {
+    typescript: string;
+    completions: Array<{
+        label: string;
+        type: 'function' | 'property' | 'variable' | 'keyword';
+        detail: string;
+        info: string;
+        apply?: string;
+    }>;
+    endpoints: Array<{
+        name: string;
+        type: 'slack' | 'discord' | 'webhook' | 'forward';
+        status: string;
+    }>;
+    inboxes: Array<string>;
+    lists: Array<string>;
 };
 
 export type RitualTypings = {
@@ -2767,6 +2874,17 @@ export type RitualTypings = {
     lists: Array<string>;
 };
 
+export type RuleTemplates = {
+    data: Array<{
+        id: string;
+        name: string;
+        description: string;
+        needs: 'slack' | 'discord' | 'webhook' | 'forward' | null;
+        endpoint: string | null;
+        source: string;
+    }>;
+};
+
 export type RitualTemplates = {
     data: Array<{
         id: string;
@@ -2776,6 +2894,48 @@ export type RitualTemplates = {
         endpoint: string | null;
         source: string;
     }>;
+};
+
+export type RuleRecipes = {
+    /**
+     * The order recipes are grouped in.
+     */
+    groups: Array<{
+        id: string;
+        title: string;
+    }>;
+    data: Array<RuleRecipe>;
+    /**
+     * USD per 1,000 emails an AI decision checks.
+     */
+    decisionPricePerThousand: string;
+};
+
+export type RuleRecipe = {
+    id: string;
+    group: string;
+    name: string;
+    description: string;
+    /**
+     * What a rule made from it does, with {field} where each parameter goes.
+     */
+    sentence: string;
+    fields: Array<RuleRecipeField>;
+    /**
+     * Asks the AI about each email (an AI decision), billed per email checked. Saving one lets the AI read mail at those addresses’ domains.
+     */
+    decisions: boolean;
+};
+
+export type RuleRecipeField = {
+    name: string;
+    /**
+     * slack, discord, chat (Slack or Discord), forward and webhook take the name of an endpoint of that type (createEndpoint); meaning is what the AI looks for, like "a refund request"; label is one label; senders is a list of addresses and @domains.
+     */
+    type: 'slack' | 'discord' | 'chat' | 'forward' | 'webhook' | 'meaning' | 'label' | 'senders';
+    label: string;
+    placeholder: string | null;
+    hint: string | null;
 };
 
 export type RitualRecipes = {
@@ -2788,7 +2948,7 @@ export type RitualRecipes = {
     }>;
     data: Array<RitualRecipe>;
     /**
-     * USD per 1,000 emails an omen checks.
+     * USD per 1,000 emails an AI decision checks.
      */
     omenPricePerThousand: string;
 };
@@ -2799,12 +2959,12 @@ export type RitualRecipe = {
     name: string;
     description: string;
     /**
-     * What a ritual made from it does, with {field} where each parameter goes.
+     * What a rule made from it does, with {field} where each parameter goes.
      */
     sentence: string;
     fields: Array<RitualRecipeField>;
     /**
-     * Asks the AI about each email on its addresses (an omen), billed per email checked. Saving one lets the AI read mail at those addresses’ domains.
+     * Asks the AI about each email (an AI decision), billed per email checked. Saving one lets the AI read mail at those addresses’ domains.
      */
     omens: boolean;
 };
@@ -2820,14 +2980,14 @@ export type RitualRecipeField = {
     hint: string | null;
 };
 
-export type RitualTraceRow = {
+export type RuleTraceRow = {
     recipient: string;
     /**
-     * What the ritual is attached to: inbox or address.
+     * rule.
      */
     kind: string;
     /**
-     * Ritual key.
+     * Rule key.
      */
     key: string;
     scores: {
@@ -2846,7 +3006,74 @@ export type RitualTraceRow = {
         value?: string;
     }>;
     /**
-     * The evaluation in order: each condition and its result, omen answers read, actions taken and the return (at most 128 steps). For stepping through a dry run.
+     * The evaluation in order: each condition and its result, decision answers read, actions taken and the return (at most 128 steps). For stepping through a dry run.
+     */
+    timeline: Array<RuleTimelineStep>;
+};
+
+export type RuleTimelineStep = {
+    kind: 'condition';
+    line: number;
+    column: number;
+    endLine: number;
+    endColumn: number;
+    /**
+     * What the condition evaluated to.
+     */
+    result: boolean;
+} | {
+    kind: 'decisions';
+    line: number;
+    /**
+     * Decision name → the answer the rule read: the scores passed in, recorded answers or each decision’s onError value.
+     */
+    scores: {
+        [key: string]: number | boolean;
+    };
+} | {
+    kind: 'action';
+    line: number;
+    /**
+     * label, junk, block, drop, allow, inbox.deliver or endpoint.
+     */
+    op: string;
+    /**
+     * endpoint:<name> or inbox:<key>.
+     */
+    ref?: string;
+    value?: string;
+} | {
+    kind: 'return';
+    line: number;
+};
+
+export type RitualTraceRow = {
+    recipient: string;
+    /**
+     * rule.
+     */
+    kind: string;
+    /**
+     * Rule key.
+     */
+    key: string;
+    scores: {
+        [key: string]: number | boolean;
+    };
+    steps: number;
+    /**
+     * Statement lines run, in order (at most 128).
+     */
+    lines: Array<number>;
+    error: string | null;
+    actions: Array<{
+        op: string;
+        ref?: string;
+        body?: unknown;
+        value?: string;
+    }>;
+    /**
+     * The evaluation in order: each condition and its result, decision answers read, actions taken and the return (at most 128 steps). For stepping through a dry run.
      */
     timeline: Array<RitualTimelineStep>;
 };
@@ -2865,7 +3092,7 @@ export type RitualTimelineStep = {
     kind: 'omens';
     line: number;
     /**
-     * Omen name → the answer the ritual read: the scores passed in, recorded answers or each omen’s onError value.
+     * Decision name → the answer the rule read: the scores passed in, recorded answers or each decision’s onError value.
      */
     scores: {
         [key: string]: number | boolean;
@@ -3750,7 +3977,46 @@ export type InboundOverview = {
         nextCursor: string | null;
     };
     /**
-     * Every ritual in the config, in the order it was saved.
+     * Every rule in the config, in the order it was saved.
+     */
+    rules: Array<{
+        key: string;
+        /**
+         * Endpoint names it can call.
+         */
+        calls: Array<string>;
+        /**
+         * Inbox keys it can deliver to.
+         */
+        delivers: Array<string>;
+        /**
+         * The names of the AI decisions it asks for.
+         */
+        decisions: Array<string>;
+        /**
+         * Address IDs or addresses it runs on.
+         */
+        attachedTo: Array<string>;
+        /**
+         * attachedTo as addresses: an inbox ID reads as its primary address.
+         */
+        addresses: Array<string>;
+        recipe: RuleRecipeRef & ({
+            [key: string]: unknown;
+        } | null);
+        /**
+         * False when it is turned off: it keeps its addresses and doesn’t run.
+         */
+        enabled: boolean;
+        /**
+         * When it last took an action on received mail, among the workspace’s last 1,000 received emails; null if it didn’t.
+         */
+        lastMatchedAt: string | null;
+    }>;
+    /**
+     * Deprecated: rules, with omens for decisions.
+     *
+     * @deprecated
      */
     rituals: Array<{
         key: string;
@@ -3762,6 +4028,9 @@ export type InboundOverview = {
          * Inbox keys it can deliver to.
          */
         delivers: Array<string>;
+        /**
+         * The names of the AI decisions it asks for.
+         */
         omens: Array<string>;
         /**
          * Address IDs or addresses it runs on.
@@ -3796,7 +4065,7 @@ export type InboundOverview = {
      */
     domains: Array<InboundOverviewDomain>;
     /**
-     * False for members and scoped keys: they see their addresses, without routes, rituals, endpoints or domains.
+     * False for members and scoped keys: they see their addresses, without routes, rules, endpoints or domains.
      */
     manage: boolean;
 };
@@ -3828,11 +4097,17 @@ export type InboundOverviewRoute = {
      */
     catchAll: 'store' | 'create_address' | null;
     /**
-     * Rituals attached to this address or alias, in the order they run.
+     * Rules attached to this address or alias, in the order they run.
+     */
+    rules: Array<string>;
+    /**
+     * Deprecated: rules.
+     *
+     * @deprecated
      */
     rituals: Array<string>;
     /**
-     * Where its mail goes: routing first, then active webhook subscribers, then what attached rituals can send it to, then paused subscribers. Routing and ritual targets are always complete; subscribers are listed up to 50, active ones first.
+     * Where its mail goes: routing first, then active webhook subscribers, then what attached rules can send it to, then paused subscribers. Routing and rule targets are always complete; subscribers are listed up to 50, active ones first.
      */
     to: Array<InboundOverviewTarget>;
     /**
@@ -3867,7 +4142,7 @@ export type InboundOverviewTarget = {
      */
     detail: string | null;
     /**
-     * The ritual that sends mail here. A ritual may do so for only some mail; null when routing always does.
+     * The rule that sends mail here. A rule may do so for only some mail; null when routing always does.
      */
     via: string | null;
     /**
@@ -3882,7 +4157,7 @@ export type InboundOverviewEndpoint = {
      */
     id: string;
     /**
-     * endpoint: a named endpoint, which rituals call (listEndpoints). inbound_webhook: a webhook without a name (listInboundWebhooks lists every webhook, named or not).
+     * endpoint: a named endpoint, which rules call (listEndpoints). inbound_webhook: a webhook without a name (listInboundWebhooks lists every webhook, named or not).
      */
     source: 'endpoint' | 'inbound_webhook';
     name: string;
@@ -3893,7 +4168,7 @@ export type InboundOverviewEndpoint = {
      */
     target: string;
     /**
-     * How a ritual calls an endpoint; null for an inbound webhook.
+     * How a rule calls an endpoint; null for an inbound webhook.
      */
     call: string | null;
     /**
@@ -3905,7 +4180,13 @@ export type InboundOverviewEndpoint = {
      */
     routes: number;
     /**
-     * Rituals that call it.
+     * Rules that call it.
+     */
+    rules: Array<string>;
+    /**
+     * Deprecated: rules.
+     *
+     * @deprecated
      */
     rituals: Array<string>;
 };
@@ -4142,7 +4423,7 @@ export type InboundWebhook = {
     addressIds: Array<string> | null;
     approval: ApprovalTie;
     /**
-     * Its endpoint name: rituals call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names.
+     * Its endpoint name: rules call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names.
      */
     key: string | null;
     /**
@@ -4173,7 +4454,7 @@ export type InboundWebhook = {
 
 export type CreateInboundWebhook = {
     /**
-     * Its endpoint name: rituals call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names.
+     * Its endpoint name: rules call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names.
      */
     key?: string | null;
     /**
@@ -4227,7 +4508,7 @@ export type InboundWebhookList = {
 
 export type UpdateInboundWebhook = {
     /**
-     * Its endpoint name: rituals call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names.
+     * Its endpoint name: rules call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names.
      */
     key?: string | null;
     /**
@@ -4328,6 +4609,13 @@ export type WorkspaceMember = {
     email: string;
     name: string;
     role: 'owner' | 'admin' | 'member';
+};
+
+export type CreatedWorkspaceInvitation = WorkspaceInvitation & {
+    /**
+     * What to do next, for people and agents: no email is sent, so share acceptUrl with the invitee.
+     */
+    nextStep: string;
 };
 
 export type WorkspaceInvitation = {
@@ -5967,6 +6255,15 @@ export type BillingSummary = {
          * USD per 1,000 emails, sent (per recipient) or received (per message).
          */
         emailPerThousand: string;
+        /**
+         * USD per 1,000 emails an AI decision checks.
+         */
+        decisionPerThousand: string;
+        /**
+         * Deprecated: decisionPerThousand.
+         *
+         * @deprecated
+         */
         omenPerThousand: string;
         /**
          * USD per GB-month for received mail older than 90 days, beyond the free GB.
@@ -6015,7 +6312,7 @@ export type BillingUsagePoint = {
     start: string;
     meter: 'send' | 'receive' | 'omen' | 'storage' | 'byo_send' | 'byo_receive';
     /**
-     * send: recipients; receive: messages; omen: evaluations; storage: billable byte-days beyond the free GB; byo_*: reported only, $0.
+     * send: recipients; receive: messages; omen: emails checked by AI decisions (the meter keeps its name from before the rename); storage: billable byte-days beyond the free GB; byo_*: reported only, $0.
      */
     quantity: string;
 };
@@ -15093,6 +15390,76 @@ export type TestRoutingResponses = {
 
 export type TestRoutingResponse = TestRoutingResponses[keyof TestRoutingResponses];
 
+export type ListRuleVersionsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        cursor?: number;
+        limit?: number;
+    };
+    url: '/v1/rules/history';
+};
+
+export type ListRuleVersionsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListRuleVersionsError = ListRuleVersionsErrors[keyof ListRuleVersionsErrors];
+
+export type ListRuleVersionsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<{
+            version: number;
+            actor: string;
+        }>;
+        nextCursor: number | null;
+    };
+};
+
+export type ListRuleVersionsResponse = ListRuleVersionsResponses[keyof ListRuleVersionsResponses];
+
 export type ListRitualVersionsData = {
     body?: never;
     path?: never;
@@ -15162,6 +15529,110 @@ export type ListRitualVersionsResponses = {
 };
 
 export type ListRitualVersionsResponse = ListRitualVersionsResponses[keyof ListRitualVersionsResponses];
+
+export type RestoreRuleVersionData = {
+    body: {
+        version: number;
+    };
+    headers?: {
+        'if-match'?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/rules/restore';
+};
+
+export type RestoreRuleVersionErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RestoreRuleVersionError = RestoreRuleVersionErrors[keyof RestoreRuleVersionErrors];
+
+export type RestoreRuleVersionResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        config: {
+            rules?: Array<{
+                key: string;
+                source: string;
+                recipe?: RuleRecipeRef;
+                /**
+                 * false: saved and attached, but not run. Omitted or true: runs.
+                 */
+                enabled?: boolean;
+            }>;
+            attachments?: Array<{
+                rule: string;
+                /**
+                 * A mailbox ID (mbx_…) or an existing recipient address.
+                 */
+                target: string;
+                /**
+                 * Run the next attached rule even after this one took an action.
+                 */
+                continue?: boolean;
+            }>;
+            /**
+             * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+             */
+            senderLists?: {
+                [key: string]: Array<string>;
+            };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
+            evaluateDomains?: Array<string>;
+            /**
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
+             */
+            evaluateRoutes?: Array<string>;
+        };
+    };
+};
+
+export type RestoreRuleVersionResponse = RestoreRuleVersionResponses[keyof RestoreRuleVersionResponses];
 
 export type RestoreRitualVersionData = {
     body: {
@@ -15243,7 +15714,7 @@ export type RestoreRitualVersionResponses = {
                  */
                 target: string;
                 /**
-                 * Run the next attached ritual even after this one took an action.
+                 * Run the next attached rule even after this one took an action.
                  */
                 continue?: boolean;
             }>;
@@ -15253,9 +15724,12 @@ export type RestoreRitualVersionResponses = {
             senderLists?: {
                 [key: string]: Array<string>;
             };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
             evaluateDomains?: Array<string>;
             /**
-             * Route IDs opted in to Jev, in addition to the receiving domains.
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
              */
             evaluateRoutes?: Array<string>;
         };
@@ -15264,11 +15738,125 @@ export type RestoreRitualVersionResponses = {
 
 export type RestoreRitualVersionResponse = RestoreRitualVersionResponses[keyof RestoreRitualVersionResponses];
 
-export type SetOmenOptInsData = {
+export type SetDecisionOptInsData = {
     body: {
+        /**
+         * Receiving domains whose mail may be sent to the AI for decisions.
+         */
         evaluateDomains?: Array<string>;
         /**
-         * Route IDs opted in to Jev, in addition to the receiving domains.
+         * Route IDs opted in to AI decisions, in addition to the receiving domains.
+         */
+        evaluateRoutes?: Array<string>;
+    };
+    headers?: {
+        'if-match'?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/rules/decisions';
+};
+
+export type SetDecisionOptInsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type SetDecisionOptInsError = SetDecisionOptInsErrors[keyof SetDecisionOptInsErrors];
+
+export type SetDecisionOptInsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        config: {
+            rules?: Array<{
+                key: string;
+                source: string;
+                recipe?: RuleRecipeRef;
+                /**
+                 * false: saved and attached, but not run. Omitted or true: runs.
+                 */
+                enabled?: boolean;
+            }>;
+            attachments?: Array<{
+                rule: string;
+                /**
+                 * A mailbox ID (mbx_…) or an existing recipient address.
+                 */
+                target: string;
+                /**
+                 * Run the next attached rule even after this one took an action.
+                 */
+                continue?: boolean;
+            }>;
+            /**
+             * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+             */
+            senderLists?: {
+                [key: string]: Array<string>;
+            };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
+            evaluateDomains?: Array<string>;
+            /**
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
+             */
+            evaluateRoutes?: Array<string>;
+        };
+    };
+};
+
+export type SetDecisionOptInsResponse = SetDecisionOptInsResponses[keyof SetDecisionOptInsResponses];
+
+export type SetOmenOptInsData = {
+    body: {
+        /**
+         * Receiving domains whose mail may be sent to the AI for decisions.
+         */
+        evaluateDomains?: Array<string>;
+        /**
+         * Route IDs opted in to AI decisions, in addition to the receiving domains.
          */
         evaluateRoutes?: Array<string>;
     };
@@ -15348,7 +15936,7 @@ export type SetOmenOptInsResponses = {
                  */
                 target: string;
                 /**
-                 * Run the next attached ritual even after this one took an action.
+                 * Run the next attached rule even after this one took an action.
                  */
                 continue?: boolean;
             }>;
@@ -15358,9 +15946,12 @@ export type SetOmenOptInsResponses = {
             senderLists?: {
                 [key: string]: Array<string>;
             };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
             evaluateDomains?: Array<string>;
             /**
-             * Route IDs opted in to Jev, in addition to the receiving domains.
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
              */
             evaluateRoutes?: Array<string>;
         };
@@ -15499,7 +16090,7 @@ export type DeleteEndpointData = {
     body?: never;
     path: {
         /**
-         * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+         * Endpoint name, unique in the workspace across every type. Rules call endpoints.<name>(…).
          */
         name: string;
     };
@@ -15565,7 +16156,7 @@ export type GetEndpointData = {
     body?: never;
     path: {
         /**
-         * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+         * Endpoint name, unique in the workspace across every type. Rules call endpoints.<name>(…).
          */
         name: string;
     };
@@ -15631,7 +16222,7 @@ export type UpdateEndpointData = {
     body: UpdateEndpoint;
     path: {
         /**
-         * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+         * Endpoint name, unique in the workspace across every type. Rules call endpoints.<name>(…).
          */
         name: string;
     };
@@ -15699,7 +16290,7 @@ export type SendEndpointVerificationData = {
     };
     path: {
         /**
-         * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+         * Endpoint name, unique in the workspace across every type. Rules call endpoints.<name>(…).
          */
         name: string;
     };
@@ -15765,7 +16356,7 @@ export type TestEndpointData = {
     body?: never;
     path: {
         /**
-         * Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).
+         * Endpoint name, unique in the workspace across every type. Rules call endpoints.<name>(…).
          */
         name: string;
     };
@@ -15903,6 +16494,80 @@ export type CreateInboxConnectionResponses = {
 
 export type CreateInboxConnectionResponse = CreateInboxConnectionResponses[keyof CreateInboxConnectionResponses];
 
+export type GetRuleVersionData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * The version you have. The call waits until the version differs from it.
+         */
+        after?: number | null;
+        /**
+         * The endpoints marker from the last response: also wait for an endpoint to be created, changed or deleted.
+         */
+        endpoints?: string;
+        /**
+         * Seconds to wait for a change (0–25). Ignored without after or endpoints.
+         */
+        wait?: number | null;
+    };
+    url: '/v1/rules/version';
+};
+
+export type GetRuleVersionErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetRuleVersionError = GetRuleVersionErrors[keyof GetRuleVersionErrors];
+
+export type GetRuleVersionResponses = {
+    /**
+     * Success
+     */
+    200: RuleVersion;
+};
+
+export type GetRuleVersionResponse = GetRuleVersionResponses[keyof GetRuleVersionResponses];
+
 export type GetRitualVersionData = {
     body?: never;
     path?: never;
@@ -15977,6 +16642,76 @@ export type GetRitualVersionResponses = {
 
 export type GetRitualVersionResponse = GetRitualVersionResponses[keyof GetRitualVersionResponses];
 
+export type CheckRuleData = {
+    body: {
+        source: string;
+        key?: string;
+        /**
+         * Lists to check against. Defaults to the saved sender lists.
+         */
+        senderLists?: {
+            [key: string]: Array<string>;
+        };
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/rules/check';
+};
+
+export type CheckRuleErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CheckRuleError = CheckRuleErrors[keyof CheckRuleErrors];
+
+export type CheckRuleResponses = {
+    /**
+     * Success
+     */
+    200: RuleCheck;
+};
+
+export type CheckRuleResponse = CheckRuleResponses[keyof CheckRuleResponses];
+
 export type CheckRitualData = {
     body: {
         source: string;
@@ -16047,6 +16782,67 @@ export type CheckRitualResponses = {
 
 export type CheckRitualResponse = CheckRitualResponses[keyof CheckRitualResponses];
 
+export type GetRuleTypingsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/rules/typings';
+};
+
+export type GetRuleTypingsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetRuleTypingsError = GetRuleTypingsErrors[keyof GetRuleTypingsErrors];
+
+export type GetRuleTypingsResponses = {
+    /**
+     * Success
+     */
+    200: RuleTypings;
+};
+
+export type GetRuleTypingsResponse = GetRuleTypingsResponses[keyof GetRuleTypingsResponses];
+
 export type GetRitualTypingsData = {
     body?: never;
     path?: never;
@@ -16108,6 +16904,67 @@ export type GetRitualTypingsResponses = {
 
 export type GetRitualTypingsResponse = GetRitualTypingsResponses[keyof GetRitualTypingsResponses];
 
+export type ListRuleTemplatesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/rules/templates';
+};
+
+export type ListRuleTemplatesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListRuleTemplatesError = ListRuleTemplatesErrors[keyof ListRuleTemplatesErrors];
+
+export type ListRuleTemplatesResponses = {
+    /**
+     * Success
+     */
+    200: RuleTemplates;
+};
+
+export type ListRuleTemplatesResponse = ListRuleTemplatesResponses[keyof ListRuleTemplatesResponses];
+
 export type ListRitualTemplatesData = {
     body?: never;
     path?: never;
@@ -16168,6 +17025,187 @@ export type ListRitualTemplatesResponses = {
 };
 
 export type ListRitualTemplatesResponse = ListRitualTemplatesResponses[keyof ListRitualTemplatesResponses];
+
+export type ListRuleRecipesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/rules/recipes';
+};
+
+export type ListRuleRecipesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListRuleRecipesError = ListRuleRecipesErrors[keyof ListRuleRecipesErrors];
+
+export type ListRuleRecipesResponses = {
+    /**
+     * Success
+     */
+    200: RuleRecipes;
+};
+
+export type ListRuleRecipesResponse = ListRuleRecipesResponses[keyof ListRuleRecipesResponses];
+
+export type CreateRuleFromRecipeData = {
+    body: {
+        recipe: string;
+        /**
+         * The recipe’s fields by name, normalized.
+         */
+        params?: {
+            [key: string]: string | Array<string>;
+        };
+        /**
+         * Inbox IDs (mbx_…) or receiving addresses it runs on.
+         */
+        addresses: Array<string>;
+        key?: string;
+        enabled?: boolean;
+    };
+    headers?: {
+        'if-match'?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/rules/recipes';
+};
+
+export type CreateRuleFromRecipeErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateRuleFromRecipeError = CreateRuleFromRecipeErrors[keyof CreateRuleFromRecipeErrors];
+
+export type CreateRuleFromRecipeResponses = {
+    /**
+     * Success
+     */
+    201: {
+        version: number;
+        config: {
+            rules?: Array<{
+                key: string;
+                source: string;
+                recipe?: RuleRecipeRef;
+                /**
+                 * false: saved and attached, but not run. Omitted or true: runs.
+                 */
+                enabled?: boolean;
+            }>;
+            attachments?: Array<{
+                rule: string;
+                /**
+                 * A mailbox ID (mbx_…) or an existing recipient address.
+                 */
+                target: string;
+                /**
+                 * Run the next attached rule even after this one took an action.
+                 */
+                continue?: boolean;
+            }>;
+            /**
+             * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+             */
+            senderLists?: {
+                [key: string]: Array<string>;
+            };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
+            evaluateDomains?: Array<string>;
+            /**
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
+             */
+            evaluateRoutes?: Array<string>;
+        };
+        /**
+         * The new rule’s key.
+         */
+        key: string;
+    };
+};
+
+export type CreateRuleFromRecipeResponse = CreateRuleFromRecipeResponses[keyof CreateRuleFromRecipeResponses];
 
 export type ListRitualRecipesData = {
     body?: never;
@@ -16322,7 +17360,7 @@ export type CreateRitualFromRecipeResponses = {
                  */
                 target: string;
                 /**
-                 * Run the next attached ritual even after this one took an action.
+                 * Run the next attached rule even after this one took an action.
                  */
                 continue?: boolean;
             }>;
@@ -16332,20 +17370,140 @@ export type CreateRitualFromRecipeResponses = {
             senderLists?: {
                 [key: string]: Array<string>;
             };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
             evaluateDomains?: Array<string>;
             /**
-             * Route IDs opted in to Jev, in addition to the receiving domains.
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
              */
             evaluateRoutes?: Array<string>;
         };
         /**
-         * The new ritual’s key.
+         * The new rule’s key.
          */
         key: string;
     };
 };
 
 export type CreateRitualFromRecipeResponse = CreateRitualFromRecipeResponses[keyof CreateRitualFromRecipeResponses];
+
+export type UpdateRuleFromRecipeData = {
+    body: {
+        recipe?: string;
+        /**
+         * The recipe’s fields by name, normalized.
+         */
+        params?: {
+            [key: string]: string | Array<string>;
+        };
+        /**
+         * Inbox IDs (mbx_…) or receiving addresses it runs on.
+         */
+        addresses?: Array<string>;
+        enabled?: boolean;
+    };
+    headers?: {
+        'if-match'?: string;
+    };
+    path: {
+        key: string;
+    };
+    query?: never;
+    url: '/v1/rules/scripts/{key}/recipe';
+};
+
+export type UpdateRuleFromRecipeErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateRuleFromRecipeError = UpdateRuleFromRecipeErrors[keyof UpdateRuleFromRecipeErrors];
+
+export type UpdateRuleFromRecipeResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        config: {
+            rules?: Array<{
+                key: string;
+                source: string;
+                recipe?: RuleRecipeRef;
+                /**
+                 * false: saved and attached, but not run. Omitted or true: runs.
+                 */
+                enabled?: boolean;
+            }>;
+            attachments?: Array<{
+                rule: string;
+                /**
+                 * A mailbox ID (mbx_…) or an existing recipient address.
+                 */
+                target: string;
+                /**
+                 * Run the next attached rule even after this one took an action.
+                 */
+                continue?: boolean;
+            }>;
+            /**
+             * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+             */
+            senderLists?: {
+                [key: string]: Array<string>;
+            };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
+            evaluateDomains?: Array<string>;
+            /**
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
+             */
+            evaluateRoutes?: Array<string>;
+        };
+    };
+};
+
+export type UpdateRuleFromRecipeResponse = UpdateRuleFromRecipeResponses[keyof UpdateRuleFromRecipeResponses];
 
 export type UpdateRitualFromRecipeData = {
     body: {
@@ -16440,7 +17598,7 @@ export type UpdateRitualFromRecipeResponses = {
                  */
                 target: string;
                 /**
-                 * Run the next attached ritual even after this one took an action.
+                 * Run the next attached rule even after this one took an action.
                  */
                 continue?: boolean;
             }>;
@@ -16450,9 +17608,12 @@ export type UpdateRitualFromRecipeResponses = {
             senderLists?: {
                 [key: string]: Array<string>;
             };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
             evaluateDomains?: Array<string>;
             /**
-             * Route IDs opted in to Jev, in addition to the receiving domains.
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
              */
             evaluateRoutes?: Array<string>;
         };
@@ -16460,6 +17621,399 @@ export type UpdateRitualFromRecipeResponses = {
 };
 
 export type UpdateRitualFromRecipeResponse = UpdateRitualFromRecipeResponses[keyof UpdateRitualFromRecipeResponses];
+
+export type DeleteRuleData = {
+    body?: never;
+    headers?: {
+        'if-match'?: string;
+    };
+    path: {
+        key: string;
+    };
+    query?: never;
+    url: '/v1/rules/scripts/{key}';
+};
+
+export type DeleteRuleErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type DeleteRuleError = DeleteRuleErrors[keyof DeleteRuleErrors];
+
+export type DeleteRuleResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        config: {
+            rules?: Array<{
+                key: string;
+                source: string;
+                recipe?: RuleRecipeRef;
+                /**
+                 * false: saved and attached, but not run. Omitted or true: runs.
+                 */
+                enabled?: boolean;
+            }>;
+            attachments?: Array<{
+                rule: string;
+                /**
+                 * A mailbox ID (mbx_…) or an existing recipient address.
+                 */
+                target: string;
+                /**
+                 * Run the next attached rule even after this one took an action.
+                 */
+                continue?: boolean;
+            }>;
+            /**
+             * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+             */
+            senderLists?: {
+                [key: string]: Array<string>;
+            };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
+            evaluateDomains?: Array<string>;
+            /**
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
+             */
+            evaluateRoutes?: Array<string>;
+        };
+    };
+};
+
+export type DeleteRuleResponse = DeleteRuleResponses[keyof DeleteRuleResponses];
+
+export type GetRuleData = {
+    body?: never;
+    path: {
+        key: string;
+    };
+    query?: never;
+    url: '/v1/rules/scripts/{key}';
+};
+
+export type GetRuleErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetRuleError = GetRuleErrors[keyof GetRuleErrors];
+
+export type GetRuleResponses = {
+    /**
+     * Success
+     */
+    200: {
+        key: string;
+        source: string;
+        recipe?: RuleRecipeRef;
+        /**
+         * false: saved and attached, but not run. Omitted or true: runs.
+         */
+        enabled?: boolean;
+    };
+};
+
+export type GetRuleResponse = GetRuleResponses[keyof GetRuleResponses];
+
+export type UpdateRuleData = {
+    body: {
+        enabled: boolean;
+    };
+    headers?: {
+        'if-match'?: string;
+    };
+    path: {
+        key: string;
+    };
+    query?: never;
+    url: '/v1/rules/scripts/{key}';
+};
+
+export type UpdateRuleErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateRuleError = UpdateRuleErrors[keyof UpdateRuleErrors];
+
+export type UpdateRuleResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        config: {
+            rules?: Array<{
+                key: string;
+                source: string;
+                recipe?: RuleRecipeRef;
+                /**
+                 * false: saved and attached, but not run. Omitted or true: runs.
+                 */
+                enabled?: boolean;
+            }>;
+            attachments?: Array<{
+                rule: string;
+                /**
+                 * A mailbox ID (mbx_…) or an existing recipient address.
+                 */
+                target: string;
+                /**
+                 * Run the next attached rule even after this one took an action.
+                 */
+                continue?: boolean;
+            }>;
+            /**
+             * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+             */
+            senderLists?: {
+                [key: string]: Array<string>;
+            };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
+            evaluateDomains?: Array<string>;
+            /**
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
+             */
+            evaluateRoutes?: Array<string>;
+        };
+    };
+};
+
+export type UpdateRuleResponse = UpdateRuleResponses[keyof UpdateRuleResponses];
+
+export type SaveRuleData = {
+    body: {
+        key: string;
+        source: string;
+        recipe?: RuleRecipeRef;
+        /**
+         * false: saved and attached, but not run. Omitted or true: runs.
+         */
+        enabled?: boolean;
+    };
+    headers?: {
+        'if-match'?: string;
+    };
+    path: {
+        key: string;
+    };
+    query?: never;
+    url: '/v1/rules/scripts/{key}';
+};
+
+export type SaveRuleErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type SaveRuleError = SaveRuleErrors[keyof SaveRuleErrors];
+
+export type SaveRuleResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        config: {
+            rules?: Array<{
+                key: string;
+                source: string;
+                recipe?: RuleRecipeRef;
+                /**
+                 * false: saved and attached, but not run. Omitted or true: runs.
+                 */
+                enabled?: boolean;
+            }>;
+            attachments?: Array<{
+                rule: string;
+                /**
+                 * A mailbox ID (mbx_…) or an existing recipient address.
+                 */
+                target: string;
+                /**
+                 * Run the next attached rule even after this one took an action.
+                 */
+                continue?: boolean;
+            }>;
+            /**
+             * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+             */
+            senderLists?: {
+                [key: string]: Array<string>;
+            };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
+            evaluateDomains?: Array<string>;
+            /**
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
+             */
+            evaluateRoutes?: Array<string>;
+        };
+    };
+};
+
+export type SaveRuleResponse = SaveRuleResponses[keyof SaveRuleResponses];
 
 export type DeleteRitualData = {
     body?: never;
@@ -16541,7 +18095,7 @@ export type DeleteRitualResponses = {
                  */
                 target: string;
                 /**
-                 * Run the next attached ritual even after this one took an action.
+                 * Run the next attached rule even after this one took an action.
                  */
                 continue?: boolean;
             }>;
@@ -16551,9 +18105,12 @@ export type DeleteRitualResponses = {
             senderLists?: {
                 [key: string]: Array<string>;
             };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
             evaluateDomains?: Array<string>;
             /**
-             * Route IDs opted in to Jev, in addition to the receiving domains.
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
              */
             evaluateRoutes?: Array<string>;
         };
@@ -16715,7 +18272,7 @@ export type UpdateRitualResponses = {
                  */
                 target: string;
                 /**
-                 * Run the next attached ritual even after this one took an action.
+                 * Run the next attached rule even after this one took an action.
                  */
                 continue?: boolean;
             }>;
@@ -16725,9 +18282,12 @@ export type UpdateRitualResponses = {
             senderLists?: {
                 [key: string]: Array<string>;
             };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
             evaluateDomains?: Array<string>;
             /**
-             * Route IDs opted in to Jev, in addition to the receiving domains.
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
              */
             evaluateRoutes?: Array<string>;
         };
@@ -16824,7 +18384,7 @@ export type SaveRitualResponses = {
                  */
                 target: string;
                 /**
-                 * Run the next attached ritual even after this one took an action.
+                 * Run the next attached rule even after this one took an action.
                  */
                 continue?: boolean;
             }>;
@@ -16834,9 +18394,12 @@ export type SaveRitualResponses = {
             senderLists?: {
                 [key: string]: Array<string>;
             };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
             evaluateDomains?: Array<string>;
             /**
-             * Route IDs opted in to Jev, in addition to the receiving domains.
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
              */
             evaluateRoutes?: Array<string>;
         };
@@ -16845,16 +18408,148 @@ export type SaveRitualResponses = {
 
 export type SaveRitualResponse = SaveRitualResponses[keyof SaveRitualResponses];
 
-export type AttachRitualsData = {
+export type AttachRulesData = {
     body: {
         attachments: Array<{
-            ritual: string;
+            /**
+             * The rule to run.
+             */
+            rule?: string;
+            /**
+             * The earlier name for rule.
+             *
+             * @deprecated
+             */
+            ritual?: string;
             /**
              * A mailbox ID (mbx_…) or an existing recipient address.
              */
             target: string;
             /**
-             * Run the next attached ritual even after this one took an action.
+             * Run the next attached rule even after this one took an action.
+             */
+            continue?: boolean;
+        }>;
+    };
+    headers?: {
+        'if-match'?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/rules/attachments';
+};
+
+export type AttachRulesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type AttachRulesError = AttachRulesErrors[keyof AttachRulesErrors];
+
+export type AttachRulesResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        config: {
+            rules?: Array<{
+                key: string;
+                source: string;
+                recipe?: RuleRecipeRef;
+                /**
+                 * false: saved and attached, but not run. Omitted or true: runs.
+                 */
+                enabled?: boolean;
+            }>;
+            attachments?: Array<{
+                rule: string;
+                /**
+                 * A mailbox ID (mbx_…) or an existing recipient address.
+                 */
+                target: string;
+                /**
+                 * Run the next attached rule even after this one took an action.
+                 */
+                continue?: boolean;
+            }>;
+            /**
+             * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+             */
+            senderLists?: {
+                [key: string]: Array<string>;
+            };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
+            evaluateDomains?: Array<string>;
+            /**
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
+             */
+            evaluateRoutes?: Array<string>;
+        };
+    };
+};
+
+export type AttachRulesResponse = AttachRulesResponses[keyof AttachRulesResponses];
+
+export type AttachRitualsData = {
+    body: {
+        attachments: Array<{
+            /**
+             * The rule to run.
+             */
+            rule?: string;
+            /**
+             * The earlier name for rule.
+             *
+             * @deprecated
+             */
+            ritual?: string;
+            /**
+             * A mailbox ID (mbx_…) or an existing recipient address.
+             */
+            target: string;
+            /**
+             * Run the next attached rule even after this one took an action.
              */
             continue?: boolean;
         }>;
@@ -16935,7 +18630,7 @@ export type AttachRitualsResponses = {
                  */
                 target: string;
                 /**
-                 * Run the next attached ritual even after this one took an action.
+                 * Run the next attached rule even after this one took an action.
                  */
                 continue?: boolean;
             }>;
@@ -16945,9 +18640,12 @@ export type AttachRitualsResponses = {
             senderLists?: {
                 [key: string]: Array<string>;
             };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
             evaluateDomains?: Array<string>;
             /**
-             * Route IDs opted in to Jev, in addition to the receiving domains.
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
              */
             evaluateRoutes?: Array<string>;
         };
@@ -16955,6 +18653,270 @@ export type AttachRitualsResponses = {
 };
 
 export type AttachRitualsResponse = AttachRitualsResponses[keyof AttachRitualsResponses];
+
+export type GetRulesData = {
+    body?: never;
+    path?: never;
+    query?: {
+        version?: number;
+    };
+    url: '/v1/rules';
+};
+
+export type GetRulesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetRulesError = GetRulesErrors[keyof GetRulesErrors];
+
+export type GetRulesResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        config: {
+            rules?: Array<{
+                key: string;
+                source: string;
+                recipe?: RuleRecipeRef;
+                /**
+                 * false: saved and attached, but not run. Omitted or true: runs.
+                 */
+                enabled?: boolean;
+            }>;
+            attachments?: Array<{
+                rule: string;
+                /**
+                 * A mailbox ID (mbx_…) or an existing recipient address.
+                 */
+                target: string;
+                /**
+                 * Run the next attached rule even after this one took an action.
+                 */
+                continue?: boolean;
+            }>;
+            /**
+             * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+             */
+            senderLists?: {
+                [key: string]: Array<string>;
+            };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
+            evaluateDomains?: Array<string>;
+            /**
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
+             */
+            evaluateRoutes?: Array<string>;
+        };
+    };
+};
+
+export type GetRulesResponse = GetRulesResponses[keyof GetRulesResponses];
+
+export type ApplyRulesData = {
+    body: {
+        /**
+         * Every rule, by key.
+         */
+        rules?: Array<{
+            key: string;
+            source: string;
+            recipe?: RuleRecipeRef;
+            /**
+             * false: saved and attached, but not run. Omitted or true: runs.
+             */
+            enabled?: boolean;
+        }>;
+        /**
+         * The earlier name for rules.
+         *
+         * @deprecated
+         */
+        rituals?: Array<{
+            key: string;
+            source: string;
+            recipe?: RuleRecipeRef;
+            /**
+             * false: saved and attached, but not run. Omitted or true: runs.
+             */
+            enabled?: boolean;
+        }>;
+        attachments?: Array<{
+            /**
+             * The rule to run.
+             */
+            rule?: string;
+            /**
+             * The earlier name for rule.
+             *
+             * @deprecated
+             */
+            ritual?: string;
+            /**
+             * A mailbox ID (mbx_…) or an existing recipient address.
+             */
+            target: string;
+            /**
+             * Run the next attached rule even after this one took an action.
+             */
+            continue?: boolean;
+        }>;
+        /**
+         * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+         */
+        senderLists?: {
+            [key: string]: Array<string>;
+        };
+        /**
+         * Receiving domains whose mail may be sent to the AI for decisions.
+         */
+        evaluateDomains?: Array<string>;
+        /**
+         * Route IDs opted in to AI decisions, in addition to the receiving domains.
+         */
+        evaluateRoutes?: Array<string>;
+    };
+    headers?: {
+        'if-match'?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/rules';
+};
+
+export type ApplyRulesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ApplyRulesError = ApplyRulesErrors[keyof ApplyRulesErrors];
+
+export type ApplyRulesResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        config: {
+            rules?: Array<{
+                key: string;
+                source: string;
+                recipe?: RuleRecipeRef;
+                /**
+                 * false: saved and attached, but not run. Omitted or true: runs.
+                 */
+                enabled?: boolean;
+            }>;
+            attachments?: Array<{
+                rule: string;
+                /**
+                 * A mailbox ID (mbx_…) or an existing recipient address.
+                 */
+                target: string;
+                /**
+                 * Run the next attached rule even after this one took an action.
+                 */
+                continue?: boolean;
+            }>;
+            /**
+             * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+             */
+            senderLists?: {
+                [key: string]: Array<string>;
+            };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
+            evaluateDomains?: Array<string>;
+            /**
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
+             */
+            evaluateRoutes?: Array<string>;
+        };
+    };
+};
+
+export type ApplyRulesResponse = ApplyRulesResponses[keyof ApplyRulesResponses];
 
 export type GetRitualsData = {
     body?: never;
@@ -17033,7 +18995,7 @@ export type GetRitualsResponses = {
                  */
                 target: string;
                 /**
-                 * Run the next attached ritual even after this one took an action.
+                 * Run the next attached rule even after this one took an action.
                  */
                 continue?: boolean;
             }>;
@@ -17043,9 +19005,12 @@ export type GetRitualsResponses = {
             senderLists?: {
                 [key: string]: Array<string>;
             };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
             evaluateDomains?: Array<string>;
             /**
-             * Route IDs opted in to Jev, in addition to the receiving domains.
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
              */
             evaluateRoutes?: Array<string>;
         };
@@ -17056,23 +19021,49 @@ export type GetRitualsResponse = GetRitualsResponses[keyof GetRitualsResponses];
 
 export type ApplyRitualsData = {
     body: {
+        /**
+         * Every rule, by key.
+         */
+        rules?: Array<{
+            key: string;
+            source: string;
+            recipe?: RuleRecipeRef;
+            /**
+             * false: saved and attached, but not run. Omitted or true: runs.
+             */
+            enabled?: boolean;
+        }>;
+        /**
+         * The earlier name for rules.
+         *
+         * @deprecated
+         */
         rituals?: Array<{
             key: string;
             source: string;
-            recipe?: RitualRecipeRef;
+            recipe?: RuleRecipeRef;
             /**
              * false: saved and attached, but not run. Omitted or true: runs.
              */
             enabled?: boolean;
         }>;
         attachments?: Array<{
-            ritual: string;
+            /**
+             * The rule to run.
+             */
+            rule?: string;
+            /**
+             * The earlier name for rule.
+             *
+             * @deprecated
+             */
+            ritual?: string;
             /**
              * A mailbox ID (mbx_…) or an existing recipient address.
              */
             target: string;
             /**
-             * Run the next attached ritual even after this one took an action.
+             * Run the next attached rule even after this one took an action.
              */
             continue?: boolean;
         }>;
@@ -17082,9 +19073,12 @@ export type ApplyRitualsData = {
         senderLists?: {
             [key: string]: Array<string>;
         };
+        /**
+         * Receiving domains whose mail may be sent to the AI for decisions.
+         */
         evaluateDomains?: Array<string>;
         /**
-         * Route IDs opted in to Jev, in addition to the receiving domains.
+         * Route IDs opted in to AI decisions, in addition to the receiving domains.
          */
         evaluateRoutes?: Array<string>;
     };
@@ -17164,7 +19158,7 @@ export type ApplyRitualsResponses = {
                  */
                 target: string;
                 /**
-                 * Run the next attached ritual even after this one took an action.
+                 * Run the next attached rule even after this one took an action.
                  */
                 continue?: boolean;
             }>;
@@ -17174,9 +19168,12 @@ export type ApplyRitualsResponses = {
             senderLists?: {
                 [key: string]: Array<string>;
             };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
             evaluateDomains?: Array<string>;
             /**
-             * Route IDs opted in to Jev, in addition to the receiving domains.
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
              */
             evaluateRoutes?: Array<string>;
         };
@@ -17185,26 +19182,52 @@ export type ApplyRitualsResponses = {
 
 export type ApplyRitualsResponse = ApplyRitualsResponses[keyof ApplyRitualsResponses];
 
-export type TestRitualsData = {
+export type TestRulesData = {
     body: {
         config?: {
+            /**
+             * Every rule, by key.
+             */
+            rules?: Array<{
+                key: string;
+                source: string;
+                recipe?: RuleRecipeRef;
+                /**
+                 * false: saved and attached, but not run. Omitted or true: runs.
+                 */
+                enabled?: boolean;
+            }>;
+            /**
+             * The earlier name for rules.
+             *
+             * @deprecated
+             */
             rituals?: Array<{
                 key: string;
                 source: string;
-                recipe?: RitualRecipeRef;
+                recipe?: RuleRecipeRef;
                 /**
                  * false: saved and attached, but not run. Omitted or true: runs.
                  */
                 enabled?: boolean;
             }>;
             attachments?: Array<{
-                ritual: string;
+                /**
+                 * The rule to run.
+                 */
+                rule?: string;
+                /**
+                 * The earlier name for rule.
+                 *
+                 * @deprecated
+                 */
+                ritual?: string;
                 /**
                  * A mailbox ID (mbx_…) or an existing recipient address.
                  */
                 target: string;
                 /**
-                 * Run the next attached ritual even after this one took an action.
+                 * Run the next attached rule even after this one took an action.
                  */
                 continue?: boolean;
             }>;
@@ -17214,9 +19237,149 @@ export type TestRitualsData = {
             senderLists?: {
                 [key: string]: Array<string>;
             };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
             evaluateDomains?: Array<string>;
             /**
-             * Route IDs opted in to Jev, in addition to the receiving domains.
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
+             */
+            evaluateRoutes?: Array<string>;
+        };
+        messageId?: string;
+        mime?: string;
+        to?: Array<string>;
+        scores?: {
+            [key: string]: number;
+        };
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/rules/test';
+};
+
+export type TestRulesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type TestRulesError = TestRulesErrors[keyof TestRulesErrors];
+
+export type TestRulesResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: number;
+        recipients: Array<{
+            [key: string]: unknown;
+        }>;
+        trace: Array<RuleTraceRow>;
+        steps: number;
+    };
+};
+
+export type TestRulesResponse = TestRulesResponses[keyof TestRulesResponses];
+
+export type TestRitualsData = {
+    body: {
+        config?: {
+            /**
+             * Every rule, by key.
+             */
+            rules?: Array<{
+                key: string;
+                source: string;
+                recipe?: RuleRecipeRef;
+                /**
+                 * false: saved and attached, but not run. Omitted or true: runs.
+                 */
+                enabled?: boolean;
+            }>;
+            /**
+             * The earlier name for rules.
+             *
+             * @deprecated
+             */
+            rituals?: Array<{
+                key: string;
+                source: string;
+                recipe?: RuleRecipeRef;
+                /**
+                 * false: saved and attached, but not run. Omitted or true: runs.
+                 */
+                enabled?: boolean;
+            }>;
+            attachments?: Array<{
+                /**
+                 * The rule to run.
+                 */
+                rule?: string;
+                /**
+                 * The earlier name for rule.
+                 *
+                 * @deprecated
+                 */
+                ritual?: string;
+                /**
+                 * A mailbox ID (mbx_…) or an existing recipient address.
+                 */
+                target: string;
+                /**
+                 * Run the next attached rule even after this one took an action.
+                 */
+                continue?: boolean;
+            }>;
+            /**
+             * Named address lists for lists.has(name, address). Entries are addresses or @domain.
+             */
+            senderLists?: {
+                [key: string]: Array<string>;
+            };
+            /**
+             * Receiving domains whose mail may be sent to the AI for decisions.
+             */
+            evaluateDomains?: Array<string>;
+            /**
+             * Route IDs opted in to AI decisions, in addition to the receiving domains.
              */
             evaluateRoutes?: Array<string>;
         };
@@ -22574,7 +24737,7 @@ export type InviteWorkspaceMemberResponses = {
     /**
      * Success
      */
-    201: WorkspaceInvitation;
+    201: CreatedWorkspaceInvitation;
 };
 
 export type InviteWorkspaceMemberResponse = InviteWorkspaceMemberResponses[keyof InviteWorkspaceMemberResponses];
@@ -22764,7 +24927,7 @@ export type CreateWorkspaceInvitationResponses = {
     /**
      * Success
      */
-    201: WorkspaceInvitation;
+    201: CreatedWorkspaceInvitation;
 };
 
 export type CreateWorkspaceInvitationResponse = CreateWorkspaceInvitationResponses[keyof CreateWorkspaceInvitationResponses];
@@ -25598,7 +27761,10 @@ export type GetBillingUsageData = {
          */
         to?: string;
         granularity?: 'hour' | 'day' | 'month';
-        meter?: 'send' | 'receive' | 'omen' | 'storage' | 'byo_send' | 'byo_receive';
+        /**
+         * decision is the omen meter: AI decisions.
+         */
+        meter?: 'send' | 'receive' | 'omen' | 'decision' | 'storage' | 'byo_send' | 'byo_receive';
     };
     url: '/v1/billing/usage';
 };

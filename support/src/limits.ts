@@ -58,10 +58,10 @@ export async function mailIdentity(env: Env, mailbox: Mailbox, sender: string, d
 }
 
 /** Whether one more inbound message fits today (its sender's or bucket's cap, then the total). */
-export async function mailAllowed(env: Env, mailbox: Mailbox, sender: string, dmarcPass: boolean): Promise<{ ok: true } | { ok: false; reason: string }> {
+export async function mailAllowed(env: Env, mailbox: Mailbox, sender: string, dmarcPass: boolean, count = countToday): Promise<{ ok: true } | { ok: false; reason: string }> {
   const id = await mailIdentity(env, mailbox, sender, dmarcPass), cap = limits(env);
-  if (!(await countToday(env, id.key, id.limit)).ok) return { ok: false, reason: dmarcPass ? 'mail per sender' : `unauthenticated mail to ${mailbox}@` };
-  if (!(await countToday(env, 'global:mail', cap.mailPerDay)).ok) { await alertOnce(env, 'mail', cap.mailPerDay); return { ok: false, reason: 'mail per day' }; }
+  if (!(await count(env, id.key, id.limit)).ok) return { ok: false, reason: dmarcPass ? 'mail per sender' : `unauthenticated mail to ${mailbox}@` };
+  if (!(await count(env, 'global:mail', cap.mailPerDay)).ok) { await alertOnce(env, 'mail', cap.mailPerDay); return { ok: false, reason: 'mail per day' }; }
   return { ok: true };
 }
 
@@ -69,21 +69,21 @@ export async function mailAllowed(env: Env, mailbox: Mailbox, sender: string, dm
  * Whether a new ticket fits: a verified customer's from the verified reserve (and their own cap), anyone else's from
  * their intake address's budget (and, when DMARC passes, their own cap). `scope` says which cap refused it.
  */
-export async function ticketAllowed(env: Env, input: { verifiedUserId: string | null; mailbox: Mailbox; sender: string | null; dmarcPass: boolean }): Promise<{ ok: true } | { ok: false; scope: 'person' | 'global'; reason: string }> {
+export async function ticketAllowed(env: Env, input: { verifiedUserId: string | null; mailbox: Mailbox; sender: string | null; dmarcPass: boolean }, count = countToday): Promise<{ ok: true } | { ok: false; scope: 'person' | 'global'; reason: string }> {
   const cap = limits(env);
   if (input.verifiedUserId) {
-    if (!(await countToday(env, `user:${input.verifiedUserId}:tickets`, cap.ticketsPerPerson)).ok) return { ok: false, scope: 'person', reason: 'tickets per customer' };
-    if (!(await countToday(env, 'global:tickets:verified', cap.ticketsVerifiedPerDay)).ok) { await alertOnce(env, 'tickets', cap.ticketsVerifiedPerDay); return { ok: false, scope: 'global', reason: 'verified tickets per day' }; }
+    if (!(await count(env, `user:${input.verifiedUserId}:tickets`, cap.ticketsPerPerson)).ok) return { ok: false, scope: 'person', reason: 'tickets per customer' };
+    if (!(await count(env, 'global:tickets:verified', cap.ticketsVerifiedPerDay)).ok) { await alertOnce(env, 'tickets', cap.ticketsVerifiedPerDay); return { ok: false, scope: 'global', reason: 'verified tickets per day' }; }
     return { ok: true };
   }
-  if (input.dmarcPass && input.sender && !(await countToday(env, `sender:${await addressHash(input.sender)}:tickets`, cap.ticketsPerPerson)).ok) return { ok: false, scope: 'person', reason: 'tickets per sender' };
-  if (!(await countToday(env, `global:tickets:intake:${input.mailbox}`, cap.ticketsIntakePerMailbox)).ok) return { ok: false, scope: 'global', reason: `tickets for ${input.mailbox}@` };
+  if (input.dmarcPass && input.sender && !(await count(env, `sender:${await addressHash(input.sender)}:tickets`, cap.ticketsPerPerson)).ok) return { ok: false, scope: 'person', reason: 'tickets per sender' };
+  if (!(await count(env, `global:tickets:intake:${input.mailbox}`, cap.ticketsIntakePerMailbox)).ok) return { ok: false, scope: 'global', reason: `tickets for ${input.mailbox}@` };
   return { ok: true };
 }
 
 /** Keeps a message that went over a cap for the team's digest (bounded: 4,000 characters, 2,000 messages a day). */
-export async function holdOverCap(env: Env, held: { channel: Mailbox; reason: string; sender: string | null; dmarc: string | null; subject: string | null; text: string | null; messageId: string; threadId: string | null }) {
-  const n = await countToday(env, 'overflow:kept', 2000);
+export async function holdOverCap(env: Env, held: { channel: Mailbox; reason: string; sender: string | null; dmarc: string | null; subject: string | null; text: string | null; messageId: string; threadId: string | null }, count = countToday) {
+  const n = await count(env, 'overflow:kept', 2000);
   log('warn', { event: 'email', code: 'OVER_CAP_HELD', channel: held.channel, reason: held.reason, kept: n.ok });
   if (!n.ok) return;
   await env.DB.prepare('INSERT INTO overflow (day, channel, reason, sender, dmarc, subject, text, message_id, thread_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')

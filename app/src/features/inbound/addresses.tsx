@@ -80,9 +80,9 @@ type AddressForm = { base: InboundAddress; displayName: string; aliases: AliasSt
 const formOf = (address: InboundAddress): AddressForm => ({ base: address, displayName: address.displayName ?? '', aliases: aliasState(address.aliases) })
 const sameList = (a: string[], b: string[]) => a.length === b.length && [...a].sort().join('\n') === [...b].sort().join('\n')
 
-type RitualConfig = { version: number; config: { attachments: { ritual: string; target: string; continue: boolean }[] } }
+type RuleConfig = { version: number; config: { attachments: { rule: string; target: string; continue: boolean }[] } }
 
-/** Route → Rituals → Goes to for one address, with what can be done at each step right there. */
+/** Route → Rules → Goes to for one address, with what can be done at each step right there. */
 function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address: InboundAddress; overview: ReturnType<typeof useOverview>; onAddAlias: () => void; onAddPattern: () => void }) {
   const toast = useToast()
   const entry = overview.data?.routes.data.find(r => r.address?.id === address.id)
@@ -90,16 +90,16 @@ function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address:
   const [busy, setBusy] = useState(false)
   const [routing, setRouting] = useState(false)
   // Single flight: attaching reads the saved version and writes against it, so a second click would conflict with the first.
-  const attach = useSingleFlight('rituals.attachments', async (change: (list: RitualConfig['config']['attachments']) => RitualConfig['config']['attachments'], done: string) => {
+  const attach = useSingleFlight('rules.attachments', async (change: (list: RuleConfig['config']['attachments']) => RuleConfig['config']['attachments'], done: string) => {
     setBusy(true)
     try {
-      const current = await request<RitualConfig>('/v1/rituals')
-      await request('/v1/rituals/attachments', { method: 'PUT', body: { attachments: change(current.config.attachments) }, ifMatch: current.version })
+      const current = await request<RuleConfig>('/v1/rules')
+      await request('/v1/rules/attachments', { method: 'PUT', body: { attachments: change(current.config.attachments) }, ifMatch: current.version })
       toast(done, 'success'); setRitual(''); await overview.refetch()
     } catch (e) { toast(errorText(e), 'error') } finally { setBusy(false) }
   }, address.id)
-  const attached = entry?.rituals ?? []
-  const available = (overview.data?.rituals ?? []).filter(r => !attached.includes(r.key))
+  const attached = entry?.rules ?? []
+  const available = (overview.data?.rules ?? []).filter(r => !attached.includes(r.key))
   return <div className="addr-path" aria-label="How mail to this address is handled">
     <section className="addr-step" id="route">
       <h2>{steps.route.title}</h2>
@@ -111,17 +111,17 @@ function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address:
       {!address.expiresAt && <div className="addr-step__actions"><Button size="sm" variant="ghost" onClick={onAddAlias}>Add alias</Button><Button size="sm" variant="ghost" onClick={onAddPattern}>Add pattern</Button></div>}
     </section>
     <span className="addr-arrow" aria-hidden="true">→</span>
-    <section className="addr-step" id="rituals">
-      <h2>{steps.rituals.title}</h2>
-      {!entry ? <SkeletonText width="50%" /> : attached.length ? <ul>{attached.map((k, i) => <li key={k}><RitualIcon /><Link to={`/receiving/rituals/${encodeURIComponent(k)}`}><code>{k}</code></Link>{i < attached.length - 1 && <span className="addr-then">then</span>}<span className="addr-grow" />
-        <IconButton size="sm" label={`Detach ${k}`} disabled={busy} onClick={() => void attach(list => list.filter(b => !(b.ritual === k && b.target === address.id)), `${k} detached.`)}><X size={14} aria-hidden="true" /></IconButton></li>)}</ul>
-        : <p className="addr-step__empty">{steps.rituals.empty}</p>}
+    <section className="addr-step" id="rules">
+      <h2>{steps.rules.title}</h2>
+      {!entry ? <SkeletonText width="50%" /> : attached.length ? <ul>{attached.map((k, i) => <li key={k}><RitualIcon /><Link to={`/receiving/rules/${encodeURIComponent(k)}`}><code>{k}</code></Link>{i < attached.length - 1 && <span className="addr-then">then</span>}<span className="addr-grow" />
+        <IconButton size="sm" label={`Detach ${k}`} disabled={busy} onClick={() => void attach(list => list.filter(b => !(b.rule === k && b.target === address.id)), `${k} detached.`)}><X size={14} aria-hidden="true" /></IconButton></li>)}</ul>
+        : <p className="addr-step__empty">{steps.rules.empty}</p>}
       <div className="addr-step__foot">
         {available.length > 0 && <div className="addr-step__actions">
-          <Select aria-label="Ritual to attach" value={ritual} onValueChange={setRitual} options={[{ value: '', label: 'Attach a ritual…' }, ...available.map(r => ({ value: r.key, label: r.key }))]} />
-          <Button size="sm" disabled={!ritual || busy || attached.length >= RITUALS_PER_ADDRESS} onClick={() => void attach(list => [...list, { ritual, target: address.id, continue: !!available.find(r => r.key === ritual)?.recipe }], `${ritual} attached.`)}>Attach</Button>
+          <Select aria-label="Rule to attach" value={ritual} onValueChange={setRitual} options={[{ value: '', label: 'Attach a rule…' }, ...available.map(r => ({ value: r.key, label: r.key }))]} />
+          <Button size="sm" disabled={!ritual || busy || attached.length >= RITUALS_PER_ADDRESS} onClick={() => void attach(list => [...list, { rule: ritual, target: address.id, continue: !!available.find(r => r.key === ritual)?.recipe }], `${ritual} attached.`)}>Attach</Button>
         </div>}
-        <div className="addr-step__actions"><Link className="ui-button ui-button--ghost ui-button--sm" to={`/receiving/rituals/new?address=${encodeURIComponent(address.id)}`}>New ritual</Link></div>
+        <div className="addr-step__actions"><Link className="ui-button ui-button--ghost ui-button--sm" to={`/receiving/rules/new?address=${encodeURIComponent(address.id)}`}>New rule</Link></div>
       </div>
     </section>
     <span className="addr-arrow" aria-hidden="true">→</span>

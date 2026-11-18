@@ -52,12 +52,12 @@ const McpApprovalPage = settings.page(m => m.McpApprovalPage)
 const WebhookDetailPage = settings.page(m => m.WebhookDetailPage)
 const DocsPage = docs.page(m => m.DocsPage)
 const InboundPage = inbound.page(m => m.InboundPage)
-const RitualsPage = chunk(()=>import('./features/inbound/rituals')).page(m=>m.RitualsPage)
+const RulesPage = chunk(()=>import('./features/inbound/rituals')).page(m=>m.RulesPage)
 const TracePage = inbound.page(m => m.TracePage)
 const RitualsRedirect = inbound.page(m => m.RitualsRedirect)
-const NewRitualPage = inbound.page(m => m.NewRitualPage)
+const NewRulePage = inbound.page(m => m.NewRulePage)
 const NewRecipeRoute = inbound.page(m => m.NewRecipeRoute)
-const RitualRoute = inbound.page(m => m.RitualRoute)
+const RuleRoute = inbound.page(m => m.RuleRoute)
 const ReceivingPage = inbound.page(m => m.ReceivingPage)
 const InboundAddressDetailPage = inbound.page(m => m.InboundAddressDetailPage)
 const AgentInboxesPage = inbound.page(m => m.AgentInboxesPage)
@@ -144,7 +144,7 @@ export function App() {
   return <AppErrorBoundary><Routes><Route path="legal/:doc?" element={<ChunkFallback.Provider value={<BootLoader />}><Suspense fallback={<BootLoader />}><LegalPage /></Suspense></ChunkFallback.Provider>} /><Route path="onboarding" element={<OnboardingRoute />} /><Route index element={<RootPage />} /><Route element={<DashboardGate />}>
     <Route path="overview" element={<OverviewPage />} />
     <Route path="logs" element={<LogsPage />} /><Route path="logs/received/:id" element={<Moved to={params => `/logs/${encodeURIComponent(params.id ?? '')}`} />} /><Route path="logs/:id" element={<LogDetailPage />} />
-    <Route path="receiving/endpoints" element={<Navigate replace to="/receiving?tab=endpoints" />}/><Route path="receiving/rituals" element={<RitualsRedirect />} /><Route path="receiving/rituals/new" element={<NewRitualPage />} /><Route path="receiving/rituals/new/script" element={<RitualsPage />} /><Route path="receiving/rituals/new/:recipe" element={<NewRecipeRoute />} /><Route path="receiving/rituals/:key" element={<RitualRoute />} /><Route path="receiving/rituals/:key/code" element={<RitualsPage />} /><Route path="receiving/routing" element={<Navigate replace to="/receiving" />} /><Route path="receiving/trace" element={<TracePage />} /><Route path="receiving" element={<ReceivingPage />} /><Route path="receiving/inbox" element={<InboundPage />} /><Route path="receiving/addresses/:id" element={<InboundAddressDetailPage />} /><Route path="receiving/webhooks" element={<WebhooksListRedirect />} /><Route path="receiving/webhooks/:id" element={<InboundWebhookDetailPage />} />
+    <Route path="receiving/endpoints" element={<Navigate replace to="/receiving?tab=endpoints" />}/><Route path="receiving/rituals/*" element={<RitualsRedirect />} /><Route path="receiving/rules/new" element={<NewRulePage />} /><Route path="receiving/rules/new/script" element={<RulesPage />} /><Route path="receiving/rules/new/:recipe" element={<NewRecipeRoute />} /><Route path="receiving/rules/:key" element={<RuleRoute />} /><Route path="receiving/rules/:key/code" element={<RulesPage />} /><Route path="receiving/rules" element={<Navigate replace to="/receiving?tab=rules" />} /><Route path="receiving/routing" element={<Navigate replace to="/receiving" />} /><Route path="receiving/trace" element={<TracePage />} /><Route path="receiving" element={<ReceivingPage />} /><Route path="receiving/inbox" element={<InboundPage />} /><Route path="receiving/addresses/:id" element={<InboundAddressDetailPage />} /><Route path="receiving/webhooks" element={<WebhooksListRedirect />} /><Route path="receiving/webhooks/:id" element={<InboundWebhookDetailPage />} />
     <Route path="receiving/addresses" element={<Moved to={() => '/receiving'} />} /><Route path="inbound" element={<Moved to={() => '/receiving/inbox'} />} /><Route path="inbound/addresses" element={<Moved to={() => '/receiving'} />} /><Route path="inbound/addresses/:id" element={<Moved to={params => `/receiving/addresses/${id(params)}`} />} /><Route path="inbound/webhooks" element={<WebhooksListRedirect />} /><Route path="inbound/webhooks/:id" element={<Moved to={params => `/receiving/webhooks/${id(params)}`} />} />
     <Route path="receiving/inboxes" element={<AgentInboxesPage />} /><Route path="receiving/inboxes/:id" element={<AgentInboxPage />} />
     <Route path="mailboxes" element={<LegacyMailboxesRedirect />} /><Route path="mailboxes/webhooks" element={<LegacyMailboxWebhooksRedirect />} /><Route path="mailboxes/webhooks/:id" element={<LegacyMailboxWebhookRedirect />} /><Route path="mailboxes/:id" element={<LegacyMailboxRedirect />} />

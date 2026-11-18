@@ -88,7 +88,7 @@ export async function endpointTarget(runtime: Runtime, w: string, r: Pick<Endpoi
 const base = '/v1/endpoints',
   meta = { security, tags: ['Endpoints'] },
   types = ['slack', 'discord', 'webhook', 'forward'] as const,
-  Name = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/).describe('Endpoint name, unique in the workspace across every type. Rituals call endpoints.<name>(…).'),
+  Name = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/).describe('Endpoint name, unique in the workspace across every type. Rules call endpoints.<name>(…).'),
   Status = z.enum(['ready', 'pending', 'expired', 'declined', 'paused']).describe('ready: callable. pending: a forward waiting for its recipient to confirm. expired: the confirmation link lapsed. declined: the recipient declined or stopped forwards. paused: deliveries are held.'),
   Policy = z.object({
     perMinute: z.number().int().min(1).max(6000).describe('Calls per minute; extra calls wait for the next minute.'),
@@ -99,7 +99,7 @@ export const Endpoint = z.object({
   name: Name,
   type: z.enum(types),
   status: Status,
-  call: z.string().describe('How a ritual calls it.'),
+  call: z.string().describe('How a rule calls it.'),
   target: z.string().describe('Where it delivers. Slack, Discord and webhook URLs are write-only; only the last four characters are shown.'),
   policy: Policy,
   expiresAt: z.string().nullable().describe('When a pending forward confirmation link expires.'),
@@ -121,7 +121,7 @@ const CreateEndpoint = z.discriminatedUnion('type', [
   }).strict(),
 ]).openapi('CreateEndpoint');
 const UpdateEndpoint = Policy.partial().extend({
-  name: Name.optional().describe('Rename it. Refused while an attached ritual calls it by the current name.'),
+  name: Name.optional().describe('Rename it. Refused while an attached rule calls it by the current name.'),
   type: z.enum(types).optional().describe('Switch a Slack endpoint to Discord or back, with the new url. Webhook and forward endpoints keep their type.'),
   paused: z.boolean().optional().describe('Hold deliveries. Queued calls resume when unpaused.'),
   url: Url.optional().describe('Replace a Slack, Discord or webhook URL. Write-only: omit it to keep the current URL. Replacing a webhook URL drops its custom headers unless headers are sent with it.'),
@@ -135,7 +135,7 @@ export async function endpointView(runtime: Runtime, w: string, r: EndpointRow):
   const name = r.key!, policy = endpointPolicy(r.type, r), call = endpointCall(name), target = await endpointTarget(runtime, w, r), status = endpointStatus(r);
   const payload = endpointPayloads[r.type].signature(name).replace(/^endpoints\.[^(]+/, call);
   const nextStep = {
-    ready: `Call it from a ritual: ${payload}.`,
+    ready: `Call it from a rule: ${payload}.`,
     pending: `Waiting for ${target} to open the confirmation link (expires ${iso(r.expires_at)}). Only the recipient can confirm. Resend with sendEndpointVerification if it was lost.`,
     expired: `The confirmation link expired. Send a new one with sendEndpointVerification.`,
     declined: `${target} declined or stopped forwards. A new request is possible 30 days after ${iso(r.declined_at)}.`,
@@ -147,16 +147,16 @@ const missingEndpoint = (name: string) => new ApiError(404, 'NOT_FOUND', `No end
 
 // ── Checks every write applies ────────────────────────────────────────────────────────────
 /**
- * Refuses a change that would leave an attached ritual calling endpoints.<name> with nothing behind it, or with the
+ * Refuses a change that would leave an attached rule calling endpoints.<name> with nothing behind it, or with the
  * wrong payload: deleting the endpoint, renaming it (or removing a webhook's name) or switching its type. A delete is
- * also refused while a route delivers to it. The caller holds the address lane, which ritual and route saves take too.
+ * also refused while a route delivers to it. The caller holds the address lane, which rule and route saves take too.
  */
 export async function assertEndpointUnused(tx: DbExecutor, w: string, endpoint: { name: string | null; id: string }, change: 'delete' | 'rename' | 'switch', field = change === 'switch' ? 'type' : 'name') {
-  // Attached rituals' programs resolved endpoints.<name> and checked its type when they were saved.
+  // Attached rules' programs resolved endpoints.<name> and checked its type when they were saved.
   const callers = endpoint.name === null ? [] : (await tx.execute<{ key: string }>(sql`SELECT r.key FROM mail_ritual_configs c, jsonb_each(c.programs->'rituals') r
     WHERE c.workspace_id=${w} AND r.value->'refs' ? ${'endpoint:' + endpoint.name} ORDER BY r.key`)).rows.map(r => r.key);
   if (callers.length) {
-    const one = callers.length === 1, them = one ? 'ritual' : 'rituals';
+    const one = callers.length === 1, them = one ? 'rule' : 'rules';
     throw new ApiError(409, 'ENDPOINT_IN_USE', `Attached ${them} ${callers.join(', ')} ${one ? 'calls' : 'call'} endpoints.${endpoint.name}. ` + (change === 'delete'
       ? `Remove the call or detach the ${them}, then delete.` : `To ${change} it, create a new endpoint, point the ${them} at it, then delete this one.`), change === 'delete' ? undefined : field);
   }
@@ -352,7 +352,7 @@ async function requestConfirmation(c: Ctx, tx: DbExecutor, w: string, endpointId
 export function registerEndpoints(app: App) {
   const manage = 'create, change, test or delete endpoints';
   const findEndpoint = async (db: DbExecutor, w: string, name: string) => { const row = (await endpointRows(db, w, { name, limit: 1 }))[0]; if (!row) throw missingEndpoint(name); return row; };
-  app.openapi(createRoute({ ...meta, method: 'get', path: base, operationId: 'listEndpoints', summary: 'List endpoints rituals can call', request: { query: z.object({ type: z.enum(types).optional(), cursor: z.string().max(64).optional(), limit: z.coerce.number().int().min(1).max(200).default(100) }) }, responses: { 200: response(z.object({ data: z.array(Endpoint), nextCursor: z.string().nullable() }).openapi('EndpointPage')), ...errors } }), async c => {
+  app.openapi(createRoute({ ...meta, method: 'get', path: base, operationId: 'listEndpoints', summary: 'List endpoints rules can call', request: { query: z.object({ type: z.enum(types).optional(), cursor: z.string().max(64).optional(), limit: z.coerce.number().int().min(1).max(200).default(100) }) }, responses: { 200: response(z.object({ data: z.array(Endpoint), nextCursor: z.string().nullable() }).openapi('EndpointPage')), ...errors } }), async c => {
     const w = receivingAdmin(c).workspaceId, q = c.req.valid('query'), rows = await endpointRows(c.env.db, w, q);
     return c.json({ data: await Promise.all(rows.slice(0, q.limit).map(r => endpointView(c.env, w, r))), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.key : null }, 200);
   });
@@ -397,7 +397,7 @@ export function registerEndpoints(app: App) {
     });
     return c.json(await endpointView(c.env, w, rowOf(updated)), 200);
   });
-  app.openapi(createRoute({ ...meta, method: 'delete', path: `${base}/{name}`, operationId: 'deleteEndpoint', summary: 'Delete an endpoint no ritual or route uses', request: { params: NameParam }, responses: { 200: response(z.object({ name: Name, deleted: z.literal(true) }).openapi('DeletedEndpoint')), ...errors } }), async c => {
+  app.openapi(createRoute({ ...meta, method: 'delete', path: `${base}/{name}`, operationId: 'deleteEndpoint', summary: 'Delete an endpoint no rule or route uses', request: { params: NameParam }, responses: { 200: response(z.object({ name: Name, deleted: z.literal(true) }).openapi('DeletedEndpoint')), ...errors } }), async c => {
     const w = receivingAdmin(c, manage).workspaceId, name = c.req.valid('param').name;
     await c.env.db.transaction(async tx => {
       const row = await lockEndpoint(tx, c, w, { name }, false);
@@ -419,11 +419,11 @@ export function registerEndpoints(app: App) {
     c.get('actor').wakeJobs = 1;
     return c.json(await endpointView(c.env, w, await findEndpoint(c.env.db, w, name)), 202);
   });
-  app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{name}/test`, operationId: 'testEndpoint', summary: 'Post a fixed test message to a Slack, Discord or webhook endpoint now', description: 'Bypasses rituals and queues: one synchronous post, counted against the endpoint rate. Forwards send real mail, so they are not tested this way; use testRituals for a dry run.', request: { params: NameParam }, responses: { 200: response(z.object({ ok: z.boolean(), status: z.number().int().nullable(), error: z.string().nullable() }).openapi('EndpointTest')), ...errors } }), async c => {
+  app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{name}/test`, operationId: 'testEndpoint', summary: 'Post a fixed test message to a Slack, Discord or webhook endpoint now', description: 'Bypasses rules and queues: one synchronous post, counted against the endpoint rate. Forwards send real mail, so they are not tested this way; use testRules for a dry run.', request: { params: NameParam }, responses: { 200: response(z.object({ ok: z.boolean(), status: z.number().int().nullable(), error: z.string().nullable() }).openapi('EndpointTest')), ...errors } }), async c => {
     const w = receivingAdmin(c, manage).workspaceId, name = c.req.valid('param').name;
     const [row] = await c.env.db.select().from(endpoints).where(and(eq(endpoints.workspaceId, w), eq(endpoints.key, name)));
     if (!row) throw missingEndpoint(name);
-    if (row.type === 'forward') throw new ApiError(422, 'FORWARD_TEST_UNAVAILABLE', 'Forwards send real mail. Dry-run the ritual with testRituals instead.');
+    if (row.type === 'forward') throw new ApiError(422, 'FORWARD_TEST_UNAVAILABLE', 'Forwards send real mail. Dry-run the rule with testRules instead.');
     if (needsUrl(row)) throw resumeNeedsUrl(); // Nothing is posted to a held endpoint, a test included.
     await debit(c.env.db, w, 'endpoint-test:' + row.id, 10, 'hour', 'At most 10 endpoint tests per hour.');
     try {
@@ -447,7 +447,7 @@ const shownFormat = (format: StoredFormat): typeof webhookFormat | 'inbound' => 
 const formatHelp = `${webhookFormat} (default): ${productName}'s thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus ${productName}'s signature headers. Attachment downloadUrl and rawUrl need an admin API key.`;
 const FormatInput = z.enum([webhookFormat, 'inbound', legacyWebhookFormat]).describe(`${formatHelp} ${legacyWebhookFormat} is the earlier name of ${webhookFormat}, still accepted.`);
 // Delivery settings a route webhook needs. The inbound format replays inbound.new's email.received for receivers moved from it.
-const hookOptions={key:RoutingKey.nullable().describe('Its endpoint name: rituals call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names.'),name:z.string().max(120).nullable().describe('Display name; sent as endpoint.name in the inbound format.'),
+const hookOptions={key:RoutingKey.nullable().describe('Its endpoint name: rules call it as endpoints.<key>(…) and routes can name it as webhook:<key>. Shared with Slack, Discord and forward endpoint names.'),name:z.string().max(120).nullable().describe('Display name; sent as endpoint.name in the inbound format.'),
   format:z.enum([webhookFormat,'inbound']).describe(formatHelp),
   junk:z.enum(['skip','include']).describe(`include delivers junk mail (SES spam verdict not PASS) as message.junk, or with spam.isJunk in the inbound format. Defaults to skip for ${webhookFormat} and include for inbound.`),
   include:z.array(z.enum(['message','raw'])).max(2).describe(`${webhookFormat} format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL.`),
@@ -686,7 +686,7 @@ function registerForwardPages(app: App) {
 // ── Sending one delivery ───────────────────────────────────────────────────────────────────
 /**
  * Posts one claimed delivery to its endpoint, by the endpoint's type: a webhook gets the signed event, Slack and Discord
- * the ritual's message, and a forward sends the message on. Retries, rates and fences are applied around it by
+ * the rule's message, and a forward sends the message on. Retries, rates and fences are applied around it by
  * deliverEndpoint (endpoint-delivery.ts).
  */
 export async function sendToEndpoint(runtime: Runtime, w: string, h: ClaimedWebhook) {
@@ -702,15 +702,9 @@ export async function sendToEndpoint(runtime: Runtime, w: string, h: ClaimedWebh
   await runtime.db.transaction(async tx => {
     await checkExternal(tx, w, value);
     const [m] = await tx.select().from(mailMessages).where(and(eq(mailMessages.workspaceId, w), eq(mailMessages.id, event.messageId), eq(mailMessages.direction, 'inbound'), retainedMail()));
-    // Whether it may be forwarded never changes after ingest (forwardEligibility); only whether it is still kept does.
-    let eligible = m?.verdicts.forwardEligible;
-    if (m && eligible === undefined) {
-      // Stored without it (by the Worker this release replaces): decide by the same rule now. The answer is kept with
-      // the message when the forward goes ahead; a refusal rolls back and is decided again on a retry.
-      eligible = (await import('./mailbox-ingest.js')).storedForwardEligibility(m);
-      await tx.execute(sql`UPDATE mail_messages SET verdicts=verdicts||jsonb_build_object('forwardEligible',${eligible}::boolean) WHERE workspace_id=${w} AND id=${m.id} AND NOT verdicts ? 'forwardEligible'`);
-    }
-    if (!m || eligible !== true)
+    // Whether it may be forwarded is decided once at ingest (forwardEligibility); only whether it is still kept changes.
+    // A message stored without the verdict (sandbox mail, an IMAP append) is never forwarded.
+    if (!m || m.verdicts.forwardEligible !== true)
       throw new ApiError(422, 'FORWARD_BLOCKED', 'Automated, junk, unparsed, looped or unscanned mail is never forwarded.');
     const recipient = event.data.recipients![0]!;
     const [box] = await tx.select().from(mailboxes).where(and(eq(mailboxes.workspaceId, w), sql`id=(SELECT mailbox_id FROM mailbox_addresses WHERE workspace_id=${w} AND address IN (${recipient},regexp_replace(${recipient},'[+][^@]*@','@')) ORDER BY (address=${recipient}) DESC LIMIT 1)`));

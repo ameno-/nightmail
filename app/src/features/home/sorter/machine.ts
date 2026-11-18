@@ -525,7 +525,7 @@ export function buildMachine(p: Plan) {
   // fitted. Each is of the machine's own make: a box with a cap and a foot, on a bracket against the tower's side and
   // plugged in by a collar, a window in a bezel on its front, a plate for its name and a lamp. In the window, what
   // that part of the product does: a thread's tape deck, its reels turning as mail comes; an inbox's pigeonholes, a
-  // letter put in one; a ritual's clock, its hand stepping round, and four lamps that step with it; an agent's
+  // letter put in one; a rule's clock, its hand stepping round, and four lamps that step with it; an agent's
   // printer, the aerial it listens on; a mail app's screen, a new line on it; a campaign's horn over a stack of what
   // it sends. (Each is a floor of its own, so it is carried in whole; what moves on it is a part, and moves only while
   // the machine works.)

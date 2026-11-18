@@ -57,14 +57,17 @@ const rolePermissions = (role: string): Permission[] => role === 'owner' || role
  * whenever a credential or object the approval created is used in that workspace.
  */
 export async function externalMcpGrant(runtime: Runtime, keyId: string, workspaceId: string, db: DbExecutor = runtime.db): Promise<Actor | null> {
+  // Expiry is judged on the locked row against the wall clock (clock_timestamp()), after the lock: now() is the start of
+  // the caller's transaction, so a write that waited inside it would still accept an approval that expired meanwhile.
   const { rows: [grant] } = await db.execute<{role: string; permissions: Permission[]; user_id: string}>(sql`
-    SELECT m.role, g.permissions, i.user_id FROM nightmail_resource_grants g
+    WITH locked AS MATERIALIZED (SELECT m.role, g.permissions, i.user_id, g.expires_at FROM nightmail_resource_grants g
     JOIN nightmail_oidc_identities i ON (g.issuer, g.subject, g.user_id) = (i.issuer, i.subject, i.user_id)
     JOIN nightmail_users u ON u.id=i.user_id
     JOIN workspace_members m ON m.workspace_id = ${workspaceId} AND m.user_id = i.user_id
-    WHERE g.id = ${keyId} AND g.issuer = ${runtime.config.accountIssuer} AND NOT g.revoked AND g.expires_at > now()
+    WHERE g.id = ${keyId} AND g.issuer = ${runtime.config.accountIssuer} AND NOT g.revoked
       AND m.role IN ('owner','admin','member')
-      AND (${runtime.config.multiTenant} OR (m.role IN ('owner','admin') AND ${JSON.stringify(runtime.config.allowedSubjects)}::jsonb ? i.subject)) FOR SHARE OF g, i, m, u`);
+      AND (${runtime.config.multiTenant} OR (m.role IN ('owner','admin') AND ${JSON.stringify(runtime.config.allowedSubjects)}::jsonb ? i.subject)) FOR SHARE OF g, i, m, u)
+    SELECT role, permissions, user_id FROM locked WHERE expires_at > clock_timestamp()`);
   if (!grant) return null;
   const allowed = grant.permissions.filter(p => rolePermissions(grant.role).includes(p));
   return allowed.length ? { keyId, grantId: keyId.slice(4), userId: grant.user_id, receivingConsent: grant.role !== 'member', workspaceId, role: grant.role, permissions: allowed, domains: [], credential: 'mcp' } : null;
@@ -192,7 +195,7 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   const profile = profileLabel(new URL(request.url).searchParams.get('profile'));
   // Revoked in Nightmail, an approval refuses the tokens of the consents it had. A token of a new consent (the person
   // connected the client again at the account service) starts it again under a new key, so nothing tied to the revoked
-  // one comes back: its credentials, objects, ritual parts and scheduled mail stay ended. (Clients with a fixed
+  // one comes back: its credentials, objects, rule parts and scheduled mail stay ended. (Clients with a fixed
   // client_id, such as OpenCode's metadata document, could otherwise never reconnect that account.)
   if (consent) await runtime.db.execute(sql`UPDATE nightmail_resource_grants SET id=${'mcp_at_' + await digest(JSON.stringify([userId, claims.client_id, consent]))},
       revoked=false, issuer_grant=${consent}, permissions=${sql.param(allowed)}::text[], expires_at=to_timestamp(${claims.exp}), issued_at=${claims.iat},

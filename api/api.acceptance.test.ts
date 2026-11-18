@@ -593,16 +593,29 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   assert.equal((spec.paths as Json)['/v1/workspaces'].get.deprecated, true, 'listWorkspaces is a deprecated alias of GET /v1/me workspaces.');
   const markdown=coverageMarkdown(catalog,spec as Json);assert.doesNotMatch(markdown,/UNCOVERED/);assert.equal(String(await readFile(new URL('../docs/mcp-coverage.md',import.meta.url))),markdown,'Run bun run mcp:coverage');
   // Tools that return received mail, or text derived from it, carry the untrusted-content notice.
-  for(const name of ['listEmails','getEmail','getEmailContent','getEmailDetail','previewEmail','listLogs','testRouting','testRituals','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
+  for(const name of ['listEmails','getEmail','getEmailContent','getEmailDetail','previewEmail','listLogs','testRouting','testRules','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
   for(const op of catalog.values()){assert.ok((TOOLSETS as readonly string[]).includes(op.toolset),op.tool.name);assert.equal(op.tool.outputSchema?.type,'object',op.tool.name);assert.match(op.tool.name,/^[a-z][A-Za-z]+$/,op.tool.name)}
   // Internal routes (operators and support grants) are never tools, whatever their security scheme.
-  const bearer=Object.entries(spec.paths??{}).filter(([path])=>!/^\/v1\/(?:support|operator)\//.test(path)).flatMap(([,item])=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&!['receiveSesSnsEvent','revealWebhookSecret','getRitualVersion','createBillingTopUp','updateBillingAutoRecharge','createBillingCardSetup','deleteBillingPaymentMethod'].includes(o.operationId)).map((o:Json)=>o.operationId as string);
-  assert.deepEqual([...catalog.keys()].sort(), [...bearer,'waitForMessage'].sort());
-  const { resourceTools, resourceInventory } = await import('./src/mcp-resources.js');
+  const bearer=Object.entries(spec.paths??{}).filter(([path])=>!/^\/v1\/(?:support|operator)\//.test(path)).flatMap(([,item])=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&!o.operationId.endsWith('Ritual')&&!/Ritual[A-Z]|Rituals|OmenOptIns/.test(o.operationId)&&!['receiveSesSnsEvent','revealWebhookSecret','getRuleVersion','createBillingTopUp','updateBillingAutoRecharge','createBillingCardSetup','deleteBillingPaymentMethod'].includes(o.operationId)).map((o:Json)=>o.operationId as string);
+  // Members and invitations are session routes that an owner's or admin's own sign-in also calls (core.ts memberAdminRoute).
+  assert.deepEqual([...catalog.keys()].sort(), [...bearer,'waitForMessage','listWorkspaceMembers','listWorkspaceInvitations','createWorkspaceInvitation','revokeWorkspaceInvitation'].sort());
+  const { resourceTools, resourceInventory, listedTool } = await import('./src/mcp-resources.js'), { workspaceTools, workspaceResource } = await import('./src/mcp.js');
   assert.deepEqual(resourceInventory().map(x=>x.operation).sort(), [...catalog.keys()].sort());
-  const plain = resourceTools(catalog), bytes = Buffer.byteLength(JSON.stringify({jsonrpc:'2.0',id:1,result:{tools:plain}}));
-  // Budget the full-grant JSON-RPC response, including discovery, not just an ordinary manage grant.
-  assert.equal(plain.length, 30); assert.ok(bytes <= 50_000, `${bytes} bytes`);
+  // The listing's byte budget is measured as sent, for the largest credential (Hosted MCP members and invitations).
+  const plain = resourceTools(catalog);
+  assert.equal(plain.length, 30);
+  // tools/list leaves out the hints that equal the MCP spec's defaults: every tool it can list (each operation's Code Mode
+  // tool, each plain resource tool and describe_tool, the workspace tools) keeps the same effective hints, and keeps
+  // destructiveHint wherever it was set.
+  const effective = (a: Json = {}) => ({ readOnlyHint: a.readOnlyHint ?? false, destructiveHint: a.destructiveHint ?? true, idempotentHint: a.idempotentHint ?? false, openWorldHint: a.openWorldHint ?? true, title: a.title });
+  const listable = [...[...catalog.values()].map(op => op.tool), ...plain, ...workspaceTools, workspaceResource];
+  assert.equal(listable.length, catalog.size + plain.length + 3);
+  for (const tool of listable) {
+    const listed = listedTool(tool);
+    assert.deepEqual(effective(listed.annotations), effective(tool.annotations), tool.name);
+    assert.equal(listed.annotations?.destructiveHint, tool.annotations?.destructiveHint, tool.name);
+    assert.deepEqual({ ...listed, annotations: undefined }, { ...tool, annotations: undefined }, tool.name);
+  }
   for (const {name,action,operation} of resourceInventory()) {
     const schema = plain.find(t=>t.name===name)!.inputSchema as Json;
     const branch = schema.oneOf.find((v:Json)=>v.properties.action.const===action);
@@ -612,20 +625,20 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   // Campaign delivery controls are owner/admin only; MCP listings follow REST, so a member's grant is never offered them.
   for (const name of ['sendCampaign', 'scheduleCampaign', 'unscheduleCampaign', 'rescheduleCampaign', 'pauseCampaign', 'resumeCampaign', 'setCampaignPacing', 'cancelCampaign']) assert.equal(catalog.get(name)?.ownerOnly, true, name);
 });
-test('rituals: compiler diagnostics, linear regex, plain scores and atomic step/output budgets',async()=>{
+test('rules: compiler diagnostics, linear regex, plain scores and atomic step/output budgets',async()=>{
   const {compileRitual,runRitual}=await import('./src/ritual-engine.js');const source=(s:string)=>`export default function route(email,ctx){\n${s}\n}`;
   for(const body of ['Date.now()','fetch(email.subject)','webhook[email.subject]()','email.forward("a@example.org")','while(true){}','const r=omens(email,{news:email.subject})','hold()','forward[email.subject]()'])assert.throws(()=>compileRitual(source(body)),/Line 2, column/);
   const ir=compileRitual(source('if (/news/i.test(email.subject)) label("news"); endpoints.team( {text:email.text})'));
   assert.deepEqual(runRitual(ir,{subject:'NEWS',text:'hi'},{},{}).intents.map(i=>i.op),['label','endpoint']);
   // Diagnostics name the problem, point at it and suggest the fix.
-  for(const [body,pattern] of [['email.subjet',/column 7: email has no field subjet\. Did you mean email\.subject\?/],['slack.billing({text:"x"})',/called by name.*endpoints\.billing\(\{ text \}\)/],['lable("x")',/Did you mean label\(\)\?/],['let x=1',/Use const, not let/],['const r=omens(email,{refund:"Is this a refund?"});if(r.refnd)label("x")',/Did you mean r\.refund\?/],['inbox.delver("x")',/Did you mean inbox\.deliver\(\)\?/],['for(;;){}',/Loops are not available/],['x==1',/Use === instead of ==/]] as const)assert.throws(()=>compileRitual(source(body)),pattern);
+  for(const [body,pattern] of [['email.subjet',/column 7: email has no field subjet\. Did you mean email\.subject\?/],['slack.billing({text:"x"})',/called by name.*endpoints\.billing\(\{ text \}\)/],['lable("x")',/Did you mean label\(\)\?/],['let x=1',/Use const, not let/],['const r=omens(email,{refund:"Is this a refund?"});if(r.refnd)label("x")',/Did you mean r\.refund\?/],['const r=decisions(email,{refund:"Is this a refund?"});if(r.refnd)label("x")',/has no decision named refnd\. Did you mean r\.refund\?/],['decision(email,{a:"Is this a refund?"})',/Did you mean decisions\(\)\?/],['inbox.delver("x")',/Did you mean inbox\.deliver\(\)\?/],['for(;;){}',/Loops are not available/],['x==1',/Use === instead of ==/]] as const)assert.throws(()=>compileRitual(source(body)),pattern);
   const {retryAfterMs,actionDelay,endpointPolicy}=await import('./src/ritual-retry.js');assert.equal(retryAfterMs('1.5'),1500);assert.equal(retryAfterMs('120'),120000);assert.ok(retryAfterMs(new Date(Date.now()+5000).toUTCString())>3000);assert.equal(retryAfterMs('soon'),0);
   for(const r of [0,0.5,0.999]){const d=actionDelay(2,0,()=>r);assert.ok(d>=45000&&d<=75000,String(d))}assert.equal(actionDelay(1,90000,()=>0),90000);assert.deepEqual(endpointPolicy('slack'),{perMinute:60,retryOnTimeout:false,idempotent:false});assert.equal(endpointPolicy('forward',{retry_on_timeout:false}).retryOnTimeout,true);
   const {ritualTemplates,ritualTypings}=await import('./src/ritual-schema.js');for(const t of ritualTemplates)assert.doesNotThrow(()=>compileRitual(t.source()),t.id);assert.ok(ritualTemplates.length>=9);
-  const dts=ritualTypings({endpoints:[{name:'billing',type:'slack',status:'ready'},{name:'support-hook',type:'webhook',status:'ready'}],inboxes:['support'],lists:['vip']});assert.match(dts,/billing\(message: \{ text: string \}\): void/);assert.match(dts,/"support-hook"\(payload\?: Record<string, unknown>\): void/);assert.match(dts,/deliver\(key: "support"\)/);assert.match(dts,/has\(list: "vip", value: string\)/);
+  const dts=ritualTypings({endpoints:[{name:'billing',type:'slack',status:'ready'},{name:'support-hook',type:'webhook',status:'ready'}],inboxes:['support'],lists:['vip']});assert.match(dts,/billing\(message: \{ text: string \}\): void/);assert.match(dts,/"support-hook"\(payload\?: Record<string, unknown>\): void/);assert.match(dts,/deliver\(key: "support"\)/);assert.match(dts,/has\(list: "vip", value: string\)/);assert.match(dts,/declare function decisions</);assert.match(dts,/@deprecated The earlier name for decisions\(\)[^\n]*\ndeclare function omens</);
   for(const r of [runRitual(ir,{subject:'news',text:'x'.repeat(65537)},{},{}),runRitual(ir,{subject:'news',text:'hi'},{},{},{},2)]){assert.ok(r.error);assert.deepEqual(r.intents,[])}
 });
-test('rituals: microbenchmarks (CPU per message, warm IR)',{skip:!BENCH},async t=>{
+test('rules: microbenchmarks (CPU per message, warm IR)',{skip:!BENCH},async t=>{
   const {compileRitual,runRitual}=await import('./src/ritual-engine.js');const email={subject:'Refund for my order',from:{address:'sender@example.invalid'},text:'Refund requested. '.repeat(40)},ctx={recipient:'team@example.invalid'};
   for(const [name,s] of Object.entries({predicate:'if(email.subject.includes("Refund")) label("refund")',webhook:'endpoints.team({from:email.from.address,subject:email.subject,snippet:text.snippet(email.text,200)})',regex:'if(/refund/i.test(email.text)) label("urgent")'})){const ir=compileRitual(`export default function route(email,ctx){${s}}`);const run=()=>runRitual(ir,email,ctx,{});for(let i=0;i<2000;i++)run();const start=process.cpuUsage();for(let i=0;i<30000;i++)run();const cpu=process.cpuUsage(start);const result=run();assert.ok(!result.error&&result.steps<5000);t.diagnostic(`${name}: ${((cpu.user+cpu.system)/30000).toFixed(2)} CPU µs/message, ${result.steps} steps`)}
 });
@@ -3295,6 +3308,105 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(ok(await list(manage.secret, await start(manage.secret, '/mcp?codemode=true'), '/mcp?codemode=true')).result.tools.length, ok(await list(read.secret, await start(read.secret, '/mcp?codemode=true'), '/mcp?codemode=true')).result.tools.length);
   });
 
+  // The rule tools were renamed (getRituals is getRules, the plain rituals resource is rules). A client's cached tool list
+  // or saved call still names them as they were: each earlier name is a tool no listing shows that calls its deprecated
+  // /v1/rituals operation, so it answers in that operation's shapes and codes, behind the same confirmation, and only
+  // for a credential that could call it before.
+  test('the rule tools under their earlier names: never listed, and answering as their /v1/rituals operations do', async t => {
+    const db = await fixtureDatabase(t);
+    const manage = await keyFixture(t), read = await keyFixture(t, { permissions: ['read'] }), sender = await keyFixture(t, { permissions: ['read', 'send'], domains: ['example.com'] });
+    const grant = await oauthGrant(t, db, 'bane:read offline_access');
+    const { resourceActions, earlierResourceActions } = await import('./src/mcp-resources.js');
+    const earlier = earlierResourceActions('rituals')!, current = resourceActions('rules')!;
+    // [earlier tool, its tool now, its plain action]
+    const renamed = Object.entries(earlier).map(([action, name]) => [name, current[action === 'omens' ? 'decisions' : action], action] as const);
+    assert.equal(renamed.length, 17);
+    const init = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } } };
+    const send = (key: string, method: string, params: Json, path = '/mcp?codemode=false', session?: string) => http('POST', path, key, { jsonrpc: '2.0', id: 2, method, params }, session ? { ...rpcHeaders, 'mcp-session-id': session } : rpcHeaders);
+    const call = async (key: string, name: string, args: Json = {}, path?: string, session?: string) => ok(await send(key, 'tools/call', { name, arguments: args }, path, session)).result as Json;
+    const plain = (key: string, action: string, args: Json = {}) => call(key, 'rituals', { action, ...args }, '/mcp');
+    const fingerprint = (tools: Json) => createHash('sha256').update(JSON.stringify(tools)).digest('hex').slice(0, 16);
+    // What a call answers, and what REST answers the same request, in the same terms: the body, or the status and code.
+    // Versions and times differ between two writes of the same thing.
+    const steady = (value: unknown) => JSON.parse(JSON.stringify(value, (k, v) => ['version', 'createdAt', 'updatedAt', 'savedAt', 'nextCursor'].includes(k) ? undefined : v));
+    const answer = (r: Json) => steady(r.isError ? [r._meta?.status ?? null, r.structuredContent?.error?.code] : r.structuredContent);
+    const rest = (reply: Reply) => steady(reply.status < 300 ? reply.body : [reply.status, reply.body?.error?.code]);
+    const unavailable = (r: Json) => r.isError && r.structuredContent?.error?.code === 'TOOL_UNAVAILABLE';
+
+    // Listings: neither shows an earlier name, and a session's fingerprint is of exactly what it is shown, in which an
+    // earlier name still answers.
+    for (const path of ['/mcp?codemode=false', '/mcp']) {
+      const started = await http('POST', path, manage.secret, init, rpcHeaders), session = started.headers.get('mcp-session-id')!;
+      assert.equal(started.status, 200, diagnostic(started));
+      const tools = ok(await send(manage.secret, 'tools/list', {}, path, session)).result.tools as Json[];
+      assert.equal(session.split('.')[0], fingerprint(tools));
+      const names = tools.flatMap(x => [x.name as string, ...((x.inputSchema.properties?.action?.enum ?? []) as string[]).map(a => `${x.name}.${a}`)]);
+      assert.ok(names.includes(path === '/mcp' ? 'rules.decisions' : 'setDecisionOptIns'), path);
+      assert.deepEqual(names.filter(n => /ritual|omen/i.test(n)), [], path);
+      const config = await call(manage.secret, path === '/mcp' ? 'rituals' : 'getRituals', path === '/mcp' ? { action: 'config' } : {}, path, session);
+      assert.deepEqual(answer(config), rest(await http('GET', '/v1/rituals', manage.secret)), path);
+    }
+
+    // Every earlier name, by itself and as its plain action, answers what its /v1/rituals operation answers over REST,
+    // each from the same starting config.
+    const omens = 'export default function route(email, ctx) {\n  const r = omens(email, { refund: "Is the sender asking for a refund?" })\n  if (r.refund >= 0.7) label("refund")\n}';
+    const start = { rituals: [{ key: 'earlier', source: omens }, { key: 'plain', source: 'export default function route(email) { label("seen") }' }], attachments: [] };
+    const reset = async () => ok(await http('PUT', '/v1/rituals', manage.secret, start)).version as number;
+    const first = await reset();
+    const mime = 'From: a@example.net\r\nTo: earlier@example.com\r\nSubject: Refund\r\n\r\nRefund please';
+    const broken = { rituals: [{ key: 'broken', source: 'export default function route(email){ email.subjet }' }] };
+    const calls: [string, Json, string, string, Json?][] = [
+      ['getRituals', {}, 'GET', '/v1/rituals'], ['getRitualTypings', {}, 'GET', '/v1/rituals/typings'], ['listRitualTemplates', {}, 'GET', '/v1/rituals/templates'],
+      ['listRitualRecipes', {}, 'GET', '/v1/rituals/recipes'], ['listRitualVersions', { limit: 2 }, 'GET', '/v1/rituals/history?limit=2'], ['getRitual', { key: 'earlier' }, 'GET', '/v1/rituals/scripts/earlier'],
+      ['checkRitual', { body: { key: 'earlier', source: omens } }, 'POST', '/v1/rituals/check', { key: 'earlier', source: omens }],
+      ['testRituals', { body: { mime, scores: { 'Is the sender asking for a refund?': 0.9 } } }, 'POST', '/v1/rituals/test', { mime, scores: { 'Is the sender asking for a refund?': 0.9 } }],
+      ['applyRituals', { confirm: true, body: { ...start, rituals: start.rituals.slice(1) } }, 'PUT', '/v1/rituals', { ...start, rituals: start.rituals.slice(1) }],
+      ['applyRituals', { confirm: true, body: broken }, 'PUT', '/v1/rituals', broken],
+      ['saveRitual', { key: 'earlier', confirm: true, body: { key: 'earlier', source: omens.replace('0.7', '0.8') } }, 'PUT', '/v1/rituals/scripts/earlier', { key: 'earlier', source: omens.replace('0.7', '0.8') }],
+      ['updateRitual', { key: 'earlier', confirm: true, body: { enabled: false } }, 'PATCH', '/v1/rituals/scripts/earlier', { enabled: false }],
+      ['attachRituals', { confirm: true, body: { attachments: [] } }, 'PUT', '/v1/rituals/attachments', { attachments: [] }],
+      ['setOmenOptIns', { confirm: true, body: { evaluateDomains: [], evaluateRoutes: [] } }, 'PUT', '/v1/rituals/omens', { evaluateDomains: [], evaluateRoutes: [] }],
+      ['createRitualFromRecipe', { confirm: true, body: { recipe: 'junk-newsletters', params: {}, addresses: ['earlier@example.com'], key: 'earlier' } }, 'POST', '/v1/rituals/recipes', { recipe: 'junk-newsletters', params: {}, addresses: ['earlier@example.com'], key: 'earlier' }],
+      ['updateRitualFromRecipe', { key: 'plain', confirm: true, body: { recipe: 'junk-newsletters', params: {}, addresses: ['earlier@example.com'] } }, 'PUT', '/v1/rituals/scripts/plain/recipe', { recipe: 'junk-newsletters', params: {}, addresses: ['earlier@example.com'] }],
+      ['restoreRitualVersion', { confirm: true, body: { version: first } }, 'POST', '/v1/rituals/restore', { version: first }],
+      ['deleteRitual', { key: 'earlier', confirm: true }, 'DELETE', '/v1/rituals/scripts/earlier'],
+    ];
+    const actionOf = new Map(renamed.map(([name, , action]) => [name, action]));
+    for (const [name, args, method, path, body] of calls) {
+      await reset(); const expected = rest(await http(method, path, manage.secret, body));
+      await reset(); const named = await call(manage.secret, name, args);
+      await reset(); const grouped = await plain(manage.secret, actionOf.get(name)!, args);
+      assert.deepEqual([answer(named), answer(grouped)], [expected, expected], `${name}: ${redact(named)}`);
+    }
+    assert.deepEqual(new Set(calls.map(([name]) => name)), new Set(actionOf.keys()));
+    // The compile error is the one from before the rename, field and details too.
+    await reset(); const failed = await call(manage.secret, 'applyRituals', { confirm: true, body: broken });
+    assert.deepEqual([failed.structuredContent.error.code, failed.structuredContent.error.field, failed.structuredContent.error.details[0].ritual], ['RITUAL_INVALID', 'rituals', 'broken']);
+    // A write still needs its confirmation, as the tool now does.
+    const unconfirmed = await call(manage.secret, 'applyRituals', { body: start });
+    assert.deepEqual(answer(unconfirmed), answer(await call(manage.secret, 'applyRules', { body: { rules: start.rituals, attachments: [] } })));
+    assert.equal(unconfirmed.isError, true);
+    // describe_tool answers for the earlier resource as it did.
+    const described = await call(manage.secret, 'describe_tool', { resource: 'rituals', action: 'config' }, '/mcp');
+    assert.deepEqual([described.isError, described.structuredContent.name, described.structuredContent.description], [false, 'rituals', 'Read the saved rituals (sources), ordered attachments to inboxes and addresses, sender lists and omen opt-ins. Pass version for an earlier snapshot.']);
+    assert.equal((await call(manage.secret, 'describe_tool', { resource: 'rituals', action: 'omens' }, '/mcp')).structuredContent.inputSchema.properties.action.const, 'omens');
+
+    // Each credential reaches an earlier name exactly when it reaches the tool now: rules are receiving administration, so
+    // only the manage key does, and REST refuses the others too.
+    for (const [label, key] of [['manage key', manage.secret], ['read key', read.secret], ['sender-domain key', sender.secret], ['read approval', grant.token]] as const) {
+      for (const [name, now, action] of renamed) {
+        const [was, is] = [await call(key, name, {}), await call(key, now, {})], [wasPlain, isPlain] = [await plain(key, action), await call(key, 'rules', { action: action === 'omens' ? 'decisions' : action }, '/mcp')];
+        assert.deepEqual([unavailable(was), unavailable(wasPlain)], [unavailable(is), unavailable(isPlain)], `${label} ${name}: ${redact(was)}`);
+        const describedThen = await call(key, 'describe_tool', { resource: 'rituals', action }, '/mcp');
+        assert.equal(unavailable(describedThen), unavailable(isPlain), `${label} describe ${name}`);
+      }
+    }
+    const reached = [[manage, 'getRituals', {}], [read, 'getRituals', {}], [read, 'applyRituals', { confirm: true, body: start }], [sender, 'getRituals', {}]] as const;
+    assert.deepEqual(await Promise.all(reached.map(async ([key, name, args]) => unavailable(await call(key.secret, name, args)))), [false, true, true, true]);
+    assert.deepEqual([(await http('GET', '/v1/rituals', read.secret)).status, (await http('PUT', '/v1/rituals', read.secret, start)).status, (await http('GET', '/v1/rituals', sender.secret)).status], [403, 403, 403]);
+    await http('PUT', '/v1/rituals', manage.secret, {});
+  });
+
   test('hosted MCP advertises both catalogs and composes campaign, contact, email and temporary-token workflows', async t => {
     const db = await fixtureDatabase(t);
     const { token, consentId } = await oauthGrant(t, db);
@@ -3329,7 +3441,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
     for (const name of ['search_tools', 'describe_tool']) assert.ok(!tools.has(name), name);
     // Receiving follows the role: the person owns the workspace and approved bane:manage, so the receiving tools are listed.
-    for (const name of ['workspaces', 'setDefaultWorkspace', 'applyRituals', 'createEndpoint', 'createRoute', 'applyRouting', 'enableInboundDomain', 'createInboundAddress', 'listInboundAddresses', 'getInboundScanPolicy']) assert.ok(tools.has(name), name);
+    for (const name of ['workspaces', 'setDefaultWorkspace', 'applyRules', 'createEndpoint', 'createRoute', 'applyRouting', 'enableInboundDomain', 'createInboundAddress', 'listInboundAddresses', 'getInboundScanPolicy']) assert.ok(tools.has(name), name);
     for (const tool of tools.values()) {
       assert.equal(tool.outputSchema?.type, 'object', tool.name);
       assert.equal(tool.inputSchema.properties.path, undefined, tool.name);
@@ -3531,9 +3643,10 @@ describe('Hosted MCP OAuth and tools', () => {
         const writes: [string, string, unknown?][] = [
           ['PUT', '/v1/routing', { routes: [] }], ['POST', '/v1/routing/routes', { match: 'fixture@example.com', to: [hook.id] }],
           ['PATCH', '/v1/routing/routes/billing', { to: [] }], ['DELETE', '/v1/routing/routes/billing'], ['POST', '/v1/routing/versions/1/restore'],
-          ['PUT', '/v1/rituals', {}], ['PUT', '/v1/rituals/scripts/fixture', { key: 'fixture', source: 'export default function route(email){}' }],
-          ['PATCH', '/v1/rituals/scripts/fixture', { enabled: false }], ['DELETE', '/v1/rituals/scripts/fixture'], ['POST', '/v1/rituals/restore', { version: 1 }],
-          ['PUT', '/v1/rituals/omens', {}], ['POST', '/v1/rituals/recipes', { recipe: 'fixture', addresses: ['fixture@example.com'] }], ['PUT', '/v1/rituals/scripts/fixture/recipe', {}],
+          // Rules, and the same writes through their deprecated /v1/rituals aliases.
+          ...['/v1/rules', '/v1/rituals'].flatMap(base => [['PUT', base, {}], ['PUT', `${base}/scripts/fixture`, { key: 'fixture', source: 'export default function route(email){}' }],
+            ['PATCH', `${base}/scripts/fixture`, { enabled: false }], ['DELETE', `${base}/scripts/fixture`], ['POST', `${base}/restore`, { version: 1 }], ['PUT', `${base}/attachments`, { attachments: [] }],
+            ['PUT', base === '/v1/rules' ? `${base}/decisions` : `${base}/omens`, {}], ['POST', `${base}/recipes`, { recipe: 'fixture', addresses: ['fixture@example.com'] }], ['PUT', `${base}/scripts/fixture/recipe`, {}]] as [string, string, unknown?][]),
           ['POST', '/v1/endpoints', { type: 'slack', name: 'agent-fixture', url: 'https://hooks.slack.com/services/T0AGENT/B0AGENT/synthetic' }],
           ['PATCH', '/v1/endpoints/agent-fixture', { paused: true }], ['DELETE', '/v1/endpoints/agent-fixture'],
           ['POST', '/v1/endpoints/agent-fixture/verification', {}], ['POST', '/v1/endpoints/agent-fixture/test'],
@@ -3555,8 +3668,8 @@ describe('Hosted MCP OAuth and tools', () => {
         }
         assert.equal(ok(await http('GET', '/v1/routing', MANAGER)).version, before, 'No refused write saved a routing version.');
         assert.equal(ok(await http('GET', `/v1/inbound/webhooks/${hook.id}`, MANAGER)).paused, true);
-        // Reads and previews stay open: routing, its dry run, rituals, endpoints and a webhook's deliveries.
-        for (const path of ['/v1/routing', '/v1/routing/routes', '/v1/rituals', '/v1/endpoints', `/v1/inbound/webhooks/${hook.id}`, `/v1/inbound/webhooks/${hook.id}/deliveries`, '/v1/inbound/domains']) ok(await http('GET', path, agent.token));
+        // Reads and previews stay open: routing, its dry run, rules, endpoints and a webhook's deliveries.
+        for (const path of ['/v1/routing', '/v1/routing/routes', '/v1/rules', '/v1/rituals', '/v1/endpoints', `/v1/inbound/webhooks/${hook.id}`, `/v1/inbound/webhooks/${hook.id}/deliveries`, '/v1/inbound/domains']) ok(await http('GET', path, agent.token));
         assert.ok(Array.isArray(ok(await http('POST', '/v1/routing/test', agent.token, { envelope: { to: ['fixture@example.com'] } })).recipients));
         // Reading a domain's subdomains stays allowed: an unknown domain is not found, not refused.
         error(await http('GET', '/v1/inbound/domains/dom_fixture/subdomains', agent.token), 404, 'NOT_FOUND');
@@ -3612,7 +3725,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const passwords=['listInboxAppPasswords','createInboxAppPassword','revokeInboxAppPassword'];
       const listing=async()=>new Set((await rpc(token,'tools/list')).tools.map((t:Json)=>t.name));
       // No consent checkbox: an owner or admin of the workspace reaches the receiving tools, and changes them with bane:manage.
-      const apply=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{rituals:[{key:'bulk',source:'export default function route(email){if(email.subject.includes("newsletter")) junk()}' }]}}});assert.equal(apply.isError,false,redact(apply));assert.equal((await db.query("SELECT owners->>'ritual:bulk' AS owner FROM mail_ritual_configs WHERE workspace_id='default'" )).rows[0].owner,consentId);
+      const apply=await rpc(token,'tools/call',{name:'applyRules',arguments:{confirm:true,body:{rules:[{key:'bulk',source:'export default function route(email){if(email.subject.includes("newsletter")) junk()}' }]}}});assert.equal(apply.isError,false,redact(apply));assert.equal((await db.query("SELECT owners->>'ritual:bulk' AS owner FROM mail_ritual_configs WHERE workspace_id='default'" )).rows[0].owner,consentId);
       const tools=await listing();assert.ok(passwords.every(op=>tools.has(op)));
       // A mail client password outlives the token that asks for it, so a temporary token cannot issue one. It can still list them.
       error(await http('POST','/v1/inboxes/fixture/app-passwords',managed.token,{name:'fixture',protocols:['imap']}),403,'CREDENTIAL_DELEGATION_FORBIDDEN');
@@ -3629,8 +3742,8 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.doesNotMatch(inboxSet.find((tool:Json)=>tool.name==='attachments').description, /upload|outgoing|delete/i);
       const slack={confirm:true,idempotencyKey:'mcp-endpoint-1',body:{type:'slack',name:'mcp-alerts',url:'https://hooks.slack.com/services/T0/B0/mcpfixture'}};const endpoint=await rpc(token,'tools/call',{name:'createEndpoint',arguments:slack});assert.equal(endpoint.isError,false,redact(endpoint));assert.equal(endpoint.structuredContent.status,'ready');
       assert.equal((await rpc(token,'tools/call',{name:'createEndpoint',arguments:slack})).structuredContent.call,'endpoints["mcp-alerts"]');
-      const listed=ok(await http('POST','/mcp?toolsets=endpoints',token,{jsonrpc:'2.0',id:31,method:'tools/list',params:{}},rpcHeaders)).result.tools.map((x:Json)=>x.name);assert.ok(listed.includes('endpoints')&&listed.includes('inboundWebhooks')&&!listed.includes('rituals'),listed.join());
-      const checked=await rpc(token,'tools/call',{name:'checkRitual',arguments:{body:{source:'export default function route(email,ctx){endpoints["mcp-alerts"]({text:email.subject})}'}}});assert.equal(checked.structuredContent.ok,true,redact(checked));
+      const listed=ok(await http('POST','/mcp?toolsets=endpoints',token,{jsonrpc:'2.0',id:31,method:'tools/list',params:{}},rpcHeaders)).result.tools.map((x:Json)=>x.name);assert.ok(listed.includes('endpoints')&&listed.includes('inboundWebhooks')&&!listed.includes('rules'),listed.join());
+      const checked=await rpc(token,'tools/call',{name:'checkRule',arguments:{body:{source:'export default function route(email,ctx){endpoints["mcp-alerts"]({text:email.subject})}'}}});assert.equal(checked.structuredContent.ok,true,redact(checked));
       const parent=await callTool(token,'createApiKey',{confirm:true,body:{name:'grant administration fixture',permissions:['manage']}},201);
       // The policy the server passes (receivingPolicy): this shard is self-hosted, so the address must be allowlisted.
       const grantPolicy={hosted:false,subjects:(process.env.AUTH_ALLOWED_SUBJECTS??'').split(',').map(e=>e.trim())};
@@ -3640,7 +3753,7 @@ describe('Hosted MCP OAuth and tools', () => {
       secrets.add(parent.secret);grantKeys.push(parent.id);
       const child=ok(await http('POST','/v1/api-keys',parent.secret,{name:'read fixture',permissions:['read']}),201);
       secrets.add(child.secret);grantKeys.push(child.id);
-      error(await http('POST','/v1/rituals/test',child.secret,{messageId:'msg_fixture'}),403,'PERMISSION_DENIED');
+      error(await http('POST','/v1/rules/test',child.secret,{messageId:'msg_fixture'}),403,'PERMISSION_DENIED');
       // Routing with read permission: lists and the dry run work, and every change needs manage.
       ok(await http('GET','/v1/routing/routes',child.secret)); error(await http('POST','/v1/routing/test',child.secret,{}),422,'MISSING_RECIPIENTS');
       for(const [method,path,body] of [['PUT','/v1/routing',{routes:[]}],['POST','/v1/routing/routes',{match:'fixture@example.com',to:[]}],['PATCH','/v1/routing/routes/billing',{to:[]}],
@@ -3654,7 +3767,7 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal(await live(),false);
       const policy=ok(await http('GET','/v1/inbound/policy',MANAGER));
       for(const secret of [parent.secret,derived.secret]){
-        for(const path of ['/v1/inbound/policy','/v1/inbound/addresses','/v1/routing/routes','/v1/rituals','/v1/endpoints'])error(await http('GET',path,secret),401,'AUTH_INVALID');
+        for(const path of ['/v1/inbound/policy','/v1/inbound/addresses','/v1/routing/routes','/v1/rules','/v1/rituals','/v1/endpoints'])error(await http('GET',path,secret),401,'AUTH_INVALID');
         error(await http('PATCH','/v1/inbound/policy',secret,{spam:'quarantine'}),401,'AUTH_INVALID');
         error(await http('POST','/v1/inbound/addresses',secret,{address:'fixture@example.invalid'}),401,'AUTH_INVALID');
       }
@@ -3912,15 +4025,17 @@ describe('Hosted MCP OAuth and tools', () => {
     await simulatedSesFixture(t,async({db,local,request})=>{
       const {token,consentId}=await oauthGrant(t,db,writableScope,request);
       const box=ok(await local('POST','/v1/inboxes',{type:'sandbox'}),201);
-      const rituals=[{key:'guard',source:'export default function route(email){block()}'},{key:'note',source:'export default function route(email){label("note")}'},{key:'extra',source:'export default function route(email){label("extra")}'}];
-      const binding=(ritual:string)=>({target:box.address,ritual,continue:false});
+      const rules=[{key:'guard',source:'export default function route(email){block()}'},{key:'note',source:'export default function route(email){label("note")}'},{key:'extra',source:'export default function route(email){label("extra")}'}];
+      const binding=(rule:string)=>({target:box.address,rule,continue:false});
       const attachments=[binding('guard'),binding('note')];
-      const path='/v1/rituals', saved=ok(await local('PUT',path,{rituals,attachments}));
+      const path='/v1/rules', saved=ok(await local('PUT',path,{rules,attachments}));
       const result=ok(await request('POST','/mcp?codemode=true',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'createApiKey',arguments:{confirm:true,body:{name:'R1 fixture',permissions:['manage']}}}},rpcHeaders)).result.structuredContent;
       const key=result.secret;secrets.add(key);
       const attach=(list:typeof attachments)=>request('PUT',path+'/attachments',key,{attachments:list});
       for(const change of [[...attachments].reverse(),attachments.slice(1),[{...attachments[0],continue:true},attachments[1]]])
-        error(await attach(change),403,'RITUAL_BINDING_NOT_OWNED');
+        error(await attach(change),403,'RULE_BINDING_NOT_OWNED');
+      // The deprecated alias, written the way it was before the rename, refuses with the code it always did.
+      error(await request('PUT','/v1/rituals/attachments',key,{attachments:[...attachments].reverse().map(({rule,...b})=>({ritual:rule,...b}))}),403,'RITUAL_BINDING_NOT_OWNED');
       assert.equal(ok(await local('GET',path)).version,saved.version);
       ok(await attach([binding('extra'),...attachments]));
       const dry=async()=>ok(await local('POST',path+'/test',{mime:`To: ${box.address}\r\nSubject: fixture\r\n\r\nfixture`})).recipients[0];
@@ -3951,7 +4066,7 @@ describe('Hosted MCP OAuth and tools', () => {
         // mailboxAuth (actorMailAccess) refuses it. Every GET must be listed exactly when REST, as this grant, does not refuse it.
         const receiving=await listed(true);
         for(const name of ['listInboundKeys','listInboundAddresses','listInboundDomains','getInboundScanPolicy','listInboundWebhooks','listInboxes','revealWebhookSecret'])assert.ok(!receiving.has(name),name);
-        assert.ok(receiving.has('getRouting')&&receiving.has('getRituals')&&receiving.has('sendEmail'));
+        assert.ok(receiving.has('getRouting')&&receiving.has('getRules')&&receiving.has('sendEmail'));
         const [{createApp,createOpenApiApp},{buildMcpCatalog},{dispatchAsActor},{getMcpGrantActor}]=await Promise.all([import('./src/app.js'),import('./src/mcp-catalog.js'),import('./src/auth.js'),import('./src/mcp-auth.js')]);
         const api=await createOpenApiApp(),spec=api.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0'}}) as Json,app=createApp();
         const grantActor=(await getMcpGrantActor(runtime,'mcp_'+consentId,runtime.config.workspaceId))!;assert.ok(grantActor);
@@ -4185,7 +4300,7 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.deepEqual(await identity(), [own, 'owner', ['read', 'send', 'manage']]);
         assert.deepEqual(await identity(shared), [shared, 'member', ['read', 'send']]);
         assert.deepEqual(await identity(`Shared ${suffix}`), [shared, 'member', ['read', 'send']], 'A workspace by its name');
-        for (const [name, args] of [['createContact', { body: { email: address() }, confirm: true }], ['createApiKey', { body: { name: 'member fixture', permissions: ['read'] }, confirm: true }], ['getRituals', {}]] as const)
+        for (const [name, args] of [['createContact', { body: { email: address() }, confirm: true }], ['createApiKey', { body: { name: 'member fixture', permissions: ['read'] }, confirm: true }], ['getRules', {}]] as const)
           assert.deepEqual(failure(await call(name, { ...args, workspace: shared })), [true, 'PERMISSION_DENIED', 403], `${name} as a member`);
         // Data stays in its workspace: a contact created in one is not listed in the other.
         const label = unique('mcp-workspace-contact');
@@ -4240,11 +4355,12 @@ describe('Hosted MCP OAuth and tools', () => {
       const {token,consentId}=await oauthGrant(t,db,writableScope,request);
       const boxes:string[]=[];for(let n=0;n<3;n++)boxes.push(ok(await local('POST','/v1/inboxes',{type:'sandbox'}),201).address);
       const rituals=[{key:'listed',source:'export default function route(email){if(lists.has("deny",email.from.address)) block()}'},{key:'scored',source:'export default function route(email){const r=omens(email,{q:"Is review needed?"});if(r.q>0.5) block()}'},{key:'other',source:'export default function route(email){label("human")}'}];
+      // Saved with the keys from before the rename (rituals, ritual) and omens(…): stored configs keep working as they are.
       const config={rituals,attachments:rituals.map((r,i)=>({ritual:r.key,target:boxes[i]})),senderLists:{deny:['system@example.invalid']}};
-      ok(await local('PUT','/v1/rituals',config));
-      const saved=ok(await request('POST','/mcp?codemode=true',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'applyRituals',arguments:{confirm:true,body:{...config,senderLists:{deny:['fixture@example.net']},evaluateDomains:[boxes[0].split('@')[1]]}}}},rpcHeaders)).result;
+      ok(await local('PUT','/v1/rules',config));
+      const saved=ok(await request('POST','/mcp?codemode=true',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'applyRules',arguments:{confirm:true,body:{rules:rituals,attachments:rituals.map((r,i)=>({rule:r.key,target:boxes[i]})),senderLists:{deny:['fixture@example.net']},evaluateDomains:[boxes[0].split('@')[1]]}}}},rpcHeaders)).result;
       assert.equal(saved.isError,false,redact(saved));
-      const dry=async()=>ok(await local('POST','/v1/rituals/test',{mime:`From: fixture@example.net\r\nTo: ${boxes.join(', ')}\r\nSubject: fixture\r\n\r\nfixture`,scores:{'Is review needed?':1}})).recipients;
+      const dry=async()=>ok(await local('POST','/v1/rules/test',{mime:`From: fixture@example.net\r\nTo: ${boxes.join(', ')}\r\nSubject: fixture\r\n\r\nfixture`,scores:{'Is review needed?':1}})).recipients;
       const active=await dry();assert.deepEqual(active.map((r:Json)=>r.dropped),[true,true,false]);
       ok(await local('POST','/v1/mcp-connections/mcp_'+consentId+'/revoke'));
       const inactive=await dry();for(const r of inactive.slice(0,2)){assert.equal(r.junk,true);assert.deepEqual(r.labels,['ritual-error']);assert.match(r.warnings.join(' '),/lost receiving approval/);}
@@ -4252,12 +4368,12 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
-  // The rituals page's live view (src/ritual-version.ts): one long poll per open editor, so an agent's saves show up
+  // The rules page's live view (src/ritual-version.ts): one long poll per open editor, so an agent's saves show up
   // while a person edits. It must answer on a commit, name who made it and nothing more, stay in its workspace and
   // charge the caller's request budget for every tick it may take.
-  test('rituals live view: the version long poll wakes on a save, names who made it, stays in its workspace and is budgeted', async t => {
+  test('rules live view: the version long poll wakes on a save, names who made it, stays in its workspace and is budgeted', async t => {
     await simulatedSesFixture(t, async ({ db, local, request, runtime }) => {
-      const w = runtime.config.workspaceId, path = '/v1/rituals/version', sha = (value: string) => createHash('sha256').update(value).digest('hex');
+      const w = runtime.config.workspaceId, path = '/v1/rules/version', sha = (value: string) => createHash('sha256').update(value).digest('hex');
       const hex64 = () => (randomUUID() + randomUUID()).replaceAll('-', '');
       // An API key an agent works with, and one restricted to a sending domain (no receiving administration).
       const agent = { id: unique('key'), secret: `bane_${hex64()}` }, restricted = `bane_${hex64()}`;
@@ -4282,7 +4398,7 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal(first.changed, false); assert.match(first.endpoints, /^\d+$/);
 
       // A save by the agent's key that happened before the call: it answers at once, naming the key.
-      ok(await request('PUT', '/v1/rituals/scripts/refunds', agent.secret, { key: 'refunds', source: sources[0] }));
+      ok(await request('PUT', '/v1/rules/scripts/refunds', agent.secret, { key: 'refunds', source: sources[0] }));
       const saved = await timed(local('GET', `${path}?after=${first.version}&endpoints=${first.endpoints}&wait=25`));
       const bySave = state(saved.value);
       assert.ok(saved.ms < 2000, `${saved.ms} ms`);
@@ -4291,7 +4407,7 @@ describe('Hosted MCP OAuth and tools', () => {
       // A wait that is open when an MCP client saves wakes on that save, naming the client.
       const waiting = timed(local('GET', `${path}?after=${bySave.version}&wait=25`));
       await new Promise(resolve => setTimeout(resolve, 300));
-      const applied = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'applyRituals', arguments: { confirm: true, body: { rituals: [{ key: 'refunds', source: sources[1] }] } } } }, rpcHeaders)).result;
+      const applied = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'applyRules', arguments: { confirm: true, body: { rules: [{ key: 'refunds', source: sources[1] }] } } } }, rpcHeaders)).result;
       assert.equal(applied.isError, false, redact(applied));
       const woke = await waiting, byMcp = state(woke.value);
       assert.ok(woke.ms >= 300 && woke.ms < 8000, `${woke.ms} ms`);
@@ -4310,7 +4426,7 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.deepEqual(endpoint.actor, { type: 'api_key', name: 'Refund agent', self: false });
 
       // The person's own save (another tab) is theirs; the name is a display name, never an address.
-      ok(await local('PUT', '/v1/rituals/scripts/mine', { key: 'mine', source: sources[2] }));
+      ok(await local('PUT', '/v1/rules/scripts/mine', { key: 'mine', source: sources[2] }));
       const own = state(await local('GET', `${path}?after=${endpoint.version}&endpoints=${endpoint.endpoints}&wait=25`));
       assert.equal(own.actor.type, 'member'); assert.equal(own.actor.self, true); assert.doesNotMatch(String(own.actor.name), /@/);
       // The agent's key reads the same version, with the person's save named but not as its own.
@@ -4395,7 +4511,7 @@ describe('Hosted MCP OAuth and tools', () => {
 
       // The URL and the resume together, or the URL first and the resume after it.
       const resumed = ok(await local('PATCH', '/v1/endpoints/helpdesk', { url: 'https://example.com/hooks/helpdesk', paused: false }));
-      assert.equal(resumed.status, 'ready'); assert.match(resumed.nextStep, /^Call it from a ritual/);
+      assert.equal(resumed.status, 'ready'); assert.match(resumed.nextStep, /^Call it from a rule/);
       assert.equal((await db.query("SELECT url FROM mailbox_webhooks WHERE key='helpdesk' AND id<>$1 AND workspace_id=(SELECT workspace_id FROM mailbox_webhooks WHERE id=$1)", [hook.id])).rows[0].url, 'https://example.com/hooks/helpdesk');
       assert.equal(ok(await local('PATCH', '/v1/endpoints/alerts', { url: slack })).status, 'paused');
       assert.equal(ok(await local('PATCH', '/v1/endpoints/alerts', { paused: false })).status, 'ready');
@@ -4601,16 +4717,16 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal((await webhook('intake')).url, second);
       assert.equal(error(await local('PATCH', '/v1/endpoints/intake', { name: 'pager' }), 409, 'ENDPOINT_NAME_TAKEN').field, 'name');
 
-      // An attached ritual calls it by name: renaming or retyping it is refused and names the ritual.
+      // An attached rule calls it by name: renaming or retyping it is refused and names the rule.
       const domain = unique('mdom');
       await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,'edit.example',$3,'active')", [domain, w, REGION]);
       await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture','fixture-topic')", [w, REGION]);
       const box = ok(await local('POST', '/v1/inbound/addresses', { address: 'support@edit.example' }), 201);
-      ok(await local('PUT', '/v1/rituals', { rituals: [{ key: 'notify', source: 'export default function route(email,ctx){endpoints.pager({content:"x"})}' }], attachments: [{ ritual: 'notify', target: box.id }] }));
-      assert.match(error(await local('PATCH', '/v1/endpoints/pager', { name: 'pages' }), 409, 'ENDPOINT_IN_USE').message, /Attached ritual notify calls endpoints\.pager/);
+      ok(await local('PUT', '/v1/rules', { rules: [{ key: 'notify', source: 'export default function route(email,ctx){endpoints.pager({content:"x"})}' }], attachments: [{ rule: 'notify', target: box.id }] }));
+      assert.match(error(await local('PATCH', '/v1/endpoints/pager', { name: 'pages' }), 409, 'ENDPOINT_IN_USE').message, /Attached rule notify calls endpoints\.pager/);
       error(await local('PATCH', '/v1/endpoints/pager', { type: 'slack', url: slack }), 409, 'ENDPOINT_IN_USE');
       assert.equal(keep(ok(await local('PATCH', '/v1/endpoints/pager', { paused: true }))).status, 'paused', 'Other edits still work.');
-      ok(await local('PUT', '/v1/rituals', {}));
+      ok(await local('PUT', '/v1/rules', {}));
 
       // Another workspace's manage key can't read, edit or list them.
       const other = unique('edit-other'), outsider = `bane_${(randomUUID() + randomUUID()).replaceAll('-', '')}`;
@@ -4633,35 +4749,31 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
-  // Migration 322 runs while #357's Worker still serves, and the two Workers overlap for minutes. 322's triggers copy each
-  // write between mailbox_webhooks and mail_endpoints inside the writer's transaction. Both Workers lock an endpoint's
-  // mailbox_webhooks row before its mail_endpoints row, so no old write and new write wait on each other in a cycle.
-  // The replaced Worker's statements below are #357's, verbatim, one per call so the test can stop between them.
-  test('endpoint rollout overlap (migration 322): the replaced Worker’s and this release’s confirms, stops, edits and dispatch checks never deadlock', async t => {
-    const [{ nodeRuntime }, { answerForward, forwardStopUrl }, { forwardStillAllowed }, { createApp }, { encrypt }, { digest }, { receivingPolicy }, { sql }] = await Promise.all([import('./src/adapters/node.js'),
-      import('./src/endpoints.js'), import('./src/dispatcher.js'), import('./src/app.js'), import('./src/operations.js'), import('./src/core.js'), import('./src/mailbox-ingest-input.js'), import('drizzle-orm')]);
+  // Every endpoint write locks the endpoint's mailbox_webhooks row first (#357), and since migration 331 that row is all
+  // there is. A confirm of the same link, and the dispatcher's check whether a queued forward may still go, wait for a
+  // write under way on it and then see what it changed.
+  test('endpoint writers: a confirm and the dispatcher’s forward check wait for a write under way on the endpoint, then see it', async t => {
+    const [{ nodeRuntime }, { answerForward }, { forwardStillAllowed }, { encrypt }, { digest }, { sql }] = await Promise.all([import('./src/adapters/node.js'),
+      import('./src/endpoints.js'), import('./src/dispatcher.js'), import('./src/operations.js'), import('./src/core.js'), import('drizzle-orm')]);
     const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL }); cleanup(t, close);
-    const db = await fixtureDatabase(t), w = unique('overlap'), app = createApp();
+    const db = await fixtureDatabase(t), w = unique('endpoint-locks');
     cleanup(t, async () => {
       for (const table of ['mail_forward_once', 'mail_messages', 'mail_threads', 'mailbox_webhooks']) await db.query(`DELETE FROM ${table} WHERE workspace_id=$1`, [w]);
       await db.query('DELETE FROM workspaces WHERE id=$1', [w]);
     });
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [w]);
-    // A forward as the replaced Worker creates it (322 copies it onto its row): pending with a confirmation link, or confirmed.
+    // A forward as this release stores one: pending with a confirmation link, or confirmed.
     const forward = async (pending: boolean) => {
-      const hook = 'con_' + randomUUID().replaceAll('-', ''), token = 'fwd_' + randomUUID().replaceAll('-', '') + randomUUID().replaceAll('-', ''), ref = 'forward:f' + hook.slice(4, 16);
-      await db.query("INSERT INTO mailbox_webhooks(id,workspace_id,name,url,event_types,encrypted_secret) VALUES($1,$2,$3,'https://ritual.invalid/','[]','synthetic')", [hook, w, ref]);
-      await db.query("INSERT INTO mail_endpoints(workspace_id,ref,hook_id,encrypted_value,verified,proof_hash,expires_at,request_from) VALUES($1,$2,$3,$4,$5,$6,now()+interval '1 hour','box@example.org')",
-        [w, ref, hook, await encrypt(runtime, 'teammate@example.net', `${w}:endpoint:${hook}`), !pending, pending ? await digest(token) : null]);
+      const hook = 'con_' + randomUUID().replaceAll('-', ''), token = 'fwd_' + randomUUID().replaceAll('-', '') + randomUUID().replaceAll('-', '');
+      await db.query(`INSERT INTO mailbox_webhooks(id,workspace_id,type,key,encrypted_target,event_types,verified,proof_hash,expires_at,request_from)
+        VALUES($1,$2,'forward',$3,$4,'[]',$5,$6,now()+interval '1 hour','box@example.org')`,
+        [hook, w, 'f' + hook.slice(4, 16), await encrypt(runtime, 'teammate@example.net', `${w}:endpoint:${hook}`), !pending, pending ? await digest(token) : null]);
       return { hook, token };
     };
-    // Both tables agree after every overlap.
-    const state = async (hook: string) => (await db.query(`SELECT h.verified,h.declined_at IS NOT NULL AS declined,h.key,d.verified=h.verified AND (d.declined_at IS NULL)=(h.declined_at IS NULL)
-      AND d.ref='forward:'||h.key AS copied FROM mailbox_webhooks h JOIN mail_endpoints d ON d.hook_id=h.id WHERE h.id=$1`, [hook])).rows[0];
     const connection = async () => { const c = await fixtureDatabase(t); return { c, pid: (await c.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number }; };
     const waitingOn = async (pid: number) => {
       for (let i = 0; !(await db.query('SELECT FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))', [pid])).rowCount; i++) {
-        assert.ok(i < 250, 'The other Worker never waited.'); await new Promise(resolve => setTimeout(resolve, 20));
+        assert.ok(i < 250, 'The other writer never waited.'); await new Promise(resolve => setTimeout(resolve, 20));
       }
     };
     const inTransaction = async <T>(c: pg.Client, work: () => Promise<T>) => {
@@ -4669,86 +4781,231 @@ describe('Hosted MCP OAuth and tools', () => {
       try { const result = await work(); await c.query('COMMIT'); return result; } catch (cause) { await c.query('ROLLBACK'); throw cause; }
     };
     const started = <T>(p: Promise<T>) => { p.catch(() => {}); return p; };
-    const lockEndpointRow = (c: pg.Client, hook: string) => c.query('SELECT FROM mailbox_webhooks WHERE workspace_id=$1 AND id=$2 FOR UPDATE', [w, hook]);
 
-    // 1. The review's reproduction: the replaced Worker's confirm stops once it holds the endpoint row; this release's confirm
-    //    of the same link waits for it, then finds the link used. Before #357 the old one held mail_endpoints first: 40P01.
-    const both = await forward(true), old = await connection();
-    let fresh: Promise<unknown> | undefined;
-    const oldAnswered = await inTransaction(old.c, async () => {
-      const proof = await digest(both.token), found = (await old.c.query('SELECT workspace_id,hook_id FROM mail_endpoints WHERE proof_hash=$1', [proof])).rows[0];
-      await lockEndpointRow(old.c, found.hook_id);
-      fresh = started(answerForward(runtime, both.token, 'allow'));
-      await waitingOn(old.pid);
-      const row = (await old.c.query('SELECT hook_id FROM mail_endpoints WHERE workspace_id=$1 AND hook_id=$2 AND proof_hash=$3 AND NOT verified AND declined_at IS NULL AND expires_at>now() FOR UPDATE', [w, found.hook_id, proof])).rows[0];
-      await old.c.query('UPDATE mail_endpoints SET verified=true,proof_hash=NULL,confirmed_at=now() WHERE workspace_id=$1 AND hook_id=$2', [w, row.hook_id]);
-      return true;
+    // 1. A confirm under way holds the endpoint row; a second confirm of the same link waits for it, then finds the link used.
+    const pending = await forward(true), first = await connection();
+    let second: Promise<unknown> | undefined;
+    await inTransaction(first.c, async () => {
+      await first.c.query('SELECT FROM mailbox_webhooks WHERE workspace_id=$1 AND id=$2 FOR UPDATE', [w, pending.hook]);
+      second = started(answerForward(runtime, pending.token, 'allow'));
+      await waitingOn(first.pid);
+      await first.c.query('UPDATE mailbox_webhooks SET verified=true,proof_hash=NULL,confirmed_at=now() WHERE workspace_id=$1 AND id=$2', [w, pending.hook]);
     });
-    assert.equal(oldAnswered, true);
-    await assert.rejects(fresh!, { code: 'CONFIRMATION_UNAVAILABLE' });
-    assert.deepEqual(await state(both.hook), { verified: true, declined: false, key: 'f' + both.hook.slice(4, 16), copied: true });
+    await assert.rejects(second!, { code: 'CONFIRMATION_UNAVAILABLE' });
+    assert.deepEqual((await db.query('SELECT verified,proof_hash FROM mailbox_webhooks WHERE id=$1', [pending.hook])).rows[0], { verified: true, proof_hash: null });
 
-    // 2. The replaced Worker edits (renames) a forward while this release's stop link declines it.
-    const edited = await forward(false), editor = await connection();
-    let stop: Promise<Response> | undefined;
-    await inTransaction(editor.c, async () => {
-      await lockEndpointRow(editor.c, edited.hook);
-      const path = new URL(await forwardStopUrl(runtime, edited.hook)).pathname;
-      stop = started(Promise.resolve(app.fetch(new Request(runtime.config.publicUrl.replace(/\/$/, '') + path, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'choice=decline' }), runtime)));
-      await waitingOn(editor.pid);
-      await editor.c.query("UPDATE mail_endpoints SET ref='forward:renamed-old' WHERE workspace_id=$1 AND hook_id=$2", [w, edited.hook]);
-    });
-    assert.equal((await stop!).status, 200);
-    assert.deepEqual(await state(edited.hook), { verified: false, declined: true, key: 'renamed-old', copied: true });
-
-    // 3. This release edits (renames) a forward while the replaced Worker's stop link declines it.
-    const renamed = await forward(false), fresher = await connection(), oldStop = await connection();
-    let stopped: Promise<void> | undefined;
-    await inTransaction(fresher.c, async () => {
-      await fresher.c.query("UPDATE mailbox_webhooks SET key='renamed-new',updated_at=now() WHERE workspace_id=$1 AND id=$2", [w, renamed.hook]);
-      stopped = started(inTransaction(oldStop.c, async () => {
-        await lockEndpointRow(oldStop.c, renamed.hook);
-        await oldStop.c.query('UPDATE mail_endpoints SET verified=false,proof_hash=NULL,declined_at=now() WHERE workspace_id=$1 AND hook_id=$2', [w, renamed.hook]);
-      }));
-      await waitingOn(fresher.pid);
-    });
-    await stopped;
-    assert.deepEqual(await state(renamed.hook), { verified: false, declined: true, key: 'renamed-new', copied: true });
-
-    // 4. This release declines a forward while the replaced Worker's dispatcher decides whether its queued email may go.
-    const queued = await forward(false), thread = unique('thr'), message = unique('msg'), email = unique('em'), decliner = await connection(), dispatcher = await connection();
+    // 2. A decline (the stop link's statement) under way; the dispatcher's check for a queued forward waits for it and sees it.
+    const queued = await forward(false), thread = unique('thr'), message = unique('msg'), email = unique('em'), decliner = await connection();
     await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)', [thread, w]);
     await db.query("INSERT INTO mail_messages(id,workspace_id,direction,thread_id,status,lifecycle) VALUES($1,$2,'inbound',$3,'received','default')", [message, w, thread]);
     await db.query('INSERT INTO mail_forward_once(workspace_id,message_id,endpoint,email_id) VALUES($1,$2,$3,$4)', [w, message, queued.hook, email]);
-    const oldCheck = () => dispatcher.c.query(`SELECT EXISTS (
-      SELECT FROM mail_forward_once f JOIN mailbox_webhooks h ON h.workspace_id=f.workspace_id AND h.id=f.endpoint
-      JOIN mail_endpoints d ON d.workspace_id=h.workspace_id AND d.hook_id=h.id
-      WHERE f.email_id=x.id AND f.workspace_id=x.workspace_id AND x.actor_key_id='forward:'||f.endpoint AND starts_with(d.ref,'forward:')
-      AND d.verified AND d.declined_at IS NULL AND NOT h.paused AND NOT EXISTS(SELECT FROM jsonb_array_elements_text(f.grants) gid WHERE NOT mail_receiving_grant(f.workspace_id,gid,$4::jsonb))
-      FOR SHARE OF f, h, d) AS ok FROM (SELECT $1::text AS id,$2::text AS workspace_id,$3::text AS actor_key_id) x`, [email, w, 'forward:' + queued.hook, receivingPolicy(runtime.config)]);
-    assert.equal((await oldCheck()).rows[0].ok, true);
-    let decided: Promise<{ rows: { ok: boolean }[] }> | undefined;
+    const check = async () => (await runtime.db.execute<{ ok: boolean }>(sql`SELECT ${forwardStillAllowed(runtime, sql`x`)} AS ok FROM (SELECT ${email}::text AS id,${w}::text AS workspace_id,${'forward:' + queued.hook}::text AS actor_key_id) x`)).rows[0]!.ok;
+    assert.equal(await check(), true);
+    let decided: Promise<boolean> | undefined;
     await inTransaction(decliner.c, async () => {
       await decliner.c.query('UPDATE mailbox_webhooks SET verified=false,proof_hash=NULL,declined_at=now() WHERE workspace_id=$1 AND id=$2', [w, queued.hook]);
-      decided = started(oldCheck());
+      decided = started(check());
       await waitingOn(decliner.pid);
     });
-    assert.equal((await decided!).rows[0].ok, false, 'It waited for the decline and saw it.');
+    assert.equal(await decided!, false, 'It waited for the decline and saw it.');
+  });
+  // Contract step for 322: 331 drops the two tables 322 kept for the Worker before it, and the triggers that copied
+  // writes between them and mailbox_webhooks, once every legacy row is proven to be on its endpoint row. It runs here on
+  // committed rows in a schema of their own (322's tables, triggers and functions, rebuilt), as migrate.ts runs it: one
+  // transaction, rolled back on any error.
+  test('endpoint mirror contract: 331 drops the legacy tables exactly when every legacy row is on its endpoint row, and a refusal changes nothing', async t => {
+    const db = await fixtureDatabase(t), source = (file: string) => readFile(new URL(`./migrations/${file}`, import.meta.url), 'utf8');
+    const migration = await source('331_drop_endpoint_mirror.sql'), m322 = await source('322_one_endpoints_table.sql');
+    const schema = 'c331_' + randomUUID().replaceAll('-', '').slice(0, 12), w = 'ws-331', other = 'ws-331-other';
+    await db.query(`CREATE SCHEMA ${schema}`);
+    try {
+      await db.query(`SET search_path TO ${schema}, public`);
+      // The pre-331 schema: the endpoint table as it is, and 322's legacy tables, triggers and functions.
+      await db.query(`CREATE TABLE mailbox_webhooks (LIKE public.mailbox_webhooks INCLUDING ALL);
+        CREATE TABLE mail_endpoints(workspace_id text NOT NULL, ref text NOT NULL, hook_id text NOT NULL UNIQUE REFERENCES mailbox_webhooks(id) ON DELETE CASCADE,
+          encrypted_value text NOT NULL, verified boolean NOT NULL DEFAULT false, proof_hash text UNIQUE, expires_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(),
+          requested_at timestamptz, request_from text, confirmed_at timestamptz, declined_at timestamptz, preverified_by text, PRIMARY KEY (workspace_id, ref));
+        CREATE UNIQUE INDEX mail_endpoints_name ON mail_endpoints(workspace_id, split_part(ref, ':', 2));
+        CREATE TABLE mail_action_policies(workspace_id text NOT NULL, hook_id text NOT NULL REFERENCES mailbox_webhooks(id) ON DELETE CASCADE,
+          per_minute integer NOT NULL CHECK (per_minute BETWEEN 1 AND 6000), retry_on_timeout boolean NOT NULL, idempotent boolean NOT NULL, PRIMARY KEY (workspace_id, hook_id))`);
+      const statements = [...m322.matchAll(/^CREATE OR REPLACE FUNCTION mail_\w+_legacy\(\)[\s\S]*?^END \$\$;|^CREATE TRIGGER mail_\w+_legacy [^;]*;/gm)].map(m => m[0]);
+      assert.equal(statements.length, 6);
+      for (const statement of statements) await db.query(statement);
+      const inTransaction = async (work: () => Promise<void>) => { await db.query('BEGIN'); try { await work(); await db.query('COMMIT'); } catch (e) { await db.query('ROLLBACK'); throw e; } };
+      // The replaced Worker's create: its placeholder row, the legacy row (copied onto it by 322's trigger) and a policy.
+      let n = 0;
+      const legacy = async (type: string, fields: Record<string, unknown> = {}, policy?: [number, boolean, boolean]) => {
+        const id = `con_331_${++n}`, ref = `${type}:old-${n}`;
+        await inTransaction(async () => {
+          await db.query("INSERT INTO mailbox_webhooks(id,workspace_id,name,url,event_types,encrypted_secret) VALUES($1,$2,$3,'https://ritual.invalid/','[]','synthetic')", [id, w, ref]);
+          const values: Record<string, unknown> = { workspace_id: w, ref, hook_id: id, encrypted_value: `enc-${n}`, verified: type !== 'forward', ...fields };
+          await db.query(`INSERT INTO mail_endpoints(${Object.keys(values)}) VALUES(${Object.keys(values).map((_, i) => `$${i + 1}`)})`, Object.values(values));
+          if (policy) await db.query('INSERT INTO mail_action_policies(workspace_id,hook_id,per_minute,retry_on_timeout,idempotent) VALUES($1,$2,$3,$4,$5)', [w, id, ...policy]);
+        });
+        return id;
+      };
+      // This release's create: the endpoint row, copied back by 322's trigger.
+      const fresh = async (type: string, fields: Record<string, unknown> = {}) => {
+        const id = `con_331_${++n}`, columns = ['id', 'workspace_id', 'type', 'key', 'encrypted_target', 'event_types', ...Object.keys(fields)];
+        await db.query(`INSERT INTO mailbox_webhooks(${columns}) VALUES(${columns.map((_, i) => `$${i + 1}`)})`, [id, w, type, `new-${n}`, `enc-${n}`, '[]', ...Object.values(fields)]);
+        return id;
+      };
+      const hour = (h: number) => new Date(Date.UTC(2026, 10, 1, h)).toISOString();
+      // Every shape: Slack and Discord; forwards pending, confirmed, declined and preverified; paused and reconfirm;
+      // every retry/idempotency combination at both policy limits; one hard-deleted; edits made on either side after
+      // the upgrade; an ordinary webhook; and a legacy row whose created_at was edited by hand (not carried; see 331).
+      const ids: Record<string, string> = {};
+      ids.slack = await legacy('slack', {}, [1, false, false]);
+      ids.discord = await legacy('discord', {}, [6000, true, false]);
+      ids.pending = await legacy('forward', { proof_hash: 'proof-331', expires_at: hour(5), requested_at: hour(1), request_from: 'box@example.org' }, [1, false, true]);
+      ids.confirmed = await legacy('forward', { verified: true, confirmed_at: hour(2) }, [6000, true, true]);
+      ids.declined = await legacy('forward', { declined_at: hour(3), requested_at: hour(1), request_from: 'box@example.org' });
+      ids.preverified = await legacy('forward', { verified: true, preverified_by: 'key_331' });
+      ids.paused = await legacy('slack'); ids.reconfirm = await legacy('discord');
+      await db.query('UPDATE mailbox_webhooks SET paused=true WHERE id=$1', [ids.paused]);
+      await db.query('UPDATE mailbox_webhooks SET paused=true,reconfirm=true WHERE id=$1', [ids.reconfirm]);
+      for (const [i, [retry, idem]] of ([[false, false], [true, false], [false, true], [true, true]] as const).entries()) {
+        await legacy('slack', {}, [i % 2 ? 6000 : 1, retry, idem]);
+        await db.query('UPDATE mailbox_webhooks SET per_minute=$2,retry_on_timeout=$3,idempotent=$4 WHERE id=$1', [await fresh('discord'), i % 2 ? 1 : 6000, retry, idem]);
+      }
+      await db.query('DELETE FROM mailbox_webhooks WHERE id=$1', [await legacy('slack', {}, [5, true, true])]);
+      ids.legacyEdited = await legacy('forward', { requested_at: hour(1), request_from: 'box@example.org', proof_hash: 'proof-edit', expires_at: hour(6) }, [3, false, false]);
+      await db.query("UPDATE mail_endpoints SET ref='forward:old-renamed',verified=true,proof_hash=NULL,confirmed_at=$2 WHERE hook_id=$1", [ids.legacyEdited, hour(4)]);
+      await db.query('UPDATE mail_action_policies SET per_minute=7 WHERE hook_id=$1', [ids.legacyEdited]);
+      ids.freshEdited = await fresh('forward', { verified: false, proof_hash: 'proof-new', expires_at: hour(7), requested_at: hour(2), request_from: 'box@example.org' });
+      await db.query("UPDATE mailbox_webhooks SET key='new-renamed',verified=false,proof_hash=NULL,declined_at=$2,per_minute=9,retry_on_timeout=true,idempotent=false WHERE id=$1", [ids.freshEdited, hour(8)]);
+      ids.webhook = 'mwh_331';
+      await db.query(`INSERT INTO mailbox_webhooks(id,workspace_id,url,event_types,encrypted_secret) VALUES($1,$2,'https://example.com/hook','["message.received"]','enc-secret')`, [ids.webhook, w]);
+      ids.created = await legacy('slack', {}, [2, true, false]);
+      await db.query("UPDATE mail_endpoints SET created_at='2026-02-01' WHERE hook_id=$1", [ids.created]);
+      assert.deepEqual((await db.query("SELECT d.created_at<>h.created_at AS differs FROM mail_endpoints d JOIN mailbox_webhooks h ON h.id=d.hook_id WHERE d.hook_id=$1", [ids.created])).rows, [{ differs: true }]);
+      assert.deepEqual((await db.query('SELECT (SELECT count(*)::int FROM mail_endpoints) AS endpoints, (SELECT count(*)::int FROM mail_action_policies) AS policies')).rows, [{ endpoints: 19, policies: 15 }]);
 
-    // 5. And the other way: the replaced Worker declines while this release's dispatcher decides.
-    const queuedNew = await forward(false), messageNew = unique('msg'), emailNew = unique('em'), oldDecliner = await connection();
-    await db.query("INSERT INTO mail_messages(id,workspace_id,direction,thread_id,status,lifecycle) VALUES($1,$2,'inbound',$3,'received','default')", [messageNew, w, thread]);
-    await db.query('INSERT INTO mail_forward_once(workspace_id,message_id,endpoint,email_id) VALUES($1,$2,$3,$4)', [w, messageNew, queuedNew.hook, emailNew]);
-    const newCheck = async () => (await runtime.db.execute<{ ok: boolean }>(sql`SELECT ${forwardStillAllowed(runtime, sql`x`)} AS ok FROM (SELECT ${emailNew}::text AS id,${w}::text AS workspace_id,${'forward:' + queuedNew.hook}::text AS actor_key_id) x`)).rows[0]!.ok;
-    assert.equal(await newCheck(), true);
-    let decidedNew: Promise<boolean> | undefined;
-    await inTransaction(oldDecliner.c, async () => {
-      await lockEndpointRow(oldDecliner.c, queuedNew.hook);
-      await oldDecliner.c.query('UPDATE mail_endpoints SET verified=false,proof_hash=NULL,declined_at=now() WHERE workspace_id=$1 AND hook_id=$2', [w, queuedNew.hook]);
-      decidedNew = started(newCheck());
-      await waitingOn(oldDecliner.pid);
-    });
-    assert.equal(await decidedNew!, false, 'It waited for the decline and saw it.');
+      const state = async () => (await db.query(`SELECT md5(concat_ws('|',
+          (SELECT string_agg(to_jsonb(h)::text, ',' ORDER BY id) FROM mailbox_webhooks h),
+          (SELECT string_agg(to_jsonb(d)::text, ',' ORDER BY workspace_id, ref) FROM mail_endpoints d),
+          (SELECT string_agg(to_jsonb(p)::text, ',' ORDER BY workspace_id, hook_id) FROM mail_action_policies p),
+          (SELECT string_agg(c.relname || '.' || t.tgname || ':' || t.tgenabled::text, ',' ORDER BY c.relname, t.tgname) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid WHERE c.relnamespace = $1::regnamespace AND NOT t.tgisinternal),
+          (SELECT string_agg(proname, ',' ORDER BY proname) FROM pg_proc WHERE pronamespace = $1::regnamespace),
+          (SELECT string_agg(relname, ',' ORDER BY relname) FROM pg_class WHERE relnamespace = $1::regnamespace))) AS f`, [schema])).rows[0].f as string;
+      const migrate = () => inTransaction(async () => { await db.query(migration); });
+      // A legacy row changed without its copy (the copy trigger off), as a write that never reached the endpoint row.
+      const uncopied = async (table: 'mail_endpoints' | 'mail_action_policies', change: () => Promise<unknown>) => {
+        const trigger = table === 'mail_endpoints' ? 'mail_endpoint_from_legacy' : 'mail_policy_from_legacy';
+        await db.query(`ALTER TABLE ${table} DISABLE TRIGGER ${trigger}`);
+        try { await change(); } finally { await db.query(`ALTER TABLE ${table} ENABLE TRIGGER ${trigger}`); }
+      };
+      // Refused, unchanged, and the listing queries the refusal names return exactly the expected rows.
+      const refused = async (label: string, expected: { endpoints: Json[]; policies: Json[] }) => {
+        const before = await state();
+        const cause = await migrate().then(() => assert.fail(`${label}: 331 dropped the legacy tables.`), (e: unknown) => e as Error);
+        assert.match(cause.message, new RegExp(`^ENDPOINT_MIRROR_DIFFERS: ${expected.endpoints.length} legacy endpoint row\\(s\\) and ${expected.policies.length} legacy policy row\\(s\\) .*No data was changed\\.`), label);
+        assert.equal(await state(), before, `${label}: the refusal changed nothing.`);
+        const [endpoints, policies] = [...cause.message.matchAll(/(?:List them with|and): (SELECT \* FROM \(.*?\) x WHERE differs <> '');/gs)].map(m => m[1]!);
+        assert.ok(endpoints && policies, cause.message);
+        const listed = async (query: string) => (await db.query(`${query} ORDER BY 1, 2`)).rows;
+        assert.deepEqual({ endpoints: await listed(endpoints), policies: await listed(policies) }, expected, label);
+      };
+
+      // Every legacy row is on its endpoint row: 331 passes. Rolled back here, to try each difference on the same rows.
+      const upgraded = await state();
+      await db.query('BEGIN');
+      try {
+        await db.query(migration);
+        assert.deepEqual((await db.query(`SELECT count(*)::int AS n FROM pg_class WHERE relnamespace=$1::regnamespace AND relname IN ('mail_endpoints','mail_action_policies')`, [schema])).rows, [{ n: 0 }]);
+      } finally { await db.query('ROLLBACK'); }
+      assert.equal(await state(), upgraded);
+
+      // Review fixture A: a policy row in another workspace for the same hook (the legacy key allows it); never copied.
+      await db.query('INSERT INTO mail_action_policies(workspace_id,hook_id,per_minute,retry_on_timeout,idempotent) VALUES($1,$2,99,false,false)', [other, ids.confirmed]);
+      await refused('policy in another workspace', { endpoints: [], policies: [{ workspace_id: other, hook_id: ids.confirmed, differs: 'unmatched' }] });
+      await db.query('DELETE FROM mail_action_policies WHERE workspace_id=$1', [other]);
+      // A legacy endpoint row in another workspace, on an ordinary webhook's hook: never copied.
+      await db.query("INSERT INTO mail_endpoints(workspace_id,ref,hook_id,encrypted_value,verified) VALUES($1,'slack:ghost',$2,'enc-ghost',true)", [other, ids.webhook]);
+      await refused('endpoint in another workspace', { endpoints: [{ workspace_id: other, hook_id: ids.webhook, differs: 'unmatched' }], policies: [] });
+      await db.query('DELETE FROM mail_endpoints WHERE workspace_id=$1', [other]);
+      // Each field 322 moved, one at a time, null-safely (a value where the endpoint row has none, and the reverse).
+      // ids.created also carries the hand-edited created_at: only the field that differs is named.
+      const endpointCases: [string, string, string, unknown][] = [
+        ['ref', ids.slack!, 'ref', `discord:old-${ids.slack!.split('_').at(-1)}`], ['ref', ids.discord!, 'ref', 'discord:other-name'],
+        ['encrypted_target', ids.paused!, 'encrypted_value', 'enc-stale'], ['verified', ids.confirmed!, 'verified', false],
+        ['proof_hash', ids.confirmed!, 'proof_hash', 'proof-stale'], ['proof_hash', ids.pending!, 'proof_hash', null],
+        ['expires_at', ids.pending!, 'expires_at', hour(9)], ['requested_at', ids.declined!, 'requested_at', null],
+        ['request_from', ids.created!, 'request_from', 'stale@example.org'], ['confirmed_at', ids.legacyEdited!, 'confirmed_at', hour(9)],
+        ['declined_at', ids.freshEdited!, 'declined_at', null], ['preverified_by', ids.preverified!, 'preverified_by', 'key_stale'],
+      ];
+      for (const [differs, hook, column, value] of endpointCases) {
+        const was = (await db.query(`SELECT ${column} AS v FROM mail_endpoints WHERE hook_id=$1`, [hook])).rows[0].v;
+        await uncopied('mail_endpoints', () => db.query(`UPDATE mail_endpoints SET ${column}=$2 WHERE hook_id=$1`, [hook, value]));
+        await refused(`${differs} (${column})`, { endpoints: [{ workspace_id: w, hook_id: hook, differs }], policies: [] });
+        await uncopied('mail_endpoints', () => db.query(`UPDATE mail_endpoints SET ${column}=$2 WHERE hook_id=$1`, [hook, was]));
+      }
+      for (const [column, hook, value] of [['per_minute', ids.slack!, 2], ['retry_on_timeout', ids.discord!, false], ['idempotent', ids.legacyEdited!, true]] as const) {
+        const was = (await db.query(`SELECT ${column} AS v FROM mail_action_policies WHERE hook_id=$1`, [hook])).rows[0].v;
+        await uncopied('mail_action_policies', () => db.query(`UPDATE mail_action_policies SET ${column}=$2 WHERE hook_id=$1`, [hook, value]));
+        await refused(column, { endpoints: [], policies: [{ workspace_id: w, hook_id: hook, differs: column }] });
+        await uncopied('mail_action_policies', () => db.query(`UPDATE mail_action_policies SET ${column}=$2 WHERE hook_id=$1`, [hook, was]));
+      }
+      // Review round 2: a legacy ref with text after the name, which the old schema allows. 322's trigger copies its first
+      // two parts, so the endpoint row's type and name match; the full ref differs, so 331 refuses instead of dropping it.
+      const ref = (await db.query('SELECT ref FROM mail_endpoints WHERE hook_id=$1', [ids.confirmed])).rows[0].ref as string;
+      await db.query('UPDATE mail_endpoints SET ref=$2 WHERE hook_id=$1', [ids.confirmed, `${ref}:legacy-suffix`]);
+      assert.deepEqual((await db.query('SELECT type,key FROM mailbox_webhooks WHERE id=$1', [ids.confirmed])).rows, [{ type: 'forward', key: ref.split(':')[1] }]);
+      await refused('ref with a suffix', { endpoints: [{ workspace_id: w, hook_id: ids.confirmed, differs: 'ref' }], policies: [] });
+      await db.query('UPDATE mail_endpoints SET ref=$2 WHERE hook_id=$1', [ids.confirmed, ref]);
+      assert.equal(await state(), upgraded, 'Every difference was undone.');
+
+      // The 5 s bound (statement_timeout). A row-security policy makes each check slow: it sleeps 0.5 s on every legacy
+      // endpoint row read (19 rows, about 10 s a scan), first on every read, then only once 331 holds its exclusive locks.
+      const [watch, writer] = [await fixtureDatabase(t), await fixtureDatabase(t)];
+      await writer.query(`SET search_path TO ${schema}, public; SET statement_timeout='20s'`);
+      const migrator = (await db.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
+      const bounded = async (label: string, when: string, locked: boolean) => {
+        const before = await state();
+        await db.query(`ALTER TABLE mail_endpoints ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY; CREATE POLICY slow ON mail_endpoints USING (CASE WHEN ${when} THEN pg_sleep(0.5) IS NOT NULL ELSE true END)`);
+        let failure: Json | undefined, elapsed = 0, waited = 0;
+        try {
+          const start = performance.now();
+          const running = migrate().then(() => assert.fail(`${label}: 331 finished.`), (e: Json) => { failure = e; elapsed = performance.now() - start; });
+          // Once 331 is in the slow check (holding its exclusive locks or not), an endpoint writer writes.
+          for (let i = 0; ; i++) {
+            const r = (await watch.query(`SELECT a.wait_event, EXISTS (SELECT FROM pg_locks l WHERE l.pid = a.pid AND l.granted AND l.mode = 'AccessExclusiveLock'
+              AND l.relation = $2::regclass) AS locked FROM pg_stat_activity a WHERE a.pid = $1`, [migrator, `${schema}.mailbox_webhooks`])).rows[0];
+            if (r?.wait_event === 'PgSleep' && r.locked === locked) break;
+            assert.ok(i < 250, `${label}: 331 never reached its check.`); await new Promise(resolve => setTimeout(resolve, 20));
+          }
+          const writing = performance.now();
+          await writer.query('UPDATE mailbox_webhooks SET paused=paused WHERE id=$1', [ids.webhook]);
+          waited = performance.now() - writing;
+          await running;
+        } finally { await db.query('DROP POLICY slow ON mail_endpoints; ALTER TABLE mail_endpoints NO FORCE ROW LEVEL SECURITY, DISABLE ROW LEVEL SECURITY'); }
+        assert.equal(failure?.code, '57014', `${label}: ${failure?.message}`);
+        assert.ok(elapsed > 4900 && elapsed < 6000, `${label}: 331 stopped after ${Math.round(elapsed)} ms.`);
+        assert.equal(await state(), before, `${label}: the timeout changed nothing.`);
+        t.diagnostic(`331-BOUND ${label}: stopped after ${Math.round(elapsed)} ms, writer waited ${Math.round(waited)} ms`);
+        return waited;
+      };
+      // Before its locks, a slow check blocks no writer and stops at the bound.
+      assert.ok(await bounded('slow check before the locks', 'true', false) < 1000);
+      // Under its locks, a writer waits for 331 to stop: no longer than the bound (plus the rollback's round trip).
+      const waited = await bounded('slow check under the locks', `EXISTS (SELECT FROM pg_locks l WHERE l.pid = pg_backend_pid() AND l.relation = 'mail_endpoints'::regclass AND l.mode = 'AccessExclusiveLock')`, true);
+      assert.ok(waited > 1000 && waited < 5200, `The writer waited ${Math.round(waited)} ms.`);
+
+      // As migrate.ts applies it: dropped, and every endpoint row exactly as it was (the hand-edited created_at is not
+      // copied over the endpoint row's own).
+      const rows = async () => (await db.query('SELECT * FROM mailbox_webhooks ORDER BY id')).rows;
+      const before = await rows();
+      await migrate();
+      assert.deepEqual(await rows(), before);
+      assert.deepEqual((await db.query(`SELECT (SELECT count(*)::int FROM pg_class WHERE relnamespace=$1::regnamespace AND relname IN ('mail_endpoints','mail_action_policies')) AS tables,
+        (SELECT count(*)::int FROM pg_proc WHERE pronamespace=$1::regnamespace) AS functions,
+        (SELECT count(*)::int FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid WHERE c.relnamespace=$1::regnamespace AND NOT t.tgisinternal) AS triggers`, [schema])).rows,
+        [{ tables: 0, functions: 0, triggers: 0 }]);
+    } finally { await db.query('RESET search_path'); await db.query(`DROP SCHEMA ${schema} CASCADE`); }
+    // The fixture database applied 331, and nothing left in it names the legacy tables.
+    assert.deepEqual((await db.query(`SELECT (SELECT count(*)::int FROM pg_class WHERE relnamespace='public'::regnamespace AND relname IN ('mail_endpoints','mail_action_policies')) AS tables,
+      (SELECT count(*)::int FROM pg_proc WHERE proname IN ('mail_endpoint_from_legacy','mail_policy_from_legacy','mail_endpoint_to_legacy') OR prosrc ~ '\\m(mail_endpoints|mail_action_policies)\\M') AS functions`)).rows,
+      [{ tables: 0, functions: 0 }]);
   });
   test('endpoints and webhooks are one model: one name space, and the same caps through /v1/endpoints and /v1/inbound/webhooks, on create and on resume', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
@@ -4788,61 +5045,12 @@ describe('Hosted MCP OAuth and tools', () => {
       const all = (await db.query('SELECT id,key FROM mailbox_webhooks WHERE workspace_id=$1 ORDER BY key IS NULL, coalesce(key,\'\'), id', [w])).rows;
       assert.deepEqual(seen.map(e => e.id), all.map(r => r.id));
       assert.deepEqual(seen.filter(e => e.source === 'endpoint').map(e => e.name), ['crm', 'last', 'ops', 'spare']);
-      assert.deepEqual(seen.find(e => e.id === crm.id), { id: crm.id, source: 'endpoint', name: 'crm', type: 'webhook', status: 'ready', target: '\u2022\u2022\u2022\u2022/crm', call: 'endpoints.crm', eventTypes: ['message.received'], routes: 0, rituals: [] });
+      assert.deepEqual(seen.find(e => e.id === crm.id), { id: crm.id, source: 'endpoint', name: 'crm', type: 'webhook', status: 'ready', target: '\u2022\u2022\u2022\u2022/crm', call: 'endpoints.crm', eventTypes: ['message.received'], routes: 0, rules: [], rituals: [] });
       // An address's filter keeps the webhooks that get its received mail: crm subscribes for every address.
       assert.deepEqual(ok(await local('GET', '/v1/inbound/endpoints?addressId=mbx_any')).data.map((e: Json) => e.id), [crm.id]);
       error(await local('GET', '/v1/inbound/endpoints?cursor=forged'), 422, 'INVALID_CURSOR');
       // Every endpoint is a row of one kind: no Slack endpoint carries a URL or a signing secret any more.
       assert.deepEqual((await db.query("SELECT type,url,encrypted_secret,encrypted_target IS NOT NULL AS target FROM mailbox_webhooks WHERE workspace_id=$1 AND key='ops'", [w])).rows, [{ type: 'slack', url: null, encrypted_secret: null, target: true }]);
-    });
-  });
-
-  // Migration 322 runs before the new Worker replaces the old one. The old Worker keeps writing and reading
-  // mail_endpoints and mail_action_policies until it is gone; the new code reads and writes only the one table.
-  test('endpoint rollout (migration 322): what the replaced Worker writes reaches the one table, what this release writes reaches the tables it reads, and the backfill repeats', async t => {
-    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
-      const w = runtime.config.workspaceId, { encrypt, decrypt } = await import('./src/operations.js');
-      const slack = 'https://hooks.slack.com/services/T0ROLL/B0ROLL/rolloutfixture0001', discord = 'https://discord.com/api/webhooks/4343/rolloutfixture0002';
-      const row = async (id: string) => (await db.query('SELECT type,key,name,url,encrypted_secret,encrypted_target,verified,per_minute,retry_on_timeout,idempotent FROM mailbox_webhooks WHERE id=$1', [id])).rows[0];
-      const legacyRow = async (id: string) => (await db.query('SELECT e.ref,e.encrypted_value,e.verified,e.declined_at IS NOT NULL AS declined,p.per_minute FROM mail_endpoints e LEFT JOIN mail_action_policies p ON p.hook_id=e.hook_id WHERE e.hook_id=$1', [id])).rows[0];
-      // 1. The replaced Worker creates a Slack endpoint as it always did: a placeholder webhook row, its mail_endpoints row and a policy.
-      const legacy = 'con_' + randomUUID().replaceAll('-', '');
-      await db.query("INSERT INTO mailbox_webhooks(id,workspace_id,name,url,event_types,encrypted_secret) VALUES($1,$2,'slack:legacy','https://ritual.invalid/','[]','synthetic')", [legacy, w]);
-      await db.query("INSERT INTO mail_endpoints(workspace_id,ref,hook_id,encrypted_value,verified) VALUES($1,'slack:legacy',$2,$3,true)", [w, legacy, await encrypt(runtime, slack, `${w}:endpoint:${legacy}`)]);
-      await db.query('INSERT INTO mail_action_policies(workspace_id,hook_id,per_minute,retry_on_timeout,idempotent) VALUES($1,$2,12,true,false)', [w, legacy]);
-      const copied = await row(legacy);
-      assert.equal(await decrypt(runtime, copied.encrypted_target, `${w}:endpoint:${legacy}`), slack);
-      assert.deepEqual({ ...copied, encrypted_target: undefined }, { type: 'slack', key: 'legacy', name: null, url: null, encrypted_secret: null, encrypted_target: undefined, verified: true, per_minute: 12, retry_on_timeout: true, idempotent: false });
-      const read = ok(await local('GET', '/v1/endpoints/legacy'));
-      assert.deepEqual([read.type, read.status, read.policy], ['slack', 'ready', { perMinute: 12, retryOnTimeout: true, idempotent: false }]);
-      assert.ok(!ok(await local('GET', '/v1/inbound/webhooks')).data.some((h: Json) => h.id === legacy));
-      // It renames it its way: mail_endpoints first, then the placeholder's name.
-      await db.query("UPDATE mail_endpoints SET ref='slack:renamed' WHERE hook_id=$1", [legacy]);
-      await db.query("UPDATE mailbox_webhooks SET name='slack:renamed' WHERE id=$1", [legacy]);
-      assert.equal(ok(await local('GET', '/v1/endpoints/renamed')).type, 'slack');
-      error(await local('GET', '/v1/endpoints/legacy'), 404, 'NOT_FOUND');
-      // 2. This release writes the one table, and the replaced Worker still finds what it reads while it drains.
-      ok(await local('POST', '/v1/endpoints', { type: 'discord', name: 'fresh', url: discord }), 201);
-      const fresh = (await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='fresh'", [w])).rows[0].id as string;
-      assert.ok(fresh.startsWith('con_'), 'Slack, Discord and forward endpoints keep the con_ prefix the replaced Worker dispatches on.');
-      let back = await legacyRow(fresh);
-      assert.deepEqual([back.ref, await decrypt(runtime, back.encrypted_value, `${w}:endpoint:${fresh}`), back.verified, back.declined, back.per_minute], ['discord:fresh', discord, true, false, null]);
-      ok(await local('PATCH', '/v1/endpoints/fresh', { name: 'fresher', perMinute: 5 }));
-      back = await legacyRow(fresh);
-      assert.deepEqual([back.ref, back.per_minute], ['discord:fresher', 5]);
-      // A decline (the stop link's statement) reaches it too, so the replaced Worker forwards nothing more.
-      await db.query('UPDATE mailbox_webhooks SET verified=false,proof_hash=NULL,declined_at=now() WHERE id=$1', [fresh]);
-      assert.deepEqual([(await legacyRow(fresh)).verified, (await legacyRow(fresh)).declined], [false, true]);
-      ok(await local('DELETE', '/v1/endpoints/fresher'));
-      assert.equal(await legacyRow(fresh), undefined);
-      // 3. The backfill: the legacy row as it was before the migration, then the migration's own statements, twice.
-      await db.query("UPDATE mailbox_webhooks SET type='webhook',key=NULL,name='slack:renamed',url='https://ritual.invalid/',encrypted_secret='synthetic',encrypted_target=NULL,per_minute=NULL,retry_on_timeout=NULL,idempotent=NULL WHERE id=$1", [legacy]);
-      const migration = await readFile(new URL('./migrations/322_one_endpoints_table.sql', import.meta.url), 'utf8');
-      const backfill = [...migration.matchAll(/^UPDATE mailbox_webhooks h SET[^;]*;/gm)].map(m => m[0].replace(/;$/, ' AND h.workspace_id=$1'));
-      assert.equal(backfill.length, 2);
-      for (let pass = 0; pass < 2; pass++) for (const statement of backfill) await db.query(statement, [w]);
-      assert.deepEqual({ ...await row(legacy), encrypted_target: undefined }, { type: 'slack', key: 'renamed', name: null, url: null, encrypted_secret: null, encrypted_target: undefined, verified: true, per_minute: 12, retry_on_timeout: true, idempotent: false });
-      assert.equal(ok(await local('GET', '/v1/endpoints/renamed')).target.endsWith(slack.slice(-4)), true);
     });
   });
 
@@ -5133,6 +5341,188 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(ok(await request('PATCH', `/v1/webhooks/${hook.id}`, MANAGER, { url: 'https://example.com/hooks/rotation-race', paused: false })).paused, false);
     const current = ok(await request('GET', `/v1/webhooks/${hook.id}/secret`, MANAGER)).secret as string; secrets.add(current);
     assert.notEqual(current, rotated);
+  });
+
+  test('Hosted MCP members and invitations: an owner\'s or admin\'s own sign-in lists, invites below owner and revokes by address; listings never carry an invitation link; keys, agent tokens, members and other workspaces are refused', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, request, local }) => {
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
+      const wid = runtime.config.workspaceId, base = '/v1/workspaces/current', { mintResourceToken } = await import('./scripts/fixture-issuer.js');
+      const admin = await sessionFixture(t), member = await sessionFixture(t), guest = await sessionFixture(t), other = unique('other-ws');
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [other]);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'admin'),($4,$2,$5,'member'),($6,$7,$5,'owner')`, [unique('mem'), wid, admin.userId, unique('mem'), member.userId, unique('mem'), other]);
+      await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[admin.userId, member.userId, guest.userId]]);
+      // Each person's own sign-in: an approval for a new client, made by its first /mcp request.
+      const signIn = async (userId: string, scope = writableScope) => {
+        const issued = mintResourceToken(resourceUrl, userId, scope);
+        ok(await request('POST', '/mcp', issued.token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders));
+        return issued;
+      };
+      const mcp = async (token: string, method: string, params: Json, path = '/mcp?codemode=true') => ok(await request('POST', path, token, { jsonrpc: '2.0', id: 1, method, params }, rpcHeaders)).result;
+      const listed = async (token: string) => (await mcp(token, 'tools/list', {})).tools.map((tool: Json) => tool.name as string);
+      // Every call names this workspace unless it names another: a sign-in may belong to several.
+      const call = async (token: string, name: string, args: Json = {}) => mcp(token, 'tools/call', { name, arguments: { workspace: wid, ...args } });
+      const done = (result: Json, status = 200) => { assert.equal(result.isError, false, redact(result)); assert.equal(result._meta.status, status, redact(result)); return result.structuredContent; };
+      // A refusal before any API request (confirmation, an unlisted tool) has no HTTP status.
+      const refused = (result: Json, status: number | null, code: string) => { assert.equal(result.isError, true, redact(result)); assert.equal(result._meta.status, status, redact(result)); assert.equal(result.structuredContent.error.code, code, redact(result)); return result.structuredContent.error; };
+      const tools = ['listWorkspaceMembers', 'listWorkspaceInvitations', 'createWorkspaceInvitation', 'revokeWorkspaceInvitation'];
+      const owner = await signIn(manager!.userId), adminSignIn = await signIn(admin.userId), reader = await signIn(admin.userId, 'bane:read offline_access'), memberSignIn = await signIn(member.userId);
+
+      // The listing budget, measured as sent for the largest credential: an owner's sign-in on Hosted with every ordinary
+      // toolset (the default), with the workspaces tool and the workspace argument each tool takes.
+      const wire = Buffer.byteLength(JSON.stringify(ok(await request('POST', '/mcp', owner.token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders))));
+      t.diagnostic(`Hosted owner plain tools/list: ${wire} bytes`);
+      assert.ok(wire <= 50_000, `${wire} bytes`);
+      // Plain and Code Mode listings send no hint that equals the spec's default, and every tool keeps destructiveHint.
+      for (const path of ['/mcp', '/mcp?codemode=true']) for (const tool of (await mcp(owner.token, 'tools/list', {}, path)).tools) {
+        assert.ok(tool.annotations?.readOnlyHint !== false && tool.annotations?.idempotentHint !== false && tool.annotations?.openWorldHint !== true, `${path} ${tool.name}`);
+        if (!['workspaces', 'setDefaultWorkspace', 'describe_tool'].includes(tool.name)) assert.equal(typeof tool.annotations?.destructiveHint, 'boolean', `${path} ${tool.name}`);
+      }
+
+      // An owner's sign-in: the four tools, never role changes or removal, in Code Mode and as actions of the plain settings resource.
+      const ownerTools = await listed(owner.token);
+      for (const name of tools) assert.ok(ownerTools.includes(name), name);
+      for (const name of ['inviteWorkspaceMember', 'updateWorkspaceMember', 'removeWorkspaceMember', 'acceptWorkspaceInvitation']) assert.ok(!ownerTools.includes(name), name);
+      const plain = (await mcp(owner.token, 'tools/list', {}, '/mcp')).tools.find((tool: Json) => tool.name === 'settings');
+      for (const action of ['members', 'invitations', 'invite', 'revokeInvitation']) assert.ok(plain?.inputSchema.properties.action.enum.includes(action), action);
+      const people = done(await call(owner.token, 'listWorkspaceMembers')).data;
+      assert.deepEqual(people.map((m: Json) => [m.userId, m.role]).sort(), [[admin.userId, 'admin'], [manager!.userId, 'owner'], [member.userId, 'member']].sort());
+      refused(await call(owner.token, 'createWorkspaceInvitation', { body: { email: `${unique('unconfirmed')}@example.com`, role: 'member' } }), null, 'CONFIRMATION_REQUIRED');
+      // No email is sent: the result says so and carries the link to share, the only time it is shown.
+      const invited = done(await call(owner.token, 'createWorkspaceInvitation', { body: { email: guest.email, role: 'admin' }, confirm: true }), 201);
+      assert.equal(invited.role, 'admin'); assert.equal(invited.workspaceId, wid);
+      assert.match(invited.nextStep, /^No email was sent\. Share acceptUrl with .+ yourself/);
+      assert.equal(invited.acceptUrl, `${PUBLIC_ORIGIN}/overview?invitation=${invited.id}`);
+      // Owners are made in the dashboard, even by an owner's sign-in, and nothing is recorded for the refusal.
+      const ownerInvite = refused(await call(owner.token, 'createWorkspaceInvitation', { body: { email: `${unique('owner-invite')}@example.com`, role: 'owner' }, confirm: true }), 403, 'DASHBOARD_AUTH_REQUIRED');
+      assert.match(ownerInvite.message, /\/settings#members/);
+      // A listing names an invitation by its address; revoking takes the address, in any case, and returns no ID.
+      assert.deepEqual(done(await call(owner.token, 'listWorkspaceInvitations')).data, [{ email: invited.email, role: 'admin', expiresAt: invited.expiresAt }]);
+      assert.deepEqual(done(await call(owner.token, 'revokeWorkspaceInvitation', { email: invited.email.toUpperCase(), confirm: true })), { email: invited.email, deleted: true });
+      refused(await call(owner.token, 'revokeWorkspaceInvitation', { email: invited.email, confirm: true }), 404, 'NOT_FOUND');
+      assert.deepEqual(done(await call(owner.token, 'listWorkspaceInvitations')).data, []);
+
+      // An admin's sign-in invites up to admin; the invitation names them, and the invitee joins through the shared link.
+      const asMember = done(await call(adminSignIn.token, 'createWorkspaceInvitation', { body: { email: guest.email, role: 'member' }, confirm: true }), 201);
+      assert.equal((await db.query('SELECT inviter_id FROM workspace_invitations WHERE id=$1', [asMember.id])).rows[0].inviter_id, admin.userId);
+      const peer = done(await call(adminSignIn.token, 'createWorkspaceInvitation', { body: { email: `${unique('peer')}@example.com`, role: 'admin' }, confirm: true }), 201);
+      refused(await call(adminSignIn.token, 'createWorkspaceInvitation', { body: { email: `${unique('above')}@example.com`, role: 'owner' }, confirm: true }), 403, 'DASHBOARD_AUTH_REQUIRED');
+      // An owner invitation made in the dashboard. As there, only an owner revokes it: an admin's sign-in can't, the owner's can (below).
+      const dashboardOwner = ok(await local('POST', `${base}/invitations`, { email: `${unique('dashboard-owner')}@example.com`, role: 'owner' }), 201);
+      refused(await call(adminSignIn.token, 'revokeWorkspaceInvitation', { email: dashboardOwner.email, confirm: true }), 404, 'NOT_FOUND');
+      // Neither a read-only sign-in nor an admin's gets an invitation's ID or link from a listing, in Code Mode or as the
+      // plain resource, the dashboard's owner invitation included.
+      for (const token of [reader.token, adminSignIn.token]) {
+        for (const listing of [await call(token, 'listWorkspaceInvitations'), await mcp(token, 'tools/call', { name: 'settings', arguments: { action: 'invitations', workspace: wid } }, '/mcp')]) {
+          assert.deepEqual(done(listing).data.map((i: Json) => [i.email, i.role]).sort(), [[asMember.email, 'member'], [peer.email, 'admin'], [dashboardOwner.email, 'owner']].sort());
+          const text = JSON.stringify(listing);
+          for (const id of [asMember.id, peer.id, dashboardOwner.id]) assert.ok(!text.includes(id), 'A listing carries no invitation ID.');
+          assert.doesNotMatch(text, /invitation=|acceptUrl/);
+        }
+      }
+      // A read-only sign-in lists but never invites or revokes.
+      const readerTools = await listed(reader.token);
+      assert.ok(readerTools.includes('listWorkspaceMembers') && !readerTools.includes('createWorkspaceInvitation') && !readerTools.includes('revokeWorkspaceInvitation'));
+      refused(await call(reader.token, 'createWorkspaceInvitation', { body: { email: `${unique('read-only')}@example.com`, role: 'member' }, confirm: true }), null, 'TOOL_UNAVAILABLE');
+      refused(await call(reader.token, 'revokeWorkspaceInvitation', { email: peer.email, confirm: true }), null, 'TOOL_UNAVAILABLE');
+      assert.deepEqual(done(await call(owner.token, 'revokeWorkspaceInvitation', { email: dashboardOwner.email, confirm: true })), { email: dashboardOwner.email, deleted: true });
+      assert.equal(ok(await local('POST', `/v1/workspaces/invitations/${asMember.id}/accept`, undefined, 'live', { cookie: guest.cookie })).workspaceId, wid);
+      assert.equal((await db.query('SELECT role FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [wid, guest.userId])).rows[0].role, 'member');
+
+      // A member's sign-in acts only where its person administers: refused here, and in their own workspace it sees and
+      // revokes nothing of this one. An admin's sign-in can't name a workspace they don't belong to.
+      for (const name of ['listWorkspaceMembers', 'listWorkspaceInvitations']) refused(await call(memberSignIn.token, name, { workspace: wid }), 403, 'PERMISSION_DENIED');
+      refused(await call(memberSignIn.token, 'createWorkspaceInvitation', { workspace: wid, body: { email: `${unique('by-member')}@example.com`, role: 'member' }, confirm: true }), 403, 'PERMISSION_DENIED');
+      assert.deepEqual(done(await call(owner.token, 'listWorkspaceInvitations')).data.map((i: Json) => i.email), [peer.email]);
+      assert.deepEqual(done(await call(memberSignIn.token, 'listWorkspaceMembers', { workspace: other })).data.map((m: Json) => m.userId), [member.userId]);
+      assert.deepEqual(done(await call(memberSignIn.token, 'listWorkspaceInvitations', { workspace: other })).data, []);
+      refused(await call(memberSignIn.token, 'revokeWorkspaceInvitation', { workspace: other, email: peer.email, confirm: true }), 404, 'NOT_FOUND');
+      refused(await call(adminSignIn.token, 'listWorkspaceMembers', { workspace: other }), 403, 'WORKSPACE_ACCESS_DENIED');
+
+      // API keys (a person's, and one the owner's approval made) and agent tokens: refused over REST, never listed over MCP.
+      const personKey = ok(await local('POST', '/v1/api-keys', { name: unique('members-key'), permissions: ['read', 'send', 'manage'] }), 201).secret as string;
+      const approvalKey = done(await call(owner.token, 'createApiKey', { body: { name: unique('approval-key'), permissions: ['read', 'send', 'manage'] }, confirm: true }), 201).secret as string;
+      const agentToken = done(await call(owner.token, 'createAgentToken', { body: { permissions: ['read', 'send', 'manage'], expiresInSeconds: 600, purpose: 'members fixture' }, confirm: true }), 201).token as string;
+      for (const secret of [personKey, approvalKey, agentToken]) {
+        secrets.add(secret);
+        error(await request('GET', `${base}/members`, secret), 403, 'DASHBOARD_AUTH_REQUIRED');
+        error(await request('GET', `${base}/invitations`, secret), 403, 'DASHBOARD_AUTH_REQUIRED');
+        error(await request('POST', `${base}/invitations`, secret, { email: `${unique('by-key')}@example.com`, role: 'member' }), 403, 'DASHBOARD_AUTH_REQUIRED');
+        error(await request('DELETE', `${base}/invitations?id=${peer.id}`, secret), 403, 'DASHBOARD_AUTH_REQUIRED');
+        const keyTools = await listed(secret);
+        assert.ok(keyTools.length > 10 && tools.every(name => !keyTools.includes(name)), 'A key or agent token is never offered member administration.');
+        refused(await call(secret, 'createWorkspaceInvitation', { body: { email: `${unique('by-key-mcp')}@example.com`, role: 'member' }, confirm: true }), null, 'TOOL_UNAVAILABLE');
+      }
+      assert.equal(done(await call(owner.token, 'listWorkspaceInvitations')).data.length, 1, 'Refused calls invited no one and revoked nothing.');
+
+      // Every change is on the trail as the sign-in that made it, over MCP; refusals and the dashboard's own write as theirs.
+      const trail = (await db.query("SELECT action, actor_type, actor_id, via, target_id, summary FROM audit_events WHERE workspace_id=$1 AND action LIKE 'member.invite%' ORDER BY id", [wid])).rows;
+      const ownerGrant = `mcp_${owner.consentId}`, adminGrant = `mcp_${adminSignIn.consentId}`;
+      assert.deepEqual(trail.map(r => [r.action, r.actor_type, r.actor_id, r.via, r.target_id]), [
+        ['member.invite', 'mcp_grant', ownerGrant, 'mcp', invited.id], ['member.invite_revoke', 'mcp_grant', ownerGrant, 'mcp', invited.id],
+        ['member.invite', 'mcp_grant', adminGrant, 'mcp', asMember.id], ['member.invite', 'mcp_grant', adminGrant, 'mcp', peer.id],
+        ['member.invite', 'member', manager!.userId, 'dashboard', dashboardOwner.id], ['member.invite_revoke', 'mcp_grant', ownerGrant, 'mcp', dashboardOwner.id],
+      ]);
+      assert.deepEqual(trail[0].summary, { after: { email: guest.email, role: 'admin' } });
+    });
+  });
+
+  test('Hosted MCP members and invitations: an approval revoked, expired (set, or its own deadline passing) or narrowed to read while an invitation or a revocation waits for the workspace lock refuses it, and nothing changes', async t => {
+    // Committed rows and a second connection: the write waits on the workspace lock that connection holds while the
+    // approval changes, then reads the approval again inside its transaction.
+    const db = await fixtureDatabase(t), locker = await fixtureDatabase(t);
+    const [{ createApp }, { nodeRuntime }, { mintResourceToken }, { ensureRegionSettings }] = await Promise.all([import('./src/app.js'), import('./src/adapters/node.js'), import('./scripts/fixture-issuer.js'), import('./src/ses-region-state.js')]);
+    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET, ACCOUNT_ISSUER: process.env.ACCOUNT_ISSUER, ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
+      PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
+    cleanup(t, instance.close);
+    const app = createApp(), runtime = instance.runtime, wid = unique('invitation-race');
+    Object.assign(runtime.config, { multiTenant: true, workspaceId: wid, allowedSubjects: [], staffGoogleDomains: [] });
+    await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [wid]);
+    await ensureRegionSettings(runtime.db, runtime.config);
+    const admin = await sessionFixture(t);
+    await db.query("INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'admin')", [unique('mem'), wid, admin.userId]);
+    const request: typeof http = (method, path, key, body, headers, timeout) => http(method, path, key, body, headers, timeout, PUBLIC_ORIGIN, req => app.fetch(req, runtime));
+    const signIn = async (ttl?: number) => {
+      const issued = mintResourceToken(resourceUrl, admin.userId, writableScope, { ttl });
+      ok(await request('POST', '/mcp', issued.token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders));
+      return issued;
+    };
+    const call = async (token: string, name: string, args: Json) => ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { workspace: wid, ...args } } }, rpcHeaders)).result;
+    // change: how the approval changes while the write waits; null leaves it alone and lets the signed token's own
+    // short deadline (its exp, stored as the approval's expiry) pass during the wait.
+    const race = async (write: (token: string) => Promise<Json>, change: string | null) => {
+      const issued = await signIn(change === null ? 3 : undefined);
+      let pending: Promise<Json> | undefined;
+      await locker.query('BEGIN');
+      try {
+        await locker.query('SELECT 1 FROM workspaces WHERE id=$1 FOR NO KEY UPDATE', [wid]);
+        pending = write(issued.token);
+        let waiting = false;
+        for (let i = 0; i < 250 && !waiting; i++) {
+          waiting = (await db.query("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query ~* 'workspaces.*for no key update') AS w")).rows[0].w;
+          if (!waiting) await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        assert.ok(waiting, 'The write waits for the workspace lock.');
+        if (change !== null) await db.query(`UPDATE nightmail_resource_grants SET ${change} WHERE grant_key=$1`, [issued.consentId]);
+        else {
+          const live = async () => (await db.query('SELECT expires_at > clock_timestamp() AS live FROM nightmail_resource_grants WHERE grant_key=$1', [issued.consentId])).rows[0].live as boolean;
+          assert.equal(await live(), true, 'The approval was live when the write reached the lock.');
+          for (let i = 0; i < 250 && await live(); i++) await new Promise(resolve => setTimeout(resolve, 20));
+          assert.equal(await live(), false, 'The approval expired while the write waited.');
+        }
+      } finally { await locker.query('COMMIT'); }
+      const result = await pending!;
+      assert.equal(result.isError, true, redact(result)); assert.equal(result._meta.status, 401, redact(result)); assert.equal(result.structuredContent.error.code, 'AUTH_INVALID', redact(result));
+    };
+    const inviter = await signIn();
+    for (const change of ['revoked=true', "expires_at=now()-interval '1 second'", "permissions=ARRAY['read']::text[],issued_at=issued_at+1", null]) {
+      const email = `${unique('race-invite')}@example.com`;
+      await race(token => call(token, 'createWorkspaceInvitation', { body: { email, role: 'member' }, confirm: true }), change);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM workspace_invitations WHERE workspace_id=$1 AND email=$2', [wid, email])).rows[0].n, 0, String(change));
+      const target = await call(inviter.token, 'createWorkspaceInvitation', { body: { email: `${unique('race-revoke')}@example.com`, role: 'member' }, confirm: true });
+      assert.equal(target._meta.status, 201, redact(target));
+      await race(token => call(token, 'revokeWorkspaceInvitation', { email: target.structuredContent.email, confirm: true }), change);
+      assert.equal((await db.query('SELECT status FROM workspace_invitations WHERE id=$1', [target.structuredContent.id])).rows[0].status, 'pending', String(change));
+    }
   });
 
   test('Support and operator routes: customers get 403 everywhere; operators read the audited trail; a support grant reads only its customer', async t => {
@@ -7532,8 +7922,11 @@ describe('Billing: metering, gate and settlement', () => {
     return {
       wid, from,
       send: (recipients = 1) => request('POST', '/v1/emails/send', key.secret, { from, to: Array.from({ length: recipients }, () => `reader-${n++}@example.net`), subject: 'Billing fixture', text: 'Fixture.' }),
-      mode: (mode: 'off' | 'shadow' | 'enforce', extra = '') => db.query(`UPDATE billing_config SET mode=$1${extra}`, [mode]),
-      freeUsed: (sent: number, received = 0) => db.query(`INSERT INTO billing_accounts(workspace_id,free_sent_used,free_received_used) VALUES ($1,$2,$3) ON CONFLICT (workspace_id) DO UPDATE SET free_sent_used=$2,free_received_used=$3,free_month=(date_trunc('month',now() AT TIME ZONE 'UTC'))::date`, [wid, sent, received]),
+      // The installation's mode, charged or not for every hour (tests price hours long gone).
+      mode: async (mode: 'off' | 'shadow' | 'enforce', extra = '') => { await db.query(`UPDATE billing_config SET mode=$1${extra}`, [mode]); await charging(db, null, mode === 'enforce'); },
+      // The workspace free or prepaid, for every hour.
+      exempt: async (on: boolean) => { await db.query(`UPDATE billing_accounts SET mode=$2 WHERE workspace_id=$1`, [wid, on ? 'exempt' : 'prepaid']); await charging(db, wid, !on); },
+      freeUsed: (sent: number, received = 0) => settledThisMonth(db, wid, sent, received),
       post: async (kind: string, source: string, paid: bigint, promo = 0n) => (await db.query(`SELECT billing_post($1,$2,$3,$4,$5,'{}','system') AS r`, [wid, kind, source, paid.toString(), promo.toString()])).rows[0].r,
       position: async () => (await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p,
       open: async (meter: string) => Number((await db.query(`SELECT coalesce(sum(quantity-settled_quantity),0)::int AS n FROM billing_usage_hourly WHERE workspace_id=$1 AND meter=$2`, [wid, meter])).rows[0].n),
@@ -7541,12 +7934,55 @@ describe('Billing: metering, gate and settlement', () => {
     };
   }
   const settle = async (db: pg.Client, wid: string, cutoff = "date_trunc('hour', now(), 'UTC')") => (await db.query(`SELECT billing_settle($1, ${cutoff}) AS s`, [wid])).rows[0].s;
-  // A refund as billing_adjust_sends writes it: into `hour`, noting the hour its mail was metered in (`origin`).
-  const refundInto = (db: pg.Client, wid: string, hour: string, origin: string, meter: string, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity,refunds)
-    VALUES ($1,$2::timestamptz,$3,$4::bigint,jsonb_build_object(extract(epoch FROM $5::timestamptz)::bigint::text,$4::bigint))
+  // A cutoff past everything written so far: the settler still never takes the current hour.
+  const later = "now() + interval '1 hour'";
+  // What the mode history (318) says from an hour on, for the installation (null) or a workspace: from `since` (a
+  // timestamp, or hours before the current one), or for every hour. A switch takes effect on an hour boundary in real
+  // time, so tests that price hours long gone state the history instead.
+  const charging = (db: pg.Client, scope: string | null, charged: boolean, since: string | number | 'always' = 'always') => db.query(`INSERT INTO billing_mode_changes(workspace_id,charged,effective_hour,actor)
+    VALUES ($1,$2,CASE WHEN $3::text='always' THEN '-infinity'::timestamptz WHEN $3 ~ '^[0-9]+$' THEN date_trunc('hour',now(),'UTC') - make_interval(hours=>$3::int) ELSE date_trunc('hour',$3::timestamptz,'UTC') END,'fixture')`, [scope, charged, String(since)]);
+  // A refund as billing_adjust_sends writes it, now: into the current hour (mail of an earlier month: that month's last
+  // hour), noting the hour its mail was metered in.
+  const refundInto = (db: pg.Client, wid: string, origin: string, meter: string, q: number) => db.query(`WITH b AS (
+      SELECT CASE WHEN date_trunc('month',$2::timestamptz,'UTC') < date_trunc('month',now(),'UTC')
+        THEN (date_trunc('month',$2::timestamptz AT TIME ZONE 'UTC') + interval '1 month' - interval '1 hour') AT TIME ZONE 'UTC' ELSE date_trunc('hour',now(),'UTC') END AS h),
+    k AS (SELECT h, CASE WHEN h < date_trunc('hour',now(),'UTC') THEN 's' ELSE '' END || extract(epoch FROM date_trunc('hour',$2::timestamptz,'UTC'))::bigint::text AS k FROM b)
+    INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity,refunds) SELECT $1, h, $3, $4::bigint, jsonb_build_object(k, $4::bigint) FROM k
     ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity,
-      refunds=u.refunds||jsonb_build_object(extract(epoch FROM $5::timestamptz)::bigint::text,coalesce((u.refunds->>extract(epoch FROM $5::timestamptz)::bigint::text)::bigint,0)+excluded.quantity)`, [wid, hour, meter, q, origin]);
+      refunds=u.refunds || (SELECT jsonb_object_agg(e.key, coalesce((u.refunds->>e.key)::bigint,0) + e.value::bigint) FROM jsonb_each_text(excluded.refunds) e)`, [wid, origin, meter, q]);
+  // This month's charged usage as settled so far (and posted at what it costs).
+  const settledThisMonth = (db: pg.Client, wid: string, sent: number, received = 0) => db.query(`INSERT INTO billing_months(workspace_id,month,sent,received,posted_uc) VALUES ($1,(date_trunc('month',now() AT TIME ZONE 'UTC'))::date,$2,$3,billing_month_cost($2,$3,0))
+    ON CONFLICT (workspace_id,month) DO UPDATE SET sent=excluded.sent, received=excluded.received, posted_uc=excluded.posted_uc`, [wid, sent, received]);
+  // A month's settled totals, by whether their hours were charged.
+  const month = async (db: pg.Client, wid: string, first: string) => (await db.query(`SELECT sent::int, received::int, uncharged_sent::int AS "unchargedSent", uncharged_received::int AS "unchargedReceived"
+    FROM billing_months WHERE workspace_id=$1 AND month=$2::date`, [wid, first])).rows[0];
   const captureLogs = (t: TestContext) => { const logs: Json[] = []; for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} }); return logs; };
+  // A clock for the rest of the fixture's transaction, for tests whose hours must close: now() and clock_timestamp() read
+  // billing.clock, through a schema of their own ahead of pg_catalog on the search path. Column defaults keep the real
+  // time, so mail is written with its own created_at.
+  const clock = async (db: pg.Client, start: string) => {
+    const schema = 'billing_clock_' + randomUUID().replaceAll('-', '');
+    await db.query(`SELECT set_config('billing.clock', $1, true)`, [start]);
+    await db.query(`CREATE SCHEMA ${schema};
+      CREATE FUNCTION ${schema}.now() RETURNS timestamptz LANGUAGE sql STABLE AS $$ SELECT current_setting('billing.clock')::timestamptz $$;
+      CREATE FUNCTION ${schema}.clock_timestamp() RETURNS timestamptz LANGUAGE sql VOLATILE AS $$ SELECT current_setting('billing.clock')::timestamptz $$`);
+    await db.query(`SELECT set_config('search_path', current_setting('search_path') || ', ${schema}, pg_catalog', true)`);
+    return async (at: string) => { await db.query(`SELECT set_config('billing.clock', $1, true)`, [at]); };
+  };
+  // A Hosted workspace whose mail is written directly, at the time each send gives.
+  const hosted = async (db: pg.Client, prefix: string) => {
+    const wid = unique(prefix);
+    await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [wid]);
+    await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared','222233334444','ready')`, [wid, REGION]);
+    return {
+      wid,
+      mail: async (recipients: number, at: string, simulated = false) => (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        VALUES ($1,$2,$3,'fixture','hello@billing.example',(SELECT jsonb_agg('r'||n||'@example.net') FROM generate_series(1,$4::int) n),'[]','[]','Review','{}',$6,$5::timestamptz) RETURNING id`,
+        [unique('mail'), wid, REGION, recipients, at, simulated])).rows[0].id as string,
+      totals: async () => (await db.query(`SELECT balance_uc::text AS balance, promo_uc::text AS promo, unpaid_since FROM billing_accounts WHERE workspace_id=$1`, [wid])).rows[0],
+      position: async () => (await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p,
+    };
+  };
 
   test('the gate lives in the one admission statement: off and shadow allow, enforce gives 402, exempt and the platform pass, debt blocks free sends', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
@@ -7577,16 +8013,16 @@ describe('Billing: metering, gate and settlement', () => {
       assert.equal((await f.position()).availableUc, '0');
       // Exempt accounts are never gated; neither is the platform's own workspace. There is no invoiced mode (315): an
       // account is prepaid or exempt.
-      await db.query(`UPDATE billing_accounts SET mode='exempt' WHERE workspace_id=$1`, [f.wid]); ok(await f.send(), 202);
+      await f.exempt(true); ok(await f.send(), 202);
       await db.query('SAVEPOINT invoiced');
       await assert.rejects(db.query(`UPDATE billing_accounts SET mode='invoiced' WHERE workspace_id=$1`, [f.wid]), { code: '23514', constraint: 'billing_accounts_mode_check' });
       await db.query('ROLLBACK TO SAVEPOINT invoiced');
-      await db.query(`UPDATE billing_accounts SET mode='prepaid' WHERE workspace_id=$1`, [f.wid]);
+      await f.exempt(false);
       error(await f.send(), 402, 'BALANCE_EXHAUSTED');
       runtime.config.platformDomainWorkspace = f.wid;
       try { ok(await f.send(), 202); } finally { runtime.config.platformDomainWorkspace = undefined; }
       // A debt blocks even sends the free allowance would cover.
-      await db.query(`UPDATE billing_accounts SET free_sent_used=0 WHERE workspace_id=$1`, [f.wid]);
+      await f.freeUsed(0);
       await f.post('adjustment', `adjustment:${unique('debt')}`, -1_000_000n);
       assert.ok((await f.position()).freeSentLeft > 0);
       error(await f.send(), 402, 'BALANCE_EXHAUSTED');
@@ -7595,37 +8031,40 @@ describe('Billing: metering, gate and settlement', () => {
     });
   });
 
-  test('settlement prices closed hours once, applies each direction\'s free tier, rolls the month, and shadow or exempt post $0', async t => {
+  test('settlement prices closed hours once, applies each direction\'s free tier, posts a row per month, and shadow or exempt post $0', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
-      const wid = unique('billing-settle'), at = (h: number) => `date_trunc('hour', now(), 'UTC') - interval '${h} hours'`;
-      const usage = (meter: string, hours: number, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1, ${at(hours)}, $2, $3)
-        ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, meter, q]);
+      const wid = unique('billing-settle');
+      const usage = (meter: string, hour: string, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1, $2::timestamptz, $3, $4)
+        ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, hour, meter, q]);
       const ledger = async () => (await db.query(`SELECT kind,paid_uc::text,promo_uc::text,detail FROM billing_ledger WHERE workspace_id=$1 ORDER BY id`, [wid])).rows;
       const account = async () => (await db.query('SELECT * FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
-      await db.query(`UPDATE billing_config SET mode='shadow'`);
-      // 3,000 sent use the free sends and 1,000 received are free too; then one more send costs 20,000 µ¢ and 7 Omens 70,000 µ¢.
-      await usage('send', 3, 3000); await usage('receive', 3, 1000); await usage('send', 2, 1); await usage('omen', 2, 7); await usage('byo_send', 2, 5);
-      await usage('send', 0, 4); // The current hour is still open: never settled.
-      const first = await settle(db, wid);
+      const at = (cutoff: string) => settle(db, wid, `'${cutoff}'::timestamptz`);
+      // Shadow until 04:00 on July 1, enforced from then, and the workspace free from 06:00.
+      await charging(db, null, false); await charging(db, null, true, '2026-07-01 04:00Z'); await charging(db, wid, false, '2026-07-01 06:00Z');
+      // In shadow, 3,000 sent and 1,000 received, then one more send and 7 Omens: what they would cost is 20,000 µ¢ and
+      // 70,000 µ¢, posted at $0. Usage of a later hour waits for its own settlement.
+      await usage('send', '2026-07-01 01:00Z', 3000); await usage('receive', '2026-07-01 01:00Z', 1000);
+      await usage('send', '2026-07-01 02:00Z', 1); await usage('omen', '2026-07-01 02:00Z', 7); await usage('byo_send', '2026-07-01 02:00Z', 5);
+      await usage('send', '2026-07-01 03:00Z', 4);
+      const first = await at('2026-07-01 03:00Z');
       assert.deepEqual([first.entries, first.costUc, first.charged], [5, '90000', false]);
       const [row] = await ledger();
-      assert.deepEqual([row.kind, row.paid_uc, row.promo_uc, row.detail.costUc, row.detail.meters.send.payable, row.detail.meters.byo_send.costUc], ['usage', '0', '0', '90000', 1, 0], 'Shadow posts a $0 usage row with the would-be cost.');
-      assert.deepEqual([(await account()).free_sent_used, (await account()).free_received_used, (await account()).month_spend_uc, (await account()).balance_uc], [3001, 1000, '90000', '0']);
+      assert.deepEqual([row.kind, row.paid_uc, row.promo_uc, row.detail.costUc, row.detail.usageMonth, row.detail.meters.send.payable, row.detail.meters.byo_send.costUc], ['usage', '0', '0', '90000', '2026-07', 1, 0], 'Shadow posts a $0 usage row with the would-be cost.');
       // Idempotent: a second run finds nothing; a late write into a settled hour settles with the next run.
-      assert.deepEqual(await settle(db, wid), { entries: 0 });
-      await usage('send', 3, 5);
-      assert.equal((await settle(db, wid)).costUc, '100000');
-      // The gate counts the open hour against what's left of the free tier.
-      assert.equal((await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p.openUc, '80000');
-      // Enforce: promo first, then paid; the account goes into debt and unpaid_since starts; a top-up collects it.
-      await db.query(`UPDATE billing_config SET mode='enforce'`);
+      assert.deepEqual(await at('2026-07-01 03:00Z'), { entries: 0 });
+      await usage('send', '2026-07-01 01:00Z', 5);
+      assert.equal((await at('2026-07-01 03:00Z')).costUc, '100000');
+      // Shadow usage doesn't use up the free allowance (Ryan, 2026-11-16): only what is charged does.
+      assert.deepEqual(await month(db, wid, '2026-07-01'), { sent: 0, received: 0, unchargedSent: 3006, unchargedReceived: 1000 });
+      // Enforced: 3,010 sends cost 10 beyond the allowance; promo first, then paid; the account goes into debt and
+      // unpaid_since starts; a top-up collects it.
       await db.query(`SELECT billing_post($1,'grant','grant:fixture',0,50000,'{}','operator:fixture')`, [wid]);
-      await usage('send', 1, 10);
-      const charged = await settle(db, wid);
+      await db.query(`UPDATE billing_config SET mode='enforce'`);
+      await usage('send', '2026-07-01 04:00Z', 3010);
+      const charged = await at('2026-07-01 05:00Z');
       assert.deepEqual([charged.costUc, charged.charged], ['200000', true]);
       const debt = await account();
       assert.deepEqual([debt.promo_uc, debt.balance_uc, debt.unpaid_since !== null], ['0', '-150000', true]);
-      assert.equal((await db.query(`SELECT count(*)::int AS n FROM billing_notices WHERE workspace_id=$1 AND kind='sends_paused' AND status='pending'`, [wid])).rows[0].n, 1);
       await db.query(`SELECT billing_post($1,'topup','attempt:fixture-collect',170000,0,'{}','stripe')`, [wid]);
       const paid = await account();
       assert.deepEqual([paid.balance_uc, paid.unpaid_since, paid.empty_since], ['20000', null, null], 'A top-up collects the debt and ends the episode.');
@@ -7635,19 +8074,18 @@ describe('Billing: metering, gate and settlement', () => {
       await db.query(`SELECT billing_post($1,'write_off','write_off:fixture',480000,0,'{}','system')`, [wid]);
       const written = await account();
       assert.deepEqual([written.balance_uc, written.unpaid_since !== null], ['0', true]);
-      // Exempt accounts settle at $0 under enforce too, with the would-be cost recorded.
-      await db.query(`UPDATE billing_accounts SET mode='exempt' WHERE workspace_id=$1`, [wid]);
-      await usage('omen', 1, 3);
-      assert.deepEqual([(await settle(db, wid)).charged, (await ledger()).at(-1).detail.costUc], [false, '30000']);
-      // Month roll: last month's used free tier doesn't carry over; this month's first emails are free again. (Months
-      // priced per direction: from free_split_from on, the account's cached counters are that month's pool.)
-      await db.query(`UPDATE billing_config SET free_split_from='2026-09-01'`);
-      const roll = unique('billing-roll');
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_sent_used,free_received_used,month_spend_uc) VALUES ($1,'2026-09-01',3000,3000,123)`, [roll]);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,'2026-09-30 23:00Z','send',2),($1,'2026-10-01 05:00Z','send',10)`, [roll]);
-      const rolled = await settle(db, roll, "'2026-10-02 00:00Z'::timestamptz");
-      const after = (await db.query('SELECT free_month::text,free_sent_used,free_received_used,month_spend_uc::text FROM billing_accounts WHERE workspace_id=$1', [roll])).rows[0];
-      assert.deepEqual([rolled.costUc, after], ['40000', { free_month: '2026-10-01', free_sent_used: 10, free_received_used: 0, month_spend_uc: '0' }]);
+      // Free hours settle at $0 too, with the would-be cost recorded.
+      await usage('omen', '2026-07-01 06:00Z', 3);
+      assert.deepEqual([(await at('2026-07-01 07:00Z')).charged, (await ledger()).at(-1).detail.costUc], [false, '30000']);
+      // The month turns: September's late sends are priced against September, October's first 3,000 are free, and each
+      // month gets its own ledger row.
+      const roll = unique('billing-roll'), rolled = (q: string, hour: string) => db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,$2::timestamptz,'send',$3)`, [roll, hour, q]);
+      await rolled('3000', '2026-09-30 21:00Z');
+      assert.equal((await settle(db, roll, "'2026-09-30 22:00Z'::timestamptz")).costUc, '0');
+      await rolled('2', '2026-09-30 23:00Z'); await rolled('10', '2026-10-01 05:00Z');
+      const across = await settle(db, roll, "'2026-10-02 00:00Z'::timestamptz");
+      const months = (await db.query(`SELECT detail->>'usageMonth' AS m, detail->>'costUc' AS c FROM billing_ledger WHERE id = ANY($1::bigint[]) ORDER BY 1`, [across.entryIds])).rows;
+      assert.deepEqual([across.costUc, months], ['40000', [{ m: '2026-09', c: '40000' }, { m: '2026-10', c: '0' }]]);
       // Drift: every balance equals the sum of its ledger rows.
       assert.deepEqual((await db.query(`SELECT a.workspace_id FROM billing_accounts a WHERE a.workspace_id=ANY($1) AND (a.balance_uc,a.promo_uc)<>(SELECT coalesce(sum(paid_uc),0),coalesce(sum(promo_uc),0) FROM billing_ledger l WHERE l.workspace_id=a.workspace_id)`, [[wid, roll]])).rows, []);
       await db.query('SAVEPOINT ledger_append_only');
@@ -7658,22 +8096,20 @@ describe('Billing: metering, gate and settlement', () => {
 
   test('the free tier is 3,000 sent and 3,000 received a month, counted separately: overage in one direction is charged while the other is still free, and both roll over', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
-      await db.query(`UPDATE billing_config SET mode='enforce', free_split_from='2026-07-01'`);
       const meter = (wid: string, hour: string, name: string, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1,$2::timestamptz,$3,$4)
         ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, hour, name, q]);
       // [cost, sends charged, received charged] of one settlement up to the cutoff.
       const priced = async (wid: string, cutoff: string) => {
-        const s = await settle(db, wid, `'${cutoff}'::timestamptz`);
-        const { meters } = (await db.query('SELECT detail FROM billing_ledger WHERE id=$1', [s.entryId])).rows[0].detail;
-        return [s.costUc, meters.send?.payable ?? 0, meters.receive?.payable ?? 0];
+        const s = await settle(db, wid, cutoff === 'later' ? later : `'${cutoff}'::timestamptz`);
+        const rows = (await db.query('SELECT detail FROM billing_ledger WHERE id = ANY($1::bigint[])', [s.entryIds])).rows;
+        const sum = (m: string) => rows.reduce((n, r) => n + (r.detail.meters[m]?.payable ?? 0), 0);
+        return [s.costUc, sum('send'), sum('receive')];
       };
-      const counters = async (wid: string) => (await db.query('SELECT free_month::text AS month, free_sent_used AS sent, free_received_used AS received FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
-      const both = unique('free-both'), sends = unique('free-sends'), receives = unique('free-receives'), legacy = unique('free-legacy');
-      for (const wid of [both, sends, receives]) await db.query(`INSERT INTO billing_accounts(workspace_id,free_month) VALUES ($1,'2026-07-01')`, [wid]);
+      const both = unique('free-both'), sends = unique('free-sends'), receives = unique('free-receives');
       // 3,000 sent (recipients) and 3,000 received in one month are free.
       await meter(both, '2026-07-01 01:00Z', 'send', 3000); await meter(both, '2026-07-01 01:00Z', 'receive', 3000);
       assert.deepEqual(await priced(both, '2026-07-01 02:00Z'), ['0', 0, 0]);
-      assert.deepEqual(await counters(both), { month: '2026-07-01', sent: 3000, received: 3000 });
+      assert.deepEqual(await month(db, both, '2026-07-01'), { sent: 3000, received: 3000, unchargedSent: 0, unchargedReceived: 0 });
       // The 3,001st send is charged while received mail is still free: the 3,000th received costs nothing, the 3,001st does.
       await meter(sends, '2026-07-01 01:00Z', 'send', 3001); await meter(sends, '2026-07-01 01:00Z', 'receive', 2999);
       assert.deepEqual(await priced(sends, '2026-07-01 02:00Z'), ['20000', 1, 0]);
@@ -7691,40 +8127,30 @@ describe('Billing: metering, gate and settlement', () => {
       // Month rollover: both allowances start again in August.
       await meter(sends, '2026-08-01 00:00Z', 'send', 3000); await meter(sends, '2026-08-01 00:00Z', 'receive', 3000);
       assert.deepEqual(await priced(sends, '2026-08-01 01:00Z'), ['0', 0, 0]);
-      assert.deepEqual(await counters(sends), { month: '2026-08-01', sent: 3000, received: 3000 });
+      assert.deepEqual(await month(db, sends, '2026-08-01'), { sent: 3000, received: 3000, unchargedSent: 0, unchargedReceived: 0 });
       await meter(receives, '2026-08-01 00:00Z', 'send', 1);
       assert.deepEqual(await priced(receives, '2026-08-01 01:00Z'), ['0', 0, 0]);
-      // A July refund settled in August (in July's last hour) leaves July's pool for its own direction and returns what
-      // its mail's own hour was charged.
-      await refundInto(db, sends, '2026-07-31 23:00Z', '2026-07-01 01:00Z', 'send', -1);
-      assert.deepEqual(await priced(sends, '2026-08-01 02:00Z'), ['-20000', -1, 0], 'July\'s 3,001st send comes back.');
-      await refundInto(db, receives, '2026-07-31 23:00Z', '2026-07-01 03:00Z', 'send', -1); await refundInto(db, receives, '2026-07-31 23:00Z', '2026-07-01 01:00Z', 'receive', -1);
-      assert.deepEqual(await priced(receives, '2026-08-01 02:00Z'), ['-40000', -1, -1], 'Each refund returns what its own direction paid in July.');
-      // A refund of mail that was free returns nothing: one of the 2,000 sends of 01:00.
-      await refundInto(db, receives, '2026-07-31 23:00Z', '2026-07-01 01:00Z', 'send', -1);
-      assert.deepEqual(await priced(receives, '2026-08-01 03:00Z'), ['0', 0, 0]);
-      assert.deepEqual([await counters(sends), await counters(receives)], [{ month: '2026-08-01', sent: 3000, received: 3000 }, { month: '2026-08-01', sent: 1, received: 0 }]);
-      // A month before the split (free_split_from) shares one pool: after June's 2,000 + 2,000, a late June received
-      // message is charged, and refunding it returns that charge. June's own mail settled with no charge record, so
-      // refunding it returns nothing.
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month) VALUES ($1,'2026-08-01')`, [legacy]);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,settled_quantity) VALUES ($1,'2026-06-10 10:00Z','send',2000,2000),($1,'2026-06-10 10:00Z','receive',2000,2000)`, [legacy]);
-      await meter(legacy, '2026-06-30 23:00Z', 'receive', 1);
-      assert.deepEqual(await priced(legacy, '2026-08-01 01:00Z'), ['20000', 0, 1]);
-      await refundInto(db, legacy, '2026-06-30 23:00Z', '2026-06-30 23:00Z', 'receive', -1);
-      assert.deepEqual(await priced(legacy, '2026-08-01 02:00Z'), ['-20000', 0, -1]);
-      await refundInto(db, legacy, '2026-06-30 23:00Z', '2026-06-10 10:00Z', 'send', -1);
-      assert.deepEqual(await priced(legacy, '2026-08-01 03:00Z'), ['0', 0, 0]);
+      // A refund settled in August goes back into July, its mail's own hour, and gives back what July's cost drops by:
+      // the price of one email for each unit July's total was above its allowance.
+      await refundInto(db, sends, '2026-07-01 01:00Z', 'send', -1);
+      assert.deepEqual(await priced(sends, 'later'), ['-20000', -1, 0], 'July\'s 3,001st send comes back.');
+      await refundInto(db, receives, '2026-07-01 03:00Z', 'send', -1); await refundInto(db, receives, '2026-07-01 01:00Z', 'receive', -1);
+      assert.deepEqual(await priced(receives, 'later'), ['-40000', -1, -1], 'Each refund returns what its own direction cost in July.');
+      // July's sends are back at the allowance, so another refund returns nothing.
+      await refundInto(db, receives, '2026-07-01 01:00Z', 'send', -1);
+      assert.deepEqual(await priced(receives, 'later'), ['0', 0, 0]);
+      assert.deepEqual([await month(db, sends, '2026-08-01'), await month(db, receives, '2026-08-01')],
+        [{ sent: 3000, received: 3000, unchargedSent: 0, unchargedReceived: 0 }, { sent: 1, received: 0, unchargedSent: 0, unchargedReceived: 0 }]);
 
       // The gate prices sends against the sent allowance only. This month: free sends used, every received email left.
       const live = unique('free-live'), gate = async () => (await db.query('SELECT billing_gate($1, 1) AS g', [live])).rows[0].g;
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_sent_used) VALUES ($1,(date_trunc('month',now() AT TIME ZONE 'UTC'))::date,3000)`, [live]);
+      await settledThisMonth(db, live, 3000);
       let g = await gate();
       assert.deepEqual([g.ok, g.requiredUc, g.freeSentLeft, g.freeReceivedLeft], [false, '20000', 0, 3000], 'The 3,001st send needs credit while received mail is still free.');
       await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'receive',1)`, [live]);
       assert.deepEqual([(await gate()).openUc, (await gate()).freeReceivedLeft], ['0', 2999], 'An unsettled received message is free.');
       // And the other way round: received allowance used, sends free.
-      await db.query(`UPDATE billing_accounts SET free_sent_used=0, free_received_used=3000 WHERE workspace_id=$1`, [live]);
+      await settledThisMonth(db, live, 0, 3000);
       await db.query(`DELETE FROM billing_usage_hourly WHERE workspace_id=$1`, [live]);
       g = await gate();
       assert.deepEqual([g.ok, g.requiredUc, g.freeSentLeft, g.freeReceivedLeft], [true, '0', 3000, 0]);
@@ -7733,67 +8159,55 @@ describe('Billing: metering, gate and settlement', () => {
     });
   });
 
-  test('a month before the split prices late writes from its own combined history, even for an account dormant since, and refunds only what has a charge record', async t => {
+  test('a refund of an earlier month\'s mail gives back what that month charged for it, also for an account that hasn\'t settled since, in any session time zone', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
       // Month and hour arithmetic is UTC whatever the session's time zone.
       await db.query(`SET LOCAL TIME ZONE 'America/New_York'`);
-      await db.query(`UPDATE billing_config SET mode='enforce', free_split_from='2026-11-01'`);
       const balance = async (wid: string) => (await db.query('SELECT balance_uc::text AS b FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0].b;
-      // As 313 leaves an account that last settled in October: October cached, per-direction counters zero, and
-      // 2,000 sends + 2,000 received settled under the combined rule (20,000,000 µ¢), with no per-hour charge record.
+      // #301 review 1: October's 200,000 sends cost $39.40; the account doesn't settle again until all of them are
+      // canceled in November. The refund goes back into October and returns the $39.40.
       const wid = unique('dormant');
       await db.query(`SELECT billing_post($1,'topup','attempt:'||$1,10000000000,0,'{}','stripe')`, [wid]);
-      await db.query(`UPDATE billing_accounts SET free_month='2026-10-01' WHERE workspace_id=$1`, [wid]);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,settled_quantity) VALUES ($1,'2026-10-15 10:00Z','send',2000,2000),($1,'2026-10-15 10:00Z','receive',2000,2000)`, [wid]);
-      await db.query(`SELECT billing_post($1,'usage','usage:october:'||$1,$2,0,'{}','system')`, [wid, -20_000_000]);
-      // A late received message is charged against October's pool, not a fresh allowance; refunding it returns that.
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,'2026-10-31 22:00Z','receive',1)`, [wid]);
-      assert.equal((await settle(db, wid, "'2026-11-15 00:00Z'::timestamptz")).costUc, '20000');
-      await refundInto(db, wid, '2026-10-31 23:00Z', '2026-10-31 22:00Z', 'receive', -1);
-      assert.equal((await settle(db, wid, "'2026-11-15 00:00Z'::timestamptz")).costUc, '-20000');
-      // October's own sends settled before the switch with no charge record: canceling them returns nothing (the
-      // operator query in #301 lists any workspace the combined rule charged).
-      await refundInto(db, wid, '2026-10-31 23:00Z', '2026-10-15 10:00Z', 'send', -2000);
-      assert.equal((await settle(db, wid, "'2026-11-15 00:00Z'::timestamptz")).costUc, '0');
-      assert.equal(await balance(wid), '9980000000');
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,'2026-10-15 10:00Z','send',200000),($1,'2026-10-31 22:00Z','receive',1)`, [wid]);
+      assert.equal((await settle(db, wid, "'2026-11-01 00:00Z'::timestamptz")).costUc, '3940000000');
+      assert.equal(await balance(wid), '6060000000');
+      await refundInto(db, wid, '2026-10-15 10:00Z', 'send', -200000);
+      assert.equal((await settle(db, wid, later)).costUc, '-3940000000');
+      assert.equal(await balance(wid), '10000000000');
     });
   });
 
-  test('the split rule in its own month: an exempt cancellation leaves no debt, and refunds price each direction from its own count', async t => {
+  test('a cancellation in a month with both directions\' allowances: canceling sends of an hour that was charged, after the workspace became free, leaves no debt', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
-      await db.query(`UPDATE billing_config SET mode='enforce', free_split_from='2026-07-01'`);
       const wid = unique('split-forward');
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month) VALUES ($1,'2026-07-01')`, [wid]);
       const meter = (hour: string, name: string, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1,$2::timestamptz,$3,$4)
         ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, hour, name, q]);
-      const cost = async (cutoff: string) => (await settle(db, wid, `'${cutoff}'::timestamptz`)).costUc;
-      const account = async () => (await db.query('SELECT balance_uc::text AS balance, unpaid_since IS NOT NULL AS unpaid, free_sent_used AS sent, free_received_used AS received FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
-      const mode = (m: string) => db.query('UPDATE billing_accounts SET mode=$2 WHERE workspace_id=$1', [wid, m]);
-      // The review's case, prepaid with no funds: 3,000 sends, then 3,000 received. The combined rule took $0.60 for the
-      // received; the split rule takes nothing.
+      const cost = async (cutoff: string) => (await settle(db, wid, cutoff === 'later' ? later : `'${cutoff}'::timestamptz`)).costUc;
+      const account = async () => (await db.query('SELECT balance_uc::text AS balance, unpaid_since IS NOT NULL AS unpaid FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
+      // #301 recheck 2, prepaid with no funds: 3,000 sends, then 3,000 received, each free in its own allowance.
       await meter('2026-07-01 01:00Z', 'send', 3000);
       assert.equal(await cost('2026-07-01 02:00Z'), '0');
       await meter('2026-07-01 02:00Z', 'receive', 3000);
       assert.equal(await cost('2026-07-01 03:00Z'), '0');
-      // Exempted, the 3,000 queued sends are canceled; prepaid again: no debt, and the counts are what's left.
-      await mode('exempt');
-      await refundInto(db, wid, '2026-07-01 03:00Z', '2026-07-01 01:00Z', 'send', -3000);
-      assert.equal(await cost('2026-07-01 04:00Z'), '0');
-      await mode('prepaid');
-      assert.deepEqual(await account(), { balance: '0', unpaid: false, sent: 0, received: 3000 });
+      // Free from 03:00, the 3,000 queued sends are canceled (into 01:00, when they were charged); prepaid again from
+      // 04:00: no debt.
+      await charging(db, wid, false, '2026-07-01 03:00Z');
+      await refundInto(db, wid, '2026-07-01 01:00Z', 'send', -3000);
+      assert.equal(await cost('later'), '0');
+      await charging(db, wid, true, '2026-07-01 04:00Z');
+      assert.deepEqual([await account(), await month(db, wid, '2026-07-01')], [{ balance: '0', unpaid: false }, { sent: 0, received: 3000, unchargedSent: 0, unchargedReceived: 0 }]);
       // So 3,000 more sends are free and the 3,001st is charged.
       await meter('2026-07-01 04:00Z', 'send', 3001);
       assert.equal(await cost('2026-07-01 05:00Z'), '20000');
-      assert.deepEqual(await account(), { balance: '-20000', unpaid: true, sent: 3001, received: 3000 });
-      // That send canceled an hour later: its charge comes back and the sends' count drops. Only a payment ends the
-      // unpaid episode, as before.
-      await refundInto(db, wid, '2026-07-01 05:00Z', '2026-07-01 04:00Z', 'send', -1);
-      assert.equal(await cost('2026-07-01 06:00Z'), '-20000');
-      assert.deepEqual(await account(), { balance: '0', unpaid: true, sent: 3000, received: 3000 });
+      assert.deepEqual(await account(), { balance: '-20000', unpaid: true });
+      // That send canceled: its charge comes back. Only a payment ends the unpaid episode, as before.
+      await refundInto(db, wid, '2026-07-01 04:00Z', 'send', -1);
+      assert.equal(await cost('later'), '-20000');
+      assert.deepEqual(await account(), { balance: '0', unpaid: true });
       // A received message past its own 3,000 is charged; sends stay at their count.
       await meter('2026-07-01 06:00Z', 'receive', 1);
       assert.equal(await cost('2026-07-01 07:00Z'), '20000');
-      assert.deepEqual(await account(), { balance: '-20000', unpaid: true, sent: 3000, received: 3001 });
+      assert.deepEqual([await account(), await month(db, wid, '2026-07-01')], [{ balance: '-20000', unpaid: true }, { sent: 3000, received: 3001, unchargedSent: 0, unchargedReceived: 0 }]);
     });
   });
 
@@ -7801,23 +8215,24 @@ describe('Billing: metering, gate and settlement', () => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const f = await billingFixture(runtime, db, local, request);
       const free = async (on: boolean) => (await db.query(`SELECT billing_set_workspace_free($1,$2,'Fixture',NULL,'operator:fixture')->>'mode' AS m`, [f.wid, on])).rows[0].m;
-      const queue = async (rows: number, each: number) => (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
-        SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,$6::int) n),'[]','[]','Queued','{}',false
+      const queue = async (rows: number, each: number) => (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,$6::int) n),'[]','[]','Queued','{}',false,now()-interval '1 hour'
         FROM generate_series(1,$5::int) i RETURNING id`, [unique('queued'), f.wid, REGION, f.from, rows, each])).rows.map(r => r.id as string);
       const cancel = (ids: string[]) => db.query(`UPDATE sending_emails SET status='canceled' WHERE id=ANY($1)`, [ids]);
       const account = async () => (await db.query(`SELECT balance_uc::text AS balance, (SELECT coalesce(sum(remaining_uc),0)::text FROM billing_credit_lots l WHERE l.workspace_id=a.workspace_id) AS lots FROM billing_accounts a WHERE workspace_id=$1`, [f.wid])).rows[0];
       await f.mode('enforce');
-      // Billing sweep B1: an exempt workspace queues 50,000 recipients, which settle at $0 (would-be $9.40).
+      // Billing sweep B1: an exempt workspace queued 50,000 recipients an hour ago, which settle at $0 (would-be $9.40).
       assert.equal(await free(true), 'exempt');
+      await charging(db, f.wid, false);
       const ids = await queue(5, 10_000);
-      const exempt = await settle(db, f.wid, "now() + interval '1 hour'");
+      const exempt = await settle(db, f.wid, later);
       assert.deepEqual([exempt.charged, exempt.costUc], [false, '940000000']);
-      // The free flag ends, and 20,000 of those recipients are canceled. Before, the refund paid out $4.00 of credit.
+      // The free flag ends, and 20,000 of those recipients are canceled. Before 313, the refund paid out $4.00 of credit.
       assert.equal(await free(false), 'prepaid');
       await cancel(ids.slice(0, 2));
-      assert.equal((await f.position()).availableUc, '0', 'A pending refund is no credit.');
-      const refunded = await settle(db, f.wid, "now() + interval '1 hour'");
-      assert.deepEqual([refunded.charged, refunded.costUc], [true, '0']);
+      assert.equal((await f.position()).availableUc, '0', 'A refund of mail that was never charged is no credit.');
+      const refunded = await settle(db, f.wid, later);
+      assert.deepEqual([refunded.entries, refunded.charged], [1, false]);
       assert.deepEqual(await account(), { balance: '0', lots: '0' });
     });
   });
@@ -7827,25 +8242,25 @@ describe('Billing: metering, gate and settlement', () => {
       const f = await billingFixture(runtime, db, local, request), { restoreJob } = await import('./src/billing/restore.js');
       const free = (on: boolean) => db.query(`SELECT billing_set_workspace_free($1,$2,'Fixture',NULL,'operator:fixture')`, [f.wid, on]);
       await f.mode('enforce', ', receive_hold=true');
-      // Exempt: 4,000 recipients queued in four sends settle at $0.
-      await free(true);
-      const ids = (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
-        SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,1000) n),'[]','[]','Queued','{}',false
+      // Exempt: 4,000 recipients queued two hours ago in four sends settle at $0.
+      await free(true); await charging(db, f.wid, false);
+      const ids = (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,1000) n),'[]','[]','Queued','{}',false,now()-interval '2 hours'
         FROM generate_series(1,4) i RETURNING id`, [unique('queued'), f.wid, REGION, f.from])).rows.map(r => r.id as string);
-      assert.equal((await settle(db, f.wid, "now() + interval '1 hour'")).charged, false);
-      // Prepaid with no funds: 4,000 received messages owe $0.20, eight days ago, so received mail is held.
-      await free(false);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'receive',4000)`, [f.wid]);
-      assert.equal((await settle(db, f.wid, "now() + interval '1 hour'")).costUc, '20000000');
+      assert.equal((await settle(db, f.wid, later)).charged, false);
+      // Prepaid from an hour ago with no funds: 4,000 received messages owe $0.20, eight days ago, so received mail is held.
+      await free(false); await charging(db, f.wid, true, 1);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC') - interval '1 hour','receive',4000)`, [f.wid]);
+      assert.equal((await settle(db, f.wid, later)).costUc, '20000000');
       await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '8 days' WHERE workspace_id=$1`, [f.wid]);
       const mid = unique('held');
       await db.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,status,error)
         VALUES ($1,$2,$3,'fixture',$4,'["inbox@billing.example"]','{}','held','BILLING_HOLD')`, [f.wid, mid, REGION, 'held/' + mid]);
       assert.equal((await f.position()).receiveHeld, true);
-      // Canceling 1,000 of the exempt recipients (the campaign-cancel transition) gives nothing back: the debt, the
-      // episode and the hold stay, and the restore job releases nothing.
+      // #301 recheck 3: canceling 1,000 of the exempt recipients (the campaign-cancel transition) gives nothing back: the
+      // debt, the episode and the hold stay, and the restore job releases nothing.
       await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [ids[0]]);
-      assert.equal((await settle(db, f.wid, "now() + interval '1 hour'")).costUc, '0');
+      assert.equal((await settle(db, f.wid, later)).charged, false);
       const account = (await db.query('SELECT balance_uc::text AS balance, unpaid_since IS NOT NULL AS unpaid FROM billing_accounts WHERE workspace_id=$1', [f.wid])).rows[0];
       assert.deepEqual([account, (await f.position()).receiveHeld], [{ balance: '-20000000', unpaid: true }, true]);
       assert.equal((await db.query('SELECT count(*)::int AS n FROM jobs WHERE id=$1', [`billing.restored:${f.wid}`])).rows[0].n, 0);
@@ -7854,29 +8269,24 @@ describe('Billing: metering, gate and settlement', () => {
     });
   });
 
-  test('a refund and a new send that net to zero in one hour are still work: the gate counts the send, the settler charges it, and paid attribution moves with it', async t => {
+  test('canceling exempt mail while new mail is sent lends the new mail nothing: the gate counts each send, the refund goes back into its own hour and gives nothing back', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const f = await billingFixture(runtime, db, local, request);
       const free = (on: boolean) => db.query(`SELECT billing_set_workspace_free($1,$2,'Fixture',NULL,'operator:fixture')`, [f.wid, on]);
       const hour = (h: number) => `date_trunc('hour', now(), 'UTC') - interval '${h} hours'`;
-      // Mail queued an hour ago, as its hour's meter recorded it: one 3,000-recipient send and two single ones.
-      const queuedLastHour = async () => {
-        const ids = (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
-          SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,CASE WHEN i=0 THEN 3000 ELSE 1 END) n),'[]','[]','Queued','{}',false,now()-interval '1 hour'
-          FROM generate_series(0,2) i ORDER BY i RETURNING id`, [unique('queued'), f.wid, REGION, f.from])).rows.map(r => r.id as string);
-        await db.query(`UPDATE billing_usage_hourly SET hour=${hour(1)} WHERE workspace_id=$1 AND meter='send' AND hour=${hour(0)}`, [f.wid]);
-        assert.equal((await settle(db, f.wid, hour(0))).entries, 1);
-        return ids;
-      };
       const cancel = (id: string) => db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [id]);
       await f.mode('enforce');
-      // Exempt origin: 3,002 recipients settle at $0. Prepaid again with credit for exactly two sends.
-      await free(true);
-      const [, a, b] = await queuedLastHour();
-      await free(false);
+      // Exempt an hour ago: one 3,000-recipient send and two single ones, settled at $0.
+      await free(true); await charging(db, f.wid, false);
+      const [, a, b] = (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,CASE WHEN i=0 THEN 3000 ELSE 1 END) n),'[]','[]','Queued','{}',false,now()-interval '1 hour'
+        FROM generate_series(0,2) i ORDER BY i RETURNING id`, [unique('queued'), f.wid, REGION, f.from])).rows.map(r => r.id as string);
+      assert.equal((await settle(db, f.wid, hour(0))).entries, 1);
+      // Prepaid from this hour, this month's free sends used, credit for exactly two sends.
+      await free(false); await charging(db, f.wid, true, 0); await f.freeUsed(3000);
       await f.post('topup', `attempt:${unique('two')}`, 40_000n);
-      // A new send, and one of the exempt recipients canceled in the same hour: the row nets to zero but owes the send,
-      // so the second send takes the last of the credit and the third is refused.
+      // #301 recheck 4: a new send, and one of the exempt recipients canceled in the same hour, used to net to zero in one
+      // row and hide the send. The second send takes the last of the credit and the third is refused.
       ok(await f.send(1), 202);
       await cancel(a!);
       assert.deepEqual([(await f.position()).openUc, (await f.position()).availableUc], ['20000', '20000']);
@@ -7884,63 +8294,65 @@ describe('Billing: metering, gate and settlement', () => {
       await cancel(b!);
       assert.equal((await f.position()).availableUc, '0');
       error(await f.send(1), 402, 'BALANCE_EXHAUSTED');
-      // The net-zero row is still settled, and both sends are charged; the exempt refunds give nothing back.
-      const row = (await db.query(`SELECT quantity::int, settled_quantity::int, refunds <> '{}' AS pending FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='send' AND hour=${hour(0)}`, [f.wid])).rows[0];
-      assert.deepEqual(row, { quantity: 0, settled_quantity: 0, pending: true });
+      // The refunds went into this hour's row with the two new sends, netting to zero, and note the hour their mail was
+      // metered in, where they count.
+      const rows = async () => (await db.query(`SELECT CASE WHEN hour=${hour(0)} THEN 'now' ELSE 'before' END AS h, quantity::int, settled_quantity::int, refunds FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='send' ORDER BY hour`, [f.wid])).rows;
+      const origin = (await db.query(`SELECT extract(epoch FROM ${hour(1)})::bigint::text AS k`)).rows[0].k;
+      assert.deepEqual(await rows(), [{ h: 'before', quantity: 3002, settled_quantity: 3002, refunds: {} }, { h: 'now', quantity: 0, settled_quantity: 0, refunds: { [origin]: -2 } }]);
+      // Settling past this hour (as a mode switch does) takes the refunds, which give nothing back; the two sends wait for
+      // their hour to close.
       const { settleClosedHours } = await import('./src/billing/cron.js');
       await settleClosedHours(runtime, (await db.query(`SELECT (${hour(0)} + interval '1 hour')::text AS c`)).rows[0].c);
-      const settled = (await db.query(`SELECT refunds = '{}' AS done FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='send' AND hour=${hour(0)}`, [f.wid])).rows[0];
-      assert.equal(settled.done, true, 'Cron discovery finds the net-zero row.');
-      assert.deepEqual([(await f.account()).balance_uc, (await f.position()).availableUc], ['0', '0']);
+      assert.deepEqual(await rows(), [{ h: 'before', quantity: 3002, settled_quantity: 3002, refunds: {} }, { h: 'now', quantity: 0, settled_quantity: -2, refunds: {} }]);
+      assert.deepEqual([(await f.account()).balance_uc, (await f.position()).availableUc], ['40000', '0']);
     });
   });
 
-  test('a net-zero hour whose refunded mail was paid moves the charge to the new send, and refunding that send returns it', async t => {
+  test('canceling a paid recipient while a new one is sent: the month\'s cost is unchanged, and canceling the new one returns one email\'s price', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const f = await billingFixture(runtime, db, local, request);
       const hour = (h: number) => `date_trunc('hour', now(), 'UTC') - interval '${h} hours'`;
-      const paid = async () => Object.fromEntries((await db.query(`SELECT CASE WHEN hour = ${hour(0)} THEN 'now' ELSE 'before' END AS h, units::int FROM billing_usage_paid WHERE workspace_id=$1 AND meter='send'`, [f.wid])).rows.map(r => [r.h, r.units]));
       await f.mode('enforce');
       await f.post('topup', `attempt:${unique('dollar')}`, 100_000_000n);
-      // Prepaid origin an hour ago: 3,002 recipients, the last two charged.
+      // Prepaid an hour ago: 3,002 recipients, the last two charged.
       const ids = (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
         SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,CASE WHEN i=0 THEN 3000 ELSE 1 END) n),'[]','[]','Queued','{}',false,now()-interval '1 hour'
         FROM generate_series(0,2) i ORDER BY i RETURNING id`, [unique('queued'), f.wid, REGION, f.from])).rows.map(r => r.id as string);
-      await db.query(`UPDATE billing_usage_hourly SET hour=${hour(1)} WHERE workspace_id=$1 AND meter='send' AND hour=${hour(0)}`, [f.wid]);
       assert.equal((await settle(db, f.wid, hour(0))).costUc, '40000');
-      assert.deepEqual(await paid(), { before: 2 });
-      // A new send and one of the paid recipients canceled in the same hour: the refund pays for the new send.
+      // A new send, and one of the paid recipients canceled in the same hour: the month still has 3,002, so nothing is
+      // owed, at once.
       const sent = ok(await f.send(1), 202).id as string;
       await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [ids[1]]);
-      assert.equal((await f.position()).openUc, '20000', 'Until it settles, the refund lends nothing.');
-      const moved = await settle(db, f.wid, "now() + interval '1 hour'");
-      assert.deepEqual([moved.entries, moved.costUc], [1, '0']);
-      assert.deepEqual(await paid(), { before: 1, now: 1 });
-      // Canceling the new send now returns its charge.
+      assert.equal((await f.position()).openUc, '0', 'The refund pays for the new send.');
+      // Canceling the new send too: the month has 3,001, one email's price comes back.
       await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [sent]);
-      assert.equal((await settle(db, f.wid, "now() + interval '1 hour'")).costUc, '-20000');
-      assert.deepEqual([await paid(), (await f.account()).balance_uc], [{ before: 1, now: 0 }, '99980000']);
+      assert.equal((await f.position()).openUc, '-20000');
+      assert.equal((await settle(db, f.wid, later)).costUc, '-20000');
+      assert.deepEqual([(await f.account()).balance_uc, (await f.position()).availableUc], ['99980000', '99980000']);
     });
   });
 
-  test('meters: pre-SES refunds land in the current hour, spam rejections stay charged, receives, Omens and storage count once', async t => {
+  test('meters: a send counts in the hour it was created in, and its refund there too; spam rejections stay charged; receives, Omens and storage count once', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const f = await billingFixture(runtime, db, local, request);
       const usage = async () => Object.fromEntries((await db.query(`SELECT meter,sum(quantity)::int AS q FROM billing_usage_hourly WHERE workspace_id=$1 AND hour=date_trunc('hour',now(),'UTC') GROUP BY 1`, [f.wid])).rows.map(r => [r.meter, r.q]));
-      // Two days after admission, a pre-SES rejection refunds its three recipients into the current hour.
-      const old = unique('billing-old');
+      // Created two days ago (a send created now counts now): its three recipients count in that hour.
+      const old = unique('billing-old'), then = "date_trunc('hour', now() - interval '2 days', 'UTC')";
       await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
         VALUES ($1,$2,$3,'fixture',$4,'["a@example.net","b@example.net"]','["c@example.net"]','[]','Old','{}',false,now()-interval '2 days')`, [old, f.wid, REGION, f.from]);
-      assert.equal((await usage()).send, 3);
-      await db.query(`UPDATE billing_config SET mode='shadow'`); await settle(db, f.wid, "now() + interval '1 hour'");
+      assert.deepEqual((await db.query(`SELECT quantity::int FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='send' AND hour=${then}`, [f.wid])).rows[0], { quantity: 3 });
+      await f.mode('shadow'); await settle(db, f.wid, later);
+      // A pre-SES rejection now refunds them in the current hour's row, noting the hour they were metered in, where they
+      // count; that hour's row stays as it settled.
       await db.query(`UPDATE sending_emails SET status='rejected',error_code='RENDERING_FAILED' WHERE id=$1`, [old]);
-      assert.equal((await usage()).send, 0, 'The refund is an unsettled −3 in the current hour.');
-      assert.equal((await db.query(`SELECT quantity-settled_quantity AS d FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='send' AND hour=date_trunc('hour',now(),'UTC')`, [f.wid])).rows[0].d, '-3');
-      // A spam-screen rejection stays charged.
+      const origin = (await db.query(`SELECT extract(epoch FROM ${then})::bigint::text AS k`)).rows[0].k;
+      assert.deepEqual((await db.query(`SELECT quantity::int, refunds FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='send' AND hour=date_trunc('hour',now(),'UTC')`, [f.wid])).rows[0], { quantity: -3, refunds: { [origin]: -3 } });
+      assert.deepEqual((await db.query(`SELECT quantity::int, settled_quantity::int FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='send' AND hour=${then}`, [f.wid])).rows[0], { quantity: 3, settled_quantity: 3 });
+      // A spam-screen rejection stays charged: the current hour's own send.
       const spam = unique('billing-spam');
       await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated) VALUES ($1,$2,$3,'fixture',$4,'["s@example.net"]','[]','[]','Spam','{}',false)`, [spam, f.wid, REGION, f.from]);
       await db.query(`UPDATE sending_emails SET status='rejected',error_code='CONTENT_REJECTED_SPAM' WHERE id=$1`, [spam]);
-      assert.equal((await usage()).send, 1);
+      assert.equal((await usage()).send, 1 - 3);
       // Receives: one per message with an SES message ID (spam included), Omens from verdicts.omenCalls, stored bytes per day.
       const thread = unique('thread');
       await db.query(`INSERT INTO mail_threads(id,workspace_id) VALUES ($1,$2)`, [thread, f.wid]);
@@ -8079,42 +8491,42 @@ describe('Billing: metering, gate and settlement', () => {
   test('refunds return promo first, a refund from an earlier month is priced against that month, and write-offs repeat per day', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const f = await billingFixture(runtime, db, local, request);
-      const account = async (wid = f.wid) => (await db.query('SELECT balance_uc::text,promo_uc::text,promo_spent_uc::text FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
+      const account = async (wid = f.wid) => (await db.query('SELECT balance_uc::text,promo_uc::text FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
       const row = (id: string, wid: string, created: string, recipients = 1) => db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
         VALUES ($1,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||n||'@example.net') FROM generate_series(1,$5::int) n),'[]','[]','Fixture','{}',false,${created})`, [id, wid, REGION, f.from, recipients]);
-      const settleAll = (wid = f.wid) => settle(db, wid, "now() + interval '1 hour'");
+      const settleAll = (wid = f.wid) => settle(db, wid, later);
       // Promo pays first; when refunds outweigh new usage, the money goes back to promo up to what promo paid.
       await f.freeUsed(3000);
       await f.post('grant', 'grant:fixture-promo', 0n, 100_000n);
       const sent = unique('promo-paid');
-      await row(sent, f.wid, 'now()', 3);
+      await row(sent, f.wid, "now() - interval '1 hour'", 3);
       await settleAll();
-      assert.deepEqual(await account(), { balance_uc: '0', promo_uc: '40000', promo_spent_uc: '60000' });
+      assert.deepEqual(await account(), { balance_uc: '0', promo_uc: '40000' });
       await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [sent]);
       assert.equal((await settleAll()).costUc, '-60000');
-      assert.deepEqual(await account(), { balance_uc: '0', promo_uc: '100000', promo_spent_uc: '0' }, 'Not a cent of promo became paid (refundable) credit.');
+      assert.deepEqual(await account(), { balance_uc: '0', promo_uc: '100000' }, 'Not a cent of promo became paid (refundable) credit.');
       // A send admitted last month and charged there (beyond that month's free 3,000) is refunded this month: the refund
-      // lands in last month's last hour and returns exactly what last month charged for it.
+      // goes back into last month and returns exactly what last month charged for it.
       const lastMonth = "date_trunc('month', now(), 'UTC') - interval '2 days'";
+      await f.post('topup', `attempt:${unique('cross')}`, 100_000n);
       const old = unique('cross-month');
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1, date_trunc('hour', ${lastMonth}, 'UTC'), 'send', 3000)`, [f.wid]);
       await row(old, f.wid, lastMonth, 2);
-      // As last month settled it: 3,000 free units and these 2 paid ones, recorded as that hour's charged units (the insert
-      // trigger meters into the current hour).
-      await db.query(`UPDATE billing_usage_hourly SET quantity=quantity-2 WHERE workspace_id=$1 AND hour=date_trunc('hour', now(), 'UTC') AND meter='send'`, [f.wid]);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,settled_quantity) VALUES ($1, date_trunc('hour', ${lastMonth}), 'send', 3002, 3002)`, [f.wid]);
-      await db.query(`INSERT INTO billing_usage_paid VALUES ($1, date_trunc('hour', ${lastMonth}), 'send', 2)`, [f.wid]);
+      assert.equal((await settleAll()).costUc, '40000');
       await db.query(`UPDATE sending_emails SET status='rejected',error_code='RENDERING_FAILED' WHERE id=$1`, [old]);
-      const target = (await db.query(`SELECT hour = date_trunc('month', now(), 'UTC') - interval '1 hour' AS last_hour, quantity-settled_quantity AS d FROM billing_usage_hourly WHERE workspace_id=$1 AND quantity<>settled_quantity`, [f.wid])).rows;
-      assert.deepEqual(target, [{ last_hour: true, d: '-2' }]);
+      // It goes into last month's last hour, as before, noting the hour its mail was metered in.
+      const target = (await db.query(`SELECT hour = date_trunc('month', now(), 'UTC') - interval '1 hour' AS last, refunds ? ('s'||extract(epoch FROM date_trunc('hour', ${lastMonth}, 'UTC'))::bigint) AS noted,
+        quantity-settled_quantity AS d FROM billing_usage_hourly WHERE workspace_id=$1 AND quantity<>settled_quantity`, [f.wid])).rows;
+      assert.deepEqual(target, [{ last: true, noted: true, d: '-2' }]);
       assert.equal((await settleAll()).costUc, '-40000', 'Both refunded recipients were paid for last month, so both come back.');
       // A refund of last month's free sends returns nothing, even though this month's free tier is spent.
       const other = unique('billing-free-month'), free = unique('cross-month-free');
       await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [other]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared','222233334444','ready')`, [other, REGION]);
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_sent_used) VALUES ($1,3000)`, [other]);
+      await settledThisMonth(db, other, 3000);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1, date_trunc('hour', ${lastMonth}, 'UTC'), 'send', 9)`, [other]);
       await row(free, other, lastMonth);
-      await db.query(`UPDATE billing_usage_hourly SET quantity=quantity-1 WHERE workspace_id=$1 AND meter='send'`, [other]);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,settled_quantity) VALUES ($1, date_trunc('hour', ${lastMonth}), 'send', 10, 10)`, [other]);
+      await settleAll(other);
       await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [free]);
       assert.equal((await settleAll(other)).costUc, '0');
       // Write-offs: debt that builds up again under the same unpaid episode is written off again (the key carries the day).
@@ -8129,34 +8541,42 @@ describe('Billing: metering, gate and settlement', () => {
       assert.deepEqual(after, { balance_uc: '0', unpaid: true }, 'Written off again; unpaid_since (and a receive hold) stays until a top-up.');
     });
   });
-  test('usage is priced under the mode it was metered in: nothing metered while billing was off is charged when it comes back, and a free flag starting or ending prices its own hour', async t => {
+
+  test('usage is priced under the mode of the hour it was metered in: nothing metered while billing was off is charged when it comes back, and a free flag starting or ending makes its whole hour free', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
       const { setBillingEnforcement } = await import('./scripts/set-billing-enforcement.js');
       const usage = (wid: string, meter: string, hours: number, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity)
         VALUES ($1, date_trunc('hour', now(), 'UTC') - make_interval(hours=>$3), $2, $4) ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, meter, hours, q]);
       const balance = async (wid: string) => (await db.query('SELECT balance_uc::text AS b, unpaid_since IS NOT NULL AS unpaid FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
-      const closed = "date_trunc('hour', now() - interval '5 minutes', 'UTC')", later = "now() + interval '1 hour'";
-      await db.query(`UPDATE billing_config SET mode='enforce'`);
-      // The kill-switch for a day and a half: 50,000 sent and 20,000 received while billing is off, some in the open hour.
+      const open = async (wid: string) => (await db.query('SELECT billing_position($1)->>\'openUc\' AS o', [wid])).rows[0].o;
+      const closed = "date_trunc('hour', now() - interval '5 minutes', 'UTC')";
+      // Billing sweep B2, the kill-switch for a day and a half: 50,000 sent and 20,000 received while billing was off,
+      // some in the open hour.
+      await charging(db, null, false, 36);
+      await db.query(`UPDATE billing_config SET mode='off'`);
       const off = unique('billing-off');
-      await setBillingEnforcement(db, ['off', '--reason', 'Kill-switch while the settler is checked']);
       await db.query(`INSERT INTO billing_accounts(workspace_id) VALUES ($1)`, [off]);
       await usage(off, 'send', 30, 50_000); await usage(off, 'receive', 20, 20_000); await usage(off, 'send', 0, 10);
-      // Back on: none of it is charged, not even the open hour, and no unpaid episode starts.
+      // Back on: charging starts with the next hour. None of it is charged, not even the open hour, and no unpaid episode
+      // starts. (The switch settles every workspace's closed hours, at $0 here.)
       await setBillingEnforcement(db, ['enforce', '--reason', 'Billing back on after the check']);
       assert.deepEqual(await settle(db, off, closed), { entries: 0 });
-      assert.equal((await settle(db, off, later)).entries, 0);
-      assert.deepEqual(await balance(off), { b: '0', unpaid: false });
-      // A workspace's free flag ends with usage still open: that usage stays free. A paying workspace becomes free with
-      // usage still open: that usage is charged as it was metered.
+      assert.deepEqual([await balance(off), await open(off)], [{ b: '0', unpaid: false }, '0']);
+      // A switch takes effect on an hour boundary, in the customer's favour: a free flag that ends leaves the rest of its
+      // hour free, and one that starts makes its whole hour free, usage already sent included.
+      await charging(db, null, true);
       const ending = unique('billing-free-ends'), starting = unique('billing-free-starts');
       await db.query(`SELECT billing_set_workspace_free($1, true, 'Partner trial for the quarter', NULL, 'script')`, [ending]);
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_sent_used) VALUES ($1,(date_trunc('month',now() AT TIME ZONE 'UTC'))::date,3000)`, [starting]);
+      await charging(db, ending, false);
+      await settledThisMonth(db, starting, 3000);
       await usage(ending, 'send', 0, 4000); await usage(starting, 'send', 0, 10);
+      assert.deepEqual([await open(ending), await open(starting)], ['0', '200000']);
       await db.query(`SELECT billing_set_workspace_free($1, false, NULL, NULL, 'script')`, [ending]);
       await db.query(`SELECT billing_set_workspace_free($1, true, 'Partner trial for the quarter', NULL, 'script')`, [starting]);
-      for (const wid of [ending, starting]) await settle(db, wid, later);
-      assert.deepEqual([await balance(ending), await balance(starting)], [{ b: '0', unpaid: false }, { b: '-200000', unpaid: true }]);
+      assert.deepEqual([await open(ending), await open(starting)], ['0', '0']);
+      // From the next hour on, the first is charged and the second isn't.
+      const next = (wid: string) => db.query(`SELECT billing_charged($1, date_trunc('hour', now(), 'UTC') + interval '1 hour') AS c`, [wid]).then(r => r.rows[0].c);
+      assert.deepEqual([await next(ending), await next(starting)], [true, false]);
     });
   });
 
@@ -8241,23 +8661,164 @@ describe('Billing: metering, gate and settlement', () => {
   test('the gate prices an earlier month\'s unsettled usage against that month: a refund there never hands out free sends now', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
       await db.query(`UPDATE billing_config SET mode='enforce'`);
-      const lastMonth = "(date_trunc('month', now() AT TIME ZONE 'UTC') - interval '1 month')::date", lastHour = "date_trunc('month', now(), 'UTC') - interval '1 hour'";
+      const lastMonth = "date_trunc('month', now(), 'UTC') - interval '10 days'", lastHour = "date_trunc('month', now(), 'UTC') - interval '1 hour'";
       const gate = async (wid: string, n: number) => (await db.query('SELECT billing_gate($1, $2) AS g', [wid, n])).rows[0].g;
-      // Last month's 20,000 queued recipients are canceled today (the refund lands in last month's last hour) and this
-      // month's 3,000 free sends are admitted. With $0, another 3,000 needs $0.60.
+      // Billing sweep B3: last month's 20,000 sends cost $3.40, unpaid; today they are canceled (the refund goes back into
+      // last month) and this month's 3,000 free sends are admitted. The refund gives back last month's $3.40, which pays
+      // the debt; it frees no send this month, so another 3,000 needs $0.60.
       const refunded = unique('billing-month-refund');
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month) VALUES ($1,${lastMonth})`, [refunded]);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,${lastHour},'send',-20000),($1,date_trunc('hour',now(),'UTC'),'send',3000)`, [refunded]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',${lastMonth},'UTC'),'send',20000)`, [refunded]);
+      assert.equal((await settle(db, refunded)).costUc, '340000000');
+      await refundInto(db, refunded, (await db.query(`SELECT (${lastMonth})::text AS t`)).rows[0].t, 'send', -20000);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'send',3000)`, [refunded]);
       const g = await gate(refunded, 3000);
-      assert.deepEqual([g.ok, g.freeSentLeft, g.openUc, g.requiredUc], [false, 0, '0', '60000000']);
+      assert.deepEqual([g.ok, g.freeSentLeft, g.openUc, g.availableUc, g.requiredUc], [false, 0, '-340000000', '0', '60000000']);
       // Just after midnight on the 1st, last month's still-open hour is priced against last month's used-up allowance,
       // and this month's 3,000 free sends are all left.
       const rolled = unique('billing-month-open');
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_sent_used) VALUES ($1,${lastMonth},3000)`, [rolled]);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,settled_quantity) VALUES ($1,${lastHour}-interval '1 day','send',3000,3000),($1,${lastHour},'send',500,0)`, [rolled]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,${lastHour}-interval '1 day','send',3000)`, [rolled]);
+      assert.equal((await settle(db, rolled, lastHour)).costUc, '0');
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,${lastHour},'send',500)`, [rolled]);
       const p = (await db.query('SELECT billing_position($1) AS p', [rolled])).rows[0].p;
       assert.deepEqual([p.freeSentLeft, p.openUc, p.availableUc], [3000, '10000000', '-10000000']);
     });
+  });
+
+  test('the free 3,000 count only charged usage: a workspace free earlier in the month pays nothing for its first 3,000 once charged, and a refund returns what the month\'s cost drops by', async t => {
+    await simulatedSesFixture(t, async ({ db }) => {
+      const wid = unique('billing-rules');
+      const meter = (hour: string, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1,$2::timestamptz,'send',$3)
+        ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, hour, q]);
+      const balance = async () => (await db.query('SELECT balance_uc::text AS b FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0].b;
+      await db.query(`SELECT billing_post($1,'topup','attempt:'||$1,1000000000,0,'{}','stripe')`, [wid]);
+      // Free until 10:00 on July 3 (Ryan, 2026-11-16, rule 1): 5,000 free sends would cost $0.40 and use none of the allowance.
+      await charging(db, wid, false); await charging(db, wid, true, '2026-07-03 10:00Z');
+      await meter('2026-07-02 09:00Z', 5000);
+      const free = await settle(db, wid, "'2026-07-02 10:00Z'::timestamptz");
+      assert.deepEqual([free.charged, free.costUc, await balance()], [false, '40000000', '1000000000']);
+      // Charged from then: 3,000 sends are free, the 3,001st costs one email.
+      await meter('2026-07-03 10:00Z', 3001);
+      assert.equal((await settle(db, wid, "'2026-07-03 11:00Z'::timestamptz")).costUc, '20000');
+      assert.deepEqual(await month(db, wid, '2026-07-01'), { sent: 3001, received: 0, unchargedSent: 5000, unchargedReceived: 0 });
+      // Rule 2: canceling free mail gives nothing back; canceling 500 charged sends gives back what the month's cost
+      // drops by, one email (the month is back at its allowance), not 500 emails' price.
+      await refundInto(db, wid, '2026-07-02 09:00Z', 'send', -1000);
+      assert.equal((await settle(db, wid, later)).charged, false);
+      await refundInto(db, wid, '2026-07-03 10:00Z', 'send', -500);
+      assert.equal((await settle(db, wid, later)).costUc, '-20000');
+      assert.equal(await balance(), '1000000000');
+      // A refund noted the way the settler before 334 found it (in the row it landed in, by origin hour) counts in that
+      // origin hour too: July's 2,501 charged sends lose one more, which is free.
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,refunds) VALUES ($1,'2026-07-20 10:00Z','send',-1,jsonb_build_object(extract(epoch FROM '2026-07-03 10:00Z'::timestamptz)::bigint::text,-1))`, [wid]);
+      assert.deepEqual([(await settle(db, wid, later)).costUc, (await month(db, wid, '2026-07-01')).sent], ['0', 2500]);
+      // A settlement by the settler before 334, resumed after it, fails instead of counting usage another way.
+      await db.query('SAVEPOINT old_settler');
+      await assert.rejects(db.query(`SELECT billing_post($1,'usage','usage:old',0,0,'{"meters":{},"charged":true,"rateVersion":1}','system')`, [wid]), { code: '55000' });
+      await db.query('ROLLBACK TO SAVEPOINT old_settler');
+    });
+  });
+
+  test('what is owed doesn\'t depend on when hours settle: random usage, refunds and mode changes, settled at random cutoffs, add up to each month\'s price', async t => {
+    await simulatedSesFixture(t, async ({ db }) => {
+      let seed = 20261117;
+      const random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648), pick = <T>(xs: T[]) => xs[Math.floor(random() * xs.length)]!;
+      const hours = Array.from({ length: 48 }, (_, i) => new Date(Date.UTC(2026, 6, 30, 0) + i * 3_600_000).toISOString());   // July 30 to August 1
+      await charging(db, null, true);
+      for (let round = 0; round < 12; round++) {
+        const wid = unique('billing-order'), changes: [string, boolean][] = [];
+        await db.query(`SELECT billing_post($1,'topup','attempt:'||$1,100000000000,0,'{}','stripe')`, [wid]);
+        // The workspace's history: a few switches at random hours.
+        for (let i = 0; i < 3; i++) { const change: [string, boolean] = [pick(hours), random() < 0.5]; changes.push(change); await charging(db, wid, change[1], change[0]); }
+        const charged = (hour: string) => changes.reduce((c, [at, on]) => at <= hour ? on : c, true);
+        const metered = new Map<string, number>();   // hour|meter → units
+        for (let step = 0; step < 30; step++) {
+          const r = random(), hour = pick(hours), meter = pick(['send', 'send', 'receive', 'omen']);
+          if (r < 0.6) {
+            const q = Math.floor(random() * 2500) + 1;
+            await db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1,$2,$3,$4) ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, hour, meter, q]);
+            metered.set(`${hour}|${meter}`, (metered.get(`${hour}|${meter}`) ?? 0) + q);
+          } else if (r < 0.8) {
+            const [key, units] = pick([...metered.entries()].filter(([, n]) => n > 0).concat([[`${hour}|send`, 0]]));
+            const q = Math.min(units, Math.floor(random() * 1500) + 1);
+            if (q > 0) { await refundInto(db, wid, key.split('|')[0]!, key.split('|')[1]!, -q); metered.set(key, units - q); }
+          } else await settle(db, wid, random() < 0.5 ? later : `'${pick(hours)}'::timestamptz`);
+        }
+        await settle(db, wid, later);
+        // The price of each month from what was metered, by whether its hour was charged.
+        const totals = new Map<string, { send: number; receive: number; omen: number }>();
+        for (const [key, units] of metered) {
+          const [hour, meter] = key.split('|') as [string, 'send' | 'receive' | 'omen'];
+          if (!charged(hour)) continue;
+          const m = hour.slice(0, 7), tot = totals.get(m) ?? { send: 0, receive: 0, omen: 0 };
+          tot[meter] += units; totals.set(m, tot);
+        }
+        const owed = [...totals.values()].reduce((n, x) => n + 20000 * (Math.max(0, x.send - 3000) + Math.max(0, x.receive - 3000)) + 10000 * x.omen, 0);
+        const { b } = (await db.query('SELECT (balance_uc + promo_uc)::text AS b FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
+        assert.equal(BigInt(b), 100000000000n - BigInt(owed), `round ${round}`);
+        assert.equal((await db.query(`SELECT count(*)::int AS n FROM billing_usage_hourly WHERE workspace_id=$1 AND quantity<>settled_quantity`, [wid])).rows[0].n, 0);
+      }
+    });
+  });
+
+  test('a refund written into an old hour settles once the hour it was written in has closed, after that hour\'s credit expiries, as it did in the current hour', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const f = await billingFixture(runtime, db, local, request), { creditExpiry } = await import('./src/billing/cron.js');
+      const position = async () => { const p = await f.position(); return [p.balanceUc, p.availableUc]; };
+      await f.mode('enforce');
+      // Review of #353, round 1: $0.40 of credit, then 4,000 recipients two hours ago cost $0.20.
+      await f.post('topup', `attempt:${unique('lot')}`, 40_000_000n);
+      const ids = (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,1000) n),'[]','[]','Queued','{}',false,now()-interval '2 hours'
+        FROM generate_series(1,4) i RETURNING id`, [unique('queued'), f.wid, REGION, f.from])).rows.map(r => r.id as string);
+      assert.equal((await settle(db, f.wid)).costUc, '20000000');
+      // The credit expired half an hour into the previous hour; 1,000 of the recipients are canceled now.
+      await db.query(`UPDATE billing_credit_lots SET expires_at=date_trunc('hour', now(), 'UTC') - interval '30 minutes' WHERE workspace_id=$1`, [f.wid]);
+      await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [ids[0]]);
+      // The expiry run settles up to the closed hour: the refund, written in this hour, waits; the lot's $0.20 expires.
+      const cutoff = (await db.query(`SELECT date_trunc('hour', now(), 'UTC')::text AS c`)).rows[0].c;
+      await creditExpiry(runtime, cutoff);
+      assert.deepEqual(await position(), ['0', '20000000'], 'Expired; the refund is open.');
+      // The next run settles the refund into new credit.
+      await settle(db, f.wid, later);
+      assert.deepEqual(await position(), ['20000000', '20000000']);
+    });
+  });
+
+  test('send meters take one lock per workspace before its usage rows: cancellations of different mail from the same hours never deadlock', { skip: DATABASE_FIXTURE_SKIP }, async t => {
+    // Committed rows on two connections. B cancels one envelope and stays open; A cancels two others in one statement
+    // and waits for B; B then cancels a fourth from another month. A refund of an earlier month's mail goes into that
+    // month's last hour, so without the lock A and B would take two months' rows in opposite orders (review of #353,
+    // round 1).
+    const a = await fixtureDatabase(t), b = await fixtureDatabase(t), wid = unique('billing-meter-lock'), pool = '222233334444';
+    await a.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [wid]);
+    await a.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+    const ids = (await a.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+      SELECT $1||'-'||i,$1,$2,'fixture','hello@billing.example','["r@example.net"]','[]','[]','Queued','{}',false,now()-make_interval(days=>CASE WHEN i<=2 THEN 70 ELSE 40 END)
+      FROM generate_series(1,4) i ORDER BY i RETURNING id`, [wid, REGION])).rows.map(r => r.id as string);
+    const waiting = async () => {
+      for (const until = Date.now() + 4000; ;) {
+        const { rows: [w] } = await b.query(`SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1`, [(a as unknown as { processID: number }).processID]);
+        if (w?.wait_event_type === 'Lock') return;
+        assert.ok(Date.now() < until, 'A waits for B.');
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    };
+    try {
+      await b.query('BEGIN');
+      await b.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [ids[3]]);
+      const bulk = a.query(`UPDATE sending_emails SET status='canceled' WHERE id=ANY($1)`, [[ids[0], ids[2]]]);
+      await waiting();
+      await b.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [ids[1]]);
+      await b.query('COMMIT');
+      await bulk;
+      assert.equal((await a.query(`SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1 AND status='canceled'`, [wid])).rows[0].n, 4);
+      // Each month: its mail's hour, then the refunds in its last hour.
+      assert.deepEqual((await a.query(`SELECT quantity::int FROM billing_usage_hourly WHERE workspace_id=$1 ORDER BY hour`, [wid])).rows.map(r => r.quantity), [2, -2, 2, -2]);
+    } finally {
+      await b.query('ROLLBACK').catch(() => {});
+      for (const table of ['sending_emails', 'billing_usage_hourly', 'provider_connections']) await a.query(`DELETE FROM ${table} WHERE workspace_id=$1`, [wid]);
+      await a.query('DELETE FROM workspaces WHERE id=$1', [wid]).catch(() => {});
+    }
   });
 
   test('a promotional credit that covers a debt ends the unpaid episode and its receive hold; the debt is paid by the next top-up', async t => {
@@ -8308,22 +8869,21 @@ describe('Billing: metering, gate and settlement', () => {
 
   test('a refund gives back promotional credit only up to what promo paid for that month\'s usage; the rest is paid credit again', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
-      await db.query(`UPDATE billing_config SET mode='enforce', free_split_from='2026-07-01'`);
+      await db.query(`UPDATE billing_config SET mode='enforce'`);
       const wid = unique('billing-promo-month');
       const meter = (hour: string, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1,$2::timestamptz,'send',$3)
         ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, hour, q]);
       const account = async () => (await db.query('SELECT balance_uc::text AS paid, promo_uc::text AS promo FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_sent_used) VALUES ($1,'2026-07-01',3000)`, [wid]);
-      // July: a $1 grant pays for 5,000 sends beyond the free ones.
+      // Billing sweep B8. July: a $1 grant pays for 5,000 sends beyond the free 3,000.
       await db.query(`SELECT billing_post($1,'grant','grant:'||$1,0,100000000,'{}','operator:fixture')`, [wid]);
-      await meter('2026-07-10 10:00Z', 5000);
+      await meter('2026-07-10 10:00Z', 8000);
       assert.equal((await settle(db, wid, "'2026-07-10 11:00Z'::timestamptz")).costUc, '100000000');
       // August: a $25 top-up pays for 10,000 sends beyond August's free 3,000; those 10,000 are canceled before they go out.
       await db.query(`SELECT billing_post($1,'topup','attempt:'||$1,2500000000,0,'{}','stripe')`, [wid]);
       await meter('2026-08-02 10:00Z', 13000);
       assert.equal((await settle(db, wid, "'2026-08-02 11:00Z'::timestamptz")).costUc, '200000000');
-      await refundInto(db, wid, '2026-08-02 11:00Z', '2026-08-02 10:00Z', 'send', -10000);
-      assert.equal((await settle(db, wid, "'2026-08-02 12:00Z'::timestamptz")).costUc, '-200000000');
+      await refundInto(db, wid, '2026-08-02 10:00Z', 'send', -10000);
+      assert.equal((await settle(db, wid, later)).costUc, '-200000000');
       // The $2 comes back as paid credit: no promo paid for August's sends.
       assert.deepEqual(await account(), { paid: '2500000000', promo: '0' });
     });
@@ -8346,13 +8906,14 @@ describe('Billing: metering, gate and settlement', () => {
 
   test('month boundaries and time zones: "sending paused" reads this month\'s allowance, and storage starts at 00:00 UTC in any session time zone', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
-      await db.query(`UPDATE billing_config SET mode='enforce', free_split_from='2026-01-01'`);
-      // Last month's free sends were used and $0.10 was left; 500 sends from its last hour settle just after midnight.
-      // This month's 3,000 free sends are all left, so sending isn't paused and no notice goes out.
-      const wid = unique('billing-month-end');
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_sent_used) VALUES ($1,(date_trunc('month',now() AT TIME ZONE 'UTC') - interval '1 month')::date,3000)`, [wid]);
+      await db.query(`UPDATE billing_config SET mode='enforce'`);
+      // Billing sweep B10: last month's free sends were used and $0.10 was left; 500 sends from its last hour settle just
+      // after midnight. This month's 3,000 free sends are all left, so sending isn't paused and no notice goes out.
+      const wid = unique('billing-month-end'), lastHour = "date_trunc('month',now(),'UTC') - interval '1 hour'";
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,${lastHour} - interval '1 day','send',3000)`, [wid]);
+      assert.equal((await settle(db, wid, lastHour)).costUc, '0');
       await db.query(`SELECT billing_post($1,'topup','attempt:'||$1,10000000,0,'{}','stripe')`, [wid]);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('month',now(),'UTC') - interval '1 hour','send',500)`, [wid]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,${lastHour},'send',500)`, [wid]);
       assert.equal((await settle(db, wid)).costUc, '10000000');
       const after = (await db.query(`SELECT empty_since, (SELECT count(*)::int FROM billing_notices WHERE workspace_id=$1 AND kind='sends_paused') AS notices FROM billing_accounts WHERE workspace_id=$1`, [wid])).rows[0];
       assert.deepEqual([after.empty_since, after.notices, (await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p.freeSentLeft], [null, 0, 3000]);
@@ -8408,25 +8969,25 @@ describe('Billing: metering, gate and settlement', () => {
     }
   });
 
-  for (const funding of ['top-up', 'promo'] as const) test(`canceling exempt mail never takes the charge of other mail metered in the same hour (${funding}), and a real debt keeps its hold`, async t => {
+  for (const funding of ['top-up', 'promo'] as const) test(`canceling exempt mail never takes the charge of other mail (${funding}), and a real debt keeps its hold`, async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const f = await billingFixture(runtime, db, local, request), { restoreJob } = await import('./src/billing/restore.js');
       const free = (on: boolean) => db.query(`SELECT billing_set_workspace_free($1,$2,'Fixture',NULL,'operator:fixture')`, [f.wid, on]);
-      const queue = async (rows: number) => (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
-        SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,50) n),'[]','[]','Queued','{}',false
-        FROM generate_series(1,$5::int) i RETURNING id`, [unique('queued'), f.wid, REGION, f.from, rows])).rows.map(r => r.id as string);
-      const later = "now() + interval '1 hour'";
+      const queue = async (rows: number, hoursAgo: number) => (await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,50) n),'[]','[]','Queued','{}',false,now()-make_interval(hours=>$6::int)
+        FROM generate_series(1,$5::int) i RETURNING id`, [unique('queued'), f.wid, REGION, f.from, rows, hoursAgo])).rows.map(r => r.id as string);
       await f.mode('enforce', ', receive_hold=true');
-      // Exempt: 80 messages × 50 recipients. The exemption ends and they settle at $0.
-      await free(true);
-      const exempt = await queue(80);
-      await free(false);
-      // Funded with exactly $0.20, 20 more messages × 50 recipients in the same hour cost $0.20.
+      // Review of #307, finding 2. Exempt two hours ago: 80 messages × 50 recipients, settled at $0.
+      await free(true); await charging(db, f.wid, false);
+      const exempt = await queue(80, 2);
+      // Prepaid from an hour ago, this month's free sends used, funded with exactly $0.20: 20 more messages × 50
+      // recipients cost $0.20.
+      await free(false); await charging(db, f.wid, true, 1); await f.freeUsed(3000);
       await db.query(`SELECT billing_post($1,$2,'fixture:'||$1,$3,$4,'{}','operator:fixture')`, funding === 'top-up' ? [f.wid, 'topup', 20_000_000, 0] : [f.wid, 'grant', 0, 20_000_000]);
-      const funded = await queue(20);
+      const funded = await queue(20, 1);
       assert.equal((await settle(db, f.wid, later)).costUc, '20000000');
       // 4,000 received messages owe $0.20; eight days later received mail is held.
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'receive',4000)`, [f.wid]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC') - interval '1 hour','receive',4000)`, [f.wid]);
       assert.equal((await settle(db, f.wid, later)).costUc, '20000000');
       await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '8 days' WHERE workspace_id=$1`, [f.wid]);
       const mid = unique('held');
@@ -8434,7 +8995,7 @@ describe('Billing: metering, gate and settlement', () => {
         VALUES ($1,$2,$3,'fixture',$4,'["inbox@billing.example"]','{}','held','BILLING_HOLD')`, [f.wid, mid, REGION, 'held/' + mid]);
       // 20 of the exempt messages are canceled: nothing comes back, the debt and its hold stay, and the funded mail is queued.
       await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=ANY($1)`, [exempt.slice(0, 20)]);
-      assert.equal((await settle(db, f.wid, later)).costUc, '0');
+      assert.equal((await settle(db, f.wid, later)).charged, false);
       const p = await f.position();
       assert.deepEqual([p.balanceUc, p.promoUc, p.receiveHeld], ['-20000000', '0', true]);
       await restoreJob(runtime, {}, { id: `billing.restored:${f.wid}`, attempts: 1, workspaceId: f.wid });
@@ -8550,7 +9111,7 @@ describe('Billing: metering, gate and settlement', () => {
     for (const first of ['settler', 'migration'] as const) {
       const wid = unique(`billing-314-${first}`);
       await a.query(`SELECT billing_post($1,'adjustment','adjustment:'||$1,-1000000,0,'{}','system')`, [wid]);
-      await a.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'send',4000)`, [wid]);
+      await a.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC') - interval '1 hour','send',4000)`, [wid]);
       const settle = (db: pg.Client) => db.query(`SELECT billing_settle($1, now() + interval '1 hour') AS s`, [wid]);
       try {
         if (first === 'settler') {
@@ -8657,7 +9218,7 @@ describe('Billing: metering, gate and settlement', () => {
       // Expiry: the older lot expired 30 minutes into the previous hour. Not before that hour has closed...
       await db.query(`UPDATE billing_credit_lots SET expires_at=date_trunc('hour', now(), 'UTC') - interval '30 minutes' WHERE workspace_id=$1 AND source_id='attempt:older'`, [wid]);
       // ...and usage from before the expiry (5 paid sends in that hour) is settled first, so it spends the expiring credit.
-      await db.query(`UPDATE billing_accounts SET free_sent_used=3000, free_month=(date_trunc('month', now() AT TIME ZONE 'UTC'))::date WHERE workspace_id=$1`, [wid]);
+      await settledThisMonth(db, wid, 3000);
       await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1, date_trunc('hour', now(), 'UTC') - interval '1 hour', 'send', 5)`, [wid]);
       const expiries = async () => (await db.query(`SELECT count(*)::int AS n FROM billing_ledger WHERE workspace_id=$1 AND kind='expire'`, [wid])).rows[0].n;
       const [earlier, cutoff] = (await db.query(`SELECT date_trunc('hour', now(), 'UTC') - interval '1 hour' AS e, date_trunc('hour', now(), 'UTC') AS c`)).rows.map(r => [r.e.toISOString(), r.c.toISOString()])[0]!;
@@ -8673,6 +9234,271 @@ describe('Billing: metering, gate and settlement', () => {
       await invariant();
     });
   });
+  test('a cancellation just before its hour settles doesn\'t hold back the hour\'s charge past a credit expiry (review of #393, finding 1)', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { settleClosedHours, creditExpiry } = await import('./src/billing/cron.js');
+      const at = await clock(db, '2027-01-05T09:00:00Z'), w = await hosted(db, 'billing-r1-expiry');
+      // $0.40 of credit expiring at 11:55. 4,000 recipients at 11:10 cost $0.20; 50 of them are canceled at 12:02.
+      await db.query(`SELECT billing_post($1,'topup','attempt:'||$1,40000000,0,'{}','stripe')`, [w.wid]);
+      await db.query(`UPDATE billing_credit_lots SET expires_at='2027-01-05T11:55:00Z' WHERE workspace_id=$1`, [w.wid]);
+      await at('2027-01-05T11:10:00Z');
+      await w.mail(3950, '2027-01-05T11:10:00Z'); const canceled = await w.mail(50, '2027-01-05T11:10:00Z');
+      await at('2027-01-05T12:02:00Z');
+      await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [canceled]);
+      // 12:07: the hour's $0.20 spends the expiring credit and the other $0.20 expires; the cancellation is due at 13:07,
+      // after the hour it was written in, and comes back as new credit: $0.01, as before 334.
+      await at('2027-01-05T12:07:00Z'); await settleClosedHours(runtime); await creditExpiry(runtime);
+      assert.deepEqual(await w.totals(), { balance: '0', promo: '0', unpaid_since: null });
+      await at('2027-01-05T13:07:00Z'); await settleClosedHours(runtime);
+      assert.deepEqual(await w.totals(), { balance: '1000000', promo: '0', unpaid_since: null });
+    });
+  });
+
+  test('canceling last month\'s mail while this month\'s usage settles opens no unpaid episode and no receive hold (review of #393, finding 2)', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { settleClosedHours } = await import('./src/billing/cron.js');
+      await db.query(`UPDATE billing_config SET receive_hold=true`);
+      const at = await clock(db, '2027-01-20T09:00:00Z'), w = await hosted(db, 'billing-r1-month');
+      // January: 4,000 recipients cost $0.20, paid.
+      await db.query(`SELECT billing_post($1,'topup','attempt:'||$1,20000000,0,'{}','stripe')`, [w.wid]);
+      await at('2027-01-20T10:00:00Z');
+      await w.mail(3000, '2027-01-20T10:00:00Z'); const january = await w.mail(1000, '2027-01-20T10:00:00Z');
+      await at('2027-01-20T11:07:00Z'); await settleClosedHours(runtime);
+      assert.deepEqual(await w.totals(), { balance: '0', promo: '0', unpaid_since: null });
+      // February 2, 11:10: 4,000 received messages owe $0.20. 12:02: 1,000 of January's recipients are canceled, which
+      // gives $0.20 back. Both settle at 12:07, as before 334, so nothing is ever owed.
+      await at('2027-02-02T11:10:00Z');
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,'2027-02-02T11:00:00Z','receive',4000)`, [w.wid]);
+      await at('2027-02-02T12:02:00Z');
+      await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [january]);
+      for (const run of ['2027-02-02T12:07:00Z', '2027-02-02T13:07:00Z']) { await at(run); await settleClosedHours(runtime); }
+      assert.deepEqual(await w.totals(), { balance: '0', promo: '0', unpaid_since: null });
+      // Eight days later received mail isn't held.
+      await at('2027-02-10T13:00:00Z');
+      assert.equal((await w.position()).receiveHeld, false);
+    });
+  });
+
+  test('simulated mail is refunded by today\'s bill_simulated, as before 333: with it off nothing comes back, with it on even mail never billed is refunded (review of #393, finding 3, kept as before on installations that simulate SES)', async t => {
+    await simulatedSesFixture(t, async ({ db }) => {
+      await db.query(`UPDATE billing_config SET bill_simulated=false`);
+      const at = await clock(db, '2027-03-03T09:00:00Z'), w = await hosted(db, 'billing-r1-simulated');
+      const refunds = async () => Number((await db.query(`SELECT coalesce(sum(quantity),0)::int AS n FROM billing_usage_hourly WHERE workspace_id=$1 AND refunds <> '{}'`, [w.wid])).rows[0].n);
+      // Not billed: 1,000 simulated recipients at 10:00 and 1,000 at 11:00. Billed: 4,000 real ones at 11:00, $0.20, unpaid.
+      await at('2027-03-03T10:00:00Z'); const alone = await w.mail(1000, '2027-03-03T10:00:00Z', true);
+      await at('2027-03-03T11:00:00Z'); const beside = await w.mail(1000, '2027-03-03T11:00:00Z', true); await w.mail(4000, '2027-03-03T11:00:00Z');
+      await at('2027-03-03T12:07:00Z'); await settle(db, w.wid);
+      assert.equal((await w.totals()).balance, '-20000000');
+      // Canceled while simulated mail isn't billed: nothing is refunded.
+      await at('2027-03-03T12:10:00Z'); await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [alone]);
+      assert.equal(await refunds(), 0);
+      // Canceled once it is billed: refunded, though it was never billed (known; only where SES is simulated). Its
+      // month's charged total drops by 1,000, so the $0.20 comes back.
+      await db.query(`UPDATE billing_config SET bill_simulated=true`);
+      await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [beside]);
+      assert.equal(await refunds(), -1000);
+      await at('2027-03-03T13:07:00Z'); await settle(db, w.wid);
+      assert.equal((await w.totals()).balance, '0');
+    });
+  });
+
+  test('storage priced a day at a time rounds each day down: fractions of a micro-cent never add up to a debt or a hold (review of #393, finding 4)', async t => {
+    await simulatedSesFixture(t, async ({ db }) => {
+      await db.query(`UPDATE billing_config SET receive_hold=true, storage_billing_from='2027-04-01', storage_aged_through=NULL`);
+      const at = await clock(db, '2027-04-05T00:05:00Z'), wid = unique('billing-r1-storage');
+      // 500 bytes over the free 1 GB, kept past 90 days: about 0.42 µ¢ a day, metered and settled three days running.
+      await db.query(`INSERT INTO mail_storage_days(workspace_id,day,bytes) VALUES ($1,'2027-01-01',1000000500)`, [wid]);
+      for (const day of ['2027-04-05', '2027-04-06', '2027-04-07']) {
+        await at(`${day}T00:05:00Z`); await db.query('SELECT billing_storage_day($1::date)', [day]);
+        await at(`${day}T01:07:00Z`); await settle(db, wid);
+      }
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='storage' AND quantity=500 AND settled_quantity=500`, [wid])).rows[0].n, 3);
+      const gate = (await db.query('SELECT billing_gate($1, 1) AS g', [wid])).rows[0].g;
+      assert.deepEqual([gate.balanceUc, gate.ok, gate.unpaidSince], ['0', true, null]);
+      await at('2027-04-16T00:00:00Z');
+      assert.equal((await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p.receiveHeld, false);
+    });
+  });
+
+  // Every migration before the owed model's, in a schema of its own (dropped afterwards), and two connections on it: A
+  // runs the owed model's migration while B holds a send, a switch or a job open.
+  const preOwedSchema = async (t: TestContext) => {
+    const a = await fixtureDatabase(t), b = await fixtureDatabase(t), schema = 'billing_cut_' + randomUUID().replaceAll('-', '');
+    const { readdir } = await import('node:fs/promises'), dir = new URL('./migrations/', import.meta.url);
+    const files = (await readdir(dir)).filter(f => /^\d+_[a-z_]+\.sql$/.test(f)).sort(), owed = files.findIndex(f => f.endsWith('_billing_owed_model.sql'));
+    assert.ok(owed > 0);
+    await a.query(`CREATE SCHEMA ${schema}; SET search_path TO ${schema}`); await b.query(`SET search_path TO ${schema}`);
+    cleanup(t, async () => { await b.query('ROLLBACK').catch(() => {}); await a.query(`ROLLBACK; RESET search_path; DROP SCHEMA ${schema} CASCADE`).catch(() => {}); });
+    for (const file of files.slice(0, owed)) {
+      const source = await readFile(new URL(file, dir), 'utf8');
+      if (source.startsWith('-- bane:batched\n')) { let cursor = ''; do { cursor = (await a.query(source, [cursor])).rows[0].cursor; } while (cursor); continue; }
+      if (source.startsWith('-- bane:no-transaction\n')) { for (const statement of source.split('\n').filter(line => line.trim() && !line.startsWith('--'))) await a.query(statement); continue; }
+      await a.query('BEGIN'); if (file === '065_log_search.sql') await a.query(`SET LOCAL search_path TO ${schema},public`);
+      await a.query(source); await a.query('COMMIT');
+    }
+    const migration = await readFile(new URL(files[owed]!, dir), 'utf8');
+    const migrate = async () => { await a.query('BEGIN'); try { await a.query(migration); await a.query('COMMIT'); } catch (e) { await a.query('ROLLBACK'); throw e; } };
+    const waiting = async () => {
+      for (const until = Date.now() + 1500; ;) {
+        const { rows: [w] } = await b.query(`SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1`, [(a as unknown as { processID: number }).processID]);
+        if (w?.wait_event_type === 'Lock') return;
+        assert.ok(Date.now() < until, 'The migration waits for the transaction in flight.');
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    };
+    const hosted = async (wid: string) => {
+      await a.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [wid]);
+      await a.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared','222233334444','ready')`, [wid, REGION]);
+    };
+    const send = (c: pg.Client, wid: string, recipients: number, age: string) => c.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+      VALUES ($1,$2,$3,'fixture','hello@billing.example',(SELECT jsonb_agg('r'||n||'@example.net') FROM generate_series(1,$4::int) n),'[]','[]','Cutover','{}',false,date_trunc('hour',now(),'UTC')-$5::interval)`, [unique('mail'), wid, REGION, recipients, age]);
+    return { a, b, schema, migration, migrate, waiting, hosted, send };
+  };
+
+  test('the owed model\'s cutover waits for a send in flight and for an operator\'s switch, refuses whenever usage moved money, and a refused run changes nothing (review of #393, findings 5 and 6, and round 2 D)', { skip: DATABASE_FIXTURE_SKIP }, async t => {
+    const { a, b, schema, migration, migrate, waiting, hosted, send } = await preOwedSchema(t);
+    await t.test('round 2 D: usage that moved money stops the migration also when no hourly rows are left', async () => {
+      await a.query('BEGIN');
+      await a.query(`SELECT billing_post('w-restored','usage','usage:restored',-20000000,0,'{"meters":{},"charged":true}','system')`);
+      assert.equal((await a.query('SELECT count(*)::int AS n FROM billing_usage_hourly')).rows[0].n, 0);
+      await assert.rejects(a.query(migration), /charged money for usage/);
+      await a.query('ROLLBACK');
+      assert.equal((await a.query(`SELECT to_regclass('billing_owed_from') AS t`)).rows[0].t, null);
+    });
+    for (const wid of ['w-committed', 'w-flight']) await hosted(wid);
+    // Enforced, with 2,000 recipients metered two hours ago (free, so the cutover has hours to settle and freeze).
+    assert.equal((await a.query('SELECT mode FROM billing_config')).rows[0].mode, 'enforce');
+    await a.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ('w-committed',date_trunc('hour',now(),'UTC')-interval '2 hours','send',2000)`);
+    await t.test('finding 6: a send being written when the migration starts is waited for and counted, so its paid hour stops the migration as a committed one does', async () => {
+      // B's transaction began a minute before this hour (the meter before the owed model writes the hour its
+      // transaction began in): a clock of its own, ahead of pg_catalog on B's search path only.
+      await a.query(`CREATE FUNCTION ${schema}.now() RETURNS timestamptz LANGUAGE sql STABLE AS $$ SELECT current_setting('billing.clock')::timestamptz $$`);
+      await b.query(`SET search_path TO ${schema}, pg_catalog`);
+      await b.query(`SELECT set_config('billing.clock', (date_trunc('hour', pg_catalog.now(), 'UTC') - interval '1 minute')::text, false)`);
+      await b.query('BEGIN');
+      await send(b, 'w-flight', 4000, '0 minutes');   // the last closed hour: $0.20
+      const run = migrate();
+      await waiting();
+      await b.query('COMMIT');
+      await b.query(`SET search_path TO ${schema}`);
+      await assert.rejects(run, /charged money for usage/);
+      assert.deepEqual((await a.query(`SELECT to_regclass('billing_months') AS m, (SELECT count(*)::int FROM billing_ledger WHERE kind='usage') AS settled`)).rows[0], { m: null, settled: 0 });
+      // The operator settles it another way; here, the usage is removed.
+      await a.query(`DELETE FROM billing_usage_hourly WHERE workspace_id='w-flight'`);
+    });
+    await t.test('finding 5: switches committed in the cutover hour, and one committed while the migration waits, decide the hours from then on', async () => {
+      for (const mode of ['shadow', 'enforce', 'shadow', 'enforce']) await a.query(`UPDATE billing_config SET mode=$1`, [mode]);
+      await b.query('BEGIN'); await b.query(`UPDATE billing_config SET mode='off'`);
+      const decisions = async () => (await a.query('SELECT count(*)::int AS n FROM billing_mode_changes')).rows[0].n as number;
+      const recorded = await decisions();
+      const run = migrate();
+      await waiting();
+      await b.query('COMMIT');
+      await run;
+      // The migration writes no decisions of its own: the history is the operator's (and the switch to off).
+      assert.equal(await decisions(), recorded + 1);
+      const charged = async () => (await a.query(`SELECT billing_charged('w-committed', date_trunc('hour',now(),'UTC') - interval '2 hours') AS before,
+        billing_charged('w-committed', date_trunc('hour',now(),'UTC')) AS now, billing_charged('w-committed', date_trunc('hour',now(),'UTC') + interval '1 hour') AS next`)).rows[0];
+      assert.deepEqual(await charged(), { before: false, now: false, next: false });
+      // Billing on again: charged from the next hour, because the operator's last decision says so.
+      await a.query(`UPDATE billing_config SET mode='enforce'`);
+      assert.deepEqual(await charged(), { before: false, now: false, next: true });
+      // Running the migration again changes nothing.
+      const state = async () => (await a.query(`SELECT (SELECT json_agg(m ORDER BY workspace_id, month) FROM billing_months m) AS months, (SELECT count(*)::int FROM billing_mode_changes) AS decisions`)).rows[0];
+      const before = await state();
+      await migrate();
+      assert.deepEqual([await state(), await charged()], [before, { before: false, now: false, next: true }]);
+    });
+  });
+
+  test('the cutover never waits on a send\'s recharge job while holding the meter fence: a send that queues auto-recharge and the migration both complete (review of #393, round 2 C)', { skip: DATABASE_FIXTURE_SKIP }, async t => {
+    const { a, b, migrate, waiting, hosted, send } = await preOwedSchema(t);
+    // Prepaid, auto-recharge on and $1 below its $5 threshold, with one free recipient in the last closed hour, which the
+    // cutover settles (and so queues the recharge).
+    await hosted('w-recharge');
+    await a.query(`SELECT billing_post('w-recharge','topup','attempt:w-recharge',100000000,0,'{}','stripe')`);
+    await a.query(`UPDATE billing_accounts SET recharge_enabled=true, recharge_threshold_uc=500000000, stripe_payment_method='pm_fixture' WHERE workspace_id='w-recharge'`);
+    await a.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ('w-recharge',date_trunc('hour',now(),'UTC')-interval '1 hour','send',1)`);
+    // B is a send: the gate admits it and queues the recharge job, which B holds until it commits.
+    await b.query('BEGIN');
+    assert.equal((await b.query(`SELECT billing_gate('w-recharge', 1) AS g`)).rows[0].g.ok, true);
+    const run = migrate();
+    await waiting();   // the cutover's settlement waits for B's recharge job
+    await send(b, 'w-recharge', 1, '0 minutes');   // B meters the send: the fence was released, so it doesn't wait
+    await b.query('COMMIT');
+    await run;
+    assert.deepEqual((await a.query(`SELECT (SELECT count(*)::int FROM sending_emails WHERE workspace_id='w-recharge') AS sent,
+      (SELECT count(*)::int FROM jobs WHERE id='billing.recharge:w-recharge') AS jobs, (SELECT count(*)::int FROM billing_owed_from) AS cutover`)).rows[0], { sent: 1, jobs: 1, cutover: 1 });
+  });
+
+  test('the hourly run settles every workspace with work due: hundreds of fresh cancellations don\'t hide a closed hour (review of #393, finding 7)', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { settleClosedHours } = await import('./src/billing/cron.js');
+      // 520 workspaces sent one recipient two hours ago, settled, and cancel it now. Another has 4,000 received messages
+      // in the last closed hour, $0.20.
+      const busy = unique('aa-billing-r1-busy'), due = unique('zz-billing-r1-due');
+      await db.query(`INSERT INTO workspaces(id,name,slug) SELECT $1||i,$1||i,$1||i FROM generate_series(1,520) i`, [busy]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) SELECT $1||i,$1||i,$2,'ready','shared','222233334444','ready' FROM generate_series(1,520) i`, [busy, REGION]);
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        SELECT $1||i||'-mail',$1||i,$2,'fixture','hello@billing.example','["r@example.net"]','[]','[]','Busy','{}',false,date_trunc('hour',now(),'UTC')-interval '2 hours' FROM generate_series(1,520) i`, [busy, REGION]);
+      await db.query(`SELECT billing_settle($1||i, date_trunc('hour',now(),'UTC')) FROM generate_series(1,520) i`, [busy]);
+      await db.query(`UPDATE sending_emails SET status='canceled' WHERE id LIKE $1||'%'`, [busy]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC')-interval '1 hour','receive',4000)`, [due]);
+      const cutoff = (await db.query(`SELECT date_trunc('hour', now(), 'UTC')::text AS c`)).rows[0].c;
+      // Every workspace the run takes up has something to settle; none is passed over.
+      const run = await settleClosedHours(runtime, cutoff);
+      assert.ok(run.workspaces >= 1 && run.entries >= run.workspaces, `Workspaces without work due were taken up: ${JSON.stringify(run)}`);
+      assert.deepEqual((await db.query(`SELECT a.balance_uc::text AS b, (SELECT settled_quantity::int FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='receive') AS settled
+        FROM billing_accounts a WHERE a.workspace_id=$1`, [due])).rows[0], { b: '-20000000', settled: 4000 });
+    });
+  });
+
+  test('a delivery that reverses a validation suppression after the workspace became free costs nothing, as before 334 (review of #393, finding 8)', async t => {
+    await simulatedSesFixture(t, async ({ db }) => {
+      const at = await clock(db, '2027-05-04T09:00:00Z'), w = await hosted(db, 'billing-r1-recharge');
+      // 10:00: 4,000 recipients, 1,000 of them on one email SES then suppresses: 3,000 settle within the allowance.
+      await at('2027-05-04T10:00:00Z');
+      await w.mail(3000, '2027-05-04T10:00:00Z'); const suppressed = await w.mail(1000, '2027-05-04T10:00:00Z');
+      await db.query(`UPDATE sending_emails SET status='sent', provider_id='p-'||id WHERE id=$1`, [suppressed]);
+      await at('2027-05-04T10:30:00Z');
+      await db.query(`UPDATE sending_emails SET status='suppressed', error_code='EMAIL_VALIDATION_SUPPRESSED', suppression_reason='email_validation' WHERE id=$1`, [suppressed]);
+      await at('2027-05-04T11:07:00Z'); await settle(db, w.wid);
+      // 12:30: the workspace becomes free. 13:10: a delivery to the email's other recipients reverses the suppression.
+      await at('2027-05-04T12:30:00Z'); await db.query(`SELECT billing_set_workspace_free($1,true,'Review',NULL,'operator:fixture')`, [w.wid]);
+      await at('2027-05-04T13:10:00Z'); await db.query(`UPDATE sending_emails SET status='delivered' WHERE id=$1`, [suppressed]);
+      for (const run of ['2027-05-04T14:07:00Z', '2027-05-04T15:07:00Z']) { await at(run); await settle(db, w.wid); }
+      assert.deepEqual(await w.totals(), { balance: '0', promo: '0', unpaid_since: null });
+    });
+  });
+
+  test('the kill-switch forgives what it leaves unsettled, as before: billing off before an hour settled charges nothing for it, and its refunds take the forgiven units first', async t => {
+    await simulatedSesFixture(t, async ({ db }) => {
+      const at = await clock(db, '2027-06-08T09:00:00Z'), w = await hosted(db, 'billing-kill-switch');
+      const billing = async (mode: string) => { if (mode !== 'off') await db.query('SELECT billing_settle_all()'); await db.query(`UPDATE billing_config SET mode=$1 WHERE singleton`, [mode]); };
+      const forgiven = async () => (await db.query(`SELECT hour::text, meter, units::int FROM billing_forgiven WHERE workspace_id=$1 ORDER BY hour`, [w.wid])).rows;
+      await db.query(`SELECT billing_post($1,'topup','attempt:'||$1,100000000,0,'{}','stripe')`, [w.wid]);
+      // 10:00, charged: 4,500 recipients, $0.30 beyond the allowance. Billing goes off at 11:03, before the hourly run.
+      await at('2027-06-08T10:10:00Z');
+      await w.mail(3000, '2027-06-08T10:10:00Z'); const a = await w.mail(1000, '2027-06-08T10:10:00Z'); await w.mail(500, '2027-06-08T10:10:00Z');
+      await at('2027-06-08T11:03:00Z'); await billing('off');
+      // Back on at 12:20: everything open settles while billing is still off, so 10:00's usage is forgiven.
+      await at('2027-06-08T12:20:00Z'); await billing('enforce');
+      assert.deepEqual(await forgiven(), [{ hour: '2027-06-08 10:00:00+00', meter: 'send', units: 4500 }]);
+      assert.deepEqual([(await w.totals()).balance, (await w.position()).openUc], ['100000000', '0']);
+      // A cancellation of that mail takes 1,000 of the forgiven units: nothing comes back.
+      await at('2027-06-08T12:40:00Z'); await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [a]);
+      assert.equal((await w.position()).openUc, '0');
+      await at('2027-06-08T13:07:00Z'); await settle(db, w.wid);
+      assert.deepEqual(await forgiven(), [{ hour: '2027-06-08 10:00:00+00', meter: 'send', units: 3500 }]);
+      assert.deepEqual(await month(db, w.wid, '2027-06-01'), { sent: 0, received: 0, unchargedSent: 3500, unchargedReceived: 0 });
+      assert.equal((await w.totals()).balance, '100000000');
+      // Charged again from 13:00, with the month's allowance untouched by the forgiven mail: 3,001 recipients cost one email.
+      await at('2027-06-08T13:10:00Z'); await w.mail(3001, '2027-06-08T13:10:00Z');
+      await at('2027-06-08T14:07:00Z'); await settle(db, w.wid);
+      assert.equal((await w.totals()).balance, String(100000000 - 20000));
+    });
+  });
+
   test('244 removed the per-inbox IMAP charge; password revocation still notifies open sessions', async t => {
     const db = await fixtureDatabase(t);
     const gone = (await db.query(`SELECT to_regprocedure('inbox_protocol_daily_usage(date)') AS f, to_regclass('inbox_protocol_periods') AS t`)).rows[0];
@@ -10428,7 +11254,11 @@ describe('Billing: Stripe', () => {
     assert.equal((await deliver('invoice.payment_failed', voided)).body.outcome, 'processed');
     await recharge();
     const notices = async () => (await db.query("SELECT dedupe_key, status, data FROM billing_notices WHERE workspace_id = $1 AND kind = 'recharge_failed' ORDER BY created_at", [wid])).rows;
-    assert.deepEqual((await notices()).map(n => [n.dedupe_key, n.status, n.data.last4, n.data.code]), [[`recharge_failed:${declined.id}`, 'pending', '4242', 'insufficient_funds']]);
+    // Exactly one notice. Its status is wherever the notice job has got to: the integration shard's job runner may have
+    // claimed it already (sending, then sent, or suppressed: this workspace has no owner to email). #329.
+    assert.deepEqual((await notices()).map(n => [n.dedupe_key, n.data.last4, n.data.code]), [[`recharge_failed:${declined.id}`, '4242', 'insufficient_funds']]);
+    assert.ok(['pending', 'sending', 'sent', 'suppressed'].includes((await notices())[0].status), (await notices())[0].status);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM jobs WHERE id = $1', [`billing.notify:${(await db.query("SELECT id FROM billing_notices WHERE dedupe_key = $1", [`recharge_failed:${declined.id}`])).rows[0].id}`])).rows[0].n, 1);
     assert.equal((await recharges()).length, 3, 'No automatic retry after a decline.');
     // Turned back on: the reason clears. A 3DS request (authentication_required) is a failure of its own, with its own notice.
     await stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 100_000 });
@@ -10637,7 +11467,7 @@ describe('Billing: Stripe', () => {
     const top = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 5000, actor: 'user:fixture', billingEmail: null });
     await deliver('checkout.session.completed', fake.payCheckout((await attempt(top.attemptId)).stripe_checkout_session));
     // The free tier is used up and 240,000 recipients went out an hour ago: $48 owed, not settled yet, $2 left.
-    await db.query('UPDATE billing_accounts SET free_sent_used = 3000 WHERE workspace_id = $1', [wid]);
+    await db.query(`INSERT INTO billing_months(workspace_id,month,sent) VALUES ($1,(date_trunc('month',now() AT TIME ZONE 'UTC'))::date,3000) ON CONFLICT (workspace_id,month) DO UPDATE SET sent=3000`, [wid]); // This month's free sends used.
     await db.query(`INSERT INTO billing_usage_hourly (workspace_id, hour, meter, quantity) VALUES ($1, date_trunc('hour', now(), 'UTC') - interval '1 hour', 'send', 240000)`, [wid]);
     assert.equal((await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p.availableUc, String(200n * UC));
     const refund = (amountCents?: number) => stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: top.attemptId, amountCents, basis: 'billing_error', reason: 'Unused credit', operator: 'operator:fixture' });
@@ -10912,7 +11742,7 @@ describe('Billing: API, MCP and notices', () => {
       // The state follows the balance: debt pauses sending (enforced, prepaid). While the installation doesn't hold
       // received mail, nothing promises a hold; with holds on, the debt starts the received-mail grace.
       await db.query(`SELECT billing_post($1,'usage','usage:fixture-debt',-3000000000,-500000000,'{}','system')`, [wid]);
-      await db.query(`UPDATE billing_accounts SET free_month=date_trunc('month',now() AT TIME ZONE 'UTC')::date,free_sent_used=3000 WHERE workspace_id=$1`, [wid]);
+      await db.query(`INSERT INTO billing_months(workspace_id,month,sent) VALUES ($1,(date_trunc('month',now() AT TIME ZONE 'UTC'))::date,3000) ON CONFLICT (workspace_id,month) DO UPDATE SET sent=3000`, [wid]); // This month's free sends used.
       const unheld = ok(await local('GET', '/v1/billing'));
       assert.deepEqual([unheld.state.sending, unheld.state.receiving, unheld.grace.receiveHoldAt, typeof unheld.grace.unpaidSince], ['paused', 'ok', null, 'string']);
       await db.query('UPDATE billing_config SET receive_hold=true WHERE singleton');
@@ -11009,6 +11839,8 @@ describe('Billing: API, MCP and notices', () => {
       const usage = ok(await local('GET', '/v1/billing/usage')).data;
       assert.deepEqual(usage.map((p: Json) => [p.start, p.meter, p.quantity]), [[`${day}T00:00:00Z`, 'omen', '3'], [`${day}T00:00:00Z`, 'receive', '7'], [`${day}T00:00:00Z`, 'send', '42']]);
       assert.deepEqual(ok(await local('GET', `/v1/billing/usage?granularity=hour&meter=send&from=${day}&to=${day}`)).data.map((p: Json) => p.quantity), ['40', '2']);
+      // decision names the omen meter (AI decisions), which keeps its name in the response.
+      assert.deepEqual(ok(await local('GET', '/v1/billing/usage?meter=decision')).data.map((p: Json) => [p.meter, p.quantity]), [['omen', '3']]);
       assert.equal(ok(await local('GET', '/v1/billing/usage?granularity=month')).data.find((p: Json) => p.meter === 'send').start.slice(8), '01T00:00:00Z');
       const reader = ok(await local('POST', '/v1/api-keys', { name: 'Usage reader', permissions: ['read'] }), 201).secret; secrets.add(reader);
       assert.deepEqual(ok(await request('GET', '/v1/billing/usage', reader)).data.map((p: Json) => p.meter), ['send']);
@@ -11167,7 +11999,7 @@ describe('Billing: API, MCP and notices', () => {
       const until = new Date(Date.now() + 30 * 86_400_000).toISOString();
       const gate = async (w = wid) => (await db.query('SELECT billing_gate($1, 10, false) AS g', [w])).rows[0].g;
       const mode = async (w = wid) => (await db.query('SELECT mode,free_via FROM billing_accounts WHERE workspace_id=$1', [w])).rows[0] ?? { mode: 'prepaid', free_via: null };
-      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_sent_used) VALUES ($1,date_trunc('month',now() AT TIME ZONE 'UTC')::date,3000)`, [wid]);
+      await db.query(`INSERT INTO billing_months(workspace_id,month,sent) VALUES ($1,(date_trunc('month',now() AT TIME ZONE 'UTC'))::date,3000) ON CONFLICT (workspace_id,month) DO UPDATE SET sent=3000`, [wid]); // This month's free sends used.
       assert.deepEqual([(await gate()).ok, (await gate()).enforced], [false, true], 'A prepaid workspace at $0 past its free emails is gated.');
       // Operators only.
       const key = ok(await local('POST', '/v1/api-keys', { name: 'Not an operator', permissions: ['manage'] }), 201); secrets.add(key.secret);
@@ -11186,7 +12018,9 @@ describe('Billing: API, MCP and notices', () => {
       assert.deepEqual([free.mode, free.freePlan, free.state.sending], ['exempt', { until: until.replace(/\.\d{3}Z$/, 'Z') }, 'ok']);
       assert.equal(ok(await local('GET', '/v1/me')).billing.free, true);
       assert.deepEqual([(await gate()).ok, (await gate()).enforced], [true, false], 'A free workspace is never gated.');
-      // Usage is metered and settled at $0, with what it would have cost.
+      // Usage is metered and settled at $0, with what it would have cost. (A flag takes effect from the hour it is set in;
+      // this usage is an hour old, so the history says the workspace was free then too.)
+      await db.query(`INSERT INTO billing_mode_changes(workspace_id,charged,effective_hour,actor) VALUES ($1,false,'-infinity','fixture')`, [wid]);
       await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now())-interval '1 hour','send',2000)`, [wid]);
       await db.query(`SELECT billing_settle($1, date_trunc('hour', now()))`, [wid]);
       const [usage] = (await db.query(`SELECT paid_uc::text,promo_uc::text,detail->>'costUc' AS cost,detail->>'charged' AS charged FROM billing_ledger WHERE workspace_id=$1 AND kind='usage'`, [wid])).rows;
@@ -18196,7 +19030,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       for (const rank of [1.5, 1e12]) error(await local('GET', `/v1/inbound/overview?cursor=${b64(['host.example', rank, 'match', 'id'])}`), 422, 'INVALID_CURSOR');
       error(await local('GET', '/v1/inbound/events?after=9999999999999999999'), 422, 'INVALID_CURSOR');
       // A version cursor past the integer range starts from the newest version.
-      ok(await local('GET', '/v1/rituals/history?cursor=3000000000'));
+      ok(await local('GET', '/v1/rules/history?cursor=3000000000'));
     });
   });
   // Every address is an inbox (migration addresses_are_inboxes); convert_addresses converts the existing ones while #360's Worker still serves:
@@ -18877,36 +19711,205 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(await disconnected,'SCAN_STALE',`${first} first: the disconnect gets past its locks (no connection to disconnect here).`);
     }
   });
-  // Migration 321 adds forwardEligible to stored mail before the new Worker serves; the Worker it replaces keeps storing
-  // mail without it until then. A message it commits after the migration ran is decided by the same rule on read.
-  test('forward rollout: mail the replaced Worker commits after migration 321 is decided on read, not refused',async t=>{
+  // Migration 332 decides the inbound mail stored without forwardEligible; a message committed after the page that
+  // would have seen it is never decided on read any more: a forward refuses it.
+  test('forward rollout: mail committed without forwardEligible after migration 332 ran is refused, not decided on read',async t=>{
     const [{nodeRuntime},{sendToEndpoint},{encrypt}]=await Promise.all([import('./src/adapters/node.js'),import('./src/endpoints.js'),import('./src/operations.js')]);
     const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
     const a=await fixtureDatabase(t),b=await fixtureDatabase(t),w=unique('fwdroll'),hook='con_'+randomUUID().replaceAll('-',''),thread=unique('thr'),mid=unique('msg');
     cleanup(t,async()=>{
-      for (const table of ['mail_messages','mail_threads','mail_endpoints','mailbox_webhooks']) await a.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[w]);
+      for (const table of ['mail_messages','mail_threads','mailbox_webhooks']) await a.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[w]);
       await a.query('DELETE FROM workspaces WHERE id=$1',[w]);
     });
     await a.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[w]);
-    // The forward endpoint as the replaced Worker writes one (migration 322 copies it onto its row).
-    await a.query("INSERT INTO mailbox_webhooks(id,workspace_id,name,url,event_types,encrypted_secret) VALUES($1,$2,'forward:team','https://ritual.invalid/','[]','synthetic')",[hook,w]);
-    await a.query("INSERT INTO mail_endpoints(workspace_id,ref,hook_id,encrypted_value,verified) VALUES($1,'forward:team',$2,$3,true)",[w,hook,await encrypt(runtime,'teammate@example.net',`${w}:endpoint:${hook}`)]);
+    // A confirmed forward endpoint.
+    await a.query("INSERT INTO mailbox_webhooks(id,workspace_id,type,key,encrypted_target,event_types) VALUES($1,$2,'forward','team',$3,'[]')",[hook,w,await encrypt(runtime,'teammate@example.net',`${w}:endpoint:${hook}`)]);
     await a.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[thread,w]);
-    // The migration's own statement, limited to this workspace so it leaves the other tests' mail alone.
-    const migration=await readFile(new URL('./migrations/321_forward_eligibility.sql',import.meta.url),'utf8'),scoped=migration.replace("WHERE m.direction = 'inbound'","WHERE m.workspace_id = $1 AND m.direction = 'inbound'");
+    // Migration 332, limited to this workspace so it leaves the other tests' mail alone, run as migrate.ts runs it.
+    const migration=await readFile(new URL('./migrations/332_forward_eligible_only.sql',import.meta.url),'utf8'),scoped=migration.replace('WHERE id > $1','WHERE workspace_id = $2 AND id > $1');
     assert.notEqual(scoped,migration);
-    // The replaced Worker stores a clean message with forwardSafe only, and commits after the migration ran.
+    // A clean message stored without forwardEligible (as only the Worker before #347 stored one) commits after the migration ran.
     await b.query('BEGIN');
     try {
       await b.query("INSERT INTO mail_messages(id,workspace_id,direction,thread_id,status,verdicts,headers,lifecycle) VALUES($1,$2,'inbound',$3,'received',$4,$5,'default')",
         [mid,w,thread,JSON.stringify({spf:'PASS',dkim:'PASS',dmarc:'PASS',spam:'PASS',virus:'PASS',forwardSafe:true}),JSON.stringify([{name:'Subject',value:'Rollout'}])]);
-      await a.query(scoped,[w]);
+      for(let cursor='';;){const next=(await a.query(scoped,[cursor,w])).rows[0].cursor;if(next===null)break;cursor=next;}
       await b.query('COMMIT');
     } finally { await b.query('ROLLBACK'); }
     assert.equal((await a.query("SELECT verdicts ? 'forwardEligible' AS decided FROM mail_messages WHERE id=$1",[mid])).rows[0].decided,false,'The migration never saw it.');
-    // It passes the forward rule and stops at the next check: this fixture has no sending address.
+    // The forward refuses it and decides nothing.
     const delivery={type:'forward',webhook_id:hook,payload:{messageId:mid,type:'message.received',data:{recipients:[`box@${w}.example`],junk:false}}} as unknown as import('./src/core.js').ClaimedWebhook;
-    await assert.rejects(sendToEndpoint(runtime,w,delivery),{code:'FORWARD_SENDER_REQUIRED'});
+    await assert.rejects(sendToEndpoint(runtime,w,delivery),{code:'FORWARD_BLOCKED'});
+    assert.equal((await a.query("SELECT verdicts ? 'forwardEligible' AS decided FROM mail_messages WHERE id=$1",[mid])).rows[0].decided,false);
+  });
+  // Migration 332 rewrites verdicts on mail_messages, a large hot table, while the previous release keeps ingesting and
+  // forwarding: one committed page at a time, resumable, and never over an answer a live forward stored meanwhile. It
+  // runs here on a copy of the table in its own schema, so two connections can take row locks on committed rows.
+  test('forward contract: 332 pages through every message, resumes after a lock timeout, keeps what a live writer stored and never changes a row twice', async t => {
+    const source = await readFile(new URL('./migrations/332_forward_eligible_only.sql', import.meta.url), 'utf8');
+    assert.match(source, /^-- bane:batched\n/);
+    const schema = 'c332_' + randomUUID().replaceAll('-', '').slice(0, 12), [admin, migrator, live] = await Promise.all([fixtureDatabase(t), fixtureDatabase(t), fixtureDatabase(t)]);
+    await admin.query(`CREATE SCHEMA ${schema}; CREATE TABLE ${schema}.mail_messages (LIKE public.mail_messages INCLUDING ALL)`);
+    try {
+      for (const c of [admin, migrator, live]) await c.query(`SET search_path TO ${schema}, public`);
+      // As migrate.ts runs a batched file: from cursor '', one committed page per call, until the cursor is NULL.
+      const migrate = async () => { let cursor = '', pages = 0; for (;;) { const next = (await migrator.query(source, [cursor])).rows[0].cursor; pages++; if (next === null) return pages; assert.notEqual(next, cursor); cursor = next; } };
+      // 4,500 messages (three pages), each of one kind (in subject), by g % 6.
+      const clean = '{"spf":"PASS","dkim":"PASS","dmarc":"PASS","spam":"PASS","virus":"PASS"}', headers = '[{"name":"From","value":"a@example.org"},{"name":"Received","value":"relay"}]';
+      await admin.query(`INSERT INTO mail_messages(id,workspace_id,thread_id,direction,status,subject,verdicts,headers)
+        SELECT 'm'||lpad(g::text,5,'0'),'contract-332','thr',CASE WHEN g%6=4 THEN 'outbound' ELSE 'inbound' END,CASE WHEN g%6=4 THEN 'sent' ELSE 'received' END,k,
+          CASE k WHEN 'legacy-allowed' THEN $1::jsonb||'{"forwardSafe":true}' WHEN 'legacy-refused' THEN $1::jsonb||'{"forwardSafe":false}'
+            WHEN 'decided-by-321' THEN $1::jsonb||'{"forwardSafe":false,"forwardEligible":true}' WHEN 'current' THEN $1::jsonb||'{"forwardEligible":false}'
+            WHEN 'outbound' THEN '{}'::jsonb ELSE '{"origin":"client-append"}'::jsonb END,
+          CASE WHEN g%6=4 THEN '[]'::jsonb ELSE $2::jsonb END
+        FROM generate_series(1,4500) g, LATERAL (SELECT (ARRAY['legacy-allowed','legacy-refused','decided-by-321','current','outbound','appended'])[g%6+1] AS k) kind`, [clean, headers]);
+      // Every shape the columns allow (verdicts and headers are any JSON), in the last page. [id, direction, status,
+      // automated, spam, verdicts, headers]
+      const ok = JSON.parse(clean), hdr = JSON.parse(headers), named = (...names: string[]) => names.map(name => ({ name, value: 'synthetic' }));
+      const shapes: [string, 'inbound' | 'outbound', string, boolean, boolean, unknown, unknown][] = [
+        ['s-safe-true', 'inbound', 'received', false, false, { ...ok, forwardSafe: true }, hdr],
+        ['s-safe-false', 'inbound', 'received', false, false, { ...ok, forwardSafe: false }, hdr],
+        ['s-safe-string', 'inbound', 'received', false, false, { ...ok, forwardSafe: 'false' }, hdr],
+        ['s-safe-null', 'inbound', 'received', false, false, { ...ok, forwardSafe: null }, hdr],
+        ['s-both', 'inbound', 'received', false, false, { ...ok, forwardSafe: true, forwardEligible: false }, hdr],
+        ['s-both-refused', 'inbound', 'received', false, false, { ...ok, forwardSafe: false, forwardEligible: true }, hdr],
+        ['s-eligible-only', 'inbound', 'received', false, false, { ...ok, forwardEligible: true }, hdr],
+        ['s-eligible-malformed', 'inbound', 'received', false, false, { ...ok, forwardEligible: 'yes', forwardSafe: true }, hdr],
+        ['s-eligible-null', 'inbound', 'received', false, false, { ...ok, forwardEligible: null }, hdr],
+        ['s-neither-clean', 'inbound', 'received', false, false, ok, hdr],
+        ['s-neither-empty', 'inbound', 'received', false, false, {}, hdr],
+        ['s-neither-sandbox', 'inbound', 'received', false, false, { simulated: true, spf: 'NONE', dkim: 'NONE', dmarc: 'NONE' }, hdr],
+        ['s-list', 'inbound', 'received', false, false, ok, named('From', 'List-Id')],
+        ['s-loop', 'inbound', 'received', false, false, ok, named('X-Bane-Loop')],
+        ['s-hops-24', 'inbound', 'received', false, false, ok, named(...Array(24).fill('Received'))],
+        ['s-hops-25', 'inbound', 'received', false, false, ok, named(...Array(25).fill('Received'))],
+        ['s-headers-199', 'inbound', 'received', false, false, ok, named(...Array(199).fill('X-Fixture'))],
+        ['s-headers-200', 'inbound', 'received', false, false, ok, named(...Array(200).fill('X-Fixture'))],
+        ['s-dmarc-fail', 'inbound', 'received', false, false, { ...ok, dmarc: 'FAIL' }, hdr],
+        ['s-no-virus', 'inbound', 'received', false, false, { ...ok, virus: undefined }, hdr],
+        ['s-unparsed', 'inbound', 'unparsed', false, false, ok, hdr],
+        ['s-automated', 'inbound', 'received', true, false, ok, hdr],
+        ['s-spam', 'inbound', 'received', false, true, ok, hdr],
+        ['s-json-null', 'inbound', 'received', false, false, null, hdr],
+        ['s-number', 'inbound', 'received', false, false, 5, hdr],
+        ['s-boolean', 'inbound', 'received', false, false, true, hdr],
+        ['s-array-empty', 'inbound', 'received', false, false, [], hdr],
+        ['s-array-key', 'inbound', 'received', false, false, ['forwardSafe', 'forwardEligible'], hdr],
+        ['s-array-object', 'inbound', 'received', false, false, [{ forwardSafe: true }], hdr],
+        ['s-string', 'inbound', 'received', false, false, 'forwardSafe', hdr],
+        ['s-headers-object', 'inbound', 'received', false, false, { ...ok, forwardSafe: true }, { name: 'From' }],
+        ['s-headers-string', 'inbound', 'received', false, false, ok, 'From: a@example.org'],
+        ['s-headers-nameless', 'inbound', 'received', false, false, ok, [{ value: 'x' }]],
+        ['s-headers-scalar-item', 'inbound', 'received', false, false, ok, ['From']],
+        ['s-headers-number-name', 'inbound', 'received', false, false, ok, [{ name: 5, value: 'x' }]],
+        ['s-headers-bad-refused', 'inbound', 'received', false, false, { ...ok, forwardSafe: false }, { name: 'From' }],
+        ['s-out-safe', 'outbound', 'sent', false, false, { forwardSafe: true }, []],
+        ['s-out-scalar', 'outbound', 'sent', false, false, 'forwardSafe', []],
+        ['s-out-array', 'outbound', 'sent', false, false, ['forwardSafe'], []],
+        ['s-out-null', 'outbound', 'sent', false, false, null, []],
+      ];
+      for (const [id, direction, status, automated, spam, verdicts, hs] of shapes)
+        await admin.query(`INSERT INTO mail_messages(id,workspace_id,thread_id,direction,status,automated,spam,subject,verdicts,headers) VALUES($1,'contract-332','thr',$2,$3,$4,$5,'shape',$6::jsonb,$7::jsonb)`,
+          [id, direction, status, automated, spam, JSON.stringify(verdicts), JSON.stringify(hs)]);
+      // The read #347 shipped (sendToEndpoint, then storedForwardEligibility for a message without forwardEligible), on
+      // each stored row: its answer, or that it threw.
+      const { forwardEligibility } = await import('./src/mailbox-ingest.js');
+      type Stored = { id: string; direction: string; status: string; automated: boolean; spam: boolean; verdicts: any; headers: any };
+      const shipped = (m: Stored): { value: unknown } | 'threw' => {
+        try {
+          let eligible = m.verdicts.forwardEligible;
+          if (eligible === undefined) eligible = m.verdicts.forwardSafe !== false && forwardEligibility(m, m.headers.map((h: { name: string }) => h.name.toLowerCase()));
+          return { value: eligible };
+        } catch { return 'threw'; }
+      };
+      // The read now: forwardEligible true, or refused.
+      const forwards = (m: Stored) => { try { return m.verdicts.forwardEligible === true; } catch { return false; } };
+      const stored = async (where = "subject='shape'") => new Map((await admin.query(`SELECT id,direction,status,automated,spam,verdicts,headers,xmin::text AS xmin FROM mail_messages WHERE ${where} ORDER BY id`)).rows.map((r: Stored & { xmin: string }) => [r.id, r]));
+      const seeded = await stored();
+      const versions = async () => new Map((await admin.query('SELECT id,xmin::text AS xmin FROM mail_messages')).rows.map((r: { id: string; xmin: string }) => [r.id, r.xmin]));
+      const inserted = await versions();
+      const state = async () => (await admin.query(`SELECT subject AS kind,count(*)::int AS n,count(*) FILTER (WHERE verdicts ? 'forwardSafe')::int AS safe,
+        count(*) FILTER (WHERE verdicts->'forwardEligible'='true')::int AS eligible,count(*) FILTER (WHERE verdicts->'forwardEligible'='false')::int AS refused FROM mail_messages WHERE subject<>'shape' GROUP BY 1 ORDER BY 1`)).rows;
+      const fingerprint = async () => (await admin.query('SELECT md5(string_agg(id||verdicts::text,\',\' ORDER BY id)) AS f FROM mail_messages')).rows[0].f;
+      const row = async (id: string) => (await admin.query('SELECT verdicts FROM mail_messages WHERE id=$1', [id])).rows[0].verdicts;
+      // The live Worker: a forward decides a legacy message on read (its own answer) and holds the row in page two, and
+      // ingest stores new mail on both sides of the cursor, as every message it stores now: forwardEligible, no forwardSafe.
+      assert.deepEqual(await row('m02496'), { ...JSON.parse(clean), forwardSafe: true });
+      await live.query('BEGIN');
+      let committed = false, pageOne: Map<string, string>;
+      try {
+        await live.query(`UPDATE mail_messages SET verdicts=verdicts||jsonb_build_object('forwardEligible',false) WHERE id='m02496' AND NOT verdicts ? 'forwardEligible'`);
+        await live.query(`INSERT INTO mail_messages(id,workspace_id,thread_id,direction,subject,verdicts,headers) VALUES('m00000a','contract-332','thr','inbound','new',$1::jsonb||'{"forwardEligible":true}',$2),
+          ('m04999a','contract-332','thr','inbound','new',$1::jsonb||'{"forwardEligible":false}',$2)`, [clean, headers]);
+        // A page that waits longer than lock_timeout fails; the pages before it stay committed.
+        await migrator.query("SET lock_timeout='200ms'");
+        await assert.rejects(migrate(), (e: Json) => e.code === '55P03');
+        assert.deepEqual(await row('m00006'), { ...JSON.parse(clean), forwardEligible: true }, 'Page one committed.');
+        pageOne = await versions();
+        // Run again (migrate.ts starts over from the first page): it waits for the forward, then finishes.
+        await migrator.query("SET lock_timeout='4s'");
+        const rerun = migrate(); rerun.catch(() => {});
+        const livePid = (await live.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+        for (let i = 0; !(await admin.query('SELECT FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))', [livePid])).rowCount; i++) {
+          assert.ok(i < 200, 'The rerun never reached the row the forward holds.'); await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        await live.query('COMMIT'); committed = true;
+        assert.equal(await rerun, 3);
+      } finally { if (!committed) await live.query('ROLLBACK'); }
+      // The rerun changed no row the interrupted run had already changed (page one): not even rewritten.
+      const after = await versions();
+      for (const [id, xmin] of pageOne!) if (id <= 'm02000') assert.equal(after.get(id), xmin, id);
+      // The forward's answer stands and forwardSafe is gone; ingest's new mail is as it stored it.
+      assert.deepEqual(await row('m02496'), { ...JSON.parse(clean), forwardEligible: false });
+      assert.deepEqual([await row('m00000a'), await row('m04999a')], [{ ...JSON.parse(clean), forwardEligible: true }, { ...JSON.parse(clean), forwardEligible: false }]);
+      // Every kind: legacy mail decided by 321's rule (an earlier refusal stands), an answer already stored kept, nothing
+      // else changed, and no forwardSafe left anywhere. Appended mail has no virus verdict, so the rule refuses it.
+      assert.deepEqual(await state(), [
+        { kind: 'appended', n: 750, safe: 0, eligible: 0, refused: 750 },
+        { kind: 'current', n: 750, safe: 0, eligible: 0, refused: 750 },
+        { kind: 'decided-by-321', n: 750, safe: 0, eligible: 750, refused: 0 },
+        { kind: 'legacy-allowed', n: 750, safe: 0, eligible: 749, refused: 1 },
+        { kind: 'legacy-refused', n: 750, safe: 0, eligible: 0, refused: 750 },
+        { kind: 'new', n: 2, safe: 0, eligible: 1, refused: 1 },
+        { kind: 'outbound', n: 750, safe: 0, eligible: 0, refused: 0 },
+      ]);
+      // Rows that needed nothing were never written, and the differential: each shape against the read #347 shipped.
+      for (const kind of ['current', 'outbound']) {
+        const ids = [...(await stored(`subject='${kind}'`)).keys()];
+        assert.ok(ids.every(id => after.get(id) === inserted.get(id)), `${kind} rows were never written.`);
+      }
+      const migrated = await stored();
+      for (const [id, before] of seeded) {
+        const now = migrated.get(id)!, old = shipped(before), object = before.verdicts !== null && typeof before.verdicts === 'object' && !Array.isArray(before.verdicts);
+        const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+        if (!object) {
+          // Not an object: left exactly as stored (never written), and the read refuses it as before (false, or threw on JSON null).
+          assert.equal(now.xmin, before.xmin, `${id}: written`);
+          assert.ok(old === 'threw' ? before.verdicts === null : old.value === false, `${id}: the shipped read allowed it`);
+        } else if (before.direction === 'outbound') {
+          // Outbound: forwardSafe removed, nothing added.
+          const { forwardSafe: _, ...rest } = before.verdicts;
+          assert.deepEqual(now.verdicts, rest, id);
+        } else {
+          // Inbound object: forwardEligible is what the shipped read returned (kept when it was stored), false where the
+          // read threw on malformed headers; forwardSafe removed; every other key as stored.
+          const { forwardSafe: _, ...rest } = before.verdicts;
+          const expected = old === 'threw' ? false : old.value;
+          assert.ok(same(now.verdicts.forwardEligible, expected), `${id}: ${JSON.stringify(now.verdicts.forwardEligible)} vs ${JSON.stringify(old)}`);
+          assert.deepEqual({ ...now.verdicts, forwardEligible: undefined }, { ...rest, forwardEligible: undefined }, id);
+          if (!('forwardSafe' in before.verdicts) && 'forwardEligible' in before.verdicts) assert.equal(now.xmin, before.xmin, `${id}: written`);
+        }
+        // Whatever the shape, a forward goes ahead now exactly when the shipped read let it.
+        assert.equal(forwards(now), old !== 'threw' && old.value === true, `${id}: forward decision changed`);
+      }
+      assert.equal(shipped(seeded.get('s-headers-object')!), 'threw');
+      assert.equal(shipped(seeded.get('s-json-null')!), 'threw');
+      // Run once more: nothing changes, and no row is written again.
+      const done = await fingerprint(), versionsDone = await versions();
+      assert.equal(await migrate(), 3);
+      assert.equal(await fingerprint(), done);
+      assert.deepEqual(await versions(), versionsDone);
+    } finally { await admin.query(`DROP SCHEMA ${schema} CASCADE`); }
   });
   // Recheck 2 of #57 (tear witness, 5 steps: accept m1 a, claim, accept m1 ac, lose, legacy-fail -> the previous
   // Worker's unfenced terminal write failed the receipt its reopen had expanded). Lease exhaustion retires a job
@@ -20100,10 +21103,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           [{ webhook_id: inbound.id, type: 'message.junk' }],
         );
       });
-      await t.test('rituals: ordered shaped webhook reuse routing, one admission and two or three ingest trips', async (it) => {
-        const path='/v1/rituals',config={rituals:[{key:'triage',source:'export default function route(email,ctx){ label("handled");endpoints["support-hook"]( {subject:email.subject,recipient:ctx.recipient}) }'}],attachments:[{target:box.id,ritual:'triage'}]};
-        const before=await call('GET',path);const demo=await call('POST',path+'/test',{config,mime:`To: ${box.address}\r\nSubject: hello\r\n\r\nTest`});assert.deepEqual(demo.trace.map((e:Json)=>e.kind),['ritual']);assert.deepEqual(demo.recipients[0].bodies[hook.id],{subject:'hello',recipient:box.address});assert.equal((await call('GET',path)).version,before.version);
-        const guard=async(source:string,text:string)=> (await call('POST',path+'/test',{config:{...config,rituals:[{key:'triage',source:`export default function route(email){${source}}`}]},mime:`To: ${box.address}\r\nSubject: fixture\r\n\r\n${text}`})).recipients[0];
+      await t.test('rules: ordered shaped webhook reuse routing, one admission and two or three ingest trips', async (it) => {
+        const path='/v1/rules',config={rules:[{key:'triage',source:'export default function route(email,ctx){ label("handled");endpoints["support-hook"]( {subject:email.subject,recipient:ctx.recipient}) }'}],attachments:[{target:box.id,rule:'triage'}]};
+        const before=await call('GET',path);const demo=await call('POST',path+'/test',{config,mime:`To: ${box.address}\r\nSubject: hello\r\n\r\nTest`});assert.deepEqual(demo.trace.map((e:Json)=>e.kind),['rule']);assert.deepEqual(demo.recipients[0].bodies[hook.id],{subject:'hello',recipient:box.address});assert.equal((await call('GET',path)).version,before.version);
+        const guard=async(source:string,text:string)=> (await call('POST',path+'/test',{config:{...config,rules:[{key:'triage',source:`export default function route(email){${source}}`}]},mime:`To: ${box.address}\r\nSubject: fixture\r\n\r\n${text}`})).recipients[0];
         assert.equal((await guard('if(/fixture/.test(email.text))block()','fixture'+' '.repeat(65536))).dropped,true);
         const failed=await guard('label(email.text)','invalid label');assert.equal(failed.junk,true);assert.ok(failed.labels.includes('ritual-error'));assert.ok(!failed.webhooks.includes(hook.id));
         await call('PUT',path,config);
@@ -20122,10 +21125,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           );
           await db.query('DELETE FROM jobs');
         }
-        const stored=await ingest('ritual-trace',[box.address]);const replay=await call('POST',path+'/test',{messageId:stored.id});assert.deepEqual(replay.recipients,stored.routing.recipients);
+        const stored=await ingest('ritual-trace',[box.address]);const replay=await call('POST',path+'/test',{messageId:stored.id});
+        // The dry run on the stored message is what ingest recorded; the rule operations name an action's stable ID actionId.
+        assert.deepEqual(replay.recipients,stored.routing.recipients.map((r:Json)=>r.actions?{...r,actions:Object.fromEntries(Object.entries(r.actions).map(([id,list])=>[id,(list as Json[]).map(({ritualAction,...a})=>({actionId:ritualAction,...a}))]))}:r));
+        assert.deepEqual((await call('POST','/v1/rituals/test',{messageId:stored.id})).recipients,stored.routing.recipients);
         const payload=(await db.query('SELECT payload FROM mailbox_webhook_deliveries WHERE workspace_id=$1 AND webhook_id=$2 AND payload->>\'messageId\'=$3',[wid,hook.id,stored.id])).rows[0].payload;assert.deepEqual(payload.ritualBody,{subject:'Test ritual-trace',recipient:box.address});
         assert.ok((await db.query('SELECT labels FROM mailbox_messages WHERE message_id=$1 AND mailbox_id=$2',[stored.id,box.id])).rows[0].labels.includes('handled'));await call('PUT',path,{});
-        const mixed={rituals:[...config.rituals,{key:'temporary',source:'export default function route(email){block()}'}],attachments:[{target:box.id,ritual:'temporary'},...config.attachments]};
+        const mixed={rules:[...config.rules,{key:'temporary',source:'export default function route(email){block()}'}],attachments:[{target:box.id,rule:'temporary'},...config.attachments]};
         await call('PUT',path,mixed);
         // A deleted grant can no longer authorize its binding to a human script. The other
         // binding still runs, and the unrelated outgoing action has no grant dependency.
@@ -20135,29 +21141,28 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal(independentAction.ritualBody.subject,'Test mixed-ownership');assert.equal(independentAction.grants,undefined);
         await call('PUT',path,{});
         await db.query('EXPLAIN INSERT INTO mailbox_webhook_deliveries DEFAULT VALUES ON CONFLICT(webhook_id,event_seq) DO NOTHING');
-        await call('PUT',path,{...config,rituals:[{key:'triage',source:'export default function route(email){endpoints["support-hook"]({part:1});endpoints["support-hook"]({part:2})}'}]});
+        await call('PUT',path,{...config,rules:[{key:'triage',source:'export default function route(email){endpoints["support-hook"]({part:1});endpoints["support-hook"]({part:2})}'}]});
         const multi=await ingest('two-actions',[box.address]);assert.deepEqual((await db.query("SELECT payload->'ritualBody' AS body FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2 ORDER BY body",[hook.id,multi.id])).rows.map(r=>r.body),[{part:1},{part:2}]);await call('PUT',path,{});
       });
-      await t.test('endpoints: a keyed webhook an attached ritual calls is neither deleted nor renamed, through either API', async () => {
+      await t.test('endpoints: a keyed webhook an attached rule calls is neither deleted nor renamed, through either API', async () => {
         const made = await call('POST', '/v1/inbound/webhooks', { url: 'https://hooks.example.org/in-use', eventTypes: [], key: 'in-use-hook' }, 201), legacy = '/v1/inbound/webhooks/' + made.id;
-        await call('PUT', '/v1/rituals', { rituals: [{ key: 'caller', source: 'export default function route(email){endpoints["in-use-hook"]({})}' }], attachments: [{ target: box.id, ritual: 'caller' }] });
+        await call('PUT', '/v1/rules', { rules: [{ key: 'caller', source: 'export default function route(email){endpoints["in-use-hook"]({})}' }], attachments: [{ target: box.id, rule: 'caller' }] });
         try {
           for (const [method, path, body, field] of [['DELETE', legacy, undefined, undefined], ['PATCH', legacy, { key: 'in-use-renamed' }, 'key'], ['PATCH', legacy, { key: null }, 'key'],
             ['DELETE', '/v1/endpoints/in-use-hook', undefined, undefined], ['PATCH', '/v1/endpoints/in-use-hook', { name: 'in-use-renamed' }, 'name']] as const) {
             const refused = error(await local(method, path, body), 409, 'ENDPOINT_IN_USE');
-            assert.match(refused.message, /^Attached ritual caller calls endpoints\.in-use-hook\./, `${method} ${path}`);
+            assert.match(refused.message, /^Attached rule caller calls endpoints\.in-use-hook\./, `${method} ${path}`);
             assert.equal(refused.field, field, `${method} ${path}`);
           }
           assert.equal((await call('PATCH', legacy, { description: 'still called' })).key, 'in-use-hook');
-        } finally { await call('PUT', '/v1/rituals', {}); }
+        } finally { await call('PUT', '/v1/rules', {}); }
         assert.equal((await call('PATCH', legacy, { key: 'in-use-renamed' })).key, 'in-use-renamed');
         await call('DELETE', legacy);
       });
       // Migration 322 gives Slack, Discord and forward endpoints a key, while this release still resolves routes.
       await t.test('routing: a Slack, Discord or forward endpoint is never a route destination, by ID or by name, even once it has a key', async () => {
         await call('POST', '/v1/endpoints', { type: 'slack', name: 'route-slack', url: 'https://hooks.slack.com/services/T0ROUTE/B0ROUTE/routefixture0001' }, 201);
-        const con = (await db.query("SELECT hook_id FROM mail_endpoints WHERE workspace_id=$1 AND ref='slack:route-slack'", [wid])).rows[0].hook_id as string;
-        await db.query('UPDATE mailbox_webhooks SET key=$2 WHERE id=$1', [con, 'route-slack']);
+        const con = (await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND type='slack' AND key='route-slack'", [wid])).rows[0].id as string;
         const config = (to: string[]) => ({ envelope: { to: ['route-check@receive.example'] }, config: { routes: [{ match: 'route-check@receive.example', to }] } });
         try {
           error(await local('POST', '/v1/routing/routes', { match: 'route-check@receive.example', to: ['webhook:route-slack'] }), 422, 'UNKNOWN_DESTINATION');
@@ -20173,24 +21178,27 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           assert.ok(!JSON.stringify(await call('GET', '/v1/routing?format=config')).includes('route-slack'));
         } finally { await call('DELETE', '/v1/endpoints/route-slack'); }
       });
-      await t.test('inbound overview: one read merges addresses, patterns, routes and catch-alls with their rituals and endpoints; dry runs step through each condition', async () => {
+      await t.test('inbound overview: one read merges addresses, patterns, routes and catch-alls with their rules and endpoints; dry runs step through each condition', async () => {
         const box2 = await call('POST', '/v1/inbound/addresses', { address: 'overview@receive.example', key: 'overview', displayName: 'Overview desk', aliases: ['ov-alias@receive.example'], rules: ['ov+*@receive.example'] }, 201);
         const only = await route('ov-route@receive.example', [hook.id]), dropped = await route('ov-drop@receive.example', 'drop');
         const source = 'export default function route(email){ if(/refund/i.test(email.subject)) { label("refund"); endpoints["support-hook"]({ s: email.subject }) } else junk("other") }';
-        await call('PUT', '/v1/rituals', { rituals: [{ key: 'ovtriage', source }], attachments: [{ target: box2.id, ritual: 'ovtriage' }] });
+        await call('PUT', '/v1/rules', { rules: [{ key: 'ovtriage', source }], attachments: [{ target: box2.id, rule: 'ovtriage' }] });
         const overview = await call('GET', '/v1/inbound/overview?q=ov');
         const byMatch = (m: string) => overview.routes.data.find((r: Json) => r.match === m);
         const own = byMatch('overview@receive.example');
-        assert.equal(own.kind, 'address'); assert.equal(own.address.id, box2.id); assert.deepEqual(own.address.aliases, ['ov-alias@receive.example']); assert.deepEqual(own.rituals, ['ovtriage']);
-        assert.deepEqual(own.to.map((t: Json) => [t.type, t.id, t.via]), [['inbox', box2.id, null], ['webhook', hook.id, 'ovtriage']], 'its inbox by routing, then the endpoint the ritual can call');
+        assert.equal(own.kind, 'address'); assert.equal(own.address.id, box2.id); assert.deepEqual(own.address.aliases, ['ov-alias@receive.example']); assert.deepEqual([own.rules, own.rituals], [['ovtriage'], ['ovtriage']]);
+        assert.deepEqual(own.to.map((t: Json) => [t.type, t.id, t.via]), [['inbox', box2.id, null], ['webhook', hook.id, 'ovtriage']], 'its inbox by routing, then the endpoint the rule can call');
         assert.deepEqual([own.toTotal, own.toTruncated, own.toMore], [2, false, null], 'a short list is the whole list');
         assert.equal(byMatch('ov+*@receive.example').kind, 'pattern'); assert.equal(byMatch('ov+*@receive.example').address.id, box2.id);
         assert.deepEqual([byMatch('ov-route@receive.example').kind, byMatch('ov-route@receive.example').route.id, byMatch('ov-route@receive.example').to[0].id], ['route', only.id, hook.id]);
         assert.deepEqual(byMatch('ov-drop@receive.example').to.map((t: Json) => t.type), ['drop']);
         assert.equal(overview.manage, true); assert.ok(overview.counts.address >= 1 && overview.counts.route >= 2 && overview.counts.pattern >= 1);
-        assert.deepEqual(overview.rituals.find((r: Json) => r.key === 'ovtriage'), { key: 'ovtriage', calls: ['support-hook'], delivers: [], omens: [], attachedTo: [box2.id], addresses: [box2.address], recipe: null, enabled: true, lastMatchedAt: null });
+        const listed = { key: 'ovtriage', calls: ['support-hook'], delivers: [], attachedTo: [box2.id], addresses: [box2.address], recipe: null, enabled: true, lastMatchedAt: null };
+        assert.deepEqual(overview.rules.find((r: Json) => r.key === 'ovtriage'), { ...listed, decisions: [] });
+        // The deprecated rituals list is the same list under the names from before the rename.
+        assert.deepEqual(overview.rituals.find((r: Json) => r.key === 'ovtriage'), { ...listed, omens: [] });
         const endpoint = overview.endpoints.find((e: Json) => e.id === hook.id);
-        assert.deepEqual([endpoint.source, endpoint.name, endpoint.rituals], ['endpoint', 'support-hook', ['ovtriage']]); assert.ok(endpoint.routes >= 1);
+        assert.deepEqual([endpoint.source, endpoint.name, endpoint.rules, endpoint.rituals], ['endpoint', 'support-hook', ['ovtriage'], ['ovtriage']]); assert.ok(endpoint.routes >= 1);
         assert.ok(!JSON.stringify(overview).includes('hooks.example.org'), 'webhook URLs stay write-only');
         assert.equal((await call('GET', '/v1/inbound/overview?q=ov-alias')).routes.data[0].address.id, box2.id, 'search reaches aliases');
         const first = await call('GET', '/v1/inbound/overview?q=ov&kind=route&limit=1'), second = await call('GET', '/v1/inbound/overview?q=ov&kind=route&limit=1&cursor=' + first.routes.nextCursor);
@@ -20204,8 +21212,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const scoped = await call('POST', '/v1/inbound/keys', { name: 'overview reader', addressIds: [box2.id], permissions: ['read'] }, 201); secrets.add(scoped.secret);
         const limited = ok(await request('GET', '/v1/inbound/overview', scoped.secret));
         assert.equal(limited.manage, false); assert.deepEqual(limited.routes.data.map((r: Json) => r.match), ['overview@receive.example', 'ov+*@receive.example']);
-        assert.deepEqual([limited.rituals, limited.endpoints, limited.domains, limited.routes.data[0].to.map((t: Json) => t.type)], [[], [], [], ['inbox']]);
-        const step = async (subject: string) => (await call('POST', '/v1/rituals/test', { mime: `From: a@example.net\r\nTo: overview@receive.example\r\nSubject: ${subject}\r\n\r\nHello` })).trace[0].timeline;
+        assert.deepEqual([limited.rules, limited.rituals, limited.endpoints, limited.domains, limited.routes.data[0].to.map((t: Json) => t.type)], [[], [], [], [], ['inbox']]);
+        const step = async (subject: string) => (await call('POST', '/v1/rules/test', { mime: `From: a@example.net\r\nTo: overview@receive.example\r\nSubject: ${subject}\r\n\r\nHello` })).trace[0].timeline;
         const at = source.indexOf('/refund/') + 1, end = source.indexOf(') {') + 1;
         assert.deepEqual(await step('Refund please'), [
           { kind: 'condition', line: 1, column: at, endLine: 1, endColumn: end, result: true },
@@ -20213,7 +21221,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           { kind: 'action', line: 1, op: 'endpoint', ref: 'endpoint:support-hook' },
         ]);
         assert.deepEqual((await step('Hello')).map((s: Json) => [s.kind, s.result ?? s.op]), [['condition', false], ['action', 'junk']]);
-        await call('PUT', '/v1/rituals', {});
+        await call('PUT', '/v1/rules', {});
         for (const r of [only, dropped]) await call('DELETE', '/v1/routing/routes/' + r.id);
         await call('DELETE', `/v1/inbound/addresses/${box2.id}?detach=true`);
       });
@@ -20345,23 +21353,23 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.deepEqual([after.toTruncated, after.toTotal, after.toMore], [false, after.to.length, null]);
         await call('DELETE', `/v1/inbound/addresses/${sub.id}?detach=true`);
       });
-      await t.test('rituals: recipes write ordinary rituals in stage order, keep their recipe until edited by hand, turn off without detaching and report last matched', async () => {
-        const path = '/v1/rituals', recipes = path + '/recipes';
+      await t.test('rules: recipes write ordinary rules in stage order, keep their recipe until edited by hand, turn off without detaching and report last matched', async () => {
+        const path = '/v1/rules', recipes = path + '/recipes';
         const catalog = await call('GET', recipes);
         assert.deepEqual(catalog.groups.map((g: Json) => g.id), ['notify', 'pass', 'junk', 'ai']);
-        assert.equal(catalog.omenPricePerThousand, '0.10');
-        assert.deepEqual(catalog.data.filter((r: Json) => r.omens).map((r: Json) => r.id), ['label-by-meaning', 'alert-by-meaning']);
+        assert.equal(catalog.decisionPricePerThousand, '0.10');
+        assert.deepEqual(catalog.data.filter((r: Json) => r.decisions).map((r: Json) => r.id), ['label-by-meaning', 'alert-by-meaning']);
         assert.deepEqual(catalog.data.find((r: Json) => r.id === 'slack').fields, [{ name: 'channel', type: 'slack', label: 'Slack channel', placeholder: null, hint: null }]);
         await call('POST', '/v1/endpoints', { type: 'slack', name: 'recipe-chat', url: 'https://hooks.slack.com/services/T0RECIPE/B0RECIPE/synthetic' }, 201);
         // A hand-written script already runs on the address and stops the rest when it acts.
-        await call('PUT', path, { rituals: [{ key: 'own', source: 'export default function route(email){ label("own") }' }], attachments: [{ ritual: 'own', target: box.id }] });
+        await call('PUT', path, { rules: [{ key: 'own', source: 'export default function route(email){ label("own") }' }], attachments: [{ rule: 'own', target: box.id }] });
         error(await local('POST', recipes, { recipe: 'slack', params: { channel: 'nope' }, addresses: [box.id] }), 422, 'INVALID_RECIPE');
         error(await local('POST', recipes, { recipe: 'slack', params: { channel: 'support-hook' }, addresses: [box.id] }), 422, 'INVALID_RECIPE');
         error(await local('POST', recipes, { recipe: 'teleport', params: {}, addresses: [box.id] }), 422, 'UNKNOWN_RECIPE');
         error(await local('POST', recipes, { recipe: 'slack', params: { channel: 'recipe-chat' }, addresses: ['nobody@receive.example'] }), 422, 'UNKNOWN_TARGET');
         const slack = await call('POST', recipes, { recipe: 'slack', params: { channel: 'recipe-chat' }, addresses: [box.id] }, 201);
         assert.equal(slack.key, 'slack-support');
-        const ritual = (config: Json, key: string) => config.rituals.find((r: Json) => r.key === key);
+        const ritual = (config: Json, key: string) => config.rules.find((r: Json) => r.key === key);
         assert.deepEqual(ritual(slack.config, 'slack-support').recipe, { id: 'slack', params: { channel: 'recipe-chat' } });
         assert.match(ritual(slack.config, 'slack-support').source, /if \(ctx\.junk\) return\n  endpoints\["recipe-chat"\]\(\{ text: `\$\{email\.from\.address\}: \$\{email\.subject\}` \}\)/);
         // Recipes act independently and run before the address's own scripts, keep-out recipes first.
@@ -20369,25 +21377,25 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const vip = await call('POST', recipes, { recipe: 'allow-senders', params: { senders: 'CEO@Example.net, @partner.example' }, addresses: [box.id] }, 201);
         assert.deepEqual(ritual(vip.config, vip.key).recipe.params, { senders: ['ceo@example.net', '@partner.example'] });
         assert.deepEqual(vip.config.attachments, [
-          { ritual: junk.key, target: box.address, continue: true }, { ritual: vip.key, target: box.id, continue: true },
-          { ritual: 'slack-support', target: box.id, continue: true }, { ritual: 'own', target: box.id, continue: false },
+          { rule: junk.key, target: box.address, continue: true }, { rule: vip.key, target: box.id, continue: true },
+          { rule: 'slack-support', target: box.id, continue: true }, { rule: 'own', target: box.id, continue: false },
         ]);
         assert.deepEqual(vip.config.evaluateDomains, []);
         const ai = await call('POST', recipes, { recipe: 'label-by-meaning', params: { meaning: 'A refund request.', label: 'Refund' }, addresses: [box.id] }, 201);
         assert.deepEqual(ritual(ai.config, ai.key).recipe.params, { meaning: 'a refund request', label: 'refund' });
         assert.deepEqual(ai.config.evaluateDomains, ['receive.example']);
-        // Ingest records which rituals acted; the overview turns that into last matched.
+        // Ingest records which rules acted; the overview turns that into last matched.
         const first = await ingest('recipe-matched', [box.address]);
         const acted = (await db.query('SELECT verdicts FROM mail_messages WHERE id=$1', [first.id])).rows[0].verdicts.ritualsActed;
         assert.deepEqual([...acted].sort(), ['own', 'slack-support']);
-        const overview = async () => (await call('GET', '/v1/inbound/overview?q=support')).rituals;
+        const overview = async () => (await call('GET', '/v1/inbound/overview?q=support')).rules;
         const listed = (await overview()).find((r: Json) => r.key === 'slack-support');
         assert.deepEqual([listed.recipe, listed.enabled, typeof listed.lastMatchedAt, listed.addresses], [{ id: 'slack', params: { channel: 'recipe-chat' } }, true, 'string', [box.address]]);
         assert.equal((await overview()).find((r: Json) => r.key === junk.key).lastMatchedAt, null);
-        // Off keeps the ritual and its attachment, and leaves it out of the plan ingest runs.
+        // Off keeps the rule and its attachment, and leaves it out of the plan ingest runs.
         const off = await call('PATCH', path + '/scripts/slack-support', { enabled: false });
         assert.equal(ritual(off.config, 'slack-support').enabled, false);
-        assert.ok(off.config.attachments.some((a: Json) => a.ritual === 'slack-support'));
+        assert.ok(off.config.attachments.some((a: Json) => a.rule === 'slack-support'));
         assert.ok(!(await db.query('SELECT programs FROM mail_ritual_configs WHERE workspace_id=$1', [wid])).rows[0].programs.attachments.some((a: Json) => a.ritual === 'slack-support'));
         const second = await ingest('recipe-off', [box.address]);
         assert.deepEqual((await db.query('SELECT verdicts FROM mail_messages WHERE id=$1', [second.id])).rows[0].verdicts.ritualsActed, ['own']);
@@ -20403,15 +21411,15 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         error(await local('PUT', path + '/scripts/own/recipe', { params: {} }), 422, 'NOT_A_RECIPE');
         const converted = await call('PUT', path + '/scripts/own/recipe', { recipe: 'junk-failed-dmarc', params: {} });
         assert.equal(ritual(converted.config, 'own').recipe.id, 'junk-failed-dmarc');
-        assert.deepEqual(converted.config.attachments.at(-1), { ritual: 'own', target: box.id, continue: false });
+        assert.deepEqual(converted.config.attachments.at(-1), { rule: 'own', target: box.id, continue: false });
         // Changing a recipe's addresses keeps the ones that stay where they were.
         const other = await call('POST', '/v1/inbound/addresses', { address: 'recipes@receive.example' }, 201);
         const moved = await call('PUT', `${path}/scripts/${junk.key}/recipe`, { params: {}, addresses: [box.address, other.id] });
-        assert.deepEqual(moved.config.attachments.filter((a: Json) => a.ritual === junk.key).map((a: Json) => a.target), [box.address, other.id]);
-        // A ritual with no attachments still lists in the overview.
+        assert.deepEqual(moved.config.attachments.filter((a: Json) => a.rule === junk.key).map((a: Json) => a.target), [box.address, other.id]);
+        // A rule with no attachments still lists in the overview.
         await call('PUT', path + '/scripts/loose', { key: 'loose', source: 'export default function route(email){ label("loose") }' });
         assert.deepEqual((await overview()).find((r: Json) => r.key === 'loose').attachedTo, []);
-        // A forward that stops being confirmed after a ritual was saved with it no longer blocks other saves.
+        // A forward that stops being confirmed after a rule was saved with it no longer blocks other saves.
         // From the other address, so its confirmation email isn't the one the forward tests below read for box.
         await call('POST', '/v1/endpoints', { type: 'forward', name: 'recipe-fwd', address: 'recipes@example.net', from: other.id }, 201);
         error(await local('POST', recipes, { recipe: 'forward', params: { to: 'recipe-fwd' }, addresses: [box.id] }), 422, 'UNKNOWN_ENDPOINT');
@@ -20424,6 +21432,103 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await call('PUT', path, {});
         for (const name of ['recipe-chat', 'recipe-fwd']) await call('DELETE', `/v1/endpoints/${name}`);
       });
+      await t.test('rules: omens(…) compiles to the plan decisions(…) does and ingests to the same verdicts; the /v1/rituals aliases answer as they did before the rename', async it => {
+        const path = '/v1/rules', legacy = '/v1/rituals', prior = runtime.config.screen;
+        const source = (fn: string) => `export default function route(email,ctx){\n  const r = ${fn}(email, { refund: "Is the sender asking for a refund?", urgent: { prompt: "Does this need a reply today?", type: "boolean", threshold: 0.8 } })\n  if (r.refund >= 0.7) label("refund")\n  if (r.urgent) endpoints["support-hook"]({ subject: "urgent" })\n}`;
+        const { compileRitual } = await import('./src/ritual-engine.js');
+        assert.deepEqual(compileRitual(source('omens')), compileRitual(source('decisions')), 'one compiled plan');
+        runtime.config.screen = { apiKey: 'synthetic', endpoint: 'https://jev.invalid/fixture', model: 'synthetic', mode: 'reject', threshold: 0.7 };
+        // The AI answers e0 and e1 in the order of the sorted questions: the reply-today one, then the refund one.
+        const stub = it.mock.method(globalThis, 'fetch', async () => Response.json({ answers: { e0: { noul: 0.95 }, e1: { noul: 0.9 } } }));
+        try {
+          const outcome = async (fn: string) => {
+            await call('PUT', path, { rules: [{ key: 'asks', source: source(fn) }], attachments: [{ rule: 'asks', target: box.id }], evaluateDomains: ['receive.example'] });
+            const m = await ingest(`asks-${fn}`, [box.address]);
+            const { verdicts } = (await db.query('SELECT verdicts FROM mail_messages WHERE id=$1', [m.id])).rows[0];
+            const { labels } = (await db.query('SELECT labels FROM mailbox_messages WHERE message_id=$1 AND mailbox_id=$2', [m.id, box.id])).rows[0];
+            const bodies = (await db.query("SELECT payload->'ritualBody' AS body FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2 AND payload ? 'ritualBody'", [hook.id, m.id])).rows.map(r => r.body);
+            const dry = await call('POST', path + '/test', { messageId: m.id });
+            return { scores: verdicts.ritualScores, acted: verdicts.ritualsActed, calls: verdicts.omenCalls, labels, bodies, trace: dry.trace.map(({ recipient, ...row }: Json) => row), routed: dry.recipients.map(({ actions, ...r }: Json) => ({ ...r, actions: Object.keys(actions ?? {}) })) };
+          };
+          const omens = await outcome('omens'), decisions = await outcome('decisions');
+          assert.deepEqual(decisions, omens);
+          assert.deepEqual([omens.labels.includes('refund'), omens.bodies, omens.calls, omens.acted], [true, [{ subject: 'urgent' }], 1, ['asks']]);
+          assert.deepEqual(omens.trace[0].timeline.find((s: Json) => s.kind === 'decisions').scores, { refund: 0.9, urgent: true });
+        } finally { stub.mock.restore(); runtime.config.screen = prior; }
+        // The rule operations name things rules and decisions; each alias answers in the shape it always did.
+        const saved = await call('GET', path), old = await call('GET', legacy);
+        assert.equal(old.version, saved.version);
+        assert.deepEqual([Object.keys(saved.config).sort(), saved.config.attachments], [['attachments', 'evaluateDomains', 'evaluateRoutes', 'rules', 'senderLists'], [{ rule: 'asks', target: box.id, continue: false }]]);
+        assert.deepEqual([Object.keys(old.config).sort(), old.config.attachments, old.config.rituals], [['attachments', 'evaluateDomains', 'evaluateRoutes', 'rituals', 'senderLists'], [{ ritual: 'asks', target: box.id, continue: false }], saved.config.rules]);
+        // Either spelling is accepted on write, through either name; never both at once.
+        for (const [base, body, key] of [[path, { rituals: [{ key: 'old', source: source('omens') }], attachments: [{ ritual: 'old', target: box.id }] }, 'old'], [legacy, { rules: [{ key: 'new', source: source('decisions') }], attachments: [{ rule: 'new', target: box.id }] }, 'new']] as [string, Json, string][])
+          assert.deepEqual((await call('PUT', base, body)).config.attachments.map((a: Json) => a.rule ?? a.ritual), [key]);
+        error(await local('PUT', path, { rules: [], rituals: [] }), 422);
+        error(await local('PUT', path + '/attachments', { attachments: [{ rule: 'new', ritual: 'new', target: box.id }] }), 422);
+        // Compile errors: the rule code, field and details; the alias keeps the ritual ones.
+        const broken = { rules: [{ key: 'broken', source: 'export default function route(email){ email.subjet }' }] };
+        const now = error(await local('PUT', path, broken), 422, 'RULE_INVALID'), then = error(await local('PUT', legacy, broken), 422, 'RITUAL_INVALID');
+        assert.deepEqual([now.field, now.details[0].rule, now.details[0].ritual, then.field, then.details[0].ritual, then.details[0].rule], ['rules', 'broken', undefined, 'rituals', 'broken', undefined]);
+        assert.match(now.message, /^Rule broken, line 1/);
+        const checked = await call('POST', path + '/check', { key: 'asks', source: source('omens') }), checkedThen = await call('POST', legacy + '/check', { key: 'asks', source: source('decisions') });
+        assert.deepEqual([checked.decisions, checked.omens, checkedThen.omens, checkedThen.decisions], [['refund', 'urgent'], undefined, ['refund', 'urgent'], undefined]);
+        assert.deepEqual((await call('POST', path + '/check', { source: broken.rules[0].source, key: 'broken' })).diagnostics[0].rule, 'broken');
+        // Recipes, templates and typings: decisions, and omens only on the aliases.
+        const recipes = await call('GET', path + '/recipes'), recipesThen = await call('GET', legacy + '/recipes');
+        assert.deepEqual([recipes.decisionPricePerThousand, recipes.omenPricePerThousand, recipesThen.omenPricePerThousand, recipesThen.decisionPricePerThousand], ['0.10', undefined, '0.10', undefined]);
+        assert.deepEqual([recipes.data.filter((r: Json) => r.decisions).map((r: Json) => r.id), recipesThen.data.filter((r: Json) => r.omens).map((r: Json) => r.id)], [['label-by-meaning', 'alert-by-meaning'], ['label-by-meaning', 'alert-by-meaning']]);
+        // Each name's typings declare its own words and type-check its own templates (TypeScript itself checks them): the
+        // alias answers the declarations from before the rename, and the rule ones also declare omens and Omen, deprecated,
+        // so a source stored with them still checks in an editor that loads the new typings.
+        const ts = (await import('typescript')).default, libs = new Map<string, ReturnType<typeof ts.createSourceFile> | undefined>();
+        const problems = (declarations: string, sources: Record<string, string>) => {
+          const options = { noEmit: true, strict: false, skipLibCheck: true, target: ts.ScriptTarget.ES2022, lib: ['lib.es2022.d.ts'], types: [] };
+          // The declarations as a global script, and each source as a module whose function takes route's types.
+          const files = new Map([['/rules.d.ts', declarations.replace(/^export default function route\(/m, 'declare function route(')],
+            ...Object.entries(sources).map(([name, source]) => [`/${name}.ts`, source.replace(/^export default function route\(/m, 'export const typed: typeof route = function (')] as [string, string])]);
+          const host = ts.createCompilerHost(options), read = host.getSourceFile.bind(host), exists = host.fileExists.bind(host);
+          host.fileExists = name => files.has(name) || exists(name);
+          host.getSourceFile = (name, target) => files.has(name) ? ts.createSourceFile(name, files.get(name)!, target) : libs.get(name) ?? libs.set(name, read(name, target)).get(name);
+          return ts.getPreEmitDiagnostics(ts.createProgram([...files.keys()], options, host)).map(d => `${d.file?.fileName}: ${ts.flattenDiagnosticMessageText(d.messageText, ' ')}`);
+        };
+        const asks = (fn: string, question: string, context: string) => `export default function route(email, ctx) {\n  const urgent: ${question} = { prompt: "Does this need a reply today?", type: "boolean" }\n  const r = ${fn}(email, { refund: "Is the sender asking for a refund?", urgent })\n  const recipient: ${context} = ctx\n  if (r.refund >= 0.7 && r.urgent) label(recipient.local)\n}`;
+        await call('PUT', path, { senderLists: { vip: ['@example.com'] } });
+        const [typings, typingsThen] = [await call('GET', path + '/typings'), await call('GET', legacy + '/typings')];
+        const [templates, templatesThen] = [(await call('GET', path + '/templates')).data as Json[], (await call('GET', legacy + '/templates')).data as Json[]];
+        const usable = (list: Json[]) => Object.fromEntries(list.filter(x => !x.needs || x.endpoint).map(x => [x.id, x.source]));
+        assert.ok(Object.keys(usable(templates)).length >= 5);
+        assert.deepEqual(problems(typings.typescript, { ...usable(templates), now: asks('decisions', 'Decision', 'RuleContext'), stored: asks('omens', 'Omen', 'RuleContext') }), []);
+        assert.deepEqual(problems(typingsThen.typescript, { ...usable(templatesThen), then: asks('omens', 'Omen', 'RitualContext') }), []);
+        assert.match(problems(typingsThen.typescript, { now: asks('decisions', 'Decision', 'RitualContext') }).join('\n'), /Cannot find name 'decisions'/);
+        assert.deepEqual([/@deprecated[^\n]*\ntype Omen = Decision;/.test(typings.typescript), /\bdecisions\b|Decision|RuleContext/.test(typingsThen.typescript)], [true, false]);
+        assert.deepEqual([typings.completions.some((x: Json) => x.label === 'omens'), typingsThen.completions.filter((x: Json) => ['omens', 'decisions'].includes(x.label)).map((x: Json) => x.label)], [false, ['omens']]);
+        assert.deepEqual([templates.find(x => x.id === 'refund-decision')?.source.includes('decisions(email'), templatesThen.find(x => x.id === 'refund-omen')?.source.includes('omens(email')], [true, true]);
+        assert.ok(templatesThen.every(x => !/decisions\(/.test(x.source)) && templates.every(x => !/omens\(/.test(x.source)));
+        // A dry run names each row's kind rule, its timeline's answers decisions, and an endpoint call's stable ID actionId.
+        const mime = `From: a@example.net\r\nTo: ${box.address}\r\nSubject: Refund\r\n\r\nRefund please`, scores = { 'Is the sender asking for a refund?': 0.9, 'Does this need a reply today?': 1 };
+        await call('PUT', path, { rules: [{ key: 'asks', source: source('decisions') }], attachments: [{ rule: 'asks', target: box.id }], evaluateDomains: ['receive.example'] });
+        const dry = await call('POST', path + '/test', { mime, scores }), dryThen = await call('POST', legacy + '/test', { mime, scores });
+        assert.deepEqual([dry.trace[0].kind, dryThen.trace[0].kind], ['rule', 'ritual']);
+        assert.deepEqual([dry.trace[0].timeline.map((s: Json) => s.kind), dryThen.trace[0].timeline.map((s: Json) => s.kind)], [['decisions', 'condition', 'action', 'condition', 'action'], ['omens', 'condition', 'action', 'condition', 'action']]);
+        assert.deepEqual([Object.keys(dry.recipients[0].actions[hook.id][0]), Object.keys(dryThen.recipients[0].actions[hook.id][0])], [['actionId', 'body'], ['ritualAction', 'body']]);
+        assert.equal(dry.recipients[0].actions[hook.id][0].actionId, dryThen.recipients[0].actions[hook.id][0].ritualAction);
+        // Opt-ins: decisions, at its earlier path too.
+        assert.deepEqual((await call('PUT', path + '/decisions', { evaluateDomains: ['receive.example'] })).config.evaluateDomains, ['receive.example']);
+        assert.deepEqual((await call('PUT', legacy + '/omens', { evaluateDomains: [] })).config.evaluateDomains, []);
+        // An AI recipe saved before the rename wrote omens(…): it keeps its recipe, and rewriting it writes decisions(…).
+        const recipe = await call('POST', path + '/recipes', { recipe: 'label-by-meaning', params: { meaning: 'a refund request', label: 'refund' }, addresses: [box.id], key: 'meaning' }, 201);
+        const written = recipe.config.rules.find((r: Json) => r.key === 'meaning').source as string;
+        assert.match(written, /const asks = decisions\(email/);
+        const before = await call('PUT', path + '/scripts/meaning', { key: 'meaning', source: written.replace('decisions(', 'omens(') });
+        assert.deepEqual(before.config.rules.find((r: Json) => r.key === 'meaning').recipe, { id: 'label-by-meaning', params: { meaning: 'a refund request', label: 'refund' } });
+        error(await local('POST', path + '/recipes', { recipe: 'junk-newsletters', params: {}, addresses: [box.id], key: 'meaning' }), 409, 'RULE_EXISTS');
+        error(await local('POST', legacy + '/recipes', { recipe: 'junk-newsletters', params: {}, addresses: [box.id], key: 'meaning' }), 409, 'RITUAL_EXISTS');
+        const overview = await call('GET', '/v1/inbound/overview?q=support');
+        assert.deepEqual([overview.rules.find((r: Json) => r.key === 'meaning').decisions, overview.rituals.find((r: Json) => r.key === 'meaning').omens], [['match'], ['match']]);
+        await call('PUT', path, {});
+      });
+      // The tests below write through the deprecated /v1/rituals aliases with the keys from before the rename (rituals,
+      // ritual, omens(…)), as clients written then do.
       await t.test('rituals: opt-in unions Jev questions, replays recorded scores and lets scripts choose the action',async it=>{
         const path='/v1/rituals',prior=runtime.config.screen;runtime.config.screen={apiKey:'synthetic',endpoint:'https://jev.invalid/fixture',model:'synthetic',mode:'reject',threshold:0.7};let calls=0;
         const questions=(start:number,count:number)=>Array.from({length:count},(_,i)=>`q${start+i}:"question ${start+i}?"`).join(',');
@@ -20499,7 +21604,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           assert.equal((await db.query('SELECT FROM mail_forward_once WHERE message_id=$1 AND endpoint=$2',[m.id,hookId])).rowCount,1);
         }finally{await call('PUT','/v1/rituals',{});}
       });
-      await t.test('rituals: one forward rule, recorded at ingest for every message, added to older mail and decided on read for mail stored without it',async()=>{
+      await t.test('rituals: one forward rule, recorded at ingest for every message and added to older mail; mail stored without it is never forwarded',async()=>{
         // tear/delivery witnesses: ingest m1 z, strip m1, rituals forward, ingest m1 b+z, run K m1:F (and the loop variant).
         const {mailboxEventJobs}=await import('./src/mailbox-events.js');
         const hookId=(await db.query("SELECT id AS hook_id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='team' AND type='forward' AND verified",[wid])).rows[0].hook_id;
@@ -20513,31 +21618,34 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         for(const [mid,extra] of cases){raw.set(mid,Buffer.from(`From: Agent <a@example.org>\r\n${extra}Subject: Test ${mid}\r\nMessage-ID: <${mid}@example.org>\r\n\r\nHello`));await submit(mid,['late@receive.example'],'Mail');await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);}
         // Recorded at ingest for every message, though nothing routes this address yet.
         assert.deepEqual(Object.fromEntries(Object.entries(await verdicts()).map(([mid,v])=>[mid,v.forwardEligible])),Object.fromEntries(cases.map(([mid,,ok])=>[mid,ok])));
-        // As stored by earlier deployments: no verdict, or the earlier ingest's forwardSafe (it let List-Id and 25 hops
-        // through). The backfill (migration 321) applies the same rule, keeps an earlier refusal, and runs twice the same.
-        await db.query("UPDATE mail_messages SET verdicts=verdicts-'forwardEligible'-'ritualVerified' WHERE workspace_id=$1 AND ses_message_id=ANY($2)",[wid,cases.map(c=>c[0])]);
-        await db.query(`UPDATE mail_messages SET verdicts=verdicts||'{"forwardSafe":true}' WHERE workspace_id=$1 AND ses_message_id IN ('fwd-list','fwd-hops-25','fwd-old')`,[wid]);
+        // As stored by earlier deployments: no verdict, the earlier ingest's forwardSafe (it let List-Id and 25 hops
+        // through), or both once migration 321 decided it. Migration 332, run as migrate.ts runs a batched file, decides
+        // the first two by the same rule (an earlier refusal stands), keeps an answer already stored, removes forwardSafe
+        // and changes nothing else; a second run changes nothing.
+        await db.query("UPDATE mail_messages SET verdicts=verdicts-'forwardEligible'-'ritualVerified' WHERE workspace_id=$1 AND ses_message_id=ANY($2) AND ses_message_id<>'fwd-hops-24'",[wid,cases.map(c=>c[0])]);
+        await db.query(`UPDATE mail_messages SET verdicts=verdicts-'ritualVerified'||'{"forwardSafe":true}' WHERE workspace_id=$1 AND ses_message_id IN ('fwd-list','fwd-hops-25','fwd-old','fwd-hops-24')`,[wid]);
         await db.query(`UPDATE mail_messages SET verdicts=verdicts||'{"forwardSafe":false}' WHERE workspace_id=$1 AND ses_message_id='fwd-was-refused'`,[wid]);
-        const before=await verdicts(),backfill=await readFile(new URL('./migrations/321_forward_eligibility.sql',import.meta.url),'utf8');
-        await db.query(backfill);const once=await verdicts();await db.query(backfill);assert.deepEqual(await verdicts(),once);
+        const before=await verdicts(),page=await readFile(new URL('./migrations/332_forward_eligible_only.sql',import.meta.url),'utf8');
+        const migrate=async()=>{let cursor='';for(;;){const next=(await db.query(page,[cursor])).rows[0].cursor;if(next===null)return;assert.notEqual(next,cursor);cursor=next;}};
+        await migrate();const once=await verdicts();await migrate();assert.deepEqual(await verdicts(),once);
         assert.deepEqual(Object.fromEntries(Object.entries(once).map(([mid,v])=>[mid,v.forwardEligible])),Object.fromEntries(cases.map(([mid,,ok])=>[mid,ok&&mid!=='fwd-was-refused'])));
-        // It only adds: the Worker it replaces still reads forwardSafe during the rollout, and an explicit refusal stays one.
-        for(const [mid,v] of Object.entries(once)) assert.deepEqual({...v,forwardEligible:undefined},{...before[mid],forwardEligible:undefined},mid);
-        assert.equal(once['fwd-was-refused']!.forwardSafe,false);
-        // Mail the replaced Worker stores during the rollout has no forwardEligible: a forward decides it by the same rule.
-        await db.query("UPDATE mail_messages SET verdicts=verdicts-'forwardEligible' WHERE workspace_id=$1 AND ses_message_id IN ('fwd-old','fwd-old-loop','fwd-was-refused')",[wid]);
+        const others=(v:Json)=>Object.fromEntries(Object.entries(v).filter(([key])=>key!=='forwardSafe'&&key!=='forwardEligible'));
+        for(const [mid,v] of Object.entries(once)) assert.deepEqual(others(v),others(before[mid]),mid);
+        assert.ok(Object.values(once).every(v=>!('forwardSafe' in v)),'No forwardSafe is left.');
+        // Nothing decides a message stored without forwardEligible on read any more: it is never forwarded.
+        await db.query("UPDATE mail_messages SET verdicts=verdicts-'forwardEligible' WHERE workspace_id=$1 AND ses_message_id='fwd-old'",[wid]);
         await call('PUT','/v1/rituals',{rituals:[{key:'forward',source:'export default function route(email,ctx){endpoints.team() }'}],attachments:[{ritual:'forward',target:box.id}]});
         try{
           for(const [mid,,ok] of cases){
-            const [status,error]=ok&&mid!=='fwd-was-refused'?['delivered',null]:['failed','FORWARD_BLOCKED'];
+            const [status,error]=ok&&mid!=='fwd-was-refused'&&mid!=='fwd-old'?['delivered',null]:['failed','FORWARD_BLOCKED'];
             await submit(mid,['late@receive.example',box.address],'Mail');await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);
             const m=(await db.query('SELECT id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];
             const d=(await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,m.id])).rows[0];
             await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:d.id},{id:unique('job'),workspaceId:wid,attempts:1}).catch(()=>{});
             assert.deepEqual((await db.query('SELECT status,last_error FROM mailbox_webhook_deliveries WHERE id=$1',[d.id])).rows[0],{status,last_error:error},mid);
           }
-          assert.equal((await verdicts())['fwd-old']!.forwardEligible,true,'A forward that goes ahead keeps the answer it decided.');
-          const forwarded=(await db.query("SELECT headers FROM mail_messages WHERE workspace_id=$1 AND direction='outbound' AND subject='Fwd: Test fwd-old'",[wid])).rows[0];
+          assert.equal('forwardEligible' in (await verdicts())['fwd-old']!,false,'A refused forward stores no verdict.');
+          const forwarded=(await db.query("SELECT headers FROM mail_messages WHERE workspace_id=$1 AND direction='outbound' AND subject='Fwd: Test fwd-hops-24'",[wid])).rows[0];
           assert.ok(forwarded?.headers.some((h:Json)=>h.name==='X-Nightmail-Loop' && h.value.startsWith('v1.1.')),'A forward carries X-Nightmail-Loop.');
         }finally{await call('PUT','/v1/rituals',{});}
       });
@@ -24896,7 +26004,7 @@ test('Audit trail: sensitive actions each write one redacted row', async t => {
     await audited(await call('DELETE', '/v1/endpoints/audit-endpoint'), 'endpoint.delete', ['endpoint', endpointRow.target_id]);
     const source = `export default function route(email){label("secret-${hex}")}`;
     secrets.push(`secret-${hex}`);
-    const ritual = await audited(await call('PUT', '/v1/rituals/scripts/note', { key: 'note', source }), 'ritual.save', ['ritual', 'note']);
+    const ritual = await audited(await call('PUT', '/v1/rules/scripts/note', { key: 'note', source }), 'ritual.save', ['ritual', 'note']);
     assert.equal(ritual.summary.after.key, 'note');
     const version = ok(await local('GET', '/v1/routing', undefined, 'live')).version;
     const routing = await audited(await call('PUT', '/v1/routing', { routes: [{ match: `audit@${host}`, to: 'drop' }] }, 200, { 'if-match': `"${version}"` }), 'routing.apply', ['routing', wid]);

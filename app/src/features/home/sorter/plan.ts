@@ -26,9 +26,9 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   // The machine is built up as the product is, a part at a time: it begins with one lane, the middle one, and the
   // others are fitted outwards from it in turn, left then right (`fit`: the lanes in that order). So the lanes stand,
   // left to right, in the order that fitting them from the middle brings the product's own: endpoints first, then
-  // threads, agents, inboxes, IMAP, rituals, campaigns. (A phone's roof has room for one port only, on the left, clear
+  // threads, agents, inboxes, IMAP, rules, campaigns. (A phone's roof has room for one port only, on the left, clear
   // of its cannon: it begins with its rightmost lane, threads, and is fitted from the right to the left, each new deck
-  // running along the roller line to stop short of the last: agents, inboxes, rituals.)
+  // running along the roller line to stop short of the last: agents, inboxes, rules.)
   const routes = phone ? [5, 3, 2, 0] : [5, 3, 0, 1, 2, 4, 6], fit = phone ? [3, 2, 1, 0] : [3, 2, 4, 1, 5, 0, 6], count = routes.length, per = phone ? 0 : 4
   // In cells: the unlit columns and rows round the price, the strip the tubes run down (a phone: the cabinet's stile),
   // and each floor of the machine. (Over the price the frame is ten rows high, not two: the wordmark stands in them.)
@@ -121,7 +121,7 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   // beyond it at the roof's end, that lowers each new lane's deck in (machine.ts).
   const eject = { x: (phone ? .6 : .5) * Xw, z: phone ? zL + 3.3 * U : zL }
   // Eight tubes, four each side of the price, the nearest the price first: inbox, agent inbox, endpoint, thread;
-  // mailbox, ritual, campaign, logs. They run down the front between two manifolds, into a block at each end of the
+  // mailbox, rule, campaign, logs. They run down the front between two manifolds, into a block at each end of the
   // lower one. On a wide page that block goes on round the cabinet's corner, a riser comes down from it to a header on
   // the slab beside the cabinet (`heads`: a trunk with an outlet for each tube in its front), and the tubes run
   // straight forward from the header side by side (`fan`: where each lies, and where on the page it goes over the
@@ -207,7 +207,7 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   short ||= oy - cta.y > fold - inset.bottom
   // On a wide page each lane fitted after the first brings a unit of its own, plugged onto the tower's side beside
   // the price: three up each side in the order they come, each slid in from its own side of the page over the one
-  // before (the left's: threads, inboxes, rituals; the right's: agents, IMAP, campaigns). `pods`: each one's lane and
+  // before (the left's: threads, inboxes, rules; the right's: agents, IMAP, campaigns). `pods`: each one's lane and
   // side, its place (its left edge, its foot, how far back its front stands), its size, and the plate its name is on
   // (its left edge, its foot, its size: never under 12 px tall).
   const podW = 9 * U, podH = 9.6 * U, pods = phone ? [] : fit.slice(1).map(lane => {

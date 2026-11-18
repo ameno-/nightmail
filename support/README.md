@@ -16,8 +16,8 @@ dashboard Help ─ POST /v1/contact-support (Nightmail) ─▶ handoff JWS
               ─ POST /chat/start {handoff} ─▶ router ─ BANE.verifyHandoff ─▶ Nightmail SupportPlatform (service binding)
                                                      └ DO.openChat ─ BANE.mintGrant ─▶ grant (private DO table); OpenCode boots in the background
               ═ WebSocket /c/<conv>?token= ═▶ DO ─ OpenCode turn ─ tools ─ BANE.read(/v1/support/*, grant)
-                                                                └ model ─▶ Console gateway (Sonnet 5.5, medium)
-support@ mail ─ Nightmail route → webhook ritual ─▶ POST /hooks/bane-inbound ─▶ DO inbox + alarm
+                                                                └ model ─▶ Console gateway (Opus 5.5, medium)
+support@ mail ─ Nightmail route → webhook rule ───▶ POST /hooks/bane-inbound ─▶ DO inbox + alarm
                                               DO ─ BANE_API (address API key) ─ read message, reply in thread
 tickets ─ D1 (typed: billing, bug, deliverability, account, abuse_report, feature_request, other)
         ─ email "[Nightmail <type>] tkt_…" to the team (Nightmail API) + the customer's follow-up thread
@@ -28,7 +28,7 @@ screenshots ─ POST /c/<conv>/attachments (chat) or email image attachments ─
 
 - **Nightmail access** is a service binding to Nightmail's `SupportPlatform` entrypoint (`api/src/support-platform.ts`), with no token. It can verify a handoff, verify an email sender, mint and revoke a grant, and run grant-scoped `GET /v1/support/*` reads. The grant is stored only in the DO's private `support_grant` table, and tool closures add it to each read. It never reaches the model, the panel, logs or D1.
 - **Email and tickets** go through Nightmail's public API as a normal customer would: an API key limited to the support address (`BANE_SUPPORT_INBOX_KEY`) over the `BANE_API` binding.
-- **The model** is pinned to Claude Sonnet 5.5 at medium effort, through Console's inference gateway (`GATEWAY_URL`, key `CONSOLE_GATEWAY_KEY`). It's pinned in the config, the agent, the session and a provider policy. A fetch guard also refuses any other model or effort. Nothing falls back. A conversation whose session began under an earlier pin is switched to the current one before its next turn. The key may only use the models Console's Controls allow for it (Anomaly's workspace, policy "Bane Support"): a model it isn't allowed answers `403 Model access is disabled`. The same fetch caches the tools and the system prompt for an hour (`cache_control.ttl`), so a chat opened after a quiet spell doesn't prefill them again.
+- **The model** is pinned to Claude Opus 5.5 at medium effort, through Console's inference gateway (`GATEWAY_URL`, key `CONSOLE_GATEWAY_KEY`). It's pinned in the config, the agent, the session and a provider policy. A fetch guard also refuses any other model or effort. Nothing falls back. A conversation whose session began under an earlier pin is switched to the current one before its next turn. The key may only use the models Console's Controls allow for it (Anomaly's workspace, policy "Bane Support"): a model it isn't allowed answers `403 Model access is disabled`. The same fetch caches the tools and the system prompt for an hour (`cache_control.ttl`), so a chat opened after a quiet spell doesn't prefill them again.
 - **Opening a chat** costs no model call. The panel shows its own first line ("Hey, what's up? How can we help?") and takes messages at once. On a new page that line is all it shows: an earlier conversation opens only from **Continue last conversation** in its menu; `/chat/start` returns once the grant is minted, and OpenCode boots in the Durable Object in the background, ready for the first message. Our tables are named `_support_*` because OpenCode bootstraps its schema only into a database whose other tables start with `_`; a conversation from before is renamed on its next wake.
 
 ## Why OpenCode, embedded this way

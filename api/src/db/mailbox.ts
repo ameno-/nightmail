@@ -27,7 +27,7 @@ const catchAll = customType<{data:'create_address'|'store';driverData:'create_ma
 });
 export type MailboxPermission = 'read' | 'send' | 'modify' | 'create';
 export type SendLimits = { perHour: number; perDay: number; perRecipientPerHour: number; perThreadPer10Minutes: number };
-export type Verdicts = { simulated?:boolean; spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string; /** Set at ingest by forwardEligibility (mailbox-ingest.ts). */ forwardEligible?: boolean };
+export type Verdicts = { simulated?:boolean; spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string; /** Set at ingest by forwardEligibility (mailbox-ingest.ts); without it a message is never forwarded. */ forwardEligible?: boolean };
 
 const scope = () => ({ workspaceId: text('workspace_id').notNull() });
 const ts = (name: string) => timestamp(name, { withTimezone: true, mode: 'string' });
@@ -159,12 +159,12 @@ export const mailboxEvents = pgTable('mailbox_events', {
 /**
  * Every endpoint, of every type, is one row (migration 322): a webhook (mwh_ ID) or a Slack, Discord or forward
  * endpoint (con_ ID). Deliveries, routes, grants, attempt fences and forward-once rows reference its ID. The table keeps
- * its first name, mailbox_webhooks, until the release that drops mail_endpoints and mail_action_policies.
+ * its first name, mailbox_webhooks.
  */
 export const endpoints = pgTable('mailbox_webhooks', {
   id: text('id').primaryKey(), ...scope(),
   type: text('type').$type<'webhook' | 'slack' | 'discord' | 'forward'>().notNull().default('webhook'),
-  /** The endpoint name rituals call and routes can name (endpoints.<key>); unique in the workspace across every type. Optional for a webhook. */
+  /** The endpoint name rules call and routes can name (endpoints.<key>); unique in the workspace across every type. Optional for a webhook. */
   key: text('key'),
   // Webhooks: where and how they post, and the events they subscribe to (none for a route-only webhook).
   url: text('url'), encryptedSecret: text('encrypted_secret'), encryptedHeaders: text('encrypted_headers'),

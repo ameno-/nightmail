@@ -1,9 +1,9 @@
-// The words Receiving uses, in one place. Names follow the API: routes, rituals, endpoints, catch-all (catchAll), store.
+// The words Receiving uses, in one place. Names follow the API: routes, rules, endpoints, catch-all (catchAll), store.
 // What each one means is said once, in the Docs guides (docs/guides.tsx and docs/receiving.md), not on the screens.
 
 export const concepts = {
   routes: { title: 'Routes' },
-  rituals: { title: 'Rituals', adminOnly: 'Owners and admins manage rituals' },
+  rules: { title: 'Rules', adminOnly: 'Owners and admins manage rules' },
   endpoints: { title: 'Endpoints' },
   trace: { title: 'Trace' },
 } as const
@@ -11,7 +11,7 @@ export const concepts = {
 // Where each concept is explained in full: the guides in Docs.
 export const guides = {
   receiving: '/docs/receiving',
-  rituals: '/docs/rituals',
+  rules: '/docs/rules',
   endpoints: '/docs/endpoints',
   inboxes: '/docs/inboxes',
   mcp: '/docs/mcp',
@@ -46,7 +46,7 @@ export const outcomes = {
 // The three steps on an address's page.
 export const steps = {
   route: { title: 'Route' },
-  rituals: { title: 'Rituals', empty: 'No ritual yet' },
+  rules: { title: 'Rules', empty: 'No rule yet' },
   goesTo: { title: 'Goes to' },
 } as const
 

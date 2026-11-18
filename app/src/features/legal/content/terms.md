@@ -24,7 +24,7 @@ By creating an account, joining a workspace or using the Service, you accept the
 | **Account** | Your personal sign-in to Nightmail. |
 | **Workspace** | A shared space that holds domains, inboxes, contacts, keys, settings and its own **prepaid balance**. A person can belong to several workspaces. |
 | **Owner, admin, member** | Workspace roles. Owners and admins manage billing, members and keys. |
-| **Customer Data** | Everything you or your users put into Nightmail or receive through it: messages, attachments, contacts, lists, templates, rituals, settings and the data in them. |
+| **Customer Data** | Everything you or your users put into Nightmail or receive through it: messages, attachments, contacts, lists, templates, rules, settings and the data in them. |
 | **Recipients and correspondents** | The people you email, and the people who email your addresses. |
 | **Credit** | Money you add to a workspace's prepaid balance. |
 | **Hosted** | Nightmail sends and receives mail through Anomaly's own Amazon SES accounts. |
@@ -41,7 +41,7 @@ By creating an account, joining a workspace or using the Service, you accept the
 
 ## 4. The Service
 
-- **What Nightmail does.** Transactional and marketing sending, receiving mail for your domains, inboxes (including short-lived agent inboxes), IMAP and SMTP access, webhooks, routing and **Rituals** (scripts that act on received mail), **Omens** (questions an AI classifier answers about a received message), sender reputation tools and an MCP server.
+- **What Nightmail does.** Transactional and marketing sending, receiving mail for your domains, inboxes (including short-lived agent inboxes), IMAP and SMTP access, webhooks, routing and **Rules** (scripts that act on received mail), **AI decisions** (questions an AI classifier answers about a received message), sender reputation tools and an MCP server.
 - **Your domains.** You may only send from, or receive for, domains and addresses you own or are authorized to use. You set up DNS records to prove it. If you lose control of a domain, we may stop sending and receiving for it.
 - **Delivery isn't guaranteed.** We hand your mail to receiving servers. We can't control whether they accept it, file it as spam, or how fast they deliver it. Receiving depends on senders and their providers.
 - **Changes.** We may add, change or remove features. If we remove a material paid feature, we'll give at least 30 days' notice. Beta or preview features are provided as they are and may change or end.
@@ -62,14 +62,14 @@ By creating an account, joining a workspace or using the Service, you accept the
 | What | Price | How it's counted |
 | --- | --- | --- |
 | Email | **$0.20 per 1,000** | Sent: per recipient. Received: per message accepted for your domains. |
-| Omens | **$0.10 per 1,000** evaluations | One evaluation is one classifier call about one message. One call answers every question a ritual asks about that message, up to ten. |
+| AI decisions | **$0.10 per 1,000** evaluations | One evaluation is one classifier call about one message. One call answers every question a rule asks about that message, up to ten. |
 | Storage | **$0.25 per GB-month** | Received mail older than 90 days, above 1 GB per workspace, measured daily. |
 | IMAP and SMTP access | Free | Fair use: downloads up to 5 GB a day and 30 GB a month per inbox; above that, downloads slow down. |
 | BYO AWS | Free | Fair use: about 10 million emails a month. |
 
 - **Not charged:** mail Nightmail suppresses or cancels before it goes out, and mail rejected before sending for reasons other than the spam screen.
 - **Charged:** a message the spam screen rejects is charged as a send.
-- **Free:** received mail that Amazon's spam scan flags as spam. Omens asked about it are still charged.
+- **Free:** received mail that Amazon's spam scan flags as spam. AI decisions asked about it are still charged.
 - **Storage starts later.** Storage charges start **90 days after we notify you** that they apply. Until then, stored mail is free.
 
 ### 5.3 Free tier
@@ -89,9 +89,9 @@ By creating an account, joining a workspace or using the Service, you accept the
 
 If a workspace's balance and its free usage are used up:
 
-1. **Sending stops.** The API returns `402 BALANCE_EXHAUSTED`, campaigns wait, and SMTP submission is deferred. Omens return their fallback answer without asking the classifier.
+1. **Sending stops.** The API returns `402 BALANCE_EXHAUSTED`, campaigns wait, and SMTP submission is deferred. AI decisions return their fallback answer without asking the classifier.
 2. **Receiving continues for 7 days.** Mail is still accepted and charged, so the balance can go below $0. That amount is a debt you owe.
-3. **After 7 days, new received mail is held.** It's stored but not delivered to your inboxes, webhooks or rituals until you add credit. Mail you already have stays available.
+3. **After 7 days, new received mail is held.** It's stored but not delivered to your inboxes, webhooks or rules until you add credit. Mail you already have stays available.
 4. **Nothing is deleted** because the balance is empty.
 
 We email owners and admins when the balance is low (by default, below $5), when sending pauses, before mail is held, and when it's held.
@@ -140,7 +140,7 @@ You must follow the [Acceptable Use Policy](/legal/acceptable-use). In short: se
 
 ## 7. Automated screening and sender score
 
-- **Automated content screening.** To prevent fraud and abuse, Nightmail scans the content of email sent through, or received into, your workspace with an automated classifier. This covers mail sent through Nightmail's shared (Hosted) sending pool, mail your rituals forward to outside addresses, and received mail only where you turn on Omens. We use the results only to (a) prevent fraud, spam and other abuse of the Service, which may include holding, rejecting or reviewing messages, and (b) compute your workspace's sender score. We don't sell scanned content or results and don't use them for advertising.
+- **Automated content screening.** To prevent fraud and abuse, Nightmail scans the content of email sent through, or received into, your workspace with an automated classifier. This covers mail sent through Nightmail's shared (Hosted) sending pool, mail your rules forward to outside addresses, and received mail only where you turn on AI decisions. We use the results only to (a) prevent fraud, spam and other abuse of the Service, which may include holding, rejecting or reviewing messages, and (b) compute your workspace's sender score. We don't sell scanned content or results and don't use them for advertising.
 - **Sender score.** Your sender score (0–100) is calculated from your workspace's own activity: complaints, spam-screen rejections, bounces, list quality, domain authentication and unsubscribes. It sets your **daily sending limit** and can lead to warnings, a hold on marketing mail, or a pause, as described in [section 8](#sending-limits-enforcement-and-suspension) and in the [published thresholds](/legal/acceptable-use#sending-limits-and-thresholds).
 - **Screening can be wrong.** A classifier can block a legitimate message or miss a bad one. If you think a decision is wrong, ask for a review ([section 8.4](#getting-back-and-appeals)).
 
@@ -187,7 +187,7 @@ We'll tell you why and what to do, unless the law or an active investigation pre
 
 - **You own your Customer Data.** We claim no ownership of it.
 - **What you allow us to do.** You give us a worldwide, non-exclusive license to host, copy, process, transmit and display Customer Data only as needed to provide, secure and support the Service, to prevent abuse, to bill you, and as the law requires.
-- **What we don't do.** We don't sell Customer Data, don't use it for advertising, and **don't use it to train AI models**. This covers the content we send to our AI provider for screening and Omens too: our AI provider, TypeSafe AI, has confirmed to us in writing that it doesn't retain or train on that content.
+- **What we don't do.** We don't sell Customer Data, don't use it for advertising, and **don't use it to train AI models**. This covers the content we send to our AI provider for screening and AI decisions too: our AI provider, TypeSafe AI, has confirmed to us in writing that it doesn't retain or train on that content.
 - **Aggregated data.** We may use data about how the Service is used (volumes, delivery and bounce rates, performance) to run and improve it, and to publish aggregate statistics that don't identify you, your recipients or your content.
 - **People at Anomaly.** Support can't read your message content unless you allow it for a specific support request ([section 10](#support-access)). Staff who review abuse see message metadata, such as recipient domains and the subject line of a message the screen rejected, but not message bodies. Any other access to systems that hold message content is limited to Anomaly personnel who need it to run, secure or repair the Service.
 - **Personal data.** For personal data in Customer Data, you're the controller and we're your processor (a "service provider" under US state privacy laws), as described in the [Privacy Policy](/legal/privacy). A Data Processing Addendum is available to business customers on request at [privacy@nightmail.dev](mailto:privacy@nightmail.dev).
@@ -205,8 +205,8 @@ Nightmail can send your data where you tell it to: webhooks, Slack and Discord e
 
 ## 12. AI features
 
-- Omens and the spam screen use **Jev**, a classifier from TypeSafe AI. TypeSafe has confirmed to us in writing that it doesn't retain or train on the content we send it. Results are scores or yes/no answers, and they can be wrong.
-- You decide what your rituals do with an Omen answer. Don't use Omens alone to make decisions with legal or similarly significant effects on a person.
+- AI decisions and the spam screen use **Jev**, a classifier from TypeSafe AI. TypeSafe has confirmed to us in writing that it doesn't retain or train on the content we send it. Results are scores or yes/no answers, and they can be wrong.
+- You decide what your rules do with an AI decision answer. Don't use AI decisions alone to make decisions with legal or similarly significant effects on a person.
 
 ## 13. Security
 
@@ -219,7 +219,7 @@ We use reasonable technical and organizational measures to protect Customer Data
 
 ## 15. Disclaimers
 
-Except as stated in these Terms, the Service is provided **"as is" and "as available"**. To the extent the law allows, we disclaim all implied warranties, including merchantability, fitness for a particular purpose and non-infringement. We don't warrant that mail will be delivered, placed in an inbox, or received from any sender, or that screening and Omens will be accurate.
+Except as stated in these Terms, the Service is provided **"as is" and "as available"**. To the extent the law allows, we disclaim all implied warranties, including merchantability, fitness for a particular purpose and non-infringement. We don't warrant that mail will be delivered, placed in an inbox, or received from any sender, or that screening and AI decisions will be accurate.
 
 ## 16. Limitation of liability
 

@@ -1,5 +1,5 @@
-// Trace: run an email through routes and rituals with the dry run (testRituals) and step through what happened:
-// each condition lights up true or false, omen answers fill in, then the actions and where the mail ends up.
+// Trace: run an email through routes and rules with the dry run (testRules) and step through what happened:
+// each condition lights up true or false, AI decision answers fill in, then the actions and where the mail ends up.
 // Nothing is sent or saved. Steps are laid out up front and revealed in place, so the animation never moves the page.
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router'
@@ -19,7 +19,7 @@ import './receiving.css'
 
 export type TimelineStep =
   | { kind: 'condition'; line: number; column: number; endLine: number; endColumn: number; result: boolean }
-  | { kind: 'omens'; line: number; scores: Record<string, number | boolean> }
+  | { kind: 'decisions'; line: number; scores: Record<string, number | boolean> }
   | { kind: 'action'; line: number; op: string; ref?: string; value?: string }
   | { kind: 'return'; line: number }
 export type TraceRow = { recipient: string; kind: string; key: string; scores: Record<string, number | boolean>; steps: number; lines: number[]; error: string | null; actions: { op: string; ref?: string; value?: string }[]; timeline: TimelineStep[] }
@@ -31,7 +31,7 @@ export const sampleMime = (to: string) => [
   'From: Dana Customer <dana@example.net>', `To: ${to}`, 'Subject: Refund for order 4821', 'Message-ID: <sample-4821@example.net>', 'Content-Type: text/plain; charset=utf-8', '',
   'Hi, the blender arrived broken. Could I get a refund? Order 4821.', '', 'Thanks, Dana',
 ].join('\r\n')
-/** The request body testRituals takes for a choice, or null while the choice is incomplete. */
+/** The request body testRules takes for a choice, or null while the choice is incomplete. */
 export function traceInput(choice: EmailChoice, to?: string): { messageId?: string; mime?: string; to?: string[] } | null {
   const envelope = to?.trim() ? { to: [to.trim().toLowerCase()] } : {}
   if (choice.mode === 'recent') return choice.messageId ? { messageId: choice.messageId, ...envelope } : null
@@ -81,7 +81,7 @@ const reduced = () => typeof matchMedia === 'function' && matchMedia('(prefers-r
 const STEP_MS = 560
 
 type Flat = { row: number; step: number }
-/** Steps through every ritual's timeline in order, then reveals the result. Reduced motion shows everything at once. */
+/** Steps through every rule's timeline in order, then reveals the result. Reduced motion shows everything at once. */
 function usePlayback(total: number, runId: number) {
   const [at, setAt] = useState(-1)
   useEffect(() => {
@@ -100,12 +100,12 @@ function conditionText(source: string, s: Extract<TimelineStep, { kind: 'conditi
   return `${lines[s.line - 1]?.slice(s.column - 1) ?? ''} …`
 }
 
-/** The ritual's source with the active line marked and each evaluated condition tinted by its result. */
+/** The rule's source with the active line marked and each evaluated condition tinted by its result. */
 function Code({ source, steps, active, revealed }: { source: string; steps: TimelineStep[]; active: number | null; revealed: number }) {
   const lines = source.replace(/\n$/, '').split('\n')
   const marks = steps.map((s, i) => ({ s, i })).filter((x): x is { s: Extract<TimelineStep, { kind: 'condition' }>; i: number } => x.s.kind === 'condition' && x.s.line === x.s.endLine)
   const activeLine = active === null ? null : steps[active]?.line ?? null
-  return <ol className="trace-code" aria-label="Ritual source">{lines.map((text, n) => {
+  return <ol className="trace-code" aria-label="Rule source">{lines.map((text, n) => {
     const line = n + 1, here = marks.filter(m => m.s.line === line).sort((a, b) => a.s.column - b.s.column)
     const parts: React.ReactNode[] = []
     let from = 0
@@ -128,7 +128,7 @@ function actionText(a: Extract<TimelineStep, { kind: 'action' }>, endpoints: Ove
   return { icon: a.op === 'drop' || a.op === 'block' ? 'drop' as const : a.op === 'junk' ? 'store' as const : null, text: (words[a.op] ?? a.op) + (a.op === 'junk' && a.value ? ` (${a.value})` : '') }
 }
 
-/** One dry run, animated: per recipient, each ritual's code and steps, then the result. */
+/** One dry run, animated: per recipient, each rule's code and steps, then the result. */
 export function TraceView({ result, sources, overview, inboxes, runId }: { result: DryRun; sources: Record<string, string>; overview: Overview | undefined; inboxes: Map<string, string>; runId: number }) {
   const flat: Flat[] = useMemo(() => result.trace.flatMap((row, r) => row.timeline.length ? row.timeline.map((_, step) => ({ row: r, step })) : [{ row: r, step: -1 }]), [result])
   const { at, skip } = usePlayback(flat.length, runId)
@@ -138,7 +138,7 @@ export function TraceView({ result, sources, overview, inboxes, runId }: { resul
   const position = (row: number, step: number) => flat.findIndex(f => f.row === row && f.step === step)
   const done = at >= flat.length
   return <div className="trace-view" data-done={done || undefined}>
-    <div className="trace-view__bar"><span className="muted">{result.trace.length ? `Ran ${result.trace.length === 1 ? `the ${result.trace[0]!.key} ritual` : `${result.trace.length} rituals`}` : 'No ritual runs on this mail'}</span>
+    <div className="trace-view__bar"><span className="muted">{result.trace.length ? `Ran ${result.trace.length === 1 ? `the ${result.trace[0]!.key} rule` : `${result.trace.length} rules`}` : 'No rule runs on this mail'}</span>
       <div className="cluster">{!done && <Button size="sm" variant="ghost" onClick={skip}>Show all</Button>}</div></div>
     {result.recipients.map(rcpt => {
       const rows = result.trace.map((row, r) => ({ row, r })).filter(x => x.row.recipient === rcpt.address)
@@ -159,7 +159,7 @@ export function TraceView({ result, sources, overview, inboxes, runId }: { resul
                   return <li key={i} className="trace-step" data-kind={s.kind} data-state={state}>
                     <span className="trace-step__line">L{s.line}</span>
                     {s.kind === 'condition' ? <><code className="trace-step__code"><MaskedText text={conditionText(sources[row.key] ?? '', s) || 'condition'} /></code><span className="trace-bool" data-value={String(s.result)}>{String(s.result)}</span></>
-                      : s.kind === 'omens' ? <div className="trace-omens">{Object.entries(s.scores).map(([name, value]) => <div key={name} className="trace-omen"><code>{name}</code>
+                      : s.kind === 'decisions' ? <div className="trace-omens">{Object.entries(s.scores).map(([name, value]) => <div key={name} className="trace-omen"><code>{name}</code>
                         {typeof value === 'number' ? <span className="trace-omen__bar"><span style={{ transform: `scaleX(${state === 'pending' ? 0 : Math.max(0, Math.min(1, value))})` }} /></span> : <span className="trace-bool" data-value={String(value)}>{String(value)}</span>}
                         <span className="trace-omen__value">{typeof value === 'number' ? value.toFixed(2) : ''}</span></div>)}</div>
                       : s.kind === 'action' ? (() => { const a = actionText(s, endpoints); return <span className="trace-action">→ {a.icon && <TargetIcon type={a.icon} size={13} />}{a.text}</span> })()
@@ -190,7 +190,7 @@ export function TraceView({ result, sources, overview, inboxes, runId }: { resul
   </div>
 }
 
-/** Runs testRituals for a choice, with optional unsaved config and omen answers. */
+/** Runs testRules for a choice, with optional unsaved config and AI decision answers. */
 export function useDryRun() {
   const [result, setResult] = useState<DryRun | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -198,7 +198,7 @@ export function useDryRun() {
   const [runId, setRunId] = useState(0)
   async function run(body: Record<string, unknown>) {
     setPending(true); setError(null)
-    try { setResult(await request<DryRun>('/v1/rituals/test', { method: 'POST', body })); setRunId(n => n + 1) }
+    try { setResult(await request<DryRun>('/v1/rules/test', { method: 'POST', body })); setRunId(n => n + 1) }
     catch (e) { setError(errorText(e)); setResult(null) }
     finally { setPending(false) }
   }
@@ -211,7 +211,7 @@ export function TracePage() {
   // An address page hands its address over in the navigation state, so a link never spells it out; ?to= still works.
   const preferred = (useLocation().state as { to?: string } | null)?.to ?? params.get('to') ?? undefined
   const overview = useOverview({ limit: 100 })
-  const saved = useApiQuery(['ritual-config'], (_api, signal) => request<{ config: { rituals: { key: string; source: string }[] } }>('/v1/rituals', { signal }))
+  const saved = useApiQuery(['rule-config'], (_api, signal) => request<{ config: { rules: { key: string; source: string }[] } }>('/v1/rules', { signal }))
   const addresses = (overview.data?.routes.data ?? []).filter(r => r.kind === 'address' && r.address).map(r => r.match)
   const recent = useRecentMail()
   const [picked, setChoice] = useState<EmailChoice | null>(null)
@@ -225,7 +225,7 @@ export function TracePage() {
   const view = useRef<HTMLDivElement>(null)
   // Recent mail is traced as mail to the address it arrived at, unless another address is given.
   const input = traceInput(choice, choice.mode === 'sample' ? undefined : to || (choice.mode === 'recent' ? choice.to : undefined))
-  const sources = Object.fromEntries((saved.data?.config.rituals ?? []).map(r => [r.key, r.source]))
+  const sources = Object.fromEntries((saved.data?.config.rules ?? []).map(r => [r.key, r.source]))
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (!input) return
@@ -240,13 +240,13 @@ export function TracePage() {
       {choice.mode !== 'sample' && <Field label="Trace it as mail to" htmlFor="trace-to">
         <Input id="trace-to" className="private-field trace-to" list="trace-addresses" value={to} onChange={e => { setTo(e.target.value); dry.clear() }} placeholder="The message’s own recipients" autoComplete="off" />
       </Field>}
-      {/* Rituals run as saved, and omens give their default answer; a ritual's own Try it sets the answers. */}
+      {/* Rules run as saved, and AI decisions give their default answer; a rule's own Try it sets the answers. */}
       <div className="cluster"><Button variant="primary" type="submit" loading={dry.pending} disabled={!input}>Trace</Button></div>
     </form>
     <div ref={view} className="trace-out">
       {dry.error ? <Alert tone="danger" title="The trace didn’t run">{dry.error}</Alert>
         : dry.result ? <TraceView result={dry.result} sources={sources} overview={overview.data} inboxes={new Map((options.data ?? []).map(a => [a.id, a.address]))} runId={dry.runId} />
-        : <EmptyState title="Pick an email and trace it" action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving?tab=rituals">Rituals</Link>} />}
+        : <EmptyState title="Pick an email and trace it" action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving?tab=rules">Rules</Link>} />}
     </div>
     </>}
   </div>
