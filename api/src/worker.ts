@@ -150,12 +150,13 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
 const SUPPORT_POOL = 4;
 export class SupportPlatform extends WorkerEntrypoint<Env> {
   private async platform(): Promise<SupportPlatformApi> {
-    const [{ app, core }, { supportPlatform, SUPPORT_PLATFORM_CALLER }, { CONFIG_KEYS, loadConfig }] = await Promise.all([loadHttpDeps(), import('./support-platform.js'), import('./config.js')]);
+    const [{ app, core }, { supportPlatform, platformRuntime }, { CONFIG_KEYS, loadConfig }] = await Promise.all([loadHttpDeps(), import('./support-platform.js'), import('./config.js')]);
     stampLogs(this.env, core);
     const config = () => configFor(this.env, CONFIG_KEYS, loadConfig);
-    return supportPlatform(async request => {
+    // The conversation of a request() call rides on the runtime, like the caller: no HTTP request can set either.
+    return supportPlatform(async (request, conversation) => {
       if (!(await this.env.ADMISSION.limit({ key: 'bane:support-platform' })).success) return core.admissionDenied();
-      return withRuntime(this.env, async runtime => app.fetch(request, { ...runtime, platformCaller: SUPPORT_PLATFORM_CALLER }), SUPPORT_POOL, this.ctx);
+      return withRuntime(this.env, async runtime => app.fetch(request, { ...runtime, ...platformRuntime(conversation) }), SUPPORT_POOL, this.ctx);
     }, config);
   }
   async verifyHandoff(token: string) { return (await this.platform()).verifyHandoff(token); }
@@ -164,6 +165,9 @@ export class SupportPlatform extends WorkerEntrypoint<Env> {
   async revokeGrant(grantId: string) { return (await this.platform()).revokeGrant(grantId); }
   async verifyStaff(token: string) { return (await this.platform()).verifyStaff(token); }
   async read(path: string, grant: string) { return (await this.platform()).read(path, grant); }
+  async registerConversation(body: Parameters<SupportPlatformApi['registerConversation']>[0]) { return (await this.platform()).registerConversation(body); }
+  async closeConversation(conversationId: string) { return (await this.platform()).closeConversation(conversationId); }
+  async request(conversationId: string, method: string, path: string, body?: unknown) { return (await this.platform()).request(conversationId, method, path, body); }
   // A plain fetch to the entrypoint answers nothing: the methods above are the whole surface.
   override async fetch() { return new Response(null, { status: 404 }); }
 }
