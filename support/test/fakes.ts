@@ -72,13 +72,16 @@ const keys = new Map();
 const outages = new Map();
 const canonical = value => Array.isArray(value) ? '[' + value.map(canonical).join(',') + ']'
   : value && typeof value === 'object' ? '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical(value[k])).join(',') + '}' : JSON.stringify(value) ?? 'null';
+const failure = outage => Response.json({ error: { code: outage.code } }, { status: outage.status, headers: outage.retryAfter ? { 'retry-after': outage.retryAfter } : {} });
 export default {
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === '/__calls') return Response.json(calls);
+    // An outage refuses the request; a lost one (lost: true) carries it out, then the answer never arrives (the Worker
+    // sees the error status, as when a connection drops after Nightmail committed).
     if (url.pathname === '/__outage') {
-      const { path, status, code, retryAfter } = await request.json();
-      if (status) outages.set(path, { status, code, retryAfter }); else outages.delete(path);
+      const { path, status, code, retryAfter, lost } = await request.json();
+      if (status) outages.set(path, { status, code, retryAfter, lost }); else outages.delete(path);
       return new Response(null, { status: 204 });
     }
     // Test setup: a key already used for another body (a send that committed but whose response never arrived).
@@ -87,19 +90,51 @@ export default {
     const call = ['api', request.method, url.pathname, body, request.headers.get('authorization'), request.headers.get('idempotency-key')];
     calls.push(call);
     const scope = call[5] && request.method === 'POST' ? call[4] + ' ' + url.pathname + ' ' + call[5] : null, stored = scope && keys.get(scope);
-    const answer = stored ? (stored.hash === canonical(body) ? Response.json(stored.result, { status: stored.status })
+    const replayed = !!stored && stored.hash === canonical(body);
+    const answer = stored ? (replayed ? Response.json(stored.result, { status: stored.status })
       : Response.json({ error: { code: 'IDEMPOTENCY_CONFLICT', message: 'This Idempotency-Key was already used with a different request. Use a new key for a new request.' } }, { status: 409 }))
       : await route(request, url, body);
-    // [6]: the status Nightmail answered, so a test can tell a delivered send from a refused one.
-    call.push(answer.status);
+    // [6]: the status Nightmail answered, so a test can tell a delivered send from a refused one; [7]: a replay of an
+    // earlier request under the same key (nothing new was sent).
+    call.push(answer.status, replayed);
     if (scope && !stored && answer.ok) keys.set(scope, { hash: canonical(body), status: answer.status, result: await answer.clone().json() });
-    return answer;
+    const outage = outages.get(url.pathname);
+    return outage?.lost && answer.ok ? failure(outage) : answer;
   },
 };
+// id → [thread, from, dmarc, to, subject, text]; unknown ids are Ada's Gmail question.
+const MESSAGES = {
+  msg_mail_1: ['thr_mail_1'], msg_mail_2: ['thr_mail_1'], msg_nodmarc_1: ['thr_nodmarc', null, 'FAIL'], msg_nodmarc_lost: ['thr_nodmarc_lost', null, 'FAIL'], msg_auto_1: ['thr_auto'], msg_image_1: ['thr_image'],
+  msg_nodmarc_spoof: ['thr_mail_1', null, 'FAIL', null, 'Refund', 'refund my top-up please'], msg_stranger_1: ['thr_mail_1', 'stranger@else.test'],
+  msg_phish_1: ['thr_phish', null, 'PASS', null, 'Reset', 'Please send me the reset link'],
+  msg_stranger_cap_1: ['thr_cap_1', 'stranger@else.test'], msg_stranger_cap_2: ['thr_cap_2', 'stranger@else.test'], msg_stranger_cap_3: ['thr_cap_3', 'stranger@else.test'],
+  msg_nodmarc_c1: ['thr_c1', null, 'FAIL'], msg_nodmarc_c2: ['thr_c2', null, 'FAIL'],
+  msg_abuse_1: ['thr_abuse', 'reporter@isp.test', 'PASS', 'abuse@dev.bane.mx', 'Spam from your customer', 'Your customer sends us spam. Headers attached.'],
+  msg_abuse_2: ['thr_abuse', 'reporter@isp.test', 'PASS', 'abuse@dev.bane.mx', 'Re: Spam from your customer', 'More of it today.'],
+  msg_abuse_auto_1: ['thr_abuse_auto', 'fbl@isp.test', 'PASS', 'abuse@dev.bane.mx', 'Abuse report', 'Feedback loop report'],
+  msg_legal_nodmarc_1: ['thr_legal', 'lawyer@firm.test', 'FAIL', 'legal@dev.bane.mx', 'Subpoena', 'Please preserve records for account X.'],
+  msg_v1a: ['thr_v1', 'victim@acme.test', 'FAIL'], msg_v1b: ['thr_v1', 'victim@acme.test', 'FAIL'], msg_v2a: ['thr_v2', 'vera@acme.test', 'FAIL'], msg_v2b: ['thr_v3', 'vera@acme.test', 'FAIL'],
+  msg_abuse_s1: ['thr_s1', 's1@spoof.test', 'FAIL', 'abuse@dev.bane.mx', 'Spam 1', 'spam'], msg_abuse_s2: ['thr_s2', 's2@spoof.test', 'FAIL', 'abuse@dev.bane.mx', 'Spam 2', 'spam'],
+  msg_abuse_s3: ['thr_s3', 's3@spoof.test', 'FAIL', 'abuse@dev.bane.mx', 'Spam 3', 'spam'], msg_legal_pass_1: ['thr_legal_pass', 'counsel@firm.test', 'PASS', 'legal@dev.bane.mx', 'Subpoena 2', 'Preserve records.'],
+  msg_privacy_bcc_1: ['thr_privacy', 'dpo@corp.test', 'PASS', 'someone@corp.test', 'Data request', 'Please export my data.'],
+  msg_legal_legacy_1: ['thr_legal_legacy', 'counsel@old.test', 'PASS', 'legal@dev.bane.mx', 'Old request', 'Queued before the address was kept.'],
+  msg_image_missing: ['thr_image_missing', 'missing@example.test'], msg_image_unavailable: ['thr_image_unavailable', 'unavailable@example.test'],
+  // The conversation work queue's cases.
+  msg_stale_1: ['thr_stale'], msg_busy_1: ['thr_busy', 'rita@acme.test'], msg_resend_1: ['thr_resend'], msg_d2: ['thr_d2', 'dora@acme.test', 'FAIL'],
+  msg_d3_a: ['thr_d3'], msg_d3_b: ['thr_d3', 'stranger@else.test'], msg_d5: ['thr_d5', null, 'PASS', 'old-support@dev.bane.mx'],
+  msg_legacy_answered: ['thr_legacy_a'], msg_legacy_new: ['thr_legacy_a'], msg_legacy_failed: ['thr_legacy_a'], msg_legacy_confirmed: ['thr_legacy_a'],
+  msg_legacy_waiting: ['thr_legacy_b', 'pat@acme.test', 'FAIL'],
+};
+function message(id) {
+  const [threadId = 'thr_other', from = 'ada@acme.test', dmarc = 'PASS', to = 'support@dev.bane.mx', subject = 'Bounces from Gmail?', body = 'Why are Gmail bounces up this week?'] = (MESSAGES[id] ?? []).map(v => v ?? undefined);
+  // The receiving address the message is linked to (the one before a move, for old-support@).
+  const addressId = to === 'old-support@dev.bane.mx' ? 'adr_old' : to.endsWith('@dev.bane.mx') ? 'adr_' + to.split('@')[0] : 'adr_other';
+  return { threadId, from, dmarc, to, subject, body, addressId };
+}
 async function route(request, url, body) {
   {
     const outage = outages.get(url.pathname);
-    if (outage) return Response.json({ error: { code: outage.code } }, { status: outage.status, headers: outage.retryAfter ? { 'retry-after': outage.retryAfter } : {} });
+    if (outage && !outage.lost) return failure(outage);
     // Like Nightmail: inbox keys get an attachment as a short-lived signed link (on Nightmail's origin for R2-stored mail), and
     // never the admin-only parts route.
     if (request.method === 'GET' && /^\\/v1\\/inbound\\/messages\\/[^/]+\\/attachments\\/part_png$/.test(url.pathname)) return Response.json({ url: url.origin + '/v1/objects/fixture-png.sig', expiresAt: new Date(Date.now() + 300_000).toISOString() });
@@ -108,32 +143,18 @@ async function route(request, url, body) {
     if (request.method === 'GET' && url.pathname.startsWith('/v1/inbound/messages/') && url.searchParams.get('includeDelivery') === 'true') return Response.json({ error: { code: 'ADMIN_REQUIRED' } }, { status: 403 });
     if (request.method === 'GET' && url.pathname.startsWith('/v1/inbound/messages/')) {
       const id = url.pathname.split('/').pop();
-      // id → [thread, from, dmarc, to, subject, text]; unknown ids are Ada's Gmail question.
-      const table = {
-        msg_mail_1: ['thr_mail_1'], msg_mail_2: ['thr_mail_1'], msg_nodmarc_1: ['thr_nodmarc', null, 'FAIL'], msg_nodmarc_lost: ['thr_nodmarc_lost', null, 'FAIL'], msg_auto_1: ['thr_auto'], msg_image_1: ['thr_image'],
-        msg_nodmarc_spoof: ['thr_mail_1', null, 'FAIL', null, 'Refund', 'refund my top-up please'], msg_stranger_1: ['thr_mail_1', 'stranger@else.test'],
-        msg_phish_1: ['thr_phish', null, 'PASS', null, 'Reset', 'Please send me the reset link'],
-        msg_stranger_cap_1: ['thr_cap_1', 'stranger@else.test'], msg_stranger_cap_2: ['thr_cap_2', 'stranger@else.test'], msg_stranger_cap_3: ['thr_cap_3', 'stranger@else.test'],
-        msg_nodmarc_c1: ['thr_c1', null, 'FAIL'], msg_nodmarc_c2: ['thr_c2', null, 'FAIL'],
-        msg_abuse_1: ['thr_abuse', 'reporter@isp.test', 'PASS', 'abuse@dev.bane.mx', 'Spam from your customer', 'Your customer sends us spam. Headers attached.'],
-        msg_abuse_2: ['thr_abuse', 'reporter@isp.test', 'PASS', 'abuse@dev.bane.mx', 'Re: Spam from your customer', 'More of it today.'],
-        msg_abuse_auto_1: ['thr_abuse_auto', 'fbl@isp.test', 'PASS', 'abuse@dev.bane.mx', 'Abuse report', 'Feedback loop report'],
-        msg_legal_nodmarc_1: ['thr_legal', 'lawyer@firm.test', 'FAIL', 'legal@dev.bane.mx', 'Subpoena', 'Please preserve records for account X.'],
-        msg_v1a: ['thr_v1', 'victim@acme.test', 'FAIL'], msg_v1b: ['thr_v1', 'victim@acme.test', 'FAIL'], msg_v2a: ['thr_v2', 'vera@acme.test', 'FAIL'], msg_v2b: ['thr_v3', 'vera@acme.test', 'FAIL'],
-        msg_abuse_s1: ['thr_s1', 's1@spoof.test', 'FAIL', 'abuse@dev.bane.mx', 'Spam 1', 'spam'], msg_abuse_s2: ['thr_s2', 's2@spoof.test', 'FAIL', 'abuse@dev.bane.mx', 'Spam 2', 'spam'],
-        msg_abuse_s3: ['thr_s3', 's3@spoof.test', 'FAIL', 'abuse@dev.bane.mx', 'Spam 3', 'spam'], msg_legal_pass_1: ['thr_legal_pass', 'counsel@firm.test', 'PASS', 'legal@dev.bane.mx', 'Subpoena 2', 'Preserve records.'],
-        msg_privacy_bcc_1: ['thr_privacy', 'dpo@corp.test', 'PASS', 'someone@corp.test', 'Data request', 'Please export my data.'],
-        msg_legal_legacy_1: ['thr_legal_legacy', 'counsel@old.test', 'PASS', 'legal@dev.bane.mx', 'Old request', 'Queued before the address was kept.'],
-        msg_image_missing: ['thr_image_missing', 'missing@example.test'], msg_image_unavailable: ['thr_image_unavailable', 'unavailable@example.test'],
-      }[id] ?? [];
-      const [threadId = 'thr_other', from = 'ada@acme.test', dmarc = 'PASS', to = 'support@dev.bane.mx', subject = 'Bounces from Gmail?', body = 'Why are Gmail bounces up this week?'] = table.map(v => v ?? undefined);
+      const { threadId, from, dmarc, to, subject, body, addressId } = message(id);
       const auto = id.includes('auto');
       const attachments = id.startsWith('msg_image_') || id === 'msg_abuse_1' ? [{ id: 'part_png', filename: 'bounce screenshot.png', contentType: 'image/png', size: 300, disposition: 'attachment' }, { id: 'part_pdf', filename: 'invoice.pdf', contentType: 'application/pdf', size: 900, disposition: 'attachment' }] : [];
       const authentication = url.searchParams.get('includeAuthentication') === 'true' ? { authentication: { spf: 'PASS', dkim: null, dmarc }, automated: auto } : {};
-      return Response.json({ id, threadId, direction: 'inbound', subject, from: { name: null, address: from }, to: [to], text: body, replyText: body, messageId: '<' + id + '@mail.test>', ...authentication, attachments });
+      return Response.json({ id, threadId, addressIds: [addressId], direction: 'inbound', subject, from: { name: null, address: from }, to: [to], text: body, replyText: body, messageId: '<' + id + '@mail.test>', ...authentication, attachments });
     }
     if (request.method === 'POST' && url.pathname === '/v1/inbound/threads') return Response.json({ id: 'msg_new', threadId: 'thr_new_' + calls.length }, { status: 202 });
-    if (request.method === 'POST' && /^\\/v1\\/inbound\\/threads\\/[^/]+\\/reply$/.test(url.pathname)) return Response.json({ id: 'msg_reply', threadId: url.pathname.split('/')[4] }, { status: 202 });
+    if (request.method === 'POST' && /^\\/v1\\/inbound\\/threads\\/[^/]+\\/reply$/.test(url.pathname)) {
+      // Like Nightmail: an addressId the replied message isn't linked to has no reply target there.
+      if (body.addressId && body.addressId !== message(body.replyToMessageId).addressId) return Response.json({ error: { code: 'NOT_FOUND', message: 'There is no visible reply target in this conversation.' } }, { status: 404 });
+      return Response.json({ id: 'msg_reply', threadId: url.pathname.split('/')[4] }, { status: 202 });
+    }
     return Response.json({ error: { code: 'NOT_FOUND' } }, { status: 404 });
   }
 }
