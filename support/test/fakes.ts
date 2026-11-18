@@ -122,8 +122,10 @@ const MESSAGES = {
   // The conversation work queue's cases.
   msg_stale_1: ['thr_stale'], msg_busy_1: ['thr_busy', 'rita@acme.test'], msg_resend_1: ['thr_resend'], msg_d2: ['thr_d2', 'dora@acme.test', 'FAIL'],
   msg_d3_a: ['thr_d3'], msg_d3_b: ['thr_d3', 'stranger@else.test'], msg_d5: ['thr_d5', null, 'PASS', 'old-support@dev.bane.mx'],
-  msg_legacy_answered: ['thr_legacy_a'], msg_legacy_new: ['thr_legacy_a'], msg_legacy_failed: ['thr_legacy_a'], msg_legacy_confirmed: ['thr_legacy_a'],
-  msg_legacy_waiting: ['thr_legacy_b', 'pat@acme.test', 'FAIL'],
+  msg_legacy_answered: ['thr_legacy_a'], msg_legacy_new: ['thr_legacy_a'], msg_legacy_confirmed: ['thr_legacy_a'],
+  msg_legacy_waiting: ['thr_legacy_b', 'pat@acme.test', 'FAIL'], msg_legacy_gave_up: ['thr_legacy_c'],
+  msg_ticket_throw: ['thr_ticket_throw', null, 'PASS', null, 'Webhook test', 'My webhook test fails with a 500 every time.'],
+  msg_ticket_abort: ['thr_ticket_abort', null, 'PASS', null, 'Webhook test', 'My webhook test fails with a 500 every time.'],
 };
 function message(id) {
   const [threadId = 'thr_other', from = 'ada@acme.test', dmarc = 'PASS', to = 'support@dev.bane.mx', subject = 'Bounces from Gmail?', body = 'Why are Gmail bounces up this week?'] = (MESSAGES[id] ?? []).map(v => v ?? undefined);

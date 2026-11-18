@@ -69,7 +69,7 @@ type Answer = { messageId: string; threadId: string; sender: string; dmarc: stri
 /** An answer imported from the earlier inbox: its sender and route are settled when it first runs. */
 type Imported = { messageId: string; threadId: string; legacy: 1 };
 type Composed = {
-  message?: Snapshot; settled?: Answer; charges?: Charges; refused?: string | null; allowed?: boolean; images?: Record<string, string>;
+  message?: Snapshot; settled?: Answer; owned?: boolean; charges?: Charges; refused?: string | null; allowed?: boolean; images?: Record<string, string>;
   model?: string; ticketed?: boolean; fixed?: 'no_account' | 'busy'; text?: string | null;
 };
 type Confirm = { messageId: string; threadId: string; sender: string; route: Route; text: string };
@@ -105,12 +105,14 @@ export class SupportConversation extends DurableObject<Env> {
    */
   private importLegacy() {
     const now = Date.now(), finished = "('answered','dropped','held','rerouted')", decided = "('awaiting_confirmation','confirmed')", ofMessage = "json_extract(payload,'$.messageId') IN (SELECT message_id FROM _support_inbox WHERE state IN";
-    // 'failed' meant six tries were spent: it runs again under the new rules. A message waiting for (or past) its
-    // confirmation was already decided and its link sent: only its answer is left.
+    // Only 'new' runs. 'failed' (six tries spent, possibly days ago) is kept for the record and never run again: a late
+    // reply or link for old mail would only confuse. A message waiting for (or past) its confirmation was already decided
+    // and its link sent: only its answer is left.
     return [
-      this.sql.exec(`INSERT INTO _support_work(id,kind,state,payload,due_at,attempts,created_at,updated_at)
-        SELECT 'msg:'||message_id,'message',CASE WHEN state IN ('new','failed') THEN 'pending' WHEN state='held' THEN 'held' ELSE 'done' END,
-          json_object('messageId',message_id,'threadId',thread_id,'deliveryId',delivery_id),received_at,attempts,received_at,?
+      this.sql.exec(`INSERT INTO _support_work(id,kind,state,payload,due_at,attempts,last_error,created_at,updated_at)
+        SELECT 'msg:'||message_id,'message',CASE state WHEN 'new' THEN 'pending' WHEN 'held' THEN 'held' WHEN 'failed' THEN 'dead' ELSE 'done' END,
+          json_object('messageId',message_id,'threadId',thread_id,'deliveryId',delivery_id),received_at,attempts,
+          CASE state WHEN 'failed' THEN 'permanent:0:LEGACY_FAILED' END,received_at,?
         FROM _support_inbox WHERE NOT EXISTS (SELECT 1 FROM _support_work WHERE id='msg:'||message_id)`, now),
       this.sql.exec(`INSERT INTO _support_work(id,kind,state,payload,parent,due_at,created_at,updated_at)
         SELECT 'answer:'||message_id,'answer',CASE state WHEN 'confirmed' THEN 'pending' ELSE 'parked' END,
@@ -747,8 +749,13 @@ export class SupportConversation extends DurableObject<Env> {
   private async compose(answer: Answer, message: Snapshot, progress: Composed, save: () => void) {
     if (answer.fixed) { progress.fixed = answer.fixed; progress.text = FIXED[answer.fixed]; save(); return; }
     const meta = this.meta()!, body = bodyOf(message), dmarc = answer.dmarc;
-    // After a ticket, the team owns the thread: later mail is added to the ticket, not answered by the agent.
-    if (meta.status === 'ticketed' && meta.ticketId) {
+    // After a ticket, the team owns the thread: later mail is added to the ticket, not answered by the agent. Decided once,
+    // before the model runs: a ticket filed by this answer's own turn (or its limit or gate step) never stops its reply.
+    if (progress.owned === undefined) {
+      progress.owned = progress.model === undefined && progress.allowed === undefined && meta.status === 'ticketed' && !!meta.ticketId;
+      save();
+    }
+    if (progress.owned) {
       await this.harnessTicket(meta, internal('Customer wrote again', 'The customer wrote again after the ticket was filed.', body.slice(0, 600), 'Read their new message in the thread.', 'other', [answer.messageId]), dmarc);
       progress.text = null; save();
       return;

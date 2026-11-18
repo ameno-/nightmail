@@ -68,40 +68,60 @@ export default {
   },
 };`;
 
-// Test-only entrypoint for conversations: two conversations as the earlier inbox (`_support_inbox`) left them, a forward
-// a test makes fail once, and the real alarm handler driven at the chosen instant.
+// Test-only entrypoint for conversations: conversations as the earlier inbox (`_support_inbox`) left them, a forward or a
+// usage update a test makes fail once, and the real alarm handler driven at the chosen instant.
 const CONVERSATION_ENTRY = `
 import worker, { SupportConversation as Conversation } from './worker.js';
 export * from './worker.js';
 const unavailable = new Set(); // message IDs whose next delivery fails (module state: every object in this isolate)
-const now = Date.now(), base = { channel: 'email', status: 'open', contentAccess: false, page: null, handoffMessage: null, requestIds: [], greeted: false,
+let failTurns = null; // the next usage update ('UPDATE conversations SET turns') throws, or evicts the object first
+function failingDb(ctx, db) {
+  const fail = async () => {
+    const how = failTurns; failTurns = null;
+    if (how === 'abort') { await ctx.storage.sync(); ctx.abort('fixture: evicted'); throw new Error('aborted'); }
+    if (how === 'throw') throw new Error('D1_ERROR: fixture transient failure');
+  };
+  return new Proxy(db, { get(target, prop) {
+    if (prop !== 'prepare') { const value = target[prop]; return typeof value === 'function' ? value.bind(target) : value; }
+    return query => {
+      const statement = target.prepare(query);
+      if (!query.startsWith('UPDATE conversations SET turns')) return statement;
+      return { bind: (...args) => { const bound = statement.bind(...args); return { run: async () => { await fail(); return bound.run(); } }; } };
+    };
+  } });
+}
+// A function: the clock reads 0 at module scope in workerd.
+const legacy = now => { const base = { channel: 'email', status: 'open', contentAccess: false, page: null, handoffMessage: null, requestIds: [], greeted: false,
   turns: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, ticketId: null, lastActivity: now, closedAt: null, pendingSender: null, confirmSentAt: null };
-const LEGACY = [
+return [
   ['conv_legacy_a', { ...base, threadId: 'thr_legacy_a', userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada Lovelace', role: 'owner', verified: 'dmarc',
     workspace: { id: 'ws_acme', name: 'Acme Prod' }, workspaces: [{ id: 'ws_acme', name: 'Acme Prod', role: 'owner' }] },
-    [['msg_legacy_answered', 'answered', 1], ['msg_legacy_new', 'new', 0], ['msg_legacy_failed', 'failed', 6], ['msg_legacy_confirmed', 'confirmed', 1]]],
+    [['msg_legacy_answered', 'answered', 1], ['msg_legacy_new', 'new', 0], ['msg_legacy_confirmed', 'confirmed', 1]]],
   ['conv_legacy_b', { ...base, threadId: 'thr_legacy_b', userId: null, email: 'pat@acme.test', name: null, role: null, verified: null, workspace: null, workspaces: [],
     pendingSender: 'pat@acme.test', confirmSentAt: now - 60000 }, [['msg_legacy_waiting', 'awaiting_confirmation', 1]]],
-];
+  ['conv_legacy_c', { ...base, threadId: 'thr_legacy_c', userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada Lovelace', role: 'owner', verified: 'dmarc', status: 'closed', closedAt: now - 86400000,
+    workspace: { id: 'ws_acme', name: 'Acme Prod' }, workspaces: [{ id: 'ws_acme', name: 'Acme Prod', role: 'owner' }] }, [['msg_legacy_gave_up', 'failed', 6]]],
+]; };
 export class SupportConversation extends Conversation {
   constructor(ctx, env) {
-    for (const [name, meta, rows] of LEGACY) {
+    for (const [name, meta, rows] of legacy(Date.now())) {
       if (!ctx.id.equals(env.CONVERSATION.idFromName(name)) || ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE name='_support_meta'").toArray().length) continue;
       ctx.storage.sql.exec('CREATE TABLE _support_meta (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL)');
       ctx.storage.sql.exec('INSERT INTO _support_meta VALUES (1, ?)', JSON.stringify({ conversationId: name, ...meta }));
       ctx.storage.sql.exec("CREATE TABLE _support_inbox (message_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, delivery_id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'new', attempts INTEGER NOT NULL DEFAULT 0, received_at INTEGER NOT NULL, subject TEXT)");
       for (const [id, state, attempts] of rows) ctx.storage.sql.exec('INSERT INTO _support_inbox (message_id, thread_id, delivery_id, state, attempts, received_at) VALUES (?, ?, ?, ?, ?, 1)', id, meta.threadId, 'wh_legacy', state, attempts);
     }
-    super(ctx, env);
+    super(ctx, { ...env, DB: failingDb(ctx, env.DB) });
   }
   async alarm() {} // Tests call super.alarm() at the chosen instant.
   async enqueueInbound(input) {
     if (unavailable.delete(input.messageId)) throw new Error('fixture: unavailable');
     return super.enqueueInbound(input);
   }
-  async fixture({ expire, tick, age, unavailable: id, route }) {
+  async fixture({ expire, tick, age, unavailable: id, route, fail }) {
     const sql = this.ctx.storage.sql, has = name => sql.exec('SELECT 1 FROM sqlite_master WHERE name=?', name).toArray().length > 0;
     if (id) unavailable.add(id);
+    if (fail) failTurns = fail;
     if (expire && has('_support_work')) sql.exec('UPDATE _support_work SET due_at=1 WHERE id=?', expire);
     if (age) { const meta = this.meta(); meta.lastActivity -= age; if (meta.closedAt) meta.closedAt -= age; this.save(meta); }
     if (route) this.env = { ...this.env, SUPPORT_ADDRESS_ID: route };
@@ -696,10 +716,15 @@ describe('support Worker', () => {
     afterAll(() => instance?.dispose());
     type Row = { id: string; kind: string; state: string; attempts: number; due_at: number; last_error: string | null };
     type Run = { rows: Row[]; legacy: { message_id: string; state: string }[]; alarm: number | null; before: number; meta: { closedAt: number | null } | null };
-    async function drive(id: string, options: { tick?: boolean; expire?: string; age?: number; unavailable?: string; route?: string } = {}) {
+    async function drive(id: string, options: { tick?: boolean; expire?: string; age?: number; unavailable?: string; route?: string; fail?: 'throw' } = {}) {
       const res = await instance.dispatchFetch(`${SUPPORT}/__conversation`, { method: 'POST', body: JSON.stringify({ id, ...options }) });
       assert.equal(res.status, 200);
       return await res.json() as Run;
+    }
+    /** Runs the alarm with the next usage update evicting the object: the call that caused it ends with it. */
+    async function evicted(id: string) {
+      const res = await instance.dispatchFetch(`${SUPPORT}/__conversation`, { method: 'POST', body: JSON.stringify({ id, fail: 'abort', tick: true }) });
+      await res.body?.cancel();
     }
     async function outage(path: string, status = 0, code = 'UNAVAILABLE', lost = false) {
       const res = await (await instance.getWorker('fake-bane')).fetch('http://fake-bane/__outage', { method: 'POST', body: JSON.stringify({ path, status, code, lost }) });
@@ -865,14 +890,14 @@ describe('support Worker', () => {
     });
 
     test('a deploy finishes each message the earlier inbox left once, without resending what it sent; it keeps that inbox current for a rollback', async () => {
-      // Ada's conversation: one message answered, one new, one whose six tries were spent, one confirmed but unanswered.
+      // Ada's conversation: one message answered, one new, one confirmed but unanswered.
       let run = await drive('conv_legacy_a');
-      assert.deepEqual(states(run), { 'msg:msg_legacy_answered': 'done', 'msg:msg_legacy_new': 'pending', 'msg:msg_legacy_failed': 'pending', 'msg:msg_legacy_confirmed': 'done', 'answer:msg_legacy_confirmed': 'pending' });
+      assert.deepEqual(states(run), { 'msg:msg_legacy_answered': 'done', 'msg:msg_legacy_new': 'pending', 'msg:msg_legacy_confirmed': 'done', 'answer:msg_legacy_confirmed': 'pending' });
       assert.ok(run.alarm !== null && run.alarm <= Date.now(), 'Armed when imported.');
       run = await drive('conv_legacy_a', { tick: true });
       assert.ok(Object.values(states(run)).every(s => s === 'done'), JSON.stringify(run.rows));
       await drive('conv_legacy_a', { tick: true });
-      for (const id of ['new', 'failed', 'confirmed']) assert.deepEqual((await sends(`reply-msg_legacy_${id}`)).map(c => [c[6], c[7]]), [[202, false]], id);
+      for (const id of ['new', 'confirmed']) assert.deepEqual((await sends(`reply-msg_legacy_${id}`)).map(c => [c[6], c[7]]), [[202, false]], id);
       assert.equal((await sends('reply-msg_legacy_answered')).length, 0, 'Never sent again.');
       // Every row is finished in the old table too, so a rolled-back Worker has nothing left to send.
       assert.ok(run.legacy.every(r => r.state === 'answered'), JSON.stringify(run.legacy));
@@ -886,6 +911,34 @@ describe('support Worker', () => {
       run = await drive('conv_legacy_b', { tick: true });
       assert.deepEqual((await sends('reply-msg_legacy_waiting')).map(c => [c[6], c[7]]), [[202, false]]);
       assert.deepEqual(run.legacy, [{ message_id: 'msg_legacy_waiting', state: 'answered' }]);
+    });
+
+    test('a message the earlier inbox gave up on is kept for the record and never run again', async () => {
+      // Six tries spent, in a conversation closed since: running it now would send a late fixed reply for old mail.
+      const run = await drive('conv_legacy_c', { tick: true });
+      assert.deepEqual(run.rows.map(r => [r.id, r.state]), [['msg:msg_legacy_gave_up', 'dead']]);
+      assert.deepEqual(run.legacy, [{ message_id: 'msg_legacy_gave_up', state: 'failed' }]);
+      await drive('conv_legacy_c', { tick: true });
+      assert.equal((await fakeCalls(instance)).filter(c => c[0] === 'api' && (c[2].includes('msg_legacy_gave_up') || c[2].includes('thr_legacy_c') || String(c[5]).includes('msg_legacy_gave_up'))).length, 0, 'Not read, answered or confirmed again.');
+      assert.equal(await (await db()).prepare("SELECT count(*) AS n FROM conversations WHERE thread_id LIKE 'thr_legacy_c%'").first('n'), 0);
+    });
+
+    test.each(['throw', 'abort'] as const)('an answer whose turn filed a ticket is sent once after a failure before the send (%s)', async how => {
+      // The agent files a ticket while answering (the bug path); then the usage update fails (a transient D1 error) or the
+      // object is evicted at that point, before the answer's text is stored as final.
+      const thread = `thr_ticket_${how}`, message = `msg_ticket_${how}`;
+      await hook(message, thread);
+      const id = await conversationOf(thread);
+      if (how === 'abort') await evicted(id); else await drive(id, { fail: 'throw', tick: true });
+      const ticket = async () => (await db()).prepare('SELECT id, notes FROM tickets WHERE conversation_id = ?').bind(id).first<{ id: string; notes: string }>();
+      assert.ok(await ticket(), 'The turn filed a ticket.');
+      assert.equal((await replies(thread, instance)).length, 0, 'Not sent yet.');
+      const turns = recorded.length;
+      const run = await drive(id, { expire: `answer:${message}`, tick: true });
+      assert.equal(states(run)[`answer:${message}`], 'done');
+      assert.deepEqual((await replies(thread, instance)).map(c => c[3].text), ['That’s a Nightmail bug: I’ve passed it to the Nightmail team.']);
+      assert.equal(recorded.length, turns, 'No second model call.');
+      assert.deepEqual(JSON.parse((await ticket())!.notes), [], 'Its own ticket gets no “wrote again” note.');
     });
   });
 
