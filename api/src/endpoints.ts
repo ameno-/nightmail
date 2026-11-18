@@ -472,12 +472,21 @@ const getWebhook = async (db: DbExecutor, w: string, webhookId: string) => { con
 // Charge actual queued copies, not API requests. A rejected charge rolls the requeue and its jobs back.
 const requeue=(wid:string,condition:ReturnType<typeof sql>)=>sql`WITH resumed AS (UPDATE mailbox_webhook_deliveries SET last_redelivery_at=now(),status='pending',generation=generation+1,last_error=NULL,updated_at=now() WHERE workspace_id=${wid} AND ${condition} RETURNING *), reset_success AS (DELETE FROM mail_action_attempts a USING resumed r WHERE a.workspace_id=r.workspace_id AND a.delivery_id=r.id AND a.state='delivered') INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id,'generation',generation) FROM resumed`;
 // The manual posts a person asks for, shared by their public routes and the support actions they confirm signed in.
+type InboundTest = { format?: z.infer<typeof FormatInput>; overrideUrl?: string };
 /** Testing an inbound webhook (POST /v1/inbound/webhooks/{id}/test): posts a synthetic message.received and returns the receiver's status. */
-export async function testInboundWebhook(runtime: Runtime, w: string, webhookId: string, input: { format?: z.infer<typeof FormatInput>; overrideUrl?: string } = {}) {
-  const row = await getWebhook(runtime.db, w, webhookId);
+export async function testInboundWebhook(runtime: Runtime, w: string, webhookId: string, input: InboundTest = {}) {
+  return postInboundTest(runtime, await prepareInboundTest(runtime.db, w, webhookId, input), input);
+}
+/** A test's checks and its one manual post's charge, in `db` (a support action commits them with its decision). */
+export async function prepareInboundTest(db: DbExecutor, w: string, webhookId: string, input: InboundTest = {}) {
+  const row = await getWebhook(db, w, webhookId);
   // Nothing is posted to a held webhook's saved URL, a test included; a test to another URL is not affected.
   if (row.paused && row.reconfirm && !input.overrideUrl) throw resumeNeedsUrl();
-  await chargeManualDelivery(runtime.db, row.workspaceId, 1);
+  await chargeManualDelivery(db, row.workspaceId, 1);
+  return row;
+}
+/** Posts a prepared test and returns the receiver's status. */
+export async function postInboundTest(runtime: Runtime, row: EndpointRecord, input: InboundTest = {}) {
   const { sendTestWebhook } = await import('./inbound-webhook.js');
   try { return { statusCode: (await sendTestWebhook(runtime, row, { ...input, format: input.format && storedFormat(input.format) })).status }; }
   catch (error) {

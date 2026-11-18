@@ -6785,6 +6785,100 @@ export type SupportNote = {
     createdAt: string;
 };
 
+export type SupportAction = {
+    id: string;
+    kind: 'retry_webhook_delivery' | 'test_webhook' | 'retry_inbound_delivery' | 'test_inbound_webhook' | 'redeliver_message' | 'pause_campaign';
+    /**
+     * proposed: waiting for the customer; running: a test is posting; done or failed: what the public route answered (failed with SUPPORT_ACTION_OUTCOME_UNKNOWN when a test's answer was never recorded within 5 minutes; it is never posted again); declined; expired after 24 hours.
+     */
+    status: 'proposed' | 'running' | 'done' | 'failed' | 'declined' | 'expired';
+    /**
+     * What the customer approves, as plain text: never render it as Markdown or HTML. Nightmail's own sentence from its records, with each name a person typed (a workspace, a campaign, the end of a webhook URL) inserted as a JSON-quoted string, its control and formatting characters (bidirectional ones included) removed.
+     */
+    summary: string;
+    /**
+     * The summary in parts, to render the typed names apart from the sentence.
+     */
+    parts: {
+        /**
+         * The same sentence with a {placeholder} where each typed name goes. Nothing in it was typed by a person.
+         */
+        template: string;
+        /**
+         * The typed names, as data: put each in place of its {placeholder} once, as text.
+         */
+        labels: {
+            [key: string]: string;
+        };
+    };
+    workspaceId: string;
+    target: {
+        [key: string]: string;
+    };
+    /**
+     * Where the customer confirms or declines it, signed in.
+     */
+    url: string;
+    /**
+     * The public route’s answer when it ran.
+     */
+    result: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * The public route’s error when it refused.
+     */
+    error: {
+        code: string;
+        message: string;
+    } | null;
+    createdAt: string;
+    expiresAt: string;
+    resolvedAt: string | null;
+};
+
+export type SupportActionProposal = {
+    kind: 'retry_webhook_delivery';
+    webhookId: string;
+    deliveryId: string;
+} | {
+    kind: 'test_webhook';
+    webhookId: string;
+} | {
+    kind: 'retry_inbound_delivery';
+    webhookId: string;
+    deliveryId: string;
+} | {
+    kind: 'test_inbound_webhook';
+    webhookId: string;
+} | {
+    kind: 'redeliver_message';
+    messageId: string;
+    /**
+     * Only this endpoint; omit for every route webhook that finished with the message.
+     */
+    webhookId?: string;
+} | {
+    kind: 'pause_campaign';
+    campaignId: string;
+};
+
+export type SupportDomainRecheck = {
+    id: string;
+    workspaceId: string;
+    name: string;
+    verificationStatus: string;
+    verified: boolean;
+    dkimStatus: string;
+    sending: string;
+    receiving: string;
+    mailFromStatus: string | null;
+    /**
+     * False when a re-check was already due: read the domain’s health again shortly.
+     */
+    recheckQueued: boolean;
+};
+
 export type ListMcpConnectionsData = {
     body?: never;
     path?: never;
@@ -29378,3 +29472,194 @@ export type CreateSupportNoteResponses = {
 };
 
 export type CreateSupportNoteResponse = CreateSupportNoteResponses[keyof CreateSupportNoteResponses];
+
+export type ProposeSupportActionData = {
+    body: SupportActionProposal;
+    path?: never;
+    query?: never;
+    url: '/v1/support/actions';
+};
+
+export type ProposeSupportActionErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ProposeSupportActionError = ProposeSupportActionErrors[keyof ProposeSupportActionErrors];
+
+export type ProposeSupportActionResponses = {
+    /**
+     * Success
+     */
+    200: SupportAction;
+    /**
+     * Success
+     */
+    201: SupportAction;
+};
+
+export type ProposeSupportActionResponse = ProposeSupportActionResponses[keyof ProposeSupportActionResponses];
+
+export type GetSupportActionData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/support/actions/{id}';
+};
+
+export type GetSupportActionErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetSupportActionError = GetSupportActionErrors[keyof GetSupportActionErrors];
+
+export type GetSupportActionResponses = {
+    /**
+     * Success
+     */
+    200: SupportAction;
+};
+
+export type GetSupportActionResponse = GetSupportActionResponses[keyof GetSupportActionResponses];
+
+export type RecheckSupportDomainData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/support/domains/{id}/verify';
+};
+
+export type RecheckSupportDomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RecheckSupportDomainError = RecheckSupportDomainErrors[keyof RecheckSupportDomainErrors];
+
+export type RecheckSupportDomainResponses = {
+    /**
+     * Success
+     */
+    200: SupportDomainRecheck;
+};
+
+export type RecheckSupportDomainResponse = RecheckSupportDomainResponses[keyof RecheckSupportDomainResponses];

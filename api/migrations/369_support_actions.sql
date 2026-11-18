@@ -14,10 +14,15 @@ CREATE TABLE support_actions (
   kind text NOT NULL CHECK (kind IN ('retry_webhook_delivery','retry_inbound_delivery','redeliver_message','test_webhook','test_inbound_webhook','pause_campaign')),
   -- The IDs it acts on (webhookId, deliveryId, messageId, campaignId), as the public route takes them.
   target jsonb NOT NULL CHECK (jsonb_typeof(target) = 'object' AND octet_length(target::text) <= 1000),
-  -- What the person approves, in Nightmail's words from its own rows; never the support platform's text.
+  -- What the person approves, as plain text: Nightmail's sentence from its own rows, never the support platform's text,
+  -- with each name a person typed inserted as a JSON-quoted string. parts keeps the sentence ({placeholders}) and the
+  -- typed names (labels) apart, for a renderer that shows names as data.
   summary text NOT NULL CHECK (length(summary) BETWEEN 1 AND 1000),
-  -- proposed until the person decides; running only while a test posts outside the transaction that claimed it.
+  parts jsonb NOT NULL CHECK (jsonb_typeof(parts -> 'template') = 'string' AND jsonb_typeof(parts -> 'labels') = 'object' AND octet_length(parts::text) <= 2000),
+  -- proposed until the person decides; running only while a test posts after the transaction that checked and charged
+  -- it, from started_at. One whose answer was never recorded settles as failed (outcome unknown) and never posts again.
   status text NOT NULL DEFAULT 'proposed' CHECK (status IN ('proposed','running','done','failed','declined')),
+  started_at timestamptz CHECK (status <> 'running' OR started_at IS NOT NULL),
   -- What the public route answered: its body when it succeeded, its error code and message when it refused.
   result jsonb CHECK (result IS NULL OR (jsonb_typeof(result) = 'object' AND octet_length(result::text) <= 4000)),
   created_at timestamptz NOT NULL DEFAULT now(),
