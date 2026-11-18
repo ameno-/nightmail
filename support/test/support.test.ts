@@ -68,6 +68,79 @@ export default {
   },
 };`;
 
+// Test-only entrypoint for conversations: conversations as the earlier inbox (`_support_inbox`) left them, a forward or a
+// usage update a test makes fail once, and the real alarm handler driven at the chosen instant.
+const CONVERSATION_ENTRY = `
+import worker, { SupportConversation as Conversation } from './worker.js';
+export * from './worker.js';
+const unavailable = new Set(); // message IDs whose next delivery fails (module state: every object in this isolate)
+let failTurns = null; // the next usage update ('UPDATE conversations SET turns') throws, or evicts the object first
+function failingDb(ctx, db) {
+  const fail = async () => {
+    const how = failTurns; failTurns = null;
+    if (how === 'abort') { await ctx.storage.sync(); ctx.abort('fixture: evicted'); throw new Error('aborted'); }
+    if (how === 'throw') throw new Error('D1_ERROR: fixture transient failure');
+  };
+  return new Proxy(db, { get(target, prop) {
+    if (prop !== 'prepare') { const value = target[prop]; return typeof value === 'function' ? value.bind(target) : value; }
+    return query => {
+      const statement = target.prepare(query);
+      if (!query.startsWith('UPDATE conversations SET turns')) return statement;
+      return { bind: (...args) => { const bound = statement.bind(...args); return { run: async () => { await fail(); return bound.run(); } }; } };
+    };
+  } });
+}
+// A function: the clock reads 0 at module scope in workerd.
+const legacy = now => { const base = { channel: 'email', status: 'open', contentAccess: false, page: null, handoffMessage: null, requestIds: [], greeted: false,
+  turns: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, ticketId: null, lastActivity: now, closedAt: null, pendingSender: null, confirmSentAt: null };
+return [
+  ['conv_legacy_a', { ...base, threadId: 'thr_legacy_a', userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada Lovelace', role: 'owner', verified: 'dmarc',
+    workspace: { id: 'ws_acme', name: 'Acme Prod' }, workspaces: [{ id: 'ws_acme', name: 'Acme Prod', role: 'owner' }] },
+    [['msg_legacy_answered', 'answered', 1], ['msg_legacy_new', 'new', 0], ['msg_legacy_confirmed', 'confirmed', 1]]],
+  ['conv_legacy_b', { ...base, threadId: 'thr_legacy_b', userId: null, email: 'pat@acme.test', name: null, role: null, verified: null, workspace: null, workspaces: [],
+    pendingSender: 'pat@acme.test', confirmSentAt: now - 60000 }, [['msg_legacy_waiting', 'awaiting_confirmation', 1]]],
+  ['conv_legacy_c', { ...base, threadId: 'thr_legacy_c', userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada Lovelace', role: 'owner', verified: 'dmarc', status: 'closed', closedAt: now - 86400000,
+    workspace: { id: 'ws_acme', name: 'Acme Prod' }, workspaces: [{ id: 'ws_acme', name: 'Acme Prod', role: 'owner' }] }, [['msg_legacy_gave_up', 'failed', 6]]],
+]; };
+export class SupportConversation extends Conversation {
+  constructor(ctx, env) {
+    for (const [name, meta, rows] of legacy(Date.now())) {
+      if (!ctx.id.equals(env.CONVERSATION.idFromName(name)) || ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE name='_support_meta'").toArray().length) continue;
+      ctx.storage.sql.exec('CREATE TABLE _support_meta (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL)');
+      ctx.storage.sql.exec('INSERT INTO _support_meta VALUES (1, ?)', JSON.stringify({ conversationId: name, ...meta }));
+      ctx.storage.sql.exec("CREATE TABLE _support_inbox (message_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, delivery_id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'new', attempts INTEGER NOT NULL DEFAULT 0, received_at INTEGER NOT NULL, subject TEXT)");
+      for (const [id, state, attempts] of rows) ctx.storage.sql.exec('INSERT INTO _support_inbox (message_id, thread_id, delivery_id, state, attempts, received_at) VALUES (?, ?, ?, ?, ?, 1)', id, meta.threadId, 'wh_legacy', state, attempts);
+    }
+    super(ctx, { ...env, DB: failingDb(ctx, env.DB) });
+  }
+  async alarm() {} // Tests call super.alarm() at the chosen instant.
+  async enqueueInbound(input) {
+    if (unavailable.delete(input.messageId)) throw new Error('fixture: unavailable');
+    return super.enqueueInbound(input);
+  }
+  async fixture({ expire, tick, age, unavailable: id, route, fail }) {
+    const sql = this.ctx.storage.sql, has = name => sql.exec('SELECT 1 FROM sqlite_master WHERE name=?', name).toArray().length > 0;
+    if (id) unavailable.add(id);
+    if (fail) failTurns = fail;
+    if (expire && has('_support_work')) sql.exec('UPDATE _support_work SET due_at=1 WHERE id=?', expire);
+    if (age) { const meta = this.meta(); meta.lastActivity -= age; if (meta.closedAt) meta.closedAt -= age; this.save(meta); }
+    if (route) this.env = { ...this.env, SUPPORT_ADDRESS_ID: route };
+    const before = Date.now();
+    if (tick) await super.alarm();
+    return { before, alarm: await this.ctx.storage.getAlarm(), meta: has('_support_meta') ? this.meta() : null,
+      rows: has('_support_work') ? sql.exec('SELECT id,kind,state,attempts,due_at,last_error FROM _support_work ORDER BY created_at,rowid').toArray() : [],
+      legacy: has('_support_inbox') ? sql.exec('SELECT message_id,state FROM _support_inbox ORDER BY message_id').toArray() : [] };
+  }
+}
+export default {
+  ...worker,
+  async fetch(request, env, ctx) {
+    if (new URL(request.url).pathname !== '/__conversation') return worker.fetch(request, env, ctx);
+    const body = await request.json();
+    return Response.json(await env.CONVERSATION.get(env.CONVERSATION.idFromName(body.id)).fixture(body));
+  },
+};`;
+
 const baseEnv = (overrides: Record<string, unknown> = {}) => ({
   STAGE: text('dev'), PUBLIC_URL: text(SUPPORT), DASHBOARD_ORIGINS: text(`${ORIGIN},http://localhost:5173`), BANE_ORIGIN: text(ORIGIN),
   SUPPORT_ADDRESS: text('support@dev.bane.mx'), SUPPORT_ADDRESS_ID: text('adr_support'), TICKET_TO: text('ryan@anoma.ly'), GATEWAY_URL: text('https://opencode.ai/inference/anthropic/v1'),
@@ -142,8 +215,8 @@ function signedHook(messageId: string, threadId: string, from = 'ada@acme.test',
 }
 const CONFIRM_TEMPLATE = /^Hi,\n\nThanks for writing to Nightmail support\. Before I can look at a Nightmail account, I need to confirm that this email came from you\. Open this link and press Confirm \(it works once, within 24 hours\):\n\nhttps:\/\/support\.dev\.bane\.mx\/confirm\/\S+\n\nOr sign in to Nightmail and press Help\.\n\nIf you didn't write to Nightmail support, ignore this email\.\n\nNightmail support \(AI\)$/;
 const NO_ACCOUNT = 'Hi,\n\nThanks for writing to Nightmail support. I couldn’t find a Nightmail account for this email address, so I can’t look anything up. Please write from the address you sign in to Nightmail with, or sign in and press Help.\n\nNightmail support (AI)';
-// The replies Nightmail accepted (a refused one, such as a 409, never reaches the customer).
-const replies = async (thread: string, instance?: Miniflare) => (await fakeCalls(instance)).filter(c => c[0] === 'api' && c[2] === `/v1/inbound/threads/${thread}/reply` && c[6] < 300);
+// The replies Nightmail delivered (a refused one, such as a 409, never reaches the customer, and a replay sends nothing new).
+const replies = async (thread: string, instance?: Miniflare) => (await fakeCalls(instance)).filter(c => c[0] === 'api' && c[2] === `/v1/inbound/threads/${thread}/reply` && c[6] < 300 && !c[7]);
 async function eventually<T>(read: () => Promise<T | undefined>, ms = 30_000): Promise<T | undefined> {
   for (let waited = 0; waited < ms; waited += 250) { const value = await read(); if (value) return value; await new Promise(r => setTimeout(r, 250)); }
   return undefined;
@@ -251,7 +324,9 @@ describe('support Worker', () => {
     assert.deepEqual(JSON.parse(row.details), { topic: 'refund' });
     assert.ok(row.recommendation.includes('Refund the second $25'));
     assert.equal((await db.prepare('SELECT status, ticket_id FROM conversations WHERE id = ?').bind(started.body.conversationId).first<any>()).status, 'ticketed');
-    const sends = (await fakeCalls()).filter(c => c[0] === 'api' && c[1] === 'POST' && c[2] === '/v1/inbound/threads');
+    // Both are work of their own, sent by the alarm.
+    const ticketSends = async () => (await fakeCalls()).filter(c => c[0] === 'api' && c[1] === 'POST' && c[2] === '/v1/inbound/threads' && c[3].text.includes(filed.ticketId));
+    const sends = (await eventually(async () => (await ticketSends()).length >= 2 ? ticketSends() : undefined)) ?? [];
     const team = sends.find(c => c[3].to[0] === 'ryan@anoma.ly'), customer = sends.find(c => c[3].to[0] === 'ada@acme.test');
     assert.ok(team && customer, JSON.stringify(sends));
     assert.equal(team[3].addressId, 'adr_support'); assert.equal(team[3].subject, `[Nightmail billing] ${filed.ticketId}: Duplicate $25 top-up (P3)`);
@@ -357,7 +432,7 @@ describe('support Worker', () => {
     assert.ok(await eventually(async () => (await tried()).length || undefined), 'The answer was tried.');
     await new Promise(r => setTimeout(r, 1500));
     // One answer per message: the changed body is a 409 under the same key, and nothing is sent under any other key. The
-    // message stays in the inbox and is retried (each a 409) until it is marked failed after six tries, as before.
+    // answer waits as blocked work, for a person.
     assert.deepEqual((await tried()).map(c => [c[5], c[6]]), [['reply-msg_nodmarc_lost', 409]]);
     assert.deepEqual((await replies('thr_nodmarc_lost')).map(c => c[5]), ['confirm-msg_nodmarc_lost'], 'Only the confirm link was accepted in this run.');
   }, 180_000);
@@ -625,6 +700,245 @@ describe('support Worker', () => {
       assert.equal(run.rows[0]!.due_at, Date.parse(later)); assert.equal(run.alarm, Math.min(...run.rows.map(r => r.due_at)));
       const overdue = await drive(thread, { expire: `msg:${b}`, message: b });
       assert.ok(overdue.alarm !== null && overdue.alarm >= overdue.before);
+    });
+  });
+
+  describe('conversation work queue', () => {
+    let instance: Miniflare;
+    beforeAll(async () => {
+      const support = worker('support', baseEnv());
+      Object.assign(support.config.manifest.modules, { 'conversation-test.js': { type: 'esm', contents: CONVERSATION_ENTRY } });
+      support.config.manifest.mainModule = 'conversation-test.js';
+      instance = new Miniflare({ cf: false, telemetry: { enabled: false }, workers: [support,
+        { config: { name: 'fake-bane', compatibilityDate: '2026-09-08', manifest: { mainModule: 'bane.js', modules: { 'bane.js': { type: 'esm', contents: FAKE_BANE } } }, env: {} } }] } as never);
+      await migrate(instance);
+    });
+    afterAll(() => instance?.dispose());
+    type Row = { id: string; kind: string; state: string; attempts: number; due_at: number; last_error: string | null };
+    type Run = { rows: Row[]; legacy: { message_id: string; state: string }[]; alarm: number | null; before: number; meta: { closedAt: number | null } | null };
+    async function drive(id: string, options: { tick?: boolean; expire?: string; age?: number; unavailable?: string; route?: string; fail?: 'throw' } = {}) {
+      const res = await instance.dispatchFetch(`${SUPPORT}/__conversation`, { method: 'POST', body: JSON.stringify({ id, ...options }) });
+      assert.equal(res.status, 200);
+      return await res.json() as Run;
+    }
+    /** Runs the alarm with the next usage update evicting the object: the call that caused it ends with it. */
+    async function evicted(id: string) {
+      const res = await instance.dispatchFetch(`${SUPPORT}/__conversation`, { method: 'POST', body: JSON.stringify({ id, fail: 'abort', tick: true }) });
+      await res.body?.cancel();
+    }
+    async function outage(path: string, status = 0, code = 'UNAVAILABLE', lost = false) {
+      const res = await (await instance.getWorker('fake-bane')).fetch('http://fake-bane/__outage', { method: 'POST', body: JSON.stringify({ path, status, code, lost }) });
+      assert.equal(res.status, 204);
+    }
+    const states = (run: Run) => Object.fromEntries(run.rows.map(r => [r.id, r.state]));
+    const sends = async (key: string) => (await fakeCalls(instance)).filter(c => c[0] === 'api' && c[5] === key);
+    const db = () => instance.getD1Database('DB', 'support');
+    const conversationOf = async (thread: string) => (await (await db()).prepare('SELECT id FROM conversations WHERE thread_id = ?').bind(thread).first<{ id: string }>())!.id;
+    const hook = async (message: string, thread: string, from?: string) => assert.equal((await signedHook(message, thread, from, { instance })).status, 200);
+
+    test('new-address mail read with a stale key waits, then is answered once after the same key is expanded', async () => {
+      const thread = 'thr_stale', message = 'msg_stale_1', path = `/v1/inbound/messages/${message}`;
+      await outage(path, 404, 'NOT_FOUND');
+      await hook(message, thread);
+      const id = await conversationOf(thread);
+      let run = await drive(id, { tick: true });
+      for (let n = 2; n <= 8; n++) run = await drive(id, { expire: `msg:${message}`, tick: true });
+      const waiting = run.rows.find(r => r.id === `msg:${message}`)!;
+      assert.deepEqual([waiting.state, waiting.attempts, waiting.last_error], ['blocked', 8, 'config:404:NOT_FOUND'], 'Past the old six tries, still waiting.');
+      assert.ok(run.alarm === waiting.due_at && waiting.due_at >= run.before + 60_000, 'Retried on its own schedule, never at once.');
+      assert.equal((await replies(thread, instance)).length, 0);
+      await outage(path);
+      run = await drive(id, { expire: `msg:${message}`, tick: true });
+      assert.deepEqual(states(run), { [`msg:${message}`]: 'done', [`answer:${message}`]: 'done' });
+      await drive(id, { tick: true });
+      const answered = await replies(thread, instance);
+      assert.deepEqual(answered.map(c => c[5]), [`reply-${message}`]);
+      assert.match(answered[0][3].text, /Gmail hard-bounced 61 of 1,000/);
+    });
+
+    test('ticket work created during the inbox keeps its retry, and an elapsed idle or retention deadline never schedules the past', async () => {
+      const thread = 'thr_busy', message = 'msg_busy_1';
+      // Rita is over today's answers, so her email files a ticket for the team while it is processed.
+      await (await db()).prepare("INSERT INTO daily_counters (day, key, n) VALUES (?, 'user:usr_rita:turns', 1000)").bind(new Date().toISOString().slice(0, 10)).run();
+      await outage('/v1/inbound/threads', 503);
+      await hook(message, thread, 'rita@acme.test');
+      const id = await conversationOf(thread);
+      let run = await drive(id, { tick: true });
+      const notify = run.rows.find(r => r.kind === 'notify')!;
+      assert.deepEqual([notify?.state, run.alarm], ['pending', notify?.due_at], 'The team email’s retry is the next alarm, not the 7-day idle time.');
+      assert.ok(notify.due_at >= run.before + 60_000);
+      assert.match((await replies(thread, instance))[0]?.[3].text ?? '', /can’t answer automatically/);
+      // Its idle time passes: it closes, and the retry is still the next alarm.
+      run = await drive(id, { age: 8 * 86_400_000, tick: true });
+      assert.ok(run.meta?.closedAt && run.alarm === notify.due_at, JSON.stringify(run));
+      // Its retention passes too: kept while the email is unsent, and the alarm is the retry, never a time in the past.
+      run = await drive(id, { age: 8 * 86_400_000, tick: true });
+      assert.ok(run.meta && run.alarm === notify.due_at && run.alarm >= run.before, JSON.stringify(run));
+      // Sent once after the repair; nothing is left, so the conversation is deleted.
+      await outage('/v1/inbound/threads');
+      run = await drive(id, { expire: notify.id, tick: true });
+      assert.deepEqual([run.meta, run.rows, run.alarm], [null, [], null]);
+      assert.deepEqual((await sends(notify.id.replace('notify:', 'ticket-'))).map(c => c[6]), [503, 202]);
+    });
+
+    test('a chat ticket’s team email and follow-up are retried until sent, once each, as first built', async () => {
+      await outage('/v1/inbound/threads', 503);
+      const start = await instance.dispatchFetch(`${SUPPORT}/chat/start`, { method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN }, body: JSON.stringify({ handoff: handoff() }) });
+      const started = await start.json() as any;
+      const upload = await instance.dispatchFetch(`${SUPPORT}/c/${started.conversationId}/attachments`, { method: 'POST', body: pngWithMetadata(64, 32), headers: { 'content-type': 'image/png', authorization: `Bearer ${started.chatToken}`, origin: ORIGIN } });
+      assert.equal(upload.status, 201);
+      const socket = await instance.dispatchFetch(started.socketUrl.replace('wss:', 'https:'), { headers: { upgrade: 'websocket', origin: ORIGIN } });
+      const ws = (socket as any).webSocket; ws.accept();
+      const frames: any[] = []; ws.addEventListener('message', (e: MessageEvent) => frames.push(JSON.parse(String(e.data))));
+      const until = async (match: (f: any) => boolean) => { for (let i = 0; i < 600 && !frames.some(match); i++) await new Promise(r => setTimeout(r, 100)); return frames.find(match); };
+      await until(f => f.type === 'history');
+      ws.send(JSON.stringify({ type: 'user.message', clientMessageId: 'w1', text: 'Can I get a refund of my duplicate top-up?' }));
+      const filed = await until(f => f.type === 'ticket.filed');
+      assert.ok(filed && await until(f => f.type === 'message.end' && f.text?.includes('passed this')));
+      ws.close();
+      let run = await drive(started.conversationId, { tick: true });
+      assert.deepEqual([states(run)[`notify:${filed.ticketId}`], states(run)[`followup:${filed.ticketId}`]], ['pending', 'pending']);
+      // Past a second, so links signed again on a retry would differ.
+      await new Promise(r => setTimeout(r, 1100));
+      await outage('/v1/inbound/threads');
+      for (const item of [`notify:${filed.ticketId}`, `followup:${filed.ticketId}`]) await drive(started.conversationId, { expire: item });
+      run = await drive(started.conversationId, { tick: true });
+      assert.deepEqual([states(run)[`notify:${filed.ticketId}`], states(run)[`followup:${filed.ticketId}`]], ['done', 'done']);
+      await drive(started.conversationId, { tick: true });
+      const team = await sends(`ticket-${filed.ticketId}`), followUp = await sends(`followup-${filed.ticketId}`);
+      assert.deepEqual([team.map(c => c[6]), followUp.map(c => c[6])], [[503, 202], [503, 202]]);
+      for (const tries of [team, followUp]) assert.deepEqual(tries[1].slice(1, 6), tries[0].slice(1, 6), 'The retry is the first request, byte for byte.');
+      assert.deepEqual([team[0][3].to, followUp[0][3].to], [['ryan@anoma.ly'], ['ada@acme.test']]);
+      assert.match(team[0][3].text, /\/attachments\/conv_[a-z2-7]{26}\/att_[a-z2-7]{16}\?exp=\d+&sig=/, 'With the screenshot’s link, signed once.');
+      const ticket = await (await db()).prepare('SELECT notified_at, followup_thread_id FROM tickets WHERE id = ?').bind(filed.ticketId).first<any>();
+      assert.ok(ticket.notified_at && ticket.followup_thread_id);
+    });
+
+    test('a confirm link that fails to send is retried, and the answer waits for the confirmation', async () => {
+      const thread = 'thr_d2', message = 'msg_d2', path = `/v1/inbound/threads/${thread}/reply`;
+      await outage(path, 503);
+      await hook(message, thread, 'dora@acme.test');
+      const id = await conversationOf(thread);
+      let run = await drive(id, { tick: true });
+      assert.deepEqual(states(run), { [`msg:${message}`]: 'done', [`confirm:${message}`]: 'pending', [`answer:${message}`]: 'parked' });
+      assert.deepEqual(run.legacy, [{ message_id: message, state: 'awaiting_confirmation' }]);
+      await outage(path);
+      run = await drive(id, { expire: `confirm:${message}`, tick: true });
+      const links = await sends(`confirm-${message}`);
+      assert.deepEqual(links.map(c => c[6]), [503, 202]);
+      assert.deepEqual(links[1].slice(1, 6), links[0].slice(1, 6), 'The same link, resent.');
+      assert.match(links[1][3].text, CONFIRM_TEMPLATE);
+      assert.equal((await replies(thread, instance)).length, 1, 'Only the link: the answer waits for the confirmation.');
+      const confirmed = await instance.dispatchFetch(`${SUPPORT}/confirm/${String(links[1][3].text).match(/\/confirm\/(\S+)/)![1]}`, { method: 'POST' });
+      assert.match(await confirmed.text(), /that’s confirmed/);
+      run = await drive(id, { tick: true });
+      assert.deepEqual(run.legacy, [{ message_id: message, state: 'answered' }]);
+      assert.deepEqual((await replies(thread, instance)).map(c => c[5]), [`confirm-${message}`, `reply-${message}`]);
+    });
+
+    test('a forward whose target is unavailable is retried, and the message is answered once in its own conversation', async () => {
+      const thread = 'thr_d3';
+      await hook('msg_d3_a', thread);
+      const id = await conversationOf(thread);
+      await drive(id, { tick: true });
+      await hook('msg_d3_b', thread, 'stranger@else.test');
+      let run = await drive(id, { unavailable: 'msg_d3_b', tick: true });
+      const forward = run.rows.find(r => r.id === 'forward:msg_d3_b')!;
+      assert.deepEqual([forward?.state, forward?.attempts], ['pending', 1], 'The target failed: not marked forwarded.');
+      run = await drive(id, { expire: forward.id, tick: true });
+      assert.equal(states(run)[forward.id], 'done');
+      assert.equal(run.legacy.find(r => r.message_id === 'msg_d3_b')?.state, 'rerouted');
+      const target = (await (await db()).prepare("SELECT id FROM conversations WHERE thread_id LIKE 'thr_d3#%'").first<{ id: string }>())!.id;
+      await drive(target, { tick: true });
+      const toStranger = (await replies(thread, instance)).filter(c => c[3].to[0] === 'stranger@else.test');
+      assert.deepEqual(toStranger.map(c => [c[3].replyToMessageId, c[3].text]), [['msg_d3_b', NO_ACCOUNT]]);
+    });
+
+    test('an answer is resent with the same text and no second model call', async () => {
+      const thread = 'thr_resend', message = 'msg_resend_1', path = `/v1/inbound/threads/${thread}/reply`;
+      await outage(path, 503);
+      await hook(message, thread);
+      const id = await conversationOf(thread);
+      let run = await drive(id, { tick: true });
+      assert.deepEqual(states(run), { [`msg:${message}`]: 'done', [`answer:${message}`]: 'pending' });
+      const turns = recorded.length;
+      await outage(path);
+      run = await drive(id, { expire: `answer:${message}`, tick: true });
+      assert.equal(states(run)[`answer:${message}`], 'done');
+      assert.equal(recorded.length, turns, 'No second model call.');
+      const tries = await sends(`reply-${message}`);
+      assert.deepEqual(tries.map(c => c[6]), [503, 202]);
+      assert.deepEqual(tries[1].slice(1, 6), tries[0].slice(1, 6), 'The same text, to the same address, under the same key.');
+      assert.match(tries[1][3].text, /Gmail hard-bounced 61 of 1,000/);
+    });
+
+    test('a reply’s sender address and key are chosen once, so a configuration change between tries never sends twice', async () => {
+      // To the support address used before a move. The first try is delivered, but its response is lost.
+      const thread = 'thr_d5', message = 'msg_d5', path = `/v1/inbound/threads/${thread}/reply`;
+      await outage(path, 503, 'UNAVAILABLE', true);
+      await hook(message, thread);
+      const id = await conversationOf(thread);
+      let run = await drive(id, { tick: true });
+      assert.equal(states(run)[`answer:${message}`], 'pending');
+      // Meanwhile SUPPORT_ADDRESS_ID is pointed at the address the message came in on.
+      await outage(path);
+      run = await drive(id, { route: 'adr_old', expire: `answer:${message}`, tick: true });
+      assert.equal(states(run)[`answer:${message}`], 'done');
+      const tries = (await fakeCalls(instance)).filter(c => c[0] === 'api' && c[2] === path);
+      assert.deepEqual(tries.map(c => [c[3].addressId, c[5], c[6], c[7]]), [[undefined, `reply-${message}:received`, 202, false], [undefined, `reply-${message}:received`, 202, true]], 'The retry was replayed.');
+      assert.equal((await replies(thread, instance)).length, 1, 'One email.');
+    });
+
+    test('a deploy finishes each message the earlier inbox left once, without resending what it sent; it keeps that inbox current for a rollback', async () => {
+      // Ada's conversation: one message answered, one new, one confirmed but unanswered.
+      let run = await drive('conv_legacy_a');
+      assert.deepEqual(states(run), { 'msg:msg_legacy_answered': 'done', 'msg:msg_legacy_new': 'pending', 'msg:msg_legacy_confirmed': 'done', 'answer:msg_legacy_confirmed': 'pending' });
+      assert.ok(run.alarm !== null && run.alarm <= Date.now(), 'Armed when imported.');
+      run = await drive('conv_legacy_a', { tick: true });
+      assert.ok(Object.values(states(run)).every(s => s === 'done'), JSON.stringify(run.rows));
+      await drive('conv_legacy_a', { tick: true });
+      for (const id of ['new', 'confirmed']) assert.deepEqual((await sends(`reply-msg_legacy_${id}`)).map(c => [c[6], c[7]]), [[202, false]], id);
+      assert.equal((await sends('reply-msg_legacy_answered')).length, 0, 'Never sent again.');
+      // Every row is finished in the old table too, so a rolled-back Worker has nothing left to send.
+      assert.ok(run.legacy.every(r => r.state === 'answered'), JSON.stringify(run.legacy));
+      // Pat's conversation: a message waiting for the confirmation whose link the old code sent. No second link; once
+      // confirmed, the answer goes out once.
+      run = await drive('conv_legacy_b', { tick: true });
+      assert.deepEqual(states(run), { 'msg:msg_legacy_waiting': 'done', 'answer:msg_legacy_waiting': 'parked' });
+      assert.equal((await sends('confirm-msg_legacy_waiting')).length, 0);
+      const confirmed = await instance.dispatchFetch(`${SUPPORT}/confirm/${await confirmToken(ROOT, 'conv_legacy_b', 'pat@acme.test')}`, { method: 'POST' });
+      assert.match(await confirmed.text(), /that’s confirmed/);
+      run = await drive('conv_legacy_b', { tick: true });
+      assert.deepEqual((await sends('reply-msg_legacy_waiting')).map(c => [c[6], c[7]]), [[202, false]]);
+      assert.deepEqual(run.legacy, [{ message_id: 'msg_legacy_waiting', state: 'answered' }]);
+    });
+
+    test('a message the earlier inbox gave up on is kept for the record and never run again', async () => {
+      // Six tries spent, in a conversation closed since: running it now would send a late fixed reply for old mail.
+      const run = await drive('conv_legacy_c', { tick: true });
+      assert.deepEqual(run.rows.map(r => [r.id, r.state]), [['msg:msg_legacy_gave_up', 'dead']]);
+      assert.deepEqual(run.legacy, [{ message_id: 'msg_legacy_gave_up', state: 'failed' }]);
+      await drive('conv_legacy_c', { tick: true });
+      assert.equal((await fakeCalls(instance)).filter(c => c[0] === 'api' && (c[2].includes('msg_legacy_gave_up') || c[2].includes('thr_legacy_c') || String(c[5]).includes('msg_legacy_gave_up'))).length, 0, 'Not read, answered or confirmed again.');
+      assert.equal(await (await db()).prepare("SELECT count(*) AS n FROM conversations WHERE thread_id LIKE 'thr_legacy_c%'").first('n'), 0);
+    });
+
+    test.each(['throw', 'abort'] as const)('an answer whose turn filed a ticket is sent once after a failure before the send (%s)', async how => {
+      // The agent files a ticket while answering (the bug path); then the usage update fails (a transient D1 error) or the
+      // object is evicted at that point, before the answer's text is stored as final.
+      const thread = `thr_ticket_${how}`, message = `msg_ticket_${how}`;
+      await hook(message, thread);
+      const id = await conversationOf(thread);
+      if (how === 'abort') await evicted(id); else await drive(id, { fail: 'throw', tick: true });
+      const ticket = async () => (await db()).prepare('SELECT id, notes FROM tickets WHERE conversation_id = ?').bind(id).first<{ id: string; notes: string }>();
+      assert.ok(await ticket(), 'The turn filed a ticket.');
+      assert.equal((await replies(thread, instance)).length, 0, 'Not sent yet.');
+      const turns = recorded.length;
+      const run = await drive(id, { expire: `answer:${message}`, tick: true });
+      assert.equal(states(run)[`answer:${message}`], 'done');
+      assert.deepEqual((await replies(thread, instance)).map(c => c[3].text), ['That’s a Nightmail bug: I’ve passed it to the Nightmail team.']);
+      assert.equal(recorded.length, turns, 'No second model call.');
+      assert.deepEqual(JSON.parse((await ticket())!.notes), [], 'Its own ticket gets no “wrote again” note.');
     });
   });
 

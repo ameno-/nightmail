@@ -4,7 +4,7 @@ import { MissingSecret } from './tokens.js';
 import { log } from './log.js';
 
 export type WorkState = 'pending' | 'blocked' | 'parked' | 'done' | 'held' | 'dead';
-export type NewWork = { id: string; kind: string; payload: object };
+export type NewWork = { id: string; kind: string; payload: object; state?: 'pending' | 'parked' };
 export type WorkRow = { id: string; kind: string; payload: string; result: string; attempts: number; created_at: number };
 export type Outcome = { state?: 'done' | 'held' | 'parked'; result?: object; children?: NewWork[] };
 
@@ -46,21 +46,28 @@ export class WorkQueue {
 
   insert(item: NewWork, parent: string | null = null) {
     const now = Date.now();
-    this.sql.exec('INSERT INTO _support_work(id,kind,payload,parent,due_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING',
-      item.id, item.kind, JSON.stringify(item.payload), parent, now, now, now);
+    this.sql.exec('INSERT INTO _support_work(id,kind,state,payload,parent,due_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING',
+      item.id, item.kind, item.state ?? 'pending', JSON.stringify(item.payload), parent, now, now, now);
   }
 
   checkpoint(id: string, result: object) {
     this.sql.exec('UPDATE _support_work SET result=?, updated_at=? WHERE id=?', JSON.stringify(result), Date.now(), id);
   }
 
-  arm() {
+  /** Whether any item still has to run (parked items wait for someone else and don't count). */
+  open() {
+    return this.sql.exec(`SELECT 1 FROM _support_work WHERE ${runnable} LIMIT 1`).toArray().length > 0;
+  }
+
+  /** The alarm: the earliest due item, or the owner's next deadline (null: none) if sooner. Never in the past. */
+  arm(deadline: number | null = null) {
     const { due } = this.sql.exec<{ due: number | null }>(`SELECT min(due_at) AS due FROM _support_work WHERE ${runnable}`).one();
-    return due === null ? this.storage.deleteAlarm() : this.storage.setAlarm(Math.max(Date.now(), due));
+    const next = due === null ? deadline : deadline === null ? due : Math.min(due, deadline);
+    return next === null ? this.storage.deleteAlarm() : this.storage.setAlarm(Math.max(Date.now(), next));
   }
 
   /** Only called from alarm(): workerd runs at most one alarm handler per object. RPCs can enqueue during I/O. */
-  async drain(run: (item: WorkRow) => Promise<Outcome>, transitioned: (item: WorkRow, state: WorkState) => void) {
+  async drain(run: (item: WorkRow) => Promise<Outcome>, transitioned: (item: WorkRow, state: WorkState) => void, deadline: () => number | null = () => null) {
     const end = Date.now() + 30_000;
     for (let i = 0; i < 20 && Date.now() < end; i++) {
       const item = this.sql.exec<WorkRow>(`UPDATE _support_work SET attempts=attempts+1, updated_at=? WHERE id=(
@@ -83,6 +90,6 @@ export class WorkQueue {
         log('warn', { event: 'work', kind: item.kind, state, attempts: item.attempts, error });
       }
     }
-    await this.arm();
+    await this.arm(deadline());
   }
 }
