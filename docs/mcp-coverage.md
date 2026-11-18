@@ -150,11 +150,11 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `restoreRoutingVersion` | `routing` · `restore` · routing |
 | `testRouting` | `routing` · `test` · routing |
 | `listRuleVersions` | `rules` · `versions` · rules |
-| `listRitualVersions` | Deprecated alias of `listRuleVersions`, its name before the rename; agents use that. |
+| `listRitualVersions` | Deprecated alias of `listRuleVersions`, its name before the rename: still callable, not listed. |
 | `restoreRuleVersion` | `rules` · `restore` · rules |
-| `restoreRitualVersion` | Deprecated alias of `restoreRuleVersion`, its name before the rename; agents use that. |
+| `restoreRitualVersion` | Deprecated alias of `restoreRuleVersion`, its name before the rename: still callable, not listed. |
 | `setDecisionOptIns` | `rules` · `decisions` · rules |
-| `setOmenOptIns` | Deprecated alias of `setDecisionOptIns`, its name before the rename; agents use that. |
+| `setOmenOptIns` | Deprecated alias of `setDecisionOptIns`, its name before the rename: still callable, not listed. |
 | `listEndpoints` | `endpoints` · `list` · endpoints |
 | `createEndpoint` | `endpoints` · `create` · endpoints |
 | `getEndpoint` | `endpoints` · `get` · endpoints |
@@ -164,35 +164,35 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `testEndpoint` | `endpoints` · `test` · endpoints |
 | `createInboxConnection` | `connections` · `createInbox` · inboxes |
 | `getRuleVersion` | Dashboard step: the rules page’s long poll, so a person sees an agent’s saves live. Agents read the version from rules · config (getRules). |
-| `getRitualVersion` | Deprecated alias of `getRuleVersion`, its name before the rename; agents use that. |
+| `getRitualVersion` | Deprecated alias of `getRuleVersion`, its name before the rename. |
 | `checkRule` | `rules` · `check` · rules |
-| `checkRitual` | Deprecated alias of `checkRule`, its name before the rename; agents use that. |
+| `checkRitual` | Deprecated alias of `checkRule`, its name before the rename: still callable, not listed. |
 | `getRuleTypings` | `rules` · `typings` · rules |
-| `getRitualTypings` | Deprecated alias of `getRuleTypings`, its name before the rename; agents use that. |
+| `getRitualTypings` | Deprecated alias of `getRuleTypings`, its name before the rename: still callable, not listed. |
 | `listRuleTemplates` | `rules` · `templates` · rules |
-| `listRitualTemplates` | Deprecated alias of `listRuleTemplates`, its name before the rename; agents use that. |
+| `listRitualTemplates` | Deprecated alias of `listRuleTemplates`, its name before the rename: still callable, not listed. |
 | `listRuleRecipes` | `rules` · `recipes` · rules |
 | `createRuleFromRecipe` | `rules` · `createFromRecipe` · rules |
-| `listRitualRecipes` | Deprecated alias of `listRuleRecipes`, its name before the rename; agents use that. |
-| `createRitualFromRecipe` | Deprecated alias of `createRuleFromRecipe`, its name before the rename; agents use that. |
+| `listRitualRecipes` | Deprecated alias of `listRuleRecipes`, its name before the rename: still callable, not listed. |
+| `createRitualFromRecipe` | Deprecated alias of `createRuleFromRecipe`, its name before the rename: still callable, not listed. |
 | `updateRuleFromRecipe` | `rules` · `updateFromRecipe` · rules |
-| `updateRitualFromRecipe` | Deprecated alias of `updateRuleFromRecipe`, its name before the rename; agents use that. |
+| `updateRitualFromRecipe` | Deprecated alias of `updateRuleFromRecipe`, its name before the rename: still callable, not listed. |
 | `updateRule` | `rules` · `update` · rules |
 | `getRule` | `rules` · `get` · rules |
 | `saveRule` | `rules` · `save` · rules |
 | `deleteRule` | `rules` · `delete` · rules |
-| `updateRitual` | Deprecated alias of `updateRule`, its name before the rename; agents use that. |
-| `getRitual` | Deprecated alias of `getRule`, its name before the rename; agents use that. |
-| `saveRitual` | Deprecated alias of `saveRule`, its name before the rename; agents use that. |
-| `deleteRitual` | Deprecated alias of `deleteRule`, its name before the rename; agents use that. |
+| `updateRitual` | Deprecated alias of `updateRule`, its name before the rename: still callable, not listed. |
+| `getRitual` | Deprecated alias of `getRule`, its name before the rename: still callable, not listed. |
+| `saveRitual` | Deprecated alias of `saveRule`, its name before the rename: still callable, not listed. |
+| `deleteRitual` | Deprecated alias of `deleteRule`, its name before the rename: still callable, not listed. |
 | `attachRules` | `rules` · `attach` · rules |
-| `attachRituals` | Deprecated alias of `attachRules`, its name before the rename; agents use that. |
+| `attachRituals` | Deprecated alias of `attachRules`, its name before the rename: still callable, not listed. |
 | `getRules` | `rules` · `config` · rules |
 | `applyRules` | `rules` · `apply` · rules |
-| `getRituals` | Deprecated alias of `getRules`, its name before the rename; agents use that. |
-| `applyRituals` | Deprecated alias of `applyRules`, its name before the rename; agents use that. |
+| `getRituals` | Deprecated alias of `getRules`, its name before the rename: still callable, not listed. |
+| `applyRituals` | Deprecated alias of `applyRules`, its name before the rename: still callable, not listed. |
 | `testRules` | `rules` · `test` · rules |
-| `testRituals` | Deprecated alias of `testRules`, its name before the rename; agents use that. |
+| `testRituals` | Deprecated alias of `testRules`, its name before the rename: still callable, not listed. |
 | `listInboxFolders` | `inboxes` · `folders` · inboxes |
 | `createInboxFolder` | `inboxes` · `createFolder` · inboxes |
 | `updateInboxFolder` | `inboxes` · `updateFolder` · inboxes |

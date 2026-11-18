@@ -28,7 +28,7 @@ import {
   type Programs,
 } from './ritual-pipeline.js';
 import { compileRitual, type Diagnostic } from './ritual-engine.js';
-import { buildRecipe, closest, endpointCall, endpointPayloads, legacyTemplateIds, recipeGroups, recipeWrote, ritualCompletions, ritualRecipes, ritualTemplates, ritualTypings, type EndpointType, type RecipeParams } from './ritual-schema.js';
+import { buildRecipe, closest, endpointCall, endpointPayloads, recipeGroups, recipeWrote, ritualCompletions, ritualRecipes, ritualTemplates, ritualTypings, type EndpointType, type RecipeParams } from './ritual-schema.js';
 import { RATES } from './billing/money.js';
 import type { RoutingInput } from './routing-match.js';
 import { registerEndpoints } from './endpoints.js';
@@ -286,10 +286,10 @@ export function registerRituals(app: App) {
     summary: 'TypeScript declarations and editor completions for this workspace',
     description: 'Generated from the workspace’s endpoints, inbox keys and sender lists. Load typescript into an editor as a .d.ts, or read it to learn exactly what a rule can call.',
     responses: { 200: response(typings.openapi('RuleTypings')), ...errors },
-  }, async c => {
-    const symbols = await workspaceSymbols(c);
+  }, async (c, family) => {
+    const symbols = await workspaceSymbols(c), earlierNames = family === 'rituals';
     c.header('Cache-Control', 'no-store');
-    return c.json({ typescript: ritualTypings(symbols), completions: ritualCompletions(symbols), ...symbols }, 200);
+    return c.json({ typescript: ritualTypings(symbols, earlierNames), completions: ritualCompletions(symbols, earlierNames), ...symbols }, 200);
   }, { responses: { 200: response(typings.openapi('RitualTypings')), ...errors } });
   const templates = z.object({ data: z.array(z.object({ id: z.string(), name: z.string(), description: z.string(), needs: z.enum(['slack', 'discord', 'webhook', 'forward']).nullable(), endpoint: z.string().nullable(), source: z.string() })) });
   both(app, {
@@ -301,7 +301,8 @@ export function registerRituals(app: App) {
     const { endpoints } = await workspaceSymbols(c);
     return c.json({ data: ritualTemplates.map(t => {
       const endpoint = t.needs ? endpoints.find(e => e.type === t.needs && e.status === 'ready')?.name ?? null : null;
-      return { id: family === 'rituals' ? legacyTemplateIds[t.id] ?? t.id : t.id, name: t.name, description: t.description, needs: t.needs ?? null, endpoint, source: t.source(endpoint ?? undefined) };
+      const shown = family === 'rituals' && t.before ? { ...t, ...t.before } : t;
+      return { id: shown.id, name: t.name, description: shown.description, needs: t.needs ?? null, endpoint, source: shown.source(endpoint ?? undefined) };
     }) }, 200);
   }, { responses: { 200: response(templates.openapi('RitualTemplates')), ...errors } });
   const params=z.object({key:z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/)}),item=path+'/scripts/{key}';

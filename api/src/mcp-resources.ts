@@ -113,6 +113,17 @@ export function resourceActions(name: string): Readonly<Record<string, string>> 
   return Object.hasOwn(resources, name) ? resources[name].actions : undefined;
 }
 
+// Resources under their names before the rename, with their earlier actions: never listed, still callable (and
+// described), each action naming a hidden alias tool (mcp-catalog.ts mcpAliases), so a saved plain call keeps working.
+const earlierResources: Record<string, Record<string, string>> = {
+  rituals: {
+    get: 'getRitual', save: 'saveRitual', delete: 'deleteRitual', check: 'checkRitual', typings: 'getRitualTypings', templates: 'listRitualTemplates', recipes: 'listRitualRecipes', createFromRecipe: 'createRitualFromRecipe', updateFromRecipe: 'updateRitualFromRecipe', update: 'updateRitual', attach: 'attachRituals', config: 'getRituals', apply: 'applyRituals', test: 'testRituals', versions: 'listRitualVersions', restore: 'restoreRitualVersion', omens: 'setOmenOptIns',
+  },
+};
+export function earlierResourceActions(name: string): Readonly<Record<string, string>> | undefined {
+  return Object.hasOwn(earlierResources, name) ? earlierResources[name] : undefined;
+}
+
 // Optional pagination is uniform across resources; list it once at the tool level.
 const commonArgs = new Set(['search', 'from', 'subjectContains', 'ifMatch']);
 const commonBodyFields = new Set(['name', 'type', 'from', 'to', 'subject', 'text', 'html', 'email', 'ttlSeconds']);

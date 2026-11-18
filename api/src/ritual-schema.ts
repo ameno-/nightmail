@@ -194,19 +194,38 @@ function tsFields(fields: Record<string, Field>, indent: string, skip: string[] 
   return Object.entries(fields).filter(([name]) => !skip.includes(name)).map(([name, field]) => `${indent}/** ${field.doc} */\n${indent}${name}: ${tsType(field, indent)};\n`).join('');
 }
 
+// The language's wording before rituals were renamed rules and omens decisions: what the deprecated getRitualTypings and
+// listRitualTemplates still answer, byte for byte, for editors and agents that load them (rule-names.ts).
+const omensBuiltin = { signature: 'omens(email, { name: "question" })', doc: 'Ask Jev each question once per message. Returns a 0–1 score per name, or a boolean for type "boolean". Questions must be literal text.' };
+const EARLIER_DOCS: [string, string][] = [
+  ['Attachment metadata. Content is never available to a rule.', 'Attachment metadata. Content is never available to a ritual.'],
+  ['The route this rule runs on.', 'The routing decision this ritual runs on.'],
+  ['Receipt time (ISO 8601). Rules have no clock.', 'Receipt time (ISO 8601). Rituals have no clock.'],
+  ['Posts a signed JSON request: your payload as its body, or the message.received event without one.', 'Posts a signed JSON event. With a payload, data.ritualBody carries your record.'],
+];
+const earlier = (text: string) => EARLIER_DOCS.reduce((t, [now, then]) => t.replaceAll(now, then), text);
+
 /** TypeScript declarations for editors and agents, generated from the workspace's endpoints, inboxes and lists. */
-export function ritualTypings(workspace: RitualWorkspace): string {
+export function ritualTypings(workspace: RitualWorkspace, earlierNames = false): string {
   const endpointLines = workspace.endpoints.map(e => {
     const p = endpointPayloads[e.type];
     const param = e.type === 'slack' ? 'message: { text: string }' : e.type === 'discord' ? 'message: { content: string }' : e.type === 'webhook' ? 'payload?: Record<string, unknown>' : '';
     return `  /** ${e.type} · ${e.status}. ${p.doc} */\n  ${ident(e.name) ? e.name : JSON.stringify(e.name)}(${param}): void;\n`;
   }).join('');
   const fn = (name: string) => builtins[name]!;
-  return `// Rule declarations. Rules are a deterministic subset of JavaScript: one default
+  const [ruleNoun, context] = earlierNames ? ['Ritual', 'RitualContext'] : ['Rule', 'RuleContext'];
+  const result = '{ [K in keyof T]: T[K] extends { type: "boolean" } ? boolean : number }', question = 'string | { prompt: string; type?: "score" | "boolean"; threshold?: number; onError?: number | boolean | "defer" }';
+  // The deprecated getRitualTypings answers the declarations as they were; the rule typings declare the earlier names too,
+  // deprecated, so a stored source that still calls omens(…) type-checks.
+  const asks = earlierNames
+    ? `type Omen = ${question};\n/** ${omensBuiltin.doc} */\ndeclare function omens<T extends Record<string, Omen>>(email: Email, questions: T): ${result};\n`
+    : `type Decision = ${question};\n/** ${fn('decisions').doc} */\ndeclare function decisions<T extends Record<string, Decision>>(email: Email, questions: T): ${result};\n`
+      + `/** @deprecated The earlier name for Decision. */\ntype Omen = Decision;\n/** @deprecated The earlier name for decisions(). ${fn('decisions').doc} */\ndeclare function omens<T extends Record<string, Decision>>(email: Email, questions: T): ${result};\n`;
+  const text = `// ${ruleNoun} declarations. ${ruleNoun}s are a deterministic subset of JavaScript: one default
 // function, const bindings, if/else, ternaries, templates and the calls below. No loops,
-// clock, randomness or network access. Reference: docs/rules.md.
+// clock, randomness or network access. Reference: docs/${ruleNoun.toLowerCase()}s.md.
 
-export default function route(email: Email, ctx: RuleContext): void;
+export default function route(email: Email, ctx: ${context}): void;
 
 interface Mailbox {
 ${tsFields(mailbox.fields!, '  ')}}
@@ -223,7 +242,7 @@ ${tsFields(emailFields, '  ', ['headers'])}  /** ${emailFields.headers!.doc} */
     has(name: string): boolean;
   };
 }
-interface RuleContext {
+interface ${context} {
 ${tsFields(ctxFields, '  ')}}
 
 /** Endpoints configured in this workspace. Call them by name; type decides the payload. */
@@ -249,15 +268,13 @@ ${['block', 'drop', 'junk'].map(name => `/** ${fn(name).doc} */\ndeclare functio
 declare function allow(): void;
 /** ${fn('label').doc} */
 declare function label(name: string): void;
-type Decision = string | { prompt: string; type?: "score" | "boolean"; threshold?: number; onError?: number | boolean | "defer" };
-/** ${fn('decisions').doc} */
-declare function decisions<T extends Record<string, Decision>>(email: Email, questions: T): { [K in keyof T]: T[K] extends { type: "boolean" } ? boolean : number };
-`;
+${asks}`;
+  return earlierNames ? earlier(text) : text;
 }
 
 export type Completion = { label: string; type: 'function' | 'property' | 'variable' | 'keyword'; detail: string; info: string; apply?: string };
 /** Editor completions: the same facts as the typings, flattened for CodeMirror. */
-export function ritualCompletions(workspace: RitualWorkspace): Completion[] {
+export function ritualCompletions(workspace: RitualWorkspace, earlierNames = false): Completion[] {
   const out: Completion[] = [];
   const walk = (prefix: string, fields: Record<string, Field>) => {
     for (const [name, field] of Object.entries(fields)) {
@@ -276,10 +293,11 @@ export function ritualCompletions(workspace: RitualWorkspace): Completion[] {
   }
   for (const key of workspace.inboxes) out.push({ label: `inbox.deliver(${JSON.stringify(key)})`, type: 'function', detail: 'inbox', info: `Deliver to the inbox ${key}.` });
   for (const name of workspace.lists) out.push({ label: `lists.has(${JSON.stringify(name)}, email.from.address)`, type: 'function', detail: 'sender list', info: `True when ${name} contains the sender.` });
-  return out;
+  return earlierNames ? out.map(c => c.label === 'decisions' ? { label: 'omens', type: c.type, detail: omensBuiltin.signature, info: omensBuiltin.doc, apply: 'omens(' } : { ...c, info: earlier(c.info) }) : out;
 }
 
-export type RitualTemplate = { id: string; name: string; description: string; needs?: EndpointType; source: (endpoint?: string) => string };
+/** `before`: what the deprecated listRitualTemplates answers for a template the rename changed. */
+export type RitualTemplate = { id: string; name: string; description: string; needs?: EndpointType; source: (endpoint?: string) => string; before?: { id: string; description: string; source: (endpoint?: string) => string } };
 const wrap = (body: string) => `export default function route(email, ctx) {\n${body.trim().split('\n').map(line => (line ? '  ' + line : line)).join('\n')}\n}\n`;
 /** Starting points. Each one compiles; endpoint templates take the name of an endpoint of the right type. */
 export const ritualTemplates: RitualTemplate[] = [
@@ -328,6 +346,12 @@ if (email.headers.has("list-unsubscribe") || email.flags.bulk) junk("newsletter"
     source: () => wrap(`
 const result = decisions(email, { refund: "Is the sender asking for a refund?" })
 if (result.refund >= 0.7) label("refund")`),
+    before: {
+      id: 'refund-omen', description: `Ask ${productName}’s AI (an omen) whether the sender wants a refund, then label it. Needs omens enabled for the domain.`,
+      source: () => wrap(`
+const result = omens(email, { refund: "Is the sender asking for a refund?" })
+if (result.refund >= 0.7) label("refund")`),
+    },
   },
   {
     id: 'block-domain', name: 'Block a domain',
@@ -476,8 +500,6 @@ export type BuiltRecipe = { ok: true; recipe: RitualRecipe; params: RecipeParams
  *  the rename; a rule saved then keeps its recipe. */
 export const recipeWrote = (built: { source: string }, source: string) =>
   source === built.source || source === built.source.replace('const asks = decisions(', 'const asks = omens(');
-/** Template IDs before the rename, still returned by the deprecated listRitualTemplates. */
-export const legacyTemplateIds: Record<string, string> = { 'refund-decision': 'refund-omen' };
 /**
  * Checks a recipe's parameters and writes its script. `kind` says what type an endpoint name has in this workspace
  * (undefined when there is none). Parameters come back normalized: trimmed, lowercased where it matters, deduplicated.

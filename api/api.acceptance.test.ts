@@ -635,7 +635,7 @@ test('rules: compiler diagnostics, linear regex, plain scores and atomic step/ou
   const {retryAfterMs,actionDelay,endpointPolicy}=await import('./src/ritual-retry.js');assert.equal(retryAfterMs('1.5'),1500);assert.equal(retryAfterMs('120'),120000);assert.ok(retryAfterMs(new Date(Date.now()+5000).toUTCString())>3000);assert.equal(retryAfterMs('soon'),0);
   for(const r of [0,0.5,0.999]){const d=actionDelay(2,0,()=>r);assert.ok(d>=45000&&d<=75000,String(d))}assert.equal(actionDelay(1,90000,()=>0),90000);assert.deepEqual(endpointPolicy('slack'),{perMinute:60,retryOnTimeout:false,idempotent:false});assert.equal(endpointPolicy('forward',{retry_on_timeout:false}).retryOnTimeout,true);
   const {ritualTemplates,ritualTypings}=await import('./src/ritual-schema.js');for(const t of ritualTemplates)assert.doesNotThrow(()=>compileRitual(t.source()),t.id);assert.ok(ritualTemplates.length>=9);
-  const dts=ritualTypings({endpoints:[{name:'billing',type:'slack',status:'ready'},{name:'support-hook',type:'webhook',status:'ready'}],inboxes:['support'],lists:['vip']});assert.match(dts,/billing\(message: \{ text: string \}\): void/);assert.match(dts,/"support-hook"\(payload\?: Record<string, unknown>\): void/);assert.match(dts,/deliver\(key: "support"\)/);assert.match(dts,/has\(list: "vip", value: string\)/);assert.match(dts,/declare function decisions</);assert.doesNotMatch(dts,/omens/);
+  const dts=ritualTypings({endpoints:[{name:'billing',type:'slack',status:'ready'},{name:'support-hook',type:'webhook',status:'ready'}],inboxes:['support'],lists:['vip']});assert.match(dts,/billing\(message: \{ text: string \}\): void/);assert.match(dts,/"support-hook"\(payload\?: Record<string, unknown>\): void/);assert.match(dts,/deliver\(key: "support"\)/);assert.match(dts,/has\(list: "vip", value: string\)/);assert.match(dts,/declare function decisions</);assert.match(dts,/@deprecated The earlier name for decisions\(\)[^\n]*\ndeclare function omens</);
   for(const r of [runRitual(ir,{subject:'news',text:'x'.repeat(65537)},{},{}),runRitual(ir,{subject:'news',text:'hi'},{},{},{},2)]){assert.ok(r.error);assert.deepEqual(r.intents,[])}
 });
 test('rules: microbenchmarks (CPU per message, warm IR)',{skip:!BENCH},async t=>{
@@ -3306,6 +3306,105 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(changed.status, 404, diagnostic(changed));
     assert.equal((changed.body as Json).error.code, -32001);
     assert.equal(ok(await list(manage.secret, await start(manage.secret, '/mcp?codemode=true'), '/mcp?codemode=true')).result.tools.length, ok(await list(read.secret, await start(read.secret, '/mcp?codemode=true'), '/mcp?codemode=true')).result.tools.length);
+  });
+
+  // The rule tools were renamed (getRituals is getRules, the plain rituals resource is rules). A client's cached tool list
+  // or saved call still names them as they were: each earlier name is a tool no listing shows that calls its deprecated
+  // /v1/rituals operation, so it answers in that operation's shapes and codes, behind the same confirmation, and only
+  // for a credential that could call it before.
+  test('the rule tools under their earlier names: never listed, and answering as their /v1/rituals operations do', async t => {
+    const db = await fixtureDatabase(t);
+    const manage = await keyFixture(t), read = await keyFixture(t, { permissions: ['read'] }), sender = await keyFixture(t, { permissions: ['read', 'send'], domains: ['example.com'] });
+    const grant = await oauthGrant(t, db, 'bane:read offline_access');
+    const { resourceActions, earlierResourceActions } = await import('./src/mcp-resources.js');
+    const earlier = earlierResourceActions('rituals')!, current = resourceActions('rules')!;
+    // [earlier tool, its tool now, its plain action]
+    const renamed = Object.entries(earlier).map(([action, name]) => [name, current[action === 'omens' ? 'decisions' : action], action] as const);
+    assert.equal(renamed.length, 17);
+    const init = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } } };
+    const send = (key: string, method: string, params: Json, path = '/mcp?codemode=false', session?: string) => http('POST', path, key, { jsonrpc: '2.0', id: 2, method, params }, session ? { ...rpcHeaders, 'mcp-session-id': session } : rpcHeaders);
+    const call = async (key: string, name: string, args: Json = {}, path?: string, session?: string) => ok(await send(key, 'tools/call', { name, arguments: args }, path, session)).result as Json;
+    const plain = (key: string, action: string, args: Json = {}) => call(key, 'rituals', { action, ...args }, '/mcp');
+    const fingerprint = (tools: Json) => createHash('sha256').update(JSON.stringify(tools)).digest('hex').slice(0, 16);
+    // What a call answers, and what REST answers the same request, in the same terms: the body, or the status and code.
+    // Versions and times differ between two writes of the same thing.
+    const steady = (value: unknown) => JSON.parse(JSON.stringify(value, (k, v) => ['version', 'createdAt', 'updatedAt', 'savedAt', 'nextCursor'].includes(k) ? undefined : v));
+    const answer = (r: Json) => steady(r.isError ? [r._meta?.status ?? null, r.structuredContent?.error?.code] : r.structuredContent);
+    const rest = (reply: Reply) => steady(reply.status < 300 ? reply.body : [reply.status, reply.body?.error?.code]);
+    const unavailable = (r: Json) => r.isError && r.structuredContent?.error?.code === 'TOOL_UNAVAILABLE';
+
+    // Listings: neither shows an earlier name, and a session's fingerprint is of exactly what it is shown, in which an
+    // earlier name still answers.
+    for (const path of ['/mcp?codemode=false', '/mcp']) {
+      const started = await http('POST', path, manage.secret, init, rpcHeaders), session = started.headers.get('mcp-session-id')!;
+      assert.equal(started.status, 200, diagnostic(started));
+      const tools = ok(await send(manage.secret, 'tools/list', {}, path, session)).result.tools as Json[];
+      assert.equal(session.split('.')[0], fingerprint(tools));
+      const names = tools.flatMap(x => [x.name as string, ...((x.inputSchema.properties?.action?.enum ?? []) as string[]).map(a => `${x.name}.${a}`)]);
+      assert.ok(names.includes(path === '/mcp' ? 'rules.decisions' : 'setDecisionOptIns'), path);
+      assert.deepEqual(names.filter(n => /ritual|omen/i.test(n)), [], path);
+      const config = await call(manage.secret, path === '/mcp' ? 'rituals' : 'getRituals', path === '/mcp' ? { action: 'config' } : {}, path, session);
+      assert.deepEqual(answer(config), rest(await http('GET', '/v1/rituals', manage.secret)), path);
+    }
+
+    // Every earlier name, by itself and as its plain action, answers what its /v1/rituals operation answers over REST,
+    // each from the same starting config.
+    const omens = 'export default function route(email, ctx) {\n  const r = omens(email, { refund: "Is the sender asking for a refund?" })\n  if (r.refund >= 0.7) label("refund")\n}';
+    const start = { rituals: [{ key: 'earlier', source: omens }, { key: 'plain', source: 'export default function route(email) { label("seen") }' }], attachments: [] };
+    const reset = async () => ok(await http('PUT', '/v1/rituals', manage.secret, start)).version as number;
+    const first = await reset();
+    const mime = 'From: a@example.net\r\nTo: earlier@example.com\r\nSubject: Refund\r\n\r\nRefund please';
+    const broken = { rituals: [{ key: 'broken', source: 'export default function route(email){ email.subjet }' }] };
+    const calls: [string, Json, string, string, Json?][] = [
+      ['getRituals', {}, 'GET', '/v1/rituals'], ['getRitualTypings', {}, 'GET', '/v1/rituals/typings'], ['listRitualTemplates', {}, 'GET', '/v1/rituals/templates'],
+      ['listRitualRecipes', {}, 'GET', '/v1/rituals/recipes'], ['listRitualVersions', { limit: 2 }, 'GET', '/v1/rituals/history?limit=2'], ['getRitual', { key: 'earlier' }, 'GET', '/v1/rituals/scripts/earlier'],
+      ['checkRitual', { body: { key: 'earlier', source: omens } }, 'POST', '/v1/rituals/check', { key: 'earlier', source: omens }],
+      ['testRituals', { body: { mime, scores: { 'Is the sender asking for a refund?': 0.9 } } }, 'POST', '/v1/rituals/test', { mime, scores: { 'Is the sender asking for a refund?': 0.9 } }],
+      ['applyRituals', { confirm: true, body: { ...start, rituals: start.rituals.slice(1) } }, 'PUT', '/v1/rituals', { ...start, rituals: start.rituals.slice(1) }],
+      ['applyRituals', { confirm: true, body: broken }, 'PUT', '/v1/rituals', broken],
+      ['saveRitual', { key: 'earlier', confirm: true, body: { key: 'earlier', source: omens.replace('0.7', '0.8') } }, 'PUT', '/v1/rituals/scripts/earlier', { key: 'earlier', source: omens.replace('0.7', '0.8') }],
+      ['updateRitual', { key: 'earlier', confirm: true, body: { enabled: false } }, 'PATCH', '/v1/rituals/scripts/earlier', { enabled: false }],
+      ['attachRituals', { confirm: true, body: { attachments: [] } }, 'PUT', '/v1/rituals/attachments', { attachments: [] }],
+      ['setOmenOptIns', { confirm: true, body: { evaluateDomains: [], evaluateRoutes: [] } }, 'PUT', '/v1/rituals/omens', { evaluateDomains: [], evaluateRoutes: [] }],
+      ['createRitualFromRecipe', { confirm: true, body: { recipe: 'junk-newsletters', params: {}, addresses: ['earlier@example.com'], key: 'earlier' } }, 'POST', '/v1/rituals/recipes', { recipe: 'junk-newsletters', params: {}, addresses: ['earlier@example.com'], key: 'earlier' }],
+      ['updateRitualFromRecipe', { key: 'plain', confirm: true, body: { recipe: 'junk-newsletters', params: {}, addresses: ['earlier@example.com'] } }, 'PUT', '/v1/rituals/scripts/plain/recipe', { recipe: 'junk-newsletters', params: {}, addresses: ['earlier@example.com'] }],
+      ['restoreRitualVersion', { confirm: true, body: { version: first } }, 'POST', '/v1/rituals/restore', { version: first }],
+      ['deleteRitual', { key: 'earlier', confirm: true }, 'DELETE', '/v1/rituals/scripts/earlier'],
+    ];
+    const actionOf = new Map(renamed.map(([name, , action]) => [name, action]));
+    for (const [name, args, method, path, body] of calls) {
+      await reset(); const expected = rest(await http(method, path, manage.secret, body));
+      await reset(); const named = await call(manage.secret, name, args);
+      await reset(); const grouped = await plain(manage.secret, actionOf.get(name)!, args);
+      assert.deepEqual([answer(named), answer(grouped)], [expected, expected], `${name}: ${redact(named)}`);
+    }
+    assert.deepEqual(new Set(calls.map(([name]) => name)), new Set(actionOf.keys()));
+    // The compile error is the one from before the rename, field and details too.
+    await reset(); const failed = await call(manage.secret, 'applyRituals', { confirm: true, body: broken });
+    assert.deepEqual([failed.structuredContent.error.code, failed.structuredContent.error.field, failed.structuredContent.error.details[0].ritual], ['RITUAL_INVALID', 'rituals', 'broken']);
+    // A write still needs its confirmation, as the tool now does.
+    const unconfirmed = await call(manage.secret, 'applyRituals', { body: start });
+    assert.deepEqual(answer(unconfirmed), answer(await call(manage.secret, 'applyRules', { body: { rules: start.rituals, attachments: [] } })));
+    assert.equal(unconfirmed.isError, true);
+    // describe_tool answers for the earlier resource as it did.
+    const described = await call(manage.secret, 'describe_tool', { resource: 'rituals', action: 'config' }, '/mcp');
+    assert.deepEqual([described.isError, described.structuredContent.name, described.structuredContent.description], [false, 'rituals', 'Read the saved rituals (sources), ordered attachments to inboxes and addresses, sender lists and omen opt-ins. Pass version for an earlier snapshot.']);
+    assert.equal((await call(manage.secret, 'describe_tool', { resource: 'rituals', action: 'omens' }, '/mcp')).structuredContent.inputSchema.properties.action.const, 'omens');
+
+    // Each credential reaches an earlier name exactly when it reaches the tool now: rules are receiving administration, so
+    // only the manage key does, and REST refuses the others too.
+    for (const [label, key] of [['manage key', manage.secret], ['read key', read.secret], ['sender-domain key', sender.secret], ['read approval', grant.token]] as const) {
+      for (const [name, now, action] of renamed) {
+        const [was, is] = [await call(key, name, {}), await call(key, now, {})], [wasPlain, isPlain] = [await plain(key, action), await call(key, 'rules', { action: action === 'omens' ? 'decisions' : action }, '/mcp')];
+        assert.deepEqual([unavailable(was), unavailable(wasPlain)], [unavailable(is), unavailable(isPlain)], `${label} ${name}: ${redact(was)}`);
+        const describedThen = await call(key, 'describe_tool', { resource: 'rituals', action }, '/mcp');
+        assert.equal(unavailable(describedThen), unavailable(isPlain), `${label} describe ${name}`);
+      }
+    }
+    const reached = [[manage, 'getRituals', {}], [read, 'getRituals', {}], [read, 'applyRituals', { confirm: true, body: start }], [sender, 'getRituals', {}]] as const;
+    assert.deepEqual(await Promise.all(reached.map(async ([key, name, args]) => unavailable(await call(key.secret, name, args)))), [false, true, true, true]);
+    assert.deepEqual([(await http('GET', '/v1/rituals', read.secret)).status, (await http('PUT', '/v1/rituals', read.secret, start)).status, (await http('GET', '/v1/rituals', sender.secret)).status], [403, 403, 403]);
+    await http('PUT', '/v1/rituals', manage.secret, {});
   });
 
   test('hosted MCP advertises both catalogs and composes campaign, contact, email and temporary-token workflows', async t => {
@@ -21047,10 +21146,33 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const recipes = await call('GET', path + '/recipes'), recipesThen = await call('GET', legacy + '/recipes');
         assert.deepEqual([recipes.decisionPricePerThousand, recipes.omenPricePerThousand, recipesThen.omenPricePerThousand, recipesThen.decisionPricePerThousand], ['0.10', undefined, '0.10', undefined]);
         assert.deepEqual([recipes.data.filter((r: Json) => r.decisions).map((r: Json) => r.id), recipesThen.data.filter((r: Json) => r.omens).map((r: Json) => r.id)], [['label-by-meaning', 'alert-by-meaning'], ['label-by-meaning', 'alert-by-meaning']]);
-        assert.ok((await call('GET', path + '/templates')).data.some((x: Json) => x.id === 'refund-decision' && x.source.includes('decisions(email')));
-        assert.ok((await call('GET', legacy + '/templates')).data.some((x: Json) => x.id === 'refund-omen'));
-        const typings = (await call('GET', path + '/typings')).typescript;
-        assert.match(typings, /declare function decisions</); assert.doesNotMatch(typings, /omens|Ritual|ritual/);
+        // Each name's typings declare its own words and type-check its own templates (TypeScript itself checks them): the
+        // alias answers the declarations from before the rename, and the rule ones also declare omens and Omen, deprecated,
+        // so a source stored with them still checks in an editor that loads the new typings.
+        const ts = (await import('typescript')).default, libs = new Map<string, ReturnType<typeof ts.createSourceFile> | undefined>();
+        const problems = (declarations: string, sources: Record<string, string>) => {
+          const options = { noEmit: true, strict: false, skipLibCheck: true, target: ts.ScriptTarget.ES2022, lib: ['lib.es2022.d.ts'], types: [] };
+          // The declarations as a global script, and each source as a module whose function takes route's types.
+          const files = new Map([['/rules.d.ts', declarations.replace(/^export default function route\(/m, 'declare function route(')],
+            ...Object.entries(sources).map(([name, source]) => [`/${name}.ts`, source.replace(/^export default function route\(/m, 'export const typed: typeof route = function (')] as [string, string])]);
+          const host = ts.createCompilerHost(options), read = host.getSourceFile.bind(host), exists = host.fileExists.bind(host);
+          host.fileExists = name => files.has(name) || exists(name);
+          host.getSourceFile = (name, target) => files.has(name) ? ts.createSourceFile(name, files.get(name)!, target) : libs.get(name) ?? libs.set(name, read(name, target)).get(name);
+          return ts.getPreEmitDiagnostics(ts.createProgram([...files.keys()], options, host)).map(d => `${d.file?.fileName}: ${ts.flattenDiagnosticMessageText(d.messageText, ' ')}`);
+        };
+        const asks = (fn: string, question: string, context: string) => `export default function route(email, ctx) {\n  const urgent: ${question} = { prompt: "Does this need a reply today?", type: "boolean" }\n  const r = ${fn}(email, { refund: "Is the sender asking for a refund?", urgent })\n  const recipient: ${context} = ctx\n  if (r.refund >= 0.7 && r.urgent) label(recipient.local)\n}`;
+        await call('PUT', path, { senderLists: { vip: ['@example.com'] } });
+        const [typings, typingsThen] = [await call('GET', path + '/typings'), await call('GET', legacy + '/typings')];
+        const [templates, templatesThen] = [(await call('GET', path + '/templates')).data as Json[], (await call('GET', legacy + '/templates')).data as Json[]];
+        const usable = (list: Json[]) => Object.fromEntries(list.filter(x => !x.needs || x.endpoint).map(x => [x.id, x.source]));
+        assert.ok(Object.keys(usable(templates)).length >= 5);
+        assert.deepEqual(problems(typings.typescript, { ...usable(templates), now: asks('decisions', 'Decision', 'RuleContext'), stored: asks('omens', 'Omen', 'RuleContext') }), []);
+        assert.deepEqual(problems(typingsThen.typescript, { ...usable(templatesThen), then: asks('omens', 'Omen', 'RitualContext') }), []);
+        assert.match(problems(typingsThen.typescript, { now: asks('decisions', 'Decision', 'RitualContext') }).join('\n'), /Cannot find name 'decisions'/);
+        assert.deepEqual([/@deprecated[^\n]*\ntype Omen = Decision;/.test(typings.typescript), /\bdecisions\b|Decision|RuleContext/.test(typingsThen.typescript)], [true, false]);
+        assert.deepEqual([typings.completions.some((x: Json) => x.label === 'omens'), typingsThen.completions.filter((x: Json) => ['omens', 'decisions'].includes(x.label)).map((x: Json) => x.label)], [false, ['omens']]);
+        assert.deepEqual([templates.find(x => x.id === 'refund-decision')?.source.includes('decisions(email'), templatesThen.find(x => x.id === 'refund-omen')?.source.includes('omens(email')], [true, true]);
+        assert.ok(templatesThen.every(x => !/decisions\(/.test(x.source)) && templates.every(x => !/omens\(/.test(x.source)));
         // A dry run names each row's kind rule, its timeline's answers decisions, and an endpoint call's stable ID actionId.
         const mime = `From: a@example.net\r\nTo: ${box.address}\r\nSubject: Refund\r\n\r\nRefund please`, scores = { 'Is the sender asking for a refund?': 0.9, 'Does this need a reply today?': 1 };
         await call('PUT', path, { rules: [{ key: 'asks', source: source('decisions') }], attachments: [{ rule: 'asks', target: box.id }], evaluateDomains: ['receive.example'] });
