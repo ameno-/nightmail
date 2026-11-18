@@ -53,7 +53,7 @@ type Transcript = { id: string; role: 'user' | 'assistant'; kind: 'first' | 'rep
 type Outgoing = Record<string, unknown> & { type: string };
 type GrantRow = { grant_id: string; token: string; expires_at: number; workspace_ids: string; content_workspace_id: string | null };
 
-// Email work (mail-handling design §2–§4). Each payload is fixed when the item is created; `result` holds what an item
+// Email work. Each payload is fixed when the item is created; `result` holds what an item
 // decided or produced so far, so a retry never decides, charges or asks the model twice.
 /** A received message as the decision and its answer read it: fetched once and kept with its `msg:` item. */
 type Snapshot = {

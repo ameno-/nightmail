@@ -789,7 +789,7 @@ describe('support Worker', () => {
       assert.ok(ticket.notified_at && ticket.followup_thread_id);
     });
 
-    test('D2: a confirm link that fails to send is retried, and the answer waits for the confirmation', async () => {
+    test('a confirm link that fails to send is retried, and the answer waits for the confirmation', async () => {
       const thread = 'thr_d2', message = 'msg_d2', path = `/v1/inbound/threads/${thread}/reply`;
       await outage(path, 503);
       await hook(message, thread, 'dora@acme.test');
@@ -811,7 +811,7 @@ describe('support Worker', () => {
       assert.deepEqual((await replies(thread, instance)).map(c => c[5]), [`confirm-${message}`, `reply-${message}`]);
     });
 
-    test('D3: a forward whose target is unavailable is retried, and the message is answered once in its own conversation', async () => {
+    test('a forward whose target is unavailable is retried, and the message is answered once in its own conversation', async () => {
       const thread = 'thr_d3';
       await hook('msg_d3_a', thread);
       const id = await conversationOf(thread);
@@ -847,7 +847,7 @@ describe('support Worker', () => {
       assert.match(tries[1][3].text, /Gmail hard-bounced 61 of 1,000/);
     });
 
-    test('D5: a reply’s sender address and key are chosen once, so a configuration change between tries never sends twice', async () => {
+    test('a reply’s sender address and key are chosen once, so a configuration change between tries never sends twice', async () => {
       // To the support address used before a move. The first try is delivered, but its response is lost.
       const thread = 'thr_d5', message = 'msg_d5', path = `/v1/inbound/threads/${thread}/reply`;
       await outage(path, 503, 'UNAVAILABLE', true);
