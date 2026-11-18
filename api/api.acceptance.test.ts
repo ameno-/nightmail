@@ -6285,6 +6285,253 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  test('Support inbox: operators read every conversation and reply through the support platform’s outbox; only its binding mirrors, and only the operator role changes anything', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const hex = () => (randomUUID() + randomUUID()).replaceAll('-', ''), base32 = 'abcdefghijklmnopqrstuvwxyz234567';
+      const random = (n: number) => Array.from(crypto.getRandomValues(new Uint8Array(n)), b => base32[b & 31]).join('');
+      const conversation = () => `conv_${random(26)}`, msg = () => `msg_${random(16)}`, ticketId = () => `tkt_${random(16)}`;
+      const signing = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json;
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [],
+        support: { url: 'https://support.example.com/start', signingKey: { kty: 'OKP', crv: 'Ed25519', d: signing.d, x: signing.x }, addressIds: [] } });
+      const { createApp } = await import('./src/app.js'), app = createApp();
+      const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
+        const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
+        const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+        return { status: res.status, body: parsed, headers: res.headers };
+      };
+      const { supportPlatform, platformRuntime } = await import('./src/support-platform.js');
+      const platform = supportPlatform(async (req, id) => app.fetch(req, { ...runtime, ...platformRuntime(id) }), () => runtime.config);
+      const reply = (r: { status: number; body: unknown; requestId: string | null }): Reply => ({ status: r.status, body: r.body, headers: new Headers(r.requestId ? { 'x-request-id': r.requestId } : {}) });
+      const session = (f: SessionFixture, workspace?: string) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN, ...(workspace ? { 'x-nightmail-workspace': workspace } : {}) });
+      const keyed = (f: SessionFixture, key = unique('key')) => ({ ...session(f), 'idempotency-key': key });
+      const inbox = '/v1/operator/support-inbox';
+
+      // Acme's owner (who also administers Beta) and member; an operator and a read-only operator in the platform workspace.
+      const owner = await sessionFixture(t), member = await sessionFixture(t), operator = await sessionFixture(t), reader = await sessionFixture(t);
+      const acme = unique('acme-ws'), beta = unique('beta-ws'), home = unique('platform-ws');
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2),($3,$3,$3)', [acme, beta, home]);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$2,$5,'member'),($6,$7,$3,'admin'),($8,$9,$10,'member'),($11,$9,$12,'member')`,
+        [unique('mem'), acme, owner.userId, unique('mem'), member.userId, unique('mem'), beta, unique('mem'), home, operator.userId, unique('mem'), reader.userId]);
+      await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[owner, member, operator, reader].map(f => f.userId)]);
+      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator', 'support inbox acceptance fixture'), ($2, 'operator:read', 'support inbox acceptance fixture')`, [operator.userId, reader.userId]);
+      const chat = async (f: SessionFixture, workspace = acme, body: Json = {}) => {
+        const handoff = ok(await send('POST', '/v1/contact-support', session(f, workspace), body), 201), id = conversation();
+        ok(reply(await platform.registerConversation({ conversationId: id, evidence: { kind: 'handoff', token: handoff.token } })), 201);
+        return id;
+      };
+      /** An email whose sender proved nothing, as registration stores one. */
+      const stranger = async (address = `someone-${hex().slice(0, 8)}@elsewhere.example`) => {
+        const id = conversation();
+        await db.query(`INSERT INTO support_conversations(id, channel, pending_address, verification, mode) VALUES ($1, 'email', $2, 'none', 'unverified')`, [id, address]);
+        return id;
+      };
+      const messages = async (id: string) => (await db.query('SELECT id, seq, author, text, delivery, staff_user_id FROM support_messages WHERE conversation_id = $1 ORDER BY seq', [id])).rows;
+      // The support site: every request to it is recorded and answered; nothing else leaves the fixture.
+      const wakes: { method: string; url: string; headers: string[]; body: string }[] = [], previous = globalThis.fetch;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        if (new URL(request.url).origin !== 'https://support.example.com') return previous(input, init);
+        wakes.push({ method: request.method, url: request.url, headers: [...request.headers.keys()], body: await request.text() });
+        return new Response(null, { status: 202 });
+      };
+      try {
+        const chatId = await chat(owner, acme, { page: '/domains' }), emailId = await stranger(), first = msg(), answer = msg();
+
+        await t.test('1 access: an operator’s own session only; operator:read reads but changes nothing; customers, keys and the binding get 403', async () => {
+          for (const path of [inbox, `${inbox}/${chatId}`]) {
+            for (const headers of [session(owner, acme), session(member, acme), {}, { authorization: `Bearer nm_${hex()}` }] as Record<string, string>[]) error(await send('GET', path, headers), 403, 'OPERATOR_REQUIRED');
+            ok(await send('GET', path, session(reader)));
+          }
+          error(await send('POST', `${inbox}/${chatId}/replies`, { ...keyed(owner), 'x-nightmail-workspace': acme }, { text: 'Hello' }), 403, 'OPERATOR_REQUIRED');
+          // The support platform's binding cannot reach the inbox: its allow-list refuses it, and so does the gate if it got there.
+          error(reply(await platform.call('GET', inbox)), 404);
+          error(reply(await platform.call('POST', `${inbox}/${chatId}/replies`, { text: 'Hello' })), 404);
+          error(reply(await platform.request(chatId, 'GET', inbox)), 404);
+          const direct = async (method: string, path: string, body?: Json) => (await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: body ? { 'content-type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined }), { ...runtime, ...platformRuntime() })).status;
+          assert.deepEqual([await direct('GET', inbox), await direct('GET', `${inbox}/${chatId}`), await direct('POST', `${inbox}/${chatId}/replies`, { text: 'Hello' }), await direct('POST', `${inbox}/${chatId}/pause`)], [403, 403, 403, 403]);
+          for (const action of ['replies', 'pause', 'resume', 'resolve', 'wake'])
+            error(await send('POST', `${inbox}/${chatId}/${action}`, keyed(reader), action === 'replies' ? { text: 'Hello' } : undefined), 403, 'OPERATOR_REQUIRED');
+          assert.deepEqual([await messages(chatId), wakes], [[], []]);
+          error(await send('GET', `${inbox}/${conversation()}`, session(reader)), 404);
+        });
+
+        await t.test('2 mirror: only through the binding, idempotent by message ID, numbered in order; an unknown conversation is 404', async () => {
+          const third = msg(), at = new Date(Date.now() - 60_000).toISOString();
+          const mirrored = ok(reply(await platform.mirrorMessages(chatId, [{ id: first, author: 'customer', text: 'My domain will not verify.', at },
+            { id: answer, author: 'agent', kind: 'reply', text: 'Your DKIM records are missing.', tools: [{ label: 'Read your domains', ok: true }], delivery: 'sent' }])));
+          assert.deepEqual(mirrored.data.map((m: Json) => [m.id, m.seq, m.created]), [[first, 1, true], [answer, 2, true]]);
+          const again = ok(reply(await platform.mirrorMessages(chatId, [{ id: answer, author: 'agent', text: 'Something else' }, { id: third, author: 'customer', text: 'Which records?' }])));
+          assert.deepEqual(again.data.map((m: Json) => [m.id, m.seq, m.created]), [[answer, 2, false], [third, 3, true]]);
+          assert.deepEqual((await messages(chatId)).map(m => [m.seq, m.author, m.text]), [[1, 'customer', 'My domain will not verify.'], [2, 'agent', 'Your DKIM records are missing.'], [3, 'customer', 'Which records?']]);
+          assert.equal(new Date((await db.query('SELECT created_at FROM support_messages WHERE id = $1', [first])).rows[0].created_at).getTime(), Date.parse(at), 'Written when the support platform says.');
+          error(reply(await platform.mirrorMessages(conversation(), [{ id: msg(), author: 'customer', text: 'Hello' }])), 404);
+          error(reply(await platform.mirrorMessages(emailId, [{ id: first, author: 'customer', text: 'Hello' }])), 409, 'SUPPORT_MESSAGE_CONFLICT');
+          error(reply(await platform.mirrorMessages(chatId, [{ id: msg(), author: 'staff', text: 'A staff reply' } as never])), 422);
+          error(reply(await platform.mirrorMessages(chatId, [{ id: msg(), author: 'customer', text: 'Hello', delivery: 'held' }])), 422);
+          error(reply(await platform.mirrorMessages(chatId, [{ id: msg(), author: 'customer', text: 'Hello', at: new Date(Date.now() + 3_600_000).toISOString() }])), 422);
+          assert.equal((await messages(chatId)).length, 3);
+          // Every mirror and outbox route answers the binding alone: an operator's session and a customer's get 403, a stamped request 404.
+          const routes: [string, string, Json?][] = [['POST', `/v1/operator/support/conversations/${chatId}/messages`, { messages: [{ id: msg(), author: 'customer', text: 'Hello' }] }],
+            ['GET', `/v1/operator/support/conversations/${chatId}/state`], ['POST', `/v1/operator/support/conversations/${chatId}/state`, { blockedWork: 5 }], ['GET', '/v1/operator/support/outbox'],
+            ['POST', `/v1/operator/support/conversations/${chatId}/messages/${first}/delivery`, { status: 'sent' }]];
+          for (const [method, path, body] of routes) {
+            error(await send(method, path, session(operator), body), 403, 'SUPPORT_PLATFORM_REQUIRED');
+            error(await send(method, path, session(owner, acme), body), 403, 'OPERATOR_REQUIRED');
+            error(reply(await platform.request(chatId, method, path, body)), 404);
+          }
+          assert.equal((await messages(chatId)).length, 3);
+          assert.equal((await db.query('SELECT count(*)::int AS n FROM support_outbox_polls')).rows[0].n, 0, 'Only the binding’s pull counts as a poll.');
+          // State: the ticket marks it ticketed, counters only grow, and a second ticket is refused.
+          const tkt = ticketId(), state = ok(reply(await platform.mirrorState(chatId, { subject: 'Domain will not verify', ticket: { id: tkt, type: 'bug', severity: 'P2' }, turns: 3, costUsd: 0.12, blockedWork: 1 })));
+          assert.deepEqual([state.status, state.ticket.id, state.ticket.severity, state.agentState, state.pausedBy], ['ticketed', tkt, 'P2', 'active', null]);
+          ok(reply(await platform.mirrorState(chatId, { turns: 1, costUsd: 0.01 })));
+          assert.deepEqual((await db.query('SELECT turns, cost_usd::float AS cost, blocked_work, subject FROM support_conversations WHERE id = $1', [chatId])).rows[0], { turns: 3, cost: 0.12, blocked_work: 1, subject: 'Domain will not verify' });
+          error(reply(await platform.mirrorState(chatId, { ticket: { id: ticketId(), type: 'bug', severity: 'P1' } })), 409, 'SUPPORT_TICKET_EXISTS');
+          error(reply(await platform.mirrorState(conversation(), { turns: 1 })), 404);
+          error(reply(await platform.inboxState(conversation())), 404);
+          // An emailed ticket pauses an active agent; it never resumes one.
+          const ticketed = await stranger();
+          assert.deepEqual([ok(reply(await platform.mirrorState(ticketed, { pauseForTicket: true }))).pausedBy, ok(reply(await platform.inboxState(ticketed))).agentState], ['ticket', 'paused']);
+          const listed = ok(await send('GET', `${inbox}?view=attention`, session(reader))).data.map((c: Json) => c.id);
+          assert.ok(listed.includes(chatId) && !listed.includes(emailId), listed.join());
+        });
+
+        await t.test('3 staff reply: refused until the support platform polls; queued once per key, pauses the agent, appears in the outbox, wakes with the ID only, then marked sent', async () => {
+          const path = `${inbox}/${chatId}/replies`, text = 'Add the three CNAME records shown on the Domains page, then press Verify.';
+          const available = async () => [ok(await send('GET', inbox, session(operator))).replyAvailable, ok(await send('GET', `${inbox}/${chatId}`, session(operator))).replyAvailable];
+          assert.deepEqual(await available(), [false, false]);
+          error(await send('POST', path, keyed(operator), { text }), 409, 'SUPPORT_REPLY_UNAVAILABLE');
+          assert.deepEqual(ok(reply(await platform.pullOutbox())).data.filter((r: Json) => r.conversationId === chatId), []);
+          assert.deepEqual(await available(), [true, true]);
+          await db.query(`UPDATE support_outbox_polls SET polled_at = now() - interval '11 minutes'`);
+          assert.deepEqual(await available(), [false, false], 'A poll older than 10 minutes is not enough.');
+          error(await send('POST', path, keyed(operator), { text }), 409, 'SUPPORT_REPLY_UNAVAILABLE');
+          ok(reply(await platform.pullOutbox(chatId)));
+          error(await send('POST', path, session(operator), { text }), 422);
+          assert.deepEqual([(await messages(chatId)).length, wakes.length], [3, 0]);
+
+          const key = unique('reply'), queued = ok(await send('POST', path, keyed(operator, key), { text }), 201);
+          assert.deepEqual([queued.author, queued.kind, queued.delivery, queued.staff.userId, queued.text, queued.seq], ['staff', 'reply', 'queued', operator.userId, text, 4]);
+          assert.deepEqual(ok(await send('POST', path, keyed(operator, key), { text }), 201), queued, 'The same key answers the same reply.');
+          error(await send('POST', path, keyed(operator, key), { text: 'Something else' }), 409, 'IDEMPOTENCY_CONFLICT');
+          assert.deepEqual((await messages(chatId)).filter(m => m.author === 'staff').map(m => [m.id, m.delivery, m.staff_user_id]), [[queued.id, 'queued', operator.userId]]);
+          const paused = ok(reply(await platform.inboxState(chatId)));
+          assert.deepEqual([paused.agentState, paused.pausedBy, paused.queuedReplies], ['paused', 'staff', 1]);
+          const listed = ok(await send('GET', `${inbox}?view=paused`, session(reader))).data.find((c: Json) => c.id === chatId);
+          assert.deepEqual([listed.pausedBy.kind, listed.pausedBy.userId, listed.queuedReplies, listed.lastAuthor, listed.needsReply], ['staff', operator.userId, 1, 'staff', false]);
+          // The wake names the conversation and nothing else.
+          assert.deepEqual(wakes, [1, 2].map(() => ({ method: 'POST', url: 'https://support.example.com/hooks/nightmail-wake', headers: ['content-type'], body: JSON.stringify({ conversationId: chatId }) })));
+          assert.deepEqual((await db.query(`SELECT user_id, actor_id, internal, summary->>'message' AS message FROM audit_events WHERE action = 'support.reply' AND target_id = $1`, [chatId])).rows,
+            [{ user_id: owner.userId, actor_id: operator.userId, internal: true, message: queued.id }]);
+          // The outbox: one conversation's after its wake, or every one; marked sent once.
+          const pulled = ok(reply(await platform.pullOutbox(chatId))).data;
+          assert.deepEqual(pulled.map((r: Json) => [r.id, r.conversationId, r.channel, r.text]), [[queued.id, chatId, 'chat', text]]);
+          assert.ok(ok(reply(await platform.pullOutbox())).data.some((r: Json) => r.id === queued.id));
+          assert.deepEqual(ok(reply(await platform.pullOutbox(emailId))).data, []);
+          error(reply(await platform.markDelivery(emailId, queued.id, 'sent')), 404);
+          error(reply(await platform.markDelivery(chatId, answer, 'sent')), 404);
+          const sent = ok(reply(await platform.markDelivery(chatId, queued.id, 'sent')));
+          assert.deepEqual([sent.delivery, typeof sent.deliveredAt], ['sent', 'string']);
+          assert.deepEqual(ok(reply(await platform.markDelivery(chatId, queued.id, 'sent'))), sent);
+          error(reply(await platform.markDelivery(chatId, queued.id, 'failed')), 409, 'SUPPORT_REPLY_DELIVERED');
+          assert.deepEqual(ok(reply(await platform.pullOutbox(chatId))).data, []);
+          assert.equal(ok(await send('GET', `${inbox}/${chatId}`, session(reader))).messages.at(-1).delivery, 'sent');
+
+          // Pause and hand back, resolve: the operator role, each once, each on the trail.
+          error(await send('POST', `${inbox}/${chatId}/pause`, session(operator)), 409, 'ALREADY_PAUSED');
+          assert.equal(ok(await send('POST', `${inbox}/${chatId}/resume`, session(operator))).agentState, 'active');
+          assert.deepEqual([ok(reply(await platform.inboxState(chatId))).agentState, ok(reply(await platform.mirrorState(chatId, { pauseForTicket: true }))).pausedBy], ['active', 'ticket']);
+          error(await send('POST', `${inbox}/${chatId}/pause`, session(operator)), 409, 'ALREADY_PAUSED');
+          assert.equal(ok(await send('POST', `${inbox}/${chatId}/resume`, session(operator))).pausedBy, null);
+          error(await send('POST', `${inbox}/${chatId}/resume`, session(operator)), 409, 'NOT_PAUSED');
+          const pausedAgain = ok(await send('POST', `${inbox}/${chatId}/pause`, keyed(operator)));
+          assert.deepEqual([pausedAgain.agentState, pausedAgain.pausedBy.userId], ['paused', operator.userId]);
+          assert.equal(ok(reply(await platform.mirrorState(chatId, { pauseForTicket: true }))).pausedBy, 'staff', 'A ticket never takes over a staff pause.');
+          const resolved = ok(await send('POST', `${inbox}/${chatId}/resolve`, session(operator)));
+          assert.ok(resolved.ticket.resolvedAt);
+          error(await send('POST', `${inbox}/${chatId}/resolve`, session(operator)), 409, 'ALREADY_RESOLVED');
+          error(await send('POST', `${inbox}/${emailId}/resolve`, session(operator)), 409, 'SUPPORT_NO_TICKET');
+          assert.ok(!ok(await send('GET', `${inbox}?view=tickets`, session(reader))).data.some((c: Json) => c.id === chatId), 'A resolved ticket leaves the Tickets view.');
+          assert.deepEqual((await db.query(`SELECT action FROM audit_events WHERE target_id = $1 AND action IN ('support.pause','support.resume','support.resolve') AND internal ORDER BY id`, [chatId])).rows.map(r => r.action),
+            ['support.resume', 'support.resume', 'support.pause', 'support.resolve']);
+          // A closed conversation takes no reply.
+          const closing = await chat(owner);
+          ok(reply(await platform.closeConversation(closing)));
+          error(await send('POST', `${inbox}/${closing}/replies`, keyed(operator), { text }), 409, 'SUPPORT_CONVERSATION_CLOSED');
+        });
+
+        await t.test('4 wake: skipped without the support site; Retry now wakes with the ID only', async () => {
+          const before = wakes.length, site = runtime.config.support!.url;
+          runtime.config.support!.url = undefined;
+          try {
+            ok(reply(await platform.pullOutbox()));
+            ok(await send('POST', `${inbox}/${emailId}/replies`, keyed(operator), { text: 'We are looking into it.' }), 201);
+            assert.deepEqual(ok(await send('POST', `${inbox}/${emailId}/wake`, session(operator))), { id: emailId, woken: false });
+            assert.equal(wakes.length, before);
+            assert.equal(ok(reply(await platform.pullOutbox(emailId))).data.length, 1, 'The reply waits for the support platform’s sweep.');
+          } finally { runtime.config.support!.url = site; }
+          assert.deepEqual(ok(await send('POST', `${inbox}/${emailId}/wake`, session(operator))), { id: emailId, woken: true });
+          assert.deepEqual(wakes.slice(before).map(w => w.body), [JSON.stringify({ conversationId: emailId })]);
+          error(await send('POST', `${inbox}/${conversation()}/wake`, session(operator)), 404);
+        });
+
+        await t.test('5 one read for the conversation page: the transcript and the customer’s panel, from data operators may see, on the trail', async () => {
+          const other = await chat(owner, beta);
+          ok(reply(await platform.request(chatId, 'GET', '/v1/support/workspaces')));
+          const note = ok(reply(await platform.request(chatId, 'POST', '/v1/support/notes', { text: 'Prefers email; DNS is managed by their agency.' })), 201);
+          const detail = ok(await send('GET', `${inbox}/${chatId}`, session(reader)));
+          const c = detail.conversation;
+          assert.deepEqual([c.id, c.channel, c.mode, c.verification, c.customer.userId, c.customer.email, c.workspace.id, c.page, c.evidence.handoff?.startsWith('sho_'), c.subject, c.ticket.type],
+            [chatId, 'chat', 'member', 'handoff', owner.userId, owner.email, acme, '/domains', true, 'Domain will not verify', 'bug']);
+          assert.deepEqual(detail.messages.map((m: Json) => [m.seq, m.author, m.delivery]), [[1, 'customer', null], [2, 'agent', 'sent'], [3, 'customer', null], [4, 'staff', 'sent']]);
+          assert.deepEqual([detail.messages[1].tools, detail.messages[3].staff.userId, detail.earlierMessages], [[{ label: 'Read your domains', ok: true }], operator.userId, 0]);
+          assert.deepEqual([detail.customer.user.id, detail.customer.user.emailVerified], [owner.userId, true]);
+          assert.deepEqual(detail.customer.workspaces.map((w: Json) => [w.id, w.role, w.inScope]).sort(), [[acme, 'owner', true], [beta, 'admin', false]].sort());
+          assert.ok(detail.customer.conversations.some((o: Json) => o.id === other) && !detail.customer.conversations.some((o: Json) => o.id === chatId || o.id === emailId));
+          const actions = detail.customer.activity.map((e: Json) => e.action);
+          assert.ok(actions.includes('support.view') && !actions.includes('support.read'), actions.join());
+          assert.deepEqual(detail.customer.notes.map((n: Json) => [n.id, n.text, n.workspaceId, n.conversationId]), [[note.id, note.text, acme, chatId]]);
+          assert.deepEqual((await db.query(`SELECT DISTINCT user_id, actor_id, internal FROM audit_events WHERE action = 'support.inbox_view' AND target_id = $1 AND actor_id = $2`, [chatId, reader.userId])).rows,
+            [{ user_id: owner.userId, actor_id: reader.userId, internal: true }]);
+          // A sender who proved nothing has no account, workspaces or activity on the panel: only their address.
+          const unbound = ok(await send('GET', `${inbox}/${emailId}`, session(reader)));
+          assert.deepEqual([unbound.conversation.customer, unbound.conversation.sender?.endsWith('@elsewhere.example'), unbound.customer.user, unbound.customer.workspaces, unbound.customer.activity, unbound.customer.notes],
+            [null, true, null, [], [], []]);
+        });
+
+        await t.test('6 list: views, search and pages', async () => {
+          const name = `waiting-${hex().slice(0, 8)}`, waiting = await stranger(`${name}@elsewhere.example`);
+          ok(reply(await platform.mirrorMessages(waiting, [{ id: msg(), author: 'customer', text: 'Is anyone there?', at: new Date(Date.now() + 60_000).toISOString() }])));
+          const ids = async (query: string) => ok(await send('GET', `${inbox}${query}`, session(reader))).data.map((c: Json) => c.id);
+          assert.equal((await ids(''))[0], waiting, 'Most recent activity first.');
+          assert.ok((await ids('?view=needs_reply')).includes(waiting) && !(await ids('?view=needs_reply')).includes(chatId));
+          assert.deepEqual(await ids(`?q=${name}`), [waiting]);
+          assert.ok((await ids(`?q=${encodeURIComponent(owner.email)}`)).includes(chatId));
+          assert.deepEqual(await ids(`?q=${chatId}`), [chatId]);
+          assert.ok((await ids('?channel=email')).every((id: string) => id !== chatId));
+          const pageOne = ok(await send('GET', `${inbox}?limit=1`, session(reader))), pageTwo = ok(await send('GET', `${inbox}?limit=1&cursor=${pageOne.nextCursor}`, session(reader)));
+          assert.equal(pageOne.data.length, 1);
+          assert.notEqual(pageTwo.data[0].id, pageOne.data[0].id);
+          error(await send('GET', `${inbox}?limit=1&view=paused&cursor=${pageOne.nextCursor}`, session(reader)), 422, 'INVALID_CURSOR');
+        });
+
+        await t.test('7 purge: a transcript and its subject go 90 days after the conversation closed', async () => {
+          const old = await stranger(), recent = await stranger();
+          for (const id of [old, recent]) {
+            ok(reply(await platform.mirrorMessages(id, [{ id: msg(), author: 'customer', text: 'Hello' }])));
+            ok(reply(await platform.mirrorState(id, { subject: 'Hello' })));
+            ok(reply(await platform.closeConversation(id)));
+          }
+          await db.query(`UPDATE support_conversations SET closed_at = now() - interval '91 days' WHERE id = $1`, [old]);
+          await db.query(`UPDATE support_conversations SET closed_at = now() - interval '89 days' WHERE id = $1`, [recent]);
+          await (await import('./src/maintenance.js')).cleanup(runtime);
+          assert.deepEqual([(await messages(old)).length, (await messages(recent)).length, (await messages(chatId)).length], [0, 1, 4]);
+          assert.deepEqual((await db.query('SELECT id, subject FROM support_conversations WHERE id = ANY($1) ORDER BY id = $2 DESC', [[old, recent], old])).rows.map(r => r.subject), [null, 'Hello']);
+        });
+      } finally { globalThis.fetch = previous; }
+    });
+  });
+
   test('UI notes: only allowlisted operators (UI_NOTES_SUBJECTS) leave notes with screenshots behind five-minute links; a notes key reads and resolves them and nothing else; other operators get 404, customers 403; every change is audited', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });

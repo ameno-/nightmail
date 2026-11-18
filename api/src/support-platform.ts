@@ -7,7 +7,8 @@ import type { Config } from './core.js';
 //
 // It answers exactly what the support Worker needs and nothing else (PR #137 review L2): verify a handoff, verify an
 // email sender, mint and revoke a support grant, read a handoff, verify a staff sign-in, register and close a support
-// conversation, the grant-scoped GET /v1/support/* reads, and the same reads stamped with a conversation (request).
+// conversation, the grant-scoped GET /v1/support/* reads, the same reads stamped with a conversation (request), and the
+// inbox: mirror a conversation's transcript and state, and pull and acknowledge the staff replies it delivers.
 // Each call runs through the normal routes, so validation, audit rows and budgets are the same as for an operator.
 // Operator paths act as `service:bane-support`; /v1/support/* needs the grant's own bearer, or a registered conversation
 // that only request() can name: it rides on the runtime, never in a header, query parameter or body.
@@ -28,6 +29,12 @@ const OPERATOR_ROUTES: [method: string, path: RegExp][] = [
   ['POST', /^\/v1\/operator\/support\/staff\/verify$/],
   ['POST', /^\/v1\/operator\/support\/conversations$/],
   ['POST', /^\/v1\/operator\/support\/conversations\/conv_[a-z2-7]{26}\/close$/],
+  // The inbox (src/support-inbox.ts): the transcript and state it mirrors, and the staff replies it delivers.
+  ['POST', /^\/v1\/operator\/support\/conversations\/conv_[a-z2-7]{26}\/messages$/],
+  ['GET', /^\/v1\/operator\/support\/conversations\/conv_[a-z2-7]{26}\/state$/],
+  ['POST', /^\/v1\/operator\/support\/conversations\/conv_[a-z2-7]{26}\/state$/],
+  ['GET', /^\/v1\/operator\/support\/outbox$/],
+  ['POST', /^\/v1\/operator\/support\/conversations\/conv_[a-z2-7]{26}\/messages\/msg_[a-z2-7]{16}\/delivery$/],
 ];
 const SUPPORT_READ = /^\/v1\/support\/[A-Za-z0-9_./-]{1,200}$/;
 const SUPPORT_GRANT = /^(?:nm|bane)_support_[0-9a-f]{64}$/; // bane_: remove after rename cleanup
@@ -62,6 +69,17 @@ export type HandoffCheck =
 export type ConversationEvidence = { kind: 'handoff'; token: string } | { kind: 'email'; messageId: string };
 export type RegisteredConversation = { id: string; channel: 'chat' | 'email'; mode: 'member' | 'non_member' | 'pending_signin' | 'unverified'; verification: 'handoff' | 'dmarc' | 'signin' | 'none';
   status: 'open' | 'ticketed' | 'closed'; workspaceId: string | null; contentShared: boolean; created: boolean };
+
+/** A transcript entry the support platform mirrors into the inbox (src/support-inbox.ts). Staff replies come from the inbox. */
+export type MirroredMessage = { id: string; author: 'customer' | 'agent' | 'system'; kind?: string | null; text: string; tools?: { label: string; ok: boolean }[]; attachments?: string[];
+  delivery?: 'sent' | 'failed' | 'held'; at?: string };
+/** What the support platform mirrors about a conversation; each field is optional. */
+export type MirroredState = { subject?: string; ticket?: { id: string; type: string; severity: 'P1' | 'P2' | 'P3' }; turns?: number; costUsd?: number; blockedWork?: number; pauseForTicket?: true };
+/** A conversation's inbox state as the support platform needs it: check agentState before every turn and every send. */
+export type InboxState = { id: string; status: 'open' | 'ticketed' | 'closed'; agentState: 'active' | 'paused'; pausedBy: 'staff' | 'ticket' | null; pausedAt: string | null;
+  ticket: { id: string; type: string | null; severity: string | null; resolvedAt: string | null } | null; queuedReplies: number };
+/** A staff reply waiting for delivery. */
+export type OutboxReply = { id: string; conversationId: string; channel: 'chat' | 'email'; text: string; staffName: string | null; createdAt: string };
 
 export type StaffCheck =
   | { ok: true; staff: { userId: string; email: string; role: string }; jti: string; expiresAt: string }
@@ -192,6 +210,18 @@ export function supportPlatform(dispatch: (request: Request, conversation?: stri
     registerConversation: (body: { conversationId: string; evidence: ConversationEvidence }) => call<RegisteredConversation>('POST', '/v1/operator/support/conversations', body),
     /** End a conversation: every later request for it is refused. Repeating it is harmless. */
     closeConversation: (conversationId: string) => call<{ id: string; status: 'closed'; closedAt: string }>('POST', `/v1/operator/support/conversations/${encodeURIComponent(String(conversationId))}/close`, {}),
+    /** Mirror transcript entries into the inbox, in order. Appending an entry again (same ID) changes nothing. */
+    mirrorMessages: (conversationId: string, messages: MirroredMessage[]) =>
+      call<{ data: { id: string; seq: number; created: boolean }[] }>('POST', `/v1/operator/support/conversations/${encodeURIComponent(String(conversationId))}/messages`, { messages }),
+    /** Mirror a conversation's subject, ticket, counters and blocked work; answers its inbox state. */
+    mirrorState: (conversationId: string, state: MirroredState) => call<InboxState>('POST', `/v1/operator/support/conversations/${encodeURIComponent(String(conversationId))}/state`, state),
+    /** A conversation's inbox state: whether staff paused the agent, before every turn and every send. */
+    inboxState: (conversationId: string) => call<InboxState>('GET', `/v1/operator/support/conversations/${encodeURIComponent(String(conversationId))}/state`),
+    /** The staff replies waiting for delivery (one conversation's, after its wake), oldest first. Staff can reply only while this is polled. */
+    pullOutbox: (conversationId?: string) => call<{ data: OutboxReply[] }>('GET', `/v1/operator/support/outbox${conversationId === undefined ? '' : `?conversationId=${encodeURIComponent(String(conversationId))}`}`),
+    /** Record a staff reply's delivery: sent, or failed for good. */
+    markDelivery: (conversationId: string, messageId: string, status: 'sent' | 'failed') =>
+      call<{ id: string; delivery: 'sent' | 'failed'; deliveredAt: string | null }>('POST', `/v1/operator/support/conversations/${encodeURIComponent(String(conversationId))}/messages/${encodeURIComponent(String(messageId))}/delivery`, { status }),
     /**
      * A /v1/support request for one registered conversation: a GET, or a write (POST /v1/support/scope or notes). The
      * conversation rides on the runtime, never in the request; Nightmail derives the customer from its row and answers

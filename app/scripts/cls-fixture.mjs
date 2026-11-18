@@ -449,6 +449,42 @@ async function billing(db) {
   await month(db, 'ws_harbor', 3000, 3000, 3_240_000_000n);
 }
 
+// The support inbox (Operator → Support): Sam's ticketed chat that Dana answered (agent paused), Lee's emailed question
+// the agent answered, a sender who proved nothing with blocked work, and a closed, resolved chat. The support platform
+// pulled the outbox a minute ago, so staff can reply. IDs follow the support platform's shapes (conv_, msg_, tkt_).
+const supportId = (prefix, word, length) => `${prefix}_${word.padEnd(length, 'a')}`;
+async function supportInbox(db) {
+  const conv = word => supportId('conv', word, 26), msg = word => supportId('msg', word, 16);
+  const chat = conv('samdkimchat'), email = conv('leebouncemail'), stranger = conv('strangermail'), closed = conv('samclosedchat');
+  await db.query(`INSERT INTO support_conversations(id,channel,thread_id,user_id,pending_address,verification,evidence,mode,workspace_id,status,subject,ticket_id,ticket_type,ticket_severity,
+      ticket_resolved_at,ticket_resolved_by,agent_state,paused_by,paused_at,last_message_at,messages,turns,cost_usd,blocked_work,created_at,closed_at) VALUES
+    ($1,'chat',NULL,'user_sam',NULL,'handoff','{"handoff":"sho_00000000000000000000000000000001"}','member','ws_northwind','ticketed','DKIM will not verify for mail.northwind.example',$5,'bug','P2',
+      NULL,NULL,'paused','user_dana',now()-interval '12 minutes',now()-interval '4 minutes',4,3,0.1840,0,now()-interval '40 minutes',NULL),
+    ($2,'email','thr_cls_lee','user_lee','lee@northwind.example','dmarc','{"message":"msg_00000000000000000000000000000002","dmarc":"PASS","dkimAligned":true}','member',NULL,'open','Why did my test email bounce?',NULL,NULL,NULL,
+      NULL,NULL,'active',NULL,NULL,now()-interval '25 minutes',2,1,0.0610,0,now()-interval '30 minutes',NULL),
+    ($3,'email','thr_cls_stranger',NULL,'someone@example.org','none','{"message":"msg_00000000000000000000000000000003","dmarc":"FAIL","dkimAligned":false}','unverified',NULL,'open','Account access',NULL,NULL,NULL,
+      NULL,NULL,'active',NULL,NULL,now()-interval '2 hours',1,0,0,1,now()-interval '2 hours',NULL),
+    ($4,'chat',NULL,'user_sam',NULL,'handoff','{"handoff":"sho_00000000000000000000000000000004"}','member','ws_northwind','closed','Raise the daily limit',$6,'account','P3',
+      now()-interval '2 days','user_dana','active',NULL,NULL,now()-interval '3 days',2,2,0.0920,0,now()-interval '3 days',now()-interval '2 days')`,
+    [chat, email, stranger, closed, supportId('tkt', 'samdkim', 16), supportId('tkt', 'samlimit', 16)]);
+  const line = (id, conversation, seq, author, text, minutes, extra = {}) => db.query(`INSERT INTO support_messages(id,conversation_id,seq,author,kind,text,tools,staff_user_id,delivery,delivered_at,created_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,CASE WHEN $9 = 'sent' AND $4 = 'staff' THEN now()-make_interval(mins=>$10) END,now()-make_interval(mins=>$10))`,
+    [id, conversation, seq, author, extra.kind ?? null, text, JSON.stringify(extra.tools ?? []), extra.staff ?? null, extra.delivery ?? null, minutes]);
+  await line(msg('samone'), chat, 1, 'customer', 'DKIM for mail.northwind.example has said pending since yesterday.', 40);
+  await line(msg('samtwo'), chat, 2, 'agent', 'Two of the three DKIM records are published. The third, **s3._domainkey**, is missing from your DNS. Add it as a CNAME and verification finishes within the hour.', 39,
+    { kind: 'reply', tools: [{ label: 'Read your domains', ok: true }, { label: 'Checked DNS for mail.northwind.example', ok: true }], delivery: 'sent' });
+  await line(msg('samthree'), chat, 3, 'staff', 'I added a note to your ticket. Our DNS check also ran against an old resolver; I re-ran it and it should turn green shortly.', 12, { kind: 'reply', staff: 'user_dana', delivery: 'sent' });
+  await line(msg('samfour'), chat, 4, 'customer', 'Still pending here. Is there anything else I should change?', 4);
+  await line(msg('leeone'), email, 1, 'customer', 'My test email to a Gmail address bounced with 550 5.7.26. What does that mean?', 30);
+  await line(msg('leetwo'), email, 2, 'agent', 'Gmail refused it because the From domain had no DMARC record at the time. Your domain has one now, so the next send should be accepted.', 25,
+    { kind: 'reply', tools: [{ label: 'Read the bounce', ok: true }], delivery: 'sent' });
+  await line(msg('strangerone'), stranger, 1, 'customer', 'I can’t sign in to my account. Please reset it for this address.', 120);
+  await line(msg('closedone'), closed, 1, 'customer', 'Can we send 20,000 a day starting next week?', 4320);
+  await line(msg('closedtwo'), closed, 2, 'agent', 'I filed this as a limit request; the team replies within two business days.', 4319, { kind: 'reply', delivery: 'sent' });
+  await db.query("INSERT INTO support_outbox_polls(id,polled_at) VALUES (1,now()-interval '1 minute') ON CONFLICT (id) DO UPDATE SET polled_at=excluded.polled_at");
+  return chat;
+}
+
 /** Driftwood's triage rule, version `n`: each agent save in a live job changes one line in place, so the line count
  *  (and the editor's height) stays the same. A longer script grows the editor, which is the content changing. */
 export const liveSource = n => `export default function route(email, ctx) {\n  if (email.headers.has("list-unsubscribe")) return junk("newsletter")\n  label(${JSON.stringify(n ? `refund-${n}` : 'support')})\n  endpoints.support({ text: \`\${email.from.address}: \${email.subject}\` })\n}\n`;
@@ -585,6 +621,7 @@ export async function seed(fx) {
     events: [{ at: ago(3 * 24 * 60), from: 'ok', to: 'warn', reasons: [{ ...complaints, code: 'COMPLAINTS_WARN', step: 'warn', count: 2, message: '2 of 1,830 accepted emails were marked as spam in 24 hours (0.11%; the warn line is 0.05% and 2).' }] }, { at: ago(2 * 24 * 60), from: 'warn', to: 'restrict', reasons: [complaints] }] });
 
   await billing(db);
+  const supportConversation = await supportInbox(db);
 
   // Lumen Labs: verified domain, no key, no mail. Field Notes: no sending connection yet.
   const nia = await fx.signIn('nia', 'nia@lumenlabs.example', 'Nia Moreau', { id: 'ws_fresh', name: 'Lumen Labs' });
@@ -615,6 +652,6 @@ export async function seed(fx) {
   fx.liveKey = agent.secret;
   return {
     mcp, restricted: 'ws_harbor', email, junkEmail, receivedEmail: 'msg_northwind_invoice', domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
-    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id,
+    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id, supportConversation,
   };
 }
