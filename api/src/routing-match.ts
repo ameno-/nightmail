@@ -2,10 +2,7 @@
 export type RouteTarget = string[] | 'drop';
 type Route = { id: string | null; match: string; to: RouteTarget; subaddresses?: boolean };
 export type RoutingInput = {
-  /** Owners of rules and routes whose approval is active: a rule made over MCP runs only then. */
   grants?:string[];
-  /** Route owners whose approval stands: a route made over MCP routes until its approval is removed (mail_route_grant). */
-  routeGrants?:string[];
   routeOwners?:Record<string,string[]>;
   programs?:import('./ritual-pipeline.js').Programs|null;
   version: number;
@@ -41,7 +38,7 @@ export function addressGlob(pattern: string, address: string) {
 
 type Resolved = { tier: RouteTier; route: Route | null; to: RouteTarget };
 function resolve(input: RoutingInput, address: string): Resolved {
-  const active=(r:Route)=>!r.id||!input.routeOwners?.[r.id]?.some(id=>!input.routeGrants?.includes(id));
+  const active=(r:Route)=>!r.id||!input.routeOwners?.[r.id]?.some(id=>!input.grants?.includes(id));
   const host = input.hosts?.[address.split('@')[1]!],
     base = plusBase(address);
   const at = (addr: string): Resolved | undefined => {
@@ -113,6 +110,6 @@ export function matchRouting(input: RoutingInput, addresses: string[], messageJu
       warnings,
     };
   });
-  return { version: input.version, recipients,...(input.grants?.length?{grants:input.grants}:{}),...(input.routeGrants?.length?{routeGrants:input.routeGrants}:{}) };
+  return { version: input.version, recipients,...(input.grants?.length?{grants:input.grants}:{}) };
 }
 export type RoutingResult = ReturnType<typeof matchRouting>;

@@ -158,7 +158,7 @@ export async function bearerActor(c: Ctx, token: string): Promise<Actor> {
   let grant:Actor|null=null;
   if (key.grant_id) {
     const {getMcpGrantActor}=await wrapModuleLoad(()=>import('./mcp-auth.js'));
-    grant=await getMcpGrantActor(c.env,'mcp_'+key.grant_id,key.workspace_id);
+    grant=await getMcpGrantActor(c.env,'mcp_'+key.grant_id,key.workspace_id,undefined,'lasting');
     if (grant?.workspaceId!==key.workspace_id || !grant.permissions.includes('manage')) throw new ApiError(401,'AUTH_INVALID','The originating management approval is no longer active.');
   } else rememberFingerprint(hash);
   return { grantId:grant?.grantId, receivingConsent:grant?.receivingConsent, userId:grant?.userId, keyId: key.id, workspaceId: key.workspace_id, permissions: key.permissions, domains: key.domains, credential: 'apiKey' };
@@ -281,7 +281,8 @@ export async function approvalMadeKey(tx: DbExecutor, a: Actor, kind: 'api_key' 
 export async function holdKeyAdmin<T>(tx: DbExecutor, c: Ctx, receiving: boolean, target?: { id: string; lock: () => Promise<T | undefined> }): Promise<T | undefined> {
   const a = c.get('actor'), changed = (who: string) => new ApiError(401, 'AUTH_INVALID', `${who} was revoked or changed while this request ran. Nothing was changed.`);
   if (a.grantId) {
-    const grant = await (await wrapModuleLoad(() => import('./mcp-auth.js'))).getMcpGrantActor(c.env, 'mcp_' + a.grantId, a.workspaceId, tx);
+    const { getMcpGrantActor, approvalUse } = await wrapModuleLoad(() => import('./mcp-auth.js'));
+    const grant = await getMcpGrantActor(c.env, 'mcp_' + a.grantId, a.workspaceId, tx, approvalUse(a));
     if (grant?.workspaceId !== a.workspaceId || !grant.permissions.includes('manage') || receiving && !grant.receivingConsent) throw changed('The MCP approval behind this request');
   } else if (a.credential === 'dashboard') {
     const { rows: [member] } = await tx.execute<{ role: string }>(sql`SELECT role FROM workspace_members WHERE workspace_id = ${a.workspaceId} AND user_id = ${a.keyId.slice('user_'.length)} FOR SHARE`);

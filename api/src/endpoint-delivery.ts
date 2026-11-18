@@ -1,7 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { ApiError, type DbExecutor, type Runtime, type ClaimedWebhook } from './core.js';
 import { JobDeferred } from './jobs.js';
-import { receivingPolicy } from './mailbox-ingest-input.js';
 import { ActionRetry, endpointPolicy, replaySafe, retryAfterMs } from './ritual-retry.js';
 import type { EndpointType } from './ritual-schema.js';
 export { ActionRetry } from './ritual-retry.js';
@@ -34,19 +33,6 @@ const notSent = (e: unknown) => e instanceof Error && NOT_SENT.has(String((e as 
 /** A transport deferral (the timeout breaker) happens before anything leaves: it keeps the attempts already spent. */
 const keepAttempts = (e: unknown) => e instanceof JobDeferred ? new JobDeferred(e.availableAt, e.payload, true) : e;
 /**
- * A routed delivery names the approvals of its route and of its endpoint. The route's need only stand (mail_route_grant:
- * not removed, its person still an owner or admin), as at the claim; an approval that also owns the endpoint stays
- * checked as active, like every delivery to an endpoint an approval made.
- */
-async function standingRouteGrants(runtime: Runtime, w: string, h: ClaimedWebhook, grants: string[]) {
-  const route = (h.payload as { data?: { route?: unknown } }).data?.route;
-  if (typeof route !== 'string') return [];
-  return (await runtime.db.execute<{ gid: string }>(sql`SELECT gid FROM unnest(${sql.param(grants)}::text[]) gid
-    WHERE EXISTS(SELECT FROM mail_grant_objects o WHERE o.workspace_id=${w} AND o.kind='route' AND o.resource=${route} AND o.grant_id=gid)
-      AND NOT EXISTS(SELECT FROM mail_grant_objects o WHERE o.workspace_id=${w} AND o.kind='endpoint' AND o.resource=${h.webhook_id} AND o.grant_id=gid)
-      AND mail_route_grant(${w},gid,${receivingPolicy(runtime.config)}::jsonb)`)).rows.map(r => r.gid);
-}
-/**
  * The one delivery path for every endpoint delivery: rule endpoint calls (Slack, Discord, webhook,
  * forward), routed webhooks and plain event subscriptions. `send` posts it (sendToEndpoint, endpoints.ts).
  * Order: grant still active → the gate (pause, stale claim) → per-action fence → per-endpoint rate slot → send.
@@ -59,16 +45,14 @@ async function standingRouteGrants(runtime: Runtime, w: string, h: ClaimedWebhoo
  */
 export async function deliverEndpoint(runtime: Runtime, w: string, h: ClaimedWebhook, send: () => Promise<Sent>, claim?: Claim): Promise<Sent> {
   const grants = (h.payload as { grants?: string[] }).grants;
-  const action = (h.payload as { ritualAction?: string }).ritualAction;
   if (grants?.length) {
-    const standing = h.routed && !action ? await standingRouteGrants(runtime, w, h, grants) : [];
     const { getMcpGrantActor } = await import('./mcp-auth.js');
     for (const id of grants) {
-      if (standing.includes(id)) continue;
-      const grant = await getMcpGrantActor(runtime, 'mcp_' + id, w);
+      const grant = await getMcpGrantActor(runtime, 'mcp_' + id, w, undefined, 'lasting');
       if (!grant?.receivingConsent || grant.workspaceId !== w || !grant.permissions.includes('manage')) throw new ApiError(403, 'GRANT_REVOKED', 'The receiving grant is no longer active.');
     }
   }
+  const action = (h.payload as { ritualAction?: string }).ritualAction;
   if (!action && !h.routed) {
     const row = await gate(runtime.db, w, h, claim);
     if (!row?.current || row.paused) return { status: 0, parked: true };

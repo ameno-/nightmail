@@ -651,7 +651,7 @@
           },
           "endsAt": {
             "type": "string",
-            "description": "The earliest end among its owners: when it stops working unless their agents connect again."
+            "description": "The earliest end among its owners: when it stops working unless their agents connect again before then."
           },
           "owners": {
             "type": "array",
@@ -678,7 +678,7 @@
           },
           "endsAt": {
             "type": "string",
-            "description": "When this approval ends unless its agent connects again: each new sign-in token moves it later."
+            "description": "When this approval ends: 30 days after its agent last connected, and no later than 90 days after the person approved the agent. Each connection moves it later, up to that limit; removing the approval ends it at once."
           },
           "active": {
             "type": "boolean",

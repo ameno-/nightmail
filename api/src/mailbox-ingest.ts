@@ -488,7 +488,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const receivedAt = sesTimestamp ? new Date(sesTimestamp).toISOString() : receipt.createdAt;
   let plan=receipt.routing && matchRouting(receipt.routing,receipt.recipients,spam,verdicts.dmarc??'',receivedAt);
   // Every recipient dropped by route: settle with the job and its trace, without reading S3 or storing anything.
-  if(plan?.recipients.length && !plan.grants?.length && !plan.routeGrants?.length && plan.recipients.every(r=>r.dropped)){
+  if(plan?.recipients.length && !plan.grants?.length && plan.recipients.every(r=>r.dropped)){
     s3.destroy();
     const recorded=sql`recorded AS (UPDATE mail_receipts SET status='processed',processed_at=now(),routing=mail_routing_trace(${JSON.stringify(plan)}::jsonb) FROM settled WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND status='pending' AND recipients=${JSON.stringify(receipt.recipients)}::jsonb)`;
     if(job.recordWithSettlement)job.recordWithSettlement(recorded);else await runtime.db.execute(sql`WITH settled AS (SELECT 1),${recorded} SELECT 1`);return;
