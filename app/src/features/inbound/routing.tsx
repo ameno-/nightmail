@@ -62,8 +62,8 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks }: 
     return <fieldset className="routing-choices" disabled={save.isPending}>
       <legend className="ui-field__label">{label}</legend>
       {items.length ? <div className="settings-choices">{items.map(d => <Checkbox key={d.id} checked={selected.includes(d.id)} onCheckedChange={on => toggle(d.id, on)} label={<span className="settings-cell-stack"><span>{d.kind === 'inbox' && d.name === d.detail ? <PrivateAddress value={d.name} /> : d.name}{d.paused ? ' (paused)' : ''}</span>{d.detail !== d.name && <span className="ui-field__hint">{d.kind === 'inbox' ? <PrivateAddress value={d.detail} /> : d.detail}</span>}</span>} />)}</div> : <p className="muted">{empty}</p>}
-      {/* Slack, Discord and forwards are a ritual's to send, never a route's: the way there sits beside New webhook. */}
-      {kind === 'webhook' && <div className="cluster"><Button size="sm" onClick={() => setCreating(true)}>New webhook</Button><Link className="ui-button ui-button--ghost ui-button--sm" to="/receiving/rituals/new">Slack, Discord or forward</Link></div>}
+      {/* Slack, Discord and forwards are a rule's to send, never a route's: the way there sits beside New webhook. */}
+      {kind === 'webhook' && <div className="cluster"><Button size="sm" onClick={() => setCreating(true)}>New webhook</Button><Link className="ui-button ui-button--ghost ui-button--sm" to="/receiving/rules/new">Slack, Discord or forward</Link></div>}
     </fieldset>
   }
   return <>
@@ -98,7 +98,7 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks }: 
       const hook = (await refreshWebhooks()).find(h => h.key === endpoint.name)
       if (hook) { setAction('deliver'); setSelected(current => current.includes(hook.id) ? current : [...current, hook.id]) }
     }} />
-    <CreatedEndpointDialog created={created} onClose={() => setCreated(null)} writeRitual={false} />
+    <CreatedEndpointDialog created={created} onClose={() => setCreated(null)} writeRule={false} />
     <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} danger title="Delete route?" description="Its mail falls back to the next rule: its inbox, a pattern or the domain default." confirmLabel="Delete route" pending={remove.isPending}
       onConfirm={async () => { try { await remove.mutateAsync(); setConfirmDelete(false); onClose() } catch { /* The dialog stays open. */ } }} />
   </>

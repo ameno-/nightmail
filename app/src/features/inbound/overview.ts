@@ -1,4 +1,4 @@
-// getInboundOverview: the Receiving screen in one read (routes page, counts, rituals, endpoints, domains).
+// getInboundOverview: the Receiving screen in one read (routes page, counts, rules, endpoints, domains).
 import { useApiQuery } from '../../data/context'
 import { request } from '../../data/live'
 import type { InboundAddress, MailboxDomain } from '../../data/types'
@@ -12,20 +12,20 @@ export type RouteEntry = {
   address: InboundAddress | null
   route: { id: string; enabled: boolean; to: string[] | 'drop' } | null
   catchAll: 'store' | 'create_address' | null
-  rituals: string[]; to: Target[]
+  rules: string[]; to: Target[]
   /** The complete list's size; more than to.length only when toTruncated (more webhook subscribers than listed). */
   toTotal: number; toTruncated: boolean; toMore: string | null
 }
 export type RecipeRef = { id: string; params: Record<string, string | string[]> }
-/** A ritual as the list shows it: made from a recipe (its sentence) or a script, on or off, and when it last acted. */
-export type OverviewRitual = { key: string; calls: string[]; delivers: string[]; omens: string[]; attachedTo: string[]; addresses: string[]; recipe: RecipeRef | null; enabled: boolean; lastMatchedAt: string | null }
-export type OverviewEndpoint = { id: string; source: 'endpoint' | 'inbound_webhook'; name: string; type: 'webhook' | 'slack' | 'discord' | 'forward'; status: EndpointStatus; target: string; call: string | null; eventTypes: string[]; routes: number; rituals: string[] }
+/** A rule as the list shows it: made from a recipe (its sentence) or a script, on or off, and when it last acted. */
+export type OverviewRule = { key: string; calls: string[]; delivers: string[]; decisions: string[]; attachedTo: string[]; addresses: string[]; recipe: RecipeRef | null; enabled: boolean; lastMatchedAt: string | null }
+export type OverviewEndpoint = { id: string; source: 'endpoint' | 'inbound_webhook'; name: string; type: 'webhook' | 'slack' | 'discord' | 'forward'; status: EndpointStatus; target: string; call: string | null; eventTypes: string[]; routes: number; rules: string[] }
 /** A domain as the overview lists it: its receiving host, receiving status and catch-all. */
 export type OverviewDomain = Pick<MailboxDomain, 'id' | 'name' | 'status' | 'catchAll'>
 export type Overview = {
   counts: { address: number; auto: number; route: number; pattern: number; catch_all: number; inbox: number }
   routes: { data: RouteEntry[]; nextCursor: string | null }
-  rituals: OverviewRitual[]; endpoints: OverviewEndpoint[]; endpointsTruncated: boolean; domains: OverviewDomain[]; manage: boolean
+  rules: OverviewRule[]; endpoints: OverviewEndpoint[]; endpointsTruncated: boolean; domains: OverviewDomain[]; manage: boolean
 }
 export type OverviewQuery = { kind?: string; origin?: 'api' | 'auto'; domain?: string; q?: string; cursor?: string; limit?: number }
 

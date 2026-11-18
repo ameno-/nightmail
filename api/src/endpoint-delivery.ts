@@ -33,7 +33,7 @@ const notSent = (e: unknown) => e instanceof Error && NOT_SENT.has(String((e as 
 /** A transport deferral (the timeout breaker) happens before anything leaves: it keeps the attempts already spent. */
 const keepAttempts = (e: unknown) => e instanceof JobDeferred ? new JobDeferred(e.availableAt, e.payload, true) : e;
 /**
- * The one delivery path for every endpoint delivery: ritual endpoint calls (Slack, Discord, webhook,
+ * The one delivery path for every endpoint delivery: rule endpoint calls (Slack, Discord, webhook,
  * forward), routed webhooks and plain event subscriptions. `send` posts it (sendToEndpoint, endpoints.ts).
  * Order: grant still active → the gate (pause, stale claim) → per-action fence → per-endpoint rate slot → send.
  * The claim checks the pause too, but a pause can commit between the claim and the send; every

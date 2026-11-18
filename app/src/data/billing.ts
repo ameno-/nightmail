@@ -18,7 +18,7 @@ export interface BillingSummary {
   grace: { unpaidSince: string | null; receiveHoldAt: string | null; writeOffAt: string | null }
   autoRecharge: { enabled: boolean; thresholdCents: number; amountCents: number; monthlyCapCents: number; monthTotalCents: number; disabledReason: string | null; pending: boolean } | null
   paymentMethod: { brand: string; last4: string; expMonth: number; expYear: number } | null
-  prices: { emailPerThousand: string; omenPerThousand: string; storagePerGbMonth: string; freeEmails: number; freeSentEmails: number; freeReceivedEmails: number; freeStorageBytes: number; topUpMinCents: number; currency: 'USD' }
+  prices: { emailPerThousand: string; decisionPerThousand: string; storagePerGbMonth: string; freeEmails: number; freeSentEmails: number; freeReceivedEmails: number; freeStorageBytes: number; topUpMinCents: number; currency: 'USD' }
   topUpUrl: string
   /** Anomaly made this workspace free: nothing is charged; usage is still measured (monthToDate is what it would cost). */
   freePlan: { until: string | null } | null

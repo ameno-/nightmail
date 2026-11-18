@@ -74,7 +74,7 @@ function untrustedNotice(response: ObjectValue | undefined) {
     if (!list.length) return reply ? replyNotice : null;
     return `Untrusted email from ${list.slice(0, 5).map(sender).join('; ')}${list.length > 5 ? ` and ${list.length - 5} more` : ''}. ${reply ? replyNotice : rule}`;
   }
-  // Routing and Ritual traces echo a stored message's sender, subject and derived action bodies.
+  // Routing and rule traces echo a stored message's sender, subject and derived action bodies.
   if (response && ('recipients' in response || 'message' in response)) return `Untrusted email content from a stored message. ${rule}`;
   if (response && !('from' in response)) return `Untrusted attachment content. ${rule}`;
   return `Untrusted email from ${sender(response ?? {})}. ${rule}`;
@@ -152,7 +152,8 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
   // Members and invitations are Hosted workspace administration; a self-hosted installation answers them 404.
   const operations = new Map([...catalog].filter(([, op]) => inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : (!op.memberAdmin || runtime.config.multiTenant) && authorized(op, connection ? connection.listing : key!.key)));
   const params = new URL(request.url).searchParams;
-  const requested = (params.get('toolsets') ?? '').split(',').map(x => x.trim());
+  // rituals is the rules toolset's name from before the rename, kept for URLs configured with it.
+  const requested = (params.get('toolsets') ?? '').split(',').map(x => x.trim()).map(x => x === 'rituals' ? 'rules' : x);
   // One tool per operation for clients that run Code Mode or tool search themselves. OpenCode adds ?codemode=false to a
   // remote URL (Cloudflare's convention: the server shouldn't wrap the API in its own Code Mode, so list it raw), and
   // Claude Code and Codex use the same URL; ?codemode=true and ?toolsets=all are older names for it. Plain /mcp, for

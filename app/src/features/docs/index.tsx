@@ -150,11 +150,14 @@ function pageOf(splat: string): Page {
 }
 const pathOf = (page: Page) => page.kind === 'guide' ? `/docs/${page.guide.id}` : page.kind === 'operation' ? operationPath(page.id) : '/docs'
 function anchor(hash: string) { try { return decodeURIComponent(hash.slice(1)) } catch { return '' } }
+// Guides under their names before a rename: rules were called rituals.
+const renamedGuides: Record<string, string> = { rituals: 'rules' }
 // Links from before the docs had pages of their own: /docs#guide-rituals, /docs#mcp and /docs#sendEmail.
 function legacyPath(hash: string, all: Operation[]): string | null {
   const id = anchor(hash)
   if (id === 'mcp') return '/docs/mcp'
-  if (id.startsWith('guide-') && guides.some(guide => `guide-${guide.id}` === id)) return `/docs/${id.slice('guide-'.length)}`
+  const named = id.startsWith('guide-') ? renamedGuides[id.slice('guide-'.length)] ?? id.slice('guide-'.length) : null
+  if (named && guides.some(guide => guide.id === named)) return `/docs/${named}`
   // Operation IDs are camelCase; overview sections are kebab-case.
   return /^[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*$/.test(id) || all.some(operation => operation.id === id) ? operationPath(id) : null
 }
@@ -255,7 +258,7 @@ export function DocsPage() {
   const spec = query.data as Document | undefined
   const all = useMemo(() => operations(spec), [spec])
   const location = useLocation()
-  const page = pageOf(useParams()['*'] ?? '')
+  const splat = useParams()['*'] ?? '', page = pageOf(splat)
   const inShell = useDocsAudience() === 'shell'
   const current = page.kind === 'operation' ? all.find(operation => operation.id === page.id) : undefined
   const missing = page.kind === 'missing' || (page.kind === 'operation' && Boolean(spec) && !current)
@@ -279,6 +282,8 @@ export function DocsPage() {
   }, [active, all.length])
   const legacy = page.kind === 'overview' && location.hash ? legacyPath(location.hash, all) : null
   if (legacy) return <Navigate replace to={legacy} />
+  const renamed = renamedGuides[splat.replace(/\/$/, '')]
+  if (renamed) return <Navigate replace to={`/docs/${renamed}${location.hash}`} />
   const Main = inShell ? 'div' : 'main'
   return <div className="docs-frame"><div className="docs-layout">
     <aside className="docs-toc" aria-label="Documentation contents"><Input type="search" aria-label="Search the documentation" placeholder="Search guides and API" value={search} onChange={event => setSearch(event.target.value)} />

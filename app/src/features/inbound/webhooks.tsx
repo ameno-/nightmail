@@ -17,7 +17,7 @@ import { productName } from '../../../../api/src/brand'
 const deliveryStatus: Record<MailboxWebhookDelivery['status'], { label: string; tone: Tone }> = { pending: { label: 'Retrying', tone: 'warning' }, delivered: { label: 'Delivered', tone: 'success' }, failed: { label: 'Failed', tone: 'danger' }, paused: { label: 'Held', tone: 'neutral' } }
 // routeOnly is form state: a webhook that subscribes to no events and only gets mail a route sends to it.
 type Draft = InboundWebhookInput & { routeOnly: boolean }
-// A webhook a ritual endpoint created has no description: its endpoint name says what it is, not its masked URL.
+// A webhook a rule endpoint created has no description: its endpoint name says what it is, not its masked URL.
 const webhookTitle = (webhook: InboundWebhook) => webhook.description || (webhook.name ? `endpoints.${webhook.name}` : webhook.url)
 const draftOf = (webhook: InboundWebhook): Draft => ({ url: '', description: webhook.description, eventTypes: [...webhook.eventTypes].sort(), addressIds: webhook.addressIds, format: webhook.format ?? 'nightmail', junk: webhook.junk, routeOnly: !webhook.eventTypes.length })
 const payloadOf = ({ routeOnly, ...input }: Draft): InboundWebhookInput => ({ ...input, url: input.url.trim(), description: input.description.trim(), eventTypes: routeOnly ? [] : input.eventTypes })

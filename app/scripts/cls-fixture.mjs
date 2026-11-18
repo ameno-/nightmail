@@ -449,7 +449,7 @@ async function billing(db) {
   await month(db, 'ws_harbor', 3000, 3000, 3_240_000_000n);
 }
 
-/** Driftwood's triage ritual, version `n`: each agent save in a live job changes one line in place, so the line count
+/** Driftwood's triage rule, version `n`: each agent save in a live job changes one line in place, so the line count
  *  (and the editor's height) stays the same. A longer script grows the editor, which is the content changing. */
 export const liveSource = n => `export default function route(email, ctx) {\n  if (email.headers.has("list-unsubscribe")) return junk("newsletter")\n  label(${JSON.stringify(n ? `refund-${n}` : 'support')})\n  endpoints.support({ text: \`\${email.from.address}: \${email.subject}\` })\n}\n`;
 
@@ -482,7 +482,7 @@ export async function seed(fx) {
   await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, created_at)
     VALUES ($1,'ws_northwind','${REGION}','fixture','deals@mail.northwind.example','["customer@example.net"]','[]','[]',$2,$3::jsonb,false,'delivered','provider-'||$1,3,now()-interval '1 minute')`,
     [junkEmail, JUNK_SUBJECT, JSON.stringify({ kind: 'marketing', region: REGION, subject: JUNK_SUBJECT, html: JUNK_HTML, attachments: [] })]);
-  // Receiving: addresses with aliases, routes, endpoints, rituals, webhooks, agent inboxes and threads.
+  // Receiving: addresses with aliases, routes, endpoints, rules, webhooks, agent inboxes and threads.
   const make = input => dana.api('POST', '/v1/inbound/addresses', input, 201);
   const A = {
     support: await make({ address: 'support@northwind.example', key: 'support', displayName: 'Support', aliases: ['help@northwind.example', 'hello@northwind.example'], rules: ['reply+*@northwind.example'] }),
@@ -501,9 +501,9 @@ export async function seed(fx) {
   await dana.api('POST', '/v1/endpoints', { type: 'slack', name: 'support', url: 'https://hooks.slack.com/services/T0SYNTH/B0SYNTH/northwindfixture0a1' }, 201);
   await dana.api('POST', '/v1/endpoints', { type: 'webhook', name: 'crm', url: 'https://hooks.northwind.example/crm-ritual' }, 201);
   await dana.api('POST', '/v1/endpoints', { type: 'forward', name: 'founders', address: 'founders@mail.northwind.example', preverify: true }, 201);
-  // Ready-made rituals (recipes) beside the two scripts, written by the API's own buildRecipe and saved in this one
-  // config write (one audit row, so Settings → Activity measures what it did before): the Rituals tab shows them as
-  // sentences, one turned off, and an edit opens the recipe's form (cls.mjs `Receiving · recipe ritual`).
+  // Ready-made rules (recipes) beside the two scripts, written by the API's own buildRecipe and saved in this one
+  // config write (one audit row, so Settings → Activity measures what it did before): the Rules tab shows them as
+  // sentences, one turned off, and an edit opens the recipe's form (cls.mjs `Receiving · recipe rule`).
   const apiDir = fileURLToPath(new URL('../../api/', import.meta.url));
   const { tsImport } = await import(pathToFileURL(createRequire(join(apiDir, 'package.json')).resolve('tsx/esm/api')).href);
   const { buildRecipe } = await tsImport(join(apiDir, 'src/ritual-schema.ts'), import.meta.url);
@@ -513,8 +513,8 @@ export async function seed(fx) {
     if (!built.ok) throw new Error(`fixture recipe ${id}: ${built.message}`);
     return { key, source: built.source, recipe: { id, params: built.params }, ...extra };
   };
-  await dana.api('PUT', '/v1/rituals', {
-    rituals: [
+  await dana.api('PUT', '/v1/rules', {
+    rules: [
       { key: 'triage', source: 'export default function route(email, ctx) {\n  if (email.headers.has("list-unsubscribe")) return junk("newsletter")\n  label("support")\n  endpoints.support({ text: `${email.from.address}: ${email.subject}` })\n}\n' },
       { key: 'invoices', source: 'export default function route(email, ctx) {\n  if (email.attachments.length > 0) {\n    label("invoice")\n    endpoints.crm({ subject: email.subject, from: email.from.address })\n  }\n}\n' },
       recipe('allow-senders-support', 'allow-senders', { senders: ['ceo@example.net', '@partner.example'] }),
@@ -522,11 +522,11 @@ export async function seed(fx) {
       recipe('forward-sales', 'forward', { to: 'founders' }),
       recipe('junk-newsletters-sales', 'junk-newsletters', {}, { enabled: false }),
     ],
-    // Recipes run with "Run the next one too" on, before the address's own script (createRitualFromRecipe's order).
+    // Recipes run with "Run the next one too" on, before the address's own script (createRuleFromRecipe's order).
     attachments: [
-      { ritual: 'allow-senders-support', target: A.support.id, continue: true }, { ritual: 'label-by-meaning-support', target: A.support.id, continue: true }, { ritual: 'triage', target: A.support.id, continue: false },
-      { ritual: 'label-by-meaning-support', target: A.billing.id, continue: true }, { ritual: 'invoices', target: A.billing.id, continue: false },
-      { ritual: 'junk-newsletters-sales', target: A.sales.id, continue: true }, { ritual: 'forward-sales', target: A.sales.id, continue: true },
+      { rule: 'allow-senders-support', target: A.support.id, continue: true }, { rule: 'label-by-meaning-support', target: A.support.id, continue: true }, { rule: 'triage', target: A.support.id, continue: false },
+      { rule: 'label-by-meaning-support', target: A.billing.id, continue: true }, { rule: 'invoices', target: A.billing.id, continue: false },
+      { rule: 'junk-newsletters-sales', target: A.sales.id, continue: true }, { rule: 'forward-sales', target: A.sales.id, continue: true },
     ],
     senderLists: { vip: ['ceo@example.net'] }, evaluateDomains: ['northwind.example'], evaluateRoutes: [],
   }, 200);
@@ -534,8 +534,8 @@ export async function seed(fx) {
   await threads(db, 'ws_northwind', A.billing, mix(4, 2));
   await threads(db, 'ws_northwind', A.sales, mix(3, 3));
   await threads(db, 'ws_northwind', A.dana, mix(2, 4));
-  // Ingest records which rituals acted on each email (verdicts.ritualsActed); these threads are inserted directly, so
-  // say it here: the Rituals tab's Last matched.
+  // Ingest records which rules acted on each email (verdicts.ritualsActed); these threads are inserted directly, so
+  // say it here: the Rules tab's Last matched.
   const acted = async (box, keys) => db.query(`UPDATE mail_messages SET verdicts=verdicts||jsonb_build_object('ritualsActed',$3::jsonb) WHERE workspace_id=$1 AND id IN (SELECT message_id FROM mailbox_messages WHERE mailbox_id=$2)`, ['ws_northwind', box.id, JSON.stringify(keys)]);
   await acted(A.support, ['triage', 'label-by-meaning-support']);
   await acted(A.billing, ['invoices']);
@@ -603,13 +603,13 @@ export async function seed(fx) {
     ('agt_cls_import','ws_northwind',$1,'["read","send"]','[]','Import October contacts',now()+interval '50 minutes',now()-interval '10 minutes'),
     ('agt_cls_digest','ws_northwind',$1,'["send"]','["mail.northwind.example"]','Send the weekly digest',now()+interval '5 hours',now()-interval '1 hour'),
     ('agt_cls_sam','ws_northwind','mcp_at_cls_sam','["read"]','[]','Check bounce rates',now()+interval '2 hours',now()-interval '30 minutes')`, [mcp]);
-  // Driftwood: the rituals page while an agent edits beside it (cls.mjs `live` jobs). Kai's OpenCode approval can change
-  // rituals here (the page says it is connected), and the agent's own API key saves the ritual while a job watches.
+  // Driftwood: the rules page while an agent edits beside it (cls.mjs `live` jobs). Kai's OpenCode approval can change
+  // rules here (the page says it is connected), and the agent's own API key saves the rule while a job watches.
   const kai = await fx.signIn('kai', 'kai@driftwood.example', 'Kai Moana', { id: 'ws_live', name: 'Driftwood' });
   await domain(db, 'ws_live', await hosted(db, 'ws_live'), 'driftwood.example', { receiving: true });
   const desk = await kai.api('POST', '/v1/inbound/addresses', { address: 'support@driftwood.example', key: 'support', displayName: 'Support' }, 201);
   await kai.api('POST', '/v1/endpoints', { type: 'slack', name: 'support', url: 'https://hooks.slack.com/services/T0SYNTH/B0SYNTH/driftwoodfixture0a1' }, 201);
-  await kai.api('PUT', '/v1/rituals', { rituals: [{ key: 'triage', source: liveSource(0) }], attachments: [{ ritual: 'triage', target: desk.id, continue: false }] }, 200);
+  await kai.api('PUT', '/v1/rules', { rules: [{ key: 'triage', source: liveSource(0) }], attachments: [{ rule: 'triage', target: desk.id, continue: false }] }, 200);
   const agent = await kai.api('POST', '/v1/api-keys', { name: 'Refund agent', permissions: ['read', 'send', 'manage'], domains: [] }, 201);
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile,receiving) VALUES('mcp_at_cls_live','https://account.anoma.ly','user_kai','user_kai','opencode','ws_live','{read,send,manage}',now()+interval '1 day',0,'work',true)");
   fx.liveKey = agent.secret;

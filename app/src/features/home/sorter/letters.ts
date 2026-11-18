@@ -6,7 +6,7 @@ import type { Letter } from './engine'
 import url from './letters.bin?url'
 
 const row = ([subject, from, addr, snippet, route]: readonly [string, string, string, string, number]): Letter => ({ subject, from, addr, snippet, route, scam: route === 7 })
-// Routes: 0 thread, 1 endpoint, 2 agent inbox, 3 inbox, 4 mailbox, 5 ritual, 6 campaign, 7 the laser.
+// Routes: 0 thread, 1 endpoint, 2 agent inbox, 3 inbox, 4 mailbox, 5 rule, 6 campaign, 7 the laser.
 export const STARTERS: Letter[] = ([
   ['Your pager wants to be friends', 'On-Call Pager', 'pager@ops.invalid', 'We speak most nights. I have started to look forward to it.', 3],
   ['Your webhook is answering in Latin', 'Delivery Service', 'deliver@hooks.example', 'Status 200, but the body is a mood, not a response.', 1],

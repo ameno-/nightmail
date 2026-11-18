@@ -50,8 +50,8 @@ Nightmail handles personal data in two different roles.
 
 - The sender, recipients, subject, headers, text and HTML bodies, and attachments of mail sent to a customer's addresses.
 - Authentication results (SPF, DKIM and DMARC) and Amazon's spam and virus verdicts.
-- What the customer's routing and rituals did with each message: delivered, labeled, junked, forwarded, posted to Slack or Discord, or sent to a webhook.
-- Omen questions and the scores returned.
+- What the customer's routing and rules did with each message: delivered, labeled, junked, forwarded, posted to Slack or Discord, or sent to a webhook.
+- AI decision questions and the scores returned.
 - For inboxes: folders, read state and flags.
 
 ### 3.3 What customers send elsewhere
@@ -79,10 +79,10 @@ We **don't sell** personal data, don't "share" it for cross-context behavioral a
 | What | When | What the classifier receives |
 | --- | --- | --- |
 | **Spam screen on sending** | Messages sent through Nightmail's shared (Hosted) sending pool, before they reach Amazon. Repeated identical content may reuse a recent result. | The sender name and address, subject, visible text from the HTML and text parts, and the domains of links, up to about 24 KB per message |
-| **Forwarded mail** | When a ritual forwards a received message to an outside address | The same parts of the forwarded message |
-| **Omens** | Only for receiving domains or routes the customer opted in | The subject, sender, authentication results and up to 8,000 characters of visible text, plus the customer's questions |
+| **Forwarded mail** | When a rule forwards a received message to an outside address | The same parts of the forwarded message |
+| **AI decisions** | Only for receiving domains or routes the customer opted in | The subject, sender, authentication results and up to 8,000 characters of visible text, plus the customer's questions |
 
-Received mail isn't sent to the classifier unless the customer turns on Omens or a forward. BYO AWS sending isn't screened unless the customer asks for it.
+Received mail isn't sent to the classifier unless the customer turns on AI decisions or a forward. BYO AWS sending isn't screened unless the customer asks for it.
 
 ### 5.2 Who runs it
 
@@ -92,7 +92,7 @@ The classifier is **Jev**, from **TypeSafe AI**. Nightmail calls TypeSafe's API 
 
 - A message whose spam score is over the threshold is **rejected before it's sent**. The rejection is recorded with the score and model name.
 - Rejection rates feed the workspace's **sender score**, which sets its daily sending limit and can lead to a warning, a hold on marketing, or a pause.
-- Omen scores are given to the customer's rituals, which decide what to do.
+- AI decision scores are given to the customer's rules, which decide what to do.
 
 ### 5.4 People and automated decisions
 
@@ -102,7 +102,7 @@ The classifier is **Jev**, from **TypeSafe AI**. Nightmail calls TypeSafe's API 
 
 ### 5.5 Training
 
-- **Anomaly doesn't use customer mail or Omen questions to train AI models.**
+- **Anomaly doesn't use customer mail or AI decision questions to train AI models.**
 - **TypeSafe has confirmed to us in writing that it doesn't retain or train on** the content Nightmail sends to it.
 
 ## 6. Support access
@@ -138,7 +138,7 @@ Nightmail stores and processes data mainly in the **United States**. Cloudflare 
 | **Sent mail** records (content, recipients) and delivery events | 30 days |
 | Received-mail events and webhook delivery records | 30 days |
 | Contacts, lists, consent and suppression records | Until the customer deletes them. Unsubscribe and suppression records may be kept after a contact is deleted so the opt-out keeps working. |
-| Routing and ritual version history | Up to 1 year |
+| Routing and rule version history | Up to 1 year |
 | Audit trail | 1 year; billing and payment events 7 years; support reads 90 days |
 | Billing ledger and payment records | 7 years, including after a workspace is closed |
 | Stripe webhook events | 90 days |

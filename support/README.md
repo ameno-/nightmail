@@ -17,7 +17,7 @@ dashboard Help ─ POST /v1/contact-support (Nightmail) ─▶ handoff JWS
                                                      └ DO.openChat ─ BANE.mintGrant ─▶ grant (private DO table); OpenCode boots in the background
               ═ WebSocket /c/<conv>?token= ═▶ DO ─ OpenCode turn ─ tools ─ BANE.read(/v1/support/*, grant)
                                                                 └ model ─▶ Console gateway (Opus 5.5, medium)
-support@ mail ─ Nightmail route → webhook ritual ─▶ POST /hooks/bane-inbound ─▶ DO inbox + alarm
+support@ mail ─ Nightmail route → webhook rule ───▶ POST /hooks/bane-inbound ─▶ DO inbox + alarm
                                               DO ─ BANE_API (address API key) ─ read message, reply in thread
 tickets ─ D1 (typed: billing, bug, deliverability, account, abuse_report, feature_request, other)
         ─ email "[Nightmail <type>] tkt_…" to the team (Nightmail API) + the customer's follow-up thread

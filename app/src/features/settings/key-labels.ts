@@ -1,4 +1,4 @@
-// Plain words for what a credential can do, shared by API keys, Create key, Settings → Account and the rituals page.
+// Plain words for what a credential can do, shared by API keys, Create key, Settings → Account and the rules page.
 import type { Agent, AppPasswordProtocol, ApprovalTie, MailPermission } from '../../data/types'
 import { shortDateTime } from '../../lib/format'
 

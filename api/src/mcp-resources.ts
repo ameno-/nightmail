@@ -24,14 +24,14 @@ const resources: Record<string, { label: string; actions: Record<string, string>
   addresses: { label: 'Receiving addresses', actions: {
     list: 'listInboundAddresses', overview: 'getInboundOverview', get: 'getInboundAddress', create: 'createInboundAddress', update: 'updateInboundAddress', delete: 'deleteInboundAddress', release: 'releaseRetiredAddress',
   } },
-  routes: { label: 'Inbound routing rules', actions: {
+  routes: { label: 'Inbound routes', actions: {
     list: 'listRoutes', get: 'getRoute', create: 'createRoute', update: 'updateRoute', delete: 'deleteRoute',
   } },
   routing: { label: 'Workspace routing', actions: {
     get: 'getRouting', apply: 'applyRouting', test: 'testRouting', audit: 'getRoutingAudit', versions: 'listRoutingVersions', version: 'getRoutingVersion', restore: 'restoreRoutingVersion',
   } },
-  rituals: { label: 'Inbound mail scripts', actions: {
-    get: 'getRitual', save: 'saveRitual', delete: 'deleteRitual', check: 'checkRitual', typings: 'getRitualTypings', templates: 'listRitualTemplates', recipes: 'listRitualRecipes', createFromRecipe: 'createRitualFromRecipe', updateFromRecipe: 'updateRitualFromRecipe', update: 'updateRitual', attach: 'attachRituals', config: 'getRituals', apply: 'applyRituals', test: 'testRituals', versions: 'listRitualVersions', restore: 'restoreRitualVersion', omens: 'setOmenOptIns',
+  rules: { label: 'Inbound mail rules', actions: {
+    get: 'getRule', save: 'saveRule', delete: 'deleteRule', check: 'checkRule', typings: 'getRuleTypings', templates: 'listRuleTemplates', recipes: 'listRuleRecipes', createFromRecipe: 'createRuleFromRecipe', updateFromRecipe: 'updateRuleFromRecipe', update: 'updateRule', attach: 'attachRules', config: 'getRules', apply: 'applyRules', test: 'testRules', versions: 'listRuleVersions', restore: 'restoreRuleVersion', decisions: 'setDecisionOptIns',
   } },
   endpoints: { label: 'Endpoints: Slack, Discord, webhooks and forwards', actions: {
     list: 'listEndpoints', listAll: 'listInboundEndpoints', get: 'getEndpoint', create: 'createEndpoint', update: 'updateEndpoint', delete: 'deleteEndpoint', verify: 'sendEndpointVerification', test: 'testEndpoint',
