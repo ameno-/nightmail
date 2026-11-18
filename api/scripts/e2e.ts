@@ -66,6 +66,7 @@ Object.assign(SKIP, {
   listSupportEvents: supportInternal, listSupportWebhookDeliveries: supportInternal, getSupportStanding: supportInternal, getSupportBilling: supportInternal, listSupportAudit: supportInternal,
   getSupportRequest: supportInternal, listSupportRequests: supportInternal, getSupportDeliveryMetrics: supportInternal, getSupportBounceReasons: supportInternal, getSupportDomainHealth: supportInternal, getSupportScreen: supportInternal,
   listSupportCampaigns: supportInternal, getSupportCampaign: supportInternal, getSupportEmailLint: supportInternal, getSupportCampaignLint: supportInternal, getSupportAudienceHealth: supportInternal,
+  getSupportScope: 'Internal: needs a support conversation the support platform registered through its service binding; covered by isolated acceptance.', updateSupportScope: 'Internal: needs a support conversation the support platform registered through its service binding; covered by isolated acceptance.',
 });
 SKIP.retryInboundWebhookDelivery='Requires an exhausted run-owned inbound delivery; retries and leases are exercised offline.';
 // The receiving MVP (routing, rules, endpoints, agent inboxes) is exercised end to end by the isolated acceptance

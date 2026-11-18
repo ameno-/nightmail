@@ -77,7 +77,7 @@ export interface Config {
   /** Hosted only: From for Nightmail's own owner notices (sender standing), on the platform workspace's domain. */
   notifyFrom?: string;
   /** Hosted only: the support platform's operator credential, its URL and the handoff signing key (src/support.ts). */
-  support?: { url?: string; signingKey?: { kty: 'OKP'; crv: 'Ed25519'; d: string; x: string } };
+  support?: { url?: string; signingKey?: { kty: 'OKP'; crv: 'Ed25519'; d: string; x: string }; addressIds?: string[] };
   /** Hosted only: where support reads this Worker's request lines (Workers Logs, src/support-logs.ts). */
   observability?: { token: string; accountId: string; script: string };
   regionalSending?: boolean;
@@ -143,6 +143,9 @@ export interface Runtime {
   jwksCacheScope?: object; // Workers create a new DB adapter per request; scope public keys to the binding instead.
   // Set only by the SupportPlatform service-binding entrypoint (src/support-platform.ts), never from a request.
   platformCaller?: 'bane-support';
+  // The support conversation (conv_…) a binding request() is for, set only by that entrypoint method, never from a
+  // request: supportGate derives the customer from its row (src/support-conversations.ts).
+  supportConversation?: string;
   renderHtmlImage?: (html: string, grow?: (bytes: number) => void) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>;
   // Outbound webhook transport. Node supplies a connect-time guard against private addresses
   // (see adapters/node.ts); Workers use plain fetch, which cannot reach them.
@@ -152,9 +155,14 @@ export type WebhookFetch = (url: string, init: { method: 'POST'; headers: Record
 // mailboxIds is what the credential can see now (a provisioning key also sees the inboxes it created);
 // scopeIds is an inbox key's configured scope, which never changes for that key.
 export type MailboxAccess = { keyId: string; grantId?:string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; scopeIds?: string[] | null; permissions: import('./db/mailbox.js').MailboxPermission[] };
-/** A support grant (src/support.ts): one user, the workspaces they still belong to, read-only, for one ticket. */
+/**
+ * A support grant (src/support.ts): one user, the workspaces they still belong to, read-only, for one ticket. Or a
+ * support conversation (src/support-conversations.ts, `conversation` set): grantId and ticketRef are the conversation's
+ * ID, and its workspaces are those this route's dashboard counterpart lets the user's role read.
+ */
 export type SupportScope = { grantId: string; userId: string; ticketRef: string; operatorId: string; contentWorkspaceId: string | null; expiresAt: string;
-  workspaces: { id: string; name: string; role: 'owner' | 'admin' | 'member' }[] };
+  workspaces: { id: string; name: string; role: 'owner' | 'admin' | 'member' }[];
+  conversation?: { id: string; channel: 'chat' | 'email'; verification: string; workspaceId: string | null } };
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess;
   /** The error code and field a failed request answered with, for its request log line. `unmatched`: no route did. */
   failure?: { code: string; field?: string; databaseCode?: string; unmatched?: boolean };

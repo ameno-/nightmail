@@ -5791,6 +5791,428 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  test('Support conversations: Nightmail binds each conversation from evidence it checks itself; only the binding stamps one on a read; each read follows the dashboard’s answer for the role', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const hex = () => (randomUUID() + randomUUID()).replaceAll('-', ''), base32 = 'abcdefghijklmnopqrstuvwxyz234567';
+      const conversation = () => `conv_${Array.from(crypto.getRandomValues(new Uint8Array(26)), b => base32[b & 31]).join('')}`;
+      const signing = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json;
+      const supportBox = `mbx_${hex().slice(0, 32)}`, salesBox = `mbx_${hex().slice(0, 32)}`, acmeBox = `mbx_${hex().slice(0, 32)}`;
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [],
+        support: { url: 'https://support.example.com/start', signingKey: { kty: 'OKP', crv: 'Ed25519', d: signing.d, x: signing.x }, addressIds: [supportBox] } });
+      const { createApp, createOpenApiApp } = await import('./src/app.js'), app = createApp();
+      const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
+        const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
+        const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+        return { status: res.status, body: parsed, headers: res.headers };
+      };
+      // The SupportPlatform entrypoint (src/worker.ts) wraps exactly this: the conversation rides on the runtime.
+      const { supportPlatform, platformRuntime } = await import('./src/support-platform.js');
+      const platform = supportPlatform(async (req, id) => app.fetch(req, { ...runtime, ...platformRuntime(id) }), () => runtime.config);
+      const reply = (r: { status: number; body: unknown; requestId: string | null }): Reply => ({ status: r.status, body: r.body, headers: new Headers(r.requestId ? { 'x-request-id': r.requestId } : {}) });
+      const stamped = async (id: string, method: string, path: string, body?: Json) => reply(await platform.request(id, method, path, body));
+      const register = async (conversationId: string, evidence: Json) => reply(await platform.registerConversation({ conversationId, evidence: evidence as never }));
+      const session = (f: SessionFixture, workspace?: string) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN, ...(workspace ? { 'x-nightmail-workspace': workspace } : {}) });
+      const reads = async (id: string) => (await db.query(`SELECT summary, internal, retain_until > now() + interval '89 days' AND retain_until < now() + interval '91 days' AS kept FROM audit_events WHERE action = 'support.read' AND actor_id = $1 ORDER BY id`, [id])).rows;
+      const lastRead = async (id: string) => (await reads(id)).at(-1)?.summary as Json | undefined;
+      const row = async (id: string) => (await db.query('SELECT user_id, mode, verification, pending_address, workspace_id, content_workspace_id, status, evidence FROM support_conversations WHERE id = $1', [id])).rows[0];
+
+      // Acme has an owner, an admin and a member; the member also owns Beta; the outsider owns Other. The support
+      // addresses live in the platform workspace.
+      const owner = await sessionFixture(t), admin = await sessionFixture(t), member = await sessionFixture(t), outsider = await sessionFixture(t), lonely = await sessionFixture(t), operator = await sessionFixture(t);
+      const acme = unique('acme-ws'), beta = unique('beta-ws'), other = unique('other-ws'), home = unique('platform-ws');
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2),($3,$3,$3),($4,$4,$4)', [acme, beta, other, home]);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$2,$5,'admin'),($6,$2,$7,'member'),($8,$9,$7,'owner'),($10,$11,$12,'owner')`,
+        [unique('mem'), acme, owner.userId, unique('mem'), admin.userId, unique('mem'), member.userId, unique('mem'), beta, unique('mem'), other, outsider.userId]);
+      await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[owner, admin, member, outsider, lonely, operator].map(f => f.userId)]);
+      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support conversations acceptance fixture')`, [operator.userId]);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'member')`, [unique('mem'), home, operator.userId]);
+      const supportDomain = `sup-${hex().slice(0, 10)}.example`, acmeDomain = `acme-${hex().slice(0, 10)}.example`, thread = unique('thread'), acmeThread = unique('thread');
+      await db.query('INSERT INTO mail_threads(id, workspace_id) VALUES ($1, $2), ($3, $4)', [thread, home, acmeThread, acme]);
+      const homeDom = unique('mdom'), acmeDom = unique('mdom');
+      await db.query("INSERT INTO mailbox_domains(id, workspace_id, domain_id, name, region, status) VALUES ($1, $2, $1, $3, $4, 'active'), ($5, $6, $5, $7, $4, 'active')", [homeDom, home, supportDomain, REGION, acmeDom, acme, acmeDomain]);
+      await db.query('INSERT INTO mailboxes(id, workspace_id, domain_id, address) VALUES ($1, $2, $3, $4), ($5, $2, $3, $6), ($7, $8, $9, $10)',
+        [supportBox, home, homeDom, `support@${supportDomain}`, salesBox, `sales@${supportDomain}`, acmeBox, acme, acmeDom, `help@${acmeDomain}`]);
+      /** A message Nightmail stored, as ingest would: its From header, DKIM signatures and SES's verdicts. */
+      const mail = async (from: string, o: { dmarc?: string; box?: string | null; workspace?: string; fromHeader?: string[]; direction?: string; text?: string } = {}) => {
+        const id = `msg_${hex().slice(0, 32)}`, workspace = o.workspace ?? home, domain = from.split('@')[1];
+        const headers = [...(o.fromHeader ?? [`"Synthetic sender" <${from}>`]).map(value => ({ name: 'From', value })), { name: 'DKIM-Signature', value: `v=1; a=rsa-sha256; d=${domain}; s=s1; bh=x; b=y` }];
+        await db.query(`INSERT INTO mail_messages(id, workspace_id, direction, thread_id, region, subject, from_address, envelope_to, verdicts, headers, text) VALUES ($1, $2, $3, $4, $5, 'Help', $6, '[]', $7, $8, $9)`,
+          [id, workspace, o.direction ?? 'inbound', workspace === home ? thread : acmeThread, REGION, from, JSON.stringify({ dmarc: o.dmarc ?? 'PASS', dkim: 'PASS', spf: 'PASS' }), JSON.stringify(headers), o.text ?? null]);
+        if (o.box !== null) await db.query("INSERT INTO mailbox_messages(mailbox_id, message_id, workspace_id, thread_id, direction, received_at) VALUES ($1, $2, $3, $4, 'inbound', now())", [o.box ?? supportBox, id, workspace, workspace === home ? thread : acmeThread]);
+        return id;
+      };
+      const handoff = async (f: SessionFixture, workspace: string, body: Json = {}) => ok(await send('POST', '/v1/contact-support', session(f, workspace), body), 201);
+      const chat = async (f: SessionFixture, workspace = acme, body: Json = {}) => { const id = conversation(); ok(await register(id, { kind: 'handoff', token: (await handoff(f, workspace, body)).token }), 201); return id; };
+      const email = async (from: string, o: Parameters<typeof mail>[1] = {}) => { const id = conversation(); const body = ok(await register(id, { kind: 'email', messageId: await mail(from, o) }), 201); return { id, body }; };
+      const mint = async (body: Json) => reply(await platform.mintGrant({ reason: 'Customer asked about their workspace', ticketRef: unique('T'), ...body } as never));
+
+      await t.test('1 registration: Nightmail decides who a conversation is for from its own handoff, or from a support address’s stored From and DMARC verdict', async () => {
+        // A handoff binds its user and workspace, once, and is shared with grants either way.
+        const first = await handoff(owner, acme, { shareContent: true, page: '/domains' }), id = conversation();
+        const created = ok(await register(id, { kind: 'handoff', token: first.token }), 201);
+        assert.deepEqual([created.channel, created.mode, created.verification, created.workspaceId, created.contentShared, created.created], ['chat', 'member', 'handoff', acme, true, true]);
+        assert.deepEqual([(await row(id)).user_id, (await row(id)).workspace_id], [owner.userId, acme]);
+        assert.equal(ok(await register(id, { kind: 'handoff', token: first.token })).created, false, 'The same registration again answers its state.');
+        error(await register(conversation(), { kind: 'handoff', token: first.token }), 409, 'SUPPORT_HANDOFF_USED');
+        error(await mint({ userId: owner.userId, verification: 'handoff', handoffId: first.id }), 409, 'SUPPORT_HANDOFF_USED');
+        const used = await platform.verifyHandoff(first.token);
+        assert.ok(used.ok && used.handoff.usedAt && used.handoff.grantId === null, JSON.stringify(used));
+        const granted = await handoff(owner, acme);
+        secrets.add(ok(await mint({ userId: owner.userId, verification: 'handoff', handoffId: granted.id }), 201).token);
+        error(await register(conversation(), { kind: 'handoff', token: granted.token }), 409, 'SUPPORT_HANDOFF_USED');
+        const [header, payload] = first.token.split('.');
+        error(await register(conversation(), { kind: 'handoff', token: `${header}.${payload}.${Buffer.from('forged').toString('base64url')}` }), 422, 'HANDOFF_INVALID');
+        const late = await handoff(admin, acme);
+        await db.query(`UPDATE support_handoffs SET created_at = now() - interval '1 hour', expires_at = now() - interval '31 minutes' WHERE id = $1`, [late.id]);
+        error(await register(conversation(), { kind: 'handoff', token: late.token }), 404);
+        const leaving = await handoff(member, beta);
+        await db.query('UPDATE workspace_members SET workspace_id = $1 WHERE user_id = $2 AND workspace_id = $3', [other, member.userId, beta]);
+        error(await register(conversation(), { kind: 'handoff', token: leaving.token }), 404, 'NOT_FOUND');
+        await db.query('UPDATE workspace_members SET workspace_id = $1 WHERE user_id = $2 AND workspace_id = $3', [beta, member.userId, other]);
+        error(await register(id, { kind: 'email', messageId: await mail(owner.email) }), 409, 'SUPPORT_CONVERSATION_EXISTS');
+
+        // Email: only a message received at a support address, and its stored From and DMARC verdict decide.
+        const pass = await email(owner.email);
+        assert.deepEqual([pass.body.channel, pass.body.mode, pass.body.verification, pass.body.workspaceId, pass.body.contentShared], ['email', 'member', 'dmarc', null, false]);
+        assert.deepEqual([(await row(pass.id)).user_id, (await row(pass.id)).evidence.dkimAligned], [owner.userId, true]);
+        const failing = await email(owner.email, { dmarc: 'FAIL' });
+        assert.deepEqual([failing.body.mode, failing.body.verification, (await row(failing.id)).user_id, (await row(failing.id)).pending_address], ['pending_signin', 'none', null, owner.email]);
+        assert.equal((await email(owner.email, { dmarc: 'GRAY' })).body.mode, 'pending_signin', 'Only PASS counts.');
+        assert.equal((await email(owner.email, { fromHeader: [`<${owner.email}>, <other@${acmeDomain}>`] })).body.mode, 'pending_signin', 'A From that is not one literal address proves nothing.');
+        assert.equal((await email(owner.email, { fromHeader: [owner.email, owner.email] })).body.mode, 'pending_signin', 'Two From fields prove nothing.');
+        const nobody = `nobody-${hex().slice(0, 8)}@elsewhere.example`;
+        assert.deepEqual([(await email(nobody)).body.mode, (await email(nobody, { dmarc: 'FAIL' })).body.mode], ['non_member', 'unverified']);
+        const alone = await email(lonely.email);
+        assert.deepEqual([alone.body.mode, (await row(alone.id)).user_id], ['non_member', lonely.userId], 'A verified person without a workspace gets general answers.');
+        // Another workspace's message, another address, an unrouted copy and sent mail are not support mail.
+        error(await register(conversation(), { kind: 'email', messageId: await mail(owner.email, { workspace: acme, box: acmeBox }) }), 404);
+        error(await register(conversation(), { kind: 'email', messageId: await mail(owner.email, { workspace: acme, box: supportBox }) }), 404);
+        error(await register(conversation(), { kind: 'email', messageId: await mail(owner.email, { box: salesBox }) }), 404);
+        error(await register(conversation(), { kind: 'email', messageId: await mail(owner.email, { box: null }) }), 404);
+        error(await register(conversation(), { kind: 'email', messageId: await mail(owner.email, { direction: 'outbound' }) }), 404);
+        error(await register(conversation(), { kind: 'email', messageId: `msg_${hex().slice(0, 32)}` }), 404);
+        // Each later message registers again: it can bind the waiting sender, never another person.
+        const waiting = await email(admin.email, { dmarc: 'FAIL' });
+        const upgraded = ok(await register(waiting.id, { kind: 'email', messageId: await mail(admin.email) }));
+        assert.deepEqual([upgraded.mode, upgraded.created, (await row(waiting.id)).user_id], ['member', false, admin.userId]);
+        assert.equal(ok(await register(waiting.id, { kind: 'email', messageId: await mail(admin.email) })).mode, 'member');
+        error(await register(waiting.id, { kind: 'email', messageId: await mail(admin.email, { dmarc: 'FAIL' }) }), 409, 'SUPPORT_CONVERSATION_MISMATCH');
+        error(await register(waiting.id, { kind: 'email', messageId: await mail(owner.email) }), 409, 'SUPPORT_CONVERSATION_SENDER');
+        error(await register(conversation(), { kind: 'chat', messageId: await mail(owner.email) }), 422);
+        // Binding a person is on their trail; registering a sender who proved nothing opens no access and is not.
+        assert.deepEqual((await db.query(`SELECT user_id, summary->>'mode' AS mode FROM audit_events WHERE action = 'support.register' AND actor_id = 'service:bane-support' AND target_id = $1 AND internal`, [waiting.id])).rows, [{ user_id: admin.userId, mode: 'member' }]);
+        // Only the binding registers: an operator's own session and every customer get 403.
+        error(await send('POST', '/v1/operator/support/conversations', session(operator), { conversationId: conversation(), evidence: { kind: 'email', messageId: await mail(owner.email) } }), 403, 'SUPPORT_PLATFORM_REQUIRED');
+        error(await send('POST', '/v1/operator/support/conversations', session(owner, acme), { conversationId: conversation(), evidence: { kind: 'email', messageId: await mail(owner.email) } }), 403, 'OPERATOR_REQUIRED');
+        const configured = runtime.config.support!.addressIds;
+        runtime.config.support!.addressIds = [];
+        error(await register(conversation(), { kind: 'email', messageId: await mail(owner.email) }), 503, 'SUPPORT_NOT_CONFIGURED');
+        runtime.config.support!.addressIds = configured;
+      });
+
+      await t.test('2 stamp: only the binding’s request() names a conversation; nothing in an HTTP request can, and an unbound or closed one reads nothing', async () => {
+        const id = await chat(owner), theirs = await chat(outsider, other);
+        const asked = ok(await stamped(id, 'GET', `/v1/support/context?userId=${outsider.userId}&conversationId=${theirs}&workspaceId=${acme}`));
+        assert.deepEqual([asked.user.id, asked.workspaces.map((w: Json) => w.id), asked.grant.id], [owner.userId, [acme], id], 'A model-style userId or conversationId changes nothing.');
+        error(await stamped(id, 'GET', `/v1/support/workspaces?workspaceId=${other}`), 404);
+        // Over HTTP every header, query parameter and credential naming a conversation, user or token gets today's 403.
+        const refused: string[] = [];
+        for (const headers of [{}, { 'x-support-conversation': id }, { 'x-nightmail-support-conversation': id }, { 'x-conversation-id': id }, { 'x-user-id': owner.userId },
+          { authorization: `Bearer ${id}` }, { authorization: `Bearer nm_support_${hex()}` }, session(owner, acme)] as Record<string, string>[])
+          for (const query of ['', `?conversationId=${id}`, `?supportConversation=${id}`, `?userId=${owner.userId}`, `?conversation=${id}&user=${owner.userId}`]) {
+            const got = await send('GET', `/v1/support/context${query}`, headers);
+            if (got.status !== 403 || got.body?.error?.code !== 'SUPPORT_GRANT_REQUIRED') refused.push(`${JSON.stringify(Object.keys(headers))} ${query} → ${got.status}`);
+          }
+        assert.deepEqual(refused, []);
+        error(await send('POST', '/v1/support/scope', session(owner, acme), { workspaceId: acme }), 403, 'SUPPORT_GRANT_REQUIRED');
+        error(reply(await platform.call('GET', '/v1/support/context')), 403, 'SUPPORT_GRANT_REQUIRED');
+        // A conversation never arrives with a credential beside it; the stamp reaches no operator route and writes only its scope.
+        const direct = async (path: string, init: RequestInit = {}) => (await app.fetch(new Request(PUBLIC_ORIGIN + path, init), { ...runtime, ...platformRuntime(id) })).status;
+        assert.equal(await direct('/v1/support/context', { headers: { authorization: `Bearer nm_support_${hex()}` } }), 403);
+        assert.equal(await direct('/v1/support/context', { headers: { cookie: owner.cookie } }), 403);
+        assert.equal(await direct(`/v1/operator/support/handoffs/sho_${'0'.repeat(32)}`), 403);
+        assert.equal(await direct('/v1/support/context', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }), 403);
+        assert.equal(await direct('/v1/api-keys'), 401);
+        error(await stamped(id, 'POST', '/v1/support/context', {}), 404);
+        error(await stamped(id, 'GET', '/v1/operator/support/grants'), 404);
+        error(await stamped(id, 'GET', '/v1/support/../operator/users/x/audit'), 404);
+        error(await stamped('conv_unknown', 'GET', '/v1/support/context'), 403, 'SUPPORT_GRANT_REQUIRED');
+        error(await stamped(conversation(), 'GET', '/v1/support/context'), 403, 'SUPPORT_GRANT_REQUIRED');
+        error(await stamped((await email(owner.email, { dmarc: 'FAIL' })).id, 'GET', '/v1/support/context'), 403, 'SUPPORT_GRANT_REQUIRED');
+        error(await stamped((await email(`n-${hex().slice(0, 8)}@elsewhere.example`)).id, 'GET', '/v1/support/context'), 403, 'SUPPORT_GRANT_REQUIRED');
+        const closed = ok(reply(await platform.closeConversation(id)));
+        assert.equal(closed.status, 'closed');
+        assert.equal(ok(reply(await platform.closeConversation(id))).closedAt, closed.closedAt, 'Closing again is harmless.');
+        error(await stamped(id, 'GET', '/v1/support/context'), 403, 'SUPPORT_GRANT_REQUIRED');
+        error(reply(await platform.closeConversation(conversation())), 404);
+        ok(await stamped(theirs, 'GET', '/v1/support/workspaces'));
+      });
+
+      await t.test('3 role ceiling: every /v1/support route reads a workspace for a role exactly when the dashboard’s counterpart answers that role', async () => {
+        const { SUPPORT_CEILINGS, CONTEXT_SECTIONS } = await import('./src/support-conversations.js');
+        const registered = [...new Set((await createOpenApiApp()).routes.filter(r => r.path.startsWith('/v1/support/') && r.method !== 'ALL').map(r => `${r.method} ${r.path.replace(/:([A-Za-z]+)/g, '{$1}')}`))].sort();
+        const table = SUPPORT_CEILINGS.map(e => `${e.method} ${e.path}`).sort();
+        assert.deepEqual(registered.filter(r => !table.includes(r)), [], 'A /v1/support route without a role ceiling.');
+        assert.deepEqual(table.filter(e => !registered.includes(e)), [], 'A role ceiling for a route that does not exist.');
+        assert.ok(registered.length >= 23, registered.join());
+        const people = { owner, admin, member } as const, chats = { owner: await chat(owner), admin: await chat(admin), member: await chat(member) };
+        const dashboard = new Map<string, number>(), mismatches: string[] = [];
+        const counterpart = async (route: string, role: keyof typeof people) => {
+          const key = `${route} ${role}`;
+          if (!dashboard.has(key)) { const [method, path] = route.split(' '); dashboard.set(key, (await send(method!, path!, session(people[role], acme))).status); }
+          return dashboard.get(key)!;
+        };
+        for (const entry of SUPPORT_CEILINGS) for (const role of ['owner', 'admin', 'member'] as const) {
+          const status = await counterpart(entry.counterpart, role), allowed = status >= 200 && status < 300;
+          if (allowed !== entry.roles.includes(role)) mismatches.push(`${entry.method} ${entry.path} as ${role}: table ${entry.roles.includes(role)}, dashboard ${entry.counterpart} → ${status}`);
+          const path = entry.path.replace('{requestId}', `req_${'0'.repeat(32)}`).replace(/\{[^}]+\}/g, 'x'), before = (await reads(chats[role])).length;
+          const got = await stamped(chats[role], entry.method, entry.method === 'GET' ? `${path}?workspaceId=${acme}` : path, entry.method === 'POST' ? { workspaceId: acme } : undefined);
+          const logged = await reads(chats[role]), last = logged.at(-1)?.summary;
+          if (logged.length !== before + 1 || last?.route !== path) { mismatches.push(`${entry.method} ${entry.path} as ${role}: not logged (${got.status})`); continue; }
+          const admitted = (last.workspaces as string[]).includes(acme);
+          if (admitted !== allowed) mismatches.push(`${entry.method} ${entry.path} as ${role}: support read ${admitted}, dashboard ${allowed}`);
+          if (!admitted && got.status !== 404) mismatches.push(`${entry.method} ${entry.path} as ${role}: refused with ${got.status}`);
+        }
+        assert.deepEqual(mismatches, []);
+        // Context sections follow their own counterparts.
+        for (const [section, { roles, counterpart: route }] of Object.entries(CONTEXT_SECTIONS))
+          for (const role of ['owner', 'admin', 'member'] as const) { const status = await counterpart(route, role); assert.equal(status < 300, roles.includes(role), `${section} as ${role}: ${route} → ${status}`); }
+        const domain = unique('dom'), hook = unique('whk'), event = unique('evt');
+        await db.query('INSERT INTO operation_domains(id, name, workspace_id, region) VALUES ($1, $2, $3, $4)', [domain, `ctx-${hex().slice(0, 10)}.example`, acme, REGION]);
+        await db.query(`INSERT INTO operation_webhooks(id, workspace_id, url, event_types, encrypted_secret) VALUES ($1, $2, 'https://example.com/hooks/ctx', '[]', 'fixture')`, [hook, acme]);
+        await db.query(`INSERT INTO operation_events(id, workspace_id, type, region, data, created_at) VALUES ($1, $2, 'email.delivered', $3, '{}', now())`, [event, acme, REGION]);
+        await db.query(`INSERT INTO operation_deliveries(id, workspace_id, webhook_id, event_id, payload, status, last_status_code) VALUES ($1, $2, $3, $4, '{}', 'failed', 500)`, [unique('whd'), acme, hook, event]);
+        await db.query(`INSERT INTO audit_events(workspace_id, actor_type, via, action, retain_until) VALUES ($1, 'system', 'job', 'test.visible', now() + interval '1 day')`, [acme]);
+        const sections = async (id: string) => { const ctx = ok(await stamped(id, 'GET', '/v1/support/context')); return [ctx.domains.length > 0, ctx.recentFailures.webhookDeliveries.length > 0, ctx.recentActivity.length > 0, ctx.workspaces.length]; };
+        assert.deepEqual(await sections(chats.owner), [true, true, true, 1]);
+        assert.deepEqual(await sections(chats.admin), [true, true, true, 1]);
+        assert.deepEqual(await sections(chats.member), [false, false, false, 1]);
+        // Received mail follows actorMailAccess: a member reads mail on receiving addresses, never unassigned stored mail.
+        const routed = await mail(`a-${hex().slice(0, 6)}@example.org`, { workspace: acme, box: acmeBox }), stored = await mail(`b-${hex().slice(0, 6)}@example.org`, { workspace: acme, box: null });
+        const received = async (id: string) => ok(await stamped(id, 'GET', '/v1/support/emails?direction=received')).data.map((e: Json) => e.id).filter((e: string) => e === routed || e === stored).sort();
+        assert.deepEqual(await received(chats.owner), [routed, stored].sort());
+        assert.deepEqual(await received(chats.member), [routed]);
+        ok(await stamped(chats.member, 'GET', `/v1/support/emails/${routed}`));
+        error(await stamped(chats.member, 'GET', `/v1/support/emails/${stored}`), 404);
+        ok(await stamped(chats.owner, 'GET', `/v1/support/emails/${stored}`));
+        // The grant path is unchanged: a grant still reads its member's domains.
+        const grant = ok(await mint({ userId: member.userId, verification: 'dmarc', workspaceIds: [acme] }), 201); secrets.add(grant.token);
+        assert.equal(ok(reply(await platform.read('/v1/support/domains', grant.token))).data.length, 1);
+      });
+
+      await t.test('4 removal: the next request drops a workspace the person left, and scope reports shrunk once it had been read', async () => {
+        const both = await email(member.email);
+        assert.deepEqual(ok(await stamped(both.id, 'GET', '/v1/support/workspaces')).data.map((w: Json) => w.id).sort(), [acme, beta].sort());
+        const before = ok(await stamped(both.id, 'GET', '/v1/support/scope'));
+        assert.deepEqual([before.shrunk, before.workspace, before.workspaces.length, before.conversation.mode, before.user.email], [false, null, 2, 'member', member.email]);
+        assert.ok(!('id' in before.user), 'The scope names no user ID.');
+        await db.query('DELETE FROM workspace_members WHERE user_id = $1 AND workspace_id = $2', [member.userId, beta]);
+        assert.deepEqual(ok(await stamped(both.id, 'GET', '/v1/support/workspaces')).data.map((w: Json) => w.id), [acme]);
+        error(await stamped(both.id, 'GET', `/v1/support/workspaces?workspaceId=${beta}`), 404);
+        const after = ok(await stamped(both.id, 'GET', '/v1/support/scope'));
+        assert.deepEqual([after.shrunk, after.workspaces.map((w: Json) => w.id)], [true, [acme]]);
+        error(await stamped(both.id, 'POST', '/v1/support/scope', { workspaceId: beta }), 404);
+        // Narrowing an email to one of the person's workspaces; a chat stays where it came from.
+        const narrowing = await email(owner.email);
+        assert.deepEqual(ok(await stamped(narrowing.id, 'POST', '/v1/support/scope', { workspaceId: acme })).workspace, { id: acme, name: acme, role: 'owner' });
+        assert.equal((await row(narrowing.id)).workspace_id, acme);
+        const ownChat = await chat(admin);
+        ok(await stamped(ownChat, 'GET', '/v1/support/workspaces'));
+        error(await stamped(ownChat, 'POST', '/v1/support/scope', { workspaceId: beta }), 409, 'SUPPORT_SCOPE_FIXED');
+        assert.equal(ok(await stamped(ownChat, 'POST', '/v1/support/scope', { workspaceId: acme })).workspace.id, acme);
+        // A workspace never read does not shrink the conversation; it only drops out.
+        const unread = await chat(admin);
+        await db.query('DELETE FROM workspace_members WHERE user_id = $1 AND workspace_id = $2', [admin.userId, acme]);
+        const gone = ok(await stamped(unread, 'GET', '/v1/support/scope'));
+        assert.deepEqual([gone.shrunk, gone.workspace, gone.workspaces], [false, null, []]);
+        assert.deepEqual(ok(await stamped(unread, 'GET', '/v1/support/workspaces')).data, []);
+        assert.equal(ok(await stamped(ownChat, 'GET', '/v1/support/scope')).shrunk, true, 'The chat above had read Acme.');
+        await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'admin')`, [unique('mem'), acme, admin.userId]);
+      });
+
+      await t.test('5 audit: support.view once per conversation and workspace, customer-visible and in Activity; support.read internal on every call', async () => {
+        const id = await chat(owner);
+        for (const path of ['/v1/support/context', '/v1/support/workspaces', '/v1/support/emails', '/v1/support/scope']) ok(await stamped(id, 'GET', path));
+        const logged = await reads(id);
+        assert.deepEqual([logged.length, logged.every(r => r.internal && r.kept)], [4, true]);
+        assert.deepEqual(logged.map(r => r.summary.route), ['/v1/support/context', '/v1/support/workspaces', '/v1/support/emails', '/v1/support/scope']);
+        const views = (await db.query(`SELECT workspace_id, user_id, internal, ticket_ref, summary, retain_until > now() + interval '364 days' AS kept FROM audit_events WHERE action = 'support.view' AND actor_id = $1`, [id])).rows;
+        assert.deepEqual(views.map(v => [v.workspace_id, v.user_id, v.internal, v.ticket_ref, v.kept]), [[acme, owner.userId, false, id, true]]);
+        assert.deepEqual(views[0].summary, { ticket: id, member: owner.userId, channel: 'chat', verification: 'handoff', contentShared: false });
+        const seen = ok(await send('GET', '/v1/activity?actorType=support', session(owner, acme))).data.filter((e: Json) => e.actor.id === id);
+        assert.deepEqual(seen.map((e: Json) => [e.action, e.summary.ticket, e.subject?.userId, e.via]), [['support.view', id, owner.userId, 'support']]);
+        // Reading only the scope shows no workspace's data, so the customer sees no "support viewed".
+        const scopeOnly = await chat(owner);
+        ok(await stamped(scopeOnly, 'GET', '/v1/support/scope'));
+        assert.equal((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'support.view' AND actor_id = $1`, [scopeOnly])).rows[0].n, 0);
+        assert.equal((await reads(scopeOnly)).length, 1);
+        for (const done of [id, scopeOnly]) ok(reply(await platform.closeConversation(done)));
+      });
+
+      await t.test('6 rate: each conversation has its own minute window, aggregates counting 5; a person has at most 10 open conversations', async () => {
+        const id = await chat(outsider, other), neighbour = await chat(outsider, other);
+        await db.query('UPDATE support_conversations SET used = 114 WHERE id = $1', [id]);
+        ok(await stamped(id, 'GET', '/v1/support/screen'));
+        ok(await stamped(id, 'GET', '/v1/support/workspaces'));
+        assert.equal((await db.query('SELECT used FROM support_conversations WHERE id = $1', [id])).rows[0].used, 120);
+        const limited = await stamped(id, 'GET', '/v1/support/workspaces');
+        error(limited, 429, 'REQUEST_RATE_LIMITED');
+        assert.equal((await reads(id)).length, 2, 'A refused request is not logged as a read.');
+        ok(await stamped(neighbour, 'GET', '/v1/support/workspaces'));
+        await db.query('UPDATE support_conversations SET used = 119 WHERE id = $1', [id]);
+        error(await stamped(id, 'GET', '/v1/support/screen'), 429, 'REQUEST_RATE_LIMITED');
+        await db.query(`UPDATE support_conversations SET window_start = window_start - interval '1 minute' WHERE id = $1`, [id]);
+        ok(await stamped(id, 'GET', '/v1/support/workspaces'));
+        assert.equal((await db.query('SELECT used FROM support_conversations WHERE id = $1', [id])).rows[0].used, 1, 'A new minute starts a new window.');
+        const open = (await db.query(`SELECT count(*)::int AS n FROM support_conversations WHERE user_id = $1 AND status <> 'closed'`, [outsider.userId])).rows[0].n, filler: string[] = [];
+        for (let i = open; i < 10; i++) filler.push(conversation());
+        for (const extra of filler) await db.query(`INSERT INTO support_conversations(id, channel, user_id, verification, mode, workspace_id) VALUES ($1, 'chat', $2, 'handoff', 'member', $3)`, [extra, outsider.userId, other]);
+        const over = await handoff(outsider, other);
+        error(await register(conversation(), { kind: 'handoff', token: over.token }), 429, 'SUPPORT_CONVERSATION_LIMIT');
+        error(await register(conversation(), { kind: 'email', messageId: await mail(outsider.email) }), 429, 'SUPPORT_CONVERSATION_LIMIT');
+        ok(reply(await platform.closeConversation(filler[0] ?? id)));
+        ok(await register(conversation(), { kind: 'handoff', token: over.token }), 201);
+      });
+
+      await t.test('7 claim: only the session whose verified email is the waiting sender binds the conversation, once', async () => {
+        const waiting = await email(owner.email, { dmarc: 'FAIL' }), path = `/v1/support-conversations/${waiting.id}/claim`;
+        for (const who of [admin, member, outsider, operator]) error(await send('POST', path, session(who)), 404);
+        error(await send('POST', path, {}), 401);
+        error(reply(await platform.call('POST', path, {})), 404);
+        const claimed = ok(await send('POST', path, session(owner)));
+        assert.deepEqual([claimed.id, claimed.mode, (await row(waiting.id)).user_id, (await row(waiting.id)).verification], [waiting.id, 'member', owner.userId, 'signin']);
+        assert.deepEqual(ok(await send('POST', path, session(owner))), claimed, 'Claiming again changes nothing.');
+        error(await send('POST', path, session(admin)), 404);
+        const claims = (await db.query(`SELECT user_id, actor_id, internal FROM audit_events WHERE action = 'support.claim' AND target_id = $1`, [waiting.id])).rows;
+        assert.deepEqual(claims, [{ user_id: owner.userId, actor_id: owner.userId, internal: true }]);
+        assert.deepEqual(ok(await stamped(waiting.id, 'GET', '/v1/support/workspaces')).data.map((w: Json) => w.id), [acme]);
+        // Only email conversations wait for a claim; a closed one does not.
+        error(await send('POST', `/v1/support-conversations/${await chat(owner)}/claim`, session(admin)), 404);
+        const stale = await email(admin.email, { dmarc: 'FAIL' });
+        ok(reply(await platform.closeConversation(stale.id)));
+        error(await send('POST', `/v1/support-conversations/${stale.id}/claim`, session(admin)), 404);
+        error(await send('POST', '/v1/support-conversations/not-a-conversation/claim', session(owner)), 422);
+      });
+
+      await t.test('8 content access: only the chat’s own person, while a member of its workspace', async () => {
+        const id = await chat(owner), emailId = unique('email');
+        await db.query(`INSERT INTO sending_emails(id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, snapshot, simulated)
+          VALUES ($1, $2, $3, 'fixture', 'sender@example.com', '["someone@example.org"]', '[]', '[]', 'Receipt', 'delivered', $4, true)`,
+          [emailId, acme, REGION, JSON.stringify({ from: 'sender@example.com', to: ['someone@example.org'], cc: [], bcc: [], replyTo: [], region: REGION, kind: 'transactional', subject: 'Receipt', text: 'private acme words', attachments: [], tracking: false })]);
+        assert.equal(ok(await stamped(id, 'GET', `/v1/support/emails/${emailId}`)).content, null);
+        const path = `/v1/support-conversations/${id}/content-access`;
+        for (const [who, workspace] of [[admin, acme], [member, acme], [outsider, undefined], [operator, undefined]] as const) error(await send('POST', path, session(who, workspace)), 404);
+        error(reply(await platform.call('POST', path, {})), 404);
+        assert.deepEqual(ok(await send('POST', path, session(owner, acme))), { id, contentWorkspaceId: acme });
+        assert.equal(ok(await stamped(id, 'GET', `/v1/support/emails/${emailId}`)).content.text, 'private acme words');
+        assert.equal(ok(await stamped(id, 'GET', '/v1/support/scope')).contentWorkspaceId, acme);
+        assert.deepEqual((await db.query(`SELECT workspace_id, user_id, internal FROM audit_events WHERE action = 'support.content' AND target_id = $1`, [id])).rows, [{ workspace_id: acme, user_id: owner.userId, internal: true }]);
+        // Email can never grant it, and a person who left the workspace cannot.
+        const mailed = await email(owner.email);
+        error(await send('POST', `/v1/support-conversations/${mailed.id}/content-access`, session(owner, acme)), 404);
+        const leaving = await chat(admin);
+        await db.query('UPDATE workspace_members SET workspace_id = $1 WHERE user_id = $2 AND workspace_id = $3', [beta, admin.userId, acme]);
+        error(await send('POST', `/v1/support-conversations/${leaving}/content-access`, session(admin)), 404);
+        // A handoff whose sender ticked "share content" starts the chat with it, in that workspace only.
+        const ticked = await chat(owner, acme, { shareContent: true });
+        assert.equal(ok(await stamped(ticked, 'GET', `/v1/support/emails/${emailId}`)).content.text, 'private acme words');
+        ok(reply(await platform.closeConversation(id)));
+        error(await send('POST', path, session(owner, acme)), 404);
+      });
+
+      await t.test('9 claim without a workspace: a signed-in person with no membership binds their own pending email, from the dashboard only, and reads no workspace', async () => {
+        const waiting = await email(lonely.email, { dmarc: 'FAIL' }), path = `/v1/support-conversations/${waiting.id}/claim`;
+        error(await send('POST', path, { cookie: lonely.cookie }), 403, 'CSRF_ORIGIN_INVALID');
+        error(await send('POST', path, { ...session(lonely), authorization: `Bearer nm_${hex()}` }), 403, 'DASHBOARD_AUTH_REQUIRED');
+        assert.deepEqual(ok(await send('POST', path, session(lonely))), { id: waiting.id, mode: 'non_member' });
+        assert.deepEqual([(await row(waiting.id)).user_id, (await row(waiting.id)).verification], [lonely.userId, 'signin']);
+        assert.deepEqual((await db.query(`SELECT user_id FROM audit_events WHERE action = 'support.claim' AND target_id = $1`, [waiting.id])).rows.map(r => r.user_id), [lonely.userId]);
+        assert.deepEqual(ok(await stamped(waiting.id, 'GET', '/v1/support/scope')).workspaces, []);
+      });
+    });
+  });
+
+  // Claims race on committed rows through a real pool: the simulated fixture's one rollback transaction cannot.
+  test('Support conversation claims race: one binding, once, for the address’s current owner; a person’s tenth open conversation is the last even at once', async t => {
+    assert.ok(['localhost', '127.0.0.1', '[::1]'].includes(new URL(FIXTURE_DATABASE_URL!).hostname), 'Racing claims requires an isolated local database.');
+    const [{ createApp }, { nodeRuntime }] = await Promise.all([import('./src/app.js'), import('./src/adapters/node.js')]);
+    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET,
+      ACCOUNT_ISSUER: process.env.ACCOUNT_ISSUER, ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
+      PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
+      S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
+    cleanup(t, instance.close);
+    const runtime = instance.runtime, app = createApp(), db = await fixtureDatabase(t), made: string[] = [];
+    Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
+    cleanup(t, async () => { await db.query('DELETE FROM support_conversations WHERE id = ANY($1)', [made]); });
+    const base32 = 'abcdefghijklmnopqrstuvwxyz234567';
+    const conversation = () => { const id = `conv_${Array.from(crypto.getRandomValues(new Uint8Array(26)), b => base32[b & 31]).join('')}`; made.push(id); return id; };
+    /** An email conversation waiting for its sender to sign in, as registration stores one. */
+    const waiting = async (address: string) => {
+      const id = conversation();
+      await db.query(`INSERT INTO support_conversations(id, channel, pending_address, verification, mode) VALUES ($1, 'email', $2, 'none', 'pending_signin')`, [id, address]);
+      return id;
+    };
+    const claim = async (who: SessionFixture, id: string): Promise<Reply> => {
+      const res = await app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/support-conversations/${id}/claim`, { method: 'POST', headers: { cookie: who.cookie, origin: PUBLIC_ORIGIN } }), runtime);
+      return { status: res.status, body: await res.json(), headers: res.headers };
+    };
+    // Another transaction holds the conversations' rows until every claim waits, then lets them go together.
+    const race = async (claims: [SessionFixture, string][], locked: string[], between?: () => Promise<void>) => {
+      const blocker = await fixtureDatabase(t), pending: Promise<Reply>[] = [];
+      const waitingFor = async (n: number) => {
+        for (const deadline = Date.now() + 10_000; Date.now() < deadline; await new Promise(resolve => setTimeout(resolve, 20))) {
+          if ((await db.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND cardinality(pg_blocking_pids(pid)) > 0
+            AND (query LIKE '%support_conversations%' OR query LIKE '%pg_advisory_xact_lock%39601%')`)).rows[0].n >= n) return;
+        }
+        assert.fail(`Expected ${n} claims waiting.`);
+      };
+      await blocker.query('BEGIN');
+      await blocker.query('SELECT id FROM support_conversations WHERE id = ANY($1) FOR UPDATE', [locked]);
+      try {
+        for (const [i, [who, id]] of claims.entries()) {
+          if (i && between) await between();
+          pending.push(claim(who, id));
+          await waitingFor(i + 1);
+        }
+      } finally { await blocker.query('COMMIT'); }
+      return Promise.all(pending);
+    };
+    const subject = async (id: string) => (await db.query('SELECT user_id FROM support_conversations WHERE id = $1', [id])).rows[0].user_id;
+    const claims = async (id: string) => (await db.query(`SELECT user_id FROM audit_events WHERE action = 'support.claim' AND target_id = $1`, [id])).rows.map(r => r.user_id);
+
+    await t.test('the same person twice: one transition and one claim on the trail; the second answers the state', async () => {
+      const same = await sessionFixture(t), first = await waiting(same.email);
+      const twice = await race([[same, first], [same, first]], [first]);
+      assert.deepEqual(twice.map(r => r.status), [200, 200]);
+      assert.deepEqual(twice[1]!.body, twice[0]!.body);
+      assert.deepEqual(await claims(first), [same.userId]);
+    });
+
+    await t.test('the address moves from A to B while A’s claim waits: one of them binds, and the trail names that one', async () => {
+      const a = await sessionFixture(t), b = await sessionFixture(t), moved = await waiting(a.email);
+      const raced = await race([[a, moved], [b, moved]], [moved], async () => {
+        await db.query('UPDATE nightmail_users SET email = NULL, email_verified = false WHERE id = $1', [a.userId]);
+        await db.query('UPDATE nightmail_users SET email = $2 WHERE id = $1', [b.userId, a.email]);
+        await db.query('UPDATE nightmail_sessions SET verified_email = $2 WHERE user_id = $1', [b.userId, a.email]);
+      });
+      const winner = await subject(moved);
+      assert.deepEqual(raced.map(r => r.status).sort(), [200, 404]);
+      assert.equal([a, b][raced.findIndex(r => r.status === 200)]!.userId, winner);
+      assert.deepEqual(await claims(moved), [winner]);
+    });
+
+    await t.test('nine open conversations and two claims at once: the tenth is the last', async () => {
+      const busy = await sessionFixture(t);
+      for (let i = 0; i < 9; i++) await db.query(`INSERT INTO support_conversations(id, channel, user_id, verification, mode, workspace_id) VALUES ($1, 'chat', $2, 'handoff', 'member', 'default')`, [conversation(), busy.userId]);
+      const open = async () => (await db.query(`SELECT count(*)::int AS n FROM support_conversations WHERE user_id = $1 AND status <> 'closed'`, [busy.userId])).rows[0].n;
+      const p1 = await waiting(busy.email), p2 = await waiting(busy.email);
+      const both = await race([[busy, p1], [busy, p2]], [p1, p2]);
+      assert.deepEqual(both.map(r => r.status).sort(), [200, 429]);
+      error(both.find(r => r.status === 429)!, 429, 'SUPPORT_CONVERSATION_LIMIT');
+      assert.equal(await open(), 10);
+    });
+  });
+
   test('UI notes: only allowlisted operators (UI_NOTES_SUBJECTS) leave notes with screenshots behind five-minute links; a notes key reads and resolves them and nothing else; other operators get 404, customers 403; every change is audited', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
