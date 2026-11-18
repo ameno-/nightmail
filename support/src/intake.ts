@@ -20,11 +20,12 @@ import { productName } from '../../api/src/brand.js';
 export const INTAKE = { abuse: { type: 'abuse_report', severity: 'P3', label: 'abuse' }, privacy: { type: 'privacy', severity: 'P2', label: 'privacy' }, legal: { type: 'legal', severity: 'P2', label: 'legal' } } as const;
 export type Mailbox = keyof typeof INTAKE;
 const MAX_FILES = 5;
+const MAX_IMAGE_ATTEMPTS = 3; // Optional evidence, not a retry limit on the message or any of its obligations.
 type Incoming = { threadId: string; messageId: string; mailbox: Mailbox; address?: string | null };
 type Decision = {
   message?: InboundMessage; admission?: Awaited<ReturnType<typeof mailAllowed>>;
   charges?: Record<string, Awaited<ReturnType<typeof countToday>>>;
-  parts?: Record<string, string>; attachments?: TicketContext['attachments'];
+  parts?: Record<string, string>; attachments?: TicketContext['attachments']; imageFailures?: Record<string, number>;
   ticket?: { id: string } | { reason: string };
 };
 type Ticket = { ctx: TicketContext; input: TicketInput; ticketId: string; messageId: string };
@@ -170,29 +171,42 @@ export class SupportIntake extends DurableObject<Env> {
     const conversationId = await external(this.conversationId(threadId));
     // Attachments: images like screenshots (checked, stripped, 5 MB, 5 per thread); other files are listed only.
     const files = message.attachments ?? [], stored: { id: string; name: string; type: string; size: number; url: string }[] = [], listed: string[] = [];
-    const objects = (await external(this.env.UPLOADS.list({ prefix: `conversations/${conversationId}/` }))).objects;
-    const parts = progress.parts ??= {};
-    const already = objects.filter(o => !Object.values(parts).some(id => o.key.startsWith(`conversations/${conversationId}/${id}.`))).length;
+    const parts = progress.parts ??= {}, failures = progress.imageFailures ??= {};
+    let already: number | undefined, omitted = 0;
     for (const part of files) {
       const name = safeName(part.filename, 'attachment');
-      if (!(IMAGE_TYPES as readonly string[]).includes(String(part.contentType).toLowerCase()) || part.size > MAX_IMAGE_BYTES || already + stored.length >= MAX_FILES) { listed.push(`${name} (${String(part.contentType).slice(0, 60)}, ${Math.ceil(part.size / 1024)} KB)`); continue; }
+      const description = `${name} (${String(part.contentType).slice(0, 60)}, ${Math.ceil(part.size / 1024)} KB)`;
+      if (!(IMAGE_TYPES as readonly string[]).includes(String(part.contentType).toLowerCase()) || part.size > MAX_IMAGE_BYTES) { listed.push(description); continue; }
+      if ((failures[part.id] ?? 0) >= MAX_IMAGE_ATTEMPTS) { omitted++; continue; }
       try {
         const saved = progress.attachments?.find(a => a.id === parts[part.id]);
         if (saved) { stored.push(saved); continue; }
+        if (already === undefined) {
+          const { objects } = await external(this.env.UPLOADS.list({ prefix: `conversations/${conversationId}/` }));
+          already = objects.filter(o => !Object.values(parts).some(id => o.key.startsWith(`conversations/${conversationId}/${id}.`))).length;
+        }
+        if (already + stored.length >= MAX_FILES) { listed.push(description); continue; }
         const bytes = await external(api.part(messageId, part.id, MAX_IMAGE_BYTES));
         if (!bytes) { listed.push(`${name} (too large)`); continue; }
         const clean = cleanImage(bytes);
         if (!parts[part.id]) { parts[part.id] = newId('att'); save(); }
-        const image = await external(storeImage(this.env, conversationId, parts[part.id]!, clean, 'email', name));
-        const attachment = { id: image.id, name: image.name, type: image.type, size: image.size, url: await attachmentLink(this.env, conversationId, image) };
+        const id = parts[part.id]!, url = await attachmentLink(this.env, conversationId, { id });
+        const image = await external(storeImage(this.env, conversationId, id, clean, 'email', name));
+        const attachment = { id, name: image.name, type: image.type, size: image.size, url };
         stored.push(attachment); (progress.attachments ??= []).push(attachment); save();
-      } catch (e) { if (!(e instanceof ImageRejected)) throw e; listed.push(`${name} (not a readable image)`); }
+      } catch (e) {
+        const permanent = e instanceof ImageRejected || (e instanceof BaneError && [404, 410].includes(e.status));
+        failures[part.id] = permanent ? MAX_IMAGE_ATTEMPTS : (failures[part.id] ?? 0) + 1;
+        save();
+        if (failures[part.id]! < MAX_IMAGE_ATTEMPTS) throw e;
+        omitted++;
+      }
     }
     const config = INTAKE[next.mailbox], text = (message.text ?? '').slice(0, 4000), subject = (message.subject ?? '(no subject)').replace(/[\r\n]+/g, ' ').trim();
     const input: TicketInput = {
       type: config.type as TicketType, title: subject.slice(0, 80) || '(no subject)', severity: config.severity, ask: text.slice(0, 600),
       summary: `An email to ${next.mailbox}@ (filed without the AI agent). Subject: “${subject.slice(0, 200)}”.\n\n${text.slice(0, 900)}`,
-      tried: [], recommendation: `Read it in ${productName}’s inbox (${mailbox}@ thread ${threadId}) and reply there.${listed.length ? ` Other attachments, not opened here: ${listed.join('; ')}.` : ''}${automatic ? ' It was sent automatically (no acknowledgement was sent).' : ''}`,
+      tried: [], recommendation: `Read it in ${productName}’s inbox (${mailbox}@ thread ${threadId}) and reply there.${omitted ? ` ${omitted === 1 ? 'One attachment' : `${omitted} attachments`} could not be stored.` : ''}${listed.length ? ` Other attachments, not opened here: ${listed.join('; ')}.` : ''}${automatic ? ' It was sent automatically (no acknowledgement was sent).' : ''}`,
       evidence: { ids: [messageId] }, details: { topic: mailbox },
     };
     const ctx: TicketContext = { conversationId, channel: 'email', threadId, costUsd: 0, model: 'none (intake)', attachments: stored, verified, dmarc, sender: verified ? null : sender, customer };
