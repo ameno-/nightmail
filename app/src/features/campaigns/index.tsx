@@ -43,6 +43,13 @@ export const placeholders = (...sources: (string | undefined)[]) => [...new Set(
 const emailIsValid = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
 const replyToAddresses = (value: string) => value.split(',').map(address => address.trim()).filter(Boolean)
 const replyToError = (value: string) => { const addresses = replyToAddresses(value); return addresses.length > 10 ? 'Use at most 10 Reply-To addresses.' : addresses.some(address => !emailIsValid(address)) ? 'Enter valid Reply-To addresses separated by commas.' : '' }
+// The API's rule (outbound-content.ts unsubscribePageUrl), checked as typed so autosave never sends a page it refuses.
+const unsubscribePageError = (value = '') => {
+  const text = value.trim()
+  if (!text) return ''
+  try { const url = new URL(text); if (/^https:\/\//i.test(text) && text.length <= 1000 && !/\s/.test(text) && !url.username && !url.password && !/^[^/?#]*@/.test(text.slice(8))) return '' } catch { /* not a URL */ }
+  return 'Enter an https:// address without a user name or password.'
+}
 const campaignRoute = (campaign: Pick<Campaign, 'id'>, view: 'edit' | 'review') => `/campaigns/${encodeURIComponent(campaign.id)}/${view}`
 function campaignReadinessError(campaign: Campaign) {
   const missing = [!campaign.name.trim() && 'a campaign name', !campaign.subject.trim() && 'a subject', !emailIsValid(campaign.fromEmail.trim()) && 'a valid sender email address', !campaign.listId && 'a recipient list', !campaign.html.trim() && 'email content'].filter(Boolean)
@@ -51,7 +58,7 @@ function campaignReadinessError(campaign: Campaign) {
 const olderCampaign = (candidate: Campaign, baseline: Campaign) => (candidate.revision ?? 1) < (baseline.revision ?? 1) || ((candidate.revision ?? 1) === (baseline.revision ?? 1) && Date.parse(candidate.updatedAt) < Date.parse(baseline.updatedAt))
 const campaignInput = (campaign: Campaign): CampaignInput => ({
   id: campaign.id, revision: campaign.revision, draft: campaign.draft, attachments: campaign.attachments, regionId: campaign.regionId,
-  name: campaign.name, subject: campaign.subject, previewText: campaign.previewText, fromName: campaign.fromName, fromEmail: campaign.fromEmail, replyTo: campaign.replyTo,
+  name: campaign.name, subject: campaign.subject, previewText: campaign.previewText, fromName: campaign.fromName, fromEmail: campaign.fromEmail, replyTo: campaign.replyTo, unsubscribePageUrl: campaign.unsubscribePageUrl,
   listId: campaign.listId, segmentId: campaign.segmentId, html: campaign.html, defaults: Object.fromEntries(Object.entries(campaign.draft?.defaults ?? {}).map(([key, value]) => [key, String(value)])),
 })
 
@@ -204,8 +211,9 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   const readOnly = unavailable || Boolean(current && (current.archivedAt || !campaignEditable(current)))
   const controlsDisabled = preparing || attachmentsBusy || composerBusy || loadingLatest || readOnly
   const replyToValidation = replyToError(replyToText)
+  const unsubscribePageValidation = unsubscribePageError(form.unsubscribePageUrl)
   const fallbackKeys = [...new Set([...placeholders(form.subject, form.previewText), ...bodyKeys])].filter(key => key !== 'email')
-  const saveDisabled = options.isPending || options.isError || !composerReady || readOnly || Boolean(remote) || Boolean(replyToValidation)
+  const saveDisabled = options.isPending || options.isError || !composerReady || readOnly || Boolean(remote) || Boolean(replyToValidation) || Boolean(unsubscribePageValidation)
   useEffect(() => {
     if (!dirty || pending || saveDisabled || autosavePaused || !form.name.trim()) return
     const timer = setTimeout(() => { void save('auto') }, 800)
@@ -337,6 +345,8 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
             <div className="campaign-compose-row"><label htmlFor="campaign-from-email">From</label><CampaignSenderInput key={generation} name={form.fromName} email={form.fromEmail} domains={choices.domains.map(domain => domain.name)} disabled={controlsDisabled || options.isPending} onChange={({name, email}) => {const domain = email.split('@')[1]?.toLowerCase(); const supports = (parent: string) => domain === parent || domain?.endsWith(`.${parent}`); const match = choices.domains.find(item => supports(item.name) && item.regionId === formRef.current.regionId) ?? choices.domains.find(item => supports(item.name)); if (name !== formRef.current.fromName || email !== formRef.current.fromEmail || (match && match.regionId !== formRef.current.regionId)) updateForm({...formRef.current, fromName: name, fromEmail: email, ...(match ? {regionId: match.regionId} : {})}); markDirty()}} /></div>
             <div className="campaign-compose-row"><label htmlFor="campaign-reply-to">Reply to</label><Input id="campaign-reply-to" type="text" inputMode="email" autoCapitalize="none" spellCheck={false} placeholder="reply@example.com" value={replyToText} aria-invalid={Boolean(replyToValidation) || undefined} aria-describedby={replyToValidation ? 'campaign-reply-to-error' : undefined} onChange={event => { const value = event.target.value; setReplyToText(value); updateForm({...formRef.current, replyTo: replyToAddresses(value)}); markDirty() }} disabled={controlsDisabled} /></div>
             {replyToValidation && <div id="campaign-reply-to-error" className="campaign-compose-feedback ui-field__error" role="alert">{replyToValidation}</div>}
+            <div className="campaign-compose-row"><label htmlFor="campaign-unsubscribe-page">Unsubscribe</label><Input id="campaign-unsubscribe-page" type="url" inputMode="url" autoCapitalize="none" spellCheck={false} maxLength={1000} placeholder="https://example.com/unsubscribe" value={form.unsubscribePageUrl ?? ''} aria-invalid={Boolean(unsubscribePageValidation) || undefined} aria-describedby={unsubscribePageValidation ? 'campaign-unsubscribe-page-error' : undefined} onChange={event => change('unsubscribePageUrl', event.target.value)} disabled={controlsDisabled} /></div>
+            {unsubscribePageValidation && <div id="campaign-unsubscribe-page-error" className="campaign-compose-feedback ui-field__error" role="alert">{unsubscribePageValidation}</div>}
             {(optionCursors.domains || choices.next.domains) && <div className="campaign-compose-feedback cluster"><Button onClick={() => setOptionCursors({...optionCursors, domains: undefined})}>First domains</Button><Button disabled={!choices.next.domains} onClick={() => setOptionCursors({...optionCursors, domains: choices.next.domains ?? undefined})}>More domains</Button></div>}
             {!options.isPending && choices.domains.length === 0 && <Alert tone="warning">No verified domains on this page. <Link to="/domains">Add a domain</Link></Alert>}
             <div className="campaign-compose-row"><label htmlFor="campaign-list">To</label><Select id="campaign-list" aria-label="Recipient list" disabled={controlsDisabled || options.isPending} value={form.listId} onValueChange={value => change('listId', value)} options={options.isPending ? [{value: form.listId, label: 'Loading recipient lists…', disabled: true}] : choices.lists.length ? [{ value: '', label: 'Choose a list' }, ...(listMissing ? [{value: form.listId, label: chosenList.data?.name ?? (chosenList.isError ? 'List not found' : 'Loading list…')}] : []), ...choices.lists.map(list => ({ value: list.id, label: list.name }))] : [{value: '', label: 'No lists yet. Create one in Audience.', disabled: true}]} /></div>

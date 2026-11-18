@@ -34,6 +34,22 @@ export const foldedDisplayName = (value: string) => skeleton(value).replace(/[\u
 export const displayNameAllowed = (value: string) => !CONTROL.test(value) && !/[@<>]/.test(foldedDisplayName(value));
 export const senderDisplayName = () => z.string().max(200).refine(displayNameAllowed, 'Sender name cannot contain an address, angle brackets, or control characters.');
 
+// A campaign's own unsubscribe page. It is only ever a link in the message and a redirect target, never fetched, so it
+// needs HTTPS and no credentials; the recipient is named by their unsubscribe token, never by address or internal ID.
+export const UNSUBSCRIBE_PAGE_PARAM = 'unsubscribe_token';
+const unsubscribePageAllowed = (value: string) => {
+  if (!/^https:\/\//i.test(value) || /[\s\x00-\x1f\x7f]/.test(value) || /^[^/?#]*@/.test(value.slice(8))) return false;
+  try { const url = new URL(value); return url.protocol === 'https:' && !!url.hostname && !url.username && !url.password; } catch { return false; }
+};
+export const unsubscribePageUrl = () => z.string().url().max(1000).refine(unsubscribePageAllowed, 'Use an https:// address without a user name, password or spaces.')
+  .describe(`Your own unsubscribe or preference page: HTTPS, no user name or password. The footer's Unsubscribe link opens it with ${UNSUBSCRIBE_PAGE_PARAM}=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.`);
+/** The recipient's link to a campaign's own unsubscribe page: the page with their opaque unsubscribe token added. */
+export function unsubscribePageLink(page: string, token: string): string {
+  const url = new URL(page);
+  url.search = `${url.search || '?'}${url.search ? '&' : ''}${UNSUBSCRIBE_PAGE_PARAM}=${token}`;
+  return url.href;
+}
+
 export const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 // Base64 of 8 MiB plus padding and the line breaks MIME tools and SDKs insert.
 export const MAX_ATTACHMENT_BASE64 = 12 * 1024 * 1024;

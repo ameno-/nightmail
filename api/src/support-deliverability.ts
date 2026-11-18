@@ -154,7 +154,7 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
         dns, alignment: align,
         volume: { days: activity.days, firstSendAt: activity.firstSendAt, olderThanRetention, warmupAgeDays: ageDays, peakDaily: peak, medianDaily: median, peakToMedian: median ? Math.round(peak / median * 10) / 10 : null },
         streams: { emails, campaign, marketingApi: activity.marketingApi, marketingShare: d.rate(campaign + activity.marketingApi, emails),
-          listUnsubscribe: `${productName} adds List-Unsubscribe and List-Unsubscribe-Post (one-click) to every campaign email and every kind=marketing send; transactional sends carry none.`, bulkLikeTransactional: activity.bulk },
+          listUnsubscribe: `${productName} adds List-Unsubscribe and List-Unsubscribe-Post (one-click) to every campaign email and every kind=marketing send, its own one-click address even when a campaign links its footer to the customer's unsubscribe page; transactional sends carry none.`, bulkLikeTransactional: activity.bulk },
         findings: d.domainFindings(name, { dns, align, days: activity.days, ageDays, bulk: activity.bulk, marketingApi: activity.marketingApi }),
       };
     }), 200);

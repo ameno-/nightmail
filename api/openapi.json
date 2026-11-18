@@ -2094,6 +2094,12 @@
             },
             "maxItems": 20,
             "default": []
+          },
+          "unsubscribePageUrl": {
+            "type": "string",
+            "maxLength": 1000,
+            "format": "uri",
+            "description": "Your own unsubscribe or preference page: HTTPS, no user name or password. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page."
           }
         },
         "required": [
@@ -3947,6 +3953,12 @@
             },
             "default": {}
           },
+          "unsubscribePageUrl": {
+            "type": "string",
+            "maxLength": 1000,
+            "format": "uri",
+            "description": "Your own unsubscribe or preference page: HTTPS, no user name or password. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page."
+          },
           "html": {
             "type": "string"
           }
@@ -4274,6 +4286,12 @@
               ]
             },
             "default": {}
+          },
+          "unsubscribePageUrl": {
+            "type": "string",
+            "maxLength": 1000,
+            "format": "uri",
+            "description": "Your own unsubscribe or preference page: HTTPS, no user name or password. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page."
           },
           "html": {
             "type": "string",
@@ -5129,6 +5147,12 @@
                   ]
                 },
                 "default": {}
+              },
+              "unsubscribePageUrl": {
+                "type": "string",
+                "maxLength": 1000,
+                "format": "uri",
+                "description": "Your own unsubscribe or preference page: HTTPS, no user name or password. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page."
               },
               "html": {
                 "type": "string",
@@ -40591,6 +40615,16 @@
               "text/html": {
                 "schema": {
                   "$ref": "#/components/schemas/UnsubscribeConfirmationHtml"
+                }
+              }
+            }
+          },
+          "303": {
+            "description": "The confirmation form of a campaign with its own unsubscribe page: the opt-out is recorded, then the browser continues to that page with unsubscribe_token. A one-click POST is never redirected (RFC 8058 section 3.1).",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
                 }
               }
             }
