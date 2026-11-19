@@ -8627,6 +8627,58 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     assert.deepEqual(rows, [{ type: 'accepted', n: 1 }, { type: 'dispatch_attempt', n: 1 }], 'Sent exactly once.');
   });
 
+  // Review of #410 (P1, confirmation): the last attempt's finalizer read the job's run token in the statement that waited
+  // for the email's row lock, so a reschedule that held the lock meanwhile was answered 200 and then rejected by the old
+  // run. Two real connections in a fixed order: the finalizer waits on the lock the real reschedule route holds.
+  test('a reschedule that holds the email while a failed last attempt waits for it wins: the old run rejects nothing', async t => {
+    if (!fixtureWorker) return t.skip('requires the isolated loopback job runner');
+    const [{ jobHandlers }, { MAX_ATTEMPTS }, { createApp }, { PgDialect }] = await Promise.all([import('./src/sending.js'), import('./src/jobs.js'), import('./src/app.js'), import('drizzle-orm/pg-core')]);
+    const key = await keyFixture(t);
+    const receipt = ok(await http('POST', '/v1/emails/send', key.secret, mail({ scheduledAt: new Date(Date.now() + 3_600_000).toISOString() })), 202);
+    // Its time has come (only the email's time moves: its release job waits an hour, so the runner leaves it to this test).
+    await authDb!.query("UPDATE sending_emails SET scheduled_at=now()-interval '1 second' WHERE id=$1", [receipt.id]);
+    const run = async () => (await authDb!.query('SELECT payload->>$2 AS run FROM jobs WHERE id=$1', [`release:${receipt.id}`, 'run'])).rows[0].run as string;
+    const oldRun = await run();
+    // A gate a statement waits at: `reached` resolves when it gets there, `open` lets it go on.
+    const gate = () => { let arrive!: () => void, go!: () => void; const reached = new Promise<void>(r => { arrive = r; }), opened = new Promise<void>(r => { go = r; }); return { reached, open: () => go(), wait: () => { arrive(); return opened; } }; };
+    const finalizing = gate(), rescheduling = gate(), dialect = new PgDialect();
+    const pass = <T extends object>(target: T, name: PropertyKey) => { const value = Reflect.get(target, name); return typeof value === 'function' ? value.bind(target) : value; };
+    const intercept = (base: import('./src/core.js').Runtime, onStatement: (text: string) => Promise<void> | void) => ({ ...base, db: new Proxy(base.db, { get: (db, name) => name !== 'transaction' ? pass(db, name)
+      : (work: (tx: import('./src/core.js').DbExecutor) => Promise<unknown>) => db.transaction(tx => work(new Proxy(tx, { get: (inner, method) => method !== 'execute' ? pass(inner, method)
+        : async (query: import('drizzle-orm').SQL) => { await onStatement(dialect.sqlToQuery(query.getSQL()).sql); return inner.execute(query); } }))) }) });
+    const base = { ...fixtureWorker.runtime, config: { ...fixtureWorker.runtime.config, workspaceId: 'default' } };
+    // The worker's last attempt: its release fails before it commits, and its finalizer stops before it asks for the row.
+    const worker = intercept(base, async text => {
+      if (text.startsWith("UPDATE sending_emails SET status='queued'")) throw new Error('Simulated release failure');
+      if (/FROM sending_emails WHERE[\s\S]*FOR UPDATE$/.test(text)) await finalizing.wait();
+    });
+    const finalized = jobHandlers['sending.release']!(worker, { emailId: receipt.id, run: oldRun }, { id: `release:${receipt.id}`, attempts: MAX_ATTEMPTS, workspaceId: 'default' });
+    await finalizing.reached;
+    // The owner reschedules through the real route: it takes the email's row lock and stops before it writes.
+    const later = new Date(Date.now() + 7_200_000).toISOString();
+    const app = createApp(), owner = intercept(base, async text => { if (text.startsWith('WITH moved AS')) await rescheduling.wait(); });
+    const moving = Promise.resolve(app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/emails/${receipt.id}/reschedule`, { method: 'POST', headers: { authorization: `Bearer ${key.secret}`, 'content-type': 'application/json' }, body: JSON.stringify({ scheduledAt: later }) }), owner));
+    await rescheduling.reached;
+    // The finalizer asks for the row and waits for the reschedule's lock.
+    finalizing.open();
+    let waiting = false;
+    for (let i = 0; i < 100 && !waiting; i++) {
+      waiting = (await authDb!.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%FROM sending_emails WHERE%FOR UPDATE'`)).rows[0].n > 0;
+      if (!waiting) await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.ok(waiting, 'The finalizer waits for the row the reschedule holds.');
+    // The reschedule writes a new run and commits; then the finalizer gets the row.
+    rescheduling.open();
+    const moved = await moving;
+    assert.equal(moved.status, 200);
+    assert.deepEqual([(await moved.json() as Json).scheduled, ...await Promise.all([finalized])], [true, undefined]);
+    const { rows: [row] } = await authDb!.query('SELECT status, error_code, scheduled_at FROM sending_emails WHERE id=$1', [receipt.id]);
+    assert.deepEqual([row.status, row.error_code, row.scheduled_at.toISOString()], ['scheduled', null, later], 'The reschedule the owner was told succeeded stands.');
+    assert.notEqual(await run(), oldRun);
+    assert.equal((await authDb!.query(`SELECT count(*)::int AS n FROM operation_events WHERE workspace_id='default' AND type='email.rejected' AND data->>'emailId'=$1`, [receipt.id])).rows[0].n, 0);
+    ok(await http('POST', `/v1/emails/${receipt.id}/cancel`, key.secret));
+  });
+
   // Review of #410 (P1): a release job that ran out of attempts or leases left its email scheduled forever, unseen. Both
   // runs drive the real job runner (processJobs) over a session-local jobs table, so no other scenario's job is claimed.
   test('a scheduled send whose release runs out of attempts or leases is rejected and its sender told, never left waiting', async t => {

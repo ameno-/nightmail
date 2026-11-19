@@ -826,12 +826,14 @@ const releaseScheduled: JobHandler = retryDatabaseFailures(async (runtime, paylo
 });
 /** A release's last attempt failed: under the email's row lock, and only while this attempt's run is still the job's (a
  * reschedule requeues it with a new one), the scheduled email is rejected with SCHEDULE_RELEASE_FAILED. Returns the
- * webhook jobs it queued. */
+ * webhook jobs it queued. Lock order, as cancel and reschedule: the email row first, then the job read in a statement of
+ * its own, so it sees a reschedule that held the row while this one waited (one statement would keep the snapshot it
+ * took before the wait and judge by the old run). */
 async function endRelease(runtime: Runtime, wid: string, emailId: string, run: unknown) {
   return runtime.db.transaction(async tx => {
-    const { rows: [row] } = await tx.execute<{ current: boolean }>(sql`SELECT (SELECT payload->>'run' FROM jobs WHERE id=${releaseJobId(emailId)}) IS NOT DISTINCT FROM ${typeof run === 'string' ? run : null}::text AS current
-      FROM sending_emails WHERE workspace_id=${wid} AND id=${emailId} AND status='scheduled' FOR UPDATE`);
-    if (!row?.current) return 0;
+    if (!(await tx.execute(sql`SELECT 1 FROM sending_emails WHERE workspace_id=${wid} AND id=${emailId} AND status='scheduled' FOR UPDATE`)).rows.length) return 0;
+    const { rows: [job] } = await tx.execute<{ run: string | null }>(sql`SELECT payload->>'run' AS run FROM jobs WHERE id=${releaseJobId(emailId)}`);
+    if ((job?.run ?? null) !== (typeof run === 'string' ? run : null)) return 0;
     const { rows: [ended] } = await tx.execute<{ n: number }>(sql`WITH ${failScheduledRelease(sql`SELECT ${wid}::text AS workspace_id,${emailId}::text AS id`)} SELECT count(*)::int AS n FROM webhook_jobs`);
     log('warn', { code: 'SCHEDULE_RELEASE_FAILED', workspaceId: wid, emailId });
     return ended!.n;
