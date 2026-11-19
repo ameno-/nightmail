@@ -7,15 +7,15 @@
   --srt-screen-text: oklch(0.93 0.01 92); --srt-screen-dim: oklch(0.72 0.02 262); --srt-plate: oklch(0.42 0.02 268);
   --srt-cta: oklch(0.975 0.02 92); --srt-cta-hover: oklch(0.995 0.012 92); --srt-cta-top: oklch(1 0 0); --srt-cta-side: oklch(0.78 0.03 92); --srt-on-cta: oklch(0.2 0.02 268); --srt-cta-edge: oklch(0.2 0.02 268 / 14%);
   --srt-paper: oklch(0.985 0.01 92); --srt-red: oklch(0.6 0.22 27); --srt-card: oklch(0.995 0.004 92); --srt-card-text: oklch(0.21 0.02 268); --srt-card-dim: oklch(0.45 0.02 268); --srt-card-edge: oklch(0.21 0.02 268 / 12%);
-  --srt-ease: cubic-bezier(.22, 1, .36, 1); --srt-k: 17.17; --srt-header: 64px;
+  --srt-ease: cubic-bezier(.22, 1, .36, 1); --srt-k: 17.17;
   /* One of the screen's own pixels: what is drawn a pixel or two deep is set on whole ones, so it stays sharp. */
   --srt-dev: 1px;
   /* The brand's marks (lib/marks.ts) are set in its ink on the pale page and its paper on the dark one, and in nothing else. */
   --srt-name: var(--color-logo);
   /* A phone's safe areas (its status bar, where the page runs under one; the sides of one held on its side; its home
-     indicator), and the header with the first of them. */
-  --srt-safe-t: env(safe-area-inset-top, 0px); --srt-safe-r: env(safe-area-inset-right, 0px); --srt-safe-b: env(safe-area-inset-bottom, 0px); --srt-safe-l: env(safe-area-inset-left, 0px); --srt-head: calc(var(--srt-header) + var(--srt-safe-t));
-  display: flex; flex-direction: column; min-height: 100svh; overflow-x: clip; background: var(--srt-floor); color: var(--srt-text); }
+     indicator). There is no header: the hero begins at the top of the window, or under a status bar the page runs under. */
+  --srt-safe-t: env(safe-area-inset-top, 0px); --srt-safe-r: env(safe-area-inset-right, 0px); --srt-safe-b: env(safe-area-inset-bottom, 0px); --srt-safe-l: env(safe-area-inset-left, 0px); --srt-head: var(--srt-safe-t);
+  display: flex; flex-direction: column; box-sizing: border-box; min-height: 100svh; padding-top: var(--srt-head); overflow-x: clip; background: var(--srt-floor); color: var(--srt-text); }
 :root[data-theme='dark'] .srt-page {
   --srt-floor: rgb(10 13 19); --srt-text: oklch(0.968 0.004 268); --srt-text-2: oklch(0.74 0.014 268); --srt-text-3: oklch(0.63 0.016 268); --srt-hair: oklch(1 0 0 / 9%); --srt-hover: oklch(1 0 0 / 6%);
   --srt-screen-text: oklch(0.955 0.014 92); --srt-screen-dim: oklch(0.62 0.018 268); --srt-plate: oklch(0.66 0.016 268);
@@ -25,38 +25,14 @@
 @media (min-resolution: 2dppx), (-webkit-min-device-pixel-ratio: 2) { .srt-page { --srt-dev: .5px; } }
 @media (min-resolution: 3dppx), (-webkit-min-device-pixel-ratio: 3) { .srt-page { --srt-dev: calc(1px / 3); } }
 
-/* The header stands over the night: letters fall behind it. */
-.srt-header { position: relative; z-index: 4; display: flex; flex: none; align-items: center; justify-content: space-between; box-sizing: border-box; height: var(--srt-head); padding: var(--srt-safe-t) max(var(--space-32), var(--srt-safe-r)) 0 max(var(--space-32), var(--srt-safe-l)); pointer-events: none; }
-.srt-header > * { pointer-events: auto; }
-.srt-header .theme-toggle { position: relative; inset: auto; }
-/* The header's mark is the monogram alone: the wordmark is on the machine, over the price. Its left edge is the page's
-   margin, its middle the bar's (and so the middle of "API docs" and the theme button); the link is 44 px to press. */
-.srt-mark { display: flex; flex: none; align-items: center; height: 44px; border-radius: 4px; color: var(--srt-name); }
-.srt-mark svg { width: 26px; height: 26px; }
-.srt-mark:focus-visible { outline: var(--focus-width) solid var(--color-focus); outline-offset: 4px; }
-.srt-nav { display: flex; align-items: center; gap: var(--space-4); }
-.srt-nav > a, .srt-nav .theme-toggle { height: 32px; border-radius: 8px; color: var(--srt-text-2); transition: color 150ms var(--srt-ease), background-color 150ms var(--srt-ease), transform 160ms var(--srt-ease); }
-.srt-nav > a { display: inline-flex; align-items: center; padding-inline: var(--space-12); font-size: var(--text-sm); font-weight: 510; letter-spacing: -.005em; text-decoration: none; }
-.srt-nav .theme-toggle { width: 32px; box-shadow: inset 0 0 0 1px var(--srt-hair); }
-@media (hover: hover) and (pointer: fine) { .srt-nav > a:hover, .srt-nav .theme-toggle:hover:not(:disabled) { background: var(--srt-hover); color: var(--srt-text); } }
-.srt-nav > a:active, .srt-nav .theme-toggle:active { transform: scale(.96); }
-.srt-nav > a:focus-visible { outline: var(--focus-width) solid var(--color-focus); outline-offset: 1px; }
-/* The header's own button, where the page is too short for the machine's to be seen before scrolling: the same lit
-   key, small. (Tall enough to press: its hit area stands over and under it.) */
-.srt-head-cta { position: relative; height: 32px; margin-inline: var(--space-4); padding: 1px 14px 0; border: 0; border-radius: 0; background: var(--srt-cta); box-shadow: 0 -2px 0 var(--srt-cta-top), -1px 0 0 var(--srt-cta-side), -1px -2px 0 var(--srt-cta-side); color: var(--srt-on-cta); font-family: var(--font-body); font-size: 14px; font-weight: 600; line-height: 1; letter-spacing: -.01em; white-space: nowrap; cursor: pointer; transition: background-color 150ms var(--srt-ease), translate 90ms var(--srt-ease), box-shadow 90ms var(--srt-ease); }
-.srt-head-cta::after { content: ''; position: absolute; inset: -7px 0; }
-@media (hover: hover) and (pointer: fine) { .srt-head-cta:hover:not(:disabled) { background: var(--srt-cta-hover); } }
-.srt-head-cta:active:not(:disabled) { box-shadow: 0 0 0 var(--srt-cta-top), 0 0 0 var(--srt-cta-side), 0 0 0 var(--srt-cta-side); translate: -1px -2px; }
-.srt-head-cta:disabled { opacity: 1; cursor: progress; }
-.srt-head-cta:focus-visible { outline: var(--focus-width) solid var(--color-focus); outline-offset: 4px; }
-
 .srt-page > main { display: flex; flex: 1; flex-direction: column; }
 .srt-hero { position: relative; flex: none; height: calc(100svh - var(--srt-head)); min-height: 600px; }
-/* How much of the page is seen under the header before any scrolling: measured by the small viewport, so a phone's
+/* How much of the page is seen before any scrolling: measured by the small viewport, so a phone's
    toolbars coming and going change nothing. sorter/plan.ts lays the machine out for it, and gives the hero its height
    (a phone's machine may run on under it: the button is always over it). Its padding is the safe areas. */
-.srt-fold { position: absolute; top: 0; left: 0; box-sizing: border-box; width: 0; height: calc(100svh - var(--srt-head)); padding: 0 var(--srt-safe-r) var(--srt-safe-b) var(--srt-safe-l); visibility: hidden; pointer-events: none; }
-/* The canvases reach up behind the header, so a letter is never cut off where the hero begins. */
+.srt-fold { position: absolute; top: 0; left: 0; box-sizing: border-box; width: 0; height: calc(100svh - var(--srt-head)); padding: var(--srt-head) var(--srt-safe-r) var(--srt-safe-b) var(--srt-safe-l); visibility: hidden; pointer-events: none; }
+/* The canvases reach up behind a status bar the page runs under (`--srt-head`: the fold's top padding tells the machine
+   how far), so a letter is never cut off where the hero begins. */
 .srt-canvas { position: absolute; top: calc(-1 * var(--srt-head)); left: 0; display: block; width: 100%; height: calc(100% + var(--srt-head)); pointer-events: none; }
 /* The renderer's first frame comes up through the still it is laid over. */
 .srt-gl { height: calc(100% + var(--srt-head) + var(--srt-ext, 0px)); opacity: 0; touch-action: pan-y; transition: opacity 260ms var(--srt-ease); }
@@ -214,8 +190,6 @@
    button it is seen before any scrolling. (It is the page's own, like the button: nothing that flies is drawn over it.) */
 .srt-consent-on { position: absolute; z-index: 2; display: grid; place-items: center; pointer-events: auto; }
 .srt-consent-on .srt-consent { position: static; width: auto; max-width: none; translate: none; }
-/* Where the header carries the button (a page too short to show the machine's): under it, at the hero's top. */
-.srt-consent-head { top: 0; right: max(var(--space-12), var(--srt-safe-r) + var(--space-8)); bottom: auto; left: auto; width: min(300px, 100% - 2 * var(--space-16)); max-width: none; text-align: right; translate: none; }
 
 /* A letter, opened, over the one the pointer is on: a sheet held up in the machine's light, its shadow soft under it. */
 .srt-card { position: absolute; z-index: 5; top: 0; left: 0; width: 0; height: 0; pointer-events: none; }
@@ -248,22 +222,13 @@
 .srt-page[data-phone] .srt-lanes li { font-size: clamp(11px, var(--srt-plate) / 5.4, 13px); letter-spacing: .02em; }
 .srt-page[data-phone] .srt-card-route { font-size: 11px; }
 @media (max-width: 899px) {
-  .srt-page { --srt-header: 56px; }
-  .srt-header { padding-inline: max(var(--space-16), var(--srt-safe-l) + var(--space-8)) max(var(--space-12), var(--srt-safe-r) + var(--space-8)); }
-  .srt-mark svg { width: 24px; height: 24px; }
   .srt-card-body { width: 232px; }
-  /* Everything in the header is 44 px to press: the links by their own height, the switch by a ring drawn inside it. */
-  .srt-nav > a { height: 44px; }
-  .srt-nav { gap: 0; }
-  .srt-nav .theme-toggle { width: 44px; height: 44px; box-shadow: none; }
-  .srt-nav .theme-toggle::before { content: ''; position: absolute; inset: 5px; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--srt-hair); pointer-events: none; }
-  @media (hover: hover) and (pointer: fine) { .srt-nav .theme-toggle:hover:not(:disabled) { background: none; } .srt-nav .theme-toggle:hover:not(:disabled)::before { background: var(--srt-hover); } }
   /* (A link in a line of text: its hit area stands over and under the line, and its focus ring keeps to the words.) */
   .srt-consent a, .srt-end-consent a { position: relative; }
   .srt-consent a::before, .srt-end-consent a::before { content: ''; position: absolute; inset: -14px 0; }
 }
 
-@media (prefers-reduced-motion: reduce) { .srt-cta::before, .srt-cta-label, .srt-cta-arrow, .srt-nav > a, .srt-nav .theme-toggle { transition: none; } .srt-card-body { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .srt-cta::before, .srt-cta-label, .srt-cta-arrow { transition: none; } .srt-card-body { animation: none; } }
 
 
 /* ── Under the slab: the tubes run on down the page to each place mail can go (sorter-stations.tsx) ──

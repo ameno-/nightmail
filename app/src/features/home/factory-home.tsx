@@ -2,8 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from
 import { SignInConsent } from '../../components/LegalLinks'
 import { useTheme } from '../../lib/theme'
 import type { HomeProps } from '.'
-import { HomeHeader } from './home-header'
-import { DashboardLink, StartButton } from './start'
+import { StartButton } from './start'
 import { plan, type Plan } from './sorter/plan'
 import { toneVars } from './sorter/tones'
 import { Stations } from './sorter-stations'
@@ -17,7 +16,8 @@ import phoneBoard1 from './factory/phone/board1.webp'
 import phoneBoard2 from './factory/phone/board2.webp'
 import './factory-home.css'
 
-// The homepage: the factory, in a wide frame on a desktop and a tall one on a phone (index.tsx picks). A rendered hall with the sorting machine standing in it, the price on the
+// The homepage: the factory, in a wide frame on a desktop and a tall one on a phone (index.tsx picks), from the very top
+// of the window: there is no header (the machine carries the name). A rendered hall with the sorting machine standing in it, the price on the
 // machine's front, and billboards with the free tier on them sliding slowly along a rail behind it (factory/player.ts).
 // The page writes only the button, on the blank plate the machine's front has for it. The first picture is the poster,
 // laid out by CSS alone before anything loads (factory-home.css), so nothing moves when the videos take over from it;
@@ -121,7 +121,6 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
   }, [])
 
   return <div className="srt-page fac-page" data-format={format} data-visitor={visitor ? '' : undefined} style={toneVars(dark) as CSSProperties}>
-    <HomeHeader>{!visitor && <DashboardLink>Dashboard</DashboardLink>}</HomeHeader>
     <main>
       <section className="fac-hero" ref={scene} aria-label="Pricing">
         <div className="srt-fold" ref={probe} aria-hidden="true" />
@@ -139,8 +138,9 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
             <StartButton start={start} className="fac-cta" style={buttonBox} />
           </div>
         </div>
-        {/* Under the button, off the frame (on a phone directly under it): what signing in agrees to. */}
-        {visitor && <div className="fac-under"><SignInConsent className="fac-consent" /></div>}
+        {/* Under the button, off the frame (on a phone directly under it): what signing in agrees to, and the way to
+            the API docs beside it (where the header had it). */}
+        {visitor && <div className="fac-under"><SignInConsent className="fac-consent" after={<><span aria-hidden="true"> · </span><a href="/docs">API docs</a></>} /></div>}
         {notice && <div className="srt-notice">{notice}</div>}
       </section>
       <Stations plan={p} start={start} edges />

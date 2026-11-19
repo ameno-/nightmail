@@ -1,5 +1,6 @@
-/* The factory homepage (factory-home.tsx), in its wide frame on a desktop and its tall one on a phone. Under the header, the hero: the stage, and under it (for a
-   visitor) a strip with what signing in agrees to. On the stage, the frame: the renders' picture, as large as covers
+/* The factory homepage (factory-home.tsx), in its wide frame on a desktop and its tall one on a phone. From the top of
+   the window (there is no header), the hero: the stage, and under it (for a visitor) a strip with what signing in agrees
+   to and the way to the API docs. On the stage, the frame: the renders' picture, as large as covers
    the stage and still shows, whatever the window's shape, the boards and the machine down to its button (the safe
    box: factory-home.tsx), and never with its foot below the floor line, where the plinth's pipes go down out of the
    picture. It is placed by CSS alone (the stage's container units), so the
@@ -55,14 +56,15 @@
 @media (pointer: coarse) { .fac-cta::after { content: ''; position: absolute; inset: min(0px, (100% - 44px) / 2) 0; } }
 .fac-cta:focus-visible::after { content: ''; position: absolute; inset: -6px; border: var(--focus-width) solid var(--color-focus); pointer-events: none; }
 
-/* What signing in agrees to: a strip of the page's own floor under the stage, before the places mail can go. */
+/* What signing in agrees to, and after it the way to the API docs, in the same quiet type: a strip of the page's own
+   floor under the stage, before the places mail can go. */
 .fac-page { --fac-under: 52px; }
 .fac-under { display: grid; flex: none; place-items: center; height: var(--fac-under); padding: 0 var(--space-16); }
 .fac-consent { margin: 0; color: var(--srt-text-2); font-size: 12px; line-height: 16px; text-align: center; text-wrap: balance; }
 .fac-consent a:hover { color: var(--srt-text); }
 .fac-consent a { white-space: nowrap; }
-/* A phone's: directly under the console's strip of floor, on two lines, clear of a home indicator. Its links are tall
-   enough to press. */
+/* A phone's: directly under the console's strip of floor, on two lines (three on the narrowest), clear of a home
+   indicator. Its links are tall enough to press. */
 .fac-page[data-format='phone'] { --fac-under: calc(64px + var(--srt-safe-b)); }
 .fac-page[data-format='phone'] .fac-under { place-items: start center; padding: 6px var(--space-16) var(--srt-safe-b); }
 .fac-page[data-format='phone'] .fac-consent { max-width: 340px; }

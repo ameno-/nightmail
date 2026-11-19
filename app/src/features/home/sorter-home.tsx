@@ -1,17 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
-import { Volume2, VolumeX } from 'lucide-react'
-import { IconButton } from '../../components/ui'
 import { SignInConsent } from '../../components/LegalLinks'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useTheme } from '../../lib/theme'
 import { productName } from '../../../../api/src/brand'
 import type { HomeProps } from '.'
-import { HomeHeader } from './home-header'
-import { DashboardLink, StartButton } from './start'
+import { StartButton } from './start'
 import { DX, DY, onFront, plan, type Plan, type Rect } from './sorter/plan'
 import { drawStill } from './sorter/still'
 import { toneVars } from './sorter/tones'
-import { createSound } from './sorter/sound'
 import { COLS } from './sorter/price'
 import { Stations } from './sorter-stations'
 import type { Hooks, Letter, Phase, Sorter } from './sorter/engine'
@@ -39,11 +35,11 @@ export function SorterHome({ start, notice }: HomeProps) {
   const visitor = start.signedIn ? null : start
   const dark = useTheme().theme === 'dark'
   const scene = useRef<HTMLElement>(null), still = useRef<HTMLCanvasElement>(null), gl = useRef<HTMLCanvasElement>(null), sorter = useRef<Sorter | null>(null)
-  const head = useRef<HTMLElement>(null), probe = useRef<HTMLDivElement>(null)
+  const probe = useRef<HTMLDivElement>(null)
   const veiled = useRef<(HTMLElement | null)[]>([]), tally = useRef<HTMLSpanElement>(null), cta = useRef<HTMLElement>(null)
   const readout = useRef<HTMLDivElement>(null), cardBox = useRef<HTMLDivElement>(null), counts = useRef([0, 0]), shown = useRef<Letter | null>(null)
-  // `over`: how far the canvases reach up behind the header (its height, with a phone's status bar where the page runs under one).
-  const [p, setP] = useState<Plan | null>(null), [over, setOver] = useState(64)
+  // `over`: how far the canvases reach up behind a phone's status bar, where the page runs under one.
+  const [p, setP] = useState<Plan | null>(null), [over, setOver] = useState(0)
   const [reduced] = useState(reducedMotion)
   // Whoever has watched it burst once gets there sooner the next time.
   const [quick] = useState(() => { try { return localStorage.getItem(SEEN) === '1' } catch { return false } })
@@ -55,10 +51,6 @@ export function SorterHome({ start, notice }: HomeProps) {
   // sorting floor and the console are slid in under the roof (sorter/engine.ts). What the page writes on a floor is
   // not there before the floor is; `whole`: fitted out, with everything on it that can be pressed.
   const [tower, setTower] = useState(() => ({ floors: reduced ? 2 : 0, whole: reduced }))
-
-  // The machine's sound: off until the header's button is pressed (sorter/sound.ts), and never there without motion.
-  const [audio] = useState(createSound), [sound, setSound] = useState(false)
-  useEffect(() => () => audio.destroy(), [audio])
 
   // What the machine tells the page: the letter under the scanner, the tally, where it is in its day, the letter under the pointer.
   const [hooks] = useState<Hooks>(() => ({
@@ -82,8 +74,6 @@ export function SorterHome({ start, notice }: HomeProps) {
       else if (box?.dataset.screen === 'off') box.dataset.screen = 'on'
     },
     // Smoke in front of what is written on the machine hides it, as it hides the machine.
-    // Each little thing the machine does, as it does it, and where across the page (sorter/sound.ts plays it).
-    sound(name, x, gain) { audio.play(name, x, gain) },
     floors(count, whole) { setTower(now => now.floors === count && now.whole === whole ? now : { floors: count, whole }) },
     // (A side unit's name comes on as the unit seats on the tower, with its lamp.)
     units(seated) { setDocked(now => now && now.length === seated.length && now.every((on, i) => on === seated[i]) ? now : seated) },
@@ -110,15 +100,15 @@ export function SorterHome({ start, notice }: HomeProps) {
 
   // Before the first paint: measure the page and place the machine, so nothing moves afterwards.
   useLayoutEffect(() => {
-    // (The probe is as tall as the page is under the header before any scrolling, by the small viewport: a phone's
-    // toolbars coming and going do not change it. Its padding is the page's safe areas.)
+    // (The probe is as tall as the page is before any scrolling, by the small viewport: a phone's toolbars coming and
+    // going do not change it. Its padding is the page's safe areas.)
     const measure = () => {
       const fold = probe.current!, safe = getComputedStyle(fold), next = plan(scene.current!.clientWidth, fold.offsetHeight, { left: parseFloat(safe.paddingLeft) || 0, right: parseFloat(safe.paddingRight) || 0, bottom: parseFloat(safe.paddingBottom) || 0 }, !start.signedIn)
-      setP(now => now && now.W === next.W && now.H === next.H && now.fold === next.fold && now.ox === next.ox ? now : next); setOver(head.current!.offsetHeight)
+      setP(now => now && now.W === next.W && now.H === next.H && now.fold === next.fold && now.ox === next.ox ? now : next); setOver(parseFloat(safe.paddingTop) || 0)
     }
     measure()
     const observer = new ResizeObserver(measure)
-    observer.observe(scene.current!); observer.observe(probe.current!); observer.observe(head.current!)
+    observer.observe(scene.current!); observer.observe(probe.current!)
     return () => observer.disconnect()
   }, [])
   useLayoutEffect(() => { if (p) drawStill(still.current!, p, over, dark, reduced) }, [p, over, dark, reduced])
@@ -143,16 +133,10 @@ export function SorterHome({ start, notice }: HomeProps) {
   useEffect(() => { sorter.current?.setTheme(dark) }, [dark])
   // Off screen the machine stands still.
   useEffect(() => {
-    const observer = new IntersectionObserver(([entry]) => { sorter.current?.setVisible(entry.isIntersecting); audio.setShown(entry.isIntersecting) }, { threshold: .02 })
+    const observer = new IntersectionObserver(([entry]) => sorter.current?.setVisible(entry.isIntersecting), { threshold: .02 })
     observer.observe(scene.current!)
     return () => observer.disconnect()
   }, [])
-  // Under everything the machine does, its hum while it runs, and its works straining while it is overloaded; both
-  // cut at the blast, and there is quiet until it is put back together.
-  useEffect(() => {
-    const cut = phase === 'boom' ? .05 : .6
-    audio.loop('hum', phase === 'run' || phase === 'overload' ? 1 : 0, cut); audio.loop('strain', phase === 'overload' ? 1 : 0, phase === 'boom' ? .05 : 1.2)
-  }, [audio, phase, sound])
   // `?perf`: a frame meter in the corner, for checking pace on a real phone.
   useEffect(() => { if (new URLSearchParams(location.search).has('perf')) void import('./sorter/meter').then(meter => meter.mountMeter()) }, [])
   // The old code brings the flood.
@@ -190,13 +174,6 @@ export function SorterHome({ start, notice }: HomeProps) {
   // The hopper's mouth, as it is seen: wide enough to press.
   const hopperBox = (q: Plan) => { const w = Math.max(48, 2.6 * q.lw), h = Math.max(44, q.hopper * .82 + 12), x = DX * q.zL, y = DY * q.zL; return { left: q.ox + x - w / 2, top: q.oy - q.yTop - y - h, width: w, height: h } }
   return <div className="srt-page" data-phase={phase} data-live={live || undefined} data-phone={p?.phone || undefined} data-tight={p?.tight || undefined} data-floors={tower.floors} data-whole={tower.whole || undefined} style={{ ...toneVars(dark), ...p && { '--srt-u': `${p.U}px`, '--srt-v': `${p.V}px`, '--srt-price': `${price.w}px`, '--srt-below': `${p.floor - p.front - p.lip}px`, '--srt-ext': `${p.ext}px`, '--srt-ox': `${p.ox}px`, '--srt-plate': `${p.label * p.P}px` } } as CSSProperties}>
-    <HomeHeader ref={head}>
-      {/* Signed in, the way into the dashboard; signed out, where the page is too short for the machine's own button to
-          be seen before scrolling, the button. */}
-      {visitor ? p?.short && <button type="button" className="srt-head-cta" disabled={visitor.busy} aria-busy={visitor.busy || undefined} onClick={visitor.onSignIn} onPointerDown={visitor.onSignInIntent}>Get started</button> : <DashboardLink>Dashboard</DashboardLink>}
-      {!reduced && <IconButton className="theme-toggle srt-sound" variant="ghost" size="sm" label={sound ? 'Turn sound off' : 'Turn sound on'} aria-pressed={sound} onClick={() => { void audio.set(!sound); setSound(!sound) }}>{sound ? <Volume2 size={16} /> : <VolumeX size={16} />}</IconButton>}
-    </HomeHeader>
-
     <main>
       <section className="srt-hero" ref={scene} style={p ? { height: p.H } : undefined} aria-label="Pricing">
         <div className="srt-fold" ref={probe} aria-hidden="true" />
@@ -234,8 +211,6 @@ export function SorterHome({ start, notice }: HomeProps) {
         </div>}
         {p && <>
           {visitor && !p.consent && <SignInConsent className="srt-consent" />}
-          {/* And under the header's button, where the header carries one. */}
-          {visitor && p.short && <SignInConsent className="srt-consent srt-consent-head" />}
           {/* The letter under the pointer, opened. */}
           <div className="srt-card" ref={cardBox} data-open={card ? '' : undefined} aria-hidden="true">
             {card && <div className="srt-card-body" data-scam={card.scam || undefined}>

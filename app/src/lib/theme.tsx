@@ -1,4 +1,5 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from 'react'
+import { useLocation } from 'react-router'
 
 type Theme = 'light' | 'dark'
 const storageKey = 'nightmail.theme'
@@ -9,10 +10,13 @@ function savedTheme() {
 }
 function systemTheme(): Theme { return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light' }
 
+// The homepage ("/") has no theme switch: it is always in the system's theme, whatever the dashboard's switch chose
+// (public/theme.js decides the same before the first paint). Everywhere else a saved choice wins over the system's.
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [preference, setPreference] = useState<Theme | null>(savedTheme)
   const [system, setSystem] = useState<Theme>(systemTheme)
-  const theme = preference ?? system
+  const home = useLocation().pathname === '/'
+  const theme = home ? system : preference ?? system
 
   useLayoutEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -41,7 +45,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     try { localStorage.setItem(storageKey, next) } catch { /* Theme remains usable without persistence. */ }
   }, [theme])
 
-  return <ThemeContext.Provider value={{ theme, toggleTheme }}>{children}</ThemeContext.Provider>
+  // (The same value until the theme changes: a navigation re-renders this, never everything that reads the theme.)
+  const value = useMemo(() => ({ theme, toggleTheme }), [theme, toggleTheme])
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>
 }
 
 export function useTheme() {
