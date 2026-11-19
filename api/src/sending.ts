@@ -930,6 +930,8 @@ async function uploadBody(request: Request, length: number | null): Promise<Uint
     return out;
   } finally { void reader.cancel().catch(() => {}); }
 }
+/** How long a download's response may take to be read before it is ended and its file let go (tests shorten it). */
+export const attachmentDownload = { readMs: 120_000 };
 async function saveAttachment(c: Ctx, a: Actor, metadata: AttachmentMetadataInput, bytes: Uint8Array, max = MAX_ATTACHMENT_BYTES) {
   sesAttachment(metadata);
   const input = validateAttachment(metadata, bytes, max);
@@ -1216,27 +1218,34 @@ export function registerSending(app: App) {
     // The file counts against the isolate's budget (isolate-memory.ts) until its response has been read, and the JSON
     // streams out with the base64 written from the file a chunk at a time: the file is the only large buffer.
     const lease = await reserveMemory(row!.size * 1.15 + 1024 * 1024);
-    let file: Uint8Array;
+    let file: Uint8Array | null;
     try {
       const asset = await c.env.storage.get(row!.storageKey);
       if (!asset || asset.body.length !== row!.size || asset.body.length > MAX_ATTACHMENT_BYTES || await bytesDigest(asset.body) !== row!.checksum) throw new ApiError(503, 'ATTACHMENT_STORAGE_UNAVAILABLE', 'An immutable attachment is missing or changed.', undefined, true);
       file = asset.body;
     } catch (error) { lease.release(); throw error; }
-    // A reader that never finishes still gives the budget back.
-    const guard = setTimeout(() => lease.release(), 120_000) as unknown as { unref?: () => void };
-    guard.unref?.();
-    const done = () => { clearTimeout(guard as never); lease.release(); };
     const json = JSON.stringify({ ...AttachmentInfo.parse(row), content: '' }), encoder = new TextEncoder();
-    let at = 0;
+    let at = 0, stream: ReadableStreamDefaultController<Uint8Array> | undefined;
+    // Read to the end, canceled, or not read within attachmentDownload.readMs: the response is ended and the file let go
+    // first, so its bytes are unreachable when they return to the budget. Once only.
+    const end = (timedOut: boolean) => {
+      if (!file) return;
+      file = null; clearTimeout(watchdog as never);
+      if (timedOut) try { stream?.error(new ApiError(504, 'DOWNLOAD_TIMEOUT', 'The attachment was not read in time.')); } catch { /* already closed */ }
+      lease.release();
+    };
+    const watchdog = setTimeout(() => end(true), attachmentDownload.readMs) as unknown as { unref?: () => void };
+    watchdog.unref?.();
     const body = new ReadableStream<Uint8Array>({
-      start(controller) { controller.enqueue(encoder.encode(json.slice(0, -2))); },
+      start(controller) { stream = controller; controller.enqueue(encoder.encode(json.slice(0, -2))); },
       pull(controller) {
-        if (at >= file.length) { controller.enqueue(encoder.encode(json.slice(-2))); controller.close(); done(); return; }
-        const end = Math.min(file.length, at + 3 * 64 * 1024);
-        controller.enqueue(encoder.encode(Buffer.from(file.buffer, file.byteOffset + at, end - at).toString('base64')));
-        at = end;
+        if (!file) return;
+        if (at >= file.length) { controller.enqueue(encoder.encode(json.slice(-2))); controller.close(); end(false); return; }
+        const next = Math.min(file.length, at + 3 * 64 * 1024);
+        controller.enqueue(encoder.encode(Buffer.from(file.buffer, file.byteOffset + at, next - at).toString('base64')));
+        at = next;
       },
-      cancel() { done(); },
+      cancel() { end(false); },
     });
     c.header('X-Content-Type-Options', 'nosniff');
     return c.body(body, 200, { 'content-type': 'application/json' }) as never;

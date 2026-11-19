@@ -10220,6 +10220,9 @@ describe('Private attachment assets and campaign revisions', () => {
       await new Promise(resolve => setTimeout(resolve, 20)); active--;
     })));
     assert.deepEqual([started, peak <= SEND_LIMITS.isolateWorkingBytes, alone, memoryInUse()], [[0, 1, 2, 3], true, true, 0]);
+    // A nested reservation past its holder's is added to the count at once (never waiting on its own holder).
+    assert.equal(await withMemory(MiB, () => withMemory(30 * MiB, async () => memoryInUse())), 30 * MiB);
+    assert.equal(memoryInUse(), 0);
     // Five 25 MiB raw uploads at once all succeed; they wait their turn for the isolate's memory.
     const five = await Promise.all(Array.from({ length: 5 }, (_, i) => upload(`five${i}.txt`, max)));
     for (const response of five) { const file = ok(response, 201); cleanup(t, async () => { ok(await http('DELETE', `/v1/attachments/${file.id}`, key.secret), [200, 404]); }); }
@@ -25100,6 +25103,36 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal((await db.query('SELECT count(*)::int AS count FROM operation_sns_receipts WHERE workspace_id = $1 AND processed_at IS NOT NULL', [runtime.config.workspaceId])).rows[0].count, 1);
       assert.equal(page(await local('GET', `/v1/emails/${email.id}/events`)).filter(event => event.type === 'delivery').length, 1);
       assert.equal((await jobs('operation.webhook')).length, 1);
+    });
+  });
+
+  test('attachment downloads: an unread response is ended and its file let go before its memory returns to the budget',async t=>{
+    await simulatedSesFixture(t,async({runtime,local,fetch})=>{
+      const [{attachmentDownload},{memoryInUse,sendReservation,withMemory}]=await Promise.all([import('./src/sending.js'),import('./src/isolate-memory.js')]);
+      const objects=new Map<string,Uint8Array>(),MiB=1024*1024,size=25*MiB,readMs=attachmentDownload.readMs;
+      runtime.storage={put:async(key:string,body:Uint8Array)=>{objects.set(key,body);},get:async(key:string)=>objects.has(key)?{body:objects.get(key)!,contentType:'text/plain'}:null,delete:async(key:string)=>{objects.delete(key);}};
+      const key=ok(await local('POST','/v1/api-keys',{name:'downloads',permissions:['send','read']}),201).secret as string;secrets.add(key);
+      const authorization=`Bearer ${key}`;
+      const upload=await fetch(new Request(`${PUBLIC_ORIGIN}/v1/attachments/upload`,{method:'POST',headers:{authorization,'content-type':'text/plain','x-nightmail-filename':'big.txt'},body:Buffer.alloc(size,0x61)}));
+      const file=await upload.json() as Json;assert.equal(upload.status,201);
+      attachmentDownload.readMs=50;
+      try {
+        // Two 25 MiB downloads nobody reads: each holds its file's share of the budget.
+        const unread=await Promise.all([0,1].map(()=>fetch(new Request(`${PUBLIC_ORIGIN}/v1/attachments/${file.id}/content`,{headers:{authorization}}))));
+        assert.deepEqual(unread.map(r=>r.status),[200,200]);
+        assert.equal(memoryInUse(),2*Math.ceil(size*1.15+MiB));
+        await new Promise(resolve=>setTimeout(resolve,200));
+        // Past the deadline both responses are ended (a read fails) and only then is their memory free again, so a
+        // 25 MiB send that follows is admitted at once.
+        for(const response of unread) await assert.rejects(response.text());
+        assert.equal(memoryInUse(),0);
+        assert.equal(await Promise.race([withMemory(sendReservation(size,0),async()=>memoryInUse()),new Promise(resolve=>setTimeout(()=>resolve('waiting'),100))]),Math.ceil(size*2.5));
+        // A download that is read to the end or canceled gives its share back once, and the timer then has nothing to do.
+        const read=await fetch(new Request(`${PUBLIC_ORIGIN}/v1/attachments/${file.id}/content`,{headers:{authorization}}));
+        assert.equal(Buffer.from((await read.json() as Json).content,'base64').length,size);
+        const canceled=await fetch(new Request(`${PUBLIC_ORIGIN}/v1/attachments/${file.id}/content`,{headers:{authorization}}));await canceled.body!.cancel();
+        await new Promise(resolve=>setTimeout(resolve,200));assert.equal(memoryInUse(),0);
+      } finally { attachmentDownload.readMs=readMs; }
     });
   });
 

@@ -62,6 +62,8 @@ export function r2MailObjects(wid: string, bucket: R2Bucket): MailObjects {
     async put(key, body, contentType) {
       assertMailKey(wid, key);
       const httpMetadata = { contentType };
+      // FixedLengthStream exists only in workerd; elsewhere (an R2-shaped binding on Node) a stream is read into one first.
+      if (!(body instanceof Uint8Array) && typeof FixedLengthStream === 'undefined') body = await readMailBytes(body.stream, body.length, body.length);
       if (body instanceof Uint8Array) await bucket.put(key, body, { httpMetadata, sha256: await crypto.subtle.digest('SHA-256', body as BufferSource) });
       else {
         const fixed = new FixedLengthStream(body.length);
@@ -107,13 +109,12 @@ export function s3MailObjects(wid: string, client: S3Client, bucket: string): Ma
     },
   };
 }
-/** Small whole objects only: sandbox mail on Node, where no receiving bucket exists. */
+/** Sandbox mail on Node, where no receiving bucket exists: whole objects (a stream is read into one first). */
 function storageMailObjects(wid: string, storage: Storage): MailObjects {
   return {
     async put(key, body, contentType) {
       assertMailKey(wid, key);
-      if (!(body instanceof Uint8Array)) throw new Error('Local mail storage accepts whole objects only');
-      await storage.put(key, body, contentType);
+      await storage.put(key, body instanceof Uint8Array ? body : await readMailBytes(body.stream, body.length, body.length), contentType);
     },
     async get(key, range) {
       assertMailKey(wid, key);

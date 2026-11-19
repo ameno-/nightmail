@@ -1,36 +1,44 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { log } from './core.js';
 import { SEND_LIMITS } from './send-limits.js';
 
 // One byte budget for every path that holds a large attachment in memory: raw uploads, attachment downloads, the
-// dispatcher's pages with attachments or large bodies (every lane counts), and inbox mail's attachment copy and Sent
+// dispatcher's pages with attachments or large bodies (every lane counts), and inbox mail's attachment copies and Sent
 // archive. A Worker isolate has 128 MB for all its requests at once and the loaded app holds about 25 MB, so these paths
 // together may hold at most SEND_LIMITS.isolateWorkingBytes. Each path reserves its expected peak (the file and every
 // buffer it builds from it) before it reads anything, waits in arrival order while the budget is spent, and gives it
-// back when it is done. A reservation larger than the budget waits for the whole budget and then runs alone.
+// back only once those buffers are unreachable. A reservation larger than the budget waits for the whole budget and then
+// runs alone.
 const budget = SEND_LIMITS.isolateWorkingBytes;
 let used = 0;
 const waiting: { bytes: number; start: () => void }[] = [];
-// A path that already holds a reservation (the dispatcher's page, a Sent archive) covers the work inside it, so a nested
-// reservation never waits on its own holder.
-const holding = new AsyncLocalStorage<true>();
+// The reservation a path holds. Work inside it (a Sent archive that copies its files first, a mailbox copy that
+// finishes a pending archive) is covered up to that size without waiting on its own holder; past it, the extra is
+// added at once (it never waits, so a holder cannot deadlock on itself) and logged, because the outer estimate was short.
+const holding = new AsyncLocalStorage<{ bytes: number }>();
 
 function admit() {
   while (waiting.length && used + waiting[0]!.bytes <= budget) { const next = waiting.shift()!; used += next.bytes; next.start(); }
 }
 export type MemoryLease = { release(): void };
-/** Reserves `bytes` (at most the whole budget) and resolves once they are free. Release the lease exactly when done; it is idempotent. */
+const lease = (n: number): MemoryLease => { let held = true; return { release() { if (held) { held = false; used -= n; admit(); } } }; };
+/** Reserves `bytes` (at most the whole budget) and resolves once they are free. Release the lease exactly once its
+ * buffers are unreachable; release is idempotent. */
 export async function reserveMemory(bytes: number): Promise<MemoryLease> {
-  if (holding.getStore()) return { release() {} };
-  const n = Math.max(1, Math.min(budget, Math.ceil(bytes)));
+  const n = Math.max(1, Math.min(budget, Math.ceil(bytes))), outer = holding.getStore();
+  if (outer) {
+    if (n <= outer.bytes) return { release() {} };
+    log('warn', { code: 'ISOLATE_MEMORY_NESTED_GROWTH', heldBytes: outer.bytes, neededBytes: n });
+    used += n - outer.bytes;
+    return lease(n - outer.bytes);
+  }
   await new Promise<void>(start => { waiting.push({ bytes: n, start }); admit(); });
-  let held = true;
-  return { release() { if (held) { held = false; used -= n; admit(); } } };
+  return lease(n);
 }
 /** Runs `work` holding `bytes` of the isolate's budget. */
 export async function withMemory<T>(bytes: number, work: () => Promise<T>): Promise<T> {
-  if (holding.getStore()) return work();
-  const lease = await reserveMemory(bytes);
-  try { return await holding.run(true, work); } finally { lease.release(); }
+  const held = await reserveMemory(bytes), outer = holding.getStore();
+  try { return await holding.run({ bytes: Math.max(outer?.bytes ?? 0, Math.min(budget, Math.ceil(bytes))) }, work); } finally { held.release(); }
 }
 /** What the budget has handed out now (for tests and measurements). */
 export const memoryInUse = () => used;

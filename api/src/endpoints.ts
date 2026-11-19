@@ -15,7 +15,7 @@ import { encrypt, decrypt, encryptWebhookHeaders, postWebhook, webhookHeaderView
 import { inboundEventTypes, webhookSecretBinding } from './mailbox-events.js';
 import { InboundAddressId } from './inbound-threads.js';
 import { htmlToPlain, lockMailboxLane } from './mailbox-store.js';
-import { copyReservation, mailAttachmentBytes, safeForwardHtml, sendFromMailbox } from './mailbox-send.js';
+import { mailAttachmentBytes, mailCopyReservation, safeForwardHtml, sendFromMailbox } from './mailbox-send.js';
 import { withMemory } from './isolate-memory.js';
 import { AttachmentContentId, AttachmentContentType, blockedExtension, mailAddress } from './outbound-content.js';
 import { SEND_LIMITS } from './send-limits.js';
@@ -736,7 +736,7 @@ async function forwardAttachments(runtime: Runtime, w: string, m: Received) {
       disposition: contentId && file.disposition === 'inline' ? 'inline' as const : 'attachment' as const, contentId };
     try {
       // The file and its stored copy count against the isolate's memory budget (isolate-memory.ts).
-      files.push(await withMemory(copyReservation(file.sizeBytes), async () => {
+      files.push(await withMemory(await mailCopyReservation(runtime, w, file), async () => {
         const content = await mailAttachmentBytes(runtime, w, m.region ?? '', file);
         if (screened) Object.assign(metadata, screened(metadata.filename, metadata.contentType, content, metadata.disposition === 'inline'));
         return storeAttachmentBytes!(runtime, { workspaceId: w }, metadata, content);
