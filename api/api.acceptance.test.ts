@@ -14847,8 +14847,18 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await assert.rejects(adoptIdentities(db,op,wid,rows.map(r=>r.arn),inventory,`arn:aws:sts::${acct}:assumed-role/migration/fixture`,true,flags),/--reason/,'An apply without a reason fails before any read.');
     drift=true;await assert.rejects(adopt(true),/drift/);drift=false;
     await db.query(`INSERT INTO domain_claims(workspace_id,name) VALUES($1,'adopted-0.fixture.test')`,[wid]);await assert.rejects(adopt(true),/Overlapping/);await db.query(`DELETE FROM domain_claims WHERE workspace_id=$1 AND name='adopted-0.fixture.test'`,[wid]);
+    // Adoption counts against the workspace's own domain limit (not a literal 100): with 95 more domains, 107 refuses the
+    // twelve new claims before inserting any, and a raised 108 admits them.
+    await db.query(`INSERT INTO domain_claims(workspace_id,name,ever_proven) SELECT $1,'filler-'||n||'.limit.test',true FROM generate_series(1,95) n`,[wid]);
+    const claimCount=async()=>(await db.query('SELECT count(*)::int AS n FROM domain_claims WHERE workspace_id=$1',[wid])).rows[0].n;
+    await db.query('UPDATE workspaces SET domain_limit=107 WHERE id=$1',[wid]);
+    await assert.rejects(adopt(true),/domain limit exceeded: 96 of 107 domains, 12 more/);assert.equal(await claimCount(),96);
+    await db.query('UPDATE workspaces SET domain_limit=108 WHERE id=$1',[wid]);
     await assert.rejects(adopt(true),/interrupted/);assert.equal((await db.query(`SELECT FROM domain_claims WHERE workspace_id=$1 AND sending_state='verified' AND identity ? 'adopted'`,[wid])).rowCount,0);
     await adopt(true);await adopt(true);assert.equal(members.size,15);
+    // Lowering the limit below the count removes nothing, and retrying the finished adoption stays idempotent.
+    await db.query('UPDATE workspaces SET domain_limit=1 WHERE id=$1',[wid]);await adopt(true);assert.equal(await claimCount(),108);
+    await db.query(`DELETE FROM domain_claims WHERE workspace_id=$1 AND name LIKE 'filler-%.limit.test'`,[wid]);await db.query('UPDATE workspaces SET domain_limit=NULL WHERE id=$1',[wid]);
     const adopted=(await db.query(`SELECT b.domain_id FROM domain_sending_bindings b JOIN domain_claims dc USING(workspace_id,name) WHERE b.workspace_id=$1 AND dc.sending_state='verified' AND dc.receiving_state='off' AND dc.identity ? 'adopted'`,[wid])).rows;assert.equal(adopted.length,12);
     assert.equal((await db.query('SELECT FROM mailbox_domains WHERE workspace_id=$1',[wid])).rowCount,0);
     ok(await api('DELETE','/v1/domains/'+added.id));const mark=calls.length;

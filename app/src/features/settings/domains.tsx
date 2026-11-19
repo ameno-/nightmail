@@ -12,7 +12,7 @@ import { domainPattern, normalizeDomain } from '../../lib/domain'
 import { mxTone, receivingStatus } from '../inbound/status'
 import { receivingIssueReason, receivingIssueTitle } from './receiving-issue-title'
 import { AdminOnlyPage } from './admin-only'
-import { DomainDetailSkeleton, domainColumns } from './skeletons'
+import { DomainCountSkeleton, DomainDetailSkeleton, domainColumns } from './skeletons'
 import { DnsRecordTable, DnsWaitNote, DomainRecords, domainState, recordsFor, useDnsSetup, useDomain, zoneLines } from './domain-records'
 import { resourceOf } from '../../data/invalidation'
 import { ReceivingHosts, useReceivingHosts } from './receiving-hosts'
@@ -99,7 +99,10 @@ function DomainsList() {
     } catch { /* Shown inline. */ }
   }
   return <div className="stack">
-    <PageHeader title="Domains" actions={<Button variant="primary" onClick={openCreate}>Add domain</Button>} />
+    <PageHeader title="Domains" actions={<>
+      {multiTenant && (quota ? <span className="muted domains-count">{`${quota.used.toLocaleString('en-US')} of ${quota.limit.toLocaleString('en-US')} domains`}</span> : domains.isPending && <DomainCountSkeleton />)}
+      <Button variant="primary" onClick={openCreate}>Add domain</Button>
+    </>} />
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
       <DataTable className="domains-table" loading={domains.isPending || (inbound.isPending && !inbound.error)} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} rowHref={row => `/domains/${row.id}`} onRowIntent={row => void warm([queries.domain(row.id)])} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
         { ...columns[0], render: row => <span className="domain-name" title={row.name}>{row.name}</span> },
