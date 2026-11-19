@@ -1,13 +1,14 @@
 import { createHmac, hkdfSync, sign, timingSafeEqual } from 'node:crypto';
 import { z } from '@hono/zod-openapi';
 import type { Config } from './core.js';
-import { domainConnectProviderId } from './brand.js';
+import { domainConnectProviderIds } from './brand.js';
 import { isProofRecord } from './states.js';
 
-const template = `/v2/domainTemplates/providers/${domainConnectProviderId}/services/mail`;
+// The mail template under each provider ID, preferred first. A DNS provider applies only a template it lists.
+const templates = domainConnectProviderIds.map(id => `/v2/domainTemplates/providers/${id}/services/mail`);
 export const groupIds = ['sending', 'ownership', 'receiving', 'receivingReply', 'mailfrom'] as const;
 type Group = typeof groupIds[number];
-type Discovery = { zone: string; name: string; id: string; sync: string; version?: number };
+type Discovery = { zone: string; name: string; id: string; sync: string; template: string };
 
 // The TXT value is user-controlled (and may include a path, notably on Cloudflare).
 // Pin both ends of discovery, not just the advertised providerId. Never follow redirects.
@@ -65,11 +66,13 @@ async function probe(zone:string, signal:AbortSignal): Promise<Discovery|null|un
   const api=urlAPI.replace(/\/$/,''), sync=urlSyncUX.replace(/\/$/,'');
   const legacy=base===ionosApi[1] && !providerId && providerName==='1and1';
   if ((!legacy && providerId!==trusted.id) || !trusted.api.includes(api) || !trusted.sync.includes(sync)) return null;
-  const support=await get(api+template);
-  if (support.status!==200) { await support.body?.cancel(); return null; }
-  // A 200 may be empty, disclose just the revision, or return the deployed template.
-  const details=z.object({version:z.number().int().positive()}).safeParse(await support.json().catch(()=>null));
-  return {zone,id:trusted.id,name:providerDisplayName ?? (legacy?'IONOS':providerName),sync,version:details.data?.version};
+  // The first template this provider lists. A 200 may be empty or carry the template; only the status counts.
+  for (const template of templates) {
+    const support=await get(api+template);
+    await support.body?.cancel();
+    if (support.status===200) return {zone,id:trusted.id,name:providerDisplayName ?? (legacy?'IONOS':providerName),sync,template};
+  }
+  return null;
 }
 
 type CacheEntry = { value: Discovery|null; expiresAt:number };
@@ -98,7 +101,7 @@ export async function discover(name:string):Promise<Discovery|null> {
 }
 
 type RecordSet = { name:string; region:string; dns:{name:string;type:string;purpose:string;status:string;value:string}[] };
-export function pendingGroups(domain:RecordSet, shared:boolean, safeReceiving:boolean, requested:readonly string[]=groupIds, version?:number) {
+export function pendingGroups(domain:RecordSet, shared:boolean, safeReceiving:boolean, requested:readonly string[]=groupIds) {
   const groups:Group[]=[], vars:Record<string,string>={};
   const pending=domain.dns.filter(r=>r.status==='pending');
   const add=(group:Group, fields:Record<string,string>)=>{ if(requested.includes(group)) {groups.push(group); Object.assign(vars,fields);} };
@@ -111,20 +114,16 @@ export function pendingGroups(domain:RecordSet, shared:boolean, safeReceiving:bo
       add('sending',{dkim1:selectors[0]!,dkim2:selectors[1]!,dkim3:selectors[2]!,dkimZone:zone.slice(0,-'.amazonses.com'.length)});
     }
   }
-  // The registered template publishes the token as _bane, which proves a claim shown with any label.
+  // The templates publish the token as _nightmail, which proves a claim shown with any accepted label.
   const proof=pending.find(r=>r.purpose==='sending' && r.type==='TXT' && isProofRecord(r.name,domain.name));
   if(shared && proof) add('ownership',{ownership:proof.value});
   // Only the domain's own receiving record (the first): its other hosts were added by hand and are published by hand.
   const own=domain.dns.find(r=>r.purpose==='receiving' && r.type==='MX'), mx=own?.status==='pending' ? own : undefined;
   const inbound=mx && /^inbound-smtp\.([a-z]{2}(?:-[a-z]+)+-\d+)\.amazonaws\.com$/.exec(mx.value)?.[1];
-  // On an undisclosed revision sign both names only when they agree. A stale v1
-  // provider must never point the customer's receiving MX at the sending pool.
-  if(safeReceiving && inbound && ((version ?? 1)>=2 || inbound===domain.region)) {
-    const fields:Record<string,string>={};
-    if(version!==1) fields.inboundRegion=inbound;
-    if((version ?? 1)<2) fields.region=inbound;
-    if(mx.name===domain.name) add('receiving',fields);
-    if(mx.name===`reply.${domain.name}`) add('receivingReply',fields);
+  // Receiving has its own region (%inboundRegion%); %region% is the sending region, for MAIL FROM.
+  if(safeReceiving && inbound) {
+    if(mx.name===domain.name) add('receiving',{inboundRegion:inbound});
+    if(mx.name===`reply.${domain.name}`) add('receivingReply',{inboundRegion:inbound});
   }
   const bounce=pending.find(r=>r.purpose==='mail_from' && r.type==='MX' && r.value===`feedback-smtp.${domain.region}.amazonses.com`);
   if(bounce?.name===`email.${domain.name}` && pending.some(r=>r.type==='TXT' && r.name===bounce.name && r.value==='v=spf1 include:amazonses.com ~all')) {
@@ -165,5 +164,5 @@ export function signedApply(config:Config, found:Discovery, domain:{id:string;na
   q.sort();
   const signature=Buffer.from(sign('RSA-SHA256',Buffer.from(q.toString()),signing.privateKey)).toString('base64');
   q.set('key',signing.keyId); q.set('sig',signature); // Signature excludes both and must be last on Cloudflare.
-  return `${found.sync}${template}/apply?${q}`;
+  return `${found.sync}${found.template}/apply?${q}`;
 }
