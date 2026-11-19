@@ -140,10 +140,10 @@ Be honest about what the data shows:
 
 **Standing and enforcement.** Use `get_standing`.
 
-- **Limits by score:** a new workspace's first 100 real recipients are its evaluation: 100 a day until their delivery results are in, at most about an hour after the 100th (`gradedBy` says when). Then 75 and up has no daily limit, only a per-minute pace (a quarter of the pool's rate, at least 500 a minute); 70–74: 500 a day; 65–69: 200; under 65: 100. The score updates every 10 minutes; a limit appears under 73 and lifts at 75. A `dailyLimit` of null is no daily limit.
+- **Limits by score:** a new workspace's first 100 real recipients are its evaluation: 100 a day until their delivery results are in, about an hour after the 100th (`gradedBy` says by when). Then 75 and up has no daily limit, only a per-minute pace (a quarter of the pool's rate, at least 500 a minute); 70–74: 500 a day; 65–69: 200; under 65: 100. For 72 clean hours after the evaluation sending also grows, from 1,000 recipients an hour across the account's workspaces, doubling after each clean hour whose results are in (`limit.growth`); mail over it waits in the queue, and only a person can lift it. The score is recounted hourly; a limit appears under 73 and lifts at 75. A `dailyLimit` of null is no daily limit.
 - **The ladder:**
   - Notice is a note on the score card.
-  - Warn freezes the limit (without one, at the last 24 hours' volume, at least 10,000) and clears after 24 hours under 80% of its line.
+  - Warn freezes the limit (without one, at what SES accepted in the last 24 hours, at least 10,000) and clears after 24 hours under 80% of its line.
   - Restrict holds marketing and pauses campaigns, while transactional mail keeps flowing. An owner can press **Release marketing** on the Overview after 24 hours, once every 14 days, at 50% for 48 hours.
   - Pause stops all sending, and queued mail is canceled after 72 hours. **Resume sending** is self-service only for a pause caused by transactional bounces, once every 30 days. Every other pause needs a review.
   - A pause leaves a strike for 90 days.

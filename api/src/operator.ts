@@ -229,6 +229,21 @@ export function registerOperator(app: App) {
       return { result: { ok: true as const, version: current?.version ?? null, step: current?.step ?? null }, audit: { action: 'operator-set-limit', before, after: { daily: body.daily, expiresAt: body.expiresAt ?? null }, reason: body.reason, ticketRef: body.ticketRef } };
     }), 200);
   });
+  // The growth pace after the evaluation (src/standing-model.ts GROWTH): an operator lifts it for a known, legitimate
+  // launch; the workspace then sends at its per-minute pace. Audited, with a standing event.
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'post', path: '/v1/operator/workspaces/{id}/growth/lift', operationId: 'operatorLiftGrowth',
+    request: { params: WorkspaceParam, headers: z.object(Mutation), body: json(MutationBody) }, responses: { 200: response(done), ...errors } }), async c => {
+    const body = c.req.valid('json'), wid = c.req.valid('param').id;
+    const operator = await operatorActor(c, 'operator');
+    await hostedWorkspace(c.env.db, wid);
+    return c.json(await mutate(c, operator, wid, body, async (tx, expectVersion) => {
+      const { rows: [before] } = await tx.execute<{ until: string | null; cap: number | null }>(sql`SELECT growth_until AS until,growth_cap AS cap FROM sender_standing WHERE workspace_id=${wid} FOR UPDATE`);
+      if (!before?.until || Date.parse(before.until) <= Date.now() || before.cap === null) throw new ApiError(409, 'GROWTH_NOT_ACTIVE', 'This workspace has no growth pace to lift.');
+      await tx.execute(sql`UPDATE sender_standing SET growth_until=NULL,growth_cap=NULL,growth_hour=NULL,growth_quality=NULL WHERE workspace_id=${wid}`);
+      const result = await applyChange(tx, { workspaceId: wid, actor: { kind: 'operator', id: operator.userId, via: 'console' }, expectVersion, kind: 'operator', details: { growthLifted: before, reason: body.reason } });
+      return { result: { ok: true as const, version: result?.version ?? null, step: result?.step ?? null }, audit: { action: 'operator-lift-growth', before, after: { until: null, cap: null }, reason: body.reason, ticketRef: body.ticketRef } };
+    }), 200);
+  });
   // A workspace's domain limit (default 100). Lowering it below the current count removes nothing; it only refuses new
   // domains until the workspace is under it again. Any Hosted workspace, shared or BYO sending.
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'put', path: '/v1/operator/workspaces/{id}/domain-limit', operationId: 'operatorSetDomainLimit',

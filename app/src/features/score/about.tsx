@@ -38,6 +38,7 @@ export function ScoreAbout({ report, error, onRetry }: { report: SenderScore | u
   const moved = graded && report.history.length ? Math.round(report.score! - report.history[0].score) : 0
   const limit = report?.limit
   const limitLine = !limit ? null : [limit.daily === null ? 'No daily limit' : `Daily limit ${number(limit.daily)}${limit.source === 'override' ? ' (override)' : ''}`,
+    limit.growth ? `growing: up to ${number(limit.growth.hourly)} this hour` : null,
     graded && limit.next ? limit.next.unlimited ? `none from ${limit.next.atScore}` : `next ${number(limit.next.limit)} at ${limit.next.atScore}` : null, `${number(limit.perMinute)} a minute`, limit.transactionalReserve ? `${number(limit.transactionalReserve)} kept for receipts` : null].filter(Boolean).join(' · ')
   return <Dialog open={open} onOpenChange={next => { if (!next) closeScoreAbout() }} className="score-about" title="Sender score"
     footer={<><Link className="ui-button ui-button--ghost ui-button--md" to="/docs/api/getSenderScore" onClick={closeScoreAbout}>API reference</Link><Button variant="primary" onClick={closeScoreAbout}>Done</Button></>}>
@@ -62,7 +63,7 @@ export function ScoreAbout({ report, error, onRetry }: { report: SenderScore | u
         <dl className="score-about__bases">{report.factors.map(factor => <div key={factor.key}><dt>{factor.label}</dt><dd>{factor.basis}</dd></div>)}</dl>
         <ul>
           <li>Each part scores 0–100. Parts with no data are left out and the rest count more.</li>
-          <li>Recent days count most (30-day half-life). It updates every 10 minutes.</li>
+          <li>Recent days count most (30-day half-life). It updates hourly.</li>
           <li>Your first {number(report.needed)} real emails set it once their results are in.{report.limit ? ` ${GOOD_STANDING} and up has no daily limit.` : ''}</li>
           <li>Counts every email you send except simulated sends. Mail only to <code>…@simulator.amazonses.com</code> uses your daily limit but not the score.</li>
           <li>{grades}</li>

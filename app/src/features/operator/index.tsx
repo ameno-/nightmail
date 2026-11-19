@@ -100,7 +100,7 @@ function Actions() {
 
 // ---------------------------------------------------------------- one workspace
 
-type ActionKind = 'pause' | 'resume' | 'hold' | 'release' | 'limit' | 'domains' | 'campaign'
+type ActionKind = 'pause' | 'resume' | 'hold' | 'release' | 'limit' | 'growth' | 'domains' | 'campaign'
 type PendingAction = { kind: ActionKind; key: string; campaign?: OperatorCampaign }
 const open = (kind: ActionKind, campaign?: OperatorCampaign): PendingAction => ({ kind, key: crypto.randomUUID(), campaign })
 
@@ -118,6 +118,7 @@ export function OperatorWorkspacePage() {
     paused ? { label: 'Resume sending…', onSelect: () => setAction(open('resume')) } : { label: 'Pause sending…', destructive: true, onSelect: () => setAction(open('pause')) },
     held ? { label: 'Release marketing…', onSelect: () => setAction(open('release')) } : { label: 'Hold marketing…', onSelect: () => setAction(open('hold')) },
     { label: 'Set daily limit…', onSelect: () => setAction(open('limit')) },
+    ...(data?.score?.limit?.growth ? [{ label: 'Lift growth pace…', onSelect: () => setAction(open('growth')) }] : []),
     { label: 'Set domain limit…', onSelect: () => setAction(open('domains')) },
   ]
   return <>
@@ -205,6 +206,7 @@ function WorkspaceBody({ data, canAct, onReleaseCampaign }: { data: OperatorWork
           ['Override', limit.override ? `${number(limit.override.daily)} a day${limit.override.expiresAt ? ` until ${when(limit.override.expiresAt)}` : ', no expiry'}` : data.exempt ? 'Exempt from hosted quotas' : 'None'],
           ['Restore', limit.restore ? `${number(limit.restore.daily)} a day until ${when(limit.restore.until)}` : 'None'],
           ['Strike cap', limit.strikeCapUntil ? `50% until ${when(limit.strikeCapUntil)}` : 'None'],
+          ['Growth pace', limit.growth ? `${number(limit.growth.used)} of ${number(limit.growth.hourly)} this hour, until ${when(limit.growth.until)}` : 'None'],
           ['Bursts', `${number(limit.perMinute)} a minute · marketing ${number(limit.marketingPerHour)} an hour`],
           ['Transactional reserve', number(limit.transactionalReserve)],
         ]} /> : <EmptyState title="No hosted limit" />}
@@ -280,6 +282,7 @@ const actionCopy: Record<ActionKind, { title: string; description?: string; conf
   hold: { title: 'Hold marketing?', description: 'Campaigns pause and new marketing is refused.', confirm: 'Hold marketing', done: 'Marketing held' },
   release: { title: 'Release marketing?', description: 'The workspace moves to Warn until it clears.', confirm: 'Release marketing', done: 'Marketing released' },
   limit: { title: 'Set the daily limit', confirm: 'Save limit', done: 'Limit saved' },
+  growth: { title: 'Lift the growth pace?', confirm: 'Lift growth pace', done: 'Growth pace lifted' },
   domains: { title: 'Set the domain limit', confirm: 'Save limit', done: 'Domain limit saved' },
   campaign: { title: 'Release this campaign?', confirm: 'Release campaign', done: 'Campaign released' },
 }
@@ -359,6 +362,7 @@ function ActionForm({ action, workspace, onClose }: { action: PendingAction; wor
         case 'resume': return operatorApi.resume(id, { ...why, restore: restore === '100' ? 100 : 50 }, guard)
         case 'hold': return operatorApi.marketing(id, { ...why, held: true }, guard)
         case 'release': return operatorApi.marketing(id, { ...why, held: false }, guard)
+        case 'growth': return operatorApi.liftGrowth(id, why, guard)
         case 'limit': return operatorApi.limit(id, { ...why, daily: clear ? null : dailyValue, expiresAt: expires ? new Date(expires).toISOString() : null }, guard)
         case 'domains': return operatorApi.domainLimit(id, { ...why, limit: defaultDomains ? null : domainValue }, guard).then(() => undefined)
         case 'campaign': return operatorApi.releaseCampaign(action.campaign!.id, why, guard)

@@ -43,10 +43,12 @@ export function DailyLimit({ report }: { report: SenderScore | undefined }) {
   const [explaining, setExplaining] = useState(false)
   if (!limit) return null
   const cap = limit.cap, share = cap === null ? 0 : Math.min(1, limit.used / Math.max(1, cap)), left = cap === null ? 0 : Math.max(0, cap - limit.used)
+  // No daily limit, but a new sender's growth pace: say what it allows this hour.
+  const growth = cap === null ? report?.limit?.growth ?? null : null, none = growth ? `Growing: up to ${number(growth.hourly)} this hour` : 'None'
   const notes = limitNotes(report)
   return <section className="daily-limit" aria-label="Daily limit">
-    <button type="button" className="limit-row" onClick={() => setExplaining(true)} title={cap === null ? limitSummary(limit) : `${limitSummary(limit)} Includes simulator addresses.`} aria-label={cap === null ? 'No daily limit. How limits work' : `Daily limit: ${number(left)} of ${number(cap)} left. How limits work`}>
-      <span className="limit-row__text"><span className="limit-row__label">Daily limit<Info size={12} aria-hidden="true" /></span><span className="muted">{cap === null ? 'None' : `${number(left)} of ${number(cap)} left`}</span></span>
+    <button type="button" className="limit-row" onClick={() => setExplaining(true)} title={cap === null ? limitSummary(limit) : `${limitSummary(limit)} Includes simulator addresses.`} aria-label={cap === null ? `No daily limit${growth ? `, growing: up to ${number(growth.hourly)} this hour` : ''}. How limits work` : `Daily limit: ${number(left)} of ${number(cap)} left. How limits work`}>
+      <span className="limit-row__text"><span className="limit-row__label">Daily limit<Info size={12} aria-hidden="true" /></span><span className="muted">{cap === null ? none : `${number(left)} of ${number(cap)} left`}</span></span>
       {cap !== null && <span className="limit-row__track" data-full={share >= 0.9 || undefined}><i style={{ width: `${share * 100}%` }} /></span>}
     </button>
     {notes.map(note => <p key={note.text} className="limit-row__note" data-tone={note.tone}>{note.tone && <span aria-hidden="true" />}{note.text}</p>)}

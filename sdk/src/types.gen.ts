@@ -1940,7 +1940,7 @@ export type SenderScore = {
      */
     needed: number;
     /**
-     * When the 100th recipient was counted; the score starts once their delivery results are in, at most an hour later.
+     * When the 100th recipient was counted; the score starts once their delivery results are in, at most an hour later plus the ten-minute job run (gradedBy).
      */
     calibratedAt: string | null;
     /**
@@ -1948,7 +1948,7 @@ export type SenderScore = {
      */
     gradedBy: string | null;
     /**
-     * 0–100, one decimal; null while warming up. The quality of the last 30 days of mail, recomputed every ten minutes: 75 and up has no daily limit.
+     * 0–100, one decimal; null while warming up. The quality of the last 30 days of mail, recounted hourly: 75 and up has no daily limit.
      */
     score: number | null;
     grade: 'A+' | 'A' | 'B' | 'C' | 'D' | 'F' | null;
@@ -2066,6 +2066,23 @@ export type SenderLimit = {
     } | null;
     strikeCapUntil: string | null;
     /**
+     * For 72 clean hours after the evaluation, while it limits more than the per-minute pace: sending grows from 1,000 recipients an hour (shared by the account's workspaces, every stream) to twice the distinct recipients of the last completed hour whose results are in and clean. Null otherwise. Mail over it waits in the queue.
+     */
+    growth: {
+        /**
+         * Recipients the sponsor's growing workspaces may send in a rolling hour now.
+         */
+        hourly: number;
+        /**
+         * Recipients sent in the rolling hour.
+         */
+        used: number;
+        /**
+         * When the growth pace ends, after 72 clean hours.
+         */
+        until: string;
+    } | null;
+    /**
      * Recipients a minute the workspace may send (pacing that protects the shared pool, not a daily limit): clamp(daily ÷ 20, 50, 500), or without a daily limit a quarter of the pool's SES rate, at least 500. Half of it per sending domain.
      */
     perMinute: number;
@@ -2084,7 +2101,7 @@ export type SenderLimit = {
  */
 export type SenderStanding = {
     /**
-     * ok; notice (dashboard only); warn (limit frozen: no rises, and a workspace without one is limited to what it sent in the last 24 hours, at least 10,000; owners emailed); restrict (marketing held, transactional flows, limit frozen); pause (all sending stopped).
+     * ok; notice (dashboard only); warn (limit frozen: no rises, and a workspace without one is limited to what SES accepted from it in the last 24 hours, at least 10,000; owners emailed); restrict (marketing held, transactional flows, limit frozen); pause (all sending stopped).
      */
     step: 'ok' | 'notice' | 'warn' | 'restrict' | 'pause';
     reasons: Array<StandingReason>;

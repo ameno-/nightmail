@@ -6,8 +6,32 @@ SET LOCAL lock_timeout='2s';
 -- limit applying without one, and paces a workspace without one by the pool instead of by a limit it no longer has.
 -- Replaces the daily ramp (a score from 65 rising at most +5 a day, up to 10,000): existing workspaces are re-graded by
 -- the job's next runs, within six hours; until then admission reads the limit they have.
-ALTER TABLE sender_standing ALTER COLUMN daily_limit DROP NOT NULL, ALTER COLUMN band_limit DROP NOT NULL;
+ALTER TABLE sender_standing ALTER COLUMN daily_limit DROP NOT NULL, ALTER COLUMN band_limit DROP NOT NULL,
+  -- The growth pace after the evaluation (src/standing-model.ts GROWTH): until growth_until, a sponsor's growing
+  -- workspaces may have at most growth_cap recipients claimed in any rolling hour, every stream. growth_hour is the last
+  -- completed hour the job judged, growth_quality the quality when the cap last grew.
+  ADD COLUMN growth_until timestamptz, ADD COLUMN growth_cap int CHECK (growth_cap > 0), ADD COLUMN growth_hour timestamptz, ADD COLUMN growth_quality numeric(5,2);
 COMMENT ON COLUMN sender_standing.daily_limit IS 'Recipients per rolling 24 hours admission enforces; NULL: no daily limit (good standing).';
+-- Recipients the dispatch claim charged to a sponsor's growth pace, per minute (a sponsor is quota_sponsor, or the
+-- workspace without one). Rows older than two hours are deleted by the standing job.
+CREATE TABLE hosted_growth_minutes (growth_key text NOT NULL, minute timestamptz NOT NULL, used int NOT NULL DEFAULT 0, PRIMARY KEY (growth_key, minute));
+-- Workspaces graded in the last 72 hours grow like a new evaluation from 1,000 an hour (more than their old daily limit).
+UPDATE sender_standing SET growth_until=calibrated_at+interval '72 hours',growth_cap=1000,growth_hour=date_trunc('hour',now(),'UTC')-interval '1 hour'
+  WHERE phase='graded' AND calibrated_at>now()-interval '72 hours';
+
+-- Real (non-simulator) recipients SES accepted in the rolling 24 hours admission counts: what a freeze keeps. Unlike the
+-- admission counter (hosted_usage_hourly), queued and unsent mail is not in it.
+CREATE FUNCTION hosted_accepted_day(wid text) RETURNS int LANGUAGE sql STABLE AS $$
+  SELECT coalesce(sum(h.accepted),0)::int FROM hosted_health_hourly h WHERE h.workspace_id=wid AND h.hour>=date_trunc('hour',now(),'UTC')-interval '23 hours'
+$$;
+-- A workspace without a daily limit that enters a ladder step, a pause or a resume gets a concrete one at once, so a
+-- resume's 50% and a strike's half always have a number: what SES accepted in the last 24 hours, at least `minimum`.
+-- Overrides keep their precedence (hosted_base_cap reads them first) and an exempt workspace stays without one.
+-- Returns the base it set, or NULL when the workspace already had a limit.
+CREATE FUNCTION hosted_freeze(wid text, minimum int) RETURNS int LANGUAGE sql VOLATILE AS $$
+  UPDATE sender_standing s SET band_limit=f.base,daily_limit=f.base FROM (SELECT greatest(minimum,hosted_accepted_day(wid)) AS base) f, workspaces w
+  WHERE s.workspace_id=wid AND w.id=wid AND s.daily_limit IS NULL AND NOT w.exempt_hosted_quotas RETURNING f.base
+$$;
 
 -- The limit before any resume restore: an active operator override, nothing when exempt, else the standing's limit, NULL
 -- when it has none (first_week only for a workspace the standing job has not seen yet).
@@ -65,11 +89,53 @@ $$;
 -- SES rate a minute (the share campaign planning gives a shared workspace, provider_workspace_limits), at least 500,
 -- today's largest. hosted_burst_ok gives each sending domain half of it (at least 50), and the dispatcher's lease gives
 -- every workspace with queued mail a slot before any gets a second, under the pool's own rate.
+CREATE FUNCTION hosted_pool_pace(wid text) RETURNS int LANGUAGE sql STABLE AS $$
+  SELECT greatest(500,floor(60*coalesce((SELECT max(l.max_send_rate) FROM provider_account_limits l WHERE l.aws_account_id=c.aws_account_id),0)/4)::int)
+  FROM provider_connections c WHERE c.workspace_id=wid AND c.kind='shared'
+$$;
 CREATE OR REPLACE FUNCTION hosted_minute_cap(wid text) RETURNS int LANGUAGE sql STABLE AS $$
-  SELECT CASE WHEN o.daily IS NULL AND s.workspace_id IS NOT NULL AND s.daily_limit IS NULL
-      THEN greatest(500,floor(60*coalesce((SELECT max(l.max_send_rate) FROM provider_account_limits l WHERE l.aws_account_id=c.aws_account_id),0)/4)::int)
+  SELECT CASE WHEN o.daily IS NULL AND s.workspace_id IS NOT NULL AND s.daily_limit IS NULL THEN hosted_pool_pace(wid)
     ELSE greatest(least(500,greatest(50,coalesce(o.daily,s.daily_limit,100)/20)),ceil(o.daily/1440.0)::int) END
   FROM workspaces w JOIN provider_connections c ON c.workspace_id=w.id AND c.kind='shared' LEFT JOIN sender_standing s ON s.workspace_id=w.id
     CROSS JOIN LATERAL (SELECT CASE WHEN w.send_cap_override_expires_at IS NULL OR w.send_cap_override_expires_at>now() THEN w.send_cap_override END AS daily) o
   WHERE w.id=wid
 $$;
+
+-- The growth pace for a growing workspace: its sponsor's key, the hourly allowance and what the sponsor's growing
+-- workspaces were charged in the rolling hour (this minute and the 59 before). No row once growth ended or was lifted.
+CREATE FUNCTION hosted_growth(wid text) RETURNS TABLE(key text, cap int, used int) LANGUAGE sql STABLE AS $$
+  SELECT k.key,s.growth_cap,coalesce((SELECT sum(m.used) FROM hosted_growth_minutes m WHERE m.growth_key=k.key AND m.minute>date_trunc('minute',statement_timestamp())-interval '60 minutes'),0)::int
+  FROM sender_standing s JOIN workspaces w ON w.id=s.workspace_id CROSS JOIN LATERAL (SELECT coalesce(w.quota_sponsor,w.id) AS key) k
+  WHERE s.workspace_id=wid AND s.growth_until>now() AND s.growth_cap IS NOT NULL AND NOT w.exempt_hosted_quotas
+$$;
+
+-- The durable dispatch claim (src/dispatcher.ts), unchanged from 231 except the growth pace: a growing workspace's
+-- recipients count against its sponsor's rolling hour, under the sponsor's current-minute row lock, for every stream.
+CREATE OR REPLACE FUNCTION hosted_burst_ok(wid text,domain_key text,cost int) RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$
+DECLARE cap int; tenant int; dom int; sponsor text; gkey text; gcap int; gused int; tick timestamptz:=date_trunc('minute',statement_timestamp());
+BEGIN
+ IF cost=0 THEN RETURN true; END IF;
+ SELECT hosted_minute_cap(wid), CASE WHEN p.send_cap_override IS NULL OR w.send_cap_override_expires_at<=now() THEN w.quota_sponsor END INTO cap,sponsor
+ FROM hosted_admission_policy p JOIN workspaces w ON w.id=p.workspace_id WHERE p.workspace_id=wid AND NOT p.exempt_hosted_quotas;
+ IF NOT FOUND THEN RETURN true; END IF;
+ INSERT INTO hosted_burst_windows VALUES(wid,'',tick,0) ON CONFLICT DO NOTHING;
+ SELECT CASE WHEN minute=tick THEN used ELSE 0 END INTO tenant FROM hosted_burst_windows WHERE workspace_id=wid AND scope='' FOR UPDATE;
+ SELECT used INTO dom FROM hosted_burst_windows WHERE workspace_id=wid AND scope=domain_key AND minute=tick;
+ IF tenant+cost>cap OR coalesce(dom,0)+cost>greatest(50,cap/2) THEN RETURN false; END IF;
+ SELECT g.key,g.cap INTO gkey,gcap FROM hosted_growth(wid) g;
+ IF gkey IS NOT NULL THEN
+   -- The current minute's row is the sponsor's lock: claims of its growing workspaces count the hour one at a time.
+   INSERT INTO hosted_growth_minutes AS m VALUES(gkey,tick,0) ON CONFLICT ON CONSTRAINT hosted_growth_minutes_pkey DO UPDATE SET used=m.used WHERE false;
+   SELECT coalesce(sum(m.used),0) INTO gused FROM hosted_growth_minutes m WHERE m.growth_key=gkey AND m.minute>tick-interval '60 minutes';
+   IF gused+cost>gcap THEN RETURN false; END IF;
+ END IF;
+ IF sponsor IS NOT NULL THEN
+   INSERT INTO hosted_burst_windows AS b VALUES(sponsor,'#sponsor',tick,cost) ON CONFLICT(workspace_id,scope) DO UPDATE SET
+     minute=tick,used=cost+CASE WHEN b.minute=tick THEN b.used ELSE 0 END WHERE b.minute<>tick OR b.used+cost<=cap;
+   IF NOT FOUND THEN RETURN false; END IF;
+ END IF;
+ UPDATE hosted_burst_windows SET used=tenant+cost,minute=tick WHERE workspace_id=wid AND scope='';
+ INSERT INTO hosted_burst_windows VALUES(wid,domain_key,tick,coalesce(dom,0)+cost) ON CONFLICT(workspace_id,scope) DO UPDATE SET minute=tick,used=excluded.used;
+ IF gkey IS NOT NULL THEN UPDATE hosted_growth_minutes m SET used=m.used+cost WHERE m.growth_key=gkey AND m.minute=tick; END IF;
+ RETURN true;
+END $$;

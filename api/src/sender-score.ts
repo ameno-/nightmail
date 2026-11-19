@@ -3,7 +3,7 @@ import { sql } from 'drizzle-orm';
 import { DASHBOARD_CACHE_NOTE, dashboardRead } from './dashboard-cache.js';
 import { productName } from './brand.js';
 import { actor, ApiError, dashboardSession, requiredOf, unrestrictedRequired, errors, json, response, security, type App, type Runtime } from './core.js';
-import { burstFor, EVALUATION, evaluateLadder, FACTOR_KEYS, FREEZE_FLOOR, GOOD_STANDING, GRADE_BANDS, GRADES, gradeOf, marketingHourFor, nextBand, quality, reserveFor, round, stepRank, STEPS, type DayEvidence, type DomainAuth, type Factor, type Reason, type Step } from './standing-model.js';
+import { burstFor, EVALUATION, evaluateLadder, FACTOR_KEYS, FREEZE_FLOOR, GOOD_STANDING, GROWTH, GRADE_BANDS, GRADES, gradeOf, marketingHourFor, nextBand, quality, reserveFor, round, stepRank, STEPS, type DayEvidence, type DomainAuth, type Factor, type Reason, type Step } from './standing-model.js';
 
 // GET /v1/sender-score reads what the ten-minute standing job stored (src/standing.ts): the score, its factors, the
 // daily limit it sets (none in good standing) and the ladder step. A workspace without a Hosted connection (self-hosted, BYO) has no standing;
@@ -24,7 +24,7 @@ const ReasonSchema = z.object({
   window: z.enum(['24h', '7d']).nullable(), step: z.enum(STEPS), message: z.string(),
 }).openapi('StandingReason');
 export const StandingSchema = z.object({
-  step: z.enum(STEPS).describe(`ok; notice (dashboard only); warn (limit frozen: no rises, and a workspace without one is limited to what it sent in the last 24 hours, at least ${FREEZE_FLOOR.toLocaleString('en-US')}; owners emailed); restrict (marketing held, transactional flows, limit frozen); pause (all sending stopped).`),
+  step: z.enum(STEPS).describe(`ok; notice (dashboard only); warn (limit frozen: no rises, and a workspace without one is limited to what SES accepted from it in the last 24 hours, at least ${FREEZE_FLOOR.toLocaleString('en-US')}; owners emailed); restrict (marketing held, transactional flows, limit frozen); pause (all sending stopped).`),
   reasons: z.array(ReasonSchema), since: z.iso.datetime(),
   pauseKind: z.enum(['bounce', 'full']).nullable().describe('bounce: only transactional bounces paused it, and an owner may resume it once in 30 days. full: complaints, the spam screen, abuse or an AWS tenant pause; an operator reviews it.'),
   marketingHeld: z.boolean(), marketingRelease: z.object({ percent: z.number().int(), until: z.iso.datetime() }).nullable().describe('An owner released a restrict: marketing is at this share of its allowance until then.'),
@@ -43,6 +43,9 @@ const LimitSchema = z.object({
   override: z.object({ daily: z.number().int(), expiresAt: z.iso.datetime().nullable() }).nullable(),
   restore: z.object({ daily: z.number().int(), until: z.iso.datetime() }).nullable().describe('After a resume: the limit is at most this many recipients a day until then (half the limit before the resume, unless an operator restored all of it).'),
   strikeCapUntil: z.iso.datetime().nullable(),
+  growth: z.object({ hourly: z.number().int().describe('Recipients the sponsor\'s growing workspaces may send in a rolling hour now.'), used: z.number().int().describe('Recipients sent in the rolling hour.'),
+    until: z.iso.datetime().describe('When the growth pace ends, after 72 clean hours.') }).nullable()
+    .describe(`For 72 clean hours after the evaluation, while it limits more than the per-minute pace: sending grows from ${GROWTH.start.toLocaleString('en-US')} recipients an hour (shared by the account's workspaces, every stream) to twice the distinct recipients of the last completed hour whose results are in and clean. Null otherwise. Mail over it waits in the queue.`),
   perMinute: z.number().int().describe('Recipients a minute the workspace may send (pacing that protects the shared pool, not a daily limit): clamp(daily ÷ 20, 50, 500), or without a daily limit a quarter of the pool\'s SES rate, at least 500. Half of it per sending domain.'),
   marketingPerHour: z.number().int().describe('Marketing recipients an hour: max(25, daily ÷ 4); without a daily limit, what the per-minute pace allows (perMinute × 60).'),
   transactionalReserve: z.number().int().describe('Recipients of the daily limit marketing may not use, kept for transactional mail: max(100, 10%). 0 without a daily limit.'),
@@ -51,9 +54,9 @@ const SenderScoreSchema = z.object({
   state: z.enum(['warmup', 'graded']).describe(`warmup during the evaluation: until ${EVALUATION.recipients} real recipients were accepted and their delivery results are in (${EVALUATION.resolved * 100}% of them, or an hour after the ${EVALUATION.recipients}th) (Hosted), or the first ${EVALUATION.recipients} emails (self-hosted).`),
   emails: z.object({ firstEmails: z.number().int().describe('Real recipients accepted, counted up to 100.'), last30Days: z.number().int() }),
   needed: z.number().int().describe('Accepted recipients before the first score (100).'),
-  calibratedAt: z.iso.datetime().nullable().describe(`When the ${EVALUATION.recipients}th recipient was counted; the score starts once their delivery results are in, at most an hour later.`),
+  calibratedAt: z.iso.datetime().nullable().describe(`When the ${EVALUATION.recipients}th recipient was counted; the score starts once their delivery results are in, at most an hour later plus the ten-minute job run (gradedBy).`),
   gradedBy: z.iso.datetime().nullable().describe(`Hosted, during the evaluation once the ${EVALUATION.recipients}th recipient was counted: the latest the first grade comes (an hour after it, plus the ten-minute job run), sooner once ${EVALUATION.resolved * 100}% of them have a delivery result. Null otherwise.`),
-  score: z.number().nullable().describe(`0–100, one decimal; null while warming up. The quality of the last 30 days of mail, recomputed every ten minutes: ${GOOD_STANDING} and up has no daily limit.`),
+  score: z.number().nullable().describe(`0–100, one decimal; null while warming up. The quality of the last 30 days of mail, recounted hourly: ${GOOD_STANDING} and up has no daily limit.`),
   grade: z.enum(GRADES).nullable(),
   target: z.number().describe('The score the evidence supports now; the score follows it on every run (the same as raw).'),
   raw: z.number().describe('Quality: the weighted factor result.'),
@@ -70,7 +73,8 @@ export type SenderScore = z.infer<typeof SenderScoreSchema>;
 type Stored = { workspace_id: string; phase: 'seed' | 'calibrating' | 'graded'; first_recipients: number; calibrated_at: string | null; score: string | null; target: string; quality: string;
   factors: Factor[]; band_limit: number | null; daily_limit: number | null; step: Step; reasons: Reason[]; since: string; pause_kind: 'bounce' | 'full' | null; marketing_hold: boolean; release_until: string | null;
   release_percent: number | null; last_release_at: string | null; last_self_resume_at: string | null; strikes: unknown[]; strike_until: string | null; version: number; sequence: number; computed_at: string | null };
-type Row = { standing: Stored | null; history: { date: string; score: number }[]; last30: number; override: number | null; override_expires_at: string | null; exempt: boolean; minute_cap: number | null;
+type Row = { standing: Stored | null; history: { date: string; score: number }[]; last30: number; override: number | null; override_expires_at: string | null; exempt: boolean; minute_cap: number | null; pool_pace: number | null;
+  growth: { cap: number; used: number; until: string } | null;
   restore_until: string | null; restore_cap: number | null; paused_at: string | null; days: DayEvidence[] | null; domains: DomainAuth[] | null; screened: boolean };
 const iso = (v: string | null | undefined) => v ? new Date(v).toISOString() : null;
 /** The standing job runs every ten minutes (standingTick), so an evaluation's wait ends at most this much later. */
@@ -108,7 +112,8 @@ export async function loadStanding(runtime: Runtime, wid: string): Promise<Row> 
         WHERE d.workspace_id=${wid} AND d.score IS NOT NULL AND d.day>(now() AT TIME ZONE 'UTC')::date-14),'[]') AS history,
       coalesce((SELECT sum(d.accepted) FROM sender_score_daily d WHERE d.workspace_id=${wid} AND d.day>(now() AT TIME ZONE 'UTC')::date-30),0)::int AS last30,
       (SELECT send_cap_override FROM workspaces WHERE id=${wid}) AS override,(SELECT send_cap_override_expires_at FROM workspaces WHERE id=${wid}) AS override_expires_at,
-      coalesce((SELECT exempt_hosted_quotas FROM workspaces WHERE id=${wid}),false) AS exempt,(SELECT hosted_minute_cap(${wid}) FROM s) AS minute_cap,
+      coalesce((SELECT exempt_hosted_quotas FROM workspaces WHERE id=${wid}),false) AS exempt,(SELECT hosted_minute_cap(${wid}) FROM s) AS minute_cap,(SELECT hosted_pool_pace(${wid}) FROM s) AS pool_pace,
+      (SELECT json_build_object('cap',g.cap,'used',g.used,'until',(SELECT growth_until FROM s)) FROM hosted_growth(${wid}) g) AS growth,
       (SELECT restore_until FROM pc) AS restore_until,(SELECT restore_cap FROM pc) AS restore_cap,(SELECT CASE WHEN resume_pending_at IS NULL THEN paused_at END FROM pc) AS paused_at,${screened} AND EXISTS (SELECT FROM pc) AS screened,
       (SELECT json_agg(x) FROM (SELECT to_char(day,'YYYY-MM-DD') AS day,count(*)::int AS emails,
         count(*) FILTER (WHERE status<>'suppressed' AND (provider_id IS NOT NULL OR status IN ('accepted','sent','delivered','bounced','complained','delayed') OR event_outcomes & 1 <> 0))::int AS accepted,
@@ -146,7 +151,9 @@ export function scoreView(row: Row, now = new Date()): SenderScore {
   // The pace admission applies (hosted_minute_cap), and what it allows in an hour and a day without a daily limit.
   const perMinute = row.minute_cap ?? burstFor(daily);
   const up = score === null || overrideActive || row.exempt ? null : nextBand(score);
-  const next = up && { limit: up.limit ?? perMinute * 1440, atScore: up.min, unlimited: up.limit === null };
+  const next = up && { limit: up.limit ?? (row.pool_pace ?? burstFor(null)) * 1440, atScore: up.min, unlimited: up.limit === null };
+  // The growth pace, while it is tighter than the per-minute pace's hour.
+  const growth = row.growth && row.growth.cap < perMinute * 60 ? { hourly: row.growth.cap, used: Math.min(row.growth.used, row.growth.cap), until: iso(row.growth.until)! } : null;
   const release = s.release_until && Date.parse(s.release_until) > now.getTime() && s.release_percent ? { percent: s.release_percent, until: iso(s.release_until)! } : null;
   return {
     state: score === null ? 'warmup' : 'graded', emails: { firstEmails: Math.min(s.first_recipients, EVALUATION.recipients), last30Days: row.last30 }, needed: EVALUATION.recipients, calibratedAt: iso(s.calibrated_at),
@@ -154,7 +161,7 @@ export function scoreView(row: Row, now = new Date()): SenderScore {
     score, grade: score === null ? null : gradeOf(score), target: round(Number(s.target)), raw: round(Number(s.quality)), ...grades(score), factors: s.factors, history: row.history.map(h => ({ date: h.date, score: Number(h.score) })),
     limit: { daily, unlimited: daily === null, source: overrideActive ? 'override' : row.exempt ? 'exempt' : score === null ? 'calibrating' : 'score', band: s.band_limit ?? perMinute * 1440, next,
       override: overrideActive ? { daily: row.override!, expiresAt: iso(row.override_expires_at) } : null, restore,
-      strikeCapUntil: s.strike_until && Date.parse(s.strike_until) > now.getTime() ? iso(s.strike_until) : null,
+      strikeCapUntil: s.strike_until && Date.parse(s.strike_until) > now.getTime() ? iso(s.strike_until) : null, growth,
       perMinute, marketingPerHour: daily === null ? perMinute * 60 : marketingHourFor(daily), transactionalReserve: daily === null ? 0 : overrideActive ? Math.ceil(daily * 0.1) : reserveFor(daily) },
     standing: { step: s.step, reasons: s.reasons, since: iso(s.since)!, pauseKind: s.step === 'pause' ? s.pause_kind : null,
       marketingHeld: (stepRank(s.step) >= stepRank('restrict') && !release) || s.marketing_hold, marketingRelease: release, strikes: s.strikes.length,
@@ -184,7 +191,7 @@ export async function protocolScoreCap(runtime: Runtime, w: string) {
 const dashboardSecurity = [{ dashboardSession: [] }, { secureDashboardSession: [] }] as Record<string, string[]>[];
 export function registerSenderScore(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/sender-score', operationId: 'getSenderScore', tags: ['Metrics'], security,
-    description: `The workspace sender score, the daily limit it sets and the enforcement step (Hosted). In good standing (a score of ${GOOD_STANDING} or more, no warning) there is no daily limit: limit.unlimited is true, limit.daily null, and only the per-minute pace (limit.perMinute) applies. A new workspace's first ${EVALUATION.recipients} real recipients are its evaluation, at ${EVALUATION.limit} a day until their delivery results are in (gradedBy says by when). Under ${GOOD_STANDING} the limit is 500 (70–74), 200 (65–69) or 100, and a warning freezes it. The score (0–100) is the quality of what the workspace sends (complaints, the spam screen, bounces, list quality, authentication and engagement), decayed with a 30-day half-life and recomputed every ten minutes. Self-hosted and BYO get the score for display only. ${DASHBOARD_CACHE_NOTE} A change of standing or limit shows at once. Workspace-wide: keys restricted to domains get 403.`,
+    description: `The workspace sender score, the daily limit it sets and the enforcement step (Hosted). In good standing (a score of ${GOOD_STANDING} or more, no warning) there is no daily limit: limit.unlimited is true, limit.daily null, and only the per-minute pace (limit.perMinute) applies. A new workspace's first ${EVALUATION.recipients} real recipients are its evaluation, at ${EVALUATION.limit} a day until their delivery results are in (gradedBy says by when); for 72 clean hours after it, sending grows from ${GROWTH.start.toLocaleString('en-US')} recipients an hour, doubling with each clean hour (limit.growth). Under ${GOOD_STANDING} the limit is 500 (70–74), 200 (65–69) or 100, and a warning freezes it. The score (0–100) is the quality of what the workspace sends (complaints, the spam screen, bounces, list quality, authentication and engagement), decayed with a 30-day half-life and recounted hourly. Self-hosted and BYO get the score for display only. ${DASHBOARD_CACHE_NOTE} A change of standing or limit shows at once. Workspace-wide: keys restricted to domains get 403.`,
     responses: { 200: response(SenderScoreSchema), ...errors } }), async c => {
     const a = actor(c, 'read');
     if (a.domains.length) throw unrestrictedRequired('Workspace-wide operations require a key without domain restrictions.', requiredOf(c, 'read'));

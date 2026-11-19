@@ -61,6 +61,7 @@ export const operatorApi = {
     return { items: page.data, nextCursor: page.nextCursor }
   },
   pause: (workspaceId: string, input: OperatorWhy, guard: OperatorGuard) => write(`/workspaces/${id(workspaceId)}/pause`, 'POST', why(input), guard),
+  liftGrowth: (workspaceId: string, input: OperatorWhy, guard: OperatorGuard) => write(`/workspaces/${id(workspaceId)}/growth/lift`, 'POST', why(input), guard),
   resume: (workspaceId: string, input: OperatorWhy & { restore: 50 | 100 }, guard: OperatorGuard) => write(`/workspaces/${id(workspaceId)}/resume`, 'POST', { ...why(input), restore: input.restore }, guard),
   marketing: (workspaceId: string, input: OperatorWhy & { held: boolean }, guard: OperatorGuard) => write(`/workspaces/${id(workspaceId)}/marketing`, 'PUT', { held: input.held, ...why(input) }, guard),
   limit: (workspaceId: string, input: OperatorWhy & { daily: number | null; expiresAt: string | null }, guard: OperatorGuard) => write(`/workspaces/${id(workspaceId)}/limit`, 'PUT', { daily: input.daily, expiresAt: input.daily === null ? null : input.expiresAt, ...why(input) }, guard),

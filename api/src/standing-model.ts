@@ -6,11 +6,14 @@ import { productName } from './brand.js'
 //   quality       Q = Σ weight·s ÷ Σ weight over measured factors (neutral ones drop out, the rest re-weigh)
 //   evaluation    a new workspace's first 100 real recipients: 100 a day until they were accepted and their delivery
 //                 results are in (90% of them, or an hour after the 100th), then the score is their quality alone
-//   score         Q, recomputed every run from all the evidence (no prior, no daily movement limit): complaints that
-//                 arrive days after the evaluation move it at once
+//   score         Q, recomputed from all the evidence (counted hourly; no prior, no daily movement limit): complaints
+//                 that arrive days after the evaluation move it as soon as they are counted
+//   growth        for 72 clean hours after the evaluation, a sponsor's growing workspaces may send at most 1,000
+//                 recipients in a rolling hour, then twice the distinct recipients of its last mature, clean hour
 //   limit         none at 75 and up (good standing); under it the bands below, dropping only 2 points under a band
 //   ladder        notice → warn → restrict (marketing held) → pause (all sending), each line a count and a rate; a
-//                 step from warn up freezes the limit (none becomes what was sent in 24 hours, at least 10,000)
+//                 step from warn up, a pause or a resume freezes the limit (none becomes what SES accepted in 24 hours,
+//                 at least 10,000), and it stays frozen until the step and any strike reduction are over
 
 export const GRADES = ['A+', 'A', 'B', 'C', 'D', 'F'] as const;
 export type Grade = (typeof GRADES)[number];
@@ -30,8 +33,21 @@ export const LIMIT_BANDS: readonly { min: number; limit: number | null }[] = [
 export const EVALUATION = { recipients: 100, limit: 100, resolved: 0.9, waitMinutes: 60 } as const;
 /** prior: the score with nothing measured at all (no real mail in 180 days). */
 export const SCORE = { prior: 60, halfLifeDays: 30, hysteresis: 2, historyDays: 180 };
-/** From warn up the limit is frozen: a workspace without one gets what it sent in the last 24 hours, at least this. */
+/**
+ * From warn up the limit is frozen: a workspace without one gets what SES accepted from it in the last 24 hours
+ * (hosted_accepted_day: never queued or unsent mail), at least this.
+ */
 export const FREEZE_FLOOR = 10_000;
+/**
+ * Growth after the evaluation, so a clean evaluation cannot be followed by a full-pace blast before any feedback exists.
+ * For 72 clean hours (a ladder step from warn up starts them again) a sponsor's growing workspaces share one rolling-hour
+ * allowance, enforced in the dispatch claim for every stream (hosted_burst_ok): 1,000 recipients, and after each
+ * completed hour that is feedback-mature (90% of its accepted recipients delivered or bounced) and clean (hard bounces
+ * under 2%, no complaints, quality no more than 2 points below the last growth), twice that hour's distinct real
+ * recipients if that is more. Stale feedback, a notice or worse, or worsening quality stop the growth; nothing lowers
+ * it. An operator can lift it for a workspace. A good sender doubles every hour: about a million an hour after ten.
+ */
+export const GROWTH = { start: 1_000, factor: 2, hours: 72, resolved: 0.9, bounceRate: 0.02, qualityDrop: 2 } as const;
 /**
  * Pacing protects the shared pool; it is not a customer limit. With a daily limit: clamp(limit ÷ 20, 50, 500) a minute.
  * Without one: a quarter of the pool's SES rate (the share campaign planning already uses), at least 500 a minute. Half
@@ -255,14 +271,38 @@ export function limitRequest(o: { phase: ScoreState['phase'] | null; step: Step 
 
 /**
  * The limit admission enforces from the standing (before an operator override or a resume's restore); null is none.
- * `band` is the stored band, `usedDay` the recipients of the last 24 hours (what a freeze keeps).
+ * `band` is the stored band, `acceptedDay` what SES accepted in the last 24 hours (what a freeze keeps).
  */
-export function dailyLimit(o: { phase: ScoreState['phase']; score: number | null; band: number | null; step: Step; strikeCapped: boolean; usedDay: number }) {
+export function dailyLimit(o: { phase: ScoreState['phase']; score: number | null; band: number | null; step: Step; strikeCapped: boolean; acceptedDay: number }) {
   if (o.phase !== 'graded' || o.score === null) return { band: EVALUATION.limit as number | null, limit: EVALUATION.limit as number | null };
   let band = bandLimit(o.score, o.band);
-  // From warn up the limit is frozen: no rises until the step clears, and no limit becomes the last 24 hours' volume.
-  const frozen = () => o.band ?? Math.max(FREEZE_FLOOR, o.usedDay);
-  if (stepRank(o.step) >= stepRank('warn')) band = tighter(band, frozen());
-  const limit = o.strikeCapped ? Math.max(EVALUATION.limit, Math.floor((band ?? frozen()) / 2)) : band;
+  // From warn up, and for as long as a strike halves it, the limit is frozen: no rises, and no limit becomes the last
+  // 24 hours' accepted volume. The stored band is the reference, so the halving cannot drift between runs.
+  if (stepRank(o.step) >= stepRank('warn') || o.strikeCapped) band = tighter(band, o.band ?? Math.max(FREEZE_FLOOR, o.acceptedDay));
+  const limit = o.strikeCapped && band !== null ? Math.max(EVALUATION.limit, Math.floor(band / 2)) : band;
   return { band, limit };
+}
+
+/** One completed hour of a sponsor's growing workspaces: real recipients SES accepted, distinct ones, and their results. */
+export type GrowthHour = { accepted: number; distinct: number; resolved: number; bounces: number; complaints: number };
+export type Growth = { until: string | null; cap: number | null; hour: string | null; quality: number | null };
+export const NO_GROWTH: Growth = { until: null, cap: null, hour: null, quality: null };
+/**
+ * The next growth state. `graduated`: the evaluation ended in this run. `hour` is the last completed hour (its start)
+ * and `evidence` its figures, when the caller counted them (null: not counted, nothing to learn from it).
+ */
+export function nextGrowth(prev: Growth, o: { graduated: boolean; step: Step; quality: number; hour: string; evidence: GrowthHour | null; now: Date }): Growth {
+  const later = new Date(o.now.getTime() + GROWTH.hours * 3600_000).toISOString();
+  if (o.graduated) return { until: later, cap: GROWTH.start, hour: o.hour, quality: o.quality };
+  if (!prev.until || Date.parse(prev.until) <= o.now.getTime() || prev.cap === null) return NO_GROWTH;
+  // A ladder step from warn up starts the 72 clean hours again; nothing grows meanwhile.
+  if (stepRank(o.step) >= stepRank('warn')) return { ...prev, until: Date.parse(prev.until) < Date.parse(later) ? later : prev.until };
+  const e = o.evidence;
+  if (o.step !== 'ok' || !e || (prev.hour !== null && Date.parse(o.hour) <= Date.parse(prev.hour))) return prev;
+  if (!e.accepted) return { ...prev, hour: o.hour };
+  // Stale feedback: wait for the hour's results (the next run counts it again).
+  if (e.resolved < GROWTH.resolved * e.accepted) return prev;
+  const clean = e.bounces < GROWTH.bounceRate * e.accepted && e.complaints === 0 && o.quality >= (prev.quality ?? 0) - GROWTH.qualityDrop;
+  if (!clean) return { ...prev, hour: o.hour };
+  return { ...prev, hour: o.hour, quality: o.quality, cap: Math.max(prev.cap, GROWTH.factor * e.distinct) };
 }

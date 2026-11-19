@@ -4,7 +4,7 @@ import { actor, actorMailAccess, ApiError, errors, requiredOf, unrestrictedRequi
 import { DASHBOARD_CACHE_NOTE, dashboardRead } from './dashboard-cache.js';
 import { hostedAllowance, type HostedAllowance } from './hosted-sending.js';
 import { RATES } from './billing/money.js';
-import { EVALUATION, GOOD_STANDING } from './standing-model.js';
+import { EVALUATION, GOOD_STANDING, GROWTH } from './standing-model.js';
 
 // Plan & usage (hosted only): what the dashboard's Plan & usage page and an agent need to answer "what does this cost
 // and how much can I send". The prices are billing's (billing/money.ts RATES); billing.enforcement says whether usage is
@@ -46,7 +46,7 @@ const Usage = z.object({
 }).openapi('Usage');
 
 export function usageSteps(caps: { firstWeek: number }): z.infer<typeof Step>[] {
-  return [{ cap: caps.firstWeek, requires: `The evaluation: a new workspace's first ${EVALUATION.recipients} real recipients. It ends once their delivery results are in, at most an hour after the ${EVALUATION.recipients}th.` }];
+  return [{ cap: caps.firstWeek, requires: `The evaluation: a new workspace's first ${EVALUATION.recipients} real recipients. It ends once their delivery results are in, about an hour after the ${EVALUATION.recipients}th; then sending grows from ${GROWTH.start.toLocaleString('en-US')} recipients an hour for ${GROWTH.hours} clean hours.` }];
 }
 export const PRICING = { currency: 'USD', perThousand: Number(RATES.emailUc) * 1000 / 100_000_000, freeEmails: RATES.freeSentEmails, freeSentEmails: RATES.freeSentEmails, freeReceivedEmails: RATES.freeReceivedEmails, freeStorageBytes: Number(RATES.freeStorageBytes) } as const;
 

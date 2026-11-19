@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { Disclosure } from '../../components/ui'
 import type { SenderLimit } from '../../data/types'
 import { number } from '../../lib/format'
-import { EVALUATION, FREEZE_FLOOR, GRADE_BANDS, LADDER, LIMIT_BANDS, PACE, SCORE, burstFor, pct } from '../../../../api/src/standing-model'
+import { EVALUATION, FREEZE_FLOOR, GRADE_BANDS, GROWTH, LADDER, LIMIT_BANDS, PACE, SCORE, burstFor, pct } from '../../../../api/src/standing-model'
 import './limits.css'
 
 // How sending limits work: the published score → limit table, the warning lines as one table (a rate and a count for
@@ -37,7 +37,7 @@ const lines: [what: string, warn: string, restrict: string, pause: string][] = [
 // What each step does, then how it ends.
 const ladder: { step: string; mark: string; tone: string; does: string; recovery: string }[] = [
   { step: 'Notice', mark: '·', tone: 'neutral', does: 'A first complaint or a few bounces adds a dashboard note.', recovery: 'It clears by itself.' },
-  { step: 'Warn', mark: '1', tone: 'warning', does: `The limit is frozen (without one, at the last 24 hours, at least ${FREEZE_FLOOR.toLocaleString('en-US')}). Owners and admins get an email.`, recovery: 'Clears after 24 hours under 80% of the line.' },
+  { step: 'Warn', mark: '1', tone: 'warning', does: `The limit is frozen (without one, at the last 24 hours’ accepted mail, at least ${FREEZE_FLOOR.toLocaleString('en-US')}). Owners and admins get an email.`, recovery: 'Clears after 24 hours under 80% of the line.' },
   { step: 'Restrict', mark: '2', tone: 'warning', does: 'Marketing is held; receipts and resets still send.', recovery: 'After 24 hours owners and admins can release it from Overview: 50% for 48 hours, once per 14 days.' },
   { step: 'Pause', mark: '3', tone: 'danger', does: 'Sending stops. Queued mail is canceled after 72 hours.', recovery: 'A pause from transactional bounces alone: owners can resume it at 50% for 48 hours, once per 30 days. Others need a review.' },
 ]
@@ -56,7 +56,7 @@ export function SendingLimitsGuide({ headings = 'h3', limit, compact = false }: 
         <tbody>{bands.map(([score, cap, current]) => <tr key={score} aria-current={limit && current(limit) ? 'true' : undefined}><td>{score}{limit && current(limit) && <span className="limits-table__now">Now</span>}</td><td>{cap === null ? 'None' : number(cap)}</td><td>{cap === null ? `${number(PACE.uncappedFloor)}+` : number(burstFor(cap))}</td></tr>)}</tbody>
       </table></div>
       <ul className="limits-notes">
-        <li>The first {EVALUATION.recipients} wait for their delivery results, at most an hour.</li>
+        <li>The first {EVALUATION.recipients} wait for their results, about an hour. Then sending grows from {number(GROWTH.start)} an hour for {GROWTH.hours} hours.</li>
         <li>Under a limit, 100 or 10% is kept for receipts. A band drops {SCORE.hysteresis} points under its floor.</li>
       </ul>
     </section>

@@ -1,4 +1,5 @@
 import { sql, type SQL } from 'drizzle-orm';
+import { FREEZE_FLOOR } from './standing-model.js';
 import type { GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
 import { id, type DbExecutor } from './core.js';
 import type { MxReport } from './db/mailbox.js';
@@ -390,7 +391,8 @@ export type HostedResume = { reason: string; percent?: 50 | 100; via?: 'script' 
  */
 const resumeConnection = (wid: string, percent: number, caps: HostedCaps) => sql`previous AS MATERIALIZED (
     SELECT pc.id,pc.paused_at,pc.pause_reason,pc.marketing_held_at,pc.marketing_hold_reason,CASE WHEN pc.restore_until>now() THEN pc.restore_cap END AS active_cap,
-      hosted_base_cap(${wid},${caps.firstWeek},${caps.secondWeek},${caps.mature}) AS base,
+      -- A workspace without a daily limit gets its frozen one here at the latest (hosted_freeze), so the 50% has a base.
+      coalesce(hosted_base_cap(${wid},${caps.firstWeek},${caps.secondWeek},${caps.mature}),hosted_freeze(${wid},${FREEZE_FLOOR})) AS base,
       pc.paused_at IS NOT NULL AND (EXISTS (SELECT FROM hosted_tenant_status t WHERE t.connection_id=pc.id AND t.applied<>'ENABLED')
         OR EXISTS (SELECT FROM jobs j WHERE j.id='hosted.tenantStatus:'||pc.workspace_id AND j.status='running')) AS enable_first
     FROM provider_connections pc WHERE pc.workspace_id=${wid} AND pc.kind='shared' AND (pc.paused_at IS NOT NULL OR pc.marketing_held_at IS NOT NULL) FOR UPDATE

@@ -253,13 +253,15 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
     ) heads ORDER BY workspace_id LIMIT 1`;
   const queuedOwners = sql`SELECT n.workspace_id,1 FROM (${seek(sql`${gate.ownerCursor??''}`)}) n
       UNION ALL SELECT n.workspace_id,o.step+1 FROM queued_owners o CROSS JOIN LATERAL (${seek(sql`o.workspace_id`)}) n WHERE o.step<${limit}`;
-  const ownersSql = mx ? sql`SELECT q.workspace_id,hosted_marketing_held(q.workspace_id) AS marketing_held ${liveMx?sql`,cap,cap-coalesce(b.used,0) AS remaining,pc.kind='shared' AS required_screen,
+  const ownersSql = mx ? sql`SELECT q.workspace_id,hosted_marketing_held(q.workspace_id) AS marketing_held ${liveMx?sql`,p.cap,least(p.cap-coalesce(b.used,0),g.cap-g.used) AS remaining,pc.kind='shared' AS required_screen,
     (${!!runtime.config.trustedPool} AND pc.pool_tier='trusted' AND NOT pc.legacy_names) AS trusted`:sql``}
     FROM queued_owners q JOIN ${sendingConnections(runtime)} pc USING(workspace_id)
     ${liveMx?sql`LEFT JOIN workspaces w ON w.id=q.workspace_id LEFT JOIN hosted_burst_windows b ON b.workspace_id=q.workspace_id AND b.scope='' AND b.minute=${tick}
-      CROSS JOIN LATERAL (SELECT CASE WHEN pc.kind='shared' AND NOT w.exempt_hosted_quotas THEN hosted_minute_cap(q.workspace_id) END AS cap) p`:sql``}
+      CROSS JOIN LATERAL (SELECT CASE WHEN pc.kind='shared' AND NOT w.exempt_hosted_quotas THEN hosted_minute_cap(q.workspace_id) END AS cap) p
+      -- A new sender's growth pace (sponsor-wide rolling hour): an owner it has used up is not leased, so nothing is prepared or screened for it.
+      LEFT JOIN LATERAL hosted_growth(q.workspace_id) g ON pc.kind='shared'`:sql``}
     WHERE pc.region=${region} AND pc.aws_account_id=${accountId} AND pc.paused_at IS NULL AND hosted_sponsor_hold(q.workspace_id) IS DISTINCT FROM 'pause'
-      ${liveMx?sql`AND (cap IS NULL OR cap-coalesce(b.used,0)>0)`:sql``}` : sql`SELECT workspace_id,false AS marketing_held FROM queued_owners`;
+      ${liveMx?sql`AND (p.cap IS NULL OR p.cap-coalesce(b.used,0)>0) AND (g.key IS NULL OR g.cap-g.used>0)`:sql``}` : sql`SELECT workspace_id,false AS marketing_held FROM queued_owners`;
   const result = await runtime.db.execute<Record<string, unknown>>(sql`WITH RECURSIVE queued_owners(workspace_id,step) AS (${queuedOwners}), owners AS MATERIALIZED (${ownersSql}), candidates AS (
       SELECT o.workspace_id, row_number() OVER (ORDER BY q.turn, q.transactional DESC, q.created_at, q.id) AS place FROM owners o CROSS JOIN LATERAL (
         SELECT p.*,row_number() OVER (ORDER BY transactional DESC,created_at,id) AS turn FROM (${page(sql`${limit}`)}) p

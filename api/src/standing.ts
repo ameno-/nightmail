@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import { ApiError, id, isSimulatedSes, log, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { enqueue, retryDatabaseFailures } from './jobs.js';
 import { queueTenantStatus, resumeHostedConnection, tenantStatusDrift, terminalColumns, terminalEvents, type HostedCaps } from './states.js';
-import { dailyLimit, evaluated, FREEZE_FLOOR, moveScore, nextStanding, quality, stepRank, type DayEvidence, type DomainAuth, type Factor, type LadderInput, type Reason, type ScoreState, type Step, type Window } from './standing-model.js';
+import { dailyLimit, evaluated, FREEZE_FLOOR, GROWTH, moveScore, nextGrowth, nextStanding, quality, stepRank, type DayEvidence, type GrowthHour, type DomainAuth, type Factor, type LadderInput, type Reason, type ScoreState, type Step, type Window } from './standing-model.js';
 import { productName } from './brand.js';
 
 // The standing job: every ten minutes it counts each Hosted workspace's mail, moves its score, sets the daily limit
@@ -16,6 +16,7 @@ export type StandingRow = {
   target: string; quality: string; volume: number; factors: Factor[]; band_limit: number | null; daily_limit: number | null; step: Step; reasons: Reason[]; since: string; clear_since: string | null;
   pause_kind: 'bounce' | 'full' | null; marketing_hold: boolean; release_until: string | null; release_percent: number | null; last_release_at: string | null; last_self_resume_at: string | null;
   strikes: { at: string; reason: string; kind: string }[]; strike_until: string | null; watch: boolean; notified: Record<string, string>; evidence_at: string | null; computed_at: string | null; version: number; sequence: number;
+  growth_until: string | null; growth_cap: number | null; growth_hour: string | null; growth_quality: string | null;
 };
 export type Change = {
   workspaceId: string; actor: StandingActor; kind: 'step' | 'limit' | 'quarantine' | 'release' | 'tenant' | 'operator';
@@ -62,6 +63,10 @@ export async function applyChange(db: DbExecutor, change: Change): Promise<{ eve
     last_release_at=${change.touch?.lastRelease ? at : row.last_release_at}::timestamptz,last_self_resume_at=${change.touch?.lastSelfResume ? at : row.last_self_resume_at}::timestamptz,
     strikes=${JSON.stringify(strikes)}::jsonb,strike_until=${strikeUntil}::timestamptz,watch=${change.watch ?? row.watch},
     version=${version},sequence=${sequence} WHERE workspace_id=${wid}`);
+  // A workspace without a daily limit gets a concrete one as it enters a step from warn up, a pause or a resume
+  // (hosted_freeze: what SES accepted in 24 hours, at least the floor), so the resume's 50% below and a strike's half
+  // always have a number and admission reads it at once.
+  if (!row.exempt && (stepRank(step) >= stepRank('warn') || change.pause || change.resume)) await db.execute(sql`SELECT hosted_freeze(${wid},${FREEZE_FLOOR})`);
   // A pause bumps the tenant generation, so the SES tenant job disables the tenants even if a resume was in flight.
   if (change.pause && !row.paused_at) {
     await db.execute(sql`UPDATE provider_connections SET paused_at=clock_timestamp(),pause_reason=${change.pause.message},resume_pending_at=NULL,tenant_generation=tenant_generation+1 WHERE id=${row.connection_id}`);
@@ -100,7 +105,8 @@ export async function applyChange(db: DbExecutor, change: Change): Promise<{ eve
 }
 
 // ---------- the job ----------
-type Candidate = StandingRow & { connection_id: string; paused_at: string | null; pause_reason: string | null; marketing_hold_reason: string | null; legacy_hold: boolean; exempt: boolean; screened_workspace: boolean; accepted_total: number; used_day: number;
+type Candidate = StandingRow & { connection_id: string; paused_at: string | null; pause_reason: string | null; marketing_hold_reason: string | null; legacy_hold: boolean; exempt: boolean; screened_workspace: boolean; accepted_total: number; accepted_day: number;
+  sponsor_key: string; pace: number | null;
   days: DayEvidence[] | null; domains: DomainAuth[] | null; win: { day: Window; week: Window } | null; screen: { screened: number; rejected: number } | null };
 const MAIL_ACCEPTED = sql`e.status<>'suppressed' AND (e.provider_id IS NOT NULL OR e.status IN ('accepted','sent','delivered','bounced','complained','delayed') OR e.event_outcomes & 1 <> 0)`;
 /**
@@ -151,6 +157,27 @@ async function refreshEvidence(db: DbExecutor, limit: number) {
   return r?.n ?? 0;
 }
 
+/**
+ * One completed hour of a sponsor's growing workspaces (the growth pace's evidence): real recipients of the mail SES
+ * accepted in it (by its acceptance events), how many distinct ones (repeating a recipient grows nothing), and how many
+ * of them have a delivery result, bounced or complained. Bounded by the allowance it can raise (src/standing-model.ts GROWTH).
+ */
+async function growthHour(runtime: Runtime, key: string, hour: string): Promise<GrowthHour> {
+  const { rows: [r] } = await runtime.db.execute<GrowthHour>(sql`WITH members AS (
+      SELECT w.id FROM workspaces w JOIN sender_standing s ON s.workspace_id=w.id AND s.growth_until>now() WHERE coalesce(w.quota_sponsor,w.id)=${key}
+    ), accepted AS (
+      SELECT DISTINCT v.workspace_id,v.email_id FROM members m JOIN sending_email_events v ON v.workspace_id=m.id AND v.created_at>=${hour}::timestamptz
+        AND v.created_at<${hour}::timestamptz+interval '1 hour' AND v.type IN ('accepted','send') AND NOT v.simulated
+    ), recipients AS (
+      SELECT lower(x) AS address,(e.status='delivered' OR e.event_outcomes & 2 <> 0) AS delivered,(e.status='bounced' OR e.event_outcomes & 4 <> 0) AS bounced,
+        (e.status='complained' OR e.event_outcomes & 8 <> 0) AS complained
+      FROM accepted a JOIN sending_emails e ON e.workspace_id=a.workspace_id AND e.id=a.email_id AND NOT e.simulated
+      CROSS JOIN LATERAL jsonb_array_elements_text(e.to_addresses||e.cc_addresses||e.bcc_addresses) x WHERE lower(x) NOT LIKE '%@simulator.amazonses.com'
+    ) SELECT count(*)::int AS accepted,count(DISTINCT address)::int AS "distinct",count(*) FILTER (WHERE delivered OR bounced)::int AS resolved,
+      count(*) FILTER (WHERE bounced)::int AS bounces,count(*) FILTER (WHERE complained)::int AS complaints FROM recipients`);
+  return { accepted: r?.accepted ?? 0, distinct: r?.distinct ?? 0, resolved: r?.resolved ?? 0, bounces: r?.bounces ?? 0, complaints: r?.complaints ?? 0 };
+}
+
 const PAUSE_LEAD: Record<Reason['metric'], string> = { complaints: 'high spam-complaint rate', screen: 'the content screen rejected a high share of mail',
   transactional_bounces: 'high hard-bounce rate on transactional mail', bounces: 'high hard-bounce rate', marketing_bounces: 'high hard-bounce rate on marketing mail', external: 'paused' };
 const zero: Window = { accepted: 0, bounces: 0, complaints: 0, marketingAccepted: 0, marketingBounces: 0, marketingComplaints: 0 };
@@ -168,8 +195,8 @@ async function candidates(runtime: Runtime, limit: number, only?: string) {
     SELECT c.*,pc.id AS connection_id,CASE WHEN pc.resume_pending_at IS NULL THEN pc.paused_at END AS paused_at,pc.pause_reason,
       pc.marketing_held_at IS NOT NULL AS legacy_hold,pc.marketing_hold_reason,(SELECT exempt_hosted_quotas FROM workspaces WHERE id=c.workspace_id) AS exempt,${screened} AND pc.kind='shared' AS screened_workspace,
       (SELECT coalesce(sum(accepted),0)::int FROM sender_score_daily d WHERE d.workspace_id=c.workspace_id) AS accepted_total,
-      -- The rolling 24 hours admission counts (hosted_allowance_read): what a ladder step freezes a workspace without a limit at.
-      (SELECT coalesce(sum(u.recipients),0)::int FROM hosted_usage_hourly u WHERE u.workspace_id=c.workspace_id AND u.hour>=date_trunc('hour',now(),'UTC')-interval '23 hours') AS used_day,
+      -- What SES accepted in the rolling 24 hours: what a ladder step freezes a workspace without a limit at.
+      hosted_accepted_day(c.workspace_id) AS accepted_day,(SELECT coalesce(quota_sponsor,id) FROM workspaces WHERE id=c.workspace_id) AS sponsor_key,hosted_minute_cap(c.workspace_id) AS pace,
       (SELECT json_agg(d ORDER BY d.day) FROM sender_score_daily d WHERE d.workspace_id=c.workspace_id AND d.day>=(now() AT TIME ZONE 'UTC')::date-180) AS days,
       (SELECT json_agg(json_build_object('name',name,'dkim',identity #>> '{ses,DkimAttributes,Status}'='SUCCESS' AND identity #>> '{ses,DkimAttributes,SigningEnabled}'='true',
         'mailFrom',identity #>> '{ses,MailFromAttributes,MailFromDomainStatus}'='SUCCESS','dmarc',identity #>> '{dmarc,status}','emails',0))
@@ -214,6 +241,7 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
   await refreshEvidence(runtime.db, options.only ? 1 : 200);
   const rows = await candidates(runtime, limit, options.only);
   const today = now.toISOString().slice(0, 10), routine: Record<string, unknown>[] = [];
+  const lastHour = new Date(Math.floor(now.getTime() / 3600_000) * 3600_000 - 3600_000).toISOString();
   let changed = 0;
   for (const row of rows) {
     const q = quality(row.days ?? [], row.domains ?? [], row.screened_workspace, today);
@@ -237,7 +265,11 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
       next = { ...next, step: 'warn', pauseKind: null, ...(prev.step === 'warn' ? { since: prev.since } : {}) };
     }
     const strikeCapped = !!row.strike_until && Date.parse(row.strike_until) > now.getTime();
-    const limits = dailyLimit({ phase: moved.phase, score: moved.score, band: row.band_limit, step: next.step, strikeCapped, usedDay: Number(row.used_day) });
+    const limits = dailyLimit({ phase: moved.phase, score: moved.score, band: row.band_limit, step: next.step, strikeCapped, acceptedDay: Number(row.accepted_day) });
+    // The growth pace: the last completed hour is counted only while it can still raise an allowance that limits.
+    const was = { until: row.growth_until, cap: row.growth_cap, hour: row.growth_hour && new Date(row.growth_hour).toISOString(), quality: row.growth_quality === null ? null : Number(row.growth_quality) };
+    const counts = !!was.until && Date.parse(was.until) > now.getTime() && was.cap !== null && next.step === 'ok' && (row.pace === null || was.cap < 60 * row.pace) && (!was.hour || Date.parse(lastHour) > Date.parse(was.hour));
+    const growth = nextGrowth(was, { graduated: row.phase === 'calibrating' && moved.phase === 'graded', step: next.step, quality: q.quality, hour: lastHour, evidence: counts ? await growthHour(runtime, row.sponsor_key, lastHour) : null, now });
     // An owner's marketing release and an operator's hold after a self-resume both end on their own.
     const releaseExpired = !!row.release_until && Date.parse(row.release_until) <= now.getTime();
     if (next.step !== prev.step || releaseExpired || row.legacy_hold) {
@@ -263,16 +295,18 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
       SELECT ${id('stev')},workspace_id,sequence,'limit',step,step,'{"kind":"system","via":"job"}'::jsonb,${JSON.stringify({ from: row.daily_limit, to: limits.limit, score: moved.score })}::jsonb FROM s`);
     routine.push({ workspace_id: row.workspace_id, phase: moved.phase, first_recipients: moved.firstRecipients, calibrated_at: moved.calibratedAt, score: moved.score, day_score: moved.dayScore, score_day: moved.scoreDay,
       target: q.target, quality: q.quality, volume: q.volume, factors: q.factors, band_limit: limits.band, daily_limit: limits.limit, clear_since: next.step === prev.step ? next.clearSince : null,
-      strike_until: strikeCapped ? row.strike_until : null, step: next.step });
+      strike_until: strikeCapped ? row.strike_until : null, step: next.step, growth_until: growth.until, growth_cap: growth.cap, growth_hour: growth.hour, growth_quality: growth.quality });
   }
   if (routine.length) await runtime.db.execute(sql`WITH r AS (SELECT * FROM jsonb_to_recordset(${JSON.stringify(routine)}::jsonb) AS r(workspace_id text,phase text,first_recipients int,calibrated_at timestamptz,
-      score numeric,day_score numeric,score_day date,target numeric,quality numeric,volume double precision,factors jsonb,band_limit int,daily_limit int,clear_since timestamptz,strike_until timestamptz,step text)),
+      score numeric,day_score numeric,score_day date,target numeric,quality numeric,volume double precision,factors jsonb,band_limit int,daily_limit int,clear_since timestamptz,strike_until timestamptz,step text,
+      growth_until timestamptz,growth_cap int,growth_hour timestamptz,growth_quality numeric)),
     updated AS (UPDATE sender_standing s SET phase=r.phase,first_recipients=r.first_recipients,calibrated_at=r.calibrated_at,score=r.score,day_score=r.day_score,score_day=r.score_day,target=r.target,
       quality=r.quality,volume=r.volume,factors=r.factors,band_limit=r.band_limit,daily_limit=r.daily_limit,clear_since=CASE WHEN s.step=r.step THEN r.clear_since ELSE s.clear_since END,
-      strike_until=r.strike_until,computed_at=now() FROM r WHERE s.workspace_id=r.workspace_id RETURNING s.*)
+      strike_until=r.strike_until,growth_until=r.growth_until,growth_cap=r.growth_cap,growth_hour=r.growth_hour,growth_quality=r.growth_quality,computed_at=now() FROM r WHERE s.workspace_id=r.workspace_id RETURNING s.*)
     INSERT INTO sender_score_daily(workspace_id,day,score,quality,target,daily_limit,step) SELECT workspace_id,(now() AT TIME ZONE 'UTC')::date,score,quality,target,daily_limit,step FROM updated
     ON CONFLICT(workspace_id,day) DO UPDATE SET score=excluded.score,quality=excluded.quality,target=excluded.target,daily_limit=excluded.daily_limit,step=excluded.step`);
   await settlePaused(runtime);
+  await runtime.db.execute(sql`DELETE FROM hosted_growth_minutes WHERE minute<now()-interval '2 hours'`);
   // Any workspace whose SES tenants differ from what Nightmail wants (a missed job, a tenant ready after the pause) is queued.
   if (!options.only) await runtime.db.execute(queueTenantStatus(tenantStatusDrift()));
   return { evaluated: rows.length, changed };
@@ -373,7 +407,7 @@ export function noticeText(o: { workspace: string; step: Step; reasons: Reason[]
   const did = o.quarantine ? `${productName} paused the campaign "${o.quarantine.campaign}". Your other mail is unaffected.`
     : o.step === 'pause' ? `${productName} paused all sending from this workspace. Receiving, inboxes, reads and the dashboard keep working. Queued mail is held for 72 hours, then canceled.`
     : o.step === 'restrict' ? `${productName} holds marketing (campaigns and marketing sends). Receipts, password resets and other transactional mail still send.`
-    : `Nothing is held yet. Until this clears your daily limit is frozen: it will not rise, and a workspace without one is limited to what it sent in the last 24 hours (at least ${FREEZE_FLOOR.toLocaleString('en-US')}).`;
+    : `Nothing is held yet. Until this clears your daily limit is frozen: it will not rise, and a workspace without one is limited to what SES accepted from it in the last 24 hours (at least ${FREEZE_FLOOR.toLocaleString('en-US')}).`;
   const fix = o.quarantine ? ['Remove the contacts that bounced and any you have not mailed before.', 'Check where the list came from and that every contact opted in.', 'Resume the campaign from its page, or ask for a review.']
     : ['Find the campaign or domain named above and stop sending to the addresses that bounced or complained.', 'Remove contacts you cannot show opted in, and old or bought lists.', o.step === 'warn' ? 'Keep sending as usual: the warning clears by itself after 24 hours under the line.' : 'Open the dashboard to follow the checklist, release it when allowed, or ask for a review.'];
   const base = o.origin.replace(/\/$/, '')

@@ -6940,7 +6940,7 @@
               "null"
             ],
             "format": "date-time",
-            "description": "When the 100th recipient was counted; the score starts once their delivery results are in, at most an hour later."
+            "description": "When the 100th recipient was counted; the score starts once their delivery results are in, at most an hour later plus the ten-minute job run (gradedBy)."
           },
           "gradedBy": {
             "type": [
@@ -6955,7 +6955,7 @@
               "number",
               "null"
             ],
-            "description": "0–100, one decimal; null while warming up. The quality of the last 30 days of mail, recomputed every ten minutes: 75 and up has no daily limit."
+            "description": "0–100, one decimal; null while warming up. The quality of the last 30 days of mail, recounted hourly: 75 and up has no daily limit."
           },
           "grade": {
             "type": [
@@ -7253,6 +7253,33 @@
             ],
             "format": "date-time"
           },
+          "growth": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "hourly": {
+                "type": "integer",
+                "description": "Recipients the sponsor's growing workspaces may send in a rolling hour now."
+              },
+              "used": {
+                "type": "integer",
+                "description": "Recipients sent in the rolling hour."
+              },
+              "until": {
+                "type": "string",
+                "format": "date-time",
+                "description": "When the growth pace ends, after 72 clean hours."
+              }
+            },
+            "required": [
+              "hourly",
+              "used",
+              "until"
+            ],
+            "description": "For 72 clean hours after the evaluation, while it limits more than the per-minute pace: sending grows from 1,000 recipients an hour (shared by the account's workspaces, every stream) to twice the distinct recipients of the last completed hour whose results are in and clean. Null otherwise. Mail over it waits in the queue."
+          },
           "perMinute": {
             "type": "integer",
             "description": "Recipients a minute the workspace may send (pacing that protects the shared pool, not a daily limit): clamp(daily ÷ 20, 50, 500), or without a daily limit a quarter of the pool's SES rate, at least 500. Half of it per sending domain."
@@ -7275,6 +7302,7 @@
           "override",
           "restore",
           "strikeCapUntil",
+          "growth",
           "perMinute",
           "marketingPerHour",
           "transactionalReserve"
@@ -7296,7 +7324,7 @@
               "restrict",
               "pause"
             ],
-            "description": "ok; notice (dashboard only); warn (limit frozen: no rises, and a workspace without one is limited to what it sent in the last 24 hours, at least 10,000; owners emailed); restrict (marketing held, transactional flows, limit frozen); pause (all sending stopped)."
+            "description": "ok; notice (dashboard only); warn (limit frozen: no rises, and a workspace without one is limited to what SES accepted from it in the last 24 hours, at least 10,000; owners emailed); restrict (marketing held, transactional flows, limit frozen); pause (all sending stopped)."
           },
           "reasons": {
             "type": "array",
@@ -41498,7 +41526,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "The workspace sender score, the daily limit it sets and the enforcement step (Hosted). In good standing (a score of 75 or more, no warning) there is no daily limit: limit.unlimited is true, limit.daily null, and only the per-minute pace (limit.perMinute) applies. A new workspace's first 100 real recipients are its evaluation, at 100 a day until their delivery results are in (gradedBy says by when). Under 75 the limit is 500 (70–74), 200 (65–69) or 100, and a warning freezes it. The score (0–100) is the quality of what the workspace sends (complaints, the spam screen, bounces, list quality, authentication and engagement), decayed with a 30-day half-life and recomputed every ten minutes. Self-hosted and BYO get the score for display only. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. A change of standing or limit shows at once. Workspace-wide: keys restricted to domains get 403.",
+        "description": "The workspace sender score, the daily limit it sets and the enforcement step (Hosted). In good standing (a score of 75 or more, no warning) there is no daily limit: limit.unlimited is true, limit.daily null, and only the per-minute pace (limit.perMinute) applies. A new workspace's first 100 real recipients are its evaluation, at 100 a day until their delivery results are in (gradedBy says by when); for 72 clean hours after it, sending grows from 1,000 recipients an hour, doubling with each clean hour (limit.growth). Under 75 the limit is 500 (70–74), 200 (65–69) or 100, and a warning freezes it. The score (0–100) is the quality of what the workspace sends (complaints, the spam screen, bounces, list quality, authentication and engagement), decayed with a 30-day half-life and recounted hourly. Self-hosted and BYO get the score for display only. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. A change of standing or limit shows at once. Workspace-wide: keys restricted to domains get 403.",
         "responses": {
           "200": {
             "description": "Success",

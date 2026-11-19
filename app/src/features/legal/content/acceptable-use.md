@@ -93,7 +93,7 @@ Don't:
 Most problems are handled by Nightmail's automatic sender score. It moves through steps, from least to most serious:
 
 1. **Notice.** A note on your score card, for a first complaint or a few bounces. Nothing changes.
-2. **Warn.** We email owners and admins. Your daily limit is frozen: it can't rise, and without one you're limited to what you sent in the last 24 hours (at least 10,000). It clears by itself after a day of good sending.
+2. **Warn.** We email owners and admins. Your daily limit is frozen: it can't rise, and without one you're limited to what was accepted for delivery in the last 24 hours (at least 10,000). It clears by itself after a day of good sending.
 3. **Restrict.** We hold your **marketing** mail and pause campaigns. Transactional mail (receipts, password resets) keeps flowing. You can resume from the dashboard after fixing the cause, at a reduced rate at first.
 4. **Pause.** **All sending stops.** Your inboxes, receiving and dashboard keep working. Queued mail waits 72 hours, then is canceled. Some pauses you can lift yourself; others need our review.
 
@@ -117,8 +117,9 @@ These are the current limits and thresholds for Hosted sending. We may change th
 | 65–69 | 200 | 50 | 50 |
 | Under 65 | 100 | 50 | 25 |
 
-- A new workspace's first 100 real recipients are its evaluation. It can send no more until their delivery results are in, at most about an hour after the 100th. Its score is then the quality of those 100: good mail has no daily limit from then on.
-- The score is recomputed every 10 minutes from your mail of the last 30 days, recent days counting most. A limit appears only when the score falls under 73, and lifts again at 75.
+- A new workspace's first 100 real recipients are its evaluation. It can send no more until their delivery results are in, about an hour after the 100th. Its score is then the quality of those 100: good mail has no daily limit from then on.
+- For 72 clean hours after the evaluation, sending grows: up to 1,000 recipients an hour across your workspaces at first, then up to twice the distinct recipients of the last hour whose results are in and clean. A good sender doubles every hour; mail over it waits in the queue.
+- The score is recomputed hourly from your mail of the last 30 days, recent days counting most. A limit appears only when the score falls under 73, and lifts again at 75.
 - The per-minute pace protects the shared infrastructure, so one sender can't crowd out the others.
 - Under a daily limit, marketing can use it except a reserve for transactional mail: the larger of 100 or 10% of the limit.
 
