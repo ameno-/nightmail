@@ -94,6 +94,14 @@ Identity is `(issuer, subject)`. An issuer can assert a verified address that th
 
 **Fix:** decide by subject: the sign-in's provider identity for hosted staff (`api/src/account-policy.ts`), an invitation link, `AUTH_ALLOWED_SUBJECTS` when self-hosted, or an operator binding a subject (`scripts/list-signin-attempts.ts`). A line that must name a removed setting, such as the startup refusal, carries `premerge-identity: allowed`.
 
+### Permissions
+
+Every operation states what it needs: `x-nightmail-permission` in `api/openapi.json`, from its row in `api/src/operation-permissions.ts`. A row records what the operation's guards enforce today: a permission and level with the scope, role or kind of credential it also needs, a person, or no credential. The docs and MCP `describe_tool` show it. The acceptance test `permission table` calls every operation with keys, keys limited to addresses, people of each role, an MCP sign-in and agent tokens, and fails when a row admits or refuses a credential that REST does not.
+
+**Fails when** an operation has no `x-nightmail-permission` or an invalid one, or the table has a row for an operation that no longer exists.
+
+**Fix:** add or update the row in the same change as the route or guard, run `bun run sdk` in `api/`, then run the `permission table` acceptance test.
+
 ## Copy and density lint (`build`, `cls`)
 
 Both are ratchets: a baseline holds today's findings, only a new one fails, and a clean local run drops fixed ones from it (`--update-baseline` accepts a deliberate exception). A finding keeps its identity when its line moves or its text is edited in place, and the product's name counts as one neutral word, so a rename is never new.

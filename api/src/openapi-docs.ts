@@ -1,6 +1,7 @@
 import { webhookSignatureGuide } from './webhook-signature-guide.js';
 import type { App } from './core.js';
 import { apiKeyEnv, productName, publicOrigin, sdkPackage } from './brand.js';
+import { permissionExtension, permissionOf } from './operation-permissions.js';
 
 type Json = Record<string, any>;
 const METHODS = ['get', 'post', 'put', 'patch', 'delete'] as const;
@@ -133,6 +134,9 @@ export function createOpenApiDocument(app: App) {
     if (!operation?.operationId) continue;
     // Support routes are internal: in the contract and the SDK for Nightmail's support platform, out of customer docs.
     if (/^\/v1\/support\//.test(path)) operation['x-internal'] = true;
+    // What it needs (operation-permissions.ts). An operation without a row has none, and check-premerge.ts fails on it.
+    const permission = permissionOf(operation.operationId);
+    if (permission) operation[permissionExtension] = permission;
     operation['x-codeSamples'] = [
       { lang: 'TypeScript', label: 'TypeScript SDK', source: sdkSample(document, path, method, pathItem, operation) },
       { lang: 'Shell', label: 'cURL', source: curlSample(document, path, method, pathItem, operation) },
@@ -172,7 +176,8 @@ function operationMarkdown(document: Json, entry: ReturnType<typeof operationEnt
   const body = operation.requestBody?.content?.['application/json']?.schema;
   const responseRows = Object.entries<Json>(operation.responses ?? {}).map(([status, response]) => `| \`${status}\` | ${markdownText(response.description)} | ${response.content?.['application/json']?.schema ? schemaType(document, response.content['application/json'].schema) : '—'} |`).join('\n');
   const samples = Object.fromEntries((operation['x-codeSamples'] ?? []).map((item: Json) => [item.lang, item.source]));
-  return `## ${title(operation.operationId)}\n\n\`${method.toUpperCase()} ${path}\`\n\n${operation.description ?? ''}\n\nOperation ID: \`${operation.operationId}\`\n\n${parameterRows}\n${schemaMarkdown(document, body, 'Request body')}\n### TypeScript SDK\n\n\`\`\`ts\n${samples.TypeScript ?? ''}\n\`\`\`\n\n### cURL\n\n\`\`\`sh\n${samples.Shell ?? ''}\n\`\`\`\n\n### Responses\n\n| Status | Description | Schema |\n| --- | --- | --- |\n${responseRows}\n`;
+  const permission = operation[permissionExtension]?.text;
+  return `## ${title(operation.operationId)}\n\n\`${method.toUpperCase()} ${path}\`\n\n${operation.description ?? ''}\n\nOperation ID: \`${operation.operationId}\`\n\n${permission ? `Permission: ${permission}\n\n` : ''}${parameterRows}\n${schemaMarkdown(document, body, 'Request body')}\n### TypeScript SDK\n\n\`\`\`ts\n${samples.TypeScript ?? ''}\n\`\`\`\n\n### cURL\n\n\`\`\`sh\n${samples.Shell ?? ''}\n\`\`\`\n\n### Responses\n\n| Status | Description | Schema |\n| --- | --- | --- |\n${responseRows}\n`;
 }
 
 // Tag groups in the document's tag order, operations in path order within each.
