@@ -49,11 +49,11 @@ export type ApiError = {
          */
         required?: {
             /**
-             * The permission: sendEmail, sentMail, receivedMail, inboxes, audience (audience and content), receivingRules, configuration or administration (the workspace, its members, invitations and billing).
+             * The permission: sendEmail, sentMail, receivedMail, inboxes, audience (audience and content), receivingRules or configuration.
              */
-            permission?: 'sendEmail' | 'sentMail' | 'receivedMail' | 'inboxes' | 'audience' | 'receivingRules' | 'configuration' | 'administration';
+            permission?: 'sendEmail' | 'sentMail' | 'receivedMail' | 'inboxes' | 'audience' | 'receivingRules' | 'configuration';
             /**
-             * The level of that permission: on (sendEmail), read or write.
+             * The level of that permission: on (sendEmail), read or write. With person alone, what the person's MCP sign-in must be approved for.
              */
             level?: 'on' | 'read' | 'write';
             /**
@@ -61,13 +61,13 @@ export type ApiError = {
              */
             scope?: string;
             /**
-             * The kind of credential: person (a signed-in dashboard session or the person's own MCP sign-in), dashboard (a signed-in dashboard session), signIn (an MCP sign-in), lasting (anything but a temporary agent token) or notDelegated (a dashboard session, or an API key no MCP approval made).
+             * The kind of credential: dashboard (a signed-in dashboard session), signIn (an MCP sign-in), lasting (anything but a temporary agent token) or notDelegated (a dashboard session, or an API key no MCP approval made).
              */
-            credential?: 'person' | 'dashboard' | 'signIn' | 'lasting' | 'notDelegated';
+            credential?: 'dashboard' | 'signIn' | 'lasting' | 'notDelegated';
             /**
-             * The workspace role: admin (an owner or admin) or owner.
+             * A person, never a key: a signed-in dashboard session or their own MCP sign-in, with this role in the workspace (admin is an owner or admin). The workspace, its members, invitations and billing are a person's.
              */
-            role?: 'admin' | 'owner';
+            person?: 'admin' | 'owner';
         };
     };
 };
@@ -16666,6 +16666,9 @@ export type CreateInboxConnectionData = {
          * opencode, claude (Claude Code), cursor, or generic for any other MCP client.
          */
         client: 'opencode' | 'claude' | 'cursor' | 'generic';
+        /**
+         * key. oauth is refused with 422: a sign-in can’t be limited to inboxes.
+         */
         auth: 'key' | 'oauth';
         reply?: boolean;
     };
@@ -23236,7 +23239,7 @@ export type ListInboundMessagesData = {
         cursor?: string;
         limit?: number;
         /**
-         * Include delivery details for workspace logs (dashboard or unrestricted live manage access only).
+         * Include delivery details for workspace logs (owner or admin sessions, and API keys with manage permission on all domains, only).
          */
         includeDelivery?: 'true' | 'false';
         region?: string;
@@ -23312,7 +23315,7 @@ export type GetInboundMessageData = {
          */
         addressId?: string;
         /**
-         * Include delivery details for workspace logs (dashboard or unrestricted live manage access only).
+         * Include delivery details for workspace logs (owner or admin sessions, and API keys with manage permission on all domains, only).
          */
         includeDelivery?: 'true' | 'false';
         /**

@@ -248,7 +248,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   // These areas have read or send routes as well as manage routes. An MX member's
   // read/send scopes do not confer access to infrastructure or campaign delivery controls.
   app.use('/v1/*', (c, next) => {
-    if (memberRefused(c.get('actor'), c.req.method, c.req.path)) throw denied('PERMISSION_DENIED', 'This operation requires a workspace owner or admin.', { ...requiredOf(c), role: 'admin' });
+    if (memberRefused(c.get('actor'), c.req.method, c.req.path)) throw denied('PERMISSION_DENIED', 'This operation requires a workspace owner or admin.', { ...requiredOf(c), person: 'admin' });
     return next();
   });
   const regions = async (c: Ctx, next: () => Promise<void>) => {

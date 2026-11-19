@@ -110,7 +110,7 @@ export async function chargeGrantBudget(runtime:Runtime,w:string,id:string){
 // Run after authentication and before idempotent replay or any configuration handler.
 export const requireReceivingConsent: MiddlewareHandler<AppEnv> = async (c,next) => {
   const a=c.get('actor');
-  if (a?.grantId && !a.receivingConsent) throw denied('ADMIN_REQUIRED','Reconnect with explicit receiving consent to access receiving configuration.', { ...requiredOf(c), role: 'admin' });
+  if (a?.grantId && !a.receivingConsent) throw denied('ADMIN_REQUIRED','Receiving configuration requires an owner or admin of this workspace.', { ...requiredOf(c), person: 'admin' });
   await next();
 };
 
@@ -286,7 +286,7 @@ export async function holdKeyAdmin<T>(tx: DbExecutor, c: Ctx, receiving: boolean
     if (grant?.workspaceId !== a.workspaceId || !grant.permissions.includes('manage') || receiving && !grant.receivingConsent) throw changed('The MCP approval behind this request');
   } else if (a.credential === 'dashboard') {
     const { rows: [member] } = await tx.execute<{ role: string }>(sql`SELECT role FROM workspace_members WHERE workspace_id = ${a.workspaceId} AND user_id = ${a.keyId.slice('user_'.length)} FOR SHARE`);
-    if (member?.role !== 'owner' && member?.role !== 'admin') throw denied('PERMISSION_DENIED', 'Key administration requires a workspace owner or admin.', { permission: 'configuration', level: 'write', role: 'admin' });
+    if (member?.role !== 'owner' && member?.role !== 'admin') throw denied('PERMISSION_DENIED', 'Key administration requires a workspace owner or admin.', { permission: 'configuration', level: 'write', person: 'admin' });
   }
   const caller = a.credential === 'apiKey' ? a.keyId : null;
   let row: T | undefined;
@@ -422,7 +422,7 @@ export function registerAuth(app: App) {
     const auth = manageKeys(c), keyId = c.req.valid('param').id, input = c.req.valid('json');
     if (input.name === undefined && !input.permissions && !input.domains && !input.access) throw new ApiError(422, 'VALIDATION_FAILED', 'Change at least one of name, permissions, domains or access.');
     // What a key may do is another administrator's decision, never its own.
-    if (auth.keyId === keyId) throw denied('PERMISSION_DENIED', 'A key can\'t change itself. Change it in the dashboard or with another key that has manage permission.', { permission: 'configuration', level: 'write', credential: 'person' });
+    if (auth.keyId === keyId) throw denied('PERMISSION_DENIED', 'A key can\'t change itself. Change it in the dashboard or with another key that has manage permission.', { permission: 'configuration', level: 'write', person: 'admin' });
     const limited = keyId.startsWith('mbk_') ? await addressKeys() : null;
     const view = await idempotent(c.env.db, { ...idempotentRequest(c), workspaceId: auth.workspaceId, actorKeyId: auth.keyId }, input,
       async tx => limited ? limited.updateLimitedKey(tx, c, auth, keyId, input) : keyView(await updateWorkspaceKey(tx, c, auth, keyId, input)));

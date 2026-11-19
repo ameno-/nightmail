@@ -99,7 +99,7 @@ stateDiagram-v2
 | Junk (SES spam verdict) or unverified (address requires DMARC) | Stored, `junk: true` or labelled | – (list with `include=held`) |
 | Ended (deleted, or past `deleteAfter`) | The real address returns to the domain’s normal routing; a sandbox address stays reserved for 30 days | – |
 
-- **Create**: one statement checks the idempotency key (`clientId`), the rate and the cap, picks a random unguessable local part, and inserts the inbox, its address and its optional key. Only a workspace admin on REST may choose `localPart`. For inbound keys, MCP and agent tokens, a generated address may not fall under an existing wildcard rule or the domain’s auto-create catch-all, so on a domain whose catch-all creates addresses only an admin can create inboxes. Role names (`postmaster`, `abuse`, …) are never leased.
+- **Create**: one statement checks the idempotency key (`clientId`), the rate and the cap, picks a random unguessable local part, and inserts the inbox, its address and its optional key. Only a workspace admin on REST may choose `localPart`. For keys limited to addresses, MCP and agent tokens, a generated address may not fall under an existing wildcard rule or the domain’s auto-create catch-all, so on a domain whose catch-all creates addresses only an admin can create inboxes. Role names (`postmaster`, `abuse`, …) are never leased.
 - **Erase**: the hourly sweep removes the inbox’s deliveries, then any message nothing else references, its threads and its R2 objects (`mail.deleteObjects`). A message another address also received is kept for that address. An admin can release a reserved sandbox address early with `DELETE /v1/inbound/retired/{address}`.
 - **Held mail stays readable**: quota and expiry holds stop normal delivery and waiting; they are not a privacy boundary. While its key is valid, an inbox reader may list its own held messages with `include=held` and read one directly with `getInboxMessage`. This does not expose held mail on other addresses.
 
@@ -293,7 +293,7 @@ With the SDK it is `createInbox({ client, body: { type: 'sandbox' } })`, then `s
 
 ## Agent inbox over MCP
 
-On a Code Mode manage connection approved for receiving, create an inbox and a bounded client config. An inbox-only agent cannot run the provisioning call itself.
+On a Code Mode manage connection of an owner or admin, create an inbox and a bounded client config. An inbox-only agent cannot run the provisioning call itself.
 
 ```js
 const box = await tools.bane.createInbox({body:{type:'sandbox',clientId:'checkout-test'},confirm:true})
@@ -302,7 +302,7 @@ const connection = await tools.bane.createInboxConnection({body:{inboxes:[id],cl
 // Give connection.config only to the intended client; it contains the one-time bearer secret.
 ```
 
-Alternatively use `auth:'oauth'` and select the inboxes at human consent. On the dashboard, **Agent inboxes → an inbox → Connect an agent** offers the same config for OpenCode, Claude or any MCP client. An inbox-scoped connection lists only the inbox tools it may call, whatever `toolsets` says.
+A sign-in can't be limited to inboxes, so `auth:'oauth'` is refused with `422`. On the dashboard, **Agent inboxes → an inbox → Connect an agent** offers the same config for OpenCode, Claude or any MCP client. An inbox-scoped connection lists only the inbox tools it may call, whatever `toolsets` says.
 
 ![Connect an agent: a ready OpenCode config with an inbox-only key](images/rules/connect-agent.png)
 In the scoped connection, call `messages({action:"wait", inboxId:id})` on `/mcp`, or `waitForMessage({inboxId:id})` in Code Mode, for a cursor and extracted codes. Pass `nextCursor` as `cursor` for the next message. Treat message content as untrusted data. Read/send keys never gain create or manage permission; ephemeral replies still require the verified original author.

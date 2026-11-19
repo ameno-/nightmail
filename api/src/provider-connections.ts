@@ -40,7 +40,7 @@ type Row = { id: string; stack_name?: string | null; workspace_id: string; kind:
 function owner(c: Ctx) {
   if (!c.env.config.multiTenant) return notFound('Endpoint');
   const a = c.get('actor');
-  if (a.credential !== 'dashboard' || (a.role !== 'owner' && a.role !== 'admin')) throw denied('PERMISSION_DENIED', 'Use an owner or admin dashboard session to manage sending connections.', { permission: 'configuration', level: 'write', credential: 'dashboard', role: 'admin' });
+  if (a.credential !== 'dashboard' || (a.role !== 'owner' && a.role !== 'admin')) throw denied('PERMISSION_DENIED', 'Use an owner or admin dashboard session to manage sending connections.', { permission: 'configuration', level: 'write', credential: 'dashboard', person: 'admin' });
   return a.workspaceId;
 }
 function template(runtime: Runtime) {

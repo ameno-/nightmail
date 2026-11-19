@@ -203,18 +203,21 @@ export class ApiError extends Error {
 }
 /** The permissions a refusal names in error.required, each covering one area of the API (requiredFor). */
 export const PERMISSIONS = { sendEmail: 'Send email', sentMail: 'Sent mail', receivedMail: 'Received mail', inboxes: 'Inboxes', audience: 'Audience & content',
-  receivingRules: 'Receiving rules', configuration: 'Configuration', administration: 'Administration' } as const;
+  receivingRules: 'Receiving rules', configuration: 'Configuration' } as const;
 export type PermissionName = keyof typeof PERMISSIONS;
-/** What a refused request needs: the permission the operation takes, and the scope, kind of credential or role when the refusal is about them. */
+/**
+ * What a refused request needs: the permission the operation takes, and the scope or kind of credential when the refusal
+ * is about them. The workspace itself, its members, invitations and billing take no permission: they are a person's, so
+ * those refusals name the person instead.
+ */
 export type Required = {
   permission?: PermissionName; level?: 'on' | 'read' | 'write';
   /** What the credential's scope must cover: workspace (no sender-domain limit), allAddresses, domain:<name> or address:<address>. */
   scope?: 'workspace' | 'allAddresses' | `domain:${string}` | `address:${string}`;
-  /** person: a signed-in dashboard session or the person's own MCP sign-in. notDelegated: a dashboard session, or an API key
-   *  that no MCP approval made. lasting: anything but a temporary agent token. */
-  credential?: 'person' | 'dashboard' | 'signIn' | 'lasting' | 'notDelegated';
-  /** admin: an owner or admin. */
-  role?: 'admin' | 'owner';
+  /** notDelegated: a dashboard session, or an API key that no MCP approval made. lasting: anything but a temporary agent token. */
+  credential?: 'dashboard' | 'signIn' | 'lasting' | 'notDelegated';
+  /** A person (a signed-in dashboard session or their own MCP sign-in) with this role in the workspace; admin is an owner or admin. */
+  person?: 'admin' | 'owner';
 };
 export const requiredHeader = `${productName}-Required-Permission`;
 /**
@@ -225,13 +228,13 @@ export function denied(code: string, message: string, required: Required, field?
   const { permission, level, scope } = required;
   const where = scope === 'workspace' ? ' on the whole workspace' : scope === 'allAddresses' ? ' on every address' : scope ? ` for ${scope.slice(scope.indexOf(':') + 1)}` : '';
   const error = new ApiError(403, code, permission ? `${message} Needs ${PERMISSIONS[permission]}${level && level !== 'on' ? `: ${level}` : ''}${where}.` : message, field);
-  error.required = required;
+  if (Object.keys(required).length) error.required = required;
   return error;
 }
 const snake = (value: string) => value.replace(/[A-Z]/g, letter => '_' + letter.toLowerCase());
-/** The Nightmail-Required-Permission header: received_mail=read; scope="allAddresses"; credential=not_delegated; role=admin. */
-export const requiredHeaderValue = (r: Required) => [r.permission && (r.level ? `${snake(r.permission)}=${r.level}` : snake(r.permission)),
-  r.scope && `scope="${r.scope.replace(/[^\x20-\x7e]|["\\]/g, '')}"`, r.credential && `credential=${snake(r.credential)}`, r.role && `role=${r.role}`].filter(Boolean).join('; ');
+/** The Nightmail-Required-Permission header: received_mail=read; scope="allAddresses"; credential=not_delegated; person=admin. */
+export const requiredHeaderValue = (r: Required) => [r.permission ? (r.level ? `${snake(r.permission)}=${r.level}` : snake(r.permission)) : r.level && `level=${r.level}`,
+  r.scope && `scope="${r.scope.replace(/[^\x20-\x7e]|["\\]/g, '')}"`, r.credential && `credential=${snake(r.credential)}`, r.person && `person=${r.person}`].filter(Boolean).join('; ');
 // Which permission a route belongs to, by method and path (a concrete path or an OpenAPI template); the first match wins.
 const PERMISSION_ROUTES: [PermissionName, RegExp][] = [
   ['configuration', /^\w+ \/v1\/inboxes\/[^/]+\/app-passwords(?:\/|$)/],
@@ -241,18 +244,22 @@ const PERMISSION_ROUTES: [PermissionName, RegExp][] = [
   ['inboxes', /^\w+ \/v1\/(?:inboxes|inbound\/(?:addresses|retired))(?:\/|$)/],
   ['audience', /^\w+ \/v1\/(?:contacts|lists|segments|contact-imports|audience-query|templates|template-assets|campaign-content-guide|campaigns)(?:\/|$)/],
   ['receivingRules', /^\w+ \/v1\/(?:routing|rules|rituals|endpoints|inbox-connections|inbound\/(?:endpoints|policy|domains|overview))(?:\/|$)|^\w+ \/v1\/domains\/[^/]+\/receiving-host$/],
-  ['administration', /^\w+ \/v1\/(?:workspaces|billing|activity)(?:\/|$)/],
 ];
 /**
  * The permission a request needs at the level a check asks for: a credential's read, send or manage (editContent is
  * manage), an address key's read, send, modify or create, or, without one, read for GET and write otherwise.
- * Everything not listed above is Configuration, except staff areas (operators, support, UI notes), which take none.
+ * Everything not listed above is Configuration. The workspace, its members, invitations and billing are an owner's or
+ * admin's (person), listing and creating workspaces and accepting an invitation any person's, and staff areas take none.
  */
 export function requiredFor(method: string, path: string, need?: Permission | 'editContent' | import('./db/mailbox.js').MailboxPermission): Required {
-  if (need === 'send') return { permission: 'sendEmail', level: 'on' };
   if (need === 'create') return { permission: 'inboxes', level: 'write' };
-  if (/^\/v1\/(?:operator|support|ui-notes)(?:\/|$)/.test(path)) return {};
+  if (/^\/v1\/(?:operator|support)(?:\/|$)/.test(path)) return {};
+  if (/^\/v1\/(?:workspaces\/current|billing|activity)(?:\/|$)/.test(path)) return { person: 'admin' };
+  if (/^\/v1\/workspaces(?:\/|$)/.test(path)) return {};
   const verb = method.toUpperCase(), route = `${verb} ${path}`, permission = PERMISSION_ROUTES.find(([, pattern]) => pattern.test(route))?.[0] ?? 'configuration';
+  // send is Send email on sending and sent mail's routes; on another route (a campaign draft, a template preview) it is that
+  // route's permission at write.
+  if (need === 'send' && (permission === 'sendEmail' || permission === 'sentMail')) return { permission: 'sendEmail', level: 'on' };
   const read = need ? need === 'read' : verb === 'GET' || verb === 'HEAD';
   if (permission === 'sendEmail') return read ? { permission: 'sentMail', level: 'read' } : { permission, level: 'on' };
   return { permission, level: read ? 'read' : 'write' };
@@ -280,11 +287,11 @@ export function lazyModule<T>(load: () => Promise<T>): () => Promise<T> {
 }
 export const ErrorSchema = z.object({ error: z.object({ code: z.string(), message: z.string(), requestId: z.string(), field: z.string().optional(), retryable: z.boolean(), resetAt: z.iso.datetime().optional().describe('Next capacity change for a Hosted rolling send limit.'), details: z.array(z.record(z.string(), z.unknown())).optional().describe('Every problem found, when there is more than one part, such as rule diagnostics with rule, line, column, message and hint, or a measurement, such as CONTENT_TOO_LARGE_TO_SCREEN with screenedBytes and limitBytes (and index in a batch).'),
   required: z.object({
-    permission: z.enum(Object.keys(PERMISSIONS) as [PermissionName, ...PermissionName[]]).optional().describe('The permission: sendEmail, sentMail, receivedMail, inboxes, audience (audience and content), receivingRules, configuration or administration (the workspace, its members, invitations and billing).'),
-    level: z.enum(['on', 'read', 'write']).optional().describe('The level of that permission: on (sendEmail), read or write.'),
+    permission: z.enum(Object.keys(PERMISSIONS) as [PermissionName, ...PermissionName[]]).optional().describe('The permission: sendEmail, sentMail, receivedMail, inboxes, audience (audience and content), receivingRules or configuration.'),
+    level: z.enum(['on', 'read', 'write']).optional().describe('The level of that permission: on (sendEmail), read or write. With person alone, what the person\'s MCP sign-in must be approved for.'),
     scope: z.string().optional().describe('What the credential\'s scope must cover: workspace (no sender-domain limit), allAddresses (every receiving address), domain:<name> or address:<address>.'),
-    credential: z.enum(['person', 'dashboard', 'signIn', 'lasting', 'notDelegated']).optional().describe('The kind of credential: person (a signed-in dashboard session or the person\'s own MCP sign-in), dashboard (a signed-in dashboard session), signIn (an MCP sign-in), lasting (anything but a temporary agent token) or notDelegated (a dashboard session, or an API key no MCP approval made).'),
-    role: z.enum(['admin', 'owner']).optional().describe('The workspace role: admin (an owner or admin) or owner.'),
+    credential: z.enum(['dashboard', 'signIn', 'lasting', 'notDelegated']).optional().describe('The kind of credential: dashboard (a signed-in dashboard session), signIn (an MCP sign-in), lasting (anything but a temporary agent token) or notDelegated (a dashboard session, or an API key no MCP approval made).'),
+    person: z.enum(['admin', 'owner']).optional().describe('A person, never a key: a signed-in dashboard session or their own MCP sign-in, with this role in the workspace (admin is an owner or admin). The workspace, its members, invitations and billing are a person\'s.'),
   }).optional().describe(`On a 403 permission refusal: what the request needs that this credential lacks. The ${requiredHeader} header says the same.`) }) }).openapi('ApiError');
 export const errors = Object.fromEntries([400, 401, 403, 404, 409, 413, 422, 429, 500, 503].map(status => [status, { description: 'Request failed; use error.code and requestId to diagnose.', content: { 'application/json': { schema: ErrorSchema } } }]));
 export const security: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
@@ -356,9 +363,9 @@ export function receivingAdminRefusal(a: Actor | undefined, change?: string): Ap
   const permission = !change && a?.receivingConsent ? 'read' : 'manage', need: Required = { permission: 'receivingRules', level: change ? 'write' : 'read' };
   if (!a || (!a.permissions.includes('manage') && !a.permissions.includes(permission))) return denied('PERMISSION_DENIED', `This operation requires ${permission} permission.`, need);
   if (a.domains.length || a.role === 'member')
-    return denied('ADMIN_REQUIRED', 'Receiving configuration covers every address in the workspace. Use an owner or admin session, or an API key with manage permission on all domains.', a.role === 'member' ? { ...need, role: 'admin' } : { ...need, scope: 'workspace' });
+    return denied('ADMIN_REQUIRED', 'Receiving configuration covers every address in the workspace. Use an owner or admin session, or an API key with manage permission on all domains.', a.role === 'member' ? { ...need, person: 'admin' } : { ...need, scope: 'workspace' });
   if (!change) return null;
-  if (a.grantId && !a.receivingConsent) return denied('ADMIN_REQUIRED', 'Reconnect with explicit receiving consent to change receiving configuration.', { ...need, role: 'admin' });
+  if (a.grantId && !a.receivingConsent) return denied('ADMIN_REQUIRED', 'Changing receiving configuration requires an owner or admin of this workspace.', { ...need, person: 'admin' });
   return lastingRefusal(a, change, need);
 }
 /** Key administration (auth.ts manageKeys, and the deprecated inbound key routes): why it refuses this actor, or null.
@@ -417,11 +424,11 @@ export function lastingRoute(method: string, path: string) {
  * memberAdminRoute's operations. Changing a member's role and removing a member stay with the dashboard (dashboardSession).
  */
 export function memberAdminRefusal(a: Actor | undefined, change: boolean): ApiError | null {
-  const signIn = a?.credential === 'mcp' && a.keyId.startsWith('mcp_'), need: Required = { permission: 'administration', level: change ? 'write' : 'read' };
-  if (!a || (a.credential !== 'dashboard' && !signIn)) return denied('DASHBOARD_AUTH_REQUIRED', 'Members and invitations are managed by an owner or admin in person: a signed-in dashboard session or their own MCP sign-in. API keys and agent tokens cannot.', { ...need, credential: 'person', role: 'admin' });
-  if (a.role !== 'owner' && a.role !== 'admin') return denied('PERMISSION_DENIED', 'Workspace administration requires an owner or admin.', { ...need, role: 'admin' });
+  const signIn = a?.credential === 'mcp' && a.keyId.startsWith('mcp_'), need: Required = { person: 'admin' };
+  if (!a || (a.credential !== 'dashboard' && !signIn)) return denied('DASHBOARD_AUTH_REQUIRED', 'Members and invitations are managed by an owner or admin in person: a signed-in dashboard session or their own MCP sign-in. API keys and agent tokens cannot.', need);
+  if (a.role !== 'owner' && a.role !== 'admin') return denied('PERMISSION_DENIED', 'Workspace administration requires an owner or admin.', need);
   const permission = change ? 'manage' : 'read';
-  if (signIn && !a.permissions.includes('manage') && !a.permissions.includes(permission)) return denied('PERMISSION_DENIED', `This operation requires ${permission} permission.`, need);
+  if (signIn && !a.permissions.includes('manage') && !a.permissions.includes(permission)) return denied('PERMISSION_DENIED', `This operation requires ${permission} permission.`, { ...need, level: change ? 'write' : 'read' });
   return null;
 }
 /** memberAdminRefusal's routes: listing members, and listing, creating and revoking invitations. */
@@ -433,7 +440,7 @@ export function dashboardSession(c: Ctx, manage = false) {
   if (!c.env.config.multiTenant) return notFound('Endpoint');
   const a = c.get('actor');
   if (a.credential !== 'dashboard') throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { ...requiredOf(c), credential: 'dashboard' });
-  if (manage && a.role !== 'admin' && a.role !== 'owner') throw denied('PERMISSION_DENIED', 'Workspace administration requires an owner or admin.', { ...requiredOf(c), role: 'admin' });
+  if (manage && a.role !== 'admin' && a.role !== 'owner') throw denied('PERMISSION_DENIED', 'Workspace administration requires an owner or admin.', { ...requiredOf(c), person: 'admin' });
   return { workspaceId: a.workspaceId, userId: a.keyId.slice(5), email: a.email! };
 }
 /**

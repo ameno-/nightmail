@@ -15,7 +15,7 @@ const base = '/v1/inboxes/{id}/app-passwords',
   params = z.object({ id: z.string().min(1).max(120) }),
   meta = { tags: ['Agent inboxes'], security };
 const managerRequired = (c: Ctx) => denied('ADMIN_REQUIRED', 'An unrestricted workspace manager must grant mail client access.',
-  { permission: 'configuration', level: 'write', ...(c.get('actor')?.role === 'member' ? { role: 'admin' } : { scope: 'workspace' }) });
+  { permission: 'configuration', level: 'write', ...(c.get('actor')?.role === 'member' ? { person: 'admin' } : { scope: 'workspace' }) });
 export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAccess) {
   const manager = (c: Ctx, change = false) => {
     const v = access(c);

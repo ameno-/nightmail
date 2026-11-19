@@ -109,7 +109,9 @@ async function ownWebhook(c: Ctx, tx: DbExecutor, a: Actor, webhookId: string) {
 // the URL is sent again. Sending the URL takes the webhook over: the mark goes, and so does the signing secret the
 // approval was given (on create or rotate).
 const webhookNeedsUrl = () => new ApiError(409, 'WEBHOOK_URL_REQUIRED', 'Deliveries were held when the approval that set up or changed this webhook was removed, and its URL is write-only. Send the URL again to resume; the webhook then gets a new signing secret.', 'url');
-function allowedDomain(a: Actor, name: string) { if (!senderDomainAllowed(a.domains, name)) throw denied('DOMAIN_NOT_ALLOWED', 'The API key is not authorized for this domain or its parent domain.', { permission: 'configuration', scope: `domain:${name}` }); }
+// The refusal names the domain only when the caller sent its name (`named`): a domain loaded by ID stays unnamed to a key
+// whose scope doesn't cover it.
+function allowedDomain(a: Actor, name: string, named = false) { if (!senderDomainAllowed(a.domains, name)) throw denied('DOMAIN_NOT_ALLOWED', 'The API key is not authorized for this domain or its parent domain.', { permission: 'configuration', ...(named ? { scope: `domain:${name}` as const } : {}) }); }
 async function sesCall<T>(operation: (sesv2: Sesv2Mod) => Promise<T>,creatingIdentity=false): Promise<T> {
   const sesv2 = await loadOperationsSesv2();
   try { return await operation(sesv2); } catch (error) {
@@ -607,7 +609,7 @@ export async function expireDomainClaims(runtime:Runtime,deadline:number) {
 function dnsSetupActor(c:Ctx) {
   if (!c.env.config.multiTenant) return notFound('Endpoint');
   const a=actor(c,'manage');
-  if (a.credential!=='dashboard' || (a.role!=='owner' && a.role!=='admin')) throw denied('PERMISSION_DENIED','Use an owner or admin dashboard session to set up DNS.',{ permission: 'configuration', level: 'write', credential: 'dashboard', role: 'admin' });
+  if (a.credential!=='dashboard' || (a.role!=='owner' && a.role!=='admin')) throw denied('PERMISSION_DENIED','Use an owner or admin dashboard session to set up DNS.',{ permission: 'configuration', level: 'write', credential: 'dashboard', person: 'admin' });
   return a;
 }
 export function recheckJob(wid: string, source: SQL, mode:'manual'|'dashboard'|'supersede'='manual') {
@@ -884,7 +886,7 @@ export function registerOperations(app: App) {
     return c.json(await domainPage(c, domainReader(c, q.region), q), 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/domains', operationId: 'createDomain', tags: ['Domains'], security, request: { body: json(z.object({ name: claimName, region: z.string().optional().describe('Regional BYO defaults to the first enabled region, otherwise Ohio.') }).openapi('CreateDomain')) }, responses: { 201: response(domainSchema),202:response(RegionalAccepted), ...errors } }), async c => {
-    const a = actor(c, 'manage'); const input = c.req.valid('json'); allowedDomain(a, input.name);
+    const a = actor(c, 'manage'); const input = c.req.valid('json'); allowedDomain(a, input.name, true);
     if (c.env.config.multiTenant) {
       const pending=await (await wrapModuleLoad(() => import('./byo-regional.js'))).newRegionalDomain(c.env,a.workspaceId,input.name,a.credential==='dashboard' && (a.role==='owner' || a.role==='admin'),input.region,c.req.header('Idempotency-Key'));
       if (pending) {a.wakeJobs=1;return c.json(pending,202);}
@@ -1061,7 +1063,7 @@ export function registerOperations(app: App) {
       JOIN workspace_members m ON m.user_id=${userId} AND m.workspace_id=${wid} AND m.role IN ('owner','admin') FOR SHARE OF m),
       selected AS (UPDATE nightmail_users SET selected_workspace_id=${wid} WHERE id=${userId} AND selected_workspace_id IS DISTINCT FROM ${wid} AND EXISTS(SELECT 1 FROM target)),
       queued AS (${recheckJob(wid,sql`SELECT id,token FROM target WHERE ${error===undefined}`)}) SELECT 1 FROM target`);
-    if(!result.rowCount) throw denied('PERMISSION_DENIED','Domain setup requires owner or admin access to the original workspace and domain.',{ permission: 'configuration', level: 'write', role: 'admin' });
+    if(!result.rowCount) throw denied('PERMISSION_DENIED','Domain setup requires owner or admin access to the original workspace and domain.',{ permission: 'configuration', level: 'write', person: 'admin' });
     return back(userId);
   });
   for (const verifyRoute of [false, true]) app.openapi(createRoute({ method: verifyRoute ? 'post' : 'get', path: verifyRoute ? '/v1/domains/{id}/verify' : '/v1/domains/{id}', operationId: verifyRoute ? 'verifyDomain' : 'getDomain', description: verifyRoute ? 'On MX, request a background verification and return the current stored status. Read the domain again for updates.' : 'On MX, read the stored DNS records and verification status without an AWS call.', tags: ['Domains'], security, request: { params: IdParams }, responses: { 200: response(domainSchema), ...errors } }), async c => {

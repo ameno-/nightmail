@@ -224,8 +224,8 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormP
   // What the choices above add up to, in plain lines: the detail behind "What this key can do".
   const can = [
     purposes.find(item => item.value === purpose)!.does,
-    ...workspace && !allDomains ? [`Sends and email logs are limited to the chosen domains and their subdomains${example ? `: ${example} also covers mail from news.${example}` : ''}.`, 'Contacts, lists, templates and campaigns stay workspace-wide.', ...purpose === 'manage' ? ['Limited to domains, it can’t manage keys, inbound or settings.'] : []] : [],
-    ...purpose === 'addresses' || purpose === 'inbox' ? ['Lists and reads mail, events and attachments.', ...reply ? [`Replies and starts conversations, from ${where} only.${purpose === 'inbox' ? ' Needs replies on for the inbox.' : ''}`] : [], ...organize ? ['Marks read, archives, stars and labels.'] : []] : [],
+    ...workspace && !allDomains ? [`Sends and email logs are limited to the chosen domains and their subdomains${example ? `: ${example} also covers mail from news.${example}` : ''}.`, 'It can’t launch campaigns or reach contacts, lists, settings, webhooks or received mail.', ...purpose === 'manage' ? ['Limited to domains, it can’t manage keys or receiving.'] : []] : [],
+    ...purpose === 'addresses' || purpose === 'inbox' ? ['Lists and reads mail, events and attachments.', ...reply ? [`Replies and starts conversations, from ${where} only.${purpose === 'inbox' ? ' Needs replies on for the inbox.' : ''}`] : [], ...organize ? [`Marks read, archives, stars and labels${purpose === 'inbox' ? ', and can delete the inbox' : allAddresses ? ', and can delete agent inboxes' : ''}.`] : []] : [],
   ]
 
   return <>

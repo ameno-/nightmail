@@ -86,7 +86,7 @@ const TraceRow = traceRow(timeline('decisions').openapi('RuleTimelineStep')).ope
  * Take it before any row a removal disables (endpoints, routes, keys), the order a removal takes them in. */
 export async function holdReceiving(tx:DbExecutor,c:Ctx){
   const a=c.get('actor');if(!a.grantId)return;
-  if(!a.receivingConsent||!a.permissions.includes('manage'))throw denied('ADMIN_REQUIRED','Explicit manage and receiving consent required.',{ permission: 'receivingRules', level: 'write', role: 'admin' });
+  if(!a.receivingConsent||!a.permissions.includes('manage'))throw denied('ADMIN_REQUIRED','Receiving changes require an owner or admin of this workspace with manage permission.',{ permission: 'receivingRules', level: 'write', person: 'admin' });
   const {getMcpGrantActor,approvalUse}=await import('./mcp-auth.js');
   const grant=await getMcpGrantActor(c.env,'mcp_'+a.grantId,a.workspaceId,tx,approvalUse(a));
   if(grant?.workspaceId!==a.workspaceId||!grant.receivingConsent||!grant.permissions.includes('manage'))throw new ApiError(401,'AUTH_INVALID','The MCP approval behind this request was revoked while it ran. Nothing was changed.');

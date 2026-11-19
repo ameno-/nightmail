@@ -367,7 +367,7 @@ To authenticate an email or inbound webhook, include `"headers": [{"name":"Autho
 
 Header names must be unique HTTP tokens (case-insensitive, 64 characters maximum); values must be HTTP field bytes (tab, visible ASCII or Latin-1 above 0x7F), at most 2,048 characters. Up to 10 headers and 8 KiB total (UTF-8 names + values). `Host`, `Content-Length`, `Content-Type`, `Content-Encoding`, `Transfer-Encoding`, `Connection`, `Keep-Alive`, `TE`, `Trailer`, `Upgrade`, `HTTP2-Settings`, `Expect`, `Proxy-*`, `User-Agent`, `Webhook-Id`, `Webhook-Timestamp`, `Webhook-Signature` and `Nightmail-Test` (also legacy `Bane-Test` and `OpenSend-Test`) are reserved. `Cookie` is also reserved so a server-to-server callback cannot forward a browser session cookie; use endpoint-specific credentials instead.
 
-Migration `070_webhook_headers.sql` adds nullable encrypted header storage; existing endpoints send no extra headers. Header values are write-only. Managers see `{name,hint,updatedAt}` (a masked suffix, fully masked for short values); unrestricted read API keys see `{name}`. Address-scoped inbound keys cannot inspect workspace endpoints. No custom headers are stored in delivery histories.
+Migration `070_webhook_headers.sql` adds nullable encrypted header storage; existing endpoints send no extra headers. Header values are write-only. Managers see `{name,hint,updatedAt}` (a masked suffix, fully masked for short values); unrestricted read API keys see `{name}`. Keys limited to addresses cannot inspect workspace endpoints. No custom headers are stored in delivery histories.
 
 ### Errors, logs, and retention
 
@@ -377,11 +377,11 @@ A permission refusal (403) keeps its code and adds `required`, what the request 
 
 | Field | Values |
 | --- | --- |
-| `permission` | `sendEmail`, `sentMail`, `receivedMail`, `inboxes`, `audience` (audience and content), `receivingRules`, `configuration`, `administration` (the workspace, its members, invitations and billing) |
-| `level` | `on` (for `sendEmail`), `read` or `write` |
+| `permission` | `sendEmail`, `sentMail`, `receivedMail`, `inboxes`, `audience` (audience and content), `receivingRules`, `configuration` |
+| `level` | `on` (for `sendEmail`), `read` or `write`; with `person` alone, what the person's MCP sign-in must be approved for |
 | `scope` | what the credential's scope must cover: `workspace` (no sender-domain limit), `allAddresses`, `domain:<name>` or `address:<address>` |
-| `credential` | `person` (a dashboard session or the person's own MCP sign-in), `dashboard`, `signIn` (an MCP sign-in), `lasting` (not a temporary agent token) or `notDelegated` (a dashboard session, or an API key no MCP approval made) |
-| `role` | `admin` (an owner or admin) or `owner` |
+| `credential` | `dashboard`, `signIn` (an MCP sign-in), `lasting` (not a temporary agent token) or `notDelegated` (a dashboard session, or an API key no MCP approval made) |
+| `person` | a person, never a key (a dashboard session or their own MCP sign-in), with role `admin` (an owner or admin) or `owner`. The workspace, its members, invitations and billing are a person's, so their refusals name only this |
 
 For example `{ "permission": "receivedMail", "level": "read", "scope": "workspace" }` is sent as `Nightmail-Required-Permission: received_mail=read; scope="workspace"`. Over MCP the tool error carries the same `required`. Search JSON logs by that ID; dispatch carries it through the outbox. Logs include operation/job/attempt/error codes, not request bodies, credentials, or unsubscribe tokens. Unexpected stack traces remain server-side. API-key last-use timestamps update at most once per minute.
 
