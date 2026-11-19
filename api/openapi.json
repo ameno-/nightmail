@@ -5491,6 +5491,24 @@
               "string",
               "null"
             ]
+          },
+          "quota": {
+            "type": "object",
+            "properties": {
+              "used": {
+                "type": "integer",
+                "description": "Domains in the workspace, across every region and page."
+              },
+              "limit": {
+                "type": "integer",
+                "description": "How many domains the workspace may have: 100 unless Nightmail set another limit on request."
+              }
+            },
+            "required": [
+              "used",
+              "limit"
+            ],
+            "description": "Hosted only, and only for credentials without domain restrictions. Adding a domain past the limit fails with DOMAIN_LIMIT_REACHED; at most 10 of them may be unproven at once."
           }
         },
         "required": [

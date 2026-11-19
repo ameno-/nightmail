@@ -37,6 +37,8 @@ const Action = z.object({ at: z.string(), workspaceId: z.string(), action: z.str
   requestId: z.string().nullable(), before: z.unknown().nullable(), after: z.unknown().nullable(), details: z.unknown() }).openapi('OperatorAction');
 const TimelineItem = z.object({ at: z.string(), kind: z.enum(['standing', 'limit', 'quarantine', 'release', 'tenant', 'operator', 'score', 'audit', 'bounces', 'rejection']),
   title: z.string(), detail: z.unknown() }).openapi('OperatorTimelineItem');
+const DomainLimit = z.object({ used: z.number().int(), limit: z.number().int(), custom: z.boolean().describe('An operator set this limit; otherwise it is the default of 100.') }).openapi('OperatorDomainLimit');
+const domainLimitOf = (wid: string) => sql`SELECT json_build_object('used',(SELECT count(*)::int FROM domain_claims WHERE workspace_id=${wid}),'limit',workspace_domain_limit(${wid}),'custom',domain_limit IS NOT NULL) FROM workspaces WHERE id=${wid}`;
 const WorkspaceView = z.object({ workspace: z.object({ id: z.string(), name: z.string(), createdAt: z.string() }), score: z.unknown(), standing: StandingSchema.nullable(),
   connection: z.object({ region: z.string(), paused: z.boolean(), resuming: z.boolean(), pauseReason: z.string().nullable(), tenantGeneration: z.number().int(),
     tenants: z.array(z.object({ region: z.string(), applied: z.enum(['ENABLED', 'DISABLING', 'DISABLED']).describe(`DISABLING: ${productName} asked AWS and does not know the outcome yet, so it treats the tenant as possibly disabled.`), generation: z.number().int(), appliedAt: z.string() }))
@@ -44,6 +46,7 @@ const WorkspaceView = z.object({ workspace: z.object({ id: z.string(), name: z.s
   domains: z.array(z.object({ name: z.string(), region: z.string().nullable(), pool: z.string(), dkim: z.boolean(), mailFrom: z.boolean(), dmarc: z.string().nullable() })),
   members: z.array(z.object({ userId: z.string(), email: z.string(), role: z.string() })), siblings: z.array(z.object({ id: z.string(), name: z.string() })),
   override: z.object({ daily: z.number().int(), expiresAt: z.string().nullable() }).nullable(), exempt: z.boolean(),
+  domainLimit: DomainLimit,
   campaigns: z.array(z.object({ id: z.string(), name: z.string(), state: z.string(), pauseReason: z.unknown().nullable(), quarantines: z.number().int() })) }).openapi('OperatorWorkspace');
 
 // Timestamps leave as ISO 8601 with microseconds; a page cursor is the last row's "at|key", opaque to clients.
@@ -128,6 +131,7 @@ export function registerOperator(app: App) {
       coalesce((SELECT json_agg(json_build_object('id',o.id,'name',o.name) ORDER BY o.created_at) FROM workspaces me JOIN workspaces o ON o.quota_sponsor=me.quota_sponsor AND o.id<>me.id WHERE me.id=${wid} AND me.quota_sponsor IS NOT NULL),'[]') AS siblings,
       (SELECT CASE WHEN send_cap_override IS NOT NULL THEN json_build_object('daily',send_cap_override,'expiresAt',send_cap_override_expires_at) END FROM workspaces WHERE id=${wid}) AS override,
       (SELECT exempt_hosted_quotas FROM workspaces WHERE id=${wid}) AS exempt,
+      (${domainLimitOf(wid)}) AS "domainLimit",
       coalesce((SELECT json_agg(x) FROM (SELECT id,coalesce(draft->>'name',id) AS name,state,pause_reason AS "pauseReason",quarantines FROM sending_campaigns
         WHERE workspace_id=${wid} AND (quarantines>0 OR state IN ('sending','paused','scheduled')) ORDER BY updated_at DESC LIMIT 20) x),'[]') AS campaigns`);
     return c.json({ ...row!, score, standing: score.standing }, 200);
@@ -223,6 +227,21 @@ export function registerOperator(app: App) {
         INSERT INTO standing_events(id,workspace_id,sequence,kind,from_step,to_step,actor,details) SELECT 'stev_'||replace(gen_random_uuid()::text,'-',''),workspace_id,sequence,'limit',step,step,
           ${JSON.stringify({ kind: 'operator', id: operator.userId, via: 'console' })}::jsonb,${JSON.stringify({ override: { from: before, to: { daily: body.daily, expiresAt: body.expiresAt ?? null } }, reason: body.reason })}::jsonb FROM s`);
       return { result: { ok: true as const, version: current?.version ?? null, step: current?.step ?? null }, audit: { action: 'operator-set-limit', before, after: { daily: body.daily, expiresAt: body.expiresAt ?? null }, reason: body.reason, ticketRef: body.ticketRef } };
+    }), 200);
+  });
+  // A workspace's domain limit (default 100). Lowering it below the current count removes nothing; it only refuses new
+  // domains until the workspace is under it again. Any Hosted workspace, shared or BYO sending.
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'put', path: '/v1/operator/workspaces/{id}/domain-limit', operationId: 'operatorSetDomainLimit',
+    request: { params: WorkspaceParam, headers: z.object(Mutation), body: json(z.object({ limit: z.number().int().min(1).max(10_000).nullable().describe('null returns the workspace to the default of 100.'), reason: Reason, ticketRef: TicketRef }).strict()) },
+    responses: { 200: response(z.object({ ok: z.literal(true), domainLimit: DomainLimit })), ...errors } }), async c => {
+    const body = c.req.valid('json'), wid = c.req.valid('param').id;
+    const operator = await operatorActor(c, 'operator');
+    return c.json(await mutate(c, operator, wid, body, async tx => {
+      const { rows: [before] } = await tx.execute<{ limit: number | null }>(sql`SELECT domain_limit AS "limit" FROM workspaces WHERE id=${wid} FOR NO KEY UPDATE`);
+      if (!before) notFound('Workspace');
+      await tx.execute(sql`UPDATE workspaces SET domain_limit=${body.limit} WHERE id=${wid}`);
+      const { rows: [view] } = await tx.execute<{ domainLimit: z.infer<typeof DomainLimit> }>(sql`SELECT (${domainLimitOf(wid)}) AS "domainLimit"`);
+      return { result: { ok: true as const, domainLimit: view!.domainLimit }, audit: { action: 'operator-set-domain-limit', before: { limit: before!.limit }, after: { limit: body.limit }, reason: body.reason, ticketRef: body.ticketRef } };
     }), 200);
   });
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'post', path: '/v1/operator/campaigns/{id}/release', operationId: 'operatorReleaseCampaign',
