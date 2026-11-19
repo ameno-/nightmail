@@ -11,9 +11,13 @@ import { matchRouting, ROUTE_TIERS, type RoutingInput } from './routing-match.js
 export const RoutingKey = z
   .string()
   .regex(/^[a-z0-9][a-z0-9-]{0,62}$/)
-  .describe('Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.');
+  .describe('Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key>, webhook:<key> and forward:<name>.');
 const Address = z.string().trim().toLowerCase().max(254);
-const Destination = z.string().max(128).regex(/^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$/).describe('An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>).');
+// A forward is the second alternative, so a client written for inboxes and webhooks keeps validating against the first.
+const Destination = z.union([
+  z.string().max(128).regex(/^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$/).describe('An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>).'),
+  z.string().max(128).regex(/^(?:con_[a-zA-Z0-9_-]+|forward:[a-z0-9][a-z0-9-]{0,62})$/).describe('A forward endpoint (con_… or forward:<name>) its recipient confirmed: it gets the whole message, as a rule\'s endpoints.<name>() call sends it.'),
+]).describe('An inbox (mbx_… or inbox:<key>), a webhook (mwh_… or webhook:<key>) or a confirmed forward (con_… or forward:<name>).');
 const RouteFields = z
   .object({
     key: RoutingKey.nullable().optional(),
@@ -23,7 +27,7 @@ const RouteFields = z
     to: z
       .union([z.literal('drop'), z.array(Destination).max(10)])
       .describe(
-        "Up to 10 destinations, [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.",
+        "Up to 10 destinations (inboxes, webhooks and confirmed forwards), [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.",
       ),
     subaddresses: z.boolean().optional().describe('Also route user+tag@host here when nothing more specific matches. Default true.'),
     enabled: z.boolean().optional().describe('A disabled route is skipped; its mail falls through to the next tier. Default true.'),
@@ -33,7 +37,7 @@ const RouteFields = z
 const MailRoute = RouteFields.extend({
   id: z.string(),
   key: RoutingKey.nullable(),
-  to: RouteFields.shape.to.describe("Inbox and webhook IDs, [] to keep, or 'drop'."),
+  to: RouteFields.shape.to.describe("Inbox, webhook and forward IDs, [] to keep, or 'drop'."),
   subaddresses: z.boolean(),
   enabled: z.boolean(),
   note: z.string(),
@@ -104,7 +108,7 @@ const RoutedRecipient = z
       ),
     route: z.string().nullable().describe('Route ID; null for an address, an address wildcard rule or the domain default.'),
     inboxes: z.array(z.string()),
-    webhooks: z.array(z.string()),
+    webhooks: z.array(z.string()).describe('Webhook and forward endpoint IDs.'),
     skipBase:z.literal(true).optional().describe('A base route explicitly disables plus-address fallback.'),
     limited:z.literal(true).optional().describe('Fan-out was capped. The recipient is also recorded as unrouted.'),
     dropped: z.boolean(),
@@ -209,24 +213,31 @@ function checkRoutes(routes: Route[]) {
     patterns.set(hostOf(r.match), n);
   }
 }
-/** A route delivers to inboxes and webhooks only: a Slack, Discord or forward endpoint is never a destination, by ID or as webhook:<key>. */
-const realWebhook = sql`h.type='webhook'`;
-/** Replaces keys with IDs in place. Leniently (restores), drops destinations that no longer exist instead of failing. */
-async function resolveDestinations(tx: DbExecutor, w: string, routes: Route[], lenient: boolean) {
+/** A route delivers to inboxes, webhooks and forwards: a Slack or Discord endpoint is never a destination, by ID or by name. */
+const realWebhook = sql`h.type='webhook'`,
+  forward = sql`h.type='forward'`;
+/**
+ * Replaces keys with IDs in place. Leniently (restores), drops destinations that no longer exist instead of failing.
+ * A forward a route did not already name must be confirmed, as a rule that calls one must be when it is saved; one its
+ * recipient later declined stays, and its deliveries are refused (sendToEndpoint), so a decline never blocks a save.
+ */
+async function resolveDestinations(tx: DbExecutor, w: string, routes: Route[], lenient: boolean, previous: Map<string, Route> = new Map()) {
   const refs = [...referenceSet(routes)],
     warnings: string[] = [];
   if (!refs.length) return warnings;
-  const found = new Map(
-    (
-      await tx.execute<{ ref: string; id: string }>(
-        sql`WITH refs AS MATERIALIZED (SELECT ref,split_part(ref,':',2) AS key FROM jsonb_array_elements_text(${JSON.stringify(refs)}::jsonb) ref)
-          SELECT ref,b.id FROM refs JOIN mailboxes b ON b.workspace_id=${w} AND b.id=ref WHERE starts_with(ref,'mbx_')
-          UNION ALL SELECT ref,b.id FROM refs JOIN mailboxes b ON b.workspace_id=${w} AND b.key=refs.key WHERE starts_with(ref,'inbox:')
-          UNION ALL SELECT ref,h.id FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.id=ref AND ${realWebhook} WHERE starts_with(ref,'mwh_')
-          UNION ALL SELECT ref,h.id FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.key=refs.key AND ${realWebhook} WHERE starts_with(ref,'webhook:')`,
-      )
-    ).rows.map((d) => [d.ref, d.id]),
-  );
+  const rows = (
+    await tx.execute<{ ref: string; id: string; pending: boolean }>(
+      sql`WITH refs AS MATERIALIZED (SELECT ref,split_part(ref,':',2) AS key FROM jsonb_array_elements_text(${JSON.stringify(refs)}::jsonb) ref)
+        SELECT ref,b.id,false AS pending FROM refs JOIN mailboxes b ON b.workspace_id=${w} AND b.id=ref WHERE starts_with(ref,'mbx_')
+        UNION ALL SELECT ref,b.id,false FROM refs JOIN mailboxes b ON b.workspace_id=${w} AND b.key=refs.key WHERE starts_with(ref,'inbox:')
+        UNION ALL SELECT ref,h.id,false FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.id=ref AND ${realWebhook} WHERE starts_with(ref,'mwh_')
+        UNION ALL SELECT ref,h.id,false FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.key=refs.key AND ${realWebhook} WHERE starts_with(ref,'webhook:')
+        UNION ALL SELECT ref,h.id,NOT (h.verified AND h.declined_at IS NULL) FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.id=ref AND ${forward} WHERE starts_with(ref,'con_')
+        UNION ALL SELECT ref,h.id,NOT (h.verified AND h.declined_at IS NULL) FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.key=refs.key AND ${forward} WHERE starts_with(ref,'forward:')`,
+    )
+  ).rows;
+  const found = new Map(rows.map((d) => [d.ref, d.id])),
+    pending = new Set(rows.filter((d) => d.pending).map((d) => d.ref));
   for (const r of routes) {
     if (!Array.isArray(r.to)) continue;
     const missing = r.to.filter((ref) => !found.has(ref));
@@ -234,7 +245,16 @@ async function resolveDestinations(tx: DbExecutor, w: string, routes: Route[], l
       throw fail(
         422,
         'UNKNOWN_DESTINATION',
-        `${missing[0]} is not an inbox or webhook in this workspace. Use an ID from listInboundAddresses or listInboundWebhooks, or a key such as inbox:support.`,
+        `${missing[0]} is not an inbox, webhook or forward in this workspace. Use an ID from listInboundAddresses, listInboundWebhooks or listEndpoints, or a key such as inbox:support or forward:team.`,
+        'to',
+      );
+    const before = previous.get(r.id)?.to,
+      unconfirmed = lenient ? undefined : r.to.find((ref) => pending.has(ref) && !(Array.isArray(before) && before.includes(found.get(ref)!)));
+    if (unconfirmed)
+      throw fail(
+        422,
+        'FORWARD_NOT_CONFIRMED',
+        `${unconfirmed} is a forward its recipient has not confirmed. A route can deliver to it once they choose Allow in the emailed link; getEndpoint shows its status.`,
         'to',
       );
     for (const ref of missing) warnings.push(`Removed ${ref} from ${r.match}: it no longer exists.`);
@@ -262,6 +282,7 @@ async function save(
     w,
     after.filter((r) => !same(previous.get(r.id), r)),
     lenient,
+    previous,
   );
   const diff = [
     ...before.filter((r) => !kept.has(r.id)).map((r) => ({ before: r, after: null })),
@@ -406,7 +427,7 @@ export function registerRouting(app: App) {
       operationId: 'getRouting',
       summary: 'Read the routing config',
       description:
-        "Every explicit route and the current version (also the ETag). With format=config, routes omit IDs and refer to keyed inboxes and webhooks as inbox:<key> and webhook:<key>, ready to edit and PUT back. An inbox's own addresses route to it without a route.",
+        "Every explicit route and the current version (also the ETag). With format=config, routes omit IDs and refer to keyed inboxes, webhooks and forwards as inbox:<key>, webhook:<key> and forward:<name>, ready to edit and PUT back. An inbox's own addresses route to it without a route.",
       request: { query: z.object({ format: z.enum(['config']).optional() }) },
       responses: { 200: response(z.union([RoutingConfig, RoutingConfigFile])), ...errors },
     }),
@@ -422,7 +443,8 @@ export function registerRouting(app: App) {
       const keys = new Map(
         (
           await c.env.db.execute<{ id: string; ref: string }>(
-            sql`SELECT id,'inbox:'||key AS ref FROM mailboxes WHERE workspace_id=${w} AND key IS NOT NULL UNION ALL SELECT id,'webhook:'||key FROM mailbox_webhooks h WHERE workspace_id=${w} AND key IS NOT NULL AND ${realWebhook}`,
+            sql`SELECT id,'inbox:'||key AS ref FROM mailboxes WHERE workspace_id=${w} AND key IS NOT NULL UNION ALL SELECT id,'webhook:'||key FROM mailbox_webhooks h WHERE workspace_id=${w} AND key IS NOT NULL AND ${realWebhook}
+              UNION ALL SELECT id,'forward:'||key FROM mailbox_webhooks h WHERE workspace_id=${w} AND key IS NOT NULL AND ${forward}`,
           )
         ).rows.map((r) => [r.id, r.ref]),
       );
@@ -472,7 +494,7 @@ export function registerRouting(app: App) {
       operationId: 'createRoute',
       summary: 'Route a recipient',
       description:
-        'Example: { "match": "support@acme.com", "to": ["inbox:support", "webhook:helpdesk"] } keeps the Support inbox and adds a webhook. Mail is routed by the new version as soon as this returns. Test first with testRouting.',
+        'Example: { "match": "support@acme.com", "to": ["inbox:support", "webhook:helpdesk", "forward:team"] } keeps the Support inbox, adds a webhook and forwards each message whole to a confirmed forward endpoint. Mail is routed by the new version as soon as this returns. Test first with testRouting.',
       request: { headers: ifMatch, body: json(RouteFields.openapi('CreateMailRoute')) },
       responses: { 201: response(MailRoute), ...errors },
     }),

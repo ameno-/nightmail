@@ -1,4 +1,4 @@
-import { ApiError, type MailRoute, type RoutingTestResult, type Api, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type AudiencePreview, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxWebhookDelivery, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity, type OverviewSetup } from './types'
+import { ApiError, type MailRoute, type RoutingTestResult, type Api, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type AudiencePreview, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxWebhookDelivery, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type ForwardEndpoint, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity, type OverviewSetup } from './types'
 
 import type { Agent, ApiKey, AppPassword, CreatedAppPassword, DomainQuota } from './types'
 import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogEntry, SenderScore } from './types'
@@ -334,6 +334,7 @@ export function createLiveApi(): Api {
       reply: (threadId, { idempotencyKey, ...input }, signal) => request<InboundMessage>(`/v1/inbound/threads/${idPath(threadId)}/reply`, { method: 'POST', body: input, signal, idempotencyKey }),
       startThread: ({ idempotencyKey, ...input }, signal) => request<InboundMessage>('/v1/inbound/threads', { method: 'POST', body: input, signal, idempotencyKey }),
       webhooks: async signal => (await inboundCall<{ data: InboundWebhook[] }>('/webhooks', 'GET', undefined, signal)).data,
+      forwards: async signal => (await call<{ data: ForwardEndpoint[] }>('/endpoints?type=forward&limit=100', 'GET', undefined, signal)).data,
       webhook: (id, signal) => inboundCall<InboundWebhook>(`/webhooks/${idPath(id)}`, 'GET', undefined, signal),
       updateWebhook: (id, patch, signal) => inboundCall<InboundWebhook>(`/webhooks/${idPath(id)}`, 'PATCH', patch, signal),
       deleteWebhook: async (id, signal) => { await inboundCall(`/webhooks/${idPath(id)}?detach=true`, 'DELETE', undefined, signal) },

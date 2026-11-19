@@ -186,6 +186,8 @@ export interface WebhookHeaderView { name: string; hint?: string; updatedAt?: IS
 /** Omitted on update to keep the current headers; any list replaces them all, and [] removes them. */
 export interface WebhookHeaderInput { name: string; value: string }
 export type InboundWebhookFormat = 'nightmail' | 'inbound'
+/** A forward endpoint as listEndpoints returns it: routes name it by id, and only a confirmed (ready) one gets mail. */
+export interface ForwardEndpoint { id: string; name: string; status: 'ready' | 'pending' | 'expired' | 'declined' | 'paused'; target: string }
 export interface InboundWebhook { id: string; key?: string | null; name?: string | null; url: string; description: string; eventTypes: MailboxEventType[]; addressIds: string[] | null; paused: boolean; headers: WebhookHeaderView[]; format?: InboundWebhookFormat; junk?: 'skip' | 'include'; createdAt: ISODate; updatedAt: ISODate; approval: ApprovalTie | null }
 /** eventTypes [] is a route-only webhook: it gets only the mail a route sends to it. */
 export interface InboundWebhookInput { url: string; description: string; eventTypes: MailboxEventType[]; addressIds: string[] | null; headers?: WebhookHeaderInput[]; format?: InboundWebhookFormat; junk?: 'skip' | 'include' }
@@ -330,6 +332,8 @@ export interface Api {
     reply(threadId: string, input: InboundReplyInput, signal?: AbortSignal): Promise<InboundMessage>
     startThread(input: InboundThreadInput, signal?: AbortSignal): Promise<InboundMessage>
     webhooks(signal?: AbortSignal): Promise<InboundWebhook[]>
+    /** Every forward endpoint (a workspace has at most 50): what a route can forward its mail to once confirmed. */
+    forwards(signal?: AbortSignal): Promise<ForwardEndpoint[]>
     /** One page of inbound webhooks; addressId keeps those that get that address's received mail. */
     webhook(id: string, signal?: AbortSignal): Promise<InboundWebhook>
     updateWebhook(id: string, patch: Partial<InboundWebhookInput> & { paused?: boolean }, signal?: AbortSignal): Promise<InboundWebhook>

@@ -162,6 +162,8 @@ const pages = ids => [
   ['Domains · add domain dialog', '/domains', { dialog: 'Add domain' }],
   ['API keys · create key dialog', '/api-keys', { dialog: 'Create key' }],
   ['Receiving · new address dialog', '/receiving', { dialog: 'New address' }],
+  // The route editor opens once its inboxes, webhooks and forwards have loaded.
+  ['Receiving · route editor dialog', `/receiving/addresses/${ids.address}`, { dialog: 'Add a route' }],
   ['Receiving · new agent inbox dialog', '/receiving/inboxes', { dialog: 'New agent inbox' }],
   ['Receiving · ask your agent dialog', '/receiving/rules/new', { dialog: 'Ask your agent' }],
   ['Audience · import dialog', '/audience', { dialog: 'Import contacts' }],

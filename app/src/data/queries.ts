@@ -16,6 +16,7 @@ export const queries = {
   logs: (params: PageRequest & { direction?: LogDirection }) => def(['logs', params], (api, signal) => api.logs.list(params, signal)),
   inboundDomains: () => def(['mailbox-domains'], (api, signal) => api.mailboxes.domains(signal)),
   inboundWebhooks: () => def(['inbound-webhooks'], (api, signal) => api.inbound.webhooks(signal)),
+  forwardEndpoints: () => def(['forward-endpoints'], (api, signal) => api.inbound.forwards(signal)),
   routing: () => def(['routing'], (api, signal) => api.routing.routes(signal)),
   receivingAddresses: (search: string, cursor: string | undefined) => def(['inbound-addresses', 'address', search, cursor ?? null], (api, signal) => api.inbound.addresses({ kind: 'address', search: search || undefined, cursor }, signal)),
   // Every picker's choices: all addresses, not just the first page (up to ten pages of 100).
