@@ -1,23 +1,27 @@
 // Publishes the homepage's render sets to a stage's R2 media bucket (infra/pulumi: nightmail-<stage>-media, served at
-// media.dev.nightmail.dev and media.nightmail.dev), so new or replacement segments go live without a deploy. The page
-// reads <set>/current.json there and plays the version it names (src/features/home/factory/manifest.ts).
+// media.dev.nightmail.dev and media.nightmail.dev), so new or replacement segments go live without a deploy. A version
+// holds both formats, the desktop's wide frame and the phone's tall one; the page reads factory/current.json there and
+// plays its own format of the version it names (src/features/home/factory/manifest.ts).
 //
-//   node scripts/factory-media.mjs publish <dir> --stage dev [--set desktop] [--dry-run] [--to <local dir>]
-//     Uploads a layer set folder (manifest.json, boards/, a folder per segment: the web-layers contract) as a new
-//     version, then points current.json at it. --to writes the same keys into a local folder instead (previews).
-//   node scripts/factory-media.mjs promote <version> --stage production [--set desktop] [--from <url>] [--dry-run]
+//   node scripts/factory-media.mjs publish <dir> --stage dev [--dry-run] [--to <local dir>]
+//     Uploads a web-layers folder as a new version: the desktop set at its top (manifest.json, boards/, a folder per
+//     segment: the web-layers contract) and the phone set in its phone/ folder, each where there is one; then points
+//     current.json at it. --to writes the same keys into a local folder instead (previews).
+//   node scripts/factory-media.mjs promote <version> --stage production [--from <url>] [--dry-run]
 //     Copies a version published on dev, read from dev's public host (--from, default media.dev.nightmail.dev) and
 //     checked against its files.json, into the stage's bucket, then points current.json at it. Production is reached
 //     only from CI: .github/workflows/media.yml.
-//   node scripts/factory-media.mjs point <version> --stage <stage> [--set desktop] [--dry-run]
+//   node scripts/factory-media.mjs point <version> --stage <stage> [--dry-run]
 //     Points current.json at a version already in the stage's bucket: rolling back is pointing at the previous one.
 //
-// Keys: factory/<set>/<version>/... (never written twice, cached for a year) and factory/<set>/current.json (cached a
-// minute). A version is the day and the start of a hash over its files' hashes. Writes go through Wrangler
-// (`r2 object put --remote`) in the stage's account: WRANGLER names the command (wwrangler on a machine logged in to the
-// work account; CI passes api/node_modules/.bin/wrangler with its minted CLOUDFLARE_API_TOKEN). What still needs a
-// deploy: a set whose frame, button or board geometry differs from the bundled manifest, or whose first frame differs
-// from the bundled poster (the page keeps its poster until then).
+// Keys: factory/<version>/desktop/... and factory/<version>/phone/... (never written twice, cached for a year), with
+// factory/<version>/files.json (every file's size and sha256) and each format's manifest.json; and factory/current.json
+// (cached a minute): { version, formats: { desktop: <manifest>, phone: <manifest> } }. A version is the day and the start
+// of a hash over its files' hashes. Writes go through Wrangler (`r2 object put --remote`) in the stage's account:
+// WRANGLER names the command (wwrangler on a machine logged in to the work account; CI passes
+// api/node_modules/.bin/wrangler with its minted CLOUDFLARE_API_TOKEN). What still needs a deploy: a set whose frame,
+// button, board or pipe geometry differs from the bundled manifest of its format, or whose first frame differs from the
+// bundled poster (the page keeps its poster until then).
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -36,12 +40,14 @@ const VERSION = /^\d{4}-\d{2}-\d{2}-[0-9a-f]{8}$/, NAME = /^[\w-]+$/
 
 const [command, subject, ...rest] = process.argv.slice(2)
 const flag = name => { const i = rest.indexOf(`--${name}`); return i < 0 ? undefined : rest[i + 1] }
-const dry = rest.includes('--dry-run'), set = flag('set') ?? 'desktop', stage = STAGES[flag('stage')], to = flag('to')
+const dry = rest.includes('--dry-run'), stage = STAGES[flag('stage')], to = flag('to')
 const fail = message => { console.error(`factory-media: ${message}`); process.exit(1) }
 if (!['publish', 'promote', 'point'].includes(command) || !subject) fail('usage: publish <dir> | promote <version> | point <version>, with --stage dev|production (see the top of this file)')
 if (!stage && !to) fail('--stage dev|production')
-if (!NAME.test(set)) fail(`bad set name ${set}`)
-const prefix = `factory/${set}/`
+const prefix = 'factory/'
+/** Each format, and where its set is in a web-layers folder. */
+const FORMATS = { desktop: '.', phone: 'phone' }
+const PATH = /^(desktop|phone)\/[\w-]+\/[\w.-]+$/
 const sha256 = buffer => createHash('sha256').update(buffer).digest('hex')
 
 // The set's manifest, checked for what the page and this script rely on; and every file it needs, by its path in the set.
@@ -90,36 +96,54 @@ async function putAll(list, from) {
   }))
   return total
 }
-// The pointer: the version's manifest, and which version it is. Written last, so the page never names files not yet there.
-async function point(version, manifest) {
+// The pointer: which version it is, and each format's manifest. Written last, so the page never names files not yet there.
+async function point(version, formats) {
   const work = mkdtempSync(join(tmpdir(), 'factory-media-')), file = join(work, 'current.json')
-  writeFileSync(file, JSON.stringify({ version, ...manifest }) + '\n')
+  writeFileSync(file, JSON.stringify({ version, formats }) + '\n')
   try { await put(`${prefix}current.json`, file, POINTER) } finally { rmSync(work, { recursive: true, force: true }) }
-  console.log(`${dry ? 'would point' : 'pointed'} ${where()}${prefix}current.json at ${version}`)
+  console.log(`${dry ? 'would point' : 'pointed'} ${where()}${prefix}current.json at ${version} (${Object.keys(formats).join(' and ')})`)
 }
 const where = () => to ? `${resolve(to)}/` : `r2://${stage.bucket}/`
 const fetchOk = async url => { const response = await fetch(url); if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`); return response }
 
-async function publish(dir) {
-  const { manifest, files } = collect(resolve(dir))
-  const version = `${new Date().toISOString().slice(0, 10)}-${sha256(JSON.stringify(files)).slice(0, 8)}`
-  const list = files.map(file => ({ ...file, key: `${prefix}${version}/${file.path}` }))
-  const bytes = list.reduce((sum, file) => sum + file.bytes, 0)
-  console.log(`${dry ? 'would publish' : 'publishing'} ${manifest.segments.length} segments, ${list.length} files, ${(bytes / 1e6).toFixed(1)} MB as ${where()}${prefix}${version}/`)
-  await putAll(list, resolve(dir))
+// Writes a version's index (files.json) and each format's manifest beside its files.
+async function writeIndex(version, files, formats) {
   const work = mkdtempSync(join(tmpdir(), 'factory-media-'))
   try {
-    writeFileSync(join(work, 'files.json'), JSON.stringify({ files }, null, 1) + '\n'); writeFileSync(join(work, 'manifest.json'), JSON.stringify(manifest, null, 1) + '\n')
-    await put(`${prefix}${version}/files.json`, join(work, 'files.json'), IMMUTABLE); await put(`${prefix}${version}/manifest.json`, join(work, 'manifest.json'), IMMUTABLE)
+    writeFileSync(join(work, 'files.json'), JSON.stringify({ files }, null, 1) + '\n')
+    await put(`${prefix}${version}/files.json`, join(work, 'files.json'), IMMUTABLE)
+    for (const [format, manifest] of Object.entries(formats)) {
+      writeFileSync(join(work, `${format}.json`), JSON.stringify(manifest, null, 1) + '\n')
+      await put(`${prefix}${version}/${format}/manifest.json`, join(work, `${format}.json`), IMMUTABLE)
+    }
   } finally { rmSync(work, { recursive: true, force: true }) }
-  await point(version, manifest)
+}
+const formatsIn = files => [...new Set(files.map(file => file.path.split('/')[0]))].filter(format => format in FORMATS)
+
+async function publish(dir) {
+  const formats = {}, files = []
+  for (const [format, sub] of Object.entries(FORMATS)) {
+    if (!existsSync(join(resolve(dir), sub, 'manifest.json'))) continue
+    const set = collect(join(resolve(dir), sub))
+    formats[format] = set.manifest; files.push(...set.files.map(file => ({ ...file, path: `${format}/${file.path}`, from: join(resolve(dir), sub, file.path) })))
+    console.log(`  ${format}: ${set.manifest.segments.length} segments, ${set.files.length} files, ${(set.files.reduce((sum, file) => sum + file.bytes, 0) / 1e6).toFixed(1)} MB`)
+  }
+  if (!files.length) fail(`no manifest.json in ${dir} or ${join(dir, 'phone')}`)
+  const index = files.map(({ path, bytes, sha256 }) => ({ path, bytes, sha256 }))
+  const version = `${new Date().toISOString().slice(0, 10)}-${sha256(JSON.stringify(index)).slice(0, 8)}`
+  const list = files.map(file => ({ ...file, key: `${prefix}${version}/${file.path}` }))
+  console.log(`${dry ? 'would publish' : 'publishing'} ${Object.keys(formats).join(' and ')}, ${list.length} files, ${(list.reduce((sum, file) => sum + file.bytes, 0) / 1e6).toFixed(1)} MB as ${where()}${prefix}${version}/`)
+  await putAll(list.map(file => ({ ...file, path: file.from })), '/')
+  await writeIndex(version, index, formats)
+  await point(version, formats)
 }
 
 async function promote(version) {
   if (!VERSION.test(version)) fail(`bad version ${version}`)
   const from = new URL(`${prefix}${version}/`, flag('from') ?? STAGES.dev.host)
-  const [{ files }, manifest] = await Promise.all([fetchOk(new URL('files.json', from)).then(r => r.json()), fetchOk(new URL('manifest.json', from)).then(r => r.json())])
-  check(manifest)
+  const { files } = await fetchOk(new URL('files.json', from)).then(r => r.json())
+  for (const file of files) if (!PATH.test(file.path)) throw new Error(`bad path ${file.path}`)
+  const formats = Object.fromEntries(await Promise.all(formatsIn(files).map(async format => [format, check(await fetchOk(new URL(`${format}/manifest.json`, from)).then(r => r.json()))])))
   const work = mkdtempSync(join(tmpdir(), 'factory-media-'))
   try {
     // Every file as published, byte for byte, before anything is written.
@@ -127,24 +151,25 @@ async function promote(version) {
     await Promise.all(Array.from({ length: 6 }, async () => {
       while (next < files.length) {
         const file = files[next++]
-        if (!/^[\w-]+\/[\w.-]+$/.test(file.path)) throw new Error(`bad path ${file.path}`)
         const body = Buffer.from(await (await fetchOk(new URL(file.path, from))).arrayBuffer())
         if (body.length !== file.bytes || sha256(body) !== file.sha256) throw new Error(`${file.path} differs from files.json`)
         mkdirSync(dirname(join(work, file.path)), { recursive: true }); writeFileSync(join(work, file.path), body)
       }
     }))
-    writeFileSync(join(work, 'files.json'), JSON.stringify({ files }, null, 1) + '\n'); writeFileSync(join(work, 'manifest.json'), JSON.stringify(manifest, null, 1) + '\n')
-    const list = [...files, { path: 'files.json', bytes: 0 }, { path: 'manifest.json', bytes: 0 }].map(file => ({ ...file, key: `${prefix}${version}/${file.path}` }))
-    console.log(`${dry ? 'would copy' : 'copying'} ${files.length} files (${(files.reduce((sum, file) => sum + file.bytes, 0) / 1e6).toFixed(1)} MB, all matching files.json) from ${from} to ${where()}${prefix}${version}/`)
+    const list = files.map(file => ({ ...file, key: `${prefix}${version}/${file.path}` }))
+    console.log(`${dry ? 'would copy' : 'copying'} ${Object.keys(formats).join(' and ')}, ${files.length} files (${(files.reduce((sum, file) => sum + file.bytes, 0) / 1e6).toFixed(1)} MB, all matching files.json) from ${from} to ${where()}${prefix}${version}/`)
     await putAll(list, work)
   } finally { rmSync(work, { recursive: true, force: true }) }
-  await point(version, manifest)
+  await writeIndex(version, files, formats)
+  await point(version, formats)
 }
 
 async function repoint(version) {
   if (!VERSION.test(version)) fail(`bad version ${version}`)
-  const manifest = check(to ? JSON.parse(readFileSync(join(to, prefix, version, 'manifest.json'), 'utf8')) : await (await fetchOk(new URL(`${prefix}${version}/manifest.json`, stage.host))).json())
-  await point(version, manifest)
+  const read = async path => to ? JSON.parse(readFileSync(join(to, prefix, version, path), 'utf8')) : await (await fetchOk(new URL(`${prefix}${version}/${path}`, stage.host))).json()
+  const { files } = await read('files.json')
+  const formats = Object.fromEntries(await Promise.all(formatsIn(files).map(async format => [format, check(await read(`${format}/manifest.json`))])))
+  await point(version, formats)
 }
 
 try {

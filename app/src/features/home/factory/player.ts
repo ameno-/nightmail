@@ -49,9 +49,9 @@ export type Player = { setShown(shown: boolean): void; destroy(): void }
 export type Layers = { stage: HTMLElement; bg: HTMLElement; boards: HTMLElement; fg: HTMLElement }
 
 /** Starts the factory in `layers` once the first segment and the boards can play; until then (and for good, where
- *  they cannot) the page's poster is what is seen. `base` is where the renders are, ending in a slash; `height` which
- *  of their sizes. The stage gets `data-playing` when the videos are up. */
-export function mountPlayer(layers: Layers, { base, manifest: m, format, height }: { base: string; manifest: Manifest; format: AlphaFormat; height: 720 | 1080 }): Player {
+ *  they cannot: `failed` is called) the page's poster is what is seen. `base` is where the renders are, ending in a
+ *  slash; `height` which of their sizes. The stage gets `data-playing` when the videos are up. */
+export function mountPlayer(layers: Layers, { base, manifest: m, format, height, failed }: { base: string; manifest: Manifest; format: AlphaFormat; height: 720 | 1080; failed?: () => void }): Player {
   const order = schedule(m.segments), frame = 1 / m.fps
   // (A layer one segment shares with another is the other's file: rush's hall is steady's bg-1080.mp4, so it is
   // downloaded once.)
@@ -205,11 +205,13 @@ export function mountPlayer(layers: Layers, { base, manifest: m, format, height 
   void (async () => {
     const first = decks[0]
     const [ok, boardsOk] = await Promise.all([load(first, order.first), boardsReady])
-    if (destroyed || !ok || !boardsOk) return
-    // Muted, inline video may start by itself; where it may not (a browser's setting), the poster stays.
+    if (destroyed) return
+    if (!ok || !boardsOk) { failed?.(); return }
+    // Muted, inline video may start by itself; where it may not (a browser's setting, a phone's low power mode), the
+    // poster stays.
     const played = await Promise.all(both(first).map(v => v.play().then(() => true, () => false)))
     if (destroyed) return
-    if (!played.every(Boolean)) { hold(first); return }
+    if (!played.every(Boolean)) { hold(first); failed?.(); return }
     await presented(first.bg)
     if (destroyed) return
     // The first pair and the boards come on over the poster (where the poster has the boards, so nothing moves);

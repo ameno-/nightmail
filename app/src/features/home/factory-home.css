@@ -1,4 +1,4 @@
-/* The factory homepage (factory-home.tsx), on a desktop. Under the header, the hero: the stage, and under it (for a
+/* The factory homepage (factory-home.tsx), in its wide frame on a desktop and its tall one on a phone. Under the header, the hero: the stage, and under it (for a
    visitor) a strip with what signing in agrees to. On the stage, the frame: the renders' picture, as large as covers
    the stage and still shows, whatever the window's shape, the boards and the machine down to its button (the safe
    box: factory-home.tsx), and never with its foot below the floor line, where the plinth's pipes end (the section
@@ -13,6 +13,12 @@
   --fac-fh: calc(var(--fac-fw) * var(--fac-h) / var(--fac-w));
   position: absolute; top: clamp(min(100cqh - var(--fac-fw) * var(--fac-floor) / var(--fac-w), (100cqh - var(--fac-fh)) / 2), 50cqh - var(--fac-fw) * var(--fac-mid) / var(--fac-w), max(0px, (100cqh - var(--fac-fh)) / 2));
   left: calc((100cqw - var(--fac-fw)) / 2); width: var(--fac-fw); height: var(--fac-fh); container-type: inline-size; }
+/* A phone's frame: as large as covers the stage down to the strip of floor under the console (`--fac-cut`, the stage's
+   foot: the floor further in front is cut off), and no larger than shows the boards' faces down to there and the middle
+   76% across. */
+.fac-page[data-format='phone'] .fac-frame {
+  --fac-fw: min(max(100cqw, 100cqh * var(--fac-w) / var(--fac-cut)), 100cqh * var(--fac-w) / var(--fac-safe-h), 100cqw * var(--fac-w) / var(--fac-safe-w));
+  top: calc(100cqh - var(--fac-fw) * var(--fac-cut) / var(--fac-w)); }
 .fac-poster, .fac-layer, .fac-video { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
 .fac-poster { user-select: none; pointer-events: none; }
 /* Each layer is its own stack, so the video put over the other one in it (`data-top`) stays under the next layer. */
@@ -29,11 +35,14 @@
 .fac-boards { overflow: hidden; opacity: 0; }
 .fac-stage[data-playing] .fac-boards { opacity: 1; }
 .fac-rail { position: absolute; inset: 0; will-change: transform; }
+/* A phone's boards where nothing plays: hung still from the rail, one at a time (factory-home.tsx). */
+.fac-still img { position: absolute; height: auto; opacity: 0; transition: opacity 300ms var(--srt-ease); }
+.fac-still img[data-on] { opacity: 1; }
 .fac-board { position: absolute; left: 0; height: auto; }
 
 /* The button: the page's words on the machine's blank plate. Pointed at, the plate is lit brighter; pressed, it dims
    and the words go in with it. */
-.fac-cta { position: absolute; z-index: 1; display: flex; align-items: center; justify-content: center; padding: 0; border: 0; background: none; color: var(--srt-on-cta); font-family: var(--font-body); font-size: max(13px, 100cqw * 19 / var(--fac-w)); font-weight: 600; line-height: 1; letter-spacing: -.012em; text-decoration: none; cursor: pointer; }
+.fac-cta { position: absolute; z-index: 1; display: flex; align-items: center; justify-content: center; padding: 0; border: 0; background: none; color: var(--srt-on-cta); font-family: var(--font-body); font-size: max(13px, 100cqw * var(--fac-label) / var(--fac-w)); font-weight: 600; line-height: 1; letter-spacing: -.012em; text-decoration: none; cursor: pointer; }
 .fac-cta::before { content: ''; position: absolute; inset: 0; background: rgb(255 255 255); opacity: 0; pointer-events: none; transition: opacity 150ms var(--srt-ease), background-color 90ms var(--srt-ease); }
 .fac-cta svg { width: 1em; height: 1em; }
 @media (hover: hover) and (pointer: fine) { .fac-cta:hover:not(:disabled)::before { opacity: .35; } .fac-cta:hover:not(:disabled) .srt-cta-arrow { translate: .25em 0; } }
@@ -42,16 +51,29 @@
 .fac-cta:disabled { opacity: 1; }
 .fac-cta[data-busy] { cursor: progress; }
 .fac-cta:focus-visible { outline: none; }
+/* On a touch screen it is pressed a little past its plate where that is under 44 px tall. */
+@media (pointer: coarse) { .fac-cta::after { content: ''; position: absolute; inset: min(0px, (100% - 44px) / 2) 0; } }
 .fac-cta:focus-visible::after { content: ''; position: absolute; inset: -6px; border: var(--focus-width) solid var(--color-focus); pointer-events: none; }
 
 /* What signing in agrees to: over the top of the section under the hero (pulled up under it, so its tubes start at the
    stage's foot, out of the hero's pipes), on a plate of the page's own floor so the tubes pass behind it. */
-.fac-under { position: relative; z-index: 1; display: grid; flex: none; place-items: center; height: 52px; padding: 0 var(--space-16); pointer-events: none; }
-.fac-page[data-visitor] .srt-stations { margin-top: -52px; }
+.fac-page { --fac-under: 52px; }
+.fac-under { position: relative; z-index: 1; display: grid; flex: none; place-items: center; height: var(--fac-under); padding: 0 var(--space-16); pointer-events: none; }
+.fac-page[data-visitor] .srt-stations { margin-top: calc(-1 * var(--fac-under)); }
 .fac-consent { margin: 0; padding: 4px 12px; border-radius: 6px; background: var(--srt-floor); color: var(--srt-text-2); font-size: 12px; line-height: 16px; text-align: center; text-wrap: balance; pointer-events: auto; }
 .fac-consent a:hover { color: var(--srt-text); }
 /* Where each tube comes out of its pipe at the stage's foot (sorter-stations.tsx Seam): a collar in the render's steel
    (its pipes' tone where the stage cuts them), flat. The renders are the same by day and by night, and so is this. */
 .fac-page .srt-seam { fill: rgb(58 72 86); }
+/* A phone's: directly under the console's strip of floor, and no wider than the gap between the two pipes either side
+   of the console that show in the picture (ENDPOINTS and RULES, 52.9% of the frame apart, and the frame is never
+   narrower than the page), so those run on beside it and only the ones hidden behind the console pass behind it. (Never
+   narrower than three lines need: on a 320 px phone it reaches the edges of those two.) Over a home indicator, the
+   strip stands clear of it. Its links are tall enough to press. */
+.fac-page[data-format='phone'] { --fac-under: calc(64px + var(--srt-safe-b)); }
+.fac-page[data-format='phone'] .fac-under { place-items: start center; padding: 4px 0 var(--srt-safe-b); }
+.fac-page[data-format='phone'] .fac-consent { max-width: max(52.9% - 18px, 164px); padding-inline: 8px; }
+.fac-page[data-format='phone'] .fac-consent a { position: relative; }
+.fac-page[data-format='phone'] .fac-consent a::before { content: ''; position: absolute; inset: -6px 0; }
 
 @media (prefers-reduced-motion: reduce) { .fac-cta::before, .fac-cta .srt-cta-label, .fac-cta .srt-cta-arrow { transition: none; } }
