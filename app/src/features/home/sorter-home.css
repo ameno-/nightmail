@@ -314,6 +314,11 @@
 .srt-caption { position: absolute; top: 0; display: grid; row-gap: 8px; }
 .srt-caption h2 { margin: 0; color: var(--srt-text); font-size: 30px; font-weight: 500; font-variation-settings: 'opsz' 32; line-height: 1.05; letter-spacing: -.024em; }
 .srt-caption p { margin: 0; color: var(--srt-text-2); font-size: 15px; line-height: 22px; letter-spacing: -.006em; }
+/* (On a wide page a caption stops short of the outbound main where the main runs up through it (sorter-stations.tsx):
+   a line too long for that runs on to a second, balanced, and the caption grows up the page into the gap over it,
+   never down onto its appliance. Its foot is where one line's is.) */
+.srt-stations:not([data-phone]) .srt-caption { top: auto; bottom: calc(-1 * (30px * 1.05 + 8px + 22px)); }
+.srt-stations:not([data-phone]) .srt-caption p { text-wrap: balance; }
 
 /* An appliance's box, in the machine's projection: a front, with its top and the side that is seen behind it. They
    are lit as the machine's own faces are: the front from the lamp over it, a little brighter at the top and darker
@@ -425,7 +430,10 @@
 .srt-feed-down .srt-paper { top: 0; bottom: auto; padding: 0; translate: 0 round(down, calc((var(--t) - 1) * var(--feed)), var(--pitch)); clip-path: polygon(0 0, 100% 0, 100% 100%, 95% 97%, 90% 100%, 85% 97%, 80% 100%, 75% 97%, 70% 100%, 65% 97%, 60% 100%, 55% 97%, 50% 100%, 45% 97%, 40% 100%, 35% 97%, 30% 100%, 25% 97%, 20% 100%, 15% 97%, 10% 100%, 5% 97%, 0 100%); }
 .srt-paper .srt-log { display: grid; grid-template-columns: 66px minmax(0, 1fr); align-items: center; column-gap: 8px; height: var(--pitch); padding: 0 13px; text-indent: 0; box-shadow: 0 1px 0 color-mix(in oklab, var(--srt-card-text) 12%, transparent); font-family: var(--font-body); font-size: 11px; }
 .srt-log b { font-weight: 450; line-height: 15px; }
-.srt-log span { color: var(--srt-card-dim); font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .04em; text-transform: uppercase; }
+/* (On a wide page a log is one line of the tape: on a narrow tape a long subject ends in an ellipsis, as a mail app's
+   list does, never runs on to a second line its row has no room for. A phone's rows are two lines high.) */
+.srt-stations:not([data-phone]) .srt-log b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srt-log span { color: var(--srt-card-dim); font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; }
 .srt-log span[data-status='Received'] { color: oklch(0.47 0.1 269); }
 /* The teleprinter's keys; the ledger printer's little window. */
 .srt-keys { position: absolute; inset: 14px 14px 44px; display: grid; grid-template-columns: repeat(11, 1fr); gap: 5px 6px; }
@@ -443,11 +451,23 @@
 .srt-panel span::before { content: ''; flex: none; width: 11px; height: 11px; border-radius: 50%; background: var(--srt-lamp-off); box-shadow: 0 0 0 2px var(--srt-trim); }
 .srt-jacks span::before { background: var(--srt-slot); }
 .srt-led { color: color-mix(in oklab, var(--srt-text-3), var(--srt-text) calc(var(--t) * 100%)); }
+/* (By night the panel's names are in the captions' second tone: the third is under 4.5:1 on the box's face.) */
+:root[data-theme='dark'] .srt-panel { --srt-text-3: var(--srt-text-2); }
 .srt-panel .srt-led::before { background: color-mix(in oklab, var(--srt-lamp-off), var(--srt-paper) calc(var(--t) * 100%)); }
 .srt-v-ritual { padding-top: 12px; }
 .srt-v-ritual pre { display: grid; font-family: var(--font-mono); font-size: 10.5px; line-height: 20px; white-space: pre; }
 .srt-v-ritual pre > span { padding-inline: 13px; color: var(--dim); }
 .srt-line-narrow { display: none; }
+/* (A wide page's appliances can be narrower than the rule's one-line call, 44 characters: there the screen sets the
+   call over three lines, as a phone's does, closer together, and the letters stand a little closer where it is
+   narrower still than the longest of the rest, 40 characters. Nothing on it is cut off, and nothing is set smaller.) */
+.srt-v-ritual { container-type: inline-size; }
+@container (width < 304px) {
+  .srt-stations:not([data-phone]) .srt-v-ritual pre { --pad: clamp(7px, calc((100cqw - 40 * .6 * 10.5px) / 2), 13px); line-height: 17px; letter-spacing: clamp(-.8px, calc((100cqw - 2 * var(--pad) - 40 * .6 * 10.5px) / 40), 0px); }
+  .srt-stations:not([data-phone]) .srt-v-ritual pre > span { padding-inline: var(--pad); }
+  .srt-stations:not([data-phone]) .srt-line-wide { display: none; }
+  .srt-stations:not([data-phone]) .srt-line-narrow { display: block; }
+}
 .srt-run { color: color-mix(in oklab, var(--dim), var(--srt-screen-text) calc(var(--t) * 100%)) !important; box-shadow: inset 2px 0 0 color-mix(in oklab, transparent, var(--color-brand) calc(var(--t) * 100%)); }
 .srt-v-endpoint { display: grid; align-content: start; row-gap: 8px; padding: 13px 13px 0; font-family: var(--font-mono); font-size: 10.5px; line-height: 15px; }
 .srt-v-endpoint p { white-space: nowrap; }
