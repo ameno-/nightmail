@@ -451,6 +451,8 @@
 .srt-panel span::before { content: ''; flex: none; width: 11px; height: 11px; border-radius: 50%; background: var(--srt-lamp-off); box-shadow: 0 0 0 2px var(--srt-trim); }
 .srt-jacks span::before { background: var(--srt-slot); }
 .srt-led { color: color-mix(in oklab, var(--srt-text-3), var(--srt-text) calc(var(--t) * 100%)); }
+/* (By night the panel's names are in the captions' second tone: the third is under 4.5:1 on the box's face.) */
+:root[data-theme='dark'] .srt-panel { --srt-text-3: var(--srt-text-2); }
 .srt-panel .srt-led::before { background: color-mix(in oklab, var(--srt-lamp-off), var(--srt-paper) calc(var(--t) * 100%)); }
 .srt-v-ritual { padding-top: 12px; }
 .srt-v-ritual pre { display: grid; font-family: var(--font-mono); font-size: 10.5px; line-height: 20px; white-space: pre; }
