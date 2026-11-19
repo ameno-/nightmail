@@ -290,7 +290,7 @@ export function receivingAdminRefusal(a: Actor | undefined, change?: string): Ap
   if (a.domains.length || a.role === 'member')
     return new ApiError(403, 'ADMIN_REQUIRED', 'Receiving configuration covers every address in the workspace. Use an owner or admin session, or an API key with manage permission on all domains.');
   if (!change) return null;
-  if (a.grantId && !a.receivingConsent) return new ApiError(403, 'ADMIN_REQUIRED', 'Reconnect with explicit receiving consent to change receiving configuration.');
+  if (a.grantId && !a.receivingConsent) return new ApiError(403, 'ADMIN_REQUIRED', 'Changing receiving configuration requires an owner or admin of this workspace.');
   return lastingRefusal(a, change);
 }
 /** Key administration (auth.ts manageKeys, and the deprecated inbound key routes): why it refuses this actor, or null.

@@ -21858,8 +21858,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         // named for the inbox and client so several connections stay apart. OpenCode gets its V2 shape (mcp.servers).
         assert.equal(new URL(connected.config.url).pathname+new URL(connected.config.url).search,'/mcp');assert.match(connected.config.headers.Authorization,/^Bearer nm_mbx_/);
         assert.match((await db.query('SELECT name FROM mailbox_keys WHERE id=$1',[connected.id])).rows[0].name,/ · Other MCP client$/);
-        const opencode=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'opencode',auth:'oauth'}),201);assert.equal(opencode.id,null);
-        assert.deepEqual(opencode.config.mcp.servers.nightmail,{type:'remote',url:connected.config.url});assert.equal(opencode.config.mcp.nightmail,undefined);
+        // A sign-in can't be limited to inboxes: auth=oauth is refused rather than handing back an unscoped config.
+        error(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'opencode',auth:'oauth'}),422,'VALIDATION_FAILED');
+        const opencode=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'opencode',auth:'key'}),201);ok(await local('POST',`/v1/inbound/keys/${opencode.id}/revoke`));
+        assert.deepEqual(opencode.config.mcp.servers.nightmail,{type:'remote',url:connected.config.url,oauth:false,headers:opencode.config.mcp.servers.nightmail.headers});assert.match(opencode.config.mcp.servers.nightmail.headers.Authorization,/^Bearer nm_mbx_/);assert.equal(opencode.config.mcp.nightmail,undefined);
         const cursor=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'cursor',auth:'key'}),201);assert.match(cursor.config.mcpServers.nightmail.headers.Authorization,/^Bearer nm_mbx_/);ok(await local('POST',`/v1/inbound/keys/${cursor.id}/revoke`));
         const scoped=ok(await local('POST','/v1/inbound/keys',{name:'separate',permissions:['read'],addressIds:[box.id]}),201).secret;
         await db.query("UPDATE mailboxes SET expires_at=now()-interval '1 minute' WHERE id=$1",[box.id]);const grace=await deliver('grace',[box.address]);assert.equal(ok(await request('GET',`${url}/${grace.id}`,key)).held,'expired');ok(await charged(2,()=>request('DELETE',path,key)),202);

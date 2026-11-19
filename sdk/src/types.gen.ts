@@ -16641,6 +16641,9 @@ export type CreateInboxConnectionData = {
          * opencode, claude (Claude Code), cursor, or generic for any other MCP client.
          */
         client: 'opencode' | 'claude' | 'cursor' | 'generic';
+        /**
+         * key. oauth is refused with 422: a sign-in can’t be limited to inboxes.
+         */
         auth: 'key' | 'oauth';
         reply?: boolean;
     };
@@ -23211,7 +23214,7 @@ export type ListInboundMessagesData = {
         cursor?: string;
         limit?: number;
         /**
-         * Include delivery details for workspace logs (dashboard or unrestricted live manage access only).
+         * Include delivery details for workspace logs (owner or admin sessions, and API keys with manage permission on all domains, only).
          */
         includeDelivery?: 'true' | 'false';
         region?: string;
@@ -23287,7 +23290,7 @@ export type GetInboundMessageData = {
          */
         addressId?: string;
         /**
-         * Include delivery details for workspace logs (dashboard or unrestricted live manage access only).
+         * Include delivery details for workspace logs (owner or admin sessions, and API keys with manage permission on all domains, only).
          */
         includeDelivery?: 'true' | 'false';
         /**

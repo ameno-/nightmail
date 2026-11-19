@@ -190,12 +190,12 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
   const accessible = accessibleMessages;
   // Received Logs can inspect the entire workspace, including SMTP envelopes and unassigned mail.
   // Never grant this projection to an address key, even a key that can read every address.
-  const includeDelivery = z.enum(['true','false']).optional().describe('Include delivery details for workspace logs (dashboard or unrestricted live manage access only).');
+  const includeDelivery = z.enum(['true','false']).optional().describe('Include delivery details for workspace logs (owner or admin sessions, and API keys with manage permission on all domains, only).');
   function messageScope(c: Ctx, delivery?: string) {
     const v=access(c,'read');
     if (delivery!=='true') return v;
     // A dashboard member reads only addressed mail, like a non-admin key (L1).
-    if (!readsDelivery(c.get('actor'),v)) throw new ApiError(403,'ADMIN_REQUIRED','Delivery details require a workspace owner or admin session, or an unrestricted live manage API key.');
+    if (!readsDelivery(c.get('actor'),v)) throw new ApiError(403,'ADMIN_REQUIRED','Delivery details require a workspace owner or admin session, or an API key with manage permission on all domains that wasn’t created over MCP.');
     return {...v,admin:true};
   }
   // The sender's SPF, DKIM and DMARC results and the automated-mail flag describe the message itself, not the workspace's

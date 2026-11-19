@@ -3289,7 +3289,7 @@ export const testEndpoint = <ThrowOnError extends boolean = false>(options: Opti
 });
 
 /**
- * Generate client config for selected inboxes. Key shown once; OAuth requires human selection at consent.
+ * Generate client config with a key limited to selected inboxes. Key shown once.
  */
 export const createInboxConnection = <ThrowOnError extends boolean = false>(options: Options<CreateInboxConnectionData, ThrowOnError>): RequestResult<CreateInboxConnectionResponses, CreateInboxConnectionErrors, ThrowOnError> => (options.client ?? client).post<CreateInboxConnectionResponses, CreateInboxConnectionErrors, ThrowOnError>({
     security: [
@@ -4454,7 +4454,7 @@ export const listInboxes = <ThrowOnError extends boolean = false>(options?: Opti
 /**
  * Create an agent inbox
  *
- * Creates an inbox with a fresh address. Set type=persistent for forever retention (no lease or default per-inbox cap; workspace manage permission). The default is an expiring inbox on one of the workspace’s active receiving domains, or a sandbox inbox that needs no DNS. Then wait for mail with GET /v1/inboxes/{id}/messages?wait=30 (or the SDK’s waitForMessage). Needs a workspace admin or an inbound key with create permission. Limits: 60 creates per minute and 1,000 retained inboxes (including grace and pending erasure) per workspace. Errors: RECEIVING_DOMAIN_REQUIRED and RECEIVING_NOT_ACTIVE name the DNS step to take; ADDRESS_TAKEN, ADDRESS_RETIRED, EPHEMERAL_INBOX_LIMIT, INBOX_CREATE_RATE (with Retry-After) and IDEMPOTENCY_CONFLICT.
+ * Creates an inbox with a fresh address. Set type=persistent for forever retention (no lease or default per-inbox cap; workspace manage permission). The default is an expiring inbox on one of the workspace’s active receiving domains, or a sandbox inbox that needs no DNS. Then wait for mail with GET /v1/inboxes/{id}/messages?wait=30 (or the SDK’s waitForMessage). Needs a workspace admin or a key with create permission. Limits: 60 creates per minute and 1,000 retained inboxes (including grace and pending erasure) per workspace. Errors: RECEIVING_DOMAIN_REQUIRED and RECEIVING_NOT_ACTIVE name the DNS step to take; ADDRESS_TAKEN, ADDRESS_RETIRED, EPHEMERAL_INBOX_LIMIT, INBOX_CREATE_RATE (with Retry-After) and IDEMPOTENCY_CONFLICT.
  */
 export const createInbox = <ThrowOnError extends boolean = false>(options: Options<CreateInboxData, ThrowOnError>): RequestResult<CreateInboxResponses, CreateInboxErrors, ThrowOnError> => (options.client ?? client).post<CreateInboxResponses, CreateInboxErrors, ThrowOnError>({
     security: [
@@ -5347,7 +5347,7 @@ export const listLogs = <ThrowOnError extends boolean = false>(options?: Options
 /**
  * Every route mail can take, with its rules and endpoints, in one read
  *
- * One page of routes (addresses, agent inboxes, address patterns, explicit routes and catch-alls) merged and ordered by host, kind and address, each resolved to the rules that run on it and where its mail goes. Also returns counts per kind, the rules, up to 100 endpoints and 100 inbound webhooks, and the domains. Members and scoped keys see only their addresses. Requires explicit receiving consent on MCP-derived credentials, like the other receiving reads.
+ * One page of routes (addresses, agent inboxes, address patterns, explicit routes and catch-alls) merged and ordered by host, kind and address, each resolved to the rules that run on it and where its mail goes. Also returns counts per kind, the rules, up to 100 endpoints and 100 inbound webhooks, and the domains. Members and scoped keys see only their addresses. Over MCP, it requires an owner or admin, like the other receiving reads.
  */
 export const getInboundOverview = <ThrowOnError extends boolean = false>(options?: Options<GetInboundOverviewData, ThrowOnError>): RequestResult<GetInboundOverviewResponses, GetInboundOverviewErrors, ThrowOnError> => (options?.client ?? client).get<GetInboundOverviewResponses, GetInboundOverviewErrors, ThrowOnError>({
     security: [
