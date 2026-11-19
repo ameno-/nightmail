@@ -4,6 +4,7 @@ import { ApiError, assertSharedAccount, lazyModule, type Config, type Runtime } 
 import { connectionReady } from './states.js';
 import { setupResources } from './ses-setup.js';
 import { productName } from './brand.js';
+import { requirePlatformAccount } from './config.js';
 export { assertSharedAccount };
 
 type Credentials = NonNullable<Config['aws']>;
@@ -22,13 +23,37 @@ export async function caller(region: string, credentials: Credentials) {
 }
 // Only completed credential values cross requests, never a Worker request's promise or SDK client.
 const sessions = new Map<string, Credentials & { expiration: Date }>();
-export async function assume(runtime: Runtime, region: string, roleArn: string, externalId: string, verify = false, policy?: string) {
-  const platform = platformCredentials(runtime), key = `${platform.accessKeyId}:${roleArn}:${externalId}:${policy ? createHash('sha256').update(policy).digest('hex') : ''}`;
+const remember = (map: Map<string, Credentials & { expiration: Date }>, key: string, value: Credentials & { expiration: Date }) => {
+  if (map.size >= 256) map.delete(map.keys().next().value!);
+  map.set(key, value);
+  return value;
+};
+/** The platform role that alone may assume a connected account's role (infra/pulumi/byo-broker.ts). Customer stacks trust its name. */
+export const brokerRoleArn = (runtime: Runtime) => `arn:aws:iam::${requirePlatformAccount(runtime.config.platformAccount)}:role/nightmail-byo-broker`;
+const brokers = new Map<string, Credentials & { expiration: Date }>();
+async function brokerCredentials(runtime: Runtime, region: string) {
+  const platform = platformCredentials(runtime), RoleArn = brokerRoleArn(runtime), key = `${platform.accessKeyId}:${RoleArn}`, cached = brokers.get(key);
+  // Customer sessions are chained from this one: keep at least 15 minutes for them.
+  if (cached && cached.expiration.getTime() - Date.now() > 15 * 60_000) return cached;
+  const { client, AssumeRoleCommand } = await sts(region, platform);
+  try {
+    const c = (await client.send(new AssumeRoleCommand({ RoleArn, RoleSessionName: 'nightmail-broker', DurationSeconds: 3600 }), { abortSignal: AbortSignal.timeout(4000) })).Credentials;
+    if (!c?.AccessKeyId || !c.SecretAccessKey || !c.SessionToken || !c.Expiration) throw new ApiError(503, 'AWS_SESSION_INVALID', 'STS returned incomplete session credentials.');
+    return remember(brokers, key, { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken, expiration: c.Expiration });
+  } finally { client.destroy(); }
+}
+/** A connected-account session from the broker: named nightmail-<purpose>, carrying the connection ID as its source identity. */
+export type ByoSession = { connectionId: string; purpose: 'scan' | 'provision' | 'cleanup' | 'send' | 'template' | 'quota' | 'verify' | 'read' | 'delete' | 'mailfrom' };
+export async function assume(runtime: Runtime, region: string, roleArn: string, externalId: string, verify = false, policy?: string, session?: ByoSession) {
+  // Without a session: the legacy v4 path, which assumes customer roles with the platform credentials directly.
+  const platform = session ? await brokerCredentials(runtime, region) : platformCredentials(runtime);
+  const name = session ? `nightmail-${session.purpose}` : 'Bane';
+  const key = `${platformCredentials(runtime).accessKeyId}:${roleArn}:${externalId}:${name}:${session?.connectionId ?? ''}:${policy ? createHash('sha256').update(policy).digest('hex') : ''}`;
   const cached = sessions.get(key);
   if (!verify && cached && cached.expiration.getTime() - Date.now() > 60_000) return cached;
   const { client, AssumeRoleCommand } = await sts(region, platform);
   try {
-    const input = { RoleArn: roleArn, RoleSessionName: 'Bane', DurationSeconds: policy ? 900 : 3600, Policy: policy };
+    const input = { RoleArn: roleArn, RoleSessionName: name, DurationSeconds: policy ? 900 : 3600, Policy: policy, SourceIdentity: session?.connectionId };
     const opts = { abortSignal: AbortSignal.timeout(4000) };
     const probe = async (ExternalId?: string) => {
       try { await client.send(new AssumeRoleCommand({ ...input, ExternalId }), opts); }
@@ -45,10 +70,7 @@ export async function assume(runtime: Runtime, region: string, roleArn: string, 
       const expected = /^arn:aws:iam::(\d{12}):role\/((?:Nightmail|Bane)-[a-f0-9]{20})$/.exec(roleArn);
       if (!expected || result.AssumedRoleUser?.Arn !== `arn:aws:sts::${expected[1]}:assumed-role/${expected[2]}/${input.RoleSessionName}`) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'STS did not return the expected customer role and account.');
     }
-    const value = { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken, expiration: c.Expiration };
-    if (sessions.size >= 256) sessions.delete(sessions.keys().next().value!);
-    sessions.set(key, value);
-    return value;
+    return remember(sessions, key, { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken, expiration: c.Expiration });
   } finally { client.destroy(); }
 }
 type DeliverySession={purpose:'send';domainId:string}|{purpose:'template';name:string}|{purpose:'quota'};
@@ -77,7 +99,7 @@ async function deliveryCredentials(runtime:Runtime,region:string,row:ReadyConnec
     if (!/^bane-[A-Za-z0-9_-]+$/.test(scope.name)) throw new ApiError(422,'TEMPLATE_SCOPE_REQUIRED','Regional BYO may render only bane- templates.');
     statements=[allow(['ses:GetEmailTemplate','ses:TestRenderEmailTemplate'],prefix+'template/'+scope.name)];
   } else statements=[allow(['ses:GetAccount'],'*')];
-  return assume(runtime,region,row.role_arn,row.external_id,false,JSON.stringify({Version:'2012-10-17',Statement:statements}));
+  return assume(runtime,region,row.role_arn,row.external_id,false,JSON.stringify({Version:'2012-10-17',Statement:statements}),{connectionId:row.id,purpose:scope.purpose});
 }
 export async function workspaceConnection(runtime: Runtime, region?: string) {
   const result = await runtime.db.execute<ReadyConnection & { region: string }>(sql`
@@ -100,7 +122,7 @@ export async function workspaceCredentials(runtime: Runtime, region: string, con
     // session before release; never silently hand it the customer's entire role.
     if (!scope || !/^(?:[a-z0-9-]+\.)+[a-z]{2,63}$/.test(scope.name)) throw new ApiError(409,'BYO_SESSION_SCOPE_REQUIRED','A purpose-scoped regional AWS session is required.');
     const actions=['ses:GetEmailIdentity',...({read:[],verify:['ses:CreateEmailIdentity','ses:TagResource'],delete:['ses:DeleteEmailIdentity'],mailFrom:['ses:PutEmailIdentityMailFromAttributes']}[scope.purpose])];
-    return assume(runtime,region,row.role_arn,row.external_id,false,JSON.stringify({Version:'2012-10-17',Statement:[{Effect:'Allow',Action:actions,Resource:`arn:aws:ses:${region}:${row.aws_account_id}:identity/${scope.name}`}] }));
+    return assume(runtime,region,row.role_arn,row.external_id,false,JSON.stringify({Version:'2012-10-17',Statement:[{Effect:'Allow',Action:actions,Resource:`arn:aws:ses:${region}:${row.aws_account_id}:identity/${scope.name}`}] }),{connectionId:row.id,purpose:scope.purpose==='mailFrom'?'mailfrom':scope.purpose});
   }
   return assume(runtime,region,row.role_arn,row.external_id);
 }

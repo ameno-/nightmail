@@ -1,169 +1,196 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Bane BYO v5. Install once in a commercial region. Creates only a global IAM role; no identities, feedback resources, mailboxes or callbacks at install time.
+Description: Nightmail BYO 6.0. Creates one IAM role that Nightmail assumes to send mail through this account's Amazon SES. Install once, in us-east-2.
+# Versions are additive: a later 6.x only adds permissions and keeps the role's name, logical IDs and parameters.
+# Receiving isn't part of 6.0: classic SES can't limit receipt rules to Nightmail's own, and an account's active rule set
+# is never Nightmail's to change. Unpublished: the stack callback resource lands before 6.0 is published.
+Metadata:
+  TemplateVersion: '6.0'
 Parameters:
   PlatformAccount:
+    Description: The Nightmail account allowed to assume the role (only through its nightmail-byo-* roles).
     Type: String
     Default: '009882681002'
-    AllowedValues: ['009882681002']
+    AllowedValues: ['009882681002', '905840579680']
   ExternalId:
+    Description: This connection's external ID, set by Nightmail. It isn't a secret; it stops another Nightmail workspace from using this role.
     Type: String
-    NoEcho: true
     AllowedPattern: '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'
   ConnectionId:
     Type: String
     AllowedPattern: 'conn_[0-9a-f]{32}'
   WorkspaceId:
+    Description: The Nightmail workspace this account sends for.
     Type: String
     AllowedPattern: 'ws_[0-9a-f]{32}'
   ResourcePrefix:
-    Description: bane- followed by the first 20 hex characters of SHA256(ConnectionId).
+    Description: nightmail- followed by the first 20 hex characters of SHA256(ConnectionId). Nightmail names everything it creates here with it.
     Type: String
-    AllowedPattern: 'bane-[0-9a-f]{20}'
-  ReceiveMail:
-    Description: Allow mailbox provisioning. Classic SES cannot restrict receipt-rule writes to a rule name; leave off unless you approve this risk.
+    AllowedPattern: 'nightmail-[0-9a-f]{20}'
+  EventsHost:
+    Description: The only host SES feedback and inbound notifications may be sent to.
     Type: String
-    Default: 'false'
-    AllowedValues: ['false', 'true']
-  ReceivingRegions:
-    Description: Only these regions may receive mail when ReceiveMail is enabled.
-    Type: CommaDelimitedList
-    Default: us-east-2
-    AllowedValues: [us-east-1, us-east-2, us-west-1, us-west-2, af-south-1, ap-southeast-3, ap-south-1, ap-northeast-3, ap-northeast-2, ap-southeast-1, ap-southeast-2, ap-northeast-1, ca-central-1, eu-central-1, eu-west-1, eu-west-2, eu-south-1, eu-west-3, eu-north-1, il-central-1, me-south-1, sa-east-1]
+    Default: events.nightmail.dev
+    AllowedValues: [events.nightmail.dev, events.dev.nightmail.dev]
   EnableAccountRequests:
-    Description: Allow SES production-access and sending quota/rate requests. PutAccountDetails can ALSO disable production access in the selected regions. IAM cannot enforce enable-only. Leave off to use the AWS console instead.
+    Description: Let Nightmail request SES production access and higher sending quotas for you. PutAccountDetails can also turn production access off, and IAM can't limit it to turning it on.
     Type: String
-    Default: 'false'
+    Default: 'true'
     AllowedValues: ['false', 'true']
   AccountRequestRegions:
     Type: CommaDelimitedList
-    Default: us-east-2
+    Default: us-east-1,us-east-2,us-west-1,us-west-2,af-south-1,ap-south-1,ap-south-2,ap-southeast-1,ap-southeast-2,ap-southeast-3,ap-southeast-4,ap-southeast-5,ap-southeast-6,ap-southeast-7,ap-northeast-1,ap-northeast-2,ap-northeast-3,ca-central-1,ca-west-1,eu-central-1,eu-central-2,eu-west-1,eu-west-2,eu-west-3,eu-south-1,eu-south-2,eu-north-1,il-central-1,mx-central-1,me-south-1,me-central-1,sa-east-1
     AllowedValues: [us-east-1, us-east-2, us-west-1, us-west-2, af-south-1, ap-south-1, ap-south-2, ap-southeast-1, ap-southeast-2, ap-southeast-3, ap-southeast-4, ap-southeast-5, ap-southeast-6, ap-southeast-7, ap-northeast-1, ap-northeast-2, ap-northeast-3, ca-central-1, ca-west-1, eu-central-1, eu-central-2, eu-west-1, eu-west-2, eu-west-3, eu-south-1, eu-south-2, eu-north-1, il-central-1, mx-central-1, me-south-1, me-central-1, sa-east-1]
 Rules:
-  NotPlatform:
+  NotNightmail:
     Assertions:
-      - Assert: !Not [!Equals [!Ref 'AWS::AccountId', !Ref PlatformAccount]]
-        AssertDescription: The Hosted platform account cannot be used as a BYO account.
+      - Assert: !Not [!Equals [!Ref 'AWS::AccountId', '009882681002']]
+        AssertDescription: A Nightmail platform account can't be connected.
+      - Assert: !Not [!Equals [!Ref 'AWS::AccountId', '905840579680']]
+        AssertDescription: A Nightmail platform account can't be connected.
 Conditions:
-  Receiving: !Equals [!Ref ReceiveMail, 'true']
   AccountRequests: !Equals [!Ref EnableAccountRequests, 'true']
 Resources:
-  BaneRole:
+  Role:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Ref AWS::StackName
+      Description: !Sub 'Nightmail sends mail through Amazon SES with this role for workspace ${WorkspaceId} (connection ${ConnectionId}).'
+      MaxSessionDuration: 3600
       Tags:
-        - {Key: 'bane:owner', Value: bane}
-        - {Key: 'bane:installation-id', Value: !Ref ConnectionId}
-        - {Key: 'bane:purpose', Value: byo-role}
+        - {Key: 'nightmail:owner', Value: nightmail}
+        - {Key: 'nightmail:installation-id', Value: !Ref ConnectionId}
+        - {Key: 'nightmail:workspace', Value: !Ref WorkspaceId}
+        - {Key: 'nightmail:purpose', Value: byo-role}
+        - {Key: 'nightmail:template-version', Value: '6.0'}
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
+          # The Nightmail account, only through its broker roles, only with this connection's external ID. Every
+          # session is named nightmail-<purpose> and carries the connection ID, so CloudTrail shows what each call was for.
           - Effect: Allow
-            Principal: {AWS: !Sub 'arn:aws:iam::${PlatformAccount}:user/bane-runtime'}
-            Action: sts:AssumeRole
-            Condition: {StringEquals: {'sts:ExternalId': !Ref ExternalId, 'sts:RoleSessionName': Bane}}
+            Principal: {AWS: !Sub 'arn:aws:iam::${PlatformAccount}:root'}
+            Action: [sts:AssumeRole, sts:SetSourceIdentity]
+            Condition:
+              StringEquals: {'sts:ExternalId': !Ref ExternalId, 'sts:SourceIdentity': !Ref ConnectionId}
+              ArnLike: {'aws:PrincipalArn': !Sub 'arn:aws:iam::${PlatformAccount}:role/nightmail-byo-*'}
+              StringLike: {'sts:RoleSessionName': 'nightmail-*'}
       Policies:
         - PolicyName: Sending
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Effect: Deny
+              - Sid: CommercialRegions
+                Effect: Deny
                 Action: '*'
                 Resource: '*'
-                Condition:
-                  StringNotEquals:
-                    'aws:RequestedRegion': [us-east-1, us-east-2, us-west-1, us-west-2, af-south-1, ap-south-1, ap-south-2, ap-southeast-1, ap-southeast-2, ap-southeast-3, ap-southeast-4, ap-southeast-5, ap-southeast-6, ap-southeast-7, ap-northeast-1, ap-northeast-2, ap-northeast-3, ca-central-1, ca-west-1, eu-central-1, eu-central-2, eu-west-1, eu-west-2, eu-west-3, eu-south-1, eu-south-2, eu-north-1, il-central-1, mx-central-1, me-south-1, me-central-1, sa-east-1]
-              - Effect: Deny
+                Condition: {StringNotEquals: {'aws:RequestedRegion': [us-east-1, us-east-2, us-west-1, us-west-2, af-south-1, ap-south-1, ap-south-2, ap-southeast-1, ap-southeast-2, ap-southeast-3, ap-southeast-4, ap-southeast-5, ap-southeast-6, ap-southeast-7, ap-northeast-1, ap-northeast-2, ap-northeast-3, ca-central-1, ca-west-1, eu-central-1, eu-central-2, eu-west-1, eu-west-2, eu-west-3, eu-south-1, eu-south-2, eu-north-1, il-central-1, mx-central-1, me-south-1, me-central-1, sa-east-1]}}
+              - Sid: OnlyMailServices
+                Effect: Deny
+                NotAction: ['ses:*', 'sns:*', 'servicequotas:*', 'iam:GetRole', 'iam:ListRoleTags', 'iam:ListRolePolicies', 'iam:GetRolePolicy', 'iam:ListAttachedRolePolicies', 'cloudformation:DescribeStacks', 'cloudformation:CreateChangeSet', 'cloudformation:DescribeChangeSet', 'cloudformation:DeleteChangeSet']
+                Resource: '*'
+              # Nothing that costs money or changes the whole account's mail settings.
+              - Sid: NeverAccountWide
+                Effect: Deny
+                Action: ['ses:CreateDedicatedIpPool', 'ses:PutDedicatedIp*', 'ses:PutAccountDedicatedIpWarmupAttributes', 'ses:PutDeliverabilityDashboardOption', 'ses:PutAccountVdmAttributes', 'ses:PutConfigurationSetVdmOptions', 'ses:PutAccountSuppressionAttributes', 'ses:PutAccountSendingAttributes', 'ses:CreateReceiptRuleSet', 'ses:DeleteReceiptRuleSet', 'ses:SetActiveReceiptRuleSet', 'ses:ReorderReceiptRuleSet', 'sns:AddPermission', 'sns:RemovePermission']
+                Resource: '*'
+              - Sid: OnlyNightmailEndpoint
+                Effect: Deny
+                Action: sns:Subscribe
+                Resource: '*'
+                Condition: {StringNotEquals: {'sns:Endpoint': !Sub 'https://${EventsHost}/v1/events/ses'}}
+              - Sid: OnlyHttps
+                Effect: Deny
+                Action: sns:Subscribe
+                Resource: '*'
+                Condition: {StringNotEquals: {'sns:Protocol': https}}
+              - Sid: NoAddressIdentities
+                Effect: Deny
                 Action: 'ses:*'
                 Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:identity/*@*'
-              - Effect: Allow
+              - Sid: ReadOwnRole
+                Effect: Allow
+                Action: ['iam:GetRole', 'iam:ListRoleTags', 'iam:ListRolePolicies', 'iam:GetRolePolicy', 'iam:ListAttachedRolePolicies']
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}'
+              # Nightmail can prepare an update of this stack from its own published templates. Only you can run it.
+              - Sid: ReadOwnStack
+                Effect: Allow
+                Action: ['cloudformation:DescribeStacks', 'cloudformation:DescribeChangeSet', 'cloudformation:DeleteChangeSet']
+                Resource:
+                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*'
+                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/nightmail-update-*/*'
+              - Sid: PrepareOwnUpdate
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*'
+                Condition:
+                  StringLike: {'cloudformation:TemplateUrl': !Sub 'https://nightmail-byo-templates-${PlatformAccount}.s3.us-east-2.amazonaws.com/byo/*', 'cloudformation:ChangeSetName': 'nightmail-update-*'}
+                  'Null': {'cloudformation:RoleArn': 'true'}
+              - Sid: AccountReads
+                Effect: Allow
                 Action: ['ses:GetAccount', 'ses:ListEmailIdentities', 'ses:ListConfigurationSets', 'ses:DescribeActiveReceiptRuleSet']
                 Resource: '*'
-              - Effect: Allow
+              - Sid: DomainReads
+                Effect: Allow
                 Action: ses:GetEmailIdentity
                 Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*'
-              - Effect: Allow
+              - Sid: OtherInstallations
+                Effect: Allow
                 Action: ses:GetConfigurationSet
+                Resource: [!Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/bane-*', !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/nightmail-*']
+              # Everything Nightmail creates here is named with ResourcePrefix, so new features need no new permissions.
+              - Sid: OwnSesResources
+                Effect: Allow
+                Action: 'ses:*'
                 Resource:
-                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/bane-*'
-                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-transactional'
-                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-marketing'
-              # Imported identities are never tagged, so the tags are IfExists: an identity Bane tagged
-              # for another owner or installation in this account cannot be sent from through this role.
-              - Effect: Allow
+                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-*'
+                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:template/${ResourcePrefix}-*'
+                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:contact-list/${ResourcePrefix}-*'
+              - Sid: OwnTopics
+                Effect: Allow
+                Action: 'sns:*'
+                Resource: !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-*'
+              # Imported identities are never tagged, so the tags are IfExists: an identity Nightmail tagged
+              # for another installation in this account cannot be sent from through this role.
+              - Sid: Send
+                Effect: Allow
                 Action: ses:SendEmail
                 Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*'
                 Condition:
                   StringEquals: {'ses:ApiVersion': '2'}
-                  StringEqualsIfExists: {'aws:ResourceTag/bane:owner': bane, 'aws:ResourceTag/bane:installation-id': !Ref ConnectionId, 'aws:ResourceTag/bane:purpose': domain-identity}
+                  StringEqualsIfExists: {'aws:ResourceTag/nightmail:owner': nightmail, 'aws:ResourceTag/nightmail:installation-id': !Ref ConnectionId, 'aws:ResourceTag/nightmail:purpose': domain-identity}
                   'Null': {'ses:TenantName': 'true', 'ses:MultiRegionEndpointId': 'true'}
-              - Effect: Allow
-                Action: ses:SendEmail
-                Resource:
-                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-transactional'
-                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-marketing'
-                Condition: {StringEquals: {'ses:ApiVersion': '2'}, 'Null': {'ses:TenantName': 'true', 'ses:MultiRegionEndpointId': 'true'}}
-              - Effect: Allow
+              - Sid: Tracking
+                Effect: Allow
                 Action: ses:ApplyTrackingConfigurationOverrides
                 Resource: '*'
                 Condition: {StringEquals: {'ses:OpenTrackingEnabled': '${ses:ClickTrackingEnabled}'}}
-              - Effect: Allow
+              - Sid: YourTemplates
+                Effect: Allow
                 Action: ['ses:GetEmailTemplate', 'ses:TestRenderEmailTemplate']
                 Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:template/bane-*'
-              - Effect: Allow
+              - Sid: CreateDomains
+                Effect: Allow
                 Action: ses:CreateEmailIdentity
                 Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*'
                 Condition:
-                  StringEquals: {'aws:RequestTag/bane:owner': bane, 'aws:RequestTag/bane:installation-id': !Ref ConnectionId, 'aws:RequestTag/bane:purpose': domain-identity}
-                  StringLike: {'aws:RequestTag/bane:domain-claim': '????????-????-4???-????-????????????'}
-                  'ForAllValues:StringEquals': {'aws:TagKeys': ['bane:owner', 'bane:installation-id', 'bane:purpose', 'bane:domain-claim']}
-              - Effect: Allow
+                  StringEquals: {'aws:RequestTag/nightmail:owner': nightmail, 'aws:RequestTag/nightmail:installation-id': !Ref ConnectionId, 'aws:RequestTag/nightmail:purpose': domain-identity}
+                  StringLike: {'aws:RequestTag/nightmail:domain-claim': '????????-????-4???-????-????????????'}
+                  'ForAllValues:StringEquals': {'aws:TagKeys': ['nightmail:owner', 'nightmail:installation-id', 'nightmail:purpose', 'nightmail:domain-claim']}
+              - Sid: RetagOwnDomains
+                Effect: Allow
                 Action: ses:TagResource
                 Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*'
                 Condition:
-                  StringEquals: {'aws:ResourceTag/bane:owner': bane, 'aws:ResourceTag/bane:installation-id': !Ref ConnectionId, 'aws:ResourceTag/bane:purpose': domain-identity, 'aws:RequestTag/bane:owner': bane, 'aws:RequestTag/bane:installation-id': !Ref ConnectionId, 'aws:RequestTag/bane:purpose': domain-identity, 'aws:RequestTag/bane:domain-claim': '${aws:ResourceTag/bane:domain-claim}'}
-                  StringLike: {'aws:ResourceTag/bane:domain-claim': '????????-????-4???-????-????????????'}
-                  'ForAllValues:StringEquals': {'aws:TagKeys': ['bane:owner', 'bane:installation-id', 'bane:purpose', 'bane:domain-claim']}
-              - Effect: Allow
+                  StringEquals: {'aws:ResourceTag/nightmail:owner': nightmail, 'aws:ResourceTag/nightmail:installation-id': !Ref ConnectionId, 'aws:ResourceTag/nightmail:purpose': domain-identity, 'aws:RequestTag/nightmail:owner': nightmail, 'aws:RequestTag/nightmail:installation-id': !Ref ConnectionId, 'aws:RequestTag/nightmail:purpose': domain-identity, 'aws:RequestTag/nightmail:domain-claim': '${aws:ResourceTag/nightmail:domain-claim}'}
+                  StringLike: {'aws:ResourceTag/nightmail:domain-claim': '????????-????-4???-????-????????????'}
+                  'ForAllValues:StringEquals': {'aws:TagKeys': ['nightmail:owner', 'nightmail:installation-id', 'nightmail:purpose', 'nightmail:domain-claim']}
+              - Sid: OwnDomains
+                Effect: Allow
                 Action: ['ses:PutEmailIdentityMailFromAttributes', 'ses:DeleteEmailIdentity']
                 Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*'
                 Condition:
-                  StringEquals: {'aws:ResourceTag/bane:owner': bane, 'aws:ResourceTag/bane:installation-id': !Ref ConnectionId, 'aws:ResourceTag/bane:purpose': domain-identity}
-                  StringLike: {'aws:ResourceTag/bane:domain-claim': '????????-????-4???-????-????????????'}
-              - Effect: Allow
-                Action: ['ses:CreateConfigurationSet', 'sns:CreateTopic']
-                Resource:
-                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-transactional'
-                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-marketing'
-                  - !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-feedback'
-                Condition:
-                  StringEquals: {'aws:RequestTag/bane:owner': bane, 'aws:RequestTag/bane:installation-id': !Ref ConnectionId, 'aws:RequestTag/bane:purpose': ses-feedback}
-                  'ForAllValues:StringEquals': {'aws:TagKeys': ['bane:owner', 'bane:installation-id', 'bane:purpose']}
-              - Effect: Allow
-                Action: ['ses:TagResource', 'sns:TagResource']
-                Resource:
-                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-transactional'
-                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-marketing'
-                  - !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-feedback'
-                Condition:
-                  StringEquals: {'aws:ResourceTag/bane:owner': bane, 'aws:ResourceTag/bane:installation-id': !Ref ConnectionId, 'aws:ResourceTag/bane:purpose': ses-feedback, 'aws:RequestTag/bane:owner': bane, 'aws:RequestTag/bane:installation-id': !Ref ConnectionId, 'aws:RequestTag/bane:purpose': ses-feedback}
-                  'ForAllValues:StringEquals': {'aws:TagKeys': ['bane:owner', 'bane:installation-id', 'bane:purpose']}
-              - Effect: Allow
-                Action: ['sns:GetTopicAttributes', 'sns:ListTagsForResource', 'sns:GetSubscriptionAttributes', 'sns:ListSubscriptionsByTopic']
-                Resource: !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-feedback'
-              - Effect: Allow
-                Action: ['ses:GetConfigurationSetEventDestinations', 'ses:PutConfigurationSetSuppressionOptions', 'ses:CreateConfigurationSetEventDestination', 'ses:UpdateConfigurationSetEventDestination', 'ses:DeleteConfigurationSet', 'sns:SetTopicAttributes', 'sns:DeleteTopic']
-                Resource:
-                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-transactional'
-                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-marketing'
-                  - !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-feedback'
-                Condition:
-                  StringEquals: {'aws:ResourceTag/bane:owner': bane, 'aws:ResourceTag/bane:installation-id': !Ref ConnectionId, 'aws:ResourceTag/bane:purpose': ses-feedback}
-              - Effect: Allow
-                Action: sns:Subscribe
-                Resource: !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-feedback'
-                Condition:
-                  StringEquals: {'aws:ResourceTag/bane:owner': bane, 'aws:ResourceTag/bane:installation-id': !Ref ConnectionId, 'aws:ResourceTag/bane:purpose': ses-feedback, 'sns:Protocol': https, 'sns:Endpoint': 'https://bane.mx/v1/events/ses'}
+                  StringEquals: {'aws:ResourceTag/nightmail:owner': nightmail, 'aws:ResourceTag/nightmail:installation-id': !Ref ConnectionId, 'aws:ResourceTag/nightmail:purpose': domain-identity}
+                  StringLike: {'aws:ResourceTag/nightmail:domain-claim': '????????-????-4???-????-????????????'}
         - !If
           - AccountRequests
           - PolicyName: AccountRequests
@@ -181,127 +208,7 @@ Resources:
                     - !Sub 'arn:aws:servicequotas:*:${AWS::AccountId}:ses/L-CDEF9B6B'
                   Condition: {StringEquals: {'aws:RequestedRegion': !Ref AccountRequestRegions, 'servicequotas:service': ses}}
           - !Ref AWS::NoValue
-  # Separate only when enabled: inline role policies have a combined 10,240-character quota.
-  ReceivingPolicy:
-    Type: AWS::IAM::ManagedPolicy
-    Condition: Receiving
-    Properties:
-      Roles: [!Ref BaneRole]
-      PolicyDocument:
-              Version: '2012-10-17'
-              Statement:
-                - Effect: Deny
-                  Action: ['s3:*', 'ses:CreateReceiptRule', 'ses:DeleteReceiptRule', 'ses:DescribeReceiptRuleSet']
-                  Resource: '*'
-                  Condition: {StringNotEquals: {'aws:RequestedRegion': !Ref ReceivingRegions}}
-                - Effect: Deny
-                  Action: 'sns:*'
-                  Resource: !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-inbound'
-                  Condition: {StringNotEquals: {'aws:RequestedRegion': !Ref ReceivingRegions}}
-                - Effect: Allow
-                  Action: ['ses:DescribeReceiptRuleSet', 'ses:CreateReceiptRule', 'ses:DeleteReceiptRule']
-                  Resource: '*'
-                - Effect: Allow
-                  Action: sns:CreateTopic
-                  Resource: !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-inbound'
-                  Condition:
-                    StringEquals: {'aws:RequestTag/bane:owner': bane, 'aws:RequestTag/bane:installation-id': !Ref ConnectionId, 'aws:RequestTag/bane:purpose': mailbox-inbound}
-                    'ForAllValues:StringEquals': {'aws:TagKeys': ['bane:owner', 'bane:installation-id', 'bane:purpose']}
-                - Effect: Allow
-                  Action: sns:TagResource
-                  Resource: !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-inbound'
-                  Condition:
-                    StringEquals: {'aws:ResourceTag/bane:owner': bane, 'aws:ResourceTag/bane:installation-id': !Ref ConnectionId, 'aws:ResourceTag/bane:purpose': mailbox-inbound, 'aws:RequestTag/bane:owner': bane, 'aws:RequestTag/bane:installation-id': !Ref ConnectionId, 'aws:RequestTag/bane:purpose': mailbox-inbound}
-                    'ForAllValues:StringEquals': {'aws:TagKeys': ['bane:owner', 'bane:installation-id', 'bane:purpose']}
-                - Effect: Allow
-                  Action: ['sns:ListTagsForResource', 'sns:ListSubscriptionsByTopic', 'sns:GetTopicAttributes', 'sns:GetSubscriptionAttributes']
-                  Resource: !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-inbound'
-                - Effect: Allow
-                  Action: ['sns:SetTopicAttributes', 'sns:DeleteTopic']
-                  Resource: !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-inbound'
-                  Condition: {StringEquals: {'aws:ResourceTag/bane:owner': bane, 'aws:ResourceTag/bane:installation-id': !Ref ConnectionId, 'aws:ResourceTag/bane:purpose': mailbox-inbound}}
-                - Effect: Allow
-                  Action: sns:Subscribe
-                  Resource: !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-inbound'
-                  Condition: {StringEquals: {'aws:ResourceTag/bane:owner': bane, 'aws:ResourceTag/bane:installation-id': !Ref ConnectionId, 'aws:ResourceTag/bane:purpose': mailbox-inbound, 'sns:Protocol': https, 'sns:Endpoint': 'https://bane.mx/v1/events/ses'}}
-                - Effect: Allow
-                  Action: s3:CreateBucket
-                  Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}'
-                  Condition: {StringEquals: {'s3:LocationConstraint': '${aws:RequestedRegion}'}, StringNotEquals: {'aws:RequestedRegion': us-east-1}, StringEqualsIfExists: {'s3:x-amz-object-ownership': BucketOwnerEnforced}}
-                - Effect: Allow
-                  Action: s3:CreateBucket
-                  Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-us-east-1'
-                  Condition: {StringEquals: {'aws:RequestedRegion': us-east-1}, 'Null': {'s3:LocationConstraint': 'true'}, StringEqualsIfExists: {'s3:x-amz-object-ownership': BucketOwnerEnforced}}
-                - Effect: Allow
-                  Action: s3:ListBucket
-                  Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-us-east-1'
-                  Condition: {StringEquals: {'aws:RequestedRegion': us-east-1}, StringEqualsIfExists: {'s3:ResourceAccount': !Ref 'AWS::AccountId'}, 'Null': {'s3:prefix': 'true'}}
-                - Effect: Allow
-                  Action: s3:ListBucket
-                  Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}'
-                  Condition: {StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId', 's3:prefix': 'staging/'}}
-                - Effect: Allow
-                  Action: s3:PutObject
-                  Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}/quarantine/?*'
-                  Condition: {StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId'}}
-                - Effect: Allow
-                  Action: ['s3:GetBucketTagging', 's3:PutBucketTagging', 's3:PutBucketPublicAccessBlock', 's3:PutBucketPolicy', 's3:PutLifecycleConfiguration']
-                  Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}'
-                  Condition: {StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId'}}
-                - Effect: Allow
-                  Action: s3:GetObject
-                  Resource:
-                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}/staging/?*'
-                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}/workspaces/${WorkspaceId}/raw/?*.eml'
-                  Condition: {StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId'}}
-                # Received attachments: workspaces/<ws>/att/<msg>/<64-hex ingest batch>/<matt>. Sent copies
-                # and files stored before the batch segment use workspaces/<ws>/att/<msg>/<matt>.
-                - Effect: Allow
-                  Action: ['s3:GetObject', 's3:PutObject']
-                  Resource:
-                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}/workspaces/${WorkspaceId}/att/msg_????????????????????????????????/matt_????????????????????????????????'
-                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}/workspaces/${WorkspaceId}/att/msg_????????????????????????????????/????????????????????????????????????????????????????????????????/matt_????????????????????????????????'
-                  Condition: {StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId'}}
-                - Effect: Allow
-                  # Unreferenced received uploads are only ever tagged for expiry, never deleted.
-                  Action: s3:PutObjectTagging
-                  Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}/workspaces/${WorkspaceId}/att/msg_????????????????????????????????/????????????????????????????????????????????????????????????????/matt_????????????????????????????????'
-                  Condition:
-                    StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId', 's3:RequestObjectTag/bane-kind': orphan}
-                    'ForAllValues:StringEquals': {'s3:RequestObjectTagKeys': bane-kind}
-                - Effect: Allow
-                  # Only initiation carries tags; UploadPart/Copy and Complete are authorized as PutObject without tags.
-                  Action: ['s3:PutObject', 's3:PutObjectTagging', 's3:AbortMultipartUpload']
-                  Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}/workspaces/${WorkspaceId}/raw/?*.eml'
-                  Condition:
-                    StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId'}
-                    StringEqualsIfExists: {'s3:RequestObjectTag/bane-kind': raw}
-                    'ForAllValues:StringEquals': {'s3:RequestObjectTagKeys': bane-kind}
-  # Revision kept-v1. Keep ordinary raw's expiry/tag policy unchanged. Separate
-  # managed policy so the existing receiving policy stays below its IAM size cap.
-  KeptReceivingV1:
-    Type: AWS::IAM::ManagedPolicy
-    Condition: Receiving
-    Properties:
-      Roles: [!Ref BaneRole]
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Action: ['s3:PutObject', 's3:PutObjectTagging']
-            Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}/workspaces/${WorkspaceId}/raw/kept/msg_????????????????????????????????.eml'
-            Condition:
-              StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId', 's3:RequestObjectTag/bane-kind': kept}
-              'ForAllValues:StringEquals': {'s3:RequestObjectTagKeys': bane-kind}
-          - Effect: Allow
-            Action: s3:PutObjectTagging
-            Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}/workspaces/${WorkspaceId}/raw/kept/msg_????????????????????????????????.eml'
-            Condition:
-              StringEquals: {'s3:ResourceAccount': !Ref 'AWS::AccountId', 's3:RequestObjectTag/bane-kind': orphan}
-              'ForAllValues:StringEquals': {'s3:RequestObjectTagKeys': bane-kind}
 Outputs:
-  KeptReceivingPolicy:
-    Condition: Receiving
-    Value: !Sub 'kept-v1:${WorkspaceId}'
   AccountId: {Value: !Ref 'AWS::AccountId'}
-  RoleArn: {Value: !GetAtt BaneRole.Arn}
+  RoleArn: {Value: !GetAtt Role.Arn}
+  TemplateVersion: {Value: '6.0'}

@@ -25,8 +25,8 @@ const values = z.object({
   // Origins this installation served before PUBLIC_URL and still answers on (https://bane.mx after the switch to
   // nightmail.dev), comma-separated. Their /mcp resource stays valid for tokens minted there. Remove after rename cleanup.
   PREVIOUS_PUBLIC_URLS: z.string().default(''),
-  // The name a new BYO connection gives its CloudFormation stack and IAM role (<prefix>-<id>). Bane until the runtime's
-  // sts:AssumeRole policy also allows role/Nightmail-*, then Nightmail. Existing connections keep their stack's name.
+  // The name a new v4 BYO connection gives its CloudFormation stack and IAM role (<prefix>-<id>). Regional (v5)
+  // connections are always Nightmail-<id>: the broker role may assume only those. Existing connections keep their stack's name.
   BYO_STACK_PREFIX: z.enum(['Bane', 'Nightmail']).default('Bane'),
   // Kept distinct from a missing value: self-hosted installations opt out with an explicit empty value.
   ACCOUNT_REQUIRED_ACR: z.union([z.literal(''), z.string().max(256).regex(/^\S+$/)]).optional(),
@@ -76,6 +76,9 @@ const values = z.object({
   NIGHTMAIL_PLACEMENT_DBL_ZONE: optional(z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
   NIGHTMAIL_BYO_V2: z.enum(['true','false']).default('false'),
   BYO_V5_TEMPLATE_URL: optional(z.url({ protocol: /^https$/ })),
+  // The origin a connected account's SNS topics deliver to (https://events.nightmail.dev): its role template allows
+  // only this host. Unset, BYO uses SES_FEEDBACK_URL or PUBLIC_URL.
+  BYO_EVENTS_ORIGIN: optional(z.url({ protocol: /^https$/ })),
   BYO_TEMPLATE_URL: optional(z.url({ protocol: /^https$/ })),
   DOMAIN_CONNECT_PRIVATE_KEY: optional(z.string().min(1)),
   DOMAIN_CONNECT_KEY_ID: optional(z.string().regex(/^_?[a-z0-9][a-z0-9-]{0,60}[a-z0-9]$/)),
@@ -206,7 +209,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     hostedScreen: v.MULTI_TENANT==='true' && v.NIGHTMAIL_HOSTED_SCREEN==='true',
     billing: v.MULTI_TENANT==='true' ? { stripe: v.STRIPE_SECRET_KEY && v.STRIPE_WEBHOOK_SECRET ? { secretKey: v.STRIPE_SECRET_KEY, webhookSecret: v.STRIPE_WEBHOOK_SECRET, automaticTax: v.STRIPE_AUTOMATIC_TAX === 'true', apiBase: v.STRIPE_API_BASE.replace(/\/$/, '') } : undefined } : undefined,
     placementShadow: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_PLACEMENT_SHADOW === 'true', placementDblZone: v.NIGHTMAIL_PLACEMENT_DBL_ZONE,
-    byoV2: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL,
+    byoV2: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL, byoEventsOrigin: v.BYO_EVENTS_ORIGIN,
     hostedSendCaps: { firstWeek: v.HOSTED_SEND_CAP_FIRST_WEEK, secondWeek: v.HOSTED_SEND_CAP_SECOND_WEEK, mature: v.HOSTED_SEND_CAP_MATURE },
     domainConnect,
     allowedSubjects, staffGoogleDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr, uiNotesSubjects,

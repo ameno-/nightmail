@@ -98,13 +98,19 @@ export const byoStackName = (prefix: 'Bane' | 'Nightmail' | undefined, connectio
 export function setupResources(installationId: string, namespace?:MxNamespace): { transactional: string; marketing: string; topicName: string; eventDestinationName: string } {
   if (!installationId) throw new ApiError(503, 'INSTALLATION_ID_REQUIRED', 'The persisted installation ID is missing.');
   const hash=createHash('sha256').update(installationId).digest('hex').slice(0,20);
-  const prefix = installationId === POOL_INSTALLATION && namespace !== 'byo' ? (namespace ? `${TAG_PREFIX}-${namespace}` : TAG_PREFIX) : namespace ? mxResourceName(namespace==='byo'?hash:namespace) : `bane-${hash}`;
+  // A connected account's resources are named nightmail-<hash>: its role template (api/byo-template.yaml) allows that prefix only.
+  const prefix = installationId === POOL_INSTALLATION && namespace !== 'byo' ? (namespace ? `${TAG_PREFIX}-${namespace}` : TAG_PREFIX) : namespace === 'byo' ? `nightmail-${hash}` : namespace ? mxResourceName(namespace) : `bane-${hash}`;
   return { transactional: `${prefix}-transactional`, marketing: `${prefix}-marketing`, topicName: `${prefix}-feedback`, eventDestinationName: `${prefix}-events` };
 }
 
 // Raw configured identity for persisted discovery caches and queued-job target fencing.
 export function feedbackTarget(config: Pick<Config, 'publicUrl' | 'sesFeedbackUrl'>): string {
   return config.sesFeedbackUrl ?? `${config.publicUrl.replace(/\/$/, '')}/v1/events/ses`;
+}
+
+/** Where a connected account's SNS topics deliver: BYO_EVENTS_ORIGIN, the one host its role allows, else the hosted endpoint. */
+export function byoFeedbackUrl(config: Pick<Config, 'publicUrl' | 'sesFeedbackUrl' | 'byoEventsOrigin'>): string {
+  return config.byoEventsOrigin ? feedbackUrl({ publicUrl: config.byoEventsOrigin }) : feedbackUrl(config);
 }
 
 // Deliberately no DNS requests: URL validation is not proof of endpoint reachability.
@@ -452,7 +458,7 @@ export async function scanRegionPage(runtime:Runtime,region:string,installation:
       const sets:NonNullable<Inventory['configurationSets']>=Object.create(null);
       for (const name of p.ConfigurationSets) {
         let tagged:boolean|null=null;
-        if (name.startsWith('bane-') || name===names.transactional || name===names.marketing) {
+        if (/^(?:bane|nightmail)-/.test(name) || name===names.transactional || name===names.marketing) {
           const s=await c.ses.send(new GetConfigurationSetCommand({ConfigurationSetName:name}),opts);
           tagged=!!s.Tags?.some(t=>!!t.Value && hasTags([t],[{Key:OWNER_TAG,Value:t.Value}]));
         }
@@ -541,7 +547,7 @@ export async function removeByoFeedbackResource(runtime:Runtime,region:string,in
   const present=async<T>(read:()=>Promise<T>)=>{try{return await read();}catch(e){if (!missing(e)) throw e;return null;}};
   try {
     const role=await c.sts.send(new GetCallerIdentityCommand({}),request);
-    if (role.Account!==account || !(['Nightmail','Bane'] as const).some(prefix => role.Arn===`arn:aws:sts::${account}:assumed-role/${byoStackName(prefix,installationId)}/Bane`)) throw drift();
+    if (role.Account!==account || role.Arn!==`arn:aws:sts::${account}:assumed-role/${byoStackName('Nightmail',installationId)}/nightmail-cleanup`) throw drift();
     const topic=entries.find(e=>e.kind==='topic'),sub=entries.find(e=>e.kind==='subscription');
     const attrs=await present(()=>c.sns.send(new GetTopicAttributesCommand({TopicArn:arn.topic}),request));
     if (attrs) {
