@@ -5,11 +5,12 @@ import type { S3Client } from '@aws-sdk/client-s3';
 import { readableMailboxKey, mailboxS3 } from './mailbox-setup.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, sql, type SQLWrapper } from 'drizzle-orm';
-import { ApiError, denied, errors, isoTime, json, lazyModule, page, response, security, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { actorMailAccess, ApiError, denied, errors, isoTime, json, lazyModule, page, response, security, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { productName } from './brand.js';
 
 const loadS3Presign = lazyModule(() => Promise.all([import('@aws-sdk/client-s3'), import('@aws-sdk/s3-request-presigner')]));
-import { mailboxMessages as links, mailboxThreads, mailAttachments, mailMessages as messages, retainedMail } from './db/mailbox.js';
+import { mailboxMessages as links, mailboxThreads, mailAttachments, mailMessages as messages } from './db/mailbox.js';
+import { accessibleMessages, EmailThread, liveBox, threadBlock, threadView, visibleLinks, type Filter, type RawThread } from './thread-view.js';
 import { htmlToPlain, replyText } from './mailbox-store.js';
 import { boundedHtmlFragment } from './bounded-html.js';
 import { archiveMailboxFiles, sendFromMailbox, finishMailboxArchive, type OutgoingMessage } from './mailbox-send.js';
@@ -53,23 +54,12 @@ function decodeCursor(value?: string) {
 }
 const encodeCursor = (time: string, id: string) => Buffer.from(JSON.stringify([time, id])).toString('base64url');
 
-type Filter = { addressId?: string; threadId?: string; messageId?: string };
-const liveBox=(bid:SQLWrapper)=>sql`NOT EXISTS(SELECT FROM mailboxes ended WHERE ended.id=${bid} AND ended.delete_after<=statement_timestamp())`;
-function visibleLinks(value: MailboxAccess, filter: Filter) {
-  if (filter.addressId && value.mailboxIds && !value.mailboxIds.includes(filter.addressId)) throw new ApiError(404, 'NOT_FOUND', 'Address was not found.');
-  return and(liveBox(links.mailboxId),sql`${links.heldReason} IS NULL`,eq(links.workspaceId, value.workspaceId),
-    filter.addressId ? eq(links.mailboxId, filter.addressId) : value.mailboxIds ? inArray(links.mailboxId, value.mailboxIds) : undefined,
-    filter.threadId ? eq(links.threadId, filter.threadId) : undefined, filter.messageId ? eq(links.messageId, filter.messageId) : undefined);
-}
-
 // Delivery details (SMTP envelope, region, spam verdict, headers, raw message) go to owner and admin dashboard sessions and
 // unrestricted manage API keys only; MCP grants, agent tokens and the API keys a grant created read mail without them.
 // Shared with logs.ts.
 export const readsDelivery = (actor: Actor | undefined, v: MailboxAccess) => (actor?.credential==='dashboard' && actor.role!=='member') || (actor?.credential==='apiKey' && !actor.grantId && v.admin);
-// Which stored messages a reader can see, and the receiving addresses each was delivered to. Shared with the unified
-// logs (logs.ts), so both lists apply the same rule.
-export const accessibleMessages = (v: MailboxAccess, f: Filter) => and(eq(messages.workspaceId,v.workspaceId),
-  v.admin && !f.addressId ? retainedMail() : sql`EXISTS (SELECT 1 FROM ${links} WHERE ${visibleLinks(v,f)} AND ${links.messageId}=${messages.id})`);
+// The receiving addresses each stored message was delivered to that a reader can see (which messages: thread-view.ts).
+// Shared with the unified logs (logs.ts).
 export const visibleAddresses = (v:MailboxAccess,q:Filter={}) => sql<{id:string;address:string}[]>`coalesce((SELECT jsonb_agg(jsonb_build_object('id',a.id,'address',a.address) ORDER BY a.id)
     FROM mailbox_messages JOIN mailboxes a ON a.id=mailbox_messages.mailbox_id
     WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id), '[]'::jsonb)`;
@@ -201,6 +191,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
   // The sender's SPF, DKIM and DMARC results and the automated-mail flag describe the message itself, not the workspace's
   // delivery, so any reader of the message gets them; an inbox key uses them to decide whether, and how, to answer.
   const includeAuthentication = z.enum(['true','false']).default('false').describe('Include the sender authentication results (SPF, DKIM, DMARC) and whether the message is automated (auto-replies, bounces, bulk and list mail). Available to any reader of the message.');
+  const includeThread = z.enum(['true','false']).default('false').describe('Include the conversation it belongs to (thread): up to 50 messages around it that you can read, oldest first, and their count. A key limited to addresses or an inbox reads only the messages on its addresses.');
   const Authentication = z.object({spf:z.string().nullable(),dkim:z.string().nullable(),dmarc:z.string().nullable().describe('PASS when the From domain is aligned with a passing SPF or DKIM result.')}).openapi('InboundMessageAuthentication');
   const authenticationView = (row:{verdicts:Verdicts|null;automated:boolean}) => ({authentication:{spf:row.verdicts?.spf??null,dkim:row.verdicts?.dkim??null,dmarc:row.verdicts?.dmarc??null},automated:row.automated});
   const deliverySchema = z.object({addresses:z.array(z.object({id:Id,address:z.string()})),envelopeTo:z.array(z.string()),region:z.string().nullable(),spam:z.boolean(),to:z.array(Address)});
@@ -216,24 +207,29 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
   const Attachment = z.object({id:Id,filename:z.string(),contentType:z.string(),size:z.number().int(),disposition:z.string(),contentId:z.string().nullable(),url:z.string().nullable().optional()});
   const DeliveryDetail = deliverySchema.omit({to:true}).extend({rawUrl:z.string().nullable(),rawExpiresAt:z.string().nullable(),sentAt:z.string().nullable(),sizeBytes:z.number().int().nullable(),headers:z.array(z.object({name:z.string(),value:z.string()})),verdicts:z.record(z.string(),z.union([z.string(),z.boolean()]))}).partial();
   app.openapi(createRoute({ method: 'get', path: '/v1/inbound/messages/{messageId}', operationId: 'getInboundMessage', tags, security, summary: 'Read a visible message',
-    request: { params: z.object({ messageId: Id }), query: AddressFilter.extend({includeDelivery,includeAuthentication,includeHtml:z.enum(['true','false']).default('false')}) }, responses: { 200: response(Message.extend({...DeliveryDetail.shape,authentication:Authentication.optional().describe('With includeAuthentication=true.'),automated:z.boolean().optional().describe('With includeAuthentication=true: an auto-reply, bounce, delivery report, or bulk or list mail. Never answer it automatically.'),html:z.string().nullable(),htmlTooComplex:z.boolean().describe(`With includeHtml=true: the HTML has more elements or deeper nesting than ${productName} parses (20,000 nodes, 256 levels deep). It is returned as stored; prefer text to rendering it.`),attachments:z.array(Attachment)}).openapi('InboundMessageDetail')), ...errors } }), async c => {
+    request: { params: z.object({ messageId: Id }), query: AddressFilter.extend({includeDelivery,includeAuthentication,includeHtml:z.enum(['true','false']).default('false'),includeThread}) }, responses: { 200: response(Message.extend({...DeliveryDetail.shape,thread:EmailThread.nullable().optional().describe('With includeThread=true: its conversation, as getEmailDetail shows it.'),authentication:Authentication.optional().describe('With includeAuthentication=true.'),automated:z.boolean().optional().describe('With includeAuthentication=true: an auto-reply, bounce, delivery report, or bulk or list mail. Never answer it automatically.'),html:z.string().nullable(),htmlTooComplex:z.boolean().describe(`With includeHtml=true: the HTML has more elements or deeper nesting than ${productName} parses (20,000 nodes, 256 levels deep). It is returned as stored; prefer text to rendering it.`),attachments:z.array(Attachment)}).openapi('InboundMessageDetail')), ...errors } }), async c => {
     const q=c.req.valid('query'),v=messageScope(c,q.includeDelivery),id=c.req.valid('param').messageId;
     // The same bounded parse every other reader of stored HTML uses; the body itself is returned as stored.
     const body=(html:string|null)=>q.includeHtml==='true'&&html?{html,htmlTooComplex:!boundedHtmlFragment(html,'document')}:{html:null,htmlTooComplex:false};
     const auth=(row:{verdicts:Verdicts|null;automated:boolean})=>q.includeAuthentication==='true'?authenticationView(row):{};
+    // Its conversation, in the same statement. The emails that joined it by replying are ordinary sends: a workspace
+    // credential reads them, an address or inbox key doesn't.
+    const a=c.get('actor') as Actor|undefined;
+    const thread=q.includeThread==='true'?threadBlock(v,{thread:sql`mail_messages.thread_id`,focus:sql`mail_messages.id`,addressId:q.addressId,sends:!!a&&!!actorMailAccess(a)&&!q.addressId}):sql<RawThread|null>`NULL`;
+    const conversation=(raw:RawThread|null)=>q.includeThread==='true'?{thread:threadView(raw,!!a?.permissions.includes('manage'))}:{};
     if (q.includeDelivery==='true') {
-      const [result]=await c.env.db.select({row:messages,addresses:deliveryAddresses(v,q),addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
+      const [result]=await c.env.db.select({row:messages,thread,addresses:deliveryAddresses(v,q),addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
       if (!result) throw new ApiError(404,'NOT_FOUND','Message was not found.');
       const {row,addresses,addressIds,isRead}=result;
       const files=await c.env.db.select().from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
       const {rawUrl,rawExpiresAt,urls}=await deliveryLinks(c.env,row,files);
-      return c.json({...messageView(row,addressIds,isRead),addresses,envelopeTo:row.envelopeTo,region:row.region,spam:row.spam,headers:row.headers,verdicts:row.verdicts,sentAt:row.sentAt?timestamp(row.sentAt):null,sizeBytes:row.sizeBytes,rawUrl,...body(row.html),...auth(row),
+      return c.json({...messageView(row,addressIds,isRead),addresses,envelopeTo:row.envelopeTo,region:row.region,spam:row.spam,headers:row.headers,verdicts:row.verdicts,sentAt:row.sentAt?timestamp(row.sentAt):null,sizeBytes:row.sizeBytes,rawUrl,...body(row.html),...auth(row),...conversation(result.thread),
         rawExpiresAt,attachments:files.map((f,i)=>({id:f.id,filename:f.filename,contentType:f.contentType,size:f.sizeBytes,disposition:f.disposition,contentId:f.contentId,url:urls[i]!}))},200);
     }
-    const [row] = await c.env.db.select({...messageFields,verdicts:messages.verdicts,automated:messages.automated,addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
+    const [row] = await c.env.db.select({...messageFields,thread,verdicts:messages.verdicts,automated:messages.automated,addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Message was not found.');
     const attachments=await c.env.db.select({id:mailAttachments.id,filename:mailAttachments.filename,contentType:mailAttachments.contentType,size:mailAttachments.sizeBytes,disposition:mailAttachments.disposition,contentId:mailAttachments.contentId}).from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
-    return c.json({...messageView(row,row.addressIds,row.isRead),...body(row.html),...auth(row),attachments},200);
+    return c.json({...messageView(row,row.addressIds,row.isRead),...body(row.html),...auth(row),...conversation(row.thread),attachments},200);
   });
   // rawUrl in webhook payloads is the delivery record (it names every recipient): only delivery-detail readers follow it.
   app.get('/v1/inbound/messages/:messageId/raw',async c=>{

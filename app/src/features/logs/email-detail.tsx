@@ -12,12 +12,13 @@ import { AddressText } from '../../components/AddressText'
 import { date, label, shortDateTime, time } from '../../lib/format'
 import { EmailDetailSkeleton } from './skeletons'
 import { useDetailLayout } from './detail-layout'
+import { ThreadChip, ThreadRows, ThreadTimeline, threaded, threadItems, useThreadPrefetch } from './thread'
 import { productName } from '../../../../api/src/brand'
 import { errorText } from '../../data/types'
 
 // A sent email, in the order people come for: did it arrive (the status and its delivery), what it looked like (the
 // preview: as sent and in each client, side by side where there is room), and how to do better (the score, the fixes to
-// make first and every finding). The window decides where each sits (detail-layout.ts).
+// make first and every finding), and the conversation it is part of. The window decides where each sits (detail-layout.ts).
 
 // A scheduled email reads queued, with scheduled true, until it goes; the page calls it scheduled.
 const statusOf = (email: Email) => email.scheduled ? 'scheduled' : email.status
@@ -25,20 +26,25 @@ const statusOf = (email: Email) => email.scheduled ? 'scheduled' : email.status
 const pendingStatuses = ['queued', 'attempting', 'accepted', 'sent', 'deferred', 'delayed']
 export function EmailDetailPage() {
   const { id = '' } = useParams()
-  const query = useApiDef(queries.email(id), { interval: email => email && pendingStatuses.includes(email.status) ? 30_000 : false })
+  // Moving to another message of its thread keeps this one up until that one arrives (thread.tsx reads it ahead).
+  const query = useApiDef(queries.email(id), { interval: email => email && pendingStatuses.includes(email.status) ? 30_000 : false, keepPrevious: true })
   if (query.isPending) return <EmailDetailSkeleton />
   if (query.isError) return <><PageHeader title="Email detail" backTo="/logs" /><ErrorState error={query.error} onRetry={() => query.refetch()} /></>
-  return query.data ? <EmailDetail email={query.data} /> : null
+  return query.data ? <EmailDetail key={query.data.id} email={query.data} focus={id} /> : null
 }
 
 
-function EmailDetail({ email }: { email: Email }) {
+// focus: the email the URL names, which the thread marks at once while it loads.
+function EmailDetail({ email, focus }: { email: Email; focus: string }) {
   const { mode, roomy } = useDetailLayout()
   const [panel, setPanel] = useState(false)
-  // A phone or tablet opens the delivery and the facts, and the score, in sheets; each returns focus to its opener.
-  const [sheet, setSheet] = useState<'details' | 'sendability' | null>(null)
+  // A phone or tablet opens the delivery and the facts, the score, and the thread in sheets; each returns focus to its opener.
+  const [sheet, setSheet] = useState<'details' | 'sendability' | 'thread' | null>(null)
   const opener = useRef<HTMLElement | null>(null)
-  const openSheet = (which: 'details' | 'sendability') => (from: HTMLElement) => { opener.current = from; setSheet(which) }
+  const openSheet = (which: 'details' | 'sendability' | 'thread') => (from: HTMLElement) => { opener.current = from; setSheet(which) }
+  const thread = threaded(email.thread) ? email.thread : null
+  const items = threadItems(thread, focus)
+  const open = { warm: useThreadPrefetch(items), onNavigate: () => setSheet(null) }
   const panelId = useId(), deliveryId = useId()
   const panelRef = useRef<HTMLElement>(null)
   useEffect(() => { if (panel) panelRef.current?.focus() }, [panel])
@@ -55,16 +61,19 @@ function EmailDetail({ email }: { email: Email }) {
   const compact = mode === 'stack'
   const subject = email.subject || '(no subject)'
   return <div className="email-detail" data-mode={mode}>
-    {compact ? <PageHeader title={<Subject text={subject} />} backTo="/logs" subtitle={<StatusLine email={email} chip={<SendabilityChip check={check} onOpen={openSheet('sendability')} />} onOpen={openSheet('details')} />} />
+    {compact ? <PageHeader title={<Subject text={subject} />} backTo="/logs" subtitle={<StatusLine email={email} chip={<>{thread && <ThreadChip count={thread.count} onOpen={openSheet('thread')} />}<SendabilityChip check={check} onOpen={openSheet('sendability')} /></>} onOpen={openSheet('details')} />} />
       : <PageHeader title={subject} backTo="/logs" subtitle={<EmailFacts email={email} />} actions={<StatusBadge status={statusOf(email)} />} />}
     {mode === 'panel' && delivery}
     <div className="email-detail__body">
       <section className="email-detail__preview" aria-label="Preview">
+        {thread && mode === 'panel' && <ThreadRows items={items} part="before" open={open} />}
         <EmailViews source={source} previewSource={hasHtml ? { emailId: email.id } : null} check={check} original={{ doc: original.complete ? original.doc : null, error: original.error, html: email.html, text }}
           fill={!compact} wide={!compact} compact={compact}
           toolbarEnd={mode === 'panel' && <SendabilityToggle check={check} open={panel} onToggle={() => setPanel(!panel)} controls={panelId} />} />
+        {thread && mode === 'panel' && <ThreadRows items={items} part="after" open={open} />}
       </section>
       {mode === 'column' && <aside className="email-detail__side ui-scroll-fade" aria-label="Details">
+        {thread && <ThreadTimeline thread={thread} items={items} open={open} />}
         <section className="email-detail__delivery" aria-labelledby={deliveryId}><h2 id={deliveryId} className="ss__title">Delivery</h2>{delivery}</section>
         {sendability}
       </aside>}
@@ -79,6 +88,9 @@ function EmailDetail({ email }: { email: Email }) {
       <Sheet open={sheet === 'sendability'} onOpenChange={open => setSheet(open ? 'sendability' : null)} title={<SendabilityTitle check={check} />} className="email-detail-sheet email-detail-sheet--tall" returnFocus={opener}>
         <SendabilityDetails check={check} expanded titled={false} />
       </Sheet>
+      {thread && <Sheet open={sheet === 'thread'} onOpenChange={open => setSheet(open ? 'thread' : null)} title={`Thread · ${thread.count}`} className="email-detail-sheet" returnFocus={opener}>
+        <ThreadTimeline thread={thread} items={items} open={open} titled={false} />
+      </Sheet>}
     </>}
   </div>
 }

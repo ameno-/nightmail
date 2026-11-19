@@ -33,6 +33,8 @@ export type EmailSnapshot = {
   sealed?: boolean;
   /** Sent from a receiving address or inbox: a reply, a new conversation, a forward or a mail-client submission. Reading it needs mailbox access. */
   mailbox?: boolean;
+  /** An ordinary send whose In-Reply-To names a stored message its sender could read: that message's thread (thread-view.ts joinReplies). */
+  threadId?: string;
 };
 export type CampaignDraft = {
   regionPinned?: boolean;

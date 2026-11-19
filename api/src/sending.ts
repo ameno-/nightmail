@@ -25,6 +25,7 @@ import { forDelivery, type ReadyConnection } from './provider-credentials.js';
 import { bulkFlags, hostedCost } from './hosted-sending.js';
 import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { CustomHeaders } from './custom-headers.js';
+import { EmailThread, joinReplies, mailboxMail, sentThreadId, threadBlock, threadView, type RawThread } from './thread-view.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, mib, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
 import { clients, type Client } from './email-preview/support.js';
@@ -309,10 +310,6 @@ export function senderDomainWhere(column: AnyPgColumn | SQL, allowed: readonly s
 // Tests are transactional for dispatch and have no campaign_id. Require an explicit JSON null:
 // a missing key (SQL NULL) is an old snapshot that might have been a campaign test.
 const directDelivery = sql`sending_emails.campaign_id IS NULL AND sending_emails.snapshot->'testCampaignId' = 'null'::jsonb`;
-// Mail sent from a receiving address or inbox is conversation mail: a reply can quote the message it answers and a
-// forward carries it whole. The sending log lists and reads it only for credentials the receiving API lets read
-// mailboxes (actorMailAccess). Rows queued before snapshots recorded their origin are known by their mailbox message.
-const mailboxMail = sql`(sending_emails.snapshot @> '{"mailbox":true}'::jsonb OR EXISTS (SELECT FROM mail_messages m WHERE m.workspace_id=sending_emails.workspace_id AND m.sending_email_id=sending_emails.id))`;
 export const mailWhere = (a: Actor, emailId?: string) => and(scope(emails, a), emailId === undefined ? undefined : eq(emails.id, emailId), senderDomainWhere(emails.from, a.domains), a.domains.length ? directDelivery : undefined,
   actorMailAccess(a) ? undefined : sql`NOT ${mailboxMail}`);
 
@@ -984,6 +981,8 @@ async function renderTemplates(runtime: Runtime, a: Actor, out: Outgoing[], batc
 /** POST /v1/emails/send and /batch after authentication, the dashboard's test email and the platform's notices. */
 async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emails: SendRequest[] }, scheduledAt?: string) {
   const batch = 'emails' in input, mails = batch ? input.emails : [input], out = await directMessages(call.runtime, mails, batch);
+  // A reply by header joins the conversation it answers only when its sender can read that message.
+  await joinReplies(call.db ?? call.runtime.db, actorMailAccess(a), out.map(m => m.snapshot));
   if (!out.some(m => m.template)) return admitSends(call, input, out, { actor: a }, { batch, scheduledAt });
   return claimedSend(call, a, input, async () => { await renderTemplates(call.runtime, a, out, batch); return { out }; }, { batch, scheduledAt });
 }
@@ -1020,7 +1019,8 @@ export async function admitRelayed(runtime: Runtime, input: RelayedMessage, cred
   return await admitSends({ runtime, path: '/v1/emails/send' }, parsed, out, { credential, authorize }, { batch: false }) as SendReceipt;
 }
 // Auth middleware calls this only for ordinary bearer keys, after the request size gate. Malformed inputs, mailbox
-// tracking and provider-rendered templates keep their normal authenticated handler (including error ordering).
+// tracking, provider-rendered templates and replies by In-Reply-To (whose thread depends on what the key can read,
+// joinReplies) keep their normal authenticated handler (including error ordering).
 export async function tryAtomicKeyAdmission(c:Ctx,credentialCtes:(charge?:SQL)=>SQL) {
   if(!/^application\/json(?:\s*;|$)/i.test(c.req.header('content-type')??''))return;
   await boundRequestBody(c);
@@ -1028,7 +1028,7 @@ export async function tryAtomicKeyAdmission(c:Ctx,credentialCtes:(charge?:SQL)=>
   const parsed=batch?BatchInput.safeParse(body):SingleSendInput.safeParse(body);
   if(!parsed.success)return;
   const input=parsed.data,mails='emails' in input?input.emails:[input];
-  if(('replyAddressId' in input && input.replyAddressId)||('replyMailboxId' in input && input.replyMailboxId)||('scheduledAt' in input && input.scheduledAt)||mails.some(m=>m.template || m.attachments.some(a=>a.includes('\0'))))return;
+  if(('replyAddressId' in input && input.replyAddressId)||('replyMailboxId' in input && input.replyMailboxId)||('scheduledAt' in input && input.scheduledAt)||mails.some(m=>m.template || m.attachments.some(a=>a.includes('\0')) || m.headers?.some(h=>h.name.toLowerCase()==='in-reply-to')))return;
   const key=c.req.header('Idempotency-Key');if(key!==undefined && !validIdempotencyKey(key))return;
   if(batch && mails.reduce((n,m)=>n+(m.html?.length??0)+(m.text?.length??0),0)>2*1024*1024)return;
   // The statement authenticates the key and answers 401, 429 and 403 before any admission answer. A duplicate of a
@@ -1305,9 +1305,10 @@ export function registerSending(app: App) {
     return c.json(emailView(listedSubject(a, row ?? notFound('Email'))), 200);
   });
   app.openapi(createRoute({ method:'get', path:'/v1/emails/{id}/detail', operationId:'getEmailDetail', tags:['Emails'], security,
-    description:'One log detail: metadata, visible HTML/text, attachment IDs, the first 100 events and active contact for a single To address. Uses the same content and event redaction as their individual endpoints; no raw MIME. Continue events with listEmailEvents.',
-    request:{params:IdParams},responses:{200:response(z.object({email:Email,content:EmailContent.pick({html:true,text:true,attachments:true}),events:page(Event),contact:z.object({id:z.string(),suppressed:z.boolean()}).nullable()}).openapi('EmailDetail')),...errors} }),async c=>{
-    const a=actor(c), emailId=c.req.valid('param').id;
+    description:'One log detail: metadata, visible HTML/text, attachment IDs, the first 100 events, active contact for a single To address, and the conversation the email belongs to. Uses the same content and event redaction as their individual endpoints; no raw MIME. Continue events with listEmailEvents.',
+    request:{params:IdParams},responses:{200:response(z.object({email:Email,content:EmailContent.pick({html:true,text:true,attachments:true}),events:page(Event),contact:z.object({id:z.string(),suppressed:z.boolean()}).nullable(),
+      thread:EmailThread.nullable().describe('The conversation: of a reply from a receiving address or inbox, or of an email whose In-Reply-To named a stored message its sender could read, with the messages around it that you can read. Null for an email in none, when you can read none of the conversation\'s received or stored messages, and for credentials that cannot read received mail.')}).openapi('EmailDetail')),...errors} }),async c=>{
+    const a=actor(c), emailId=c.req.valid('param').id, access=actorMailAccess(a);
     // Single-table select fields render columns unqualified, which would bind to the subquery's own
     // table (events matching their own id; contacts matching any workspace). Name the outer row.
     const [detail]=await c.env.db.select({mail:emails,fromName:emailColumns.fromName,untrustedContent:sentUntrustedContent,
@@ -1315,12 +1316,15 @@ export function registerSending(app: App) {
         WHERE c.workspace_id=sending_emails.workspace_id AND c.deleted_at IS NULL AND jsonb_array_length(sending_emails.to_addresses)=1 AND c.email=lower(sending_emails.to_addresses->>0))`,
       timeline:sql<z.input<typeof Event>[]>`(SELECT coalesce(jsonb_agg(t ORDER BY t."createdAt"::timestamptz,t.id),'[]') FROM (
         SELECT id,email_id AS "emailId",type,provider_id AS "providerId",simulated,created_at::text AS "createdAt",data FROM sending_email_events
-        WHERE workspace_id=sending_emails.workspace_id AND email_id=sending_emails.id ORDER BY created_at,id LIMIT 101) t)`
+        WHERE workspace_id=sending_emails.workspace_id AND email_id=sending_emails.id ORDER BY created_at,id LIMIT 101) t)`,
+      // Its conversation, in this statement: only for a reader that sees one of the thread's stored messages (thread-view.ts).
+      thread:access ? threadBlock(access,{thread:sentThreadId,focus:sql`sending_emails.id`,sends:true}) : sql<RawThread|null>`NULL`,
     }).from(emails).where(mailWhere(a,emailId)).limit(1);
     if(!detail) return notFound('Email');
     const {mail,contact,timeline,untrustedContent}=detail, {html,text,attachments}=await visibleEmailContent(c.env,a,mail,untrustedContent);
+    const thread=threadView(detail.thread,a.permissions.includes('manage'));
     const email=emailView({...mail,untrustedContent,subject:a.permissions.includes('manage') ? mail.subject : redactCapabilityText(mail.subject),fromName:detail.fromName,kind:mail.snapshot.kind});
-    return c.json({email,content:{html,text,attachments},contact,events:{data:timeline.slice(0,100).map(r=>visibleEmailEvent(a,r)),nextCursor:nextCursor(timeline as {id:string;createdAt:string}[],100,`email-events:${mail.id}`)}},200);
+    return c.json({email,content:{html,text,attachments},contact,thread,events:{data:timeline.slice(0,100).map(r=>visibleEmailEvent(a,r)),nextCursor:nextCursor(timeline as {id:string;createdAt:string}[],100,`email-events:${mail.id}`)}},200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/content', operationId: 'getEmailContent', description: 'Manage keys receive full snapshots. Other readers receive app unsubscribe tokens redacted from subject/HTML/text and raw MIME withheld (null), since MIME encodings can conceal capabilities. Other transactional bearer links are not sanitized; grant content-read access only to trusted integrations.', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(EmailContent), ...errors } }), async c => {
     const a = actor(c); const row = await findEmail(c.env.db, a, c.req.valid('param').id);

@@ -12247,6 +12247,119 @@ describe('Dashboard API capabilities', () => {
     });
   });
 
+  test('email threads: a detail and its Logs rows show the whole conversation, as far as each credential may read it', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = runtime.config.workspaceId, at = (seconds: number) => new Date(Date.parse('2026-02-05T10:00:00Z') + seconds * 1000).toISOString();
+      const [mdom, boxA, boxB, thread, single, long, hidden] = ['mdom', 'box-a', 'box-b', 'thr', 'thr-single', 'thr-long', 'thr-hidden'].map(name => unique(`threads-${name}-`));
+      const [r0, r1, out, r2, r3, h0] = ['r0', 'r1', 'out', 'r2', 'r3', 'h0'].map(name => unique(`msg-${name}-`));
+      const [s1, s2, s3, s4] = ['s1', 's2', 's3', 's4'].map(name => unique(`threads-email-${name}-`));
+      const token = `u_${'cd'.repeat(32)}`;
+      await db.query("INSERT INTO mailbox_domains(id, workspace_id, domain_id, name, region, status) VALUES ($1, $2, $1, 'threads.example', $3, 'active')", [mdom, wid, REGION]);
+      await db.query("INSERT INTO mailboxes(id, workspace_id, domain_id, address) VALUES ($1, $3, $4, 'support@threads.example'), ($2, $3, $4, 'sales@threads.example')", [boxA, boxB, wid, mdom]);
+      await db.query('INSERT INTO mail_threads(id, workspace_id) VALUES ($1, $5), ($2, $5), ($3, $5), ($4, $5)', [thread, single, long, hidden, wid]);
+      // s1: a mailbox reply from support (its copy is out); s2: an ordinary send that joined the thread by answering r2 (as
+      // sendEmail records it for a sender that could read r2); s3: one whose In-Reply-To names r1 but that never joined,
+      // since a header is no authorization; s4: an ordinary send without threading headers.
+      const sent = (id: string, seconds: number, snapshot: Json) => db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, created_at)
+        VALUES ($1, $2, $3, 'fixture', 'support@threads.example', '["ada@example.net"]', '[]', '[]', 'Re: Threads', $4::jsonb, false, 'delivered', $5)`, [id, wid, REGION, JSON.stringify({ kind: 'transactional', testCampaignId: null, subject: 'Re: Threads', attachments: [], headers: [], ...snapshot }), at(seconds)]);
+      await sent(s1, 20, { mailbox: true, text: 'Mailbox reply' });
+      await sent(s2, 40, { fromName: 'Support', text: `Ordinary reply ${token}`, attachments: ['att_one'], threadId: thread, headers: [{ Name: 'in-reply-to', Value: `<${r2}@ext.example>` }] });
+      await sent(s3, 50, { text: 'Forged parent', headers: [{ Name: 'In-Reply-To', Value: `<${r1}@ext.example>` }] });
+      await sent(s4, 60, { text: 'No headers' });
+      // r0 and h0 were stored unrouted: administrators read them, members and address keys don't. r2 reached sales only.
+      await db.query(`INSERT INTO mail_messages(id, workspace_id, direction, thread_id, region, subject, from_address, from_name, message_id, sending_email_id, snippet, status, attachment_count, received_at) VALUES
+        ($1, $7, 'inbound', $8, $9, 'Threads', 'ada@example.net', 'Ada', $1 || '@ext.example', NULL, 'Unrouted first', 'received', 0, $10),
+        ($2, $7, 'inbound', $8, $9, 'Threads', 'ada@example.net', 'Ada', $2 || '@ext.example', NULL, 'Hello support', 'received', 0, $11),
+        ($3, $7, 'outbound', $8, $9, 'Re: Threads', 'support@threads.example', 'Support', 'prov-' || $3 || '@email.amazonses.com', $5, 'Mailbox reply', 'delivered', 0, $12),
+        ($4, $7, 'inbound', $8, $9, 'Re: Threads', 'ada@example.net', 'Ada', $4 || '@ext.example', NULL, 'Hello sales', 'received', 1, $13),
+        ($6, $7, 'inbound', $14, $9, 'Alone', 'grace@example.net', NULL, $6 || '@ext.example', NULL, 'Alone', 'received', 0, $15),
+        ($16, $7, 'inbound', $17, $9, 'Private', 'eve@example.net', NULL, $16 || '@ext.example', NULL, 'HIDDEN SECRET', 'received', 0, $10)`,
+        [r0, r1, out, r2, s1, r3, wid, thread, REGION, at(1), at(10), at(20), at(30), single, at(70), h0, hidden]);
+      await db.query('INSERT INTO mail_message_ids(workspace_id, message_id, mail_message_id, thread_id) SELECT workspace_id, message_id, id, thread_id FROM mail_messages WHERE id = ANY($1)', [[r0, r1, out, r2, r3, h0]]);
+      await db.query(`INSERT INTO mailbox_messages(mailbox_id, message_id, workspace_id, thread_id, direction, received_at) VALUES
+        ($1, $3, $6, $7, 'inbound', $9), ($1, $4, $6, $7, 'outbound', $10), ($2, $5, $6, $7, 'inbound', $11), ($1, $8, $6, $12, 'inbound', $13)`, [boxA, boxB, r1, out, r2, wid, thread, r3, at(10), at(20), at(30), single, at(70)]);
+      const shape = (block: Json) => block && { id: block.id, count: block.count, messages: block.messages.map((m: Json) => [m.id, m.emailId, m.direction, m.status, m.attachmentCount]) };
+      const whole = { id: thread, count: 5, messages: [[r0, null, 'inbound', 'received', 0], [r1, null, 'inbound', 'received', 0], [out, s1, 'outbound', 'delivered', 0], [r2, null, 'inbound', 'received', 1], [s2, s2, 'outbound', 'delivered', 1]] };
+
+      // An administrator: the mailbox reply and the email that joined by answering r2 both open the whole conversation, oldest first.
+      for (const id of [s1, s2]) assert.deepEqual(shape(ok(await local('GET', `/v1/emails/${id}/detail`)).thread), whole, id);
+      const reply = ok(await local('GET', `/v1/emails/${s2}/detail`)).thread.messages.at(-1);
+      assert.deepEqual([reply.from, reply.snippet, reply.at], [{ name: 'Support', address: 'support@threads.example' }, `Ordinary reply ${token}`, at(40)]);
+      for (const id of [s3, s4]) assert.equal(ok(await local('GET', `/v1/emails/${id}/detail`)).thread, null, id);
+      const received = ok(await local('GET', `/v1/inbound/messages/${r1}?includeThread=true`));
+      assert.deepEqual(shape(received.thread), whole);
+      assert.ok(!('thread' in ok(await local('GET', `/v1/inbound/messages/${r1}`))), 'The thread is opt-in on getInboundMessage.');
+      assert.deepEqual(shape(ok(await local('GET', `/v1/inbound/messages/${r3}?includeThread=true&includeDelivery=true`)).thread), { id: single, count: 1, messages: [[r3, null, 'inbound', 'received', 0]] });
+      // Logs: each row's thread and its size, sent and received alike; an email in no thread has neither.
+      const rows = async (call: (path: string) => Promise<Reply>, ids = [s1, s2, s3, s4, r0, r1, r2, r3]) => Object.fromEntries(ok(await call('/v1/logs?limit=100')).data.filter((row: Json) => ids.includes(row.id)).map((row: Json) => [row.id, [row.threadId, row.threadCount]]));
+      assert.deepEqual(await rows(path => local('GET', path)), { [s1]: [thread, 5], [s2]: [thread, 5], [s3]: [null, null], [s4]: [null, null], [r0]: [thread, 5], [r1]: [thread, 5], [r2]: [thread, 5], [r3]: [single, 1] });
+      // An unrestricted manage key reads what the owner reads.
+      const manage = ok(await local('POST', '/v1/api-keys', { name: 'Threads manager', permissions: ['manage'] }), 201); secrets.add(manage.secret);
+      assert.deepEqual(shape(ok(await request('GET', `/v1/emails/${s2}/detail`, manage.secret)).thread), whole);
+      // Credentials that can't read received mail get no conversation.
+      const reader = ok(await local('POST', '/v1/api-keys', { name: 'Threads reader', permissions: ['read'] }), 201); secrets.add(reader.secret);
+      const scoped = ok(await local('POST', '/v1/api-keys', { name: 'Threads scoped', permissions: ['read'], domains: ['threads.example'] }), 201); secrets.add(scoped.secret);
+      for (const key of [reader, scoped]) {
+        assert.equal(ok(await request('GET', `/v1/emails/${s2}/detail`, key.secret)).thread, null);
+        error(await request('GET', `/v1/emails/${s1}/detail`, key.secret), 404, 'NOT_FOUND');
+        assert.deepEqual(await rows(path => request('GET', path, key.secret)), { [s2]: [null, null], [s3]: [null, null], [s4]: [null, null] });
+      }
+
+      // Review of #425: a reply joins only through what its sender can read. A key limited to a sender domain that names
+      // the unrouted r0 and the unrouted h0 in In-Reply-To joins neither, so no reader learns those Message-IDs exist.
+      const replyTo = (parent: string, extra: Json = {}) => mail({ text: 'Synthetic reply', headers: [{ name: 'In-Reply-To', value: `<${parent}@ext.example>` }], ...extra });
+      const snapshotThread = async (id: string) => (await db.query("SELECT snapshot->>'threadId' AS t FROM sending_emails WHERE id=$1", [id])).rows[0].t;
+      const forger = ok(await local('POST', '/v1/api-keys', { name: 'Threads forger', permissions: ['read', 'send'], domains: ['example.com'] }), 201); secrets.add(forger.secret);
+      const forged = [ok(await request('POST', '/v1/emails/send', forger.secret, replyTo(r0)), 202).id, ok(await request('POST', '/v1/emails/send', forger.secret, replyTo(h0, { scheduledAt: new Date(Date.now() + 3_600_000).toISOString() })), 202).id];
+      for (const id of forged) {
+        assert.equal(await snapshotThread(id), null);
+        assert.equal(ok(await local('GET', `/v1/emails/${id}/detail`)).thread, null);
+      }
+      assert.deepEqual(await rows(path => local('GET', path), forged), Object.fromEntries(forged.map(id => [id, [null, null]])));
+      assert.equal(ok(await local('GET', `/v1/emails/${s1}/detail`)).thread.count, 5, 'A forged reply never joins the conversation.');
+      // A sender that can read the message joins its thread, by sendEmail or a batch: a manage key answering r2, and the
+      // owner answering the hidden h0 (owners read unrouted mail).
+      const joined = ok(await request('POST', '/v1/emails/send', manage.secret, replyTo(r2)), 202).id;
+      const [owned] = ok(await local('POST', '/v1/emails/batch', { emails: [replyTo(h0)] }), 202).data.map((receipt: Json) => receipt.id);
+      assert.deepEqual([await snapshotThread(joined), await snapshotThread(owned)], [thread, hidden]);
+      const ownerJoined = ok(await local('GET', `/v1/emails/${joined}/detail`)).thread;
+      assert.deepEqual([ownerJoined.count, ownerJoined.messages.map((m: Json) => m.id)], [6, [r0, r1, out, r2, s2, joined]]);
+      assert.deepEqual(shape(ok(await local('GET', `/v1/emails/${owned}/detail`)).thread).messages.map((m: Json[]) => m[0]), [h0, owned]);
+      // Keys limited to addresses read the messages on their addresses, never an ordinary send: support's key sees r1 and
+      // its reply; a key for every address also sees r2 on sales, but not unrouted r0 or the replies that joined.
+      const supportKey = ok(await local('POST', '/v1/api-keys', { name: 'Threads support', access: { type: 'addresses', addressIds: [boxA], mail: ['read'] } }), 201); secrets.add(supportKey.secret);
+      const everyKey = ok(await local('POST', '/v1/api-keys', { name: 'Threads every address', access: { type: 'addresses', mail: ['read'] } }), 201); secrets.add(everyKey.secret);
+      assert.deepEqual(shape(ok(await request('GET', `/v1/inbound/messages/${r1}?includeThread=true`, supportKey.secret)).thread), { id: thread, count: 2, messages: whole.messages.slice(1, 3) });
+      error(await request('GET', `/v1/inbound/messages/${r2}?includeThread=true`, supportKey.secret), 404, 'NOT_FOUND');
+      assert.deepEqual(shape(ok(await request('GET', `/v1/inbound/messages/${r2}?includeThread=true`, everyKey.secret)).thread), { id: thread, count: 3, messages: whole.messages.slice(1, 4) });
+      // An administrator narrowing to one address reads that address's view too, without the ordinary sends.
+      assert.deepEqual(shape(ok(await local('GET', `/v1/inbound/messages/${r1}?includeThread=true&addressId=${boxA}`)).thread), { id: thread, count: 2, messages: whole.messages.slice(1, 3) });
+      // A dashboard member reads mail on live addresses: not unrouted r0, the snippet of an ordinary reply without its
+      // unsubscribe token, and nothing of the hidden thread, though it reads the owner's reply into it.
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
+      const { rows: [{ role }] } = await db.query('SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2', [wid, manager!.userId]);
+      await db.query("UPDATE workspace_members SET role = 'member' WHERE workspace_id = $1 AND user_id = $2", [wid, manager!.userId]);
+      try {
+        const member = ok(await local('GET', `/v1/emails/${s1}/detail`)).thread;
+        assert.deepEqual([member.count, member.messages.map((m: Json) => m.id)], [5, [r1, out, r2, s2, joined]]);
+        assert.equal(member.messages[3].snippet, 'Ordinary reply [redacted]');
+        error(await local('GET', `/v1/inbound/messages/${h0}`), 404, 'NOT_FOUND');
+        for (const id of [owned, ...forged]) assert.equal(ok(await local('GET', `/v1/emails/${id}/detail`)).thread, null, id);
+        assert.deepEqual(await rows(path => local('GET', path), [s1, owned, ...forged]), { [s1]: [thread, 5], ...Object.fromEntries([owned, ...forged].map(id => [id, [null, null]])) });
+      } finally {
+        await db.query('UPDATE workspace_members SET role = $3 WHERE workspace_id = $1 AND user_id = $2', [wid, manager!.userId, role]);
+      }
+      // A long conversation: up to 50 messages around this one, with every message counted.
+      const longIds = Array.from({ length: 60 }, (_, i) => `${long}-${String(i).padStart(2, '0')}`);
+      await db.query(`INSERT INTO mail_messages(id, workspace_id, direction, thread_id, region, subject, from_address, received_at)
+        SELECT id, $2, 'inbound', $3, $4, 'Long', 'ada@example.net', $5::timestamptz + n * interval '1 second' FROM unnest($1::text[]) WITH ORDINALITY u(id, n)`, [longIds, wid, long, REGION, at(100)]);
+      const around = async (id: string) => { const block = ok(await local('GET', `/v1/inbound/messages/${id}?includeThread=true`)).thread; return [block.count, block.messages[0].id, block.messages.at(-1).id, block.messages.length]; };
+      assert.deepEqual(await around(longIds[5]!), [60, longIds[0], longIds[49], 50]);
+      assert.deepEqual(await around(longIds[30]!), [60, longIds[6], longIds[55], 50]);
+      assert.deepEqual(await around(longIds[58]!), [60, longIds[10], longIds[59], 50]);
+    });
+  });
+
   // Dev E2E, 2026-11-11: Postgres refused Hyperdrive's connections during a burst. Requests failed with 500
   // INTERNAL_ERROR at authentication and a campaign.run job failed for good, stranding its campaign in preparing.
   test('database connection refusals: a retryable 503 for requests and a retried job, with the SQLSTATE logged', async t => {

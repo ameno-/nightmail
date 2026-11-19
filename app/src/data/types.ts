@@ -57,7 +57,11 @@ export type PreviewClient = 'gmail-web' | 'gmail-ios' | 'gmail-android' | 'gmail
 export interface PreviewIssue { feature: string; clients: PreviewClient[]; severity: 'warning' | 'error' }
 export interface ClientPreview { client: PreviewClient; html: string; issues: PreviewIssue[] }
 export interface EmailPreviewRequest { source: { emailId: string } | { html: string }; clients: PreviewClient[]; theme: 'light' | 'dark'; device: 'desktop' | 'mobile' }
-export interface Email { scheduled?: boolean; scheduledAt?: ISODate | null; contact?: {id:string; suppressed:boolean} | null; campaignId?: string | null; text?: string | null; eventsNextCursor?: string | null; fromName?: string; simulated?: boolean; attachments?: string[]; id: string; regionId: RegionId; to: string; from: string; subject: string; stream: Stream; status: EmailStatus; sentAt: ISODate; html: string; events: EmailEvent[] }
+export interface Email { scheduled?: boolean; scheduledAt?: ISODate | null; contact?: {id:string; suppressed:boolean} | null; campaignId?: string | null; text?: string | null; eventsNextCursor?: string | null; fromName?: string; simulated?: boolean; attachments?: string[]; id: string; regionId: RegionId; to: string; from: string; subject: string; stream: Stream; status: EmailStatus; sentAt: ISODate; html: string; events: EmailEvent[]; thread?: EmailThread | null }
+/** The conversation an email belongs to (getEmailDetail, getInboundMessage?includeThread=true): up to 50 of the messages around it, oldest first, and how many the reader sees. */
+export interface EmailThread { id: string; count: number; messages: ThreadMessage[] }
+/** id: the stored message (msg_…), or an email that answers by header and has no copy (its email ID). emailId: the sent email, on outbound messages. */
+export interface ThreadMessage { id: string; emailId: string | null; direction: 'inbound' | 'outbound'; from: MailAddress; snippet: string; at: ISODate; status: string; attachmentCount: number }
 export interface ChartPoint { at: ISODate; sent: number; delivered: number; bounced: number; complaints: number }
 /** GET /v1/sender-score: the workspace's reputation grade, computed by the API. */
 export type SenderGrade = Grade
@@ -203,7 +207,7 @@ export interface RoutingTestInput { to?: string[]; raw?: string; junk?: boolean 
 export type LogDirection = 'all' | 'sent' | 'received'
 export interface LogEntry {
   id: string; direction: 'sent' | 'received'; at: ISODate; status: string; from: MailAddress; to: string[]; subject: string
-  stream: Stream | null; campaignId: string | null; simulated: boolean; attachmentCount: number | null; threadId: string | null
+  stream: Stream | null; campaignId: string | null; simulated: boolean; attachmentCount: number | null; threadId: string | null; threadCount: number | null
   /** A sent email waiting to be sent (status scheduled): when it goes. */
   scheduledAt: ISODate | null
   addresses: { id: string; address: string }[] | null; regionId: RegionId | null; envelopeTo: string[] | null
@@ -220,6 +224,7 @@ export interface ReceivedEmailDetail extends ReceivedEmail {
   attachments: { id: string; filename: string; contentType: string; size: number; contentId: string | null; disposition: 'attachment' | 'inline'; url: string | null }[]
   verdicts?: { spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string }
   sizeBytes?: number | null; rawUrl?: string | null
+  thread?: EmailThread | null
 }
 export interface WebhookDelivery { id: string; at: ISODate; regionId: RegionId; event: WebhookEvent; response: number | null; attempts: number; status: 'delivered' | 'retry_pending' | 'pending' | 'failed' | 'paused'; payload: Record<string, unknown>; /** A Test endpoint delivery, not real traffic. */ test?: boolean }
 export interface Webhook { id: string; name: string; url: string; regionIds: RegionId[] | 'all'; events: WebhookEvent[]; status: 'active' | 'paused'; secretHint: string; headers: WebhookHeaderView[]; deliveries: WebhookDelivery[]; nextCursor?: string | null; /** The signing secret: only in the response that created the webhook. */ secret?: string }

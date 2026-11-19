@@ -59,10 +59,11 @@ const workers = Number(process.env.CLS_WORKERS) || Math.min(32, availableParalle
 const began = Date.now();
 const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 
-// [name, path, { user, from, click, row, switchTo, support, notes, dialog, still, alone }]. The in-app navigation starts on `from` and clicks the
+// [name, path, { user, from, click, row, switchTo, support, notes, dialog, still, alone, phoneOnly }]. The in-app navigation starts on `from` and clicks the
 // control whose text starts with `click`, the table row containing `row`, picks the workspace `switchTo` in the account
 // switcher, or else a link to `path`; with none of those (pages reached from a dropdown menu) it pushes `path` through
-// the router's history. It must land on `path`. `support` opens the support chat first, `dialog` a dialog (see above).
+// the router's history. It must land on `path`. `support` opens the support chat first, `dialog` a dialog (see above);
+// `phoneOnly` measures a page in the phone pass alone (a control only a phone shows).
 // dana owns an established hosted workspace (and is a Bane operator), nia a brand-new one with a verified domain, ona one
 // still onboarding, rae a restricted one that also owes $12.40 (the standing and billing banners on every page).
 // A list of users is one browser signed in to each of them (one session cookie per account, the first the default).
@@ -80,6 +81,12 @@ const pages = ids => [
   // A junk-like message: EmailInsight's low score, findings and client issues.
   ['Sent email · junk-like', `/logs/${ids.junkEmail}`, { from: '/logs?view=sent', row: 'FINAL NOTICE' }],
   ['Received email', `/logs/${ids.receivedEmail}`, { from: '/logs?view=received', row: 'Invoice for October' }],
+  // A conversation (cls-fixture.mjs): the reply that joined it by its In-Reply-To and Jordan's answer, each with its Thread
+  // section; the section's link from one to the other; and on a phone, the thread's sheet from the status line.
+  ['Sent email · thread', `/logs/${ids.threadEmail}`, { from: '/logs?view=sent', row: 'Re: What happened' }],
+  ['Received email · thread', `/logs/${ids.threadReceived}`, { from: '/logs?view=received', row: 'Re: What happened' }],
+  ['Received email · from its thread', `/logs/${ids.threadReceived}`, { from: `/logs/${ids.threadEmail}` }],
+  ['Sent email · thread sheet', `/logs/${ids.threadEmail}`, { dialog: '5 messages', phoneOnly: true }],
   ['Receiving', '/receiving', { from: '/overview' }],
   // A workspace with no receiving domain yet: the three steps that start it.
   ['Receiving · new workspace', '/receiving', { user: 'nia' }],
@@ -176,7 +183,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Overview · range', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · endpoints', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
+const phonePages = new Set(['Overview', 'Overview · range', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · endpoints', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -515,8 +522,8 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, notes, dialog, still, alone }] of pages(ids)) {
-    if (only && !only.test(name) || device === 'phone' && !phonePages.has(name)) continue;
+  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, notes, dialog, still, alone, phoneOnly }] of pages(ids)) {
+    if (only && !only.test(name) || device === 'phone' && !phonePages.has(name) || phoneOnly && device !== 'phone') continue;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
     const load = { name, path, user, scheme, device, support, live, notes, dialog, still, alone, mode: 'load', slug: slug + '-load' };
     if (densityOnly && !density.wanted(load)) continue;
