@@ -8,7 +8,7 @@ This codebase is yours: what it's for and how it's built are your call, and you'
 
 ## Repository map
 
-- `app/` — React/Vite dashboard. `app/index.html` loads `src/main.tsx`; `src/App.tsx` defines routes. Screens live in `src/features/`, shared UI in `src/components/`, API adapters in `src/data/`, and design tokens/styles in `src/styles/`.
+- `app/` — React/Vite dashboard. `app/index.html` loads `src/main.tsx`; `src/App.tsx` defines routes. Screens live in `src/features/`, shared UI in `src/components/`, API adapters in `src/data/`, and design tokens/styles in `src/styles/`. `app/commercial/` is not the dashboard: the WebGPU television commercial at `/commercial/`, a page of its own that shares nothing with it (`app/commercial/README.md`).
 - `api/` — Hono API with Zod/OpenAPI schemas. `src/app.ts` assembles routes; `src/server.ts` runs on Node and `src/worker.ts` runs on Cloudflare. `src/runner.ts` runs the Node job worker. PostgreSQL schemas are in `src/db/`, migrations in `migrations/`, and platform/database/storage adapters in `src/adapters/`.
 - `sdk/` — Generated TypeScript client, published on npm as `@nightmail/sdk`. Usage is in `sdk/README.md`.
 - `support/` — The AI support agent's Worker (`bane-support`, `bane-support-dev`): OpenCode in a Durable Object per conversation, reaching Bane through the `SupportPlatform` service binding. Setup and tests are in `support/README.md`, and the Help panel's WebSocket contract is in `support/PROTOCOL.md`.

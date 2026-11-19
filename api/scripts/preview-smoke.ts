@@ -42,6 +42,13 @@ for (const path of ['/', '/overview', '/logs', '/settings']) {
   const html = await response.text();
   if (response.status !== 200 || !html.includes('<div id="root"')) failures.push(`GET ${path}: expected the dashboard HTML from assets, got HTTP ${response.status}.`);
 }
+// The commercial is a page of its own (app/commercial): assets answer with it, with or without the trailing slash, and
+// a path under it that has no file is still the dashboard's.
+for (const [path, show] of [['/commercial/', true], ['/commercial', true], ['/commercial/does-not-exist', false]] as const) {
+  const response = await fetch(origin + path, { signal: AbortSignal.timeout(20_000) });
+  const html = await response.text();
+  if (response.status !== 200 || html.includes('<canvas class="gl"') !== show || html.includes('<div id="root"') === show) failures.push(`GET ${path}: expected ${show ? 'the commercial’s page' : 'the dashboard HTML'} from assets, got HTTP ${response.status}.`);
+}
 const missing = await fetch(origin + '/assets/does-not-exist.js');
 if (missing.status !== 404) failures.push(`Missing chunk: expected 404, got ${missing.status}.`);
 for (const failure of failures) console.log(`::error title=Preview smoke::${failure}`);
