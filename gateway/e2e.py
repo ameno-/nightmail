@@ -322,6 +322,10 @@ def mail(p):
             c.mail(ALIAS)
             c.rcpt(USER)
             assert c.data(field + b"\r\nbody\r\n")[0] == 553
+        # A bare LF (smtplib sends bytes as given) can't be framed: a 500 reply, then the session ends.
+        c.mail(ALIAS)
+        c.rcpt(USER)
+        assert c.data(f"From: {ALIAS}\nSubject: bare LF\n\nbody\n".encode())[0] == 500
     with connect(p["IMAPS"]) as c:
         ok(c._simple_command("LIST", '""', '"*"', "RETURN", "(SPECIAL-USE)"))
         listed = b" ".join(c.response("LIST")[1])
@@ -529,6 +533,7 @@ def deadline(p):
         with socket.create_connection(('localhost',p[proto]),timeout=5) as s:
             assert s.recv(2048).startswith(greeting)
             if proto=='IMAP': s.sendall(b'a CAP')
+            else: assert s.recv(2048).startswith(b'421 4.4.2'), 'SMTP closed without a timeout reply'
             assert not s.recv(1), 'idle or unfinished pre-auth command survived deadline'
     # The fixture allows five seconds total, four seconds idle. A successful
     # command three seconds in must not buy another four idle seconds.

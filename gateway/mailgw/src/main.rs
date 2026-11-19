@@ -9,7 +9,7 @@ use mailgw_core::{
     session::{Account, Action, Protocol, Reply},
     smtp::{Caps, Sink, Smtp},
     store::Memory,
-    wire::{Event, Frame},
+    wire::{Error as FrameError, Event, Frame},
 };
 use std::{
     env,
@@ -115,6 +115,9 @@ impl Gateway {
         let auth_deadline = start + self.preauth;
         const PREAUTH_IDLE: Duration = Duration::from_secs(4);
         let greeting_deadline = auth_deadline.min(start + PREAUTH_IDLE);
+        // SMTP never closes silently: a client that waits too long learns why (RFC 5321 4.5.3.2).
+        let smtp = port.protocol == Protocol::Smtp;
+        const TIMED_OUT: &[u8] = b"421 4.4.2 Timeout\r\n";
         timeout_at(greeting_deadline, tokio::time::sleep_until(slot.after)).await?;
         tcp.set_nodelay(true)?;
         if port.implicit {
@@ -178,7 +181,7 @@ impl Gateway {
             };
             let read = tokio::select! {
                 biased;
-                _=tokio::time::sleep_until(read_deadline)=>break,
+                _=tokio::time::sleep_until(read_deadline)=>{if smtp{refuse(&mut stream,TIMED_OUT).await}break},
                 _=stop.changed()=>{write(&mut stream,match port.protocol{Protocol::Imap=>b"* BYE [UNAVAILABLE] Restarting\r\n",Protocol::Smtp=>b"421 4.3.2 Restarting\r\n"}).await?;break},
                 event=async {match &mut feed{Some((_,rx))=>next_hint(rx).await,None=>std::future::pending().await}}=>{
                     let generation=event?;
@@ -241,17 +244,32 @@ impl Gateway {
                 }
                 let was_partial = frame.partial();
                 let stream_body = backend.is_some() && matches!(&core,Core::Imap(i) if !i.idling());
-                let event = if let Some(u) = spool.take() {
+                let framed = if let Some(u) = spool.take() {
                     terminator = 0;
                     backend.as_mut().context("missing upload owner")?.upload = Some(u);
-                    frame.consume_mode(&mut &b"\r\n"[..], true, true, true)?
+                    frame.consume_mode(&mut &b"\r\n"[..], true, true, true)
                 } else {
                     frame.consume_mode(
                         &mut src,
                         port.protocol == Protocol::Imap,
                         login.is_some() && !idling,
                         stream_body,
-                    )?
+                    )
+                };
+                let event = match framed {
+                    Ok(event) => event,
+                    // The rest of the stream can't be framed, so the session ends, with a reply:
+                    // a bare LF anywhere, DATA included, or an overlong line.
+                    Err(e) => {
+                        if smtp {
+                            let reply: &[u8] = match e {
+                                FrameError::Limit => b"500 5.5.2 Line too long\r\n",
+                                FrameError::Syntax => b"500 5.5.2 Lines must end with CRLF\r\n",
+                            };
+                            refuse(&mut stream, reply).await
+                        }
+                        return Err(e.into());
+                    }
                 };
                 if login.is_some() && !was_partial && frame.partial() {
                     deadline = Instant::now() + IO
@@ -307,6 +325,9 @@ impl Gateway {
                     }
                 }
                 if login.is_none() && Instant::now() >= auth_deadline {
+                    if smtp {
+                        refuse(&mut stream, TIMED_OUT).await
+                    }
                     return Ok(());
                 }
                 let verb = bytes
@@ -381,6 +402,9 @@ impl Gateway {
                     drop(data_permit.take())
                 }
                 if login.is_none() && Instant::now() >= auth_deadline {
+                    if smtp {
+                        refuse(&mut stream, TIMED_OUT).await
+                    }
                     return Ok(());
                 }
                 if r.action == Action::Login {
@@ -514,6 +538,19 @@ fn snapshot_bye(e: mailgw_core::store::Error) -> Reply {
     Reply {
         action: Action::Close,
         ..Reply::one(&format!("* BYE {e}"))
+    }
+}
+/// A last reply before the server closes. Unread input at close would reset the connection and could
+/// lose the reply, so the write side closes first and what the client still sends is read and dropped.
+async fn refuse(stream: &mut Stream, reply: &[u8]) {
+    if write(stream, reply).await.is_ok()
+        && timeout(Duration::from_secs(1), stream.shutdown())
+            .await
+            .is_ok()
+    {
+        let mut sink = [0u8; 4096];
+        let drain = async { while matches!(stream.read(&mut sink).await, Ok(n) if n > 0) {} };
+        timeout(Duration::from_secs(2), drain).await.ok();
     }
 }
 async fn write(stream: &mut Stream, data: &[u8]) -> Result<()> {
