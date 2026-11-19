@@ -11,7 +11,7 @@ export const gradeKey = (grade: SenderGrade) => grade === 'A+' ? 'aplus' : grade
 export type RaisedStep = 'warn' | 'restrict' | 'pause'
 export const standingTitle: Record<RaisedStep, string> = { warn: 'Your limit is frozen', restrict: 'Marketing is held', pause: 'Sending is paused' }
 export const standingDid: Record<RaisedStep, string> = {
-  warn: 'Your daily limit won’t rise until this clears.',
+  warn: 'Your daily limit is frozen until this clears.',
   restrict: 'Marketing is held; receipts and resets still send.',
   pause: 'All sending is paused. Queued mail is held for 72 hours, then canceled.',
 }

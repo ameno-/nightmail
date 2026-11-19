@@ -4,7 +4,7 @@ import type { MiddlewareHandler } from 'hono';
 import { ApiError, denied, digest, errors, hasSessionCookie, id, json, log, notFound, randomSecret, response, timed, webhookUrlHint, type App, type AppEnv, type Ctx, type DbExecutor, type SupportScope } from './core.js';
 import { AuditEntry, AuditFilters, auditContext, auditInsert, customerTrail, operatorContext, operatorRequired, requireOperator, userEmail } from './audit.js';
 import { budgetedRead } from './deliverability.js';
-import { limitRequestEligibility, LIMIT_REQUEST, type Step } from './standing-model.js';
+import { GOOD_STANDING, limitRequest, type Step } from './standing-model.js';
 import { cached, registerSupportDeliverability } from './support-deliverability.js';
 import { ERROR_CODE, groupLines, LOG_RETENTION_DAYS, LOG_ROWS, LogsUnavailable, requestLines, ROUTE_TEMPLATE } from './support-logs.js';
 import { CONVERSATION_ID, keyId, signSupportToken, STAFF_AUDIENCE, STAFF_TOKEN_SECONDS, verifyStaffToken } from './support-platform.js';
@@ -619,16 +619,16 @@ export function registerSupport(app: App) {
       changes: z.array(z.object({ at: z.string(), kind: z.string().describe('step, limit, quarantine, release, tenant or operator.'), from: z.string().nullable(), to: z.string().nullable(), reasons: z.array(z.string()),
         limitFrom: z.number().nullable(), limitTo: z.number().nullable() })).describe('Changes of standing (ladder steps, limit bands, quarantines, releases), newest first, at most 50.'),
     }).describe('The last 60 days.'),
-    limitRequest: z.object({ eligibleForAutoApproval: z.boolean(), reasons: z.array(z.object({ code: z.string(), message: z.string() })).describe('Why not, when not.'), maxAuto: z.number(),
-      requested: z.number().nullable() }).describe(`"Request a higher limit" is approved automatically with a score of ${LIMIT_REQUEST.minScore} or more on each of the last ${LIMIT_REQUEST.scoreDays} days, no warn, restrict or pause in ${LIMIT_REQUEST.quietDays} days, and a request of at most ${LIMIT_REQUEST.maxAuto.toLocaleString('en-US')} a day. Anything else goes to a person.`),
+    limitRequest: z.object({ eligibleForAutoApproval: z.boolean().describe('Always false: nothing is approved automatically.'), reasons: z.array(z.object({ code: z.string(), message: z.string() })).describe('Why a higher limit is not needed or not automatic: NO_DAILY_LIMIT, EVALUATING, SCORE_CAP, LADDER_STEP or NO_STANDING.'), maxAuto: z.number().describe('Always 0.'),
+      requested: z.number().nullable() }).describe(`Deprecated: a workspace in good standing (score ${GOOD_STANDING} and up, no warning) has no daily limit, and a limit set by the score or a warning lifts by itself as the workspace recovers, so no limit request is approved automatically. A person can still review a capped workspace and set an operator override.`),
   }).openapi('SupportStandingDetail');
-  app.openapi(createRoute({ ...meta('getSupportStanding', 'Sending standing and limits per workspace: the connection and any pause with its reason, limit overrides, the sender standing where enabled, the last 24 hours of sends by status, 60 days of score, limit and step history, and whether a limit request would be approved automatically.'), path: '/v1/support/standing',
-    request: { query: WorkspaceFilter.extend({ requestedLimit: z.coerce.number().int().min(1).max(10_000_000).optional().describe('The daily limit the customer asks for, to check it against the automatic maximum.') }) },
+  app.openapi(createRoute({ ...meta('getSupportStanding', 'Sending standing and limits per workspace: the connection and any pause with its reason, limit overrides, the sender standing where enabled (a null dailyLimit is no daily limit), the last 24 hours of sends by status, 60 days of score, limit and step history, and why a higher limit is or is not needed.'), path: '/v1/support/standing',
+    request: { query: WorkspaceFilter.extend({ requestedLimit: z.coerce.number().int().min(1).max(10_000_000).optional().describe('The daily limit the customer asks for; echoed as limitRequest.requested.') }) },
     responses: { 200: response(z.object({ data: z.array(StandingDetail) })), ...errors } }), async c => {
     const list = scoped(c).ids, requested = c.req.valid('query').requestedLimit;
-    type History = { workspace_id: string; today: string; phase: 'seed' | 'calibrating' | 'graded' | null; step: Step | null; steps: number; days: z.infer<typeof StandingDetail>['history']['days']; changes: z.infer<typeof StandingDetail>['history']['changes'] };
-    const { rows, history } = await budgetedRead(c.env.db, async tx => ({ rows: await standings(tx, list), history: list.length ? (await tx.execute<History>(sql`SELECT w.id AS workspace_id, (now() AT TIME ZONE 'UTC')::date::text AS today,
-        s.phase, s.step, (SELECT count(*)::int FROM standing_events e WHERE e.workspace_id = w.id AND e.at > now() - interval '30 days' AND e.to_step IN ('warn','restrict','pause') AND e.to_step IS DISTINCT FROM e.from_step) AS steps,
+    type History = { workspace_id: string; phase: 'seed' | 'calibrating' | 'graded' | null; step: Step | null; daily: number | null; days: z.infer<typeof StandingDetail>['history']['days']; changes: z.infer<typeof StandingDetail>['history']['changes'] };
+    const { rows, history } = await budgetedRead(c.env.db, async tx => ({ rows: await standings(tx, list), history: list.length ? (await tx.execute<History>(sql`SELECT w.id AS workspace_id,
+        s.phase, s.step, s.daily_limit AS daily,
         (SELECT coalesce(json_agg(json_build_object('day', d.day::text, 'score', d.score::float8, 'quality', d.quality::float8, 'limit', d.daily_limit, 'step', d.step, 'accepted', d.accepted, 'bounced', d.bounced,
           'complained', d.complained, 'rejected', d.rejected) ORDER BY d.day), '[]') FROM sender_score_daily d WHERE d.workspace_id = w.id AND d.day > (now() AT TIME ZONE 'UTC')::date - 60) AS days,
         (SELECT coalesce(json_agg(x ORDER BY x.at DESC), '[]') FROM (SELECT e.at, e.kind, e.from_step AS "from", e.to_step AS "to", ARRAY(SELECT r->>'code' FROM jsonb_array_elements(e.reasons) r WHERE r ? 'code') AS reasons,
@@ -638,7 +638,7 @@ export function registerSupport(app: App) {
     return c.json({ data: rows.map(row => {
       const h = history.find(x => x.workspace_id === row.workspaceId)!;
       return { ...row, history: { days: h.days, changes: h.changes.map(x => ({ ...x, at: new Date(x.at).toISOString() })) },
-        limitRequest: { ...limitRequestEligibility({ phase: h.phase, step: h.step, days: h.days, steps: h.steps, today: h.today, requested }), requested: requested ?? null } };
+        limitRequest: { ...limitRequest({ phase: h.phase, step: h.step, daily: h.daily }), requested: requested ?? null } };
     }) }, 200);
   });
   const Billing = z.object({ available: z.boolean().describe('False until billing is enabled on this installation.'), data: z.array(z.object({ workspaceId: z.string(), account: z.record(z.string(), z.unknown()).nullable(),

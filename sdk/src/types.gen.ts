@@ -164,7 +164,7 @@ export type ConnectionSummary = {
      */
     sendingLimit?: {
         /**
-         * Recipients allowed per rolling 24 hours. Null when this workspace has no hosted limit.
+         * Recipients allowed per rolling 24 hours. Null when this workspace has no daily limit: in good standing (GET /v1/sender-score) or exempt.
          */
         cap: number | null;
         /**
@@ -176,7 +176,7 @@ export type ConnectionSummary = {
          */
         resetAt: string | null;
         /**
-         * The next limit for a new workspace, or null once it has the mature limit.
+         * After a resume, the limit that applies when its reduced limit ends; null otherwise, and null when no daily limit follows.
          */
         nextCap: number | null;
         /**
@@ -1925,7 +1925,7 @@ export type Metrics = {
 
 export type SenderScore = {
     /**
-     * warmup while calibrating: until 100 real recipients were accepted and 24 hours passed (Hosted), or the first 100 emails (self-hosted).
+     * warmup during the evaluation: until 100 real recipients were accepted and their delivery results are in (90% of them, or an hour after the 100th) (Hosted), or the first 100 emails (self-hosted).
      */
     state: 'warmup' | 'graded';
     emails: {
@@ -1940,20 +1940,24 @@ export type SenderScore = {
      */
     needed: number;
     /**
-     * When the 100th recipient was accepted; the score starts 24 hours later.
+     * When the 100th recipient was counted; the score starts once their delivery results are in, at most an hour later plus the ten-minute job run (gradedBy).
      */
     calibratedAt: string | null;
     /**
-     * 0–100, one decimal; null while warming up. It moves towards target by at most +5 or −10 a day.
+     * Hosted, during the evaluation once the 100th recipient was counted: the latest the first grade comes (an hour after it, plus the ten-minute job run), sooner once 90% of them have a delivery result. Null otherwise.
+     */
+    gradedBy: string | null;
+    /**
+     * 0–100, one decimal; null while warming up. The quality of the last 30 days of mail, recounted hourly: 75 and up has no daily limit.
      */
     score: number | null;
     grade: 'A+' | 'A' | 'B' | 'C' | 'D' | 'F' | null;
     /**
-     * Where the score is heading: quality shrunk towards 60 by the decayed volume (250 emails count as much as the prior).
+     * The score the evidence supports now; the score follows it on every run (the same as raw).
      */
     target: number;
     /**
-     * Quality: the weighted factor result before shrinkage. It is the ceiling the score can reach.
+     * Quality: the weighted factor result.
      */
     raw: number;
     /**
@@ -2016,24 +2020,38 @@ export type SenderScoreFactor = {
 };
 
 /**
- * Hosted only: the daily limit the score sets and what changes it.
+ * Hosted only: the daily limit the score sets (none in good standing), the pace and what changes them.
  */
 export type SenderLimit = {
     /**
-     * Recipients per rolling 24 hours that admission enforces now. Null when the workspace has no hosted limit.
+     * Recipients per rolling 24 hours that admission enforces now. Null when there is no daily limit (unlimited): a workspace in good standing (score 75 and up, no warning) or an exempt one.
      */
     daily: number | null;
+    /**
+     * True when no daily limit applies (daily is null): only the per-minute pace bounds sending.
+     */
+    unlimited: boolean;
+    /**
+     * calibrating: the evaluation (the first 100 real recipients); score: set by the score and the ladder, none in good standing; override: set by Nightmail; exempt: none.
+     */
     source: 'calibrating' | 'score' | 'override' | 'exempt';
     /**
-     * The limit the score earns, before a resume or strike reduction.
+     * The daily limit the score earns, before a resume or strike reduction. Without one: what the per-minute pace allows in 24 hours (perMinute × 1,440).
      */
     band: number;
     /**
-     * The next band up and the score it starts at.
+     * The next band up and the score it starts at. Null without a daily limit, or when an operator set it.
      */
     next: {
+        /**
+         * The next band's daily limit; when unlimited, what the pace allows in 24 hours.
+         */
         limit: number;
         atScore: number;
+        /**
+         * The next band has no daily limit.
+         */
+        unlimited: boolean;
     } | null;
     override: {
         daily: number;
@@ -2047,8 +2065,34 @@ export type SenderLimit = {
         until: string;
     } | null;
     strikeCapUntil: string | null;
+    /**
+     * For 72 clean hours after the evaluation, while it limits more than the per-minute pace: sending grows from 1,000 recipients an hour (shared by the account's workspaces, every stream) to twice the distinct recipients of the last completed hour whose results are in and clean. Null otherwise. Mail over it waits in the queue.
+     */
+    growth: {
+        /**
+         * Recipients the sponsor's growing workspaces may send in a rolling hour now.
+         */
+        hourly: number;
+        /**
+         * Recipients sent in the rolling hour.
+         */
+        used: number;
+        /**
+         * When the growth pace ends, after 72 clean hours.
+         */
+        until: string;
+    } | null;
+    /**
+     * Recipients a minute the workspace may send (pacing that protects the shared pool, not a daily limit): clamp(daily ÷ 20, 50, 500), or without a daily limit a quarter of the pool's SES rate, at least 500. Half of it per sending domain.
+     */
     perMinute: number;
+    /**
+     * Marketing recipients an hour: max(25, daily ÷ 4); without a daily limit, what the per-minute pace allows (perMinute × 60).
+     */
     marketingPerHour: number;
+    /**
+     * Recipients of the daily limit marketing may not use, kept for transactional mail: max(100, 10%). 0 without a daily limit.
+     */
     transactionalReserve: number;
 } | null;
 
@@ -2057,7 +2101,7 @@ export type SenderLimit = {
  */
 export type SenderStanding = {
     /**
-     * ok; notice (dashboard only); warn (limit frozen, owners emailed); restrict (marketing held, transactional flows); pause (all sending stopped).
+     * ok; notice (dashboard only); warn (limit frozen: no rises, and a workspace without one is limited to what SES accepted from it in the last 24 hours, at least 10,000; owners emailed); restrict (marketing held, transactional flows, limit frozen); pause (all sending stopped).
      */
     step: 'ok' | 'notice' | 'warn' | 'restrict' | 'pause';
     reasons: Array<StandingReason>;
@@ -2201,12 +2245,12 @@ export type Usage = {
          */
         resetAt: string | null;
         /**
-         * Index into steps of the step this workspace has reached; null when an operator set a custom limit.
+         * Index into steps of the step this workspace is on; null past them: no daily limit (cap null), or one set by the score, a warning or an operator.
          */
         step: number | null;
     } | null;
     /**
-     * How the daily limit grows, for every workspace on this installation. Only real SES acceptances count towards the next step: simulated sends and simulator addresses use the limit but never raise it.
+     * The daily limits a new workspace passes through: only the evaluation. After it, a workspace in good standing (score 75 and up, no warning) has no daily limit; bad signals set one (GET /v1/sender-score). Only real SES acceptances count: simulated sends and simulator addresses use the limit but never end the evaluation.
      */
     steps: Array<{
         /**
@@ -5294,17 +5338,23 @@ export type SupportStandingDetail = SupportStanding & {
         }>;
     };
     /**
-     * "Request a higher limit" is approved automatically with a score of 90 or more on each of the last 14 days, no warn, restrict or pause in 30 days, and a request of at most 25,000 a day. Anything else goes to a person.
+     * Deprecated: a workspace in good standing (score 75 and up, no warning) has no daily limit, and a limit set by the score or a warning lifts by itself as the workspace recovers, so no limit request is approved automatically. A person can still review a capped workspace and set an operator override.
      */
     limitRequest: {
+        /**
+         * Always false: nothing is approved automatically.
+         */
         eligibleForAutoApproval: boolean;
         /**
-         * Why not, when not.
+         * Why a higher limit is not needed or not automatic: NO_DAILY_LIMIT, EVALUATING, SCORE_CAP, LADDER_STEP or NO_STANDING.
          */
         reasons: Array<{
             code: string;
             message: string;
         }>;
+        /**
+         * Always 0.
+         */
         maxAuto: number;
         requested: number | null;
     };
@@ -26847,7 +26897,7 @@ export type GetSupportStandingData = {
          */
         workspaceId?: string;
         /**
-         * The daily limit the customer asks for, to check it against the automatic maximum.
+         * The daily limit the customer asks for; echoed as limitRequest.requested.
          */
         requestedLimit?: number;
     };

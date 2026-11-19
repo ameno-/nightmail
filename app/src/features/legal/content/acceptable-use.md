@@ -1,8 +1,8 @@
 ---
 title: Acceptable Use Policy
 description: What you may and may not do with Nightmail, the published sending limits and enforcement thresholds, and how to report abuse.
-updated: 13 November 2026
-effective: 13 November 2026
+updated: 19 November 2026
+effective: 19 November 2026
 ---
 
 Nightmail shares sending infrastructure and reputation among its customers, so one sender's spam hurts everyone's delivery. This policy says what you may and may not do with Nightmail. It's part of the [Terms of Service](/legal/terms), and it applies to you, everyone in your workspaces, and every Agent (API key, MCP client, AI agent, inbox key or app password) that acts for you.
@@ -93,7 +93,7 @@ Don't:
 Most problems are handled by Nightmail's automatic sender score. It moves through steps, from least to most serious:
 
 1. **Notice.** A note on your score card, for a first complaint or a few bounces. Nothing changes.
-2. **Warn.** We email owners and admins. Your daily limit stops growing. It clears by itself after a day of good sending.
+2. **Warn.** We email owners and admins. Your daily limit is frozen: it can't rise, and without one you're limited to what was accepted for delivery in the last 24 hours (at least 10,000). It clears by itself after a day of good sending.
 3. **Restrict.** We hold your **marketing** mail and pause campaigns. Transactional mail (receipts, password resets) keeps flowing. You can resume from the dashboard after fixing the cause, at a reduced rate at first.
 4. **Pause.** **All sending stops.** Your inboxes, receiving and dashboard keep working. Queued mail waits 72 hours, then is canceled. Some pauses you can lift yourself; others need our review.
 
@@ -112,18 +112,16 @@ These are the current limits and thresholds for Hosted sending. We may change th
 | Sender score | Daily limit (rolling 24 hours, recipients) | Per minute | Marketing per hour |
 | --- | --- | --- | --- |
 | New workspace, first 100 recipients | 100 | 50 | 25 |
-| Under 65 | 100 | 50 | 25 |
-| 65–69 | 200 | 50 | 50 |
+| 75 and up | None | A quarter of the shared pool's sending rate, at least 500 | No separate limit |
 | 70–74 | 500 | 50 | 125 |
-| 75–79 | 1,000 | 50 | 250 |
-| 80–84 | 2,000 | 100 | 500 |
-| 85–89 | 5,000 | 250 | 1,250 |
-| 90 and up | 10,000 | 500 | 2,500 |
-| On request | 25,000, 50,000 or 100,000 | Up to 1,000 | A quarter of the daily limit |
+| 65–69 | 200 | 50 | 50 |
+| Under 65 | 100 | 50 | 25 |
 
-- A new workspace sends up to 100 a day until 100 real recipients have been accepted and 24 hours have passed. Its score then starts at 65 if the mail was good, lower if it wasn't.
-- The score moves towards its target by at most +5 a day and −10 a day.
-- Marketing can use the daily limit except a reserve for transactional mail: the larger of 100 or 10% of the limit.
+- A new workspace's first 100 real recipients are its evaluation. It can send no more until their delivery results are in, about an hour after the 100th. Its score is then the quality of those 100: good mail has no daily limit from then on.
+- For 72 clean hours after the evaluation, sending grows: up to 1,000 recipients an hour across your workspaces at first, then up to twice the distinct recipients of the last hour whose results are in and clean. A good sender doubles every hour; mail over it waits in the queue.
+- The score is recomputed hourly from your mail of the last 30 days, recent days counting most. A limit appears only when the score falls under 73, and lifts again at 75.
+- The per-minute pace protects the shared infrastructure, so one sender can't crowd out the others.
+- Under a daily limit, marketing can use it except a reserve for transactional mail: the larger of 100 or 10% of the limit.
 
 ### What the score is made of
 

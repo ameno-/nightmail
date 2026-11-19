@@ -470,7 +470,7 @@
                   "integer",
                   "null"
                 ],
-                "description": "Recipients allowed per rolling 24 hours. Null when this workspace has no hosted limit."
+                "description": "Recipients allowed per rolling 24 hours. Null when this workspace has no daily limit: in good standing (GET /v1/sender-score) or exempt."
               },
               "used": {
                 "type": "integer",
@@ -489,7 +489,7 @@
                   "integer",
                   "null"
                 ],
-                "description": "The next limit for a new workspace, or null once it has the mature limit."
+                "description": "After a resume, the limit that applies when its reduced limit ends; null otherwise, and null when no daily limit follows."
               },
               "nextCapAt": {
                 "type": [
@@ -6912,7 +6912,7 @@
               "warmup",
               "graded"
             ],
-            "description": "warmup while calibrating: until 100 real recipients were accepted and 24 hours passed (Hosted), or the first 100 emails (self-hosted)."
+            "description": "warmup during the evaluation: until 100 real recipients were accepted and their delivery results are in (90% of them, or an hour after the 100th) (Hosted), or the first 100 emails (self-hosted)."
           },
           "emails": {
             "type": "object",
@@ -6940,14 +6940,22 @@
               "null"
             ],
             "format": "date-time",
-            "description": "When the 100th recipient was accepted; the score starts 24 hours later."
+            "description": "When the 100th recipient was counted; the score starts once their delivery results are in, at most an hour later plus the ten-minute job run (gradedBy)."
+          },
+          "gradedBy": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Hosted, during the evaluation once the 100th recipient was counted: the latest the first grade comes (an hour after it, plus the ten-minute job run), sooner once 90% of them have a delivery result. Null otherwise."
           },
           "score": {
             "type": [
               "number",
               "null"
             ],
-            "description": "0–100, one decimal; null while warming up. It moves towards target by at most +5 or −10 a day."
+            "description": "0–100, one decimal; null while warming up. The quality of the last 30 days of mail, recounted hourly: 75 and up has no daily limit."
           },
           "grade": {
             "type": [
@@ -6966,11 +6974,11 @@
           },
           "target": {
             "type": "number",
-            "description": "Where the score is heading: quality shrunk towards 60 by the decayed volume (250 emails count as much as the prior)."
+            "description": "The score the evidence supports now; the score follows it on every run (the same as raw)."
           },
           "raw": {
             "type": "number",
-            "description": "Quality: the weighted factor result before shrinkage. It is the ceiling the score can reach."
+            "description": "Quality: the weighted factor result."
           },
           "band": {
             "type": [
@@ -7060,6 +7068,7 @@
           "emails",
           "needed",
           "calibratedAt",
+          "gradedBy",
           "score",
           "grade",
           "target",
@@ -7150,7 +7159,11 @@
               "integer",
               "null"
             ],
-            "description": "Recipients per rolling 24 hours that admission enforces now. Null when the workspace has no hosted limit."
+            "description": "Recipients per rolling 24 hours that admission enforces now. Null when there is no daily limit (unlimited): a workspace in good standing (score 75 and up, no warning) or an exempt one."
+          },
+          "unlimited": {
+            "type": "boolean",
+            "description": "True when no daily limit applies (daily is null): only the per-minute pace bounds sending."
           },
           "source": {
             "type": "string",
@@ -7159,11 +7172,12 @@
               "score",
               "override",
               "exempt"
-            ]
+            ],
+            "description": "calibrating: the evaluation (the first 100 real recipients); score: set by the score and the ladder, none in good standing; override: set by Nightmail; exempt: none."
           },
           "band": {
             "type": "integer",
-            "description": "The limit the score earns, before a resume or strike reduction."
+            "description": "The daily limit the score earns, before a resume or strike reduction. Without one: what the per-minute pace allows in 24 hours (perMinute × 1,440)."
           },
           "next": {
             "type": [
@@ -7172,17 +7186,23 @@
             ],
             "properties": {
               "limit": {
-                "type": "integer"
+                "type": "integer",
+                "description": "The next band's daily limit; when unlimited, what the pace allows in 24 hours."
               },
               "atScore": {
                 "type": "number"
+              },
+              "unlimited": {
+                "type": "boolean",
+                "description": "The next band has no daily limit."
               }
             },
             "required": [
               "limit",
-              "atScore"
+              "atScore",
+              "unlimited"
             ],
-            "description": "The next band up and the score it starts at."
+            "description": "The next band up and the score it starts at. Null without a daily limit, or when an operator set it."
           },
           "override": {
             "type": [
@@ -7233,29 +7253,61 @@
             ],
             "format": "date-time"
           },
+          "growth": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "hourly": {
+                "type": "integer",
+                "description": "Recipients the sponsor's growing workspaces may send in a rolling hour now."
+              },
+              "used": {
+                "type": "integer",
+                "description": "Recipients sent in the rolling hour."
+              },
+              "until": {
+                "type": "string",
+                "format": "date-time",
+                "description": "When the growth pace ends, after 72 clean hours."
+              }
+            },
+            "required": [
+              "hourly",
+              "used",
+              "until"
+            ],
+            "description": "For 72 clean hours after the evaluation, while it limits more than the per-minute pace: sending grows from 1,000 recipients an hour (shared by the account's workspaces, every stream) to twice the distinct recipients of the last completed hour whose results are in and clean. Null otherwise. Mail over it waits in the queue."
+          },
           "perMinute": {
-            "type": "integer"
+            "type": "integer",
+            "description": "Recipients a minute the workspace may send (pacing that protects the shared pool, not a daily limit): clamp(daily ÷ 20, 50, 500), or without a daily limit a quarter of the pool's SES rate, at least 500. Half of it per sending domain."
           },
           "marketingPerHour": {
-            "type": "integer"
+            "type": "integer",
+            "description": "Marketing recipients an hour: max(25, daily ÷ 4); without a daily limit, what the per-minute pace allows (perMinute × 60)."
           },
           "transactionalReserve": {
-            "type": "integer"
+            "type": "integer",
+            "description": "Recipients of the daily limit marketing may not use, kept for transactional mail: max(100, 10%). 0 without a daily limit."
           }
         },
         "required": [
           "daily",
+          "unlimited",
           "source",
           "band",
           "next",
           "override",
           "restore",
           "strikeCapUntil",
+          "growth",
           "perMinute",
           "marketingPerHour",
           "transactionalReserve"
         ],
-        "description": "Hosted only: the daily limit the score sets and what changes it."
+        "description": "Hosted only: the daily limit the score sets (none in good standing), the pace and what changes them."
       },
       "SenderStanding": {
         "type": [
@@ -7272,7 +7324,7 @@
               "restrict",
               "pause"
             ],
-            "description": "ok; notice (dashboard only); warn (limit frozen, owners emailed); restrict (marketing held, transactional flows); pause (all sending stopped)."
+            "description": "ok; notice (dashboard only); warn (limit frozen: no rises, and a workspace without one is limited to what SES accepted from it in the last 24 hours, at least 10,000; owners emailed); restrict (marketing held, transactional flows, limit frozen); pause (all sending stopped)."
           },
           "reasons": {
             "type": "array",
@@ -7619,7 +7671,7 @@
                   "integer",
                   "null"
                 ],
-                "description": "Index into steps of the step this workspace has reached; null when an operator set a custom limit."
+                "description": "Index into steps of the step this workspace is on; null past them: no daily limit (cap null), or one set by the score, a warning or an operator."
               }
             },
             "required": [
@@ -7649,7 +7701,7 @@
                 "requires"
               ]
             },
-            "description": "How the daily limit grows, for every workspace on this installation. Only real SES acceptances count towards the next step: simulated sends and simulator addresses use the limit but never raise it."
+            "description": "The daily limits a new workspace passes through: only the evaluation. After it, a workspace in good standing (score 75 and up, no warning) has no daily limit; bad signals set one (GET /v1/sender-score). Only real SES acceptances count: simulated sends and simulator addresses use the limit but never end the evaluation."
           },
           "simulated": {
             "type": "boolean",
@@ -17251,7 +17303,8 @@
                 "type": "object",
                 "properties": {
                   "eligibleForAutoApproval": {
-                    "type": "boolean"
+                    "type": "boolean",
+                    "description": "Always false: nothing is approved automatically."
                   },
                   "reasons": {
                     "type": "array",
@@ -17270,10 +17323,11 @@
                         "message"
                       ]
                     },
-                    "description": "Why not, when not."
+                    "description": "Why a higher limit is not needed or not automatic: NO_DAILY_LIMIT, EVALUATING, SCORE_CAP, LADDER_STEP or NO_STANDING."
                   },
                   "maxAuto": {
-                    "type": "number"
+                    "type": "number",
+                    "description": "Always 0."
                   },
                   "requested": {
                     "type": [
@@ -17288,7 +17342,7 @@
                   "maxAuto",
                   "requested"
                 ],
-                "description": "\"Request a higher limit\" is approved automatically with a score of 90 or more on each of the last 14 days, no warn, restrict or pause in 30 days, and a request of at most 25,000 a day. Anything else goes to a person."
+                "description": "Deprecated: a workspace in good standing (score 75 and up, no warning) has no daily limit, and a limit set by the score or a warning lifts by itself as the workspace recovers, so no limit request is approved automatically. A person can still review a capped workspace and set an operator override."
               }
             },
             "required": [
@@ -42223,7 +42277,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "The workspace sender score, the daily limit it sets and the enforcement step (Hosted). The score (0–100) grows from the quality of what the workspace sends: complaints, the spam screen, bounces, list quality, authentication and engagement, decayed with a 30-day half-life. Hosted: calibrating at 100/day until 100 real recipients were accepted and 24 hours passed; then the limit follows the score (65: 200, 70: 500, 75: 1,000, 80: 2,000, 85: 5,000, 90: 10,000 a day), moving at most +5 or −10 a day. Self-hosted and BYO get the score for display only. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. A change of standing or limit shows at once. Workspace-wide: keys restricted to domains get 403.",
+        "description": "The workspace sender score, the daily limit it sets and the enforcement step (Hosted). In good standing (a score of 75 or more, no warning) there is no daily limit: limit.unlimited is true, limit.daily null, and only the per-minute pace (limit.perMinute) applies. A new workspace's first 100 real recipients are its evaluation, at 100 a day until their delivery results are in (gradedBy says by when); for 72 clean hours after it, sending grows from 1,000 recipients an hour, doubling with each clean hour (limit.growth). Under 75 the limit is 500 (70–74), 200 (65–69) or 100, and a warning freezes it. The score (0–100) is the quality of what the workspace sends (complaints, the spam screen, bounces, list quality, authentication and engagement), decayed with a 30-day half-life and recounted hourly. Self-hosted and BYO get the score for display only. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. A change of standing or limit shows at once. Workspace-wide: keys restricted to domains get 403.",
         "responses": {
           "200": {
             "description": "Success",
@@ -42530,7 +42584,7 @@
           }
         ],
         "summary": "Plan, pricing and sending limits",
-        "description": "Hosted only. Pricing and whether billing charges yet, this month's sent and received counts against their free allowances, 3,000 each, counted separately (received only for credentials that may read all received mail), and the rolling daily sending limit with the steps it grows through. Workspace-wide: keys restricted to domains get 403. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results.",
+        "description": "Hosted only. Pricing and whether billing charges yet, this month's sent and received counts against their free allowances, 3,000 each, counted separately (received only for credentials that may read all received mail), and the rolling daily sending limit (none in good standing) with the evaluation before it. Workspace-wide: keys restricted to domains get 403. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results.",
         "responses": {
           "200": {
             "description": "Success",
@@ -76364,7 +76418,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "Sending standing and limits per workspace: the connection and any pause with its reason, limit overrides, the sender standing where enabled, the last 24 hours of sends by status, 60 days of score, limit and step history, and whether a limit request would be approved automatically. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
+        "description": "Sending standing and limits per workspace: the connection and any pause with its reason, limit overrides, the sender standing where enabled (a null dailyLimit is no daily limit), the last 24 hours of sends by status, 60 days of score, limit and step history, and why a higher limit is or is not needed. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -76382,10 +76436,10 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 10000000,
-              "description": "The daily limit the customer asks for, to check it against the automatic maximum."
+              "description": "The daily limit the customer asks for; echoed as limitRequest.requested."
             },
             "required": false,
-            "description": "The daily limit the customer asks for, to check it against the automatic maximum.",
+            "description": "The daily limit the customer asks for; echoed as limitRequest.requested.",
             "name": "requestedLimit",
             "in": "query"
           }
