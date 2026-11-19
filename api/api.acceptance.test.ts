@@ -8591,6 +8591,57 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     assert.deepEqual(rows, [{ type: 'accepted', n: 1 }, { type: 'dispatch_attempt', n: 1 }], 'Sent exactly once.');
   });
 
+  // Review of #410 (P1): a release job that ran out of attempts or leases left its email scheduled forever, unseen. Both
+  // runs drive the real job runner (processJobs) over a session-local jobs table, so no other scenario's job is claimed.
+  test('a scheduled send whose release runs out of attempts or leases is rejected and its sender told, never left waiting', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const [{ processJobs, MAX_ATTEMPTS }, { jobHandlers }, { PgDialect }, { sql }] = await Promise.all([import('./src/jobs.js'), import('./src/sending.js'), import('drizzle-orm/pg-core'), import('drizzle-orm')]);
+      const wid = runtime.config.workspaceId;
+      const schedule = async () => { const { id } = ok(await local('POST', '/v1/emails/send', mail({ scheduledAt: new Date(Date.now() + 3_600_000).toISOString() })), 202); await elapse(db, [id], 3_601_000); return id as string; };
+      const email = async (id: string) => (await db.query('SELECT status, error_code, provider_id FROM sending_emails WHERE id=$1', [id])).rows[0];
+      const job = async (id: string) => (await db.query('SELECT status, attempts, last_error FROM jobs WHERE id=$1', [`release:${id}`])).rows[0];
+      const told = async (id: string) => (await db.query(`SELECT data FROM operation_events WHERE workspace_id=$1 AND type='email.rejected' AND data->>'emailId'=$2`, [wid, id])).rows.map(r => [r.data.status, r.data.code, r.data.providerCalled]);
+      const events = async (id: string) => (await db.query('SELECT type, data FROM sending_email_events WHERE email_id=$1', [id])).rows.map(r => [r.type, r.data.code ?? null]);
+      // Every release fails before it commits, as one would on a database that keeps refusing its write.
+      const dialect = new PgDialect(), pass = <T extends object>(target: T, name: PropertyKey) => { const value = Reflect.get(target, name); return typeof value === 'function' ? value.bind(target) : value; };
+      const failing = { ...runtime, db: new Proxy(runtime.db, { get: (base, name) => name !== 'transaction' ? pass(base, name)
+        : (work: (tx: import('./src/core.js').DbExecutor) => Promise<unknown>) => base.transaction(tx => work(new Proxy(tx, { get: (inner, method) => method !== 'execute' ? pass(inner, method)
+          : (query: import('drizzle-orm').SQL) => dialect.sqlToQuery(query.getSQL()).sql.startsWith("UPDATE sending_emails SET status='queued'") ? Promise.reject(new Error('Simulated refusal')) : inner.execute(query) }))) }) };
+      const ordinary = await schedule(), lost = await schedule(), sent = await schedule(), moved = await schedule();
+      await runtime.db.execute(sql`CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP`);
+      try {
+        await db.query('INSERT INTO jobs SELECT * FROM public.jobs WHERE id = ANY($1)', [[ordinary, lost, sent, moved].map(id => `release:${id}`)]);
+        const due = (id: string, attempts: number) => db.query(`UPDATE jobs SET status='pending', attempts=$2, available_at=now()-interval '1 second' WHERE id=$1`, [`release:${id}`, attempts]);
+        const handlers = { 'sending.release': jobHandlers['sending.release']! };
+        // Ordinary retries: an attempt with retries left fails and waits for the next, the email still scheduled.
+        await db.query(`UPDATE jobs SET status='completed' WHERE id = ANY($1)`, [[lost, sent, moved].map(id => `release:${id}`)]);
+        await due(ordinary, MAX_ATTEMPTS - 2);
+        assert.equal(await processJobs(failing, handlers, 1, 1), 1);
+        assert.deepEqual([await email(ordinary), (await job(ordinary)).status], [{ status: 'scheduled', error_code: null, provider_id: null }, 'pending']);
+        // Its last attempt fails too: the email is rejected with a code of its own and its sender is told, with the job.
+        await due(ordinary, MAX_ATTEMPTS - 1);
+        assert.equal(await processJobs(failing, handlers, 1, 1), 1);
+        assert.deepEqual([await email(ordinary), (await job(ordinary)).status], [{ status: 'rejected', error_code: 'SCHEDULE_RELEASE_FAILED', provider_id: null }, 'completed']);
+        assert.deepEqual(await told(ordinary), [['rejected', 'SCHEDULE_RELEASE_FAILED', false]]);
+        assert.deepEqual((await events(ordinary)).sort(), [['reject', 'SCHEDULE_RELEASE_FAILED'], ['scheduled', null]]);
+        // A last attempt of a run that a reschedule has since replaced (another run token) rejects nothing.
+        await jobHandlers['sending.release']!(failing, { emailId: moved, run: 'run_replaced' }, { id: `release:${moved}`, attempts: MAX_ATTEMPTS, workspaceId: wid });
+        assert.deepEqual([(await email(moved)).status, await told(moved)], ['scheduled', []]);
+        // Its last lease runs out (every worker that claimed it was lost before it finished): the runner's claim fails the
+        // job and rejects the email in the same statement. One whose release committed before its worker was lost stays released.
+        await db.query(`UPDATE jobs SET status='running', attempts=$2, lease_until=clock_timestamp()-interval '1 second' WHERE id = ANY($1)`, [[lost, sent].map(id => `release:${id}`), MAX_ATTEMPTS]);
+        await db.query(`UPDATE sending_emails SET status='queued', created_at=clock_timestamp() WHERE id=$1`, [sent]);
+        assert.equal(await processJobs(runtime, handlers, 1, 1), 0);
+        assert.deepEqual([await email(lost), await job(lost)], [{ status: 'rejected', error_code: 'SCHEDULE_RELEASE_FAILED', provider_id: null }, { status: 'failed', attempts: MAX_ATTEMPTS, last_error: 'JOB_LEASE_EXHAUSTED' }]);
+        assert.deepEqual(await told(lost), [['rejected', 'SCHEDULE_RELEASE_FAILED', false]]);
+        assert.deepEqual([(await email(sent)).status, (await job(sent)).status, await told(sent)], ['queued', 'failed', []]);
+        // Rejected, it can't be moved or canceled any more, and it was never charged.
+        error(await local('POST', `/v1/emails/${lost}/reschedule`, { scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 409, 'EMAIL_NOT_SCHEDULED');
+        error(await local('POST', `/v1/emails/${lost}/cancel`), 409, 'EMAIL_NOT_SCHEDULED');
+      } finally { await runtime.db.execute(sql`DROP TABLE IF EXISTS pg_temp.jobs`); }
+    });
+  });
+
   test('a scheduled send waits for its time on a simulated clock and goes when the clock reaches it', async t => {
     await simulatedSesFixture(t, async ({ local, db, run, jobs }) => {
       const at = new Date(Date.now() + 3_600_000).toISOString();

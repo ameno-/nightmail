@@ -14,7 +14,7 @@ import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
 import { actor, actorMailAccess, ApiError, AudienceSpec, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, wakeWebhooks } from './jobs.js';
-import { countScreened, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, quarantineCampaign, clearProbe, waitProbe, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, restrictToDelivered, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState } from './states.js';
+import { countScreened, failScheduledRelease, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, quarantineCampaign, clearProbe, waitProbe, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, restrictToDelivered, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState } from './states.js';
 import { productName } from './brand.js';
 import type { CampaignScreen } from './screen.js';
 export { simulatedTopic, taggedEmailId, terminalColumns, terminalEvents };
@@ -777,11 +777,25 @@ const RELEASE_GRACE_MS = 15 * 60_000, RELEASE_RETRY_MS = 30_000;
  * immediate send's) for the dispatcher. Refused, it is rejected with the refusal's code: a reject event and
  * email.rejected, nothing charged. Canceled or already released meanwhile: nothing to do; moved later: it waits.
  * One transaction: a crash before its commit leaves the email scheduled for the job's next attempt, after it leaves
- * nothing to redo, and the dispatcher's claim (queued -> attempting) sends it once.
+ * nothing to redo, and the dispatcher's claim (queued -> attempting) sends it once. Its last attempt failing rejects
+ * the email (endRelease) instead of leaving it waiting forever; the job runner's claim does the same when its last
+ * lease runs out (jobs.ts, failScheduledRelease).
  */
 const releaseScheduled: JobHandler = retryDatabaseFailures(async (runtime, payload, job) => {
   const emailId = String(payload.emailId), wid = job.workspaceId;
-  const outcome = await runtime.db.transaction(async tx => {
+  let outcome: Awaited<ReturnType<typeof release>>;
+  try { outcome = await release(); } catch (error) {
+    if (error instanceof JobDeferred || job.attempts < MAX_ATTEMPTS) throw error;
+    // An email that can't be rejected now is not dropped: its release starts over, with a fresh set of attempts.
+    const webhooks = await endRelease(runtime, wid, emailId, payload.run).catch(() => { throw new JobDeferred(new Date(Date.now() + 60_000).toISOString()); });
+    return wakeWebhooks(runtime, webhooks);
+  }
+  if (outcome?.route) {
+    const { route, priority } = outcome;
+    try { await runtime.dispatch?.(route.region, route.connection?.aws_account_id, 1, route.connection?.kind, priority); }
+    catch { log('warn', { code: 'DISPATCH_WAKE_FAILED', jobId: job.id, message: 'Released mail is durable; the dispatcher polls and the scheduler pings it.' }); }
+  } else if (outcome?.webhooks) await wakeWebhooks(runtime, outcome.webhooks);
+  async function release() { return runtime.db.transaction(async tx => {
     // Its time by the database's clock, which the job runner's claim also reads.
     const [row] = await tx.select({ status: emails.status, scheduledAt: emails.scheduledAt, actorKeyId: emails.actorKeyId, from: emails.from, snapshot: emails.snapshot,
       early: sql<boolean>`${emails.scheduledAt} > clock_timestamp()`, waits: sql<boolean>`${emails.scheduledAt} + make_interval(secs => ${RELEASE_GRACE_MS / 1000}) > clock_timestamp()` })
@@ -808,13 +822,21 @@ const releaseScheduled: JobHandler = retryDatabaseFailures(async (runtime, paylo
       ), ${terminalEvents(sql`SELECT * FROM rejected`, sql`'{"providerCalled":false}'::jsonb`)} SELECT count(*)::int AS n FROM webhook_jobs`);
     log('warn', { code: 'SCHEDULED_EMAIL_REFUSED', workspaceId: wid, emailId, refusal: d.code, jobId: job.id });
     return { webhooks: rejected!.n };
-  });
-  if (outcome?.route) {
-    const { route, priority } = outcome;
-    try { await runtime.dispatch?.(route.region, route.connection?.aws_account_id, 1, route.connection?.kind, priority); }
-    catch { log('warn', { code: 'DISPATCH_WAKE_FAILED', jobId: job.id, message: 'Released mail is durable; the dispatcher polls and the scheduler pings it.' }); }
-  } else if (outcome?.webhooks) await wakeWebhooks(runtime, outcome.webhooks);
+  }); }
 });
+/** A release's last attempt failed: under the email's row lock, and only while this attempt's run is still the job's (a
+ * reschedule requeues it with a new one), the scheduled email is rejected with SCHEDULE_RELEASE_FAILED. Returns the
+ * webhook jobs it queued. */
+async function endRelease(runtime: Runtime, wid: string, emailId: string, run: unknown) {
+  return runtime.db.transaction(async tx => {
+    const { rows: [row] } = await tx.execute<{ current: boolean }>(sql`SELECT (SELECT payload->>'run' FROM jobs WHERE id=${releaseJobId(emailId)}) IS NOT DISTINCT FROM ${typeof run === 'string' ? run : null}::text AS current
+      FROM sending_emails WHERE workspace_id=${wid} AND id=${emailId} AND status='scheduled' FOR UPDATE`);
+    if (!row?.current) return 0;
+    const { rows: [ended] } = await tx.execute<{ n: number }>(sql`WITH ${failScheduledRelease(sql`SELECT ${wid}::text AS workspace_id,${emailId}::text AS id`)} SELECT count(*)::int AS n FROM webhook_jobs`);
+    log('warn', { code: 'SCHEDULE_RELEASE_FAILED', workspaceId: wid, emailId });
+    return ended!.n;
+  });
+}
 
 /** One message of a send, as built before admission: what TypeScript alone found wrong with it waits in `invalid`. */
 type Outgoing = { snapshot: EmailSnapshot; recipients: number; marketing: boolean; template?: SendRequest['template']; token?: { hash: string; email: string }; duplicate?: boolean; invalid?: unknown; oversize?: ApiError };
