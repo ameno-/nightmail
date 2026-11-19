@@ -46,6 +46,15 @@ in it, relaxed lids, level brows, eyes on the camera, bouncing on the beat. He n
 looks worried and never looks at the door. He is oblivious until Doug lands on him, and it is the
 same pitchman on every viewing.
 
+He is always whole, and nothing is ever in front of him. He stands on the top edge of the band,
+hat to foot, and the type lands in the band under him. Beside the footage he has a column of his
+own, with the readout, the board and the price burst above his hat. On a phone he has the left of
+the strip under the footage and they have the right. The two exceptions are the drive, where he is
+a framed circle in the corner, and the ending, where Doug is on top of him. `bun run
+commercial:smoke` holds this to account: every frame, at six picture shapes, it fails if the
+footage, the band, the type, the readout, the board or anything in flight touches the room he is
+taking up.
+
 No arms on anyone: Doug works his phone by leaning over and putting his forehead on it.
 
 The band along the bottom only ever shows the line being spoken, with the fine print that keeps
@@ -72,8 +81,8 @@ toggle and two invisible click targets (the glass and the dial).
   takes dents (bites out of its outline that the gloss bends round), spiral or X eyes, and a hat
   that sits askew, has a dent of its own, or is drawn alone.
 - `src/show.js`: the timeline, the broadcast layouts (`solo`, `monitor`, `big`, `split`, `desk`,
-  `takeover`, `studio`, `attack`, each with a portrait version where the pitchman sits under the
-  footage), cuts, the six-up office grid, the last shot (the door, the tackle, then `strike` and
+  `takeover`, `studio`, `attack`, each with a portrait version where the pitchman stands under the
+  footage; `layoutOf` and its `column` size him to the room he has), cuts, the six-up office grid, the last shot (the door, the tackle, then `strike` and
   `attack`: the list of blows, where Doug is between them, and what each one does to the
   pitchman, the hat, the camera, the lights and the boom mic), the band of kinetic type, the
   studio's amber readout, and Doug's phone: the banners at the top left
@@ -93,8 +102,9 @@ Cues are looked up by the word the announcer says, not by a time: `w("s4", s4, "
 says "We" in clip `s4`, from the Scribe timings in `public/commercial/audio/manifest.json`. The
 band's lines are `[word, chyron]` pairs, so a new recording of the same script retimes the whole
 show through its manifest. Events that depend on each other are clamped in order (he can't click
-before he opens). `bun run commercial:smoke` (from `app/`) runs the whole show without a GPU, wide
-and tall, and fails on an exception, a NaN, an overflowing list or a missing sprite.
+before he opens). `bun run commercial:smoke` (from `app/`) runs the whole show without a GPU, at
+three wide and three tall picture shapes, and fails on an exception, a NaN, an overflowing list, a
+missing sprite or a covered pitchman.
 
 WebGPU only; without it the page says so.
 

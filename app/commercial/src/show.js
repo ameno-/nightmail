@@ -44,6 +44,9 @@ function newCam(tile) {
   return { tile, scene: "couch", a: 1, cell: null, mode: 0, noise: 0.14, zoom: 1, cx: 0.5, cy: 0.5, gain: 1, contrast: 1.1, glitch: 0, flash: 0, caption: "", S: {} }
 }
 const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, "")
+// how much of his own radius the pitchman needs, bouncing: above the band (hat included), and to each side
+const ROOM = 3.0
+const HALF = 1.1
 const ANGRY = { lid: 0.4, squint: 0.55, brow: -0.6, worry: -1, smile: -0.45, autoBlink: 0 }
 
 export class Show {
@@ -1206,15 +1209,47 @@ export class Show {
   }
 
   // ─── layout: where the footage and the pitchman sit in the broadcast ─────────
+  // The pitchman is always whole: he stands on the top edge of the band, hat to foot, and nothing
+  // is ever in front of him. Beside the footage he has a column of his own, with the readout and
+  // the board above his hat. On a phone he has the left of the strip under the footage and they
+  // have the right. (sx, sy, sw: where the readout and the board go. ROOM and HALF: how much
+  // of his own radius he needs above the band and to each side, bouncing.)
   layoutOf(name) {
     const W = this.BW
     const H = this.BH
     const P = H > W
     const band = P ? 104 : 118
-    const L = { bezel: 1, band, pip: 0 }
-    const stand = (R, k = 0.62) => H - L.band - R * k
-    // on a phone the pitchman takes whatever height the footage leaves him
-    const tall = () => clamp((H - L.band - L.fy - L.fh - 150) * 0.38, W * 0.17, W * 0.3)
+    const L = { bezel: 1, band, pip: 0, sx: 26, sy: 46, sw: 300, dk: P ? 1.5 : 2.4 } // dk: how far off the door is, in pitchmen
+    const stand = (R) => H - L.band - R - 2
+    // his column. rows: readout lines to leave room for. board: and the inbox board.
+    // squarish: on a phone the footage may be made smaller to leave him a decent size; keep it 4:3
+    const column = (cap, rows, board, squarish) => {
+      const floor = H - L.band
+      if (P) {
+        const under = () => L.fy + L.fh + 14 * L.bezel
+        const short = ROOM * W * 0.14 - (floor - under() - 14)
+        if (short > 0) {
+          L.fh -= short
+          if (squarish) {
+            L.fx += (L.fw - L.fh / 0.75) / 2
+            L.fw = L.fh / 0.75
+          }
+        }
+        L.pR = Math.min(W * 0.2, (floor - under() - 14) / ROOM)
+        L.px = 10 + HALF * L.pR
+        L.sx = L.px + HALF * L.pR + 12
+        L.sy = under() + 12
+        L.sw = W - L.sx - 14
+      } else {
+        L.sx = 26
+        L.sy = Math.max(46, L.fy + 8)
+        L.sw = L.fx - 44
+        const edge = L.fx - (L.bezel ? 31 : 12)
+        L.pR = Math.min(cap, edge / (2 * HALF + 0.1), (floor - 10 - L.sy - rows * 40 - (board ? 174 : 0) - 6) / ROOM)
+        L.px = edge / 2
+      }
+      L.py = stand(L.pR)
+    }
     if (name === "standby") {
       L.band = 0
       L.fw = P ? W - 90 : W * 0.36
@@ -1230,25 +1265,28 @@ export class Show {
       L.fh = L.fw * 0.75
       L.fx = W + 80
       L.fy = P ? 64 : 60
-      L.pR = name === "studio" ? (P ? W * 0.24 : H * 0.235) : name === "attack" ? (P ? W * 0.26 : H * 0.25) : P ? W * 0.27 : H * 0.245
-      L.px = name === "studio" ? W * (P ? 0.38 : 0.36) : name === "attack" ? W * (P ? 0.42 : 0.46) : W * 0.5
-      L.py = stand(L.pR, 0.66)
+      L.pR = name === "studio" ? (P ? W * 0.21 : H * 0.235) : name === "attack" ? (P ? W * 0.26 : H * 0.25) : P ? W * 0.27 : H * 0.245
+      L.px = name === "studio" ? W * (P ? 0.25 : 0.36) : name === "attack" ? W * (P ? 0.42 : 0.46) : W * 0.5
+      if (P && name === "studio") L.dk = 2.34 // on a phone the door has the other half of the picture, so Doug isn't behind him
+      if (P && name === "solo") {
+        // on a phone the footage comes in over his head, so he leaves it the room it will need
+        const m = this.layoutOf("monitor")
+        Object.assign(L, { fw: m.fw, fh: m.fh, fy: m.fy })
+        L.pR = Math.min(L.pR, (H - L.band - 8 - (m.fy + m.fh + 17)) / ROOM)
+      }
+      L.py = stand(L.pR)
     } else if (name === "monitor") {
       L.fw = P ? W - 44 : Math.min(W * 0.56, ((H - band - 76) * 4) / 3)
       L.fh = L.fw * 0.75
       L.fx = P ? 22 : W - L.fw - 46
       L.fy = P ? 46 : (H - band - L.fh) / 2
-      L.pR = P ? tall() : Math.min(H * 0.2, L.fx * 0.36)
-      L.px = P ? L.pR * 1.25 : L.fx / 2 + 4
-      L.py = stand(L.pR)
+      column(H * 0.2, 3, false, true)
     } else if (name === "big") {
       L.fx = P ? 10 : W * 0.3
       L.fy = P ? 34 : 24
       L.fw = W - L.fx - (P ? 10 : 24)
       L.fh = P ? Math.min(H * 0.5, L.fw * 0.92) : H - band - 50
-      L.pR = P ? tall() : Math.min(H * 0.185, L.fx * 0.38)
-      L.px = P ? L.pR * 1.25 : L.fx / 2 + 4
-      L.py = stand(L.pR)
+      column(H * 0.185, 3, false, false)
     } else if (name === "split" || name === "desk") {
       // the footage edge to edge, beside the pitchman (desk: he gets more room, for his board)
       L.band = P ? 96 : 100
@@ -1257,9 +1295,7 @@ export class Show {
       L.fy = 0
       L.fw = W - L.fx
       L.fh = P ? Math.min(H * 0.6, W * 0.84) : H - L.band
-      L.pR = P ? tall() : Math.min(H * 0.17, L.fx * 0.4)
-      L.px = P ? L.pR * 1.25 : L.fx / 2
-      L.py = stand(L.pR, 0.6)
+      column(H * 0.17, 1, true, false)
     } else {
       // takeover: the footage is the broadcast and the pitchman is a picture in the corner
       // (on a phone it stays a wide picture across the top, so nothing in it is cropped away)
@@ -1273,6 +1309,9 @@ export class Show {
       L.pR = P ? 64 : 52
       L.px = P ? 124 : 108
       L.py = H - (P ? 150 : 112)
+      L.sx = P ? 20 : 30
+      L.sy = L.fy + L.fh + 26
+      L.sw = P ? W - 40 : Math.min(430, W - 60)
     }
     L.pops = P ? 0.86 : 1.06
     return L
@@ -1310,11 +1349,10 @@ export class Show {
   }
   // the door at the back of the set
   door(L) {
-    const P = this.BH > this.BW
     const floor = this.BH - L.band
     const hw = L.pR * 0.62
     const hh = L.pR * 1.25
-    return { x: L.px + L.pR * (P ? 1.5 : 2.4), y: floor - hh, hw, hh, floor }
+    return { x: L.px + L.pR * L.dk, y: floor - hh, hw, hh, floor }
   }
 
   // ─── drawing: the footage ─────────────────────────────────────────────────────
@@ -1605,8 +1643,9 @@ export class Show {
     const main = this.cams[0].rect
     const floor = H - L.band
 
-    // the pitchman: behind his desk, or (once the footage has taken over) in a circle in the corner
+    // the pitchman: standing on the band, or (once the footage has taken over) in a circle in the corner
     const R = L.pR
+    this.clear = [] // what else is drawn in the broadcast, as [name, x0, y0, x1, y1]: none of it may touch him (smoke.ts)
     const a = this.atk
     const px = L.px + G.dx * (1 - L.pip)
     const py = L.py + G.hy + (1 - G.in) * (R * 2.6 + L.band) + L.pip * R * 0.35
@@ -1618,13 +1657,17 @@ export class Show {
       list.flags = 2
       list.ring(L.px, L.py + cr * 0.9, cr * 1.25, cr * 0.09, 0, 0, { col: [0.94, 0.66, 0.14, L.pip] })
     }
-    const sq = G.sq
+    const sq = Math.min(G.sq, 0.36) // (he only stretches as far as the room he has: ROOM)
     // What is left of him once Doug gets there: every blow leaves him a little flatter
     const flat = a ? a.flat * (1 - 0.3 * a.pop) : 0
     const psx = Math.max(0.2, 1 - sq * 0.3) * (1 + flat * 0.55)
     const psy = Math.max(0.16, 1 + sq * 0.45) * (1 - flat * 0.7)
-    const pcy = a ? lerp(py + R, floor + R * 0.04, clamp(flat * 5, 0, 1)) - R * psy : py - sq * R * 0.2
+    // (his feet stay where they are: a bounce stretches him upwards, never down into the band)
+    const pcy = a ? lerp(py + R, floor + R * 0.04, clamp(flat * 5, 0, 1)) - R * psy : lerp(py + R - R * psy, py - sq * R * 0.2, L.pip)
     const out = a && a.daze >= 2
+    // the room he is taking up, hat included
+    this.box = [px - R * 0.82 * Math.max(psx, 1), pcy - R * psy * 1.56, px + R * 0.82 * Math.max(psx, 1), pcy + R * psy]
+    if (L.pip < 0.01 && !a) list.glow(px, py + R, R * 0.9, R * 0.1, [0, 0, 0, 0.4], false)
     if (px > -R * 3) {
       // Until then he is a showman, and nothing has ever gone wrong for him: an easy grin with
       // all his teeth in it, relaxed lids, level brows, and his eyes on the camera.
@@ -1662,8 +1705,10 @@ export class Show {
     if (this.lower && this.set) {
       const d = this.door(L)
       const k = E.out(clamp((t - this.lower.t0) / 0.18, 0, 1))
-      const hw = d.hw + 78
-      const x = d.x + (1 - k) * W * 0.5
+      const left = Math.max(d.x - d.hw - 78, L.px + R * HALF + 10) // it stops short of the pitchman
+      const hw = (d.x + d.hw + 78 - left) / 2
+      const x = left + hw + (1 - k) * W * 0.5
+      this.clear.push(["lower third", x - hw, d.floor - 43, x + hw, d.floor - 5])
       const y = d.floor - 24
       list.rbox(x, y, hw, 17, 0, { col: [0.03, 0.025, 0.02, 0.94] })
       list.rbox(x, y - 17, hw, 1.5, 0, { col: [0.97, 0.88, 0.7, 1] })
@@ -1674,7 +1719,7 @@ export class Show {
     // anything lands, and by the end whoever was holding it has let it drop.
     if (this.set) {
       const drop = a?.rest != null ? E.out(clamp((t - a.rest) / 0.8, 0, 1)) : 0
-      const tx = L.px - R * (P ? 0.95 : 1.25)
+      const tx = L.px - R * (P ? 1.2 : 1.45)
       const ty = H * (0.05 + 0.13 * drop)
       const ang = clamp(this.boom.a * 0.6, -1.1, 1.1) + Math.sin(t * 1.1) * 0.03
       const len = R * 0.42
@@ -1711,10 +1756,15 @@ export class Show {
     if (chy) {
       const { s, a } = this.slam(chy)
       const under = L.fy + L.fh // on a phone the taken-over footage leaves room beneath it
-      const y = !over ? H - L.band * 0.58 : P ? (under < H - 200 ? under + (H - under) * 0.42 : H - 250) : H - 86
       const x = over && !P ? W / 2 + 80 * L.pip : W / 2
       const k = (!over ? L.band / 118 : 1) * (P ? 0.66 : 0.88)
-      this.type(list, chy.name, x, y - 4, k * s, (W - (over && !P ? 50 + 290 * L.pip : 50)) * s, chy.soft ? 0 : -0.012, [chy.col[0], chy.col[1], chy.col[2], a])
+      const maxW = (W - (over && !P ? 50 + 290 * L.pip : 50)) * s
+      const [cw, ch] = list.size(chy.name)
+      const half = (ch * Math.min(k * s, maxW / Math.max(cw, 1))) / 2
+      // in the band it lands big, but it stays in the band: the pitchman is standing on top of it
+      const y = !over ? Math.max(H - L.band * 0.58, floor + 12 + half) : P ? (under < H - 200 ? under + (H - under) * 0.42 : H - 250) : H - 86
+      this.type(list, chy.name, x, y - 4, k * s, maxW, chy.soft ? 0 : -0.012, [chy.col[0], chy.col[1], chy.col[2], a])
+      if (cw) this.clear.push(["chyron", x - (cw * half) / ch, y - 4 - half * 0.86, x + (cw * half) / ch, y - 4 + half])
     }
     if (this.fineKey) {
       const a = clamp((t - this.fineT) / 0.3, 0, 1)
@@ -1723,9 +1773,9 @@ export class Show {
     }
     // the studio's readout, and whatever graphic it's holding up
     const n = this.read.length
-    const colW = over ? Math.min(430, W - 60) : P ? W - 40 : L.fx - 44
-    const x0 = over ? 30 : P ? 20 : 26
-    const y0 = over && !(P && L.fy + L.fh < H - 200) ? L.py - L.pR * 1.5 - 40 * n - 6 : P ? L.fy + L.fh + 26 : Math.max(46, L.fy + 8)
+    const colW = L.sw
+    const x0 = L.sx
+    const y0 = over && !(P && L.fy + L.fh < H - 200) ? L.py - L.pR * 1.5 - 40 * n - 6 : L.sy
     if (live || !this.set)
       this.read.forEach((r, i) => {
         const typed = r.typed ? Math.floor((t - r.t0) * 38) : r.text.length
@@ -1734,6 +1784,7 @@ export class Show {
         const a = clamp((t - r.t0) / 0.1, 0, 1)
         const y = y0 + 8 + i * 40
         const tw = list.measure("mono", r.text, s) + 22
+        this.clear.push(["readout", x0, y - 17, x0 + tw, y + 17])
         list.rbox(x0 + tw / 2, y, tw / 2, 17, 0, { col: [0.13, 0.06, 0.03, 0.92 * a] })
         list.text("mono", str, x0 + 11, y, s, 0, [r.col[0], r.col[1], r.col[2], a])
         if (r.typed && typed < r.text.length + 12 && Math.floor(t * 8) % 2) list.rbox(x0 + 11 + list.measure("mono", str, s) + 6, y, 5, 9, 0, { col: [r.col[0], r.col[1], r.col[2], a] })
@@ -1747,6 +1798,7 @@ export class Show {
       const bx = x0 + bw / 2
       const by = y0 + n * 40 + 16 + bh / 2
       const slack = b.mode === "slack"
+      this.clear.push(["board", bx - bw / 2, by - bh / 2, bx + bw / 2, by + bh / 2])
       list.glow(bx + 5, by + 10, bw * 0.6, bh * 0.7, [0, 0, 0, 0.45], false)
       list.rbox(bx, by, bw / 2, bh / 2, 9, { col: [0.95, 0.88, 0.72, 1] })
       list.rbox(bx, by, bw / 2 - 5, bh / 2 - 5, 5, { col: [0.07, 0.05, 0.04, 1] })
@@ -1778,9 +1830,12 @@ export class Show {
       const k = clamp((t - this.star.t0) / 0.2, 0, 1)
       const out = clamp((t - this.star.until) / 0.25, 0, 1)
       const s = E.back(k) * (1 - out)
-      const sr = (P ? 74 : 92) * s
-      const sx = P ? W - 100 : L.px + L.pR * 1.02
-      const sy = P ? L.py - L.pR * 0.7 : L.py - L.pR * 1.55
+      // (at the top of his column, clear of his hat; on a phone, beside him)
+      const sr0 = P ? Math.min(74, (ROOM * L.pR - 70) / 2.3) : 62
+      const sr = sr0 * s
+      const sx = P ? L.sx + L.sw / 2 : L.sx + L.sw - sr0 * 1.15 - 6
+      const sy = P ? L.sy + 56 + sr0 * 1.15 : L.sy + sr0 * 1.15 - 12
+      this.clear.push(["star", sx - sr * 1.15, sy - sr * 1.15, sx + sr * 1.15, sy + sr * 1.15])
       list.star(sx, sy, sr * 1.15, 14, 0.8, { col: [0.2, 0.09, 0.04, 1], rot: t * 0.5 })
       list.star(sx, sy, sr, 14, 0.8, { col: [1, 0.8, 0.16, 1], rot: t * 0.5 })
       this.type(list, this.star.name, sx, sy, 0.7 * s, sr * 1.5, -0.1, WHITE)
@@ -1880,7 +1935,10 @@ export class Show {
       const [fw, fh] = list.size(f.name)
       list.glow(x + 4, y + 8, fw * s * 0.55, fh * s * 0.8, [0, 0, 0, 0.4], false)
       list.sprite(f.name, x, y, s, Math.sin(e * Math.PI) * 0.1, WHITE)
+      this.clear.push(["in flight", x - (fw * s) / 2, y - (fh * s) / 2, x + (fw * s) / 2, y + (fh * s) / 2])
     }
+    if (live) this.clear.push(["footage", L.fx - 17 * L.bezel, L.fy - 17 * L.bezel, L.fx + L.fw + 17 * L.bezel, L.fy + L.fh + 17 * L.bezel])
+    if (!over) this.clear.push(["band", 0, floor, W, H])
     if (this.fade > 0) list.rbox(W / 2, H / 2, W / 2 + 2, H / 2 + 2, 0, { col: [0, 0, 0, this.fade] })
   }
 }
