@@ -15,6 +15,8 @@ import { mxResourceName, POOL_INSTALLATION, setupResources } from './ses-setup.j
 import { forDelivery, type ReadyConnection } from './provider-credentials.js';
 import { wakeWebhooks } from './jobs.js';
 import { screenSnapshot, type CampaignScreen } from './screen.js';
+import { SEND_LIMITS } from './send-limits.js';
+import { oneLargeMessage } from './ses-body.js';
 
 const loadSesv2 = lazyModule(() => import('@aws-sdk/client-sesv2'));
 const loadSimulatedSes = lazyModule(() => import('./adapters/simulated-ses.js'));
@@ -464,7 +466,10 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
   sizeCheck(s, rows);
   const content: SendEmailCommandInput['Content'] = s.raw
     ? { Raw: { Data: new TextEncoder().encode(s.raw) } }
-    : !leased.owner.tenantName && s.html && parts.some(part => part.ContentDisposition === 'INLINE')
+    // Inline images are built as multipart/related raw MIME (Simple places them beside the body). Raw MIME is
+    // base64-encoded again inside SES's JSON body, about 3.2 times the files at once, so a message with more than the
+    // lane budget of files goes as Simple content, as Hosted mail always does.
+    : !leased.owner.tenantName && s.html && parts.some(part => part.ContentDisposition === 'INLINE') && rows.reduce((n, row) => n + row.size, 0) <= SEND_LIMITS.laneBytes
       ? { Raw: { Data: inlineMessage(s, parts) } }
       : simpleContent(s, parts);
   return { ...leased, mail, snapshot: s, content, unsubscribe, stored, screened };
@@ -965,11 +970,12 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
   if(ready.some(item=>item.contentBytes || item.mail.snapshot.attachments.length)) {
     // Reserve bytes, not a whole lane. Small pages overlap and share the result
     // writer; disjoint large bodies still cannot accumulate across sibling lanes.
-    const limit=8*1024*1024;let page:typeof ready=[],bytes=0;
+    const limit=SEND_LIMITS.laneBytes;let page:typeof ready=[],bytes=0,real=0;
     const flush=async()=>{
       while(lane.attachmentBytes+bytes>limit) await (lane.bytesReleased??=new Promise(resolve=>{lane.notifyBytes=resolve;}));
       lane.attachmentBytes+=bytes;
-      try {
+      // A message above the lane budget fills its page alone, and runs alone in the isolate.
+      try { await oneLargeMessage(real,async()=>{
         // A single immutable review shares all object reads. With no external
         // classifier, prepare one full claim at a time; CPU speed is not a
         // reason to split it. Unrelated objects/probes still stream below.
@@ -981,13 +987,13 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
           }
           await dispatchPrepared(base,lane,prepared);
         } else await streamPage(page,true);
-      }finally{lane.attachmentBytes-=bytes;lane.bytesReleased=undefined;lane.notifyBytes?.();lane.notifyBytes=undefined;}
-      page=[];bytes=0;
+      });}finally{lane.attachmentBytes-=bytes;lane.bytesReleased=undefined;lane.notifyBytes?.();lane.notifyBytes=undefined;}
+      page=[];bytes=0;real=0;
     };
     for(const item of ready){
       // Invalid oversize metadata is rejected in prepare before reading the object.
-      const n=Math.min(limit,(await loadAttachments(item.mail)).reduce((s,r)=>s+r.size,item.contentBytes));
-      if(page.length && bytes+n>limit)await flush();page.push(item);bytes+=n;
+      const size=(await loadAttachments(item.mail)).reduce((s,r)=>s+r.size,item.contentBytes),n=Math.min(limit,size);
+      if(page.length && bytes+n>limit)await flush();page.push(item);bytes+=n;real+=size;
     }
     if(page.length)await flush();
   } else if (ready.some(({mail, owner}) => (mail.snapshot.screen || owner.tenantName && owner.runtime.config.hostedScreen) && owner.runtime.config.screen && !isSimulatedSes(owner.runtime))) {

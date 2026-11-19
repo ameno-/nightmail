@@ -20,7 +20,7 @@ const contentId = value(args, '--content-id')
 if (inline && !contentId) fail('--inline requires --content-id.')
 const info = await stat(path).catch(() => null)
 if (!info?.isFile()) fail('The upload path must be a readable file.')
-if (!info.size || info.size > 8 * 1024 * 1024) fail('Attachments must be nonempty and at most 8 MiB.')
+if (!info.size || info.size > 25 * 1024 * 1024) fail('Attachments must be nonempty and at most 25 MiB.')
 try {
   const attachment = await uploadAttachmentBytes({
     apiUrl, token, filename: value(args, '--filename') ?? basename(path), bytes: await readFile(path),

@@ -105,7 +105,7 @@ export function refusal(runtime: Runtime, d: Refused, local: { batch?: boolean; 
     case 'ATTACHMENT_LIMIT_EXCEEDED': return item(new ApiError(413, d.code, `Combined attachments may not exceed ${SEND_LIMITS.attachmentBytes / 1024 / 1024} MiB of decoded data.`));
     case 'DUPLICATE_CONTENT_ID': return item(new ApiError(422, d.code, 'Inline content IDs must be unique.'));
     case 'ATTACHMENT_METADATA_INVALID': return item(new ApiError(422, d.code, `SES attachment content IDs and MIME types must fit in ${SEND_LIMITS.mimeFieldChars} printable ASCII characters.`, 'attachments'));
-    case 'ENCODED_MESSAGE_TOO_LARGE': return item(new ApiError(413, d.code, `Estimated encoded MIME exceeds the initial ${SEND_LIMITS.encodedBytes / 1024 / 1024} MiB message limit.`));
+    case 'ENCODED_MESSAGE_TOO_LARGE': return item(new ApiError(413, d.code, `Estimated encoded MIME exceeds the ${SEND_LIMITS.encodedBytes / 1_000_000} MB message limit, Amazon SES's maximum.`));
     case 'HOSTED_AUTO_PAUSE_REQUIRED': return new ApiError(422, d.code, 'Automatic bounce and complaint pauses cannot be disabled on Hosted shared sending.', 'autoPause');
     case 'CAMPAIGN_PENDING_LIMIT_EXCEEDED': return new ApiError(429, d.code, `Campaigns may reserve ${count(SEND_LIMITS.campaignPendingKey)} outstanding recipients per sender key and ${count(SEND_LIMITS.campaignPendingWorkspace)} per workspace. Wait for dispatch or cancel an active campaign.`, undefined, true);
     case 'SENDER_BINDING_CHANGED': return new ApiError(409, d.code, 'The reviewed sending binding is no longer ready.');

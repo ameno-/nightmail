@@ -26,7 +26,7 @@ import { bulkFlags, hostedCost } from './hosted-sending.js';
 import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { CustomHeaders } from './custom-headers.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
-import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BASE64, MAX_ATTACHMENT_BYTES, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
+import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, mib, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { headerPrefix, requestHeader } from './brand.js';
@@ -34,6 +34,7 @@ import { canonical, idempotencyGate, idempotencyKey, idempotent, IdempotencyHead
 import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, registerPreviewImages, renderPreview } from './preview-images.js';
 import { actorJson, admission, admitted, charges, duplicateAttachment, type AdmissionMail, type Admitted, type Refused, type Released } from './admission.js';
 import { contentBytes, estimatedMimeBytes, SEND_LIMITS } from './send-limits.js';
+import { oneLargeMessage, spliceBody } from './ses-body.js';
 import { RATES } from './billing/money.js';
 
 type HtmlParser = typeof import('parse5').parse;
@@ -415,7 +416,7 @@ function distinctAttachmentIds(ids: string[]) {
 }
 function validateAttachmentRows(ids: string[], rows: AttachmentSize[]) {
   if (rows.length !== ids.length) throw new ApiError(404, 'ATTACHMENT_NOT_FOUND', 'One or more attachments were not found in this workspace.');
-  if (rows.reduce((n, row) => n + row.size, 0) > SEND_LIMITS.attachmentBytes) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', 'Combined attachments may not exceed 8 MiB of decoded data.');
+  if (rows.reduce((n, row) => n + row.size, 0) > SEND_LIMITS.attachmentBytes) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', `Combined attachments may not exceed ${mib(SEND_LIMITS.attachmentBytes)} of decoded data.`);
   const cid = rows.flatMap(r => r.contentId ? [r.contentId] : []);
   if (new Set(cid).size !== cid.length) throw new ApiError(422, 'DUPLICATE_CONTENT_ID', 'Inline content IDs must be unique.');
 }
@@ -452,9 +453,31 @@ export function formattedSender(from: string, fromName?: string, foldMime = fals
 }
 // SES Simple puts CID images beside the body in multipart/mixed. Build only
 // the inline-image case ourselves so each image is related to its HTML part.
+// The message is written once into one buffer of its exact size: text as it is built, each file's base64 (76-character
+// lines) straight from its bytes. A 25 MiB attachment then costs its own bytes and the message, nothing between.
+type Segment = string | { file: Uint8Array };
+const LINE_BYTES = 57, ENCODE_CHUNK = LINE_BYTES * 1024;
+const base64Size = (n: number) => { const chars = Math.ceil(n / 3) * 4; return chars + 2 * Math.max(0, Math.ceil(chars / 76) - 1); };
+function writeSegments(segments: Segment[]): Uint8Array {
+  const size = segments.reduce((n, segment) => n + (typeof segment === 'string' ? Buffer.byteLength(segment) : base64Size(segment.file.length)), 0);
+  const out = Buffer.allocUnsafe(size);
+  let at = 0;
+  for (const segment of segments) {
+    if (typeof segment === 'string') { at += out.write(segment, at); continue; }
+    const file = segment.file;
+    for (let i = 0; i < file.length; i += ENCODE_CHUNK) {
+      const encoded = Buffer.from(file.buffer, file.byteOffset + i, Math.min(ENCODE_CHUNK, file.length - i)).toString('base64');
+      for (let j = 0; j < encoded.length; j += 76) {
+        if (i || j) at += out.write('\r\n', at);
+        at += out.write(encoded.slice(j, j + 76), at, 'latin1');
+      }
+    }
+  }
+  if (at !== size) throw new Error('MIME size mismatch');
+  return out;
+}
 export function inlineMessage(snapshot: EmailSnapshot, parts: Attachment[], archive?:{id:string;date:string}): Uint8Array {
   const crlf = '\r\n';
-  const base64 = (value: string | Uint8Array) => Buffer.from(value).toString('base64').match(/.{1,76}/g)?.join(crlf) ?? '';
   const encodedWords = (value: string) => {
     const words: string[] = []; let chunk = '';
     for (const character of value) {
@@ -476,20 +499,20 @@ export function inlineMessage(snapshot: EmailSnapshot, parts: Attachment[], arch
     flush(false);
     return lines.join(crlf);
   };
-  const textPart = (type: 'plain' | 'html', body: string) => `Content-Type: text/${type}; charset=UTF-8${crlf}Content-Transfer-Encoding: quoted-printable${crlf}${crlf}${quotedPrintable(body)}`;
-  const multipart = (type: 'related' | 'alternative' | 'mixed', children: string[]) => {
+  const textPart = (type: 'plain' | 'html', body: string): Segment[] => [`Content-Type: text/${type}; charset=UTF-8${crlf}Content-Transfer-Encoding: quoted-printable${crlf}${crlf}${quotedPrintable(body)}`];
+  const multipart = (type: 'related' | 'alternative' | 'mixed', children: Segment[][]): Segment[] => {
     const boundary = `bane_${archive ? `${archive.id}_${type}` : crypto.randomUUID()}`;
-    return `Content-Type: multipart/${type}; boundary="${boundary}"${type === 'related' ? '; type="text/html"' : ''}${crlf}${crlf}` +
-      children.map(child => `--${boundary}${crlf}${child}${crlf}`).join('') + `--${boundary}--${crlf}`;
+    return [`Content-Type: multipart/${type}; boundary="${boundary}"${type === 'related' ? '; type="text/html"' : ''}${crlf}${crlf}`,
+      ...children.flatMap(child => [`--${boundary}${crlf}`, ...child, crlf]), `--${boundary}--${crlf}`];
   };
-  const filePart = (part: Attachment) => {
+  const filePart = (part: Attachment): Segment[] => {
     if (!part.RawContent || !part.FileName || !part.ContentType || /[\r\n]/.test(part.ContentType) || (part.ContentId && !/^[a-zA-Z0-9_.@-]+$/.test(part.ContentId))) throw new ApiError(422, 'INVALID_MIME_ATTACHMENT', 'Attachment metadata cannot be encoded safely.');
     // RFC 2231 continuations preserve Unicode/quotes and keep filename lines short.
     const filename = [...Buffer.from(part.FileName)].map(byte => `%${byte.toString(16).padStart(2, '0').toUpperCase()}`).join('').match(/.{1,60}/g)!;
     const disposition = part.ContentDisposition === 'INLINE' ? 'inline' : 'attachment';
     const parameters = filename.map((value, index) => ` filename*${index}*=${index === 0 ? "UTF-8''" : ''}${value}`).join(`;${crlf}`);
-    return `Content-Type: ${part.ContentType}${crlf}Content-Transfer-Encoding: base64${crlf}Content-Disposition: ${disposition};${crlf}${parameters}${crlf}` +
-      (part.ContentId ? `Content-ID: <${part.ContentId}>${crlf}` : '') + `${crlf}${base64(part.RawContent)}`;
+    return [`Content-Type: ${part.ContentType}${crlf}Content-Transfer-Encoding: base64${crlf}Content-Disposition: ${disposition};${crlf}${parameters}${crlf}` +
+      (part.ContentId ? `Content-ID: <${part.ContentId}>${crlf}` : '') + crlf, { file: part.RawContent }];
   };
   const inline = parts.filter(part => part.ContentDisposition === 'INLINE');
   const files = parts.filter(part => part.ContentDisposition !== 'INLINE');
@@ -515,8 +538,8 @@ export function inlineMessage(snapshot: EmailSnapshot, parts: Attachment[], arch
   // Body/attachment lines are bounded by their encoders. Check only message
   // headers rather than splitting a potentially multi-megabyte MIME body.
   if (headers.some(header => header.split(crlf).some(line => Buffer.byteLength(line) > 998))) throw new ApiError(422, 'MIME_LINE_TOO_LONG', 'An encoded message header exceeds the SMTP line limit.');
-  const bytes = Buffer.from([...headers, body].join(crlf), 'utf8');
-  if (bytes.length > SEND_LIMITS.encodedBytes) throw new ApiError(413, 'ENCODED_MESSAGE_TOO_LARGE', 'Encoded MIME exceeds the 16 MiB message limit.');
+  const bytes = writeSegments([[...headers, ''].join(crlf), ...body]);
+  if (bytes.length > SEND_LIMITS.encodedBytes) throw new ApiError(413, 'ENCODED_MESSAGE_TOO_LARGE', `Encoded MIME exceeds the ${SEND_LIMITS.encodedBytes / 1_000_000} MB message limit.`);
   return bytes;
 }
 function withPreheader(html: string | undefined, previewText: string | undefined, parse: HtmlParser | undefined, version = CAMPAIGN_RENDERER_VERSION): string | undefined {
@@ -622,7 +645,7 @@ async function validateHtmlUrls(html: string | undefined) {
   }
 }
 export function sizeCheck(snapshot: EmailSnapshot, rows: { size: number }[]) {
-  if (estimatedMimeBytes(snapshot, rows) > SEND_LIMITS.encodedBytes) throw new ApiError(413, 'ENCODED_MESSAGE_TOO_LARGE', 'Estimated encoded MIME exceeds the initial 16 MiB message limit.');
+  if (estimatedMimeBytes(snapshot, rows) > SEND_LIMITS.encodedBytes) throw new ApiError(413, 'ENCODED_MESSAGE_TOO_LARGE', `Estimated encoded MIME exceeds the ${SEND_LIMITS.encodedBytes / 1_000_000} MB message limit, Amazon SES's maximum.`);
 }
 // The renderer owns the MIME content, not the envelope or custom headers. A
 // substituted Subject can contain physical header lines, including obsolete From : forms.
@@ -874,9 +897,9 @@ export async function tryAtomicKeyAdmission(c:Ctx,credentialCtes:(charge?:SQL)=>
   return c.json(await admitSends(call,input,await directMessages(c.env,mails,batch),{credential,authorize},{batch}),202);
 }
 
-async function saveAttachment(c: Ctx, a: Actor, metadata: AttachmentMetadataInput, bytes: Uint8Array) {
+async function saveAttachment(c: Ctx, a: Actor, metadata: AttachmentMetadataInput, bytes: Uint8Array, max = MAX_ATTACHMENT_BYTES) {
   sesAttachment(metadata);
-  const input = validateAttachment(metadata, bytes);
+  const input = validateAttachment(metadata, bytes, max);
   const checksum = await bytesDigest(bytes);
   const upload=attachmentUpload(c.env,a,input,bytes,checksum,a.tokenId ?? a.keyId);
   try { return await idempotent(c.env.db,keyed(c,a),{...input,size:bytes.length,checksum},async db=>AttachmentInfo.parse(await upload.finish(db)),{prepare:upload.put}); }
@@ -1134,7 +1157,7 @@ export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/attachments', operationId: 'uploadAttachment', tags: ['Attachments'], security, request: { headers: IdempotencyHeaders, body: json(AttachmentUpload) }, responses: { 201: response(AttachmentInfo), ...errors } }), async c => {
     const a = actor(c, 'send'); const { content, ...metadata } = c.req.valid('json');
     const bytes = decodeBase64(content);
-    const result = await saveAttachment(c, a, metadata, bytes);
+    const result = await saveAttachment(c, a, metadata, bytes, MAX_JSON_ATTACHMENT_BYTES);
     return c.json(AttachmentInfo.parse(result), 201);
   });
   app.post('/v1/attachments/upload', async c => {
@@ -1143,7 +1166,7 @@ export function registerSending(app: App) {
     let filename = '';
     try { filename = encodedFilename ? decodeURIComponent(encodedFilename) : ''; } catch { throw new ApiError(422, 'ATTACHMENT_FILENAME_INVALID', `${headerPrefix}Filename must be URI-encoded UTF-8.`); }
     const contentLength = Number(c.req.header('content-length'));
-    if (Number.isFinite(contentLength) && contentLength > MAX_ATTACHMENT_BYTES) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', 'Attachments must be at most 8 MiB.');
+    if (Number.isFinite(contentLength) && contentLength > MAX_ATTACHMENT_BYTES) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', `Attachments must be at most ${mib(MAX_ATTACHMENT_BYTES)}.`);
     const parsed = AttachmentMetadata.safeParse({ filename, contentType: c.req.header('content-type') ?? 'application/octet-stream', disposition: requestHeader(c.req.raw.headers, 'disposition') ?? 'attachment', contentId: requestHeader(c.req.raw.headers, 'content-id') ?? undefined });
     if (!parsed.success) throw new ApiError(422, 'ATTACHMENT_METADATA_INVALID', 'Attachment headers are invalid.', parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean).join(', '));
     const bytes = new Uint8Array(await c.req.arrayBuffer());
@@ -1153,12 +1176,18 @@ export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/attachments/{id}', operationId: 'getAttachment', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(AttachmentInfo), ...errors } }), async c => {
     const [row] = await attachmentRows(c.env.db, actor(c), [c.req.valid('param').id]); return c.json(AttachmentInfo.parse(row), 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/attachments/{id}/content', operationId: 'getAttachmentContent', description: 'Returns the private attachment as canonical base64 JSON, scoped like its metadata. At most 8 MiB decoded; never a public object URL or executable inline response.', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(AttachmentInfo.extend({ content: z.string().max(MAX_ATTACHMENT_BASE64) }).openapi('AttachmentContent')), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/attachments/{id}/content', operationId: 'getAttachmentContent', description: 'Returns the private attachment as canonical base64 JSON, scoped like its metadata. At most 25 MiB decoded; never a public object URL or executable inline response.', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(AttachmentInfo.extend({ content: z.string().max(Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4) }).openapi('AttachmentContent')), ...errors } }), async c => {
     const [row] = await attachmentRows(c.env.db, actor(c), [c.req.valid('param').id]);
-    const asset = await c.env.storage.get(row!.storageKey);
-    if (!asset || asset.body.length !== row!.size || asset.body.length > MAX_ATTACHMENT_BYTES || await bytesDigest(asset.body) !== row!.checksum) throw new ApiError(503, 'ATTACHMENT_STORAGE_UNAVAILABLE', 'An immutable attachment is missing or changed.', undefined, true);
+    // The JSON is written once as bytes with the base64 straight from the file (ses-body.ts), not built as strings:
+    // a 25 MiB file then holds about 60 MB instead of 120.
+    const body = await oneLargeMessage(row!.size, async () => {
+      const asset = await c.env.storage.get(row!.storageKey);
+      if (!asset || asset.body.length !== row!.size || asset.body.length > MAX_ATTACHMENT_BYTES || await bytesDigest(asset.body) !== row!.checksum) throw new ApiError(503, 'ATTACHMENT_STORAGE_UNAVAILABLE', 'An immutable attachment is missing or changed.', undefined, true);
+      const marker = Buffer.from(crypto.getRandomValues(new Uint8Array(24))).toString('base64');
+      return spliceBody(JSON.stringify({ ...AttachmentInfo.parse(row), content: marker }), new Map([[marker, asset.body]]));
+    });
     c.header('X-Content-Type-Options', 'nosniff');
-    return c.json({ ...AttachmentInfo.parse(row), content: Buffer.from(asset.body).toString('base64') }, 200);
+    return c.body(body, 200, { 'content-type': 'application/json' }) as never;
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/attachments/{id}', operationId: 'deleteAttachment', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(Removed), ...errors } }), async c => {
     const a = actor(c, 'send'); const attachmentId = c.req.valid('param').id;

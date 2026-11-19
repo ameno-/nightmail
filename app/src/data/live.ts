@@ -54,16 +54,16 @@ function rememberFailedRequest(id: string) {
   failedRequests.length = Math.min(failedRequests.length, 5)
 }
 export const recentFailedRequestIds = () => [...failedRequests]
-export async function request<T = Json>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal; idempotencyKey?: string; ifMatch?: number } = {}): Promise<T> {
+export async function request<T = Json>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal; idempotencyKey?: string; ifMatch?: number; file?: { bytes: Blob; headers: Record<string, string> } } = {}): Promise<T> {
   const started = performance.now()
   // Every request acts as the account selected when it was sent, never one chosen later.
   const account = accountSelection
   let response: Response
   try {
-    const early = options.method === undefined && options.body === undefined ? takeEarly(path, options.signal) : null
+    const early = options.method === undefined && options.body === undefined && !options.file ? takeEarly(path, options.signal) : null
     response = (early && await early) ?? await fetch(path, { method: options.method ?? 'GET', credentials: 'include', signal: options.signal,
-      headers: { Accept: 'application/json', ...(options.ifMatch===undefined?{}:{'If-Match':String(options.ifMatch)}), ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(account ? { [accountHeader]: account } : {}), ...(workspaceSelection ? { [workspaceHeader]: workspaceSelection } : {}) },
-      body: options.body === undefined ? undefined : JSON.stringify(options.body) })
+      headers: { Accept: 'application/json', ...(options.ifMatch===undefined?{}:{'If-Match':String(options.ifMatch)}), ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...options.file?.headers, ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(account ? { [accountHeader]: account } : {}), ...(workspaceSelection ? { [workspaceHeader]: workspaceSelection } : {}) },
+      body: options.file?.bytes ?? (options.body === undefined ? undefined : JSON.stringify(options.body)) })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error
     throw new ApiError(`Cannot reach ${productName}. Check the API service and try again.`, 'NETWORK_UNAVAILABLE')
@@ -129,6 +129,11 @@ export function createLiveApi(): Api {
   const inboundCall = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => call<T>(`/inbound${path}`, method, body, signal)
   // Page numbers are local navigation only. The API owns cursors and never supplies fictional totals.
   const cursors = new Map<string, Map<number, string | undefined>>()
+  // Attachments go up as raw bytes (up to 25 MiB); template assets as base64 JSON (up to 8 MiB).
+  const uploadAttachment = (file: File, inline?: {contentId: string}) => {
+    if (file.size > 25 * 1024 * 1024) throw new ApiError('Attachments must total at most 25 MiB.', 'ATTACHMENT_TOO_LARGE')
+    return request<any>('/v1/attachments/upload', { method: 'POST', file: { bytes: file, headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-Nightmail-Filename': encodeURIComponent(file.name), ...(inline ? { 'X-Nightmail-Disposition': 'inline', 'X-Nightmail-Content-Id': inline.contentId } : {}) } } })
+  }
   const uploadFile = async (path: string, file: File, inline?: {contentId: string}) => {
     if (file.size > 8 * 1024 * 1024) throw new ApiError('Assets must total at most 8 MiB.', 'ATTACHMENT_TOO_LARGE')
     const bytes = new Uint8Array(await file.arrayBuffer()); let binary = ''
@@ -242,7 +247,7 @@ export function createLiveApi(): Api {
     attachments: {
       get: (id, signal) => call<any>(`/attachments/${idPath(id)}`, 'GET', undefined, signal),
       content: (id, signal) => call<any>(`/attachments/${idPath(id)}/content`, 'GET', undefined, signal),
-      upload: (file, inline) => uploadFile('/attachments', file, inline),
+      upload: (file, inline) => uploadAttachment(file, inline),
       remove: async id => { await call(`/attachments/${idPath(id)}`, 'DELETE') }
     },
     templateAssets: {

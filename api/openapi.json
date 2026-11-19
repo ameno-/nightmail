@@ -2293,7 +2293,7 @@
             "type": "string",
             "minLength": 4,
             "maxLength": 12582912,
-            "description": "Base64 (standard or URL-safe alphabet; line breaks are accepted). No data URLs. Maximum decoded bytes: 8 MiB."
+            "description": "Base64 (standard or URL-safe alphabet; line breaks are accepted). No data URLs. At most 8 MiB decoded in JSON; upload larger files, up to 25 MiB, as raw bytes to POST /v1/attachments/upload."
           }
         },
         "required": [
@@ -3589,7 +3589,7 @@
             "type": "string",
             "minLength": 4,
             "maxLength": 12582912,
-            "description": "Base64 (standard or URL-safe alphabet; line breaks are accepted). No data URLs. Maximum decoded bytes: 8 MiB."
+            "description": "Base64 (standard or URL-safe alphabet; line breaks are accepted). No data URLs. At most 8 MiB decoded in JSON; upload larger files, up to 25 MiB, as raw bytes to POST /v1/attachments/upload."
           }
         },
         "required": [
@@ -3608,7 +3608,7 @@
             "properties": {
               "content": {
                 "type": "string",
-                "maxLength": 12582912
+                "maxLength": 34952536
               }
             },
             "required": [
@@ -13984,7 +13984,7 @@
             },
             "maxItems": 20,
             "default": [],
-            "description": "Up to 20 files, 8 MiB combined. Any type Amazon SES delivers (executables and scripts are refused)."
+            "description": "Up to 20 files, 25 MiB combined. Any type Amazon SES delivers (executables and scripts are refused)."
           },
           "replyTo": {
             "type": "array",
@@ -14096,7 +14096,7 @@
                 "type": "string",
                 "minLength": 4,
                 "maxLength": 12582912,
-                "description": "Base64; line breaks are accepted."
+                "description": "Base64; line breaks are accepted. At most 8 MiB decoded: upload larger files with POST /v1/attachments/upload and pass their id."
               },
               "contentType": {
                 "type": "string",
@@ -14166,7 +14166,7 @@
             },
             "maxItems": 20,
             "default": [],
-            "description": "Up to 20 files, 8 MiB combined. Any type Amazon SES delivers (executables and scripts are refused)."
+            "description": "Up to 20 files, 25 MiB combined. Any type Amazon SES delivers (executables and scripts are refused)."
           },
           "replyTo": {
             "type": "array",
@@ -32751,7 +32751,7 @@
     "/v1/attachments/{id}/content": {
       "get": {
         "operationId": "getAttachmentContent",
-        "description": "Returns the private attachment as canonical base64 JSON, scoped like its metadata. At most 8 MiB decoded; never a public object URL or executable inline response.",
+        "description": "Returns the private attachment as canonical base64 JSON, scoped like its metadata. At most 25 MiB decoded; never a public object URL or executable inline response.",
         "tags": [
           "Attachments"
         ],

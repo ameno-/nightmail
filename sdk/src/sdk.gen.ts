@@ -1434,7 +1434,7 @@ export const getAttachment = <ThrowOnError extends boolean = false>(options: Opt
 });
 
 /**
- * Returns the private attachment as canonical base64 JSON, scoped like its metadata. At most 8 MiB decoded; never a public object URL or executable inline response.
+ * Returns the private attachment as canonical base64 JSON, scoped like its metadata. At most 25 MiB decoded; never a public object URL or executable inline response.
  */
 export const getAttachmentContent = <ThrowOnError extends boolean = false>(options: Options<GetAttachmentContentData, ThrowOnError>): RequestResult<GetAttachmentContentResponses, GetAttachmentContentErrors, ThrowOnError> => (options.client ?? client).get<GetAttachmentContentResponses, GetAttachmentContentErrors, ThrowOnError>({
     security: [

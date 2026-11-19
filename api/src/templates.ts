@@ -7,11 +7,12 @@ import { templateAssetLinks, templateAssets, templates, type TemplateDraft } fro
 import { BlockContentError, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
 import { readPublicImage } from './adapters/public-image.js';
 import { readOwnMailObject } from './mail-object-route.js';
-import { AttachmentContentId, AttachmentFilename, AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BYTES, senderDisplayName, unsubscribePageUrl, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
+import { AttachmentContentId, AttachmentFilename, AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_JSON_ATTACHMENT_BYTES, senderDisplayName, unsubscribePageUrl, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
 import { productName } from './brand.js';
 import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, renderPreview } from './preview-images.js';
 
-const MAX_ASSET_BYTES = MAX_ATTACHMENT_BYTES;
+// Template assets (inline images) upload as base64 JSON, so they keep the JSON file limit, also for their total.
+const MAX_ASSET_BYTES = MAX_JSON_ATTACHMENT_BYTES;
 const Address = mailAddress();
 const BlockHtml = z.string().max(512 * 1024).describe(`Concrete ${productName} block HTML shared with the visual editor and renderer. Email-safe inline styles support color, typography, spacing, borders, radius and dimensions. Templates do not accept {{placeholders}}; edit the copied campaign when personalization is needed. Call getContentGuide before writing.`).optional();
 const AssetIds = z.array(z.string().regex(/^tasset_[0-9a-f]{32}$/)).max(20).default([]);
@@ -42,7 +43,7 @@ async function assetRows(db: DbExecutor, workspaceId: string, ids: string[], loc
 async function replaceLinks(db: DbExecutor, workspaceId: string, templateId: string, stage: 'draft' | 'published', ids: string[]) { await assetRows(db, workspaceId, ids, true); await db.delete(templateAssetLinks).where(and(eq(templateAssetLinks.workspaceId, workspaceId), eq(templateAssetLinks.templateId, templateId), eq(templateAssetLinks.stage, stage))); if (ids.length) await db.insert(templateAssetLinks).values(ids.map(assetId => ({ workspaceId, templateId, assetId, stage }))); }
 async function checksum(bytes: Uint8Array) { return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>)), byte => byte.toString(16).padStart(2, '0')).join(''); }
 async function saveAsset(runtime: Runtime, identity: Actor, metadata: AttachmentMetadataInput, bytes: Uint8Array) {
-  const input = validateAttachment(metadata, bytes), assetId = id('tasset'), storageKey = `${identity.workspaceId}/templates/assets/${assetId}`, hash = await checksum(bytes);
+  const input = validateAttachment(metadata, bytes, MAX_ASSET_BYTES), assetId = id('tasset'), storageKey = `${identity.workspaceId}/templates/assets/${assetId}`, hash = await checksum(bytes);
   await runtime.storage.put(storageKey, bytes, input.contentType);
   try { const [row] = await runtime.db.insert(templateAssets).values({ id: assetId, workspaceId: identity.workspaceId, ...input, contentId: input.contentId ?? null, size: bytes.length, storageKey, checksum: hash }).returning(); return Asset.parse(row); }
   catch (error) { await runtime.storage.delete(storageKey).catch(() => undefined); throw error; }

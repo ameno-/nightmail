@@ -17,12 +17,13 @@ import { hostedMailBucket, isS3Bucket, mailKey, readMailBytes, sentMailKey, with
 import { readableMailboxKey } from './mailbox-setup.js';
 import { attachToMailboxes, htmlToPlain, messageIdList, normalizeSubject, sesMessageId, snippetOf, type Scope } from './mailbox-store.js';
 import type { SendRequest } from './sending.js';
-import { decodeBase64 } from './outbound-content.js';
+import { decodeBase64, MAX_JSON_ATTACHMENT_BYTES, mib, validateAttachment } from './outbound-content.js';
+import { SEND_LIMITS } from './send-limits.js';
 import { productName } from './brand.js';
 
 export const DEFAULT_SEND_LIMITS: SendLimits = { perHour: 100, perDay: 1000, perRecipientPerHour: 20, perThreadPer10Minutes: 10 };
 export const sendLimitsFor = (mailbox: typeof mailboxes.$inferSelect): SendLimits => ({ ...DEFAULT_SEND_LIMITS, ...mailbox.sendLimits });
-const MAX_TOTAL_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENT_BYTES = SEND_LIMITS.attachmentBytes;
 // Local parts that never read replies (RFC 3834 recommends not auto-replying to these).
 export const NO_REPLY = /^(?:no-?reply|do-?not-?reply|donotreply|mailer-daemon|postmaster|bounces?)(?:[+._-].*)?@/i;
 
@@ -47,7 +48,9 @@ export async function resolveAttachments(runtime:Runtime, mailbox:Pick<MailboxRo
   for(const item of items){
     if ('content' in item){
       const { storeAttachmentBytes } = await wrapModuleLoad(() => import('./sending.js'));
-      out.push(await storeAttachmentBytes(runtime,scope,{filename:item.filename,contentType:item.contentType??'application/octet-stream',contentId:item.contentId,disposition:item.disposition},decodeBase64(item.content,'attachments')));
+      const metadata={filename:item.filename,contentType:item.contentType??'application/octet-stream',contentId:item.contentId,disposition:item.disposition},bytes=decodeBase64(item.content,'attachments');
+      validateAttachment({...metadata,disposition:metadata.disposition??'attachment'},bytes,MAX_JSON_ATTACHMENT_BYTES);
+      out.push(await storeAttachmentBytes(runtime,scope,metadata,bytes));
     } else if(item.id.startsWith('matt_')){
       const { storeAttachmentBytes } = await wrapModuleLoad(() => import('./sending.js'));
       const [file]=await runtime.db.select({file:mailAttachments,region:mailMessages.region}).from(mailAttachments).innerJoin(mailMessages,eq(mailMessages.id,mailAttachments.messageId))
@@ -69,7 +72,7 @@ export async function resolveAttachments(runtime:Runtime, mailbox:Pick<MailboxRo
       if(!source || !ownsUpload(scope.workspaceId,source))throw new ApiError(404,'ATTACHMENT_NOT_FOUND','The upload was not found.','attachments');
       out.push(source);
     }
-    if(out.reduce((sum,file)=>sum+file.size,0)>MAX_TOTAL_ATTACHMENT_BYTES)throw new ApiError(413,'ATTACHMENT_LIMIT_EXCEEDED','Attachments may not exceed 8 MiB combined.','attachments');
+    if(out.reduce((sum,file)=>sum+file.size,0)>MAX_TOTAL_ATTACHMENT_BYTES)throw new ApiError(413,'ATTACHMENT_LIMIT_EXCEEDED',`Attachments may not exceed ${mib(MAX_TOTAL_ATTACHMENT_BYTES)} combined.`,'attachments');
   }
   return out;
 }

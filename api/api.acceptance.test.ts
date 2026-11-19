@@ -10152,6 +10152,49 @@ describe('Private attachment assets and campaign revisions', () => {
     error(await http('GET', `/v1/attachments/${attachment.id}`, key.secret), 404, 'ATTACHMENT_NOT_FOUND');
   });
 
+  test('25 MiB of attachments: raw uploads, downloads and sends at the boundary; SES request bodies carry each file once', async t => {
+    const key = await keyFixture(t), max = 25 * 1024 * 1024;
+    const upload = async (filename: string, size: number) => {
+      const response = await fetch(`${BASE}/v1/attachments/upload`, { method: 'POST', headers: { authorization: `Bearer ${key.secret}`, 'content-type': 'text/plain', 'x-nightmail-filename': filename }, body: Buffer.alloc(size, 0x61) });
+      return { status: response.status, body: await response.json(), headers: response.headers } satisfies Reply;
+    };
+    const big = ok(await upload('big.txt', max), 201), small = ok(await upload('small.txt', 1), 201);
+    // The sent email keeps its attachment (409 ATTACHMENT_IN_USE); the unused one goes.
+    cleanup(t, async () => { for (const file of [big, small]) ok(await http('DELETE', `/v1/attachments/${file.id}`, key.secret), [200, 404, 409]); });
+    assert.equal(big.size, max);
+    error(await upload('over.txt', max + 1), 413, 'ATTACHMENT_LIMIT_EXCEEDED');
+    const content = ok(await http('GET', `/v1/attachments/${big.id}/content`, key.secret, undefined, {}, 30_000)).content as string;
+    assert.ok(content.length === Math.ceil(max / 3) * 4 && Buffer.from(content, 'base64').equals(Buffer.alloc(max, 0x61)), 'The download is the whole file as canonical base64.');
+    // One message may carry 25 MiB of files; one byte more is refused before anything is queued.
+    ok(await http('POST', '/v1/emails/send', key.secret, mail({ attachments: [big.id] })), 202);
+    error(await http('POST', '/v1/emails/send', key.secret, mail({ attachments: [big.id, small.id] })), 413, 'ATTACHMENT_LIMIT_EXCEEDED');
+    // A file inside JSON stays at 8 MiB: exactly 8 MiB is accepted (8 MiB + 1 is refused above).
+    const json = ok(await http('POST', '/v1/attachments', key.secret, { filename: 'json.txt', content: Buffer.alloc(8 * 1024 * 1024, 0x62).toString('base64') }, {}, 30_000), 201);
+    cleanup(t, async () => { ok(await http('DELETE', `/v1/attachments/${json.id}`, key.secret), [200, 404]); });
+    // The largest message (25 MiB of files and both 512 KiB body parts) fits SES's 40 MB after encoding, and the estimate
+    // admission uses is never below the real size.
+    const [{ SESv2Client, SendEmailCommand }, { addSesBodySplice }, { inlineMessage }, { SEND_LIMITS, estimatedMimeBytes }] = await Promise.all([import('@aws-sdk/client-sesv2'), import('./src/ses-body.js'), import('./src/sending.js'), import('./src/send-limits.js')]);
+    const file = new Uint8Array(max).map((_, i) => (i * 2654435761) >>> 24), html = `<p>${'x'.repeat(512 * 1024 - 7)}</p>`, text = 'y'.repeat(512 * 1024);
+    const snapshot = { kind: 'transactional', from: 'sender@example.com', to: ['to@example.com'], cc: [], bcc: [], replyTo: [], subject: 'Largest', html, text, headers: [], attachments: [], region: REGION, tracking: false } as unknown as import('./src/db/sending.js').EmailSnapshot;
+    const parts = [{ FileName: 'big.bin', ContentType: 'application/octet-stream', ContentDisposition: 'ATTACHMENT' as const, RawContent: file }, { FileName: 'logo.png', ContentType: 'image/png', ContentDisposition: 'INLINE' as const, ContentId: 'logo', RawContent: new Uint8Array([137, 80, 78, 71]) }];
+    const raw = inlineMessage(snapshot, parts);
+    const estimate = estimatedMimeBytes(snapshot, [{ size: max }, { size: 4 }]);
+    assert.ok(raw.length <= estimate && estimate <= SEND_LIMITS.encodedBytes, `${raw.length} <= ${estimate} <= ${SEND_LIMITS.encodedBytes}`);
+    // The body splice sends exactly what the SDK would, for Simple attachments and raw MIME alike.
+    const body = async (splice: boolean, Content: import('@aws-sdk/client-sesv2').EmailContent) => {
+      let sent: unknown;
+      const client = new SESv2Client({ region: REGION, credentials: { accessKeyId: 'AKIDFIXTURE', secretAccessKey: 'fixture' }, maxAttempts: 1, requestHandler: { handle: async (request: { body: unknown }) => {
+        sent = request.body; return { response: { statusCode: 200, headers: { 'content-type': 'application/json' }, body: new Response('{"MessageId":"fixture"}').body } };
+      } } as never });
+      if (splice) addSesBodySplice(client.middlewareStack);
+      await client.send(new SendEmailCommand({ FromEmailAddress: 'sender@example.com', Destination: { ToAddresses: ['to@example.com'] }, Content }));
+      if (splice) assert.ok(sent instanceof Uint8Array && sent.constructor === Uint8Array, 'The spliced body is plain bytes.');
+      return JSON.parse(typeof sent === 'string' ? sent : Buffer.from(sent as Uint8Array).toString('utf8'));
+    };
+    const simple = { Simple: { Subject: { Data: 'Largest' }, Body: { Html: { Data: html } }, Attachments: parts.map(p => ({ ...p, ContentTransferEncoding: 'BASE64' as const })) } };
+    for (const content of [simple, { Raw: { Data: raw } }]) assert.deepEqual(await body(true, content), await body(false, content));
+  });
+
   test('sending freezes the audience at launch and existing schedule/cancel contracts hold', async t => {
     const key = await keyFixture(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('async-review-list') });
