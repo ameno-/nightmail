@@ -43,9 +43,6 @@ const STATIONS: Station[] = [
 // others, so on the left the appliances come in the hero's order from the inside: Threads first, Inbox last (the
 // right four already run that way). `tube` is the place from the inside, as above.
 const LABELS: Record<Kind | 'main', string> = { inbox: 'INBOX', agent: 'AGENTS', endpoint: 'ENDPOINTS', thread: 'THREADS', imap: 'IMAP', ritual: 'RULES', campaign: 'CAMPAIGNS', logs: 'LOGS', main: 'OUTBOUND' }
-// (The renders named the rules' pipe RITUALS before Rules was renamed: a manifest with either label is found, so the
-// tube stays on its pipe while the renders and the bundled manifest change over.)
-const FORMERLY: Record<string, string> = { RULES: 'RITUALS' }
 const UNDER_HERO: Station[] = (['thread', 'imap', 'endpoint', 'ritual', 'agent', 'campaign', 'inbox', 'logs'] as const).map(kind => {
   const spec = STATIONS.find(station => station.kind === kind)!
   return spec.tube < 4 ? { ...spec, tube: 3 - spec.tube } : spec
@@ -111,7 +108,7 @@ export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: H
   // (Under the factory every tube is as wide as the hero's pipes, so each reads on from its own.)
   const pipes = !p.phone && hero ? hero : null
   /** Where a tube's hero pipe comes down to the section's top edge, by its label. */
-  const heroX = (kind: Kind) => pipes ? pipes.x[LABELS[kind]] ?? pipes.x[FORMERLY[LABELS[kind]]] : undefined
+  const heroX = (kind: Kind) => pipes?.x[LABELS[kind]]
   const phone = p.phone, r = pipes ? pipes.w / 2 : p.tubeR, wide = r * 2, depth = phone ? 40 : 60, dx = -DX * depth, dy = DY * depth
   // Each appliance stands between the two fours of tubes, a little towards the side its own tube comes from: those on
   // the left share one left edge, those on the right another, so their names stand in two columns down the page.
