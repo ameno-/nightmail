@@ -74,7 +74,7 @@ For a self-hosted installation, register a confidential OIDC client with your is
 - **True:** the deploy reads the key inside its Worker step and binds it, and stops if the key is missing or invalid.
 - **False (the default):** the deploy removes the Worker's binding, so gateway calls get 403 `PROTOCOL_DENIED`.
 
-Both stages set it true. See the [dev](gateway/PHASE2.md#dev-turn-on-runbook) and [production](gateway/PHASE2.md#production-turn-on-runbook) turn-on runbooks, and [IMAP and SMTP](api/README.md#imap-and-smtp) for what customers get, including send-only SMTP logins for apps.
+Dev sets it true. Production stays false until the production runbook's follow-up PR, opened once its secrets, database role, image and DNS are in place. See the [dev](gateway/PHASE2.md#dev-turn-on-runbook) and [production](gateway/PHASE2.md#production-turn-on-runbook) turn-on runbooks, and [IMAP and SMTP](api/README.md#imap-and-smtp) for what customers get, including send-only SMTP logins for apps.
 
 **Both stages use the same key names.** The stage comes from the GitHub environment,
 which selects that environment's variables, and from the `bane/<stage>/` folder, which

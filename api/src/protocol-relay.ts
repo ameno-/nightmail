@@ -16,7 +16,7 @@ import { submissionParties, unrepresentableMime } from './mailbox-mime.js';
  * key's own minute budget. It never opens a mailbox: IMAP refuses it and it has no folders.
  *
  * The gateway keys the session by the key's ID where an app password's uses its inbox (session limits, cached logins,
- * revocation: migration 342 notifies bane_protocol_auth with the key's ID).
+ * revocation: migration 346 notifies bane_protocol_auth with the key's ID).
  */
 const RELAY_USER = 'apikey';
 const ADDRESS_KEY = /^(?:nm|bane|os)_mbx_[0-9a-f]{64}$/; // bane_/os_: remove after rename cleanup
@@ -57,40 +57,47 @@ export async function relayLogin(runtime: Runtime, user: string, password: strin
 }
 
 type Submission = { kid: string; from: string; to: string[]; content: string };
-/** An SMTP submission with a send-only key: checked like the gateway checked it, then sent as POST /v1/emails/send. */
+/**
+ * An SMTP submission with a send-only key, sent as POST /v1/emails/send with that key. In order, so nothing is written
+ * for a submission that can't go out: the key is read and charged as one request against its minute budget (refused
+ * at once when spent or revoked); the senders are checked; the message is built and its sender's admission checked
+ * as sendEmail would, without sending; only then are its attachments uploaded, as the key; and the send is admitted
+ * in sendEmail's one statement, which reads the key again (revoked or narrowed meanwhile: refused) but charges nothing
+ * more.
+ */
 export async function relaySubmit(c: Ctx, p: Submission) {
-  const rt = c.env, kind = relayKind(p.kid)!;
+  const rt = c.env, kind = relayKind(p.kid)!, table = kind === 'api_key' ? apiKeys : mailboxKeys;
   const raw = Buffer.from(p.content, 'base64');
   if (raw.length > SMTP_WIRE_LIMIT) throw new ApiError(413, 'MESSAGE_SIZE', 'Message is too large.');
   const m = await parseInboundMime(raw, 'submission');
   if (!m) throw new ApiError(422, 'MIME_LIMIT', 'Message could not be safely parsed.');
   // One From, at most one Sender, and both with the envelope sender inside what the key sends from.
-  const { from: sender, senders: addresses, to, cc, bcc } = submissionParties(m, p);
-  const denied = () => new ApiError(403, 'SENDER_NOT_OWNED', 'Send from an address this key may use.');
-  if (!sender || !addresses) throw denied();
-  const { rows: [key] } = await rt.db.execute<{ workspace_id: string; domains: string[]; owned: boolean }>(sql`SELECT k.workspace_id,k.domains,${owns(kind, addresses)} AS owned
-    FROM (${sendOnlyKey(rt, kind, sql`k.id=${p.kid}`)}) k`);
+  const { from: sender, senders, to, cc, bcc } = submissionParties(m, p), addresses = senders ?? [];
+  const { rows: [key] } = await rt.db.execute<{ workspace_id: string; domains: string[]; owned: boolean; used: number; max_requests: number }>(sql`WITH
+    ${credentialCtes(table, sendOnlyKey(rt, kind, sql`k.id=${p.kid}`))} SELECT k.workspace_id,k.domains,${owns(kind, addresses)} AS owned,budget.used,k.max_requests FROM credential k,budget`);
   if (!key) throw new ApiError(403, 'CREDENTIAL_REVOKED', 'Protocol access denied.');
-  if (!key.owned || addresses.some(a => !senderDomainAllowed(key.domains, a.split('@')[1]!))) throw denied();
+  checkBudget(c, key.used, key.max_requests);
+  if (!sender || !senders || !key.owned || senders.some(a => !senderDomainAllowed(key.domains, a.split('@')[1]!)))
+    throw new ApiError(403, 'SENDER_NOT_OWNED', 'Send from an address this key may use.');
   if (unrepresentableMime(raw)) throw new ApiError(422, 'UNSUPPORTED_MESSAGE', 'This MIME submission cannot be represented by the sending adapter.');
   if (m.attachments.length > 20) throw new ApiError(422, 'VALIDATION_FAILED', 'At most 20 attachments.', 'attachments');
-  const { storeAttachmentBytes, admitRelayed } = await wrapModuleLoad(() => import('./sending.js'));
-  // Uploaded by the key before the send, as POST /v1/attachments then /v1/emails/send would be.
+  const message = (attachments: string[]) => ({
+    from: sender, ...m.from?.name ? { fromName: m.from.name } : {}, to, cc, bcc, replyTo: (m.replyTo ?? []).flatMap(a => a.address ? [a.address] : []),
+    subject: m.subject || '(no subject)', ...m.text?.trim() ? { text: m.text } : m.html ? {} : { text: ' ' }, ...m.html ? { html: m.html } : {},
+    attachments, headers: submittedHeaders(m.headers.map(h => ({ name: h.originalKey, value: h.value }))),
+  });
+  const { storeAttachmentBytes, admitRelayed, checkRelayed } = await wrapModuleLoad(() => import('./sending.js'));
+  const a: Actor = { keyId: p.kid, workspaceId: key.workspace_id, permissions: ['send'], domains: key.domains };
+  if (m.attachments.length) await checkRelayed(rt, a, message([]));
   const attachments: string[] = [];
   for (const f of m.attachments) attachments.push((await storeAttachmentBytes(rt, { workspaceId: key.workspace_id }, {
     filename: f.filename ?? 'attachment', contentType: f.mimeType, disposition: f.disposition === 'inline' ? 'inline' : 'attachment', contentId: f.contentId?.replace(/^<|>$/g, ''),
   }, new Uint8Array(f.content as ArrayBuffer), p.kid)).id);
-  const input = {
-    from: sender, ...m.from?.name ? { fromName: m.from.name } : {}, to, cc, bcc, replyTo: (m.replyTo ?? []).flatMap(a => a.address ? [a.address] : []),
-    subject: m.subject || '(no subject)', ...m.text?.trim() ? { text: m.text } : m.html ? {} : { text: ' ' }, ...m.html ? { html: m.html } : {},
-    attachments, headers: submittedHeaders(m.headers.map(h => ({ name: h.originalKey, value: h.value }))),
-  };
-  const credential = credentialCtes(kind === 'api_key' ? apiKeys : mailboxKeys, sql`${sendOnlyKey(rt, kind, sql`k.id=${p.kid}`)} AND ${owns(kind, addresses)}`);
-  const authorize = (k: { id: string; workspace_id: string; domains: string[]; used: number | null; max_requests: number }): Actor => {
-    if (k.used !== null) checkBudget(c, k.used, k.max_requests);
-    const a: Actor = { keyId: k.id, workspaceId: k.workspace_id, permissions: ['send'], domains: k.domains };
-    c.set('actor', a);
-    return a;
-  };
-  return admitRelayed(rt, input, credential, authorize);
+  // The key as the statement reads it now; its budget was charged above, so the statement charges nothing.
+  const credential = sql`credential AS MATERIALIZED (${sendOnlyKey(rt, kind, sql`k.id=${p.kid}`)} AND ${owns(kind, addresses)}), budget AS (SELECT 0 AS used)`;
+  return admitRelayed(rt, message(attachments), credential, k => {
+    const actor: Actor = { keyId: k.id, workspaceId: k.workspace_id, permissions: ['send'], domains: k.domains };
+    c.set('actor', actor);
+    return actor;
+  });
 }

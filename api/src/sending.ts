@@ -854,16 +854,37 @@ async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emai
   if (!out.some(m => m.template)) return admitSends(call, input, out, { actor: a }, { batch });
   return claimedSend(call, a, input, async () => { await renderTemplates(call.runtime, a, out, batch); return { out }; }, { batch });
 }
+/** A message an app submitted over SMTP with a send-only key (protocol-relay.ts), as POST /v1/emails/send takes it. */
+export type RelayedMessage = { from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; subject: string; text?: string; html?: string; attachments: string[]; headers: { name: string; value: string }[] };
 /**
- * An SMTP submission signed in with a send-only key (protocol-relay.ts): POST /v1/emails/send without an Idempotency-Key,
- * built from the message. `credential` reads the key as the request's statement does for a bearer key, so the key is
- * authenticated, charged against its minute budget and admitted in one statement, and its attachments were uploaded
- * by it, as POST /v1/attachments would. SMTP already bounds the whole message, so the bodies keep no JSON part cap.
+ * A relayed message built as sendEmail builds one. SMTP's envelope decides who gets it, and every recipient may be Bcc
+ * (a To-less message), which sendEmail's schema refuses: it checks them together as To, then the copy takes the
+ * message's own To, Cc and Bcc, as a mail client's submission does (queueMailboxEmail). SMTP already bounds the whole
+ * message, so the bodies keep no JSON part cap.
  */
-export async function admitRelayed(runtime: Runtime, input: unknown, credential: SQL, authorize: (key: Principal) => Actor) {
-  const parsed = ProtocolSendInput.safeParse(input);
+async function relayedMessage(runtime: Runtime, input: RelayedMessage) {
+  const parsed = ProtocolSendInput.safeParse({ ...input, to: [...input.to, ...input.cc, ...input.bcc], cc: [], bcc: [] });
   if (!parsed.success) throw new ApiError(422, 'VALIDATION_FAILED', parsed.error.issues[0]?.message ?? 'Message fields are invalid.', parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean).join(', '));
-  return await admitSends({ runtime, path: '/v1/emails/send' }, parsed.data, await directMessages(runtime, [parsed.data], false), { credential, authorize }, { batch: false }) as SendReceipt;
+  const out = await directMessages(runtime, [parsed.data], false), message = out[0]!;
+  if (message.invalid) throw message.invalid;
+  Object.assign(message.snapshot, { to: input.to, cc: input.cc, bcc: input.bcc });
+  return { parsed: parsed.data, out };
+}
+/** Before a relayed message's attachments are uploaded: the message and its sender's admission, checked without
+ *  sending or locking (renderTemplates' check), so a send that would be refused writes nothing. */
+export async function checkRelayed(runtime: Runtime, a: Actor, input: RelayedMessage) {
+  const { out } = await relayedMessage(runtime, { ...input, attachments: [] });
+  const check = await admission(runtime, a.workspaceId, actorJson(a), { stage: 'send', locks: 'none', mails: admissionMails(out), ...charges(runtime, out) });
+  admitted(runtime, (await runtime.db.execute<{ s: Admitted | Refused }>(sql`SELECT ${check} AS s`)).rows[0]!.s, a.workspaceId);
+}
+/**
+ * A relayed message, admitted as POST /v1/emails/send without an Idempotency-Key admits one: in one statement that reads
+ * the key through `credential` (as a bearer key's request does) and writes the email. Its attachments were uploaded by
+ * the key, as POST /v1/attachments would.
+ */
+export async function admitRelayed(runtime: Runtime, input: RelayedMessage, credential: SQL, authorize: (key: Principal) => Actor) {
+  const { parsed, out } = await relayedMessage(runtime, input);
+  return await admitSends({ runtime, path: '/v1/emails/send' }, parsed, out, { credential, authorize }, { batch: false }) as SendReceipt;
 }
 // Auth middleware calls this only for ordinary bearer keys, after the request size gate. Malformed inputs, mailbox
 // tracking and provider-rendered templates keep their normal authenticated handler (including error ordering).

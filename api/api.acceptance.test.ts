@@ -1603,7 +1603,7 @@ test('mail gateway: SMTP queues dispatchable content with a single database conn
   assert.equal((await submit('Subject: revoked\r\n\r\nNo send\r\n')).status,403);
   assert.equal((await db.query('SELECT count(*)::int n FROM sending_emails WHERE actor_key_id=$1',[kid])).rows[0].n,4);
 });
-// Migration 342: the gateway closes a send-only key's sessions and drops its cached sign-ins when this names the key.
+// Migration 346: the gateway closes a send-only key's sessions and drops its cached sign-ins when this names the key.
 test('send-only SMTP: revoking a key, or changing what it may send, tells the gateway; using or renaming it does not', async t => {
   const listener = await fixtureDatabase(t), db = await fixtureDatabase(t), heard: string[] = [];
   const keyId = unique('key'), addressKey = unique('mbk'), mine = new Set([keyId, addressKey]);
@@ -19260,11 +19260,28 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal((await outcome(blocked.body.id)).status, 'suppressed');
       assert.deepEqual([(await row(fromAddress.body.id)).actor_key_id, (await outcome(fromAddress.body.id)).status], [addressKey.id, 'accepted']);
       // An attachment is uploaded by the key, then sent with the mail.
-      const withFile = await submit(smtp.id, 'app@relay.example', ['reader@example.net'], ['From: app@relay.example', 'To: reader@example.net', 'Subject: Invoice', 'MIME-Version: 1.0', 'Content-Type: multipart/mixed; boundary=b'],
-        ['--b', 'Content-Type: text/plain', '', 'See attached.', '--b', 'Content-Type: application/pdf; name="invoice.pdf"', 'Content-Disposition: attachment; filename="invoice.pdf"', 'Content-Transfer-Encoding: base64', '', Buffer.from('%PDF-fixture').toString('base64'), '--b--'].join('\r\n'));
+      const withAttachment = (kid: string, from: string, body = ['Content-Type: text/plain', '', 'See attached.']) => submit(kid, from, ['reader@example.net'], [`From: ${from}`, 'To: reader@example.net', 'Subject: Invoice', 'MIME-Version: 1.0', 'Content-Type: multipart/mixed; boundary=b'],
+        ['--b', ...body, '--b', 'Content-Type: application/pdf; name="invoice.pdf"', 'Content-Disposition: attachment; filename="invoice.pdf"', 'Content-Transfer-Encoding: base64', '', Buffer.from('%PDF-fixture').toString('base64'), '--b--'].join('\r\n'));
+      // A refused submission stores nothing: no object and no attachment row.
+      const stored = async () => [objects.size, Number((await db.query('SELECT count(*) FROM sending_attachments WHERE workspace_id=$1', [wid])).rows[0].count)];
+      const writesNothing = async (reply: Promise<{ status: number; body: Json }>, expected: [number, string]) => {
+        const before = await stored();
+        assert.deepEqual(await refusal(reply), expected);
+        assert.deepEqual(await stored(), before, `${expected[1]} stored an attachment`);
+      };
+      const withFile = await withAttachment(smtp.id, 'app@relay.example');
       assert.equal(withFile.status, 200, JSON.stringify(withFile.body));
       assert.deepEqual((await db.query(`SELECT a.filename,a.uploaded_by FROM sending_emails e JOIN sending_attachments a ON a.workspace_id=e.workspace_id AND a.id=e.snapshot->'attachments'->>0 WHERE e.id=$1`, [withFile.body.id])).rows,
         [{ filename: 'invoice.pdf', uploaded_by: smtp.id }]);
+      // A message sendEmail would refuse is refused before its attachments are uploaded.
+      await writesNothing(withAttachment(smtp.id, 'app@relay.example', ['Content-Type: text/html', '', '<a href="javascript:alert(1)">Pay</a>']), [422, 'UNSAFE_HTML_URL']);
+      // A To-less message (every recipient Bcc, as SMTP allows) goes out with no To or Cc.
+      const blind = await submit(smtp.id, 'app@relay.example', ['hidden@example.net'], ['From: app@relay.example', 'Subject: Blind copy']);
+      assert.equal(blind.status, 200, JSON.stringify(blind.body));
+      const blindRow = await row(blind.body.id);
+      assert.deepEqual([blindRow.to_addresses, blindRow.cc_addresses, blindRow.bcc_addresses, blindRow.snapshot.to], [[], [], ['hidden@example.net'], []]);
+      await run('email.dispatch');
+      assert.equal((await row(blind.body.id)).status, 'accepted');
 
       // The sender: the envelope, From and Sender all within the key's domains (or its addresses), checked before anything is sent.
       const before = Number((await db.query('SELECT count(*) FROM sending_emails WHERE workspace_id=$1', [wid])).rows[0].count);
@@ -19288,9 +19305,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       for (;;) {
         const at = await minute();
         await db.query('UPDATE api_request_budgets SET used=$3,window_start=date_trunc(\'minute\',now()) WHERE workspace_id=$1 AND key_id=$2', [wid, smtp.id, runtime.config.apiRateLimitPerMinute]);
-        const limited = await submit(smtp.id, 'app@relay.example', ['reader@example.net'], ['From: app@relay.example', 'To: reader@example.net', 'Subject: Over']);
+        const before = await stored(), limited = await withAttachment(smtp.id, 'app@relay.example');
         if (await minute() !== at) continue; // The window turned over while it ran.
+        // A spent key is refused before anything is decided or stored, and its API requests stay over budget.
         assert.deepEqual([limited.status, limited.body.error.code], [429, 'REQUEST_RATE_LIMITED']);
+        assert.deepEqual(await stored(), before, 'A spent key stored an attachment.');
         error(await request('POST', '/v1/emails/send', smtp.secret, { from: 'app@relay.example', to: 'reader@example.net', subject: 'Over', text: 'x' }), 429, 'REQUEST_RATE_LIMITED');
         break;
       }
@@ -19304,7 +19323,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal((await login(smtp.secret)).status, 403);
       assert.equal((await login(addressKey.secret)).status, 403);
       for (const [kid, from] of [[smtp.id, 'app@relay.example'], [addressKey.id, 'alerts@relay.example']])
-        assert.deepEqual(await refusal(submit(kid, from, ['reader@example.net'], [`From: ${from}`, 'To: reader@example.net', 'Subject: After revoking'])), [403, 'CREDENTIAL_REVOKED']);
+        await writesNothing(withAttachment(kid, from), [403, 'CREDENTIAL_REVOKED']);
       await run('email.dispatch');
       assert.deepEqual((await db.query('SELECT status,error_code FROM sending_emails WHERE id=$1', [queued.body.id])).rows, [{ status: 'canceled', error_code: 'ORIGIN_KEY_REVOKED' }]);
     });
