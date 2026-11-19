@@ -24179,10 +24179,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(trusted(arn,session),false,`${arn} ${session}`);
     const context=(extra:Record<string,string>={})=>({'sts:RoleSessionName':'nightmail-send','sts:SourceIdentity':source,'aws:ResourceAccount':customer,...extra});
     for(const action of ['sts:AssumeRole','sts:SetSourceIdentity'])assert.ok(iamAllows(grants,action,role,context()),action);
+    // The retired shared account is no platform account: it may be connected like any customer's.
+    assert.ok(iamAllows(grants,'sts:AssumeRole','arn:aws:iam::438095551154:role/Nightmail-0123456789abcdef0123',context({'aws:ResourceAccount':'438095551154'})));
     const refused:[string,string,Record<string,string>][]=[
       ['sts:AssumeRole',role,{'sts:RoleSessionName':'Bane'}],['sts:AssumeRole',role,{'sts:SourceIdentity':'ws_'+'0f'.repeat(16)}],
       ['sts:AssumeRole',`arn:aws:iam::${customer}:role/Bane-0123456789abcdef0123`,{}],['sts:AssumeRole',`arn:aws:iam::${customer}:role/Nightmail-admin`,{}],
-      ...['009882681002','905840579680','438095551154'].map(a=>['sts:AssumeRole',`arn:aws:iam::${a}:role/Nightmail-0123456789abcdef0123`,{'aws:ResourceAccount':a}] as [string,string,Record<string,string>]),
+      ...['009882681002','905840579680'].map(a=>['sts:AssumeRole',`arn:aws:iam::${a}:role/Nightmail-0123456789abcdef0123`,{'aws:ResourceAccount':a}] as [string,string,Record<string,string>]),
       ['sts:TagSession',role,{}],['iam:PassRole',role,{}],['ses:SendEmail',`arn:aws:ses:us-east-2:${customer}:identity/example.com`,{}],
     ];
     for(const [action,arn,extra] of refused)assert.equal(iamAllows(grants,action,arn,context(extra)),false,`${action} ${arn} ${JSON.stringify(extra)}`);

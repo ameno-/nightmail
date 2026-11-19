@@ -3,8 +3,8 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export const names = ['bane-runtime', 'bane-runtime-ohio', 'bane-runtime-trusted'];
-// The hosted accounts the BYO broker never enters: both stages and the retired shared account.
-const hostedAccounts = ['009882681002', '905840579680', '438095551154'];
+// The platform accounts the BYO broker never enters. The retired shared account may be connected like any customer's.
+const hostedAccounts = ['009882681002', '905840579680'];
 const read = (/** @type {string} */ file, /** @type {string} */ account) => JSON.parse(readFileSync(new URL(`./${file}.json`, import.meta.url), 'utf8').replaceAll('YOUR_AWS_ACCOUNT_ID', account)
   .replaceAll('"NIGHTMAIL_ACCOUNTS"', JSON.stringify([...new Set([account, ...hostedAccounts])])));
 /** @param {string} account */
