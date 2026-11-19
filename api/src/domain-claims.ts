@@ -82,11 +82,20 @@ export async function reserveClaim(runtime: Runtime, workspace: string, name: st
   if (row.error_code==='OPERATOR_ADOPTION_REQUIRED') throw new ApiError(409,row.error_code,'An operator must reattest this retained sending identity.');
   if (row.error_code==='DOMAIN_REGION_CONFLICT') throw new ApiError(409,row.error_code,'The domain already has a different sending binding.','region');
   if (row.error_code==='POOL_PLACEMENT_MANAGED') throw new ApiError(422,row.error_code,`Hosted sending placement is managed by ${productName}.`,'region');
-  if (row.error_code==='DOMAIN_LIMIT_REACHED') throw new ApiError(409,row.error_code,'A workspace can have at most 10 unproven domains and 100 domains in total. Verify or remove a domain first.');
+  if (row.error_code==='DOMAIN_LIMIT_REACHED') throw await domainLimitReached(runtime.db,workspace);
   if (row.error_code==='DOMAIN_CLAIM_EXPIRED') throw new ApiError(409,row.error_code,'The 72-hour ownership window expired. Remove the domain and add it again.');
   if (!row.token || !row.id) throw new ApiError(409,'DOMAIN_CLAIMED','This domain overlaps an existing claim.');
   return { ...row, connection: row.connection, token: row.token, claim: row.claim ?? { sending_state: 'pending', receiving_state: 'off', receiving_host: null, lost_since: null, receiving_lost_since: null, identity: null, proof_label: PROOF_LABELS[0], created_at: row.reserved_at, ever_proven: false } }; // A new claim's created_at is this transaction's now(), its proof_label the column default.
 }
+
+/** Domains the workspace holds and how many it may hold: 100 unless an operator set another limit. */
+export const domainQuota = async (db: DbExecutor, workspace: string) => (await db.execute<{ used: number; limit: number; unproven: number }>(sql`SELECT count(*)::int AS used,
+  count(*) FILTER (WHERE NOT ever_proven)::int AS unproven,workspace_domain_limit(${workspace}) AS "limit" FROM domain_claims WHERE workspace_id=${workspace}`)).rows[0]!;
+/** The refusal names whichever limit was reached: the workspace's total (its own, which an operator can change) or the 10 unproven domains. */
+export const domainLimitError = (used: number, limit: number) => new ApiError(409, 'DOMAIN_LIMIT_REACHED', used >= limit
+  ? `This workspace has ${used.toLocaleString('en-US')} of its ${limit.toLocaleString('en-US')} domains. Remove a domain first, or ask ${productName} support for a higher limit.`
+  : 'A workspace can have at most 10 domains whose ownership is not yet proven. Verify or remove one first.');
+const domainLimitReached = async (db: DbExecutor, workspace: string) => { const q = await domainQuota(db, workspace); return domainLimitError(q.used, q.limit); };
 
 export async function importByoClaims(db: DbExecutor, connection: { id: string; workspace_id: string; region: string }, domains: { name: string; ses: IdentityFacts['ses'] }[]) {
   if (!domains.length) return;

@@ -20,7 +20,7 @@ import { workspaces } from './db/workspaces.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
 import { getRegionSettings, resolveRegionRuntime, withRegionSettings } from './ses-region-state.js';
-import { claimName, domainName, platformDomainOwner, platformHosts, releaseConnectionClaims, releasedClaimCleanup, reserveClaim, reservedPlatformName } from './domain-claims.js';
+import { claimName, domainName, domainQuota, platformDomainOwner, platformHosts, releaseConnectionClaims, releasedClaimCleanup, reserveClaim, reservedPlatformName } from './domain-claims.js';
 import { loadRegistries } from './domain-registry.js';
 import { discover, groupIds, pendingGroups, signedApply, verifyReturn } from './domain-connect.js';
 import { dmarcView, localDmarc, observeDmarc, type DmarcObservation } from './dmarc.js';
@@ -81,7 +81,9 @@ const queuedSchema = z.object({ id: z.string(), status: z.literal('pending') }).
 const deletedSchema = z.object({ deleted: z.boolean() }).openapi('WebhookDeleted');
 const regionQuery = z.object({ region: z.string().optional() }).openapi('RegionQuery');
 const listSchema = <T extends z.ZodType>(item: T, name: string) => z.object({ data: z.array(item), nextCursor: z.string().nullable() }).openapi(name);
-export const DomainPage = listSchema(domainSchema, 'DomainPage');
+export const DomainPage = z.object({ data: z.array(domainSchema), nextCursor: z.string().nullable(),
+  quota: z.object({ used: z.number().int().describe('Domains in the workspace, across every region and page.'), limit: z.number().int().describe(`How many domains the workspace may have: 100 unless ${productName} set another limit on request.`) }).optional()
+    .describe('Hosted only, and only for credentials without domain restrictions. Adding a domain past the limit fails with DOMAIN_LIMIT_REACHED; at most 10 of them may be unproven at once.') }).openapi('DomainPage');
 export function workspaceActor(c: Ctx, permission: Permission = 'read') { const a = actor(c, permission); if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.'); return a; }
 // Like API keys, webhooks are set up, changed and removed by lasting credentials: a temporary agent token reads them and
 // their deliveries, and can test or retry a delivery, but does not create, change or delete them or read their signing
@@ -829,17 +831,17 @@ export function domainReader(c: Ctx, requested?: string) {
   if (!c.env.config.multiTenant) { region(c.env, requested ?? c.env.config.regions[0]!); assertSesConfigured(c.env); }
   return a;
 }
-type DomainQuery = { limit: number; region?: string; refresh: 'true' | 'false'; cursor?: string };
+type DomainQuery = { limit: number; region?: string; refresh: 'true' | 'false'; cursor?: string; /** The caller counts the quota in a statement of its own (getOverviewSetup). */ countedElsewhere?: boolean };
 /** One page of domains as listDomains returns it. Hosted: one statement. Self-hosted: two with refresh=false, otherwise one plus an SES read per domain. */
 export async function domainPage(c: Ctx, a: Actor, q: DomainQuery): Promise<z.infer<typeof DomainPage>> {
   const allowed = a.domains.length ? or(...a.domains.map(parent => or(eq(domains.name, parent), like(domains.name, `%.${parent}`)))) : undefined;
   const where = and(scoped(domains, a), allowed, q.region ? eq(domains.region, region(c.env, q.region)) : c.env.config.multiTenant ? undefined : inArray(domains.region, c.env.config.regions), q.cursor ? lt(domains.id, q.cursor) : undefined);
   if (c.env.config.multiTenant) {
-    const rows=await c.env.db.select({row:domains,hosts:sql<ReceivingHostRow[]>`${domainHosts(sql`${domains}`)}`,token:domainClaims.token,proof_label:domainClaims.proofLabel,claim_scope:domainClaims.claimScope,sending_state:domainClaims.sendingState,receiving_state:domainClaims.receivingState,receiving_host:domainClaims.receivingHost,receiving_proved_at:sql<string>`domain_claims.receiving_proved_at`,receiving_identity_at:sql<string>`domain_claims.receiving_identity_at`,receiving_proof_missed_at:sql<string>`domain_claims.receiving_proof_missed_at`,lost_since:domainClaims.lostSince,receiving_lost_since:domainClaims.receivingLostSince,identity:domainClaims.identity,created_at:domainClaims.createdAt,ever_proven:domainClaims.everProven,kind:sql<'shared'|'byo'>`pc.kind`,legacy:sql<boolean>`pc.legacy`}).from(domains)
+    const [rows,quota]=await Promise.all([c.env.db.select({row:domains,hosts:sql<ReceivingHostRow[]>`${domainHosts(sql`${domains}`)}`,token:domainClaims.token,proof_label:domainClaims.proofLabel,claim_scope:domainClaims.claimScope,sending_state:domainClaims.sendingState,receiving_state:domainClaims.receivingState,receiving_host:domainClaims.receivingHost,receiving_proved_at:sql<string>`domain_claims.receiving_proved_at`,receiving_identity_at:sql<string>`domain_claims.receiving_identity_at`,receiving_proof_missed_at:sql<string>`domain_claims.receiving_proof_missed_at`,lost_since:domainClaims.lostSince,receiving_lost_since:domainClaims.receivingLostSince,identity:domainClaims.identity,created_at:domainClaims.createdAt,ever_proven:domainClaims.everProven,kind:sql<'shared'|'byo'>`pc.kind`,legacy:sql<boolean>`pc.legacy`}).from(domains)
       .innerJoin(domainClaims,and(eq(domainClaims.name,domains.name),eq(domainClaims.workspaceId,domains.workspaceId)))
       .innerJoin(sql`regional_connections pc`,sql`pc.id=${domainClaims.connectionId} AND pc.workspace_id=${domains.workspaceId} AND pc.region=${domains.region} AND ${connectionReady()}`)
-      .where(where).orderBy(desc(domains.id)).limit(q.limit+1);
-    return {data:rows.slice(0,q.limit).map(r=>derivedReadiness({...r,...r.row,connection:{kind:r.kind,legacy:r.legacy}})),nextCursor:rows.length>q.limit?rows[q.limit-1]!.row.id:null};
+      .where(where).orderBy(desc(domains.id)).limit(q.limit+1),a.domains.length || q.countedElsewhere ? undefined : domainQuota(c.env.db,a.workspaceId)]);
+    return {data:rows.slice(0,q.limit).map(r=>derivedReadiness({...r,...r.row,connection:{kind:r.kind,legacy:r.legacy}})),nextCursor:rows.length>q.limit?rows[q.limit-1]!.row.id:null,...quota ? {quota:{used:quota.used,limit:quota.limit}} : {}};
   }
   const rows = await c.env.db.select({row:domains,mx:mailboxDomains.mx,status:mailboxDomains.status}).from(domains).leftJoin(mailboxDomains,and(eq(mailboxDomains.workspaceId,domains.workspaceId),eq(mailboxDomains.domainId,domains.id),isNull(mailboxDomains.parentId))).where(where).orderBy(desc(domains.id)).limit(q.limit + 1);
   if (q.refresh === 'false') {
