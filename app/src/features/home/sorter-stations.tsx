@@ -42,7 +42,10 @@ const STATIONS: Station[] = [
 // innermost tube (the one nearest the appliances) is Inbox's. The innermost must turn in first or it crosses the
 // others, so on the left the appliances come in the hero's order from the inside: Threads first, Inbox last (the
 // right four already run that way). `tube` is the place from the inside, as above.
-const LABELS: Record<Kind | 'main', string> = { inbox: 'INBOX', agent: 'AGENTS', endpoint: 'ENDPOINTS', thread: 'THREADS', imap: 'IMAP', ritual: 'RITUALS', campaign: 'CAMPAIGNS', logs: 'LOGS', main: 'OUTBOUND' }
+const LABELS: Record<Kind | 'main', string> = { inbox: 'INBOX', agent: 'AGENTS', endpoint: 'ENDPOINTS', thread: 'THREADS', imap: 'IMAP', ritual: 'RULES', campaign: 'CAMPAIGNS', logs: 'LOGS', main: 'OUTBOUND' }
+// (The renders named the rules' pipe RITUALS before Rules was renamed: a manifest with either label is found, so the
+// tube stays on its pipe while the renders and the bundled manifest change over.)
+const FORMERLY: Record<string, string> = { RULES: 'RITUALS' }
 const UNDER_HERO: Station[] = (['thread', 'imap', 'endpoint', 'ritual', 'agent', 'campaign', 'inbox', 'logs'] as const).map(kind => {
   const spec = STATIONS.find(station => station.kind === kind)!
   return spec.tube < 4 ? { ...spec, tube: 3 - spec.tube } : spec
@@ -107,6 +110,8 @@ export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: H
   if (!p) return <section className="srt-stations" ref={root} aria-label="Where mail goes" />
   // (Under the factory every tube is as wide as the hero's pipes, so each reads on from its own.)
   const pipes = !p.phone && hero ? hero : null
+  /** Where a tube's hero pipe comes down to the section's top edge, by its label. */
+  const heroX = (kind: Kind) => pipes ? pipes.x[LABELS[kind]] ?? pipes.x[FORMERLY[LABELS[kind]]] : undefined
   const phone = p.phone, r = pipes ? pipes.w / 2 : p.tubeR, wide = r * 2, depth = phone ? 40 : 60, dx = -DX * depth, dy = DY * depth
   // Each appliance stands between the two fours of tubes, a little towards the side its own tube comes from: those on
   // the left share one left edge, those on the right another, so their names stand in two columns down the page.
@@ -120,7 +125,7 @@ export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: H
   const bend0 = (phone ? 10 : wide) * 1.5, pitch = Math.round(wide * 1.5 + 16), jog = new Map<number | 'main', number>()
   let jogEnd = 0
   if (pipes) {
-    const moves = [...[0, 1, 2, 3, 4, 5, 6, 7].map(tube => ({ id: tube as number | 'main', from: pipes.x[LABELS[UNDER_HERO.find(station => station.tube === tube)!.kind]], to: p.drops[tube] })),
+    const moves = [...[0, 1, 2, 3, 4, 5, 6, 7].map(tube => ({ id: tube as number | 'main', from: heroX(UNDER_HERO.find(station => station.tube === tube)!.kind)!, to: p.drops[tube] })),
       { id: 'main' as const, from: pipes.x.OUTBOUND, to: p.sx + p.out }]
     const at = new Map(moves.map(move => [move.id, move.from])), pending = moves.filter(move => Math.abs(move.to - move.from) > .5), clearance = wide + 8
     const span = (move: typeof moves[number]) => [Math.min(move.from, move.to) - clearance, Math.max(move.from, move.to) + clearance]
@@ -165,7 +170,7 @@ export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: H
   const pw = phone ? 10 : wide, bend = pw * 1.5
   const runs: { key: string; points: Pt[]; wide: number; rings: Ring[] }[] = [], ways: Pt[][] = [], sleeve = (x: number): Ring => ({ at: [x, 12], across: false, tall: 30 })
   if (!phone) units.forEach(({ station, left, port, end }, k) => {
-    const side = left ? 0 : 4, n = station.tube - side, slot = (j: number) => p.drops[side + j], row = jog.get(station.tube), from = pipes?.x[LABELS[station.kind]]
+    const side = left ? 0 : 4, n = station.tube - side, slot = (j: number) => p.drops[side + j], row = jog.get(station.tube), from = heroX(station.kind)
     const points: Pt[] = row !== undefined && from !== undefined ? [[from, 0], [from, row], [slot(n), row]] : [[slot(n), 0]]
     for (let m = 0; m < n; m++) { const y = units.find(u => u.station.tube === side + m)!.port + 78 + (n - m - 1) * (wide + 16); points.push([slot(n - m), y], [slot(n - m - 1), y]) }
     points.push([points.at(-1)![0], port], [end, port])
