@@ -12027,6 +12027,83 @@ describe('Dashboard API capabilities', () => {
     });
   });
 
+  test('sender score: the growth pace is for new senders only: an operator override or a clean track record SES accepted before the pace existed skips it, once and audited; later acceptances, seeds, one recipient or domain and bounces do not', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { refreshStanding } = await import('./src/standing.js');
+      const pool = '111122223333', base = runtime.config.workspaceId;
+      Object.assign(runtime.config, { multiTenant: true });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:feedback`]);
+      // `standing`: an existing standing row, as an UPDATE's SET list (migration 349 sets history_before for workspaces
+      // that existed when the pace shipped).
+      const workspace = async (name: string, standing?: string) => {
+        const wid = `${base}-${name}`;
+        await db.query('INSERT INTO workspaces(id,slug,name) VALUES($1,$1,$1)', [wid]);
+        await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+        if (standing) { await db.query('INSERT INTO sender_standing(workspace_id) VALUES($1)', [wid]); await db.query(`UPDATE sender_standing SET ${standing} WHERE workspace_id=$1`, [wid]); }
+        return wid;
+      };
+      const legacy = "phase='calibrating',first_recipients=60,history_before=now()";
+      // Real mail admitted 2 to 15 days ago and accepted by SES then (or, `acceptedNow`, only now), one recipient each:
+      // distinct at five domains, all to one address, or distinct at one domain; every `bounceEvery`th hard-bounced.
+      const history = (wid: string, n: number, o: { to?: 'distinct' | 'same' | 'oneDomain'; bounceEvery?: number; acceptedNow?: boolean } = {}) => db.query(`WITH e AS (
+          INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,event_outcomes,created_at)
+          SELECT $1||n,$2,$3,'fixture','sender@growth.example',jsonb_build_array(CASE $5 WHEN 'same' THEN 'owner@controlled.example' WHEN 'oneDomain' THEN 'r'||n||'@one.example' ELSE 'r'||n||'@d'||n%5||'.example' END),'[]','[]','History','{}',false,
+            CASE WHEN $6::int>0 AND n%$6::int=0 THEN 'bounced' ELSE 'delivered' END,'p-'||$1||n,CASE WHEN $6::int>0 AND n%$6::int=0 THEN 5 ELSE 3 END,now()-make_interval(days=>2+n%14,secs=>n) FROM generate_series(1,$4::int) n RETURNING id,created_at)
+        INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,created_at) SELECT 'ev-'||id,$2,id,'accepted',false,CASE WHEN $7 THEN now() ELSE created_at END FROM e`,
+        [unique('history-'), wid, REGION, n, o.to ?? 'distinct', o.bounceEvery ?? 0, o.acceptedNow ?? false]);
+      const evaluation = (wid: string) => db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,event_outcomes,created_at)
+        SELECT $1||n,$2,$3,'fixture','sender@growth.example',jsonb_build_array('e'||n||'@example.net'),'[]','[]','Evaluation','{}',false,'delivered','p-'||$1||n,3,least(now(),date_trunc('day',now(),'UTC')+make_interval(secs=>n)) FROM generate_series(1,100) n`, [unique('evaluation-'), wid, REGION]);
+      const audit = async (wid: string) => (await db.query(`SELECT (SELECT json_agg(json_build_object('kind',kind,'actor',actor->>'kind','growth',details->'growth')) FROM standing_events WHERE workspace_id=$1 AND details ? 'growth') AS events,
+        (SELECT json_agg(action) FROM hosted_operator_audit WHERE workspace_id=$1) AS audit`, [wid])).rows[0];
+      const growth = async (wid: string) => { await refreshStanding(runtime, { only: wid });
+        return (await db.query('SELECT phase,growth_cap AS cap,growth_until>now()+interval \'48 hours\' AS long FROM sender_standing WHERE workspace_id=$1', [wid])).rows[0]; };
+      const paced = { phase: 'graded', cap: 1000, long: true }, skipped = { phase: 'graded', cap: null, long: null };
+
+      // A new sender: its evaluation's 100 clean recipients, then the pace, which the next runs keep, with nothing to audit.
+      const fresh = await workspace('fresh');
+      await evaluation(fresh);
+      assert.deepEqual(await growth(fresh), paced);
+      assert.deepEqual([await growth(fresh), await audit(fresh)], [paced, { events: null, audit: null }], 'A new sender stays on the pace.');
+      // A new sender with an operator daily-limit override skips it, on the timeline and in the operator audit, once.
+      const overridden = await workspace('override');
+      await db.query('UPDATE workspaces SET send_cap_override=5000 WHERE id=$1', [overridden]);
+      await evaluation(overridden);
+      assert.deepEqual(await growth(overridden), skipped);
+      assert.deepEqual(await growth(overridden), skipped);
+      assert.deepEqual(await audit(overridden), { events: [{ kind: 'limit', actor: 'system', growth: { change: 'skipped', reason: 'OPERATOR_OVERRIDE', before: null, cutoff: null, history: null } }], audit: ['growth-skipped'] });
+      // Still evaluating when the pace shipped, with 450 clean recipients SES accepted over the two weeks before: no pace.
+      const known = await workspace('known', legacy);
+      await history(known, 450);
+      assert.deepEqual(await growth(known), skipped);
+      const [event] = (await audit(known)).events;
+      assert.deepEqual([event.growth.reason, event.growth.history.recipients, event.growth.history.days >= 3, event.growth.history.domains], ['TRACK_RECORD', 350, true, 5], 'The first 100, the seeds, never count.');
+      // Not a track record, so the pace stays: 350 (250 after the seeds), mail admitted before the pace but accepted only
+      // after it (a backlog, or a late grader), the same history for a workspace created later, one recipient, one
+      // recipient domain, or 3% hard bounces.
+      for (const [name, setup] of [
+        ['seeds', (wid: string) => history(wid, 350)],
+        ['backlog', (wid: string) => history(wid, 450, { acceptedNow: true })],
+        ['one-address', (wid: string) => history(wid, 450, { to: 'same' })],
+        ['one-domain', (wid: string) => history(wid, 450, { to: 'oneDomain' })],
+        ['bounces', (wid: string) => history(wid, 450, { bounceEvery: 33 })],
+      ] as const) {
+        const wid = await workspace(name, name === 'backlog' ? "phase='calibrating',first_recipients=60,history_before=now()-interval '1 hour'" : legacy);
+        await setup(wid);
+        assert.deepEqual([name, await growth(wid)], [name, paced]);
+      }
+      const late = await workspace('late', "phase='calibrating',first_recipients=60");
+      await history(late, 450);
+      assert.deepEqual(await growth(late), paced, 'A workspace created after the pace shipped has no track record before it: a delayed grade is still an evaluation.');
+      // Graded and put on the pace with that history: the next run clears it, once, on the timeline and in the operator audit.
+      const cleared = await workspace('cleared', "phase='graded',first_recipients=100,calibrated_at=now()-interval '12 hours',history_before=now()-interval '12 hours',growth_until=now()+interval '60 hours',growth_cap=1000,growth_hour=date_trunc('hour',now())-interval '2 hours'");
+      await history(cleared, 450);
+      assert.deepEqual(await growth(cleared), skipped);
+      assert.deepEqual(await growth(cleared), skipped);
+      const trail = await audit(cleared);
+      assert.deepEqual([trail.events.length, trail.events[0].actor, trail.events[0].growth.change, trail.events[0].growth.before.cap, trail.events[0].growth.history.recipients, trail.audit], [1, 'system', 'cleared', 1000, 350, ['growth-cleared']]);
+    });
+  });
+
   test('sender score: a workspace without a daily limit gets a frozen one on a pause, so a resume\'s 50% and a strike\'s half have a number', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { applyChange, refreshStanding } = await import('./src/standing.js');
