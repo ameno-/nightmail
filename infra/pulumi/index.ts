@@ -44,8 +44,6 @@ if (!roleArn.startsWith(`arn:aws:iam::${stage.account}:role/`)) {
 }
 const permissionsBoundary = config.get("permissionsBoundary");
 const writeWorkerSecrets = config.getBoolean("writeWorkerSecrets") ?? !production;
-const publishDomainConnectKey = config.getBoolean("publishDomainConnectKey") ?? false;
-if (!production && publishDomainConnectKey) throw new Error("Domain Connect publication is production-only");
 
 function adopt(id: string, provider: pulumi.ProviderResource): pulumi.CustomResourceOptions {
   return { import: id, protect: true, provider }; // Dropping one would take its stage down.
@@ -122,17 +120,6 @@ if (nightmailCloud) {
 
 // The Hyperdrive config is not managed here. Cloudflare never returns origin.password, and
 // Pulumi fails to import the resource because the read state lacks that required property.
-
-if (production && publishDomainConnectKey) {
-  // Public DER SubjectPublicKeyInfo (not the private signing key), 200 base64 characters per TXT record.
-  const key = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnjQewwWQ0jSgWtbotOqgbSSy+TLFr8NVYAdmVG90AC19tEAKJCZmihzrnKppJcUlfXq5VIgeBoKRpTIvj3ibV7Gm3YGcC9NUme8BTbTsQEm12aAyzBVXGFdXLhh60d/9HB0jYTqQkdP/2y50IWTlGRePwXQ9Rz0zlXAKPma6Dpb66XVQkGOOKkFsJti9JcAb8BrcqQKd+bo1ngHbXrM270s/TAdfgwxswMLBYxxzPHW9DEbYuC3HojUfR+Ga1MH75Q+e2zEM6ENusM4EXUvpGSEWeA3KuI4VE4bci5TwQVzJK8PACjyIgKhzuM65nPgdzMrBSC7JqABEf7ViuId97wIDAQAB";
-  for (const [i, chunk] of key.match(/.{1,200}/g)!.entries()) {
-    new cf.DnsRecord(`domain-connect-key-${i + 1}`, {
-      zoneId: "f2942e4d7fab2ce3d86a876f7564a429", name: "_dck1.domainconnect.bane.mx",
-      type: "TXT", ttl: 3600, content: `"p=${i + 1},a=RS256,d=${chunk}"`,
-    }, { provider: cloudflare });
-  }
-}
 
 const credentials = { allowedAccountIds: [stage.account], assumeRoles: [{ roleArn }] };
 const iam = new aws.Provider("virginia", { ...credentials, region: "us-east-1" });

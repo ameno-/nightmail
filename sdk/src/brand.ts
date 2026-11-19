@@ -102,9 +102,9 @@ export const loopHeader = `${headerPrefix}Loop`;
 export const loopHeaderNames = requestHeaderNames('loop');
 
 /** Domain Connect provider IDs of the mail template (domain-connect/<id>.mail.json), preferred first: one-click DNS applies the
- * first one the domain's DNS provider lists. nightmail.dev replaces bane.mx, which stays until Cloudflare and IONOS list
- * nightmail.dev. A provider ID never follows the brand: a new one is registered and onboarded with each DNS provider again. */
-export const domainConnectProviderIds = ['nightmail.dev', 'bane.mx'] as const;
+ * first one the domain's DNS provider lists. A provider ID never follows the brand: a new one is registered and onboarded with
+ * each DNS provider again, so list it before the current one until providers have it. */
+export const domainConnectProviderIds = ['nightmail.dev'] as const;
 
 // ---------- Earlier public names, accepted until the domain cutover (remove after rename cleanup) ----------
 // Only the names above are emitted. Each one here is still accepted where a customer, a stored row or a deployment
