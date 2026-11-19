@@ -102,6 +102,12 @@ Every operation states what it needs: `x-nightmail-permission` in `api/openapi.j
 
 **Fix:** add or update the row in the same change as the route or guard, run `bun run sdk` in `api/`, then run the `permission table` acceptance test.
 
+### BYO role templates
+
+Connected AWS accounts run a published role template (`api/byo-templates/<major>.<minor>.yaml`, served from S3 as `byo/<version>.yaml`), and Nightmail must keep working with every supported version. **Fails when** a published file was edited, renamed or deleted, a new file isn't named `<major>.<minor>.yaml`, or a new version isn't newer than the newest published one.
+
+**Fix:** revert the published file and add the change as a new version. A minor version only adds permissions. The acceptance test `BYO contract` checks every session the code asks for (`api/src/byo-permissions.ts`) against the current draft and every published version; a call outside its session policy fails the BYO v5 enrollment test.
+
 ## Copy and density lint (`build`, `cls`)
 
 Both are ratchets: a baseline holds today's findings, only a new one fails, and a clean local run drops fixed ones from it (`--update-baseline` accepts a deliberate exception). A finding keeps its identity when its line moves or its text is edited in place, and the product's name counts as one neutral word, so a rename is never new.

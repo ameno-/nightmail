@@ -2,9 +2,9 @@ import { sql } from 'drizzle-orm';
 import { createHash } from 'node:crypto';
 import { ApiError, assertSharedAccount, lazyModule, type Config, type Runtime } from './core.js';
 import { connectionReady } from './states.js';
-import { setupResources } from './ses-setup.js';
 import { productName } from './brand.js';
 import { requirePlatformAccount } from './config.js';
+import { byoSessionPolicy } from './byo-permissions.js';
 export { assertSharedAccount };
 
 type Credentials = NonNullable<Config['aws']>;
@@ -89,17 +89,9 @@ async function deliveryCredentials(runtime:Runtime,region:string,row:ReadyConnec
     WHERE c.workspace_id=${runtime.config.workspaceId} AND w.byo_v2_enabled AND c.template_version='v5' AND c.kind='byo' AND c.id=${row.id} AND c.region=${region}
       AND c.aws_account_id=${row.aws_account_id} AND c.role_arn=${row.role_arn} AND c.external_id=${row.external_id}::uuid`)).rows[0];
   if (!runtime.config.byoV2 || !bound) throw new ApiError(409,'BYO_SESSION_SCOPE_REQUIRED','This delivery scope is not bound to an enabled regional connection.');
-  const prefix=`arn:aws:ses:${region}:${row.aws_account_id}:`, names=setupResources(row.id,'byo');
-  const allow=(Action:string[],Resource:string|string[],extra:Record<string,string>={})=>({Effect:'Allow',Action,Resource,Condition:{StringEquals:{'aws:RequestedRegion':region,...extra}}});
-  let statements;
-  if (scope.purpose==='send') {
-    if (!bound.name || !/^(?:[a-z0-9-]+\.)+[a-z]{2,63}$/.test(bound.name)) throw new ApiError(409,'BYO_SESSION_SCOPE_REQUIRED','Missing bound SES domain.');
-    statements=[allow(['ses:SendEmail'],[prefix+'identity/'+bound.name,...[names.transactional,names.marketing].map(n=>prefix+'configuration-set/'+n)],{'ses:ApiVersion':'2'}),allow(['ses:ApplyTrackingConfigurationOverrides'],'*',{'ses:OpenTrackingEnabled':'${ses:ClickTrackingEnabled}'})];
-  } else if (scope.purpose==='template') {
-    if (!/^bane-[A-Za-z0-9_-]+$/.test(scope.name)) throw new ApiError(422,'TEMPLATE_SCOPE_REQUIRED','Regional BYO may render only bane- templates.');
-    statements=[allow(['ses:GetEmailTemplate','ses:TestRenderEmailTemplate'],prefix+'template/'+scope.name)];
-  } else statements=[allow(['ses:GetAccount'],'*')];
-  return assume(runtime,region,row.role_arn,row.external_id,false,JSON.stringify({Version:'2012-10-17',Statement:statements}),{connectionId:row.id,purpose:scope.purpose});
+  if (scope.purpose==='send' && !bound.name) throw new ApiError(409,'BYO_SESSION_SCOPE_REQUIRED','Missing bound SES domain.');
+  const policy=byoSessionPolicy(scope.purpose,{region,account:row.aws_account_id,connectionId:row.id,domain:bound.name??undefined,template:scope.purpose==='template'?scope.name:undefined});
+  return assume(runtime,region,row.role_arn,row.external_id,false,policy,{connectionId:row.id,purpose:scope.purpose});
 }
 export async function workspaceConnection(runtime: Runtime, region?: string) {
   const result = await runtime.db.execute<ReadyConnection & { region: string }>(sql`
@@ -121,8 +113,8 @@ export async function workspaceCredentials(runtime: Runtime, region: string, con
     // A generic data-plane/mailbox caller must add its own narrowly scoped v5
     // session before release; never silently hand it the customer's entire role.
     if (!scope || !/^(?:[a-z0-9-]+\.)+[a-z]{2,63}$/.test(scope.name)) throw new ApiError(409,'BYO_SESSION_SCOPE_REQUIRED','A purpose-scoped regional AWS session is required.');
-    const actions=['ses:GetEmailIdentity',...({read:[],verify:['ses:CreateEmailIdentity','ses:TagResource'],delete:['ses:DeleteEmailIdentity'],mailFrom:['ses:PutEmailIdentityMailFromAttributes']}[scope.purpose])];
-    return assume(runtime,region,row.role_arn,row.external_id,false,JSON.stringify({Version:'2012-10-17',Statement:[{Effect:'Allow',Action:actions,Resource:`arn:aws:ses:${region}:${row.aws_account_id}:identity/${scope.name}`}] }),{connectionId:row.id,purpose:scope.purpose==='mailFrom'?'mailfrom':scope.purpose});
+    const purpose=scope.purpose==='mailFrom'?'mailfrom':scope.purpose;
+    return assume(runtime,region,row.role_arn,row.external_id,false,byoSessionPolicy(purpose,{region,account:row.aws_account_id,connectionId:row.id,domain:scope.name}),{connectionId:row.id,purpose});
   }
   return assume(runtime,region,row.role_arn,row.external_id);
 }

@@ -22,7 +22,8 @@ function iamAllows(statements:IamStatement[],action:string,resource:string,conte
   const like=(pattern:string,value:string)=>new RegExp('^'+pattern.replace(/[.+^${}()|[\]\\]/g,'\\$&').replaceAll('*','.*').replaceAll('?','.')+'$','is').test(value);
   const matches=(list:string|string[]|undefined,not:string|string[]|undefined,value:string)=>list!==undefined ? [list].flat().some(p=>like(p,value)) : not!==undefined && ![not].flat().some(p=>like(p,value));
   const condition=(op:string,key:string,want:string|string[])=>{
-    const have=context[key],values=have===undefined?[]:[have].flat(),wanted=[want].flat();
+    // A policy variable (${aws:ResourceTag/x}) stands for that key's value in the same request.
+    const have=context[key],values=have===undefined?[]:[have].flat(),wanted=[want].flat().map(w=>{const v=/^\$\{([^}]+)\}$/.exec(w)?.[1];return v===undefined?w:String(context[v]??'');});
     switch(op){
       case 'StringEquals':case 'Bool':case 'ArnEquals':return values.length>0 && values.some(v=>wanted.includes(v));
       case 'StringLike':case 'ArnLike':return values.length>0 && values.some(v=>wanted.some(w=>like(w,v)));
@@ -38,6 +39,31 @@ function iamAllows(statements:IamStatement[],action:string,resource:string,conte
   };
   const applies=(s:IamStatement)=>matches(s.Action,s.NotAction,action) && matches(s.Resource,s.NotResource,resource) && Object.entries(s.Condition??{}).every(([op,keys])=>Object.entries(keys).every(([key,want])=>condition(op,key,want)));
   return statements.some(s=>s.Effect==='Allow' && applies(s)) && !statements.some(s=>s.Effect==='Deny' && applies(s));
+}
+// A connected account's role template rendered for one connection: parameters and pseudo-parameters substituted,
+// intrinsic-function tags stripped. byoTemplates() lists every supported one: the current and each published version.
+async function byoTemplate(file:string,params:Record<string,string>,regions:string[]) {
+  const {load}=await import('js-yaml'),src=await readFile(new URL(file,import.meta.url),'utf8');
+  return load(src.replace(/!Sub '([^']*)'/g,(_,v:string)=>JSON.stringify(v.replace(/\$\{(!?)([^}]+)\}/g,(m,bang:string,k:string)=>bang?'${'+k+'}':params[k]??m)))
+    .replace(/!Ref (?:AccountRequestRegions|ReceivingRegions)\b/g,JSON.stringify(regions)).replace(/!Ref '?([A-Za-z:]+)'?/g,(m,k:string)=>k in params?JSON.stringify(params[k]):m)
+    .replace(/!(?:Ref|If|Equals|Not|GetAtt)\b/g,'')) as Json;
+}
+async function byoTemplates() {
+  const {readdir}=await import('node:fs/promises'),published=await readdir(new URL('./byo-templates/',import.meta.url)).catch(()=>[] as string[]);
+  return ['byo-template.yaml',...published.filter(n=>/^\d+\.\d+\.yaml$/.test(n)).map(n=>'byo-templates/'+n)];
+}
+// The role's identity policy statements: inline policies, conditional ones (!If) included.
+const byoRoleStatements=(cfn:Json)=>cfn.Resources.Role.Properties.Policies.map((p:Json)=>Array.isArray(p)?p[1]:p).flatMap((p:Json)=>p.PolicyDocument.Statement) as IamStatement[];
+// The IAM action and resource an SES v2 or SNS command asks for, and a check that a connected account's session (whose
+// fixture credentials carry their session policy as the token) allows it: code calls stay inside their session.
+function sessionCall(service:'ses'|'sns',cmd:any,region:string,account:string):[string,string] {
+  const i=cmd.input,action=`${service}:${cmd.constructor.name.replace(/Command$/,'')}`,ses=`arn:aws:ses:${region}:${account}:`;
+  if (service==='sns') return [action,i.TopicArn??i.ResourceArn??(i.Name?`arn:aws:sns:${region}:${account}:${i.Name}`:i.SubscriptionArn?.split(':').slice(0,6).join(':')??'*')];
+  return [action,i.ResourceArn??(i.ConfigurationSetName?ses+'configuration-set/'+i.ConfigurationSetName:i.EmailIdentity?ses+'identity/'+i.EmailIdentity:i.TemplateName?ses+'template/'+i.TemplateName:'*')];
+}
+async function withinSession(client:{config:{credentials:()=>Promise<{sessionToken?:string}>}},service:'ses'|'sns',cmd:any,region:string,account:string) {
+  const [action,resource]=sessionCall(service,cmd,region,account),policy=JSON.parse((await client.config.credentials()).sessionToken!);
+  assert.ok(iamAllows(policy.Statement,action,resource,{'aws:RequestedRegion':region,'ses:ApiVersion':'2'}),`${action} on ${resource} is outside its session policy`);
 }
 // The S3 calls Bane makes on one attachment object: ingest/archive PutObject, signed-link and
 // reuse GetObject, and the orphan expiry tag (any other tag value must stay refused).
@@ -16515,7 +16541,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       return {AssumedRoleUser:{Arn:`arn:aws:sts::${account}:assumed-role/${cmd.input.RoleArn.split('/')[1]}/${cmd.input.RoleSessionName}`},Credentials:{AccessKeyId:'v5-fixture-customer',SecretAccessKey:'fixture-only',SessionToken:cmd.input.Policy,Expiration:new Date(Date.now()+900000)}};
     });
     t.mock.method(SESClient.prototype,'send',async function(this:InstanceType<typeof SESClient>,cmd:any){assert.equal(cmd.constructor.name,'DescribeActiveReceiptRuleSetCommand');trace.push({region:await this.config.region(),op:cmd.constructor.name});return {Metadata:{Name:'customer'},Rules:[{Name:'existing',Enabled:true,Actions:[{StopAction:{Scope:'RuleSet'}}]}]};});
-    t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){const region=await this.config.region(),op=cmd.constructor.name,i=cmd.input,key=region+':'+i.ConfigurationSetName;trace.push({region,op});assert.equal((await this.config.credentials()).accessKeyId,'v5-fixture-customer');
+    t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){const region=await this.config.region(),op=cmd.constructor.name,i=cmd.input,key=region+':'+i.ConfigurationSetName;trace.push({region,op});assert.equal((await this.config.credentials()).accessKeyId,'v5-fixture-customer');await withinSession(this,'ses',cmd,region,account);
       switch(op){
         case 'GetEmailTemplateCommand':case 'TestRenderEmailTemplateCommand':{
           const [s]=JSON.parse((await this.config.credentials()).sessionToken!).Statement;assert.deepEqual(s.Action,['ses:GetEmailTemplate','ses:TestRenderEmailTemplate']);assert.equal(s.Resource,`arn:aws:ses:${region}:${account}:template/bane-pilot`);
@@ -16542,7 +16568,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         default:throw Error('unexpected SES call '+op);
       }
     });
-    t.mock.method(SNSClient.prototype,'send',async function(this:InstanceType<typeof SNSClient>,cmd:any){const region=await this.config.region(),op=cmd.constructor.name,i=cmd.input,arn=i.TopicArn??i.ResourceArn??i.SubscriptionArn?.split(':').slice(0,6).join(':')??`arn:aws:sns:${region}:${account}:${i.Name}`,topic=topics.get(arn);trace.push({region,op});
+    t.mock.method(SNSClient.prototype,'send',async function(this:InstanceType<typeof SNSClient>,cmd:any){const region=await this.config.region(),op=cmd.constructor.name,i=cmd.input,arn=i.TopicArn??i.ResourceArn??i.SubscriptionArn?.split(':').slice(0,6).join(':')??`arn:aws:sns:${region}:${account}:${i.Name}`,topic=topics.get(arn);trace.push({region,op});await withinSession(this,'sns',cmd,region,account);
       switch(op){
         case 'CreateTopicCommand':assert.ok(!topic);assert.equal(JSON.parse(i.Attributes.Policy).Statement.length,1);topics.set(arn,{Tags:i.Tags,Attributes:{...i.Attributes,Owner:account,TopicArn:arn},subs:[]});return {TopicArn:arn};
         case 'GetTopicAttributesCommand':if(denyCleanup)throw denied();if(!topic)throw missing();return {Attributes:topic.Attributes};
@@ -24199,15 +24225,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   });
 
   test('BYO template 6.0: only this connection\'s broker session gets in, and the role reaches mail and nothing account-wide',async()=>{
-    const {load}=await import('js-yaml'),{readFile}=await import('node:fs/promises'),{setupResources}=await import('./src/ses-setup.js');
+    const {setupResources}=await import('./src/ses-setup.js');
     const account='123456789012',platform='009882681002',connection=`conn_${'ab'.repeat(16)}`,wid=`ws_${'cd'.repeat(16)}`,region='eu-west-1';
     const prefix=setupResources(connection,'byo').topicName.slice(0,-9),stack='Nightmail-'+connection.slice(-20);
     assert.match(prefix,/^nightmail-[0-9a-f]{20}$/);
     const params:Record<string,string>={PlatformAccount:platform,'AWS::AccountId':account,ResourcePrefix:prefix,ConnectionId:connection,WorkspaceId:wid,EventsHost:'events.nightmail.dev','AWS::StackName':stack,'AWS::Region':'us-east-2',ExternalId:'external'};
-    const src=await readFile(new URL('./byo-template.yaml',import.meta.url),'utf8');
-    const cfn=load(src.replace(/!Sub '([^']*)'/g,(_,v:string)=>JSON.stringify(v.replace(/\$\{(!?)([^}]+)\}/g,(m,bang:string,k:string)=>bang?'${'+k+'}':params[k]??m)))
-      .replace(/!Ref (?:AccountRequestRegions|ReceivingRegions)\b/g,JSON.stringify([region])).replace(/!Ref '?([A-Za-z:]+)'?/g,(m,k:string)=>k in params?JSON.stringify(params[k]):m)
-      .replace(/!(?:Ref|If|Equals|Not|GetAtt)\b/g,'')) as Json;
+    const cfn=await byoTemplate('byo-template.yaml',params,[region]);
     // Every parameter is plain, so a quick-create link can fill it in; production access requests are on by default.
     for(const [name,p] of Object.entries(cfn.Parameters as Json))assert.equal(p.NoEcho,undefined,name);
     assert.equal(cfn.Parameters.EnableAccountRequests.Default,'true');assert.equal(cfn.Outputs.TemplateVersion.Value,'6.0');
@@ -24280,6 +24303,31 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       ['ses:UntagResource',sets[0]!,{...mine,'aws:TagKeys':['nightmail:installation-id']}],['sns:UntagResource',topic,{...mine,'aws:TagKeys':['nightmail:owner']}],
       ['ses:CreateEmailTemplate',ses+`template/${prefix}-receipt`,tagging]);
     for(const [action,resource,context] of refused)assert.equal(iamAllows(all,action,resource,{'aws:RequestedRegion':region,...context}),false,`${action} ${resource} ${JSON.stringify(context??{})}`);
+  });
+
+  test('BYO contract: every session the code asks for is allowed by every supported role template',async()=>{
+    const {byoSessionStatements}=await import('./src/byo-permissions.js'),{setupResources}=await import('./src/ses-setup.js');
+    const account='123456789012',connection=`conn_${'ab'.repeat(16)}`,region='eu-west-1',claim=randomUUID(),prefix=setupResources(connection,'byo').topicName.slice(0,-9);
+    const params:Record<string,string>={PlatformAccount:'009882681002','AWS::AccountId':account,'AWS::Region':'us-east-2',ResourcePrefix:prefix,ConnectionId:connection,WorkspaceId:`ws_${'cd'.repeat(16)}`,EventsHost:'events.nightmail.dev','AWS::StackName':'Nightmail-'+connection.slice(-20),ExternalId:'external'};
+    // A pattern in a session policy stands for the resources it names: check one of each.
+    const sample=(arn:string)=>arn.replace('identity/?*.??*','identity/example.com').replace(/configuration-set\/(bane|nightmail)-\*$/,'configuration-set/$1-0123456789abcdef0123-transactional');
+    const tags={owner:'nightmail','installation-id':connection,purpose:'domain-identity','domain-claim':claim};
+    const own=Object.fromEntries(Object.entries(tags).map(([k,v])=>['aws:ResourceTag/nightmail:'+k,v])),create={...Object.fromEntries(Object.entries(tags).map(([k,v])=>['aws:RequestTag/nightmail:'+k,v])),'aws:TagKeys':Object.keys(tags).map(k=>'nightmail:'+k)};
+    // The request facts AWS adds: tags of the identity and the request for domain calls, and the subscription endpoint.
+    const context=(action:string,resource:string)=>({'aws:RequestedRegion':region,'ses:ApiVersion':'2','ses:OpenTrackingEnabled':'true','ses:ClickTrackingEnabled':'true',
+      ...(action==='sns:Subscribe'?{'sns:Protocol':'https','sns:Endpoint':'https://events.nightmail.dev/v1/events/ses'}:{}),
+      ...(resource.includes(':identity/')?{...(action==='ses:CreateEmailIdentity'?{}:own),...(['ses:CreateEmailIdentity','ses:TagResource'].includes(action)?create:{})}:{})});
+    const purposes=['scan','provision','cleanup','send','template','quota','verify','read','delete','mailfrom'] as const,templates=await byoTemplates();
+    assert.ok(templates.includes('byo-template.yaml'));
+    let checked=0;
+    for(const file of templates){
+      const role=byoRoleStatements(await byoTemplate(file,params,[region]));
+      for(const purpose of purposes)for(const s of byoSessionStatements(purpose,{region,account,connectionId:connection,domain:'example.com',template:'bane-pilot'}))
+        for(const action of s.Action)for(const resource of [s.Resource].flat().map(sample)){
+          checked++;assert.ok(iamAllows(role,action,resource,context(action,resource)),`${file}: the ${purpose} session's ${action} on ${resource} isn't allowed by the role`);
+        }
+    }
+    assert.ok(checked>=50*templates.length,'Every purpose contributes its calls.');
   });
 
   test('inbound IAM confines receiving storage and BYO sending cannot use another installation\'s identities',async()=>{

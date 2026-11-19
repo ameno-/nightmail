@@ -3,6 +3,7 @@ import { z } from '@hono/zod-openapi';
 import { createHash } from 'node:crypto';
 import { ApiError, denied, id, ModuleLoadError, notFound, type Runtime, type DbExecutor, type JobHandler } from './core.js';
 import { assume, brokerRoleArn, loadStsSdk } from './provider-credentials.js';
+import { byoSessionPolicy } from './byo-permissions.js';
 import { requirePlatformAccount } from './config.js';
 import { awsError, byoFeedbackUrl, loadSetupSdk, provisionJournaledFeedback, readSelectedDomains, removeByoFeedbackResource, scanRegionPage, setupResources, type Inventory, type CandidateIdentity, type JournalEntry, type ScanStage, byoStackName } from './ses-setup.js';
 import { JobDeferred, retryDatabaseFailures } from './jobs.js';
@@ -84,14 +85,7 @@ export async function enrollV5(r:Runtime,wid:string,account:string) {
 async function scoped(r:Runtime,c:V5Connection,region:string,purpose:'scan'|'provision'|'cleanup',verify=false) {
   const account=c.requested_account, role=`arn:aws:iam::${account}:role/${c.stack_name ?? byoStackName('Bane',c.id)}`;
   if (account===requirePlatformAccount(r.config.platformAccount) || !/^\d{12}$/.test(account) || !(region in regionLabels) || (!verify && (c.aws_account_id!==account || c.role_arn!==role))) throw conflict('AWS_ACCOUNT_MISMATCH','The regional role is not bound to this account.');
-  const names=setupResources(c.id,'byo'),ses=`arn:aws:ses:${region}:${account}:`,sets=[names.transactional,names.marketing].map(n=>ses+'configuration-set/'+n),topic=`arn:aws:sns:${region}:${account}:${names.topicName}`;
-  const allow=(Action:string[],Resource:string|string[])=>({Effect:'Allow',Action,Resource,Condition:{StringEquals:{'aws:RequestedRegion':region}}});
-  const Statement=purpose==='cleanup'?[
-    allow(['ses:GetConfigurationSet','ses:GetConfigurationSetEventDestinations','ses:DeleteConfigurationSet'],sets),allow(['sns:GetTopicAttributes','sns:ListTagsForResource','sns:ListSubscriptionsByTopic','sns:GetSubscriptionAttributes','sns:DeleteTopic'],topic)
-  ]:purpose==='scan'?[allow(['ses:GetAccount','ses:ListEmailIdentities','ses:ListConfigurationSets','ses:DescribeActiveReceiptRuleSet'],'*'),allow(['ses:GetEmailIdentity'],ses+'identity/?*.??*'),allow(['ses:GetConfigurationSet'],[...sets,ses+'configuration-set/bane-*',ses+'configuration-set/nightmail-*'])]:[
-    allow(['ses:GetAccount'],'*'),allow(['ses:GetConfigurationSet','ses:CreateConfigurationSet','ses:TagResource','ses:PutConfigurationSetSuppressionOptions','ses:GetConfigurationSetEventDestinations','ses:CreateConfigurationSetEventDestination'],sets),
-    allow(['sns:CreateTopic','sns:TagResource','sns:GetTopicAttributes','sns:ListTagsForResource','sns:SetTopicAttributes','sns:ListSubscriptionsByTopic','sns:GetSubscriptionAttributes','sns:Subscribe'],topic)];
-  const aws=await assume(r,region,role,c.external_id,verify,JSON.stringify({Version:'2012-10-17',Statement}),{connectionId:c.id,purpose});
+  const aws=await assume(r,region,role,c.external_id,verify,byoSessionPolicy(purpose,{region,account,connectionId:c.id}),{connectionId:c.id,purpose});
   // The feedback subscription goes to the one endpoint the role allows (EventsHost).
   return {...r,config:{...r.config,workspaceId:c.workspace_id,aws,awsAccountId:account,sesFeedbackUrl:byoFeedbackUrl(r.config)}};
 }
