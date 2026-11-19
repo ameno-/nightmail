@@ -32,7 +32,7 @@ import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendabi
 import { headerPrefix, requestHeader } from './brand.js';
 import { canonical, idempotencyGate, idempotencyKey, idempotent, IdempotencyHeaders, idempotentRequest, replay, requestHash, validIdempotencyKey, type ClaimState, type IdempotentRequest } from './idempotency.js';
 import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, registerPreviewImages, renderPreview } from './preview-images.js';
-import { actorJson, admission, admitted, charges, duplicateAttachment, type AdmissionMail, type Admitted, type Refused, type Released } from './admission.js';
+import { actorJson, admission, admitted, charges, duplicateAttachment, shadowBilling, type AdmissionMail, type Admitted, type Refused, type Released } from './admission.js';
 import { contentBytes, estimatedMimeBytes, SEND_LIMITS } from './send-limits.js';
 import { RATES } from './billing/money.js';
 
@@ -113,13 +113,21 @@ const CAMPAIGN_SCREEN_NOTE = 'Hosted campaigns are screened copy by copy before 
 const ProtocolBody = z.string().min(1).optional();
 const ProtocolSendInput = SendInput.safeExtend({ html: ProtocolBody, text: ProtocolBody });
 const ReplyAddressId = z.string().min(1).max(120).optional();
-const SingleSendInput = SendInput.safeExtend({ replyAddressId: ReplyAddressId.describe('Track a conversation through this receivable address. Use explicit subject and text/html. Requires unrestricted manage permission; From and Reply-To must belong to the address.'), replyMailboxId: ReplyAddressId.openapi({ deprecated: true, description: 'Legacy spelling of replyAddressId.' }) }).refine(v => !(v.replyAddressId && v.replyMailboxId), { path: ['replyAddressId'], message: 'Supply only one reply address ID.' }).openapi('SendEmailInput');
+// A send at a later time: an RFC 3339 instant with Z or an offset (a local time without one is refused), stored and
+// returned in UTC. The bounds are send_admission's (SEND_LIMITS.schedule), so an exact retry still replays its receipt.
+const ScheduledAt = z.string().datetime({ offset: true }).describe(`Send at this time instead of now: an RFC 3339 instant with Z or an offset, such as 2026-11-20T09:00:00Z; times without an offset are refused, and the time is returned in UTC. From now (up to a minute in the past, which sends at once) to ${SEND_LIMITS.schedule.horizonSeconds / 86_400} days ahead; up to ${SEND_LIMITS.schedule.workspace.toLocaleString('en-US')} scheduled emails may wait per workspace (SCHEDULED_EMAIL_LIMIT_EXCEEDED). The email is stored now and reads status queued with scheduled true until then; cancel it with cancelEmail or move it with rescheduleEmail. Sending limits and the balance apply at that time, not now: an email they refuse then is rejected with their code (email.rejected). Not with replyAddressId.`);
+const SingleSendInput = SendInput.safeExtend({ replyAddressId: ReplyAddressId.describe('Track a conversation through this receivable address. Use explicit subject and text/html. Requires unrestricted manage permission; From and Reply-To must belong to the address.'), replyMailboxId: ReplyAddressId.openapi({ deprecated: true, description: 'Legacy spelling of replyAddressId.' }), scheduledAt: ScheduledAt.optional() })
+  .refine(v => !(v.replyAddressId && v.replyMailboxId), { path: ['replyAddressId'], message: 'Supply only one reply address ID.' })
+  .refine(v => !(v.scheduledAt && (v.replyAddressId || v.replyMailboxId)), { path: ['scheduledAt'], message: 'A tracked conversation send goes now; schedule only untracked sends.' }).openapi('SendEmailInput');
 const BatchInput = z.object({ emails: z.array(SendInput).min(1).max(100) }).strict().openapi('SendEmailBatchInput');
 export const Status = z.enum(['queued', 'attempting', 'accepted', 'sent', 'delivered', 'bounced', 'complained', 'rejected', 'rendering_failed', 'delayed', 'suppressed', 'canceled', 'acceptance_unknown', 'simulated']);
 const UntrustedContent = z.boolean().describe('True for replies and older non-campaign mail of unknown origin: the subject or body may contain received content.');
-const Email = z.object({ untrustedContent: UntrustedContent, id: z.string(), region: z.string(), campaignId: z.string().nullable(), from: z.string(), fromName: z.string().nullable(), kind: z.enum(['transactional', 'marketing']), to: z.array(z.string()), cc: z.array(z.string()), bcc: z.array(z.string()), subject: z.string(), status: Status, providerId: z.string().nullable(), simulated: z.boolean(), attemptStartedAt: z.string().nullable(), errorCode: z.string().nullable(), suppressionReason: SuppressionReason.nullable().optional(), scheduledAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('Email');
+const Email = z.object({ untrustedContent: UntrustedContent, id: z.string(), region: z.string(), campaignId: z.string().nullable(), from: z.string(), fromName: z.string().nullable(), kind: z.enum(['transactional', 'marketing']), to: z.array(z.string()), cc: z.array(z.string()), bcc: z.array(z.string()), subject: z.string(),
+  status: Status.describe('A scheduled email is queued, with scheduled true, until it is sent at scheduledAt.'), providerId: z.string().nullable(), simulated: z.boolean(), attemptStartedAt: z.string().nullable(), errorCode: z.string().nullable(), suppressionReason: SuppressionReason.nullable().optional(),
+  scheduled: z.boolean().describe('True while a scheduled send waits for scheduledAt: it has not started sending, and cancelEmail or rescheduleEmail still apply. At that time it is admitted like a send made then (limits and balance included) and follows the usual lifecycle, or is rejected with the refusal\u2019s code.'),
+  scheduledAt: z.string().nullable().describe('When a scheduled send goes (UTC). Also set while queued mail waits to be retried.'), createdAt: z.string().describe('When the email was submitted; a scheduled send\u2019s moves to the moment it was released at its time.'), updatedAt: z.string() }).openapi('Email');
 const Receipt = z.object({ id: z.string(), status: z.literal('queued'), simulated: z.boolean() }).openapi('EmailQueued');
-const SingleReceipt = z.object({ ...Receipt.shape, inboundMessageId: z.string().optional(), mailboxMessageId: z.string().optional().openapi({ deprecated: true, description: 'Legacy alias for inboundMessageId.' }), threadId: z.string().optional() }).describe('For tracked sends, id is the transactional receipt, inboundMessageId identifies the stored message, and threadId identifies its conversation.').openapi('SingleEmailQueued');
+const SingleReceipt = z.object({ ...Receipt.shape, scheduledAt: z.string().optional().describe('A scheduled send: when it goes (UTC).'), inboundMessageId: z.string().optional(), mailboxMessageId: z.string().optional().openapi({ deprecated: true, description: 'Legacy alias for inboundMessageId.' }), threadId: z.string().optional() }).describe('For tracked sends, id is the transactional receipt, inboundMessageId identifies the stored message, and threadId identifies its conversation.').openapi('SingleEmailQueued');
 const BatchReceipt = z.object({ data: z.array(Receipt) }).openapi('EmailBatchQueued');
 const Event = z.object({ id: z.string(), emailId: z.string(), type: z.string(), providerId: z.string().nullable(), simulated: z.boolean(), createdAt: z.string(), data: SuppressionEventData }).openapi('EmailEvent');
 const EmailContent = z.object({ untrustedContent: UntrustedContent, subject: z.string(), html: z.string().nullable(), text: z.string().nullable(), raw: z.string().nullable(), attachments: z.array(z.string()), render: z.enum(['direct', 'ses', 'simulated']), templateName: z.string().nullable(), simulated: z.boolean() }).openapi('EmailContent');
@@ -211,7 +219,9 @@ export async function campaignStats(db: DbExecutor, a: Pick<Actor, 'workspaceId'
 const CampaignState = Campaign.pick({ id: true, revision: true, updatedAt: true, state: true, scheduledAt: true, archivedAt: true }).describe('Compact state for draft sync polling. Compare all fields, not only revision: archival and delivery state can change without a new draft revision. Fetch the full campaign when state changes. No draft content or delivery counts.').openapi('CampaignState');
 const CampaignDraftSummary = CampaignDraftView.pick({ name: true, region: true, from: true, fromName: true, subject: true, previewText: true }).extend({ audience: AudienceSpec.pick({ listId: true, segmentId: true }).partial({ listId: true }).default({}) }).strict().openapi('CampaignDraftSummary');
 const CampaignSummary = Campaign.omit({ draft: true }).extend({ draft: CampaignDraftSummary }).describe('Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted.').openapi('CampaignSummary');
-const EmailQuery = PageQuery.extend({ campaignId: z.string().max(120).optional(), status: Status.optional(), region: Region.optional(), kind: z.enum(['transactional', 'marketing']).optional(), search: z.string().trim().min(1).max(200).optional().describe('Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID.'), from: z.string().datetime({ offset: true }).optional(), to: z.string().datetime({ offset: true }).optional() }).refine(q => !q.from || !q.to || Date.parse(q.from) < Date.parse(q.to), 'from must precede to.').describe('Newest created emails first, with an opaque cursor bound to the filters. Date range is createdAt >= from and < to. Search is literal and case-insensitive across sender address, To/Cc/Bcc recipients, subject and email/campaign/provider IDs. Use status, region, kind and creation-date filters for those fields; error codes, simulation state and timestamps are not free-text fields.').openapi('ListEmailsQuery');
+// The filters' statuses: the published ones, and scheduled for sends still waiting (they read queued, with scheduled true).
+export const EmailStatusFilter = z.enum([...Status.options, 'scheduled']);
+const EmailQuery = PageQuery.extend({ campaignId: z.string().max(120).optional(), status: EmailStatusFilter.optional().describe('scheduled lists sends waiting for their time; queued includes them.'), region: Region.optional(), kind: z.enum(['transactional', 'marketing']).optional(), search: z.string().trim().min(1).max(200).optional().describe('Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID.'), from: z.string().datetime({ offset: true }).optional(), to: z.string().datetime({ offset: true }).optional() }).refine(q => !q.from || !q.to || Date.parse(q.from) < Date.parse(q.to), 'from must precede to.').describe('Newest created emails first, with an opaque cursor bound to the filters. Date range is createdAt >= from and < to. Search is literal and case-insensitive across sender address, To/Cc/Bcc recipients, subject and email/campaign/provider IDs. Use status, region, kind and creation-date filters for those fields; error codes, simulation state and timestamps are not free-text fields.').openapi('ListEmailsQuery');
 const CampaignQuery = PageQuery.extend({ region: Region.optional(), state: CampaignStateValue.optional(), archived: z.enum(['true', 'false']).default('false').describe('False lists active campaigns; true lists archived campaigns only.'), search: z.string().trim().min(1).max(200).optional() }).describe('Newest created campaigns first, excluding archived campaigns by default, with an opaque cursor bound to the filters. Search is literal, case-insensitive name, subject or ID text.').openapi('ListCampaignsQuery');
 const AudienceCounts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int() }).describe('Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed or unsubscribed remainder. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.').openapi('CampaignAudienceCounts');
 
@@ -240,7 +250,10 @@ const emailColumns = {
   providerId: emails.providerId, simulated: emails.simulated, attemptStartedAt: emails.attemptStartedAt,
   errorCode: emails.errorCode, suppressionReason: emails.suppressionReason, scheduledAt: emails.scheduledAt, createdAt: emails.createdAt, updatedAt: emails.updatedAt,
 };
-function emailView(row: z.input<typeof Email>) { return Email.parse(row); }
+// A waiting scheduled send reads queued with scheduled true: Email's status keeps its published values.
+function emailView(row: Omit<z.input<typeof Email>, 'status' | 'scheduled'> & { status: EmailStatus }) {
+  return Email.parse({ ...row, status: row.status === 'scheduled' ? 'queued' : row.status, scheduled: row.status === 'scheduled' });
+}
 // Subjects can carry unsubscribe capability tokens; like getEmailDetail and getEmailContent, only manage callers read them.
 export function listedSubject<T extends { subject: string }>(a: Pick<Actor, 'permissions'>, row: T): T { return a.permissions.includes('manage') ? row : { ...row, subject: redactCapabilityText(row.subject) }; }
 // Draft sync polling reads only state columns, without materializing drafts or aggregating email counts.
@@ -736,6 +749,73 @@ const actorAssets = (a: Actor, ids: string[], conversation = false) => visibleAs
   domains: sql`${JSON.stringify(a.domains)}::jsonb`, mailboxAccess: sql`${conversation || actorMailAccess(a) !== null}::boolean` });
 const nulAttachment = () => new ApiError(422, 'VALIDATION_FAILED', 'Request fields are invalid: text cannot contain the NUL character (U+0000).');
 
+// ── Scheduled single sends (sendEmail scheduledAt) ──
+// A scheduled email is a sending_emails row in status scheduled, which the dispatcher never leases, plus one release job
+// keyed by the email (like a campaign's run). Rescheduling requeues that job with a fresh run token, which the runner
+// fences its settlement on, so a worker that already decided to wait for the old time can't hold back an earlier one.
+const releaseJobId = (emailId: string) => `release:${emailId}`;
+/** Releases the emails `rows` yields (workspace_id, id) at `at`, or moves their waiting release there. */
+const queueRelease = (rows: SQL, at: string) => sql`INSERT INTO jobs(id,type,workspace_id,payload,available_at)
+  SELECT 'release:'||r.id,'sending.release',r.workspace_id,jsonb_build_object('emailId',r.id,'run',${id('run')}::text),${at}::timestamptz FROM (${rows}) r
+  ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,payload=excluded.payload,available_at=excluded.available_at,lease_until=NULL,last_error=NULL RETURNING 1`;
+const scheduledEvent = (rows: SQL, type: 'scheduled' | 'rescheduled', at: string, simulated: boolean) => sql`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,data)
+  SELECT 'event_'||replace(gen_random_uuid()::text,'-',''),r.workspace_id,r.id,${type},${simulated},jsonb_build_object('scheduledAt',${at}::text) FROM (${rows}) r RETURNING 1`;
+/** A send time within the schedule's bounds (the same as send_admission's), in UTC. */
+function scheduleTime(value: string) {
+  const at = Date.parse(value), now = Date.now(), { skewSeconds, horizonSeconds } = SEND_LIMITS.schedule;
+  if (!(at >= now - skewSeconds * 1000 && at <= now + horizonSeconds * 1000)) throw new ApiError(422, 'INVALID_SCHEDULE', `Schedule between now and ${horizonSeconds / 86_400} days from now.`, 'scheduledAt');
+  return new Date(at).toISOString();
+}
+// Refusals that pass on their own within minutes (the dispatch queue is full, Hosted setup is finishing): a scheduled
+// send retries them every 30 seconds for up to 15 minutes past its time, then is rejected like any other refusal.
+const RELEASE_WAITS = new Set(['PENDING_EMAIL_LIMIT_EXCEEDED', 'TENANT_NOT_READY']);
+const RELEASE_GRACE_MS = 15 * 60_000, RELEASE_RETRY_MS = 30_000;
+/**
+ * The release job: at its time, a scheduled email is admitted by send_admission as a send made then, under its row lock:
+ * standing and holds, the Hosted daily limit, the balance, the dispatch queue, and its region and binding resolved again.
+ * Admitted, it moves scheduled -> queued with created_at now (so the hour it is charged and billed in is this one, as an
+ * immediate send's) for the dispatcher. Refused, it is rejected with the refusal's code: a reject event and
+ * email.rejected, nothing charged. Canceled or already released meanwhile: nothing to do; moved later: it waits.
+ * One transaction: a crash before its commit leaves the email scheduled for the job's next attempt, after it leaves
+ * nothing to redo, and the dispatcher's claim (queued -> attempting) sends it once.
+ */
+const releaseScheduled: JobHandler = retryDatabaseFailures(async (runtime, payload, job) => {
+  const emailId = String(payload.emailId), wid = job.workspaceId;
+  const outcome = await runtime.db.transaction(async tx => {
+    // Its time by the database's clock, which the job runner's claim also reads.
+    const [row] = await tx.select({ status: emails.status, scheduledAt: emails.scheduledAt, actorKeyId: emails.actorKeyId, from: emails.from, snapshot: emails.snapshot,
+      early: sql<boolean>`${emails.scheduledAt} > clock_timestamp()`, waits: sql<boolean>`${emails.scheduledAt} + make_interval(secs => ${RELEASE_GRACE_MS / 1000}) > clock_timestamp()` })
+      .from(emails).where(and(eq(emails.workspaceId, wid), eq(emails.id, emailId))).for('update');
+    if (row?.status !== 'scheduled') return null;
+    if (row.early) throw new JobDeferred(row.scheduledAt!);
+    const s = row.snapshot, files = [...new Set(s.attachments)], marketing = s.kind === 'marketing' || !!s.bulk;
+    const mail: AdmissionMail = { host: row.from.split('@')[1]!.toLowerCase(), region: s.requestedRegion, kind: s.kind, attachments: files, bodyBytes: contentBytes(s) };
+    // Its sender's authority is the dispatcher's to recheck at the claim, as for any queued mail.
+    const decision = await admission(runtime, wid, actorJson({ keyId: row.actorKeyId, domains: [] }), { stage: 'send', locks: 'take', mails: [mail],
+      ...charges(runtime, [{ recipients: hostedCost(s.to, s.cc, s.bcc), marketing }]) }, undefined, sql`${JSON.stringify(files)}::jsonb`);
+    const d = (await tx.execute<{ s: Admitted | Refused }>(sql`SELECT ${decision} AS s`)).rows[0]!.s;
+    shadowBilling(d.billing, wid);
+    if (d.allowed) {
+      const route = d.mails[0]!;
+      await tx.execute(sql`UPDATE sending_emails SET status='queued',region=${route.region},created_at=clock_timestamp(),updated_at=clock_timestamp(),
+        snapshot=(snapshot-'binding')||jsonb_build_object('region',${route.region}::text)${route.binding ? sql`||jsonb_build_object('binding',${JSON.stringify(route.binding)}::jsonb)` : sql``}
+        WHERE workspace_id=${wid} AND id=${emailId} AND status='scheduled'`);
+      return { route, priority: !marketing };
+    }
+    if (RELEASE_WAITS.has(d.code) && row.waits) throw new JobDeferred(new Date(Date.now() + RELEASE_RETRY_MS).toISOString());
+    const { rows: [rejected] } = await tx.execute<{ n: number }>(sql`WITH rejected AS (UPDATE sending_emails SET status='rejected',error_code=${d.code},updated_at=clock_timestamp()
+        WHERE workspace_id=${wid} AND id=${emailId} AND status='scheduled' RETURNING ${terminalColumns}
+      ), ${terminalEvents(sql`SELECT * FROM rejected`, sql`'{"providerCalled":false}'::jsonb`)} SELECT count(*)::int AS n FROM webhook_jobs`);
+    log('warn', { code: 'SCHEDULED_EMAIL_REFUSED', workspaceId: wid, emailId, refusal: d.code, jobId: job.id });
+    return { webhooks: rejected!.n };
+  });
+  if (outcome?.route) {
+    const { route, priority } = outcome;
+    try { await runtime.dispatch?.(route.region, route.connection?.aws_account_id, 1, route.connection?.kind, priority); }
+    catch { log('warn', { code: 'DISPATCH_WAKE_FAILED', jobId: job.id, message: 'Released mail is durable; the dispatcher polls and the scheduler pings it.' }); }
+  } else if (outcome?.webhooks) await wakeWebhooks(runtime, outcome.webhooks);
+});
+
 /** One message of a send, as built before admission: what TypeScript alone found wrong with it waits in `invalid`. */
 type Outgoing = { snapshot: EmailSnapshot; recipients: number; marketing: boolean; template?: SendRequest['template']; token?: { hash: string; email: string }; duplicate?: boolean; invalid?: unknown; oversize?: ApiError };
 /** A direct send's messages, built and checked without the database: URLs, headers, duplicates and the batch's size. */
@@ -768,7 +848,7 @@ const sendCall = (c: Ctx): SendCall => ({ runtime: c.env, ...idempotentRequest(c
 // used is null for an uncharged duplicate of a request that still holds its key.
 type Principal = { id:string;workspace_id:string;permissions:Actor['permissions'];domains:string[];used:number|null;max_requests:number };
 type Identity = { credential: SQL; authorize: (key: Principal) => Actor } | { actor: Actor };
-type SendReceipt = { id: string; status: 'queued'; simulated: boolean };
+type SendReceipt = { id: string; status: 'queued'; simulated: boolean; scheduledAt?: string };
 const admissionMails = (out: Outgoing[]): AdmissionMail[] => out.map(({ snapshot: s, duplicate, invalid, oversize }) => ({ host: s.from.split('@')[1]!.toLowerCase(), region: s.region || undefined,
   kind: s.kind, attachments: [...new Set(s.attachments)], bodyBytes: contentBytes(s), duplicate: !!duplicate, invalid: !!invalid, oversize: !!oversize }));
 
@@ -779,8 +859,10 @@ const admissionMails = (out: Outgoing[]): AdmissionMail[] => out.map(({ snapshot
  * through claimedSend);
  * the screen's measure runs here too, and the decision refuses it only for mail the screen would read.
  */
-async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identity: Identity, options: { batch: boolean; campaign?: { id: string; revision: number } }): Promise<SendReceipt | { data: SendReceipt[] }> {
-  const runtime = call.runtime, cfg = runtime.config, sim = isSimulatedSes(runtime), key = call.key, batch = options.batch;
+async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identity: Identity, options: { batch: boolean; campaign?: { id: string; revision: number }; scheduledAt?: string }): Promise<SendReceipt | { data: SendReceipt[] }> {
+  const runtime = call.runtime, cfg = runtime.config, sim = isSimulatedSes(runtime), key = call.key, batch = options.batch, at = options.scheduledAt;
+  // A scheduled send keeps the region it asked for, if any: its release resolves the sender's region again.
+  if (at) for (const m of out) if (m.snapshot.region) m.snapshot.requestedRegion = m.snapshot.region;
   let expanded = 0;
   for (const [i, m] of out.entries()) {
     if (cfg.screen && !sim && cfg.hostedScreen) m.oversize = await screenRefusal(runtime, m.snapshot, batch ? i : undefined);
@@ -788,7 +870,7 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
     if (batch && expanded > SENDING_LIMITS.expandedCampaignBytes) m.invalid ??= new ApiError(413, 'BATCH_CONTENT_TOO_LARGE', `Expanded batch content exceeds the ${SENDING_LIMITS.expandedCampaignBytes / 1024 / 1024} MiB limit. Submit smaller batches.`);
   }
   const hash = key === undefined ? null : await requestHash(body);
-  const data = out.map(() => ({ id: id('email'), status: 'queued' as const, simulated: sim })), receipt = batch ? { data } : data[0]!;
+  const data = out.map(() => ({ id: id('email'), status: 'queued' as const, simulated: sim, ...(at ? { scheduledAt: at } : {}) })), receipt = batch ? { data } : data[0]!;
   const rows = out.map((m, ord) => ({ ord, id: data[ord]!.id, snapshot: m.snapshot, hash: m.token?.hash, email: m.token?.email }));
   const ids = [...new Set(out.flatMap(m => m.snapshot.attachments))];
   const principal = 'credential' in identity ? sql`SELECT k.*,b.used FROM credential k LEFT JOIN budget b ON true` : sql`SELECT ${identity.actor.keyId}::text AS id,${identity.actor.workspaceId}::text AS workspace_id,
@@ -796,16 +878,18 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
   const assets = visibleAssets(ids, 'credential' in identity
     ? { workspace: sql`k.workspace_id`, uploader: sql`k.id`, domains: sql`k.domains`, mailboxAccess: sql`k.permissions ? 'manage'` }
     : { workspace: sql`k.workspace_id`, uploader: sql`${identity.actor.tokenId ?? identity.actor.keyId}::text`, domains: sql`k.domains`, mailboxAccess: sql`${actorMailAccess(identity.actor) !== null}::boolean` });
+  // A scheduled send is charged nothing now: its release admits it as a send at its time (releaseScheduled).
   const decision = await admission(runtime, sql`k.workspace_id`, sql`jsonb_build_object('id',k.id,'domains',k.domains)`, { stage: 'send', locks: 'take', mails: admissionMails(out),
-    ...charges(runtime, out), ...(key !== undefined ? { claim: { path: call.path, key, hash: hash!, receipt } } : {}), ...(options.campaign ? { campaign: options.campaign } : {}) }, undefined, assets);
+    ...(at ? { cost: 0, marketing: 0, billable: 0, scheduledAt: at } : charges(runtime, out)), ...(key !== undefined ? { claim: { path: call.path, key, hash: hash!, receipt } } : {}), ...(options.campaign ? { campaign: options.campaign } : {}) }, undefined, assets);
   const { rows: [result] } = await (call.db ?? runtime.db).execute<Principal & { s: Admitted | Refused | ClaimState | null }>(sql`WITH ${'credential' in identity ? sql`${identity.credential},` : sql``} state AS MATERIALIZED (
     SELECT k.*, CASE WHEN k.used IS NULL THEN jsonb_build_object('previous',NULL,'busy',true) WHEN k.used<=k.max_requests AND k.permissions ?| ARRAY['manage','send'] THEN ${decision} END s FROM (${principal}) k
   ), submitted AS MATERIALIZED (SELECT k.workspace_id,k.id AS actor_id,m.id,m.hash,m.email,
       m.snapshot||jsonb_build_object('region',x->>'region')||CASE WHEN jsonb_typeof(x->'binding')='object' THEN jsonb_build_object('binding',x->'binding') ELSE '{}' END AS snapshot
     FROM state k,jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) m(ord int,id text,hash text,email text,snapshot jsonb) CROSS JOIN LATERAL (SELECT k.s->'mails'->m.ord AS x) r
     WHERE k.s->>'allowed'='true'
-  ), inserted AS (INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
-    SELECT id,workspace_id,actor_id,snapshot->>'region',snapshot->>'from',snapshot->'to',snapshot->'cc',snapshot->'bcc',snapshot->>'subject',snapshot,${sim} FROM submitted),
+  ), inserted AS (INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,scheduled_at)
+    SELECT id,workspace_id,actor_id,snapshot->>'region',snapshot->>'from',snapshot->'to',snapshot->'cc',snapshot->'bcc',snapshot->>'subject',snapshot,${sim},${at ? 'scheduled' : 'queued'},${at ?? null}::timestamptz FROM submitted),
+  ${at ? sql`scheduled AS (${scheduledEvent(sql`SELECT workspace_id,id FROM submitted`, 'scheduled', at, sim)}), release AS (${queueRelease(sql`SELECT workspace_id,id FROM submitted`, at)}),` : sql``}
   links AS (INSERT INTO sending_attachment_links(workspace_id,attachment_id,owner_type,owner_id) SELECT workspace_id,a,'email',id FROM submitted,jsonb_array_elements_text(snapshot->'attachments') a),
   tokens AS (INSERT INTO operation_unsubscribe_tokens(workspace_id,token_hash,email) SELECT workspace_id,hash,email FROM submitted WHERE hash IS NOT NULL)
   SELECT id,workspace_id,permissions,domains,used,max_requests,s FROM state`);
@@ -815,6 +899,8 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
   // The statement's claim is idempotency_claim: the one replay rule answers a key it did not get.
   if ('previous' in state) return replay<typeof receipt>(state, hash!);
   const decided = admitted(runtime, state as Admitted | Refused, a.workspaceId, { batch, invalid: i => out[i]!.invalid, oversize: i => out[i]!.oversize });
+  // Its release job wakes the dispatcher at its time; one due within a minute needs the scheduler awake now to follow it.
+  if (at) { if (Date.parse(at) - Date.now() < 60_000) a.wakeJobs = Math.max(a.wakeJobs ?? 0, 1); return receipt; }
   for (const [i, m] of out.entries()) {
     const route = decided.mails[i]!;
     if (route.connection) a.dispatchAccount = { aws_account_id: route.connection.aws_account_id, kind: route.connection.kind };
@@ -829,9 +915,9 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
  * email and released only if nothing was written (idempotent's prepare). No send lock is held while it renders: the
  * transaction runs the one admission statement after the work.
  */
-async function claimedSend(call: SendCall, a: Actor, body: unknown, work: () => Promise<{ out: Outgoing[]; campaign?: { id: string; revision: number } }>, options: { batch: boolean; replayed?: (db: DbExecutor, receipt: SendReceipt) => Promise<void> }) {
+async function claimedSend(call: SendCall, a: Actor, body: unknown, work: () => Promise<{ out: Outgoing[]; campaign?: { id: string; revision: number } }>, options: { batch: boolean; scheduledAt?: string; replayed?: (db: DbExecutor, receipt: SendReceipt) => Promise<void> }) {
   let prepared: Awaited<ReturnType<typeof work>> | undefined;
-  const admit = (db?: DbExecutor) => admitSends({ ...call, key: undefined, db }, body, prepared!.out, { actor: a }, { batch: options.batch, campaign: prepared!.campaign });
+  const admit = (db?: DbExecutor) => admitSends({ ...call, key: undefined, db }, body, prepared!.out, { actor: a }, { batch: options.batch, campaign: prepared!.campaign, scheduledAt: options.scheduledAt });
   if (call.key === undefined) { prepared = await work(); return admit(); }
   return idempotent<SendReceipt | { data: SendReceipt[] }>(call.runtime.db, { path: call.path, key: call.key, workspaceId: a.workspaceId, actorKeyId: a.keyId }, body, admit,
     { prepare: async () => { prepared = await work(); }, replayed: options.replayed && ((db, receipt) => 'id' in receipt ? options.replayed!(db, receipt) : Promise.resolve()) });
@@ -849,10 +935,10 @@ async function renderTemplates(runtime: Runtime, a: Actor, out: Outgoing[], batc
   }
 }
 /** POST /v1/emails/send and /batch after authentication, the dashboard's test email and the platform's notices. */
-async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emails: SendRequest[] }) {
+async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emails: SendRequest[] }, scheduledAt?: string) {
   const batch = 'emails' in input, mails = batch ? input.emails : [input], out = await directMessages(call.runtime, mails, batch);
-  if (!out.some(m => m.template)) return admitSends(call, input, out, { actor: a }, { batch });
-  return claimedSend(call, a, input, async () => { await renderTemplates(call.runtime, a, out, batch); return { out }; }, { batch });
+  if (!out.some(m => m.template)) return admitSends(call, input, out, { actor: a }, { batch, scheduledAt });
+  return claimedSend(call, a, input, async () => { await renderTemplates(call.runtime, a, out, batch); return { out }; }, { batch, scheduledAt });
 }
 // Auth middleware calls this only for ordinary bearer keys, after the request size gate. Malformed inputs, mailbox
 // tracking and provider-rendered templates keep their normal authenticated handler (including error ordering).
@@ -863,7 +949,7 @@ export async function tryAtomicKeyAdmission(c:Ctx,credentialCtes:(charge?:SQL)=>
   const parsed=batch?BatchInput.safeParse(body):SingleSendInput.safeParse(body);
   if(!parsed.success)return;
   const input=parsed.data,mails='emails' in input?input.emails:[input];
-  if(('replyAddressId' in input && input.replyAddressId)||('replyMailboxId' in input && input.replyMailboxId)||mails.some(m=>m.template || m.attachments.some(a=>a.includes('\0'))))return;
+  if(('replyAddressId' in input && input.replyAddressId)||('replyMailboxId' in input && input.replyMailboxId)||('scheduledAt' in input && input.scheduledAt)||mails.some(m=>m.template || m.attachments.some(a=>a.includes('\0'))))return;
   const key=c.req.header('Idempotency-Key');if(key!==undefined && !validIdempotencyKey(key))return;
   if(batch && mails.reduce((n,m)=>n+(m.html?.length??0)+(m.text?.length??0),0)>2*1024*1024)return;
   // The statement authenticates the key and answers 401, 429 and 403 before any admission answer. A duplicate of a
@@ -1056,8 +1142,8 @@ export function registerSending(app: App) {
       if(input.attachments.length)await finishMailboxArchive(c.env,a.workspaceId,result.mailboxMessageId);
       return c.json(SingleReceipt.parse({ ...result, inboundMessageId: result.mailboxMessageId }), 202);
     }
-    const result = await admitEmails(sendCall(c), a, input);
-    return c.json(Receipt.parse(result), 202);
+    const result = await admitEmails(sendCall(c), a, input, input.scheduledAt && new Date(Date.parse(input.scheduledAt)).toISOString());
+    return c.json(SingleReceipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/emails/batch', operationId: 'sendEmailBatch', description: SCREEN_LIMIT_NOTE, tags: ['Emails'], security, request: { headers: IdempotencyHeaders, body: json(BatchInput) }, responses: { 202: response(BatchReceipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
@@ -1092,7 +1178,7 @@ export function registerSending(app: App) {
     const search = q.search ? literalSearch(q.search) : null;
     const rows = await c.env.db.select(emailColumns).from(emails).where(and(mailWhere(a),
       cursor ? sql`(${emails.createdAt}, ${emails.id}) < (${cursor.at}::timestamptz, ${cursor.id})` : undefined,
-      q.campaignId ? eq(emails.campaignId, q.campaignId) : undefined, q.status ? eq(emails.status, q.status) : undefined,
+      q.campaignId ? eq(emails.campaignId, q.campaignId) : undefined, q.status === 'queued' ? inArray(emails.status, ['queued', 'scheduled']) : q.status ? eq(emails.status, q.status) : undefined,
       q.region ? eq(emails.region, q.region) : undefined, q.kind ? sql`${emails.snapshot}->>'kind' = ${q.kind}` : undefined,
       q.from ? gte(emails.createdAt, q.from) : undefined, q.to ? lt(emails.createdAt, q.to) : undefined,
       search ? sql`sending_log_text(${emails.id},${emails.campaignId},${emails.providerId},${emails.from},${emails.subject},${emails.to} || ${emails.cc} || ${emails.bcc}) ILIKE ${search}` : undefined,
@@ -1130,6 +1216,43 @@ export function registerSending(app: App) {
     const a = actor(c); const emailId = c.req.valid('param').id; await findEmail(c.env.db, a, emailId); const q = c.req.valid('query'), binding = `email-events:${emailId}`, cursor = readCursor(q.cursor, binding);
     const rows = await c.env.db.select().from(emailEvents).where(and(scope(emailEvents, a), eq(emailEvents.emailId, emailId), cursor ? sql`(${emailEvents.createdAt},${emailEvents.id})>(${cursor.at}::timestamptz,${cursor.id})` : undefined)).orderBy(asc(emailEvents.createdAt), asc(emailEvents.id)).limit(q.limit + 1);
     return c.json({ data: rows.slice(0, q.limit).map(r => visibleEmailEvent(a,r)), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
+  });
+  // A scheduled send can be canceled or moved until its release at scheduledAt starts sending it (releaseScheduled holds
+  // the same row lock): after that, 409 EMAIL_NOT_SCHEDULED.
+  const notScheduled = () => new ApiError(409, 'EMAIL_NOT_SCHEDULED', 'Only a scheduled email that has not started sending can be canceled or rescheduled.');
+  const scheduledControl = async (c: Ctx, change: (tx: DbExecutor, a: Actor, emailId: string, row: { status: EmailStatus; simulated: boolean }) => Promise<number>) => {
+    const a = actor(c, 'send'), emailId = c.req.param('id')!;
+    const webhooks = await c.env.db.transaction(async tx => {
+      const [row] = await tx.select({ status: emails.status, simulated: emails.simulated }).from(emails).where(mailWhere(a, emailId)).for('update');
+      return change(tx, a, emailId, row ?? notFound('Email'));
+    });
+    await wakeWebhooks(c.env, webhooks);
+    const [row] = await c.env.db.select(emailColumns).from(emails).where(mailWhere(a, emailId)).limit(1);
+    return c.json(emailView(listedSubject(a, row ?? notFound('Email'))), 200);
+  };
+  app.openapi(createRoute({ method: 'post', path: '/v1/emails/{id}/cancel', operationId: 'cancelEmail', summary: 'Cancel a scheduled email',
+    description: 'Cancel an email scheduled with sendEmail scheduledAt before it starts sending: it becomes canceled (errorCode EMAIL_CANCELED) with a canceled event and the email.rejected webhook, and is never sent or charged. Canceling a canceled email returns it unchanged. Once its time has come and it was released to send, 409 EMAIL_NOT_SCHEDULED.',
+    tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(Email), ...errors } }), async c => scheduledControl(c, async (tx, a, emailId, row) => {
+    if (row.status === 'canceled') return 0;
+    if (row.status !== 'scheduled') throw notScheduled();
+    const { rows: [canceled] } = await tx.execute<{ n: number }>(sql`WITH canceled AS (UPDATE sending_emails SET status='canceled',error_code='EMAIL_CANCELED',updated_at=clock_timestamp()
+        WHERE workspace_id=${a.workspaceId} AND id=${emailId} AND status='scheduled' RETURNING ${terminalColumns}
+      ), ${terminalEvents(sql`SELECT * FROM canceled`)}, retired AS (UPDATE jobs SET status='completed',lease_until=NULL,last_error='EMAIL_CANCELED' WHERE id=${releaseJobId(emailId)} AND status='pending' RETURNING 1)
+      SELECT count(*)::int AS n FROM webhook_jobs`);
+    return canceled!.n;
+  }));
+  app.openapi(createRoute({ method: 'post', path: '/v1/emails/{id}/reschedule', operationId: 'rescheduleEmail', summary: 'Move a scheduled email to another time',
+    description: 'Change when an email scheduled with sendEmail scheduledAt is sent, before it starts sending; its content and recipients stay as they are. The same bounds as scheduling: from now to 30 days ahead, as a UTC instant (422 INVALID_SCHEDULE). Records a rescheduled event. Once its time has come and it was released to send, or after it was canceled, 409 EMAIL_NOT_SCHEDULED.',
+    tags: ['Emails'], security, request: { params: IdParams, body: json(z.object({ scheduledAt: ScheduledAt.describe('The new send time: an RFC 3339 instant with Z or an offset, returned in UTC.') }).strict().openapi('EmailRescheduleInput')) },
+    responses: { 200: response(Email), ...errors } }), async c => {
+    const at = scheduleTime(c.req.valid('json').scheduledAt);
+    return scheduledControl(c, async (tx, a, emailId, row) => {
+      if (row.status !== 'scheduled') throw notScheduled();
+      await tx.execute(sql`WITH moved AS (UPDATE sending_emails SET scheduled_at=${at}::timestamptz,updated_at=clock_timestamp() WHERE workspace_id=${a.workspaceId} AND id=${emailId} AND status='scheduled' RETURNING workspace_id,id),
+        noted AS (${scheduledEvent(sql`SELECT workspace_id,id FROM moved`, 'rescheduled', at, row.simulated)}) ${queueRelease(sql`SELECT workspace_id,id FROM moved`, at)}`);
+      if (Date.parse(at) - Date.now() < 60_000) a.wakeJobs = Math.max(a.wakeJobs ?? 0, 1);
+      return 0;
+    });
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/attachments', operationId: 'uploadAttachment', tags: ['Attachments'], security, request: { headers: IdempotencyHeaders, body: json(AttachmentUpload) }, responses: { 201: response(AttachmentInfo), ...errors } }), async c => {
     const a = actor(c, 'send'); const { content, ...metadata } = c.req.valid('json');
@@ -1534,7 +1657,7 @@ export async function verifiedAttachment(runtime: Runtime, row: typeof attachmen
 export const statusForEvent: Record<string, EmailStatus> = { send: 'sent', delivery: 'delivered', bounce: 'bounced', non_permanent_bounce: 'delayed', validation_suppressed: 'suppressed', complaint: 'complained', complaint_feedback: 'accepted', reject: 'rejected', rendering_failure: 'rendering_failed', delivery_delay: 'delayed', accepted: 'accepted', suppressed: 'suppressed', acceptance_unknown: 'acceptance_unknown', simulated: 'simulated' };
 // Publish email.sent from the SendEmail response; a later SES Send is status feedback only.
 export const publicEventType: Record<string, string> = { accepted: 'email.sent', delivery: 'email.delivered', bounce: 'email.bounced', non_permanent_bounce: 'email.bounced', validation_suppressed: 'email.bounced', complaint: 'email.complained', reject: 'email.rejected', acceptance_unknown: 'email.rejected', rendering_failure: 'email.rendering_failed', delivery_delay: 'email.delivery_delayed', open: 'email.opened', click: 'email.clicked' };
-export const rank: Record<EmailStatus, number> = { queued: 0, attempting: 1, acceptance_unknown: 2, accepted: 3, sent: 4, delayed: 4, suppressed: 5, delivered: 6, bounced: 7, complained: 8, rejected: 7, rendering_failed: 7, canceled: 7, simulated: 7 };
+export const rank: Record<EmailStatus, number> = { scheduled: 0, queued: 0, attempting: 1, acceptance_unknown: 2, accepted: 3, sent: 4, delayed: 4, suppressed: 5, delivered: 6, bounced: 7, complained: 8, rejected: 7, rendering_failed: 7, canceled: 7, simulated: 7 };
 type EmailEventInput = { workspaceId: string; type: string; providerId?: string; errorCode?: string; data?: Record<string, unknown>; recipientHashes?: string[]; externalId?: string; createdAt?: string; receipt?: { topicArn: string; messageId: string } };
 type IncomingReceipt = { topicArn: string; messageId: string; region: string; payload: Record<string, unknown>; recoveryType?: 'operation.ses' | 'operation.simulatedFeedbackRecovery' };
 export async function recordEmailEvent(runtime: Runtime, input: EmailEventInput & { emailId: string }) {
@@ -2361,7 +2484,7 @@ const runCampaign: JobHandler = async (runtime, payload, job) => {
 // Pre-migration email.dispatch job rows complete as no-ops: sending_emails.status drives the dispatcher (src/dispatcher.ts).
 const retiredDispatchJob: JobHandler = async () => {};
 // Job rows of the previous release's prepare/expand/finish chain continue as runs of the same campaign.
-export const jobHandlers: Record<string, JobHandler> = { 'sending.cancelPage':cancelPageJob, 'email.dispatch': retiredDispatchJob, 'campaign.run': runCampaign, 'campaign.prepare': runCampaign, 'campaign.expand': runCampaign, 'campaign.finish': runCampaign };
+export const jobHandlers: Record<string, JobHandler> = { 'sending.cancelPage':cancelPageJob, 'sending.release': releaseScheduled, 'email.dispatch': retiredDispatchJob, 'campaign.run': runCampaign, 'campaign.prepare': runCampaign, 'campaign.expand': runCampaign, 'campaign.finish': runCampaign };
 /**
  * Nightmail's own notices (standing changes) from a platform workspace, through the ordinary admission path: one
  * transactional email per recipient, deduplicated by the idempotency key, charged to that workspace like any send.

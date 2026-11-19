@@ -53,7 +53,8 @@ export const logColumns: Column<LogEntry>[] = [
 ]
 
 // The Logs page gives Status the room its longest label needs ("Acceptance unknown"); Overview keeps the compact column.
-const wide = <T extends { key: string; width?: number | string }>(columns: T[]): T[] => columns.map(column => column.key === 'status' ? { ...column, width: 172 } : column)
+// Its last column also holds a scheduled email's menu (features/logs/scheduled.tsx), at the end of its card on a phone.
+const wide = <T extends { key: string; width?: number | string; card?: SkeletonColumn['card'] }>(columns: T[]): T[] => columns.map(column => column.key === 'status' ? { ...column, width: 172 } : column.key === 'open' ? { ...column, width: 40, card: 'end' } : column)
 export const logsPageColumns = wide(logColumns)
 export const logsPageColumnDefs = wide(logColumnDefs)
 

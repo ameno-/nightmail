@@ -42,6 +42,21 @@ const message = await getEmail({
 });
 ```
 
+**Schedule it.** Add `scheduledAt`, an instant with `Z` or an offset, up to 30 days ahead. The email waits with `scheduled: true` (status `queued`); move it with `rescheduleEmail` or stop it with `cancelEmail` until it goes. Sending limits and the balance apply when it goes: one they refuse then is rejected with their code and the `email.rejected` webhook.
+
+```ts
+import { cancelEmail, rescheduleEmail, sendEmail } from '@nightmail/sdk';
+
+const { data: scheduled } = await sendEmail({
+  client,
+  headers: { 'Idempotency-Key': 'order-4821-shipping' },
+  body: { from: 'orders@example.com', to: ['recipient@example.com'], subject: 'Your order ships today', text: 'It leaves our warehouse this morning.', scheduledAt: '2026-11-20T09:00:00Z' },
+  throwOnError: true,
+});
+await rescheduleEmail({ client, path: { id: scheduled.id }, body: { scheduledAt: '2026-11-20T15:00:00Z' }, throwOnError: true });
+await cancelEmail({ client, path: { id: scheduled.id }, throwOnError: true });
+```
+
 **Base URL and region.** On hosted Nightmail use `https://nightmail.dev` and leave `region` out: each sender domain is bound to one sending region, and a different `region` fails with `SENDER_REGION_MISMATCH`. Self-hosted installations use their own public URL as `baseUrl`; pass `region` only to choose between the SES regions that installation has enabled (it defaults to the installation's default region).
 
 **Testing.** Send to `success@simulator.amazonses.com`, `bounce@simulator.amazonses.com` or `complaint@simulator.amazonses.com` to exercise each outcome without reaching a real inbox. Simulator addresses count against hosted sending limits; read the current limit from `GET /v1/me` (`connection.sendingLimit`).

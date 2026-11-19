@@ -112,6 +112,8 @@ Sending guidance: use `sendEmail` for one-off sends to **50 or fewer people tota
 
 Campaign content remains **block HTML** shared with the dashboard composer. `createCampaign` and `updateCampaign` expose the API’s draft schemas, and `previewCampaign` renders the saved draft as HTML and plain text without preparing or sending its audience.
 
+A one-off send can wait for a time: `sendEmail` with `scheduledAt` (a UTC instant, up to 30 days ahead), confirmed like any send. Until it goes, `rescheduleEmail` moves it and `cancelEmail` stops it; `listEmails` with `status=scheduled` lists the ones waiting.
+
 After the required audience/content/time confirmation, use `sendCampaign` or `scheduleCampaign` with the current campaign `revision`. Nightmail snapshots the audience and starts a durable background workflow. HTTP 202 means accepted for validation and delivery, not sent or delivered.
 
 ### Inbound addresses and conversations

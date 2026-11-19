@@ -671,6 +671,10 @@ const FIXTURE_DATABASE_URL = process.env.API_FIXTURE_DATABASE_URL || (LOCAL_API 
 if (!FIXTURE_DATABASE_URL) throw new Error('Session fixture bootstrap requires DATABASE_URL for localhost, or API_FIXTURE_DATABASE_URL explicitly paired with a remote API. No authenticated scenarios were run.');
 const DATABASE_FIXTURE_SKIP = false; // Bootstrap already requires an explicitly safe fixture database.
 const mail = (extra: Json = {}): Json => ({ from: 'sender@example.com', to: address(), region: REGION, subject: unique('Acceptance'), text: 'Synthetic acceptance message; no SES send is authorized.', ...extra });
+// Scheduled sends (sendEmail scheduledAt) on a simulated clock: `ms` passes for these emails, so their send time and their
+// release job's time both move back by it.
+const elapse = (db: pg.Client, ids: string[], ms: number) => db.query(`WITH moved AS (UPDATE sending_emails SET scheduled_at=scheduled_at-make_interval(secs=>$2::float8/1000)
+  WHERE id=ANY($1) RETURNING id,scheduled_at) UPDATE jobs j SET available_at=m.scheduled_at FROM moved m WHERE j.id='release:'||m.id`, [ids, ms]);
 type Json = Record<string, any>;
 type Reply = { status: number; body: any; headers: Headers };
 const cleanScans={virusVerdict:{status:'PASS'},spamVerdict:{status:'PASS'}};
@@ -8483,6 +8487,127 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     error(await http('POST', '/v1/emails/batch', key.secret, { emails: [] }), 422);
     error(await http('POST', '/v1/emails/send', key.secret, { from: 'sender@example.com', to: address(), region: REGION, template: { name: unique('missing-template'), data: { firstName: '<script>safe</script>' } } }), 422, 'SIMULATED_TEMPLATE_UNSUPPORTED');
   });
+
+  // Scheduled single sends (sendEmail scheduledAt), cancelEmail and rescheduleEmail.
+  test('a scheduled send waits as scheduled, keeps its idempotency key and goes at its time', async t => {
+    const key = await keyFixture(t), hour = Date.now() + 3_600_000;
+    const body = mail({ scheduledAt: new Date(hour).toISOString().replace('Z', '+00:00') }), headers = { 'Idempotency-Key': unique('scheduled') };
+    const receipt = ok(await http('POST', '/v1/emails/send', key.secret, body, headers), 202);
+    assert.deepEqual([receipt.status, receipt.scheduledAt], ['queued', new Date(hour).toISOString()], 'An instant with an offset comes back in UTC.');
+    assert.deepEqual(ok(await http('POST', '/v1/emails/send', key.secret, body, headers), 202), receipt, 'The same request replays its receipt.');
+    error(await http('POST', '/v1/emails/send', key.secret, { ...body, scheduledAt: new Date(hour + 60_000).toISOString() }, headers), 409, 'IDEMPOTENCY_CONFLICT');
+    // Waiting, it reads queued with scheduled true (Email's published statuses), and scheduled in the filters and in Logs.
+    const path = `/v1/emails/${receipt.id}`, search = encodeURIComponent(body.to);
+    const waiting = ok(await http('GET', path, key.secret));
+    assert.deepEqual([waiting.status, waiting.scheduled, Date.parse(waiting.scheduledAt), waiting.providerId], ['queued', true, hour, null]);
+    for (const status of ['scheduled', 'queued']) assert.ok(page(await http('GET', `/v1/emails?status=${status}&search=${search}`, key.secret)).some(row => row.id === receipt.id), status);
+    assert.ok(!page(await http('GET', `/v1/emails?status=accepted&search=${search}`, key.secret)).length);
+    const logged = page(await http('GET', `/v1/logs?status=scheduled&search=${search}`, key.secret)).find(row => row.id === receipt.id);
+    assert.deepEqual([logged?.status, logged?.scheduledAt], ['scheduled', receipt.scheduledAt], 'Logs give the time in UTC.');
+    assert.ok(!page(await http('GET', `/v1/logs?status=queued&search=${search}`, key.secret)).length, 'Logs call it scheduled, not queued.');
+    assert.deepEqual(page(await http('GET', `${path}/events`, key.secret)).map(e => [e.type, e.data.scheduledAt]), [['scheduled', receipt.scheduledAt]]);
+    // Moved to two seconds from now, it goes then: released no earlier than its time, then dispatched and delivered.
+    const soon = new Date(Date.now() + 2_000).toISOString();
+    assert.equal(Date.parse(ok(await http('POST', `${path}/reschedule`, key.secret, { scheduledAt: soon })).scheduledAt), Date.parse(soon));
+    const sent = await poll(path, key.secret, row => row.status === 'delivered');
+    assert.equal(sent.scheduled, false);
+    assert.ok(Date.parse(sent.createdAt) >= Date.parse(soon), `Released at ${sent.createdAt}, before its time ${soon}.`);
+    const events = page(await http('GET', `${path}/events`, key.secret)).map(e => e.type);
+    assert.deepEqual(events.slice(0, 2), ['scheduled', 'rescheduled']);
+    assert.ok(events.includes('delivery'), events.join());
+    // It started sending: too late to cancel or move it.
+    error(await http('POST', `${path}/cancel`, key.secret), 409, 'EMAIL_NOT_SCHEDULED');
+    error(await http('POST', `${path}/reschedule`, key.secret, { scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 409, 'EMAIL_NOT_SCHEDULED');
+  });
+
+  test('a send time is a UTC instant from now to 30 days ahead, for an untracked single send', async t => {
+    const key = await keyFixture(t), send = (extra: Json) => http('POST', '/v1/emails/send', key.secret, mail(extra));
+    for (const at of [Date.now() - 5 * 60_000, Date.now() + 31 * 86_400_000]) assert.equal(error(await send({ scheduledAt: new Date(at).toISOString() }), 422, 'INVALID_SCHEDULE').field, 'scheduledAt');
+    // A local time without an offset names no instant.
+    error(await send({ scheduledAt: '2030-01-01T09:00:00' }), 422, 'VALIDATION_FAILED');
+    // Tracked conversation sends and batches go now.
+    error(await send({ scheduledAt: new Date(Date.now() + 3_600_000).toISOString(), replyAddressId: unique('address') }), 422, 'VALIDATION_FAILED');
+    error(await http('POST', '/v1/emails/batch', key.secret, { emails: [mail({ scheduledAt: new Date(Date.now() + 3_600_000).toISOString() })] }), 422, 'VALIDATION_FAILED');
+    // A sender's clock a little behind: a time up to a minute ago is accepted and goes at once.
+    const late = ok(await send({ scheduledAt: new Date(Date.now() - 30_000).toISOString() }), 202);
+    assert.equal((await poll(`/v1/emails/${late.id}`, key.secret, row => row.status === 'delivered')).scheduled, false);
+  });
+
+  test('a scheduled send can be canceled or moved until it starts sending, and its sender is told', async t => {
+    const key = await keyFixture(t), other = await keyFixture(t, { permissions: ['read', 'send'], domains: ['other.example'] });
+    const receipt = ok(await http('POST', '/v1/emails/send', key.secret, mail({ scheduledAt: new Date(Date.now() + 3_600_000).toISOString() })), 202);
+    const path = `/v1/emails/${receipt.id}`, job = async () => (await authDb!.query('SELECT status, available_at FROM jobs WHERE id=$1', [`release:${receipt.id}`])).rows[0];
+    assert.deepEqual([(await job()).status, (await job()).available_at.toISOString()], ['pending', receipt.scheduledAt], 'Its release waits for exactly its time.');
+    error(await http('POST', `${path}/reschedule`, key.secret, { scheduledAt: new Date(Date.now() - 600_000).toISOString() }), 422, 'INVALID_SCHEDULE');
+    // A key limited to another sender domain can't see it, so can't cancel or move it.
+    error(await http('POST', `${path}/cancel`, other.secret), 404, 'NOT_FOUND');
+    error(await http('POST', `${path}/reschedule`, other.secret, { scheduledAt: new Date(Date.now() + 7_200_000).toISOString() }), 404, 'NOT_FOUND');
+    const later = new Date(Date.now() + 7_200_000).toISOString();
+    const moved = ok(await http('POST', `${path}/reschedule`, key.secret, { scheduledAt: later }));
+    assert.deepEqual([moved.status, moved.scheduled, Date.parse(moved.scheduledAt)], ['queued', true, Date.parse(later)]);
+    assert.deepEqual([(await job()).status, (await job()).available_at.toISOString()], ['pending', later], 'Its release moves with it.');
+    const canceled = ok(await http('POST', `${path}/cancel`, key.secret));
+    assert.deepEqual([canceled.status, canceled.scheduled, canceled.errorCode, canceled.providerId], ['canceled', false, 'EMAIL_CANCELED', null]);
+    assert.equal((await job()).status, 'completed', 'Its release is retired.');
+    // Canceling again changes nothing; moving it no longer can.
+    assert.deepEqual(ok(await http('POST', `${path}/cancel`, key.secret)), canceled);
+    error(await http('POST', `${path}/reschedule`, key.secret, { scheduledAt: later }), 409, 'EMAIL_NOT_SCHEDULED');
+    assert.deepEqual(page(await http('GET', `${path}/events`, key.secret)).map(e => e.type), ['scheduled', 'rescheduled', 'canceled']);
+    // Its sender hears of it as of any local outcome: email.rejected with the status and code.
+    const { rows } = await authDb!.query(`SELECT type, data FROM operation_events WHERE workspace_id='default' AND data->>'emailId'=$1`, [receipt.id]);
+    assert.deepEqual(rows.map(r => [r.type, r.data.status, r.data.code]), [['email.rejected', 'canceled', 'EMAIL_CANCELED']]);
+    error(await http('POST', `/v1/emails/${unique('email')}/cancel`, key.secret), 404, 'NOT_FOUND');
+  });
+
+  test('a scheduled send is released once: a crash before its commit, racing releases and a retried job send it once', async t => {
+    if (!fixtureWorker) return t.skip('requires the isolated loopback job runner');
+    const [{ jobHandlers }, { PgDialect }] = await Promise.all([import('./src/sending.js'), import('drizzle-orm/pg-core')]);
+    const key = await keyFixture(t);
+    const receipt = ok(await http('POST', '/v1/emails/send', key.secret, mail({ scheduledAt: new Date(Date.now() + 3_600_000).toISOString() })), 202);
+    // Its time comes on a simulated clock: only the email's time moves, and its release job still waits an hour, so the
+    // runner leaves the releases below to this test.
+    await authDb!.query("UPDATE sending_emails SET scheduled_at=now()-interval '1 second' WHERE id=$1", [receipt.id]);
+    const runtime = { ...fixtureWorker.runtime, config: { ...fixtureWorker.runtime.config, workspaceId: 'default' } };
+    const release = (rt: import('./src/core.js').Runtime = runtime) => jobHandlers['sending.release']!(rt, { emailId: receipt.id }, { id: `release:${receipt.id}`, attempts: 1, workspaceId: 'default' });
+    const row = async () => (await authDb!.query('SELECT status, created_at FROM sending_emails WHERE id=$1', [receipt.id])).rows[0];
+    // The process dies between admitting it and committing: nothing was released, so the job's retry releases it.
+    const dialect = new PgDialect(), pass = <T extends object>(target: T, name: PropertyKey) => { const value = Reflect.get(target, name); return typeof value === 'function' ? value.bind(target) : value; };
+    const crashing = { ...runtime, db: new Proxy(runtime.db, { get: (db, name) => name !== 'transaction' ? pass(db, name)
+      : (work: (tx: import('./src/core.js').DbExecutor) => Promise<unknown>) => db.transaction(tx => work(new Proxy(tx, { get: (inner, method) => method !== 'execute' ? pass(inner, method)
+        : (query: import('drizzle-orm').SQL) => dialect.sqlToQuery(query.getSQL()).sql.startsWith("UPDATE sending_emails SET status='queued'") ? Promise.reject(new Error('Simulated crash before commit')) : inner.execute(query) }))) }) };
+    await assert.rejects(release(crashing), { code: 'OPERATION_TEMPORARILY_UNAVAILABLE', retryable: true });
+    assert.equal((await row()).status, 'scheduled');
+    // Three runners at once (a lease that expired under a slow one): one releases it, the others find it released.
+    const before = await authDb!.query('SELECT clock_timestamp() AS at');
+    await Promise.all([release(), release(), release()]);
+    const released = await row();
+    assert.equal(released.status, 'queued');
+    assert.ok(released.created_at >= before.rows[0].at, 'Released now, so the hour it is charged in is this one.');
+    // A runner that committed the release but died before settling its job retries it: nothing left to do.
+    await release();
+    const sent = await poll(`/v1/emails/${receipt.id}`, key.secret, r => r.status === 'delivered');
+    assert.match(sent.providerId, /^sim_/);
+    const { rows } = await authDb!.query(`SELECT type, count(*)::int AS n FROM sending_email_events WHERE email_id=$1 AND type IN ('dispatch_attempt','accepted') GROUP BY type ORDER BY type`, [receipt.id]);
+    assert.deepEqual(rows, [{ type: 'accepted', n: 1 }, { type: 'dispatch_attempt', n: 1 }], 'Sent exactly once.');
+  });
+
+  test('a scheduled send waits for its time on a simulated clock and goes when the clock reaches it', async t => {
+    await simulatedSesFixture(t, async ({ local, db, run, jobs }) => {
+      const at = new Date(Date.now() + 3_600_000).toISOString();
+      const receipt = ok(await local('POST', '/v1/emails/send', mail({ scheduledAt: at })), 202);
+      const status = async () => (await db.query('SELECT status FROM sending_emails WHERE id=$1', [receipt.id])).rows[0].status;
+      // Before its time its release waits for exactly that time, and the dispatcher never sees it.
+      await run('sending.release'); await run('email.dispatch');
+      const [job] = await jobs('sending.release');
+      assert.deepEqual([job.status, job.available_at.toISOString(), await status()], ['pending', at, 'scheduled']);
+      // An hour passes: it is released and sent.
+      await elapse(db, [receipt.id], 3_601_000);
+      await run('sending.release');
+      assert.equal(await status(), 'queued');
+      await run('email.dispatch');
+      assert.equal(await status(), 'accepted');
+    });
+  });
 });
 
 describe('Billing: metering, gate and settlement', () => {
@@ -8500,7 +8625,7 @@ describe('Billing: metering, gate and settlement', () => {
     let n = 0;
     return {
       wid, from,
-      send: (recipients = 1) => request('POST', '/v1/emails/send', key.secret, { from, to: Array.from({ length: recipients }, () => `reader-${n++}@example.net`), subject: 'Billing fixture', text: 'Fixture.' }),
+      send: (recipients = 1, extra: Json = {}) => request('POST', '/v1/emails/send', key.secret, { from, to: Array.from({ length: recipients }, () => `reader-${n++}@example.net`), subject: 'Billing fixture', text: 'Fixture.', ...extra }),
       // The installation's mode, charged or not for every hour (tests price hours long gone).
       mode: async (mode: 'off' | 'shadow' | 'enforce', extra = '') => { await db.query(`UPDATE billing_config SET mode=$1${extra}`, [mode]); await charging(db, null, mode === 'enforce'); },
       // The workspace free or prepaid, for every hour.
@@ -8607,6 +8732,40 @@ describe('Billing: metering, gate and settlement', () => {
       error(await f.send(), 402, 'BALANCE_EXHAUSTED');
       // Off again: nothing is gated.
       await f.mode('off'); ok(await f.send(), 202);
+    });
+  });
+
+  test('a scheduled send is limited and charged when it goes, not when it is scheduled: refused then, it is rejected and its sender told', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
+      const f = await billingFixture(runtime, db, local, request), hour = (ms = 0) => new Date(Date.now() + 3_600_000 + ms).toISOString();
+      const used = async () => Number((await db.query('SELECT coalesce(sum(recipients),0)::int AS n FROM hosted_usage_hourly WHERE workspace_id=$1', [f.wid])).rows[0].n);
+      const email = async (id: string) => (await db.query('SELECT status, error_code FROM sending_emails WHERE id=$1', [id])).rows[0];
+      const told = async (id: string) => (await db.query(`SELECT data FROM operation_events WHERE workspace_id=$1 AND type='email.rejected' AND data->>'emailId'=$2`, [f.wid, id])).rows.map(r => [r.data.status, r.data.code, r.data.providerCalled]);
+      // The daily limit is one recipient, and scheduling takes none of it: two sends wait.
+      await db.query('UPDATE workspaces SET exempt_hosted_quotas=false, send_cap_override=1, send_cap_override_expires_at=NULL WHERE id=$1', [f.wid]);
+      await f.mode('off');
+      const first = ok(await f.send(1, { scheduledAt: hour() }), 202), second = ok(await f.send(1, { scheduledAt: hour(1000) }), 202);
+      assert.deepEqual([await used(), await f.open('send')], [0, 0], 'Scheduling charges and meters nothing.');
+      // Their time comes: the first takes the limit, the second is over it and is rejected with the code a send would get.
+      await elapse(db, [first.id, second.id], 3_602_000);
+      await run('sending.release');
+      assert.deepEqual([await email(first.id), await email(second.id)], [{ status: 'queued', error_code: null }, { status: 'rejected', error_code: 'SEND_LIMIT_REACHED' }]);
+      assert.deepEqual([await used(), await f.open('send')], [1, 1], 'Charged and metered when released.');
+      assert.deepEqual(await told(second.id), [['rejected', 'SEND_LIMIT_REACHED', false]]);
+      // Out of balance: a send now is refused at once; a scheduled one is accepted and refused at its time.
+      await db.query('UPDATE workspaces SET exempt_hosted_quotas=true, send_cap_override=NULL WHERE id=$1', [f.wid]);
+      await f.mode('enforce'); await f.freeUsed(3000, 0);
+      error(await f.send(), 402, 'BALANCE_EXHAUSTED');
+      const broke = ok(await f.send(1, { scheduledAt: hour() }), 202);
+      await elapse(db, [broke.id], 3_601_000); await run('sending.release');
+      assert.deepEqual([await email(broke.id), await f.open('send')], [{ status: 'rejected', error_code: 'BALANCE_EXHAUSTED' }, 1], 'Nothing metered.');
+      assert.deepEqual(await told(broke.id), [['rejected', 'BALANCE_EXHAUSTED', false]]);
+      // Topped up before its time, it goes, charged when it goes.
+      await f.post('topup', `attempt:${unique('fixture')}`, 2n * 20000n);
+      const paid = ok(await f.send(1, { scheduledAt: hour() }), 202);
+      assert.equal(await f.open('send'), 1);
+      await elapse(db, [paid.id], 3_601_000); await run('sending.release');
+      assert.deepEqual([await email(paid.id), await f.open('send')], [{ status: 'queued', error_code: null }, 2]);
     });
   });
 

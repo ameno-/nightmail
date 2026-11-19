@@ -518,6 +518,10 @@ export async function seed(fx) {
   await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, created_at)
     VALUES ($1,'ws_northwind','${REGION}','fixture','deals@mail.northwind.example','["customer@example.net"]','[]','[]',$2,$3::jsonb,false,'delivered','provider-'||$1,3,now()-interval '1 minute')`,
     [junkEmail, JUNK_SUBJECT, JSON.stringify({ kind: 'marketing', region: REGION, subject: JUNK_SUBJECT, html: JUNK_HTML, attachments: [] })]);
+  // A single email scheduled for tomorrow: Logs gives it a Scheduled badge and its row's menu (cancel, reschedule).
+  await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, scheduled_at, created_at)
+    VALUES ($1,'ws_northwind','${REGION}','fixture','receipts@mail.northwind.example','["customer@example.net"]','[]','[]','Your order ships tomorrow',$2::jsonb,false,'scheduled',now()+interval '1 day',now()-interval '2 minutes')`,
+    [rid('email'), JSON.stringify({ kind: 'transactional', region: REGION, subject: 'Your order ships tomorrow', text: 'It leaves our warehouse tomorrow morning.', attachments: [] })]);
   // Receiving: addresses with aliases, routes, endpoints, rules, webhooks, agent inboxes and threads.
   const make = input => dana.api('POST', '/v1/inbound/addresses', input, 201);
   const A = {

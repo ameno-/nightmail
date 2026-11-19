@@ -687,6 +687,10 @@ export type SingleEmailQueued = {
     id: string;
     status: 'queued';
     simulated: boolean;
+    /**
+     * A scheduled send: when it goes (UTC).
+     */
+    scheduledAt?: string;
     inboundMessageId?: string;
     /**
      * Legacy alias for inboundMessageId.
@@ -747,6 +751,10 @@ export type SendEmailInput = {
      * @deprecated
      */
     replyMailboxId?: string;
+    /**
+     * Send at this time instead of now: an RFC 3339 instant with Z or an offset, such as 2026-11-20T09:00:00Z; times without an offset are refused, and the time is returned in UTC. From now (up to a minute in the past, which sends at once) to 30 days ahead; up to 10,000 scheduled emails may wait per workspace (SCHEDULED_EMAIL_LIMIT_EXCEEDED). The email is stored now and reads status queued with scheduled true until then; cancel it with cancelEmail or move it with rescheduleEmail. Sending limits and the balance apply at that time, not now: an email they refuse then is rejected with their code (email.rejected). Not with replyAddressId.
+     */
+    scheduledAt?: string;
 };
 
 export type EmailBatchQueued = {
@@ -864,6 +872,9 @@ export type Email = {
     cc: Array<string>;
     bcc: Array<string>;
     subject: string;
+    /**
+     * A scheduled email is queued, with scheduled true, until it is sent at scheduledAt.
+     */
     status: 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated';
     providerId: string | null;
     simulated: boolean;
@@ -873,7 +884,17 @@ export type Email = {
      * Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.
      */
     suppressionReason?: string | null;
+    /**
+     * True while a scheduled send waits for scheduledAt: it has not started sending, and cancelEmail or rescheduleEmail still apply. At that time it is admitted like a send made then (limits and balance included) and follows the usual lifecycle, or is rejected with the refusal’s code.
+     */
+    scheduled: boolean;
+    /**
+     * When a scheduled send goes (UTC). Also set while queued mail waits to be retried.
+     */
     scheduledAt: string | null;
+    /**
+     * When the email was submitted; a scheduled send’s moves to the moment it was released at its time.
+     */
     createdAt: string;
     updatedAt: string;
 };
@@ -924,6 +945,13 @@ export type EmailContent = {
     render: 'direct' | 'ses' | 'simulated';
     templateName: string | null;
     simulated: boolean;
+};
+
+export type EmailRescheduleInput = {
+    /**
+     * The new send time: an RFC 3339 instant with Z or an offset, returned in UTC.
+     */
+    scheduledAt: string;
 };
 
 export type Attachment = {
@@ -3927,7 +3955,7 @@ export type LogEntry = {
      */
     at: string;
     /**
-     * Sent: the email status. Received: received, or spam when flagged (spam is shown to administrators only).
+     * Sent: the email status, or scheduled for a send waiting for its time (getEmail reads it as queued with scheduled true). Received: received, or spam when flagged (spam is shown to administrators only).
      */
     status: string;
     from: {
@@ -3944,6 +3972,10 @@ export type LogEntry = {
      */
     stream: 'transactional' | 'marketing' | null;
     campaignId: string | null;
+    /**
+     * Sent mail that is scheduled: when it goes (UTC). Null for received mail.
+     */
+    scheduledAt: string | null;
     /**
      * Sent through the SES mailbox simulator. Always false for received mail.
      */
@@ -10376,7 +10408,10 @@ export type ListEmailsData = {
         cursor?: string;
         limit?: number;
         campaignId?: string;
-        status?: 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated';
+        /**
+         * scheduled lists sends waiting for their time; queued includes them.
+         */
+        status?: 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated' | 'scheduled';
         region?: string;
         kind?: 'transactional' | 'marketing';
         /**
@@ -10703,6 +10738,132 @@ export type ListEmailEventsResponses = {
 };
 
 export type ListEmailEventsResponse = ListEmailEventsResponses[keyof ListEmailEventsResponses];
+
+export type CancelEmailData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/emails/{id}/cancel';
+};
+
+export type CancelEmailErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CancelEmailError = CancelEmailErrors[keyof CancelEmailErrors];
+
+export type CancelEmailResponses = {
+    /**
+     * Success
+     */
+    200: Email;
+};
+
+export type CancelEmailResponse = CancelEmailResponses[keyof CancelEmailResponses];
+
+export type RescheduleEmailData = {
+    body: EmailRescheduleInput;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/emails/{id}/reschedule';
+};
+
+export type RescheduleEmailErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RescheduleEmailError = RescheduleEmailErrors[keyof RescheduleEmailErrors];
+
+export type RescheduleEmailResponses = {
+    /**
+     * Success
+     */
+    200: Email;
+};
+
+export type RescheduleEmailResponse = RescheduleEmailResponses[keyof RescheduleEmailResponses];
 
 export type UploadAttachmentData = {
     body: AttachmentUpload;
@@ -23248,7 +23409,7 @@ export type ListLogsData = {
         /**
          * A sent-mail status lists sent mail only. received lists received mail that is not flagged as spam; spam lists received mail flagged as spam (spam is visible to administrators only, so dashboard members get none). Either leaves sent mail out, and is refused (403) to credentials that cannot read received mail, like direction=received.
          */
-        status?: 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated' | 'received' | 'spam';
+        status?: 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated' | 'scheduled' | 'received' | 'spam';
         /**
          * Sent mail only; received mail is left out when set.
          */

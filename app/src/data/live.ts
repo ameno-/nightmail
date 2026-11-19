@@ -206,6 +206,8 @@ export function createLiveApi(): Api {
         const { email, content, events, contact } = await call(`/emails/${idPath(id)}/detail`, 'GET', undefined, signal)
         return { ...mapEmail(email), html: content.html ?? '', text: content.text, attachments: content.attachments, events: events.data.map(mapEmailEvent), eventsNextCursor: events.nextCursor, contact }
       },
+      cancel: async (id, signal) => mapEmail(await call(`/emails/${idPath(id)}/cancel`, 'POST', undefined, signal)),
+      reschedule: async (id, scheduledAt, signal) => mapEmail(await call(`/emails/${idPath(id)}/reschedule`, 'POST', { scheduledAt }, signal)),
       check: (input, signal) => call<import('./types').SendabilityReport>('/emails/check', 'POST', input, signal),
       preview: async ({ source, ...options }, signal) => (await call<{ previews: import('./types').ClientPreview[] }>('/emails/preview', 'POST', { ...source, ...options }, signal)).previews,
     },
