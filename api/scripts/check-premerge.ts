@@ -256,7 +256,7 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   const operations = Object.values(spec.paths).flatMap(item => Object.values(item)).filter(op => op.operationId);
   const valid = (row: Record<string, unknown> | undefined) => !!row && (row.access ? ['public', 'staff', 'any'].includes(String(row.access)) && Object.keys(row).every(k => ['access', 'text'].includes(k))
     : row.permission ? Object.hasOwn(PERMISSIONS, String(row.permission)) && (row.permission === 'sendEmail' ? row.level === 'on' : ['read', 'write'].includes(String(row.level)))
-    : ['any', 'admin', 'owner'].includes(String(row.person)) && !row.level && !row.scope);
+    : ['any', 'admin', 'owner'].includes(String(row.person)) && (row.level === undefined || ['read', 'write'].includes(String(row.level))) && !row.scope);
   for (const op of operations) {
     const row = op[permissionExtension] as Record<string, unknown> | undefined;
     if (!row) fail('Permissions', `${op.operationId} states no permission: it has no ${permissionExtension} in api/openapi.json. Add its row to ${file} with what its guards enforce (a permission and level, a person, or public), run bun run sdk in api/, and run the acceptance test "permission table".`, file);

@@ -24,7 +24,8 @@ export type OperationPermission = {
   scope?: 'workspace' | 'domain' | 'address';
   /**
    * With a permission: the role a signed-in person needs, so a workspace member is refused (keys are judged by the
-   * permission). Alone: the operation is a person's, never a key's or an agent token's. any: every member.
+   * permission). Alone: the operation is a person's, never a key's or an agent token's. any: every member. A level beside
+   * it is what the person's MCP sign-in must be approved for: read, or write (manage).
    */
   person?: 'any' | 'admin' | 'owner';
   /**
@@ -34,14 +35,22 @@ export type OperationPermission = {
   credential?: 'dashboard' | 'signIn' | 'lasting' | 'notDelegated';
   /** The level an MCP sign-in or an agent token needs here, where it is higher than an API key's. */
   delegatedLevel?: 'write';
+  /**
+   * The request also names access it gives (an agent token's permissions and domains, an inbox's sending and its key's
+   * mail permissions), and each request is checked to give no more than the caller has. The row states the least a
+   * caller needs; what a given request needs depends on what it asks for.
+   */
+  withinCaller?: true;
   /** public: no credential (a signed link or notification, or public data). staff: support and operator tooling only. any: any credential for the workspace. */
   access?: 'public' | 'staff' | 'any';
 };
 
 type Scope = OperationPermission['scope'];
-type More = Pick<OperationPermission, 'person' | 'credential' | 'delegatedLevel'>;
+type More = Pick<OperationPermission, 'person' | 'credential' | 'delegatedLevel' | 'withinCaller'>;
 const needs = (permission: PermissionName, level: PermissionLevel, scope?: Scope, more: More = {}): OperationPermission => ({ permission, level, ...(scope ? { scope } : {}), ...more });
 const people = (person: 'any' | 'admin' | 'owner', credential?: 'dashboard' | 'signIn'): OperationPermission => ({ person, ...(credential ? { credential } : {}) });
+// People only, and also over their own MCP sign-in approved for this level.
+const signedIn = (person: 'any' | 'admin' | 'owner', level: 'read' | 'write', more: Pick<OperationPermission, 'credential' | 'withinCaller'> = {}): OperationPermission => ({ person, level, ...more });
 const admin = { person: 'admin' } as const, adminLasting = { person: 'admin', credential: 'lasting' } as const;
 const PUBLIC: OperationPermission = { access: 'public' }, STAFF: OperationPermission = { access: 'staff' };
 // Repeated rows: key administration, and receiving configuration (routing, rules, endpoints, inbox connections).
@@ -56,7 +65,7 @@ export const OPERATION_PERMISSIONS: Record<string, OperationPermission> = {
   listMcpConnections: people('any', 'dashboard'), bindMcpConnection: people('any', 'dashboard'), revokeMcpConnection: people('any', 'dashboard'),
   listAgents: people('any', 'dashboard'), revokeAgent: people('any', 'dashboard'),
   getCurrentIdentity: { access: 'any' },
-  createAgentToken: people('admin', 'signIn'), listAgentTokens: keyAdmin, revokeAgentToken: keyAdmin,
+  createAgentToken: signedIn('admin', 'read', { credential: 'signIn', withinCaller: true }), listAgentTokens: keyAdmin, revokeAgentToken: keyAdmin,
   createApiKey: keyAdmin, listApiKeys: keyAdmin, revokeApiKey: keyAdmin, updateApiKey: keyAdmin,
   // Audience. Contacts, imports and templates are content a member edits; lists and segments are not.
   listContacts: needs('audience', 'read', 'workspace'), createContact: needs('audience', 'write', 'workspace'), getContact: needs('audience', 'read', 'workspace'),
@@ -70,13 +79,13 @@ export const OPERATION_PERMISSIONS: Record<string, OperationPermission> = {
   previewContactImport: needs('audience', 'write', 'workspace'), listContactImports: needs('audience', 'read', 'workspace'), getContactImport: needs('audience', 'read', 'workspace'),
   commitContactImport: needs('audience', 'write', 'workspace'),
   queryAudience: needs('audience', 'read', 'workspace'), planAudienceMutation: needs('audience', 'write', 'workspace', admin), applyAudiencePlan: needs('audience', 'write', 'workspace', admin),
-  // Templates and their assets.
-  listCampaignTemplates: needs('audience', 'read', 'domain'), createCampaignTemplate: needs('audience', 'write', 'workspace'), getCampaignTemplate: needs('audience', 'read', 'domain'),
+  // Templates and their assets. Any key reads them, one limited to sender domains included; changing them takes the whole workspace.
+  listCampaignTemplates: needs('audience', 'read'), createCampaignTemplate: needs('audience', 'write', 'workspace'), getCampaignTemplate: needs('audience', 'read'),
   updateCampaignTemplate: needs('audience', 'write', 'workspace'), deleteCampaignTemplate: needs('audience', 'write', 'workspace'), publishCampaignTemplate: needs('audience', 'write', 'workspace'),
-  previewCampaignTemplate: needs('audience', 'read', 'domain'), renderCampaignTemplatePreviewImage: needs('sendEmail', 'on', 'domain'),
+  previewCampaignTemplate: needs('audience', 'read'), renderCampaignTemplatePreviewImage: needs('sendEmail', 'on'),
   setCampaignTemplateArchived: needs('audience', 'write', 'workspace'),
-  uploadTemplateAsset: needs('audience', 'write', 'workspace'), importTemplateImage: needs('audience', 'write', 'workspace'), getTemplateAsset: needs('audience', 'read', 'domain'),
-  deleteTemplateAsset: needs('audience', 'write', 'workspace'), getTemplateAssetContent: needs('audience', 'read', 'domain'),
+  uploadTemplateAsset: needs('audience', 'write', 'workspace'), importTemplateImage: needs('audience', 'write', 'workspace'), getTemplateAsset: needs('audience', 'read'),
+  deleteTemplateAsset: needs('audience', 'write', 'workspace'), getTemplateAssetContent: needs('audience', 'read'),
   // Sending and sent mail.
   checkEmail: needs('sentMail', 'read', 'domain'), sendEmail: needs('sendEmail', 'on', 'domain'), sendEmailBatch: needs('sendEmail', 'on', 'domain'), previewEmail: needs('sentMail', 'read', 'domain'),
   listEmails: needs('sentMail', 'read', 'domain'), getEmail: needs('sentMail', 'read', 'domain'), getEmailDetail: needs('sentMail', 'read', 'domain'), getEmailContent: needs('sentMail', 'read', 'domain'),
@@ -123,7 +132,7 @@ export const OPERATION_PERMISSIONS: Record<string, OperationPermission> = {
   getInboxChanges: mailRead,
   createInboxAppPassword: needs('configuration', 'write', 'workspace', adminLasting), listInboxAppPasswords: needs('configuration', 'write', 'workspace', admin),
   listAppPasswords: needs('configuration', 'write', 'workspace', admin), revokeInboxAppPassword: needs('configuration', 'write', 'workspace', adminLasting),
-  createInbox: needs('inboxes', 'write', 'address', admin), listInboxes: needs('inboxes', 'read', 'address'), getInbox: needs('inboxes', 'read', 'address'),
+  createInbox: needs('inboxes', 'write', 'address', { person: 'admin', withinCaller: true }), listInboxes: needs('inboxes', 'read', 'address'), getInbox: needs('inboxes', 'read', 'address'),
   updateInbox: mailChange, deleteInbox: mailChange, simulateInboxMessage: mailChange, listInboxMessages: mailRead, getInboxAttachment: mailRead,
   // Receiving: retired addresses, scan policy, receiving domains, hosts and subdomains.
   releaseRetiredAddress: needs('inboxes', 'write', 'workspace', admin), getInboundScanPolicy: hostsRead, updateInboundScanPolicy: hostsRead,
@@ -146,8 +155,8 @@ export const OPERATION_PERMISSIONS: Record<string, OperationPermission> = {
   retryInboundWebhookDelivery: needs('configuration', 'write', 'workspace', admin), listInboundWebhookDeliveries: needs('configuration', 'write', 'workspace', admin),
   // Workspaces, members, invitations and bring-your-own AWS: a person's.
   listWorkspaces: people('any', 'dashboard'), createWorkspace: people('any', 'dashboard'), renameCurrentWorkspace: people('admin', 'dashboard'),
-  listWorkspaceMembers: people('admin'), inviteWorkspaceMember: people('admin'), createWorkspaceInvitation: people('admin'), listWorkspaceInvitations: people('admin'),
-  revokeWorkspaceInvitation: people('admin'), updateWorkspaceMember: people('admin', 'dashboard'), removeWorkspaceMember: people('admin', 'dashboard'),
+  listWorkspaceMembers: signedIn('admin', 'read'), inviteWorkspaceMember: signedIn('admin', 'write'), createWorkspaceInvitation: signedIn('admin', 'write'), listWorkspaceInvitations: signedIn('admin', 'read'),
+  revokeWorkspaceInvitation: signedIn('admin', 'write'), updateWorkspaceMember: people('admin', 'dashboard'), removeWorkspaceMember: people('admin', 'dashboard'),
   getWorkspaceInvitation: people('any', 'dashboard'), acceptWorkspaceInvitation: people('any', 'dashboard'),
   getConnection: people('admin', 'dashboard'), createConnection: people('admin', 'dashboard'), deleteConnection: people('admin', 'dashboard'), listConnectionRegions: people('admin', 'dashboard'),
   refreshConnectionScan: people('admin', 'dashboard'), importConnectionDomains: people('admin', 'dashboard'), getConnectionRegionStatus: people('admin', 'dashboard'), verifyConnection: people('admin', 'dashboard'),
@@ -171,10 +180,11 @@ export function permissionText(row: OperationPermission): string {
   if (row.access === 'public') return 'Needs no credential.';
   if (row.access === 'staff') return `${productName} staff only.`;
   if (row.access === 'any') return 'Needs any API key, person or agent token of the workspace.';
+  const within = row.withinCaller ? ' A request gives no more than the caller has.' : '';
   if (!row.permission) {
-    const who = WHO[row.person ?? 'any'];
-    if (row.credential === 'signIn') return `Only ${who} signed in over MCP. Never an API key.`;
-    return `People only: ${who}${row.credential === 'dashboard' ? ' in a signed-in dashboard session' : ', in the dashboard or over their own MCP sign-in'}. Never an API key.`;
+    const who = WHO[row.person ?? 'any'], consent = row.level ? ` with ${row.level} access` : '';
+    if (row.credential === 'signIn') return `Only ${who} signed in over MCP${consent}. Never an API key.${within}`;
+    return `People only: ${who}${row.credential === 'dashboard' ? ' in a signed-in dashboard session' : `, in the dashboard or over their own MCP sign-in${consent}`}. Never an API key.${within}`;
   }
   const parts = [`Needs ${PERMISSIONS[row.permission]}${row.level && row.level !== 'on' ? `: ${row.level}` : ''}${row.scope ? WHERE[row.scope] : ''}.`];
   if (row.delegatedLevel) parts.push(`MCP sign-ins and agent tokens need ${row.delegatedLevel}.`);
@@ -182,7 +192,7 @@ export function permissionText(row: OperationPermission): string {
   if (row.credential === 'lasting') parts.push('Not a temporary agent token.');
   if (row.credential === 'notDelegated') parts.push('Only a dashboard session or an API key no MCP approval made.');
   if (row.credential === 'dashboard') parts.push('Only in a signed-in dashboard session.');
-  return parts.join(' ');
+  return parts.join(' ') + within;
 }
 /** The extension's value: the row and its sentence. */
 export const permissionOf = (operationId: string) => {

@@ -22311,8 +22311,10 @@
         },
         "x-nightmail-permission": {
           "person": "admin",
+          "level": "read",
           "credential": "signIn",
-          "text": "Only an owner or admin signed in over MCP. Never an API key."
+          "withinCaller": true,
+          "text": "Only an owner or admin signed in over MCP with read access. Never an API key. A request gives no more than the caller has."
         },
         "x-codeSamples": [
           {
@@ -29030,8 +29032,7 @@
         "x-nightmail-permission": {
           "permission": "audience",
           "level": "read",
-          "scope": "domain",
-          "text": "Needs Audience & content: read for the sender domain."
+          "text": "Needs Audience & content: read."
         },
         "x-codeSamples": [
           {
@@ -29348,8 +29349,7 @@
         "x-nightmail-permission": {
           "permission": "audience",
           "level": "read",
-          "scope": "domain",
-          "text": "Needs Audience & content: read for the sender domain."
+          "text": "Needs Audience & content: read."
         },
         "x-codeSamples": [
           {
@@ -30046,8 +30046,7 @@
         "x-nightmail-permission": {
           "permission": "audience",
           "level": "read",
-          "scope": "domain",
-          "text": "Needs Audience & content: read for the sender domain."
+          "text": "Needs Audience & content: read."
         },
         "x-codeSamples": [
           {
@@ -30240,8 +30239,7 @@
         "x-nightmail-permission": {
           "permission": "sendEmail",
           "level": "on",
-          "scope": "domain",
-          "text": "Needs Send email for the sender domain."
+          "text": "Needs Send email."
         },
         "x-codeSamples": [
           {
@@ -30900,8 +30898,7 @@
         "x-nightmail-permission": {
           "permission": "audience",
           "level": "read",
-          "scope": "domain",
-          "text": "Needs Audience & content: read for the sender domain."
+          "text": "Needs Audience & content: read."
         },
         "x-codeSamples": [
           {
@@ -31250,8 +31247,7 @@
         "x-nightmail-permission": {
           "permission": "audience",
           "level": "read",
-          "scope": "domain",
-          "text": "Needs Audience & content: read for the sender domain."
+          "text": "Needs Audience & content: read."
         },
         "x-codeSamples": [
           {
@@ -60497,7 +60493,8 @@
           "level": "write",
           "scope": "address",
           "person": "admin",
-          "text": "Needs Inboxes: write for the address or inbox. A person needs to be an owner or admin."
+          "withinCaller": true,
+          "text": "Needs Inboxes: write for the address or inbox. A person needs to be an owner or admin. A request gives no more than the caller has."
         },
         "x-codeSamples": [
           {
@@ -71494,7 +71491,8 @@
         },
         "x-nightmail-permission": {
           "person": "admin",
-          "text": "People only: an owner or admin, in the dashboard or over their own MCP sign-in. Never an API key."
+          "level": "read",
+          "text": "People only: an owner or admin, in the dashboard or over their own MCP sign-in with read access. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -71647,7 +71645,8 @@
         },
         "x-nightmail-permission": {
           "person": "admin",
-          "text": "People only: an owner or admin, in the dashboard or over their own MCP sign-in. Never an API key."
+          "level": "write",
+          "text": "People only: an owner or admin, in the dashboard or over their own MCP sign-in with write access. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -71802,7 +71801,8 @@
         },
         "x-nightmail-permission": {
           "person": "admin",
-          "text": "People only: an owner or admin, in the dashboard or over their own MCP sign-in. Never an API key."
+          "level": "write",
+          "text": "People only: an owner or admin, in the dashboard or over their own MCP sign-in with write access. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -71956,7 +71956,8 @@
         },
         "x-nightmail-permission": {
           "person": "admin",
-          "text": "People only: an owner or admin, in the dashboard or over their own MCP sign-in. Never an API key."
+          "level": "read",
+          "text": "People only: an owner or admin, in the dashboard or over their own MCP sign-in with read access. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -72126,7 +72127,8 @@
         },
         "x-nightmail-permission": {
           "person": "admin",
-          "text": "People only: an owner or admin, in the dashboard or over their own MCP sign-in. Never an API key."
+          "level": "write",
+          "text": "People only: an owner or admin, in the dashboard or over their own MCP sign-in with write access. Never an API key."
         },
         "x-codeSamples": [
           {
