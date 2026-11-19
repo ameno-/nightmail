@@ -453,6 +453,16 @@
 .srt-v-ritual pre { display: grid; font-family: var(--font-mono); font-size: 10.5px; line-height: 20px; white-space: pre; }
 .srt-v-ritual pre > span { padding-inline: 13px; color: var(--dim); }
 .srt-line-narrow { display: none; }
+/* (A wide page's appliances can be narrower than the rule's one-line call, 44 characters: there the screen sets the
+   call over three lines, as a phone's does, closer together, and the letters stand a little closer where it is
+   narrower still than the longest of the rest, 40 characters. Nothing on it is cut off, and nothing is set smaller.) */
+.srt-v-ritual { container-type: inline-size; }
+@container (width < 304px) {
+  .srt-stations:not([data-phone]) .srt-v-ritual pre { --pad: clamp(7px, calc((100cqw - 40 * .6 * 10.5px) / 2), 13px); line-height: 17px; letter-spacing: clamp(-.8px, calc((100cqw - 2 * var(--pad) - 40 * .6 * 10.5px) / 40), 0px); }
+  .srt-stations:not([data-phone]) .srt-v-ritual pre > span { padding-inline: var(--pad); }
+  .srt-stations:not([data-phone]) .srt-line-wide { display: none; }
+  .srt-stations:not([data-phone]) .srt-line-narrow { display: block; }
+}
 .srt-run { color: color-mix(in oklab, var(--dim), var(--srt-screen-text) calc(var(--t) * 100%)) !important; box-shadow: inset 2px 0 0 color-mix(in oklab, transparent, var(--color-brand) calc(var(--t) * 100%)); }
 .srt-v-endpoint { display: grid; align-content: start; row-gap: 8px; padding: 13px 13px 0; font-family: var(--font-mono); font-size: 10.5px; line-height: 15px; }
 .srt-v-endpoint p { white-space: nowrap; }
