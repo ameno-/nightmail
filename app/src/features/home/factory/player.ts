@@ -4,7 +4,8 @@
 // waiting for data holds both. A segment plays to its end and the next starts as it ends; every segment starts and
 // ends on the poster's picture, so the cut is not seen. The next segment's two videos load in a second pair of
 // elements while this one plays; one that will play again straight away loops instead. The boards keep their own,
-// slower time and move on the compositor. Nothing here makes a sound.
+// slower time and move on the compositor. Where the hall dims the boards dim with it, and where the plinth does the
+// page's tags on its labels. Nothing here makes a sound.
 import type { Manifest, Segment } from './manifest'
 
 export type AlphaFormat = 'hevc' | 'webm'
@@ -46,7 +47,7 @@ export function schedule(segments: Segment[], random = Math.random) {
 
 type Deck = { bg: HTMLVideoElement; fg: HTMLVideoElement; segment: Segment | null; ready: boolean; loading: AbortController | null }
 export type Player = { setShown(shown: boolean): void; destroy(): void }
-export type Layers = { stage: HTMLElement; bg: HTMLElement; boards: HTMLElement; fg: HTMLElement }
+export type Layers = { stage: HTMLElement; bg: HTMLElement; boards: HTMLElement; fg: HTMLElement; tags?: HTMLElement }
 
 /** Starts the factory in `layers` once the first segment and the boards can play; until then (and for good, where
  *  they cannot: `failed` is called) the page's poster is what is seen. `base` is where the renders are, ending in a
@@ -66,7 +67,9 @@ export function mountPlayer(layers: Layers, { base, manifest: m, format, height,
   }
   const decks: Deck[] = [0, 1].map(() => ({ bg: video(layers.bg), fg: video(layers.fg), segment: null, ready: false, loading: null }))
   const both = (deck: Deck) => [deck.bg, deck.fg]
-  let active = 0, upcoming: Segment | null = null, started = false, shown = true, destroyed = false, swapping = false, raf = 0, last = 0, light = 1
+  let active = 0, upcoming: Segment | null = null, started = false, shown = true, destroyed = false, swapping = false, raf = 0, last = 0, light = 1, labelLight = 1
+  // A layer lit `level` (1 is as lit as ever), set only when it changes.
+  const dim = (layer: HTMLElement | undefined, level: number, was: number) => { if (layer && level !== was) layer.style.filter = level === 1 ? '' : `brightness(${level})`; return level }
 
   // The boards: each a sprite on a rail as wide as the frame, slid by the rail's transform from just off the frame's
   // left edge across it and off its right (`gapPx` times the number of boards in all), the next one `gapPx` behind.
@@ -184,9 +187,10 @@ export function mountPlayer(layers: Layers, { base, manifest: m, format, height,
     raf = requestAnimationFrame(tick)
     if (!started || !shown || swapping) return
     const deck = decks[active], { bg, fg } = deck, end = deck.segment!.frames / m.fps
-    // Where the hall dims, the boards dim with it, frame by frame.
-    const lights = deck.segment!.boardLight, level = lights ? lights[Math.min(lights.length - 1, Math.floor(bg.currentTime * m.fps))] ?? 1 : 1
-    if (level !== light) { light = level; layers.boards.style.filter = level === 1 ? '' : `brightness(${level})` }
+    // Where the hall dims, the boards dim with it, and where the plinth dims, the tags on its labels: frame by frame.
+    const at = (lights: number[] | undefined) => lights ? lights[Math.min(lights.length - 1, Math.floor(bg.currentTime * m.fps))] ?? 1 : 1
+    light = dim(layers.boards, at(deck.segment!.boardLight), light)
+    labelLight = dim(layers.tags, at(deck.segment!.labelLight), labelLight)
     if (bg.loop) {
       // Round again: the next time through has begun.
       if (bg.currentTime < last - end / 2) plan()
@@ -243,6 +247,7 @@ export function mountPlayer(layers: Layers, { base, manifest: m, format, height,
       for (const deck of decks) { deck.loading?.abort(); for (const v of both(deck)) { v.pause(); v.removeAttribute('src'); v.load(); v.remove() } }
       for (const board of boards) { board.motion?.cancel(); board.rail.remove() }
       layers.boards.style.filter = ''
+      if (layers.tags) layers.tags.style.filter = ''
       layers.stage.removeAttribute('data-playing'); layers.stage.removeAttribute('data-live')
     },
   }

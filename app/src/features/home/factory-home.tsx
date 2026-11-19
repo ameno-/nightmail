@@ -19,7 +19,8 @@ import './factory-home.css'
 // The homepage: the factory, in a wide frame on a desktop and a tall one on a phone (index.tsx picks), from the very top
 // of the window: there is no header (the machine carries the name). A rendered hall with the sorting machine standing in it, the price on the
 // machine's front, and billboards with the free tier on them sliding slowly along a rail behind it (factory/player.ts).
-// The page writes only the button, on the blank plate the machine's front has for it. The first picture is the poster,
+// The page writes the button, on the blank plate the machine's front has for it, and a tag over each pipe's label on
+// the plinth (the render's stencils are too small and too grey to read). The first picture is the poster,
 // laid out by CSS alone before anything loads (factory-home.css), so nothing moves when the videos take over from it;
 // with reduced motion, without the renders' host (VITE_FACTORY_MEDIA), or where alpha video cannot play, the poster
 // is what is seen. The hall's pipes go down out of the picture; under it each place mail can go has a tube of its own,
@@ -57,6 +58,15 @@ function frameOf(m: Manifest, format: Format) {
   return { button, vars: { '--fac-w': m.width, '--fac-h': m.height, '--fac-safe-h': safeBottom - safeTop, '--fac-safe-w': 1120, '--fac-mid': (safeTop + safeBottom) / 2, '--fac-floor': floor, '--fac-label': label } as CSSProperties }
 }
 const FRAMES = { desktop: frameOf(MANIFESTS.desktop, 'desktop'), phone: frameOf(MANIFESTS.phone, 'phone') }
+
+// The pipes' labels: a tag over each stencil some crop shows whole (the manifest's `labelBox`; none where `visible` is
+// false), placed in the frame's pixels like the button and sized by factory-home.css: as large as the stencil, and
+// never smaller than readable type, so it can be larger. The frame's crop depends on the window's shape, so before
+// each paint (and as the stage's size changes) a tag whose stencil the stage cuts is left off, and one that would run
+// past the stage's edge is moved in along it, still over its stencil; one that would then cover the tag before it (on
+// the narrowest phones there is no room for both) is left off too.
+const tagsOf = (m: Manifest) => (m.pipes ?? []).flatMap(pipe => pipe.labelBox && pipe.visible !== false ? [{ label: pipe.label, box: pipe.labelBox }] : [])
+const TAGS = { desktop: tagsOf(MANIFESTS.desktop), phone: tagsOf(MANIFESTS.phone) }
 const POSTERS: Record<Format, string> = { desktop: desktopPoster, phone: phonePoster }
 
 // A phone's frame has room for one billboard at a time, so its poster shows one (3,000 sent). Where nothing plays (reduced
@@ -83,7 +93,7 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
   const visitor = start.signedIn ? null : start
   const dark = useTheme().theme === 'dark'
   const scene = useRef<HTMLElement>(null), probe = useRef<HTMLDivElement>(null), stage = useRef<HTMLDivElement>(null), frame = useRef<HTMLDivElement>(null)
-  const bg = useRef<HTMLDivElement>(null), boards = useRef<HTMLDivElement>(null), fg = useRef<HTMLDivElement>(null)
+  const bg = useRef<HTMLDivElement>(null), boards = useRef<HTMLDivElement>(null), fg = useRef<HTMLDivElement>(null), tags = useRef<HTMLDivElement>(null)
   // The places mail can go under the hero are laid out as the sorter's page would lay them out for this window (sorter/plan.ts).
   const [p, setP] = useState<Plan | null>(null)
   useLayoutEffect(() => {
@@ -94,6 +104,32 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
     measure()
     const observer = new ResizeObserver(measure)
     observer.observe(scene.current!); observer.observe(probe.current!)
+    return () => observer.disconnect()
+  }, [])
+
+  useLayoutEffect(() => {
+    const layer = tags.current!, area = stage.current!
+    const place = () => {
+      const s = area.getBoundingClientRect(), f = frame.current!.getBoundingClientRect(), k = f.width / m.width
+      let edge = -Infinity
+      TAGS[format].forEach(({ box }, i) => {
+        const tag = layer.children[i] as HTMLElement
+        tag.style.removeProperty('--fac-tag-dx'); tag.style.removeProperty('--fac-tag-dy')
+        // (The stencil is the box less the 3 frame px it has to spare all round.)
+        const whole = f.left + (box.x + 3) * k >= s.left - .5 && f.left + (box.x + box.w - 3) * k <= s.right + .5 && f.top + (box.y + 3) * k >= s.top - .5 && f.top + (box.y + box.h - 3) * k <= s.bottom + .5
+        const t = tag.getBoundingClientRect(), dx = Math.max(0, s.left - t.left) + Math.min(0, s.right - t.right), dy = Math.max(0, s.top - t.top) + Math.min(0, s.bottom - t.bottom)
+        const off = !whole || t.left + dx < edge + 2
+        tag.toggleAttribute('data-off', off)
+        if (off) return
+        edge = t.right + dx
+        if (dx) tag.style.setProperty('--fac-tag-dx', `${dx}px`)
+        if (dy) tag.style.setProperty('--fac-tag-dy', `${dy}px`)
+      })
+    }
+    place()
+    // (Each tag is watched too: its width changes when the mono web font takes over from its fallback.)
+    const observer = new ResizeObserver(place)
+    observer.observe(area); for (const tag of layer.children) observer.observe(tag)
     return () => observer.disconnect()
   }, [])
 
@@ -113,7 +149,7 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
       // (A desktop takes the smaller files, 1280 wide, where the frame is shown no wider than that has pixels for; a
       // phone the 1080 × 1920 ones, and the 720 × 1280 ones where it is saving data or on 3G or slower.)
       const height = format === 'phone' ? slow() ? 720 : 1080 : frame.current!.getBoundingClientRect().width * devicePixelRatio > 1280 ? 1080 : 720
-      player = mountPlayer({ stage: stage.current!, bg: bg.current!, boards: boards.current!, fg: fg.current! }, { ...set, format: codec, height, failed: fail })
+      player = mountPlayer({ stage: stage.current!, bg: bg.current!, boards: boards.current!, fg: fg.current!, tags: tags.current! }, { ...set, format: codec, height, failed: fail })
       observer.observe(stage.current!)
       document.addEventListener('visibilitychange', update)
     })
@@ -135,6 +171,8 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
             <div className="fac-layer" ref={bg} />
             <div className="fac-layer fac-boards" ref={boards} />
             <div className="fac-layer" ref={fg} />
+            <div className="fac-layer" ref={tags} aria-hidden="true">{TAGS[format].map(({ label, box }) =>
+              <span key={label} className="fac-tag" style={{ left: pct(box.x, m.width), top: pct(box.y + box.h / 2, m.height), '--fac-tag-w': box.w, '--fac-tag-h': box.h } as CSSProperties}><span>{label}</span></span>)}</div>
             <StartButton start={start} className="fac-cta" style={buttonBox} />
           </div>
         </div>
