@@ -42,12 +42,11 @@ const STATIONS: Station[] = [
 // innermost tube (the one nearest the appliances) is Inbox's. The innermost must turn in first or it crosses the
 // others, so on the left the appliances come in the hero's order from the inside: Threads first, Inbox last (the
 // right four already run that way). `tube` is the place from the inside, as above.
-// (A pipe is found by any of its names: the renders named the rules' pipe RITUALS before Rules was renamed. The desktop's
-// manifest says RULES; the phone's still says RITUALS until its re-encode is bundled, when RITUALS can go.)
-const LABELS: Record<Kind | 'main', string[]> = { inbox: ['INBOX'], agent: ['AGENTS'], endpoint: ['ENDPOINTS'], thread: ['THREADS'], imap: ['IMAP'], ritual: ['RULES', 'RITUALS'], campaign: ['CAMPAIGNS'], logs: ['LOGS'], main: ['OUTBOUND'] }
-const heroX = (pipes: HeroPipes, kind: Kind | 'main') => LABELS[kind].map(label => pipes.x[label]).find(x => x !== undefined)
+const LABELS: Record<Kind | 'main', string> = { inbox: 'INBOX', agent: 'AGENTS', endpoint: 'ENDPOINTS', thread: 'THREADS', imap: 'IMAP', ritual: 'RULES', campaign: 'CAMPAIGNS', logs: 'LOGS', main: 'OUTBOUND' }
+/** Where a tube's hero pipe comes down to the section's top edge, by its label. */
+const heroX = (pipes: HeroPipes, kind: Kind | 'main') => pipes.x[LABELS[kind]] as number | undefined
 /** Whether a tube's hero pipe shows at the stage's foot (a phone's are hidden behind the console or outside the picture). */
-const shows = (pipes: HeroPipes, kind: Kind | 'main') => !LABELS[kind].some(label => pipes.behind?.includes(label))
+const shows = (pipes: HeroPipes, kind: Kind | 'main') => !pipes.behind?.includes(LABELS[kind])
 const UNDER_HERO: Station[] = (['thread', 'imap', 'endpoint', 'ritual', 'agent', 'campaign', 'inbox', 'logs'] as const).map(kind => {
   const spec = STATIONS.find(station => station.kind === kind)!
   return spec.tube < 4 ? { ...spec, tube: 3 - spec.tube } : spec
