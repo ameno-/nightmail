@@ -66,7 +66,7 @@ const INVITATIONS: Record<string, { output: Tool['inputSchema']; view?: (respons
 // never agent calls (an agent may create a top-up link that a person opens and pays: createBillingTopUpLink).
 export const DASHBOARD_MONEY = ['createBillingTopUp', 'updateBillingAutoRecharge', 'createBillingCardSetup', 'deleteBillingPaymentMethod'] as const;
 // getRuleVersion is the dashboard's long poll for an agent's saves; an agent reads the version from getRules.
-const EXCLUDED = new Set<string>(['receiveSesSnsEvent', 'revealWebhookSecret', 'getRuleVersion', 'getRitualVersion', ...DASHBOARD_MONEY]);
+const EXCLUDED = new Set<string>(['receiveSesSnsEvent', 'revealWebhookSecret', 'downloadInboundAttachment', 'getRuleVersion', 'getRitualVersion', ...DASHBOARD_MONEY]);
 // POST operations that change nothing: no confirm argument, read-only hint, read permission.
 const READ_ONLY_POSTS = new Set(['testRouting', 'testRules', 'checkRule', 'testRituals', 'checkRitual', 'queryAudience', 'previewSegment', 'previewEmail', 'checkEmail']);
 // Writes whose calls need no confirm argument. Access to every operation is decided by its
@@ -430,6 +430,7 @@ export const HUMAN_STEPS: Record<string, string> = {
   releaseSenderStanding: 'Human step: an owner or admin confirms the fix checklist in the dashboard. Agents read the standing with getSenderScore.',
   getRuleVersion: 'Dashboard step: the rules page’s long poll, so a person sees an agent’s saves live. Agents read the version from rules · config (getRules).',
   inviteWorkspaceMember: 'The dashboard’s older name for createWorkspaceInvitation, which agents use (settings · invite).',
+  downloadInboundAttachment: 'The link webhook payloads carry: it redirects to the file. Agents read the same link with getInboundAttachment (attachments · getInbound), which answers the same credentials.',
   revealWebhookSecret: 'Human step: a signing secret is read back only in the dashboard or with an API key a person made, and every read is recorded. Agents can rotate it (webhooks · rotateSecret).',
 };
 /** Internal routes (Nightmail operators and support grants): never tools, and not listed in the customer coverage document. */

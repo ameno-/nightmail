@@ -596,7 +596,7 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   for(const name of ['listEmails','getEmail','getEmailContent','getEmailDetail','previewEmail','listLogs','testRouting','testRules','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
   for(const op of catalog.values()){assert.ok((TOOLSETS as readonly string[]).includes(op.toolset),op.tool.name);assert.equal(op.tool.outputSchema?.type,'object',op.tool.name);assert.match(op.tool.name,/^[a-z][A-Za-z]+$/,op.tool.name)}
   // Internal routes (operators and support grants) are never tools, whatever their security scheme.
-  const bearer=Object.entries(spec.paths??{}).filter(([path])=>!/^\/v1\/(?:support|operator)\//.test(path)).flatMap(([,item])=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&!o.operationId.endsWith('Ritual')&&!/Ritual[A-Z]|Rituals|OmenOptIns/.test(o.operationId)&&!['receiveSesSnsEvent','revealWebhookSecret','getRuleVersion','createBillingTopUp','updateBillingAutoRecharge','createBillingCardSetup','deleteBillingPaymentMethod'].includes(o.operationId)).map((o:Json)=>o.operationId as string);
+  const bearer=Object.entries(spec.paths??{}).filter(([path])=>!/^\/v1\/(?:support|operator)\//.test(path)).flatMap(([,item])=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&!o.operationId.endsWith('Ritual')&&!/Ritual[A-Z]|Rituals|OmenOptIns/.test(o.operationId)&&!['receiveSesSnsEvent','revealWebhookSecret','downloadInboundAttachment','getRuleVersion','createBillingTopUp','updateBillingAutoRecharge','createBillingCardSetup','deleteBillingPaymentMethod'].includes(o.operationId)).map((o:Json)=>o.operationId as string);
   // Members and invitations are session routes that an owner's or admin's own sign-in also calls (core.ts memberAdminRoute).
   assert.deepEqual([...catalog.keys()].sort(), [...bearer,'waitForMessage','listWorkspaceMembers','listWorkspaceInvitations','createWorkspaceInvitation','revokeWorkspaceInvitation'].sort());
   const { resourceTools, resourceInventory, listedTool } = await import('./src/mcp-resources.js'), { workspaceTools, workspaceResource } = await import('./src/mcp.js');
@@ -5316,7 +5316,9 @@ describe('Hosted MCP OAuth and tools', () => {
       const dashboardKey=ok(await local('POST','/v1/api-keys',{name:'R2 dashboard manage',permissions:['manage']}),201);secrets.add(dashboardKey.secret);
       const detail=`/v1/inbound/messages/${thread.id}`;
       assert.equal(ok(await request('GET',detail,parent.secret)).id,thread.id);
-      for(const path of [`${detail}?includeDelivery=true`,'/v1/inbound/messages?includeDelivery=true',`${detail}/raw`,`${detail}/parts/fixture`])error(await request('GET',path,parent.secret),403,'ADMIN_REQUIRED');
+      for(const path of [`${detail}?includeDelivery=true`,'/v1/inbound/messages?includeDelivery=true',`${detail}/raw`])error(await request('GET',path,parent.secret),403,'ADMIN_REQUIRED');
+      // Attachment links follow the message, which this key reads: a part that doesn't exist is simply not found.
+      error(await request('GET',`${detail}/parts/fixture`,parent.secret),404,'NOT_FOUND');
       assert.deepEqual(ok(await request('GET',`${detail}?includeDelivery=true`,dashboardKey.secret)).envelopeTo,['recipient@example.net']);
       error(await request('GET',`${detail}/parts/fixture`,dashboardKey.secret),404);
       await db.query('UPDATE nightmail_resource_grants SET revoked=true WHERE client_id=$1',[clientId]);
@@ -5332,6 +5334,73 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal((await db.query('SELECT FROM api_keys WHERE id=$1 AND revoked_at IS NULL',[child.id])).rowCount,1);
       assert.equal(await allowed(child.id),false);assert.equal(await allowed(mbk.id,box.address),false);
       await run('email.dispatch');assert.deepEqual((await db.query('SELECT status,error_code,provider_id FROM sending_emails WHERE id=$1',[afterDemotion])).rows,[{status:'canceled',error_code:'ORIGIN_KEY_REVOKED',provider_id:null}]);
+    });
+  });
+
+  // Attachments follow their message: a webhook payload's attachment link (/parts) answers each credential exactly as
+  // getInboundAttachment does for the same file. The raw message stays with delivery-detail readers.
+  test('webhook attachment links follow the message: /parts answers every reader as getInboundAttachment does; /raw is unchanged', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request, fetch }) => {
+      const { mailMessages, mailAttachments } = await import('./src/db/mailbox.js');
+      const { attachToMailboxes } = await import('./src/mailbox-store.js');
+      const wid = runtime.config.workspaceId, scope = { workspaceId: wid };
+      // Files in the bound R2 mail store: both routes sign a /v1/objects link (no storage call), self-hosted or hosted.
+      runtime.mailR2 = { bucket: {} as R2Bucket, name: 'parts-fixture', write: false };
+      const bucket = 'r2:parts-fixture';
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,'parts.example',$3,'active')", [unique('mdom'), wid, REGION]);
+      await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'parts-fixture','fixture-topic')", [wid, REGION]);
+      const support = ok(await local('POST', '/v1/inbound/addresses', { address: 'support@parts.example' }), 201);
+      const billing = ok(await local('POST', '/v1/inbound/addresses', { address: 'billing@parts.example' }), 201);
+      // One scanned message per address, each with a file and its stored raw MIME.
+      const files = new Map<string, { message: string; file: string }>();
+      for (const box of [support, billing]) {
+        const message = unique('msg'), file = unique('att'), thread = unique('thr');
+        await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)', [thread, wid]);
+        const [row] = await runtime.db.insert(mailMessages).values({ id: message, ...scope, direction: 'inbound', threadId: thread, region: REGION, fromAddress: 'sender@example.net', subject: 'Invoice', text: 'Invoice', snippet: 'Invoice',
+          messageId: `${message}@example.net`, verdicts: { virus: 'PASS' }, rawBucket: bucket, rawKey: `a/${wid}/${message}.eml`, attachmentCount: 1 }).returning();
+        await attachToMailboxes(runtime.db, scope, row!, [box.id]);
+        await runtime.db.insert(mailAttachments).values({ id: file, ...scope, messageId: message, filename: 'invoice.txt', contentType: 'text/plain', sizeBytes: 42, disposition: 'attachment', sha256: '0'.repeat(64), bucket, storageKey: `a/${wid}/${message}/${file}` });
+        files.set(box.id, { message, file });
+      }
+      const bearer = async (path: string, body: Json) => { const made = ok(await request('POST', path, MANAGER, { name: unique('parts-key'), ...body }), 201); secrets.add(made.secret); return { authorization: `Bearer ${made.secret}` }; };
+      // Members exist on hosted Nightmail only (self-hosted sign-in admits listed owners).
+      const member = await sessionFixture(t);
+      await db.query("UPDATE workspace_members SET workspace_id=$1, role='member' WHERE user_id=$2", [wid, member.userId]);
+      const grant = await oauthGrant(t, db, writableScope, request);
+      const minted = ok(await request('POST', '/mcp?codemode=true', grant.token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'createAgentToken', arguments: { confirm: true, body: { permissions: ['read', 'send', 'manage'], expiresInSeconds: 600, domains: [], purpose: unique('parts-agent') } } } }, rpcHeaders)).result;
+      assert.equal(minted.isError, false, redact(minted)); secrets.add(minted.structuredContent.token);
+      const credentials: [string, Record<string, string>][] = [
+        ['owner session', { cookie: manager!.cookie }], ['member session', { cookie: member.cookie }],
+        ['read-only API key', await bearer('/v1/api-keys', { permissions: ['read'] })], ['read-only inbound key', await bearer('/v1/inbound/keys', { permissions: ['read'] })],
+        ['support address key', await bearer('/v1/inbound/keys', { addressIds: [support.id], permissions: ['read'] })], ['agent token', { authorization: `Bearer ${minted.structuredContent.token}` }],
+      ];
+      runtime.config.multiTenant = true;
+      cleanup(t, async () => { runtime.config.multiTenant = false; });
+      const get = async (path: string, headers: Record<string, string>) => {
+        const res = await fetch(new Request(PUBLIC_ORIGIN + path, { headers: { origin: PUBLIC_ORIGIN, 'x-bane-environment': 'live', ...headers } }));
+        return { status: res.status, location: res.headers.get('location'), body: res.headers.get('content-type')?.includes('json') ? await res.json() as Json : null };
+      };
+      const answers: Record<string, string[]> = {};
+      for (const [label, headers] of credentials) for (const box of [support, billing]) {
+        const { message, file } = files.get(box.id)!, at = `${label} at ${box.address}`;
+        const named = await get(`/v1/inbound/messages/${message}/attachments/${file}`, headers), link = await get(`/v1/inbound/messages/${message}/parts/${file}`, headers);
+        if (named.status === 200) {
+          assert.equal(link.status, 307, at); assert.equal(link.location, link.body!.url, at);
+          // The same file: a signed /v1/objects link names the object key and filename.
+          const signed = (url: string) => { const { w, k, f } = JSON.parse(Buffer.from(new URL(url).pathname.replace(/^\/v1\/objects\//, '').split('.')[0]!, 'base64url').toString()); return { w, k, f }; };
+          assert.deepEqual(signed(link.body!.url), signed(named.body!.url), at); assert.deepEqual(signed(link.body!.url), { w: wid, k: `a/${wid}/${message}/${file}`, f: 'invoice.txt' }, at);
+          assert.ok(Math.abs(Date.parse(link.body!.expiresAt) - Date.now() - 300_000) < 5_000, at);
+        } else assert.deepEqual([link.status, link.body?.error?.code], [named.status, named.body?.error?.code], at);
+        (answers[label] ??= []).push(`${named.status} ${named.body?.error?.code ?? ''}`.trim());
+      }
+      assert.deepEqual(answers, {
+        'owner session': ['200', '200'], 'member session': ['200', '200'], 'read-only API key': ['403 ADMIN_REQUIRED', '403 ADMIN_REQUIRED'],
+        'read-only inbound key': ['200', '200'], 'support address key': ['200', '404 NOT_FOUND'], 'agent token': ['200', '200'],
+      });
+      // The raw message names every recipient: it keeps delivery-detail access (owner and admin sessions, unrestricted manage keys).
+      const raw = `/v1/inbound/messages/${files.get(support.id)!.message}/raw`;
+      assert.equal((await get(raw, credentials[0]![1])).status, 307);
+      for (const [label, headers] of credentials.slice(1)) assert.deepEqual([(await get(raw, headers)).status, (await get(raw, headers)).body?.error?.code], [403, 'ADMIN_REQUIRED'], label);
     });
   });
 
