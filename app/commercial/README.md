@@ -14,7 +14,8 @@ It is not a dashboard page: it shares no code, styles or sign-in with the dashbo
 Rules of the story:
 
 - **The pitchman never mentions Doug.** It is just a commercial. The one fourth-wall break is in
-  beat 4: in the pause he turns to the footage and says, softly, "We saw you open that."
+  beat 4: an aside, thrown away. He glances at the footage, says "We saw you open that." and is
+  back to camera before the line is over. Nothing stops for it.
 - **One storyline.** Every email is Gnome Depot's, about the one gnome. The gnome (red hat, the
   only red thing besides the badge) turns up in every shot after it is delivered.
 - **It only gets worse.** Earlier emails never stop: they keep arriving as one-line banners under
@@ -22,9 +23,9 @@ Rules of the story:
   (0 → 1 → 5 → 37 → 212 → ~400 → 1,040 → 9,000 → 99,999+). The dings go from one, to a rhythm, to
   constant, to a roar. Everything Doug tries makes more.
 
-The commercial is the master clock (about 55 seconds of it; the show runs about 65 with the fight
-and the test card). Its clips play back to back and never wait for Doug; every beat cuts to a new
-shot as its clip starts.
+The commercial is the master clock (about 52 seconds of it; the show runs 66 with what Doug does
+to the pitchman afterwards). Its clips play back to back and never wait for Doug; every beat cuts
+to a new shot as its clip starts.
 
 | beat | the pitchman says | the footage | badge |
 | --- | --- | --- | --- |
@@ -33,12 +34,20 @@ shot as its clip starts.
 | 1 | "One line of code: receipt, SENT! Accepted in a TENTH of a second!" | one ding: "Your receipt · $84.00". He smiles. It is the only email he is glad to get. | 1 |
 | 2 | "Twenty cents per thousand! At that price, why send just ONE?" | ding, ding, ding, ding: shipped, out for delivery, delivered (the gnome pops up beside the couch), "How are you enjoying your gnome?" His smile goes. He flips the phone face down. | 5 |
 | 3 | "No per-contact pricing! Put EVERYBODY on the newsletter! Schedule it for any time!" | the bedroom, 3:00 AM. The face-down phone has been buzzing. "Gnome Depot Weekly · Hi DOUG!" whites out the room and two eyes open; DAILY has him bolt upright; then HOURLY. | 37 |
-| 4 | "And you see EVERYTHING! Delivered! Opened! Clicked! … We saw you open that." | the bathroom. Doug, chin-deep in bubbles with a rubber duck, opens the newsletter to hunt for the unsubscribe link: he scrolls all the way down and gets it with his forehead. ✓ DELIVERED ✓ OPENED ✓ CLICKED are stamped on the tub. In the pause everything stops (the only 3.5 s in the show with no mail), the pitchman turns to the footage and says it. Doug freezes; his eyes and the duck go to the pitchman; he sinks to his eyes. | 212 |
+| 4 | "And you see EVERYTHING! Delivered! Opened! Clicked! We saw you open that." | the bathroom. Doug, chin-deep in bubbles with a rubber duck, opens the newsletter to hunt for the unsubscribe link: he scrolls all the way down and gets it with his forehead. ✓ DELIVERED ✓ OPENED ✓ CLICKED are stamped on the tub. The aside follows straight on from "Clicked!": the pitchman glances at the footage in passing, and the mail keeps coming. Doug heard it. His eyes and the duck go to the pitchman, and he sinks to his eyes. | 212 |
 | 5 | "But wait, there's MORE! Customers write back? Answer them, INSTANTLY!" | a first date. "Unsubscribed from HOURLY ✓. You've been moved to Gnome Depot MINUTELY." His date finds the ceiling interesting while he pecks out "please stop" with his forehead. The message leaves his phone, crosses out of the footage and lands on the INBOX board over the pitchman's head ("1 NEW · FROM: A CUSTOMER"), which the pitchman could not be prouder of. On "INSTANTLY!" the answers shoot back the other way into his phone: 10% off his next gnome, and "You might also like: Gnome (Large)". | ~400 |
 | 6 | "Post every reply to Slack! The WHOLE TEAM can answer!" | the board becomes #CUSTOMER-REPLIES with his "please stop" posted in it. The footage splits: six of Gnome Depot's staff, in company gnome hats, each answer in their own picture ("lol", "who's Doug?", "Doug!! 👋", "+1 please stop", "can we add him to VIP?", "Reply-all: please stop replying all."), and each answer flies out of its picture to his phone. His date leaves, sideways. | 1,040 |
 | 7 | "Angry customer? The AI knows! NINETY-SEVEN PERCENT! Send them MORE coupons!" | a funeral; he brought the gnome. The phone buzzes, muffled, under a hymn book. He throws the book, drums "STOP EMAILING ME" with his forehead, and the AI boxes everyone: SAD 99%, SAD 98%, CALM 100% (the gnome), ANGRY 97%. A moment of silence, then three coupons at once at full volume. He notices the "via NIGHTMAIL" in the corner of every one, and looks at the pitchman. | 9,000 |
-| 8 | "Plug in your AI agents! Hundreds of robots, sending email, ALL NIGHT LONG! NIGHTMAIL! Call n—" | still at the funeral: a robot (a metal bean with an antenna and a screen for a face) pops up from behind the casket and sends him "Doug, I'm an AI agent. I'll be in touch." Then another ("A haiku about your gnome"), then one in the pew right next to him ("Re: Re: Re: please stop"), then two rows of them at the back, every one of them sending. That does it: he leaves. He drives, eyes narrowed, past NIGHTMAIL STUDIOS 2 MI, 1 MI, EXIT NOW, with robots in the back seat, on the roof and running behind, slapping mail onto the windshield. He screeches up to a building with a red ON AIR sign; the car door does not survive, and the horde pours in behind him. Back in the commercial at full tilt, the door at the back of the set bursts open: "DOUG — ACTUAL RECIPIENT". On "Call n—" he launches (no arms) and takes the pitchman out of frame. | 99,999+ |
-| after | (the audio has cut dead) | an empty set. Just past the left edge of the frame, a cartoon fight cloud: POW, BONK, OOF, stars, envelopes. The bowler sails across. The camera gets knocked, and goes over. PLEASE STAND BY. Silence. One ding: "That looked stressful, Doug. Here's 40% off your next gnome!" Then it resets to standby. | 99,999+ |
+| 8 | "Plug in your AI agents! Hundreds of robots, sending email, ALL NIGHT LONG! NIGHTMAIL! Call n—" | still at the funeral: a robot (a metal bean with an antenna and a screen for a face) pops up from behind the casket and sends him "Doug, I'm an AI agent. I'll be in touch." Then another ("A haiku about your gnome"), then one in the pew right next to him ("Re: Re: Re: please stop"), then two rows of them at the back, every one of them sending. That does it: he leaves. He drives, eyes narrowed, past NIGHTMAIL STUDIOS 2 MI, 1 MI, EXIT NOW, with robots in the back seat, on the roof and running behind, slapping mail onto the windshield. The commercial is on the car radio, tinny ("AM 1070"). After "Hundreds of robots," he turns it off with his forehead. Half a second of peace, and it comes back on by itself, louder ("VOL 11"), and stays that way. He screeches up to a building with a red ON AIR sign; the car door does not survive, and the horde pours in behind him. Back in the commercial the sound opens to full range, and the door at the back of the set bursts open: "DOUG — ACTUAL RECIPIENT". On "Call n—" he launches (no arms) and lands on the pitchman. | 99,999+ |
+| after | (the audio has cut dead. Three times he tries to go on: "Call n—", "Call…", and, out cold, "…now…") | on camera, all of it, for eight seconds. After the tackle Doug goes up, turns over and comes down head first eighteen more times, from one side and then the other. Every blow squashes them both, leaves a dent in the pitchman and leaves him flatter; his eyes go to spirals and then to Xs. The bowler comes off on the second blow and Doug stops to flatten that too. Mail and stars fly off them, the camera gets knocked, the lights and the boom mic swing, ON AIR sparks. He has finished when the pitchman says "…now…", so there is one more. Then the camera, crooked, holds on it: Doug out of breath on what is left, the flat bowler, the boom mic still swinging, ON AIR flickering. Silence. One ding: "That looked stressful, Doug. Here's 40% off your next gnome!" He reads it. Then it resets to standby. | 99,999+ |
+
+### The second viewing
+
+Whoever has watched it to the end (`localStorage["nightmail.commercial.seen"]`) gets a different
+pitchman the next time they tune in. Same script, same voice, same hat, which now has a dent in it.
+He is thinner, he is sweating, he can't hold the smile, he blinks twice as often, and every few
+seconds he checks the door (in the last shot he doesn't take his eyes off it). It ends the same way.
+`?take=2` forces him and `?take=1` forces the original.
 
 No arms on anyone: Doug works his phone by leaning over and putting his forehead on it.
 
@@ -62,11 +71,15 @@ toggle and two invisible click targets (the glass and the dial).
   the camera gets knocked). (4) Bloom, grain and shake.
 - `src/shaders.js`: the instanced SDF "uber" shader from Hex: flat and glossy
   shapes, glows, starbursts, atlas sprites and the glossy bean characters. Doug is exactly Hex's
-  bean; the pitchman is the same bean in a brown bowler with a red band.
-- `src/show.js`: the timeline, the broadcast layouts (`solo`, `monitor`, `big`, `split`,
-  `takeover`, `studio`, each with a portrait version where the pitchman sits under the footage),
-  cuts, the six-up office grid, the last shot (the door, the tackle, the fight cloud, the hat), the
-  band of kinetic type, the studio's amber readout, and Doug's phone: the banners at the top left
+  bean; the pitchman is the same bean in a brown bowler with a red band. For the ending the bean
+  takes dents (bites out of its outline that the gloss bends round), spiral or X eyes, and a hat
+  that sits askew, has a dent of its own, or is drawn alone.
+- `src/show.js`: the timeline, the broadcast layouts (`solo`, `monitor`, `big`, `split`, `desk`,
+  `takeover`, `studio`, `attack`, each with a portrait version where the pitchman sits under the
+  footage), cuts, the six-up office grid, the last shot (the door, the tackle, then `strike` and
+  `attack`: the list of blows, where Doug is between them, and what each one does to the
+  pitchman, the hat, the camera, the lights and the boom mic), the band of kinetic type, the
+  studio's amber readout, and Doug's phone: the banners at the top left
   of the footage (the ones he is meant to read pinned on top, the ones that never stop piling up
   beneath), the mail app and its badge at the top right, and the stream of dings.
 - `src/scenes.js`: what each shot shows, in a 640×480 space, in greys: Doug, his phone, the gnome
@@ -74,7 +87,8 @@ toggle and two invisible click targets (the glass and the dial).
 - `src/atlas.js`: every email Gnome Depot sends, Bungee kinetic type, fine print and glyph sets,
   drawn once with Canvas 2D into one texture.
 - `src/audio.js`: Web Audio. The broadcast bus (announcer, jingle, bed, studio audience; the
-  announcer ducks the bed and drives the pitchman's mouth) and the footage bus.
+  announcer ducks the bed and drives the pitchman's mouth) and the footage bus. `radio(mode)`
+  band-passes the whole broadcast bus for the drive: `tinny`, `off`, `loud`, and `open` again.
 
 ### Timing is data
 
@@ -90,12 +104,15 @@ WebGPU only; without it the page says so.
 ## Audio
 
 The announcer is the v3 script: clips `s0`–`s8`, with ElevenLabs Scribe word timings in the
-manifest. The clips play with a 0.2 s breath between them and the jingle (cut to 3.3 s) after
-`s0`. `s4` has the pause and the quiet line in it; `s8` is cut off on the "n" of "Call now". The
-cut click, the dial, the car's engine and the phone under the hymn book are made with ffmpeg; a
-chapel organ, a studio audience, a tire screech, a door bang and five seconds of cartoon fight are
-ElevenLabs sound effects. At "Call n—" everything stops dead; the fight is the only sound until
-the test card, which is silent until its one ding.
+manifest. `s4` is the v3.1 take: the same voice and words, with "We saw you open that." as a
+one-second aside straight after "Clicked!". The clips play with a 0.2 s breath between them and
+the jingle (cut to 3.3 s) after `s0`. `s8` is cut off on the "n" of "Call now"; `callnow` and `now`
+are cut from the full take for what the pitchman tries to say afterwards. The cut click, the dial,
+the car's engine and the phone under the hymn book are made with ffmpeg; a chapel organ, a studio
+audience, a tire screech, a door bang, a bowler being crushed and four single heavy thuds are
+ElevenLabs sound effects. At "Call n—" everything stops dead. From there the only sounds are the
+thuds, one per blow, the hat, and the pitchman's three attempts at the rest of his line, each cut
+off by the next thud. The aftermath is silent until its one ding.
 
 ## In this repository
 
@@ -135,6 +152,7 @@ reads only 100 cache rules and the dashboard's chunks need them (`asset-headers.
 pages), so none of them reads the show: its copy is a script, shouted on purpose.
 
 **Changing the show.** It is developed as a standalone project and copied here: `src/`, the audio
-and its manifest. Three lines of `src/main.js` differ from the standalone copy: it imports
+and its manifest. Four lines of `src/main.js` differ from the standalone copy: it imports
 `./fonts.css` instead of the `@fontsource` packages, `BASE` is `/commercial/`, and the mute choice
-is stored as `nightmail.commercial.muted`. Run the smoke after copying.
+and the second viewing are stored as `nightmail.commercial.muted` and `nightmail.commercial.seen`.
+Run the smoke after copying.
