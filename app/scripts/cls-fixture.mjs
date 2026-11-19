@@ -386,6 +386,57 @@ async function threads(db, workspaceId, box, list) {
       [box.id, thread, workspaceId, subject, snippet, JSON.stringify([{ name: from[0], address: from[1] }]), unread ? 1 : 0, at]);
   }
 }
+// One support conversation (Logs' thread counts, the detail pages' Thread section): Jordan writes in, support replies
+// from its address (a mailbox reply, stored in the thread), Jordan answers, support answers that with an ordinary send
+// whose In-Reply-To names it (no stored copy: it joins the thread by its header), and Jordan writes back with a file.
+async function conversation(db, workspaceId, box) {
+  const thread = rid('thr'), customer = { name: 'Jordan Lee', address: 'jordan.lee@example.net' }, support = { name: 'Northwind Support', address: box.address };
+  const subject = 'What happened to my accounts?';
+  const steps = [
+    { out: false, minutes: 52, text: 'Hi, I logged in this morning and both of my accounts are gone from the dashboard. I didn’t delete anything. What happened to my accounts?\n\nJordan' },
+    { out: 'mailbox', minutes: 44, text: 'Hi Jordan, sorry for the scare. Your accounts are safe: last night’s migration moved them under your new organization. Switch to Lee Studio in the top-left menu and you’ll find both.\n\nNorthwind Support' },
+    { out: false, minutes: 31, text: 'Thanks, I can see one of them now, but the second one (with the 2023 invoices) still isn’t there.' },
+    { out: 'header', minutes: 19, text: 'Found it: the second account was still linked to your old email address. I’ve moved it to Lee Studio, so it shows up after a refresh, with all of your 2023 invoices.\n\nNorthwind Support' },
+    { out: false, minutes: 7, files: 1, text: 'It’s back, thank you! One invoice shows the wrong total though, screenshot attached.' },
+  ];
+  const stored = steps.filter(step => step.out !== 'header');
+  await db.query('INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,$3,$4,$5)', [thread, workspaceId, subject, stored.length, ago(7)]);
+  const ids = { email: null, received: null };
+  let previous = null, references = [];
+  for (const [i, step] of steps.entries()) {
+    const at = ago(step.minutes), id = rid('msg'), subj = i ? `Re: ${subject}` : subject;
+    const messageId = step.out ? `provider-accounts-${i + 1}@email.amazonses.com` : `accounts-${i + 1}.jordan@mail.example.org`;
+    const from = step.out ? support : customer, to = step.out ? customer : support, snippet = step.text.replace(/\s+/g, ' ').slice(0, 140);
+    let emailId = null;
+    if (step.out) {
+      emailId = rid('email');
+      const paragraphs = step.text.split('\n\n').map(p => `<p style="margin:0 0 14px">${p}</p>`).join('');
+      const quoted = steps[i - 1].text.split('\n\n').map(p => `<p style="margin:0 0 10px">${p}</p>`).join('');
+      const html = `<!doctype html><html><body style="margin:0;background:#ffffff"><div style="max-width:600px;padding:28px 32px;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:22px;color:#18181b">${paragraphs}<div style="margin-top:22px;padding-left:14px;border-left:2px solid #d4d4d8;color:#71717a;font-size:14px;line-height:20px"><p style="margin:0 0 10px">Jordan Lee wrote:</p>${quoted}</div></div></body></html>`;
+      const headers = [{ Name: 'In-Reply-To', Value: `<${previous}>` }, { Name: 'References', Value: references.map(r => `<${r}>`).join(' ') }];
+      await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, created_at)
+        VALUES ($1,$2,$3,'fixture',$4,$5::jsonb,'[]','[]',$6,$7::jsonb,false,'delivered',$8,3,$9)`,
+        [emailId, workspaceId, REGION, support.address, JSON.stringify([customer.address]), subj, JSON.stringify({ kind: 'transactional', testCampaignId: null, region: REGION, subject: subj, fromName: support.name, html, text: step.text, attachments: [], headers, ...step.out === 'mailbox' ? { mailbox: true } : {} }), messageId.split('@')[0], at]);
+      for (const [type, ms] of [['dispatch_attempt', 0], ['accepted', 400], ['delivery', 2300], ...step.out === 'header' ? [['open', 240_000]] : []])
+        await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,provider_id,external_id,data,simulated,created_at) SELECT $1,workspace_id,id,$2,provider_id,$1,jsonb_build_object('emailId',id,'providerId',provider_id),false,created_at + $3 * interval '1 millisecond' FROM sending_emails WHERE id=$4`, [rid('event'), type, ms, emailId]);
+      if (step.out === 'header') ids.email = emailId;
+    }
+    if (step.out !== 'header') {
+      await db.query(`INSERT INTO mail_messages(id,workspace_id,direction,thread_id,region,subject,from_address,from_name,"to",envelope_to,received_at,text,snippet,attachment_count,verdicts,status,sending_email_id,sender_mailbox_id,message_id,in_reply_to,"references")
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12,$13,$14,'{"virus":"PASS","spam":"PASS"}',$15,$16,$17,$18,$19,$20::jsonb)`,
+        [id, workspaceId, step.out ? 'outbound' : 'inbound', thread, REGION, subj, from.address, from.name, JSON.stringify([to]), JSON.stringify([to.address]), at, step.text, snippet, step.files ?? 0,
+          step.out ? 'delivered' : 'received', emailId, step.out ? box.id : null, messageId, previous, JSON.stringify(references)]);
+      await db.query('INSERT INTO mail_message_ids(workspace_id,message_id,mail_message_id,thread_id) VALUES($1,$2,$3,$4)', [workspaceId, messageId, id, thread]);
+      await db.query(`INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at,inbox_seq) VALUES($1,$2,$3,$4,$5,$6,$7,nextval(pg_get_serial_sequence('mailbox_events','seq')))`,
+        [box.id, id, workspaceId, thread, step.out ? 'outbound' : 'inbound', i < steps.length - 1, at]);
+      if (i === steps.length - 1) ids.received = id;
+    }
+    references = [...references, messageId]; previous = messageId;
+  }
+  await db.query('INSERT INTO mailbox_threads(mailbox_id,thread_id,workspace_id,subject,snippet,participants,message_count,unread_count,last_message_at,last_inbound_at) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,1,$8,$8)',
+    [box.id, thread, workspaceId, subject, steps.at(-1).text.slice(0, 140), JSON.stringify([customer, support]), stored.length, ago(7)]);
+  return ids;
+}
 const people = ['Ana Ruiz', 'Ben Cho', 'Cleo Park', 'Dev Shah', 'Eli Moss', 'Fay Lin', 'Gus Ito', 'Hana Ode'];
 const subjects = [['Refund for order 4821', 'Hi, the blender arrived broken. I would like a refund.'], ['Can’t sign in', 'I reset my password twice and still get an error.'], ['Invoice INV-2209', 'Attached is the invoice for October.'],
   ['Partnership idea', 'We run a 40k-member community and would love to talk.'], ['Question about the API', 'Is there a limit on attachments per message?'], ['Re: Shipping delay', 'Thanks, that works for us.']];
@@ -576,6 +627,7 @@ export async function seed(fx) {
   await threads(db, 'ws_northwind', A.billing, mix(4, 2));
   await threads(db, 'ws_northwind', A.sales, mix(3, 3));
   await threads(db, 'ws_northwind', A.dana, mix(2, 4));
+  const thread = await conversation(db, 'ws_northwind', A.support);
   // Ingest records which rules acted on each email (verdicts.ritualsActed); these threads are inserted directly, so
   // say it here: the Rules tab's Last matched.
   const acted = async (box, keys) => db.query(`UPDATE mail_messages SET verdicts=verdicts||jsonb_build_object('ritualsActed',$3::jsonb) WHERE workspace_id=$1 AND id IN (SELECT message_id FROM mailbox_messages WHERE mailbox_id=$2)`, ['ws_northwind', box.id, JSON.stringify(keys)]);
@@ -657,7 +709,7 @@ export async function seed(fx) {
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile,receiving) VALUES('mcp_at_cls_live','https://account.anoma.ly','user_kai','user_kai','opencode','ws_live','{read,send,manage}',now()+interval '1 day',0,'work',true)");
   fx.liveKey = agent.secret;
   return {
-    mcp, restricted: 'ws_harbor', email, junkEmail, receivedEmail: 'msg_northwind_invoice', domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
+    mcp, restricted: 'ws_harbor', email, junkEmail, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
     webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id, supportConversation,
   };
 }
