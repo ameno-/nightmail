@@ -201,7 +201,9 @@ export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: H
   }
   const outWays: Pt[][] = [upMain([[mainX, plate.top - dy * .5 + 14], [mainX, 16]])]
   for (const unit of senders) {
-    if (phone || !unit.left) { outWays.push(upMain([[mainX, unit.top + unit.boxTop + unit.station.h * .5], [mainX, 16]])); continue }
+    // (A box on the left wide enough to reach over the main hides it, as one on the right does: what it sends goes
+    // straight up the main behind it, with no branch out of its side.)
+    if (phone || !unit.left || unit.boxLeft + unit.w > mainX) { outWays.push(upMain([[mainX, unit.top + unit.boxTop + unit.station.h * .5], [mainX, 16]])); continue }
     const from = unit.boxLeft + unit.w - 4
     runs.push({ key: `send${unit.station.tube}`, points: [[from, unit.sends], [mainX - (wide / 2 - 1), unit.sends]], wide, rings: [{ at: [from + 9, unit.sends], across: true }, { at: [mainX - wide / 2 - 3.5, unit.sends], across: true }] })
     mainRings.push({ at: [mainX, unit.sends - wide / 2 - 4.5], across: false }, { at: [mainX, unit.sends + wide / 2 + 4.5], across: false })
@@ -210,6 +212,9 @@ export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: H
   runs.push({ key: 'main', points: main, wide, rings: mainRings })
   // Every capsule's way: down each tube from under its sleeve into its appliance; up the main from each that sends.
   flows.current = [...ways.map((points, k) => ({ points: [[points[0][0], phone ? points[0][1] + 4 : 16] as Pt, ...points.slice(1, -1), [units[k].left ? units[k].end - dx / 2 - 2 : units[k].end - 2, points.at(-1)![1]] as Pt], bend, speed: phone ? 150 : 230, unit: k, wide: phone })), ...outWays.map(points => ({ points, bend: wide * 1.5, speed: phone ? 130 : 200, unit: undefined, wide: false }))]
+  // A caption the main runs up through (beside the appliance, or behind it) stops short of it: a line too long for
+  // that runs on to a second, up the page (sorter-home.css), never under the tube.
+  const captionW = (left: number, width: number) => mainX + wide / 2 > left && mainX - wide / 2 - 14 < left + width ? mainX - wide / 2 - 14 - left : width
   const vars = { ...phone && { '--srt-feed': `${feed}px` }, '--srt-r': `${pw / 2}px`, '--srt-pipe': `${pw}px`, '--srt-dx': `${dx}px`, '--srt-dy': `${dy}px`, '--srt-slope': dy / dx, '--srt-over': phone ? '4px' : '7px', '--srt-band-end': `${under}px`, height } as CSSProperties
   return <section className="srt-stations" ref={root} style={vars} data-phone={phone || undefined} aria-label="Where mail goes">
     {/* The tubes' far walls; over them the capsules; over those (further down) the tubes' near walls and their collars. */}
@@ -223,7 +228,7 @@ export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: H
     </svg>
     <div className="srt-traffic" ref={traffic} aria-hidden="true" />
     {units.map(({ station, w, left, top, boxLeft, boxTop }, k) => <div key={station.kind} className="srt-unit" data-kind={station.kind} data-side={left ? 'l' : 'r'} style={{ top, '--srt-w': `${w}px`, '--srt-h': `${station.h}px` } as CSSProperties}>
-      <div className="srt-caption" style={phone ? { left: boxLeft + 10, width: w - 10 } : { left: boxLeft - dx, width: w + dx }}>
+      <div className="srt-caption" style={phone ? { left: boxLeft + 10, width: w - 10 } : { left: boxLeft - dx, width: captionW(boxLeft - dx, w + dx) }}>
         <h2>{station.name}</h2>
         <p>{station.line}</p>
       </div>
