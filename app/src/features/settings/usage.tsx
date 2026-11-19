@@ -7,11 +7,12 @@ import { queries } from '../../data/queries'
 import { monthEstimate } from '../../data/usage'
 import { balanceState, priceUc, total, usd } from '../../data/billing'
 import { date, number } from '../../lib/format'
+import { GOOD_STANDING } from '../../../../api/src/standing-model'
 import './usage.css'
 
 const money = (value: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: value > 0 && value < 0.01 ? 4 : 2 }).format(value)
 
-// Plan & usage (hosted): the daily sending limit first (the steps it grows through open from it), then whether billing
+// Plan & usage (hosted): the daily sending limit first (the evaluation and good standing, with no limit, open from it), then whether billing
 // charges yet, the free sent and received allowances (separate) used this month, and this month's counts and cost (the
 // prices open from it). Every member can read it; members see sent mail only and no amounts (received mail includes
 // messages they can't open). Each value has a skeleton of its own width in a 53px row, so nothing moves as the three
@@ -29,10 +30,12 @@ export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; child
   // The omen meter counts AI decisions; it keeps its name from before the rename in the API.
   const decisionCount = Number(month.data?.data.filter(p => p.meter === 'omen').reduce((sum, p) => sum + BigInt(p.quantity), 0n) ?? 0n)
   const aged = b ? Number(BigInt(b.free.storage.agedBytes)) : 0
-  // Three steps reserve their space while loading.
-  const steps = usage ? usage.steps : [null, null, null]
+  // The API's steps (the evaluation) reserve their space while loading; good standing, with no limit, follows them.
+  const steps = usage ? usage.steps : [null]
   const daily = usage?.daily
-  // A limit the team set by hand follows no step; the badge says so, and the steps still open from the row.
+  // Where the workspace is: a step, past them all (no daily limit), or on a limit no step has (set by its score, a
+  // warning or the team), which the badge names.
+  const at = !daily ? null : daily.cap === null ? steps.length : daily.step
   const custom = daily?.cap != null && daily.step === null
   const pricing = usage?.pricing
   return <>
@@ -41,17 +44,22 @@ export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; child
       {/* The limit and where it is now first; the steps it grows through open from it. */}
       <details className="usage-limit">
         <summary className="settings-row">
-          <span className="settings-row__label"><span className="usage-limit__title">Daily limit<ChevronDown size={14} aria-hidden="true" />{custom && <StatusBadge status="Custom" tone="neutral" />}</span></span>
+          <span className="settings-row__label"><span className="usage-limit__title">Daily limit<ChevronDown size={14} aria-hidden="true" />{custom && <StatusBadge status="Limited" tone="neutral" />}</span></span>
           <span className="settings-row__control">{value(usage, () => !daily ? <span className="muted">Connect sending first</span> : daily.cap === null ? 'No daily limit' : <DailyMeter used={daily.used} cap={daily.cap} resetAt={daily.resetAt} />, 160)}</span>
         </summary>
         <div className="usage-steps-section">
           <ol className="usage-steps">{steps.map((step, index) => {
-            const current = daily?.step === index, done = daily?.step != null && index < daily.step
+            const current = at === index, done = at != null && index < at
             return <li key={index} data-current={current || undefined} data-done={done || undefined} style={{ '--i': index } as CSSProperties}>
               <span className="usage-steps__mark" aria-hidden="true">{done ? <Check size={12} strokeWidth={2.75} /> : index + 1}</span>
               {step ? <span className="usage-steps__body"><span><b>{number(step.cap)}</b> recipients a day{current && <span className="usage-steps__badge">You’re here</span>}</span><span className="muted">{step.requires}</span></span> : <span className="usage-steps__body"><Skeleton width={160} height={20} /><Skeleton width={280} height={16} /><Skeleton width={200} height={16} /></span>}
             </li>
-          })}</ol>
+          })}
+            <li data-current={at === steps.length || undefined} style={{ '--i': steps.length } as CSSProperties}>
+              <span className="usage-steps__mark" aria-hidden="true">{steps.length + 1}</span>
+              <span className="usage-steps__body"><span><b>No daily limit</b>{at === steps.length && <span className="usage-steps__badge">You’re here</span>}</span><span className="muted">{`Good standing: a sender score of ${GOOD_STANDING} or more, with no warning. Sending is paced per minute.`}</span></span>
+            </li>
+          </ol>
         </div>
       </details>
       <Row title="Balance">{value(b, () => <span className="cluster settings-inline">
