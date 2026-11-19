@@ -5,7 +5,7 @@ import type { HomeProps } from '.'
 import { StartButton } from './start'
 import { plan, type Plan } from './sorter/plan'
 import { toneVars } from './sorter/tones'
-import { Stations } from './sorter-stations'
+import { Machines } from './machines'
 import { MANIFESTS, published, type Format, type Manifest } from './factory/manifest'
 import { alphaFormat, mountPlayer, type Player } from './factory/player'
 import desktopPoster from './factory/poster.jpg'
@@ -23,8 +23,8 @@ import './factory-home.css'
 // the plinth (the render's stencils are too small and too grey to read). The first picture is the poster,
 // laid out by CSS alone before anything loads (factory-home.css), so nothing moves when the videos take over from it;
 // with reduced motion, without the renders' host (VITE_FACTORY_MEDIA), or where alpha video cannot play, the poster
-// is what is seen. The hall's pipes go down out of the picture; under it each place mail can go has a tube of its own,
-// coming back onto the page from its side (sorter-stations.tsx).
+// is what is seen. The hall's pipes go down out of the picture, into its floor; under it the factory goes on down the
+// page, a storey and a machine for each thing it does (machines.tsx).
 
 /** Where the render sets are published (their current.json and versions), ending in a slash: a build without it shows the poster alone. */
 const MEDIA = (import.meta.env.VITE_FACTORY_MEDIA as string | undefined)?.replace(/\/*$/, '/') || null
@@ -94,7 +94,7 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
   const dark = useTheme().theme === 'dark'
   const scene = useRef<HTMLElement>(null), probe = useRef<HTMLDivElement>(null), stage = useRef<HTMLDivElement>(null), frame = useRef<HTMLDivElement>(null)
   const bg = useRef<HTMLDivElement>(null), boards = useRef<HTMLDivElement>(null), fg = useRef<HTMLDivElement>(null), tags = useRef<HTMLDivElement>(null)
-  // The places mail can go under the hero are laid out as the sorter's page would lay them out for this window (sorter/plan.ts).
+  // The page's foot (machines.tsx, end-band.tsx) is measured as the sorter's page would measure it for this window (sorter/plan.ts).
   const [p, setP] = useState<Plan | null>(null)
   useLayoutEffect(() => {
     const measure = () => {
@@ -181,7 +181,7 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
         {visitor && <div className="fac-under"><SignInConsent className="fac-consent" after={<><span aria-hidden="true"> · </span><a href="/docs">API docs</a></>} /></div>}
         {notice && <div className="srt-notice">{notice}</div>}
       </section>
-      <Stations plan={p} start={start} edges />
+      <Machines plan={p} start={start} />
     </main>
   </div>
 }
