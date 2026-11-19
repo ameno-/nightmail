@@ -169,7 +169,7 @@ export const endpointPayloads: Record<EndpointType, { args: [number, number]; fi
   slack: { args: [1, 1], fields: ['text'], signature: name => `endpoints.${name}({ text })`, doc: 'Posts plain text to a Slack incoming webhook. Mentions and link previews are off.' },
   discord: { args: [1, 1], fields: ['content'], signature: name => `endpoints.${name}({ content })`, doc: 'Posts plain text to a Discord webhook. Mentions are off.' },
   webhook: { args: [0, 1], fields: null, signature: name => `endpoints.${name}(payload?)`, doc: 'Posts a signed JSON request: your payload as its body, or the message.received event without one.' },
-  forward: { args: [0, 0], fields: [], signature: name => `endpoints.${name}()`, doc: 'Forwards the message as text from the receiving address. The recipient must have confirmed.' },
+  forward: { args: [0, 0], fields: [], signature: name => `endpoints.${name}()`, doc: 'Forwards the message (text, HTML and attachments) from the receiving address. The recipient must have confirmed.' },
 };
 
 export type RitualWorkspace = {
