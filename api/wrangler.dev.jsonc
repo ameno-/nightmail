@@ -1,4 +1,4 @@
-// Dev only. dev.nightmail.dev is canonical; dev.bane.mx stays a custom domain (API, SNS feedback; GETs redirected by its zone).
+// Dev only. dev.nightmail.dev is canonical; dev.bane.mx stays a custom domain (API, the legacy bane-* topics' SNS; GETs redirected by its zone).
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "nightmail-dev",
@@ -25,8 +25,9 @@
     "MAILGW_PUBLIC_DOMAIN": "dev.bane.mx",
     // The earlier origin, still served (see wrangler.prod.jsonc). Removed by the cutover.
     "PREVIOUS_PUBLIC_URLS": "https://dev.bane.mx",
-    // The pool's SNS subscriptions stay on dev.bane.mx (infra/pulumi stage.origin).
-    "SES_FEEDBACK_URL": "https://dev.bane.mx/v1/events/ses",
+    // The nightmail-* topics' SNS subscriptions (infra/pulumi stage.origin). A signed confirmation is accepted only
+    // for this endpoint (hosted_topic_cutover); the legacy bane-* subscriptions stay on dev.bane.mx.
+    "SES_FEEDBACK_URL": "https://dev.nightmail.dev/v1/events/ses",
     "ACCOUNT_ISSUER": "https://account.dev.anoma.ly",
     "ACCOUNT_REQUIRED_ACR": "urn:anomaly:acr:google",
     // MCP asks for nightmail:* scopes, on both hosts; bane:* grants are still accepted until the cutover.

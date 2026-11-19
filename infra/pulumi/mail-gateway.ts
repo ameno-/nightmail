@@ -6,21 +6,22 @@ const ports = [993, 143, 465, 587];
 const healthPort = 8080;
 const cidr = "10.68.0.0/16";
 
-type Stage = { account: string; cloudflareAccountId: string; origin: string };
+type Stage = { account: string; cloudflareAccountId: string; origin: string; legacyOrigin: string };
+const hosts = { dev: ["dev.nightmail.dev", "dev.bane.mx"], production: ["nightmail.dev", "bane.mx"] };
 
 /** The stage's own API origin, which the gateway requires (it never falls back to another installation). */
 function apiOrigin(stage: "dev" | "production", origin: string) {
   const url = URL.canParse(origin) ? new URL(origin) : undefined;
-  if (!url || url.protocol !== "https:" || url.origin !== origin || (stage === "production") !== (url.hostname === "bane.mx")) {
+  if (!url || url.protocol !== "https:" || url.origin !== origin || !hosts[stage].includes(url.hostname)) {
     throw new Error(`The ${stage} stack needs its own https API origin for MAILGW_API_URL (got ${JSON.stringify(origin)})`);
   }
   return url;
 }
 
-export function mailGateway(stage: "dev" | "production", { account, cloudflareAccountId, origin }: Stage,
+export function mailGateway(stage: "dev" | "production", { account, cloudflareAccountId, origin, legacyOrigin }: Stage,
   config: pulumi.Config, ohio: aws.Provider, iam: aws.Provider, cloudflare: cf.Provider, tags: Record<string, string>, green = false) {
   const name = green ? 'nightmail-mail-gateway' : 'bane-mail-gateway';
-  const api = apiOrigin(stage, origin);
+  const api = apiOrigin(stage, green ? origin : legacyOrigin);
   const opts = { provider: ohio, protect: true };
   const iamOpts = { provider: iam, protect: true };
   const named = (suffix: string) => ({ ...tags, Name: `${name}-${suffix}` });
@@ -149,7 +150,7 @@ export function mailGateway(stage: "dev" | "production", { account, cloudflareAc
     statistic: "Sum", threshold: 10, dimensions: { LoadBalancer: lb.arnSuffix } }, opts);
 
   if (config.getBoolean(green ? 'nightmailGatewayDns' : 'mailGatewayDns') ?? false) {
-    const zone = api.hostname; // dev.bane.mx or bane.mx: each stage owns its own zone.
+    const zone = api.hostname; // The stage's own API host's zone.
     const zoneId = cf.getZoneOutput({ filter: { name: zone, account: { id: cloudflareAccountId } } }, { provider: cloudflare }).id;
     for (const host of ["imap", "smtp"]) new cf.DnsRecord(`${name}-${host}`, { zoneId, name: `${host}.${zone}`,
       type: "CNAME", content: lb.dnsName, proxied: false, ttl: 300 }, { provider: cloudflare, protect: true, dependsOn: [service] });
