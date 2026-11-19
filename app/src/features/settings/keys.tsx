@@ -15,7 +15,7 @@ import { KeysGuide } from './keys-guide'
 import './api-keys.css'
 import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
 import { ConnectAgentButton, ConnectAgentDialog, McpKeySetup } from '../docs/connect-agent'
-import { MailSettings } from '../docs/mail-settings'
+import { MailSettings, useMailServers } from '../docs/mail-settings'
 import { apiKeyEnv, productName } from '../../../../api/src/brand'
 
 // One table for the three credential types: API keys, agent tokens (a connected agent, with the short-lived tokens it
@@ -70,9 +70,11 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   // and /api-keys?create=smtp on an SMTP login (the Keys guide links there);
   // the parameters then leave the URL, so Back and reload don't open it again.
   const [params, setParams] = useSearchParams()
+  const mailServers = useMailServers()
   const [initial] = useState(() => {
     if (!params.has('create')) return undefined
-    if (params.get('create') === 'smtp') return { smtp: true }
+    // Without a mail gateway an SMTP login could never sign in: the link opens the key types instead.
+    if (params.get('create') === 'smtp') return mailServers ? { smtp: true } : {}
     const asked = params.get('create') === 'inbound' ? 'addresses' : params.get('create')
     return { purpose: (['send', 'read_send', 'read', 'manage', 'addresses', 'inbox', 'create'] as Purpose[]).find(value => value === asked) ?? 'send', domain: params.get('domain') || undefined }
   })

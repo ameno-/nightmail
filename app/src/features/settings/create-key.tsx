@@ -50,18 +50,18 @@ export type CreatedSecret = { secret: string; title: string; description?: strin
  *  as Overview's "Create key" does with the domain it just verified, or on an SMTP login's. Render only while open, so form state and the created
  *  secret in mutation state go away on close. */
 export function CreateKeyDialog({ open, onOpenChange, onCreated, onConnectAgent, initial }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: (created: CreatedSecret) => void; onConnectAgent: () => void; initial?: { purpose?: Purpose; domain?: string; smtp?: boolean } }) {
-  const [kind, setKind] = useState<Kind | null>(initial?.smtp ? 'smtp' : initial ? 'api' : null)
-  const [pending, setPending] = useState(false)
-  // SMTP needs the installation's mail gateway.
+  // SMTP needs the installation's mail gateway: without one, the form never opens.
   const servers = useMailServers()
+  const [kind, setKind] = useState<Kind | null>(initial?.smtp && servers ? 'smtp' : initial?.purpose ? 'api' : null)
+  const [pending, setPending] = useState(false)
   useDomainOptions(open)
   // One dialog for every step, so moving between them keeps focus inside it.
-  const form = kind ? forms[kind] : undefined
+  const form = kind && (kind !== 'smtp' || servers) ? forms[kind] : undefined
   const props = { open, onOpenChange, onPending: setPending, onCreated }
   return <Dialog open={open} onOpenChange={next => { if (!pending) onOpenChange(next) }} title={form?.title ?? 'Create key'}
     footer={form ? <><Button disabled={pending} onClick={() => setKind(null)}>Back</Button><Button variant="primary" loading={pending} type="submit" form={form.id}>{form.submit}</Button></> : <Button onClick={() => onOpenChange(false)}>Cancel</Button>}>
     {kind === 'api' ? <ApiKeyForm {...props} initial={initial} />
-      : kind === 'smtp' ? <SmtpLoginForm {...props} />
+      : kind === 'smtp' && servers ? <SmtpLoginForm {...props} />
       : kind === 'app' ? <AppPasswordForm {...props} />
       : <ul className="keys-types" aria-label="What kind of key?">
         {kinds.filter(item => item.value !== 'smtp' || servers).map(item => <li key={item.value}>
@@ -321,8 +321,10 @@ function SmtpLoginForm({ open, onOpenChange, onPending, onCreated }: FormProps) 
   useEffect(() => onPending(pending), [pending, onPending])
   const receiving = (addresses.data ?? []).filter(item => item.kind !== 'inbox')
   const clearError = (field: string) => setErrors(current => { const next = { ...current }; delete next[field]; return next })
+  const servers = useMailServers()
   async function submit(event: FormEvent) {
     event.preventDefault()
+    if (!servers) return
     const next: Record<string, string> = {}
     if (!name.trim()) next.name = 'Enter a name, such as the app it’s for.'
     if (scope === 'domains' && !domains.length) next.domains = 'Select at least one domain.'
