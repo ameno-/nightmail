@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import { ApiError, id, isSimulatedSes, log, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { enqueue, retryDatabaseFailures } from './jobs.js';
 import { queueTenantStatus, resumeHostedConnection, tenantStatusDrift, terminalColumns, terminalEvents, type HostedCaps } from './states.js';
-import { dailyLimit, evaluated, FREEZE_FLOOR, GROWTH, moveScore, nextGrowth, nextStanding, quality, stepRank, type DayEvidence, type GrowthHour, type DomainAuth, type Factor, type LadderInput, type Reason, type ScoreState, type Step, type Window } from './standing-model.js';
+import { dailyLimit, ESTABLISHED, establishedSender, evaluated, FREEZE_FLOOR, GROWTH, moveScore, nextGrowth, nextStanding, quality, stepRank, type DayEvidence, type GrowthHour, type DomainAuth, type Factor, type LadderInput, type Reason, type ScoreState, type Step, type Window } from './standing-model.js';
 import { productName } from './brand.js';
 
 // The standing job: every ten minutes it counts each Hosted workspace's mail, moves its score, sets the daily limit
@@ -106,9 +106,13 @@ export async function applyChange(db: DbExecutor, change: Change): Promise<{ eve
 
 // ---------- the job ----------
 type Candidate = StandingRow & { connection_id: string; paused_at: string | null; pause_reason: string | null; marketing_hold_reason: string | null; legacy_hold: boolean; exempt: boolean; screened_workspace: boolean; accepted_total: number; accepted_day: number;
-  sponsor_key: string; pace: number | null;
+  sponsor_key: string; pace: number | null; override: boolean;
   days: DayEvidence[] | null; domains: DomainAuth[] | null; win: { day: Window; week: Window } | null; screen: { screened: number; rejected: number } | null };
 const MAIL_ACCEPTED = sql`e.status<>'suppressed' AND (e.provider_id IS NOT NULL OR e.status IN ('accepted','sent','delivered','bounced','complained','delayed') OR e.event_outcomes & 1 <> 0)`;
+// Only real Hosted mail is evidence: never simulated runs, mail only to the SES mailbox simulator, or mail the workspace
+// sent through its own (BYO) account before (the unit is one email, in numerator and denominator alike).
+const MAIL_REAL = sql`NOT e.simulated AND hosted_real_cost(e.to_addresses||e.cc_addresses||e.bcc_addresses)>0
+  AND (e.feedback_topic_arn IS NULL OR EXISTS (SELECT FROM provider_feedback_history h WHERE h.topic_arn=e.feedback_topic_arn AND h.kind='shared'))`;
 /**
  * Counts each due workspace's mail per UTC day: 30 days the first time, then the last 8 (late feedback). Hourly, or every
  * five minutes during the evaluation, so its first 100 recipients are graded soon after their results are in.
@@ -122,10 +126,7 @@ async function refreshEvidence(db: DbExecutor, limit: number) {
         (e.status='delivered' OR e.event_outcomes & 2 <> 0) AS delivered,(e.status='bounced' OR e.event_outcomes & 4 <> 0) AS bounced,
         (e.status='complained' OR e.event_outcomes & 8 <> 0) AS complained,e.status='suppressed' AS suppressed,
         e.campaign_id IS NOT NULL AS first_send,coalesce(e.snapshot->>'kind'='marketing' OR e.campaign_id IS NOT NULL OR e.snapshot ? 'bulk',false) AS marketing,e.event_outcomes & 32 <> 0 AS clicked
-      -- Only real Hosted mail is evidence: never simulated runs, mail only to the SES mailbox simulator, or mail the
-      -- workspace sent through its own (BYO) account before (the unit is one email, in numerator and denominator alike).
-      FROM due d JOIN sending_emails e ON e.workspace_id=d.workspace_id AND NOT e.simulated AND hosted_real_cost(e.to_addresses||e.cc_addresses||e.bcc_addresses)>0
-        AND (e.feedback_topic_arn IS NULL OR EXISTS (SELECT FROM provider_feedback_history h WHERE h.topic_arn=e.feedback_topic_arn AND h.kind='shared'))
+      FROM due d JOIN sending_emails e ON e.workspace_id=d.workspace_id AND ${MAIL_REAL}
         AND e.created_at>=date_trunc('day',now(),'UTC')-CASE WHEN d.evidence_at IS NULL THEN interval '30 days' ELSE interval '7 days' END
     ), days AS (
       SELECT workspace_id,day,count(*)::int AS emails,count(*) FILTER (WHERE accepted)::int AS accepted,count(*) FILTER (WHERE delivered)::int AS delivered,
@@ -178,6 +179,13 @@ async function growthHour(runtime: Runtime, key: string, hour: string): Promise<
   return { accepted: r?.accepted ?? 0, distinct: r?.distinct ?? 0, resolved: r?.resolved ?? 0, bounces: r?.bounces ?? 0, complaints: r?.complaints ?? 0 };
 }
 
+/** Real mail SES accepted from a workspace in the 30 days before `before` (its evaluation's 100th recipient): its track record. */
+async function priorAccepted(runtime: Runtime, wid: string, before: string) {
+  const { rows: [r] } = await runtime.db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM sending_emails e WHERE e.workspace_id=${wid}
+    AND e.created_at<${before}::timestamptz AND e.created_at>=${before}::timestamptz-make_interval(days=>${ESTABLISHED.days}) AND ${MAIL_REAL} AND ${MAIL_ACCEPTED}`);
+  return r?.n ?? 0;
+}
+
 const PAUSE_LEAD: Record<Reason['metric'], string> = { complaints: 'high spam-complaint rate', screen: 'the content screen rejected a high share of mail',
   transactional_bounces: 'high hard-bounce rate on transactional mail', bounces: 'high hard-bounce rate', marketing_bounces: 'high hard-bounce rate on marketing mail', external: 'paused' };
 const zero: Window = { accepted: 0, bounces: 0, complaints: 0, marketingAccepted: 0, marketingBounces: 0, marketingComplaints: 0 };
@@ -197,6 +205,7 @@ async function candidates(runtime: Runtime, limit: number, only?: string) {
       (SELECT coalesce(sum(accepted),0)::int FROM sender_score_daily d WHERE d.workspace_id=c.workspace_id) AS accepted_total,
       -- What SES accepted in the rolling 24 hours: what a ladder step freezes a workspace without a limit at.
       hosted_accepted_day(c.workspace_id) AS accepted_day,(SELECT coalesce(quota_sponsor,id) FROM workspaces WHERE id=c.workspace_id) AS sponsor_key,hosted_minute_cap(c.workspace_id) AS pace,
+      EXISTS (SELECT FROM workspaces WHERE id=c.workspace_id AND send_cap_override IS NOT NULL AND (send_cap_override_expires_at IS NULL OR send_cap_override_expires_at>now())) AS override,
       (SELECT json_agg(d ORDER BY d.day) FROM sender_score_daily d WHERE d.workspace_id=c.workspace_id AND d.day>=(now() AT TIME ZONE 'UTC')::date-180) AS days,
       (SELECT json_agg(json_build_object('name',name,'dkim',identity #>> '{ses,DkimAttributes,Status}'='SUCCESS' AND identity #>> '{ses,DkimAttributes,SigningEnabled}'='true',
         'mailFrom',identity #>> '{ses,MailFromAttributes,MailFromDomainStatus}'='SUCCESS','dmarc',identity #>> '{dmarc,status}','emails',0))
@@ -266,10 +275,16 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
     }
     const strikeCapped = !!row.strike_until && Date.parse(row.strike_until) > now.getTime();
     const limits = dailyLimit({ phase: moved.phase, score: moved.score, band: row.band_limit, step: next.step, strikeCapped, acceptedDay: Number(row.accepted_day) });
-    // The growth pace: the last completed hour is counted only while it can still raise an allowance that limits.
+    // The growth pace, for new senders only: a workspace graded now or on the pace with a track record from before its
+    // evaluation, or an operator override, skips or leaves it (ESTABLISHED). The last completed hour is counted only
+    // while it can still raise an allowance that limits.
     const was = { until: row.growth_until, cap: row.growth_cap, hour: row.growth_hour && new Date(row.growth_hour).toISOString(), quality: row.growth_quality === null ? null : Number(row.growth_quality) };
-    const counts = !!was.until && Date.parse(was.until) > now.getTime() && was.cap !== null && next.step === 'ok' && (row.pace === null || was.cap < 60 * row.pace) && (!was.hour || Date.parse(lastHour) > Date.parse(was.hour));
-    const growth = nextGrowth(was, { graduated: row.phase === 'calibrating' && moved.phase === 'graded', step: next.step, quality: q.quality, hour: lastHour, evidence: counts ? await growthHour(runtime, row.sponsor_key, lastHour) : null, now });
+    const graduated = row.phase === 'calibrating' && moved.phase === 'graded', pacing = !!was.until && Date.parse(was.until) > now.getTime() && was.cap !== null;
+    const established = (graduated || pacing) && establishedSender({ override: row.override, score: moved.score, step: next.step,
+      priorAccepted: row.override ? 0 : await priorAccepted(runtime, row.workspace_id, moved.calibratedAt ?? now.toISOString()) });
+    if (established) log('info', { code: graduated ? 'GROWTH_SKIPPED' : 'GROWTH_CLEARED', workspaceId: row.workspace_id, override: row.override });
+    const counts = !established && !!was.until && Date.parse(was.until) > now.getTime() && was.cap !== null && next.step === 'ok' && (row.pace === null || was.cap < 60 * row.pace) && (!was.hour || Date.parse(lastHour) > Date.parse(was.hour));
+    const growth = nextGrowth(was, { graduated, established, step: next.step, quality: q.quality, hour: lastHour, evidence: counts ? await growthHour(runtime, row.sponsor_key, lastHour) : null, now });
     // An owner's marketing release and an operator's hold after a self-resume both end on their own.
     const releaseExpired = !!row.release_until && Date.parse(row.release_until) <= now.getTime();
     if (next.step !== prev.step || releaseExpired || row.legacy_hold) {

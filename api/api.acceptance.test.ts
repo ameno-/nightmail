@@ -11928,9 +11928,10 @@ describe('Dashboard API capabilities', () => {
       const send = () => request('POST', '/v1/emails/send', key, mail({ from, to: 'person@example.net' }));
       const score = async () => ok(await request('GET', '/v1/sender-score', key));
       // Real mail as the standing job counts it, early today (UTC): evidence, and the rolling 24 hours admission counts.
-      const sent = (n: number, status = 'delivered', outcomes = 3, workspace = wid) => db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,event_outcomes,created_at)
-        SELECT $1||n,$2,$3,'fixture',$4,jsonb_build_array('r'||n||'@example.net'),'[]','[]','Standing','{}',false,$5::text,'p-'||$1||n,$6,least(now(),date_trunc('day',now(),'UTC')+make_interval(secs=>n%3000)) FROM generate_series(1,$7::int) n`,
-        [unique('standing-'), workspace, REGION, from, status, outcomes, n]);
+      // `late`: sent after the evaluation (the fixture's now() is its transaction's start, before the job's clock).
+      const sent = (n: number, status = 'delivered', outcomes = 3, workspace = wid, late = false) => db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,event_outcomes,created_at)
+        SELECT $1||n,$2,$3,'fixture',$4,jsonb_build_array('r'||n||'@example.net'),'[]','[]','Standing','{}',false,$5::text,'p-'||$1||n,$6,CASE WHEN $8 THEN clock_timestamp() ELSE least(now(),date_trunc('day',now(),'UTC')+make_interval(secs=>n%3000)) END FROM generate_series(1,$7::int) n`,
+        [unique('standing-'), workspace, REGION, from, status, outcomes, n, late]);
       const regrade = async (at = new Date(), workspace = wid) => { await db.query('UPDATE sender_standing SET evidence_at=NULL WHERE workspace_id=$1', [workspace]); await refreshStanding(runtime, { only: workspace, now: at }); };
       const usedDay = async () => Number((await db.query(`SELECT a->>'used' AS used FROM hosted_allowance_read($1,1,0,100,1000,10000,10) h(a)`, [wid])).rows[0].used);
 
@@ -11949,7 +11950,7 @@ describe('Dashboard API capabilities', () => {
       assert.deepEqual([view.state, view.score, view.gradedBy, view.limit.daily, view.limit.unlimited, view.limit.next, view.limit.transactionalReserve], ['graded', 100, null, null, true, null, 0]);
       assert.equal(ok(await request('GET', '/v1/me', key)).connection.sendingLimit.cap, null);
       // A day past 10,000 (the old ceiling) is admitted: the growth pace below paces dispatch, it limits no day.
-      await sent(12_000);
+      await sent(12_000, 'delivered', 3, wid, true);
       ok(await send(), 202);
       assert.ok(await usedDay() > 12_000);
 
@@ -11970,7 +11971,7 @@ describe('Dashboard API capabilities', () => {
       // acceptance; repeating a recipient grows nothing).
       const accepted = async (n: number, to: (i: number) => string) => { const tag = unique('grown-');
         await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,event_outcomes,created_at)
-          SELECT $1||n,$2,$3,'fixture',$4,jsonb_build_array($6::text||n%$7||'@example.net'),'[]','[]','Grown','{}',false,'delivered','p-'||$1||n,3,now() FROM generate_series(1,$5::int) n`, [tag, wid, REGION, from, n, to(0), to(1)]);
+          SELECT $1||n,$2,$3,'fixture',$4,jsonb_build_array($6::text||n%$7||'@example.net'),'[]','[]','Grown','{}',false,'delivered','p-'||$1||n,3,clock_timestamp() FROM generate_series(1,$5::int) n`, [tag, wid, REGION, from, n, to(0), to(1)]);
         await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,created_at) SELECT 'ev-'||$1||n,$2,$1||n,'accepted',false,now() FROM generate_series(1,$3::int) n`, [tag, wid, n]); };
       await accepted(800, i => i ? '800' : 'grown');
       await accepted(500, i => i ? '1' : 'same');
@@ -12024,6 +12025,52 @@ describe('Dashboard API capabilities', () => {
       view = await score();
       assert.deepEqual([view.standing.step, view.limit.daily, view.limit.unlimited], ['ok', null, true]);
       ok(await send(), 202);
+    });
+  });
+
+  test('sender score: the growth pace is for new senders only: a workspace with a clean track record from before its evaluation, or an operator override, skips it, and one already on it leaves it', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { refreshStanding } = await import('./src/standing.js');
+      const pool = '111122223333', base = runtime.config.workspaceId;
+      Object.assign(runtime.config, { multiTenant: true });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:feedback`]);
+      // `standing`: an existing standing row, as an UPDATE's SET list.
+      const workspace = async (name: string, standing?: string) => {
+        const wid = `${base}-${name}`;
+        await db.query('INSERT INTO workspaces(id,slug,name) VALUES($1,$1,$1)', [wid]);
+        await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+        if (standing) { await db.query('INSERT INTO sender_standing(workspace_id) VALUES($1)', [wid]); await db.query(`UPDATE sender_standing SET ${standing} WHERE workspace_id=$1`, [wid]); }
+        return wid;
+      };
+      // Clean, real mail SES accepted `daysAgo` (spread over two weeks from there), or the evaluation's 100 today.
+      const sent = (wid: string, n: number, daysAgo = 0) => db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,event_outcomes,created_at)
+        SELECT $1||n,$2,$3,'fixture','sender@growth.example',jsonb_build_array('r'||n||'@example.net'),'[]','[]','Growth','{}',false,'delivered','p-'||$1||n,3,
+          CASE WHEN $5::int=0 THEN least(now(),date_trunc('day',now(),'UTC')+make_interval(secs=>n%3000)) ELSE now()-make_interval(days=>$5::int+n%14) END FROM generate_series(1,$4::int) n`, [unique('growth-'), wid, REGION, n, daysAgo]);
+      const growth = async (wid: string) => { await refreshStanding(runtime, { only: wid });
+        return (await db.query('SELECT phase,growth_cap AS cap,growth_until>now()+interval \'48 hours\' AS long FROM sender_standing WHERE workspace_id=$1', [wid])).rows[0]; };
+
+      // A new sender: its evaluation's 100 clean recipients, then the pace, which the next runs keep.
+      const fresh = await workspace('fresh');
+      await sent(fresh, 100);
+      assert.deepEqual(await growth(fresh), { phase: 'graded', cap: 1000, long: true });
+      assert.deepEqual(await growth(fresh), { phase: 'graded', cap: 1000, long: true }, 'A new sender stays on the pace.');
+      // A new sender with an operator daily-limit override skips it.
+      const overridden = await workspace('override');
+      await db.query("UPDATE workspaces SET send_cap_override=5000 WHERE id=$1", [overridden]);
+      await sent(overridden, 100);
+      assert.deepEqual(await growth(overridden), { phase: 'graded', cap: null, long: null });
+      // A workspace still evaluating when the pace shipped, with 400 clean recipients over the weeks before: graded, no pace.
+      const known = await workspace('known', "phase='calibrating',first_recipients=60");
+      await sent(known, 400, 3);
+      assert.deepEqual(await growth(known), { phase: 'graded', cap: null, long: null });
+      // Fewer than 300 before the evaluation is still a new sender.
+      const light = await workspace('light', "phase='calibrating',first_recipients=60");
+      await sent(light, 250, 3);
+      assert.deepEqual(await growth(light), { phase: 'graded', cap: 1000, long: true });
+      // One graded and put on the pace with the same history leaves it on the next run, without an operator.
+      const paced = await workspace('paced', "phase='graded',first_recipients=100,calibrated_at=now()-interval '12 hours',growth_until=now()+interval '60 hours',growth_cap=1000,growth_hour=date_trunc('hour',now())-interval '2 hours'");
+      await sent(paced, 400, 3);
+      assert.deepEqual(await growth(paced), { phase: 'graded', cap: null, long: null });
     });
   });
 

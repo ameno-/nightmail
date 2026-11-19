@@ -8,8 +8,9 @@ import { productName } from './brand.js'
 //                 results are in (90% of them, or an hour after the 100th), then the score is their quality alone
 //   score         Q, recomputed from all the evidence (counted hourly; no prior, no daily movement limit): complaints
 //                 that arrive days after the evaluation move it as soon as they are counted
-//   growth        for 72 clean hours after the evaluation, a sponsor's growing workspaces may send at most 1,000
-//                 recipients in a rolling hour, then twice the distinct recipients of its last mature, clean hour
+//   growth        for 72 clean hours after a new sender's evaluation, a sponsor's growing workspaces may send at most 1,000
+//                 recipients in a rolling hour, then twice the distinct recipients of its last mature, clean hour; a
+//                 workspace with a clean track record from before the evaluation, or an operator override, skips it
 //   limit         none at 75 and up (good standing); under it the bands below, dropping only 2 points under a band
 //   ladder        notice → warn → restrict (marketing held) → pause (all sending), each line a count and a rate; a
 //                 step from warn up, a pause or a resume freezes the limit (none becomes what SES accepted in 24 hours,
@@ -48,6 +49,15 @@ export const FREEZE_FLOOR = 10_000;
  * it. An operator can lift it for a workspace. A good sender doubles every hour: about a million an hour after ten.
  */
 export const GROWTH = { start: 1_000, factor: 2, hours: 72, resolved: 0.9, bounceRate: 0.02, qualityDrop: 2 } as const;
+/**
+ * The growth pace is for new senders only. A workspace skips it (and leaves it, if it is on it) when it has an operator
+ * daily-limit override, or a clean track record from before its evaluation: at least 300 real emails accepted in the
+ * 30 days before the evaluation's 100th recipient was counted, in good standing at ok. A new sender cannot reach 300 there:
+ * the evaluation holds it to 100 recipients a rolling day, so fewer than 200 are accepted before its 100th is counted.
+ */
+export const ESTABLISHED = { accepted: 300, days: 30 } as const;
+export const establishedSender = (o: { priorAccepted: number; override: boolean; score: number | null; step: Step }) =>
+  o.override || (o.priorAccepted >= ESTABLISHED.accepted && o.score !== null && o.score >= GOOD_STANDING && o.step === 'ok');
 /**
  * Pacing protects the shared pool; it is not a customer limit. With a daily limit: clamp(limit ÷ 20, 50, 500) a minute.
  * Without one: a quarter of the pool's SES rate (the share campaign planning already uses), at least 500 a minute. Half
@@ -291,7 +301,8 @@ export const NO_GROWTH: Growth = { until: null, cap: null, hour: null, quality: 
  * The next growth state. `graduated`: the evaluation ended in this run. `hour` is the last completed hour (its start)
  * and `evidence` its figures, when the caller counted them (null: not counted, nothing to learn from it).
  */
-export function nextGrowth(prev: Growth, o: { graduated: boolean; step: Step; quality: number; hour: string; evidence: GrowthHour | null; now: Date }): Growth {
+export function nextGrowth(prev: Growth, o: { graduated: boolean; established?: boolean; step: Step; quality: number; hour: string; evidence: GrowthHour | null; now: Date }): Growth {
+  if (o.established) return NO_GROWTH;
   const later = new Date(o.now.getTime() + GROWTH.hours * 3600_000).toISOString();
   if (o.graduated) return { until: later, cap: GROWTH.start, hour: o.hour, quality: o.quality };
   if (!prev.until || Date.parse(prev.until) <= o.now.getTime() || prev.cap === null) return NO_GROWTH;
