@@ -53,12 +53,11 @@ export function SendingLimitsGuide({ headings = 'h3', limit, compact = false }: 
       {!compact && <p>Hosted only: recipients per rolling 24 hours, set by the sender score. Good standing has none.</p>}
       <div className="limits-table-scroll"><table className="limits-table">
         <thead><tr><th scope="col">Score</th><th scope="col">Daily limit</th><th scope="col">Per minute</th></tr></thead>
-        <tbody>{bands.map(([score, cap, current]) => <tr key={score} aria-current={limit && current(limit) ? 'true' : undefined}><td>{score}{limit && current(limit) && <span className="limits-table__now">Now</span>}</td><td>{cap === null ? 'None' : number(cap)}</td><td>{cap === null ? `${number(PACE.uncappedFloor)} or more` : number(burstFor(cap))}</td></tr>)}</tbody>
+        <tbody>{bands.map(([score, cap, current]) => <tr key={score} aria-current={limit && current(limit) ? 'true' : undefined}><td>{score}{limit && current(limit) && <span className="limits-table__now">Now</span>}</td><td>{cap === null ? 'None' : number(cap)}</td><td>{cap === null ? `${number(PACE.uncappedFloor)}+` : number(burstFor(cap))}</td></tr>)}</tbody>
       </table></div>
       <ul className="limits-notes">
-        <li>The first {EVALUATION.recipients} wait for their delivery results, at most an hour. Then the score updates every 10 minutes.</li>
-        <li>Without a limit, the pace is a quarter of the pool’s sending rate, at least {number(PACE.uncappedFloor)} a minute.</li>
-        <li>Under a limit, marketing can use all but 100 or 10%, kept for receipts and resets. A band drops only {SCORE.hysteresis} points under its floor.</li>
+        <li>The first {EVALUATION.recipients} wait for their delivery results, at most an hour.</li>
+        <li>Under a limit, 100 or 10% is kept for receipts. A band drops {SCORE.hysteresis} points under its floor.</li>
       </ul>
     </section>
     <Part title="Warnings and holds" H={H} compact={compact}>
