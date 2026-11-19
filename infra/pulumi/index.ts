@@ -87,9 +87,9 @@ new cf.R2BucketLifecycle("mail-lifecycle", { accountId: cloudflareAccountId, buc
   { id: "abort-multipart-1d", enabled: true, conditions: { prefix: "" }, abortMultipartUploadsTransition: { condition: { type: "Age", maxAge: day } } },
 ] }, { provider: cloudflare, protect: true });
 
-// The desktop homepage's render sets, public at the stage's media host (the Worker's build points the page at it:
-// .github/workflows/deploy.yml). app/scripts/factory-media.mjs uploads each set under factory/<set>/<version>/ with a
-// year's immutable Cache-Control and then rewrites factory/<set>/current.json (a minute's), which names the version the
+// The homepage's render sets, public at the stage's media host (the Worker's build points the page at it:
+// .github/workflows/deploy.yml). app/scripts/factory-media.mjs uploads each version under factory/<version>/, the desktop
+// and phone formats in it, with a year's immutable Cache-Control and then rewrites factory/current.json (a minute's), which names the version the
 // page plays; old versions stay for rollback. Only that pointer is fetched by script, so CORS allows GET and HEAD from
 // the stage's dashboard origins; video and images need none. No r2.dev URL: the custom domain is the only public way in.
 const mediaR2 = new cf.R2Bucket("media", { accountId: cloudflareAccountId, name: `${cloudPrefix}-media`, jurisdiction: "default", location: "enam", storageClass: "Standard" }, {
@@ -104,7 +104,7 @@ new cf.R2BucketCors("media-cors", { accountId: cloudflareAccountId, bucketName: 
 new cf.R2BucketLifecycle("media-lifecycle", { accountId: cloudflareAccountId, bucketName: mediaR2.name, jurisdiction: "default", rules: [
   { id: "abort-multipart-1d", enabled: true, conditions: { prefix: "" }, abortMultipartUploadsTransition: { condition: { type: "Age", maxAge: day } } },
 ] }, { provider: cloudflare });
-export const mediaUrl = `https://${stage.media.domain}/factory/desktop/`;
+export const mediaUrl = `https://${stage.media.domain}/factory/`;
 
 // Keep existing R2 resources protected under the original URNs. Adopt the standby pair in
 // addition; changing either existing physical name would request a bucket replacement.

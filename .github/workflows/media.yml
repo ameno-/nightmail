@@ -1,5 +1,5 @@
 name: Homepage media
-run-name: Promote homepage media ${{ inputs.set }} ${{ inputs.version }} to production
+run-name: Promote homepage media ${{ inputs.version }} to production
 
 # Copies a render set already published on dev (app/scripts/factory-media.mjs publish, then checked at
 # https://dev.nightmail.dev) to production's media bucket, and points production's homepage at it. It reads the version
@@ -10,14 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version on media.dev.nightmail.dev to promote (factory/<set>/<version>/, e.g. 2026-11-18-b3bbec73)
+        description: Version on media.dev.nightmail.dev to promote (factory/<version>/, both formats, e.g. 2026-11-18-b3bbec73)
         required: true
         type: string
-      set:
-        description: Render set
-        type: choice
-        options: [desktop, phone]
-        default: desktop
       dry-run:
         description: Check and list what would be copied; write nothing
         type: boolean
@@ -32,7 +27,7 @@ concurrency:
 
 jobs:
   promote:
-    name: Promote ${{ inputs.set }} ${{ inputs.version }}
+    name: Promote ${{ inputs.version }}
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 20
     environment: production
@@ -42,7 +37,6 @@ jobs:
     env:
       CF_ACCOUNT_ID: 15d29c8639fd3733b1b5486a2acfd968
       VERSION: ${{ inputs.version }}
-      SET: ${{ inputs.set }}
       DRY_RUN: ${{ inputs.dry-run }}
     steps:
       # The same people who may deploy production, from the production branch, while production is not frozen.
@@ -89,13 +83,13 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
           WRANGLER: ${{ github.workspace }}/api/node_modules/.bin/wrangler
         run: |
-          args=(promote "$VERSION" --set "$SET" --stage production)
+          args=(promote "$VERSION" --stage production)
           if [[ $DRY_RUN == true ]]; then args+=(--dry-run); fi
           node app/scripts/factory-media.mjs "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Check production serves it
         if: inputs.dry-run != true
         run: |
-          current=$(curl --fail --silent --show-error --max-time 20 "https://media.nightmail.dev/factory/$SET/current.json?check=$GITHUB_RUN_ID" | jq -er '.version')
+          current=$(curl --fail --silent --show-error --max-time 20 "https://media.nightmail.dev/factory/current.json?check=$GITHUB_RUN_ID" | jq -er '.version')
           [[ $current == "$VERSION" ]] || { echo "::error::media.nightmail.dev names $current, not $VERSION"; exit 1; }
-          echo "media.nightmail.dev/factory/$SET/current.json names $VERSION." >> "$GITHUB_STEP_SUMMARY"
+          echo "media.nightmail.dev/factory/current.json names $VERSION." >> "$GITHUB_STEP_SUMMARY"
