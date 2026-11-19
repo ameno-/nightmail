@@ -4,38 +4,45 @@ import { Link } from 'react-router'
 import { Alert, Button, Checkbox, ConfirmDialog, Dialog, ErrorState, Field, Input, Select, Switch, fieldError, MutationError } from '../../components/ui'
 import { useApiDef, useApiMutation } from '../../data/context'
 import { queries } from '../../data/queries'
-import type { InboundAddress, InboundWebhook, MailRoute } from '../../data/types'
+import type { ForwardEndpoint, InboundAddress, InboundWebhook, MailRoute } from '../../data/types'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { CreatedEndpointDialog, EndpointDialog, type Endpoint } from './ritual-connections'
+import { CreatedEndpointDialog, EndpointDialog, endpointStatusLabel, type Endpoint } from './ritual-connections'
 import '../settings/settings.css'
 import './inbound.css'
-type Destination = { id: string; name: string; detail: string; kind: 'inbox' | 'webhook'; paused: boolean; routeOnly: boolean; href: string; webhook?: InboundWebhook }
-function destinationsOf(addresses: InboundAddress[], webhooks: InboundWebhook[]): Destination[] {
+type Kind = 'inbox' | 'webhook' | 'forward'
+/** `waiting`: why a forward can't be chosen yet (its recipient hasn't confirmed, or stopped forwards). */
+type Destination = { id: string; name: string; detail: string; kind: Kind; paused: boolean; routeOnly: boolean; href: string; webhook?: InboundWebhook; waiting?: string }
+function destinationsOf(addresses: InboundAddress[], webhooks: InboundWebhook[], forwards: ForwardEndpoint[]): Destination[] {
   return [
     ...addresses.map(a => ({ id: a.id, name: a.displayName || a.address, detail: a.address, kind: 'inbox' as const, paused: false, routeOnly: false, href: `/receiving/addresses/${a.id}` })),
     ...webhooks.map(h => ({ id: h.id, name: h.name || h.description || h.url, detail: h.url, kind: 'webhook' as const, paused: h.paused, routeOnly: !h.eventTypes.length, href: `/receiving/webhooks/${h.id}`, webhook: h })),
+    ...forwards.map(f => ({ id: f.id, name: f.name, detail: f.target, kind: 'forward' as const, paused: f.status === 'paused', routeOnly: false, href: '/receiving?tab=endpoints',
+      waiting: f.status === 'ready' || f.status === 'paused' ? undefined : endpointStatusLabel[f.status] })),
   ]
 }
 
 // One row per recipient rule, read as "mail to X goes to Y". Address rows are the implicit routes every inbox has.
 
-/** Loads what a route can deliver to (inboxes and webhooks) and opens the editor for one route, or a new one for `match`. */
+/** Loads what a route can deliver to (inboxes, webhooks and forwards) and opens the editor for one route, or a new one for `match`. */
 export function RouteEditor({ match, route, to, onClose }: { match: string; route?: { id: string; enabled: boolean; to: string[] | 'drop' } | null; to?: string[]; onClose: () => void }) {
   const addresses = useApiDef(queries.inboundAddressOptions())
   const webhooks = useApiDef(queries.inboundWebhooks())
-  const error = (!addresses.data && addresses.error) || (!webhooks.data && webhooks.error)
+  const forwards = useApiDef(queries.forwardEndpoints())
+  const error = (!addresses.data && addresses.error) || (!webhooks.data && webhooks.error) || (!forwards.data && forwards.error)
   if (error) return <Dialog open onOpenChange={next => { if (!next) onClose() }} title={route ? 'Edit route' : 'Add route'} footer={<Button onClick={onClose}>Close</Button>}>
-    <ErrorState error={error} onRetry={() => { if (addresses.error) void addresses.refetch(); if (webhooks.error) void webhooks.refetch() }} />
+    <ErrorState error={error} onRetry={() => { if (addresses.error) void addresses.refetch(); if (webhooks.error) void webhooks.refetch(); if (forwards.error) void forwards.refetch() }} />
   </Dialog>
-  if (!addresses.data || !webhooks.data) return null
+  // The dialog opens once everything it lists has loaded, so nothing moves in it.
+  if (!addresses.data || !webhooks.data || !forwards.data) return null
   const draft = route ? { match, to: route.to, route: { id: route.id, enabled: route.enabled, match, to: route.to } as MailRoute } : { match, to: to ?? [] }
-  return <RouteDialog draft={draft} destinations={destinationsOf(addresses.data, webhooks.data)} owners={addresses.data} onClose={onClose} refreshWebhooks={async () => (await webhooks.refetch()).data ?? []} />
+  return <RouteDialog draft={draft} destinations={destinationsOf(addresses.data, webhooks.data, forwards.data)} owners={addresses.data} onClose={onClose}
+    refreshWebhooks={async () => (await webhooks.refetch()).data ?? []} refreshForwards={async () => { await forwards.refetch() }} />
 }
 
 type Action = 'deliver' | 'keep' | 'drop'
-function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks }: { draft: { match: string; to: string[] | 'drop'; route?: MailRoute }; destinations: Destination[]; owners: InboundAddress[]; onClose: () => void; refreshWebhooks: () => Promise<InboundWebhook[]> }) {
-  // A new webhook endpoint is made here, without leaving, and ticked once it exists.
-  const [creating, setCreating] = useState(false)
+function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks, refreshForwards }: { draft: { match: string; to: string[] | 'drop'; route?: MailRoute }; destinations: Destination[]; owners: InboundAddress[]; onClose: () => void; refreshWebhooks: () => Promise<InboundWebhook[]>; refreshForwards: () => Promise<void> }) {
+  // A new webhook or forward endpoint is made here, without leaving, and ticked once it can take mail.
+  const [creating, setCreating] = useState<'webhook' | 'forward' | null>(null)
   const [created, setCreated] = useState<(Endpoint & { secret?: string }) | null>(null)
   const route = draft.route
   const [match, setMatch] = useState(draft.match)
@@ -50,20 +57,23 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks }: 
   const owner = owners.find(a => a.address === normalized || a.aliases.includes(normalized))
   const losesOwner = owner && (action !== 'deliver' || !selected.includes(owner.id))
   const toggle = (id: string, on: boolean) => { setProblem(null); setSelected(on ? [...selected, id] : selected.filter(value => value !== id)) }
+  const tick = (id: string) => { setAction('deliver'); setSelected(current => current.includes(id) ? current : [...current, id]) }
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (!normalized.includes('@')) return setProblem('Enter an address, a pattern or *@domain.')
-    if (action === 'deliver' && !selected.length) return setProblem('Choose at least one inbox or webhook, or store it without an inbox.')
+    if (action === 'deliver' && !selected.length) return setProblem('Choose at least one inbox, webhook or forward, or store it without an inbox.')
     const order = new Map(destinations.map((d, i) => [d.id, i]))
     try { await save.mutateAsync({ match: normalized, to: action === 'drop' ? 'drop' : action === 'keep' ? [] : [...selected].sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0)), enabled }); onClose() } catch { /* Shown in the form. */ }
   }
-  const group = (kind: Destination['kind'], label: string, empty: ReactNode) => {
+  const group = (kind: Kind, label: string, empty: ReactNode) => {
     const items = destinations.filter(d => d.kind === kind)
     return <fieldset className="routing-choices" disabled={save.isPending}>
       <legend className="ui-field__label">{label}</legend>
-      {items.length ? <div className="settings-choices">{items.map(d => <Checkbox key={d.id} checked={selected.includes(d.id)} onCheckedChange={on => toggle(d.id, on)} label={<span className="settings-cell-stack"><span>{d.kind === 'inbox' && d.name === d.detail ? <PrivateAddress value={d.name} /> : d.name}{d.paused ? ' (paused)' : ''}</span>{d.detail !== d.name && <span className="ui-field__hint">{d.kind === 'inbox' ? <PrivateAddress value={d.detail} /> : d.detail}</span>}</span>} />)}</div> : <p className="muted">{empty}</p>}
-      {/* Slack, Discord and forwards are a rule's to send, never a route's: the way there sits beside New webhook. */}
-      {kind === 'webhook' && <div className="cluster"><Button size="sm" onClick={() => setCreating(true)}>New webhook</Button><Link className="ui-button ui-button--ghost ui-button--sm" to="/receiving/rules/new">Slack, Discord or forward</Link></div>}
+      {items.length ? <div className="settings-choices">{items.map(d => <Checkbox key={d.id} checked={selected.includes(d.id)} disabled={!!d.waiting && !selected.includes(d.id)} onCheckedChange={on => toggle(d.id, on)}
+        label={<span className="settings-cell-stack"><span>{d.kind === 'inbox' && d.name === d.detail ? <PrivateAddress value={d.name} /> : d.name}{d.paused ? ' (paused)' : d.waiting ? ` (${d.waiting.toLowerCase()})` : ''}</span>{d.detail !== d.name && <span className="ui-field__hint">{d.kind === 'webhook' ? d.detail : <PrivateAddress value={d.detail} />}</span>}</span>} />)}</div> : <p className="muted">{empty}</p>}
+      {/* Slack and Discord are a rule's to post, never a route's: the way there sits beside New webhook. */}
+      {kind === 'webhook' && <div className="cluster"><Button size="sm" onClick={() => setCreating('webhook')}>New webhook</Button><Link className="ui-button ui-button--ghost ui-button--sm" to="/receiving/rules/new">Slack or Discord</Link></div>}
+      {kind === 'forward' && <div className="cluster"><Button size="sm" onClick={() => setCreating('forward')}>New forward</Button></div>}
     </fieldset>
   }
   return <>
@@ -80,11 +90,12 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks }: 
         </Field>
         <Field label="Goes to" htmlFor="routing-action" error={fieldError(save.error, 'to')}>
           <Select id="routing-action" value={action} disabled={save.isPending} onValueChange={value => { setAction(value as Action); setProblem(null) }}
-            options={[{ value: 'deliver', label: 'These inboxes and webhooks' }, { value: 'keep', label: 'Store it, no inbox' }, { value: 'drop', label: 'Drop it' }]} />
+            options={[{ value: 'deliver', label: 'These inboxes, webhooks and forwards' }, { value: 'keep', label: 'Store it, no inbox' }, { value: 'drop', label: 'Drop it' }]} />
         </Field>
         {action === 'deliver' && <>
           {group('inbox', 'Inboxes', <>No addresses yet. <Link to="/receiving">Create one</Link>.</>)}
           {group('webhook', 'Webhooks', 'No webhooks yet')}
+          {group('forward', 'Forwards', 'No forwards yet')}
         </>}
         {action === 'drop' && <Alert tone="warning">Dropped mail is not stored and cannot be recovered. Its receipt still records that it arrived.</Alert>}
         {losesOwner && <Alert tone="warning">Mail to <PrivateAddress value={normalized} /> will stop reaching {owner.displayName || <PrivateAddress value={owner.address} />}. Tick its inbox to keep it.</Alert>}
@@ -93,14 +104,19 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks }: 
         {!fieldError(save.error, 'match') && !fieldError(save.error, 'to') && <MutationError error={save.error} />}
       </form>
     </Dialog>
-    <EndpointDialog open={creating} onOpenChange={setCreating} types={['webhook']} onCreated={async endpoint => {
-      setCreating(false); setCreated(endpoint)
+    <EndpointDialog open={!!creating} onOpenChange={open => { if (!open) setCreating(null) }} types={[creating ?? 'webhook']} onCreated={async endpoint => {
+      setCreating(null); setCreated(endpoint)
+      if (endpoint.type === 'forward') {
+        // A forward takes mail once its recipient confirms; one on a domain this workspace verified is ready at once.
+        await refreshForwards()
+        if (endpoint.status === 'ready') tick(endpoint.id)
+        return
+      }
       const hook = (await refreshWebhooks()).find(h => h.key === endpoint.name)
-      if (hook) { setAction('deliver'); setSelected(current => current.includes(hook.id) ? current : [...current, hook.id]) }
+      if (hook) tick(hook.id)
     }} />
     <CreatedEndpointDialog created={created} onClose={() => setCreated(null)} writeRule={false} />
     <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} danger title="Delete route?" description="Its mail falls back to the next rule: its inbox, a pattern or the domain default." confirmLabel="Delete route" pending={remove.isPending}
       onConfirm={async () => { try { await remove.mutateAsync(); setConfirmDelete(false); onClose() } catch { /* The dialog stays open. */ } }} />
   </>
 }
-

@@ -1,6 +1,6 @@
 # Rules, Endpoints and AI decisions
 
-A **rule** is a short script that runs when mail reaches an inbox or address. It reads the message and chooses its **actions**: deliver it to another inbox, call an endpoint, label it, junk it, block it. An **endpoint** is a named Slack, Discord, webhook or forward target that rules call by name. An **AI decision** is a question a rule asks Nightmail's AI about the message; the answer comes back as a plain score or boolean.
+A **rule** is a short script that runs when mail reaches an inbox or address. It reads the message and chooses its **actions**: deliver it to another inbox, call an endpoint, label it, junk it, block it. An **endpoint** is a named Slack, Discord, webhook or forward target that rules call by name; a route can also deliver to a webhook or forward directly. An **AI decision** is a question a rule asks Nightmail's AI about the message; the answer comes back as a plain score or boolean.
 
 ![The rule editor: source with live checks, Try it on an email, where it runs, sender lists and AI decision opt-in](images/rules/editor.png)
 
@@ -185,7 +185,7 @@ Every endpoint is called the same way, by name; its type decides the payload, an
 | `slack` | `endpoints.support({ text: "…" })` | Plain text. Mentions, markup and link previews are off. |
 | `discord` | `endpoints.alerts({ content: "…" })` | Plain text. Mentions are off. |
 | `webhook` | `endpoints.crm({ … })` or `endpoints.crm()` | Any record: it arrives as the signed request's JSON body, with `Idempotency-Key`. Without one, the webhook gets the `message.received` event. |
-| `forward` | `endpoints.team()` | None: it forwards this message as text from the receiving address. |
+| `forward` | `endpoints.team()` | None: it forwards this message whole (text, HTML and attachments) from the receiving address. |
 
 Hyphenated names use quotes: `endpoints["support-hook"]({ … })`. A script can never contain a URL or credential; saving fails if it does. An endpoint must exist (and a forward must be confirmed) before a rule that calls it can be saved. Each endpoint can be called at most three times per recipient of a message.
 
@@ -344,7 +344,7 @@ Both `decisions(…)` calls are answered by the same single AI request.
 | `slack` | `url`: the incoming webhook URL | Created. The URL is a credential: stored encrypted, pinned to `hooks.slack.com`, never returned. |
 | `discord` | `url`: the webhook URL | Created. Same handling, pinned to `discord.com`. |
 | `webhook` | `url`, optional `headers`, `timeoutSeconds`, `retryAttempts` | Created. Returns its signing secret once. It is also usable from routes as `webhook:<name>`. |
-| `forward` | `address`, optional `from` (the receiving address that asks), `preverify` | The recipient chooses Allow in the emailed link, or at once with `preverify` for an address on a domain this workspace verified. |
+| `forward` | `address`, optional `from` (the receiving address that asks), `preverify` | The recipient chooses Allow in the emailed link, or at once with `preverify` for an address on a domain this workspace verified. Routes then deliver to it as `forward:<name>` (or its `con_…` ID), with no rule. |
 
 `getEndpoint` returns `status` (`ready`, `pending`, `expired`, `declined`, `paused`) and a `nextStep` for people and agents. `updateEndpoint` changes the rate, retry policy, pause state or URL; `testEndpoint` posts a fixed test message; `deleteEndpoint` refuses while a rule or route uses it. Endpoint URLs are write-only, so a Slack, Discord or webhook endpoint that was paused because the approval that created or changed it was removed resumes only after its URL is sent again: `updateEndpoint { "url": "…", "paused": false }` (`ENDPOINT_URL_REQUIRED` otherwise, also for `testEndpoint`). A forward paused the same way resumes with `{ "paused": false }`: its address is shown and cannot change.
 
@@ -368,7 +368,9 @@ stateDiagram-v2
 - **The workspace cannot confirm for the recipient.** The confirmation email is sealed: the copy in the workspace's sent mail, thread view and email content API shows the link as withheld.
 - **Scanners cannot confirm.** Opening the link only shows the request; a same-origin form POST records the choice.
 - **Abuse limits.** 20 requests per workspace per day, 3 per address per workspace per day and 5 per address per day across all workspaces. Declining, or the stop link in any forwarded message, blocks that workspace from asking the address again for 30 days.
-- **What is forwarded.** Only mail that passed the virus scan, is not junk, automated or a mailing list, and did not fail DMARC; loops are refused (any `X-Nightmail-Loop`, or the earlier `X-Bane-Loop`), and each message is forwarded once per endpoint. The forward is plain text from the receiving address, with the original sender in the display name, a 1,000 a day workspace budget and 200 an hour per endpoint.
+- **What is forwarded.** Only mail that passed the virus scan, is not junk, automated or a mailing list, and did not fail DMARC (decided once at ingest as `verdicts.forwardEligible`); loops are refused (any `X-Nightmail-Loop`, or the earlier `X-Bane-Loop`), and each message is forwarded once per endpoint, whether a rule, a route or both send it there. The workspace budget is 1,000 a day and 200 an hour per endpoint, and a forward is sent and billed like any other mail from that address.
+- **Whole messages.** A forward carries the message's text, its HTML through the same allow-list as every received HTML passed on (formatting, links, tables and inline `cid:` images stay; scripts, forms, styles and remote embeds don't) and its attachments, inline images included. Attachments go along up to what one sent message may carry, in their order: 20 files and 8 MiB decoded in all. Any other, and any type SES won't deliver (such as `.exe`), is named at the end of the forward instead. On hosted Nightmail a forwarded file is someone else's, so each must also pass the content screen's attachment check whatever the sender's standing (a standard image, PDF, office document, archive, audio, video or plain-text file whose name, type and content agree; inline files only as raster images), or it is named instead. A message stored only in part (`bodyTruncated`) says so there too.
+- **Headers.** From is the receiving address the mail was sent to (or, for a route on a pattern, catch-all or an address without an inbox of its own, the one that asked the recipient to confirm), with the original sender in the display name (`Ana via support`); Reply-To is the original Reply-To or From, so a reply reaches the sender. SES signs with the workspace's domain, so SPF and DKIM align with From and the forward passes DMARC whatever the original sender's policy. Keeping the original From with `Resent-*` fields would fail DMARC (a `p=reject` sender's mail would be refused), and SES sends only from verified identities. Every forward carries `Auto-Submitted: auto-generated` and a signed `X-Nightmail-Loop` token, and either one stops a message from being forwarded again, so a forward that comes back (A to B and B to A, through another installation or a forwarder that keeps headers) ends there. A forward to a receiving host of the workspace itself is refused when it is created (`FORWARD_LOOP`).
 
 ### Retries and rate limits
 
