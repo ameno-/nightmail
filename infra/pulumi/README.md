@@ -10,6 +10,8 @@ It also **creates** the R2 bucket for hosted received mail, `bane-<stage>-mail` 
 
 It also **creates** the homepage's public media bucket, `nightmail-<stage>-media` (ENAM, protected), served only at the stage's media host (`media.dev.nightmail.dev`, `media.nightmail.dev`: an R2 custom domain in the stage's own zone, TLS 1.2+, no r2.dev URL), with CORS for `GET`/`HEAD` from the stage's dashboard origins and a one-day abort of incomplete multipart uploads. It holds render sets under `factory/<version>/` (the desktop and phone formats in `desktop/` and `phone/`) and the `factory/current.json` pointer the page reads; `app/scripts/factory-media.mjs` writes them, with each object's own `Cache-Control` (versions immutable for a year, the pointer a minute), and `.github/workflows/media.yml` promotes a version from dev to production.
 
+It also **creates** `nightmail-byo-broker` (protected), the IAM role that assumes the roles of connected AWS accounts (bring your own AWS); see [byo-broker.ts](byo-broker.ts). Only `nightmail-runtime` may enter it, and it can do nothing but assume `Nightmail-<20>` roles outside the platform accounts. Its trust and policy come from `infra/aws-shared/runtime-policies.mjs` (`--broker`). Customer stacks name this account and the `nightmail-byo-*` role names, so never rename or delete it. The runtime can't enter it until the boundary change in [Dax: one-time boundary change for the BYO broker](#dax-one-time-boundary-change-for-the-byo-broker).
+
 In addition to existing mail resources identified by the adoption inventory, each stack adopts these existing resources through the `import` options in [index.ts](index.ts), all with `protect: true`. Dev's queues are new in anomaly-dev and are adopted by their new ids; dev's attachments bucket is created rather than adopted:
 
 | Owner | Resources | Import ID |
@@ -102,6 +104,23 @@ For a new stack, dispatch on `dev` with `init: true`, `preview: true`. Init crea
   {"Effect":"Allow","Action":["ec2:AuthorizeSecurityGroupIngress","ec2:AuthorizeSecurityGroupEgress"],"Resource":"arn:aws:ec2:us-east-2:ACCOUNT:security-group-rule/*"}
 ]}
 ```
+
+## Dax: one-time boundary change for the BYO broker
+
+The deploy role creates the broker but can't edit the operator-owned `bane-runtime-boundary`. Its `AssumeBaneRoles` statement still names the earlier role patterns and not the broker, so until it changes, the runtime can't enter the broker. Nothing else depends on it: BYO isn't released and hosted sending never assumes a role. After the stage's Pulumi run has created `nightmail-byo-broker`, replace **only that statement**; every other statement stays as it is:
+
+```sh
+account=905840579680 profile=bane-dev   # production: 009882681002 and its profile
+arn=arn:aws:iam::$account:policy/bane-runtime-boundary
+v=$(aws iam get-policy --profile "$profile" --policy-arn "$arn" --query Policy.DefaultVersionId --output text)
+aws iam get-policy-version --profile "$profile" --policy-arn "$arn" --version-id "$v" --query PolicyVersion.Document > live.json
+jq --arg role "arn:aws:iam::$account:role/nightmail-byo-broker" '.Statement |= map(if .Sid == "AssumeBaneRoles"
+  then {Sid:"ByoBroker",Effect:"Allow",Action:"sts:AssumeRole",Resource:$role,Condition:{StringEquals:{"sts:RoleSessionName":"nightmail-broker"}}} else . end)' live.json > next.json
+diff <(jq -S . live.json) <(jq -S . next.json)   # expect exactly that one statement to change
+aws iam create-policy-version --profile "$profile" --policy-arn "$arn" --policy-document file://next.json --set-as-default
+```
+
+IAM keeps at most five versions of a policy; if the boundary already has five, delete its oldest non-default version first. [runtime-boundary-policy.json](../aws-shared/runtime-boundary-policy.json) carries the same `ByoBroker` statement for reference.
 
 ## Tenant status events
 

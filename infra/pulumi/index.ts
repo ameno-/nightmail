@@ -3,6 +3,7 @@ import * as cf from "@pulumi/cloudflare";
 import * as cfV5 from "@pulumi/cloudflare-v5";
 import * as pulumi from "@pulumi/pulumi";
 import { render } from "../aws-shared/runtime-policies.mjs";
+import { byoBroker } from "./byo-broker.js";
 import { mailGateway } from "./mail-gateway.js";
 import {prepareDevMail,prepareProductionMail,prepareRuntime} from './nightmail-dev.js';
 import { deadLetterAlarm, receivingAlarm } from './receiving-alarm.js';
@@ -199,7 +200,8 @@ const user = new aws.iam.User(runtime, {
 }, adopt(runtime, iam));
 
 const policies = render("--fresh", { account: stage.account, origin: stage.origin });
-const legacyPolicies = render("--fresh", { account: stage.account, origin: stage.legacyOrigin });
+const legacyPolicies = render("--fresh", { account: stage.account, origin: stage.legacyOrigin, broker: false });
+export const byoBrokerArn = byoBroker(iam, stage.account);
 const renamedKey = !production && config.getBoolean('prepareNightmailMail') ? prepareDevMail(ohio,iam,stage.account,config.require('permissionsBoundary'),policies,config.getBoolean('nightmailMailActive')===true) : undefined;
 if (production && config.getBoolean('prepareNightmailMail')) prepareProductionMail(ohio,iam,stage.account);
 const standbyRuntime = production && config.getBoolean('stageNightmailRuntime');
