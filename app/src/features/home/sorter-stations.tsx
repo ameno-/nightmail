@@ -42,7 +42,10 @@ const STATIONS: Station[] = [
 // innermost tube (the one nearest the appliances) is Inbox's. The innermost must turn in first or it crosses the
 // others, so on the left the appliances come in the hero's order from the inside: Threads first, Inbox last (the
 // right four already run that way). `tube` is the place from the inside, as above.
-const LABELS: Record<Kind | 'main', string> = { inbox: 'INBOX', agent: 'AGENTS', endpoint: 'ENDPOINTS', thread: 'THREADS', imap: 'IMAP', ritual: 'RITUALS', campaign: 'CAMPAIGNS', logs: 'LOGS', main: 'OUTBOUND' }
+const LABELS: Record<Kind | 'main', string> = { inbox: 'INBOX', agent: 'AGENTS', endpoint: 'ENDPOINTS', thread: 'THREADS', imap: 'IMAP', ritual: 'RULES', campaign: 'CAMPAIGNS', logs: 'LOGS', main: 'OUTBOUND' }
+// (The renders named the rules' pipe RITUALS before Rules was renamed: a manifest with either label is found, so the
+// tube stays on its pipe while the renders and the bundled manifest change over.)
+const FORMERLY: Record<string, string> = { RULES: 'RITUALS' }
 const UNDER_HERO: Station[] = (['thread', 'imap', 'endpoint', 'ritual', 'agent', 'campaign', 'inbox', 'logs'] as const).map(kind => {
   const spec = STATIONS.find(station => station.kind === kind)!
   return spec.tube < 4 ? { ...spec, tube: 3 - spec.tube } : spec
@@ -107,6 +110,8 @@ export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: H
   if (!p) return <section className="srt-stations" ref={root} aria-label="Where mail goes" />
   // (Under the factory every tube is as wide as the hero's pipes, so each reads on from its own.)
   const pipes = !p.phone && hero ? hero : null
+  /** Where a tube's hero pipe comes down to the section's top edge, by its label. */
+  const heroX = (kind: Kind) => pipes ? pipes.x[LABELS[kind]] ?? pipes.x[FORMERLY[LABELS[kind]]] : undefined
   const phone = p.phone, r = pipes ? pipes.w / 2 : p.tubeR, wide = r * 2, depth = phone ? 40 : 60, dx = -DX * depth, dy = DY * depth
   // Each appliance stands between the two fours of tubes, a little towards the side its own tube comes from: those on
   // the left share one left edge, those on the right another, so their names stand in two columns down the page.
@@ -120,7 +125,7 @@ export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: H
   const bend0 = (phone ? 10 : wide) * 1.5, pitch = Math.round(wide * 1.5 + 16), jog = new Map<number | 'main', number>()
   let jogEnd = 0
   if (pipes) {
-    const moves = [...[0, 1, 2, 3, 4, 5, 6, 7].map(tube => ({ id: tube as number | 'main', from: pipes.x[LABELS[UNDER_HERO.find(station => station.tube === tube)!.kind]], to: p.drops[tube] })),
+    const moves = [...[0, 1, 2, 3, 4, 5, 6, 7].map(tube => ({ id: tube as number | 'main', from: heroX(UNDER_HERO.find(station => station.tube === tube)!.kind)!, to: p.drops[tube] })),
       { id: 'main' as const, from: pipes.x.OUTBOUND, to: p.sx + p.out }]
     const at = new Map(moves.map(move => [move.id, move.from])), pending = moves.filter(move => Math.abs(move.to - move.from) > .5), clearance = wide + 8
     const span = (move: typeof moves[number]) => [Math.min(move.from, move.to) - clearance, Math.max(move.from, move.to) + clearance]
@@ -163,14 +168,14 @@ export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: H
   // side: its machine sends two wide tubes over the slab's lip, one down each side of the column, with a tee off it
   // to each appliance on its side and a bend into the last.
   const pw = phone ? 10 : wide, bend = pw * 1.5
-  const runs: { key: string; points: Pt[]; wide: number; rings: Ring[] }[] = [], ways: Pt[][] = [], sleeve = (x: number): Ring => ({ at: [x, 12], across: false, tall: 30 })
+  const runs: { key: string; points: Pt[]; wide: number; rings: Ring[] }[] = [], ways: Pt[][] = [], sleeve = (x: number): Ring => ({ at: [x, 12], across: false, tall: 30 }), seam = (x: number): Ring => ({ at: [x, 0], across: false, seam: true })
   if (!phone) units.forEach(({ station, left, port, end }, k) => {
-    const side = left ? 0 : 4, n = station.tube - side, slot = (j: number) => p.drops[side + j], row = jog.get(station.tube), from = pipes?.x[LABELS[station.kind]]
+    const side = left ? 0 : 4, n = station.tube - side, slot = (j: number) => p.drops[side + j], row = jog.get(station.tube), from = heroX(station.kind)
     const points: Pt[] = row !== undefined && from !== undefined ? [[from, 0], [from, row], [slot(n), row]] : [[slot(n), 0]]
     for (let m = 0; m < n; m++) { const y = units.find(u => u.station.tube === side + m)!.port + 78 + (n - m - 1) * (wide + 16); points.push([slot(n - m), y], [slot(n - m - 1), y]) }
     points.push([points.at(-1)![0], port], [end, port])
-    // (A tube out of the hero's pipe is that pipe going on through the floor's edge: no coupling where it comes out.)
-    runs.push({ key: `t${station.tube}`, points, wide, rings: [...pipes ? [] : [sleeve(points[0][0])], ...rings(points, bend, left ? dx / 2 + 5 : 17, !left).slice(1)] }); ways[k] = points
+    // (A tube out of the hero's pipe is fitted to it at the stage's foot, where the render's steel ends: `Seam`.)
+    runs.push({ key: `t${station.tube}`, points, wide, rings: [...from !== undefined ? [seam(points[0][0])] : pipes ? [] : [sleeve(points[0][0])], ...rings(points, bend, left ? dx / 2 + 5 : 17, !left).slice(1)] }); ways[k] = points
   })
   else for (const side of [0, 1]) {
     const mine = units.filter(u => u.left === (side === 0)), last = mine.at(-1)!, x = Math.round(p.drops[side]), out = 0, towards = side ? -1 : 1
@@ -191,7 +196,7 @@ export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: H
   // (Under the factory it comes down out of the hero's OUTBOUND pipe and steps across to its place first.)
   const mainRow = jog.get('main'), heroMain = pipes?.x.OUTBOUND, stepped = mainRow !== undefined && heroMain !== undefined
   const main: Pt[] = stepped ? [[heroMain, 0], [heroMain, mainRow], [mainX, mainRow], [mainX, plate.top - dy * .5]] : [[mainX, 0], [mainX, plate.top - dy * .5]]
-  const senders = units.filter(u => ['agent', 'campaign', 'thread'].includes(u.station.kind)), mainRings: Ring[] = [...pipes ? [] : [sleeve(main[0][0])], ...stepped ? rings(main.slice(0, 3).concat([[mainX, mainRow + 2 * bend + 40]]), bend, 0).slice(1) : []]
+  const senders = units.filter(u => ['agent', 'campaign', 'thread'].includes(u.station.kind)), mainRings: Ring[] = [...stepped ? [seam(heroMain)] : pipes ? [] : [sleeve(main[0][0])], ...stepped ? rings(main.slice(0, 3).concat([[mainX, mainRow + 2 * bend + 40]]), bend, 0).slice(1) : []]
   // What comes back up the main goes on up it to its top: through its step, where it has one.
   const upMain = (points: Pt[]): Pt[] => stepped ? [...points.slice(0, -1), [mainX, mainRow], [heroMain, mainRow], [heroMain, 16]] : points
   for (let y = stepped ? mainRow + 300 : 300; y < main.at(-1)![1] - 120; y += 380) if (units.every(u => !(!u.left || phone) || y < u.top + u.boxTop - dy - 30 || y > u.top + u.boxTop + u.station.h + 40)) mainRings.push({ at: [mainX, y], across: false })
@@ -277,7 +282,7 @@ export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: H
 type Pt = [number, number]
 const corners = (points: Pt[], bend: number) => points.map((v, i) => i === 0 || i === points.length - 1 ? 0 : Math.min(bend, Math.hypot(v[0] - points[i - 1][0], v[1] - points[i - 1][1]) / 2, Math.hypot(points[i + 1][0] - v[0], points[i + 1][1] - v[1]) / 2))
 
-type Ring = { at: Pt; across: boolean; tall?: number }
+type Ring = { at: Pt; across: boolean; tall?: number; seam?: boolean }
 type Flow = { points: Pt[]; bend: number; speed: number; unit: number | undefined; wide: boolean }
 /** Where a tube's line turns: for each corner the centre of its quarter circle, its radius, and the points it begins and ends at. */
 function turns(points: Pt[], bend: number) {
@@ -344,11 +349,19 @@ function Tube({ points, wide, bend, rings, layer }: { points: Pt[]; wide: number
     <path className="srt-tube-wall" d={line(points, bend)} strokeWidth={wide} />
     {strip('srt-tube-shade', -.9, .2)}{strip('srt-tube-band', .74, .3)}{strip('srt-tube-rim', .95, .1)}
     {strip('srt-tube-glint', .36, .14)}{strip('srt-tube-glint srt-tube-glint-2', -.58, .1)}
-    {rings.map(({ at, across, tall }, i) => across
+    {rings.map(({ at, across, tall, seam }, i) => seam ? <Seam key={i} x={at[0]} w={wide} />
+      : across
       ? <g key={i}><rect className="srt-ring" x={at[0] - 2.5} y={at[1] - half - 2.5} width={5} height={wide + 5} rx={1} /><rect className="srt-ring-lit" x={at[0] - 2.5} y={at[1] - half - 2.5} width={5} height={2} rx={1} /></g>
       : tall && tall > 12 ? <Sleeve key={i} x={at[0]} y={at[1]} w={wide + 6} h={tall} />
       : <g key={i}><rect className="srt-ring" x={at[0] - half - 2.5} y={at[1] - (tall ?? 5) / 2} width={wide + 5} height={tall ?? 5} rx={1} /><rect className="srt-ring-lit" x={at[0] - half - 2.5} y={at[1] - (tall ?? 5) / 2} width={wide + 5} height={2} rx={1} /></g>)}
   </g>
+}
+
+/** Where a tube comes out of its pipe in the hero, at the stage's foot: a collar a little wider than both, in the
+ * render's steel (factory-home.css), flat, joining its steel pipe to the page's glass tube. Never deeper than the strip
+ * over the consent's plate. */
+function Seam({ x, w }: { x: number; w: number }) {
+  return <rect className="srt-seam" x={x - w / 2 - 1.5} y={0} width={w + 3} height={Math.min(8, Math.max(4, Math.round(w * .55)))} rx={1} />
 }
 
 /** A coupling on an upright tube, as the machine would show one: a short steel cylinder seen from a little above (its

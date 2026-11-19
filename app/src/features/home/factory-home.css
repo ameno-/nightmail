@@ -50,5 +50,8 @@
 .fac-page[data-visitor] .srt-stations { margin-top: -52px; }
 .fac-consent { margin: 0; padding: 4px 12px; border-radius: 6px; background: var(--srt-floor); color: var(--srt-text-2); font-size: 12px; line-height: 16px; text-align: center; text-wrap: balance; pointer-events: auto; }
 .fac-consent a:hover { color: var(--srt-text); }
+/* Where each tube comes out of its pipe at the stage's foot (sorter-stations.tsx Seam): a collar in the render's steel
+   (its pipes' tone where the stage cuts them), flat. The renders are the same by day and by night, and so is this. */
+.fac-page .srt-seam { fill: rgb(58 72 86); }
 
 @media (prefers-reduced-motion: reduce) { .fac-cta::before, .fac-cta .srt-cta-label, .fac-cta .srt-cta-arrow { transition: none; } }
