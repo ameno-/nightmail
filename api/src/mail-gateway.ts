@@ -113,6 +113,13 @@ export function registerMailGateway(app: App) {
     if (!q.success) throw new ApiError(422, 'INVALID_REQUEST', 'Invalid protocol RPC.');
     const p = q.data;
     if (p.op === 'login') {
+      // An API key signs in to SMTP only, to send (protocol-relay.ts); it is never an app password.
+      if (/^(?:nm|bane|os)_/.test(p.password)) {
+        const { relayLogin, relayPassword } = await import('./protocol-relay.js');
+        const relay = relayPassword(p.password) ? await relayLogin(runtime, p.user, p.password, p.protocol) : null;
+        if (!relay) throw bad();
+        return c.json(relay);
+      }
       const auth = principal(runtime, p.protocol, sql`p.hash=${passwordDigest(runtime.config.authSecret, p.password)}`);
       const { rows } = await runtime.db.execute(
         sql`WITH a AS (${auth}) SELECT a.k AS kid,a.b AS inbox,a.w AS workspace,coalesce('sponsor:'||w.quota_sponsor,'unsponsored') AS account,ARRAY(SELECT address FROM mailbox_addresses WHERE mailbox_id=a.b AND workspace_id=a.w) AS addresses,${folders} AS folders FROM a JOIN workspaces w ON w.id=a.w WHERE a.b=${p.user} OR EXISTS(SELECT FROM mailbox_addresses WHERE mailbox_id=a.b AND workspace_id=a.w AND address=lower(${p.user}))`,
@@ -148,6 +155,7 @@ export function registerMailGateway(app: App) {
       return new Response(stream, { headers: { 'content-type': 'application/octet-stream' } });
     }
     if (p.op === 'submit') {
+      if (/^(?:key|mbk)_/.test(p.kid)) return c.json(await (await import('./protocol-relay.js')).relaySubmit(c, p));
       const { contentWrite } = await import('./protocol-content.js');
       return c.json(await contentWrite(c, p));
     }

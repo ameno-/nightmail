@@ -20,6 +20,9 @@
     "BANE_MAIL_BUCKET": "nightmail-dev-mail",
     "BANE_MAIL_STORE": "r2",
     "PUBLIC_URL": "https://dev.nightmail.dev",
+    // Mail apps connect to imap.dev.bane.mx and smtp.dev.bane.mx, the names on dev's gateway certificate. Shown only
+    // while the deploy binds MAILGW_API_TOKEN (bane:mailGatewayEnabled in infra/pulumi/Pulumi.dev.yaml).
+    "MAILGW_PUBLIC_DOMAIN": "dev.bane.mx",
     // The earlier origin, still served (see wrangler.prod.jsonc). Removed by the cutover.
     "PREVIOUS_PUBLIC_URLS": "https://dev.bane.mx",
     // The pool's SNS subscriptions stay on dev.bane.mx (infra/pulumi stage.origin).

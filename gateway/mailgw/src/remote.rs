@@ -42,7 +42,34 @@ pub struct Principal {
     workspace: String,
     account: String,
     addresses: Vec<String>,
+    /// A send-only API key (api/src/protocol-relay.ts): the sender domains it may use, with their subdomains. Its
+    /// `inbox` is the key's ID and it has no folders.
+    #[serde(default)]
+    domains: Vec<String>,
+    /// A key for more addresses than the login lists: submission checks the sender instead.
+    #[serde(default, rename = "anySender")]
+    any_sender: bool,
     folders: Vec<FolderMeta>,
+}
+impl Principal {
+    /// Whether this credential may send as `address`: one of its addresses, or an address on one of its domains or
+    /// below. The API checks again when the message is submitted.
+    fn sends_as(&self, address: &str) -> bool {
+        let host = address
+            .rsplit_once('@')
+            .map(|(_, host)| host.to_ascii_lowercase());
+        self.any_sender
+            || self
+                .addresses
+                .iter()
+                .any(|x| x.eq_ignore_ascii_case(address))
+            || host.is_some_and(|host| {
+                self.domains.iter().any(|d| {
+                    let d = d.to_ascii_lowercase();
+                    host == d || host.ends_with(&format!(".{d}"))
+                })
+            })
+    }
 }
 #[derive(Clone, Deserialize)]
 struct Message {
@@ -327,19 +354,15 @@ pub struct Login {
 }
 impl Identity for Login {
     fn owns(&self, a: &str) -> bool {
-        self.principal.lock().is_ok_and(|p| {
-            p.as_ref()
-                .is_some_and(|p| p.addresses.iter().any(|x| x.eq_ignore_ascii_case(a)))
-        })
+        self.principal
+            .lock()
+            .is_ok_and(|p| p.as_ref().is_some_and(|p| p.sends_as(a)))
     }
     fn login(&self, p: Protocol, user: &[u8], pass: &[u8]) -> bool {
         let (Ok(u), Ok(pw)) = (str::from_utf8(user), str::from_utf8(pass)) else {
             return false;
         };
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        u.to_ascii_lowercase().hash(&mut h);
-        let k = h.finish();
+        let k = failure_key(u, pw);
         let now = tokio::time::Instant::now();
         if self.limits.lock().is_ok_and(|l| l.blocked(self.ip, k, now)) {
             return false;
@@ -367,6 +390,24 @@ impl Identity for Login {
         *slot = Some(v);
         true
     }
+}
+/// Failed sign-ins lock out a name from one address. Every send-only API key signs in as `apikey`, so its failures
+/// count under the key's shown prefix (`nm_` and 8 characters, as the API keys page lists it): one app with a revoked
+/// key doesn't lock out another app on the same network. The per-address limit still bounds guessing.
+fn failure_key(user: &str, password: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    user.to_ascii_lowercase().hash(&mut h);
+    if ["nm_", "bane_", "os_"]
+        .iter()
+        .any(|p| password.starts_with(p))
+        && let Some(prefix) = password
+            .rfind('_')
+            .and_then(|i| password.get(..(i + 9).min(password.len())))
+    {
+        prefix.hash(&mut h);
+    }
+    h.finish()
 }
 type PreviewPage = BTreeMap<u32, (Arc<[u8]>, bool)>;
 pub struct Store {
@@ -1198,6 +1239,8 @@ mod auth_tests {
                     inbox: "inbox".into(),
                     kid: format!("app{n}"),
                     addresses: vec![],
+                    domains: vec![],
+                    any_sender: false,
                     folders: vec![],
                     started: None,
                     cached: false,
@@ -1235,6 +1278,8 @@ mod auth_tests {
                     inbox: kid.into(),
                     kid: kid.into(),
                     addresses: vec![],
+                    domains: vec![],
+                    any_sender: false,
                     folders: vec![],
                     started: None,
                     cached: false,
@@ -1316,6 +1361,8 @@ mod auth_tests {
                     inbox: inbox.into(),
                     kid: format!("app_{inbox}"),
                     addresses: vec![],
+                    domains: vec![],
+                    any_sender: false,
                     folders: vec![],
                     started: None,
                     cached: false,
@@ -1367,6 +1414,59 @@ mod auth_tests {
         assert!(r.current("two", t, after));
         r.record(None, after);
         assert!(!r.current("two", t, after));
+    }
+    /// A send-only key's principal, as the API's login returns it: its domains with their subdomains, or its addresses,
+    /// and nothing else; past the listed addresses the API decides at submission.
+    #[test]
+    fn a_send_only_key_sends_only_from_its_domains_or_addresses() {
+        let login = |extra: Value| -> Principal {
+            let mut p = json!({"kid":"key_a","inbox":"key_a","workspace":"w","account":"unsponsored","addresses":[],"folders":[]});
+            p.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(p).unwrap()
+        };
+        let domains = login(json!({"domains":["example.com"]}));
+        for (address, allowed) in [
+            ("app@example.com", true),
+            ("App@EXAMPLE.com", true),
+            ("app@news.example.com", true),
+            ("app@badexample.com", false),
+            ("app@example.com.evil.test", false),
+            ("example.com", false),
+            ("app@other.test", false),
+        ] {
+            assert_eq!(domains.sends_as(address), allowed, "{address}");
+        }
+        let addresses = login(json!({"addresses":["alerts@example.com"]}));
+        assert!(addresses.sends_as("ALERTS@example.com"));
+        assert!(!addresses.sends_as("other@example.com"));
+        assert!(login(json!({"anySender":true})).sends_as("anyone@example.com"));
+        // An app password's principal (no domains) is unchanged.
+        let inbox = login(json!({"addresses":["box@example.com"]}));
+        assert!(!inbox.sends_as("someone@example.com"));
+    }
+    #[test]
+    fn send_only_keys_fail_sign_in_under_their_own_prefix() {
+        let key = |n: char| format!("nm_{}", n.to_string().repeat(64));
+        assert_eq!(
+            failure_key("apikey", &key('a')),
+            failure_key("APIKEY", &key('a'))
+        );
+        assert_ne!(
+            failure_key("apikey", &key('a')),
+            failure_key("apikey", &key('b'))
+        );
+        assert_ne!(
+            failure_key("apikey", &format!("nm_mbx_{}", "a".repeat(64))),
+            failure_key("apikey", &format!("nm_mbx_{}", "b".repeat(64)))
+        );
+        // An app password's failures count against its username alone, whatever it guessed.
+        assert_eq!(
+            failure_key("box@example.com", "1111-2222"),
+            failure_key("box@example.com", "3333-4444")
+        );
+        assert_eq!(failure_key("apikey", "nm_"), failure_key("apikey", "nm_"));
     }
 }
 

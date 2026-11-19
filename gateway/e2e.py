@@ -29,6 +29,10 @@ ROOT = Path(__file__).resolve().parent
 USER = "primary@example.invalid"
 ALIAS = "alias@example.invalid"
 PASS = secrets.token_hex(12)
+# Send-only API keys (api/src/protocol-relay.ts): one limited to the fixture's domain, one to a receiving address, one
+# for the revocation check, and keys SMTP refuses (it can read too; it has no domain limit).
+KEYS = {name: "nm_" + secrets.token_hex(32) for name in ("relay", "revoked", "reader", "unlimited")}
+ADDRESS_KEY = "nm_mbx_" + secrets.token_hex(32)
 RAW = b"From: alias@example.invalid\r\nSubject: caf\xc3\xa9\r\nMessage-ID: <one@example.invalid>\r\nContent-Type: text/plain\r\n\r\n.dot\r\n"
 IMAPTEST = "dovecot/imaptest@sha256:db2b7de2f7bdd5d331fbdc12463828e3e35f1571c40999df47a0ff2359d399d7"
 DOVECOT = "dovecot/dovecot@sha256:547d28f9a893c93a1d2f6dc164880cd7bfa74009106dfa46b36a6a2ee636d921"
@@ -165,6 +169,12 @@ def real_services():
         INSERT INTO inbox_state(inbox_id,workspace_id) VALUES('mbx_fixture','default');
         INSERT INTO inbox_app_passwords VALUES('app_fixture','mbx_fixture','fixture','{digest}',ARRAY['smtp','imap']); UPDATE inbox_state SET protocol_passwords=1;
         """)
+        sha = lambda v: hashlib.sha256(v.encode()).hexdigest()
+        rows = {"relay": '["send"]', "revoked": '["send"]', "reader": '["read","send"]', "unlimited": '["send"]'}
+        sql("".join(f"""INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES('key_{n}','default','{n}','{sha(KEYS[n])}','{KEYS[n][:11]}','{perms}','{'[]' if n == 'unlimited' else '["example.invalid"]'}');""" for n, perms in rows.items())
+            + f"""INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind) VALUES('mbx_alerts','default','fixture','alerts@example.invalid','address');
+            INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES('default','alerts@example.invalid','mbx_alerts','primary');
+            INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) VALUES('mbk_relay','default','relay','{sha(ADDRESS_KEY)}','{ADDRESS_KEY[:15]}','["mbx_alerts"]','["send"]');""")
         log = stack.enter_context(open(ROOT / "target/real-api.log", "w"))
         for i in range(2):
             bid=f'mbx_load{i}';addr=f'load{i}@example.invalid';hashed=hmac.new(pepper,(PASS+str(i)).encode(),'sha256').hexdigest()
@@ -357,6 +367,7 @@ def delivery(p, env, pepper, log):
                     text('delivery-text', (b'x'*766 + b'\r\n')*8192)]:
             assert not c.sendmail(ALIAS, [dest], raw)
 
+    relay(p)
     # Revoke a second password after 250 but before the runner can claim it.
     password = secrets.token_hex(16)
     digest = hmac.new(pepper, password.encode(), 'sha256').hexdigest()
@@ -372,17 +383,61 @@ def delivery(p, env, pepper, log):
                     env={**env, 'AWS_EC2_METADATA_DISABLED':'true'}, stdout=log, stderr=log)
     try:
         end = time.monotonic() + 30
-        expected = ['delivery-file:delivered','delivery-plain:delivered','delivery-revoked:canceled','delivery-text:delivered']
+        expected = ['delivery-file:delivered','delivery-plain:delivered','delivery-relay-address:delivered','delivery-relay-domain:delivered',
+                    'delivery-relay-revoked:canceled','delivery-revoked:canceled','delivery-text:delivered']
         while True:
             states = sql("SELECT subject||':'||status FROM sending_emails WHERE workspace_id='default' AND subject LIKE 'delivery-%' AND simulated ORDER BY subject").splitlines()
             if states == expected: break
             assert proc.poll() is None and time.monotonic() < end, states
             time.sleep(.1)
         assert sql("SELECT error_code FROM sending_emails WHERE actor_key_id='app_delivery' AND attempt_started_at IS NULL") == 'ORIGIN_KEY_REVOKED'
+        assert sql("SELECT actor_key_id||':'||from_address FROM sending_emails WHERE subject LIKE 'delivery-relay-%' ORDER BY subject").splitlines() == [
+            'mbk_relay:alerts@example.invalid', 'key_relay:app@news.example.invalid', 'key_revoked:app@example.invalid']
         assert sql("SELECT a.checksum FROM sending_emails e JOIN sending_attachments a ON a.id=e.snapshot->'attachments'->>0 WHERE e.subject='delivery-file'") == hashlib.sha256(data).hexdigest()
         assert sql("SELECT length(replace(replace(snapshot->>'text',chr(13),''),chr(10),'')) FROM sending_emails WHERE subject='delivery-text'") == str(766*8192)
     finally:
         proc.terminate(); proc.wait(timeout=15)
+
+
+def relay(p):
+    """Send-only SMTP: an API key that can only send signs in as apikey and goes through sendEmail; it never reads mail."""
+    def refused(user, password):
+        with smtplib.SMTP_SSL('localhost', p['SMTPS'], context=CTX, timeout=10) as c:
+            try:
+                c.login(user, password)
+            except smtplib.SMTPAuthenticationError as e:
+                return e.smtp_code == 535
+            return False
+    # A key opens no mailbox, and SMTP takes only a key that can send and nothing else, limited to domains or addresses.
+    with imaplib.IMAP4_SSL('localhost', p['IMAPS'], ssl_context=CTX, timeout=8) as c:
+        try:
+            c.login('apikey', KEYS['relay'])
+        except imaplib.IMAP4.error:
+            pass
+        else:
+            raise AssertionError('IMAP accepted a send-only key')
+    assert refused('apikey', KEYS['reader']) and refused('apikey', KEYS['unlimited']) and refused('app@example.invalid', KEYS['relay'])
+    msg = lambda sender, subject: f'From: App <{sender}>\r\nTo: sink@example.invalid\r\nSubject: {subject}\r\nX-Entity-Ref-ID: {subject}\r\n\r\nHello\r\n'.encode()
+    with smtplib.SMTP_SSL('localhost', p['SMTPS'], context=CTX, timeout=10) as c:
+        c.login('apikey', KEYS['relay'])
+        assert c.mail('app@other.invalid')[0] == 553, 'a sender outside the key\'s domains'
+        assert not c.sendmail('app@example.invalid', ['sink@example.invalid'], msg('app@news.example.invalid', 'delivery-relay-domain'))
+        c.mail('app@example.invalid'); c.rcpt('sink@example.invalid')
+        assert c.data(msg('app@other.invalid', 'relay-header'))[0] == 553, 'a From header outside the key\'s domains'
+    with smtplib.SMTP('localhost', p['SMTP'], timeout=10) as c:
+        c.starttls(context=CTX); c.login('apikey', ADDRESS_KEY)
+        assert c.mail('other@example.invalid')[0] == 553, 'an address the key does not have'
+        c.rset()
+        assert not c.sendmail('alerts@example.invalid', ['sink@example.invalid'], msg('alerts@example.invalid', 'delivery-relay-address'))
+    # Revoking the key closes its open session and refuses the next sign-in; what it queued is not sent.
+    with smtplib.SMTP_SSL('localhost', p['SMTPS'], context=CTX, timeout=10) as c:
+        c.login('apikey', KEYS['revoked'])
+        assert not c.sendmail('app@example.invalid', ['sink@example.invalid'], msg('app@example.invalid', 'delivery-relay-revoked'))
+        sql("UPDATE api_keys SET revoked_at=now() WHERE id='key_revoked'")
+        assert c.getreply()[0] == 421, 'the open session closes'
+    assert refused('apikey', KEYS['revoked'])
+    assert sql("SELECT count(*) FROM sending_emails WHERE subject='relay-header'") == '0'
+    assert sql("SELECT snapshot->'headers' FROM sending_emails WHERE subject='delivery-relay-domain'") == '[{"Name": "X-Entity-Ref-ID", "Value": "delivery-relay-domain"}]'
 
 
 def client_flow(port):

@@ -36,7 +36,7 @@ export async function dispatchAsActor(app: Pick<App, 'fetch'>, request: Request,
 // `credential` returns at most one authorized row. Charge the originating principal
 // (the grant for agent tokens), but touch only the credential actually presented.
 // `charge` is evaluated before the budget row is locked: false leaves the request uncharged, with no budget row.
-function credentialCtes(table: typeof agentTokens | typeof apiKeys | typeof mailboxKeys, credential: SQL, charge?: SQL) {
+export function credentialCtes(table: typeof agentTokens | typeof apiKeys | typeof mailboxKeys, credential: SQL, charge?: SQL) {
   return sql`credential AS MATERIALIZED (${credential}), budget AS (
       INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
       SELECT workspace_id, key_id, date_trunc('minute', now()), 1 FROM credential ${charge ? sql`WHERE ${charge}` : sql``}
@@ -116,7 +116,7 @@ export const requireReceivingConsent: MiddlewareHandler<AppEnv> = async (c,next)
 
 // bane_/os_: remove after rename cleanup.
 const AGENT_TOKEN = /^(?:nm|bane|os)_agent_/;
-const API_KEY = /^(?:nm_|bane_|os_(?:live_)?)[0-9a-f]{64}$/i;
+export const API_KEY = /^(?:nm_|bane_|os_(?:live_)?)[0-9a-f]{64}$/i;
 /** A workspace API key or agent token (not an inbox key, not an account-service token): what bearerActor takes. */
 export const workspaceBearer = (token: string) => /^(?:nm|bane|os)_(?!mbx_)/.test(token);
 const apiKeyRow = (c: Ctx, hash: string) => sql`

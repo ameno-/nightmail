@@ -22,6 +22,9 @@
     "BYO_STACK_PREFIX": "Nightmail",
     "BANE_MAIL_STORE": "r2",
     "PUBLIC_URL": "https://nightmail.dev",
+    // Mail apps connect to imap.nightmail.dev and smtp.nightmail.dev (the gateway certificate names both). Shown only
+    // while the deploy binds MAILGW_API_TOKEN (bane:mailGatewayEnabled in infra/pulumi/Pulumi.production.yaml).
+    "MAILGW_PUBLIC_DOMAIN": "nightmail.dev",
     // The earlier origin: still served, its /mcp audience valid for tokens minted there, and bane.mx stays a platform
     // domain (its adopted claim keeps receiving support@ and friends). Removed by the cutover.
     "PREVIOUS_PUBLIC_URLS": "https://bane.mx",

@@ -22,9 +22,17 @@ Build with `docker buildx build --platform linux/arm64 --load -t bane-mailgw:loc
 
 **Limits of the verification:** local MinIO exercises the Node private object-store adapter, not a hosted Worker or real SES delivery. Large-folder refreshes page entries and tombstones; the real-store gate exercises 50,001 entries. Local counts do not measure hosted object-store latency, maximum-literal Worker memory, or Fargate capacity. Strict Dovecot `\Recent` expectations remain different by design; see [the compliance ledger](VERIFICATION.md).
 
+## Send-only SMTP for apps
+
+An app that only sends signs in to SMTP with the username `apikey` and, as the password, an API key that can do nothing but send: a workspace key with `send` alone, limited to sender domains, or a key for receiving addresses with `send` alone (`api/src/protocol-relay.ts`). There is no credential type of its own. The key never opens a mailbox: IMAP refuses it, and every folder operation refuses its ID. A key that can also read or manage, or a workspace key for every domain, is refused like a wrong password.
+
+- **Sign-in.** The API's login returns the key's ID as both `kid` and `inbox`, with its domains (`domains`) or addresses (`addresses`, or `anySender` past 1,000) and no folders. The gateway checks MAIL FROM, From and Sender against them, keys the per-credential session limit and cached sign-ins by the key's ID, and counts failed sign-ins under `apikey` and the key's shown prefix, so one app's revoked key doesn't lock out another app on the same network.
+- **Submission.** The API checks the envelope sender, the one From and any Sender again, then sends the message as `POST /v1/emails/send` with that key would: attachments uploaded by the key, headers the API accepts as custom headers passed through (threading and list headers first), recipients from the envelope (To, then Cc from the headers, the rest Bcc). The key is authenticated, charged against its minute budget and admitted in one statement, so limits, screening, billing, suppression, events and dispatch's recheck are sendEmail's. There is no Sent folder.
+- **Revocation.** Revoking a key, or changing its permissions, domains or addresses, notifies `bane_protocol_auth` with its ID (migration 342): open sessions end with `421`, cached sign-ins go, the next submission is refused, and mail it queued is not sent.
+
 ## Dev turn-on runbook
 
-Dev only: AWS `905840579680`, Worker `bane-dev`, `dev.bane.mx`. Production leaves `bane:mailGatewayEnabled` and `bane:mailGatewayDesired` at their defaults (false and 0). DNS stays on Spectrum: leave `bane:mailGatewayDns` off and test through the stack output `mailGatewayEndpoint` with the stage hostnames as SNI.
+Dev: AWS `905840579680`, Worker `bane-dev`, `dev.bane.mx`. Production follows the [production runbook](#production-turn-on-runbook) below. DNS stays on Spectrum: leave `bane:mailGatewayDns` off and test through the stack output `mailGatewayEndpoint` with the stage hostnames as SNI.
 
 **The switch is `bane:mailGatewayEnabled` in `infra/pulumi/Pulumi.<stage>.yaml`.** Pulumi and the Worker deploy (`.github/scripts/deploy-worker.sh`) both read the committed value, so there is no third state:
 
@@ -143,3 +151,19 @@ Record the numbers in this file next to the SQL budgets, then revoke the test ap
    Until step 1 merges, a deploy with the flag still true binds the CI copy again. If you deleted the CI copy, that deploy stops instead.
 3. **Close the database role.** Run `ALTER ROLE bane_mailgw_listen NOLOGIN;`, then `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'bane_mailgw_listen';`.
 4. **Revoke test app passwords** with `DELETE /v1/inboxes/{id}/app-passwords/{passwordId}`. DNS never changed, so there's nothing to restore.
+
+## Production turn-on runbook
+
+Production: AWS `009882681002` (`us-east-2`), Worker `bane-production`. The gateway that runs is the stack's `nightmail-mail-gateway` (`bane:nightmailGateway*`), as on dev. Mail apps use `imap.nightmail.dev` and `smtp.nightmail.dev` (`MAILGW_PUBLIC_DOMAIN` in `api/wrangler.prod.jsonc`); tasks call the API at `https://bane.mx` (`MAILGW_API_URL`, the stack's origin). The commit that sets `bane:mailGatewayEnabled: "true"` in `infra/pulumi/Pulumi.production.yaml` is step 2; nothing before step 4 starts a task.
+
+1. **Before promoting that commit**, as for dev (§1), with production names:
+   - One token, written byte for byte to `nightmail/production/mail-gateway/api-token` (production account, `us-east-2`) and to `nightmail/production/MAILGW_API_TOKEN` (secrets account `604439173067`, `us-east-1`). Without the second, the production deploy stops in "Deploy the Worker".
+   - `nightmail/production/mail-gateway/tls-cert` and `tls-key`: a public-CA certificate with SANs `imap.nightmail.dev` and `smtp.nightmail.dev`, and its key (check they match).
+   - `nightmail/production/mail-gateway/db-url`: a direct session connection (not a pooler) as `bane_mailgw_listen` to the production database, `sslmode=verify-full`. Create the role as for dev with `CONNECTION LIMIT 4` (two tasks and their replacements) and grant it only CONNECT. Check the database has 4 connections to spare at peak.
+2. **Promote it.** "Deploy the Worker" ends with `Mail gateway: bane:mailGatewayEnabled=true; Worker MAILGW_API_TOKEN bound=true.` An unsigned `curl -sX POST https://nightmail.dev/internal/v1/mail` still answers 403 `PROTOCOL_DENIED`. The dashboard now shows the IMAP and SMTP settings and offers SMTP logins.
+3. **Publish the image** as a production-account administrator, from that commit: §3 with `repo=009882681002.dkr.ecr.us-east-2.amazonaws.com/nightmail-mail-gateway`.
+4. **Start two tasks.** In a PR, add `bane:nightmailGatewayImage: 009882681002.dkr.ecr.us-east-2.amazonaws.com/nightmail-mail-gateway@sha256:<digest>` and change `bane:nightmailGatewayDesired` to `"2"` in `Pulumi.production.yaml`, nothing else. Promoting it runs Pulumi, which waits for a steady service.
+5. **Verify** as in §5, with `NLB` set to the Pulumi output `nightmailGatewayEndpoint`, target groups `nightmail-mail-gateway-<port>` and the production hostnames as SNI. Then sign in with an app password, and send one message through an SMTP login (`apikey`) to an address you own.
+6. **DNS.** In the `nightmail.dev` zone, add DNS-only CNAMEs `imap` and `smtp` to `nightmailGatewayEndpoint`, TTL 300 (the stack writes only the `bane.mx` zone, so it refuses `bane:nightmailGatewayDns` here). Check the names answer and all four TLS paths verify through them.
+
+**Rollback:** set `bane:mailGatewayEnabled: "false"` and `bane:nightmailGatewayDesired: "0"` (keep the image line) and promote; urgently, §Rollback 2 with `--cluster nightmail-mail-gateway --service nightmail-mail-gateway` and `--config wrangler.prod.jsonc`. Remove the two CNAMEs if they exist.

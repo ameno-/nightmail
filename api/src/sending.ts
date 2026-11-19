@@ -766,7 +766,7 @@ async function directMessages(runtime: Runtime, mails: SendRequest[], batch: boo
 type SendCall = IdempotentRequest & { runtime: Runtime; db?: DbExecutor };
 const sendCall = (c: Ctx): SendCall => ({ runtime: c.env, ...idempotentRequest(c) });
 // used is null for an uncharged duplicate of a request that still holds its key.
-type Principal = { id:string;workspace_id:string;permissions:Actor['permissions'];domains:string[];used:number|null;max_requests:number };
+export type Principal = { id:string;workspace_id:string;permissions:Actor['permissions'];domains:string[];used:number|null;max_requests:number };
 type Identity = { credential: SQL; authorize: (key: Principal) => Actor } | { actor: Actor };
 type SendReceipt = { id: string; status: 'queued'; simulated: boolean };
 const admissionMails = (out: Outgoing[]): AdmissionMail[] => out.map(({ snapshot: s, duplicate, invalid, oversize }) => ({ host: s.from.split('@')[1]!.toLowerCase(), region: s.region || undefined,
@@ -854,6 +854,17 @@ async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emai
   if (!out.some(m => m.template)) return admitSends(call, input, out, { actor: a }, { batch });
   return claimedSend(call, a, input, async () => { await renderTemplates(call.runtime, a, out, batch); return { out }; }, { batch });
 }
+/**
+ * An SMTP submission signed in with a send-only key (protocol-relay.ts): POST /v1/emails/send without an Idempotency-Key,
+ * built from the message. `credential` reads the key as the request's statement does for a bearer key, so the key is
+ * authenticated, charged against its minute budget and admitted in one statement, and its attachments were uploaded
+ * by it, as POST /v1/attachments would. SMTP already bounds the whole message, so the bodies keep no JSON part cap.
+ */
+export async function admitRelayed(runtime: Runtime, input: unknown, credential: SQL, authorize: (key: Principal) => Actor) {
+  const parsed = ProtocolSendInput.safeParse(input);
+  if (!parsed.success) throw new ApiError(422, 'VALIDATION_FAILED', parsed.error.issues[0]?.message ?? 'Message fields are invalid.', parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean).join(', '));
+  return await admitSends({ runtime, path: '/v1/emails/send' }, parsed.data, await directMessages(runtime, [parsed.data], false), { credential, authorize }, { batch: false }) as SendReceipt;
+}
 // Auth middleware calls this only for ordinary bearer keys, after the request size gate. Malformed inputs, mailbox
 // tracking and provider-rendered templates keep their normal authenticated handler (including error ordering).
 export async function tryAtomicKeyAdmission(c:Ctx,credentialCtes:(charge?:SQL)=>SQL) {
@@ -919,11 +930,11 @@ function attachmentUpload(runtime:Runtime,a:Pick<Actor,'workspaceId'>,input:Retu
 }
 /** Reserve quota before uploading. No database connection is held during object storage I/O.
  * Unused uploads (including a concurrent idempotency loser) use ordinary attachment retention. */
-export async function storeAttachmentBytes(runtime: Runtime, a: Pick<Actor,'workspaceId'>, metadata: { filename: string; contentType: string; disposition?: 'attachment' | 'inline'; contentId?: string }, bytes: Uint8Array) {
+export async function storeAttachmentBytes(runtime: Runtime, a: Pick<Actor,'workspaceId'>, metadata: { filename: string; contentType: string; disposition?: 'attachment' | 'inline'; contentId?: string }, bytes: Uint8Array, uploadedBy?: string) {
   sesAttachment(metadata);
   const parsed = AttachmentMetadata.safeParse({ filename: metadata.filename, contentType: metadata.contentType, disposition: metadata.disposition ?? 'attachment', ...(metadata.contentId ? { contentId: metadata.contentId } : {}) });
   if (!parsed.success) throw new ApiError(422, 'ATTACHMENT_METADATA_INVALID', `Attachment ${metadata.filename} has an invalid name, type or content ID.`);
-  const upload=attachmentUpload(runtime,a,validateAttachment(parsed.data,bytes),bytes,await bytesDigest(bytes));
+  const upload=attachmentUpload(runtime,a,validateAttachment(parsed.data,bytes),bytes,await bytesDigest(bytes),uploadedBy);
   try {await upload.put();return await runtime.db.transaction(upload.finish);}finally{await upload.refund();}
 }
 export type MailboxSendRequest = { protocolEnvelope?:boolean; from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region?: string; subject: string; html?: string; text?: string; attachments: string[]; tracking?: boolean; screen?: boolean; sealed?: boolean; headers: { Name: string; Value: string }[] };

@@ -27,10 +27,10 @@ export const platformHosts = (config:PlatformOrigins) => [...new Set([config.pub
 const platformRoot = (name:string,hosts:readonly string[]) => hosts.find(host=>name===host || name.endsWith('.'+host));
 // Operator hosts under the platform domain that not even its owning workspace may claim, receive on or send from,
 // with everything below them: another installation's zone (dev.), release fixtures (e2e., e2e-va., e2e-trusted.),
-// the shared inbound zone (in.), the Domain Connect key (domainconnect.) and service hosts (imap., tracker.). Add
+// the shared inbound zone (in.), the Domain Connect key (domainconnect.) and service hosts (imap., smtp., tracker.). Add
 // new platform hosts here before they go live. A release fixture holding its own e2e* claim keeps sending.
 const fixtureLabel=/^e2e(?:-[a-z0-9-]+)?$/;
-const platformLabel=/^(?:dev|e2e(?:-[a-z0-9-]+)?|in|domainconnect|imap|tracker)$/;
+const platformLabel=/^(?:dev|e2e(?:-[a-z0-9-]+)?|in|domainconnect|imap|smtp|tracker)$/;
 export function reservedPlatformName(name:string,config:PlatformOrigins) {
   return platformHosts(config).some(host=>name.endsWith('.'+host) && platformLabel.test(name.slice(0,-host.length-1).split('.').at(-1)!));
 }

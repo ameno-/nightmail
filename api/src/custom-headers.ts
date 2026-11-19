@@ -30,6 +30,23 @@ export const CustomHeaders = z.array(z.object({
 
 export type CustomHeader = { name: string; value: string };
 
+/**
+ * The headers of a submitted message (SMTP, protocol-relay.ts) that a send may carry: each one the custom headers above
+ * accept, the first of a repeated name, within their count and size. Threading and list headers go first, because
+ * they thread the reply and mark bulk mail; whatever doesn't fit is left out, never refused.
+ */
+export function submittedHeaders(headers: CustomHeader[]) {
+  const rank = (name: string) => /^(?:in-reply-to|references)$/i.test(name) ? 0 : /^(?:list-[a-z0-9-]+|precedence)$/i.test(name) ? 1 : 2;
+  const kept: CustomHeader[] = [];
+  let total = 0;
+  for (const header of [...headers].sort((a, b) => rank(a.name) - rank(b.name))) {
+    const value = header.value.trim();
+    if (kept.length >= 15 || total + header.name.length + value.length > MAX_TOTAL || kept.some(h => h.name.toLowerCase() === header.name.toLowerCase())) continue;
+    if (CustomHeaders.safeParse([{ name: header.name, value }]).success) { kept.push({ name: header.name, value }); total += header.name.length + value.length; }
+  }
+  return kept;
+}
+
 const unbracket = (value: string) => [...value.matchAll(/<([^<>]+)>/g)].map(match => match[1]!);
 
 /** Splits threading headers out so callers can store them on the message; the rest pass through unchanged. */

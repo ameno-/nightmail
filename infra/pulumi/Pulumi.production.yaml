@@ -4,6 +4,9 @@ config:
   bane:nightmailMailActive: "true"
   bane:stageNightmailRuntime: "true"
   bane:nightmailGateway: "true"
+  # IMAP/SMTP (gateway/PHASE2.md, production turn-on): the switch binds the Worker's MAILGW_API_TOKEN on the next
+  # production deploy. Tasks start in a follow-up that sets bane:nightmailGatewayImage and bane:nightmailGatewayDesired.
+  bane:mailGatewayEnabled: "true"
   bane:nightmailGatewayDesired: "0"
   bane:nightmailGatewayDns: "false"
   # Original S3 expiration dates observed before copying to the inactive bucket.

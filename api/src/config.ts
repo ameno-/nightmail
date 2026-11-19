@@ -11,6 +11,9 @@ const REMOVED_ALLOWLISTS = ['AUTH_ALLOWED_EMAILS', 'AUTH_ALLOWED_DOMAINS']; // R
 const values = z.object({
   NIGHTMAIL_ROOT_SECRET: z.string().min(32),
   MAILGW_API_TOKEN: optional(z.string().min(32)),
+  // The domain whose imap. and smtp. hosts reach the mail gateway, as the dashboard shows them (the gateway's TLS
+  // certificate names both). Defaults to PUBLIC_URL's host. Shown only while MAILGW_API_TOKEN is set.
+  MAILGW_PUBLIC_DOMAIN: optional(z.string().trim().toLowerCase().max(240).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
   PREVIOUS_NIGHTMAIL_ROOT_SECRET: optional(z.string().min(32)),
   ACCOUNT_ISSUER: optional(z.url({ protocol: /^https$/ })),
   ACCOUNT_CLIENT_ID: optional(z.string().min(1)),
@@ -192,6 +195,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
   return {
     // Retained internal storage namespace, not an installation setting or browser-provided tenant ID.
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.NIGHTMAIL_ROOT_SECRET, previousAuthSecret: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET,mailGatewayToken:v.MAILGW_API_TOKEN,
+    mailServers: v.MAILGW_API_TOKEN ? { imap: `imap.${v.MAILGW_PUBLIC_DOMAIN ?? url.hostname}`, smtp: `smtp.${v.MAILGW_PUBLIC_DOMAIN ?? url.hostname}` } : undefined,
     platformAccount: v.NIGHTMAIL_PLATFORM_AWS_ACCOUNT, platformDomainWorkspace: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE : undefined, notifyFrom: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_NOTIFY_FROM : undefined,
     support: v.MULTI_TENANT==='true' ? { url: v.NIGHTMAIL_SUPPORT_URL, signingKey: supportSigningKey, addressIds: supportAddressIds } : undefined,
     observability: v.MULTI_TENANT==='true' && v.CF_OBSERVABILITY_TOKEN && v.CF_OBSERVABILITY_ACCOUNT_ID && v.CF_OBSERVABILITY_SCRIPT
