@@ -66,7 +66,7 @@ const INVITATIONS: Record<string, { output: Tool['inputSchema']; view?: (respons
 // never agent calls (an agent may create a top-up link that a person opens and pays: createBillingTopUpLink).
 export const DASHBOARD_MONEY = ['createBillingTopUp', 'updateBillingAutoRecharge', 'createBillingCardSetup', 'deleteBillingPaymentMethod'] as const;
 // getRuleVersion is the dashboard's long poll for an agent's saves; an agent reads the version from getRules.
-const EXCLUDED = new Set<string>(['receiveSesSnsEvent', 'revealWebhookSecret', 'getRuleVersion', 'getRitualVersion', ...DASHBOARD_MONEY]);
+const EXCLUDED = new Set<string>(['receiveSesSnsEvent', 'revealWebhookSecret', 'downloadInboundAttachment', 'getRuleVersion', 'getRitualVersion', ...DASHBOARD_MONEY]);
 // POST operations that change nothing: no confirm argument, read-only hint, read permission.
 const READ_ONLY_POSTS = new Set(['testRouting', 'testRules', 'checkRule', 'testRituals', 'checkRitual', 'queryAudience', 'previewSegment', 'previewEmail', 'checkEmail']);
 // Writes whose calls need no confirm argument. Access to every operation is decided by its
@@ -257,7 +257,7 @@ const DESCRIPTIONS: Record<string, string> = {
   listRuleTemplates: 'Nine working starting points (Slack, Discord, JSON webhook, forward, newsletters, refund decision, block a domain, VIP allow-list, failed DMARC), filled in with this workspace’s endpoints.',
   createEndpoint: 'Create a named endpoint rules call as endpoints.<name>(…): slack or discord (url is a write-only credential), webhook (signed JSON; secret returned once) or forward (address; pending until the recipient confirms by emailed link, see nextStep; preverify skips that on a domain this workspace verified). A confirmed forward sends each message whole, from a rule or a route listing forward:<name>.',
   sendEndpointVerification: 'Email a forward recipient a new single-use confirmation link. Only the recipient can confirm by opening it and choosing Allow; poll getEndpoint for status.',
-  createInboxConnection: 'Create a least-privilege MCP connection limited to chosen inboxes. auth=key returns a bearer key once inside a ready config (OpenCode, Claude Code, Cursor or generic); auth=oauth returns the config plus the human step: the person approves and selects the inboxes on the consent screen.',
+  createInboxConnection: 'Create a least-privilege MCP connection limited to chosen inboxes. auth=key returns a bearer key once inside a ready config (OpenCode, Claude Code, Cursor or generic). auth=oauth is refused: a sign-in can’t be limited to inboxes.',
   createBillingTopUpLink: 'Returns a Stripe Checkout link for a person to open and pay; agents cannot pay. Share the link with an owner or admin. Amount in whole cents, $20 to $10,000, excluding tax; the link expires in 23 hours and credit appears once Stripe confirms the payment.',
   createApiKey: 'Create an API key: for the workspace (permissions, sender domains), or limited to receiving addresses or one agent inbox. The secret is returned once. Created over MCP it works only while this approval is active and is revoked with it (approval.endsAt); a lasting key is made in the dashboard. Prefer createAgentToken for short scripts.',
   updateApiKey: 'Change what an existing API key can reach and keep its secret: access.addAddressIds or removeAddressIds for a key limited to addresses, access.mail, or a workspace key\'s permissions and domains. Signed in as yourself, any key your role lets you change in the dashboard. Takes effect at once.',
@@ -430,6 +430,7 @@ export const HUMAN_STEPS: Record<string, string> = {
   releaseSenderStanding: 'Human step: an owner or admin confirms the fix checklist in the dashboard. Agents read the standing with getSenderScore.',
   getRuleVersion: 'Dashboard step: the rules page’s long poll, so a person sees an agent’s saves live. Agents read the version from rules · config (getRules).',
   inviteWorkspaceMember: 'The dashboard’s older name for createWorkspaceInvitation, which agents use (settings · invite).',
+  downloadInboundAttachment: 'The link webhook payloads carry: it redirects to the file. Agents read the same link with getInboundAttachment (attachments · getInbound), which answers the same credentials.',
   revealWebhookSecret: 'Human step: a signing secret is read back only in the dashboard or with an API key a person made, and every read is recorded. Agents can rotate it (webhooks · rotateSecret).',
 };
 /** Internal routes (Nightmail operators and support grants): never tools, and not listed in the customer coverage document. */

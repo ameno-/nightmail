@@ -159,6 +159,8 @@ const base = new URL(setting('URL') ?? 'https://nightmail.dev');
 const client = createClient({ baseUrl: base.origin, redirect: 'error', auth: scheme => scheme.scheme === 'bearer' ? key : undefined });
 // Previews answer 303 to their stored result; a client that follows it gets the JSON they used to return.
 const previews = createClient({ baseUrl: base.origin, redirect: 'follow', auth: scheme => scheme.scheme === 'bearer' ? key : undefined });
+// A webhook attachment link answers 307: read where it points without following it.
+const unfollowed = createClient({ baseUrl: base.origin, redirect: 'manual', auth: scheme => scheme.scheme === 'bearer' ? key : undefined });
 const attempted = new Set<Op>();
 const successResponses = new Set<Op>();
 const errorResponses = new Set<Op>();
@@ -210,14 +212,17 @@ async function api<K extends Op>(op: K, input: Input<K>): Promise<Output<K>> {
   }});
   const apiError = 'error' in result ? result.error?.error : undefined;
   if (state) state.requestId = result.response?.headers.get('x-request-id') ?? apiError?.requestId ?? null;
+  // A documented redirect with a JSON body (downloadInboundAttachment's 307, read without following) is its result.
+  const redirect = !!result.response && result.response.status >= 300 && result.response.status < 400;
+  if (redirect && 'error' in result) Object.assign(result, { data: result.error, error: undefined });
   if (result.response) {
-    assertResponse(op,result.response.status,result.response.headers.get('content-type'),result.response.ok ? result.data : 'error' in result ? result.error : undefined);
+    assertResponse(op,result.response.status,result.response.headers.get('content-type'),result.response.ok || redirect ? result.data : 'error' in result ? result.error : undefined);
     const requestId = result.response.headers.get('x-request-id');
     check(requestId && (!apiError || apiError.requestId === requestId),`${op}: missing or mismatched request ID`);
-    (result.response.ok ? successResponses : errorResponses).add(op);
+    (result.response.ok || redirect ? successResponses : errorResponses).add(op);
   }
   // Never serialize SDK errors: request objects, tokens, and unrelated mail can all be sensitive.
-  if (result.data === undefined || !result.response?.ok) throw new ApiFailure(op, result.response?.status, apiError?.code ?? (transport && `(${transport})`));
+  if (result.data === undefined || !(result.response?.ok || redirect)) throw new ApiFailure(op, result.response?.status, apiError?.code ?? (transport && `(${transport})`));
   return result.data as Output<K>;
 }
 async function expectDenial(call: () => Promise<unknown>, status: number, code: string) {
@@ -869,6 +874,9 @@ async function inbound() {
   check(msg.attachments.length === 1 && msg.attachments[0].filename === `${prefix}.png`, 'inbound attachment missing');
   const link = await api('getInboundAttachment', { path: { messageId: msg.id, attachmentId: msg.attachments[0].id }, query: { addressId } });
   check(new URL(link.url).protocol === 'https:' && Date.parse(link.expiresAt) > Date.now(), 'expected a temporary HTTPS attachment URL');
+  // The webhook payload's downloadUrl answers the same reader with a redirect to the same file.
+  const followed = await api('downloadInboundAttachment', { client: unfollowed, path: { messageId: msg.id, attachmentId: msg.attachments[0].id }, query: { addressId } }) as unknown as Output<'getInboundAttachment'>;
+  check(new URL(followed.url).protocol === 'https:' && Date.parse(followed.expiresAt) > Date.now(), 'expected the webhook attachment link to redirect to a temporary HTTPS URL');
   if (destructive) await step('Download and import the run-owned inbound PNG',async()=>{
     // S3 presigned while mail stays in S3; a Bane-signed /v1/objects link on this origin once it is in R2.
     const url = new URL(link.url), own = url.origin === base.origin && /^\/v1\/objects\/[A-Za-z0-9_.-]+$/.test(url.pathname);

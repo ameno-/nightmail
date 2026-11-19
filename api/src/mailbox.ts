@@ -32,11 +32,11 @@ const loadMailboxSesv2 = lazyModule(() => import('@aws-sdk/client-sesv2'));
 // ---------- access ----------
 function access(c: Ctx, permission?: MailboxPermission): MailboxAccess {
   const value = c.get('mailboxAccess');
-  if (!value) throw new ApiError(401, 'AUTH_REQUIRED', `Supply an inbound key or a ${productName} API key.`);
+  if (!value) throw new ApiError(401, 'AUTH_REQUIRED', `Supply a ${productName} API key.`);
   if (permission && !value.admin && !value.permissions.includes(permission)) throw new ApiError(403, 'PERMISSION_DENIED', `This operation requires ${permission} permission.`);
   return value;
 }
-function admin(c: Ctx) { const value = access(c); if (!value.admin) throw new ApiError(403, 'ADMIN_REQUIRED', `This operation requires an unrestricted live ${productName} key with manage permission.`); return value; }
+function admin(c: Ctx) { const value = access(c); if (!value.admin) throw new ApiError(403, 'ADMIN_REQUIRED', 'This operation requires an owner or admin, or an API key with manage permission on all domains.'); return value; }
 /** A change to receiving hosts outlives the credential making it: an administrator, never a temporary agent token (lastingRoute). */
 function hostAdmin(c: Ctx) { const value = admin(c); lasting(c, RECEIVING_HOST_CHANGE); return value; }
 const scopeOf = (value: MailboxAccess): Scope => ({ workspaceId: value.workspaceId });
@@ -68,8 +68,8 @@ async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
   }
   return authenticate(c, async () => {
     const value = workspaceMailAccess(c.get('actor'), c.req.method, c.req.path);
-    if (value === 'UNRESTRICTED_KEY_REQUIRED') throw new ApiError(403, value, 'Use an address-scoped inbound key or an unrestricted live manage credential.');
-    if (value === 'ADMIN_REQUIRED') throw new ApiError(403, value, 'Inbound requires an address-scoped key or an unrestricted live manage credential.');
+    if (value === 'UNRESTRICTED_KEY_REQUIRED') throw new ApiError(403, value, 'A key limited to sender domains can’t read received mail. Use a key limited to addresses, or manage permission on all domains.');
+    if (value === 'ADMIN_REQUIRED') throw new ApiError(403, value, 'Received mail requires a key limited to addresses, an owner or admin, or an API key with manage permission on all domains.');
     c.set('mailboxAccess', value);
     await next();
   });
@@ -584,7 +584,7 @@ export function registerMailbox(app: App) {
     const [owned] = await db.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(and(eq(mailboxAddresses.mailboxId, mailbox.id), from ? eq(mailboxAddresses.address, from) : eq(mailboxAddresses.kind, 'public')));
     if (from && !owned) {
       // Scoped keys may only speak as their own addresses; an administrator may use any registered sender.
-      if (!access(c).admin) throw new ApiError(403, 'FROM_NOT_ALLOWED', 'Inbound keys can send only from their own addresses. Use administrator access for another sender.', 'from');
+      if (!access(c).admin) throw new ApiError(403, 'FROM_NOT_ALLOWED', 'Keys limited to addresses send only from those addresses. Another sender requires manage permission on all domains.', 'from');
       if (!c.env.config.multiTenant) {
         const [domain] = await db.select({ region: mailboxDomains.region }).from(mailboxDomains).where(eq(mailboxDomains.id, mailbox.domainId));
         await assertRegisteredSender(db, scopeOf(access(c)), domain!.region, from);

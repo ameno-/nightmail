@@ -110,7 +110,7 @@ export async function chargeGrantBudget(runtime:Runtime,w:string,id:string){
 // Run after authentication and before idempotent replay or any configuration handler.
 export const requireReceivingConsent: MiddlewareHandler<AppEnv> = async (c,next) => {
   const a=c.get('actor');
-  if (a?.grantId && !a.receivingConsent) throw new ApiError(403,'ADMIN_REQUIRED','Reconnect with explicit receiving consent to access receiving configuration.');
+  if (a?.grantId && !a.receivingConsent) throw new ApiError(403,'ADMIN_REQUIRED','Receiving configuration requires an owner or admin of this workspace.');
   await next();
 };
 

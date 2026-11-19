@@ -14813,7 +14813,7 @@
               "nightmail",
               "inbound"
             ],
-            "description": "nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key."
+            "description": "nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Any credential that can read the message can follow its attachment downloadUrl, an inbound key for its address included; rawUrl needs an owner or admin session, or an unrestricted manage API key."
           },
           "junk": {
             "type": "string",
@@ -14833,7 +14833,7 @@
               ]
             },
             "maxItems": 2,
-            "description": "nightmail format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL."
+            "description": "nightmail format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL. Attachment urls open for any credential that can read the message; rawUrl needs an owner or admin session, or an unrestricted manage API key."
           },
           "timeoutSeconds": {
             "type": "integer",
@@ -14894,7 +14894,7 @@
               "inbound",
               "bane"
             ],
-            "description": "nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key. bane is the earlier name of nightmail, still accepted."
+            "description": "nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Any credential that can read the message can follow its attachment downloadUrl, an inbound key for its address included; rawUrl needs an owner or admin session, or an unrestricted manage API key. bane is the earlier name of nightmail, still accepted."
           },
           "junk": {
             "type": "string",
@@ -14914,7 +14914,7 @@
               ]
             },
             "maxItems": 2,
-            "description": "nightmail format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL."
+            "description": "nightmail format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL. Attachment urls open for any credential that can read the message; rawUrl needs an owner or admin session, or an unrestricted manage API key."
           },
           "timeoutSeconds": {
             "type": "integer",
@@ -15066,7 +15066,7 @@
               "inbound",
               "bane"
             ],
-            "description": "nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key. bane is the earlier name of nightmail, still accepted."
+            "description": "nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Any credential that can read the message can follow its attachment downloadUrl, an inbound key for its address included; rawUrl needs an owner or admin session, or an unrestricted manage API key. bane is the earlier name of nightmail, still accepted."
           },
           "junk": {
             "type": "string",
@@ -15086,7 +15086,7 @@
               ]
             },
             "maxItems": 2,
-            "description": "nightmail format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL."
+            "description": "nightmail format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL. Attachment urls open for any credential that can read the message; rawUrl needs an owner or admin session, or an unrestricted manage API key."
           },
           "timeoutSeconds": {
             "type": "integer",
@@ -15203,7 +15203,7 @@
               "inbound",
               "bane"
             ],
-            "description": "nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key. bane is the earlier name of nightmail, still accepted."
+            "description": "nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Any credential that can read the message can follow its attachment downloadUrl, an inbound key for its address included; rawUrl needs an owner or admin session, or an unrestricted manage API key. bane is the earlier name of nightmail, still accepted."
           },
           "overrideUrl": {
             "type": "string",
@@ -47482,7 +47482,7 @@
             "secureDashboardSession": []
           }
         ],
-        "summary": "Generate client config for selected inboxes. Key shown once; OAuth requires human selection at consent.",
+        "summary": "Generate client config with a key limited to selected inboxes. Key shown once.",
         "requestBody": {
           "required": true,
           "content": {
@@ -47515,7 +47515,8 @@
                     "enum": [
                       "key",
                       "oauth"
-                    ]
+                    ],
+                    "description": "key. oauth is refused with 422: a sign-in can’t be limited to inboxes."
                   },
                   "reply": {
                     "type": "boolean",
@@ -58821,7 +58822,7 @@
         ],
         "operationId": "createInbox",
         "summary": "Create an agent inbox",
-        "description": "Creates an inbox with a fresh address. Set type=persistent for forever retention (no lease or default per-inbox cap; workspace manage permission). The default is an expiring inbox on one of the workspace’s active receiving domains, or a sandbox inbox that needs no DNS. Then wait for mail with GET /v1/inboxes/{id}/messages?wait=30 (or the SDK’s waitForMessage). Needs a workspace admin or an inbound key with create permission. Limits: 60 creates per minute and 1,000 retained inboxes (including grace and pending erasure) per workspace. Errors: RECEIVING_DOMAIN_REQUIRED and RECEIVING_NOT_ACTIVE name the DNS step to take; ADDRESS_TAKEN, ADDRESS_RETIRED, EPHEMERAL_INBOX_LIMIT, INBOX_CREATE_RATE (with Retry-After) and IDEMPOTENCY_CONFLICT.",
+        "description": "Creates an inbox with a fresh address. Set type=persistent for forever retention (no lease or default per-inbox cap; workspace manage permission). The default is an expiring inbox on one of the workspace’s active receiving domains, or a sandbox inbox that needs no DNS. Then wait for mail with GET /v1/inboxes/{id}/messages?wait=30 (or the SDK’s waitForMessage). Needs a workspace admin or a key with create permission. Limits: 60 creates per minute and 1,000 retained inboxes (including grace and pending erasure) per workspace. Errors: RECEIVING_DOMAIN_REQUIRED and RECEIVING_NOT_ACTIVE name the DNS step to take; ADDRESS_TAKEN, ADDRESS_RETIRED, EPHEMERAL_INBOX_LIMIT, INBOX_CREATE_RATE (with Retry-After) and IDEMPOTENCY_CONFLICT.",
         "requestBody": {
           "required": true,
           "content": {
@@ -65087,10 +65088,10 @@
                 "true",
                 "false"
               ],
-              "description": "Include delivery details for workspace logs (dashboard or unrestricted live manage access only)."
+              "description": "Include delivery details for workspace logs (owner or admin sessions, and API keys with manage permission on all domains, only)."
             },
             "required": false,
-            "description": "Include delivery details for workspace logs (dashboard or unrestricted live manage access only).",
+            "description": "Include delivery details for workspace logs (owner or admin sessions, and API keys with manage permission on all domains, only).",
             "name": "includeDelivery",
             "in": "query"
           },
@@ -65311,10 +65312,10 @@
                 "true",
                 "false"
               ],
-              "description": "Include delivery details for workspace logs (dashboard or unrestricted live manage access only)."
+              "description": "Include delivery details for workspace logs (owner or admin sessions, and API keys with manage permission on all domains, only)."
             },
             "required": false,
-            "description": "Include delivery details for workspace logs (dashboard or unrestricted live manage access only).",
+            "description": "Include delivery details for workspace logs (owner or admin sessions, and API keys with manage permission on all domains, only).",
             "name": "includeDelivery",
             "in": "query"
           },
@@ -65651,6 +65652,193 @@
         ]
       }
     },
+    "/v1/inbound/messages/{messageId}/parts/{attachmentId}": {
+      "get": {
+        "operationId": "downloadInboundAttachment",
+        "tags": [
+          "Inbound threads"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "summary": "Follow an attachment link from a webhook",
+        "description": "The downloadUrl (inbound format) or url (message attachments) in webhook payloads. Answers 307 to a download link that works for five minutes, also returned as url in the body. Any credential that can read the message can follow it, exactly as with getInboundAttachment: an inbound key for the address it reached, a member, an agent token.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "messageId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "attachmentId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "description": "Opaque inbound address ID (mbx_…)."
+            },
+            "required": false,
+            "description": "Opaque inbound address ID (mbx_…).",
+            "name": "addressId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "307": {
+            "description": "Follow Location within five minutes.",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                },
+                "required": true
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboundAttachmentDownload"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { downloadInboundAttachment } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await downloadInboundAttachment({\n  client,\n  path: {\n    \"messageId\": \"message_123\",\n    \"attachmentId\": \"attachment_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://nightmail.dev/v1/inbound/messages/message_123/parts/attachment_123' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
+          }
+        ]
+      }
+    },
     "/v1/logs": {
       "get": {
         "operationId": "listLogs",
@@ -65926,7 +66114,7 @@
           }
         ],
         "summary": "Every route mail can take, with its rules and endpoints, in one read",
-        "description": "One page of routes (addresses, agent inboxes, address patterns, explicit routes and catch-alls) merged and ordered by host, kind and address, each resolved to the rules that run on it and where its mail goes. Also returns counts per kind, the rules, up to 100 endpoints and 100 inbound webhooks, and the domains. Members and scoped keys see only their addresses. Requires explicit receiving consent on MCP-derived credentials, like the other receiving reads.",
+        "description": "One page of routes (addresses, agent inboxes, address patterns, explicit routes and catch-alls) merged and ordered by host, kind and address, each resolved to the rules that run on it and where its mail goes. Also returns counts per kind, the rules, up to 100 endpoints and 100 inbound webhooks, and the domains. Members and scoped keys see only their addresses. With an MCP sign-in (approval), it requires an owner or admin, like the other receiving reads.",
         "parameters": [
           {
             "schema": {

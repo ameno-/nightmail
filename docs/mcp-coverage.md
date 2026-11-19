@@ -248,6 +248,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `listInboundMessages` | `messages` · `listInbound` · inboxes |
 | `getInboundMessage` | `messages` · `getInbound` · inboxes |
 | `getInboundAttachment` | `attachments` · `getInbound` · inboxes |
+| `downloadInboundAttachment` | The link webhook payloads carry: it redirects to the file. Agents read the same link with getInboundAttachment (attachments · getInbound), which answers the same credentials. |
 | `listLogs` | `logs` · `all` · sending |
 | `getInboundOverview` | `addresses` · `overview` · inboxes |
 | `listInboundEndpoints` | `endpoints` · `listAll` · endpoints |

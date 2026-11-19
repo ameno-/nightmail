@@ -419,7 +419,7 @@ Backoff starts at 15 seconds and grows ×4 up to 12 hours, with ±25% jitter, ne
 | AI decision opt-in | `setDecisionOptIns` |
 | Endpoints | `listEndpoints`, `getEndpoint`, `createEndpoint`, `updateEndpoint`, `deleteEndpoint`, `sendEndpointVerification`, `testEndpoint` |
 
-The config is `{ rules, attachments: [{ rule, target, continue }], senderLists, evaluateDomains, evaluateRoutes }`. Writes take `If-Match` with the version you read (MCP: `ifMatch`) and fail with `VERSION_CONFLICT` if it changed; without it, a recipe or on/off write applies to the latest version, since it changes only that rule. Creates take `Idempotency-Key` (MCP: `idempotencyKey`). Over MCP these tools are in the `rules` and `endpoints` toolsets and need an approval with `manage` and receiving consent; rules, endpoints and keys an agent creates stop working when that approval is revoked. See [docs/mcp-coverage.md](mcp-coverage.md).
+The config is `{ rules, attachments: [{ rule, target, continue }], senderLists, evaluateDomains, evaluateRoutes }`. Writes take `If-Match` with the version you read (MCP: `ifMatch`) and fail with `VERSION_CONFLICT` if it changed; without it, a recipe or on/off write applies to the latest version, since it changes only that rule. Creates take `Idempotency-Key` (MCP: `idempotencyKey`). Over MCP these tools are in the `rules` and `endpoints` toolsets and need an owner or admin's approval with `manage`; rules, endpoints and keys an agent creates stop working when that approval is revoked. See [docs/mcp-coverage.md](mcp-coverage.md).
 
 ```sh
 curl -X POST "$BANE/v1/rules/check" -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \

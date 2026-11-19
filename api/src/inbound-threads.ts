@@ -190,12 +190,12 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
   const accessible = accessibleMessages;
   // Received Logs can inspect the entire workspace, including SMTP envelopes and unassigned mail.
   // Never grant this projection to an address key, even a key that can read every address.
-  const includeDelivery = z.enum(['true','false']).optional().describe('Include delivery details for workspace logs (dashboard or unrestricted live manage access only).');
+  const includeDelivery = z.enum(['true','false']).optional().describe('Include delivery details for workspace logs (owner or admin sessions, and API keys with manage permission on all domains, only).');
   function messageScope(c: Ctx, delivery?: string) {
     const v=access(c,'read');
     if (delivery!=='true') return v;
     // A dashboard member reads only addressed mail, like a non-admin key (L1).
-    if (!readsDelivery(c.get('actor'),v)) throw new ApiError(403,'ADMIN_REQUIRED','Delivery details require a workspace owner or admin session, or an unrestricted live manage API key.');
+    if (!readsDelivery(c.get('actor'),v)) throw new ApiError(403,'ADMIN_REQUIRED','Delivery details require a workspace owner or admin session, or an API key with manage permission on all domains that wasn’t created over MCP.');
     return {...v,admin:true};
   }
   // The sender's SPF, DKIM and DMARC results and the automated-mail flag describe the message itself, not the workspace's
@@ -235,22 +235,28 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
     const attachments=await c.env.db.select({id:mailAttachments.id,filename:mailAttachments.filename,contentType:mailAttachments.contentType,size:mailAttachments.sizeBytes,disposition:mailAttachments.disposition,contentId:mailAttachments.contentId}).from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
     return c.json({...messageView(row,row.addressIds,row.isRead),...body(row.html),...auth(row),attachments},200);
   });
-  // Persistent API-key URLs in webhook payloads; presign only after workspace-level authorization.
-  app.get('/v1/inbound/messages/:messageId/parts/:part',async c=>{
-    const v=messageScope(c,'true'),mid=c.req.param('messageId'),part=c.req.param('part');
-    const [f]=await c.env.db.select({region:messages.region,bucket:mailAttachments.bucket,key:mailAttachments.storageKey,filename:mailAttachments.filename}).from(messages).innerJoin(mailAttachments,and(eq(mailAttachments.messageId,messages.id),eq(mailAttachments.workspaceId,v.workspaceId))).where(and(accessible(v,{}),eq(messages.id,mid),eq(mailAttachments.id,part),sql`${messages.verdicts}->>'virus'='PASS'`));
-    if(!f?.region)throw new ApiError(404,'NOT_FOUND','Attachment not found.');return c.redirect((await signedUrl(c.env,v.workspaceId,'att',f.region,f.bucket,f.key,f.filename)).url,307);
-  });
+  // rawUrl in webhook payloads is the delivery record (it names every recipient): only delivery-detail readers follow it.
   app.get('/v1/inbound/messages/:messageId/raw',async c=>{
     const v=messageScope(c,'true'),mid=c.req.param('messageId');const [m]=await c.env.db.select({region:messages.region,bucket:messages.rawBucket,key:messages.rawKey}).from(messages).where(and(accessible(v,{}),eq(messages.id,mid),sql`${messages.verdicts}->>'virus'='PASS' AND (${messages.lifecycle}='kept' OR least(${messages.createdAt},${messages.receivedAt})>now()-interval '90 days')`));
     if(!m?.region||!m.bucket||!m.key)throw new ApiError(404,'NOT_FOUND','Raw message not found.');return c.redirect((await signedUrl(c.env,v.workspaceId,'raw',m.region,m.bucket,m.key,mid+'.eml')).url,307);
   });
-  app.openapi(createRoute({method:'get',path:'/v1/inbound/messages/{messageId}/attachments/{attachmentId}',operationId:'getInboundAttachment',tags,security,summary:'Download an attachment from a visible message',
-    request:{params:z.object({messageId:Id,attachmentId:Id}),query:AddressFilter},responses:{200:response(z.object({url:z.string(),expiresAt:z.string()}).openapi('InboundAttachmentDownload')),...errors}}),async c=>{
-    const v=access(c,'read'),p=c.req.valid('param'),q=c.req.valid('query');
+  // Attachments follow their message: any credential that may read the message opens its files, through either route.
+  const AttachmentParams=z.object({messageId:Id,attachmentId:Id}), AttachmentDownload=z.object({url:z.string(),expiresAt:z.string()}).openapi('InboundAttachmentDownload');
+  async function attachmentLink(c:Ctx,p:z.infer<typeof AttachmentParams>,q:z.infer<typeof AddressFilter>) {
+    const v=access(c,'read');
     const [file]=await c.env.db.select({region:messages.region,bucket:mailAttachments.bucket,key:mailAttachments.storageKey,filename:mailAttachments.filename,sourceId:mailAttachments.sourceId}).from(messages).innerJoin(mailAttachments,eq(mailAttachments.messageId,messages.id)).where(and(eq(messages.id,p.messageId),eq(mailAttachments.id,p.attachmentId),sql`coalesce(${messages.verdicts}->>'virus',CASE WHEN ${messages.direction}='outbound' THEN 'PASS' END)='PASS'`,accessible(v,q)));
     if (!file?.region) throw new ApiError(404,'NOT_FOUND','Attachment was not found.');
-    return c.json(await signedUrl(c.env,v.workspaceId,'att',file.region,file.bucket,file.key,file.filename,file.sourceId?p.messageId:undefined),200);
+    return signedUrl(c.env,v.workspaceId,'att',file.region,file.bucket,file.key,file.filename,file.sourceId?p.messageId:undefined);
+  }
+  app.openapi(createRoute({method:'get',path:'/v1/inbound/messages/{messageId}/attachments/{attachmentId}',operationId:'getInboundAttachment',tags,security,summary:'Download an attachment from a visible message',
+    request:{params:AttachmentParams,query:AddressFilter},responses:{200:response(AttachmentDownload),...errors}}),async c=>c.json(await attachmentLink(c,c.req.valid('param'),c.req.valid('query')),200));
+  // The persistent link in webhook payloads (downloadUrl, or url in a message's attachments).
+  app.openapi(createRoute({method:'get',path:'/v1/inbound/messages/{messageId}/parts/{attachmentId}',operationId:'downloadInboundAttachment',tags,security,summary:'Follow an attachment link from a webhook',
+    description:'The downloadUrl (inbound format) or url (message attachments) in webhook payloads. Answers 307 to a download link that works for five minutes, also returned as url in the body. Any credential that can read the message can follow it, exactly as with getInboundAttachment: an inbound key for the address it reached, a member, an agent token.',
+    request:{params:AttachmentParams,query:AddressFilter},responses:{307:{description:'Follow Location within five minutes.',headers:z.object({Location:z.string()}),content:{'application/json':{schema:AttachmentDownload}}},...errors}}),async c=>{
+    const link=await attachmentLink(c,c.req.valid('param'),c.req.valid('query'));
+    c.header('Location',link.url);
+    return c.json(link,307);
   });
 }
 
