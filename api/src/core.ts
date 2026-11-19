@@ -52,6 +52,8 @@ export interface Config {
   workspaceId: string;
   authSecret: string;
   mailGatewayToken?:string;
+  /** The mail gateway's IMAP and SMTP hosts for mail clients (MAILGW_PUBLIC_DOMAIN); set only while the gateway is. */
+  mailServers?: { imap: string; smtp: string };
   previousAuthSecret?: string;
   accountIssuer?: string;
   /** The OAuth scope names the MCP server asks for (config OAUTH_SCOPE_PREFIX); tokens with any accepted prefix work. */

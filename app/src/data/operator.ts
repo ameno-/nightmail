@@ -14,7 +14,10 @@ export interface OperatorWorkspace {
   connection: { region: string; paused: boolean; resuming: boolean; pauseReason: string | null; tenantGeneration: number; tenants: OperatorTenant[] } | null
   domains: OperatorDomain[]; members: OperatorMember[]; siblings: { id: string; name: string }[]
   override: { daily: number; expiresAt: string | null } | null; exempt: boolean; campaigns: OperatorCampaign[]
+  /** Domains held and allowed: 100 unless an operator set another limit (custom). */
+  domainLimit: OperatorDomainLimit
 }
+export interface OperatorDomainLimit { used: number; limit: number; custom: boolean }
 /** Billing as an operator sees it: whether the workspace is free (not billed), why, and each member's free account. */
 export interface OperatorBillingFree {
   free: boolean; via: 'workspace' | 'account' | null; until: string | null
@@ -61,6 +64,7 @@ export const operatorApi = {
   resume: (workspaceId: string, input: OperatorWhy & { restore: 50 | 100 }, guard: OperatorGuard) => write(`/workspaces/${id(workspaceId)}/resume`, 'POST', { ...why(input), restore: input.restore }, guard),
   marketing: (workspaceId: string, input: OperatorWhy & { held: boolean }, guard: OperatorGuard) => write(`/workspaces/${id(workspaceId)}/marketing`, 'PUT', { held: input.held, ...why(input) }, guard),
   limit: (workspaceId: string, input: OperatorWhy & { daily: number | null; expiresAt: string | null }, guard: OperatorGuard) => write(`/workspaces/${id(workspaceId)}/limit`, 'PUT', { daily: input.daily, expiresAt: input.daily === null ? null : input.expiresAt, ...why(input) }, guard),
+  domainLimit: (workspaceId: string, input: OperatorWhy & { limit: number | null }, guard: OperatorGuard) => request<{ ok: true; domainLimit: OperatorDomainLimit }>(`${base}/workspaces/${id(workspaceId)}/domain-limit`, { method: 'PUT', body: { limit: input.limit, ...why(input) }, idempotencyKey: guard.idempotencyKey }),
   releaseCampaign: (campaignId: string, input: OperatorWhy, guard: OperatorGuard) => write(`/campaigns/${id(campaignId)}/release`, 'POST', why(input), guard),
   billing: (workspaceId: string, signal?: AbortSignal) => request<OperatorBilling>(`${base}/billing/${id(workspaceId)}`, { signal }),
   /** Free (not billed): the workspace's own flag, or a person's (every workspace they own, bound to their sign-in). */

@@ -5,7 +5,7 @@ import { mailboxes } from './db/mailbox.js';
 import { principal } from './mail-gateway.js';
 import { boundMailBucket, mailKey, withMailObjects } from './mail-objects.js';
 import { mimeIndex } from './mailbox-mime-index.js';
-import { stripBlindRecipients } from './mailbox-mime.js';
+import { stripBlindRecipients, submissionParties, unrepresentableMime } from './mailbox-mime.js';
 import { sendFromMailbox, resolveAttachments } from './mailbox-send.js';
 import { protocolScoreCap } from './sender-score.js';
 import {savePreview} from './protocol-preview.js';
@@ -29,15 +29,11 @@ export async function contentWrite(c: Ctx, p: Content) {
   if (!bucket) throw new ApiError(503, 'MAIL_STORE_UNAVAILABLE', 'Kept mail storage unavailable.');
   const key = mailKey(who.w, 'kept', who.b, mid),
     index = mimeIndex(raw);
-  const sender = m.from?.address?.toLowerCase();
-  const origins = m.headers.filter(h => h.key === 'from'), senders = m.headers.filter(h => h.key === 'sender');
-  const required = [sender, p.from.toLowerCase(), ...(senders.length ? [m.sender?.address?.toLowerCase()] : [])];
-  const ownsSenders = (addresses: string[]) => required.every(a => a && addresses.includes(a));
+  const { from: sender, senders, to, cc, bcc } = submissionParties(m, p);
+  const ownsSenders = (addresses: string[]) => !!senders?.every(a => addresses.includes(a));
   const denied = () => new ApiError(403, 'SENDER_NOT_OWNED', 'Use an address owned by this inbox.');
-  if (!sender || origins.length !== 1 || senders.length > 1 || !ownsSenders(who.owned)) throw denied();
-  // The shared SES path cannot represent signed or encrypted MIME without breaking it.
-  if (/^content-type:\s*(application\/(?:pkcs7|pgp)|multipart\/(?:signed|encrypted))/im.test(raw.subarray(0, 65536).toString('latin1')))
-    throw new ApiError(422, 'UNSUPPORTED_MESSAGE', 'This MIME submission cannot be represented by the sending adapter.');
+  if (!sender || !ownsSenders(who.owned)) throw denied();
+  if (unrepresentableMime(raw)) throw new ApiError(422, 'UNSUPPORTED_MESSAGE', 'This MIME submission cannot be represented by the sending adapter.');
   // Uploads reserve quota and commit immutable objects using their own transactions.
   // Never ask for a second connection while the Worker holds its only one.
   const attachments = await resolveAttachments(rt, {id:who.b, workspaceId:who.w, domainId:who.domain}, m.attachments.map(f => ({
@@ -85,11 +81,6 @@ export async function contentWrite(c: Ctx, p: Content) {
       throw new ApiError(429, 'INBOX_SEND_LIMIT', 'Inbox send cap reached.');
     const actor: Actor = { workspaceId: who.w, keyId: p.kid, domains: [], permissions: ['send'] };
     c.set('actor', actor);
-    const hdrTo = new Set(m.to?.map((x) => x.address?.toLowerCase())),
-      hdrCc = new Set(m.cc?.map((x) => x.address?.toLowerCase()));
-    const to = p.to.filter((a) => hdrTo.has(a.toLowerCase())),
-      cc = p.to.filter((a) => !to.includes(a) && hdrCc.has(a.toLowerCase())),
-      bcc = p.to.filter((a) => !to.includes(a) && !cc.includes(a));
     const { message } = await sendFromMailbox(rt, tx, {
       scope: { workspaceId: who.w },
       actor,

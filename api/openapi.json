@@ -2613,6 +2613,10 @@
           "simulated": {
             "type": "boolean"
           },
+          "scheduledAt": {
+            "type": "string",
+            "description": "A scheduled send: when it goes (UTC)."
+          },
           "inboundMessageId": {
             "type": "string"
           },
@@ -2800,6 +2804,11 @@
             "maxLength": 120,
             "deprecated": true,
             "description": "Legacy spelling of replyAddressId."
+          },
+          "scheduledAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Send at this time instead of now: an RFC 3339 instant with Z or an offset, such as 2026-11-20T09:00:00Z; times without an offset are refused, and the time is returned in UTC. From now (up to a minute in the past, which sends at once) to 30 days ahead; up to 10,000 scheduled emails may wait per workspace (SCHEDULED_EMAIL_LIMIT_EXCEEDED). The email is stored now and reads status queued with scheduled true until then; cancel it with cancelEmail or move it with rescheduleEmail. Sending limits and the balance apply at that time, not now: an email they refuse then is rejected with their code (email.rejected). Not with replyAddressId."
           }
         },
         "required": [
@@ -3259,7 +3268,8 @@
               "canceled",
               "acceptance_unknown",
               "simulated"
-            ]
+            ],
+            "description": "A scheduled email is queued, with scheduled true, until it is sent at scheduledAt."
           },
           "providerId": {
             "type": [
@@ -3289,14 +3299,20 @@
             ],
             "description": "Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order."
           },
+          "scheduled": {
+            "type": "boolean",
+            "description": "True while a scheduled send waits for scheduledAt: it has not started sending, and cancelEmail or rescheduleEmail still apply. At that time it is admitted like a send made then (limits and balance included) and follows the usual lifecycle, or is rejected with the refusal’s code."
+          },
           "scheduledAt": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "When a scheduled send goes (UTC). Also set while queued mail waits to be retried."
           },
           "createdAt": {
-            "type": "string"
+            "type": "string",
+            "description": "When the email was submitted; a scheduled send’s moves to the moment it was released at its time."
           },
           "updatedAt": {
             "type": "string"
@@ -3319,6 +3335,7 @@
           "simulated",
           "attemptStartedAt",
           "errorCode",
+          "scheduled",
           "scheduledAt",
           "createdAt",
           "updatedAt"
@@ -3513,6 +3530,20 @@
           "templateName",
           "simulated"
         ]
+      },
+      "EmailRescheduleInput": {
+        "type": "object",
+        "properties": {
+          "scheduledAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The new send time: an RFC 3339 instant with Z or an offset, returned in UTC."
+          }
+        },
+        "required": [
+          "scheduledAt"
+        ],
+        "additionalProperties": false
       },
       "Attachment": {
         "type": "object",
@@ -5460,6 +5491,24 @@
               "string",
               "null"
             ]
+          },
+          "quota": {
+            "type": "object",
+            "properties": {
+              "used": {
+                "type": "integer",
+                "description": "Domains in the workspace, across every region and page."
+              },
+              "limit": {
+                "type": "integer",
+                "description": "How many domains the workspace may have: 100 unless Nightmail set another limit on request."
+              }
+            },
+            "required": [
+              "used",
+              "limit"
+            ],
+            "description": "Hosted only, and only for credentials without domain restrictions. Adding a domain past the limit fails with DOMAIN_LIMIT_REACHED; at most 10 of them may be unproven at once."
           }
         },
         "required": [
@@ -13223,7 +13272,7 @@
           },
           "status": {
             "type": "string",
-            "description": "Sent: the email status. Received: received, or spam when flagged (spam is shown to administrators only)."
+            "description": "Sent: the email status, or scheduled for a send waiting for its time (getEmail reads it as queued with scheduled true). Received: received, or spam when flagged (spam is shown to administrators only)."
           },
           "from": {
             "type": "object",
@@ -13270,6 +13319,13 @@
               "string",
               "null"
             ]
+          },
+          "scheduledAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Sent mail that is scheduled: when it goes (UTC). Null for received mail."
           },
           "simulated": {
             "type": "boolean",
@@ -13340,6 +13396,7 @@
           "subject",
           "stream",
           "campaignId",
+          "scheduledAt",
           "simulated",
           "attachmentCount",
           "threadId",
@@ -21783,6 +21840,25 @@
                         "autoRecharge"
                       ],
                       "description": "Hosted dashboard sessions: whether the workspace is free, whether an empty balance has paused sending or held received mail, and auto-recharge, so the dashboard can show it on its first frame. Null otherwise; GET /v1/billing has the detail."
+                    },
+                    "mailServers": {
+                      "type": [
+                        "object",
+                        "null"
+                      ],
+                      "properties": {
+                        "imap": {
+                          "type": "string"
+                        },
+                        "smtp": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "imap",
+                        "smtp"
+                      ],
+                      "description": "The hosts mail apps connect to: IMAP on 993 (TLS) or 143 (STARTTLS), SMTP on 465 (TLS) or 587 (STARTTLS). An app password signs in to both; a send-only API key signs in to SMTP as apikey. Null when this installation has no IMAP/SMTP gateway."
                     }
                   },
                   "required": [
@@ -31457,10 +31533,13 @@
                 "suppressed",
                 "canceled",
                 "acceptance_unknown",
-                "simulated"
-              ]
+                "simulated",
+                "scheduled"
+              ],
+              "description": "scheduled lists sends waiting for their time; queued includes them."
             },
             "required": false,
+            "description": "scheduled lists sends waiting for their time; queued includes them.",
             "name": "status",
             "in": "query"
           },
@@ -32317,6 +32396,330 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request GET \\\n  --url 'https://nightmail.dev/v1/emails/resource_123/events' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/emails/{id}/cancel": {
+      "post": {
+        "operationId": "cancelEmail",
+        "summary": "Cancel a scheduled email",
+        "description": "Cancel an email scheduled with sendEmail scheduledAt before it starts sending: it becomes canceled (errorCode EMAIL_CANCELED) with a canceled event and the email.rejected webhook, and is never sent or charged. Canceling a canceled email returns it unchanged. Once its time has come and it was released to send, 409 EMAIL_NOT_SCHEDULED.",
+        "tags": [
+          "Emails"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Email"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { cancelEmail } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await cancelEmail({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/emails/resource_123/cancel' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/emails/{id}/reschedule": {
+      "post": {
+        "operationId": "rescheduleEmail",
+        "summary": "Move a scheduled email to another time",
+        "description": "Change when an email scheduled with sendEmail scheduledAt is sent, before it starts sending; its content and recipients stay as they are. The same bounds as scheduling: from now to 30 days ahead, as a UTC instant (422 INVALID_SCHEDULE). Records a rescheduled event. Once its time has come and it was released to send, or after it was canceled, 409 EMAIL_NOT_SCHEDULED.",
+        "tags": [
+          "Emails"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmailRescheduleInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Email"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { rescheduleEmail } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await rescheduleEmail({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"scheduledAt\": \"2026-09-18T19:00:00Z\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/emails/resource_123/reschedule' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"scheduledAt\": \"2026-09-18T19:00:00Z\"\n}'"
           }
         ]
       }
@@ -65306,6 +65709,7 @@
                 "canceled",
                 "acceptance_unknown",
                 "simulated",
+                "scheduled",
                 "received",
                 "spam"
               ],

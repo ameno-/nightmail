@@ -53,6 +53,17 @@ export function terminalEvents(rows: SQL, extra = sql`'{}'::jsonb`) {
   )`;
 }
 
+/**
+ * A scheduled single send whose release job ended without releasing it (its last attempt failed, or its last lease ran
+ * out): rejected with SCHEDULE_RELEASE_FAILED, a reject event and email.rejected, in the statement that ends the job, so
+ * it never waits forever unseen. `rows` yields (workspace_id, id) of emails the statement has locked; one that was
+ * released, canceled or moved meanwhile keeps its state. Nothing is charged: a scheduled email never was.
+ */
+export const failScheduledRelease = (rows: SQL) => sql`release_failed AS (UPDATE sending_emails e SET status='rejected',error_code='SCHEDULE_RELEASE_FAILED',updated_at=clock_timestamp()
+    FROM (${rows}) r WHERE e.workspace_id=r.workspace_id AND e.id=r.id AND e.status='scheduled'
+    RETURNING e.id,e.workspace_id,e.status,e.region,e.simulated,e.error_code,e.suppression_reason,e.dispatch_version
+  ), ${terminalEvents(sql`SELECT * FROM release_failed`, sql`'{"providerCalled":false}'::jsonb`)}`;
+
 /** `lost` is a grace period: proof went missing, the claim keeps working, and a later check either restores it or expires it. */
 export const LOST_GRACE_MS = 2 * 3_600_000;
 

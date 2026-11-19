@@ -409,6 +409,24 @@ async function direct() {
   const logs = await api('listEmails', { query: { search: singleSuccess, region } });
   check(logs.nextCursor === null && logs.data.length === 1 && hasId(logs, a.id), 'email missing or duplicated in log');
 }
+// A send scheduled a day out never reaches SES here: it is found as scheduled, moved a day later and canceled.
+async function scheduledSend() {
+  const to = simulator('success', '-scheduled'), scheduledAt = new Date(Date.now() + 86_400_000).toISOString();
+  const receipt = await api('sendEmail', { headers: idKey('scheduled'), body: { region, from, to: [to], subject, text, scheduledAt } });
+  defer(`cancel scheduled email ${receipt.id}`, async () => check((await api('cancelEmail', { path: { id: receipt.id } })).status === 'canceled', 'scheduled email not canceled'));
+  check(receipt.status === 'queued' && receipt.scheduledAt === scheduledAt && !receipt.simulated, 'scheduled receipt differs');
+  const email = await api('getEmail', { path: { id: receipt.id } });
+  check(email.scheduled && email.status === 'queued' && email.scheduledAt !== null && Date.parse(email.scheduledAt) === Date.parse(scheduledAt) && !email.providerId, 'scheduled email is not waiting for its time');
+  check(hasId(await api('listEmails', { query: { status: 'scheduled', search: to } }), receipt.id), 'scheduled email missing from status=scheduled');
+  const later = new Date(Date.parse(scheduledAt) + 86_400_000).toISOString();
+  const moved = await api('rescheduleEmail', { path: { id: receipt.id }, body: { scheduledAt: later } });
+  check(moved.scheduled && moved.scheduledAt !== null && Date.parse(moved.scheduledAt) === Date.parse(later), 'reschedule did not move the send time');
+  const canceled = await api('cancelEmail', { path: { id: receipt.id } });
+  check(canceled.status === 'canceled' && !canceled.scheduled && canceled.errorCode === 'EMAIL_CANCELED' && !canceled.providerId, 'cancel did not stop the scheduled email');
+  await expectDenial(() => api('rescheduleEmail', { path: { id: receipt.id }, body: { scheduledAt: later } }), 409, 'EMAIL_NOT_SCHEDULED');
+  const events = await api('listEmailEvents', { path: { id: receipt.id } });
+  check(['scheduled', 'rescheduled', 'canceled'].every(type => events.data.some(e => e.type === type)), 'scheduled email events missing');
+}
 async function batch() {
   // SES feedback upserts a suppressed contact. Own it before sending so cleanup never has
   // to sweep by name or race late feedback; deleting the profile keeps its suppression tombstone.
@@ -1022,6 +1040,7 @@ async function run() {
     await Promise.all([
       ...(destructive ? [step('Dev fixture contracts',devBoundaries),step('Virginia delivery and feedback',regionalSend),step('SDK binary upload CLI',cliUpload),step('MCP authorization discovery',mcpChallenge)] : []),
       step('Single send, replay, delivery and email log', direct),
+      step('Schedule, reschedule and cancel a single send before it goes', scheduledSend),
       step('Preview run-owned HTML without sending', async () => {
         const report = await api('checkEmail', { body: { from, subject:prefix, text:'Confirm your shipping address.', stream:'transactional' } });
         check(Number.isInteger(report.score) && report.findings.some((f:{ruleId:string})=>f.ruleId==='screen-bytes'),'missing sendability score or byte measurement');

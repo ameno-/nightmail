@@ -34,6 +34,25 @@ const blindField=(f:HeaderField)=>(f.name.startsWith('bcc') || f.name.startsWith
 /** Removes top-level Bcc and Resent-Bcc fields, so blind recipients are never stored: received mail (workspaceMime) and an SMTP submission's Sent copy (protocol-content.ts) both strip them here. */
 export const stripBlindRecipients=(bytes:Uint8Array)=>dropHeaderFields(bytes,blindField);
 
+type ParsedAddress = { address?: string; name?: string };
+/**
+ * Who an SMTP submission is from and to, for both submissions: an app password's (protocol-content.ts) and a send-only
+ * key's (protocol-relay.ts). `senders` is every address the credential must own: the one From, the envelope sender and
+ * any Sender; null when the message has no single From or more than one Sender. The envelope decides who gets it, the
+ * header how: To, then Cc, and anyone else is Bcc.
+ */
+export function submissionParties(m: { from?: ParsedAddress; sender?: ParsedAddress; to?: ParsedAddress[]; cc?: ParsedAddress[]; headers: { key: string }[] }, envelope: { from: string; to: string[] }) {
+  const from = m.from?.address?.toLowerCase(), count = (key: string) => m.headers.filter(h => h.key === key).length;
+  const senders = [from, envelope.from.toLowerCase(), ...count('sender') ? [m.sender?.address?.toLowerCase()] : []];
+  const listed = (list?: ParsedAddress[]) => new Set(list?.map(a => a.address?.toLowerCase()));
+  const headerTo = listed(m.to), headerCc = listed(m.cc);
+  const to = envelope.to.filter(a => headerTo.has(a.toLowerCase())), cc = envelope.to.filter(a => !to.includes(a) && headerCc.has(a.toLowerCase()));
+  return { from, senders: from && count('from') === 1 && count('sender') <= 1 && senders.every(a => a?.includes('@')) ? [...new Set(senders as string[])] : null,
+    to, cc, bcc: envelope.to.filter(a => !to.includes(a) && !cc.includes(a)) };
+}
+/** The shared SES path rebuilds the MIME, which a signed or encrypted message can't survive. */
+export const unrepresentableMime = (raw: Uint8Array) => /^content-type:\s*(application\/(?:pkcs7|pgp)|multipart\/(?:signed|encrypted))/im.test(Buffer.from(raw.buffer, raw.byteOffset, Math.min(raw.byteLength, 65536)).toString('latin1'));
+
 // AWS's receiving-email-notifications-examples shows the SES-added first Received field can end
 // in "for recipient@example.com;". Remove that field (including folds) when not ours. The S3
 // action preserves raw MIME, so also drop top-level Bcc/Resent-Bcc if physically present.

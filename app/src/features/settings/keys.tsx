@@ -8,13 +8,14 @@ import { date, shortDateTime } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { AdminOnlyPage } from './admin-only'
 import { KeySendExample } from '../docs/first-send'
-import { AddressChoice, chooseAddress, CreateKeyDialog, type CreatedSecret, type Purpose } from './create-key'
+import { AddressChoice, chooseAddress, CreateKeyDialog, useDomainOptions, type CreatedSecret, type Purpose } from './create-key'
 import { accessLabel, agentAccess, approvalLabel, connectionTitle, domainScope, mailLabel, protocolLabel } from './key-labels'
 import { keyTypes, settingsColumns, type KeyTypeFilter } from './skeletons'
 import { KeysGuide } from './keys-guide'
 import './api-keys.css'
 import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
 import { ConnectAgentButton, ConnectAgentDialog, McpKeySetup } from '../docs/connect-agent'
+import { MailSettings, useMailServers } from '../docs/mail-settings'
 import { apiKeyEnv, productName } from '../../../../api/src/brand'
 
 // One table for the three credential types: API keys, agent tokens (a connected agent, with the short-lived tokens it
@@ -65,15 +66,21 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   const revokeAgent = useApiMutation(async (api, id: string) => { const result = await api.credentials.revokeAgent(id); toast(result.scope === 'agent' ? 'Agent revoked' : 'Agent tokens revoked', 'success') })
   const revokeToken = useApiMutation((api, id: string) => api.credentials.revokeAgentToken(id), 'Agent token revoked')
   const revokePassword = useApiMutation((api, password: AppPassword) => api.credentials.revokeAppPassword(password.inboxId, password.id), 'App password revoked')
-  // /api-keys?create=send&domain=acme.com opens Create key on an API key, filled in (Overview's setup step links here);
+  // /api-keys?create=send&domain=acme.com opens Create key on an API key, filled in (Overview's setup step links here),
+  // and /api-keys?create=smtp on an SMTP login (the Keys guide links there);
   // the parameters then leave the URL, so Back and reload don't open it again.
   const [params, setParams] = useSearchParams()
+  const mailServers = useMailServers()
   const [initial] = useState(() => {
     if (!params.has('create')) return undefined
+    // Without a mail gateway an SMTP login could never sign in: the link opens the key types instead.
+    if (params.get('create') === 'smtp') return mailServers ? { smtp: true } : {}
     const asked = params.get('create') === 'inbound' ? 'addresses' : params.get('create')
     return { purpose: (['send', 'read_send', 'read', 'manage', 'addresses', 'inbox', 'create'] as Purpose[]).find(value => value === asked) ?? 'send', domain: params.get('domain') || undefined }
   })
   const [open, setOpen] = useState(Boolean(initial))
+  // A form opened from a link waits for its domains, so they don't push its fields down as they arrive.
+  const linkedDomains = useDomainOptions(Boolean(initial) && open)
   const [connecting, setConnecting] = useState(connectLink)
   useEffect(() => { if (params.has('create')) setParams(previous => { const next = new URLSearchParams(previous); next.delete('create'); next.delete('domain'); return next }, { replace: true }) }, [params, setParams])
   const [secret, setSecret] = useState<CreatedSecret | null>(null)
@@ -170,9 +177,9 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
         {keysShown && !listLoading && (!keys.error || pagination.page > 1) && <Pagination page={pagination.page} pageSize={100} nextCursor={keys.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, keys.data?.nextCursor)} />}
       </section>
     </div>
-    {open && <CreateKeyDialog open onOpenChange={setOpen} initial={initial} onCreated={setSecret} onConnectAgent={() => setConnecting(true)} />}
+    {open && (!initial || !linkedDomains.isPending) && <CreateKeyDialog open onOpenChange={setOpen} initial={initial} onCreated={setSecret} onConnectAgent={() => setConnecting(true)} />}
     <ConnectAgentDialog open={connecting} onOpenChange={setConnecting} onCreateKey={() => setOpen(true)} />
-    <SecretDialog secret={secret?.secret ?? null} title={secret?.title ?? 'Key created'} description={secret?.description} onClose={() => setSecret(null)}>{secret?.sendExample && <KeySendExample apiKey={secret.secret} />}{secret?.agent && <McpKeySetup secret={secret.secret} env={apiKeyEnv} />}</SecretDialog>
+    <SecretDialog secret={secret?.secret ?? null} title={secret?.title ?? 'Key created'} description={secret?.description} onClose={() => setSecret(null)}>{secret?.sendExample && <KeySendExample apiKey={secret.secret} />}{secret?.agent && <McpKeySetup secret={secret.secret} env={apiKeyEnv} />}{secret?.mail && <MailSettings username={secret.mail.username} imap={secret.mail.imap} smtp={secret.mail.smtp} />}</SecretDialog>
     <KeyDetails row={viewing} fields={viewing ? details(viewing) : []} onClose={() => setViewing(null)} onRevoke={row => { setViewing(null); setRevoking(row) }} onEdit={key => { setViewing(null); setEditing(key) }} />
     {editing && <EditAddressesDialog apiKey={editing} options={addresses.data ?? []} onClose={() => setEditing(null)} />}
     <RevokeDialog row={revoking} onClose={() => setRevoking(null)} pending={revokeKey.isPending || revokeAgent.isPending || revokeToken.isPending || revokePassword.isPending}

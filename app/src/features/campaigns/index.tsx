@@ -33,6 +33,7 @@ import { campaignVersion, useCampaignSync } from './useCampaignSync'
 import { ComposerSkeleton } from './skeletons'
 import { composerLoading, invalidSender } from './copy'
 import { AddressList, NamedAddress, PrivateAddress } from '../../components/PrivateAddress'
+import { localLabel, parseUtc, ScheduleField, scheduleError, utcLabel } from '../../components/ScheduleField'
 import { useSingleFlight } from '../../lib/single-flight'
 import { usePhone } from '../../lib/media'
 import { useLeaveGuard } from '../../lib/leave-guard'
@@ -449,21 +450,6 @@ function CampaignRenderedPreview({ campaign, transform = html => html }: { campa
   if (preview.isPending) return <div className="ui-email-preview campaign-preview-loading" role="status"><SkeletonText width="55%" lineHeight={28} /><SkeletonText /><SkeletonText width="80%" /></div>
   if (preview.isError) return <ErrorState error={preview.error} onRetry={() => void preview.refetch()} />
   return <EmailPreview html={transform(preview.data.html)} title="Campaign email preview" attachmentIds={campaign.attachments} respectStyles remoteImages />
-}
-// Schedules are entered and stored in UTC; every place that shows one also gives the viewer's local time.
-const utcLabel = (value: string) => `${date(value, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })}, ${date(value, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })} UTC`
-const localLabel = (value: string) => `${new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(value))} your time`
-const parseUtc = (value: string) => value ? new Date(`${value}:00Z`) : null
-function scheduleError(value: string) {
-  const parsed = parseUtc(value)
-  if (!parsed || Number.isNaN(parsed.getTime())) return 'Date and time: choose when to send.'
-  if (parsed.getTime() <= Date.now()) return `Date and time: that time has passed. It is now ${utcLabel(new Date().toISOString())}.`
-  if (parsed.getTime() > Date.now() + 365 * 86_400_000) return 'Date and time: pick a time within a year.'
-  return ''
-}
-// The send confirmation and the scheduled banner give the viewer's local time.
-function ScheduleField({ value, onChange, error, disabled, id }: { value: string; onChange: (value: string) => void; error?: string; disabled?: boolean; id: string }) {
-  return <Field label="Date and time (UTC)" htmlFor={id} error={error}><Input id={id} type="datetime-local" value={value} aria-invalid={Boolean(error) || undefined} onChange={event => onChange(event.target.value)} disabled={disabled} /></Field>
 }
 // A schedule that has released nobody yet can still move or go back to a draft.
 const unreleasedSchedule = (campaign: Campaign) => Boolean(campaign.scheduledAt) && ['preparing', 'scheduled', 'paused'].includes(campaign.status) && (campaign.delivery?.expanded ?? 0) === 0

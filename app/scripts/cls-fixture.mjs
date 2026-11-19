@@ -144,6 +144,8 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
       ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-in-session-fixture', BANE_ROOT_SECRET: secret,
       WEBHOOK_ALLOWED_HOSTS: 'northwind.example', S3_ACCESS_KEY_ID: 'fixture', S3_SECRET_ACCESS_KEY: 'fixture', S3_BUCKET: 'fixture', S3_ENDPOINT: 'http://127.0.0.1:9',
       SIMULATED_SES_LATENCY_MS: '0', SIMULATED_SES_DELIVERY_DELAY_MS: '0',
+      // A mail gateway, as both stages have: the dashboard then shows IMAP and SMTP settings and offers SMTP logins.
+      MAILGW_API_TOKEN: randomBytes(24).toString('hex'), MAILGW_PUBLIC_DOMAIN: 'northwind.example',
     });
     execFileSync('node', ['--import', 'tsx', 'src/migrate.ts'], { cwd: api, env: envFor(0), stdio: ['ignore', 'ignore', 'inherit'] });
     log('postgres: migrated');
@@ -518,6 +520,10 @@ export async function seed(fx) {
   await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, created_at)
     VALUES ($1,'ws_northwind','${REGION}','fixture','deals@mail.northwind.example','["customer@example.net"]','[]','[]',$2,$3::jsonb,false,'delivered','provider-'||$1,3,now()-interval '1 minute')`,
     [junkEmail, JUNK_SUBJECT, JSON.stringify({ kind: 'marketing', region: REGION, subject: JUNK_SUBJECT, html: JUNK_HTML, attachments: [] })]);
+  // A single email scheduled for tomorrow: Logs gives it a Scheduled badge and its row's menu (cancel, reschedule).
+  await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, scheduled_at, created_at)
+    VALUES ($1,'ws_northwind','${REGION}','fixture','receipts@mail.northwind.example','["customer@example.net"]','[]','[]','Your order ships tomorrow',$2::jsonb,false,'scheduled',now()+interval '1 day',now()-interval '2 minutes')`,
+    [rid('email'), JSON.stringify({ kind: 'transactional', region: REGION, subject: 'Your order ships tomorrow', text: 'It leaves our warehouse tomorrow morning.', attachments: [] })]);
   // Receiving: addresses with aliases, routes, endpoints, rules, webhooks, agent inboxes and threads.
   const make = input => dana.api('POST', '/v1/inbound/addresses', input, 201);
   const A = {
