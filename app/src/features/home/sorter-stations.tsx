@@ -201,7 +201,9 @@ export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: H
   }
   const outWays: Pt[][] = [upMain([[mainX, plate.top - dy * .5 + 14], [mainX, 16]])]
   for (const unit of senders) {
-    if (phone || !unit.left) { outWays.push(upMain([[mainX, unit.top + unit.boxTop + unit.station.h * .5], [mainX, 16]])); continue }
+    // (A box on the left wide enough to reach over the main hides it, as one on the right does: what it sends goes
+    // straight up the main behind it, with no branch out of its side.)
+    if (phone || !unit.left || unit.boxLeft + unit.w > mainX) { outWays.push(upMain([[mainX, unit.top + unit.boxTop + unit.station.h * .5], [mainX, 16]])); continue }
     const from = unit.boxLeft + unit.w - 4
     runs.push({ key: `send${unit.station.tube}`, points: [[from, unit.sends], [mainX - (wide / 2 - 1), unit.sends]], wide, rings: [{ at: [from + 9, unit.sends], across: true }, { at: [mainX - wide / 2 - 3.5, unit.sends], across: true }] })
     mainRings.push({ at: [mainX, unit.sends - wide / 2 - 4.5], across: false }, { at: [mainX, unit.sends + wide / 2 + 4.5], across: false })
