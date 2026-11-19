@@ -2,7 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { createHmac, hkdfSync, randomBytes } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { auditContext, auditInsert } from './audit.js';
-import { actorMailAccess, ApiError, errors, id, isoTime, json, lasting, response, security, type App, type Ctx, type MailboxAccess } from './core.js';
+import { actorMailAccess, ApiError, denied, errors, id, isoTime, json, lasting, response, security, type App, type Ctx, type MailboxAccess } from './core.js';
 
 export function passwordDigest(pepper: string, value: string) {
   return createHmac('sha256', hkdfSync('sha256', pepper, '', 'bane:protocol-password:v1', 32))
@@ -14,11 +14,13 @@ const item = z.object({ id: z.string(), name: z.string(), protocols: z.array(pro
 const base = '/v1/inboxes/{id}/app-passwords',
   params = z.object({ id: z.string().min(1).max(120) }),
   meta = { tags: ['Agent inboxes'], security };
+const managerRequired = (c: Ctx) => denied('ADMIN_REQUIRED', 'An unrestricted workspace manager must grant mail client access.',
+  { permission: 'configuration', level: 'write', ...(c.get('actor')?.role === 'member' ? { person: 'admin' } : { scope: 'workspace' }) });
 export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAccess) {
   const manager = (c: Ctx, change = false) => {
     const v = access(c);
     if (!v.admin || v.mailboxIds || c.get('actor')?.role === 'member')
-      throw new ApiError(403, 'ADMIN_REQUIRED', 'An unrestricted workspace manager must grant mail client access.');
+      throw managerRequired(c);
     // A password outlives the token that asks for it, like an API key or an inbound key.
     if (change) lasting(c, 'create or revoke mail client passwords');
     return v.workspaceId;
@@ -103,7 +105,7 @@ export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAcce
     async (c) => {
       const a = c.get('actor');
       if (!actorMailAccess(a)?.admin || a.role === 'member')
-        throw new ApiError(403, 'ADMIN_REQUIRED', 'An unrestricted workspace manager must grant mail client access.');
+        throw managerRequired(c);
       const r = await c.env.db.execute<z.infer<typeof item> & { inboxId: string; inboxAddress: string }>(
         sql`SELECT p.id,p.name,p.protocols,p.created_at::text AS "createdAt",s.inbox_id AS "inboxId",b.address AS "inboxAddress" FROM inbox_app_passwords p JOIN inbox_state s USING(inbox_id) JOIN mailboxes b ON b.workspace_id=s.workspace_id AND b.id=s.inbox_id WHERE s.workspace_id=${a.workspaceId} AND p.revoked_at IS NULL ORDER BY p.created_at DESC,p.id LIMIT 500`,
       );

@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { z } from '@hono/zod-openapi';
 import { createHash } from 'node:crypto';
-import { ApiError, id, ModuleLoadError, notFound, type Runtime, type DbExecutor, type JobHandler } from './core.js';
+import { ApiError, denied, id, ModuleLoadError, notFound, type Runtime, type DbExecutor, type JobHandler } from './core.js';
 import { assume, loadStsSdk } from './provider-credentials.js';
 import { requirePlatformAccount } from './config.js';
 import {TAG_PREFIX} from './resource-tags.js';
@@ -245,7 +245,7 @@ export async function selectImports(r:Runtime,wid:string,input:z.infer<typeof Im
 // v5 this returns a durable operation, even if the workspace has no ready region yet.
 export async function newRegionalDomain(r:Runtime,wid:string,name:string,owner:boolean,override?:string,key?:string) {
   const c=await connection(r.db,wid);if (!c) return null;
-  if (!owner) throw new ApiError(403,'PERMISSION_DENIED','Use an owner or admin dashboard session to enable a regional domain.');
+  if (!owner) throw denied('PERMISSION_DENIED','Use an owner or admin dashboard session to enable a regional domain.',{ permission: 'configuration', level: 'write', credential: 'dashboard', person: 'admin' });
   await writable(r,wid);if (!await claimNameAllowed(name,r.config)) throw new ApiError(422,'DOMAIN_NOT_ALLOWED','A public suffix or reserved domain cannot be claimed.','name');
   return r.db.transaction(async db=>{
     await getRegionSettings(db,wid,'update');if (usable(await connection(db,wid,true)).id!==c.id) throw stale();

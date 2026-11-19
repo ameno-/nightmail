@@ -1,6 +1,6 @@
 import {createRoute,z} from '@hono/zod-openapi';
 import {sql} from 'drizzle-orm';
-import {ApiError,digest,errors,isSimulatedSes,response,security,type App,type Runtime} from './core.js';
+import {ApiError,denied,digest,errors,isSimulatedSes,response,security,type App,type Runtime} from './core.js';
 import {accountBrowserRoute,accountSessionActor,accountSessionUser,migrateLegacyCookies,requireDashboardOrigin,settleDefaultAccount} from './account-login.js';
 import {Workspace,WorkspaceRole,sessionMemberships} from './workspaces.js';
 import {ConnectionSummary,connectionSummary} from './provider-connections.js';
@@ -14,7 +14,7 @@ export async function reserveSignIn(runtime:Runtime,headers:Headers) {
 export async function verifiedDashboardUser(runtime:Runtime,headers:Headers,requireCurrentEmail=false) {
   // A bearer credential (API key, MCP or agent token) never rides the session cookie. It is refused with 403, as on
   // every other dashboard-only route (core.ts); 401 is for a caller with no session at all.
-  if (headers.has('authorization')) throw new ApiError(403,'DASHBOARD_AUTH_REQUIRED','Use a signed-in dashboard session.');
+  if (headers.has('authorization')) throw denied('DASHBOARD_AUTH_REQUIRED','Use a signed-in dashboard session.',{credential:'dashboard'});
   const user=await accountSessionUser(runtime,headers,requireCurrentEmail);
   if (!user) throw new ApiError(401,'AUTH_REQUIRED',`Sign in to ${productName}.`);
   return {userId:user.id,email:user.email};

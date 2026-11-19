@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
-import { actor, actorMailAccess, ApiError, errors, isSimulatedSes, notFound, response, security, type App } from './core.js';
+import { actor, actorMailAccess, ApiError, errors, requiredOf, unrestrictedRequired, isSimulatedSes, notFound, response, security, type App } from './core.js';
 import { DASHBOARD_CACHE_NOTE, dashboardRead } from './dashboard-cache.js';
 import { hostedAllowance, type HostedAllowance } from './hosted-sending.js';
 import { RATES } from './billing/money.js';
@@ -56,7 +56,7 @@ export function registerUsage(app: App) {
     responses: { 200: response(Usage), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
     const a = actor(c, 'read');
-    if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.');
+    if (a.domains.length) throw unrestrictedRequired('Workspace-wide operations require a key without domain restrictions.', requiredOf(c, 'read'));
     // The received count includes unrouted and spam mail, so it belongs to whoever may list all of it (listInboundMessages
     // as an administrator). Anyone else could otherwise poll it around a probe to learn which addresses take mail.
     const receiving = actorMailAccess(a)?.admin === true;

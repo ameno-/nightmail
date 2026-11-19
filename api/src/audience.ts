@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, eq, gt, inArray, isNull, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
-import { actor, ApiError, AudienceSpec, errors, id, IdParams, json, notFound, page, PageQuery, response, security, type Actor, type App, type DbExecutor, type Runtime } from './core.js';
+import { actor, ApiError, AudienceSpec, unrestrictedRequired, errors, id, IdParams, json, notFound, page, PageQuery, response, security, type Actor, type App, type DbExecutor, type Runtime } from './core.js';
 import { productName } from './brand.js';
 export { AudienceSpec };
 import { contacts, consentAudit, imports, listMembers, lists, segments, type ImportError, type ImportRow, type SegmentRule } from './db/audience.js';
@@ -103,7 +103,7 @@ async function boundedContacts(db: DbExecutor, identity: Actor, conditions: SQL[
 // Keyset-paging the live audience across transactions would not be a review snapshot.
 // The audience's lists and segments, locked for share when the caller snapshots, and the matching conditions over contacts.
 async function audienceConditions(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, lock: boolean) {
-  if (identity.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Reading the workspace audience requires an unrestricted credential.');
+  if (identity.domains.length) throw unrestrictedRequired('Reading the workspace audience requires an unrestricted credential.', { permission: 'audience', level: 'read' });
   const listIds = [...new Set([spec.listId, ...(spec.excludeListIds ?? [])])].sort();
   const segmentIds = [...new Set([...(spec.segmentId ? [spec.segmentId] : []), ...(spec.excludeSegmentIds ?? [])])].sort();
   const listQuery = db.select({ id: lists.id }).from(lists).where(and(scope(lists, identity), inArray(lists.id, listIds))).orderBy(asc(lists.id));

@@ -1,6 +1,6 @@
 import {createRoute,z} from '@hono/zod-openapi';
 import {sql} from 'drizzle-orm';
-import {ApiError,errors,IdParams,page,PageQuery,response,security,type App,type Ctx} from './core.js';
+import {ApiError,denied,errors,requiredOf,IdParams,page,PageQuery,response,security,type App,type Ctx} from './core.js';
 import {protectedResourceMetadata} from './oidc-resource.js';
 import { productName } from './brand.js';
 export {authorizeResource as withMcpAuthorization,externalMcpGrant as getMcpGrantActor,approvalUse} from './oidc-resource.js';
@@ -54,7 +54,7 @@ async function revokeApproval(c:Ctx,user:string,id:string){
 }
 function owner(c:Ctx) {
   const principal=c.get('actor');
-  if(principal.credential!=='dashboard') throw new ApiError(403,'DASHBOARD_AUTH_REQUIRED','Use your dashboard session.');
+  if(principal.credential!=='dashboard') throw denied('DASHBOARD_AUTH_REQUIRED','Use your dashboard session.',{...requiredOf(c),credential:'dashboard'});
   return principal.keyId.slice('user_'.length);
 }
 export function registerMcpAuth(app:App) {

@@ -2,7 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { DASHBOARD_CACHE_NOTE, dashboardRead } from './dashboard-cache.js';
 import { productName } from './brand.js';
-import { actor, ApiError, dashboardSession, errors, json, response, security, type App, type Runtime } from './core.js';
+import { actor, ApiError, dashboardSession, requiredOf, unrestrictedRequired, errors, json, response, security, type App, type Runtime } from './core.js';
 import { burstFor, EVALUATION, evaluateLadder, FACTOR_KEYS, FREEZE_FLOOR, GOOD_STANDING, GRADE_BANDS, GRADES, gradeOf, marketingHourFor, nextBand, quality, reserveFor, round, stepRank, STEPS, type DayEvidence, type DomainAuth, type Factor, type Reason, type Step } from './standing-model.js';
 
 // GET /v1/sender-score reads what the ten-minute standing job stored (src/standing.ts): the score, its factors, the
@@ -187,7 +187,7 @@ export function registerSenderScore(app: App) {
     description: `The workspace sender score, the daily limit it sets and the enforcement step (Hosted). In good standing (a score of ${GOOD_STANDING} or more, no warning) there is no daily limit: limit.unlimited is true, limit.daily null, and only the per-minute pace (limit.perMinute) applies. A new workspace's first ${EVALUATION.recipients} real recipients are its evaluation, at ${EVALUATION.limit} a day until their delivery results are in (gradedBy says by when). Under ${GOOD_STANDING} the limit is 500 (70–74), 200 (65–69) or 100, and a warning freezes it. The score (0–100) is the quality of what the workspace sends (complaints, the spam screen, bounces, list quality, authentication and engagement), decayed with a 30-day half-life and recomputed every ten minutes. Self-hosted and BYO get the score for display only. ${DASHBOARD_CACHE_NOTE} A change of standing or limit shows at once. Workspace-wide: keys restricted to domains get 403.`,
     responses: { 200: response(SenderScoreSchema), ...errors } }), async c => {
     const a = actor(c, 'read');
-    if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.');
+    if (a.domains.length) throw unrestrictedRequired('Workspace-wide operations require a key without domain restrictions.', requiredOf(c, 'read'));
     const compute = async () => scoreView(await loadStanding(c.env, a.workspaceId));
     if (a.credential !== 'dashboard') return c.json(await compute(), 200);
     // Keyed by the standing's version and sequence too: a release, resume or operator action (or a limit change) shows at

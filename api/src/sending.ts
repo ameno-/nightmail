@@ -12,7 +12,7 @@ import { mergeSuppression } from './db/audience.js';
 import { SuppressionReason, SuppressionEventData, readCursor, nextCursor } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
-import { actor, actorMailAccess, ApiError, AudienceSpec, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
+import { actor, actorMailAccess, ApiError, AudienceSpec, denied, unrestrictedRequired, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, wakeWebhooks } from './jobs.js';
 import { countScreened, failScheduledRelease, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, quarantineCampaign, clearProbe, waitProbe, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, restrictToDelivered, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState } from './states.js';
 import { productName } from './brand.js';
@@ -343,13 +343,13 @@ export const campaignWhere = (a: Actor, campaignId?: string) => and(scope(campai
   a.domains.length ? and(eq(campaigns.state, 'draft'), isNull(campaigns.reviewId), sql`${campaigns.draft}->'audience' = '{}'::jsonb`) : undefined);
 function keySender(a: Actor, from: string) {
   const domain = from.split('@')[1]!.toLowerCase();
-  if (!senderDomainAllowed(a.domains, domain)) throw new ApiError(403, 'SENDER_DOMAIN_FORBIDDEN', 'This API key cannot send from this domain or its parent domain.', 'from');
+  if (!senderDomainAllowed(a.domains, domain)) throw denied('SENDER_DOMAIN_FORBIDDEN', 'This API key cannot send from this domain or its parent domain.', { permission: 'sendEmail', level: 'on', scope: `domain:${domain}` }, 'from');
 }
 function draftSender(runtime: Runtime, a: Actor, draft: CampaignDraft) {
   if (!regionalSending(runtime)) region(runtime, draft.region);
-  if (!draft.from && a.domains.length) throw new ApiError(403, 'SENDER_DOMAIN_FORBIDDEN', 'A domain-restricted key must supply a From address on one of its domains.', 'from');
+  if (!draft.from && a.domains.length) throw denied('SENDER_DOMAIN_FORBIDDEN', 'A domain-restricted key must supply a From address on one of its domains.', { permission: 'sendEmail', level: 'on', scope: 'workspace' }, 'from');
   if (draft.from) keySender(a, draft.from);
-  if (a.domains.length && Object.keys(draft.audience).length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Selecting a campaign audience requires an unrestricted credential.');
+  if (a.domains.length && Object.keys(draft.audience).length) throw unrestrictedRequired('Selecting a campaign audience requires an unrestricted credential.', { permission: 'audience', level: 'write' });
 }
 async function draftRegion(runtime:Runtime,db:DbExecutor,a:Actor,input:{from:string;region?:string;regionPinned?:boolean},previous?:CampaignDraft) {
   if (!regionalSending(runtime)) return {region:await assertRegionEnabled(db,a.workspaceId,input.region ?? previous?.region),regionPinned:previous?.regionPinned};
@@ -1238,7 +1238,8 @@ export function registerSending(app: App) {
         recipientCount:recipients===undefined ? undefined : Math.min(recipients,row.pacePerDay??Infinity),attachments:files,headers:d.replyTo?.[0]?{'Reply-To':d.replyTo[0]}:undefined};
     } else mail=input;
     const domain=splitMailbox(mail.from).address.split('@').at(-1)!.toLowerCase();
-    if (!senderDomainAllowed(a.domains,domain)) throw new ApiError(403,'DOMAIN_NOT_ALLOWED','The From domain is outside this key’s scope.','from');
+    // Name the domain only when the caller sent it: a stored email's or campaign's sender is named by ID.
+    if (!senderDomainAllowed(a.domains,domain)) throw denied('DOMAIN_NOT_ALLOWED','The From domain is outside this key’s scope.',{ permission: 'sendEmail', level: 'on', ...(mail === input ? { scope: `domain:${domain}` as const } : {}) },'from');
     const [{checkMail},{checkContext}]=await Promise.all([wrapModuleLoad(()=>import('./sendability.js')),wrapModuleLoad(()=>import('./sendability-context.js'))]);
     const context=await checkContext(c.env,a,domain);
     // A campaign is screened once for all its recipients, up to its own limit.
@@ -1248,7 +1249,7 @@ export function registerSending(app: App) {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     const replyAddressId = input.replyAddressId ?? input.replyMailboxId;
     if (replyAddressId) {
-      if (a.domains.length || !a.permissions.includes('manage')) throw new ApiError(403, 'MAILBOX_ACCESS_REQUIRED', 'Use manage permission on all domains, or start the thread with a key limited to that address.');
+      if (a.domains.length || !a.permissions.includes('manage')) throw denied('MAILBOX_ACCESS_REQUIRED', 'Use manage permission on all domains, or start the thread with a key limited to that address.', { permission: 'sendEmail', level: 'on', scope: `address:${replyAddressId}` });
       if (input.html) await validateHtmlUrls(input.html);
       const { finishMailboxArchive, trackedAttachments, queueTrackedMailboxSend } = await wrapModuleLoad(() => import('./mailbox-send.js'));
       let files:Awaited<ReturnType<typeof trackedAttachments>>=[];
@@ -1432,7 +1433,7 @@ export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'delete', path: '/v1/attachments/{id}', operationId: 'deleteAttachment', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(Removed), ...errors } }), async c => {
     const a = actor(c, 'send'); const attachmentId = c.req.valid('param').id;
     // Attachments belong to the workspace, not to a sender domain, so a domain-restricted key can't show one is its own.
-    if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'A key restricted to sender domains can’t delete attachments. Unused attachments are removed automatically after 30 days.');
+    if (a.domains.length) throw unrestrictedRequired('A key restricted to sender domains can’t delete attachments. Unused attachments are removed automatically after 30 days.', { permission: 'sendEmail', level: 'on' });
     await c.env.db.transaction(async db => {
       const [row] = await attachmentRows(db, a, [attachmentId], true);
       const links = await db.select().from(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.attachmentId, attachmentId))).limit(1);
@@ -1536,7 +1537,7 @@ export function registerSending(app: App) {
     const row = await c.env.db.transaction(async db => {
       const current = await findCampaign(db, a, campaignId, true);
       draftSender(c.env, a, current.draft);
-      if (a.role === 'member' && !campaignEditable(current)) throw new ApiError(403, 'PERMISSION_DENIED', 'Members can archive only campaign drafts.');
+      if (a.role === 'member' && !campaignEditable(current)) throw denied('PERMISSION_DENIED', 'Members can archive only campaign drafts.', { permission: 'audience', level: 'write', person: 'admin' });
       if (input.archived && ((CAMPAIGN_ACTIVE as readonly string[]).includes(current.state) || campaignResumable(current))) throw new ApiError(409, 'CAMPAIGN_ACTIVE', 'Cancel or finish sending this campaign before archiving it.');
       if (Boolean(current.archivedAt) === input.archived) return current;
       const [updated] = await db.update(campaigns).set({ archivedAt: input.archived ? now() : null, updatedAt: now() }).where(campaignWhere(a, campaignId)).returning();
@@ -1637,7 +1638,7 @@ export function registerSending(app: App) {
     await db.execute(retireCampaignRun(ref, 'CAMPAIGN_UNSCHEDULED'));
   }, unreleasedSchedule));
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/reschedule', operationId: 'rescheduleCampaign', description: 'Move the send time of a scheduled campaign that has not started sending. The frozen audience and content stay as they are; unschedule it to edit them.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({ scheduledAt: CampaignSchedule.shape.scheduledAt }).strict().openapi('CampaignRescheduleInput')) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, async (db, a, campaign) => {
-    if (a.role === 'member') throw new ApiError(403, 'PERMISSION_DENIED', 'Only workspace owners and admins can schedule campaigns.');
+    if (a.role === 'member') throw denied('PERMISSION_DENIED', 'Only workspace owners and admins can schedule campaigns.', { permission: 'sendEmail', level: 'on', person: 'admin' });
     const at = Date.parse(c.req.valid('json').scheduledAt);
     if (at <= Date.now() || at > Date.now() + 365 * 86400000) throw new ApiError(422, 'INVALID_SCHEDULE', 'Schedule between now and one year from now.', 'scheduledAt');
     const ref = campaignRef(a, campaign.id);
@@ -1727,7 +1728,7 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   a.wakeJobs = Math.max(a.wakeJobs ?? 0, 12);
   if (input.scheduledAt && (Date.parse(input.scheduledAt) <= Date.now() || Date.parse(input.scheduledAt) > Date.now() + 365 * 86400000)) throw new ApiError(422, 'INVALID_SCHEDULE', 'Schedule between now and one year from now.');
   // Campaign mail is never dispatched for a member origin (approvedOriginUser); refuse here instead of canceling later.
-  if (a.role === 'member') throw new ApiError(403, 'PERMISSION_DENIED', 'Only workspace owners and admins can send campaigns.');
+  if (a.role === 'member') throw denied('PERMISSION_DENIED', 'Only workspace owners and admins can send campaigns.', { permission: 'sendEmail', level: 'on', person: 'admin' });
   const held = await lockSendScope(db, a.workspaceId, { campaignId });
   const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision);
   const draft = readyCampaign(row.draft);

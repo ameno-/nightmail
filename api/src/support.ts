@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
-import { ApiError, digest, errors, hasSessionCookie, id, json, log, notFound, randomSecret, response, timed, webhookUrlHint, type App, type AppEnv, type Ctx, type DbExecutor, type SupportScope } from './core.js';
+import { ApiError, denied, digest, errors, hasSessionCookie, id, json, log, notFound, randomSecret, response, timed, webhookUrlHint, type App, type AppEnv, type Ctx, type DbExecutor, type SupportScope } from './core.js';
 import { AuditEntry, AuditFilters, auditContext, auditInsert, customerTrail, operatorContext, operatorRequired, requireOperator, userEmail } from './audit.js';
 import { budgetedRead } from './deliverability.js';
 import { GOOD_STANDING, limitRequest, type Step } from './standing-model.js';
@@ -466,7 +466,7 @@ export function registerSupport(app: App) {
     responses: { 201: response(Handoff), ...errors } }), async c => {
     if (!c.env.config.multiTenant) notFound('Endpoint');
     const a = c.get('actor');
-    if (a?.credential !== 'dashboard') throw new ApiError(403, 'DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.');
+    if (a?.credential !== 'dashboard') throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' });
     const body = c.req.valid('json'), userId = a.keyId.slice(5), handoffId = id('sho');
     const { rows: [row] } = await c.env.db.execute<{ id: string; expires_at: string; name: string; email: string }>(sql`WITH h AS (
         INSERT INTO support_handoffs(id, user_id, workspace_id, kind, page, request_ids, message, share_content, expires_at)

@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
-import { ApiError, dashboardSession, errors, json, log, notFound, response, type App, type Ctx, type DbExecutor } from './core.js';
+import { ApiError, dashboardSession, denied, errors, json, log, notFound, response, type App, type Ctx, type DbExecutor } from './core.js';
 import { auditContext, auditInsert, operatorContext, requireOperator } from './audit.js';
 import { CONVERSATION_ID, verifyHandoffToken, type RegisteredConversation } from './support-platform.js';
 import type { MailHeader, Verdicts } from './db/mailbox.js';
@@ -238,7 +238,7 @@ export function registerSupportConversations(app: App) {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
     // Like accepting an invitation: a signed-in person whose session's verified email is still theirs, with or without a
     // workspace, from the dashboard's own origin. Never a bearer credential (refused inside) or the support platform.
-    if (c.env.platformCaller) throw new ApiError(403, 'DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.');
+    if (c.env.platformCaller) throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' });
     const { verifiedDashboardUser, requireDashboardOrigin } = await import('./dashboard-auth.js');
     const { userId } = await verifiedDashboardUser(c.env, c.req.raw.headers, true);
     requireDashboardOrigin(c.env, c.req.raw);
