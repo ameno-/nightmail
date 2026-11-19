@@ -32,8 +32,8 @@ export function useDomain(id: string, recheckUntil = 0) {
 }
 
 export type DnsSetup = { provider: { id: string; name: string } | null; applyUrl: string | null; groups: string[] }
-// Off until DNS providers host Nightmail's Domain Connect template (none do yet), so the records never wait on
-// discovery that can only fail. DnsWaitNote says why there is no one-click button. Flip once a provider ships it.
+// Off until a DNS provider lists one of the Domain Connect templates in brand.ts (none does yet), so the records never
+// wait on discovery that can only fail. DnsWaitNote says why there is no one-click button. Flip once Cloudflare lists nightmail.dev.
 const oneClickDns = false
 // Domain Connect: the provider's one-click consent URL, when the domain's DNS host supports it.
 // Fetched once per page. Callers hold the records back while it is pending (the API bounds discovery
