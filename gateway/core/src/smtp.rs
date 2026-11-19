@@ -243,7 +243,7 @@ impl Smtp {
                 self.ehlo = true;
                 self.reset();
                 let mut r = Reply::default();
-                r.line("250-smtp.bane.mx");
+                r.line("250-smtp.nightmail.dev");
                 r.line("250-PIPELINING");
                 r.line(format!("250-SIZE {MAX_SIZE}"));
                 r.line("250-8BITMIME");

@@ -132,8 +132,11 @@ impl Gateway {
         }
         let mut core = Core::new(port.protocol, port.implicit);
         let greeting = match &core {
-            Core::Imap(i) => format!("* OK [CAPABILITY {}] Bane ready\r\n", i.capabilities()),
-            Core::Smtp(_) => "220 smtp.bane.mx ESMTP Bane ready\r\n".into(),
+            Core::Imap(i) => format!(
+                "* OK [CAPABILITY {}] imap.nightmail.dev Nightmail ready\r\n",
+                i.capabilities()
+            ),
+            Core::Smtp(_) => "220 smtp.nightmail.dev ESMTP Nightmail ready\r\n".into(),
         };
         timeout_at(greeting_deadline, write(&mut stream, greeting.as_bytes())).await??;
         let mut changed = self.changed.subscribe();
