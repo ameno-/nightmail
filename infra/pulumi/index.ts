@@ -8,9 +8,12 @@ import {prepareDevMail,prepareProductionMail,prepareRuntime} from './nightmail-d
 import { deadLetterAlarm, receivingAlarm } from './receiving-alarm.js';
 import { bucketPolicy, deliveryPolicy, feedbackPolicy, inboundPolicy, lifecycleRules, POOL_STREAMS, poolEventDestination, publicAccessBlock, receiptRule, redrivePolicy } from '../../api/src/mail-controls.js';
 
+// origin is the stage's API host: the gateway calls it, and the nightmail-runtime policies allow sns:Subscribe only to
+// its /v1/events/ses (the nightmail-* topics' subscriptions are made by hand). The legacy bane-* topics' subscriptions,
+// bane-runtime policies and gateway stay on legacyOrigin: a new endpoint would replace those protected subscriptions.
 const stages = {
   dev: {
-    account: "905840579680", origin: "https://dev.bane.mx", prefix: "bane-dev", worker: "bane-dev",
+    account: "905840579680", origin: "https://dev.nightmail.dev", legacyOrigin: "https://dev.bane.mx", prefix: "bane-dev", worker: "bane-dev",
     cloudflareAccountId: "d8e944f537ceef3f06a5bd3aec1d7a53",
     // The homepage's media host, in the stage's own zone, and the dashboard origins that read it.
     media: { domain: "media.dev.nightmail.dev", zoneId: "941e50c6e0700a28f6f1c5224f165e31", origins: ["https://dev.nightmail.dev", "https://dev.bane.mx"] },
@@ -18,7 +21,7 @@ const stages = {
     extraQueues: { webhooks: "a25aa21928d846c4a5531b7e523901a8", "feedback-dlq": "94a4269c23644e93851be3b28bb55b72" } as Record<string, string>,
   },
   production: {
-    account: "009882681002", origin: "https://bane.mx", prefix: "bane-prod", worker: "bane-production",
+    account: "009882681002", origin: "https://bane.mx", legacyOrigin: "https://bane.mx", prefix: "bane-prod", worker: "bane-production",
     cloudflareAccountId: "15d29c8639fd3733b1b5486a2acfd968",
     media: { domain: "media.nightmail.dev", zoneId: "bf500df4b73f1a5182243551e85019ee", origins: ["https://nightmail.dev", "https://bane.mx"] },
     queues: { work: "753a4b880016464c833b836a63663684", feedback: "34426f99502941fbbed927a059517b7c" },
@@ -164,7 +167,7 @@ const inbound = new aws.sns.Topic('pool-inbound',{name:'bane-inbound',tags:tags(
   deliveryPolicy:JSON.stringify(deliveryPolicy)},opts(inboundArn,ohio));
 const subArn = imports.find(id=>id.startsWith(inboundArn+':'));
 if (subArn && !/^[0-9a-f-]{36}$/i.test(subArn.slice(inboundArn.length+1))) throw new Error('Import only the confirmed Bane inbound HTTPS subscription ARN');
-const sub = new aws.sns.TopicSubscription('pool-inbound-https',{topic:inbound.arn,protocol:'https',endpoint:stage.origin+'/v1/events/ses',rawMessageDelivery:false,
+const sub = new aws.sns.TopicSubscription('pool-inbound-https',{topic:inbound.arn,protocol:'https',endpoint:stage.legacyOrigin+'/v1/events/ses',rawMessageDelivery:false,
   endpointAutoConfirms:false,redrivePolicy:JSON.stringify(redrivePolicy(region,account))},{...(subArn?adopt(subArn,ohio):protectedOhio),dependsOn:[queuePolicy]});
 const rule=receiptRule('bane-inbound-all',[],{bucket:bucketName,topicArn:inboundArn}), action=rule.Actions[0].S3Action;
 const route = new aws.ses.ReceiptRule('pool-inbound-all',{ruleSetName:'bane-inbound',name:rule.Name,enabled:rule.Enabled,scanEnabled:rule.ScanEnabled,tlsPolicy:rule.TlsPolicy,
@@ -190,7 +193,7 @@ const feedback = [false,true].map((trusted,i)=>{
   if (subscription && !/^[0-9a-f-]{36}$/i.test(subscription.slice(arn.length+1))) throw new Error(`Import only the confirmed Bane ${name} HTTPS subscription ARN`);
   // Virginia's subscription is created and journaled by the Worker during trusted enrollment;
   // Pulumi only adopts it afterwards. Ohio's is created here if the inventory found none.
-  if (subscription || !trusted) new aws.sns.TopicSubscription(`pool-${name}-https`,{topic:topic.arn,protocol:'https',endpoint:stage.origin+'/v1/events/ses',rawMessageDelivery:false,
+  if (subscription || !trusted) new aws.sns.TopicSubscription(`pool-${name}-https`,{topic:topic.arn,protocol:'https',endpoint:stage.legacyOrigin+'/v1/events/ses',rawMessageDelivery:false,
     endpointAutoConfirms:false,redrivePolicy:dlq.arn.apply(deadLetterTargetArn=>JSON.stringify({deadLetterTargetArn}))},{...(subscription?adopt(subscription,provider):options),dependsOn:[policy]});
   return topic;
 });
@@ -209,12 +212,13 @@ const user = new aws.iam.User(runtime, {
 }, adopt(runtime, iam));
 
 const policies = render("--fresh", { account: stage.account, origin: stage.origin });
+const legacyPolicies = render("--fresh", { account: stage.account, origin: stage.legacyOrigin });
 const renamedKey = !production && config.getBoolean('prepareNightmailMail') ? prepareDevMail(ohio,iam,stage.account,config.require('permissionsBoundary'),policies,config.getBoolean('nightmailMailActive')===true) : undefined;
 if (production && config.getBoolean('prepareNightmailMail')) prepareProductionMail(ohio,iam,stage.account);
 const standbyRuntime = production && config.getBoolean('stageNightmailRuntime');
 if (standbyRuntime && !writeWorkerSecrets) throw Error('Staged production runtime requires private Worker secret delivery');
 const standbyKey = standbyRuntime ? prepareRuntime(iam,stage.account,config.require('permissionsBoundary'),policies,true) : undefined;
-const attachments = Object.entries(policies).map(([name, document]) => {
+const attachments = Object.entries(legacyPolicies).map(([name, document]) => {
   const arn = `arn:aws:iam::${stage.account}:policy/${name}`;
   const policy = new aws.iam.Policy(name, { name, path: "/", policy: JSON.stringify(document) }, {...adopt(arn, iam),dependsOn:[route,...feedback,...destinations]});
   return new aws.iam.UserPolicyAttachment(name, { user: user.name, policyArn: policy.arn }, adopt(`${runtime}/${arn}`, iam));
