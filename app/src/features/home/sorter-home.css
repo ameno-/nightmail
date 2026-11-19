@@ -314,6 +314,11 @@
 .srt-caption { position: absolute; top: 0; display: grid; row-gap: 8px; }
 .srt-caption h2 { margin: 0; color: var(--srt-text); font-size: 30px; font-weight: 500; font-variation-settings: 'opsz' 32; line-height: 1.05; letter-spacing: -.024em; }
 .srt-caption p { margin: 0; color: var(--srt-text-2); font-size: 15px; line-height: 22px; letter-spacing: -.006em; }
+/* (On a wide page a caption stops short of the outbound main where the main runs up through it (sorter-stations.tsx):
+   a line too long for that runs on to a second, balanced, and the caption grows up the page into the gap over it,
+   never down onto its appliance. Its foot is where one line's is.) */
+.srt-stations:not([data-phone]) .srt-caption { top: auto; bottom: calc(-1 * (30px * 1.05 + 8px + 22px)); }
+.srt-stations:not([data-phone]) .srt-caption p { text-wrap: balance; }
 
 /* An appliance's box, in the machine's projection: a front, with its top and the side that is seen behind it. They
    are lit as the machine's own faces are: the front from the lamp over it, a little brighter at the top and darker
