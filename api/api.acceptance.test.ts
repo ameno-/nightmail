@@ -26380,24 +26380,41 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const authorization=`Bearer ${key}`;
       const upload=await fetch(new Request(`${PUBLIC_ORIGIN}/v1/attachments/upload`,{method:'POST',headers:{authorization,'content-type':'text/plain','x-nightmail-filename':'big.txt'},body:Buffer.alloc(size,0x61)}));
       const file=await upload.json() as Json;assert.equal(upload.status,201);
-      attachmentDownload.readMs=50;
+      // The read deadline passes when the test says, not on the wall clock: a real 50 ms deadline could pass before the
+      // second download was ready on a loaded runner, freeing the first share before it was counted. Only the
+      // downloads' watchdogs are armed with this delay; they are kept here to be fired by hand.
+      const deadline=987_654,armed=new Map<object,()=>void>(),fired=new Set<()=>void>(),{setTimeout:realSetTimeout,clearTimeout:realClearTimeout}=globalThis;
+      const timers=[t.mock.method(globalThis,'setTimeout',((callback:()=>void,ms?:number,...rest:unknown[])=>{
+        if(ms!==deadline) return realSetTimeout(callback,ms,...rest);
+        const handle={unref(){}};armed.set(handle,callback);fired.add(callback);return handle;
+      }) as never),t.mock.method(globalThis,'clearTimeout',((handle:unknown)=>{ if(!armed.delete(handle as object)) realClearTimeout(handle as never); }) as never)];
+      const passDeadline=()=>{ const due=[...armed.values()];armed.clear();for(const callback of due) callback(); };
+      attachmentDownload.readMs=deadline;
       try {
-        // Two 25 MiB downloads nobody reads: each holds its file's share of the budget.
+        // Two 25 MiB downloads nobody reads: each holds its file's share of the budget until its deadline.
         const unread=await Promise.all([0,1].map(()=>fetch(new Request(`${PUBLIC_ORIGIN}/v1/attachments/${file.id}/content`,{headers:{authorization}}))));
         assert.deepEqual(unread.map(r=>r.status),[200,200]);
+        assert.equal(armed.size,2);
         assert.equal(memoryInUse(),2*Math.ceil(size*1.15+MiB));
-        await new Promise(resolve=>setTimeout(resolve,200));
+        passDeadline();
         // Past the deadline both responses are ended (a read fails) and only then is their memory free again, so a
         // 25 MiB send that follows is admitted at once.
         for(const response of unread) await assert.rejects(response.text());
         assert.equal(memoryInUse(),0);
-        assert.equal(await Promise.race([withMemory(sendReservation(size,0),async()=>memoryInUse()),new Promise(resolve=>setTimeout(()=>resolve('waiting'),100))]),Math.ceil(size*2.5));
-        // A download that is read to the end or canceled gives its share back once, and the timer then has nothing to do.
+        assert.equal(await Promise.race([withMemory(sendReservation(size,0),async()=>memoryInUse()),new Promise(resolve=>setImmediate(()=>resolve('waiting')))]),Math.ceil(size*2.5));
+        // A download that is read to the end or canceled gives its share back once and clears its timer, which then has
+        // nothing to do even if it fires.
         const read=await fetch(new Request(`${PUBLIC_ORIGIN}/v1/attachments/${file.id}/content`,{headers:{authorization}}));
         assert.equal(Buffer.from((await read.json() as Json).content,'base64').length,size);
-        const canceled=await fetch(new Request(`${PUBLIC_ORIGIN}/v1/attachments/${file.id}/content`,{headers:{authorization}}));await canceled.body!.cancel();
-        await new Promise(resolve=>setTimeout(resolve,200));assert.equal(memoryInUse(),0);
-      } finally { attachmentDownload.readMs=readMs; }
+        assert.equal(memoryInUse(),0);
+        const canceled=await fetch(new Request(`${PUBLIC_ORIGIN}/v1/attachments/${file.id}/content`,{headers:{authorization}}));
+        assert.equal(memoryInUse(),Math.ceil(size*1.15+MiB));
+        await canceled.body!.cancel();
+        assert.equal(memoryInUse(),0);
+        assert.deepEqual([armed.size,fired.size],[0,4]);
+        for(const callback of fired) callback();
+        assert.equal(memoryInUse(),0);
+      } finally { attachmentDownload.readMs=readMs;for(const timer of timers) timer.mock.restore(); }
     });
   });
 
