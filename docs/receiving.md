@@ -134,6 +134,8 @@ Every address is an inbox. It has folders, UIDs and one writer for its thread an
 
 Endpoints and webhooks are one model. Every endpoint, whatever its type, is one row with one ID (`mwh_…` for a webhook, `con_…` for Slack, Discord and forwards); a webhook's `key` is its endpoint name. `/v1/endpoints` lists and changes named endpoints of every type, and `/v1/inbound/webhooks` lists and changes webhooks, named or not. Both go through the same writer (`api/src/endpoints.ts`), so names, caps (32 active webhooks with event subscriptions, 500 active route-only webhooks, 50 Slack, Discord and forward endpoints), the in-use checks and pause and resume are the same through either.
 
+Attachments follow their message. A webhook payload's attachment link (`downloadUrl` in the inbound format, `url` in a nightmail message's attachments) is `downloadInboundAttachment`: it answers `307` to a download link that works for five minutes. Any credential that can read the message can follow it, by the same rule as `getInboundAttachment`: an inbound key for the address the mail reached, a member's session or an agent token. `rawUrl` is the delivery record (raw MIME names every recipient), so it needs access to every address: an owner or admin session, or an unrestricted manage API key.
+
 ```sh
 curl "$BANE/v1/inbound/overview?kind=address,route&origin=api&q=support" -H "Authorization: Bearer $KEY"
 ```

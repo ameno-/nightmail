@@ -4499,7 +4499,7 @@ export type InboundWebhook = {
      */
     name: string | null;
     /**
-     * nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key.
+     * nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Any credential that can read the message can follow its attachment downloadUrl, an inbound key for its address included; rawUrl needs an owner or admin session, or an unrestricted manage API key.
      */
     format: 'nightmail' | 'inbound';
     /**
@@ -4507,7 +4507,7 @@ export type InboundWebhook = {
      */
     junk: 'skip' | 'include';
     /**
-     * nightmail format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL.
+     * nightmail format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL. Attachment urls open for any credential that can read the message; rawUrl needs an owner or admin session, or an unrestricted manage API key.
      */
     include: Array<'message' | 'raw'>;
     /**
@@ -4530,7 +4530,7 @@ export type CreateInboundWebhook = {
      */
     name?: string | null;
     /**
-     * nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key. bane is the earlier name of nightmail, still accepted.
+     * nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Any credential that can read the message can follow its attachment downloadUrl, an inbound key for its address included; rawUrl needs an owner or admin session, or an unrestricted manage API key. bane is the earlier name of nightmail, still accepted.
      */
     format?: 'nightmail' | 'inbound' | 'bane';
     /**
@@ -4538,7 +4538,7 @@ export type CreateInboundWebhook = {
      */
     junk?: 'skip' | 'include';
     /**
-     * nightmail format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL.
+     * nightmail format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL. Attachment urls open for any credential that can read the message; rawUrl needs an owner or admin session, or an unrestricted manage API key.
      */
     include?: Array<'message' | 'raw'>;
     /**
@@ -4584,7 +4584,7 @@ export type UpdateInboundWebhook = {
      */
     name?: string | null;
     /**
-     * nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key. bane is the earlier name of nightmail, still accepted.
+     * nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Any credential that can read the message can follow its attachment downloadUrl, an inbound key for its address included; rawUrl needs an owner or admin session, or an unrestricted manage API key. bane is the earlier name of nightmail, still accepted.
      */
     format?: 'nightmail' | 'inbound' | 'bane';
     /**
@@ -4592,7 +4592,7 @@ export type UpdateInboundWebhook = {
      */
     junk?: 'skip' | 'include';
     /**
-     * nightmail format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL.
+     * nightmail format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL. Attachment urls open for any credential that can read the message; rawUrl needs an owner or admin session, or an unrestricted manage API key.
      */
     include?: Array<'message' | 'raw'>;
     /**
@@ -4629,7 +4629,7 @@ export type InboundWebhookTestResult = {
 
 export type TestInboundWebhook = {
     /**
-     * nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key. bane is the earlier name of nightmail, still accepted.
+     * nightmail (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Any credential that can read the message can follow its attachment downloadUrl, an inbound key for its address included; rawUrl needs an owner or admin session, or an unrestricted manage API key. bane is the earlier name of nightmail, still accepted.
      */
     format?: 'nightmail' | 'inbound' | 'bane';
     overrideUrl?: string;
@@ -23421,6 +23421,66 @@ export type GetInboundAttachmentResponses = {
 };
 
 export type GetInboundAttachmentResponse = GetInboundAttachmentResponses[keyof GetInboundAttachmentResponses];
+
+export type DownloadInboundAttachmentData = {
+    body?: never;
+    path: {
+        messageId: string;
+        attachmentId: string;
+    };
+    query?: {
+        /**
+         * Opaque inbound address ID (mbx_…).
+         */
+        addressId?: string;
+    };
+    url: '/v1/inbound/messages/{messageId}/parts/{attachmentId}';
+};
+
+export type DownloadInboundAttachmentErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type DownloadInboundAttachmentError = DownloadInboundAttachmentErrors[keyof DownloadInboundAttachmentErrors];
 
 export type ListLogsData = {
     body?: never;
