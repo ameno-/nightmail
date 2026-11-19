@@ -24312,11 +24312,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     // A pattern in a session policy stands for the resources it names: check one of each.
     const sample=(arn:string)=>arn.replace('identity/?*.??*','identity/example.com').replace(/configuration-set\/(bane|nightmail)-\*$/,'configuration-set/$1-0123456789abcdef0123-transactional');
     const tags={owner:'nightmail','installation-id':connection,purpose:'domain-identity','domain-claim':claim};
+    const feedback=(kind:'Resource'|'Request')=>({[`aws:${kind}Tag/nightmail:owner`]:'nightmail',[`aws:${kind}Tag/nightmail:installation-id`]:connection,[`aws:${kind}Tag/nightmail:purpose`]:'ses-feedback'});
     const own=Object.fromEntries(Object.entries(tags).map(([k,v])=>['aws:ResourceTag/nightmail:'+k,v])),create={...Object.fromEntries(Object.entries(tags).map(([k,v])=>['aws:RequestTag/nightmail:'+k,v])),'aws:TagKeys':Object.keys(tags).map(k=>'nightmail:'+k)};
     // The request facts AWS adds: tags of the identity and the request for domain calls, and the subscription endpoint.
     const context=(action:string,resource:string)=>({'aws:RequestedRegion':region,'ses:ApiVersion':'2','ses:OpenTrackingEnabled':'true','ses:ClickTrackingEnabled':'true',
       ...(action==='sns:Subscribe'?{'sns:Protocol':'https','sns:Endpoint':'https://events.nightmail.dev/v1/events/ses'}:{}),
-      ...(resource.includes(':identity/')?{...(action==='ses:CreateEmailIdentity'?{}:own),...(['ses:CreateEmailIdentity','ses:TagResource'].includes(action)?create:{})}:{})});
+      ...(resource.includes(':identity/')?{...(action==='ses:CreateEmailIdentity'?{}:own),...(['ses:CreateEmailIdentity','ses:TagResource'].includes(action)?create:{})}
+        // Nightmail's own configuration sets and topic carry this connection's tags from creation on.
+        :resource!=='*'?{...feedback('Resource'),...(['ses:CreateConfigurationSet','sns:CreateTopic','ses:TagResource','sns:TagResource'].includes(action)?{...feedback('Request'),'aws:TagKeys':['nightmail:owner','nightmail:installation-id','nightmail:purpose']}:{})}:{})});
     const purposes=['scan','provision','cleanup','send','template','quota','verify','read','delete','mailfrom'] as const,templates=await byoTemplates();
     assert.ok(templates.includes('byo-template.yaml'));
     let checked=0;
