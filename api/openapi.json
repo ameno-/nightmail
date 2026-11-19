@@ -3463,13 +3463,17 @@
               "id",
               "suppressed"
             ]
+          },
+          "thread": {
+            "$ref": "#/components/schemas/EmailThread"
           }
         },
         "required": [
           "email",
           "content",
           "events",
-          "contact"
+          "contact",
+          "thread"
         ]
       },
       "EmailEvent": {
@@ -3515,6 +3519,100 @@
           "simulated",
           "createdAt",
           "data"
+        ]
+      },
+      "EmailThread": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The conversation (getInboundThread)."
+          },
+          "count": {
+            "type": "integer",
+            "description": "Messages in it that the caller can read."
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ThreadMessage"
+            },
+            "description": "Up to 50 of them around this email, oldest first."
+          }
+        },
+        "required": [
+          "id",
+          "count",
+          "messages"
+        ],
+        "description": "The conversation: a reply from a receiving address or inbox, or an email whose In-Reply-To header names a received or sent message, and the messages around it that you can read. Null for an email in none, and for credentials that cannot read received mail."
+      },
+      "ThreadMessage": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The stored message (getInboundMessage). An email sent with sendEmail that answers the conversation by its In-Reply-To header has no stored copy: its email ID."
+          },
+          "emailId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The sent email (getEmailDetail) of an outbound message; null for received mail."
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "inbound",
+              "outbound"
+            ]
+          },
+          "from": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "address": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "address"
+            ]
+          },
+          "snippet": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string",
+            "description": "When it was received or sent."
+          },
+          "status": {
+            "type": "string",
+            "description": "Received mail: received. Sent mail: the email status (scheduled while it waits for its time)."
+          },
+          "attachmentCount": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "emailId",
+          "direction",
+          "from",
+          "snippet",
+          "at",
+          "status",
+          "attachmentCount"
         ]
       },
       "EmailContent": {
@@ -13208,6 +13306,35 @@
                   ]
                 }
               },
+              "thread": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "The conversation (getInboundThread)."
+                  },
+                  "count": {
+                    "type": "integer",
+                    "description": "Messages in it that the caller can read."
+                  },
+                  "messages": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/ThreadMessage"
+                    },
+                    "description": "Up to 50 of them around this email, oldest first."
+                  }
+                },
+                "required": [
+                  "id",
+                  "count",
+                  "messages"
+                ],
+                "description": "With includeThread=true: its conversation, as getEmailDetail shows it."
+              },
               "authentication": {
                 "$ref": "#/components/schemas/InboundMessageAuthentication"
               },
@@ -13445,7 +13572,14 @@
               "string",
               "null"
             ],
-            "description": "Received mail only."
+            "description": "The conversation (getInboundThread): every received email's, and a sent email's when it is a reply from a receiving address or inbox, or its In-Reply-To header names a stored message. Null for credentials that cannot read received mail."
+          },
+          "threadCount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Messages in that conversation the caller can read, this one included; null without threadId."
           },
           "addresses": {
             "type": [
@@ -13502,6 +13636,7 @@
           "simulated",
           "attachmentCount",
           "threadId",
+          "threadCount",
           "addresses",
           "region",
           "envelopeTo"
@@ -32392,7 +32527,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "One log detail: metadata, visible HTML/text, attachment IDs, the first 100 events and active contact for a single To address. Uses the same content and event redaction as their individual endpoints; no raw MIME. Continue events with listEmailEvents.",
+        "description": "One log detail: metadata, visible HTML/text, attachment IDs, the first 100 events, active contact for a single To address, and the conversation the email belongs to. Uses the same content and event redaction as their individual endpoints; no raw MIME. Continue events with listEmailEvents.",
         "parameters": [
           {
             "schema": {
@@ -66998,6 +67133,21 @@
             },
             "required": false,
             "name": "includeHtml",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "default": "false",
+              "description": "Include the conversation it belongs to (thread): up to 50 messages around it that you can read, oldest first, and their count. A key limited to addresses or an inbox reads only the messages on its addresses."
+            },
+            "required": false,
+            "description": "Include the conversation it belongs to (thread): up to 50 messages around it that you can read, oldest first, and their count. A key limited to addresses or an inbox reads only the messages on its addresses.",
+            "name": "includeThread",
             "in": "query"
           }
         ],

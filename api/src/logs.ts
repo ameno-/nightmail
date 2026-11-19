@@ -4,13 +4,18 @@ import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { actor, ApiError, denied, errors, PageQuery, unrestrictedRequired, region, response, security, type Actor, type App, type MailboxAccess } from './core.js';
 import { emails } from './db/sending.js';
 import { mailMessages as messages } from './db/mailbox.js';
-import { accessibleMessages, readsDelivery, visibleAddresses } from './inbound-threads.js';
+import { readsDelivery, visibleAddresses } from './inbound-threads.js';
+import { accessibleMessages, sentThreadId, threadSize } from './thread-view.js';
 import { EmailStatusFilter, listedSubject, literalSearch, mailWhere, pageBinding, sentUntrustedContent } from './sending.js';
 
 // Logs: sent and received mail in one list, newest first, from one SQL statement. Each side keeps its own index
 // (sending_emails_created_page, mail_messages_tenant_page) and limit; the outer query merges the two pages. The cursor
 // carries the direction, so equal timestamps across the two tables still page exactly once: at one instant sent rows
 // come before received rows.
+//
+// Each row names its conversation (thread-view.ts): received mail its thread, sent mail its mailbox copy's or the one its
+// In-Reply-To joins, for credentials that read received mail; and how many of its messages the caller reads, counted
+// once per thread on the page after the merge.
 //
 // Received mail follows listInboundMessages: manage credentials read every retained message, including unrouted mail;
 // dashboard members read mail on live addresses; credentials that can't read inbound mail (domain-restricted or
@@ -32,7 +37,8 @@ const LogEntry = z.object({
   scheduledAt: z.string().nullable().describe('Sent mail that is scheduled: when it goes (UTC). Null for received mail.'),
   simulated: z.boolean().describe('Sent through the SES mailbox simulator. Always false for received mail.'),
   attachmentCount: z.number().int().nullable().describe('Received mail only.'),
-  threadId: z.string().nullable().describe('Received mail only.'),
+  threadId: z.string().nullable().describe('The conversation (getInboundThread): every received email\'s, and a sent email\'s when it is a reply from a receiving address or inbox, or its In-Reply-To header names a stored message. Null for credentials that cannot read received mail.'),
+  threadCount: z.number().int().nullable().describe('Messages in that conversation the caller can read, this one included; null without threadId.'),
   addresses: z.array(z.object({ id: z.string(), address: z.string() })).nullable().describe('Received mail only: the receiving addresses it was delivered to that the caller can read. Empty for unrouted mail.'),
   region: z.string().nullable().describe('Null for received mail unless the caller is an administrator.'),
   envelopeTo: z.array(z.string()).nullable().describe('Received mail, administrators only: the SMTP envelope recipients.'),
@@ -68,7 +74,7 @@ function readCursor(value: string | undefined, binding: string) {
   } catch { throw new ApiError(422, 'INVALID_CURSOR', 'Use the returned cursor with the same filters.', 'cursor'); }
 }
 
-type Row = { direction: 'sent' | 'received'; untrusted: boolean; id: string; at: string; status: string; from_address: string; from_name: string | null; to: unknown[]; subject: string; stream: 'transactional' | 'marketing' | null; campaign_id: string | null; scheduled_at: string | null; simulated: boolean; attachment_count: number | null; thread_id: string | null; addresses: { id: string; address: string }[] | null; region: string | null; envelope_to: string[] | null };
+type Row = { direction: 'sent' | 'received'; untrusted: boolean; id: string; at: string; status: string; from_address: string; from_name: string | null; to: unknown[]; subject: string; stream: 'transactional' | 'marketing' | null; campaign_id: string | null; scheduled_at: string | null; simulated: boolean; attachment_count: number | null; thread_id: string | null; thread_count: number | null; addresses: { id: string; address: string }[] | null; region: string | null; envelope_to: string[] | null };
 
 export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess | null) {
   app.openapi(createRoute({ method: 'get', path: '/v1/logs', operationId: 'listLogs', tags: ['Emails'], security, summary: 'List sent and received mail together',
@@ -85,7 +91,7 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
 
     const sentPage = sent ? sql`(SELECT 'sent'::text AS direction, ${sentUntrustedContent} AS untrusted, ${emails.id} AS id, ${emails.createdAt} AS sort_at, ${precise(emails.createdAt)} AS at, ${emails.status} AS status,
         ${emails.from} AS from_address, ${emails.snapshot}->>'fromName' AS from_name, ${emails.to} AS "to", ${emails.subject} AS subject, ${emails.snapshot}->>'kind' AS stream,
-        ${emails.campaignId} AS campaign_id, CASE WHEN ${emails.status}='scheduled' THEN ${precise(emails.scheduledAt)} END AS scheduled_at, ${emails.simulated} AS simulated, NULL::int AS attachment_count, NULL::text AS thread_id, NULL::jsonb AS addresses, ${emails.region} AS region, NULL::jsonb AS envelope_to
+        ${emails.campaignId} AS campaign_id, CASE WHEN ${emails.status}='scheduled' THEN ${precise(emails.scheduledAt)} END AS scheduled_at, ${emails.simulated} AS simulated, NULL::int AS attachment_count, ${access ? sentThreadId : sql`NULL::text`} AS thread_id, NULL::jsonb AS addresses, ${emails.region} AS region, NULL::jsonb AS envelope_to
       FROM ${emails} WHERE ${and(mailWhere(a),
         after ? after.direction === 'sent' ? sql`(${emails.createdAt}, ${emails.id}) < (${after.at}::timestamptz, ${after.id})` : sql`${emails.createdAt} < ${after.at}::timestamptz` : undefined,
         q.campaignId ? sql`${emails.campaignId} = ${q.campaignId}` : undefined, q.status && !onlyReceived ? sql`${emails.status} = ${q.status}` : undefined,
@@ -108,14 +114,16 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
       ORDER BY ${messages.receivedAt} DESC, ${messages.id} DESC LIMIT ${n})` : null;
 
     const pages = [sentPage, receivedPage].filter((part): part is SQL => part !== null);
-    const { rows } = await c.env.db.execute<Row>(pages.length === 1 ? pages[0]!
-      : sql`SELECT * FROM (${pages[0]} UNION ALL ${pages[1]}) log ORDER BY sort_at DESC, direction DESC, id DESC LIMIT ${n}`);
+    const merged = pages.length === 1 ? pages[0]! : sql`SELECT * FROM (${pages[0]} UNION ALL ${pages[1]}) log ORDER BY sort_at DESC, direction DESC, id DESC LIMIT ${n}`;
+    const { rows } = await c.env.db.execute<Row>(access ? sql`WITH page AS MATERIALIZED (${merged}),
+        sizes AS (SELECT t.thread_id, ${threadSize(access, true, sql`t.thread_id`)} AS thread_count FROM (SELECT DISTINCT thread_id FROM page WHERE thread_id IS NOT NULL) t)
+      SELECT page.*, sizes.thread_count FROM page LEFT JOIN sizes USING (thread_id) ORDER BY page.sort_at DESC, page.direction DESC, page.id DESC` : merged);
     const last = rows.length > q.limit ? rows[q.limit - 1] : undefined;
     return c.json({
       data: rows.slice(0, q.limit).map(row => ({
         id: row.id, direction: row.direction, untrustedContent: row.untrusted, at: new Date(row.at).toISOString(), status: row.status, from: { name: row.from_name, address: row.from_address },
         to: (row.to ?? []).map(String), subject: listedSubject(a, row).subject, stream: row.stream, campaignId: row.campaign_id, scheduledAt: row.scheduled_at && new Date(row.scheduled_at).toISOString(), simulated: row.simulated, attachmentCount: row.attachment_count,
-        threadId: row.thread_id, addresses: row.addresses, region: row.region, envelopeTo: row.envelope_to,
+        threadId: row.thread_id, threadCount: row.thread_count ?? null, addresses: row.addresses, region: row.region, envelopeTo: row.envelope_to,
       })),
       nextCursor: last ? Buffer.from(JSON.stringify([last.at, last.direction, last.id, binding])).toString('base64url') : null,
       received,

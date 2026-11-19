@@ -1316,7 +1316,7 @@ export const getEmail = <ThrowOnError extends boolean = false>(options: Options<
 });
 
 /**
- * One log detail: metadata, visible HTML/text, attachment IDs, the first 100 events and active contact for a single To address. Uses the same content and event redaction as their individual endpoints; no raw MIME. Continue events with listEmailEvents.
+ * One log detail: metadata, visible HTML/text, attachment IDs, the first 100 events, active contact for a single To address, and the conversation the email belongs to. Uses the same content and event redaction as their individual endpoints; no raw MIME. Continue events with listEmailEvents.
  */
 export const getEmailDetail = <ThrowOnError extends boolean = false>(options: Options<GetEmailDetailData, ThrowOnError>): RequestResult<GetEmailDetailResponses, GetEmailDetailErrors, ThrowOnError> => (options.client ?? client).get<GetEmailDetailResponses, GetEmailDetailErrors, ThrowOnError>({
     security: [

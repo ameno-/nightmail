@@ -939,6 +939,7 @@ export type EmailDetail = {
         id: string;
         suppressed: boolean;
     } | null;
+    thread: EmailThread;
 };
 
 export type EmailEvent = {
@@ -955,6 +956,50 @@ export type EmailEvent = {
         suppressionReason?: string;
         [key: string]: unknown;
     };
+};
+
+/**
+ * The conversation: a reply from a receiving address or inbox, or an email whose In-Reply-To header names a received or sent message, and the messages around it that you can read. Null for an email in none, and for credentials that cannot read received mail.
+ */
+export type EmailThread = {
+    /**
+     * The conversation (getInboundThread).
+     */
+    id: string;
+    /**
+     * Messages in it that the caller can read.
+     */
+    count: number;
+    /**
+     * Up to 50 of them around this email, oldest first.
+     */
+    messages: Array<ThreadMessage>;
+} | null;
+
+export type ThreadMessage = {
+    /**
+     * The stored message (getInboundMessage). An email sent with sendEmail that answers the conversation by its In-Reply-To header has no stored copy: its email ID.
+     */
+    id: string;
+    /**
+     * The sent email (getEmailDetail) of an outbound message; null for received mail.
+     */
+    emailId: string | null;
+    direction: 'inbound' | 'outbound';
+    from: {
+        name: string | null;
+        address: string;
+    };
+    snippet: string;
+    /**
+     * When it was received or sent.
+     */
+    at: string;
+    /**
+     * Received mail: received. Sent mail: the email status (scheduled while it waits for its time).
+     */
+    status: string;
+    attachmentCount: number;
 };
 
 export type EmailContent = {
@@ -3982,6 +4027,23 @@ export type InboundMessageDetail = InboundMessage & {
     verdicts?: {
         [key: string]: string | boolean;
     };
+    /**
+     * With includeThread=true: its conversation, as getEmailDetail shows it.
+     */
+    thread?: {
+        /**
+         * The conversation (getInboundThread).
+         */
+        id: string;
+        /**
+         * Messages in it that the caller can read.
+         */
+        count: number;
+        /**
+         * Up to 50 of them around this email, oldest first.
+         */
+        messages: Array<ThreadMessage>;
+    } | null;
     authentication?: InboundMessageAuthentication;
     /**
      * With includeAuthentication=true: an auto-reply, bounce, delivery report, or bulk or list mail. Never answer it automatically.
@@ -4074,9 +4136,13 @@ export type LogEntry = {
      */
     attachmentCount: number | null;
     /**
-     * Received mail only.
+     * The conversation (getInboundThread): every received email's, and a sent email's when it is a reply from a receiving address or inbox, or its In-Reply-To header names a stored message. Null for credentials that cannot read received mail.
      */
     threadId: string | null;
+    /**
+     * Messages in that conversation the caller can read, this one included; null without threadId.
+     */
+    threadCount: number | null;
     /**
      * Received mail only: the receiving addresses it was delivered to that the caller can read. Empty for unrouted mail.
      */
@@ -23373,6 +23439,10 @@ export type GetInboundMessageData = {
          */
         includeAuthentication?: 'true' | 'false';
         includeHtml?: 'true' | 'false';
+        /**
+         * Include the conversation it belongs to (thread): up to 50 messages around it that you can read, oldest first, and their count. A key limited to addresses or an inbox reads only the messages on its addresses.
+         */
+        includeThread?: 'true' | 'false';
     };
     url: '/v1/inbound/messages/{messageId}';
 };
