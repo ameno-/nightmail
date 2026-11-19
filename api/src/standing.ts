@@ -2,18 +2,18 @@ import { sql } from 'drizzle-orm';
 import { ApiError, id, isSimulatedSes, log, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { enqueue, retryDatabaseFailures } from './jobs.js';
 import { queueTenantStatus, resumeHostedConnection, tenantStatusDrift, terminalColumns, terminalEvents, type HostedCaps } from './states.js';
-import { dailyLimit, moveScore, nextStanding, quality, stepRank, type DayEvidence, type DomainAuth, type Factor, type LadderInput, type Reason, type ScoreState, type Step, type Window } from './standing-model.js';
+import { dailyLimit, evaluated, FREEZE_FLOOR, moveScore, nextStanding, quality, stepRank, type DayEvidence, type DomainAuth, type Factor, type LadderInput, type Reason, type ScoreState, type Step, type Window } from './standing-model.js';
 import { productName } from './brand.js';
 
 // The standing job: every ten minutes it counts each Hosted workspace's mail, moves its score, sets the daily limit
-// admission reads, and walks the ladder (notice → warn → restrict → pause). Every change of standing, by the job, an
+// admission reads (none in good standing), and walks the ladder (notice → warn → restrict → pause). Every change of standing, by the job, an
 // owner or an operator, goes through applyChange: one transaction writes the row, its event, the webhook, the owner
 // email and, for a pause or resume, the connection hold and the SES tenant switch.
 
 export type StandingActor = { kind: 'system' | 'owner' | 'operator'; id?: string | null; via?: 'job' | 'dashboard' | 'console' | 'script' | 'ses' };
 export type StandingRow = {
   workspace_id: string; phase: ScoreState['phase']; first_recipients: number; calibrated_at: string | null; score: string | null; day_score: string | null; score_day: string | null;
-  target: string; quality: string; volume: number; factors: Factor[]; band_limit: number; daily_limit: number; step: Step; reasons: Reason[]; since: string; clear_since: string | null;
+  target: string; quality: string; volume: number; factors: Factor[]; band_limit: number | null; daily_limit: number | null; step: Step; reasons: Reason[]; since: string; clear_since: string | null;
   pause_kind: 'bounce' | 'full' | null; marketing_hold: boolean; release_until: string | null; release_percent: number | null; last_release_at: string | null; last_self_resume_at: string | null;
   strikes: { at: string; reason: string; kind: string }[]; strike_until: string | null; watch: boolean; notified: Record<string, string>; evidence_at: string | null; computed_at: string | null; version: number; sequence: number;
 };
@@ -100,13 +100,17 @@ export async function applyChange(db: DbExecutor, change: Change): Promise<{ eve
 }
 
 // ---------- the job ----------
-type Candidate = StandingRow & { connection_id: string; paused_at: string | null; pause_reason: string | null; marketing_hold_reason: string | null; legacy_hold: boolean; exempt: boolean; screened_workspace: boolean; accepted_total: number;
+type Candidate = StandingRow & { connection_id: string; paused_at: string | null; pause_reason: string | null; marketing_hold_reason: string | null; legacy_hold: boolean; exempt: boolean; screened_workspace: boolean; accepted_total: number; used_day: number;
   days: DayEvidence[] | null; domains: DomainAuth[] | null; win: { day: Window; week: Window } | null; screen: { screened: number; rejected: number } | null };
 const MAIL_ACCEPTED = sql`e.status<>'suppressed' AND (e.provider_id IS NOT NULL OR e.status IN ('accepted','sent','delivered','bounced','complained','delayed') OR e.event_outcomes & 1 <> 0)`;
-/** Counts each due workspace's mail per UTC day: 30 days the first time, then the last 8 (late feedback). */
+/**
+ * Counts each due workspace's mail per UTC day: 30 days the first time, then the last 8 (late feedback). Hourly, or every
+ * five minutes during the evaluation, so its first 100 recipients are graded soon after their results are in.
+ */
 async function refreshEvidence(db: DbExecutor, limit: number) {
   const { rows: [r] } = await db.execute<{ n: number }>(sql`WITH due AS (
-      SELECT workspace_id,evidence_at FROM sender_standing WHERE evidence_at IS NULL OR evidence_at<now()-interval '1 hour' ORDER BY evidence_at NULLS FIRST LIMIT ${limit} FOR UPDATE SKIP LOCKED
+      SELECT workspace_id,evidence_at FROM sender_standing WHERE evidence_at IS NULL OR evidence_at<now()-CASE WHEN phase='calibrating' THEN interval '5 minutes' ELSE interval '1 hour' END
+      ORDER BY evidence_at NULLS FIRST LIMIT ${limit} FOR UPDATE SKIP LOCKED
     ), mail AS (
       SELECT d.workspace_id,(e.created_at AT TIME ZONE 'UTC')::date AS day,${MAIL_ACCEPTED} AS accepted,
         (e.status='delivered' OR e.event_outcomes & 2 <> 0) AS delivered,(e.status='bounced' OR e.event_outcomes & 4 <> 0) AS bounced,
@@ -164,6 +168,8 @@ async function candidates(runtime: Runtime, limit: number, only?: string) {
     SELECT c.*,pc.id AS connection_id,CASE WHEN pc.resume_pending_at IS NULL THEN pc.paused_at END AS paused_at,pc.pause_reason,
       pc.marketing_held_at IS NOT NULL AS legacy_hold,pc.marketing_hold_reason,(SELECT exempt_hosted_quotas FROM workspaces WHERE id=c.workspace_id) AS exempt,${screened} AND pc.kind='shared' AS screened_workspace,
       (SELECT coalesce(sum(accepted),0)::int FROM sender_score_daily d WHERE d.workspace_id=c.workspace_id) AS accepted_total,
+      -- The rolling 24 hours admission counts (hosted_allowance_read): what a ladder step freezes a workspace without a limit at.
+      (SELECT coalesce(sum(u.recipients),0)::int FROM hosted_usage_hourly u WHERE u.workspace_id=c.workspace_id AND u.hour>=date_trunc('hour',now(),'UTC')-interval '23 hours') AS used_day,
       (SELECT json_agg(d ORDER BY d.day) FROM sender_score_daily d WHERE d.workspace_id=c.workspace_id AND d.day>=(now() AT TIME ZONE 'UTC')::date-180) AS days,
       (SELECT json_agg(json_build_object('name',name,'dkim',identity #>> '{ses,DkimAttributes,Status}'='SUCCESS' AND identity #>> '{ses,DkimAttributes,SigningEnabled}'='true',
         'mailFrom',identity #>> '{ses,MailFromAttributes,MailFromDomainStatus}'='SUCCESS','dmarc',identity #>> '{dmarc,status}','emails',0))
@@ -211,7 +217,9 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
   let changed = 0;
   for (const row of rows) {
     const q = quality(row.days ?? [], row.domains ?? [], row.screened_workspace, today);
-    const moved = moveScore({ phase: row.phase, firstRecipients: row.first_recipients, calibratedAt: row.calibrated_at, score: row.score === null ? null : Number(row.score), dayScore: row.day_score === null ? null : Number(row.day_score), scoreDay: row.score_day }, q.target, row.accepted_total, now);
+    // Mail older than the 180 days of evidence counts as resolved: it has had its results.
+    const counted = evaluated(row.days ?? []), mail = { accepted: row.accepted_total, resolved: counted.resolved + Math.max(0, row.accepted_total - counted.accepted) };
+    const moved = moveScore({ phase: row.phase, firstRecipients: row.first_recipients, calibratedAt: row.calibrated_at, score: row.score === null ? null : Number(row.score), dayScore: row.day_score === null ? null : Number(row.day_score), scoreDay: row.score_day }, q.target, mail, now);
     const input = ladderInput(row);
     const prev = { step: row.step, reasons: row.reasons, since: row.since, clearSince: row.clear_since, pauseKind: row.pause_kind };
     let next = nextStanding(prev, input, now);
@@ -229,7 +237,7 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
       next = { ...next, step: 'warn', pauseKind: null, ...(prev.step === 'warn' ? { since: prev.since } : {}) };
     }
     const strikeCapped = !!row.strike_until && Date.parse(row.strike_until) > now.getTime();
-    const limits = dailyLimit({ phase: moved.phase, score: moved.score, band: row.band_limit, step: next.step, currentLimit: row.daily_limit, strikeCapped });
+    const limits = dailyLimit({ phase: moved.phase, score: moved.score, band: row.band_limit, step: next.step, strikeCapped, usedDay: Number(row.used_day) });
     // An owner's marketing release and an operator's hold after a self-resume both end on their own.
     const releaseExpired = !!row.release_until && Date.parse(row.release_until) <= now.getTime();
     if (next.step !== prev.step || releaseExpired || row.legacy_hold) {
@@ -365,7 +373,7 @@ export function noticeText(o: { workspace: string; step: Step; reasons: Reason[]
   const did = o.quarantine ? `${productName} paused the campaign "${o.quarantine.campaign}". Your other mail is unaffected.`
     : o.step === 'pause' ? `${productName} paused all sending from this workspace. Receiving, inboxes, reads and the dashboard keep working. Queued mail is held for 72 hours, then canceled.`
     : o.step === 'restrict' ? `${productName} holds marketing (campaigns and marketing sends). Receipts, password resets and other transactional mail still send.`
-    : 'Nothing is held yet. Your daily limit stays where it is (it will not rise) until this clears.';
+    : `Nothing is held yet. Until this clears your daily limit is frozen: it will not rise, and a workspace without one is limited to what it sent in the last 24 hours (at least ${FREEZE_FLOOR.toLocaleString('en-US')}).`;
   const fix = o.quarantine ? ['Remove the contacts that bounced and any you have not mailed before.', 'Check where the list came from and that every contact opted in.', 'Resume the campaign from its page, or ask for a review.']
     : ['Find the campaign or domain named above and stop sending to the addresses that bounced or complained.', 'Remove contacts you cannot show opted in, and old or bought lists.', o.step === 'warn' ? 'Keep sending as usual: the warning clears by itself after 24 hours under the line.' : 'Open the dashboard to follow the checklist, release it when allowed, or ask for a review.'];
   const base = o.origin.replace(/\/$/, '')

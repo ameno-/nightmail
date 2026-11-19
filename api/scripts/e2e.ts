@@ -1074,9 +1074,9 @@ async function run() {
       const sender = await api('getSenderScore', {});
       check(sender.state === 'warmup' ? sender.score === null : sender.score !== null && sender.score >= 0 && sender.score <= 100, 'sender score outside its grading range');
       // Plan & usage: the price, this run's sends are in the month, a manage key sees the received count (members and
-      // read-only keys get null), and the daily limit names its steps.
+      // read-only keys get null), and the daily limit names its one step, the evaluation.
       const usage = await api('getUsage', {});
-      check(usage.billing.enabled === (usage.billing.enforcement === 'enforce') && usage.pricing.perThousand > 0 && usage.month.sent >= 3 && typeof usage.month.received === 'number' && usage.steps.length === 3 && (usage.daily === null || usage.daily.step === null || usage.steps[usage.daily.step]?.cap === usage.daily.cap), 'invalid plan and usage summary');
+      check(usage.billing.enabled === (usage.billing.enforcement === 'enforce') && usage.pricing.perThousand > 0 && usage.month.sent >= 3 && typeof usage.month.received === 'number' && usage.steps.length === 1 && (usage.daily === null || usage.daily.step === null || usage.steps[usage.daily.step]?.cap === usage.daily.cap), 'invalid plan and usage summary');
       // Billing as a manage key reads it: the balance and state, the sent and received allowances, today's metered usage,
       // and the ledger and payments pages.
       const bill = await api('getBilling', {});

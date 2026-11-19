@@ -9,7 +9,7 @@ import { openScoreAbout } from '../../lib/score-about'
 import { standingTitle, standingTone, stepAtLeast, type RaisedStep } from '../../lib/standing'
 import { useTween } from '../../components/motion'
 import { Dial } from './gauge'
-import { ScoreAbout } from './about'
+import { evaluationLeft, ScoreAbout } from './about'
 import { productName } from '../../../../api/src/brand'
 export { factorFormats } from './about'
 import './score.css'
@@ -21,7 +21,7 @@ export { StandingCard } from './standing'
 export function useSenderScore() { return useApiDef(queries.senderScore(), { interval: 60_000 }) }
 const whole = (value: number) => Math.round(value)
 // Before the first grade there is no score to show: a dash beside the dial's progress, never a 0 that reads as a bad grade.
-const progressLabel = (report: SenderScore) => `${number(report.emails.firstEmails)} of ${number(report.needed)} real emails`
+const progressLabel = (report: SenderScore) => `${number(report.emails.firstEmails)} of ${number(report.needed)} real emails. ${evaluationLeft(report)}`
 
 export function SidebarScore() {
   const { data: report, isError } = useSenderScore()

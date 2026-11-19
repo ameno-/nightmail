@@ -4,36 +4,57 @@ import { productName } from './brand.js'
 //
 //   factor score  s = 100 × clamp((bad − x) ÷ (bad − good), 0, 1), x a rate decayed with a 30-day half-life
 //   quality       Q = Σ weight·s ÷ Σ weight over measured factors (neutral ones drop out, the rest re-weigh)
-//   target        T = (n·Q + 250·60) ÷ (n + 250), n = decayed accepted volume: no evidence sits at 60 (100/day)
-//   calibrating   until 100 real recipients were accepted and 24 hours passed: 100/day, no score
-//   score         starts at min(65, T) when calibration ends; each UTC day moves towards T by at most +5 / −10
-//   limit         100 × 10^((score − 60) ÷ 15), snapped to the bands below; it drops only 2 points under a band
-//   ladder        notice → warn → restrict (marketing held) → pause (all sending), each line a count and a rate
+//   evaluation    a new workspace's first 100 real recipients: 100 a day until they were accepted and their delivery
+//                 results are in (90% of them, or an hour after the 100th), then the score is their quality alone
+//   score         Q, recomputed every run from all the evidence (no prior, no daily movement limit): complaints that
+//                 arrive days after the evaluation move it at once
+//   limit         none at 75 and up (good standing); under it the bands below, dropping only 2 points under a band
+//   ladder        notice → warn → restrict (marketing held) → pause (all sending), each line a count and a rate; a
+//                 step from warn up freezes the limit (none becomes what was sent in 24 hours, at least 10,000)
 
 export const GRADES = ['A+', 'A', 'B', 'C', 'D', 'F'] as const;
 export type Grade = (typeof GRADES)[number];
 export const GRADE_BANDS: { grade: Grade; min: number }[] = [{ grade: 'A+', min: 95 }, { grade: 'A', min: 90 }, { grade: 'B', min: 80 }, { grade: 'C', min: 70 }, { grade: 'D', min: 60 }, { grade: 'F', min: 0 }];
 export const gradeOf = (score: number): Grade => GRADE_BANDS.find(b => score >= b.min)!.grade;
 
-/** Score → daily limit (rolling 24 hours, recipients). Published. */
-export const LIMIT_BANDS = [
-  { min: 90, limit: 10_000 }, { min: 85, limit: 5_000 }, { min: 80, limit: 2_000 }, { min: 75, limit: 1_000 },
-  { min: 70, limit: 500 }, { min: 65, limit: 200 }, { min: -Infinity, limit: 100 },
-] as const;
-export const CALIBRATION = { recipients: 100, hours: 24, start: 65, limit: 100 };
-export const SCORE = { prior: 60, confidence: 250, halfLifeDays: 30, maxRise: 5, maxFall: 10, hysteresis: 2, historyDays: 180 };
+/** Score → daily limit (rolling 24 hours, recipients); null is no daily limit: good standing. Published. */
+export const GOOD_STANDING = 75;
+export const LIMIT_BANDS: readonly { min: number; limit: number | null }[] = [
+  { min: GOOD_STANDING, limit: null }, { min: 70, limit: 500 }, { min: 65, limit: 200 }, { min: -Infinity, limit: 100 },
+];
+/**
+ * The evaluation: a new workspace's first 100 real recipients go at the normal pace and it can send no more until their
+ * delivery results are in (90% of them delivered or bounced, or an hour after the 100th was accepted). Hard bounces and
+ * the spam screen, the signs of a bad list, arrive within minutes, so this is the smallest wait that has them.
+ */
+export const EVALUATION = { recipients: 100, limit: 100, resolved: 0.9, waitMinutes: 60 } as const;
+/** prior: the score with nothing measured at all (no real mail in 180 days). */
+export const SCORE = { prior: 60, halfLifeDays: 30, hysteresis: 2, historyDays: 180 };
+/** From warn up the limit is frozen: a workspace without one gets what it sent in the last 24 hours, at least this. */
+export const FREEZE_FLOOR = 10_000;
+/**
+ * Pacing protects the shared pool; it is not a customer limit. With a daily limit: clamp(limit ÷ 20, 50, 500) a minute.
+ * Without one: a quarter of the pool's SES rate (the share campaign planning already uses), at least 500 a minute. Half
+ * of it per sending domain (at least 50). The dispatcher also gives every workspace with queued mail a slot before any
+ * gets a second, under the pool's own rate (docs/dispatch-scaling.md). hosted_minute_cap (migration 348) applies it.
+ */
+export const PACE = { floor: 50, ceiling: 500, perDay: 20, uncappedFloor: 500, poolShare: 4 } as const;
 export const bandFor = (score: number) => LIMIT_BANDS.find(b => score >= b.min)!;
 export const nextBand = (score: number) => [...LIMIT_BANDS].reverse().find(b => b.min > score) ?? null;
-/** Per minute: clamp(limit ÷ 20, 50, 500); marketing per hour max(25, limit ÷ 4); the reserve max(100, 10%). */
-export const burstFor = (limit: number) => Math.min(500, Math.max(50, Math.floor(limit / 20)));
+/** Per minute for a daily limit (null: the uncapped floor; the API reports the pool-based figure); marketing per hour max(25, limit ÷ 4); the reserve max(100, 10%). */
+export const burstFor = (limit: number | null) => limit === null ? PACE.uncappedFloor : Math.min(PACE.ceiling, Math.max(PACE.floor, Math.floor(limit / PACE.perDay)));
 export const marketingHourFor = (limit: number) => Math.max(25, Math.floor(limit / 4));
 export const reserveFor = (limit: number) => Math.max(Math.min(100, limit), Math.ceil(limit * 0.1));
 
-/** The band a score holds: rises at the band floor, drops only `hysteresis` points under it. */
-export function bandLimit(score: number, current: number) {
+// No daily limit ranks above every number.
+const rank = (limit: number | null) => limit ?? Infinity;
+const looser = (a: number | null, b: number | null) => rank(a) >= rank(b) ? a : b;
+const tighter = (a: number | null, b: number | null) => rank(a) <= rank(b) ? a : b;
+/** The band a score holds: rises at the band floor, drops only `hysteresis` points under it. null: no daily limit. */
+export function bandLimit(score: number, current: number | null) {
   const up = bandFor(score).limit;
-  if (up >= current) return up;
-  return Math.max(up, Math.min(current, bandFor(score + SCORE.hysteresis).limit));
+  if (rank(up) >= rank(current)) return up;
+  return looser(up, tighter(current, bandFor(score + SCORE.hysteresis).limit));
 }
 
 export const FACTOR_KEYS = ['complaints', 'content', 'bounces', 'hygiene', 'auth', 'engagement'] as const;
@@ -65,7 +86,7 @@ export function authShare(domains: DomainAuth[]): number | null {
   return volume ? domains.reduce((sum, d) => sum + share(d) * d.emails, 0) / volume : domains.reduce((sum, d) => sum + share(d), 0) / domains.length;
 }
 
-/** Quality, decayed volume and target from daily evidence (30-day half-life) and the domains' authentication. */
+/** Quality, decayed volume and target (the quality itself) from daily evidence (30-day half-life) and the domains' authentication. */
 export function quality(days: DayEvidence[], domains: DomainAuth[], screened: boolean, today: string): Quality {
   const end = Date.parse(today + 'T00:00:00Z'), t = { accepted: 0, delivered: 0, bounced: 0, known: 0, firstSends: 0, firstBad: 0, complained: 0, screened: 0, rejected: 0, mDelivered: 0, unsub: 0, clicked: 0 };
   for (const d of days) {
@@ -95,30 +116,32 @@ export function quality(days: DayEvidence[], domains: DomainAuth[], screened: bo
   });
   const measured = factors.filter(f => f.source === 'measured'), weight = measured.reduce((s, f) => s + f.weight, 0);
   const q = weight ? measured.reduce((s, f) => s + f.weight * f.score! / 100, 0) / weight * 100 : SCORE.prior;
-  return { quality: round(q, 2), volume: round(t.accepted, 2), target: round((t.accepted * q + SCORE.confidence * SCORE.prior) / (t.accepted + SCORE.confidence), 2), factors };
+  // No volume prior: the evaluation's 100 recipients establish the score on their own, and later mail moves it as it comes.
+  return { quality: round(q, 2), volume: round(t.accepted, 2), target: round(q, 2), factors };
 }
 
 export type ScoreState = { phase: 'seed' | 'calibrating' | 'graded'; firstRecipients: number; calibratedAt: string | null; score: number | null; dayScore: number | null; scoreDay: string | null };
-/** Moves the published score towards its target: calibration, then at most +5 / −10 per UTC day. */
-export function moveScore(prev: ScoreState, target: number, firstRecipients: number, now: Date): ScoreState {
-  const today = now.toISOString().slice(0, 10), recipients = Math.min(CALIBRATION.recipients, Math.max(prev.firstRecipients, firstRecipients));
+/** Real mail counted so far: accepted emails, and how many of them have a delivery result (delivered or bounced). */
+export type Evaluated = { accepted: number; resolved: number };
+/** Days of evidence as the evaluation reads them. */
+export const evaluated = (days: Pick<DayEvidence, 'accepted' | 'delivered' | 'bounced'>[]): Evaluated =>
+  days.reduce((n, d) => ({ accepted: n.accepted + Number(d.accepted), resolved: n.resolved + Math.min(Number(d.accepted), Number(d.delivered) + Number(d.bounced)) }), { accepted: 0, resolved: 0 });
+/** Moves the published score: the evaluation, then the target itself on every run. */
+export function moveScore(prev: ScoreState, target: number, mail: Evaluated, now: Date): ScoreState {
+  const today = now.toISOString().slice(0, 10), recipients = Math.min(EVALUATION.recipients, Math.max(prev.firstRecipients, mail.accepted)), score = round(target, 2);
   if (prev.phase === 'seed') {
-    // Existing senders already have evidence: start at the target (no calibration and no 65 start) once.
-    if (recipients < CALIBRATION.recipients) return { phase: 'calibrating', firstRecipients: recipients, calibratedAt: null, score: null, dayScore: null, scoreDay: null };
-    const score = round(target, 2);
+    // Existing senders already have evidence: graded at once.
+    if (recipients < EVALUATION.recipients) return { phase: 'calibrating', firstRecipients: recipients, calibratedAt: null, score: null, dayScore: null, scoreDay: null };
     return { phase: 'graded', firstRecipients: recipients, calibratedAt: prev.calibratedAt ?? now.toISOString(), score, dayScore: score, scoreDay: today };
   }
   if (prev.phase === 'calibrating') {
-    const calibratedAt = prev.calibratedAt ?? (recipients >= CALIBRATION.recipients ? now.toISOString() : null);
-    if (!calibratedAt || now.getTime() - Date.parse(calibratedAt) < CALIBRATION.hours * 3600_000) return { ...prev, firstRecipients: recipients, calibratedAt };
-    const score = round(Math.min(CALIBRATION.start, target), 2);
+    // calibratedAt: when the job first counted the 100th accepted recipient.
+    const calibratedAt = prev.calibratedAt ?? (recipients >= EVALUATION.recipients ? now.toISOString() : null);
+    const resultsIn = mail.accepted > 0 && mail.resolved >= EVALUATION.resolved * mail.accepted;
+    if (!calibratedAt || (!resultsIn && now.getTime() - Date.parse(calibratedAt) < EVALUATION.waitMinutes * 60_000)) return { ...prev, firstRecipients: recipients, calibratedAt };
     return { phase: 'graded', firstRecipients: recipients, calibratedAt, score, dayScore: score, scoreDay: today };
   }
-  const dayScore = prev.scoreDay === today && prev.dayScore !== null ? prev.dayScore : prev.score ?? CALIBRATION.start;
-  // The day calibration ends, the starting score is that day's: the first rise comes the next UTC day.
-  const graduated = !!prev.calibratedAt && new Date(Date.parse(prev.calibratedAt) + CALIBRATION.hours * 3600_000).toISOString().slice(0, 10) === today;
-  const score = round(clamp(target, dayScore - SCORE.maxFall, dayScore + (graduated ? 0 : SCORE.maxRise)), 2);
-  return { ...prev, firstRecipients: recipients, score, dayScore, scoreDay: today };
+  return { ...prev, firstRecipients: recipients, score, dayScore: score, scoreDay: today };
 }
 
 // ---------- the ladder ----------
@@ -213,35 +236,33 @@ export function belowClearLine(input: LadderInput) {
     && under(input.rejected, input.screened, LADDER.screen.warn[0]);
 }
 
-// ---------- asking for more (reputation-and-ops-design §3.5) ----------
-/** Auto-approval of "Request a higher limit": score ≥ 90 for 14 days, no ladder step in 30 days, at most 25,000 a day. */
-export const LIMIT_REQUEST = { minScore: 90, scoreDays: 14, quietDays: 30, maxAuto: 25_000 } as const;
-export type LimitRequest = { eligibleForAutoApproval: boolean; reasons: { code: string; message: string }[]; maxAuto: number };
+// ---------- asking for more ----------
 /**
- * Whether a limit request qualifies for auto-approval now. `days` are the published daily scores (sender_score_daily),
- * `steps` the ladder steps (warn, restrict, pause) entered in the last 30 days, `requested` the limit asked for, if known.
- * Notice is not a ladder step: it is a note on the score card.
+ * Whether "a higher limit" means anything now. A workspace in good standing has no daily limit, and one capped by its
+ * score (or frozen by a ladder step) has that cap lifted by the job as soon as it recovers, so nothing is approved
+ * automatically any more (the old rule, a score of 90 for 14 days, only ever matched workspaces that are now uncapped).
+ * A person can still review a capped workspace and set an operator override.
  */
-export function limitRequestEligibility(o: { phase: ScoreState['phase'] | null; step: Step | null; days: { day: string; score: number | null }[]; steps: number; today: string; requested?: number }): LimitRequest {
-  const reasons: LimitRequest['reasons'] = [], { minScore, scoreDays, quietDays, maxAuto } = LIMIT_REQUEST;
-  if (o.phase === null) reasons.push({ code: 'NO_STANDING', message: `This workspace has no sender standing (${productName} Hosted sending only), so a limit request goes to a person.` });
-  else if (o.phase !== 'graded') reasons.push({ code: 'CALIBRATING', message: 'The score is still calibrating; it needs 100 real recipients and 24 hours first.' });
-  // The 14 UTC days up to today, or up to yesterday before the job has written today's score.
-  const byDay = new Map(o.days.map(d => [d.day, d.score])), end = Date.parse(o.today + 'T00:00:00Z') - (byDay.has(o.today) ? 0 : DAY_MS);
-  const wanted = Array.from({ length: scoreDays }, (_, i) => new Date(end - i * DAY_MS).toISOString().slice(0, 10));
-  const short = wanted.filter(day => { const s = byDay.get(day); return s === undefined || s === null || s < minScore; });
-  if (o.phase === 'graded' && short.length) reasons.push({ code: 'SCORE_BELOW_90', message: `The score must be ${minScore} or more on each of the last ${scoreDays} days; it was not on ${short.length} of them (latest ${short[0]}).` });
-  if (o.steps > 0 || (o.step !== null && stepRank(o.step) >= stepRank('warn'))) reasons.push({ code: 'RECENT_LADDER_STEP', message: `The workspace reached a warn, restrict or pause step in the last ${quietDays} days${o.step !== null && stepRank(o.step) >= stepRank('warn') ? ` (now: ${o.step})` : ''}.` });
-  if (o.requested !== undefined && o.requested > maxAuto) reasons.push({ code: 'OVER_AUTO_MAXIMUM', message: `Requests above ${maxAuto.toLocaleString('en-US')} a day always go to a person.` });
-  return { eligibleForAutoApproval: !reasons.length, reasons, maxAuto };
+export type LimitRequest = { eligibleForAutoApproval: false; reasons: { code: string; message: string }[]; maxAuto: 0 };
+export function limitRequest(o: { phase: ScoreState['phase'] | null; step: Step | null; daily: number | null }): LimitRequest {
+  const reason = o.phase === null ? { code: 'NO_STANDING', message: `This workspace has no sender standing (${productName} Hosted sending only), so a limit request goes to a person.` }
+    : o.phase !== 'graded' ? { code: 'EVALUATING', message: `The evaluation lifts the limit by itself once the first ${EVALUATION.recipients} real recipients' delivery results are in.` }
+    : o.daily === null ? { code: 'NO_DAILY_LIMIT', message: 'This workspace has no daily limit: there is nothing to raise. Only the per-minute pace applies.' }
+    : o.step !== null && stepRank(o.step) >= stepRank('warn') ? { code: 'LADDER_STEP', message: `The limit is frozen while the workspace is at ${o.step}. It lifts once the step clears and the score is ${GOOD_STANDING} or more; a person can review it sooner.` }
+    : { code: 'SCORE_CAP', message: `The score sets this limit. It lifts by itself at ${GOOD_STANDING} or more; a person can review it sooner.` };
+  return { eligibleForAutoApproval: false, reasons: [reason], maxAuto: 0 };
 }
 
-/** The limit admission enforces from the standing (before an operator override or a resume's restore). */
-export function dailyLimit(o: { phase: ScoreState['phase']; score: number | null; band: number; step: Step; currentLimit: number; strikeCapped: boolean }) {
-  if (o.phase !== 'graded' || o.score === null) return { band: CALIBRATION.limit, limit: CALIBRATION.limit };
+/**
+ * The limit admission enforces from the standing (before an operator override or a resume's restore); null is none.
+ * `band` is the stored band, `usedDay` the recipients of the last 24 hours (what a freeze keeps).
+ */
+export function dailyLimit(o: { phase: ScoreState['phase']; score: number | null; band: number | null; step: Step; strikeCapped: boolean; usedDay: number }) {
+  if (o.phase !== 'graded' || o.score === null) return { band: EVALUATION.limit as number | null, limit: EVALUATION.limit as number | null };
   let band = bandLimit(o.score, o.band);
-  // Warn and above freeze the limit: no rises until the step clears.
-  if (stepRank(o.step) >= stepRank('warn')) band = Math.min(band, o.band);
-  const limit = o.strikeCapped ? Math.max(CALIBRATION.limit, Math.floor(band / 2)) : band;
+  // From warn up the limit is frozen: no rises until the step clears, and no limit becomes the last 24 hours' volume.
+  const frozen = () => o.band ?? Math.max(FREEZE_FLOOR, o.usedDay);
+  if (stepRank(o.step) >= stepRank('warn')) band = tighter(band, frozen());
+  const limit = o.strikeCapped ? Math.max(EVALUATION.limit, Math.floor((band ?? frozen()) / 2)) : band;
   return { band, limit };
 }

@@ -48,7 +48,7 @@ const queueColumns: Column<OperatorQueueItem>[] = [
   { ...def(queueColumnDefs, 'step'), render: row => <StepBadge step={row.step} /> },
   { ...def(queueColumnDefs, 'reason'), render: row => <span className="op-cell" title={row.reasons.map(reason => reason.message).join('\n')}>{flags(row) && <span className="op-flags">{flags(row)} · </span>}{row.reasons[0]?.message ?? '—'}</span> },
   { ...def(queueColumnDefs, 'score'), render: row => row.score === null ? '—' : row.score.toFixed(1), cardRender: row => row.score === null ? 'Calibrating' : `Score ${row.score.toFixed(1)}` },
-  { ...def(queueColumnDefs, 'limit'), render: row => number(row.dailyLimit), cardRender: row => `${number(row.dailyLimit)}/day` },
+  { ...def(queueColumnDefs, 'limit'), render: row => row.dailyLimit === null ? 'None' : number(row.dailyLimit), cardRender: row => row.dailyLimit === null ? 'No daily limit' : `${number(row.dailyLimit)}/day` },
   { ...def(queueColumnDefs, 'since'), render: row => <At value={row.since} />, cardRender: row => `since ${when(row.since)}` },
 ]
 function Queue() {
@@ -200,8 +200,8 @@ function WorkspaceBody({ data, canAct, onReleaseCampaign }: { data: OperatorWork
       <section className="op-section" aria-labelledby="op-limit"><SectionHeader title={<span id="op-limit">Limit math</span>} />
         {limit ? <Rows rows={[
           ['Enforced', limit.daily === null ? 'No daily limit' : `${number(limit.daily)} a day · ${label(limit.source)}`],
-          ['Score band', `${number(limit.band)} a day${limit.next ? ` · next ${number(limit.next.limit)} at ${limit.next.atScore}` : ''}`],
-          ['Score', graded ? `${score.score!.toFixed(1)} → target ${score.target.toFixed(1)} · quality ${score.raw.toFixed(1)}` : `Calibrating${score.calibratedAt ? `, graded from ${when(new Date(Date.parse(score.calibratedAt) + 86_400_000).toISOString())}` : ''}`],
+          ['Score band', `${limit.unlimited && limit.source === 'score' ? 'None' : `${number(limit.band)} a day`}${limit.next ? ` · next ${limit.next.unlimited ? 'none' : number(limit.next.limit)} at ${limit.next.atScore}` : ''}`],
+          ['Score', graded ? `${score.score!.toFixed(1)} → target ${score.target.toFixed(1)} · quality ${score.raw.toFixed(1)}` : `Evaluating${score.gradedBy ? `, graded by ${when(score.gradedBy)}` : ''}`],
           ['Override', limit.override ? `${number(limit.override.daily)} a day${limit.override.expiresAt ? ` until ${when(limit.override.expiresAt)}` : ', no expiry'}` : data.exempt ? 'Exempt from hosted quotas' : 'None'],
           ['Restore', limit.restore ? `${number(limit.restore.daily)} a day until ${when(limit.restore.until)}` : 'None'],
           ['Strike cap', limit.strikeCapUntil ? `50% until ${when(limit.strikeCapUntil)}` : 'None'],

@@ -11,7 +11,6 @@
 /* The row the workspace is on. */
 .limits-table tr[aria-current] td { font-weight: var(--font-weight-bold); }
 .limits-table__now { margin-left: var(--space-8); padding: 0 var(--space-6); border-radius: var(--radius-sm); background: var(--color-layer-2); font-weight: normal; white-space: nowrap; }
-.limits-table__part { display: inline-block; white-space: nowrap; }
 .limits-table :is(th, td):last-child { padding-right: 0; }
 .limits-notes { display: flex; flex-direction: column; gap: var(--space-4); margin: 0; padding-inline-start: var(--space-20); color: var(--color-muted); }
 .limits-notes--plain { color: var(--color-text); }
@@ -38,6 +37,5 @@
   .limits-table :is(th, td) { height: auto; padding: var(--space-6) var(--space-8) var(--space-6) 0; white-space: normal; vertical-align: top; }
   .limits-table th { padding-block: var(--space-8); font-size: 9px; letter-spacing: .06em; }
   .limits-table :is(th, td):nth-child(n + 2) { white-space: nowrap; }
-  .limits-table td:nth-child(2):has(> .limits-table__part) { white-space: normal; text-wrap: balance; }
   .limits-table--lines :is(th, td):nth-child(n) { white-space: normal; text-wrap: pretty; }
 }

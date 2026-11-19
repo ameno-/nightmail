@@ -1,7 +1,7 @@
 ---
 title: Terms of Service
 description: The agreement between you and Anomaly for using Nightmail: accounts, prepaid billing, refunds and credit expiry, sending limits, your data, and how disputes are resolved.
-updated: 15 November 2026
+updated: 19 November 2026
 effective: 13 November 2026
 ---
 
@@ -148,7 +148,7 @@ You must follow the [Acceptable Use Policy](/legal/acceptable-use). In short: se
 
 ### 8.1 Limits
 
-Hosted sending has daily and per-minute limits that grow as your sender score rises. A new workspace starts at **100 recipients a day**. The current limits and thresholds are published in the [Acceptable Use Policy](/legal/acceptable-use#sending-limits-and-thresholds). We may change them; lowering a limit applies to new mail, never to mail already accepted. Limits above 10,000 a day are available on request.
+Hosted sending has a per-minute pace and, when your sender score is low, a daily limit. A new workspace sends its first **100 recipients** and waits for their delivery results before sending more; after that, a sender in good standing has no daily limit. The current limits and thresholds are published in the [Acceptable Use Policy](/legal/acceptable-use#sending-limits-and-thresholds). We may change them; lowering a limit applies to new mail, never to mail already accepted.
 
 ### 8.2 The enforcement ladder
 

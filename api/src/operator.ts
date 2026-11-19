@@ -31,7 +31,7 @@ const Reason = z.string().trim().min(10).max(1000).describe('Why, for the audit 
 const TicketRef = z.string().trim().min(1).max(200).optional().describe('The support ticket ID or URL.');
 const WorkspaceParam = z.object({ id: z.string().min(1).max(100) });
 const Mutation = { 'Idempotency-Key': z.string().min(1).max(200).optional(), 'If-Match': z.string().regex(/^"?\d+"?$/).optional().describe('The standing version this action was decided on.') };
-const QueueItem = z.object({ workspaceId: z.string(), name: z.string(), step: z.enum(['ok', 'notice', 'warn', 'restrict', 'pause']), since: z.string(), score: z.number().nullable(), dailyLimit: z.number().int(),
+const QueueItem = z.object({ workspaceId: z.string(), name: z.string(), step: z.enum(['ok', 'notice', 'warn', 'restrict', 'pause']), since: z.string(), score: z.number().nullable(), dailyLimit: z.number().int().nullable().describe('Null: no daily limit.'),
   reasons: z.array(z.object({ code: z.string(), message: z.string() })), paused: z.boolean(), quarantined: z.number().int(), watch: z.boolean(), strikes: z.number().int() }).openapi('OperatorQueueItem');
 const Action = z.object({ at: z.string(), workspaceId: z.string(), action: z.string(), operatorId: z.string().nullable(), via: z.string().nullable(), reason: z.string().nullable(), ticketRef: z.string().nullable(),
   requestId: z.string().nullable(), before: z.unknown().nullable(), after: z.unknown().nullable(), details: z.unknown() }).openapi('OperatorAction');
@@ -147,12 +147,12 @@ export function registerOperator(app: App) {
     // has a stable key, so rows sharing a timestamp are never skipped across pages.
     const { rows } = await c.env.db.execute<z.infer<typeof TimelineItem> & { key: string; ts: string }>(sql`SELECT ${isoAt(sql`t.ts`)} AS at,t.key,t.kind,t.title,t.detail FROM (
       SELECT at AS ts,'s:'||id AS key,CASE kind WHEN 'step' THEN 'standing' ELSE kind END AS kind,
-        CASE WHEN from_step IS DISTINCT FROM to_step THEN coalesce(from_step,'?')||' → '||to_step WHEN kind='limit' AND details ? 'from' THEN 'Daily limit '||(details->>'from')||' → '||(details->>'to')
+        CASE WHEN from_step IS DISTINCT FROM to_step THEN coalesce(from_step,'?')||' → '||to_step WHEN kind='limit' AND details ? 'from' THEN 'Daily limit '||coalesce(details->>'from','none')||' → '||coalesce(details->>'to','none')
           WHEN kind='limit' THEN 'Limit override changed' ELSE kind||' ('||(actor->>'kind')||')' END AS title,
         jsonb_build_object('reasons',reasons,'actor',actor,'details',details,'sequence',sequence) AS detail FROM standing_events WHERE workspace_id=${wid} AND at<=${upTo}::timestamptz
       UNION ALL SELECT at,${auditKey},'audit',action,jsonb_build_object('operatorId',operator_id,'via',via,'reason',coalesce(reason,details->>'reason'),'ticketRef',ticket_ref,'before',before,'after',after)
         FROM hosted_operator_audit WHERE workspace_id=${wid} AND at<=${upTo}::timestamptz
-      UNION ALL SELECT day::timestamp AT TIME ZONE 'UTC','d:'||day,'score','Score '||coalesce(round(score,1)::text,'calibrating')||' · limit '||coalesce(daily_limit::text,'?'),
+      UNION ALL SELECT day::timestamp AT TIME ZONE 'UTC','d:'||day,'score','Score '||coalesce(round(score,1)::text,'calibrating')||' · limit '||coalesce(daily_limit::text,'none'),
         jsonb_build_object('accepted',accepted,'bounced',bounced,'complained',complained,'rejected',rejected,'quality',quality,'target',target,'step',step)
         FROM sender_score_daily WHERE workspace_id=${wid} AND (day::timestamp AT TIME ZONE 'UTC')<=${upTo}::timestamptz AND day>(now() AT TIME ZONE 'UTC')::date-60
       UNION ALL SELECT hour,'b:'||hour::text||':'||domain,'bounces',sum(b)||' hard bounces, '||sum(cpl)||' complaints at '||domain,jsonb_build_object('domain',domain,'bounces',sum(b),'complaints',sum(cpl)) FROM (

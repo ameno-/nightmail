@@ -74,7 +74,7 @@ export const TOOLS: ToolSpec[] = [
     label: fixed('Listing your workspaces…', 'Listed your workspaces'), execute: read((a, h) => `/v1/support/workspaces${query(a, h)}`) },
   { name: 'list_domains', description: 'Domains with sending verification (DKIM, MAIL FROM, DMARC) and receiving state.', params: { workspaceId: workspaceParam },
     label: fixed('Checking your domains…', 'Checked your domains'), execute: read((a, h) => `/v1/support/domains${query(a, h)}`) },
-  { name: 'get_standing', description: 'Sender standing per workspace: pauses and reasons, limit overrides, score, step and daily limit, 60 days of history and whether a higher limit would be auto-approved, plus the last 24 hours by status.',
+  { name: 'get_standing', description: 'Sender standing per workspace: pauses and reasons, limit overrides, score, step and daily limit, 60 days of history and why a higher limit is or is not needed (no daily limit in good standing), plus the last 24 hours by status.',
     params: { workspaceId: workspaceParam }, label: fixed('Checking your sending standing…', 'Checked your sending standing'), execute: read((a, h) => `/v1/support/standing${query(a, h)}`) },
   { name: 'get_billing', description: 'Balance and the billing ledger (top-ups, usage, refunds, credits) of workspaces the customer owns or administers.',
     params: { workspaceId: workspaceParam }, label: fixed('Checking your billing…', 'Checked your billing'), execute: read((a, h) => `/v1/support/billing${query(a, h)}`) },

@@ -1,6 +1,6 @@
 # How sending limits work (Hosted)
 
-Hosted Nightmail gives each workspace a **sender score** (0–100) from the quality of what it sends. The score sets the **daily limit**. Nightmail stays out of the way unless something goes wrong: it **warns** first, then **holds marketing**, and **pauses** only for problems that put the shared pool at risk. These thresholds are public; how Nightmail detects abuse is not.
+Hosted Nightmail gives each workspace a **sender score** (0–100) from the quality of what it sends. A sender in good standing has **no daily limit**: only a per-minute pace that protects the shared pool. A daily limit appears only when the signals go bad, and tightens as the score falls. Nightmail stays out of the way unless something goes wrong: it **warns** first, then **holds marketing**, and **pauses** only for problems that put the shared pool at risk. These thresholds are public; how Nightmail detects abuse is not.
 
 Everything here is in the API: `GET /v1/sender-score` (score, factors, `limit`, `standing`), the `account.standing.changed` webhook event, and `connection.standing` on `GET /v1/me`. Self-hosted and bring-your-own-AWS installations get the score for display only.
 
@@ -8,24 +8,25 @@ Everything here is in the API: `GET /v1/sender-score` (score, factors, `limit`, 
 
 | Score | Grade | Daily limit (rolling 24 h, recipients) | Per minute | Marketing per hour |
 | --- | --- | --- | --- | --- |
-| calibrating (first 100 recipients) | – | 100 | 50 | 25 |
-| under 65 | D, F | 100 | 50 | 25 |
-| 65–69 | D | 200 | 50 | 50 |
+| evaluation (first 100 recipients) | – | 100, until their results are in | 50 | 25 |
+| 75 and up | A+, A, B, upper C | **none** | ¼ of the pool's SES rate, at least 500 | no separate limit |
 | 70–74 | C | 500 | 50 | 125 |
-| 75–79 | C | 1,000 | 50 | 250 |
-| 80–84 | B | 2,000 | 100 | 500 |
-| 85–89 | B | 5,000 | 250 | 1,250 |
-| 90 and up | A, A+ | 10,000 | 500 | 2,500 |
-| on request | – | 25,000 / 50,000 / 100,000 | up to 1,000 | limit ÷ 4 |
+| 65–69 | D | 200 | 50 | 50 |
+| under 65 | D, F | 100 | 50 | 25 |
 
-- **Calibrating:** a new workspace sends at 100 a day until 100 real recipients were accepted (simulator mail never counts) and 24 hours passed. The score then starts at 65 (200 a day) if the mail was good, lower if it was not.
-- **Movement:** the score moves towards its target by at most **+5 a day** and **−10 a day**, so a clean sender roughly doubles its limit each day and reaches 10,000 about a week after calibrating, if it sends enough to prove it.
-- **Hysteresis:** a limit drops a band only when the score is 2 points under the band's floor.
-- **Per minute:** `clamp(limit ÷ 20, 50, 500)` per workspace, half of it per sending domain.
-- **Transactional reserve:** marketing may use at most `limit − max(100, 10% of limit)`. A small sender always keeps 100 a day for receipts and password resets; while calibrating, all 100 are for transactional mail.
+- **The evaluation:** a new workspace's first 100 real recipients (simulator mail never counts) go at the normal pace, and it can send no more until their delivery results are in: 90% of them delivered or bounced, or an hour after the 100th was accepted, whichever comes first (the ten-minute job grades it at its next run). Hard bounces and the spam screen, the signs of a bad list, arrive within minutes, so that is the shortest wait that has them. The score is then those 100 recipients' quality alone: a clean evaluation lands at its real score at once (100 perfect emails are 100) and has no daily limit; a bad one starts capped. `gradedBy` in `GET /v1/sender-score` says when the first grade comes at the latest.
+- **After it, the score is live:** it is recomputed every ten minutes from all the evidence, with no daily limit on how far it moves. Complaints arrive days later; when they do, they lower the score at once, measured against the mail actually sent, and the ladder's count-and-rate lines (below) catch them in the 24-hour and 7-day windows. There is no separate provisional mode.
+- **Good standing** is a score of 75 or more and no ladder step from warn up. A sender that delivers about 99% of its mail, bounces under 2% and draws almost no complaints scores around 90.
+- **Hysteresis:** a limit appears, or drops a band, only when the score is 2 points under the band's floor (73 for good standing). Recovering to the floor lifts it again.
+- **Frozen by a step:** from warn up the limit cannot rise. A workspace without one gets one at what it sent in the last 24 hours, at least 10,000. A falling score still tightens it. When the step clears and the score is 75 or more, the limit is gone again.
+- **Pacing** is platform protection, not a customer limit. Without a daily limit a workspace sends at most a quarter of the pool's SES rate a minute (the share campaign planning already uses), and never less than 500 a minute; with one, `clamp(limit ÷ 20, 50, 500)`. Each sending domain gets half (at least 50). Under the pool's own rate, the dispatcher gives every workspace with queued mail a slot before any gets a second, so one large sender cannot crowd out the others ([dispatch scaling](dispatch-scaling.md)). At a pool rate of 20 a second a good sender's throughput is 500 a minute (about 720,000 a day); at 200 a second, 3,000 a minute.
+- **Transactional reserve:** under a daily limit, marketing may use at most `limit − max(100, 10% of limit)`, so a small sender always keeps 100 a day for receipts and password resets; during the evaluation all 100 are for transactional mail. Without a daily limit there is nothing to reserve.
 - **Grades:** A+ ≥ 95, A ≥ 90, B ≥ 80, C ≥ 70, D ≥ 60, F below.
+- **Overrides:** an operator can still set a workspace's daily limit (after a review, or to cap one). There are no limit requests to approve: a workspace in good standing has nothing to raise, and a capped one is lifted by the job as it recovers.
 - Lowering a limit applies to new mail at once. Mail already accepted is never recalled.
 - **Scheduled sends** (`sendEmail` with `scheduledAt`) count when they go, not when they are scheduled: at its time an email is checked against the limit, the balance and the standing of that moment. One they refuse is rejected with the same code a send would get (`SEND_LIMIT_REACHED`, `BALANCE_EXHAUSTED`, …) and the `email.rejected` webhook; it is never sent late.
+
+In `GET /v1/sender-score`, no daily limit is `limit.daily: null` with `limit.unlimited: true`; `limit.band` and `limit.marketingPerHour` are then what the pace allows in a day and an hour, and `limit.transactionalReserve` is 0. `connection.sendingLimit.cap` on `GET /v1/me` and `daily.cap` on `GET /v1/usage` are null too.
 
 ## What the score is made of
 
@@ -39,7 +40,7 @@ Everything here is in the API: `GET /v1/sender-score` (score, factors, `limit`, 
 | Engagement: marketing unsubscribes ÷ delivered, lifted by clicks | 10 | ≤ 0.2% | ≥ 2% |
 
 - A factor with nothing to measure is neutral: it drops out and the others are re-weighted.
-- Evidence fades with a **30-day half-life**. Quality sets the ceiling; volume earns the way up: the target is `(n·Q + 250·60) ÷ (n + 250)`, where *n* is the faded volume. 100 perfect emails give 71; 1,000 give 92.
+- Evidence fades with a **30-day half-life**. The score is the weighted result itself (no volume prior): 100 perfect emails give 100. With nothing measured at all (no real mail in 180 days) it is 60.
 - Opens are ignored (mail privacy features inflate them).
 
 ## When something goes wrong: the ladder
@@ -58,7 +59,7 @@ A **notice** sits below Warn: a first complaint or a few bounces show on the das
 | Step | You see | Mail | Limit |
 | --- | --- | --- | --- |
 | Notice | A note on the score card | unchanged | unchanged |
-| ① Warn | Overview card, a dot on the score, an email to owners and admins | unchanged | frozen (no rises) |
+| ① Warn | Overview card, a dot on the score, an email to owners and admins | unchanged | frozen (no rises; none becomes the last 24 hours, at least 10,000) |
 | ② Restrict | A banner on every page, an email | Campaigns pause and new marketing is refused (409 `MARKETING_HELD`). Transactional mail keeps flowing. | frozen |
 | ③ Pause | A red banner on every page, an email | All sending stops (409 `HOSTED_SENDING_PAUSED`) and the workspace's SES tenants are disabled. Receiving, inboxes and the dashboard keep working. Queued mail is held for 72 hours, then canceled (`ACCOUNT_PAUSED`). | 0 |
 
@@ -73,7 +74,7 @@ Bounces alone hold marketing; they stop everything only when **transactional mai
 | ③ Pause from transactional bounces | – | once every 30 days: the limit is 50% for 48 hours and marketing stays held for 24 hours | otherwise |
 | ③ Any other pause | – | – | review only |
 
-- A resume never restarts the limit at 100 a day. The 50% is of the limit before the resume, for 48 hours; another resume in that window keeps it there. Each pause leaves a **strike** for 90 days; the second caps the limit at 50% for 7 days, and the third needs a review for any resume.
+- A resume never restarts the limit at 100 a day. The 50% is of the limit before the resume (the frozen one), for 48 hours, even if the score has meanwhile earned no limit; another resume in that window keeps it there. Each pause leaves a **strike** for 90 days; the second caps the limit at 50% for 7 days, and the third needs a review for any resume.
 - The owner action is `POST /v1/sender-score/release` (dashboard sessions, owners and admins); `standing.selfService` in `GET /v1/sender-score` says whether it is available, and when.
 
 ## Campaign list probe

@@ -1,8 +1,8 @@
-import { Fragment, type ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { Disclosure } from '../../components/ui'
 import type { SenderLimit } from '../../data/types'
 import { number } from '../../lib/format'
-import { CALIBRATION, GRADE_BANDS, LADDER, LIMIT_BANDS, SCORE, burstFor, pct } from '../../../../api/src/standing-model'
+import { EVALUATION, FREEZE_FLOOR, GRADE_BANDS, LADDER, LIMIT_BANDS, PACE, SCORE, burstFor, pct } from '../../../../api/src/standing-model'
 import './limits.css'
 
 // How sending limits work: the published score → limit table, the warning lines as one table (a rate and a count for
@@ -19,10 +19,10 @@ function gradeSpan(from: number, to: number) {
   return [first.grade, ...rest.map(band => `${band.grade} from ${band.from}`)].join(', ')
 }
 const scoreRange = (from: number, to: number) => from === -Infinity ? `Under ${to + 1}` : to === Infinity ? `${from} and up` : `${from}–${to}`
-const bands: [score: string, limit: number | string, current: (limit: SenderLimit) => boolean][] = [
-  [`Calibrating, first ${CALIBRATION.recipients} sent`, CALIBRATION.limit, l => l.source === 'calibrating'],
-  ...scoreBands.map(({ limit, from, to }): (typeof bands)[number] => [`${scoreRange(from, to)} · ${gradeSpan(from, to)}`, limit, l => l.source === 'score' && l.band === limit]),
-  ['On request', '25,000 · 50,000 · 100,000', () => false],
+// null is no daily limit: good standing, paced by the pool (at least PACE.uncappedFloor a minute).
+const bands: [score: string, limit: number | null, current: (limit: SenderLimit) => boolean][] = [
+  [`Evaluation, first ${EVALUATION.recipients} sent`, EVALUATION.limit, l => l.source === 'calibrating'],
+  ...scoreBands.map(({ limit, from, to }): (typeof bands)[number] => [`${scoreRange(from, to)} · ${gradeSpan(from, to)}`, limit, l => l.source === 'score' && (limit === null ? l.unlimited : !l.unlimited && l.band === limit)]),
 ]
 // Each cell is the rate and the count that must both be reached; a dash where the step has no line for it. A line
 // with the rate of the one before it gives only its count. `window` adds the period a line counts over.
@@ -37,7 +37,7 @@ const lines: [what: string, warn: string, restrict: string, pause: string][] = [
 // What each step does, then how it ends.
 const ladder: { step: string; mark: string; tone: string; does: string; recovery: string }[] = [
   { step: 'Notice', mark: '·', tone: 'neutral', does: 'A first complaint or a few bounces adds a dashboard note.', recovery: 'It clears by itself.' },
-  { step: 'Warn', mark: '1', tone: 'warning', does: 'The limit stops rising and owners and admins get an email.', recovery: 'Clears after 24 hours under 80% of the line.' },
+  { step: 'Warn', mark: '1', tone: 'warning', does: `The limit is frozen (without one, at the last 24 hours, at least ${FREEZE_FLOOR.toLocaleString('en-US')}). Owners and admins get an email.`, recovery: 'Clears after 24 hours under 80% of the line.' },
   { step: 'Restrict', mark: '2', tone: 'warning', does: 'Marketing is held; receipts and resets still send.', recovery: 'After 24 hours owners and admins can release it from Overview: 50% for 48 hours, once per 14 days.' },
   { step: 'Pause', mark: '3', tone: 'danger', does: 'Sending stops. Queued mail is canceled after 72 hours.', recovery: 'A pause from transactional bounces alone: owners can resume it at 50% for 48 hours, once per 30 days. Others need a review.' },
 ]
@@ -50,14 +50,15 @@ export function SendingLimitsGuide({ headings = 'h3', limit, compact = false }: 
     <section aria-label="Score and daily limit">
       <H>Score and daily limit</H>
       {/* Overview's dialog is Hosted's only; what the limit counts is in the docs it links to. */}
-      {!compact && <p>Hosted only: recipients per rolling 24 hours, set by the sender score.</p>}
+      {!compact && <p>Hosted only: recipients per rolling 24 hours, set by the sender score. Good standing has none.</p>}
       <div className="limits-table-scroll"><table className="limits-table">
         <thead><tr><th scope="col">Score</th><th scope="col">Daily limit</th><th scope="col">Per minute</th></tr></thead>
-        <tbody>{bands.map(([score, cap, current]) => <tr key={score} aria-current={limit && current(limit) ? 'true' : undefined}><td>{score}{limit && current(limit) && <span className="limits-table__now">Now</span>}</td><td>{typeof cap === 'number' ? number(cap) : cap.split(' · ').map((part, i, all) => <Fragment key={part}><span className="limits-table__part">{part}</span>{i < all.length - 1 && ' · '}</Fragment>)}</td><td>{number(burstFor(typeof cap === 'number' ? cap : Infinity))}</td></tr>)}</tbody>
+        <tbody>{bands.map(([score, cap, current]) => <tr key={score} aria-current={limit && current(limit) ? 'true' : undefined}><td>{score}{limit && current(limit) && <span className="limits-table__now">Now</span>}</td><td>{cap === null ? 'None' : number(cap)}</td><td>{cap === null ? `${number(PACE.uncappedFloor)} or more` : number(burstFor(cap))}</td></tr>)}</tbody>
       </table></div>
       <ul className="limits-notes">
-        <li>Marketing can use all but 100 or 10% (whichever is more), kept for receipts and resets.</li>
-        <li>The score moves at most {SCORE.maxRise} up or {SCORE.maxFall} down a day. A band drops only {SCORE.hysteresis} points under its floor.</li>
+        <li>The first {EVALUATION.recipients} wait for their delivery results, at most an hour. Then the score updates every 10 minutes.</li>
+        <li>Without a limit, the pace is a quarter of the pool’s sending rate, at least {number(PACE.uncappedFloor)} a minute.</li>
+        <li>Under a limit, marketing can use all but 100 or 10%, kept for receipts and resets. A band drops only {SCORE.hysteresis} points under its floor.</li>
       </ul>
     </section>
     <Part title="Warnings and holds" H={H} compact={compact}>

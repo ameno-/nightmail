@@ -30,24 +30,24 @@ function useSendingLimitRead() {
 }
 
 export function limitSummary(limit: SendingLimit) {
-  if (limit.cap === null) return 'No daily limit on this workspace.'
+  if (limit.cap === null) return 'No daily limit: only the per-minute pace applies.'
   return `${number(limit.used)} of ${number(limit.cap)} recipients in the last 24 hours.${limit.nextCap && limit.nextCapAt ? ` Rises to ${number(limit.nextCap)} on ${date(limit.nextCapAt, { month: 'short', day: 'numeric' })}.` : ''}`
 }
 
-// Hosted: the daily limit as one line, what's left of it and a meter, then a note only while one applies (an
-// adjustment, a notice). What's left, not what's used: the used count is close to the Emails figure beside it and
+// Hosted: the daily limit as one line, what's left of it and a meter (or None, in good standing), then a note only
+// while one applies (an adjustment, a notice). What's left, not what's used: the used count is close to the Emails figure beside it and
 // would say the same fact twice. The row opens how sending limits work; the next band and the per-minute rate are in
 // the sender score's explainer.
 export function DailyLimit({ report }: { report: SenderScore | undefined }) {
   const limit = useSendingLimit()
   const [explaining, setExplaining] = useState(false)
-  if (!limit || limit.cap === null) return null
-  const share = Math.min(1, limit.used / Math.max(1, limit.cap)), left = Math.max(0, limit.cap - limit.used)
+  if (!limit) return null
+  const cap = limit.cap, share = cap === null ? 0 : Math.min(1, limit.used / Math.max(1, cap)), left = cap === null ? 0 : Math.max(0, cap - limit.used)
   const notes = limitNotes(report)
   return <section className="daily-limit" aria-label="Daily limit">
-    <button type="button" className="limit-row" onClick={() => setExplaining(true)} title={`${limitSummary(limit)} Includes simulator addresses.`} aria-label={`Daily limit: ${number(left)} of ${number(limit.cap)} left. How limits work`}>
-      <span className="limit-row__text"><span className="limit-row__label">Daily limit<Info size={12} aria-hidden="true" /></span><span className="muted">{number(left)} of {number(limit.cap)} left</span></span>
-      <span className="limit-row__track" data-full={share >= 0.9 || undefined}><i style={{ width: `${share * 100}%` }} /></span>
+    <button type="button" className="limit-row" onClick={() => setExplaining(true)} title={cap === null ? limitSummary(limit) : `${limitSummary(limit)} Includes simulator addresses.`} aria-label={cap === null ? 'No daily limit. How limits work' : `Daily limit: ${number(left)} of ${number(cap)} left. How limits work`}>
+      <span className="limit-row__text"><span className="limit-row__label">Daily limit<Info size={12} aria-hidden="true" /></span><span className="muted">{cap === null ? 'None' : `${number(left)} of ${number(cap)} left`}</span></span>
+      {cap !== null && <span className="limit-row__track" data-full={share >= 0.9 || undefined}><i style={{ width: `${share * 100}%` }} /></span>}
     </button>
     {notes.map(note => <p key={note.text} className="limit-row__note" data-tone={note.tone}>{note.tone && <span aria-hidden="true" />}{note.text}</p>)}
     <Dialog open={explaining} onOpenChange={setExplaining} title="How limits work" className="limits-dialog">

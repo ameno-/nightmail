@@ -4,12 +4,13 @@ import { actor, actorMailAccess, ApiError, errors, isSimulatedSes, notFound, res
 import { DASHBOARD_CACHE_NOTE, dashboardRead } from './dashboard-cache.js';
 import { hostedAllowance, type HostedAllowance } from './hosted-sending.js';
 import { RATES } from './billing/money.js';
+import { EVALUATION, GOOD_STANDING } from './standing-model.js';
 
 // Plan & usage (hosted only): what the dashboard's Plan & usage page and an agent need to answer "what does this cost
 // and how much can I send". The prices are billing's (billing/money.ts RATES); billing.enforcement says whether usage is
 // charged yet (the balance itself is GET /v1/billing). The daily
-// limit is the same allowance admission enforces (hosted_allowance_read, no locks), with the steps it grows through
-// as hosted_history_tier (migration 101) grants them. One statement after authentication.
+// limit is the same allowance admission enforces (hosted_allowance_read, no locks): the evaluation's, then none in good
+// standing. One statement after authentication.
 const Step = z.object({
   cap: z.number().int().describe('Recipients per rolling 24 hours at this step.'),
   requires: z.string().describe('What a workspace needs to reach this step, in plain words.'),
@@ -38,26 +39,20 @@ const Usage = z.object({
     cap: z.number().int().nullable().describe('Recipients allowed per rolling 24 hours; null when this workspace has no daily limit.'),
     used: z.number().int().describe('Recipients charged in the rolling 24 hours, SES mailbox simulator addresses included.'),
     resetAt: z.iso.datetime().nullable().describe('When capacity next frees up or the limit changes.'),
-    step: z.number().int().nullable().describe('Index into steps of the step this workspace has reached; null when an operator set a custom limit.'),
+    step: z.number().int().nullable().describe('Index into steps of the step this workspace is on; null past them: no daily limit (cap null), or one set by the score, a warning or an operator.'),
   }).nullable().describe('Null until the workspace connects hosted sending.'),
-  steps: z.array(Step).describe('How the daily limit grows, for every workspace on this installation. Only real SES acceptances count towards the next step: simulated sends and simulator addresses use the limit but never raise it.'),
+  steps: z.array(Step).describe(`The daily limits a new workspace passes through: only the evaluation. After it, a workspace in good standing (score ${GOOD_STANDING} and up, no warning) has no daily limit; bad signals set one (GET /v1/sender-score). Only real SES acceptances count: simulated sends and simulator addresses use the limit but never end the evaluation.`),
   simulated: z.boolean().describe('This installation simulates SES: no email leaves it, and simulated sends never count against the daily limit.'),
 }).openapi('Usage');
 
-const rates = 'bounces under 2% and complaints under 0.05%';
-const count = (value: number) => value.toLocaleString('en-US');
-export function usageSteps(caps: { firstWeek: number; secondWeek: number; mature: number }): z.infer<typeof Step>[] {
-  return [
-    { cap: caps.firstWeek, requires: 'Every new workspace starts here.' },
-    { cap: caps.secondWeek, requires: `7 days after connecting sending, with at least 100 emails accepted by SES in the last 30 days, ${rates}.` },
-    { cap: caps.mature, requires: `14 days after connecting sending, with at least ${count(1000)} emails accepted by SES in the last 30 days, ${rates}.` },
-  ];
+export function usageSteps(caps: { firstWeek: number }): z.infer<typeof Step>[] {
+  return [{ cap: caps.firstWeek, requires: `The evaluation: a new workspace's first ${EVALUATION.recipients} real recipients. It ends once their delivery results are in, at most an hour after the ${EVALUATION.recipients}th.` }];
 }
 export const PRICING = { currency: 'USD', perThousand: Number(RATES.emailUc) * 1000 / 100_000_000, freeEmails: RATES.freeSentEmails, freeSentEmails: RATES.freeSentEmails, freeReceivedEmails: RATES.freeReceivedEmails, freeStorageBytes: Number(RATES.freeStorageBytes) } as const;
 
 export function registerUsage(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/usage', operationId: 'getUsage', tags: ['Metrics'], security, summary: 'Plan, pricing and sending limits',
-    description: 'Hosted only. Pricing and whether billing charges yet, this month\'s sent and received counts against their free allowances, 3,000 each, counted separately (received only for credentials that may read all received mail), and the rolling daily sending limit with the steps it grows through. Workspace-wide: keys restricted to domains get 403. ' + DASHBOARD_CACHE_NOTE,
+    description: 'Hosted only. Pricing and whether billing charges yet, this month\'s sent and received counts against their free allowances, 3,000 each, counted separately (received only for credentials that may read all received mail), and the rolling daily sending limit (none in good standing) with the evaluation before it. Workspace-wide: keys restricted to domains get 403. ' + DASHBOARD_CACHE_NOTE,
     responses: { 200: response(Usage), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
     const a = actor(c, 'read');
@@ -77,7 +72,7 @@ export function registerUsage(app: App) {
         ${hostedAllowance(c.env.config, a.workspaceId, 1, 0, true)} AS allowance,
         (SELECT mode FROM billing_config WHERE singleton) AS enforcement`);
       const steps = usageSteps(c.env.config.hostedSendCaps), allowance = row?.allowance ?? null;
-      // A cap that matches no step was set by an operator (an override or an exemption).
+      // A cap that matches no step was set by the score, a warning or an operator; none is past every step.
       const index = allowance?.cap == null ? -1 : steps.findIndex(s => s.cap === allowance.cap);
       return {
         billing: { enabled: row?.enforcement === 'enforce', enforcement: row?.enforcement ?? 'off' }, pricing: PRICING,

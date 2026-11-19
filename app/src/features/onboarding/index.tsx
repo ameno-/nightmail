@@ -257,7 +257,7 @@ function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) =
       <button type="button" className="onboarding-option onb-rise" style={rise(1)} onClick={() => onChoose('shared')}>
         <span className="onboarding-option-icon" aria-hidden="true"><Send size={18} /></span>
         <span className="onboarding-option-title">Hosted mail</span>
-        <span className="onboarding-option-value"><strong>Daily limit that grows</strong><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
+        <span className="onboarding-option-value"><strong>Unlimited in good standing</strong><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
       <button type="button" className="onboarding-option onb-rise" style={rise(2)} onClick={() => onChoose('byo')}>
         <span className="onboarding-option-icon onboarding-option-icon--aws" aria-hidden="true"><AwsLogo /></span>

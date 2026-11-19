@@ -3,7 +3,7 @@ import type { SenderScore, SenderStanding, StandingStep } from './types'
 
 // The operator API (/v1/operator/*): Nightmail staff with a platform role act on any Hosted workspace through one audited
 // path. It is left out of the public SDK, so the /operator area calls it with the dashboard's own request helper.
-export interface OperatorQueueItem { workspaceId: string; name: string; step: StandingStep; since: string; score: number | null; dailyLimit: number; reasons: { code: string; message: string }[]; paused: boolean; quarantined: number; watch: boolean; strikes: number }
+export interface OperatorQueueItem { workspaceId: string; name: string; step: StandingStep; since: string; score: number | null; /** Null: no daily limit. */ dailyLimit: number | null; reasons: { code: string; message: string }[]; paused: boolean; quarantined: number; watch: boolean; strikes: number }
 export interface OperatorDomain { name: string; region: string | null; pool: string; dkim: boolean; mailFrom: boolean; dmarc: string | null }
 /** What Nightmail last applied to one regional SES tenant; none listed means never switched (enabled). */
 export interface OperatorTenant { region: string; applied: 'ENABLED' | 'DISABLING' | 'DISABLED'; generation: number; appliedAt: string }
