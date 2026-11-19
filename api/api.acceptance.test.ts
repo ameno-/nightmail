@@ -2349,6 +2349,42 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
             ok(await local('DELETE',`/v1/domains/${replacement.id}`,undefined,b.cookie));
           } finally { await pool.query('DELETE FROM domain_claims WHERE workspace_id=$1 AND name LIKE $2',[wid,prefix+'%']); }
         });
+        await providerTest.test('MX domain limit: 100 by default, set per workspace only by an audited operator; lowering it removes nothing',async()=>{
+          const prefix=unique('limit'),wid=b.org.id,count=async()=>(await pool.query('SELECT count(*)::int AS n FROM domain_claims WHERE workspace_id=$1',[wid])).rows[0].n;
+          const quota=async()=>ok(await local('GET','/v1/domains?refresh=false&limit=1',undefined,b.cookie)).quota;
+          const setLimit=(cookie:string,body:Json)=>local('PUT',`/v1/operator/workspaces/${wid}/domain-limit`,body,cookie);
+          const operatorId=ok(await local('GET','/v1/me',undefined,a.cookie)).id, made:string[]=[];
+          const fill=99-await count();assert.ok(fill>=0);
+          await pool.query(`INSERT INTO domain_claims(name,workspace_id,ever_proven) SELECT $1||n||'.invalid',$2,true FROM generate_series(1,$3::int) n`,[prefix,wid,fill]);
+          try {
+            assert.deepEqual(await quota(),{used:99,limit:100},'The default is 100, and listDomains shows it with the workspace-wide count.');
+            made.push(ok(await add(b.cookie,prefix+'-x1.invalid'),201).id);
+            const full=await add(b.cookie,prefix+'-x2.invalid');error(full,409,'DOMAIN_LIMIT_REACHED');
+            assert.match(full.body.error.message,/has 100 of its 100 domains/);
+            // Customers can't change it: an owner's session and a not-yet-operator both get 403, and nothing is audited.
+            error(await setLimit(b.cookie,{limit:500,reason:'Raising my own domain limit'}),403,'OPERATOR_REQUIRED');
+            error(await setLimit(a.cookie,{limit:500,reason:'Raising my own domain limit'}),403,'OPERATOR_REQUIRED');
+            await pool.query(`INSERT INTO platform_operators(user_id,role,reason) VALUES($1,'operator','Synthetic domain-limit operator')`,[operatorId]);
+            error(await setLimit(a.cookie,{limit:102,reason:'short'}),422,'VALIDATION_FAILED');
+            error(await setLimit(a.cookie,{limit:0,reason:'Agency needs more domains'}),422,'VALIDATION_FAILED');
+            assert.deepEqual(ok(await setLimit(a.cookie,{limit:102,reason:'Agency needs more domains',ticketRef:'T-9'})).domainLimit,{used:100,limit:102,custom:true});
+            const x2=ok(await add(b.cookie,prefix+'-x2.invalid'),201);made.push(x2.id);
+            assert.deepEqual(await quota(),{used:101,limit:102});
+            const [audit]=(await pool.query(`SELECT operator_id,reason,ticket_ref,before,after FROM hosted_operator_audit WHERE workspace_id=$1 AND action='operator-set-domain-limit'`,[wid])).rows;
+            assert.deepEqual(audit,{operator_id:operatorId,reason:'Agency needs more domains',ticket_ref:'T-9',before:{limit:null},after:{limit:102}});
+            // Lowering below the count deletes nothing; it only refuses new domains. Existing ones still re-add idempotently.
+            assert.deepEqual(ok(await setLimit(a.cookie,{limit:50,reason:'Agency plan ended, back down'})).domainLimit,{used:101,limit:50,custom:true});
+            assert.equal(await count(),101);
+            assert.equal(ok(await add(b.cookie,prefix+'-x2.invalid'),201).id,x2.id);
+            const over=await add(b.cookie,prefix+'-x3.invalid');error(over,409,'DOMAIN_LIMIT_REACHED');assert.match(over.body.error.message,/has 101 of its 50 domains/);
+            assert.deepEqual(ok(await setLimit(a.cookie,{limit:null,reason:'Return to the default limit'})).domainLimit,{used:101,limit:100,custom:false});
+          } finally {
+            for (const id of made) await local('DELETE',`/v1/domains/${id}`,undefined,b.cookie);
+            await pool.query('DELETE FROM platform_operators WHERE user_id=$1',[operatorId]);
+            await pool.query('UPDATE workspaces SET domain_limit=NULL WHERE id=$1',[wid]);
+            await pool.query('DELETE FROM domain_claims WHERE workspace_id=$1 AND name LIKE $2',[wid,prefix+'%']);
+          }
+        });
         await providerTest.test('Domain Connect: inline cached discovery, sorted signature and workspace-bound dashboard return',async dc=>{
           const { operationJobs }=await import('./src/operations.js'), {JobDeferred}=await import('./src/jobs.js');
           const zone=`${unique('dc')}.co.uk`, name=`mail.${zone}`, providerPath='/v2/domainTemplates/providers/bane.mx/services/mail';
@@ -14830,8 +14866,18 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await assert.rejects(adoptIdentities(db,op,wid,rows.map(r=>r.arn),inventory,`arn:aws:sts::${acct}:assumed-role/migration/fixture`,true,flags),/--reason/,'An apply without a reason fails before any read.');
     drift=true;await assert.rejects(adopt(true),/drift/);drift=false;
     await db.query(`INSERT INTO domain_claims(workspace_id,name) VALUES($1,'adopted-0.fixture.test')`,[wid]);await assert.rejects(adopt(true),/Overlapping/);await db.query(`DELETE FROM domain_claims WHERE workspace_id=$1 AND name='adopted-0.fixture.test'`,[wid]);
+    // Adoption counts against the workspace's own domain limit (not a literal 100): with 95 more domains, 107 refuses the
+    // twelve new claims before inserting any, and a raised 108 admits them.
+    await db.query(`INSERT INTO domain_claims(workspace_id,name,ever_proven) SELECT $1,'filler-'||n||'.limit.test',true FROM generate_series(1,95) n`,[wid]);
+    const claimCount=async()=>(await db.query('SELECT count(*)::int AS n FROM domain_claims WHERE workspace_id=$1',[wid])).rows[0].n;
+    await db.query('UPDATE workspaces SET domain_limit=107 WHERE id=$1',[wid]);
+    await assert.rejects(adopt(true),/domain limit exceeded: 96 of 107 domains, 12 more/);assert.equal(await claimCount(),96);
+    await db.query('UPDATE workspaces SET domain_limit=108 WHERE id=$1',[wid]);
     await assert.rejects(adopt(true),/interrupted/);assert.equal((await db.query(`SELECT FROM domain_claims WHERE workspace_id=$1 AND sending_state='verified' AND identity ? 'adopted'`,[wid])).rowCount,0);
     await adopt(true);await adopt(true);assert.equal(members.size,15);
+    // Lowering the limit below the count removes nothing, and retrying the finished adoption stays idempotent.
+    await db.query('UPDATE workspaces SET domain_limit=1 WHERE id=$1',[wid]);await adopt(true);assert.equal(await claimCount(),108);
+    await db.query(`DELETE FROM domain_claims WHERE workspace_id=$1 AND name LIKE 'filler-%.limit.test'`,[wid]);await db.query('UPDATE workspaces SET domain_limit=NULL WHERE id=$1',[wid]);
     const adopted=(await db.query(`SELECT b.domain_id FROM domain_sending_bindings b JOIN domain_claims dc USING(workspace_id,name) WHERE b.workspace_id=$1 AND dc.sending_state='verified' AND dc.receiving_state='off' AND dc.identity ? 'adopted'`,[wid])).rows;assert.equal(adopted.length,12);
     assert.equal((await db.query('SELECT FROM mailbox_domains WHERE workspace_id=$1',[wid])).rowCount,0);
     ok(await api('DELETE','/v1/domains/'+added.id));const mark=calls.length;

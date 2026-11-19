@@ -27,7 +27,7 @@ const Setup = z.object({
   webhooks: z.object({ total: z.number().int().describe('Outbound webhooks, paused ones included.') }).nullable().describe('Null when listWebhooks would refuse the caller: members and domain-restricted keys.'),
   invitations: z.object({ pending: z.number().int().describe('Pending, unexpired invitations.') }).nullable().describe('Null unless listWorkspaceInvitations would answer: an owner or admin dashboard session on a hosted installation.'),
 }).openapi('OverviewSetup');
-type Counts = { api_keys: number | null; any_email: boolean; webhooks: number | null; invitations: number | null };
+type Counts = { api_keys: number | null; any_email: boolean; webhooks: number | null; invitations: number | null; domain_quota: { used: number; limit: number } | null };
 
 export function registerOverviewSetup(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/overview/setup', operationId: 'getOverviewSetup', tags: ['Settings'], security,
@@ -41,13 +41,17 @@ export function registerOverviewSetup(app: App) {
     if (!memberRefused(a, 'GET', '/v1/domains')) {
       // listDomains loads self-hosted region settings before its own guard (app.ts); hosted reads need none without a region.
       if (!c.env.config.multiTenant) c.env = await withRegionSettings(c.env, w);
-      if (admits(() => domainReader(c))) domains = await domainPage(c, a, { limit: 10, refresh: 'false' });
+      if (admits(() => domainReader(c))) domains = await domainPage(c, a, { limit: 10, refresh: 'false', countedElsewhere: true });
     }
+    // listDomains' quota (hosted, unrestricted credentials), counted here so the read stays one statement of counts.
+    const quota = domains !== null && c.env.config.multiTenant && !a.domains.length;
     const row = (await c.env.db.execute<Counts>(sql`/* overview-setup: counts */ SELECT
+      ${quota ? sql`(SELECT json_build_object('used',count(*)::int,'limit',workspace_domain_limit(${w})) FROM domain_claims WHERE workspace_id=${w})` : sql`NULL::json`} AS domain_quota,
       ${keys ? sql`(SELECT count(*)::int FROM ${apiKeys} WHERE ${and(eq(apiKeys.workspaceId, w), isNull(apiKeys.revokedAt))})` : sql`NULL::int`} AS api_keys,
       EXISTS (SELECT FROM ${emails} WHERE ${mailWhere(a)}) AS any_email,
       ${hooks ? sql`(SELECT count(*)::int FROM ${webhooks} WHERE ${eq(webhooks.workspaceId, w)})` : sql`NULL::int`} AS webhooks,
       ${invites ? sql`(SELECT count(*)::int FROM ${workspaceInvitations} WHERE ${and(eq(workspaceInvitations.workspaceId, w), eq(workspaceInvitations.status, 'pending'), gt(workspaceInvitations.expiresAt, sql`now()`))})` : sql`NULL::int`} AS invitations`)).rows[0]!;
+    if (domains && row.domain_quota) domains = { ...domains, quota: row.domain_quota };
     return c.json({ domains, apiKeys: row.api_keys === null ? null : { active: row.api_keys }, emails: { any: row.any_email },
       webhooks: row.webhooks === null ? null : { total: row.webhooks }, invitations: row.invitations === null ? null : { pending: row.invitations } }, 200);
   });

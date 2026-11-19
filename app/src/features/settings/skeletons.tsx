@@ -175,6 +175,8 @@ function KeysHeaderActions() {
   return <><Checkbox label="Show inactive" checked={false} onCheckedChange={() => {}} disabled /><Button variant="primary" disabled>Create key</Button></>
 }
 
+// Hosted: the domain count and limit beside Add domain, at its loaded width while the list loads.
+export const DomainCountSkeleton = () => <span className="domains-count"><SkeletonText width={128} /></span>
 export function SettingsRouteSkeleton({ kind, isNew = false }: { kind: 'keys' | 'domains' | 'domain' | 'settings' | 'webhook'; isNew?: boolean }) {
   const { regionId } = useRegion()
   const { multiTenant } = useWorkspaceAccess()
@@ -182,5 +184,5 @@ export function SettingsRouteSkeleton({ kind, isNew = false }: { kind: 'keys' | 
   if (kind === 'webhook') return <LoadingRegion className="stack settings-page" label="Loading webhook"><PageHeader title={isNew ? 'Add webhook' : <SkeletonText width={240} lineHeight={28} />} backTo="/settings#webhooks" actions={isNew ? undefined : <><Skeleton width={70} /><ControlSkeleton width="calc(5ch + 26px)" /><ControlSkeleton width={128} /></>} /><WebhookBodySkeleton isNew={isNew} /></LoadingRegion>
   if (kind === 'settings') return <LoadingRegion className="stack settings-ses settings-page" label="Loading settings"><PageHeader title="Settings" />{!multiTenant && <><SesSendingSkeleton regionId={regionId} /><WorkspaceFormSkeleton /></>}</LoadingRegion>
   if (kind === 'keys') return <LoadingRegion className="stack" label="Loading API keys"><PageHeader title="API keys" actions={<KeysHeaderActions />} /><KeysGuide /><div className="keys-sections"><section className="section stack"><Tabs label="Type" value="all" onValueChange={() => {}} disabled items={[...keyTypes]} /><TableSkeleton className="keys-table keys-table--two-line" columns={settingsColumns.keys} rows={3} /></section></div></LoadingRegion>
-  return <LoadingRegion className="stack" label="Loading domains"><PageHeader title="Domains" actions={<ControlSkeleton width="calc(10ch + 26px)" />} /><TableSkeleton className="domains-table" columns={domainColumns(multiTenant)} rows={3} pagination /></LoadingRegion>
+  return <LoadingRegion className="stack" label="Loading domains"><PageHeader title="Domains" actions={<>{multiTenant && <DomainCountSkeleton />}<ControlSkeleton width="calc(10ch + 26px)" /></>} /><TableSkeleton className="domains-table" columns={domainColumns(multiTenant)} rows={3} pagination /></LoadingRegion>
 }

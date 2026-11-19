@@ -61,7 +61,10 @@ export async function adoptIdentities(db:Client,ses:SESv2Client,wid:string,arns:
     const overlaps=(await db.query(`SELECT dc.name,b.region,b.connection_id,dc.workspace_id,dc.identity,dc.claim_scope,dc.receiving_state FROM domain_claims dc
       LEFT JOIN domain_sending_bindings b USING(workspace_id,name) WHERE EXISTS(SELECT FROM unnest($1::text[]) n WHERE right('.'||dc.name,length(n)+1)='.'||n OR right('.'||n,length(dc.name)+1)='.'||dc.name) ORDER BY dc.name FOR UPDATE OF dc`,[names])).rows;
     for (const x of overlaps) if (x.workspace_id!==wid || x.region!==region || x.connection_id!==c.id || x.receiving_state!=='off' || x.claim_scope!=='exclusive' || !rows.find(r=>r.name===x.name && r.arn===x.identity?.adopted?.arn)) throw new Error('Overlapping or changed domain claim.');
-    if (Number((await db.query('SELECT count(*) FROM domain_claims WHERE workspace_id=$1',[wid])).rows[0].count)+12-overlaps.length>100) throw new Error('Workspace domain limit exceeded.');
+    // The workspace's own limit (migration 342), read under the settings lock taken above. Only new claims count
+    // against it: a retry whose claims all exist adds none, so it stays idempotent after the limit is lowered.
+    const added=12-overlaps.length,{used,limit}=(await db.query('SELECT count(*)::int AS used,workspace_domain_limit($1) AS limit FROM domain_claims WHERE workspace_id=$1',[wid])).rows[0];
+    if (added>0 && used+added>limit) throw new Error(`Workspace domain limit exceeded: ${used} of ${limit} domains, ${added} more requested.`);
     return {c,prior:new Map(rows.map(r=>[r.name,r])),bound:new Set(overlaps.map(r=>r.name))};
   }
   const plan:{arn:string;tenant:string;action:string}[]=[];

@@ -100,7 +100,7 @@ function Actions() {
 
 // ---------------------------------------------------------------- one workspace
 
-type ActionKind = 'pause' | 'resume' | 'hold' | 'release' | 'limit' | 'campaign'
+type ActionKind = 'pause' | 'resume' | 'hold' | 'release' | 'limit' | 'domains' | 'campaign'
 type PendingAction = { kind: ActionKind; key: string; campaign?: OperatorCampaign }
 const open = (kind: ActionKind, campaign?: OperatorCampaign): PendingAction => ({ kind, key: crypto.randomUUID(), campaign })
 
@@ -118,6 +118,7 @@ export function OperatorWorkspacePage() {
     paused ? { label: 'Resume sending…', onSelect: () => setAction(open('resume')) } : { label: 'Pause sending…', destructive: true, onSelect: () => setAction(open('pause')) },
     held ? { label: 'Release marketing…', onSelect: () => setAction(open('release')) } : { label: 'Hold marketing…', onSelect: () => setAction(open('hold')) },
     { label: 'Set daily limit…', onSelect: () => setAction(open('limit')) },
+    { label: 'Set domain limit…', onSelect: () => setAction(open('domains')) },
   ]
   return <>
     <PageHeader title={data?.workspace.name ?? 'Workspace'} backTo="/operator" actions={role === 'operator' ? data ? <DropdownMenu label="Workspace actions" title={data.workspace.name} trigger={<ActionsTrigger />} items={items} /> : <ActionsTrigger disabled /> : undefined} />
@@ -210,7 +211,7 @@ function WorkspaceBody({ data, canAct, onReleaseCampaign }: { data: OperatorWork
       </section>
     </div>
     <section className="op-section"><SectionHeader title="Factors" /><DataTable className="op-table" rows={score.factors} rowKey={f => f.key} columns={factorColumns} empty={<EmptyState title="No factors yet" />} /></section>
-    <section className="op-section"><SectionHeader title="Domains" /><DataTable className="op-table" rows={data.domains} rowKey={d => d.name} columns={domainColumns} empty={<EmptyState title="No domains" />} /></section>
+    <section className="op-section"><SectionHeader title="Domains" actions={<span className="muted">{`${number(data.domainLimit.used)} of ${number(data.domainLimit.limit)}${data.domainLimit.custom ? ' · set by an operator' : ''}`}</span>} /><DataTable className="op-table" rows={data.domains} rowKey={d => d.name} columns={domainColumns} empty={<EmptyState title="No domains" />} /></section>
     <section className="op-section" aria-labelledby="op-billing"><SectionHeader title={<span id="op-billing">Billing</span>} />
       {billing.isError && !billing.data ? <ErrorState error={billing.error} onRetry={() => void billing.refetch()} /> : <dl className="op-rows op-rows--single">
         <div><dt>Status</dt><dd title={billingState ?? undefined}>{billingState ?? <SkeletonText width={220} />}</dd></div>
@@ -279,6 +280,7 @@ const actionCopy: Record<ActionKind, { title: string; description?: string; conf
   hold: { title: 'Hold marketing?', description: 'Campaigns pause and new marketing is refused.', confirm: 'Hold marketing', done: 'Marketing held' },
   release: { title: 'Release marketing?', description: 'The workspace moves to Warn until it clears.', confirm: 'Release marketing', done: 'Marketing released' },
   limit: { title: 'Set the daily limit', confirm: 'Save limit', done: 'Limit saved' },
+  domains: { title: 'Set the domain limit', confirm: 'Save limit', done: 'Domain limit saved' },
   campaign: { title: 'Release this campaign?', confirm: 'Release campaign', done: 'Campaign released' },
 }
 const reasonLabel = 'Reason for the audit log'
@@ -342,8 +344,10 @@ function ActionForm({ action, workspace, onClose }: { action: PendingAction; wor
   // The limit starts at the current override, or else at the score's band, so the number to change from is in the field.
   const band = workspace.score.limit?.band
   const [daily, setDaily] = useState(workspace.override ? String(workspace.override.daily) : band ? String(band) : ''), [expires, setExpires] = useState(''), [clear, setClear] = useState(false)
+  const [domainLimit, setDomainLimit] = useState(String(workspace.domainLimit.limit)), [defaultDomains, setDefaultDomains] = useState(false)
   const [tried, setTried] = useState(false)
   const reasonError = reasonCheck(reason)
+  const domainValue = Number(domainLimit), domainError = action.kind === 'domains' && !defaultDomains && !(Number.isInteger(domainValue) && domainValue >= 1 && domainValue <= 10_000) ? 'A whole number from 1 to 10,000.' : ''
   const ticketError = ticket.trim().length > 200 ? 'At most 200 characters.' : ''
   const dailyValue = Number(daily), dailyError = action.kind === 'limit' && !clear && !(Number.isInteger(dailyValue) && dailyValue >= 1 && dailyValue <= 10_000_000) ? 'A whole number from 1 to 10,000,000.' : ''
   const expiresAt = Date.parse(expires), expiresError = action.kind === 'limit' && !clear && expires ? !(expiresAt > Date.now()) ? futureError : expiresAt > Date.now() + 366 * 86_400_000 ? 'At most a year ahead.' : '' : ''
@@ -356,6 +360,7 @@ function ActionForm({ action, workspace, onClose }: { action: PendingAction; wor
         case 'hold': return operatorApi.marketing(id, { ...why, held: true }, guard)
         case 'release': return operatorApi.marketing(id, { ...why, held: false }, guard)
         case 'limit': return operatorApi.limit(id, { ...why, daily: clear ? null : dailyValue, expiresAt: expires ? new Date(expires).toISOString() : null }, guard)
+        case 'domains': return operatorApi.domainLimit(id, { ...why, limit: defaultDomains ? null : domainValue }, guard).then(() => undefined)
         case 'campaign': return operatorApi.releaseCampaign(action.campaign!.id, why, guard)
       }
     },
@@ -366,7 +371,7 @@ function ActionForm({ action, workspace, onClose }: { action: PendingAction; wor
   function submit(event: FormEvent) {
     event.preventDefault()
     setTried(true)
-    if (reasonError || ticketError || dailyError || expiresError) return
+    if (reasonError || ticketError || dailyError || expiresError || domainError) return
     mutation.mutate()
   }
   return <form className="op-dialog-fields" onSubmit={submit} noValidate>
@@ -374,6 +379,10 @@ function ActionForm({ action, workspace, onClose }: { action: PendingAction; wor
     {action.kind === 'limit' && <>
       <Checkbox checked={clear} onCheckedChange={setClear} label="Return to the score’s limit" disabled={!workspace.override} />
       <Field label="Daily limit" error={tried ? dailyError : ''}><Input type="number" inputMode="numeric" min={1} max={10_000_000} step={1} value={clear ? '' : daily} disabled={clear} onChange={event => setDaily(event.target.value)} /></Field>
+    </>}
+    {action.kind === 'domains' && <>
+      <Checkbox checked={defaultDomains} onCheckedChange={setDefaultDomains} label="Return to the default of 100" disabled={!workspace.domainLimit.custom} />
+      <Field label={`Domain limit (${number(workspace.domainLimit.used)} in use)`} error={tried ? domainError : ''}><Input type="number" inputMode="numeric" min={1} max={10_000} step={1} value={defaultDomains ? '' : domainLimit} disabled={defaultDomains} onChange={event => setDomainLimit(event.target.value)} /></Field>
     </>}
     <Field label={reasonLabel} error={tried ? reasonError : ''}><Textarea value={reason} maxLength={1000} onChange={event => setReason(event.target.value)} /></Field>
     <Field label={ticketLabel} error={tried ? ticketError : ''}><Input value={ticket} maxLength={200} onChange={event => setTicket(event.target.value)} /></Field>
