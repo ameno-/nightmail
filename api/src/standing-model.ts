@@ -10,7 +10,7 @@ import { productName } from './brand.js'
 //                 that arrive days after the evaluation move it as soon as they are counted
 //   growth        for 72 clean hours after a new sender's evaluation, a sponsor's growing workspaces may send at most 1,000
 //                 recipients in a rolling hour, then twice the distinct recipients of its last mature, clean hour; a
-//                 workspace with a clean track record from before the evaluation, or an operator override, skips it
+//                 workspace with a clean track record from before the pace existed, or an operator override, skips it
 //   limit         none at 75 and up (good standing); under it the bands below, dropping only 2 points under a band
 //   ladder        notice → warn → restrict (marketing held) → pause (all sending), each line a count and a rate; a
 //                 step from warn up, a pause or a resume freezes the limit (none becomes what SES accepted in 24 hours,
@@ -50,14 +50,24 @@ export const FREEZE_FLOOR = 10_000;
  */
 export const GROWTH = { start: 1_000, factor: 2, hours: 72, resolved: 0.9, bounceRate: 0.02, qualityDrop: 2 } as const;
 /**
- * The growth pace is for new senders only. A workspace skips it (and leaves it, if it is on it) when it has an operator
- * daily-limit override, or a clean track record from before its evaluation: at least 300 real emails accepted in the
- * 30 days before the evaluation's 100th recipient was counted, in good standing at ok. A new sender cannot reach 300 there:
- * the evaluation holds it to 100 recipients a rolling day, so fewer than 200 are accepted before its 100th is counted.
+ * The growth pace is for new senders only. A workspace skips it (and leaves it, if it is on it) with an active operator
+ * daily-limit override, or with a clean track record from before the pace existed: SES acceptances before its baseline
+ * (the pace's rollout, for workspaces that existed then; none for later ones) and before its evaluation, in the 30
+ * completed UTC days before that, leaving out its first 100 (its evaluation's seeds). The record needs mail on 3 days, 300
+ * distinct real recipients at more than one domain, 90% of them resolved, hard bounces under 2% and no complaints, and the
+ * workspace in good standing at ok. Mail accepted later, or without an acceptance event, never counts.
  */
-export const ESTABLISHED = { accepted: 300, days: 30 } as const;
-export const establishedSender = (o: { priorAccepted: number; override: boolean; score: number | null; step: Step }) =>
-  o.override || (o.priorAccepted >= ESTABLISHED.accepted && o.score !== null && o.score >= GOOD_STANDING && o.step === 'ok');
+export const ESTABLISHED = { days: 3, recipients: 300, domains: 2, windowDays: 30, resolved: 0.9, bounceRate: 0.02 } as const;
+/** Pre-baseline history per recipient: `accepted` recipient rows, how many resolved, bounced or complained. */
+export type TrackRecord = { days: number; recipients: number; domains: number; accepted: number; resolved: number; bounces: number; complaints: number };
+export function establishedBy(o: { override: boolean; history: TrackRecord | null; score: number | null; step: Step }): 'OPERATOR_OVERRIDE' | 'TRACK_RECORD' | null {
+  if (o.override) return 'OPERATOR_OVERRIDE';
+  const h = o.history;
+  if (!h || o.score === null || o.score < GOOD_STANDING || o.step !== 'ok') return null;
+  const clean = h.days >= ESTABLISHED.days && h.recipients >= ESTABLISHED.recipients && h.domains >= ESTABLISHED.domains
+    && h.resolved >= ESTABLISHED.resolved * h.accepted && h.bounces < ESTABLISHED.bounceRate * h.accepted && h.complaints === 0;
+  return clean ? 'TRACK_RECORD' : null;
+}
 /**
  * Pacing protects the shared pool; it is not a customer limit. With a daily limit: clamp(limit ÷ 20, 50, 500) a minute.
  * Without one: a quarter of the pool's SES rate (the share campaign planning already uses), at least 500 a minute. Half
