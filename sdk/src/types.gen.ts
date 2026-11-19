@@ -2311,7 +2311,7 @@ export type RoutingConfig = {
 
 export type MailRoute = {
     /**
-     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key>, webhook:<key> and forward:<name>.
      */
     key: string | null;
     /**
@@ -2319,9 +2319,9 @@ export type MailRoute = {
      */
     match: string;
     /**
-     * Inbox and webhook IDs, [] to keep, or 'drop'.
+     * Inbox, webhook and forward IDs, [] to keep, or 'drop'.
      */
-    to: 'drop' | Array<string>;
+    to: 'drop' | Array<string | string>;
     subaddresses: boolean;
     enabled: boolean;
     note: string;
@@ -2336,7 +2336,7 @@ export type RoutingConfigFile = {
     version?: number;
     routes: Array<{
         /**
-         * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+         * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key>, webhook:<key> and forward:<name>.
          */
         key?: string | null;
         /**
@@ -2344,9 +2344,9 @@ export type RoutingConfigFile = {
          */
         match: string;
         /**
-         * Up to 10 destinations, [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.
+         * Up to 10 destinations (inboxes, webhooks and confirmed forwards), [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.
          */
-        to: 'drop' | Array<string>;
+        to: 'drop' | Array<string | string>;
         /**
          * Also route user+tag@host here when nothing more specific matches. Default true.
          */
@@ -2382,7 +2382,7 @@ export type RoutingDiff = {
 
 export type CreateMailRoute = {
     /**
-     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key>, webhook:<key> and forward:<name>.
      */
     key?: string | null;
     /**
@@ -2390,9 +2390,9 @@ export type CreateMailRoute = {
      */
     match: string;
     /**
-     * Up to 10 destinations, [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.
+     * Up to 10 destinations (inboxes, webhooks and confirmed forwards), [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.
      */
-    to: 'drop' | Array<string>;
+    to: 'drop' | Array<string | string>;
     /**
      * Also route user+tag@host here when nothing more specific matches. Default true.
      */
@@ -2406,7 +2406,7 @@ export type CreateMailRoute = {
 
 export type UpdateMailRoute = {
     /**
-     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key>, webhook:<key> and forward:<name>.
      */
     key?: string | null;
     /**
@@ -2414,9 +2414,9 @@ export type UpdateMailRoute = {
      */
     match?: string;
     /**
-     * Up to 10 destinations, [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.
+     * Up to 10 destinations (inboxes, webhooks and confirmed forwards), [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.
      */
-    to?: 'drop' | Array<string>;
+    to?: 'drop' | Array<string | string>;
     /**
      * Also route user+tag@host here when nothing more specific matches. Default true.
      */
@@ -2490,6 +2490,9 @@ export type RoutedRecipient = {
      */
     route: string | null;
     inboxes: Array<string>;
+    /**
+     * Webhook and forward endpoint IDs.
+     */
     webhooks: Array<string>;
     /**
      * A base route explicitly disables plus-address fallback.
@@ -2578,6 +2581,10 @@ export type EndpointPage = {
 };
 
 export type Endpoint = {
+    /**
+     * Endpoint ID: mwh_… for a webhook, con_… for Slack, Discord or a forward. Routes list webhooks and forwards by ID.
+     */
+    id: string;
     /**
      * Endpoint name, unique in the workspace across every type. Rules call endpoints.<name>(…).
      */
@@ -2679,7 +2686,7 @@ export type CreateEndpoint = {
      */
     address: string;
     /**
-     * Receiving address ID (mbx_…) or address that sends the confirmation request. Defaults to the oldest permanent receiving address.
+     * Receiving address ID (mbx_…) or address that sends the confirmation request. Mail a route forwards for an address with no permanent inbox of its own is forwarded from it too. Defaults to the oldest permanent receiving address.
      */
     from?: string;
     /**
@@ -3648,7 +3655,7 @@ export type InboundAddressPage = {
 export type InboundAddress = {
     id: string;
     /**
-     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key>, webhook:<key> and forward:<name>.
      */
     key: string | null;
     address: string;
@@ -3696,7 +3703,7 @@ export type InboundAddress = {
 
 export type CreateInboundAddress = {
     /**
-     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key>, webhook:<key> and forward:<name>.
      */
     key?: string | null;
     address: string;
@@ -3734,7 +3741,7 @@ export type CreateInboundAddress = {
 
 export type UpdateInboundAddress = {
     /**
-     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>.
+     * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key>, webhook:<key> and forward:<name>.
      */
     key?: string | null;
     displayName?: string | null;

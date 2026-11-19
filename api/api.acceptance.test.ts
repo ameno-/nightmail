@@ -21598,10 +21598,15 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         finally { if(job)await db.query("UPDATE jobs SET status='pending' WHERE id=$1 AND status='running'",[job]); }
       };
       const raw=new Map<string,Buffer>(),quarantined:string[]=[],parts:Json[]=[],largeReads:string[]=[];let page=0,stageError='',quarantineDenied=false,interruptCopy=false,onTag:(()=>Promise<void>)|undefined,onGet:((mid:string)=>Promise<void>)|undefined;
+      // Objects written whole (received attachments, sending uploads) read back as written: a forward copies them.
+      const written=new Map<string,Buffer>();
       const old=new Date(Date.now()-2*3600_000),listed=(mid:string)=>({Key:'staging/'+mid,ETag:'"fixture"',LastModified:old});
       t.mock.method(S3Client.prototype,'send',async(cmd:any)=>{
         const i=cmd.input,mid=i.Key?.split('/')[1];
         if(stageError && ['ListObjectsV2Command','GetObjectCommand'].includes(cmd.constructor.name))throw Object.assign(Error(),{name:stageError});
+        const object=written.get(`${i.Bucket}/${i.Key}`);
+        if(object&&cmd.constructor.name==='GetObjectCommand')return {ContentLength:object.length,Body:{transformToByteArray:async()=>new Uint8Array(object),transformToWebStream:()=>new Response(new Uint8Array(object)).body}};
+        if(cmd.constructor.name==='PutObjectCommand'&&i.Body instanceof Uint8Array)written.set(`${i.Bucket}/${i.Key}`,Buffer.from(i.Body));
         if(mid==='large' || mid==='scrub'){
           const size=39*1024*1024;largeReads.push(cmd.constructor.name);
           if(cmd.constructor.name==='HeadObjectCommand')return {ContentLength:size,ETag:'"large"'};
@@ -22041,16 +22046,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal((await call('PATCH', legacy, { key: 'in-use-renamed' })).key, 'in-use-renamed');
         await call('DELETE', legacy);
       });
-      // Migration 322 gives Slack, Discord and forward endpoints a key, while this release still resolves routes.
-      await t.test('routing: a Slack, Discord or forward endpoint is never a route destination, by ID or by name, even once it has a key', async () => {
+      // Migration 322 gives Slack, Discord and forward endpoints a key, while this release still resolves routes. A forward
+      // is a route destination as forward:<name> (or its con_ ID); a Slack or Discord endpoint never is, by any spelling.
+      await t.test('routing: a Slack or Discord endpoint is never a route destination, by ID or by name, even once it has a key', async () => {
         await call('POST', '/v1/endpoints', { type: 'slack', name: 'route-slack', url: 'https://hooks.slack.com/services/T0ROUTE/B0ROUTE/routefixture0001' }, 201);
         const con = (await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND type='slack' AND key='route-slack'", [wid])).rows[0].id as string;
         const config = (to: string[]) => ({ envelope: { to: ['route-check@receive.example'] }, config: { routes: [{ match: 'route-check@receive.example', to }] } });
         try {
-          error(await local('POST', '/v1/routing/routes', { match: 'route-check@receive.example', to: ['webhook:route-slack'] }), 422, 'UNKNOWN_DESTINATION');
-          error(await local('POST', '/v1/routing/test', config(['webhook:route-slack'])), 422, 'UNKNOWN_DESTINATION');
-          // Its ID was never a destination: routes take mbx_ and mwh_ IDs only.
-          error(await local('POST', '/v1/routing/routes', { match: 'route-check@receive.example', to: [con] }), 422, 'VALIDATION_FAILED');
+          for (const ref of ['webhook:route-slack', 'forward:route-slack', con]) {
+            error(await local('POST', '/v1/routing/routes', { match: 'route-check@receive.example', to: [ref] }), 422, 'UNKNOWN_DESTINATION');
+            error(await local('POST', '/v1/routing/test', config([ref])), 422, 'UNKNOWN_DESTINATION');
+          }
+          error(await local('POST', '/v1/routing/routes', { match: 'route-check@receive.example', to: ['slack:route-slack'] }), 422, 'VALIDATION_FAILED');
           // The replaced Worker's resolver (#357), verbatim, doesn't resolve it either, so no route saved during the overlap can.
           const oldResolver = await db.query(`WITH refs AS MATERIALIZED (SELECT ref,split_part(ref,':',2) AS key FROM jsonb_array_elements_text($2::jsonb) ref)
             SELECT ref,h.id FROM refs JOIN mailbox_webhooks h ON h.workspace_id=$1 AND h.key=refs.key AND NOT starts_with(h.id,'con_') WHERE starts_with(ref,'webhook:')`, [wid, JSON.stringify(['webhook:route-slack', 'webhook:support-hook'])]);
@@ -22530,6 +22537,142 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           const forwarded=(await db.query("SELECT headers FROM mail_messages WHERE workspace_id=$1 AND direction='outbound' AND subject='Fwd: Test fwd-hops-24'",[wid])).rows[0];
           assert.ok(forwarded?.headers.some((h:Json)=>h.name==='X-Nightmail-Loop' && h.value.startsWith('v1.1.')),'A forward carries X-Nightmail-Loop.');
         }finally{await call('PUT','/v1/rituals',{});}
+      });
+      // Forwards send each message whole, from a route as from a rule. Each recipient here confirms through the emailed link.
+      const confirmedForward=async(name:string,address:string)=>{
+        await call('POST','/v1/endpoints',{type:'forward',name,address,from:box.id},201);
+        const request=(await db.query(`SELECT e.snapshot->>'text' AS text FROM mail_messages m JOIN sending_emails e ON e.id=m.sending_email_id
+          WHERE m.workspace_id=$1 AND m.direction='outbound' AND m.subject=$2 AND m."to" @> $3::jsonb ORDER BY m.created_at DESC LIMIT 1`,[wid,'Confirm forwarding from '+box.address,JSON.stringify([{address}])])).rows[0];
+        const token=/forwarding\/confirm\/(fwd_[0-9a-f]{64})/.exec(request.text)![1];
+        assert.equal((await rawFetch(new Request(`${PUBLIC_ORIGIN}/v1/forwarding/confirm/${token}`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',origin:PUBLIC_ORIGIN},body:'choice=allow'}))).status,200);
+        return (await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key=$2 AND type='forward' AND verified",[wid,name])).rows[0].id as string;
+      };
+      const receive=async(mid:string,to:string[],mime:string|Buffer)=>{
+        raw.set(mid,Buffer.from(mime));await submit(mid,to,'Mail');await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);
+        return (await db.query('SELECT * FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];
+      };
+      const forwardDelivery=async(hookId:string,messageId:string)=>{
+        const {mailboxEventJobs}=await import('./src/mailbox-events.js');
+        const d=(await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,messageId])).rows[0];
+        await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:d.id},{id:unique('job'),workspaceId:wid,attempts:1}).catch(()=>{});
+        return (await db.query('SELECT status,last_error,routed FROM mailbox_webhook_deliveries WHERE id=$1',[d.id])).rows[0];
+      };
+      /** What the dispatcher hands SES for a message's forward: the provider sees exactly this. */
+      const dispatchedForward=async(it:TestContext,messageId:string,hookId:string)=>{
+        const emailId=(await db.query('SELECT email_id FROM mail_forward_once WHERE message_id=$1 AND endpoint=$2',[messageId,hookId])).rows[0].email_id as string;
+        const {SESv2Client,SendEmailCommand}=await import('@aws-sdk/client-sesv2'),send=SESv2Client.prototype.send,sends:Json[]=[];
+        it.mock.method(SESv2Client.prototype,'send',async function(this:unknown,cmd:unknown,...rest:unknown[]){if(cmd instanceof SendEmailCommand)sends.push(cmd.input);return (send as (...a:unknown[])=>unknown).call(this,cmd,...rest);});
+        await (await import('./src/dispatcher.js')).dispatchDue(runtime,REGION);
+        return sends.filter(s=>s.EmailTags.some((tag:Json)=>tag.Name==='bane_email_id'&&tag.Value===emailId));
+      };
+      const forwarded:{mime?:string}={};
+      await t.test('forwards: a route forwards each message whole (text, HTML, attachments) to a confirmed recipient, from the receiving address with Reply-To the sender',async it=>{
+        const {parseInboundMime}=await import('./src/mailbox-ingest.js');
+        const hookId=await confirmedForward('whole','whole@example.net');
+        // No rule: the route names it as forward:<name>, and reads back with its ID, as a config with its name again.
+        await route('whole@receive.example',['forward:whole'],'whole');
+        assert.deepEqual((await call('GET','/v1/routing/routes/whole')).to,[hookId]);
+        assert.deepEqual((await call('GET','/v1/routing?format=config')).routes.find((r:Json)=>r.key==='whole').to,['forward:whole']);
+        assert.deepEqual((await call('POST','/v1/routing/test',{envelope:{to:['whole@receive.example']},verdicts:{spam:'PASS',dmarc:'PASS'}})).recipients[0].webhooks,[hookId]);
+        const row=(await call('GET','/v1/inbound/overview?q=whole')).routes.data.find((r:Json)=>r.match==='whole@receive.example');
+        assert.deepEqual(row.to.map((x:Json)=>[x.type,x.name,x.status]),[['forward','whole','ready']]);
+        assert.match((await call('GET','/v1/endpoints/whole')).nextStep,/forward:whole/);
+        const png=Buffer.from('89504e470d0a1a0a0000000d494844520000000100000001','hex'),pdf=Buffer.from('%PDF-1.4\n% quarterly fixture\n%%EOF\n');
+        const html='<p>Hello <b>team</b>, the <a href="https://example.org/report">report</a> is attached.</p><p><img src="cid:logo@example.org" alt="Logo"></p><script>alert(1)</script>';
+        const mime=['From: Ana Sender <ana@example.org>','Reply-To: ana.replies@example.org','To: whole@receive.example','Subject: Quarterly report','Message-ID: <fwd-whole@example.org>','MIME-Version: 1.0','Content-Type: multipart/mixed; boundary="m"','',
+          '--m','Content-Type: multipart/related; boundary="r"','','--r','Content-Type: multipart/alternative; boundary="a"','',
+          '--a','Content-Type: text/plain; charset=utf-8','','Hello team, the report is attached.','--a','Content-Type: text/html; charset=utf-8','',html,'--a--',
+          '--r','Content-Type: image/png','Content-Transfer-Encoding: base64','Content-ID: <logo@example.org>','Content-Disposition: inline; filename="logo.png"','',png.toString('base64'),'--r--',
+          '--m','Content-Type: application/pdf','Content-Transfer-Encoding: base64','Content-Disposition: attachment; filename="report.pdf"','',pdf.toString('base64'),'--m--',''].join('\r\n');
+        const m=await receive('fwd-whole',['whole@receive.example'],mime);
+        assert.equal(m.verdicts.forwardEligible,true);assert.equal(m.attachment_count,2);
+        // One delivery record, routed like a route webhook's, and one forward for the message.
+        assert.deepEqual(await forwardDelivery(hookId,m.id),{status:'delivered',last_error:null,routed:true});
+        const [sent,...more]=await dispatchedForward(it,m.id,hookId);assert.ok(sent,'The forward reached SES.');assert.equal(more.length,0);
+        // DMARC: From is the workspace's own receiving address, which its domain signs; the sender is named, and replies reach them.
+        assert.equal(sent.FromEmailAddress,'"ana at example.org via support" <support@receive.example>');
+        assert.deepEqual(sent.ReplyToAddresses,['ana.replies@example.org']);
+        const bytes=Buffer.from(sent.Content.Raw.Data);forwarded.mime=bytes.toString('latin1');
+        const wire=(await parseInboundMime(bytes))!,header=(name:string)=>wire.headers.filter(h=>h.key===name).map(h=>h.value);
+        assert.deepEqual([wire.from?.address,wire.replyTo?.map(a=>a.address),wire.subject],['support@receive.example',['ana.replies@example.org'],'Fwd: Quarterly report']);
+        assert.deepEqual(header('auto-submitted'),['auto-generated']);assert.match(header('x-nightmail-loop')[0]!,/^v1\.1\./);
+        for(const name of ['sender','resent-from','resent-sender'])assert.deepEqual(header(name),[],name);
+        // HTML through the allow-list every received HTML passes: formatting, links and the inline image stay, scripts don't.
+        assert.ok(wire.html!.startsWith('<p>Hello <b>team</b>, the <a href="https://example.org/report">report</a> is attached.</p><p><img src="cid:logo@example.org" alt="Logo"></p>'),String(wire.html));
+        assert.doesNotMatch(wire.html!,/<script/);assert.match(wire.html!,/Forwarded by support@receive\.example\. <a href="[^"]+\/v1\/forwarding\/stop\/[^"]+">Stop these forwards<\/a>/);
+        assert.match(wire.text!,/^Hello team, the report is attached\.\s+--\s+Forwarded by support@receive\.example\. Stop these forwards: \S+\/v1\/forwarding\/stop\//);
+        const files=Object.fromEntries(wire.attachments.map(a=>[a.filename,a]));
+        assert.deepEqual([Buffer.from(files['report.pdf']!.content as ArrayBuffer),files['report.pdf']!.mimeType],[pdf,'application/pdf']);
+        assert.deepEqual([Buffer.from(files['logo.png']!.content as ArrayBuffer),files['logo.png']!.contentId,files['logo.png']!.mimeType],[png,'<logo@example.org>','image/png']);
+        assert.equal((await db.query("SELECT attachment_count FROM mail_messages WHERE workspace_id=$1 AND direction='outbound' AND subject='Fwd: Quarterly report'",[wid])).rows[0].attachment_count,2);
+      });
+      await t.test('forwards: an unconfirmed recipient never receives: routes refuse a pending forward, and one stopped after it was added gets nothing',async()=>{
+        const {forwardStopUrl}=await import('./src/endpoints.js');
+        assert.equal((await call('POST','/v1/endpoints',{type:'forward',name:'unconfirmed',address:'unconfirmed@example.net',from:box.id},201)).status,'pending');
+        const pendingId=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='unconfirmed'",[wid])).rows[0].id as string;
+        for(const ref of ['forward:unconfirmed',pendingId]){
+          assert.equal(error(await local('POST','/v1/routing/routes',{match:'unconfirmed@receive.example',to:[ref]}),422,'FORWARD_NOT_CONFIRMED').field,'to');
+          error(await local('POST','/v1/routing/test',{envelope:{to:['unconfirmed@receive.example']},config:{routes:[{match:'unconfirmed@receive.example',to:[ref]}]}}),422,'FORWARD_NOT_CONFIRMED');
+        }
+        // Confirmed and routed, then stopped by its recipient: the route keeps it, so other changes still save, and nothing reaches them.
+        const hookId=await confirmedForward('stopped','stopped@example.net');
+        await route('stopped@receive.example',['forward:stopped'],'stopped');
+        assert.equal((await rawFetch(new Request(await forwardStopUrl(runtime,hookId),{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',origin:PUBLIC_ORIGIN},body:'choice=decline'}))).status,200);
+        assert.equal((await call('GET','/v1/endpoints/stopped')).status,'declined');
+        assert.equal((await call('PATCH','/v1/routing/routes/stopped',{note:'kept'})).note,'kept');
+        error(await local('POST','/v1/routing/routes',{match:'stopped-again@receive.example',to:['forward:stopped']}),422,'FORWARD_NOT_CONFIRMED');
+        const m=await receive('fwd-stopped',['stopped@receive.example'],'From: Agent <a@example.org>\r\nSubject: After the stop\r\nMessage-ID: <fwd-stopped@example.org>\r\n\r\nHello');
+        assert.deepEqual(await forwardDelivery(hookId,m.id),{status:'failed',last_error:'CONNECTOR_UNAVAILABLE',routed:true});
+        assert.equal((await db.query('SELECT FROM mail_forward_once WHERE endpoint=$1',[hookId])).rowCount,0);
+        assert.equal((await db.query("SELECT FROM mail_messages WHERE workspace_id=$1 AND direction='outbound' AND subject LIKE 'Fwd:%' AND (\"to\" @> $2::jsonb OR \"to\" @> $3::jsonb)",[wid,JSON.stringify([{address:'stopped@example.net'}]),JSON.stringify([{address:'unconfirmed@example.net'}])])).rowCount,0);
+      });
+      await t.test('forwards: a forward that comes back (A forwards to B, B forwards to A) is never forwarded again',async()=>{
+        assert.ok(forwarded.mime,'The whole-message forward ran first.');
+        const hookId=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='whole'",[wid])).rows[0].id as string;
+        // The forward exactly as SES sent it, received at an address that forwards: B handed it back whole, or another
+        // forwarder dropped Auto-Submitted on the way; either way its loop token stops it.
+        const back=forwarded.mime;
+        for(const [mid,mime] of [['fwd-back',back],['fwd-back-stripped',back.replace(/^Auto-Submitted: auto-generated\r\n/m,'')]] as const){
+          if(mid==='fwd-back-stripped')assert.ok(!/^Auto-Submitted:/mi.test(mime));
+          const m=await receive(mid,['whole@receive.example'],Buffer.from(mime,'latin1'));
+          assert.equal(m.verdicts.forwardEligible,false,mid);
+          assert.deepEqual(await forwardDelivery(hookId,m.id),{status:'failed',last_error:'FORWARD_BLOCKED',routed:true},mid);
+          assert.equal((await db.query('SELECT FROM mail_forward_once WHERE message_id=$1',[m.id])).rowCount,0,mid);
+        }
+        // Within one workspace, a forward to one of its own receiving hosts is refused when it is made.
+        error(await local('POST','/v1/endpoints',{type:'forward',name:'self',address:'back@receive.example',from:box.id}),422,'FORWARD_LOOP');
+      });
+      await t.test('forwards: attachments go along up to one message’s limits (20 files, 8 MiB); the rest are named in the forward',async it=>{
+        const hookId=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='whole'",[wid])).rows[0].id as string;
+        await route('files@receive.example',['forward:whole'],'files');
+        const parts=[...Array.from({length:21},(_,n)=>[`note-${n}.txt`,`note ${n}`]),['tool.exe','MZ fixture'],['big.bin','big fixture']];
+        const mime=['From: Ana Sender <ana@example.org>','To: files@receive.example','Subject: Many files','Message-ID: <fwd-files@example.org>','MIME-Version: 1.0','Content-Type: multipart/mixed; boundary="m"','',
+          '--m','Content-Type: text/plain; charset=utf-8','','See attached.',...parts.flatMap(([name,body])=>['--m','Content-Type: application/octet-stream',`Content-Disposition: attachment; filename="${name}"`,'',body!]),'--m--',''].join('\r\n');
+        const m=await receive('fwd-files',['files@receive.example'],mime);assert.equal(m.attachment_count,23);
+        // Received mail is parsed up to 6 MiB, so a file past the 8 MiB limit stands in by its recorded size; it is never read.
+        await db.query("UPDATE mail_attachments SET size_bytes=$3 WHERE workspace_id=$1 AND message_id=$2 AND filename='big.bin'",[wid,m.id,9*1024*1024]);
+        assert.deepEqual(await forwardDelivery(hookId,m.id),{status:'delivered',last_error:null,routed:true});
+        const notes=(await db.query("SELECT filename FROM mail_attachments WHERE workspace_id=$1 AND message_id=$2 AND filename LIKE 'note-%' ORDER BY id",[wid,m.id])).rows.map((r:Json)=>r.filename as string);
+        const [sent]=await dispatchedForward(it,m.id,hookId),files=sent.Content.Simple.Attachments as Json[];
+        // The first 20 that fit, in the received order; a type SES won't deliver, the file over the limit and the 21st are named.
+        assert.deepEqual(files.map(f=>f.FileName).sort(),notes.slice(0,20).sort());
+        for(const f of files)assert.equal(Buffer.from(f.RawContent).toString(),`note ${f.FileName.slice(5,-4)}`);
+        const named=/Not attached: (.+) \(over the 20-file, 8 MiB limit/.exec(sent.Content.Simple.Body.Text.Data)![1]!.split(', ');
+        assert.deepEqual(named.sort(),['big.bin','tool.exe',notes[20]!].sort());
+      });
+      await t.test('forwards: hosted, a forwarded file the content screen can’t vouch for is named, and the rest still go',async()=>{
+        const hookId=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='whole'",[wid])).rows[0].id as string;
+        await route('screened@receive.example',['forward:whole'],'screened');
+        const png=Buffer.from('89504e470d0a1a0a0000000d494844520000000100000001','hex');
+        const parts=[['photo.png','image/png',png],['page.html','text/html',Buffer.from('<html><body>login</body></html>')],['fake.pdf','application/pdf',Buffer.from('not a pdf')]] as const;
+        const mime=['From: Ana Sender <ana@example.org>','To: screened@receive.example','Subject: Screened files','Message-ID: <fwd-screened@example.org>','MIME-Version: 1.0','Content-Type: multipart/mixed; boundary="m"','',
+          '--m','Content-Type: text/plain; charset=utf-8','','Three files.',...parts.flatMap(([name,type,body])=>['--m',`Content-Type: ${type}`,'Content-Transfer-Encoding: base64',`Content-Disposition: attachment; filename="${name}"`,'',body.toString('base64')]),'--m--',''].join('\r\n');
+        const m=await receive('fwd-screened',['screened@receive.example'],mime);assert.equal(m.attachment_count,3);
+        const prior=runtime.config.hostedScreen;runtime.config.hostedScreen=true;
+        try{assert.deepEqual(await forwardDelivery(hookId,m.id),{status:'delivered',last_error:null,routed:true});}finally{runtime.config.hostedScreen=prior;}
+        const sent=(await db.query("SELECT id,text FROM mail_messages WHERE workspace_id=$1 AND direction='outbound' AND subject='Fwd: Screened files'",[wid])).rows[0];
+        assert.deepEqual((await db.query('SELECT filename,content_type FROM mail_attachments WHERE message_id=$1',[sent.id])).rows,[{filename:'photo.png',content_type:'image/png'}]);
+        assert.deepEqual(/Not attached: (.+) \(over the 20-file/.exec(sent.text)![1]!.split(', ').sort(),['fake.pdf','page.html']);
       });
       await t.test('delivery: an endpoint paused between the claim and the fence parks the delivery and posts nothing until resumed',async()=>{
         // tear/delivery witness: ingest m1 a, claim K m1:W, pause W, go K.

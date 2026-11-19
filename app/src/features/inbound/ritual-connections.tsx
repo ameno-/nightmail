@@ -14,7 +14,7 @@ import { useSingleFlight } from '../../lib/single-flight'
 
 type EndpointType = 'slack' | 'discord' | 'webhook' | 'forward'
 type EndpointStatus = 'ready' | 'pending' | 'expired' | 'declined' | 'paused'
-export type Endpoint = { name: string; type: EndpointType; status: EndpointStatus; call: string; target: string; policy: { perMinute: number; retryOnTimeout: boolean; idempotent: boolean }; expiresAt: string | null; nextStep: string; createdAt: string }
+export type Endpoint = { id: string; name: string; type: EndpointType; status: EndpointStatus; call: string; target: string; policy: { perMinute: number; retryOnTimeout: boolean; idempotent: boolean }; expiresAt: string | null; nextStep: string; createdAt: string }
 const typeLabel: Record<EndpointType, string> = { slack: 'Slack', discord: 'Discord', webhook: 'Webhook', forward: 'Forward' }
 const statusTone: Record<EndpointStatus, Tone> = { ready: 'success', pending: 'warning', expired: 'warning', declined: 'danger', paused: 'neutral' }
 const statusLabel: Record<EndpointStatus, string> = { ready: 'Ready', pending: 'Awaiting recipient', expired: 'Link expired', declined: 'Declined', paused: 'Paused' }

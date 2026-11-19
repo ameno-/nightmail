@@ -126,12 +126,12 @@ export const guides: Guide[] = [
           ['Slack', <code key="c">{endpointPayloads.slack.signature('support')}</code>, 'An incoming webhook URL from Slack. Stored encrypted; mentions and link previews are off.'],
           ['Discord', <code key="c">{endpointPayloads.discord.signature('alerts')}</code>, 'A webhook URL from Discord. Stored encrypted; mentions are off.'],
           ['Webhook', <code key="c">{endpointPayloads.webhook.signature('crm')}</code>, 'Signed JSON to your HTTPS URL; the signing secret is shown once. Without a payload it gets the whole message event.'],
-          ['Forward', <code key="c">{endpointPayloads.forward.signature('team')}</code>, 'Forwards the email to another address once its owner confirms by email.'],
+          ['Forward', <code key="c">{endpointPayloads.forward.signature('team')}</code>, 'Forwards the whole email, attachments included, once its recipient confirms by email. A route can forward too.'],
         ]} />
       </Section>
       <Section title="Routes or rules?">
-        <p>A <strong>route</strong> sends every message for an address, whole, to inboxes and webhooks. Every address has one: by default, its own Inbox. Edit it from the address’s page (<strong>Add a route</strong>) or from a route row.</p>
-        <p>A <strong>rule</strong> chooses: which mail, and what to send. Slack, Discord and forwards are only sent by rules, because a channel post needs a message written for it. If a rule calls a webhook the route also delivers to, with a payload of its own, that webhook gets the rule’s payload instead of the whole message, once per message.</p>
+        <p>A <strong>route</strong> sends every message for an address, whole, to inboxes, webhooks and forwards. Every address has one: by default, its own Inbox. Edit it from the address’s page (<strong>Add a route</strong>) or from a route row.</p>
+        <p>A <strong>rule</strong> chooses: which mail, and what to send. Slack and Discord posts are only sent by rules, because a channel post needs a message written for it. If a rule calls a webhook the route also delivers to, with a payload of its own, that webhook gets the rule’s payload instead of the whole message, once per message.</p>
       </Section>
       <Section title="Catch-all">
         <p>Mail for an address that doesn’t exist on the domain follows the domain’s catch-all, set on its page in <Link to="/domains">Domains</Link>: store it without an inbox, or create an address for each new recipient. A <code>*@domain</code> route takes precedence.</p>
