@@ -14,8 +14,8 @@ It is not a dashboard page: it shares no code, styles or sign-in with the dashbo
 Rules of the story:
 
 - **The pitchman never mentions Doug.** It is just a commercial. The one fourth-wall break is in
-  beat 4: an aside, thrown away. He glances at the footage, says "We saw you open that." and is
-  back to camera before the line is over. Nothing stops for it.
+  beat 4: an aside, thrown away, and smug. He glances at the footage, says "We saw you open
+  that." and is back to camera before the line is over. Nothing stops for it.
 - **One storyline.** Every email is Gnome Depot's, about the one gnome. The gnome (red hat, the
   only red thing besides the badge) turns up in every shot after it is delivered.
 - **It only gets worse.** Earlier emails never stop: they keep arriving as one-line banners under
@@ -41,13 +41,10 @@ to a new shot as its clip starts.
 | 8 | "Plug in your AI agents! Hundreds of robots, sending email, ALL NIGHT LONG! NIGHTMAIL! Call n—" | still at the funeral: a robot (a metal bean with an antenna and a screen for a face) pops up from behind the casket and sends him "Doug, I'm an AI agent. I'll be in touch." Then another ("A haiku about your gnome"), then one in the pew right next to him ("Re: Re: Re: please stop"), then two rows of them at the back, every one of them sending. That does it: he leaves. He drives, eyes narrowed, past NIGHTMAIL STUDIOS 2 MI, 1 MI, EXIT NOW, with robots in the back seat, on the roof and running behind, slapping mail onto the windshield. The commercial is on the car radio, tinny ("AM 1070"). After "Hundreds of robots," he turns it off with his forehead. Half a second of peace, and it comes back on by itself, louder ("VOL 11"), and stays that way. He screeches up to a building with a red ON AIR sign; the car door does not survive, and the horde pours in behind him. Back in the commercial the sound opens to full range, and the door at the back of the set bursts open: "DOUG — ACTUAL RECIPIENT". On "Call n—" he launches (no arms) and lands on the pitchman. | 99,999+ |
 | after | (the audio has cut dead. Three times he tries to go on: "Call n—", "Call…", and, out cold, "…now…") | on camera, all of it, for eight seconds. After the tackle Doug goes up, turns over and comes down head first eighteen more times, from one side and then the other. Every blow squashes them both, leaves a dent in the pitchman and leaves him flatter; his eyes go to spirals and then to Xs. The bowler comes off on the second blow and Doug stops to flatten that too. Mail and stars fly off them, the camera gets knocked, the lights and the boom mic swing, ON AIR sparks. He has finished when the pitchman says "…now…", so there is one more. Then the camera, crooked, holds on it: Doug out of breath on what is left, the flat bowler, the boom mic still swinging, ON AIR flickering. Silence. One ding: "That looked stressful, Doug. Here's 40% off your next gnome!" He reads it. Then it resets to standby. | 99,999+ |
 
-### The second viewing
-
-Whoever has watched it to the end (`localStorage["nightmail.commercial.seen"]`) gets a different
-pitchman the next time they tune in. Same script, same voice, same hat, which now has a dent in it.
-He is thinner, he is sweating, he can't hold the smile, he blinks twice as often, and every few
-seconds he checks the door (in the last shot he doesn't take his eyes off it). It ends the same way.
-`?take=2` forces him and `?take=1` forces the original.
+The pitchman is a showman and nothing has ever gone wrong for him: an easy grin with all his teeth
+in it, relaxed lids, level brows, eyes on the camera, bouncing on the beat. He never sweats, never
+looks worried and never looks at the door. He is oblivious until Doug lands on him, and it is the
+same pitchman on every viewing.
 
 No arms on anyone: Doug works his phone by leaning over and putting his forehead on it.
 
@@ -153,6 +150,6 @@ pages), so none of them reads the show: its copy is a script, shouted on purpose
 
 **Changing the show.** It is developed as a standalone project and copied here: `src/`, the audio
 and its manifest. Four lines of `src/main.js` differ from the standalone copy: it imports
-`./fonts.css` instead of the `@fontsource` packages, `BASE` is `/commercial/`, and the mute choice
-and the second viewing are stored as `nightmail.commercial.muted` and `nightmail.commercial.seen`.
-Run the smoke after copying.
+`./fonts.css` instead of the `@fontsource` packages, `BASE` is `/commercial/`, the mute choice is
+stored as `nightmail.commercial.muted`, and the key it clears (left by the build that changed the
+pitchman on a second viewing) is `nightmail.commercial.seen`. Run the smoke after copying.

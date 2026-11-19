@@ -34,8 +34,11 @@ function newDoug() {
     sink: 0, shiver: 0, drum: 0, autoBlink: 1, nextBlink: 2,
   }
 }
+// the pitchman's face at rest: a big easy grin, relaxed lids, level brows. He is never anything else
+// for long, until Doug lands on him.
+const EASY = { smile: 1, brow: 0.15, wide: 1, lid: 0.2 }
 function newPitch() {
-  return { in: 0, dx: 0, hy: 0, sq: 0, sqv: 0, rot: 0, gx: 0, gy: 0, fx: 0, smile: 0.9, worry: 0, brow: 0.3, wide: 1.05, lid: 0.05, mouth: 0, hype: 0 }
+  return { in: 0, dx: 0, hy: 0, sq: 0, sqv: 0, rot: 0, gx: 0, gy: 0, fx: 0, mouth: 0, hype: 0, ...EASY }
 }
 function newCam(tile) {
   return { tile, scene: "couch", a: 1, cell: null, mode: 0, noise: 0.14, zoom: 1, cx: 0.5, cy: 0.5, gain: 1, contrast: 1.1, glitch: 0, flash: 0, caption: "", S: {} }
@@ -51,7 +54,6 @@ export class Show {
     this.BW = 1152
     this.BH = 720
     this.tube = { power: 0, static: 0, roll: 0, tracking: 0.035, warp: 0, bright: 1, tilt: 0 }
-    this.understudy = false // a second viewing gets a different pitchman (main.js decides)
     this.reset()
   }
 
@@ -569,8 +571,8 @@ export class Show {
       // An aside, thrown away: the one time the pitchman looks at the footage. Nothing stops for
       // it. He is back to camera before the line is over.
       const up = tall()
-      this.pitch({ gx: up ? 0.5 : 1, gy: up ? -1 : -0.15, fx: up ? 0.1 : 0.2, lid: 0.3, brow: 0.6 }, 0.12)
-      this.pitch({ gx: 0, gy: 0, fx: 0, lid: 0.05, brow: 0.3 }, 0.18, E.io, 0.75)
+      this.pitch({ gx: up ? 0.5 : 1, gy: up ? -1 : -0.15, fx: up ? 0.1 : 0.2, lid: 0.42, brow: 0.5 }, 0.12) // smug
+      this.pitch({ gx: 0, gy: 0, fx: 0, ...EASY }, 0.18, E.io, 0.75)
       this.text("chy", "tv:WE SAW YOU OPEN THAT.", CREAM, true)
     })
     at(we + 0.25, () => {
@@ -592,7 +594,7 @@ export class Show {
     M.b5 = s5
     at(s5, () => {
       this.say("s5", D.s5)
-      this.pitch({ gx: 0, gy: 0, fx: 0, rot: 0, dx: 0, smile: 0.95, brow: 0.3, lid: 0.05, wide: 1.05, hype: 0.7 }, 0.2)
+      this.pitch({ gx: 0, gy: 0, fx: 0, rot: 0, dx: 0, ...EASY, hype: 0.7 }, 0.2)
       this.pitch({ hype: 0.3 }, 0.5, E.io, 1.2)
       if (!this.seeking) this.audio?.hush(1, 0.3)
       this.setLay("desk", 0.45)
@@ -638,7 +640,7 @@ export class Show {
       // …where the pitchman could not be prouder of it
       this.board.msg = this.t
       this.sfx("pop", { bus: "tv", gain: 0.7 })
-      this.pitch({ gx: 0.2, gy: -1, brow: 0.9, smile: 1 }, 0.15)
+      this.pitch({ gx: 0.2, gy: -1, brow: 0.5 }, 0.15)
       G.sqv += 8
     })
     lines("s5", s5, [
@@ -654,7 +656,7 @@ export class Show {
       at(inst + i * 0.3, () => {
         if (i === 0) {
           this.board.sent = this.t
-          this.pitch({ gx: 0, gy: 0, brow: 0.3 }, 0.2)
+          this.pitch({ gx: 0, gy: 0, brow: EASY.brow }, 0.2)
         }
         this.fly("card:" + k, boardAt, phoneAt, { dur: 0.26, s0: 0.7, s1: 0.3, arc: 50 })
         this.sfx("whoosh", { bus: "tv", gain: 0.35, rate: 1.3 })
@@ -714,8 +716,8 @@ export class Show {
       // the studio's board: his reply, posted to #customer-replies
       this.board = { t0: this.t, mode: "slack", msg: this.t, sent: null }
       this.sfx("pop", { bus: "tv", gain: 0.6 })
-      this.pitch({ gx: 0.2, gy: -1, brow: 0.9 }, 0.15)
-      this.pitch({ gx: 0, gy: 0, brow: 0.3 }, 0.2, E.io, 0.6)
+      this.pitch({ gx: 0.2, gy: -1, brow: 0.5 }, 0.15)
+      this.pitch({ gx: 0, gy: 0, brow: EASY.brow }, 0.2, E.io, 0.6)
     })
     TEAM.forEach((_, i) => {
       const r = first + i * rstep - 0.18
@@ -1032,7 +1034,7 @@ export class Show {
       this.to(this.tube, "static", 0, 0.2)
       this.sfx("cut", { bus: "tv", gain: 0.5 })
       this.read = []
-      this.pitch({ hype: 1, smile: 1, brow: 0.5 }, 0.1)
+      this.pitch({ hype: 1, gx: 0, gy: 0, ...EASY }, 0.1)
     })
     at(nm, () => {
       this.text("chy", "logo")
@@ -1051,9 +1053,7 @@ export class Show {
     })
     at(nm + 0.3, () => (this.lower = { t0: this.t }))
     at(call - 0.25, () => {
-      // the pitchman's eyes get there first
-      this.pitch({ gx: 1, gy: 0, brow: 1, wide: 1.3, smile: 0.3, hype: 0 }, 0.1)
-      this.D.sqv -= 9 // Doug winds up
+      this.D.sqv -= 9 // Doug winds up. The pitchman has not noticed a thing, and won't.
     })
     at(call, () => {
       this.chy("CALL N—", YELLOW)
@@ -1507,7 +1507,7 @@ export class Show {
       const y = lerp(top - R * 0.1, floor - R * 0.11 * hsy, u) - Math.sin(u * Math.PI) * R * 1.5
       const lx = -0.04 * R * hsx
       const ly = -0.97 * R * hsy
-      list.bean({ x: x - (Math.cos(th) * lx - Math.sin(th) * ly), y: y - (Math.sin(th) * lx + Math.cos(th) * ly), R, rot: th, sx: hsx, sy: hsy, kind: 6, dent: a.crush > 0 || this.understudy ? 1 : 0, rim: [0, 0, 0, 0] })
+      list.bean({ x: x - (Math.cos(th) * lx - Math.sin(th) * ly), y: y - (Math.sin(th) * lx + Math.cos(th) * ly), R, rot: th, sx: hsx, sy: hsy, kind: 6, dent: a.crush > 0 ? 1 : 0, rim: [0, 0, 0, 0] })
     }
     // Doug. side: which side of the target he comes down on (1: the door's)
     const side = (i) => (i % 2 ? -1 : 1)
@@ -1619,58 +1619,41 @@ export class Show {
       list.ring(L.px, L.py + cr * 0.9, cr * 1.25, cr * 0.09, 0, 0, { col: [0.94, 0.66, 0.14, L.pip] })
     }
     const sq = G.sq
-    // The second time anyone tunes in it is somebody else. The same script and the same hat
-    // (it has a dent in it now), but he is thinner, he is sweating, he can't hold the smile,
-    // and every few seconds he checks the door.
-    const U = this.understudy && this.started
-    const look = U && !a && (this.set ? !this.set.doug : t % 4.7 > 4.25)
     // What is left of him once Doug gets there: every blow leaves him a little flatter
     const flat = a ? a.flat * (1 - 0.3 * a.pop) : 0
-    const psx = Math.max(0.2, 1 - sq * 0.3) * (1 + flat * 0.55) * (U ? 0.88 : 1)
-    const psy = Math.max(0.16, 1 + sq * 0.45) * (1 - flat * 0.7) * (U ? 1.06 : 1)
-    const pcx = px + (U ? Math.sin(t * 47) * R * 0.007 : 0)
+    const psx = Math.max(0.2, 1 - sq * 0.3) * (1 + flat * 0.55)
+    const psy = Math.max(0.16, 1 + sq * 0.45) * (1 - flat * 0.7)
     const pcy = a ? lerp(py + R, floor + R * 0.04, clamp(flat * 5, 0, 1)) - R * psy : py - sq * R * 0.2
     const out = a && a.daze >= 2
     if (px > -R * 3) {
+      // Until then he is a showman, and nothing has ever gone wrong for him: an easy grin with
+      // all his teeth in it, relaxed lids, level brows, and his eyes on the camera.
       list.bean({
-        x: pcx,
+        x: px,
         y: pcy,
         R,
         rot: G.rot + Math.sin(t * 2.2) * 0.04 + (a ? a.wob.a * 0.5 : 0),
         sx: psx,
         sy: psy,
         kind: a?.hat ? 2 : 1, // 2: the bowler has left him
-        dent: U ? 1 : 0,
         askew: a ? 0.3 : 0,
         dents: a ? clamp((a.n - 1) / 11, 0, 1) : 0,
         daze: a ? a.daze : 0,
-        gx: a ? 0.2 : look ? 1 : G.gx,
-        gy: a ? -1 : look ? -0.1 : G.gy,
-        lid: U || a ? 0 : G.lid,
-        blink: !a && t % (U ? 1.9 : 3.7) < 0.11 ? 1 : 0,
-        brow: a ? 0.9 : G.brow + G.hype * 0.5 + (U ? 0.35 : 0),
-        worry: a ? -1 : -(U ? Math.max(G.worry, 0.85) : G.worry),
-        smile: a ? (a.pop > 0.5 ? 0.7 : out ? -0.15 : -0.6) : U ? Math.min(G.smile, 0.3) : G.smile,
-        mouth: a ? (a.pop > 0.5 ? 0.25 + 0.5 * Math.abs(Math.sin(t * 19)) : out ? 0 : a.mouth * 0.9) : G.mouth,
-        wide: a ? 1.35 : G.wide + G.hype * 0.2 + (U ? 0.12 : 0),
+        gx: a ? 0.2 : G.gx,
+        gy: a ? -1 : G.gy,
+        lid: a ? 0 : G.lid,
+        blink: !a && t % 3.7 < 0.11 ? 1 : 0,
+        brow: a ? 0.9 : G.brow + G.hype * 0.15,
+        worry: a ? -1 : 0.14,
+        smile: a ? (a.pop > 0.5 ? 0.7 : out ? -0.15 : -0.6) : G.smile,
+        mouth: a ? (a.pop > 0.5 ? 0.25 + 0.5 * Math.abs(Math.sin(t * 19)) : out ? 0 : a.mouth * 0.9) : Math.max(G.mouth, 0.32),
+        wide: a ? 1.35 : G.wide + G.hype * 0.05,
         fx: G.fx,
         rim: [1, 0.93, 0.8, 1],
         light: [1, 0.55, 0.2, 0.5],
         ldir: [-0.6, 0.6],
-        mw: U ? 0.95 : 1.15,
+        mw: 1.3,
       })
-      for (let i = 0; i < (U && !a?.hat ? 4 : 0); i++) {
-        // sweat
-        const u = (t * 0.55 + i * 0.29) % 1
-        const side = i % 2 ? 1 : -1
-        const dx = pcx + side * R * psx * (0.44 + 0.2 * u + (i > 1 ? 0.1 : 0))
-        const dy = pcy + (-0.7 + u * u * 1.05) * R * psy
-        const s = R * 0.085 * (1 - u * 0.35)
-        const al = Math.min(1, u * 8) * (1 - u * u * u)
-        list.tri(dx, dy - s * 0.95, s * 0.5, s * 0.7, 0, { col: [0.72, 0.9, 1, al] })
-        list.ellipse(dx, dy, s * 0.72, s * 0.8, { col: [0.72, 0.9, 1, al] })
-        list.ellipse(dx - s * 0.22, dy - s * 0.1, s * 0.2, s * 0.3, { col: [1, 1, 1, al] })
-      }
     }
     list.flags = 0
     if (a) this.attack(list, { R, px, pcy, psy, floor })
