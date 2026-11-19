@@ -5,7 +5,7 @@ import type { S3Client } from '@aws-sdk/client-s3';
 import { readableMailboxKey, mailboxS3 } from './mailbox-setup.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, sql, type SQLWrapper } from 'drizzle-orm';
-import { ApiError, errors, isoTime, json, lazyModule, page, response, security, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { ApiError, denied, errors, isoTime, json, lazyModule, page, response, security, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { productName } from './brand.js';
 
 const loadS3Presign = lazyModule(() => Promise.all([import('@aws-sdk/client-s3'), import('@aws-sdk/s3-request-presigner')]));
@@ -195,7 +195,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
     const v=access(c,'read');
     if (delivery!=='true') return v;
     // A dashboard member reads only addressed mail, like a non-admin key (L1).
-    if (!readsDelivery(c.get('actor'),v)) throw new ApiError(403,'ADMIN_REQUIRED','Delivery details require a workspace owner or admin session, or an unrestricted live manage API key.');
+    if (!readsDelivery(c.get('actor'),v)) throw denied('ADMIN_REQUIRED','Delivery details require a workspace owner or admin session, or an unrestricted live manage API key.',{ permission: 'receivedMail', level: 'read', scope: 'allAddresses', credential: 'notDelegated', ...(c.get('actor')?.role === 'member' ? { role: 'admin' } : {}) });
     return {...v,admin:true};
   }
   // The sender's SPF, DKIM and DMARC results and the automated-mail flag describe the message itself, not the workspace's

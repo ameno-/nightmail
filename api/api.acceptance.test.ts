@@ -3307,6 +3307,80 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
     });
 });
 
+// Every permission refusal keeps its status, code and message, and adds what it needs: error.required, the same as the
+// Nightmail-Required-Permission header, and one sentence naming the permission.
+test('permission refusals: every refusal helper names the permission, scope, credential or role a request needs', async () => {
+  const core = await import('./src/core.js'), { ApiError } = core;
+  type Actor = import('./src/core.js').Actor;
+  const key = (permissions: Actor['permissions'], extra: Json = {}): Actor => ({ workspaceId: 'w', keyId: 'key_fixture', permissions, domains: [], credential: 'apiKey', ...extra });
+  const session = (role: string): Actor => ({ workspaceId: 'w', keyId: 'user_fixture', permissions: ['read', 'send', 'manage'], domains: [], credential: 'dashboard', role });
+  const agentToken = key(['read', 'manage'], { credential: 'agentToken' }), signIn = (permissions: Actor['permissions'], extra: Json = {}) => key(permissions, { credential: 'mcp', keyId: 'mcp_fixture', role: 'owner', ...extra });
+  const ctx = (actor: Actor | undefined, method: string, path: string) => ({ get: (name: string) => name === 'actor' ? actor : undefined, env: { config: { multiTenant: true } }, req: { method, path } }) as never;
+  const refused = (run: () => unknown) => { try { const value = run(); if (value instanceof ApiError) return value; } catch (error) { if (error instanceof ApiError) return error; throw error; } return assert.fail('not refused'); };
+  // [helper call, code, message before the added sentence, required, header]
+  const rows: [string, () => unknown, string, string, Json, string][] = [
+    ['actor: editContent', () => core.actor(ctx(key(['read']), 'POST', '/v1/lists'), 'editContent'), 'PERMISSION_DENIED', 'This operation requires manage permission.', { permission: 'audience', level: 'write' }, 'audience=write'],
+    ['actor: send', () => core.actor(ctx(key(['read']), 'POST', '/v1/emails/send'), 'send'), 'PERMISSION_DENIED', 'This operation requires send permission.', { permission: 'sendEmail', level: 'on' }, 'send_email=on'],
+    ['actor: read', () => core.actor(ctx(key(['send']), 'GET', '/v1/emails/em_1'), 'read'), 'PERMISSION_DENIED', 'This operation requires read permission.', { permission: 'sentMail', level: 'read' }, 'sent_mail=read'],
+    ['lasting', () => core.lasting(ctx(agentToken, 'POST', '/v1/webhooks'), core.WEBHOOK_CHANGE), 'CREDENTIAL_DELEGATION_FORBIDDEN', `Temporary agent tokens cannot ${core.WEBHOOK_CHANGE}. Use the dashboard, an API key or the MCP approval itself.`, { permission: 'configuration', level: 'write', credential: 'lasting' }, 'configuration=write; credential=lasting'],
+    ['receivingAdminRefusal: read key', () => core.receivingAdminRefusal(key(['read'])), 'PERMISSION_DENIED', 'This operation requires manage permission.', { permission: 'receivingRules', level: 'read' }, 'receiving_rules=read'],
+    ['receivingAdminRefusal: sender domains', () => core.receivingAdminRefusal(key(['manage'], { domains: ['example.com'] }), 'change routes'), 'ADMIN_REQUIRED', 'Receiving configuration covers every address in the workspace. Use an owner or admin session, or an API key with manage permission on all domains.', { permission: 'receivingRules', level: 'write', scope: 'workspace' }, 'receiving_rules=write; scope="workspace"'],
+    ['receivingAdminRefusal: member', () => core.receivingAdminRefusal(session('member')), 'ADMIN_REQUIRED', 'Receiving configuration covers every address in the workspace. Use an owner or admin session, or an API key with manage permission on all domains.', { permission: 'receivingRules', level: 'read', role: 'admin' }, 'receiving_rules=read; role=admin'],
+    ['receivingAdminRefusal: approval', () => core.receivingAdminRefusal(signIn(['manage'], { grantId: 'g' }), 'change routes'), 'ADMIN_REQUIRED', 'Reconnect with explicit receiving consent to change receiving configuration.', { permission: 'receivingRules', level: 'write', role: 'admin' }, 'receiving_rules=write; role=admin'],
+    ['receivingAdminRefusal: agent token', () => core.receivingAdminRefusal(agentToken, 'change routes'), 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Temporary agent tokens cannot change routes. Use the dashboard, an API key or the MCP approval itself.', { permission: 'receivingRules', level: 'write', credential: 'lasting' }, 'receiving_rules=write; credential=lasting'],
+    ['keyAdminRefusal: read key', () => core.keyAdminRefusal(key(['read'])), 'PERMISSION_DENIED', 'This operation requires manage permission.', { permission: 'configuration', level: 'write' }, 'configuration=write'],
+    ['keyAdminRefusal: agent token', () => core.keyAdminRefusal(agentToken), 'CREDENTIAL_DELEGATION_FORBIDDEN', `Temporary agent tokens cannot ${core.KEY_CHANGE}. Use the dashboard, an API key or the MCP approval itself.`, { permission: 'configuration', level: 'write', credential: 'lasting' }, 'configuration=write; credential=lasting'],
+    ['keyAdminRefusal: sender domains', () => core.keyAdminRefusal(key(['manage'], { domains: ['example.com'] })), 'PERMISSION_DENIED', 'Key administration requires unrestricted management access.', { permission: 'configuration', level: 'write', scope: 'workspace' }, 'configuration=write; scope="workspace"'],
+    ['agentTokenMintRefusal', () => core.agentTokenMintRefusal(key(['read'])), 'MCP_AUTHORIZATION_REQUIRED', 'Temporary agent tokens can only be delegated directly from an MCP OAuth approval.', { credential: 'signIn' }, 'credential=sign_in'],
+    ['memberAdminRefusal: API key', () => core.memberAdminRefusal(key(['manage']), true), 'DASHBOARD_AUTH_REQUIRED', 'Members and invitations are managed by an owner or admin in person: a signed-in dashboard session or their own MCP sign-in. API keys and agent tokens cannot.', { permission: 'administration', level: 'write', credential: 'person', role: 'admin' }, 'administration=write; credential=person; role=admin'],
+    ['memberAdminRefusal: member', () => core.memberAdminRefusal(session('member'), false), 'PERMISSION_DENIED', 'Workspace administration requires an owner or admin.', { permission: 'administration', level: 'read', role: 'admin' }, 'administration=read; role=admin'],
+    ['memberAdminRefusal: read sign-in', () => core.memberAdminRefusal(signIn(['read']), true), 'PERMISSION_DENIED', 'This operation requires manage permission.', { permission: 'administration', level: 'write' }, 'administration=write'],
+    ['dashboardSession: API key', () => core.dashboardSession(ctx(key(['manage']), 'GET', '/v1/workspaces')), 'DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { permission: 'administration', level: 'read', credential: 'dashboard' }, 'administration=read; credential=dashboard'],
+    ['dashboardSession: member', () => core.dashboardSession(ctx(session('member'), 'POST', '/v1/billing/top-ups'), true), 'PERMISSION_DENIED', 'Workspace administration requires an owner or admin.', { permission: 'administration', level: 'write', role: 'admin' }, 'administration=write; role=admin'],
+    ['unrestrictedRequired', () => core.unrestrictedRequired('Workspace-wide operations require a key without domain restrictions.', core.requiredFor('GET', '/v1/metrics')), 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.', { permission: 'sentMail', level: 'read', scope: 'workspace' }, 'sent_mail=read; scope="workspace"'],
+    ['denied: an address', () => core.denied('FROM_NOT_ALLOWED', 'Send from your own address.', { permission: 'sendEmail', level: 'on', scope: 'address:"a"\r\n@example.com' as never }), 'FROM_NOT_ALLOWED', 'Send from your own address.', { permission: 'sendEmail', level: 'on', scope: 'address:"a"\r\n@example.com' }, 'send_email=on; scope="address:a@example.com"'],
+  ];
+  for (const [name, run, code, message, required, header] of rows) {
+    const error = refused(run);
+    assert.deepEqual([error.status, error.code, error.required, core.requiredHeaderValue(error.required!)], [403, code, required, header], name);
+    const permission = required.permission as keyof typeof core.PERMISSIONS | undefined;
+    assert.equal(permission ? error.message.slice(0, message.length) : error.message, message, name);
+    if (permission) assert.match(error.message.slice(message.length), new RegExp(`^ Needs ${core.PERMISSIONS[permission]}.*\\.$`, 's'), name);
+  }
+  assert.equal(refused(rows[19][1]).message, 'Send from your own address. Needs Send email for "a"\r\n@example.com.');
+  // What each helper admits is unchanged.
+  for (const value of [core.keyAdminRefusal(key(['manage'])), core.receivingAdminRefusal(key(['manage']), 'change routes'), core.agentTokenMintRefusal(signIn(['read']) as never),
+    core.memberAdminRefusal(session('admin'), true), core.lastingRefusal(key(['manage']), core.KEY_CHANGE)]) assert.equal(value, null);
+  // Which permission a route takes.
+  for (const [method, path, need, required] of [['POST', '/v1/emails/batch', undefined, 'send_email=on'], ['GET', '/v1/inbound/threads/{threadId}', undefined, 'received_mail=read'],
+    ['PATCH', '/v1/inboxes/{id}/messages/m', 'modify', 'received_mail=write'], ['DELETE', '/v1/inboxes/{id}', 'modify', 'inboxes=write'], ['POST', '/v1/inboxes', 'create', 'inboxes=write'],
+    ['POST', '/v1/inboxes/{id}/app-passwords', undefined, 'configuration=write'], ['POST', '/v1/campaigns/{id}/send', 'manage', 'send_email=on'], ['PATCH', '/v1/campaigns/{id}', 'editContent', 'audience=write'],
+    ['GET', '/v1/campaigns/{id}/stats', 'read', 'sent_mail=read'], ['PUT', '/v1/rules/attachments', 'manage', 'receiving_rules=write'], ['GET', '/v1/inbound/webhooks', 'read', 'configuration=read'],
+    ['GET', '/v1/operator/workspaces', undefined, '']] as const)
+    assert.equal(core.requiredHeaderValue(core.requiredFor(method, path, need)), required, `${method} ${path}`);
+});
+
+test('permission refusals over HTTP: the same status and code, with error.required and the Nightmail-Required-Permission header', async t => {
+  const read = await keyFixture(t, { permissions: ['read'] }), scoped = await keyFixture(t, { permissions: ['read', 'send', 'manage'], domains: ['example.com'] }), manage = await keyFixture(t);
+  const rows: [string, string, Key, unknown, string, Json, string][] = [
+    ['POST', '/v1/lists', read, { name: unique('refused-list') }, 'PERMISSION_DENIED', { permission: 'audience', level: 'write' }, 'audience=write'],
+    ['GET', '/v1/api-keys', read, undefined, 'PERMISSION_DENIED', { permission: 'configuration', level: 'write' }, 'configuration=write'],
+    ['GET', '/v1/metrics', scoped, undefined, 'UNRESTRICTED_KEY_REQUIRED', { permission: 'sentMail', level: 'read', scope: 'workspace' }, 'sent_mail=read; scope="workspace"'],
+    ['GET', '/v1/inbound/messages', read, undefined, 'ADMIN_REQUIRED', { permission: 'receivedMail', level: 'read' }, 'received_mail=read'],
+    ['GET', '/v1/inbound/messages', scoped, undefined, 'UNRESTRICTED_KEY_REQUIRED', { permission: 'receivedMail', level: 'read', scope: 'workspace' }, 'received_mail=read; scope="workspace"'],
+    ['GET', '/v1/endpoints', scoped, undefined, 'ADMIN_REQUIRED', { permission: 'receivingRules', level: 'read', scope: 'workspace' }, 'receiving_rules=read; scope="workspace"'],
+    ['POST', '/v1/domains', scoped, { name: 'other-refused.example.net' }, 'DOMAIN_NOT_ALLOWED', { permission: 'configuration', scope: 'domain:other-refused.example.net' }, 'configuration; scope="domain:other-refused.example.net"'],
+  ];
+  for (const [method, path, credential, body, code, required, header] of rows) {
+    const reply = await http(method, path, credential.secret, body), refusal = error(reply, 403, code);
+    assert.deepEqual([refusal.required, reply.headers.get('nightmail-required-permission')], [required, header], `${method} ${path}`);
+    assert.match(refusal.message, / Needs .+\.$/, `${method} ${path}`);
+  }
+  const allowed = await http('GET', '/v1/lists', manage.secret);
+  ok(allowed);
+  assert.equal(allowed.headers.get('nightmail-required-permission'), null);
+});
+
 describe('Hosted MCP OAuth and tools', () => {
   const resourceUrl = `${PUBLIC_ORIGIN}/mcp`;
   const writableScope = 'bane:read bane:manage offline_access';
@@ -3339,6 +3413,15 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.deepEqual(JSON.parse(result.content[0].text), output);
     return output;
   }
+
+  test('a refusal over MCP carries what the request needs in the error and its text', async t => {
+    const scoped = await keyFixture(t, { permissions: ['read', 'send', 'manage'], domains: ['example.com'] });
+    const result = await rpc(scoped.secret, 'tools/call', { name: 'createDomain', arguments: { body: { name: 'other-refused.example.net' }, confirm: true } });
+    assert.equal(result.isError, true, redact(result));
+    assert.deepEqual([result._meta.status, result.structuredContent.error.code, result.structuredContent.error.required], [403, 'DOMAIN_NOT_ALLOWED', { permission: 'configuration', scope: 'domain:other-refused.example.net' }], redact(result));
+    assert.deepEqual(JSON.parse(result.content[0].text).error.required, result.structuredContent.error.required);
+    assert.match(result.structuredContent.error.message, /Needs Configuration for other-refused\.example\.net\.$/);
+  });
 
   test('an MCP session is tied to the tools its own credential is listed, not the whole catalog', async t => {
     const db = await fixtureDatabase(t);

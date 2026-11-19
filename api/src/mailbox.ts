@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
-import { actorMailAccess, mailboxRoute, receivingConsentRoute, workspaceMailAccess, ApiError, RECEIVING_HOST_CHANGE, digest, errors, getSes, id, isoTime, json, KEY_CHANGE, lasting, lazyModule, log, ModuleLoadError, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { actorMailAccess, mailboxRoute, receivingConsentRoute, workspaceMailAccess, ApiError, denied, requiredOf, unrestrictedRequired, RECEIVING_HOST_CHANGE, digest, errors, getSes, id, isoTime, json, KEY_CHANGE, lasting, lazyModule, log, ModuleLoadError, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { authenticate, chargeCredential, createdInboxes, delegatedInbox, longPoll, requireReceivingConsent, reservePolls } from './auth.js';
 import { boundRequestBody } from './request-body.js';
 import { auditContext, auditInsert, recordAudit } from './audit.js';
@@ -33,10 +33,10 @@ const loadMailboxSesv2 = lazyModule(() => import('@aws-sdk/client-sesv2'));
 function access(c: Ctx, permission?: MailboxPermission): MailboxAccess {
   const value = c.get('mailboxAccess');
   if (!value) throw new ApiError(401, 'AUTH_REQUIRED', `Supply an inbound key or a ${productName} API key.`);
-  if (permission && !value.admin && !value.permissions.includes(permission)) throw new ApiError(403, 'PERMISSION_DENIED', `This operation requires ${permission} permission.`);
+  if (permission && !value.admin && !value.permissions.includes(permission)) throw denied('PERMISSION_DENIED', `This operation requires ${permission} permission.`, requiredOf(c, permission));
   return value;
 }
-function admin(c: Ctx) { const value = access(c); if (!value.admin) throw new ApiError(403, 'ADMIN_REQUIRED', `This operation requires an unrestricted live ${productName} key with manage permission.`); return value; }
+function admin(c: Ctx) { const value = access(c); if (!value.admin) throw denied('ADMIN_REQUIRED', `This operation requires an unrestricted live ${productName} key with manage permission.`, { ...requiredOf(c, 'manage'), scope: 'workspace' }); return value; }
 /** A change to receiving hosts outlives the credential making it: an administrator, never a temporary agent token (lastingRoute). */
 function hostAdmin(c: Ctx) { const value = admin(c); lasting(c, RECEIVING_HOST_CHANGE); return value; }
 const scopeOf = (value: MailboxAccess): Scope => ({ workspaceId: value.workspaceId });
@@ -68,8 +68,8 @@ async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
   }
   return authenticate(c, async () => {
     const value = workspaceMailAccess(c.get('actor'), c.req.method, c.req.path);
-    if (value === 'UNRESTRICTED_KEY_REQUIRED') throw new ApiError(403, value, 'Use an address-scoped inbound key or an unrestricted live manage credential.');
-    if (value === 'ADMIN_REQUIRED') throw new ApiError(403, value, 'Inbound requires an address-scoped key or an unrestricted live manage credential.');
+    if (value === 'UNRESTRICTED_KEY_REQUIRED') throw unrestrictedRequired('Use an address-scoped inbound key or an unrestricted live manage credential.', requiredOf(c));
+    if (value === 'ADMIN_REQUIRED') throw denied(value, 'Inbound requires an address-scoped key or an unrestricted live manage credential.', requiredOf(c));
     c.set('mailboxAccess', value);
     await next();
   });
@@ -584,7 +584,7 @@ export function registerMailbox(app: App) {
     const [owned] = await db.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(and(eq(mailboxAddresses.mailboxId, mailbox.id), from ? eq(mailboxAddresses.address, from) : eq(mailboxAddresses.kind, 'public')));
     if (from && !owned) {
       // Scoped keys may only speak as their own addresses; an administrator may use any registered sender.
-      if (!access(c).admin) throw new ApiError(403, 'FROM_NOT_ALLOWED', 'Inbound keys can send only from their own addresses. Use administrator access for another sender.', 'from');
+      if (!access(c).admin) throw denied('FROM_NOT_ALLOWED', 'Inbound keys can send only from their own addresses. Use administrator access for another sender.', { permission: 'sendEmail', level: 'on', scope: `address:${from}` }, 'from');
       if (!c.env.config.multiTenant) {
         const [domain] = await db.select({ region: mailboxDomains.region }).from(mailboxDomains).where(eq(mailboxDomains.id, mailbox.domainId));
         await assertRegisteredSender(db, scopeOf(access(c)), domain!.region, from);

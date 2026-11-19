@@ -1,7 +1,7 @@
 import { createMcpHandler, Server, type CallToolResult, type Tool } from '@modelcontextprotocol/server';
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/server/validators/cf-worker';
 import { bearerActor, dispatchAsActor, dispatchAsMailboxAccess, workspaceBearer } from './auth.js';
-import { agentTokenMintRefusal, digest, keyAdminRefusal, lastingRefusal, memberAdminRefusal, ModuleLoadError, receivingAdminRefusal, requestOrigin, withOuterRequest, workspaceMailAccess, type Actor, type MailboxAccess, type App, type RequestOrigin, type Runtime } from './core.js';
+import { agentTokenMintRefusal, denied, digest, keyAdminRefusal, requiredFor, type Required, lastingRefusal, memberAdminRefusal, ModuleLoadError, receivingAdminRefusal, requestOrigin, withOuterRequest, workspaceMailAccess, type Actor, type MailboxAccess, type App, type RequestOrigin, type Runtime } from './core.js';
 import { getMcpGrantActor, withMcpAuthorization } from './mcp-auth.js';
 import { chooseWorkspace, setDefaultWorkspace, WorkspaceChoice, type McpConnection } from './oidc-resource.js';
 import { buildMcpCatalog, mcpAliases, TOOLSETS, EMAIL_SEND_CONFIRMATION, EMAIL_SEND_ROUTING, type McpOperation } from './mcp-catalog.js';
@@ -13,12 +13,12 @@ const INPUT_LIMIT = 12 * 1024 * 1024;
 const RESPONSE_LIMIT = 16 * 1024 * 1024;
 const WIRE_LIMIT = RESPONSE_LIMIT + 1024 * 1024;
 class Failure extends Error {
-  constructor(readonly code: string, message: string, readonly status: number | null = null) { super(message); }
+  constructor(readonly code: string, message: string, readonly status: number | null = null, readonly required?: Required) { super(message); }
 }
 class ApiFailure extends Error {
   constructor(readonly value: { status: number; requestId: string | null; error: ObjectValue }) { super('API request failed.'); }
 }
-function fail(code: string, message: string, status: number | null = null): never { throw new Failure(code, message, status); }
+function fail(code: string, message: string, status: number | null = null, required?: Required): never { throw new Failure(code, message, status, required); }
 function object(value: unknown): value is ObjectValue { return value !== null && typeof value === 'object' && !Array.isArray(value); }
 const byteLength = (text: string) => new TextEncoder().encode(text).byteLength;
 function inspect(value: unknown, depth = 0, budget = { nodes: 0 }): void {
@@ -116,12 +116,21 @@ type Principal = { connection: McpConnection } | { key: Actor; bearer: string } 
  * gets more over MCP than over HTTP.
  */
 const permits = (actor: Actor, permission: McpOperation['permission']) => permission === 'any' || actor.permissions.includes('manage') || actor.permissions.includes(permission);
-const authorized = (op: McpOperation, actor: Actor) => !op.dashboardOnly
-  && (!op.mailbox || typeof workspaceMailAccess(actor, op.method, op.path) === 'object')
-  && (!op.receivingConsent || !actor.grantId || !!actor.receivingConsent) && !(op.ownerOnly && actor.role === 'member')
-  && !(op.unrestricted && actor.domains.length) && !(op.keyAdmin && keyAdminRefusal(actor)) && !(op.agentTokenMint && agentTokenMintRefusal(actor))
-  && !(op.receivingAdmin && receivingAdminRefusal(actor, op.write ? 'change receiving configuration' : undefined))
-  && !(op.lasting && lastingRefusal(actor, 'make lasting changes')) && !(op.memberAdmin && memberAdminRefusal(actor, op.write)) && permits(actor, op.permission);
+/** The first of those guards that refuses this actor the operation, as what the operation needs (error.required), or null. */
+function refusal(op: McpOperation, actor: Actor): Required | null {
+  const need = requiredFor(op.method, op.path, op.mailbox || op.permission === 'any' ? undefined : op.permission);
+  if (op.dashboardOnly) return { ...need, credential: 'dashboard' };
+  const mail = op.mailbox ? workspaceMailAccess(actor, op.method, op.path) : null;
+  if (mail === 'UNRESTRICTED_KEY_REQUIRED' || (op.unrestricted && actor.domains.length)) return { ...need, scope: 'workspace' };
+  if (mail === 'ADMIN_REQUIRED') return need;
+  if ((op.receivingConsent && actor.grantId && !actor.receivingConsent) || (op.ownerOnly && actor.role === 'member')) return { ...need, role: 'admin' };
+  const guard = (op.keyAdmin && keyAdminRefusal(actor)) || (op.agentTokenMint && agentTokenMintRefusal(actor))
+    || (op.receivingAdmin && receivingAdminRefusal(actor, op.write ? 'change receiving configuration' : undefined))
+    || (op.lasting && lastingRefusal(actor, 'make lasting changes', need)) || (op.memberAdmin && memberAdminRefusal(actor, op.write));
+  if (guard) return guard.required ?? need;
+  return permits(actor, op.permission) ? null : need;
+}
+const authorized = (op: McpOperation, actor: Actor) => !refusal(op, actor);
 
 /**
  * The hash of one listing: exactly the tools tools/list returns to this credential, in this mode and toolset. /mcp keeps
@@ -322,7 +331,8 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
       if (connection) {
         const { workspace, ...rest } = args; args = rest;
         actor = await actorFor(workspace);
-        if (!authorized(op, actor)) fail('PERMISSION_DENIED', `Your role in this workspace (${actor.role}) and this connection’s scopes don’t allow ${id}.`, 403);
+        const need = refusal(op, actor);
+        if (need) { const error = denied('PERMISSION_DENIED', `Your role in this workspace (${actor.role}) and this connection’s scopes don’t allow ${id}.`, need); fail(error.code, error.message, 403, need); }
       } else if (key && args.workspace !== undefined) {
         // A key belongs to one workspace: a call may name that one, and is refused any other.
         const { workspace, ...rest } = args; args = rest;
@@ -348,7 +358,7 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
     } catch (error) {
       if (error instanceof ModuleLoadError) return result({ error: { code: error.code, message: error.message, retryable: true } }, true, undefined, error.status, apiRequestId);
       if (error instanceof ApiFailure) return result({ error: error.value.error }, true, undefined, error.value.status, error.value.requestId);
-      return result({ error: { code: error instanceof Failure ? error.code : 'MCP_REQUEST_FAILED', message: error instanceof Failure ? error.message : 'The API request could not be completed. No automatic retry was attempted; reconcile an uncertain write before retrying.' } }, true, undefined, error instanceof Failure && error.status ? error.status : status, apiRequestId);
+      return result({ error: { code: error instanceof Failure ? error.code : 'MCP_REQUEST_FAILED', message: error instanceof Failure ? error.message : 'The API request could not be completed. No automatic retry was attempted; reconcile an uncertain write before retrying.', ...(error instanceof Failure && error.required ? { required: error.required } : {}) } }, true, undefined, error instanceof Failure && error.status ? error.status : status, apiRequestId);
     }
   }
   const handler = createMcpHandler(() => {

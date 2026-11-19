@@ -44,6 +44,31 @@ export type ApiError = {
         details?: Array<{
             [key: string]: unknown;
         }>;
+        /**
+         * On a 403 permission refusal: what the request needs that this credential lacks. The Nightmail-Required-Permission header says the same.
+         */
+        required?: {
+            /**
+             * The permission: sendEmail, sentMail, receivedMail, inboxes, audience (audience and content), receivingRules, configuration or administration (the workspace, its members, invitations and billing).
+             */
+            permission?: 'sendEmail' | 'sentMail' | 'receivedMail' | 'inboxes' | 'audience' | 'receivingRules' | 'configuration' | 'administration';
+            /**
+             * The level of that permission: on (sendEmail), read or write.
+             */
+            level?: 'on' | 'read' | 'write';
+            /**
+             * What the credential's scope must cover: workspace (no sender-domain limit), allAddresses (every receiving address), domain:<name> or address:<address>.
+             */
+            scope?: string;
+            /**
+             * The kind of credential: person (a signed-in dashboard session or the person's own MCP sign-in), dashboard (a signed-in dashboard session), signIn (an MCP sign-in), lasting (anything but a temporary agent token) or notDelegated (a dashboard session, or an API key no MCP approval made).
+             */
+            credential?: 'person' | 'dashboard' | 'signIn' | 'lasting' | 'notDelegated';
+            /**
+             * The workspace role: admin (an owner or admin) or owner.
+             */
+            role?: 'admin' | 'owner';
+        };
     };
 };
 

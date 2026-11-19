@@ -5,7 +5,7 @@ import { allowMalformedSns } from './core.js';
 import { boundRequestBody } from './request-body.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
-import { mailboxRoute, memberRefused, receivingConsentRoute, unrestrictedRoute, ApiError, databaseCodeOf, databaseConflict, databaseUnavailable, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, newRequestId, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
+import { mailboxRoute, memberRefused, receivingConsentRoute, unrestrictedRoute, ApiError, denied, requiredHeader, requiredHeaderValue, requiredOf, unrestrictedRequired, databaseCodeOf, databaseConflict, databaseUnavailable, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, newRequestId, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
@@ -237,8 +237,8 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   // A sender-domain grant can edit untargeted drafts, not operate on a workspace audience. Check before idempotency:
   // recorded launch responses also contain audience counts. The MCP listing uses the same predicate (core.ts).
   app.use('/v1/*', (c, next) => {
-    if (unrestrictedRoute(c.req.path) && c.get('actor')?.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', c.req.path.startsWith('/v1/campaigns/')
-      ? 'Campaign audience and delivery operations require an unrestricted credential.' : 'Workspace-wide operations require a key without domain restrictions.');
+    if (unrestrictedRoute(c.req.path) && c.get('actor')?.domains.length) throw unrestrictedRequired(c.req.path.startsWith('/v1/campaigns/')
+      ? 'Campaign audience and delivery operations require an unrestricted credential.' : 'Workspace-wide operations require a key without domain restrictions.', requiredOf(c));
     return next();
   });
   // Path guards are shared with the MCP listing (core.ts). Mailbox paths check receiving consent after mailboxAuth.
@@ -248,7 +248,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   // These areas have read or send routes as well as manage routes. An MX member's
   // read/send scopes do not confer access to infrastructure or campaign delivery controls.
   app.use('/v1/*', (c, next) => {
-    if (memberRefused(c.get('actor'), c.req.method, c.req.path)) throw new ApiError(403, 'PERMISSION_DENIED', 'This operation requires a workspace owner or admin.');
+    if (memberRefused(c.get('actor'), c.req.method, c.req.path)) throw denied('PERMISSION_DENIED', 'This operation requires a workspace owner or admin.', { ...requiredOf(c), role: 'admin' });
     return next();
   });
   const regions = async (c: Ctx, next: () => Promise<void>) => {
@@ -299,9 +299,10 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // The request line (logRequest) carries the code; an unexpected failure also logs its stack.
     c.set('failure', { code: responseError.code, field, databaseCode: databaseCodeOf(error) });
     if (!known && responseError.status >= 500) logError(error, { requestId, route: routeOf(c), code: responseError.code, status: responseError.status });
+    if (responseError.required) c.header(requiredHeader, requiredHeaderValue(responseError.required));
     if (responseError.resetAt) c.header('Retry-After', new Date(responseError.resetAt).toUTCString());
     else if (transient || conflict || responseError.code === 'IDEMPOTENCY_IN_PROGRESS') c.header('Retry-After', '1');
-    return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}), ...(responseError.details ? { details: responseError.details } : {}) } }, responseError.status as ContentfulStatusCode);
+    return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}), ...(responseError.details ? { details: responseError.details } : {}), ...(responseError.required ? { required: responseError.required } : {}) } }, responseError.status as ContentfulStatusCode);
   });
   app.notFound(c => { c.set('failure', { code: 'NOT_FOUND', unmatched: true }); return c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
   // origin is PUBLIC_URL's, never the request's Host: the dashboard and Docs build every example and connection URL from it.

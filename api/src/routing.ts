@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { retainedMail } from './db/mailbox.js';
-import { actor, ApiError, errors, id, json, receivingAdmin, response, security, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
+import { actor, ApiError, denied, errors, id, json, receivingAdmin, response, security, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
 import { auditContext, auditInsert } from './audit.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
 import { PARSE_LIMIT } from './mailbox-mime.js';
@@ -351,7 +351,7 @@ export async function detachDestination(tx: DbExecutor, c: Ctx, w: string, desti
       'REFERENCED',
       `Routes for ${using.join(', ')}${using.length === 3 ? ' and more' : ''} deliver to ${destination}. Delete with ?detach=true to remove it from those routes too, or change the routes first.`,
     );
-  if (c.get('actor').grantId)throw fail(403,'ADMIN_REQUIRED','Delegated credentials cannot detach route destinations.');
+  if (c.get('actor').grantId)throw denied('ADMIN_REQUIRED','Delegated credentials cannot detach route destinations.',{ permission: 'receivingRules', level: 'write', credential: 'notDelegated' });
   const routes = await listRoutes(tx, w);
   await save(
     tx,

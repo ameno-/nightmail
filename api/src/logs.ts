@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
-import { actor, ApiError, errors, PageQuery, region, response, security, type Actor, type App, type MailboxAccess } from './core.js';
+import { actor, ApiError, denied, errors, PageQuery, unrestrictedRequired, region, response, security, type Actor, type App, type MailboxAccess } from './core.js';
 import { emails } from './db/sending.js';
 import { mailMessages as messages } from './db/mailbox.js';
 import { accessibleMessages, readsDelivery, visibleAddresses } from './inbound-threads.js';
@@ -79,7 +79,7 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
     const access = mailAccess(a), onlyReceived = receivedStatus(q.status);
     // direction=received and the Received/Spam filters ask for received mail alone: refuse them to a credential that can't
     // read it, rather than answer with sent mail it didn't ask for or with nothing to query.
-    if ((q.direction === 'received' || onlyReceived) && !access) throw a.domains.length ? new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Received mail requires a credential without domain restrictions.') : new ApiError(403, 'ADMIN_REQUIRED', 'Received mail requires a dashboard session or a manage credential.');
+    if ((q.direction === 'received' || onlyReceived) && !access) throw a.domains.length ? unrestrictedRequired('Received mail requires a credential without domain restrictions.', { permission: 'receivedMail', level: 'read' }) : denied('ADMIN_REQUIRED', 'Received mail requires a dashboard session or a manage credential.', { permission: 'receivedMail', level: 'read' });
     const binding = await pageBinding(a, 'logs', q), after = readCursor(q.cursor, binding), n = q.limit + 1;
     const sent = q.direction !== 'received' && !onlyReceived, received = q.direction !== 'sent' && !!access && !(q.kind || q.campaignId) && (!q.status || onlyReceived);
 

@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, desc, eq, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
-import { actor, ApiError, chargeRenderBudget, errors, id, IdParams, json, notFound, PageQuery, page, response, security, type Actor, type App, type DbExecutor, type Runtime } from './core.js';
+import { actor, ApiError, chargeRenderBudget, requiredOf, unrestrictedRequired, errors, id, IdParams, json, notFound, PageQuery, page, response, security, type Actor, type App, type DbExecutor, type Runtime } from './core.js';
 import { attachmentLinks, attachments } from './db/sending.js';
 import { templateAssetLinks, templateAssets, templates, type TemplateDraft } from './db/templates.js';
 import { BlockContentError, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
@@ -73,7 +73,7 @@ export async function instantiateTemplate(runtime: Runtime, db: DbExecutor, iden
 
 function manageTemplates(c: Parameters<typeof actor>[0]) {
   const value = actor(c, 'editContent');
-  if (value.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Template administration requires unrestricted workspace access.');
+  if (value.domains.length) throw unrestrictedRequired('Template administration requires unrestricted workspace access.', requiredOf(c, 'editContent'));
   return value;
 }
 

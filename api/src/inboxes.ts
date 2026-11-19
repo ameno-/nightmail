@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
-import { ApiError, digest, id, randomSecret, errors, json, response, type App, type Ctx, type DbExecutor, type MailboxAccess } from './core.js';
+import { ApiError, denied, digest, id, randomSecret, errors, json, response, type App, type Ctx, type DbExecutor, type MailboxAccess } from './core.js';
 import { longPoll, reservePolls } from './auth.js';
 import { auditContext, auditInsert, type AuditContext } from './audit.js';
 import type { MailboxPermission, MailAddress, Verdicts } from './db/mailbox.js';
@@ -117,7 +117,7 @@ function createError(r: CreateResult, input: z.infer<typeof create>): ApiError {
   const where = r.domain ?? input.domain;
   switch (r.error) {
     case 'BYO_KEPT_POLICY_REQUIRED': return new ApiError(409,r.error,'Update the BYO receiving stack to kept-v1 and have the installation operator verify the binding before creating a persistent inbox.');
-    case 'ADMIN_REQUIRED': return new ApiError(403, r.error, `${where} automatically creates an address for incoming mail. Creating an inbox here needs an admin using the dashboard or an unrestricted manage key. Choose a receiving domain without an auto-create catch-all, or create a sandbox inbox.`, 'domain');
+    case 'ADMIN_REQUIRED': return denied(r.error, `${where} automatically creates an address for incoming mail. Creating an inbox here needs an admin using the dashboard or an unrestricted manage key. Choose a receiving domain without an auto-create catch-all, or create a sandbox inbox.`, { permission: 'inboxes', level: 'write', scope: 'workspace' }, 'domain');
     case 'RECEIVING_DOMAIN_REQUIRED': return input.domain
       ? new ApiError(409, r.error, `${input.domain} is not a receiving host of this workspace. Omit domain to use the oldest active one, or pick a host from GET /v1/inbound/domains.`, 'domain')
       : new ApiError(409, r.error, 'This workspace has no receiving domain yet. Add a domain, enable receiving on it and publish its MX record (Domains in the dashboard, or POST /v1/inbound/domains/{id}/enable), then retry once its status is active. To test without DNS, create an inbox with {"type":"sandbox"} and send it mail with POST /v1/inboxes/{id}/simulate.');
@@ -185,13 +185,13 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     const v = access(c, 'create'), input = c.req.valid('json');
     const grantId = c.get('actor')?.grantId ?? v.grantId;
     const manageAddress = v.admin && !grantId;
-    if(input.type==='persistent'&&!v.admin) throw new ApiError(403,'ADMIN_REQUIRED','Creating a persistent inbox requires workspace management permission.');
+    if(input.type==='persistent'&&!v.admin) throw denied('ADMIN_REQUIRED','Creating a persistent inbox requires workspace management permission.',{ permission: 'inboxes', level: 'write', scope: 'workspace' });
     if(input.type==='persistent'&&(input.ttlSeconds!==86400||input.graceHours!==24))throw new ApiError(422,'VALIDATION_FAILED','A persistent inbox has no lease or grace period.');
     if(input.credential&&grantId)throw new ApiError(422,'USE_INBOX_CONNECTION','Use an approval with receiving consent and create an inbox connection for a grant-bound key.');
-    if (input.localPart && !manageAddress) throw new ApiError(403,'PERMISSION_DENIED','This credential must omit localPart and use a generated address.','localPart');
+    if (input.localPart && !manageAddress) throw denied('PERMISSION_DENIED','This credential must omit localPart and use a generated address.',{ permission: 'inboxes', level: 'write', scope: 'workspace', credential: 'notDelegated' },'localPart');
     if (!inboxStoreReady(c.env)) throw new ApiError(503, 'INBOXES_UNAVAILABLE', 'Agent inboxes are not enabled on this deployment yet.');
     const missing = [...(input.send.enabled ? ['send'] as const : []), ...(input.credential?.permissions ?? [])].filter(p => !v.permissions.includes(p));
-    if (!v.admin && missing.length) throw new ApiError(403, 'PERMISSION_DENIED', `This key cannot grant ${[...new Set(missing)].join(', ')} permission it does not have.`);
+    if (!v.admin && missing.length) throw denied('PERMISSION_DENIED', `This key cannot grant ${[...new Set(missing)].join(', ')} permission it does not have.`, missing[0] === 'send' ? { permission: 'sendEmail', level: 'on' } : { permission: 'receivedMail', level: missing[0] === 'read' ? 'read' : 'write' });
     if (input.credential?.permissions.includes('send') && !input.send.enabled) throw new ApiError(422, 'VALIDATION_FAILED', 'A key with send permission needs send.enabled: true.', 'credential.permissions');
     if (input.type === 'sandbox' && (input.domain || input.localPart || input.send.enabled)) throw new ApiError(422, 'SANDBOX_ONLY', 'Sandbox inboxes get a generated .invalid address and cannot send: omit domain, localPart and send.');
     const secret = input.credential ? randomSecret(secretPrefixes.addressKey) : null, credential = secret ? { id: id('mbk'), hash: await digest(secret), prefix: shownPrefix(secret) } : undefined;

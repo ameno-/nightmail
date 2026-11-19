@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, sql } from 'drizzle-orm';
 import { auditContext, auditInsert, recordAudit, type AuditContext } from './audit.js';
-import { ApiError, dashboardSession, errors, id, IdParams, json, memberAdminRefusal, notFound, response, wrapModuleLoad, type App, type Ctx, type DbExecutor } from './core.js';
+import { ApiError, dashboardSession, denied, errors, id, IdParams, json, memberAdminRefusal, notFound, response, wrapModuleLoad, type App, type Ctx, type DbExecutor } from './core.js';
 import { baneUsers } from './db/users.js';
 import { workspaceMembers, workspaces } from './db/workspaces.js';
 import { invitationRecipient, verifiedDashboardUser } from './dashboard-auth.js';
@@ -104,7 +104,7 @@ function administer<T>(c: Ctx, action: (db: DbExecutor, workspaceId: string, use
   return c.env.db.transaction(async db => {
     await db.select({ id: workspaces.id }).from(workspaces).where(eq(workspaces.id, workspaceId)).for('no key update');
     const [member] = await db.select({ role: workspaceMembers.role }).from(workspaceMembers).where(and(eq(workspaceMembers.workspaceId, workspaceId), eq(workspaceMembers.userId, userId)));
-    if (member?.role !== 'owner' && member?.role !== 'admin') throw new ApiError(403, 'PERMISSION_DENIED', 'Workspace administration requires an owner or admin.');
+    if (member?.role !== 'owner' && member?.role !== 'admin') throw denied('PERMISSION_DENIED', 'Workspace administration requires an owner or admin.', { permission: 'administration', level: 'write', role: 'admin' });
     // An owner's or admin's own MCP sign-in (every such write needs manage): the approval as it is now, read after the
     // workspace lock (the order a member's removal takes the two in) and held, shared, until commit. One revoked,
     // expired, narrowed or no longer this person's while the request waited refuses the write.
@@ -115,7 +115,7 @@ function administer<T>(c: Ctx, action: (db: DbExecutor, workspaceId: string, use
     return action(db, workspaceId, userId, member.role);
   });
 }
-const ownerRequired = () => new ApiError(403, 'OWNER_REQUIRED', 'Only an owner can change workspace ownership.');
+const ownerRequired = () => denied('OWNER_REQUIRED', 'Only an owner can change workspace ownership.', { permission: 'administration', level: 'write', role: 'owner' });
 function changeMember(c: Ctx, memberId: string, newRole?: Role) {
   return administer(c, async (db, wid, _uid, role) => {
     const filter = and(eq(workspaceMembers.workspaceId, wid), eq(workspaceMembers.id, memberId));
@@ -145,7 +145,7 @@ async function invite(c: Ctx, input: z.infer<typeof Invite>) {
   const caller = memberAdmin(c, true);
   // An agent never makes an owner, even for an owner: ownership is given in the dashboard. Below that, administer
   // keeps every invitation at or under the caller's own role, checked again when the invitee accepts.
-  if (input.role === 'owner' && caller.signIn) throw new ApiError(403, 'DASHBOARD_AUTH_REQUIRED', `Owner invitations are made in the dashboard: ${dashboardUrl(c, '/settings#members')}. Over MCP, invite an admin or a member.`);
+  if (input.role === 'owner' && caller.signIn) throw denied('DASHBOARD_AUTH_REQUIRED', `Owner invitations are made in the dashboard: ${dashboardUrl(c, '/settings#members')}. Over MCP, invite an admin or a member.`, { permission: 'administration', level: 'write', credential: 'dashboard' });
   return administer(c, async (db, wid, uid, role) => {
     if (input.role === 'owner' && role !== 'owner') throw ownerRequired();
     const result = await db.execute<InviteRow>(sql`WITH invited AS (INSERT INTO workspace_invitations(id, workspace_id, email, role, inviter_id, expires_at)

@@ -10,7 +10,7 @@ import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
 import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
-import { actor, ApiError, assertSesConfigured, chargeBudget, assertSharedAccount, isSimulatedSes, digest, errors, getSes, id, IdParams, json, lazyModule, log, logError, ModuleLoadError, notFound, PageQuery, preloadSesTransport, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, wrapModuleLoad, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
+import { actor, ApiError, assertSesConfigured, chargeBudget, denied, requiredOf, unrestrictedRequired, assertSharedAccount, isSimulatedSes, digest, errors, getSes, id, IdParams, json, lazyModule, log, logError, ModuleLoadError, notFound, PageQuery, preloadSesTransport, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, wrapModuleLoad, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
 import { chargeManualDelivery, claimedWithWebhooks, enqueue, JobDeferred, WEBHOOK_ATTEMPTS, retryDatabaseFailures, webhookClaimCtes } from './jobs.js';
 import { applyClaim, connectionReady, domainHosts, receivingSetup, type ReceivingSetup, hostGraceStart, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type HostEvidence, type HostStatus, type HostWrite, type IdentityFacts, type TenantState, PROOF_LABELS, proofRecordName, type ProofLabel } from './states.js';
 import { jobs } from './db/core.js';
@@ -84,7 +84,7 @@ const listSchema = <T extends z.ZodType>(item: T, name: string) => z.object({ da
 export const DomainPage = z.object({ data: z.array(domainSchema), nextCursor: z.string().nullable(),
   quota: z.object({ used: z.number().int().describe('Domains in the workspace, across every region and page.'), limit: z.number().int().describe(`How many domains the workspace may have: 100 unless ${productName} set another limit on request.`) }).optional()
     .describe('Hosted only, and only for credentials without domain restrictions. Adding a domain past the limit fails with DOMAIN_LIMIT_REACHED; at most 10 of them may be unproven at once.') }).openapi('DomainPage');
-export function workspaceActor(c: Ctx, permission: Permission = 'read') { const a = actor(c, permission); if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.'); return a; }
+export function workspaceActor(c: Ctx, permission: Permission = 'read') { const a = actor(c, permission); if (a.domains.length) throw unrestrictedRequired('Workspace-wide operations require a key without domain restrictions.', requiredOf(c, permission)); return a; }
 // Like API keys, webhooks are set up, changed and removed by lasting credentials: a temporary agent token reads them and
 // their deliveries, and can test or retry a delivery, but does not create, change or delete them or read their signing
 // secrets.
@@ -109,7 +109,7 @@ async function ownWebhook(c: Ctx, tx: DbExecutor, a: Actor, webhookId: string) {
 // the URL is sent again. Sending the URL takes the webhook over: the mark goes, and so does the signing secret the
 // approval was given (on create or rotate).
 const webhookNeedsUrl = () => new ApiError(409, 'WEBHOOK_URL_REQUIRED', 'Deliveries were held when the approval that set up or changed this webhook was removed, and its URL is write-only. Send the URL again to resume; the webhook then gets a new signing secret.', 'url');
-function allowedDomain(a: Actor, name: string) { if (!senderDomainAllowed(a.domains, name)) throw new ApiError(403, 'DOMAIN_NOT_ALLOWED', 'The API key is not authorized for this domain or its parent domain.'); }
+function allowedDomain(a: Actor, name: string) { if (!senderDomainAllowed(a.domains, name)) throw denied('DOMAIN_NOT_ALLOWED', 'The API key is not authorized for this domain or its parent domain.', { permission: 'configuration', scope: `domain:${name}` }); }
 async function sesCall<T>(operation: (sesv2: Sesv2Mod) => Promise<T>,creatingIdentity=false): Promise<T> {
   const sesv2 = await loadOperationsSesv2();
   try { return await operation(sesv2); } catch (error) {
@@ -607,7 +607,7 @@ export async function expireDomainClaims(runtime:Runtime,deadline:number) {
 function dnsSetupActor(c:Ctx) {
   if (!c.env.config.multiTenant) return notFound('Endpoint');
   const a=actor(c,'manage');
-  if (a.credential!=='dashboard' || (a.role!=='owner' && a.role!=='admin')) throw new ApiError(403,'PERMISSION_DENIED','Use an owner or admin dashboard session to set up DNS.');
+  if (a.credential!=='dashboard' || (a.role!=='owner' && a.role!=='admin')) throw denied('PERMISSION_DENIED','Use an owner or admin dashboard session to set up DNS.',{ permission: 'configuration', level: 'write', credential: 'dashboard', role: 'admin' });
   return a;
 }
 export function recheckJob(wid: string, source: SQL, mode:'manual'|'dashboard'|'supersede'='manual') {
@@ -1016,7 +1016,7 @@ export function registerOperations(app: App) {
     description:'Dashboard only. Sends a fixed test email from hello@<domain> to the signed-in user’s own address; it takes no recipient, subject or body. Needs send permission and a verified domain, and counts like any other send. Use an Idempotency-Key to make a retry safe.',
     request:{params:IdParams},responses:{202:response(z.object({id:z.string(),status:z.literal('queued'),simulated:z.boolean()}).openapi('TestEmailQueued')),...errors}}),async c=>{
     const a=actor(c,'send');
-    if (a.credential!=='dashboard' || !a.email) throw new ApiError(403,'DASHBOARD_SESSION_REQUIRED','Sign in to the dashboard to send a test email to yourself.');
+    if (a.credential!=='dashboard' || !a.email) throw denied('DASHBOARD_SESSION_REQUIRED','Sign in to the dashboard to send a test email to yourself.',{ permission: 'sendEmail', level: 'on', credential: 'dashboard' });
     const [row]=await c.env.db.select({name:domains.name}).from(domains).where(and(scoped(domains,a),eq(domains.id,c.req.valid('param').id)));
     if (!row) return notFound('Domain');
     allowedDomain(a,row.name);
@@ -1061,7 +1061,7 @@ export function registerOperations(app: App) {
       JOIN workspace_members m ON m.user_id=${userId} AND m.workspace_id=${wid} AND m.role IN ('owner','admin') FOR SHARE OF m),
       selected AS (UPDATE nightmail_users SET selected_workspace_id=${wid} WHERE id=${userId} AND selected_workspace_id IS DISTINCT FROM ${wid} AND EXISTS(SELECT 1 FROM target)),
       queued AS (${recheckJob(wid,sql`SELECT id,token FROM target WHERE ${error===undefined}`)}) SELECT 1 FROM target`);
-    if(!result.rowCount) throw new ApiError(403,'PERMISSION_DENIED','Domain setup requires owner or admin access to the original workspace and domain.');
+    if(!result.rowCount) throw denied('PERMISSION_DENIED','Domain setup requires owner or admin access to the original workspace and domain.',{ permission: 'configuration', level: 'write', role: 'admin' });
     return back(userId);
   });
   for (const verifyRoute of [false, true]) app.openapi(createRoute({ method: verifyRoute ? 'post' : 'get', path: verifyRoute ? '/v1/domains/{id}/verify' : '/v1/domains/{id}', operationId: verifyRoute ? 'verifyDomain' : 'getDomain', description: verifyRoute ? 'On MX, request a background verification and return the current stored status. Read the domain again for updates.' : 'On MX, read the stored DNS records and verification status without an AWS call.', tags: ['Domains'], security, request: { params: IdParams }, responses: { 200: response(domainSchema), ...errors } }), async c => {
@@ -1156,7 +1156,7 @@ export function registerOperations(app: App) {
   // to every manage credential: it breaks the receiver until it is updated, so it can't go unnoticed.
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}/secret', operationId: 'revealWebhookSecret', tags: ['Webhooks'], security, description: `Read the endpoint's signing secret back. Only a dashboard session or an API key you created can: MCP approvals, the API keys they create and temporary agent tokens get 403 CREDENTIAL_DELEGATION_FORBIDDEN (they can rotate it instead). At most ${REVEALS_PER_MINUTE} reads a minute per workspace (429 REVEAL_RATE_LIMITED); each read is recorded with the credential and time.`, request: { params: IdParams }, responses: { 200: response(secretSchema), ...errors } }), async c => {
     const a = webhookManager(c);
-    if (a.credential === 'mcp' || a.credential === 'agentToken' || a.grantId) throw new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Read a signing secret back from the dashboard or with an API key you created. MCP approvals and agent tokens can rotate it instead.');
+    if (a.credential === 'mcp' || a.credential === 'agentToken' || a.grantId) throw denied('CREDENTIAL_DELEGATION_FORBIDDEN', 'Read a signing secret back from the dashboard or with an API key you created. MCP approvals and agent tokens can rotate it instead.', { permission: 'configuration', level: 'write', credential: 'notDelegated' });
     const row = await getWebhook(c.env, a, c.req.valid('param').id); c.header('Cache-Control', 'no-store');
     if (!await chargeBudget(c.env, a.workspaceId, 'webhook-secret:reveal', REVEALS_PER_MINUTE)) {
       c.header('Retry-After', '60');
