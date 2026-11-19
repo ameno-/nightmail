@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import { ApiError, id, isSimulatedSes, log, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { enqueue, retryDatabaseFailures } from './jobs.js';
 import { queueTenantStatus, resumeHostedConnection, tenantStatusDrift, terminalColumns, terminalEvents, type HostedCaps } from './states.js';
-import { dailyLimit, evaluated, FREEZE_FLOOR, GROWTH, moveScore, nextGrowth, nextStanding, quality, stepRank, type DayEvidence, type GrowthHour, type DomainAuth, type Factor, type LadderInput, type Reason, type ScoreState, type Step, type Window } from './standing-model.js';
+import { dailyLimit, ESTABLISHED, GOOD_STANDING, establishedBy, EVALUATION, evaluated, FREEZE_FLOOR, GROWTH, moveScore, nextGrowth, nextStanding, quality, stepRank, type DayEvidence, type GrowthHour, type DomainAuth, type Factor, type LadderInput, type Reason, type ScoreState, type Step, type TrackRecord, type Window } from './standing-model.js';
 import { productName } from './brand.js';
 
 // The standing job: every ten minutes it counts each Hosted workspace's mail, moves its score, sets the daily limit
@@ -16,7 +16,7 @@ export type StandingRow = {
   target: string; quality: string; volume: number; factors: Factor[]; band_limit: number | null; daily_limit: number | null; step: Step; reasons: Reason[]; since: string; clear_since: string | null;
   pause_kind: 'bounce' | 'full' | null; marketing_hold: boolean; release_until: string | null; release_percent: number | null; last_release_at: string | null; last_self_resume_at: string | null;
   strikes: { at: string; reason: string; kind: string }[]; strike_until: string | null; watch: boolean; notified: Record<string, string>; evidence_at: string | null; computed_at: string | null; version: number; sequence: number;
-  growth_until: string | null; growth_cap: number | null; growth_hour: string | null; growth_quality: string | null;
+  growth_until: string | null; growth_cap: number | null; growth_hour: string | null; growth_quality: string | null; history_before: string | null;
 };
 export type Change = {
   workspaceId: string; actor: StandingActor; kind: 'step' | 'limit' | 'quarantine' | 'release' | 'tenant' | 'operator';
@@ -106,9 +106,13 @@ export async function applyChange(db: DbExecutor, change: Change): Promise<{ eve
 
 // ---------- the job ----------
 type Candidate = StandingRow & { connection_id: string; paused_at: string | null; pause_reason: string | null; marketing_hold_reason: string | null; legacy_hold: boolean; exempt: boolean; screened_workspace: boolean; accepted_total: number; accepted_day: number;
-  sponsor_key: string; pace: number | null;
+  sponsor_key: string; pace: number | null; override: boolean;
   days: DayEvidence[] | null; domains: DomainAuth[] | null; win: { day: Window; week: Window } | null; screen: { screened: number; rejected: number } | null };
 const MAIL_ACCEPTED = sql`e.status<>'suppressed' AND (e.provider_id IS NOT NULL OR e.status IN ('accepted','sent','delivered','bounced','complained','delayed') OR e.event_outcomes & 1 <> 0)`;
+// Only real Hosted mail is evidence: never simulated runs, mail only to the SES mailbox simulator, or mail the workspace
+// sent through its own (BYO) account before (the unit is one email, in numerator and denominator alike).
+const MAIL_REAL = sql`NOT e.simulated AND hosted_real_cost(e.to_addresses||e.cc_addresses||e.bcc_addresses)>0
+  AND (e.feedback_topic_arn IS NULL OR EXISTS (SELECT FROM provider_feedback_history h WHERE h.topic_arn=e.feedback_topic_arn AND h.kind='shared'))`;
 /**
  * Counts each due workspace's mail per UTC day: 30 days the first time, then the last 8 (late feedback). Hourly, or every
  * five minutes during the evaluation, so its first 100 recipients are graded soon after their results are in.
@@ -122,10 +126,7 @@ async function refreshEvidence(db: DbExecutor, limit: number) {
         (e.status='delivered' OR e.event_outcomes & 2 <> 0) AS delivered,(e.status='bounced' OR e.event_outcomes & 4 <> 0) AS bounced,
         (e.status='complained' OR e.event_outcomes & 8 <> 0) AS complained,e.status='suppressed' AS suppressed,
         e.campaign_id IS NOT NULL AS first_send,coalesce(e.snapshot->>'kind'='marketing' OR e.campaign_id IS NOT NULL OR e.snapshot ? 'bulk',false) AS marketing,e.event_outcomes & 32 <> 0 AS clicked
-      -- Only real Hosted mail is evidence: never simulated runs, mail only to the SES mailbox simulator, or mail the
-      -- workspace sent through its own (BYO) account before (the unit is one email, in numerator and denominator alike).
-      FROM due d JOIN sending_emails e ON e.workspace_id=d.workspace_id AND NOT e.simulated AND hosted_real_cost(e.to_addresses||e.cc_addresses||e.bcc_addresses)>0
-        AND (e.feedback_topic_arn IS NULL OR EXISTS (SELECT FROM provider_feedback_history h WHERE h.topic_arn=e.feedback_topic_arn AND h.kind='shared'))
+      FROM due d JOIN sending_emails e ON e.workspace_id=d.workspace_id AND ${MAIL_REAL}
         AND e.created_at>=date_trunc('day',now(),'UTC')-CASE WHEN d.evidence_at IS NULL THEN interval '30 days' ELSE interval '7 days' END
     ), days AS (
       SELECT workspace_id,day,count(*)::int AS emails,count(*) FILTER (WHERE accepted)::int AS accepted,count(*) FILTER (WHERE delivered)::int AS delivered,
@@ -178,6 +179,30 @@ async function growthHour(runtime: Runtime, key: string, hour: string): Promise<
   return { accepted: r?.accepted ?? 0, distinct: r?.distinct ?? 0, resolved: r?.resolved ?? 0, bounces: r?.bounces ?? 0, complaints: r?.complaints ?? 0 };
 }
 
+/**
+ * A workspace's track record before `cutoff` (src/standing-model.ts ESTABLISHED): real mail by its SES acceptance
+ * events (never its admission time), in the 30 completed UTC days before the cutoff, leaving out its first 100
+ * acceptances (the evaluation's seeds), per real recipient.
+ */
+async function trackRecord(runtime: Runtime, wid: string, cutoff: string): Promise<TrackRecord> {
+  const { rows: [r] } = await runtime.db.execute<TrackRecord>(sql`WITH accepted AS (
+      SELECT v.email_id,min(v.created_at) AS at FROM sending_email_events v WHERE v.workspace_id=${wid} AND v.created_at<${cutoff}::timestamptz
+        AND v.type IN ('accepted','send') AND NOT v.simulated GROUP BY v.email_id
+    ), real AS (
+      SELECT a.at,e.* FROM accepted a JOIN sending_emails e ON e.workspace_id=${wid} AND e.id=a.email_id AND ${MAIL_REAL}
+    ), counted AS (
+      SELECT * FROM real ORDER BY at,id OFFSET ${EVALUATION.recipients}
+    ), recipients AS (
+      SELECT (c.at AT TIME ZONE 'UTC')::date AS day,lower(x) AS address,(c.status='delivered' OR c.event_outcomes & 2 <> 0) AS delivered,(c.status='bounced' OR c.event_outcomes & 4 <> 0) AS bounced,
+        (c.status='complained' OR c.event_outcomes & 8 <> 0) AS complained
+      FROM counted c CROSS JOIN LATERAL jsonb_array_elements_text(c.to_addresses||c.cc_addresses||c.bcc_addresses) x
+      WHERE c.at>=date_trunc('day',${cutoff}::timestamptz,'UTC')-make_interval(days=>${ESTABLISHED.windowDays}) AND c.at<date_trunc('day',${cutoff}::timestamptz,'UTC')
+        AND lower(x) NOT LIKE '%@simulator.amazonses.com'
+    ) SELECT count(DISTINCT day)::int AS days,count(DISTINCT address)::int AS recipients,count(DISTINCT split_part(address,'@',2))::int AS domains,count(*)::int AS accepted,
+      count(*) FILTER (WHERE delivered OR bounced)::int AS resolved,count(*) FILTER (WHERE bounced)::int AS bounces,count(*) FILTER (WHERE complained)::int AS complaints FROM recipients`);
+  return { days: r?.days ?? 0, recipients: r?.recipients ?? 0, domains: r?.domains ?? 0, accepted: r?.accepted ?? 0, resolved: r?.resolved ?? 0, bounces: r?.bounces ?? 0, complaints: r?.complaints ?? 0 };
+}
+
 const PAUSE_LEAD: Record<Reason['metric'], string> = { complaints: 'high spam-complaint rate', screen: 'the content screen rejected a high share of mail',
   transactional_bounces: 'high hard-bounce rate on transactional mail', bounces: 'high hard-bounce rate', marketing_bounces: 'high hard-bounce rate on marketing mail', external: 'paused' };
 const zero: Window = { accepted: 0, bounces: 0, complaints: 0, marketingAccepted: 0, marketingBounces: 0, marketingComplaints: 0 };
@@ -197,6 +222,7 @@ async function candidates(runtime: Runtime, limit: number, only?: string) {
       (SELECT coalesce(sum(accepted),0)::int FROM sender_score_daily d WHERE d.workspace_id=c.workspace_id) AS accepted_total,
       -- What SES accepted in the rolling 24 hours: what a ladder step freezes a workspace without a limit at.
       hosted_accepted_day(c.workspace_id) AS accepted_day,(SELECT coalesce(quota_sponsor,id) FROM workspaces WHERE id=c.workspace_id) AS sponsor_key,hosted_minute_cap(c.workspace_id) AS pace,
+      EXISTS (SELECT FROM workspaces WHERE id=c.workspace_id AND send_cap_override IS NOT NULL AND (send_cap_override_expires_at IS NULL OR send_cap_override_expires_at>now())) AS override,
       (SELECT json_agg(d ORDER BY d.day) FROM sender_score_daily d WHERE d.workspace_id=c.workspace_id AND d.day>=(now() AT TIME ZONE 'UTC')::date-180) AS days,
       (SELECT json_agg(json_build_object('name',name,'dkim',identity #>> '{ses,DkimAttributes,Status}'='SUCCESS' AND identity #>> '{ses,DkimAttributes,SigningEnabled}'='true',
         'mailFrom',identity #>> '{ses,MailFromAttributes,MailFromDomainStatus}'='SUCCESS','dmarc',identity #>> '{dmarc,status}','emails',0))
@@ -266,10 +292,17 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
     }
     const strikeCapped = !!row.strike_until && Date.parse(row.strike_until) > now.getTime();
     const limits = dailyLimit({ phase: moved.phase, score: moved.score, band: row.band_limit, step: next.step, strikeCapped, acceptedDay: Number(row.accepted_day) });
-    // The growth pace: the last completed hour is counted only while it can still raise an allowance that limits.
+    // The growth pace, for new senders only: a workspace graded now or on the pace with a track record from before its
+    // evaluation, or an operator override, skips or leaves it (ESTABLISHED). The last completed hour is counted only
+    // while it can still raise an allowance that limits.
     const was = { until: row.growth_until, cap: row.growth_cap, hour: row.growth_hour && new Date(row.growth_hour).toISOString(), quality: row.growth_quality === null ? null : Number(row.growth_quality) };
-    const counts = !!was.until && Date.parse(was.until) > now.getTime() && was.cap !== null && next.step === 'ok' && (row.pace === null || was.cap < 60 * row.pace) && (!was.hour || Date.parse(lastHour) > Date.parse(was.hour));
-    const growth = nextGrowth(was, { graduated: row.phase === 'calibrating' && moved.phase === 'graded', step: next.step, quality: q.quality, hour: lastHour, evidence: counts ? await growthHour(runtime, row.sponsor_key, lastHour) : null, now });
+    const graduated = row.phase === 'calibrating' && moved.phase === 'graded', pacing = !!was.until && Date.parse(was.until) > now.getTime() && was.cap !== null;
+    // The track record ends at the baseline, or earlier when the evaluation's 100th was counted before it.
+    const cutoff = row.history_before && new Date(Math.min(Date.parse(row.history_before), moved.calibratedAt ? Date.parse(moved.calibratedAt) : Infinity)).toISOString();
+    const history = (graduated || pacing) && !row.override && cutoff && moved.score !== null && moved.score >= GOOD_STANDING && next.step === 'ok' ? await trackRecord(runtime, row.workspace_id, cutoff) : null;
+    const exempt = graduated || pacing ? establishedBy({ override: row.override, history, score: moved.score, step: next.step }) : null, established = exempt !== null;
+    const counts = !established && pacing && next.step === 'ok' && (row.pace === null || was.cap! < 60 * row.pace) && (!was.hour || Date.parse(lastHour) > Date.parse(was.hour));
+    const growth = nextGrowth(was, { graduated, established, step: next.step, quality: q.quality, hour: lastHour, evidence: counts ? await growthHour(runtime, row.sponsor_key, lastHour) : null, now });
     // An owner's marketing release and an operator's hold after a self-resume both end on their own.
     const releaseExpired = !!row.release_until && Date.parse(row.release_until) <= now.getTime();
     if (next.step !== prev.step || releaseExpired || row.legacy_hold) {
@@ -288,6 +321,26 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
         throw error;
       }
       if (releaseExpired) await runtime.db.execute(sql`UPDATE sender_standing SET release_until=NULL,release_percent=NULL WHERE workspace_id=${row.workspace_id} AND release_until<=now()`);
+    }
+    // Skipping or leaving the growth pace is on the timeline and in the operator audit, once: a pace is cleared only while
+    // it is active and the standing is at the version read (else the next run decides), and a graduation skips it once.
+    if (exempt) {
+      const details = { growth: { change: pacing ? 'cleared' : 'skipped', reason: exempt, before: pacing ? { until: was.until, cap: was.cap } : null, cutoff: exempt === 'TRACK_RECORD' ? cutoff : null, history: exempt === 'TRACK_RECORD' ? history : null } };
+      try {
+        const done = await runtime.db.transaction(async tx => {
+          if (pacing ? !(await tx.execute(sql`UPDATE sender_standing SET growth_until=NULL,growth_cap=NULL,growth_hour=NULL,growth_quality=NULL
+              WHERE workspace_id=${row.workspace_id} AND growth_until>now() RETURNING 1`)).rows.length
+            : (await tx.execute(sql`SELECT FROM standing_events WHERE workspace_id=${row.workspace_id} AND details->'growth'->>'change'='skipped' LIMIT 1`)).rows.length) return null;
+          const change = await applyChange(tx, { workspaceId: row.workspace_id, actor: { kind: 'system', via: 'job' }, kind: 'limit', expectVersion: row.version, details });
+          await tx.execute(sql`INSERT INTO hosted_operator_audit(workspace_id,action,details,via,reason,before,after) VALUES (${row.workspace_id},${pacing ? 'growth-cleared' : 'growth-skipped'},${JSON.stringify(details)}::jsonb,'job',
+            ${exempt === 'OPERATOR_OVERRIDE' ? 'An operator daily-limit override exempts the workspace from the growth pace.' : 'A clean track record from before the growth pace existed.'},${details.growth.before && JSON.stringify(details.growth.before)}::jsonb,'{"until":null,"cap":null}'::jsonb)`);
+          return change;
+        });
+        if (done) { row.version = done.version; log('info', { code: pacing ? 'GROWTH_CLEARED' : 'GROWTH_SKIPPED', workspaceId: row.workspace_id, reason: exempt }); }
+      } catch (error) {
+        if (error instanceof ApiError && error.code === 'STANDING_VERSION_CHANGED') continue;
+        throw error;
+      }
     }
     // A band change is on the timeline (one statement: the sequence row lock orders it with applyChange).
     if (limits.limit !== row.daily_limit) await runtime.db.execute(sql`WITH s AS (UPDATE sender_standing SET sequence=sequence+1 WHERE workspace_id=${row.workspace_id} RETURNING workspace_id,sequence,step)
