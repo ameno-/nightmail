@@ -22,7 +22,6 @@ const YELLOW = [1, 0.84, 0.3, 1]
 const AMBER = [1, 0.66, 0.2, 1]
 const GAP = 0.2 // breath between commercial clips
 const JINGLE = 3.3
-const FIGHT = 5 // seconds of fight cloud after the audio cuts out
 const FEED_W = 2560
 const FEED_H = 1440
 // the fine print that keeps each line of the pitch honest (atlas.js FINE)
@@ -52,6 +51,7 @@ export class Show {
     this.BW = 1152
     this.BH = 720
     this.tube = { power: 0, static: 0, roll: 0, tracking: 0.035, warp: 0, bright: 1, tilt: 0 }
+    this.understudy = false // a second viewing gets a different pitchman (main.js decides)
     this.reset()
   }
 
@@ -84,11 +84,13 @@ export class Show {
     this.flies = [] // things crossing between the footage and the commercial
     this.star = null
     this.callout = null // "via NIGHTMAIL", noticed
-    this.set = null // the studio in the last shot: { door, doug, k, ox }
+    this.set = null // the studio in the last shot: { door, doug, k }
     this.lower = null // the lower third
-    this.fight = null // { t0 }: just off camera
-    this.hat = null // { t0 }: the bowler, in flight
-    this.card = null // { t0, coupon }: PLEASE STAND BY
+    this.atk = null // what Doug does to the pitchman after "Call n—" (see strike)
+    this.coupon = null // when the last email arrived
+    this.lamp = { a: 0, v: 0, k: 28, c: 0.7 } // the studio lights, swinging
+    this.boom = { a: 0, v: 0, k: 14, c: 0.45 } // the boom mic, swinging
+    this.radioMode = "open"
     this.post = { shake: 0, flash: 0 }
     this.hops = []
     this.voice = 0
@@ -142,6 +144,45 @@ export class Show {
   stopLoop(name, fade) {
     this.loops.delete(name)
     if (!this.seeking) this.audio?.stopLoop(name, fade)
+  }
+  // how the commercial sounds from where Doug is (audio.js radio)
+  radio(mode) {
+    this.radioMode = mode
+    if (!this.seeking) this.audio?.radio?.(mode)
+  }
+  // One blow lands: on the pitchman ("p") or on his hat ("h"). Everything in the studio feels it.
+  strike(power = 1, on = "p") {
+    const a = this.atk
+    a.n++
+    a.last = this.t
+    a.talk = 0
+    this.text("chy", null)
+    this.D.sqv -= 9 * power
+    if (on === "p") {
+      this.G.sqv -= 17 * power
+      a.flat = Math.min(0.92, a.flat + (a.n === 1 ? 0.25 : 0.045 * power)) // the tackle alone takes him down a peg
+      a.wob.v += (a.n % 2 ? 1 : -1) * 6 * power
+      a.mouth = 1
+      if (a.n >= 3 && a.daze < 2) a.daze = Math.min(1, a.daze + 0.34)
+      if (a.n === 2) a.hat = { t0: this.t } // off it comes
+    } else {
+      a.crush = Math.min(1, a.crush + 0.6)
+      this.sfx("crunch", { bus: "tv", gain: 0.9, rate: 0.9 + a.crush * 0.2 })
+    }
+    a.bursts.push({ t0: this.t, on, seed: a.n, power })
+    if (a.n % 3 === 0) a.sparks.push({ t0: this.t, seed: a.n })
+    this.post.shake = 0.5 + 0.4 * power
+    this.to(this.post, "shake", 0.04, 0.3)
+    this.post.flash = 0.16 * power
+    this.to(this.post, "flash", 0, 0.12)
+    // the camera gets knocked (less on a phone, where a tilted picture loses more of its sides)
+    const lim = this.BH > this.BW ? 0.045 : 0.09
+    this.tube.tilt = clamp(this.tube.tilt + (((a.n * 7) % 5) - 2) * lim * 0.16, -lim, lim)
+    this.lamp.v += (a.n % 2 ? 1 : -1) * 2.4 * power
+    this.boom.v += 1.8 * power
+    this.sfx("thud" + (a.n % 4), { bus: "tv", gain: 0.95, rate: 0.85 + ((a.n * 0.37) % 0.3) })
+    if (this.handles.call && !this.seeking) this.audio?.fadeOut(this.handles.call, 0.02)
+    this.handles.call = null
   }
   // everything stops dead
   silence() {
@@ -478,8 +519,7 @@ export class Show {
     const del = Math.max(w("s4", s4, "delivered") ?? 0, s4 + 0.4)
     const opn = Math.max(w("s4", s4, "opened") ?? 0, del + 0.5)
     const clk = Math.max(w("s4", s4, "clicked") ?? 0, opn + 0.4)
-    const we = Math.max(w("s4", s4, "we") ?? 0, clk + 1)
-    const turn = Math.max(clk + 0.7, we - 0.75) // in the pause
+    const we = Math.max(w("s4", s4, "we") ?? 0, clk + 0.35) // the aside
     let email = null
     at(s4, () => {
       this.say("s4", D.s4)
@@ -511,7 +551,7 @@ export class Show {
       S().lit = 1
       S().stamps.push({ text: "OPENED", t0: this.t })
       this.trimPins()
-      email = this.pop("email", we + 2.2 - opn, { win: 104, scroll: { k: 0 } })
+      email = this.pop("email", Math.min(we + 1.5, s4 + D.s4 + GAP - 0.15) - opn, { win: 104, scroll: { k: 0 } })
       this.to(email.scroll, "k", 1, clk - opn - 0.14, E.io)
       this.sfx("whoosh", { gain: 0.3 })
       this.doug({ gy: 0.8, squint: 0.4 }, clk - opn - 0.14)
@@ -525,31 +565,26 @@ export class Show {
       this.doug({ smile: 0.35, squint: 0, worry: 0, brow: 0.2, lid: 0.2, gy: 0.15 }, 0.2, E.io, 0.15) // peace, at last
       G.sqv += 9
     })
-    at(turn, () => {
-      // the one time the pitchman looks at the footage. Everything holds its breath.
-      this.text("chy", null)
-      this.amb.hold = true
+    at(we - 0.12, () => {
+      // An aside, thrown away: the one time the pitchman looks at the footage. Nothing stops for
+      // it. He is back to camera before the line is over.
       const up = tall()
-      this.pitch({ gx: up ? 0.5 : 1, gy: up ? -1 : -0.15, fx: up ? 0.1 : 0.2, rot: up ? 0.05 : 0.13, dx: up ? 0 : 16, smile: 0.35, brow: 0.7, lid: 0.3, wide: 1, hype: 0 }, 0.3)
-      if (!this.seeking) this.audio?.hush(0.08, 0.2)
+      this.pitch({ gx: up ? 0.5 : 1, gy: up ? -1 : -0.15, fx: up ? 0.1 : 0.2, lid: 0.3, brow: 0.6 }, 0.12)
+      this.pitch({ gx: 0, gy: 0, fx: 0, lid: 0.05, brow: 0.3 }, 0.18, E.io, 0.75)
+      this.text("chy", "tv:WE SAW YOU OPEN THAT.", CREAM, true)
     })
-    at(we, () => this.text("chy", "tv:WE SAW YOU OPEN THAT.", CREAM, true))
-    at(we + 0.3, () => {
-      // Doug freezes
+    at(we + 0.25, () => {
+      // Doug heard it
       this.tw.list = this.tw.list.filter((t) => t.obj !== this.D)
       Object.assign(this.D, { wide: 1.3, lid: 0, smile: 0, brow: 0.6, squint: 0, worry: 0, x: 0, y: 0, rot: 0, autoBlink: 0 })
       this.D.sqv += 5
     })
-    at(we + 0.75, () => {
-      // …and his eyes go to the pitchman. So do the duck's.
-      this.doug({ ...toPitch(), fx: tall() ? -0.05 : -0.12 }, 0.35)
-      this.to(S(), "duck", -1, 0.01, E.lin, 0.45)
-    })
-    at(Math.max(w("s4", s4, "open") ?? 0, we + 1.3), () => {
-      // down he goes, until only his eyes show
-      this.doug({ sink: 1 }, 0.9, E.io)
-      this.to(S(), "duckIn", 1, 1, E.io, 0.1)
-      this.crowd("ooh", 0.3)
+    at(we + 0.45, () => {
+      // …his eyes go to the pitchman, and so do the duck's, and down he goes until only they show
+      this.doug({ ...toPitch(), fx: tall() ? -0.05 : -0.12 }, 0.18)
+      this.to(S(), "duck", -1, 0.01, E.lin, 0.15)
+      this.doug({ sink: 1 }, 0.55, E.io, 0.15)
+      this.to(S(), "duckIn", 1, 0.6, E.io, 0.15)
     })
 
     // ── 5. "Customers write back? Answer them, INSTANTLY!" A first date. ────────
@@ -914,6 +949,40 @@ export class Show {
       this.budget(0.5, 0.3)
       this.stream(14, ["bot", "coupon", "minutely", "team"], "ding")
       this.loop("engine", { gain: 0.5, fadeIn: 0.1 })
+      // and the commercial is on the car radio
+      this.radio("tinny")
+      S().radio = 1
+    })
+    // He gets as far as "Hundreds of robots," and turns it off, with his head. It is back, and
+    // louder, for "…email, ALL NIGHT LONG!", and it stays that way until he is through the door.
+    const off = clamp((w("s8", s8, "sending") ?? dr + (ext - dr) * 0.5) - 0.25, dr + 0.7, ext - 1)
+    const on = off + 0.55
+    at(off - 0.45, () => this.doug({ gx: -1, gy: 0.9, lid: 0.5, squint: 0.7 }, 0.12)) // he looks at it
+    at(off - 0.1, () => {
+      this.doug({ rot: -0.8, x: -70, y: 68 }, 0.1, E.in)
+      this.doug({ rot: 0, x: 0, y: 0 }, 0.22, E.io, 0.16)
+    })
+    at(off, () => {
+      this.radio("off")
+      S().radio = 0
+      S().dent = this.t
+      this.sfx("thud2", { gain: 0.9, rate: 1.3 })
+      this.sfx("cut", { gain: 0.5, rate: 0.8 })
+      this.cams[0].flash = 0.5
+      this.to(this.cams[0], "flash", 0, 0.2)
+    })
+    at(off + 0.3, () => this.doug({ gx: 0, gy: 0.05, lid: 0.3, squint: 0.2, smile: 0.1, brow: 0 }, 0.2)) // quiet. Good.
+    at(on, () => {
+      // it comes back on. Louder.
+      this.radio("loud")
+      S().radio = 2
+      this.sfx("cut", { gain: 0.6, rate: 1.4 })
+      Object.assign(this.D, { wide: 1.3, lid: 0, squint: 0, smile: -0.2 })
+      this.D.sqv += 7
+      this.D.twitch = 0.6
+      this.to(this.D, "twitch", 0, 0.35, E.elastic)
+      this.doug({ gx: -1, gy: 0.9 }, 0.08)
+      this.doug({ ...ANGRY, wide: 1, gx: 0, gy: 0.05 }, 0.25, E.io, 0.45)
     })
     at(dr + (ext - dr) * 0.64 + 0.3, () => {
       // EXIT NOW. He takes it.
@@ -955,8 +1024,9 @@ export class Show {
     })
     at(st, () => {
       // the commercial, at full tilt. There is a door at the back of the set.
-      this.set = { door: 0, doug: false, k: 0, ox: 0 }
+      this.set = { door: 0, doug: false, k: 0 }
       this.lay = { from: "studio", to: "studio", k: 1 }
+      this.radio("open") // and the sound opens up: we are in the room with him
       cam.a = 0
       this.tube.static = 0.5
       this.to(this.tube, "static", 0, 0.2)
@@ -990,59 +1060,62 @@ export class Show {
       this.lower = null
       this.to(this.set, "k", 1, hit - call, E.in) // a body launch: no arms
     })
+    // ── after "Call n—": what Doug does to the pitchman. On camera, all of it. ───
+    // No arms, so it is body-slams and headbutts: [seconds after the tackle, what he lands on
+    // ("p" the pitchman, "h" the bowler), how hard]. It goes on well past where it would stop.
+    const HITS = [
+      [0.5, "p", 1], [0.9, "p", 0.8], [1.25, "p", 0.8], [1.55, "p", 0.9], [1.8, "p", 0.7], [2.05, "p", 0.7], [2.3, "p", 0.8], [2.55, "p", 1.1],
+      [3.5, "p", 1.2], [3.8, "p", 0.8], [4.05, "p", 0.8], [4.3, "p", 0.8], [4.55, "p", 1.1],
+      [5.5, "p", 1.2], [5.75, "p", 0.9],
+      [6.45, "h", 1], [6.75, "h", 1.1],
+      [7.85, "p", 1.3],
+    ]
+    // (between the hat and the last one he stands on the hat for a moment, and listens)
+    const plan = [{ t: hit, on: "p" }, ...HITS.map(([dt, on]) => ({ t: hit + dt, on })), { t: hit + 7.3, on: "h", idle: true }].sort((a, b) => a.t - b.t)
     at(hit, () => {
-      // and the audio cuts dead
+      // the audio cuts dead, and the camera pushes in
       this.silence()
-      this.post.flash = 0.7
-      this.to(this.post, "flash", 0, 0.25)
-      this.post.shake = 1
-      this.to(this.post, "shake", 0.1, 0.5)
-      this.to(this.set, "ox", -(this.BW + 500), 0.26, E.in)
-      this.pitch({ rot: -2.2 }, 0.26, E.in)
-      this.sfx("pop", { bus: "tv", gain: 1, rate: 0.5 })
+      this.radio("open")
+      this.lower = null
+      this.set.doug = false
+      this.atk = { t0: this.t, plan, n: 0, last: this.t, flat: 0, daze: 0, hat: null, crush: 0, mouth: 0, talk: 0, pop: 0, wob: { a: 0, v: 0 }, bursts: [], sparks: [], rest: null }
+      this.setLay("attack", 0.22, E.out)
+      this.D = Object.assign(newDoug(), ANGRY, { wide: 1.2, lid: 0.2 })
+      this.strike(1.2)
     })
-    const f0 = hit + 0.35
-    at(f0, () => {
-      // an empty set. Just past the edge of the frame, the two of them discuss it.
-      this.fight = { t0: this.t, words: [] }
-      this.sfx("fight", { bus: "tv", gain: 0.9, pan: -0.7 })
-    })
-    ;[[0.3, "POW!"], [1.5, "BONK!"], [2.6, "OOF!"], [3.5, "POW!"]].forEach(([dt, word], i) =>
-      at(f0 + dt, () => {
-        this.fight.words.push({ name: "tv:" + word, t0: this.t, i })
-        this.post.shake = 0.5
-        this.to(this.post, "shake", 0.08, 0.3)
-        this.tube.tilt += (i % 2 ? -1 : 1) * 0.03
+    HITS.forEach(([dt, on, power]) => at(hit + dt, () => this.strike(power, on)))
+    // Three times the pitchman tries to go on with it, slower and quieter each time. He never
+    // gets to the end of "Call now", and the third time he is unconscious.
+    ;[[2.95, "callnow", 0.92, 0.8, "CALL N—"], [4.95, "callnow", 0.74, 0.55, "CALL…"], [7.02, "now", 0.66, 0.45, "…NOW…"]].forEach(([dt, clip, rate, gain, text]) =>
+      at(hit + dt, () => {
+        this.atk.talk = 1
+        this.chy(text, YELLOW)
+        this.handles.call = this.sfx(clip, { bus: "tv", gain, rate })
+        this.doug({ squint: 0.7, lid: 0.5, wide: 1 }, 0.15) // Doug can't believe it either
       }),
     )
-    at(f0 + 1.0, () => (this.hat = { t0: this.t })) // the bowler leaves
-    at(f0 + 2.6, () => {
-      // something hits the camera
-      this.to(this.tube, "tilt", -0.1, 0.5, E.elastic)
-      this.tube.roll = 0.15
-      this.to(this.tube, "roll", 0, 0.3)
+    at(hit + 5.75, () => (this.atk.daze = 2)) // he is out
+    at(hit + 5.95, () => this.doug({ gx: 1, gy: 0.3, lid: 0.3, squint: 0.4 }, 0.2)) // …the hat
+    at(hit + 7.1, () => this.doug({ gx: -1, gy: 0.5, lid: 0.55, squint: 0.8 }, 0.18)) // …he said what?
+    const rest = hit + HITS[HITS.length - 1][0]
+    at(rest + 0.15, () => {
+      // the aftermath: a crooked camera, and Doug, out of breath, standing on what is left
+      this.atk.rest = this.t
+      this.fineKey = null
+      this.to(this.tube, "tilt", tall() ? -0.05 : -0.09, 0.6, E.elastic)
+      this.doug({ lid: 0.45, squint: 0, wide: 1, brow: -0.2, worry: -0.3, smile: -0.2, gx: 0, gy: 0.5 }, 0.5)
     })
-    at(f0 + 3.6, () => this.to(this.tube, "tilt", 0.34, hit + FIGHT - (f0 + 3.6), E.in)) // and it goes over
-    const c0 = hit + FIGHT
-    at(c0, () => {
-      // PLEASE STAND BY
-      this.silence()
-      this.card = { t0: this.t, coupon: null }
-      this.fight = null
-      this.hat = null
-      this.set = null
-      this.tw.list = this.tw.list.filter((t) => t.obj !== this.tube && t.obj !== this.post)
-      Object.assign(this.tube, { tilt: 0, roll: 0, static: 1 })
-      this.to(this.tube, "static", 0, 0.4, E.in)
-      this.post.shake = 0
-      this.sfx("cut", { bus: "tv", gain: 0.6 })
-    })
-    at(c0 + 2, () => {
+    at(rest + 2.5, () => {
       // silence. And then one more.
-      this.card.coupon = this.t
+      this.coupon = this.t
       this.sfx("ding", { gain: 1 })
+      this.doug(tall() ? { gx: 0, gy: -1, lid: 0.15, wide: 1.15 } : { gx: 1, gy: -0.15, lid: 0.15, wide: 1.15 }, 0.35, E.io, 0.3) // he reads it
     })
-    this.length = c0 + 5.4
+    at(rest + 3.5, () => {
+      this.D.twitch = 0.6
+      this.to(this.D, "twitch", 0, 0.4, E.elastic)
+    })
+    this.length = rest + 5.8
     at(this.length, () => (this.ended = true))
     this.cues.sort()
   }
@@ -1053,6 +1126,7 @@ export class Show {
     this.tube.power = 1
     this.started = true
     this.audio?.hush?.(1, 0.01)
+    this.audio?.radio?.("open", 0.01)
     this.build(D, W)
     if (from > 0) {
       this.seeking = true
@@ -1068,6 +1142,7 @@ export class Show {
         }
       }
       for (const [name, o] of this.loops) this.audio?.loop(name, o)
+      this.audio?.radio?.(this.radioMode, 0.01)
     }
   }
 
@@ -1078,6 +1153,19 @@ export class Show {
     this.tw.step(t)
     const D = this.D
     const G = this.G
+    // things that swing: the studio lights, the boom mic, a pitchman who has just been hit
+    for (const s of [this.lamp, this.boom, this.atk && { ...this.atk.wob, k: 110, c: 5, ref: this.atk.wob }]) {
+      if (!s) continue
+      const o = s.ref || s
+      o.v += (-o.a * s.k - o.v * s.c) * dt
+      o.a += o.v * dt
+    }
+    if (this.atk) {
+      this.atk.mouth = Math.max(0, this.atk.mouth - dt * 3)
+      this.atk.pop += (this.atk.talk - this.atk.pop) * Math.min(1, dt * 14)
+      this.atk.bursts = this.atk.bursts.filter((b) => t - b.t0 < 0.9)
+      this.atk.sparks = this.atk.sparks.filter((b) => t - b.t0 < 0.6)
+    }
     for (const o of [D, G]) {
       o.sqv += (-o.sq * 180 - o.sqv * 11) * dt
       o.sq += o.sqv * dt
@@ -1136,14 +1224,14 @@ export class Show {
       L.pR = H * 0.2
       L.px = W * 0.3
       L.py = H + L.pR * 2.4
-    } else if (name === "solo" || name === "studio") {
-      // the pitchman alone (studio: a wider shot of the set, for the end)
+    } else if (name === "solo" || name === "studio" || name === "attack") {
+      // the pitchman alone (studio: a wider shot of the set, for the end. attack: pushed in on it)
       L.fw = P ? W - 36 : W * 0.5
       L.fh = L.fw * 0.75
       L.fx = W + 80
       L.fy = P ? 64 : 60
-      L.pR = name === "studio" ? (P ? W * 0.24 : H * 0.235) : P ? W * 0.27 : H * 0.245
-      L.px = name === "studio" ? W * (P ? 0.38 : 0.36) : W * 0.5
+      L.pR = name === "studio" ? (P ? W * 0.24 : H * 0.235) : name === "attack" ? (P ? W * 0.26 : H * 0.25) : P ? W * 0.27 : H * 0.245
+      L.px = name === "studio" ? W * (P ? 0.38 : 0.36) : name === "attack" ? W * (P ? 0.42 : 0.46) : W * 0.5
       L.py = stand(L.pR, 0.66)
     } else if (name === "monitor") {
       L.fw = P ? W - 44 : Math.min(W * 0.56, ((H - band - 76) * 4) / 3)
@@ -1225,8 +1313,8 @@ export class Show {
     const P = this.BH > this.BW
     const floor = this.BH - L.band
     const hw = L.pR * 0.62
-    const hh = L.pR * 1.45
-    return { x: this.BW * (P ? 0.76 : 0.7), y: floor - hh, hw, hh, floor }
+    const hh = L.pR * 1.25
+    return { x: L.px + L.pR * (P ? 1.5 : 2.4), y: floor - hh, hw, hh, floor }
   }
 
   // ─── drawing: the footage ─────────────────────────────────────────────────────
@@ -1305,7 +1393,6 @@ export class Show {
     const W = this.BW
     const H = this.BH
     const t = this.t
-    if (this.card) return this.testCard(list)
     if (this.started) {
       // the studio: burnt orange, with the arches every set had in 197-something
       list.rbox(W / 2, H / 2, W / 2 + 2, H / 2 + 2, 0, { col: [0.86, 0.36, 0.1, 1], rim: [0.6, 0.2, 0.07, 1] })
@@ -1332,10 +1419,33 @@ export class Show {
     const set = this.set
     if (set) {
       const d = this.door(L)
-      const on = 0.7 + 0.3 * Math.sin(t * 9)
+      // the studio lights, on their cables. They swing when anything lands.
+      for (const [fx, len, ph] of [[0.16, 0.2, 0], [0.56, 0.15, 1.3]]) {
+        const a = this.lamp.a * (ph ? 0.8 : 1) + Math.sin(t * 1.3 + ph) * 0.015
+        const lx = W * fx + Math.sin(a) * H * len
+        const ly = Math.cos(a) * H * len
+        list.seg(W * fx, -10, lx, ly, 2, { col: [0.13, 0.065, 0.03, 1] })
+        list.glow(lx + Math.sin(a) * 120, ly + 150, 190, 230, [1, 0.9, 0.7, 0.13])
+        list.tri(lx, ly + 14, 30, 20, 0, { col: [0.13, 0.065, 0.03, 1], rot: -a })
+        list.ellipse(lx - Math.sin(a) * 30, ly + 30, 24, 7, { col: [1, 0.95, 0.8, 1], rot: -a })
+      }
+      // ON AIR. It doesn't take the fight well.
+      const a = this.atk
+      const on = a ? (a.rest != null ? (Math.sin(t * 31) * Math.sin(t * 7.3) > 0.1 ? 1 : 0.12) : Math.sin(t * 43 + a.n) > -0.4 ? 1 : 0.2) : 0.7 + 0.3 * Math.sin(t * 9)
       list.glow(d.x, d.y - d.hh - 34, 110, 50, [1, 0.2, 0.1, 0.4 * on])
-      list.rbox(d.x, d.y - d.hh - 34, 62, 18, 4, { col: [0.93, 0.13, 0.08, on] })
-      list.text("mono", "ON AIR", d.x, d.y - d.hh - 34, 0.72, 0.5, WHITE)
+      list.rbox(d.x, d.y - d.hh - 34, 62, 18, 4, { col: [0.93 * on + 0.3 * (1 - on), 0.13 * on + 0.05, 0.08 * on + 0.03, 1], rim: [0.2, 0.09, 0.04, 1] })
+      list.text("mono", "ON AIR", d.x, d.y - d.hh - 34, 0.72, 0.5, [1, 1, 1, 0.5 + 0.5 * on])
+      for (const s of a ? a.sparks : []) {
+        const age = t - s.t0
+        list.glow(d.x, d.y - d.hh - 34, 150, 80, [1, 0.8, 0.4, 0.5 * (1 - age / 0.6)])
+        for (let j = 0; j < 9; j++) {
+          const h = Math.abs((Math.sin(s.seed * 12.9898 + j * 78.233) * 43758.5453) % 1)
+          const ang = -2.6 + j * 0.26 + h * 0.3
+          const sx = d.x + (j % 2 ? 50 : -50) + Math.cos(ang) * (120 + h * 160) * age
+          const sy = d.y - d.hh - 34 + Math.sin(ang) * (120 + h * 160) * age + 900 * age * age
+          list.star(sx, sy, 7 * (1.2 - age), 4, 0.3, { col: [1, 0.95, 0.6, 1 - age / 0.6], rot: age * 12 + j })
+        }
+      }
       list.rbox(d.x, d.y, d.hw + 11, d.hh + 11, 6, { col: [0.2, 0.09, 0.04, 1] })
       list.rbox(d.x, d.y, d.hw, d.hh, 3, { col: set.door > 0.01 ? [1, 0.96, 0.84, 1] : [0.93, 0.84, 0.66, 1] })
       if (set.door > 0.01) list.glow(d.x, d.y, d.hw * 2.4, d.hh * 1.5, [1, 0.95, 0.8, 0.3 * set.door])
@@ -1348,13 +1458,13 @@ export class Show {
       if (set.doug) {
         const k = set.k
         const R0 = L.pR * 0.72
-        const x = lerp(d.x, L.px + L.pR * 0.3, k) + set.ox
+        const x = lerp(d.x, L.px + L.pR * 0.3, k)
         const y = lerp(d.floor - R0 * 1.04, L.py - L.pR * 0.1, k) - Math.sin(k * Math.PI) * L.pR * 0.7
         this.dougBean(list, x, y, lerp(R0, L.pR * 0.92, k), { rot: -k * 0.9 + this.D.rot, light: [1, 0.6, 0.25, 0.6], ldir: [-0.6, 0.6] })
       }
     }
   }
-  // PLEASE STAND BY: before anyone tunes in, and after the cameras stop
+  // PLEASE STAND BY: before anyone tunes in
   testCard(list) {
     const W = this.BW
     const H = this.BH
@@ -1370,15 +1480,110 @@ export class Show {
     const s = Math.min(0.5, lw / 760)
     list.sprite("logo:flat", lx, y0, lw / 600, 0, [0.96, 0.94, 0.9, 1])
     list.text("mono", "PLEASE STAND BY", lx - lw / 2, y0 + 62, 0.72, 0, [1, 0.66, 0.2, 1])
-    if (this.card) {
-      list.text("mono", "WE ARE EXPERIENCING TECHNICAL DIFFICULTIES", lx - lw / 2, y0 + 96, s, 0, [0.6, 0.58, 0.54, 1])
-      return
-    }
     list.text("mono", "TONIGHT'S PROGRAMME: ONE MINUTE, WITH SOUND", lx - lw / 2, y0 + 96, s, 0, [0.6, 0.58, 0.54, 1])
     list.text("mono", "TURN THE DIAL TO TUNE IN", lx - lw / 2, y0 + 124, s, 0, [0.96, 0.94, 0.9, 0.55 + 0.45 * Math.sin(this.t * 3.2)])
   }
 
   // ─── drawing: the broadcast, in front of the footage ──────────────────────────
+  // What Doug does to the pitchman, and to his hat. `g`: where the pitchman is ({ R, px, pcy,
+  // psy, floor }). No arms: Doug goes up, turns over and comes down on him head first, from
+  // one side and then the other, and the plan (a.plan) says when each one lands.
+  attack(list, g) {
+    const a = this.atk
+    const t = this.t
+    const P = this.BH > this.BW
+    const { R, px, floor } = g
+    const Rd = R * 0.8
+    const top = g.pcy - R * g.psy // the top of the pitchman, such as it is
+    // the bowler: off his head on the second blow, and down by the door
+    const hx = px + R * (P ? 1.25 : 1.6)
+    const hsx = lerp(1, 1.3, a.crush)
+    const hsy = lerp(1, 0.3, a.crush)
+    const hatTop = floor - R * 0.55 * hsy
+    if (a.hat) {
+      const u = clamp((t - a.hat.t0) / 0.85, 0, 1)
+      const th = u * Math.PI * 4
+      const x = lerp(px, hx, u)
+      const y = lerp(top - R * 0.1, floor - R * 0.11 * hsy, u) - Math.sin(u * Math.PI) * R * 1.5
+      const lx = -0.04 * R * hsx
+      const ly = -0.97 * R * hsy
+      list.bean({ x: x - (Math.cos(th) * lx - Math.sin(th) * ly), y: y - (Math.sin(th) * lx + Math.cos(th) * ly), R, rot: th, sx: hsx, sy: hsy, kind: 6, dent: a.crush > 0 || this.understudy ? 1 : 0, rim: [0, 0, 0, 0] })
+    }
+    // Doug. side: which side of the target he comes down on (1: the door's)
+    const side = (i) => (i % 2 ? -1 : 1)
+    const at = (i) => {
+      if (i === 0) return [px + R * 0.3, top + R * 0.75]
+      if (a.plan[i].idle) return [hx, hatTop - Rd * 0.9]
+      return a.plan[i].on === "h" ? [hx - side(i) * Rd * 0.12, hatTop - Rd * 0.74] : [px + side(i) * R * 0.2, top - Rd * 0.74]
+    }
+    const turn = (i) => (i === 0 ? -0.9 : a.plan[i].idle ? 0 : -side(i) * (i % 3 === 1 ? 1.7 : 2.5))
+    let i = 0
+    while (i < a.plan.length - 1 && a.plan[i + 1].t <= t) i++
+    let x, y, rot
+    let pant = 0
+    if (i < a.plan.length - 1) {
+      // (onto the hat to listen: a short hop, and then he is still)
+      const gap = a.plan[i + 1].idle ? 0.3 : a.plan[i + 1].t - a.plan[i].t
+      const u = clamp((t - a.plan[i].t) / gap, 0, 1)
+      const [x0, y0] = at(i)
+      const [x1, y1] = at(i + 1)
+      const up = 4 * u * (1 - u)
+      x = lerp(x0, x1, u) + side(i + 1) * R * 0.25 * up
+      y = lerp(y0, y1, u) - R * clamp(gap * 2.6, 0.55, 2.7) * up
+      const r1 = turn(i + 1) + (gap > 0.6 ? Math.sign(turn(i + 1) - turn(i)) * Math.PI * 2 : 0)
+      rot = lerp(turn(i), r1, u)
+    } else {
+      // and then he is done, and standing on him
+      const u = clamp((t - a.plan[i].t) / 0.55, 0, 1)
+      const [x0, y0] = at(i)
+      x = lerp(x0, px, u)
+      y = lerp(y0, top - Rd * 0.9, u) - R * 0.5 * 4 * u * (1 - u)
+      rot = lerp(turn(i), 0, E.out(u))
+      if (a.rest != null) pant = Math.sin((t - a.rest) * 8.5) * 0.05 * Math.exp(-(t - a.rest) * 0.22)
+    }
+    const sq = this.D.sq
+    this.dougBean(list, x, y - Rd * pant, Rd, {
+      rot: rot + this.D.rot,
+      sx: Math.max(0.3, 1 - sq * 0.3) * (1 - pant * 0.6),
+      sy: Math.max(0.3, 1 + sq * 0.45) * (1 + pant),
+      mouth: a.rest != null ? 0.22 + pant * 3 : this.D.mouth,
+      light: [1, 0.6, 0.25, 0.6],
+      ldir: [-0.6, 0.6],
+    })
+    for (let j = 0; j < 3 && a.rest != null; j++) {
+      // it was a lot of work
+      const u = ((t - a.rest) * 0.6 + j * 0.37) % 1
+      const dx = x + (j % 2 ? 1 : -1) * Rd * (0.5 + 0.2 * u + (j > 1 ? 0.12 : 0))
+      const dy = y - Rd * 0.7 + u * u * Rd
+      const s = Rd * 0.085 * (1 - u * 0.35)
+      const al = Math.min(1, u * 8) * (1 - u * u * u)
+      list.tri(dx, dy - s * 0.95, s * 0.5, s * 0.7, 0, { col: [0.72, 0.9, 1, al] })
+      list.ellipse(dx, dy, s * 0.72, s * 0.8, { col: [0.72, 0.9, 1, al] })
+    }
+    // what comes off them each time: a flash, stars, and a lot of mail
+    for (const b of a.bursts) {
+      const age = t - b.t0
+      const [bx, by] = b.on === "h" ? [hx, hatTop] : [px, top]
+      if (age < 0.13) {
+        const s = R * (0.5 + 0.5 * b.power) * (0.6 + age * 5)
+        list.star(bx, by, s, 11, 0.5, { col: [1, 0.84, 0.3, 1], rot: b.seed })
+        list.star(bx, by, s * 0.6, 11, 0.5, { col: [1, 1, 0.94, 1], rot: b.seed + 0.3 })
+      }
+      const u = age / 0.9
+      for (let j = 0; j < 9; j++) {
+        const h1 = (Math.sin(b.seed * 12.9898 + j * 78.233) * 43758.5453) % 1
+        const h2 = (Math.sin(b.seed * 39.346 + j * 11.135) * 24634.6345) % 1
+        const ang = -Math.PI / 2 + (j - 4) * 0.33 + h1 * 0.25
+        const sp = R * (2.6 + Math.abs(h2) * 2.4) * b.power
+        const fx = bx + Math.cos(ang) * sp * age
+        const fy = by + Math.sin(ang) * sp * age + R * 4.2 * age * age
+        const al = 1 - u * u
+        if (j % 3 === 0) list.star(fx, fy, R * 0.09 * (1.3 - u), 5, 0.45, { col: [1, 0.84, 0.3, al], rot: age * 9 + j })
+        else if (j % 3 === 1) list.sprite("mail", fx, fy, R / 150, age * (7 + h1 * 6) + j, [1, 1, 1, al])
+        else list.sprite("mini", fx, fy, R / 105, age * (5 + h2 * 5) + j, [1, 1, 1, al])
+      }
+    }
+  }
   type(list, name, x, y, s, maxW, rot, col) {
     const [w] = list.size(name)
     list.sprite(name, x, y, Math.min(s, maxW / Math.max(w, 1)), rot, col)
@@ -1395,23 +1600,6 @@ export class Show {
     const P = H > W
     const G = this.G
     this.fgClip = null
-    if (this.card) {
-      // one more, on the test card
-      if (this.card.coupon != null) {
-        const k = E.back(clamp((t - this.card.coupon) / 0.25, 0, 1))
-        const s = (P ? 1.5 : 2) * k
-        const x = P ? W / 2 - 14 : W * 0.66
-        const y = H * 0.68
-        list.glow(x + 6, y + 12, 200 * s, 60 * s, [0, 0, 0, 0.5], false)
-        list.sprite("card:last", x, y, s, -0.03, WHITE)
-        list.sprite("mail", x + 132 * s, y - 42 * s, s * 0.62, 0.1, WHITE)
-        const tw = list.measure("badge", "99,999+", s * 0.6)
-        list.rbox(x + 140 * s, y - 58 * s, tw / 2 + 6 * s, 8 * s, 8 * s, { col: [0.93, 0.13, 0.08, 1] })
-        list.text("badge", "99,999+", x + 140 * s, y - 58 * s, s * 0.6, 0.5, WHITE)
-      }
-      if (this.fade > 0) list.rbox(W / 2, H / 2, W / 2 + 2, H / 2 + 2, 0, { col: [0, 0, 0, this.fade] })
-      return
-    }
     const over = L.band <= 1 // the footage is the whole picture
     const live = this.started && this.cams[0].a > 0.001 && L.fx < W
     const main = this.cams[0].rect
@@ -1419,7 +1607,8 @@ export class Show {
 
     // the pitchman: behind his desk, or (once the footage has taken over) in a circle in the corner
     const R = L.pR
-    const px = L.px + G.dx * (1 - L.pip) + (this.set?.ox ?? 0)
+    const a = this.atk
+    const px = L.px + G.dx * (1 - L.pip)
     const py = L.py + G.hy + (1 - G.in) * (R * 2.6 + L.band) + L.pip * R * 0.35
     if (L.pip > 0.01) {
       const cr = L.pR * 1.5
@@ -1430,32 +1619,61 @@ export class Show {
       list.ring(L.px, L.py + cr * 0.9, cr * 1.25, cr * 0.09, 0, 0, { col: [0.94, 0.66, 0.14, L.pip] })
     }
     const sq = G.sq
+    // The second time anyone tunes in it is somebody else. The same script and the same hat
+    // (it has a dent in it now), but he is thinner, he is sweating, he can't hold the smile,
+    // and every few seconds he checks the door.
+    const U = this.understudy && this.started
+    const look = U && !a && (this.set ? !this.set.doug : t % 4.7 > 4.25)
+    // What is left of him once Doug gets there: every blow leaves him a little flatter
+    const flat = a ? a.flat * (1 - 0.3 * a.pop) : 0
+    const psx = Math.max(0.2, 1 - sq * 0.3) * (1 + flat * 0.55) * (U ? 0.88 : 1)
+    const psy = Math.max(0.16, 1 + sq * 0.45) * (1 - flat * 0.7) * (U ? 1.06 : 1)
+    const pcx = px + (U ? Math.sin(t * 47) * R * 0.007 : 0)
+    const pcy = a ? lerp(py + R, floor + R * 0.04, clamp(flat * 5, 0, 1)) - R * psy : py - sq * R * 0.2
+    const out = a && a.daze >= 2
     if (px > -R * 3) {
       list.bean({
-        x: px,
-        y: py - sq * R * 0.2,
+        x: pcx,
+        y: pcy,
         R,
-        rot: G.rot + Math.sin(t * 2.2) * 0.04,
-        sx: 1 - sq * 0.3,
-        sy: 1 + sq * 0.45,
-        kind: 1,
-        gx: G.gx,
-        gy: G.gy,
-        lid: G.lid,
-        blink: t % 3.7 < 0.11 ? 1 : 0,
-        brow: G.brow + G.hype * 0.5,
-        worry: -G.worry,
-        smile: G.smile,
-        mouth: G.mouth,
-        wide: G.wide + G.hype * 0.2,
+        rot: G.rot + Math.sin(t * 2.2) * 0.04 + (a ? a.wob.a * 0.5 : 0),
+        sx: psx,
+        sy: psy,
+        kind: a?.hat ? 2 : 1, // 2: the bowler has left him
+        dent: U ? 1 : 0,
+        askew: a ? 0.3 : 0,
+        dents: a ? clamp((a.n - 1) / 11, 0, 1) : 0,
+        daze: a ? a.daze : 0,
+        gx: a ? 0.2 : look ? 1 : G.gx,
+        gy: a ? -1 : look ? -0.1 : G.gy,
+        lid: U || a ? 0 : G.lid,
+        blink: !a && t % (U ? 1.9 : 3.7) < 0.11 ? 1 : 0,
+        brow: a ? 0.9 : G.brow + G.hype * 0.5 + (U ? 0.35 : 0),
+        worry: a ? -1 : -(U ? Math.max(G.worry, 0.85) : G.worry),
+        smile: a ? (a.pop > 0.5 ? 0.7 : out ? -0.15 : -0.6) : U ? Math.min(G.smile, 0.3) : G.smile,
+        mouth: a ? (a.pop > 0.5 ? 0.25 + 0.5 * Math.abs(Math.sin(t * 19)) : out ? 0 : a.mouth * 0.9) : G.mouth,
+        wide: a ? 1.35 : G.wide + G.hype * 0.2 + (U ? 0.12 : 0),
         fx: G.fx,
         rim: [1, 0.93, 0.8, 1],
         light: [1, 0.55, 0.2, 0.5],
         ldir: [-0.6, 0.6],
-        mw: 1.15,
+        mw: U ? 0.95 : 1.15,
       })
+      for (let i = 0; i < (U && !a?.hat ? 4 : 0); i++) {
+        // sweat
+        const u = (t * 0.55 + i * 0.29) % 1
+        const side = i % 2 ? 1 : -1
+        const dx = pcx + side * R * psx * (0.44 + 0.2 * u + (i > 1 ? 0.1 : 0))
+        const dy = pcy + (-0.7 + u * u * 1.05) * R * psy
+        const s = R * 0.085 * (1 - u * 0.35)
+        const al = Math.min(1, u * 8) * (1 - u * u * u)
+        list.tri(dx, dy - s * 0.95, s * 0.5, s * 0.7, 0, { col: [0.72, 0.9, 1, al] })
+        list.ellipse(dx, dy, s * 0.72, s * 0.8, { col: [0.72, 0.9, 1, al] })
+        list.ellipse(dx - s * 0.22, dy - s * 0.1, s * 0.2, s * 0.3, { col: [1, 1, 1, al] })
+      }
     }
     list.flags = 0
+    if (a) this.attack(list, { R, px, pcy, psy, floor })
 
     // who that is, in the doorway
     if (this.lower && this.set) {
@@ -1469,44 +1687,20 @@ export class Show {
       list.rbox(x, y + 17, hw, 1.5, 0, { col: [0.94, 0.66, 0.14, 1] })
       this.type(list, "tv:DOUG — ACTUAL RECIPIENT", x, y - 1, 0.4, hw * 2 - 16, 0, CREAM)
     }
-    // the bowler, on its own
-    if (this.hat) {
-      const u = (t - this.hat.t0) / 1.4
-      if (u > 0 && u < 1) {
-        const th = u * 8
-        const hx = lerp(-R * 0.4, W + R * 0.6, u)
-        const hy = floor - R * 1.2 - Math.sin(u * Math.PI) * R * 1.5
-        const lx = -0.04 * R
-        const ly = -1.12 * R
-        list.bean({ x: hx - (Math.cos(th) * lx - Math.sin(th) * ly), y: hy - (Math.sin(th) * lx + Math.cos(th) * ly), R, rot: th, kind: 6, rim: [0, 0, 0, 0] })
-      }
-    }
-    // the fight: a cloud, just past the left edge of the frame
-    const f = this.fight
-    if (f) {
-      const ft = t - f.t0
-      const Rc = R * 1.2 * E.back(clamp(ft / 0.3, 0, 1))
-      const cx = R * (0.22 + 0.3 * Math.sin(ft * 1.7))
-      const cy = floor - R * 0.85 + Math.sin(ft * 2.9) * R * 0.12
-      const puff = (grow, col) => {
-        for (let i = 0; i < 12; i++) {
-          const a = i * 2.39 + ft * (1.5 + (i % 3)) * 1.4
-          const rr = Rc * (0.2 + 0.36 * (0.5 + 0.5 * Math.sin(ft * 6 + i * 1.9)))
-          const r = Rc * (0.4 + 0.1 * Math.sin(ft * 8 + i)) + grow
-          list.ellipse(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr * 0.8, r, r, { col: col(i) })
-        }
-      }
-      puff(5, () => [0.2, 0.09, 0.04, 1])
-      puff(0, (i) => (i % 3 ? [0.95, 0.9, 0.8, 1] : [0.84, 0.77, 0.66, 1]))
-      for (let i = 0; i < 6; i++) {
-        // stars, and mail
-        const u = (ft * 1.3 + i / 6) % 1
-        const a = -1.35 + i * 0.5
-        const d = Rc * (0.7 + u * 1.5)
-        list.star(cx + Math.cos(a) * d, cy + Math.sin(a) * d, 8 + 14 * (1 - u), 5, 0.45, { col: [1, 0.84, 0.3, 1 - u * u], rot: ft * 5 + i })
-        const v = (ft * 0.8 + i * 0.29) % 1
-        list.sprite("mini", cx + v * R * (2 + (i % 3)), cy - R * 0.4 - Math.sin(v * Math.PI) * R * (0.8 + (i % 4) * 0.35) + v * R * 0.9, 1.5, v * 9 + i, [1, 1, 1, 1 - v * v])
-      }
+    // The boom mic: a pole in from the top corner, and the mic on the end of it. It swings when
+    // anything lands, and by the end whoever was holding it has let it drop.
+    if (this.set) {
+      const drop = a?.rest != null ? E.out(clamp((t - a.rest) / 0.8, 0, 1)) : 0
+      const tx = L.px - R * (P ? 0.95 : 1.25)
+      const ty = H * (0.05 + 0.13 * drop)
+      const ang = clamp(this.boom.a * 0.6, -1.1, 1.1) + Math.sin(t * 1.1) * 0.03
+      const len = R * 0.42
+      const mx = tx + Math.sin(ang) * len
+      const my = ty + Math.cos(ang) * len
+      list.seg(tx - R * 1.6, ty - R * 0.75, tx, ty, 4, { col: [0.1, 0.05, 0.03, 1] })
+      list.seg(tx, ty, mx, my, 1.6, { col: [0.1, 0.05, 0.03, 1] })
+      list.rbox(mx + Math.sin(ang) * R * 0.17, my + Math.cos(ang) * R * 0.17, R * 0.1, R * 0.2, R * 0.1, { col: [0.3, 0.29, 0.3, 1], rim: [0.6, 0.58, 0.56, 1], rot: -ang })
+      list.rbox(mx, my, R * 0.05, R * 0.035, 2, { col: [0.1, 0.05, 0.03, 1], rot: -ang })
     }
 
     // the band along the bottom, where the type lands
@@ -1515,17 +1709,20 @@ export class Show {
       list.rbox(W / 2, floor + 3, W / 2 + 2, 3, 0, { col: [0.97, 0.88, 0.7, 1] })
       list.rbox(W / 2, floor + 10, W / 2 + 2, 2.5, 0, { col: [0.94, 0.66, 0.14, 1] })
     } else if (this.started) list.glow(W / 2, H + 20, W * 0.9, 130, [0, 0, 0, 0.8], false)
-    if (f) {
-      for (const wd of f.words) {
-        const age = t - wd.t0
-        if (age > 0.8) continue
-        const s = lerp(1.6, 1, E.back(clamp(age / 0.14, 0, 1))) * (1 - clamp((age - 0.65) / 0.15, 0, 1))
-        const x = R * (1.5 + (wd.i % 2) * 0.5)
-        const y = floor - R * (2.25 - (wd.i % 3) * 0.4)
-        list.star(x, y, R * 0.78 * s, 12, 0.72, { col: [0.2, 0.09, 0.04, 1], rot: wd.i })
-        list.star(x, y, R * 0.7 * s, 12, 0.72, { col: wd.i % 2 ? [0.93, 0.13, 0.08, 1] : [1, 0.8, 0.16, 1], rot: wd.i })
-        this.type(list, wd.name, x, y, 0.62 * s * (R / 170), R * 1.05 * s, wd.i % 2 ? 0.14 : -0.12, WHITE)
-      }
+    if (this.coupon != null) {
+      // one more: beside him, over the door he came in by (on a phone, over his head)
+      const k = E.back(clamp((t - this.coupon) / 0.25, 0, 1))
+      const d = this.door(L)
+      const s0 = P ? Math.min(1.2, (W - 110) / 330) : 1.05
+      const s = s0 * k
+      const x = P ? W / 2 - 8 : L.px + R * 0.8 + 178 * s0
+      const y = P ? floor - R * 3.3 : d.y - R * 0.15
+      list.glow(x + 6, y + 12, 200 * s, 60 * s, [0, 0, 0, 0.5], false)
+      list.sprite("card:last", x, y, s, -0.03, WHITE)
+      list.sprite("mail", x + 132 * s, y - 42 * s, s * 0.62, 0.1, WHITE)
+      const tw = list.measure("badge", "99,999+", s * 0.6)
+      list.rbox(x + 140 * s, y - 58 * s, tw / 2 + 6 * s, 8 * s, 8 * s, { col: [0.93, 0.13, 0.08, 1] })
+      list.text("badge", "99,999+", x + 140 * s, y - 58 * s, s * 0.6, 0.5, WHITE)
     }
     const chy = this.texts.chy
     if (chy) {

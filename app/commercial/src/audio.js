@@ -34,8 +34,11 @@ export class AudioEngine {
       const lp = c.createBiquadFilter()
       lp.type = "lowpass"
       lp.frequency.value = 20000
-      g.connect(lp).connect(p).connect(this.master)
-      return { g, lp, p }
+      const hp = c.createBiquadFilter()
+      hp.type = "highpass"
+      hp.frequency.value = 20
+      g.connect(lp).connect(hp).connect(p).connect(this.master)
+      return { g, lp, hp, p }
     }
     this.tv = bus(0)
     this.feed = bus(0.15)
@@ -174,7 +177,18 @@ export class AudioEngine {
     } catch {}
   }
 
-  // the music holds its breath (for "Hi, Doug.")
+  // The commercial as it sounds from where Doug is. "open": full range, in the studio. "tinny":
+  // out of a car radio. "off": he has headbutted it. "loud": it came back on, louder.
+  radio(mode, time = 0.08) {
+    if (!this.ctx) return
+    const [lp, hp, gain] = { open: [20000, 20, 1], tinny: [2400, 700, 0.55], off: [2400, 700, 0], loud: [3200, 520, 1.5] }[mode]
+    const t = this.ctx.currentTime
+    this.tv.lp.frequency.setTargetAtTime(lp, t, time / 3)
+    this.tv.hp.frequency.setTargetAtTime(hp, t, time / 3)
+    this.tv.g.gain.setTargetAtTime(gain, t, time / 3)
+  }
+
+  // the music holds its breath
   hush(level, time = 0.3) {
     if (!this.ctx) return
     this.hushGain.gain.setTargetAtTime(level, this.ctx.currentTime, time / 3)

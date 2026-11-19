@@ -163,7 +163,9 @@ export class List {
     return w
   }
   // bean: p = { x, y, R, rot, sx, sy, kind, alpha, gx, gy, lid, blink, brow, worry, smile, mouth, fx, fy, wide, squint, rim:[r,g,b,i], light:[r,g,b,i], ldir:[x,y], tired, twitch, mw, shine }
-  // kind: 0 bun, 1 bowler hat (the pitchman), 2 plain (Doug), 3 robot
+  // kind: 0 bun, 1 bowler hat (the pitchman), 2 plain (Doug), 3 robot, 6 the bowler on its own
+  // the pitchman's: askew (his hat, radians), dent (in the hat), dents (in him, 0..1), daze (0..1
+  // spiral eyes, 2 an X). Once the hat has come off he is kind 2.
   bean(p) {
     if (this.nb >= this.beanCap) return
     const i = this.nb++
@@ -179,10 +181,10 @@ export class List {
         p.fx || 0, p.fy || 0, p.wide ?? 1, p.squint || 0,
         ...(p.rim || [0.92, 0.94, 0.98, 1]),
         ...(p.light || [0, 0, 0, 0]),
-        ...(p.ldir || [0, 1]), p.tired || 0, 0,
-        p.shine || 0, p.twitch || 0, p.mw ?? 1, 0,
+        ...(p.ldir || [0, 1]), p.tired || 0, p.dent || 0,
+        p.shine || 0, p.twitch || 0, p.mw ?? 1, p.dents || 0,
         ...(p.light2 || [0, 0, 0, 0]),
-        ...(p.ldir2 || [0, 1]), 0, 0,
+        ...(p.ldir2 || [0, 1]), p.askew || 0, p.daze || 0, // daze: 0..1 spiral eyes, 2 an X
       ],
       o,
     )

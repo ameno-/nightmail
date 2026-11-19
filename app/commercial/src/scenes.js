@@ -381,6 +381,7 @@ export function chapel(list, show, cam) {
 }
 
 // ── the car: Doug drives to Nightmail Studios ───────────────────────────────────
+const RADIO = [250, 318] // the radio, on the dash
 const SHIELD = (() => {
   const r = rng(9)
   const a = []
@@ -388,6 +389,7 @@ const SHIELD = (() => {
     const x = r() * 700 - 30
     const y = 186 + r() * 280 // below the signs: he still has to read those
     if (((x - 392) / 112) ** 2 + ((y - 272) / 40) ** 2 < 1) continue // the gap he drives through
+    if (Math.abs(x - RADIO[0]) < 110 && Math.abs(y - RADIO[1] + 24) < 80) continue // and none land in front of the radio
     a.push({ x, y, rot: (r() - 0.5) * 2.4, s: 1.4 + r() * 1.3, j: r() })
   }
   return a
@@ -463,6 +465,34 @@ export function drive(list, show, cam) {
   list.rbox(320, 460, 330, 46, 0, { col: g(0.07) })
   list.seg(-10, 414, 650, 414, 1.2, { col: g(0.2) })
   phone(list, 532, 380 + bump, { ...ph(show, S), s: 1.4 })
+  // The radio on the dash, and the commercial is on it. S.radio: 1 on, 0 he has turned it off
+  // (with his head: it has the dent), 2 it is back, and louder.
+  if (S.radio != null) {
+    const loud = S.radio === 2
+    const rx = RADIO[0] + (loud ? Math.sin(t * 53) * 3 : 0)
+    const ry = RADIO[1] + bump + (loud ? Math.cos(t * 47) * 2.5 : 0)
+    const hurt = S.dent != null
+    const [ax, ay] = hurt ? [rx + 112, ry - 60] : [rx + 76, ry - 106]
+    list.seg(rx + 52, ry - 32, ax, ay, 1.8, { col: g(0.85) })
+    list.ellipse(ax, ay, 4.5, 4.5, { col: g(0.95) })
+    list.rbox(rx + 3, ry + 4, 76, 37, 9, { col: g(0, 0.5) })
+    list.rbox(rx, ry, 76, 37, 9, { col: g(0.7), rim: g(1) })
+    if (hurt) list.ellipse(rx - 10, ry - 36, 34, 11, { col: g(0.3) })
+    list.rbox(rx - 18, ry - 10, 45, 15, 3, { col: S.radio ? g(loud ? 1 : 0.92) : g(0.06) })
+    list.rbox(rx - 18, ry - 10, 45, 15, 3, { col: g(0.1), stroke: 1.6 })
+    list.ellipse(rx + 50, ry - 10, 13, 13, { col: g(0.2), rim: g(0.9) })
+    list.seg(rx + 50, ry - 10, rx + 50 + (loud ? 9 : -7), ry - 18, 1.8, { col: g(0.95) })
+    for (let i = 0; i < 9; i++) list.seg(rx - 60 + i * 14.5, ry + 18, rx - 53 + i * 14.5, ry + 18, 2.2, { col: g(0.2) })
+    if (S.radio) {
+      // what is coming out of it
+      const n = loud ? 4 : 2
+      for (let i = 0; i < n; i++) {
+        const k = (t * (loud ? 2.6 : 1.8) + i / n) % 1
+        list.ring(rx - 10, ry - 28, 44 + k * (loud ? 170 : 70), loud ? 3.6 : 2, -2.75, -0.4, { col: g(1, (1 - k) * (loud ? 1 : 0.8)) })
+      }
+      list.text("mono", loud ? "VOL 11" : "AM 1070", rx - 18, ry - 10, 0.55, 0.5, g(0.05))
+    }
+  }
   // what the robots send piles up on the windshield
   const n = Math.floor((S.pile ?? 0) * SHIELD.length)
   for (let i = 0; i < n; i++) {

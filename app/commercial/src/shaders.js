@@ -138,7 +138,18 @@ fn bean(bn: Bean, w: vec2f, aa0: f32) -> vec4f {
   let p = (rot2(-bn.b0.w) * (w - bn.b0.xy)) / (R * bn.b1.xy);
   let aa = aa0 / R / min(bn.b1.x, bn.b1.y) * 1.2;
   let rx = 0.80 * (1.0 - 0.07 * p.y);
-  let dBody = sdEllipse(p, vec2f(rx, 1.0));
+  var dBody = sdEllipse(p, vec2f(rx, 1.0));
+  // b8.w: how dented he is. Each blow leaves one, and the gloss bends round them.
+  var dDents = 9.0;
+  if (bn.b8.w > 0.01) {
+    let dk = bn.b8.w;
+    dDents = min(length(p - vec2f(0.9, -0.3)) - 0.3 * smoothstep(0.0, 0.3, dk),
+      min(length(p - vec2f(-0.92, 0.22)) - 0.28 * smoothstep(0.2, 0.55, dk),
+      min(length(p - vec2f(0.72, 0.74)) - 0.24 * smoothstep(0.45, 0.8, dk),
+          length(p - vec2f(-0.5, -0.95)) - 0.26 * smoothstep(0.65, 1.0, dk))));
+    let h = clamp(0.5 + 0.5 * (dBody + dDents) / 0.09, 0.0, 1.0);
+    dBody = mix(-dDents, dBody, h) + 0.09 * h * (1.0 - h);
+  }
   var dAll = dBody;
   // Linda's bun
   let bunC = vec2f(0.12, -1.0);
@@ -146,9 +157,12 @@ fn bean(bn: Bean, w: vec2f, aa0: f32) -> vec4f {
   if (kind == 0u) { dAll = min(dAll, dBun); }
   // pitchman's little bowler hat
   let hatC = vec2f(-0.04, -0.97);
-  let hp = rot2(0.14) * (p - hatC);
+  // (b10.z: how far askew it is. b7.w: it has been through something, and has a dent to show for it)
+  let hp = rot2(0.14 + bn.b10.z) * (p - hatC - vec2f(bn.b10.z * 0.4, bn.b10.z * 0.12));
+  let dDent = length(hp - vec2f(0.19, -0.53)) - 0.21;
   let dBrim = sdRBox(hp - vec2f(0.0, 0.06), vec2f(0.68, 0.07), 0.07);
-  let dCrown = sdEllipse(hp - vec2f(0.0, -0.17), vec2f(0.4, 0.34));
+  var dCrown = sdEllipse(hp - vec2f(0.0, -0.17), vec2f(0.4, 0.34));
+  if (bn.b7.w > 0.5) { dCrown = max(dCrown, -dDent); }
   let dHat = min(dBrim, max(dCrown, hp.y - 0.05));
   // robot antenna
   let dAnt = min(sdSeg(p, vec2f(0.0, -0.98), vec2f(0.0, -1.3)) - 0.035, length(p - vec2f(0.0, -1.36)) - 0.1);
@@ -164,6 +178,7 @@ fn bean(bn: Bean, w: vec2f, aa0: f32) -> vec4f {
     let N = normalize(vec3f(nx, ny, nz));
     let lift = clamp(0.52 - 0.36 * N.y - 0.28 * N.x, 0.0, 1.0);
     col = mix(vec3f(0.016, 0.016, 0.02), vec3f(0.10, 0.105, 0.125), pow(lift, 1.5));
+    col = col + vec3f(0.2, 0.2, 0.24) * exp(-pow(dDents - 0.05, 2.0) / 0.004) * step(0.01, bn.b8.w); // the lip of a dent
     if (kind == 3u) { col = col * 1.6 + vec3f(0.4, 0.42, 0.46); } // robots are brushed metal, not ink
     // coloured key light (lamp, phone, stove)
     let L = normalize(vec3f(bn.b7.xy, 0.55));
@@ -230,6 +245,13 @@ fn bean(bn: Bean, w: vec2f, aa0: f32) -> vec4f {
         continue;
       }
       let er = vec2f(0.145, 0.2 * wide);
+      if (bn.b10.w > 1.5) {
+        // out cold: an X where each eye was
+        let xa = 0.105;
+        let dX = min(sdSeg(ep, vec2f(-xa, -xa), vec2f(xa, xa)), sdSeg(ep, vec2f(-xa, xa), vec2f(xa, -xa))) - 0.034;
+        col = mix(col, vec3f(0.96, 0.96, 0.94), cov(dX, aa));
+        continue;
+      }
       let dSock = sdEllipse(ep, er);
       let tw = select(0.0, bn.b8.y, s < 0);
       let browAng = -side * worry * 0.55;
@@ -246,6 +268,12 @@ fn bean(bn: Bean, w: vec2f, aa0: f32) -> vec4f {
       let shine = bn.b8.x;
       var ecol = mix(sclera * (1.0 - 0.55 * shine), mix(vec3f(0.03, 0.03, 0.04), vec3f(1.0), shine), cov(length(pp) - pr * (1.0 + 0.25 * shine), aa));
       ecol = mix(ecol, vec3f(1.0), cov(length(pp - vec2f(-0.022, -0.025)) - 0.019, aa));
+      if (bn.b10.w > 0.05) {
+        // seeing stars: the eyes are spirals (b10.w)
+        let rs = length(ep) / er.x;
+        let sp = sin(rs * 15.0 - atan2(ep.y, ep.x) * side * 2.0 - time * 16.0 * side);
+        ecol = mix(ecol, mix(vec3f(0.97), vec3f(0.03, 0.03, 0.04), smoothstep(-0.25, 0.25, sp)), clamp(bn.b10.w, 0.0, 1.0));
+      }
       col = mix(col, ecol, eCov);
       // lid crease
       let dCr = abs(ep.y - (topCut - 0.024)) - 0.007;
@@ -308,6 +336,7 @@ fn bean(bn: Bean, w: vec2f, aa0: f32) -> vec4f {
       var hcol = mix(vec3f(0.27, 0.15, 0.07), vec3f(0.56, 0.35, 0.18), clamp(0.35 - hp.y * 1.5 - hp.x * 0.6, 0.0, 1.0));
       let hl = exp(-dot(hp - vec2f(-0.16, -0.32), hp - vec2f(-0.16, -0.32)) * 30.0);
       hcol = hcol + vec3f(0.9, 0.8, 0.65) * hl * 0.4;
+      if (bn.b7.w > 0.5) { hcol = hcol * (0.5 + 0.5 * smoothstep(0.0, 0.16, dDent)); }
       let band = cov(abs(hp.y + 0.045) - 0.06, aa) * cov(dCrown, aa);
       hcol = mix(hcol, vec3f(0.9, 0.14, 0.1), band);
       hcol = hcol + vec3f(1.0, 0.9, 0.75) * exp(-pow(dHat + 0.014, 2.0) / 0.0005) * 0.5;
@@ -496,10 +525,11 @@ fn sdRBox(p: vec2f, b: vec2f, r: f32) -> f32 { let q = abs(p) - b + vec2f(r); re
   let k = mix(0.07, 0.04, clean);
   uv = 0.5 + cc * (1.0 + k * dot(cc, cc)) * 0.962;
   let px = c.rect.zw;
-  // a knocked camera: the picture rotates, pushed in a little so its corners stay covered
+  // a knocked camera: the picture rotates, pushed in just far enough that its corners stay covered
   let tilt = c.fx.x;
   let rp = (uv - 0.5) * px;
-  uv = 0.5 + vec2f(rp.x * cos(tilt) - rp.y * sin(tilt), rp.x * sin(tilt) + rp.y * cos(tilt)) / px / (1.0 + abs(tilt) * 2.2);
+  let push = cos(tilt) + max(px.x / px.y, px.y / px.x) * sin(abs(tilt));
+  uv = 0.5 + vec2f(rp.x * cos(tilt) - rp.y * sin(tilt), rp.x * sin(tilt) + rp.y * cos(tilt)) / px / push;
   let dEdge = sdRBox((i.uv - 0.5) * px, px * 0.5 - vec2f(1.0), c.fx2.w);
   let inScreen = 1.0 - smoothstep(-1.0, 1.0, dEdge);
   // power-on: a bright line that opens vertically

@@ -18,6 +18,9 @@ const dial = $("dial")
 const soundBtn = $("sound")
 const MUTE_KEY = "nightmail.commercial.muted"
 let muted = localStorage.getItem(MUTE_KEY) === "1"
+// Whoever has seen how it ends gets a different pitchman next time. ?take=1 and ?take=2 pick one.
+const SEEN_KEY = "nightmail.commercial.seen"
+const understudy = () => (params.has("take") ? params.get("take") !== "1" : localStorage.getItem(SEEN_KEY) === "1")
 
 // Where the television sits on the page, and how big the broadcast inside it is. Wide windows
 // get a wide tube; a phone gets a tall one with the pitchman under the feed.
@@ -83,6 +86,7 @@ async function boot() {
     page.dataset.phase = "playing"
     knob.v += 14
     if (ctx) await Promise.race([audio.preload(Object.keys(manifest.dur)), new Promise((r) => setTimeout(r, 2500))])
+    show.understudy = understudy()
     show.start(manifest.dur, manifest.words, from)
   }
   const go = () => void start(Number(params.get("t") || 0))
@@ -147,7 +151,7 @@ async function boot() {
       const d = p.knob.r + 12
       Object.assign(dial.style, { left: p.knob.x - d + "px", top: p.knob.y - d + "px", width: d * 2 + "px", height: d * 2 + "px" })
     }
-    if (params.has("debug")) document.body.dataset.dbg = JSON.stringify({ t: show.t.toFixed(2), err: window.__err, feed: lists.feed.n, beans: lists.feed.nb, fg: lists.fg.n, scene: show.cams[0].scene, lay: show.lay.to, BW: p.BW, BH: p.BH, missing: [...List.missing] })
+    if (params.has("debug")) document.body.dataset.dbg = JSON.stringify({ t: show.t.toFixed(2), err: window.__err, feed: lists.feed.n, beans: lists.feed.nb, fg: lists.fg.n, scene: show.cams[0].scene, take: show.understudy ? 2 : 1, lay: show.lay.to, BW: p.BW, BH: p.BH, missing: [...List.missing] })
 
     // the voice drives the pitchman's mouth
     if (analyser && show.t < show.talkUntil) {
@@ -168,6 +172,7 @@ async function boot() {
       state = "outro"
       outroAt = now
       audio.stopAll(1.2)
+      if (!params.has("freeze")) localStorage.setItem(SEEN_KEY, "1")
     }
     if (state === "outro") {
       const o = (now - outroAt) / 1000
