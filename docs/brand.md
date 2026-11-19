@@ -39,12 +39,12 @@ Measured with the cap height as 100:
 
 Where the app sets them:
 
-- **In the app, the wordmark stands alone.** The tile is kept for places that need a square mark: the browser's tab, the app icons, the support chat's avatar and the homepage's header.
+- **In the app, the wordmark stands alone.** The tile is kept for places that need a square mark: the browser's tab, the app icons and the support chat's avatar.
 - **Dashboard sidebar:** `NightmailWordmark` at 13 px cap height, so 140 px across, at the top with the theme button beside it and the workspace picker under it. Its first stem stands on the text's left edge, the same x as the picker's name and the navigation labels (`--sidebar-gutter` + `--sidebar-inset`). In the narrower sidebar (900 to 1100 px wide) it is 11 px, so it clears the theme button.
 - **A phone's top bar (under 640 px):** 11 px, as tall as the caps of the workspace picker's name beside it; 10 px under 380 px. From 640 px the bar carries it at 13 px.
 - **Onboarding and the legal pages:** 13 px, at the head of the page.
 - **Support chat:** `NightmailMark` at 18 px beside the agent's name.
-- **Homepage:** the header carries the tile alone (26 px, 24 on a phone). The wordmark stands in lit letters at the head of the sorting frame, exactly as wide as the price under it (`features/home/sorter/name.ts`), and again across the page's end as solids cut off by the page's edge (`features/home/end-band.tsx`). `og.png` sets the lockup beside the machine.
+- **Homepage:** there is no header and no tile: the machine carries the name. The wordmark stands in lit letters at the head of the sorting frame, exactly as wide as the price under it (`features/home/sorter/name.ts`), and again across the page's end as solids cut off by the page's edge (`features/home/end-band.tsx`). `og.png` sets the lockup beside the machine.
 
 ## Clear space and size
 

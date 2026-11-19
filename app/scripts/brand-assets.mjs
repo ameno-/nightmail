@@ -24,14 +24,15 @@ const INK = '#0A0B0F', PAPER = '#F4F2EC';
 
 // The monogram's file is the tile with the NM cut out of it: its second outline is the NM alone. An icon is that NM in
 // paper on a square of ink, the tile's own proportions at `scale` 1 (the NM eight tenths of the side across).
-const nm = (() => { const d = readFileSync(brand('nightmail-monogram.svg'), 'utf8').match(/ d="([^"]+)"/)[1], cut = d.indexOf('Z') + 1; if (!cut || !d.startsWith('M', cut)) throw Error('nightmail-monogram.svg is not a tile and one outline cut from it'); return d.slice(cut) })();
+const tile = readFileSync(brand('nightmail-monogram.svg'), 'utf8').match(/ d="([^"]+)"/)[1];
+const nm = (() => { const cut = tile.indexOf('Z') + 1; if (!cut || !tile.startsWith('M', cut)) throw Error('nightmail-monogram.svg is not a tile and one outline cut from it'); return tile.slice(cut) })();
 const icon = (size, scale) => `<body style="margin:0;width:${size}px;height:${size}px;display:grid;place-items:center;background:${INK}">
   <svg viewBox="0 0 1000 1000" style="display:block;width:${size * scale}px;height:${size * scale}px"><path fill="${PAPER}" d="${nm}"/></svg></body>`;
 
 // The link-preview card. The page is laid out for a 1440 × 900 window at night; the card is 800 by 420 of its pixels,
 // photographed at one and a half times (so 1200 × 630 exactly), ending just right of the cabinet's riser and at the foot of the headline's band.
 // What is too small to read on a card (the lane plates) is hidden, and the lockup stands in the space to the left: the
-// monogram's tile from the page's header and, one stem to its right, the wordmark as the page's last band draws it.
+// monogram's tile (its brand file) and, one stem to its right, the wordmark as the page's last band draws it.
 async function sorterCard(browser) {
   const dist = resolve(publicDir, '../dist');
   if (!existsSync(join(dist, 'index.html'))) throw Error('og.png is photographed from the built dashboard: run `bun run build` in app/ first');
@@ -57,7 +58,7 @@ async function sorterCard(browser) {
     await page.waitForFunction(() => document.querySelector('.srt-page')?.dataset.phase === 'rest', null, { timeout: 90_000 });
     // The smoke clears and the last letters settle.
     await page.waitForTimeout(7000);
-    const clip = await page.evaluate(across => {
+    const clip = await page.evaluate(([across, tile]) => {
       const band = document.querySelector('.srt-band').getBoundingClientRect(), u = band.width / 48, height = across * 630 / 1200;
       // (The cabinet's riser ends 38.4 cells right of the page's middle; the headline's band ends the card.)
       const x = Math.round(band.left + band.width / 2 + 39.4 * u - across), y = Math.round(band.bottom + 2 - height);
@@ -68,10 +69,10 @@ async function sorterCard(browser) {
       const svg = 'http://www.w3.org/2000/svg', mark = document.createElementNS(svg, 'svg'), cap = 15;
       mark.setAttribute('viewBox', '0 0 12120 1000');
       mark.style.cssText = `position: fixed; z-index: 99; left: ${x + 26}px; top: ${y + 26}px; width: ${cap * 12.12}px; height: ${cap}px; fill: var(--srt-name)`;
-      for (const [from, dx] of [['.srt-mark path', 0], ['.srt-solid-face', 1320]]) { const path = document.createElementNS(svg, 'path'); path.setAttribute('d', document.querySelector(from).getAttribute('d')); path.setAttribute('transform', `translate(${dx} 0)`); mark.append(path) }
+      for (const [d, dx] of [[tile, 0], [document.querySelector('.srt-solid-face').getAttribute('d'), 1320]]) { const path = document.createElementNS(svg, 'path'); path.setAttribute('d', d); path.setAttribute('transform', `translate(${dx} 0)`); mark.append(path) }
       document.querySelector('.srt-page').append(mark);
       return { x, y, width: across, height };
-    }, across);
+    }, [across, tile]);
     const data = await page.screenshot({ clip });
     if (data.readUInt32BE(16) !== 1200 || data.readUInt32BE(20) !== 630) throw Error(`og.png came out ${data.readUInt32BE(16)} × ${data.readUInt32BE(20)}, not 1200 × 630`);
     return data;

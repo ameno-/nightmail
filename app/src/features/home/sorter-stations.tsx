@@ -9,12 +9,13 @@ import { EndBand, endBand } from './end-band'
 
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches
 
-// Under the slab the machine stands on, its eight tubes (a phone's two wide ones) run on down the page and one by one
-// bend in to an appliance:
-// the places mail can go. Capsules run down every tube all the time, round the bends and into the appliances (each
-// one's lamp winks as one arrives); and one more tube, the outbound main, runs back up the page from the plate the
-// last button is on, past the appliances that send (they tee into it), to the slab, where the machine's cannon fires
-// what it carries off the page. One mail system from the hopper to the footer. As the page scrolls, the letter in
+// Under the page's machine, the places mail can go, each an appliance with a tube into it. Under the sorter the slab's
+// eight tubes (a phone's two wide ones) run on down the page and one by one bend in to an appliance, and one more tube,
+// the outbound main, runs back up the page from the plate the last button is on, past the appliances that send (they
+// tee into it), to the slab, where the machine's cannon fires what it carries off the page: one mail system from the
+// hopper to the footer. Under the factory (`edges`) the hall's pipes go down out of its picture, and each appliance's
+// tube comes back onto the page from the side, level with it, and straight in. Capsules run along every tube all the
+// time, round the bends and into the appliances (each one's lamp winks as one arrives). As the page scrolls, the letter in
 // each appliance arrives the way it does in the product: a pigeonhole fills and a row appears in the Inbox, a mail
 // app on a monitor gets the message, a teleprinter prints an agent's turn, a rule's lamps come on line by line, a
 // switchboard posts a webhook, a press runs a campaign off, a thread grows, a ledger tape prints the logs. That is
@@ -37,28 +38,10 @@ const STATIONS: Station[] = [
   { kind: 'logs', tube: 7, name: 'Logs', line: 'And every message, sent or received, is on record.', plate: 'Logs', w: 420, h: 88, up: 0, down: 186, port: .5 },
 ]
 
-// Under the factory (factory-home.tsx) the tubes come out of the hero's own pipes, one under each pipe's label. Its
-// left four run, from the outside in, Inbox, Agents, Endpoints, Threads: the reverse of the order above, where the
-// innermost tube (the one nearest the appliances) is Inbox's. The innermost must turn in first or it crosses the
-// others, so on the left the appliances come in the hero's order from the inside: Threads first, Inbox last (the
-// right four already run that way). `tube` is the place from the inside, as above.
-const LABELS: Record<Kind | 'main', string> = { inbox: 'INBOX', agent: 'AGENTS', endpoint: 'ENDPOINTS', thread: 'THREADS', imap: 'IMAP', ritual: 'RULES', campaign: 'CAMPAIGNS', logs: 'LOGS', main: 'OUTBOUND' }
-/** Where a tube's hero pipe comes down to the section's top edge, by its label. */
-const heroX = (pipes: HeroPipes, kind: Kind | 'main') => pipes.x[LABELS[kind]] as number | undefined
-/** Whether a tube's hero pipe shows at the stage's foot (a phone's are hidden behind the console or outside the picture). */
-const shows = (pipes: HeroPipes, kind: Kind | 'main') => !pipes.behind?.includes(LABELS[kind])
-const UNDER_HERO: Station[] = (['thread', 'imap', 'endpoint', 'ritual', 'agent', 'campaign', 'inbox', 'logs'] as const).map(kind => {
-  const spec = STATIONS.find(station => station.kind === kind)!
-  return spec.tube < 4 ? { ...spec, tube: 3 - spec.tube } : spec
-})
-/** The hero's pipes as they reach the section's top edge: each one's x by its label (off the page for a pipe outside
- *  the picture), their width, and how far down the page's own consent strip reaches over them (`clear`). */
-export type HeroPipes = { x: Record<string, number>; w: number; clear: number; behind?: string[] }
-
 /** A window of a unit's progress: the element's own --t runs 0 to 1 while --v goes from `from` to `to`. */
 const step = (from: number, to: number, extra?: CSSProperties) => ({ '--from': from, '--to': to, ...extra }) as CSSProperties
 
-export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: HomeStart; hero?: HeroPipes | null }) {
+export function Stations({ plan: p, start, edges = false }: { plan: Plan | null; start: HomeStart; edges?: boolean }) {
   const root = useRef<HTMLElement>(null), traffic = useRef<HTMLDivElement>(null), flows = useRef<Flow[]>([])
   // One pass per frame while scrolling: how far each unit has come up the page.
   useEffect(() => {
@@ -110,54 +93,19 @@ export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: H
   }, [p])
 
   if (!p) return <section className="srt-stations" ref={root} aria-label="Where mail goes" />
-  // (Under the factory every tube is as wide as the hero's pipes, so each reads on from its own.)
-  const pipes = hero ?? null
-  const phone = p.phone, r = pipes ? pipes.w / 2 : p.tubeR, wide = r * 2, depth = phone ? 40 : 60, dx = -DX * depth, dy = DY * depth
+  // (Under the factory each tube is its own and as wide on every page: a phone's a little slimmer.)
+  const phone = p.phone, r = edges ? (phone ? 4 : 6) : p.tubeR, wide = r * 2, depth = phone ? 40 : 60, dx = -DX * depth, dy = DY * depth
   // Each appliance stands between the two fours of tubes, a little towards the side its own tube comes from: those on
   // the left share one left edge, those on the right another, so their names stand in two columns down the page.
   // (sorter/plan.ts has the column's width and its middle: under the machine's front, or on a phone the page's own.)
-  // On a phone under the factory each appliance has a tube of its own too: four down a gutter each side of the column,
-  // `lane` apart, the innermost turning in first; the column gives up what width the gutters need.
-  const lane = wide + 3, gutter = 11 + 2 * r + 3 * lane, lanes = !!pipes && phone
-  const narrowest = lanes ? Math.min(p.widest, Math.floor(p.W - dx - 2 * gutter)) : p.widest
-  const { lean, sx } = p, widest = narrowest, room = lanes ? Math.min(p.room, narrowest) : p.room
-  const column = { left: Math.round(sx - widest / 2 + dx / 2), right: Math.round(sx - widest / 2 + dx / 2) + widest }
-  /** Where the tube of the appliance in place `tube` (0 to 3 on the left from the inside out, 4 to 7 on the right) runs down. */
-  const laneX = (tube: number) => tube < 4 ? column.left - dx - 6 - r - tube * lane : column.right + 6 + r + (tube - 4) * lane
-  const sendX = lanes ? Math.min(sx + p.out, column.right - 10) : sx + p.out
+  const { lean, sx, widest, room } = p, mainX = sx + p.out
   const captionH = phone ? 58 : 66, gap = phone ? 96 : 128
-  // Under the factory each tube comes straight down out of its hero pipe (past what signing in agrees to, `clear`),
-  // then steps across to its place beside the appliances' column: one step to a row, the next row lower, in an
-  // order where no step crosses a tube still standing (`jog`, by tube; the outbound main's under `main`). Steps
-  // that cross different stretches of the page share a row. The appliances begin under the last row.
-  // (On a phone a pipe outside the picture comes in from the page's side on its step; one hidden behind the machine's
-  // console comes out from under it, and from behind what signing in agrees to.)
-  const bend0 = (phone && !pipes ? 10 : wide) * 1.5, pitch = Math.round(wide * 1.5 + 16), jog = new Map<number | 'main', number>()
-  let jogEnd = 0
-  if (pipes) {
-    const moves = [...[0, 1, 2, 3, 4, 5, 6, 7].map(tube => ({ id: tube as number | 'main', from: heroX(pipes, UNDER_HERO.find(station => station.tube === tube)!.kind) ?? (lanes ? laneX(tube) : p.drops[tube]), to: lanes ? laneX(tube) : p.drops[tube] })),
-      { id: 'main' as const, from: heroX(pipes, 'main') ?? sendX, to: sendX }]
-    const at = new Map(moves.map(move => [move.id, move.from])), pending = moves.filter(move => Math.abs(move.to - move.from) > .5), clearance = lanes ? lane - 1 : wide + 8
-    const span = (move: typeof moves[number]) => [Math.min(move.from, move.to) - clearance, Math.max(move.from, move.to) + clearance]
-    let row = pipes.clear + 24 + bend0
-    while (pending.length) {
-      const taken: number[][] = []
-      for (const move of [...pending]) {
-        const [a, b] = span(move)
-        if (moves.some(other => other !== move && at.get(other.id)! > a && at.get(other.id)! < b) || taken.some(([c, d]) => a < d && b > c)) continue
-        jog.set(move.id, row); taken.push([a, b]); pending.splice(pending.indexOf(move), 1)
-      }
-      // (None can step without crossing: the nearest goes anyway.)
-      if (!taken.length) { const move = pending.sort((m, n) => Math.abs(m.to - m.from) - Math.abs(n.to - n.from)).shift()!; jog.set(move.id, row) }
-      for (const [id, y] of jog) if (y === row) at.set(id, moves.find(move => move.id === id)!.to)
-      jogEnd = row; row += pitch
-    }
-  }
-  let top = phone ? Math.max(52, jogEnd + bend0 + 40) : Math.max(110, jogEnd + bend0 + 56)
+  const bend0 = (phone && !edges ? 10 : wide) * 1.5
+  let top = edges ? (phone ? 48 : 96) : phone ? Math.max(52, bend0 + 40) : Math.max(110, bend0 + 56)
   // (On a narrow phone what is printed and what is said wraps more: the paper and the thread's screen are longer for it.)
   const narrow = phone && p.W < 380, feed = narrow ? 232 : 168
   // (Stacked the printed paper is narrower, so longer, and the rule's call takes three lines: nothing is cut short.)
-  const units = (pipes ? UNDER_HERO : STATIONS).map(spec => {
+  const units = STATIONS.map(spec => {
     const station = phone ? { ...spec, h: spec.kind === 'inbox' ? 339 : spec.kind === 'thread' ? (narrow ? 288 : 262) : spec.kind === 'ritual' ? 262 : spec.kind === 'endpoint' ? 280 : spec.h, up: spec.kind === 'agent' ? feed : spec.up, down: spec.kind === 'logs' ? 272 : spec.down } : spec
     const w = Math.min(station.w, room), left = station.tube < 4
     const boxLeft = Math.round(sx - widest / 2 + (left ? -lean : lean) + dx / 2), boxTop = top + captionH + dy + 18 + station.up
@@ -165,33 +113,35 @@ export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: H
     top = boxTop + station.h + station.down + gap
     return unit
   })
-  // Under the last appliance, the plate the last button is on; the outbound main comes out of its top.
-  const plate = { w: phone ? widest : Math.min(540, room + 60), h: phone ? 164 : 138, top: top + dy + 8 }, plateLeft = Math.round(sx - plate.w / 2 + dx / 2), mainX = sendX
+  // Under the last appliance, the plate the last button is on; under the sorter the outbound main comes out of its top.
+  const plate = { w: phone ? widest : Math.min(540, room + 60), h: phone ? 164 : 138, top: top + dy + 8 }, plateLeft = Math.round(sx - plate.w / 2 + dx / 2)
   // (Under the plate: what signing in agrees to and the last links; and under those, where the page ends, the wordmark
   // across it (end-band.tsx), which stands clear of a phone's home indicator on a sill.)
   const band = endBand(p.W, phone, p.inset), under = band.h + p.inset.bottom
   const height = plate.top + plate.h + (phone ? 172 : 140) + under
-  // The tubes. A wide page: each side's four start where they left the slab's lip; after each appliance on that side
-  // the tubes that are left step in one place towards the column (the inner ones first, so none crosses another),
+  const pw = phone && !edges ? 10 : wide, bend = pw * 1.5
+  const runs: { key: string; points: Pt[]; wide: number; rings: Ring[] }[] = [], ways: Pt[][] = [], outWays: Pt[][] = [], sleeve = (x: number): Ring => ({ at: [x, 12], across: false, tall: 30 })
+  // The tubes. Under the factory: the hall's pipes went down out of the picture, and each appliance's own tube comes
+  // back onto the page from the side it stands towards, level with where it goes in, and runs straight into it (into
+  // a flange on the side wall of one on the left; behind the front of one on the right). One tube to each, none
+  // crossing another, and nothing over the strip under the hero. A long run has a collar every so often.
+  if (edges) units.forEach(({ station, left, port, end }, k) => {
+    const towards = left ? 1 : -1, points: Pt[] = [[left ? -wide : p.W + wide, port], [end, port]], collars = rings(points, bend, left ? dx / 2 + 5 : 17, !left).slice(1)
+    for (let x = end - towards * 300; left ? x > 60 : x < p.W - 60; x -= towards * 380) collars.push({ at: [x, port], across: true })
+    runs.push({ key: `t${station.tube}`, points, wide, rings: collars }); ways[k] = points
+  })
+  // Under the sorter, a wide page: each side's four start where they left the slab's lip; after each appliance on that
+  // side the tubes that are left step in one place towards the column (the inner ones first, so none crosses another),
   // and the innermost then bends in to the next appliance: into a flange on its side wall, at half its depth (an
   // appliance on the right shows no such wall: its tube goes in behind its front). A phone has no room for four a
   // side: its machine sends two wide tubes over the slab's lip, one down each side of the column, with a tee off it
   // to each appliance on its side and a bend into the last.
-  const pw = phone && !pipes ? 10 : wide, bend = pw * 1.5
-  const runs: { key: string; points: Pt[]; wide: number; rings: Ring[] }[] = [], ways: Pt[][] = [], sleeve = (x: number): Ring => ({ at: [x, 12], across: false, tall: 30 }), seam = (x: number): Ring => ({ at: [x, 0], across: false, seam: true })
-  // (A phone under the factory: each tube down its own lane and straight in to its appliance.)
-  if (lanes) units.forEach(({ station, left, port, end }, k) => {
-    const row = jog.get(station.tube), from = heroX(pipes!, station.kind), x = laneX(station.tube)
-    const points: Pt[] = [...row !== undefined && from !== undefined ? [[from, 0], [from, row], [x, row]] as Pt[] : [[x, 0]] as Pt[], [x, port], [end, port]]
-    runs.push({ key: `t${station.tube}`, points, wide, rings: [...from !== undefined && shows(pipes!, station.kind) ? [seam(points[0][0])] : [], ...rings(points, bend, left ? dx / 2 + 5 : 17, !left).slice(1)] }); ways[k] = points
-  })
   else if (!phone) units.forEach(({ station, left, port, end }, k) => {
-    const side = left ? 0 : 4, n = station.tube - side, slot = (j: number) => p.drops[side + j], row = jog.get(station.tube), from = pipes ? heroX(pipes, station.kind) : undefined
-    const points: Pt[] = row !== undefined && from !== undefined ? [[from, 0], [from, row], [slot(n), row]] : [[slot(n), 0]]
+    const side = left ? 0 : 4, n = station.tube - side, slot = (j: number) => p.drops[side + j]
+    const points: Pt[] = [[slot(n), 0]]
     for (let m = 0; m < n; m++) { const y = units.find(u => u.station.tube === side + m)!.port + 78 + (n - m - 1) * (wide + 16); points.push([slot(n - m), y], [slot(n - m - 1), y]) }
     points.push([points.at(-1)![0], port], [end, port])
-    // (A tube out of the hero's pipe is fitted to it at the stage's foot, where the render's steel ends: `Seam`.)
-    runs.push({ key: `t${station.tube}`, points, wide, rings: [...from !== undefined ? [seam(points[0][0])] : pipes ? [] : [sleeve(points[0][0])], ...rings(points, bend, left ? dx / 2 + 5 : 17, !left).slice(1)] }); ways[k] = points
+    runs.push({ key: `t${station.tube}`, points, wide, rings: [sleeve(points[0][0]), ...rings(points, bend, left ? dx / 2 + 5 : 17, !left).slice(1)] }); ways[k] = points
   })
   else for (const side of [0, 1]) {
     const mine = units.filter(u => u.left === (side === 0)), last = mine.at(-1)!, x = Math.round(p.drops[side]), out = 0, towards = side ? -1 : 1
@@ -206,36 +156,39 @@ export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: H
     }
     runs.push({ key: `trunk${side}`, points: trunk, wide: pw, rings: collars.filter((ring, i) => collars.every((other, j) => j >= i || Math.abs(other.at[0] - ring.at[0]) > 1 || Math.abs(other.at[1] - ring.at[1]) > 12)) })
   }
-  // The outbound main: from the plate's top straight up the page to the slab (behind the appliances that lean right,
-  // beside those that lean left). On a wide page the appliances on the left that send tee into it from their right
-  // side; the others it passes behind.
-  // (Under the factory it comes down out of the hero's OUTBOUND pipe and steps across to its place first.)
-  const mainRow = jog.get('main'), heroMain = pipes ? heroX(pipes, 'main') : undefined, stepped = mainRow !== undefined && heroMain !== undefined
-  const main: Pt[] = stepped ? [[heroMain, 0], [heroMain, mainRow], [mainX, mainRow], [mainX, plate.top - dy * .5]] : [[mainX, 0], [mainX, plate.top - dy * .5]]
-  const senders = units.filter(u => ['agent', 'campaign', 'thread'].includes(u.station.kind)), mainRings: Ring[] = [...stepped ? shows(pipes!, 'main') ? [seam(heroMain)] : [] : pipes ? [] : [sleeve(main[0][0])], ...stepped ? rings(main.slice(0, 3).concat([[mainX, mainRow + 2 * bend + 40]]), bend, 0).slice(1) : []]
-  // What comes back up the main goes on up it to its top: through its step, where it has one.
-  const upMain = (points: Pt[]): Pt[] => stepped ? [...points.slice(0, -1), [mainX, mainRow], [heroMain, mainRow], [heroMain, 16]] : points
-  for (let y = stepped ? mainRow + 300 : 300; y < main.at(-1)![1] - 120; y += 380) if (units.every(u => !(!u.left || phone) || y < u.top + u.boxTop - dy - 30 || y > u.top + u.boxTop + u.station.h + 40)) mainRings.push({ at: [mainX, y], across: false })
-  for (const unit of units) if (phone || !unit.left) {
-    const over = unit.top + unit.boxTop - dy - 9 - (unit.station.kind === 'campaign' && !phone ? 34 : unit.station.kind === 'thread' ? unit.station.up : unit.station.kind === 'agent' ? unit.station.up : 0), under = unit.top + unit.boxTop + unit.station.h + (unit.station.kind === 'imap' ? 62 : unit.station.kind === 'logs' ? unit.station.down + 10 : 34)
-    for (const y of [over, under]) if (y > (stepped ? mainRow + 60 : 60) && y < main.at(-1)![1] - 30 && mainRings.every(ring => Math.abs(ring.at[1] - y) > 22)) mainRings.push({ at: [mainX, y], across: false, tall: 7 })
+  // Under the sorter, the outbound main: from the plate's top straight up the page to the slab (behind the appliances
+  // that lean right, beside those that lean left). On a wide page the appliances on the left that send tee into it from
+  // their right side; the others it passes behind. (The factory's own outbound pipe goes down out of its picture too.)
+  if (!edges) {
+    const main: Pt[] = [[mainX, 0], [mainX, plate.top - dy * .5]]
+    const senders = units.filter(u => ['agent', 'campaign', 'thread'].includes(u.station.kind)), mainRings: Ring[] = [sleeve(mainX)]
+    for (let y = 300; y < main.at(-1)![1] - 120; y += 380) if (units.every(u => !(!u.left || phone) || y < u.top + u.boxTop - dy - 30 || y > u.top + u.boxTop + u.station.h + 40)) mainRings.push({ at: [mainX, y], across: false })
+    for (const unit of units) if (phone || !unit.left) {
+      const over = unit.top + unit.boxTop - dy - 9 - (unit.station.kind === 'campaign' && !phone ? 34 : unit.station.kind === 'thread' ? unit.station.up : unit.station.kind === 'agent' ? unit.station.up : 0), under = unit.top + unit.boxTop + unit.station.h + (unit.station.kind === 'imap' ? 62 : unit.station.kind === 'logs' ? unit.station.down + 10 : 34)
+      for (const y of [over, under]) if (y > 60 && y < main.at(-1)![1] - 30 && mainRings.every(ring => Math.abs(ring.at[1] - y) > 22)) mainRings.push({ at: [mainX, y], across: false, tall: 7 })
+    }
+    outWays.push([[mainX, plate.top - dy * .5 + 14], [mainX, 16]])
+    for (const unit of senders) {
+      // (A box on the left wide enough to reach over the main hides it, as one on the right does: what it sends goes
+      // straight up the main behind it, with no branch out of its side.)
+      if (phone || !unit.left || unit.boxLeft + unit.w > mainX) { outWays.push([[mainX, unit.top + unit.boxTop + unit.station.h * .5], [mainX, 16]]); continue }
+      const from = unit.boxLeft + unit.w - 4
+      runs.push({ key: `send${unit.station.tube}`, points: [[from, unit.sends], [mainX - (wide / 2 - 1), unit.sends]], wide, rings: [{ at: [from + 9, unit.sends], across: true }, { at: [mainX - wide / 2 - 3.5, unit.sends], across: true }] })
+      mainRings.push({ at: [mainX, unit.sends - wide / 2 - 4.5], across: false }, { at: [mainX, unit.sends + wide / 2 + 4.5], across: false })
+      outWays.push([[from + 4, unit.sends], [mainX, unit.sends], [mainX, 16]])
+    }
+    runs.push({ key: 'main', points: main, wide, rings: mainRings })
   }
-  const outWays: Pt[][] = [upMain([[mainX, plate.top - dy * .5 + 14], [mainX, 16]])]
-  for (const unit of senders) {
-    // (A box on the left wide enough to reach over the main hides it, as one on the right does: what it sends goes
-    // straight up the main behind it, with no branch out of its side.)
-    if (phone || !unit.left || unit.boxLeft + unit.w > mainX) { outWays.push(upMain([[mainX, unit.top + unit.boxTop + unit.station.h * .5], [mainX, 16]])); continue }
-    const from = unit.boxLeft + unit.w - 4
-    runs.push({ key: `send${unit.station.tube}`, points: [[from, unit.sends], [mainX - (wide / 2 - 1), unit.sends]], wide, rings: [{ at: [from + 9, unit.sends], across: true }, { at: [mainX - wide / 2 - 3.5, unit.sends], across: true }] })
-    mainRings.push({ at: [mainX, unit.sends - wide / 2 - 4.5], across: false }, { at: [mainX, unit.sends + wide / 2 + 4.5], across: false })
-    outWays.push(upMain([[from + 4, unit.sends], [mainX, unit.sends], [mainX, 16]]))
-  }
-  runs.push({ key: 'main', points: main, wide, rings: mainRings })
   // Every capsule's way: down each tube from under its sleeve into its appliance; up the main from each that sends.
-  flows.current = [...ways.map((points, k) => ({ points: [[points[0][0], phone ? points[0][1] + 4 : 16] as Pt, ...points.slice(1, -1), [units[k].left ? units[k].end - dx / 2 - 2 : units[k].end - 2, points.at(-1)![1]] as Pt], bend, speed: phone ? 150 : 230, unit: k, wide: phone })), ...outWays.map(points => ({ points, bend: wide * 1.5, speed: phone ? 130 : 200, unit: undefined, wide: false }))]
+  // Under the factory each comes along its tube from off the page, from far enough out that one arrives every few
+  // seconds however short the tube that is seen.
+  flows.current = edges ? ways.map(([[x0, y], [end]], k) => {
+    const stop = units[k].left ? end - dx / 2 - 2 : end - 2, lead = Math.max(0, (phone ? 420 : 900) - Math.abs(stop - x0))
+    return { points: [[units[k].left ? x0 - lead : x0 + lead, y], [stop, y]] as Pt[], bend, speed: phone ? 120 : 230, unit: k, wide: phone }
+  }) : [...ways.map((points, k) => ({ points: [[points[0][0], phone ? points[0][1] + 4 : 16] as Pt, ...points.slice(1, -1), [units[k].left ? units[k].end - dx / 2 - 2 : units[k].end - 2, points.at(-1)![1]] as Pt], bend, speed: phone ? 150 : 230, unit: k, wide: phone })), ...outWays.map(points => ({ points, bend: wide * 1.5, speed: phone ? 130 : 200, unit: undefined, wide: false }))]
   // A caption the main runs up through (beside the appliance, or behind it) stops short of it: a line too long for
   // that runs on to a second, up the page (sorter-home.css), never under the tube.
-  const captionW = (left: number, width: number) => mainX + wide / 2 > left && mainX - wide / 2 - 14 < left + width ? mainX - wide / 2 - 14 - left : width
+  const captionW = (left: number, width: number) => !edges && mainX + wide / 2 > left && mainX - wide / 2 - 14 < left + width ? mainX - wide / 2 - 14 - left : width
   const vars = { ...phone && { '--srt-feed': `${feed}px` }, '--srt-r': `${pw / 2}px`, '--srt-pipe': `${pw}px`, '--srt-dx': `${dx}px`, '--srt-dy': `${dy}px`, '--srt-slope': dy / dx, '--srt-over': phone ? '4px' : '7px', '--srt-band-end': `${under}px`, height } as CSSProperties
   return <section className="srt-stations" ref={root} style={vars} data-phone={phone || undefined} aria-label="Where mail goes">
     {/* The tubes' far walls; over them the capsules; over those (further down) the tubes' near walls and their collars. */}
@@ -275,7 +228,7 @@ export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: H
         </g>
       })}
     </svg>
-    {/* The last plate, in the machine's make: the price and the button on it, the outbound main coming out of its top. */}
+    {/* The last plate, in the machine's make: the price and the button on it (under the sorter the outbound main coming out of its top). */}
     <div className="srt-box srt-end-plate" style={{ left: plateLeft, top: plate.top, '--srt-w': `${plate.w}px`, '--srt-h': `${plate.h}px` } as CSSProperties}>
       <p className="srt-end-price"><span><b>$0.20</b> per 1,000 emails,</span> <span>sent or received.</span></p>
       <span className="srt-end-bay">
@@ -283,10 +236,10 @@ export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: H
       </span>
       {[0, 1, 2, 3].map(k => <i key={k} className="srt-screw" style={{ [k % 2 ? 'right' : 'left']: 10, [k < 2 ? 'top' : 'bottom']: 10 }} aria-hidden="true" />)}
     </div>
-    <svg className="srt-pipes srt-ports" aria-hidden="true">
+    {!edges && <svg className="srt-pipes srt-ports" aria-hidden="true">
       <Tube layer="back" points={[[mainX, plate.top - dy - 6], [mainX, plate.top - dy * .5]]} wide={wide} bend={bend} rings={[]} />
       <Tube layer="front" points={[[mainX, plate.top - dy - 6], [mainX, plate.top - dy * .5]]} wide={wide} bend={bend} rings={[{ at: [mainX, plate.top - dy * .5 - 2.5], across: false }]} />
-    </svg>
+    </svg>}
     <footer className="srt-end">
       {!start.signedIn && <SignInConsent className="srt-end-consent" />}
       <nav aria-label="Site links"><a className="srt-by" href="https://anoma.ly" target="_blank" rel="noopener" title="Anomaly (opens in a new tab)">by <AnomalyLogo height={18} /></a><a href="/docs">API docs</a><Link to="/legal/terms">Terms</Link><Link to="/legal/privacy">Privacy</Link></nav>
@@ -298,7 +251,7 @@ export function Stations({ plan: p, start, hero }: { plan: Plan | null; start: H
 type Pt = [number, number]
 const corners = (points: Pt[], bend: number) => points.map((v, i) => i === 0 || i === points.length - 1 ? 0 : Math.min(bend, Math.hypot(v[0] - points[i - 1][0], v[1] - points[i - 1][1]) / 2, Math.hypot(points[i + 1][0] - v[0], points[i + 1][1] - v[1]) / 2))
 
-type Ring = { at: Pt; across: boolean; tall?: number; seam?: boolean }
+type Ring = { at: Pt; across: boolean; tall?: number }
 type Flow = { points: Pt[]; bend: number; speed: number; unit: number | undefined; wide: boolean }
 /** Where a tube's line turns: for each corner the centre of its quarter circle, its radius, and the points it begins and ends at. */
 function turns(points: Pt[], bend: number) {
@@ -365,19 +318,11 @@ function Tube({ points, wide, bend, rings, layer }: { points: Pt[]; wide: number
     <path className="srt-tube-wall" d={line(points, bend)} strokeWidth={wide} />
     {strip('srt-tube-shade', -.9, .2)}{strip('srt-tube-band', .74, .3)}{strip('srt-tube-rim', .95, .1)}
     {strip('srt-tube-glint', .36, .14)}{strip('srt-tube-glint srt-tube-glint-2', -.58, .1)}
-    {rings.map(({ at, across, tall, seam }, i) => seam ? <Seam key={i} x={at[0]} w={wide} />
-      : across
+    {rings.map(({ at, across, tall }, i) => across
       ? <g key={i}><rect className="srt-ring" x={at[0] - 2.5} y={at[1] - half - 2.5} width={5} height={wide + 5} rx={1} /><rect className="srt-ring-lit" x={at[0] - 2.5} y={at[1] - half - 2.5} width={5} height={2} rx={1} /></g>
       : tall && tall > 12 ? <Sleeve key={i} x={at[0]} y={at[1]} w={wide + 6} h={tall} />
       : <g key={i}><rect className="srt-ring" x={at[0] - half - 2.5} y={at[1] - (tall ?? 5) / 2} width={wide + 5} height={tall ?? 5} rx={1} /><rect className="srt-ring-lit" x={at[0] - half - 2.5} y={at[1] - (tall ?? 5) / 2} width={wide + 5} height={2} rx={1} /></g>)}
   </g>
-}
-
-/** Where a tube comes out of its pipe in the hero, at the stage's foot: a collar a little wider than both, in the
- * render's steel (factory-home.css), flat, joining its steel pipe to the page's glass tube. Never deeper than the strip
- * over the consent's plate. */
-function Seam({ x, w }: { x: number; w: number }) {
-  return <rect className="srt-seam" x={x - w / 2 - 1.5} y={0} width={w + 3} height={Math.min(8, Math.max(4, Math.round(w * .55)))} rx={1} />
 }
 
 /** A coupling on an upright tube, as the machine would show one: a short steel cylinder seen from a little above (its

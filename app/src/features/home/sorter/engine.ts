@@ -534,7 +534,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
         scanning = -1
         // Out of the slot on one side or the other in turn, tossed in an arc over the end of the roof to where the
         // page is empty beside the machine. (Stacked, where it isn't: out of the left slot, clear of the cannon, and
-        // straight up, as high as leaves it under the header; the two lasers take it in turn.)
+        // straight up, as high as leaves it under the page's top; the two lasers take it in turn.)
         const k = ejectSide ^= 1, side = p.phone ? -1 : k ? 1 : -1, from = m.ejects[p.phone ? 0 : k]
         place(i, from[0], from[1] + p.lh * .2, from[2]); L.state[i] = SCRIPT; seed[i] = Math.random()
         s.stage = 21; s.t = 0; s.lane = k; s.x0 = from[0]; s.y0 = from[1] + p.lh * .2; s.turn = -side
@@ -1220,7 +1220,7 @@ export function mountSorter(canvas: HTMLCanvasElement, options: { plan: Plan; ov
     let air = 0
     if (dark && !p.phone) { airData[0] = 0; airData[1] = p.yTop * .62; airData[2] = p.D * .5; airData[3] = p.Xc * 2.4; airData[4] = p.yTop * .9; airData[5] = 0; airData[6] = .62; airData[7] = .68; airData[8] = 1; airData[9] = .07; airData[10] = 2; air = 1 }
     // Billows, the oldest first: a new one comes out in front of what is already in the air. (Each thins out as it
-    // rises towards the page's header, gone before it reaches its controls; and after the burst what hangs over the
+    // rises towards the page's top, gone before it reaches it; and after the burst what hangs over the
     // readout thins away from it, between about 1.9 and 2.9 s of the page's time (the burst's slowed time runs .6 to
     // 1.2 s then), before the readout's instruction comes back.)
     let sn = 0

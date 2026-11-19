@@ -2,11 +2,10 @@ import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from
 import { SignInConsent } from '../../components/LegalLinks'
 import { useTheme } from '../../lib/theme'
 import type { HomeProps } from '.'
-import { HomeHeader } from './home-header'
-import { DashboardLink, StartButton } from './start'
+import { StartButton } from './start'
 import { plan, type Plan } from './sorter/plan'
 import { toneVars } from './sorter/tones'
-import { Stations, type HeroPipes } from './sorter-stations'
+import { Stations } from './sorter-stations'
 import { MANIFESTS, published, type Format, type Manifest } from './factory/manifest'
 import { alphaFormat, mountPlayer, type Player } from './factory/player'
 import desktopPoster from './factory/poster.jpg'
@@ -17,12 +16,14 @@ import phoneBoard1 from './factory/phone/board1.webp'
 import phoneBoard2 from './factory/phone/board2.webp'
 import './factory-home.css'
 
-// The homepage: the factory, in a wide frame on a desktop and a tall one on a phone (index.tsx picks). A rendered hall with the sorting machine standing in it, the price on the
+// The homepage: the factory, in a wide frame on a desktop and a tall one on a phone (index.tsx picks), from the very top
+// of the window: there is no header (the machine carries the name). A rendered hall with the sorting machine standing in it, the price on the
 // machine's front, and billboards with the free tier on them sliding slowly along a rail behind it (factory/player.ts).
 // The page writes only the button, on the blank plate the machine's front has for it. The first picture is the poster,
 // laid out by CSS alone before anything loads (factory-home.css), so nothing moves when the videos take over from it;
 // with reduced motion, without the renders' host (VITE_FACTORY_MEDIA), or where alpha video cannot play, the poster
-// is what is seen. Under it the tubes run on down the page to each place mail can go, as under the sorter.
+// is what is seen. The hall's pipes go down out of the picture; under it each place mail can go has a tube of its own,
+// coming back onto the page from its side (sorter-stations.tsx).
 
 /** Where the render sets are published (their current.json and versions), ending in a slash: a build without it shows the poster alone. */
 const MEDIA = (import.meta.env.VITE_FACTORY_MEDIA as string | undefined)?.replace(/\/*$/, '/') || null
@@ -36,12 +37,11 @@ const slow = () => saveData() || ['slow-2g', '2g', '3g'].includes(connection()?.
 // Desktop: from the top of the boards' faces (a sprite's top third is its hanger) to a little under the button, and the
 // machine's width. The frame covers the stage, cropped about the middle of that; a window too wide or too narrow for it
 // to be seen whole shows the frame smaller, on the stage's own dark. And the stage's foot is never below the floor line,
-// where the plinth's pipes go into the hall's floor (`--fac-floor`): the section under the hero carries every pipe on
-// from the stage's foot (sorter-stations.tsx), so there is always pipe down to it.
+// where the plinth's pipes go into the hall's floor (`--fac-floor`), so the picture never ends on bare floor.
 // Phone: the button stands on its own console on the floor in front of the plinth, below the floor line. The stage's
 // foot (`--fac-cut`) is a strip of floor under the console: as much as burst's letters land on (they pile up there and
-// fly home in rebuild); the rest of the floor is cut off (the renders allow the bottom tenth). The pipes go into the floor
-// over it and the section under the stage carries them on, and what signing in agrees to stands directly under it. Seen from the boards' faces (a phone sprite's hanger is its
+// fly home in rebuild); the rest of the floor is cut off (the renders allow the bottom tenth). What signing in agrees to
+// stands directly under it. Seen from the boards' faces (a phone sprite's hanger is its
 // top seventh) down to that foot, and the middle 76% of the width (all the renders keep what must be read inside it).
 const pct = (value: number, of: number) => `${value / of * 100}%`
 function frameOf(m: Manifest, format: Format) {
@@ -82,19 +82,14 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
   const [bare] = useState(still)
   const visitor = start.signedIn ? null : start
   const dark = useTheme().theme === 'dark'
-  const scene = useRef<HTMLElement>(null), probe = useRef<HTMLDivElement>(null), stage = useRef<HTMLDivElement>(null), frame = useRef<HTMLDivElement>(null), under = useRef<HTMLDivElement>(null)
+  const scene = useRef<HTMLElement>(null), probe = useRef<HTMLDivElement>(null), stage = useRef<HTMLDivElement>(null), frame = useRef<HTMLDivElement>(null)
   const bg = useRef<HTMLDivElement>(null), boards = useRef<HTMLDivElement>(null), fg = useRef<HTMLDivElement>(null)
-  // The tubes under the hero are placed as the sorter's page would place them for this window (sorter/plan.ts), and
-  // each comes out of its own pipe in the hero: where the frame puts that pipe across the page, and as wide.
-  const [p, setP] = useState<Plan | null>(null), [pipes, setPipes] = useState<HeroPipes | null>(null)
+  // The places mail can go under the hero are laid out as the sorter's page would lay them out for this window (sorter/plan.ts).
+  const [p, setP] = useState<Plan | null>(null)
   useLayoutEffect(() => {
     const measure = () => {
       const fold = probe.current!, safe = getComputedStyle(fold), next = plan(scene.current!.clientWidth, fold.offsetHeight, { left: parseFloat(safe.paddingLeft) || 0, right: parseFloat(safe.paddingRight) || 0, bottom: parseFloat(safe.paddingBottom) || 0 }, !start.signedIn)
       setP(now => now && now.W === next.W && now.H === next.H && now.fold === next.fold && now.ox === next.ox ? now : next)
-      const box = frame.current!.getBoundingClientRect(), left = box.left - scene.current!.getBoundingClientRect().left, scale = box.width / m.width
-      const x = Object.fromEntries((m.pipes ?? []).map(pipe => [pipe.label, left + pipe.x * scale])), w = (m.pipes?.[0]?.w ?? 0) * scale, clear = under.current?.offsetHeight ?? 0
-      const behind = (m.pipes ?? []).filter(pipe => pipe.hidden || pipe.offFrame).map(pipe => pipe.label)
-      setPipes(now => m.pipes && !(now && now.w === w && now.clear === clear && Object.keys(x).every(label => now.x[label] === x[label])) ? { x, w, clear, behind } : now)
     }
     measure()
     const observer = new ResizeObserver(measure)
@@ -126,7 +121,6 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
   }, [])
 
   return <div className="srt-page fac-page" data-format={format} data-visitor={visitor ? '' : undefined} style={toneVars(dark) as CSSProperties}>
-    <HomeHeader>{!visitor && <DashboardLink>Dashboard</DashboardLink>}</HomeHeader>
     <main>
       <section className="fac-hero" ref={scene} aria-label="Pricing">
         <div className="srt-fold" ref={probe} aria-hidden="true" />
@@ -144,12 +138,12 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
             <StartButton start={start} className="fac-cta" style={buttonBox} />
           </div>
         </div>
-        {/* Under the button, off the frame (on a phone directly under it): what signing in agrees to, on a plate of
-            its own over the pipes coming down out of the hero. */}
-        {visitor && <div className="fac-under" ref={under}><SignInConsent className="fac-consent" /></div>}
+        {/* Under the button, off the frame (on a phone directly under it): what signing in agrees to, and the way to
+            the API docs beside it (where the header had it). */}
+        {visitor && <div className="fac-under"><SignInConsent className="fac-consent" after={<><span aria-hidden="true"> · </span><a href="/docs">API docs</a></>} /></div>}
         {notice && <div className="srt-notice">{notice}</div>}
       </section>
-      <Stations plan={p} start={start} hero={pipes} />
+      <Stations plan={p} start={start} edges />
     </main>
   </div>
 }

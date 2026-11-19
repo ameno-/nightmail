@@ -1,8 +1,9 @@
-/* The factory homepage (factory-home.tsx), in its wide frame on a desktop and its tall one on a phone. Under the header, the hero: the stage, and under it (for a
-   visitor) a strip with what signing in agrees to. On the stage, the frame: the renders' picture, as large as covers
+/* The factory homepage (factory-home.tsx), in its wide frame on a desktop and its tall one on a phone. From the top of
+   the window (there is no header), the hero: the stage, and under it (for a visitor) a strip with what signing in agrees
+   to and the way to the API docs. On the stage, the frame: the renders' picture, as large as covers
    the stage and still shows, whatever the window's shape, the boards and the machine down to its button (the safe
-   box: factory-home.tsx), and never with its foot below the floor line, where the plinth's pipes end (the section
-   under it carries them on from the stage's foot). It is placed by CSS alone (the stage's container units), so the
+   box: factory-home.tsx), and never with its foot below the floor line, where the plinth's pipes go down out of the
+   picture. It is placed by CSS alone (the stage's container units), so the
    poster is in its place in the first paint and nothing moves after it. Everything on the frame is placed in the
    frame's own pixels, as percentages of it, and the button's type is sized by the frame's width. */
 .fac-hero { position: relative; display: flex; flex: none; flex-direction: column; height: calc(100svh - var(--srt-head)); }
@@ -55,24 +56,18 @@
 @media (pointer: coarse) { .fac-cta::after { content: ''; position: absolute; inset: min(0px, (100% - 44px) / 2) 0; } }
 .fac-cta:focus-visible::after { content: ''; position: absolute; inset: -6px; border: var(--focus-width) solid var(--color-focus); pointer-events: none; }
 
-/* What signing in agrees to: over the top of the section under the hero (pulled up under it, so its tubes start at the
-   stage's foot, out of the hero's pipes), on a plate of the page's own floor so the tubes pass behind it. */
+/* What signing in agrees to, and after it the way to the API docs, in the same quiet type: a strip of the page's own
+   floor under the stage, before the places mail can go. */
 .fac-page { --fac-under: 52px; }
-.fac-under { position: relative; z-index: 1; display: grid; flex: none; place-items: center; height: var(--fac-under); padding: 0 var(--space-16); pointer-events: none; }
-.fac-page[data-visitor] .srt-stations { margin-top: calc(-1 * var(--fac-under)); }
-.fac-consent { margin: 0; padding: 4px 12px; border-radius: 6px; background: var(--srt-floor); color: var(--srt-text-2); font-size: 12px; line-height: 16px; text-align: center; text-wrap: balance; pointer-events: auto; }
+.fac-under { display: grid; flex: none; place-items: center; height: var(--fac-under); padding: 0 var(--space-16); }
+.fac-consent { margin: 0; color: var(--srt-text-2); font-size: 12px; line-height: 16px; text-align: center; text-wrap: balance; }
 .fac-consent a:hover { color: var(--srt-text); }
-/* Where each tube comes out of its pipe at the stage's foot (sorter-stations.tsx Seam): a collar in the render's steel
-   (its pipes' tone where the stage cuts them), flat. The renders are the same by day and by night, and so is this. */
-.fac-page .srt-seam { fill: rgb(58 72 86); }
-/* A phone's: directly under the console's strip of floor, and no wider than the gap between the two pipes either side
-   of the console that show in the picture (ENDPOINTS and RULES, 52.9% of the frame apart, and the frame is never
-   narrower than the page), so those run on beside it and only the ones hidden behind the console pass behind it. (Never
-   narrower than three lines need: on a 320 px phone it reaches the edges of those two.) Over a home indicator, the
-   strip stands clear of it. Its links are tall enough to press. */
+.fac-consent a { white-space: nowrap; }
+/* A phone's: directly under the console's strip of floor, on two lines (three on the narrowest), clear of a home
+   indicator. Its links are tall enough to press. */
 .fac-page[data-format='phone'] { --fac-under: calc(64px + var(--srt-safe-b)); }
-.fac-page[data-format='phone'] .fac-under { place-items: start center; padding: 4px 0 var(--srt-safe-b); }
-.fac-page[data-format='phone'] .fac-consent { max-width: max(52.9% - 18px, 164px); padding-inline: 8px; }
+.fac-page[data-format='phone'] .fac-under { place-items: start center; padding: 6px var(--space-16) var(--srt-safe-b); }
+.fac-page[data-format='phone'] .fac-consent { max-width: 340px; }
 .fac-page[data-format='phone'] .fac-consent a { position: relative; }
 .fac-page[data-format='phone'] .fac-consent a::before { content: ''; position: absolute; inset: -6px 0; }
 

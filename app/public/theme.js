@@ -20,8 +20,9 @@
 })()
 
 ;(() => {
+  // The homepage has no theme switch: it is in the system's theme (lib/theme.tsx). Elsewhere a saved choice wins.
   let saved = null
-  try { saved = localStorage.getItem('nightmail.theme') } catch {}
+  try { if (location.pathname !== '/') saved = localStorage.getItem('nightmail.theme') } catch {}
   const theme = saved === 'light' || saved === 'dark'
     ? saved
     : matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
