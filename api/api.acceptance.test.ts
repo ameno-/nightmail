@@ -2392,11 +2392,10 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
         await providerTest.test('Domain Connect: inline cached discovery, sorted signature and workspace-bound dashboard return',async dc=>{
           const { operationJobs }=await import('./src/operations.js'), {JobDeferred}=await import('./src/jobs.js');
           const { domainConnectProviderIds }=await import('./src/brand.js');
-          const zone=`${unique('dc')}.co.uk`, name=`mail.${zone}`, pathFor=(id:string)=>`/v2/domainTemplates/providers/${id}/services/mail`, providerPath=pathFor('bane.mx');
+          const zone=`${unique('dc')}.co.uk`, name=`mail.${zone}`, pathFor=(id:string)=>`/v2/domainTemplates/providers/${id}/services/mail`, providerPath=pathFor('nightmail.dev');
           const cf='https://api.cloudflare.com/client/v4/dns/domainconnect';
           let settingsHost=cf, api=cf, sync='https://dash.cloudflare.com/domainconnect', providerId='cloudflare.com', providerName='Cloudflare', supportStatus=200, alias=false, existingMx=false;
-          // Until providers list nightmail.dev, the earlier bane.mx template is the one they hold.
-          let listed:string[]=['bane.mx'];
+          let listed:string[]=[...domainConnectProviderIds];
           const requests:string[]=[];
           dc.mock.method(globalThis,'fetch',async (input:RequestInfo|URL,init?:RequestInit)=>{
             const url=new URL(String(input)); requests.push(url.href);
@@ -2423,7 +2422,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           assert.equal(requests.length,0,'Domain creation does not discover the provider.');
           const expectedProvider={id:providerId,name:providerName};
           assert.deepEqual(await getSetup(),{provider:expectedProvider,groups:['sending','ownership'],applyUrl:null},'Supported provider with signing disabled.');
-          assert.equal(requests.length,5,'Cold GET walks two labels, fetches settings, and checks nightmail.dev and then bane.mx template support inline.');
+          assert.equal(requests.length,4,'Cold GET walks two labels, fetches settings, and checks template support inline.');
           const accountIdentity=identities.get(`${platform}:${name}`)!;
           accountIdentity.DkimAttributes={...accountIdentity.DkimAttributes,Status:'PENDING',SigningHostedZone:`dkim.${region}.amazonses.com`};
           const {rows:[vjob]}=await pool.query("SELECT * FROM jobs WHERE type='domain.verify' AND payload->>'domainId'=$1",[created.id]);
@@ -2463,11 +2462,8 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           const wire=url.search.slice(1).split('&key=')[0]!, sig=Buffer.from(params.get('sig')!,'base64');
           const sorted=new URLSearchParams(params); sorted.delete('key'); sorted.delete('sig'); sorted.sort(); assert.equal(wire,sorted.toString());
           assert.ok(verifySignature('RSA-SHA256',Buffer.from(sorted.toString()),publicKey,sig)); assert.ok(!verifySignature('RSA-SHA256',Buffer.from(wire.replace('host=mail','host=other')),publicKey,sig));
-          const [template,...fallbacks]=await Promise.all(domainConnectProviderIds.map(async id=>JSON.parse(await readFile(new URL(`../domain-connect/${id}.mail.json`,import.meta.url),'utf8'))));
-          for(const [i,t] of [template,...fallbacks].entries()) {
-            assert.equal(t.providerId,domainConnectProviderIds[i]); assert.equal(t.serviceId,'mail'); assert.equal(t.syncPubKeyDomain,`domainconnect.${t.providerId}`);
-            assert.deepEqual(t.records,template.records,`The ${t.providerId} template writes the same records as the preferred one.`);
-          }
+          const template=JSON.parse(await readFile(new URL(`../domain-connect/${domainConnectProviderIds[0]}.mail.json`,import.meta.url),'utf8'));
+          assert.equal(template.providerId,domainConnectProviderIds[0]); assert.equal(template.serviceId,'mail'); assert.equal(template.syncPubKeyDomain,`domainconnect.${template.providerId}`);
           const expand=(s:string)=>s.replace(/%(\w+)%/g,(_,key:string)=>{assert.ok(params.has(key));return params.get(key)!;});
           for(const record of template.records.filter((r:Json)=>offered.groups.includes(r.groupId))) {
             const host=expand(record.host), target=host==='@'?name:`${host}.${name}`;
@@ -2517,9 +2513,9 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           settingsHost=api='https://api.domainconnect.ionos.com'; sync='https://domainconnect.ionos.de/sync'; providerId='ionos.com'; providerName='IONOS'; alias=true;
           clock+=301_000; assert.equal(new URL((await getSetup()).applyUrl).origin,'https://domainconnect.ionos.de');
           api='https://unexpected.invalid'; clock+=301_000; assert.equal((await getSetup()).applyUrl,null); assert.ok(!requests.some(r=>r.startsWith(api)),'An advertised URL outside the provider allowlist is never requested.');
-          api=settingsHost; listed=[...domainConnectProviderIds]; clock+=301_000;
-          const preferred=new URL((await getSetup()).applyUrl), signed=preferred.searchParams;
-          assert.equal(preferred.pathname,'/sync'+pathFor('nightmail.dev')+'/apply','Once a provider lists nightmail.dev it is used, not bane.mx.');
+          api=settingsHost; clock+=301_000;
+          const applied=new URL((await getSetup()).applyUrl), signed=applied.searchParams;
+          assert.equal(applied.pathname,'/sync'+providerPath+'/apply');
           assert.equal(signed.get('region'),region); assert.equal(signed.get('inboundRegion'),region);
           assert.ok(!signed.get('groupId')!.includes('tracking'));
           const {pendingGroups}=await import('./src/domain-connect.js');
