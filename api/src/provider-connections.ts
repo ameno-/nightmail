@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
 import { auditContext, auditInsert, type AuditContext } from './audit.js';
-import { ApiError, assertSesConfigured, isSimulatedSes, errors, id, json, log, ModuleLoadError, notFound, response, wrapModuleLoad, type App, type Ctx, type Runtime, type JobHandler } from './core.js';
+import { ApiError, assertSesConfigured, denied, isSimulatedSes, errors, id, json, log, ModuleLoadError, notFound, response, wrapModuleLoad, type App, type Ctx, type Runtime, type JobHandler } from './core.js';
 import { caller, assume, platformCredentials } from './provider-credentials.js';
 import { awsError, discoverSes, feedbackUrl, loadSetupSdk, POOL_INSTALLATION, poolTenantName, provisionSes, provisionTenant, setupResources, verifiedByoDomains, type SesDiscovery, byoStackName } from './ses-setup.js';
 import { importByoClaims } from './domain-claims.js';
@@ -40,7 +40,7 @@ type Row = { id: string; stack_name?: string | null; workspace_id: string; kind:
 function owner(c: Ctx) {
   if (!c.env.config.multiTenant) return notFound('Endpoint');
   const a = c.get('actor');
-  if (a.credential !== 'dashboard' || (a.role !== 'owner' && a.role !== 'admin')) throw new ApiError(403, 'PERMISSION_DENIED', 'Use an owner or admin dashboard session to manage sending connections.');
+  if (a.credential !== 'dashboard' || (a.role !== 'owner' && a.role !== 'admin')) throw denied('PERMISSION_DENIED', 'Use an owner or admin dashboard session to manage sending connections.', { permission: 'configuration', level: 'write', credential: 'dashboard', person: 'admin' });
   return a.workspaceId;
 }
 function template(runtime: Runtime) {

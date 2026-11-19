@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
-import { actor, ApiError, assertSesConfigured, isSimulatedSes, errors, id, json, response, security, type Actor, type App, type Database, type JobHandler, type Runtime } from './core.js';
+import { actor, ApiError, assertSesConfigured, requiredOf, unrestrictedRequired, isSimulatedSes, errors, id, json, response, security, type Actor, type App, type Database, type JobHandler, type Runtime } from './core.js';
 import { recordAudit } from './audit.js';
 import { apiKeys, jobs } from './db/core.js';
 import { domains } from './db/operations.js';
@@ -25,7 +25,7 @@ const Receipt = z.object({ jobId: z.string(), status: z.enum(['pending', 'runnin
 const ValidationSettings = z.object({ stream: z.enum(['transactional', 'marketing']), mode: AutoValidationModeSchema.exclude(['inherit', 'unknown']) }).openapi('SesAutoValidationSettings');
 function access(c: Parameters<typeof actor>[0], mutate = false, aws = false) {
   const value = actor(c, mutate ? 'manage' : 'read');
-  if (value.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Region configuration requires unrestricted workspace access.');
+  if (value.domains.length) throw unrestrictedRequired('Region configuration requires unrestricted workspace access.', requiredOf(c, mutate ? 'manage' : 'read'));
   if (aws) assertSesConfigured(c.env);
   if (c.env.config.multiTenant && mutate) throw new ApiError(409, 'CONNECTION_MANAGED_REGION', 'Use the workspace sending connection to manage its AWS region.');
   return value;

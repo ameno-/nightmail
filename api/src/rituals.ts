@@ -2,7 +2,7 @@ import { receivingPolicy } from './mailbox-ingest-input.js';
 import {registerInboxConnection} from './inbox-connection.js';
 import { createRoute, z, type RouteConfig } from '@hono/zod-openapi';
 import { and, eq, sql } from 'drizzle-orm';
-import { actor, ApiError, errors, json, receivingAdmin, response, security, type App, type Ctx, type DbExecutor } from './core.js';
+import { actor, ApiError, denied, errors, json, receivingAdmin, response, security, type App, type Ctx, type DbExecutor } from './core.js';
 import { recordAudit } from './audit.js';
 import { mailMessages, mailAttachments, retainedMail } from './db/mailbox.js';
 import { lockMailboxLane } from './mailbox-store.js';
@@ -86,7 +86,7 @@ const TraceRow = traceRow(timeline('decisions').openapi('RuleTimelineStep')).ope
  * Take it before any row a removal disables (endpoints, routes, keys), the order a removal takes them in. */
 export async function holdReceiving(tx:DbExecutor,c:Ctx){
   const a=c.get('actor');if(!a.grantId)return;
-  if(!a.receivingConsent||!a.permissions.includes('manage'))throw new ApiError(403,'ADMIN_REQUIRED','Receiving changes require an owner or admin of this workspace with manage permission.');
+  if(!a.receivingConsent||!a.permissions.includes('manage'))throw denied('ADMIN_REQUIRED','Receiving changes require an owner or admin of this workspace with manage permission.',{ permission: 'receivingRules', level: 'write', person: 'admin' });
   const {getMcpGrantActor,approvalUse}=await import('./mcp-auth.js');
   const grant=await getMcpGrantActor(c.env,'mcp_'+a.grantId,a.workspaceId,tx,approvalUse(a));
   if(grant?.workspaceId!==a.workspaceId||!grant.receivingConsent||!grant.permissions.includes('manage'))throw new ApiError(401,'AUTH_INVALID','The MCP approval behind this request was revoked while it ran. Nothing was changed.');

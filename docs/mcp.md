@@ -99,7 +99,7 @@ The plain listing shows required arguments and common options. For all fields, v
 
 For example, `contacts({"action":"get","contactId":"ct_…"})` and `getContact({"contactId":"ct_…"})` return the same contact. To list contacts instead, use action `list` or `listContacts`. Pass the returned `nextCursor` as `cursor` to continue.
 
-On success, `structuredContent` is the resource or page itself, not an HTTP envelope. One compact JSON text block contains the same value. HTTP status and request ID are in `result._meta`; errors set `isError: true` and carry `{ "error": { "code": "…", "message": "…" } }`. Mail reads also prepend an untrusted-content notice. Inbox attachment images are delivered in a separate image block.
+On success, `structuredContent` is the resource or page itself, not an HTTP envelope. One compact JSON text block contains the same value. HTTP status and request ID are in `result._meta`; errors set `isError: true` and carry `{ "error": { "code": "…", "message": "…" } }`, and a permission refusal adds `required`, what the call needs (`api/README.md`, Errors). Mail reads also prepend an untrusted-content notice. Inbox attachment images are delivered in a separate image block.
 
 In Code Mode the result of one operation can feed the next directly:
 

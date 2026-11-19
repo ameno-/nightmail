@@ -153,6 +153,56 @@
                   "additionalProperties": {}
                 },
                 "description": "Every problem found, when there is more than one part, such as rule diagnostics with rule, line, column, message and hint, or a measurement, such as CONTENT_TOO_LARGE_TO_SCREEN with screenedBytes and limitBytes (and index in a batch)."
+              },
+              "required": {
+                "type": "object",
+                "properties": {
+                  "permission": {
+                    "type": "string",
+                    "enum": [
+                      "sendEmail",
+                      "sentMail",
+                      "receivedMail",
+                      "inboxes",
+                      "audience",
+                      "receivingRules",
+                      "configuration"
+                    ],
+                    "description": "The permission: sendEmail, sentMail, receivedMail, inboxes, audience (audience and content), receivingRules or configuration."
+                  },
+                  "level": {
+                    "type": "string",
+                    "enum": [
+                      "on",
+                      "read",
+                      "write"
+                    ],
+                    "description": "The level of that permission: on (sendEmail), read or write. With person alone, what the person's MCP sign-in must be approved for."
+                  },
+                  "scope": {
+                    "type": "string",
+                    "description": "What the credential's scope must cover: workspace (no sender-domain limit), allAddresses (every receiving address), domain:<name> or address:<address>."
+                  },
+                  "credential": {
+                    "type": "string",
+                    "enum": [
+                      "dashboard",
+                      "signIn",
+                      "lasting",
+                      "notDelegated"
+                    ],
+                    "description": "The kind of credential: dashboard (a signed-in dashboard session), signIn (an MCP sign-in), lasting (anything but a temporary agent token) or notDelegated (a dashboard session, or an API key no MCP approval made)."
+                  },
+                  "person": {
+                    "type": "string",
+                    "enum": [
+                      "admin",
+                      "owner"
+                    ],
+                    "description": "A person, never a key: a signed-in dashboard session or their own MCP sign-in, with this role in the workspace (admin is an owner or admin). The workspace, its members, invitations and billing are a person's."
+                  }
+                },
+                "description": "On a 403 permission refusal: what the request needs that this credential lacks. The Nightmail-Required-Permission header says the same."
               }
             },
             "required": [

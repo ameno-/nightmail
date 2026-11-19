@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, gt, isNull, sql, type SQL } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
-import { ApiError, actor, agentTokenMintRefusal, digest, errors, hasSessionCookie, id, IdParams, isoTime, json, keyAdminRefusal, PageQuery, page, randomSecret, response, security, senderDomainAllowed, timed, withOuterRequest, wrapModuleLoad } from './core.js';
+import { ApiError, actor, agentTokenMintRefusal, denied, digest, requiredOf, errors, hasSessionCookie, id, IdParams, isoTime, json, keyAdminRefusal, PageQuery, page, randomSecret, response, security, senderDomainAllowed, timed, withOuterRequest, wrapModuleLoad } from './core.js';
 import type { Actor, App, AppEnv, Ctx, DbExecutor, MailboxAccess, RequestOrigin, Runtime } from './core.js';
 import { agentTokens, apiKeys } from './db/core.js';
 import { mailboxKeys } from './db/mailbox.js';
@@ -28,7 +28,7 @@ export function dispatchAsMailboxAccess(app:Pick<App,'fetch'>,request:Request,ru
 }
 type DelegatedRuntime = Runtime & { [delegatedActor]?: Actor };
 export async function dispatchAsActor(app: Pick<App, 'fetch'>, request: Request, runtime: Runtime, identity: Actor, origin: RequestOrigin): Promise<Response> {
-  if (identity.credential !== 'mcp' || !identity.keyId.startsWith('mcp_')) throw new ApiError(403, 'PERMISSION_DENIED', 'Invalid delegated API principal.');
+  if (identity.credential !== 'mcp' || !identity.keyId.startsWith('mcp_')) throw denied('PERMISSION_DENIED', 'Invalid delegated API principal.', { credential: 'signIn' });
   const delegatedRuntime: DelegatedRuntime = { ...withOuterRequest(runtime, origin), [delegatedActor]: identity };
   return await app.fetch(request, delegatedRuntime);
 }
@@ -110,7 +110,7 @@ export async function chargeGrantBudget(runtime:Runtime,w:string,id:string){
 // Run after authentication and before idempotent replay or any configuration handler.
 export const requireReceivingConsent: MiddlewareHandler<AppEnv> = async (c,next) => {
   const a=c.get('actor');
-  if (a?.grantId && !a.receivingConsent) throw new ApiError(403,'ADMIN_REQUIRED','Receiving configuration requires an owner or admin of this workspace.');
+  if (a?.grantId && !a.receivingConsent) throw denied('ADMIN_REQUIRED','Receiving configuration requires an owner or admin of this workspace.', { ...requiredOf(c), person: 'admin' });
   await next();
 };
 
@@ -264,7 +264,7 @@ export const inactiveKey = () => new ApiError(409, 'KEY_INACTIVE', 'This key was
 export async function approvalMadeKey(tx: DbExecutor, a: Actor, kind: 'api_key' | 'key', keyId: string) {
   if (!a.grantId || a.credential !== 'apiKey') return;
   const { rows } = await tx.execute(sql`SELECT 1 FROM mail_grant_objects WHERE grant_id = ${a.grantId} AND workspace_id = ${a.workspaceId} AND kind = ${kind} AND resource = ${keyId}`);
-  if (!rows.length) throw new ApiError(403, 'PERMISSION_DENIED', 'A key an MCP approval created changes only the keys that approval created. Change this key in the dashboard, over MCP as yourself, or with a key that has manage permission.');
+  if (!rows.length) throw denied('PERMISSION_DENIED', 'A key an MCP approval created changes only the keys that approval created. Change this key in the dashboard, over MCP as yourself, or with a key that has manage permission.', { permission: 'configuration', level: 'write', credential: 'notDelegated' });
 }
 /**
  * Key administration, checked again inside the transaction that writes a key: manageKeys judged the caller as the request
@@ -286,7 +286,7 @@ export async function holdKeyAdmin<T>(tx: DbExecutor, c: Ctx, receiving: boolean
     if (grant?.workspaceId !== a.workspaceId || !grant.permissions.includes('manage') || receiving && !grant.receivingConsent) throw changed('The MCP approval behind this request');
   } else if (a.credential === 'dashboard') {
     const { rows: [member] } = await tx.execute<{ role: string }>(sql`SELECT role FROM workspace_members WHERE workspace_id = ${a.workspaceId} AND user_id = ${a.keyId.slice('user_'.length)} FOR SHARE`);
-    if (member?.role !== 'owner' && member?.role !== 'admin') throw new ApiError(403, 'PERMISSION_DENIED', 'Key administration requires a workspace owner or admin.');
+    if (member?.role !== 'owner' && member?.role !== 'admin') throw denied('PERMISSION_DENIED', 'Key administration requires a workspace owner or admin.', { permission: 'configuration', level: 'write', person: 'admin' });
   }
   const caller = a.credential === 'apiKey' ? a.keyId : null;
   let row: T | undefined;
@@ -324,8 +324,10 @@ export function registerAuth(app: App) {
     const input = c.req.valid('json'); const identity = actor(c, input.permissions.includes('manage') ? 'manage' : input.permissions.includes('send') ? 'send' : 'read');
     const refusal = agentTokenMintRefusal(identity);
     if (refusal) throw refusal;
-    if (input.permissions.some(permission => !identity.permissions.includes('manage') && !identity.permissions.includes(permission))) throw new ApiError(403, 'PERMISSION_DENIED', 'The MCP approval does not include every requested permission.');
-    if (identity.domains.length && (!input.domains.length || input.domains.some(domain => !senderDomainAllowed(identity.domains, domain)))) throw new ApiError(403, 'SENDER_DOMAIN_FORBIDDEN', 'The temporary token must remain restricted to the approved sender domains or their subdomains.', 'domains');
+    const missing = input.permissions.find(permission => !identity.permissions.includes('manage') && !identity.permissions.includes(permission));
+    if (missing) throw denied('PERMISSION_DENIED', 'The MCP approval does not include every requested permission.', requiredOf(c, missing));
+    const outside = input.domains.find(domain => !senderDomainAllowed(identity.domains, domain));
+    if (identity.domains.length && (!input.domains.length || outside)) throw denied('SENDER_DOMAIN_FORBIDDEN', 'The temporary token must remain restricted to the approved sender domains or their subdomains.', { permission: 'sendEmail', level: 'on', scope: outside ? `domain:${outside}` : 'workspace' }, 'domains');
     const expiresAt = new Date(Date.now() + input.expiresInSeconds * 1000).toISOString();
     const tokenId = id('agt');
     const { createAgentToken } = await wrapModuleLoad(() => import('./agent-token.js'));
@@ -420,7 +422,7 @@ export function registerAuth(app: App) {
     const auth = manageKeys(c), keyId = c.req.valid('param').id, input = c.req.valid('json');
     if (input.name === undefined && !input.permissions && !input.domains && !input.access) throw new ApiError(422, 'VALIDATION_FAILED', 'Change at least one of name, permissions, domains or access.');
     // What a key may do is another administrator's decision, never its own.
-    if (auth.keyId === keyId) throw new ApiError(403, 'PERMISSION_DENIED', 'A key can\'t change itself. Change it in the dashboard or with another key that has manage permission.');
+    if (auth.keyId === keyId) throw denied('PERMISSION_DENIED', 'A key can\'t change itself. Change it in the dashboard or with another key that has manage permission.', { permission: 'configuration', level: 'write', person: 'admin' });
     const limited = keyId.startsWith('mbk_') ? await addressKeys() : null;
     const view = await idempotent(c.env.db, { ...idempotentRequest(c), workspaceId: auth.workspaceId, actorKeyId: auth.keyId }, input,
       async tx => limited ? limited.updateLimitedKey(tx, c, auth, keyId, input) : keyView(await updateWorkspaceKey(tx, c, auth, keyId, input)));

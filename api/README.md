@@ -371,7 +371,19 @@ Migration `070_webhook_headers.sql` adds nullable encrypted header storage; exis
 
 ### Errors, logs, and retention
 
-Errors use `{ error: { code, message, requestId, retryable, field? } }` and an `x-request-id` header. Search JSON logs by that ID; dispatch carries it through the outbox. Logs include operation/job/attempt/error codes, not request bodies, credentials, or unsubscribe tokens. Unexpected stack traces remain server-side. API-key last-use timestamps update at most once per minute.
+Errors use `{ error: { code, message, requestId, retryable, field?, required? } }` and an `x-request-id` header.
+
+A permission refusal (403) keeps its code and adds `required`, what the request needs, and the same in a `Nightmail-Required-Permission` header; its message ends with a sentence naming the permission. Each part is present only when it applies:
+
+| Field | Values |
+| --- | --- |
+| `permission` | `sendEmail`, `sentMail`, `receivedMail`, `inboxes`, `audience` (audience and content), `receivingRules`, `configuration` |
+| `level` | `on` (for `sendEmail`), `read` or `write`; with `person` alone, what the person's MCP sign-in must be approved for |
+| `scope` | what the credential's scope must cover: `workspace` (no sender-domain limit), `allAddresses`, `domain:<name>` or `address:<address>` |
+| `credential` | `dashboard`, `signIn` (an MCP sign-in), `lasting` (not a temporary agent token) or `notDelegated` (a dashboard session, or an API key no MCP approval made) |
+| `person` | a person, never a key (a dashboard session or their own MCP sign-in), with role `admin` (an owner or admin) or `owner`. The workspace, its members, invitations and billing are a person's, so their refusals name only this |
+
+For example `{ "permission": "receivedMail", "level": "read", "scope": "workspace" }` is sent as `Nightmail-Required-Permission: received_mail=read; scope="workspace"`. Over MCP the tool error carries the same `required`. Search JSON logs by that ID; dispatch carries it through the outbox. Logs include operation/job/attempt/error codes, not request bodies, credentials, or unsubscribe tokens. Unexpected stack traces remain server-side. API-key last-use timestamps update at most once per minute.
 
 Detailed email/event/webhook logs expire after 30 days. Active jobs, campaign drafts, engagement, consent/suppression, idempotency results, and valid unsubscribe links have separate lifecycles. Unreferenced old attachment metadata is removed transactionally; object deletion is queued durably. Failed deletion jobs retain object keys for recovery. Contact deletion is **not** a promise to purge all audit/safety records, imported copies, or campaign revisions.
 

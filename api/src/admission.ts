@@ -1,5 +1,5 @@
 import { sql, type SQL } from 'drizzle-orm';
-import { ApiError, isSimulatedSes, log, type Runtime } from './core.js';
+import { ApiError, denied, isSimulatedSes, log, type Runtime } from './core.js';
 import { SEND_LIMITS } from './send-limits.js';
 import { platformPolicy, regionalSending, unverifiedSender, type SendingBinding } from './domain-claims.js';
 import { marketingHeld, type HostedAllowance } from './hosted-sending.js';
@@ -94,7 +94,7 @@ export function refusal(runtime: Runtime, d: Refused, local: { batch?: boolean; 
     case 'SCHEDULED_EMAIL_LIMIT_EXCEEDED': return new ApiError(429, d.code, `This workspace already has ${count(d.cap!)} scheduled emails waiting. Cancel some or wait for them to send.`, 'scheduledAt', true);
     case 'PENDING_EMAIL_LIMIT_EXCEEDED': return new ApiError(429, d.code, `This submission exceeds the outstanding email limit of ${d.cap} for this workspace. Wait for queued mail to dispatch before retrying.`, undefined, true);
     case 'REGION_SETTINGS_NOT_INITIALIZED': return new ApiError(503, d.code, 'Run database migrations to initialize SES region settings.');
-    case 'SENDER_DOMAIN_FORBIDDEN': return item(new ApiError(403, d.code, 'This API key cannot send from this domain or its parent domain.', 'from'));
+    case 'SENDER_DOMAIN_FORBIDDEN': return item(denied(d.code, 'This API key cannot send from this domain or its parent domain.', { permission: 'sendEmail', level: 'on' }, 'from'));
     case 'PLATFORM_SENDER_REFUSED': return item(new ApiError(403, d.code, `Only the workspace configured to own ${productName}’s own domain sends from it, and never from ${productName}’s platform hosts.`, 'from'));
     case 'SENDER_DOMAIN_NOT_VERIFIED': return item(unverifiedSender());
     case 'SENDER_REGION_MISMATCH': return item(new ApiError(422, d.code, 'The requested region does not match this sender domain.', 'region'));

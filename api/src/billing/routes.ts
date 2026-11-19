@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
-import { actor, actorMailAccess, ApiError, dashboardSession, errors, json, notFound, response, security, type Actor, type App, type Ctx, type DbExecutor } from '../core.js';
+import { actor, actorMailAccess, ApiError, dashboardSession, requiredOf, unrestrictedRequired, errors, json, notFound, response, security, type Actor, type App, type Ctx, type DbExecutor } from '../core.js';
 import { mutate, operatorActor, operatorRequestHash, type OperatorAudit, type OperatorIdentity } from '../operator.js';
 import { operatorContext, recordAudit } from '../audit.js';
 import { MicroCentsJson } from './money.js';
@@ -71,7 +71,7 @@ const Cursor = z.string().regex(/^\d{1,19}$/).optional();
 function billingActor(c: Ctx, permission: 'read' | 'manage') {
   if (!c.env.config.multiTenant) notFound('Endpoint');
   const a = actor(c, permission);
-  if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.');
+  if (a.domains.length) throw unrestrictedRequired('Workspace-wide operations require a key without domain restrictions.', requiredOf(c, permission));
   return a;
 }
 const seesMoney = (a: Actor) => a.permissions.includes('manage');
