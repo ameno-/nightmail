@@ -367,7 +367,7 @@ To authenticate an email or inbound webhook, include `"headers": [{"name":"Autho
 
 Header names must be unique HTTP tokens (case-insensitive, 64 characters maximum); values must be HTTP field bytes (tab, visible ASCII or Latin-1 above 0x7F), at most 2,048 characters. Up to 10 headers and 8 KiB total (UTF-8 names + values). `Host`, `Content-Length`, `Content-Type`, `Content-Encoding`, `Transfer-Encoding`, `Connection`, `Keep-Alive`, `TE`, `Trailer`, `Upgrade`, `HTTP2-Settings`, `Expect`, `Proxy-*`, `User-Agent`, `Webhook-Id`, `Webhook-Timestamp`, `Webhook-Signature` and `Nightmail-Test` (also legacy `Bane-Test` and `OpenSend-Test`) are reserved. `Cookie` is also reserved so a server-to-server callback cannot forward a browser session cookie; use endpoint-specific credentials instead.
 
-Migration `070_webhook_headers.sql` adds nullable encrypted header storage; existing endpoints send no extra headers. Header values are write-only. Managers see `{name,hint,updatedAt}` (a masked suffix, fully masked for short values); unrestricted read API keys see `{name}`. Address-scoped inbound keys cannot inspect workspace endpoints. No custom headers are stored in delivery histories.
+Migration `070_webhook_headers.sql` adds nullable encrypted header storage; existing endpoints send no extra headers. Header values are write-only. Managers see `{name,hint,updatedAt}` (a masked suffix, fully masked for short values); unrestricted read API keys see `{name}`. Keys limited to addresses cannot inspect workspace endpoints. No custom headers are stored in delivery histories.
 
 ### Errors, logs, and retention
 

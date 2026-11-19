@@ -1248,7 +1248,7 @@ export function registerSending(app: App) {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     const replyAddressId = input.replyAddressId ?? input.replyMailboxId;
     if (replyAddressId) {
-      if (a.domains.length || !a.permissions.includes('manage')) throw new ApiError(403, 'MAILBOX_ACCESS_REQUIRED', 'Use unrestricted manage permission, or start a thread with a scoped inbound key.');
+      if (a.domains.length || !a.permissions.includes('manage')) throw new ApiError(403, 'MAILBOX_ACCESS_REQUIRED', 'Use manage permission on all domains, or start the thread with a key limited to that address.');
       if (input.html) await validateHtmlUrls(input.html);
       const { finishMailboxArchive, trackedAttachments, queueTrackedMailboxSend } = await wrapModuleLoad(() => import('./mailbox-send.js'));
       let files:Awaited<ReturnType<typeof trackedAttachments>>=[];

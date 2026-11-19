@@ -179,7 +179,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
   }).openapi('CreatedInbox');
   app.openapi(createRoute({
     ...meta, method: 'post', path: base, operationId: 'createInbox', summary: 'Create an agent inbox',
-    description: 'Creates an inbox with a fresh address. Set type=persistent for forever retention (no lease or default per-inbox cap; workspace manage permission). The default is an expiring inbox on one of the workspace’s active receiving domains, or a sandbox inbox that needs no DNS. Then wait for mail with GET /v1/inboxes/{id}/messages?wait=30 (or the SDK’s waitForMessage). Needs a workspace admin or an inbound key with create permission. Limits: 60 creates per minute and 1,000 retained inboxes (including grace and pending erasure) per workspace. Errors: RECEIVING_DOMAIN_REQUIRED and RECEIVING_NOT_ACTIVE name the DNS step to take; ADDRESS_TAKEN, ADDRESS_RETIRED, EPHEMERAL_INBOX_LIMIT, INBOX_CREATE_RATE (with Retry-After) and IDEMPOTENCY_CONFLICT.',
+    description: 'Creates an inbox with a fresh address. Set type=persistent for forever retention (no lease or default per-inbox cap; workspace manage permission). The default is an expiring inbox on one of the workspace’s active receiving domains, or a sandbox inbox that needs no DNS. Then wait for mail with GET /v1/inboxes/{id}/messages?wait=30 (or the SDK’s waitForMessage). Needs a workspace admin or a key with create permission. Limits: 60 creates per minute and 1,000 retained inboxes (including grace and pending erasure) per workspace. Errors: RECEIVING_DOMAIN_REQUIRED and RECEIVING_NOT_ACTIVE name the DNS step to take; ADDRESS_TAKEN, ADDRESS_RETIRED, EPHEMERAL_INBOX_LIMIT, INBOX_CREATE_RATE (with Retry-After) and IDEMPOTENCY_CONFLICT.',
     request: { body: json(create) }, responses: { 200: response(Inbox), 201: response(created), ...errors },
   }), async c => {
     const v = access(c, 'create'), input = c.req.valid('json');
@@ -187,7 +187,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     const manageAddress = v.admin && !grantId;
     if(input.type==='persistent'&&!v.admin) throw new ApiError(403,'ADMIN_REQUIRED','Creating a persistent inbox requires workspace management permission.');
     if(input.type==='persistent'&&(input.ttlSeconds!==86400||input.graceHours!==24))throw new ApiError(422,'VALIDATION_FAILED','A persistent inbox has no lease or grace period.');
-    if(input.credential&&grantId)throw new ApiError(422,'USE_INBOX_CONNECTION','Use an approval with receiving consent and create an inbox connection for a grant-bound key.');
+    if(input.credential&&grantId)throw new ApiError(422,'USE_INBOX_CONNECTION','An MCP approval can’t create an inbox key with the inbox. Create the inbox, then call createInboxConnection for its key.');
     if (input.localPart && !manageAddress) throw new ApiError(403,'PERMISSION_DENIED','This credential must omit localPart and use a generated address.','localPart');
     if (!inboxStoreReady(c.env)) throw new ApiError(503, 'INBOXES_UNAVAILABLE', 'Agent inboxes are not enabled on this deployment yet.');
     const missing = [...(input.send.enabled ? ['send'] as const : []), ...(input.credential?.permissions ?? [])].filter(p => !v.permissions.includes(p));
