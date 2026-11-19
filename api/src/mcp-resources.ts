@@ -151,14 +151,14 @@ function fieldSummary(field: Schema, defs: Schema, depth = 0): Schema {
 }
 
 export const describeTool: Tool = {
-  name: 'describe_tool', description: 'Get the full input and output schemas for a resource action, including optional filters and body fields. Pass these directly to the resource tool.',
+  name: 'describe_tool', description: 'Get the full input and output schemas for a resource action, including optional filters and body fields, and the permission it needs. Pass these directly to the resource tool.',
   inputSchema: { type: 'object', properties: { resource: { type: 'string' }, action: { type: 'string' } }, required: ['resource', 'action'], additionalProperties: false },
   annotations: { readOnlyHint: true, openWorldHint: false },
 };
 
 export function describeAction(resource: string, action: string, op: McpOperation) {
   const input = op.tool.inputSchema;
-  return { name: resource, description: op.tool.description, inputSchema: { ...input, properties: { action: { const: action }, ...input.properties }, required: ['action', ...(input.required ?? [])] }, outputSchema: op.tool.outputSchema };
+  return { name: resource, description: op.tool.description, ...(op.requires ? { permission: op.requires } : {}), inputSchema: { ...input, properties: { action: { const: action }, ...input.properties }, required: ['action', ...(input.required ?? [])] }, outputSchema: op.tool.outputSchema };
 }
 
 /** Build the discriminated union *after* filtering operations by grant and requested toolsets. */

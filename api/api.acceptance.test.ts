@@ -3430,6 +3430,231 @@ describe('Hosted MCP OAuth and tools', () => {
     return output;
   }
 
+  // The permission table (src/operation-permissions.ts) is what REST enforces. Every operation is called with keys, keys
+  // limited to addresses or one inbox, people of each role, an owner's MCP sign-in at each consent level and agent tokens,
+  // and each row must admit exactly the credentials REST doesn't refuse (401, or 403 with error.required). Then every
+  // scoped row is called on real resources inside and outside a limited key's sender domain or addresses. Hosted, so
+  // every route answers as it does there.
+  test('permission table: every operation states the permission its guards enforce, for keys, people, sign-ins and agent tokens', async t => {
+    await simulatedSesFixture(t, async ({ db, request, runtime }) => {
+      const [{ createApp, createOpenApiApp }, { createOpenApiDocument }, { dispatchAsActor }, { getMcpGrantActor }, { OPERATION_PERMISSIONS, permissionExtension, permissionOf }] = await Promise.all([
+        import('./src/app.js'), import('./src/openapi-docs.js'), import('./src/auth.js'), import('./src/mcp-auth.js'), import('./src/operation-permissions.js')]);
+      type Row = import('./src/operation-permissions.js').OperationPermission;
+      runtime.config.multiTenant = true;
+      cleanup(t, async () => { runtime.config.multiTenant = false; });
+      runtime.config.apiRateLimitPerMinute = 1_000_000;
+      // Agent inboxes keep their mail in object storage: a map stands in for the bucket.
+      const objects = new Map<string, Uint8Array>();
+      runtime.mailR2 = { write: true, name: 'permission-table', bucket: { put: async (k: string, b: Uint8Array) => { objects.set(k, b); } } as unknown as R2Bucket };
+      const app = createApp(), spec = createOpenApiDocument(await createOpenApiApp()) as Json, w = runtime.config.workspaceId;
+      const key = async (body: Json) => { const made = ok(await request('POST', '/v1/api-keys', MANAGER, { name: unique('permission-table'), ...body }), 201); secrets.add(made.secret); return made.secret as string; };
+      const issuer = process.env.ACCOUNT_ISSUER ?? 'https://account.anoma.ly';
+      const person = async (role: string) => {
+        const userId = unique('permission-user'), token = createHash('sha256').update(randomUUID()).digest('base64url'), email = `${userId}@${AUTH_DOMAIN}`;
+        secrets.add(token);
+        await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$1,$2,true)', [userId, email]);
+        await db.query('INSERT INTO nightmail_oidc_identities VALUES($1,$2,$3)', [issuer, userId, userId]);
+        await db.query("INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES($1,$2,$3,$2,$4,now()+interval '1 hour')", [createHash('sha256').update(token).digest('hex'), userId, issuer, email]);
+        await db.query('INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,$4)', [randomUUID(), userId, w, role]);
+        return `${COOKIE_NAME}=${token}`;
+      };
+      // The owner's MCP sign-in, approved for read, send and manage; for read and send; and for read alone.
+      const signInAs = async (scope: string) => { const grant = await oauthGrant(t, db, `${scope} offline_access`, request), actor = (await getMcpGrantActor(runtime, 'mcp_' + grant.consentId, w))!; assert.ok(actor, scope); return { grant, actor }; };
+      const [full, sending, reading] = [await signInAs('bane:read bane:send bane:manage'), await signInAs('bane:read bane:send'), await signInAs('bane:read')];
+      assert.deepEqual([full.actor.permissions, sending.actor.permissions, reading.actor.permissions].map(p => [...p].sort()), [['manage', 'read', 'send'], ['read', 'send'], ['read']]);
+      const mint = async (permissions: string[]) => {
+        const reply = ok(await request('POST', '/mcp?codemode=false', full.grant.token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'createAgentToken', arguments: { confirm: true, body: { permissions, expiresInSeconds: 3600, domains: [], purpose: unique('permission-table') } } } }, rpcHeaders)).result;
+        assert.equal(reply.isError, false, redact(reply)); secrets.add(reply.structuredContent.token); return reply.structuredContent.token as string;
+      };
+      // Real resources on both sides of each limit: two sandbox inboxes with a received message each, two sending domains,
+      // and an email and a campaign draft from each domain. The limited keys below reach only the first of each pair.
+      const inboxes = [ok(await request('POST', '/v1/inboxes', MANAGER, { type: 'sandbox' }), 201), ok(await request('POST', '/v1/inboxes', MANAGER, { type: 'sandbox' }), 201)];
+      const received = await Promise.all(inboxes.map(async box => {
+        const { messageId } = ok(await request('POST', `/v1/inboxes/${box.id}/simulate`, MANAGER, { from: 'sender@fixture.invalid', subject: 'Permission table', text: 'Hello.' }), 202);
+        return { inbox: box.id as string, message: messageId as string, thread: ok(await request('GET', `/v1/inbound/messages/${messageId}`, MANAGER)).threadId as string };
+      }));
+      // What every example request names (sender@example.com) stays inside domainKey's limit; these two sit on either side.
+      const domainNames = ['permission-in.example.com', 'permission-out.example.net'];
+      const domainIds = domainNames.map(() => unique('dom'));
+      await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state) VALUES ($1,$1,'shared',$2,'ready')", [w, REGION]);
+      for (const [i, name] of domainNames.entries()) {
+        // The claim first: adding the domain binds it to the claim's connection (migration 067).
+        await db.query("INSERT INTO domain_claims(workspace_id,name,connection_id,sending_state) VALUES ($1,$2,$1,'verified')", [w, name]);
+        await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4)', [domainIds[i], w, name, REGION]);
+      }
+      const emailIds: string[] = [], campaignIds: string[] = [];
+      for (const name of domainNames) {
+        const email = `email_${randomUUID().replaceAll('-', '')}`;
+        await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,scheduled_at)
+          VALUES ($1,$2,$3,'fixture',$4,'["recipient@example.com"]','[]','[]','Permission table','{"testCampaignId":null,"kind":"transactional"}',true,now()+interval '1 day')`, [email, w, REGION, `sender@${name}`]);
+        emailIds.push(email);
+        campaignIds.push(ok(await request('POST', '/v1/campaigns', MANAGER, { name: unique('permission-table'), from: `news@${name}`, region: REGION, subject: 'Hello', html: '<p>Hello</p>' }), 201).id);
+      }
+      // What each credential holds in the table's terms, as today's guards give it. A workspace key's read is Sent mail,
+      // Audience & content and Configuration at read, send is Send email, and manage is everything; without manage its
+      // limits cover no receiving address. An address key's read is Received mail and Inboxes at read, send is Send email,
+      // modify is Received mail at write (without read) and create is Inboxes at write. An MCP sign-in or an agent token
+      // with read also reads receiving rules (an owner's approval), and reaches received mail only with manage. People are
+      // judged by their role and the kind of credential, and a sign-in also by what it was approved for.
+      type Holder = { kind: 'apiKey' | 'addressKey' | 'person' | 'signIn' | 'agentToken' | 'anon'; grants?: string[]; covers?: string[]; role?: 'owner' | 'admin' | 'member'; consent?: 'read' | 'send' | 'manage' };
+      const every = ['sendEmail:on', ...['sentMail', 'receivedMail', 'inboxes', 'audience', 'receivingRules', 'configuration'].flatMap(p => [p + ':read', p + ':write'])];
+      const reads = ['sentMail:read', 'audience:read', 'configuration:read'], addressed = ['receivedMail:read', 'inboxes:read'], delegatedReads = [...reads, 'receivingRules:read'];
+      const organizing = [...addressed, 'sendEmail:on', 'receivedMail:write'], [inA] = received;
+      const credentials: Record<string, Holder & { bearer?: string; cookie?: string; actor?: typeof full.actor }> = {
+        anonymous: { kind: 'anon' },
+        readKey: { kind: 'apiKey', grants: reads, covers: ['workspace', 'domain'], bearer: await key({ permissions: ['read'] }) },
+        sendKey: { kind: 'apiKey', grants: ['sendEmail:on'], covers: ['workspace', 'domain'], bearer: await key({ permissions: ['send'] }) },
+        readSendKey: { kind: 'apiKey', grants: [...reads, 'sendEmail:on'], covers: ['workspace', 'domain'], bearer: await key({ permissions: ['read', 'send'] }) },
+        manageKey: { kind: 'apiKey', grants: every, covers: ['workspace', 'domain', 'address'], bearer: await key({ permissions: ['manage'] }) },
+        domainKey: { kind: 'apiKey', grants: every, covers: ['domain'], bearer: await key({ permissions: ['read', 'send', 'manage'], domains: ['example.com'] }) },
+        addressReader: { kind: 'addressKey', grants: addressed, covers: ['address'], bearer: await key({ access: { type: 'addresses', mail: ['read'] } }) },
+        addressSender: { kind: 'addressKey', grants: ['sendEmail:on'], covers: ['address'], bearer: await key({ access: { type: 'addresses', mail: ['send'] } }) },
+        addressOrganizer: { kind: 'addressKey', grants: ['receivedMail:write'], covers: ['address'], bearer: await key({ access: { type: 'addresses', mail: ['modify'] } }) },
+        addressKey: { kind: 'addressKey', grants: organizing, covers: ['address'], bearer: await key({ access: { type: 'addresses', mail: ['read', 'send', 'modify'] } }) },
+        oneAddressKey: { kind: 'addressKey', grants: organizing, covers: ['address'], bearer: await key({ access: { type: 'addresses', addressIds: [inA!.inbox], mail: ['read', 'send', 'modify'] } }) },
+        inboxKey: { kind: 'addressKey', grants: organizing, covers: ['address'], bearer: await key({ access: { type: 'inbox', inboxId: inA!.inbox, mail: ['read', 'send', 'modify'] } }) },
+        provisioningKey: { kind: 'addressKey', grants: [...organizing, 'inboxes:write'], covers: ['address'], bearer: await key({ access: { type: 'addresses', addressIds: [], mail: ['read', 'send', 'modify', 'create'] } }) },
+        owner: { kind: 'person', role: 'owner', cookie: manager!.cookie }, admin: { kind: 'person', role: 'admin', cookie: await person('admin') }, member: { kind: 'person', role: 'member', cookie: await person('member') },
+        manageAgentToken: { kind: 'agentToken', grants: every, covers: ['workspace', 'domain', 'address'], bearer: await mint(['read', 'send', 'manage']) },
+        readAgentToken: { kind: 'agentToken', grants: delegatedReads, covers: ['workspace', 'domain'], bearer: await mint(['read']) },
+        signIn: { kind: 'signIn', role: 'owner', consent: 'manage', grants: every, covers: ['workspace', 'domain', 'address'], actor: full.actor },
+        sendingSignIn: { kind: 'signIn', role: 'owner', consent: 'send', grants: [...delegatedReads, 'sendEmail:on'], covers: ['workspace', 'domain'], actor: sending.actor },
+        readingSignIn: { kind: 'signIn', role: 'owner', consent: 'read', grants: delegatedReads, covers: ['workspace', 'domain'], actor: reading.actor },
+      };
+      const rank = { member: 0, admin: 1, owner: 2, any: 0 } as const;
+      const admits = (h: Holder, row: Row) => {
+        if (row.access === 'public') return true;
+        if (row.access === 'staff' || h.kind === 'anon') return false;
+        if (row.access === 'any') return h.kind !== 'addressKey';
+        const role = !!h.role && rank[h.role] >= rank[row.person ?? 'any'];
+        if (!row.permission) return h.kind === 'person' ? row.credential !== 'signIn' && role
+          : h.kind === 'signIn' && row.credential !== 'dashboard' && role && (row.level !== 'write' || h.consent === 'manage');
+        if ((row.credential === 'dashboard' && h.kind !== 'person') || (row.credential === 'signIn' && h.kind !== 'signIn')) return false;
+        if ((row.credential === 'lasting' && h.kind === 'agentToken') || (row.credential === 'notDelegated' && (h.kind === 'agentToken' || h.kind === 'signIn'))) return false;
+        if (h.kind === 'person' || (h.kind === 'signIn' && !role)) return role;
+        const level = ((h.kind === 'agentToken' || h.kind === 'signIn') && row.delegatedLevel) || row.level, covers = h.covers!;
+        return h.grants!.includes(`${row.permission}:${level}`) && (row.scope === 'workspace' || row.scope === 'address' ? covers.includes(row.scope) : covers.includes('workspace') || covers.includes('domain'));
+      };
+      const resolve = (value: Json | undefined): Json => { let v = value ?? {}; for (let i = 0; v.$ref && i < 20; i++) { const [, , section, name] = v.$ref.split('/'); v = spec.components[section][name]; } return v; };
+      // Path values that pass validation and name nothing, so a credential REST admits gets 404, never a change.
+      const pathValue = (name: string, schema: Json) => schema.enum?.[0] ?? (name === 'region' ? REGION : name === 'token' && schema.pattern ? 'u_' + '0'.repeat(64) : name === 'requestId' ? 'req_' + '0'.repeat(32)
+        : schema.format === 'email' ? 'missing@example.com' : [schema.type].flat().includes('integer') ? '1' : schema.anyOf ? 'inbox' : name === 'since' ? '0' : schema.pattern ? 'example' : 'missing_1');
+      // Each request body is the operation's documented example (its cURL sample), with these changes where the example
+      // alone fails validation, or a check that runs before the guard (a schedule in the past, a rule key unlike its URL).
+      const later = new Date(Date.now() + 86_400_000).toISOString();
+      const bodies: Record<string, Json> = { updateApiKey: { name: 'renamed' }, applyAudiencePlan: { planId: 'aqp_' + '0'.repeat(32) }, checkEmail: { text: 'Hello.' }, rescheduleEmail: { scheduledAt: later },
+        scheduleCampaign: { scheduledAt: later }, createDomain: { name: 'permission-table.example.com' }, configureDomainMailFrom: { mailFromDomain: 'bounce.example.com' }, chooseReceivingHost: { host: 'reply.example.com' },
+        configureRegion: { enabled: true }, createEndpoint: { name: 'example' }, attachRules: { attachments: [] }, attachRituals: { attachments: [] }, updateInboxMessage: { read: true },
+        updateInboundDomain: { catchAll: 'store' }, updateReceivingHost: { catchAll: 'store' }, createInboundAddress: { address: 'permission-table@example.com' }, createInboundThread: { text: 'Hello.' },
+        updateInboundThread: { read: true }, replyToInboundThread: { text: 'Hello.' }, createWorkspaceInvitation: { role: 'member' }, inviteWorkspaceMember: { role: 'member' } };
+      const example = (operation: Json) => { const curl = operation['x-codeSamples']?.find((s: Json) => s.lang === 'Shell')?.source as string | undefined, at = curl?.indexOf("--data '") ?? -1; return at >= 0 ? JSON.parse(curl!.slice(at + 8, curl!.lastIndexOf("'"))) : undefined; };
+      const entries: { id: string; template: string; method: string; operation: Json; params: Json[]; row: Row }[] = [];
+      for (const [template, item] of Object.entries<Json>(spec.paths)) for (const method of ['get', 'post', 'put', 'patch', 'delete']) {
+        const operation = item[method], id = operation?.operationId as string | undefined;
+        if (!id) continue;
+        const row = OPERATION_PERMISSIONS[id];
+        assert.ok(row, `${id} has no row in the permission table.`);
+        assert.deepEqual(operation[permissionExtension], permissionOf(id), id);
+        entries.push({ id, template, method, operation, row, params: [...(item.parameters ?? []), ...(operation.parameters ?? [])].map(resolve) });
+      }
+      // One request as one credential, undone afterwards (a savepoint in the fixture's transaction) so no call changes what
+      // the next one finds: refused (401, or 403 naming what it needs; support and operator routes refuse with their own
+      // codes), hidden (404: missing, or outside the credential's limits) or reached.
+      const call = async (label: string, entry: (typeof entries)[number], path: string, body: Json | undefined) => {
+        const credential = credentials[label]!, headers: Record<string, string> = { accept: 'application/json', origin: PUBLIC_ORIGIN, ...(body === undefined ? {} : { 'content-type': 'application/json' }) };
+        if (entry.method !== 'get') headers['idempotency-key'] = unique('permission-table');
+        if (entry.params.some(p => p.in === 'header' && p.name.toLowerCase() === 'if-match' && p.required)) headers['if-match'] = '"1"';
+        if (credential.bearer) headers.authorization = `Bearer ${credential.bearer}`;
+        if (credential.cookie) headers.cookie = credential.cookie;
+        const req = new Request(`${PUBLIC_ORIGIN}${path}`, { method: entry.method.toUpperCase(), headers, redirect: 'manual', ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+        await db.query('SAVEPOINT permission_table');
+        try {
+          const response = credential.actor ? await dispatchAsActor(app, req, runtime, credential.actor, { requestId: 'req_' + '0'.repeat(32), clientIp: null, userAgent: null }) : await app.fetch(req, runtime);
+          const text = await response.text(); let error: Json | undefined; try { error = JSON.parse(text).error; } catch { /* a redirect or a page */ }
+          const refused = response.status === 401 || (response.status === 403 && (entry.row.access === 'staff' || !!error?.required));
+          return { refused, hidden: response.status === 404, text, answer: `${response.status} ${error?.code ?? ''} ${error?.required ? JSON.stringify(error.required) : error?.message ?? ''}` };
+        } finally { await db.query('ROLLBACK TO SAVEPOINT permission_table'); }
+      };
+      const mismatches: string[] = [];
+      // Some admitted writes reach for the network (an upload to object storage); here such a fetch fails like any other.
+      // The fixture's own network guard stays underneath, for the issuer, and is back once every operation was called.
+      const guarded = globalThis.fetch;
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (new URL(input instanceof Request ? input.url : String(input)).origin === process.env.ACCOUNT_ISSUER) return guarded(input, init);
+        throw new Error('No network in the permission table test.');
+      }) as typeof fetch;
+      try {
+        for (const entry of entries) {
+          const { id, template, params, row } = entry;
+          let path = template.replace(/\{([^}]+)\}/g, (_, name: string) => encodeURIComponent(pathValue(name, resolve(params.find(p => p.in === 'path' && p.name === name)?.schema))));
+          const query = params.filter(p => p.in === 'query' && p.required).map(p => `${p.name}=${encodeURIComponent(pathValue(p.name, resolve(p.schema)))}`);
+          if (query.length) path += '?' + query.join('&');
+          const body = bodies[id] ? { ...example(entry.operation), ...bodies[id] } : example(entry.operation);
+          const outcomes = new Set<boolean>();
+          for (const label of Object.keys(credentials)) {
+            const expected = admits(credentials[label]!, row), { refused, answer } = await call(label, entry, path, body);
+            outcomes.add(expected);
+            if (expected === refused) mismatches.push(`${id} ${label}: the table ${expected ? 'admits' : 'refuses'} it, REST answered ${answer}`);
+          }
+          // Every row is exercised both ways: by a credential that has what it needs and by one that lacks it.
+          if (!row.access) assert.equal(outcomes.size, 2, `${id}: every credential is ${[...outcomes][0] ? 'admitted' : 'refused'}`);
+        }
+        // Resource scope. Each scoped row whose route names one of these resources (or whose body names a sender or an
+        // address) is called on the resource inside the limited key's limit and on the one outside it. Inside, the key must
+        // reach the handler's own answer: neither refused nor 404, the answer that hides what is outside a key's limits.
+        // Outside, it must be refused or hidden. The unrestricted manage key reaches both, so neither 404 is a missing
+        // resource. A listing must show the resource inside and leave out the one outside.
+        const resource = {
+          domain: { labels: ['domainKey'], pair: domainIds, path: /^\/v1\/domains\/\{id\}/ },
+          email: { labels: ['domainKey'], pair: emailIds, path: /^\/v1\/emails\/\{id\}/ },
+          campaign: { labels: ['domainKey'], pair: campaignIds, path: /^\/v1\/campaigns\/\{id\}/ },
+          inbox: { labels: ['oneAddressKey', 'inboxKey'], pair: received.map(r => r.inbox), path: /^\/v1\/(?:inboxes\/\{id\}|inbound\/addresses\/\{addressId\})/ },
+          thread: { labels: ['oneAddressKey', 'inboxKey'], pair: received.map(r => r.thread), path: /^\/v1\/inbound\/threads\/\{threadId\}/ },
+          message: { labels: ['oneAddressKey', 'inboxKey'], pair: received.map(r => r.message), path: /^\/v1\/inbound\/messages\/\{messageId\}/ },
+        };
+        const listings: Record<string, keyof typeof resource> = { listDomains: 'domain', listEmails: 'email', listLogs: 'email', listCampaigns: 'campaign', listInboxes: 'inbox', listInboundAddresses: 'inbox',
+          getInboundOverview: 'inbox', listInboundThreads: 'thread', listInboundMessages: 'message' };
+        // Request bodies that name the scoped thing: a sender, or the address a conversation starts from.
+        const named: Record<string, (i: number) => Json> = { sendEmail: i => ({ from: `sender@${domainNames[i]}` }), sendEmailBatch: i => ({ emails: [{ ...example(entries.find(e => e.id === 'sendEmailBatch')!.operation).emails[0], from: `sender@${domainNames[i]}`, subject: 'Hello', text: 'Hello.' }] }),
+          checkEmail: i => ({ from: `sender@${domainNames[i]}` }), createCampaign: i => ({ from: `news@${domainNames[i]}` }), createDomain: i => ({ name: `new.${domainNames[i]}` }),
+          configureDomainMailFrom: i => ({ mailFromDomain: `bounce.${domainNames[i]}` }), chooseReceivingHost: i => ({ host: `reply.${domainNames[i]}` }),
+          createInboundThread: i => ({ addressId: received[i]!.inbox }), replyToInboundThread: i => ({ addressId: received[i]!.inbox, replyToMessageId: received[i]!.message }) };
+        let checked = 0;
+        for (const entry of entries) {
+          const { id, template, params, row } = entry;
+          if (row.scope !== 'domain' && row.scope !== 'address') continue;
+          const family = listings[id] ?? (Object.keys(resource) as (keyof typeof resource)[]).find(name => resource[name].path.test(template))
+            ?? (named[id] || id === 'previewEmail' ? (row.scope === 'domain' ? 'domain' : 'inbox') : undefined);
+          // Attachments (object storage the fixture doesn't have) and mail client passwords: their parents are scoped here.
+          if (!family || /\{(?:attachmentId|passwordId)\}/.test(template)) continue;
+          const { labels, pair } = resource[family];
+          const sample = bodies[id] ? { ...example(entry.operation), ...bodies[id] } : example(entry.operation);
+          const at = (i: number) => {
+            let path = template.replace(/\{([^}]+)\}/g, (_, name: string) => name === 'messageId' && family === 'inbox' ? received[i]!.message : ['id', 'addressId', 'threadId', 'messageId'].includes(name) ? pair[i]! : encodeURIComponent(pathValue(name, resolve(params.find(p => p.in === 'path' && p.name === name)?.schema))));
+            const query = params.filter(p => p.in === 'query' && p.required).map(p => `${p.name}=${encodeURIComponent(pathValue(p.name, resolve(p.schema)))}`);
+            if (query.length) path += '?' + query.join('&');
+            return { path, body: id === 'previewEmail' ? { emailId: emailIds[i], clients: ['gmail-web'], theme: 'light' } : named[id] ? { ...sample, ...named[id]!(i) } : sample };
+          };
+          checked++;
+          const listing = id in listings;
+          for (const label of ['manageKey', ...labels]) {
+            if (label !== 'manageKey' && !admits(credentials[label]!, row)) continue;
+            const [inside, outside] = [await call(label, entry, at(0).path, at(0).body), await call(label, entry, at(1).path, at(1).body)];
+            const shown = (answer: Awaited<ReturnType<typeof call>>, i: number) => answer.text.includes(pair[i]!);
+            const reachedIn = !inside.refused && !inside.hidden && (!listing || shown(inside, 0));
+            const reachedOut = !outside.refused && !outside.hidden && (!listing || shown(outside, 1));
+            if (!reachedIn) mismatches.push(`${id} ${label}: inside its limits it must be reached${listing ? ' and listed' : ''}, REST answered ${inside.answer}`);
+            if (label === 'manageKey' ? !reachedOut : reachedOut) mismatches.push(`${id} ${label}: outside its limits it must be ${label === 'manageKey' ? 'reached (the resource exists)' : 'refused or hidden'}, REST answered ${outside.answer}`);
+          }
+        }
+        assert.ok(checked >= 55, `${checked} scoped rows called on real resources`);
+      } finally { globalThis.fetch = guarded; }
+      assert.deepEqual(mismatches, []);
+      assert.deepEqual(Object.keys(OPERATION_PERMISSIONS).filter(id => !entries.some(e => e.id === id)), [], 'Rows for operations that no longer exist.');
+      assert.ok(entries.length >= 300, String(entries.length));
+    });
+  });
+
   test('a refusal over MCP carries what the request needs in the error and its text', async t => {
     const scoped = await keyFixture(t, { permissions: ['read', 'send', 'manage'], domains: ['example.com'] });
     const result = await rpc(scoped.secret, 'tools/call', { name: 'createDomain', arguments: { body: { name: 'other-refused.example.net' }, confirm: true } });
@@ -3614,6 +3839,8 @@ describe('Hosted MCP OAuth and tools', () => {
     const fullSchema = (await rpc(token,'tools/call',{name:'describe_tool',arguments:{resource:'contacts',action:'list'}},'/mcp')).structuredContent;
     assert.deepEqual(fullSchema.inputSchema.properties.email, tools.get('listContacts')!.inputSchema.properties.email);
     assert.deepEqual(fullSchema.outputSchema, tools.get('listContacts')!.outputSchema);
+    // It also states what the action needs, as the OpenAPI document does.
+    assert.deepEqual(fullSchema.permission, { permission: 'audience', level: 'read', scope: 'workspace', text: 'Needs Audience & content: read on the whole workspace.' });
     for (const name of ['sendEmail', 'sendEmailBatch', 'createInbox', 'waitForMessage', 'getInboxMessage', 'listInboundThreads', 'createInboundThread', 'replyToInboundThread', 'discoverRegion', 'configureRegion', 'provisionRegion', 'listApiKeys', 'createApiKey', 'revokeApiKey', 'getWorkspaceSettings', 'updateWorkspaceSettings', 'getCampaignState', 'rotateWebhookSecret']) assert.ok(tools.has(name), name);
     assert.ok(!tools.has('revealWebhookSecret'), 'A signing secret is never read back through MCP.');
     assert.doesNotMatch(JSON.stringify(tools.get('sendCampaign')!.inputSchema), /reviewId/);

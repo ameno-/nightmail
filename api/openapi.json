@@ -21059,6 +21059,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "person": "any",
+          "credential": "dashboard",
+          "text": "People only: any member in a signed-in dashboard session. Never an API key."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -21241,6 +21246,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "person": "any",
+          "credential": "dashboard",
+          "text": "People only: any member in a signed-in dashboard session. Never an API key."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -21413,6 +21423,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "person": "any",
+          "credential": "dashboard",
+          "text": "People only: any member in a signed-in dashboard session. Never an API key."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -21574,6 +21589,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "person": "any",
+          "credential": "dashboard",
+          "text": "People only: any member in a signed-in dashboard session. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -21755,6 +21775,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "person": "any",
+          "credential": "dashboard",
+          "text": "People only: any member in a signed-in dashboard session. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -22086,6 +22111,10 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "access": "any",
+          "text": "Needs any API key, person or agent token of the workspace."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -22279,6 +22308,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "level": "read",
+          "credential": "signIn",
+          "withinCaller": true,
+          "text": "Only an owner or admin signed in over MCP with read access. Never an API key. A request gives no more than the caller has."
         },
         "x-codeSamples": [
           {
@@ -22474,6 +22510,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -22643,6 +22687,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -22816,6 +22868,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -23012,6 +23072,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -23182,6 +23250,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -23362,6 +23438,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -23605,6 +23689,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Audience & content: read on the whole workspace."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -23793,6 +23883,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "text": "Needs Audience & content: write on the whole workspace."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -23947,6 +24043,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Audience & content: read on the whole workspace."
         },
         "x-codeSamples": [
           {
@@ -24141,6 +24243,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "text": "Needs Audience & content: write on the whole workspace."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -24309,6 +24417,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "text": "Needs Audience & content: write on the whole workspace."
         },
         "x-codeSamples": [
           {
@@ -24511,6 +24625,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "text": "Needs Audience & content: write on the whole workspace."
         },
         "x-codeSamples": [
           {
@@ -24764,6 +24884,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Audience & content: read on the whole workspace."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -24972,6 +25098,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Audience & content: read on the whole workspace."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -25139,6 +25271,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Audience & content: write on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -25293,6 +25432,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Audience & content: read on the whole workspace."
         },
         "x-codeSamples": [
           {
@@ -25470,6 +25615,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Audience & content: write on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -25637,6 +25789,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Audience & content: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -25879,6 +26038,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Audience & content: read on the whole workspace."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -26066,6 +26231,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Audience & content: write on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -26245,6 +26417,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Audience & content: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -26439,6 +26618,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Audience & content: read on the whole workspace."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -26605,6 +26790,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Audience & content: write on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -26759,6 +26951,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Audience & content: read on the whole workspace."
         },
         "x-codeSamples": [
           {
@@ -26934,6 +27132,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Audience & content: write on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -27101,6 +27306,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Audience & content: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -27295,6 +27507,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Audience & content: read on the whole workspace."
         },
         "x-codeSamples": [
           {
@@ -27500,6 +27718,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "text": "Needs Audience & content: write on the whole workspace."
         },
         "x-codeSamples": [
           {
@@ -27721,6 +27945,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Audience & content: read on the whole workspace."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -27875,6 +28105,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Audience & content: read on the whole workspace."
         },
         "x-codeSamples": [
           {
@@ -28042,6 +28278,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "text": "Needs Audience & content: write on the whole workspace."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -28208,6 +28450,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Audience & content: read on the whole workspace."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -28373,6 +28621,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Audience & content: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -28547,6 +28802,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Audience & content: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -28767,6 +29029,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "text": "Needs Audience & content: read."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -28917,6 +29184,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "text": "Needs Audience & content: write on the whole workspace."
         },
         "x-codeSamples": [
           {
@@ -29072,6 +29345,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "text": "Needs Audience & content: read."
         },
         "x-codeSamples": [
           {
@@ -29235,6 +29513,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "text": "Needs Audience & content: write on the whole workspace."
         },
         "x-codeSamples": [
           {
@@ -29403,6 +29687,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "text": "Needs Audience & content: write on the whole workspace."
         },
         "x-codeSamples": [
           {
@@ -29579,6 +29869,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "text": "Needs Audience & content: write on the whole workspace."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -29746,6 +30042,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "text": "Needs Audience & content: read."
         },
         "x-codeSamples": [
           {
@@ -29935,6 +30236,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "text": "Needs Send email."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -30109,6 +30415,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "text": "Needs Audience & content: write on the whole workspace."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -30261,6 +30573,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "text": "Needs Audience & content: write on the whole workspace."
         },
         "x-codeSamples": [
           {
@@ -30416,6 +30734,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "text": "Needs Audience & content: write on the whole workspace."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -30570,6 +30894,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "text": "Needs Audience & content: read."
         },
         "x-codeSamples": [
           {
@@ -30738,6 +31067,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "text": "Needs Audience & content: write on the whole workspace."
         },
         "x-codeSamples": [
           {
@@ -30909,6 +31244,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "text": "Needs Audience & content: read."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -31063,6 +31403,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "sentMail",
+          "level": "read",
+          "scope": "domain",
+          "text": "Needs Sent mail: read for the sender domain."
         },
         "x-codeSamples": [
           {
@@ -31234,6 +31580,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "domain",
+          "text": "Needs Send email for the sender domain."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -31404,6 +31756,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "domain",
+          "text": "Needs Send email for the sender domain."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -31558,6 +31916,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "sentMail",
+          "level": "read",
+          "scope": "domain",
+          "text": "Needs Sent mail: read for the sender domain."
         },
         "x-codeSamples": [
           {
@@ -31830,6 +32194,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sentMail",
+          "level": "read",
+          "scope": "domain",
+          "text": "Needs Sent mail: read for the sender domain."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -31984,6 +32354,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "sentMail",
+          "level": "read",
+          "scope": "domain",
+          "text": "Needs Sent mail: read for the sender domain."
         },
         "x-codeSamples": [
           {
@@ -32141,6 +32517,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sentMail",
+          "level": "read",
+          "scope": "domain",
+          "text": "Needs Sent mail: read for the sender domain."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -32296,6 +32678,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "sentMail",
+          "level": "read",
+          "scope": "domain",
+          "text": "Needs Sent mail: read for the sender domain."
         },
         "x-codeSamples": [
           {
@@ -32490,6 +32878,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sentMail",
+          "level": "read",
+          "scope": "domain",
+          "text": "Needs Sent mail: read for the sender domain."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -32646,6 +33040,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "domain",
+          "text": "Needs Send email for the sender domain."
         },
         "x-codeSamples": [
           {
@@ -32813,6 +33213,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "domain",
+          "text": "Needs Send email for the sender domain."
         },
         "x-codeSamples": [
           {
@@ -32983,6 +33389,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "domain",
+          "text": "Needs Send email for the sender domain."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -33138,6 +33550,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sentMail",
+          "level": "read",
+          "scope": "domain",
+          "text": "Needs Sent mail: read for the sender domain."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -33290,6 +33708,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "workspace",
+          "text": "Needs Send email on the whole workspace."
         },
         "x-codeSamples": [
           {
@@ -33446,6 +33870,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "sentMail",
+          "level": "read",
+          "scope": "domain",
+          "text": "Needs Sent mail: read for the sender domain."
         },
         "x-codeSamples": [
           {
@@ -33616,6 +34046,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "domain",
+          "text": "Needs Send email for the sender domain."
         },
         "x-codeSamples": [
           {
@@ -33854,6 +34290,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "scope": "domain",
+          "text": "Needs Audience & content: read for the sender domain."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -34008,6 +34450,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "scope": "domain",
+          "text": "Needs Audience & content: read for the sender domain."
         },
         "x-codeSamples": [
           {
@@ -34173,6 +34621,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "domain",
+          "text": "Needs Send email for the sender domain."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -34325,6 +34779,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "domain",
+          "text": "Needs Send email for the sender domain."
         },
         "x-codeSamples": [
           {
@@ -34482,6 +34942,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sentMail",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Sent mail: read on the whole workspace."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -34625,6 +35091,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "text": "Needs Audience & content: read."
         },
         "x-codeSamples": [
           {
@@ -34782,6 +35253,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "scope": "domain",
+          "text": "Needs Audience & content: read for the sender domain."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -34937,6 +35414,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Audience & content: read on the whole workspace."
         },
         "x-codeSamples": [
           {
@@ -35113,6 +35596,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "domain",
+          "text": "Needs Send email for the sender domain."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -35268,6 +35757,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "scope": "domain",
+          "text": "Needs Audience & content: read for the sender domain."
         },
         "x-codeSamples": [
           {
@@ -35434,6 +35929,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "domain",
+          "text": "Needs Send email for the sender domain."
         },
         "x-codeSamples": [
           {
@@ -35615,6 +36116,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "workspace",
+          "text": "Needs Send email on the whole workspace."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -35794,6 +36301,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Send email on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -35975,6 +36489,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Send email on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -36145,6 +36666,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Send email on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -36312,6 +36840,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Send email on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -36481,6 +37016,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Send email on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -36646,6 +37188,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Send email on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -36815,6 +37364,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Send email on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -36981,6 +37537,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Send email on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -37123,6 +37686,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Configuration: read on the whole workspace."
         },
         "x-codeSamples": [
           {
@@ -37274,6 +37843,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -37427,6 +38003,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -37615,6 +38198,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "read",
+          "scope": "domain",
+          "person": "admin",
+          "text": "Needs Configuration: read for the sender domain. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -37791,6 +38381,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "domain",
+          "person": "admin",
+          "text": "Needs Configuration: write for the sender domain. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -37956,6 +38553,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "domain",
+          "person": "admin",
+          "text": "Needs Configuration: write for the sender domain. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -38123,6 +38727,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "domain",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write for the sender domain. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -38275,6 +38887,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -38440,6 +39057,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -38614,6 +39236,10 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "access": "public",
+          "text": "Needs no credential."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -38769,6 +39395,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "read",
+          "scope": "domain",
+          "person": "admin",
+          "text": "Needs Configuration: read for the sender domain. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -38935,6 +39568,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "domain",
+          "person": "admin",
+          "text": "Needs Configuration: write for the sender domain. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -39090,6 +39730,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "domain",
+          "person": "admin",
+          "text": "Needs Configuration: write for the sender domain. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -39256,6 +39903,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: read on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -39407,6 +40061,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -39562,6 +40224,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -39726,6 +40395,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -39878,6 +40555,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -40035,6 +40720,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "notDelegated",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Only a dashboard session or an API key no MCP approval made."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -40191,6 +40884,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -40345,6 +41046,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -40521,6 +41229,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: read on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -40681,6 +41396,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -40843,6 +41565,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -40991,6 +41720,10 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "access": "public",
+          "text": "Needs no credential."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -41134,6 +41867,10 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "access": "public",
+          "text": "Needs no credential."
         },
         "x-codeSamples": [
           {
@@ -41286,6 +42023,10 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "access": "public",
+          "text": "Needs no credential."
         },
         "x-codeSamples": [
           {
@@ -41495,6 +42236,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sentMail",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Sent mail: read on the whole workspace."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -41638,6 +42385,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "sentMail",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Sent mail: read on the whole workspace."
         },
         "x-codeSamples": [
           {
@@ -41790,6 +42543,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -41935,6 +42693,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sentMail",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Sent mail: read on the whole workspace."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -42078,6 +42842,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Configuration: read on the whole workspace."
         },
         "x-codeSamples": [
           {
@@ -42244,6 +43014,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -42413,6 +43190,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: read on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -42578,6 +43362,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -42745,6 +43536,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -42909,6 +43707,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -43088,6 +43893,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -43242,6 +44055,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -43409,6 +44229,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -43565,6 +44393,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -43743,6 +44578,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -43909,6 +44752,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -44126,6 +44977,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -44311,6 +45169,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -44490,6 +45355,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -44660,6 +45532,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -44814,6 +45694,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -45010,6 +45897,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -45208,6 +46102,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -45493,6 +46394,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -45780,6 +46689,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -46081,6 +46998,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -46385,6 +47310,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -46565,6 +47498,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -46717,6 +47657,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -46874,6 +47822,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -47041,6 +47996,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -47195,6 +48158,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -47371,6 +48342,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -47528,6 +48507,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -47750,6 +48737,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -47938,6 +48933,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -48129,6 +49131,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -48312,6 +49321,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -48498,6 +49514,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -48642,6 +49665,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -48789,6 +49819,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -48933,6 +49970,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -49080,6 +50124,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -49224,6 +50275,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -49555,6 +50613,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -49700,6 +50766,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -50032,6 +51105,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -50359,6 +51440,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -50689,6 +51778,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -50984,6 +52081,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -51158,6 +52263,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -51464,6 +52576,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -51736,6 +52856,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -52033,6 +53161,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -52209,6 +53345,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -52517,6 +53660,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -52791,6 +53942,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -53107,6 +54266,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -53426,6 +54593,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -53691,6 +54866,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -54102,6 +55284,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -54369,6 +55559,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -54782,6 +55979,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -55129,6 +56334,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -55480,6 +56692,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: read on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -55796,6 +57015,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "read",
+          "scope": "address",
+          "text": "Needs Received mail: read for the address or inbox."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -55999,6 +57224,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "write",
+          "scope": "address",
+          "person": "admin",
+          "text": "Needs Received mail: write for the address or inbox. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -56248,6 +57480,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "write",
+          "scope": "address",
+          "person": "admin",
+          "text": "Needs Received mail: write for the address or inbox. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -56456,6 +57695,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "write",
+          "scope": "address",
+          "person": "admin",
+          "text": "Needs Received mail: write for the address or inbox. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -56743,6 +57989,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "write",
+          "scope": "address",
+          "person": "admin",
+          "text": "Needs Received mail: write for the address or inbox. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -56996,6 +58249,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "write",
+          "scope": "address",
+          "person": "admin",
+          "text": "Needs Received mail: write for the address or inbox. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -57189,6 +58449,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "read",
+          "scope": "address",
+          "text": "Needs Received mail: read for the address or inbox."
         },
         "x-codeSamples": [
           {
@@ -57452,6 +58718,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "write",
+          "scope": "address",
+          "person": "admin",
+          "text": "Needs Received mail: write for the address or inbox. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -57714,6 +58987,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "write",
+          "scope": "address",
+          "person": "admin",
+          "text": "Needs Received mail: write for the address or inbox. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -57931,6 +59211,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "write",
+          "scope": "address",
+          "person": "admin",
+          "text": "Needs Received mail: write for the address or inbox. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -58126,6 +59413,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "read",
+          "scope": "address",
+          "text": "Needs Received mail: read for the address or inbox."
         },
         "x-codeSamples": [
           {
@@ -58358,6 +59651,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -58550,6 +59851,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -58693,6 +60001,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -58867,6 +60182,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -59165,6 +60488,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "inboxes",
+          "level": "write",
+          "scope": "address",
+          "person": "admin",
+          "withinCaller": true,
+          "text": "Needs Inboxes: write for the address or inbox. A person needs to be an owner or admin. A request gives no more than the caller has."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -59372,6 +60703,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "inboxes",
+          "level": "read",
+          "scope": "address",
+          "text": "Needs Inboxes: read for the address or inbox."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -59528,6 +60865,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "inboxes",
+          "level": "read",
+          "scope": "address",
+          "text": "Needs Inboxes: read for the address or inbox."
         },
         "x-codeSamples": [
           {
@@ -59710,6 +61053,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "write",
+          "scope": "address",
+          "person": "admin",
+          "text": "Needs Received mail: write for the address or inbox. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -59885,6 +61235,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "write",
+          "scope": "address",
+          "person": "admin",
+          "text": "Needs Received mail: write for the address or inbox. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -60093,6 +61450,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "write",
+          "scope": "address",
+          "person": "admin",
+          "text": "Needs Received mail: write for the address or inbox. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -60391,6 +61755,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "read",
+          "scope": "address",
+          "text": "Needs Received mail: read for the address or inbox."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -60568,6 +61938,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "read",
+          "scope": "address",
+          "text": "Needs Received mail: read for the address or inbox."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -60724,6 +62100,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "inboxes",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Inboxes: write on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -60866,6 +62249,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -61019,6 +62409,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -61162,6 +62559,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -61317,6 +62721,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -61481,6 +62892,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -61637,6 +63056,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -61805,6 +63231,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -61962,6 +63396,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -62118,6 +63560,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -62293,6 +63742,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -62470,6 +63927,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -62634,6 +64099,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -62826,6 +64299,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -62991,6 +64471,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -63155,6 +64643,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -63329,6 +64824,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -63493,6 +64996,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -63706,6 +65217,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "inboxes",
+          "level": "read",
+          "scope": "address",
+          "text": "Needs Inboxes: read for the address or inbox."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -63859,6 +65376,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "inboxes",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Inboxes: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -64018,6 +65542,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "inboxes",
+          "level": "read",
+          "scope": "address",
+          "text": "Needs Inboxes: read for the address or inbox."
         },
         "x-codeSamples": [
           {
@@ -64185,6 +65715,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "inboxes",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Inboxes: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -64356,6 +65893,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "inboxes",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Inboxes: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -64566,6 +66110,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "read",
+          "scope": "address",
+          "text": "Needs Received mail: read for the address or inbox."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -64733,6 +66283,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "address",
+          "text": "Needs Send email for the address or inbox."
         },
         "x-codeSamples": [
           {
@@ -64926,6 +66482,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "read",
+          "scope": "address",
+          "text": "Needs Received mail: read for the address or inbox."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -65089,6 +66651,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "write",
+          "scope": "address",
+          "person": "admin",
+          "text": "Needs Received mail: write for the address or inbox. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -65328,6 +66897,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "read",
+          "scope": "address",
+          "text": "Needs Received mail: read for the address or inbox."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -65538,6 +67113,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "read",
+          "scope": "address",
+          "text": "Needs Received mail: read for the address or inbox."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -65715,6 +67296,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "read",
+          "scope": "address",
+          "text": "Needs Received mail: read for the address or inbox."
         },
         "x-codeSamples": [
           {
@@ -65902,6 +67489,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "read",
+          "scope": "address",
+          "text": "Needs Received mail: read for the address or inbox."
         },
         "x-codeSamples": [
           {
@@ -66160,6 +67753,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "sentMail",
+          "level": "read",
+          "scope": "domain",
+          "text": "Needs Sent mail: read for the sender domain."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -66375,6 +67974,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "inboxes",
+          "level": "read",
+          "scope": "address",
+          "text": "Needs Inboxes: read for the address or inbox."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -66556,6 +68161,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -66736,6 +68348,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "sendEmail",
+          "level": "on",
+          "scope": "address",
+          "text": "Needs Send email for the address or inbox."
         },
         "x-codeSamples": [
           {
@@ -66956,6 +68574,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "receivedMail",
+          "level": "read",
+          "scope": "address",
+          "text": "Needs Received mail: read for the address or inbox."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -67111,6 +68735,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -67290,6 +68922,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -67447,6 +69087,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -67601,6 +69249,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -67810,6 +69466,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "delegatedLevel": "write",
+          "text": "Needs Configuration: read on the whole workspace. MCP sign-ins and agent tokens need write. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -67964,6 +69628,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "read",
+          "scope": "workspace",
+          "person": "admin",
+          "delegatedLevel": "write",
+          "text": "Needs Configuration: read on the whole workspace. MCP sign-ins and agent tokens need write. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -68128,6 +69800,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -68296,6 +69976,14 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -68463,6 +70151,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -68629,6 +70324,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -68783,6 +70485,14 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
         },
         "x-codeSamples": [
           {
@@ -68948,6 +70658,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -69124,6 +70841,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -69276,6 +71000,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "person": "any",
+          "credential": "dashboard",
+          "text": "People only: any member in a signed-in dashboard session. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -69436,6 +71165,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "person": "any",
+          "credential": "dashboard",
+          "text": "People only: any member in a signed-in dashboard session. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -69598,6 +71332,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -69750,6 +71489,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "level": "read",
+          "text": "People only: an owner or admin, in the dashboard or over their own MCP sign-in with read access. Never an API key."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -69898,6 +71642,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "level": "write",
+          "text": "People only: an owner or admin, in the dashboard or over their own MCP sign-in with write access. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -70050,6 +71799,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "level": "write",
+          "text": "People only: an owner or admin, in the dashboard or over their own MCP sign-in with write access. Never an API key."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -70199,6 +71953,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "level": "read",
+          "text": "People only: an owner or admin, in the dashboard or over their own MCP sign-in with read access. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -70365,6 +72124,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "level": "write",
+          "text": "People only: an owner or admin, in the dashboard or over their own MCP sign-in with write access. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -70559,6 +72323,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -70724,6 +72493,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -70876,6 +72650,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "person": "any",
+          "credential": "dashboard",
+          "text": "People only: any member in a signed-in dashboard session. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -71037,6 +72816,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "person": "any",
+          "credential": "dashboard",
+          "text": "People only: any member in a signed-in dashboard session. Never an API key."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -71192,6 +72976,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -71371,6 +73160,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -71539,6 +73333,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -71679,6 +73478,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -71832,6 +73636,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -72026,6 +73835,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -72384,6 +74198,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -72546,6 +74365,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -72609,6 +74433,10 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "access": "public",
+          "text": "Needs no credential."
         },
         "x-codeSamples": [
           {
@@ -72754,6 +74582,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "sentMail",
+          "level": "read",
+          "scope": "domain",
+          "text": "Needs Sent mail: read for the sender domain."
         },
         "x-codeSamples": [
           {
@@ -73011,6 +74845,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -73199,6 +75038,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "person": "any",
+          "credential": "dashboard",
+          "text": "People only: any member in a signed-in dashboard session. Never an API key."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -73351,6 +75195,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -73514,6 +75362,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -73677,6 +75529,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -73915,6 +75771,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -74076,6 +75936,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -74297,6 +76161,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -74523,6 +76391,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -74698,6 +76570,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -74850,6 +76726,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -75114,6 +76994,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -75327,6 +77211,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -75488,6 +77376,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -75726,6 +77618,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -75951,6 +77847,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -76112,6 +78012,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -76275,6 +78179,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -76477,6 +78385,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -76638,6 +78550,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -76799,6 +78715,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -76960,6 +78880,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -77121,6 +79045,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -77260,6 +79188,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -77418,6 +79350,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -77562,6 +79498,12 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Configuration: read on the whole workspace."
         },
         "x-codeSamples": [
           {
@@ -77776,6 +79718,12 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Configuration: read on the whole workspace."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -77962,6 +79910,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -78150,6 +80105,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -78306,6 +80268,13 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin."
         },
         "x-codeSamples": [
           {
@@ -78517,6 +80486,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -78700,6 +80674,13 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -78854,6 +80835,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -79012,6 +80998,11 @@
             }
           }
         },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -79154,6 +81145,11 @@
               }
             }
           }
+        },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
         },
         "x-codeSamples": [
           {
@@ -79305,6 +81301,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -79463,6 +81463,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",

@@ -10,13 +10,15 @@ import { SendingLimitsGuide } from '../score/limits'
 import { DocsArticleSkeleton, useDocsAudience } from './frame'
 import { openApiQuery } from './openapi'
 import './docs.css'
-import { productName, publicOrigin, sdkPackage } from '../../../../api/src/brand'
+import { productName, productSlug, publicOrigin, sdkPackage } from '../../../../api/src/brand'
 
 type Schema = Record<string, any>
-type Operation = { id: string; method: string; path: string; tag: string; summary: string; description: string; parameters: Schema[]; requestBody?: Schema; responses: Record<string, Schema>; samples: {lang: string; label: string; source: string}[] }
+type Operation = { id: string; method: string; path: string; tag: string; summary: string; description: string; permission?: string; parameters: Schema[]; requestBody?: Schema; responses: Record<string, Schema>; samples: {lang: string; label: string; source: string}[] }
 type QuickstartStep = { title: string; text: string; code?: string }
 type Document = { info: {title: string; version: string; description?: string; 'x-quickstart'?: QuickstartStep[]}; tags?: {name: string}[]; paths: Record<string, Record<string, Schema>>; components?: {schemas?: Record<string, Schema>; parameters?: Record<string, Schema>} }
 const methods = ['get', 'post', 'put', 'patch', 'delete']
+// What each operation needs, stated by the API (operation-permissions.ts).
+const permissionExtension = `x-${productSlug}-permission`
 // Tag names are API identifiers (ApiKeys); people read them with spaces (API keys).
 const tagTitle = (tag: string) => tag === 'ApiKeys' ? 'API keys' : tag === 'Auth' ? 'Agent tokens' : tag
 // Examples are written for the hosted origin; this instance's own goes in their place, so a copied command works here.
@@ -46,7 +48,7 @@ function operations(document?: Document): Operation[] {
     const operation = pathItem[method]
     // Internal operations (x-internal: support tooling) stay out of the public docs; a tag left empty has no group.
     if (!operation?.operationId || operation['x-internal'] === true) continue
-    result.push({ id: operation.operationId, method, path, tag: operation.tags?.[0] ?? 'API', summary: operation.summary ?? operationTitle(operation.operationId), description: operation.description ?? '', parameters: [...(Array.isArray(pathItem.parameters) ? pathItem.parameters : []), ...(Array.isArray(operation.parameters) ? operation.parameters : [])], requestBody: operation.requestBody, responses: operation.responses ?? {}, samples: operation['x-codeSamples'] ?? [] })
+    result.push({ id: operation.operationId, method, path, tag: operation.tags?.[0] ?? 'API', summary: operation.summary ?? operationTitle(operation.operationId), description: operation.description ?? '', permission: operation[permissionExtension]?.text, parameters: [...(Array.isArray(pathItem.parameters) ? pathItem.parameters : []), ...(Array.isArray(operation.parameters) ? operation.parameters : [])], requestBody: operation.requestBody, responses: operation.responses ?? {}, samples: operation['x-codeSamples'] ?? [] })
   }
   // Groups follow the document's tag order (Emails and Domains first); operations keep path order within a group.
   const order = (document.tags ?? []).map(tag => tag.name)
@@ -123,6 +125,7 @@ function OperationPage({ document, operation: raw }: {document: Document; operat
       <h1>{operation.summary}</h1>
       <div className="docs-endpoint"><span data-method={operation.method}>{operation.method}</span><code>{operation.path}</code><CopyAction value={operation.path} label="Copy endpoint path" variant="ghost" size="sm" compact className="developer-copy-icon" /></div>
       {operation.description && <p>{operation.description}</p>}
+      {operation.permission && <p className="muted">{operation.permission}</p>}
     </header>
     {sample && <section className="docs-section" aria-labelledby="docs-example-title">
       <h2 id="docs-example-title">Example</h2>

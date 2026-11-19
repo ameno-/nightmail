@@ -4,6 +4,7 @@ import { agentTokenMintRoute, keyAdminRoute, lastingRoute, mailboxRoute, memberA
 import { resourceInventory } from './mcp-resources.js';
 import { productName } from './brand.js';
 import { ruleAliases } from './rule-names.js';
+import { permissionOf } from './operation-permissions.js';
 
 type ObjectValue = Record<string, any>;
 /** Toolsets group tools for advertising only; authority comes from the grant and the API. */
@@ -49,6 +50,8 @@ export interface McpOperation {
   readonly memberAdmin: boolean;
   /** What the tool returns in place of the REST response, where they differ (INVITATIONS). */
   readonly view?: (response: ObjectValue) => ObjectValue;
+  /** What the operation needs, as its OpenAPI document states it (operation-permissions.ts): describe_tool returns it. */
+  readonly requires?: ReturnType<typeof permissionOf>;
 }
 // Over MCP an invitation is named by its address. Its ID is the secret in its link, which createWorkspaceInvitation
 // returns once, to a caller allowed to make it: listing shows the rest, and revoking takes the address (a workspace has
@@ -397,7 +400,7 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
       const ownerOnly = receiving || ownerRoute(method, path);
       (alias ? hidden : operations).set(name, Object.freeze({ tool, method, path, queryParameters, write, confirm, apiArgs, pollPage, toolset, receiving, inbound: receiving || toolset === 'inboxes', inbox: INBOX_PERMISSIONS[name], untrustedContent: UNTRUSTED_READS.has(name), permission, ownerOnly, mailbox,
         receivingConsent: receivingConsentRoute(path), unrestricted: unrestrictedRoute(path), keyAdmin: keyAdminRoute(method, path), agentTokenMint: agentTokenMintRoute(method, path),
-        receivingAdmin: receivingAdminRoute(path), lasting: lastingRoute(method, path), dashboardOnly: DASHBOARD_ONLY.has(name), memberAdmin: memberAdminRoute(method, path), view: invitations?.view, validate: validator(input), validateOutput }));
+        receivingAdmin: receivingAdminRoute(path), lasting: lastingRoute(method, path), dashboardOnly: DASHBOARD_ONLY.has(name), memberAdmin: memberAdminRoute(method, path), view: invitations?.view, requires: permissionOf(name), validate: validator(input), validateOutput }));
     }
   }
   // The sole non-REST primitive is a constrained long poll of the inbox message operation.
