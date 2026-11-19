@@ -19,7 +19,7 @@ Receiving is where mail that arrives at your domains is routed, filtered and sen
 |---|---|---|
 | **Routes** | Every address that receives mail, and where its mail goes. | `support@acme.com → triage → Inbox, Slack support` |
 | **Rules** | Short scripts that run on a route's mail: label it, filter it, or send it on. | If the subject mentions a refund, label it and post it to Slack. |
-| **Endpoints** | Places mail can be sent: Slack, Discord, a webhook or a forward. A named one is called from rules; a webhook can also subscribe to events. | `endpoints.support({ text: email.subject })` |
+| **Endpoints** | Places mail can be sent: Slack, Discord, a webhook or a forward. A named one is called from rules; a route can deliver to a webhook or a forward, and a webhook can also subscribe to events. | `endpoints.support({ text: email.subject })` |
 | **Trace** | Dry-run an email through your routes and rules; nothing is sent or saved. | |
 
 Rules and endpoints are described in full in [rules.md](rules.md); agent inboxes in [inboxes.md](inboxes.md).
@@ -53,7 +53,7 @@ A route that has no rule yet says so in its row (**No rule · add**), so what an
 | Dropped | Not stored. | `drop` |
 | New address per recipient | The domain's catch-all creates an address for each new recipient. | `create_address` |
 
-A route can deliver to inboxes and webhooks. Slack, Discord and forwards are sent by a rule.
+A route can deliver to inboxes, webhooks and confirmed forwards (`forward:<name>` or the endpoint's `con_…` ID), and a forward from a route sends each message whole, as a rule's call does ([rules.md](rules.md#forward-confirmation)). Slack and Discord posts are sent by a rule, which writes the message they post. A route refuses a forward its recipient hasn't confirmed; one they stop later stays on the route and gets nothing.
 
 The list is complete: routing targets and rule targets always show, and webhooks subscribed to an address's received mail show active ones first, then paused ones. An address with more than 50 subscribers shows the first 50 and says how many more there are, with a link to every one (Event webhooks, filtered to that address).
 
@@ -100,7 +100,7 @@ Everything is at most two clicks from Receiving.
 |---|---|
 | See every address and where its mail goes | Receiving → Routes |
 | Create an address | Receiving → New address |
-| Add an alias or pattern, attach a rule, add an endpoint | Receiving → Routes → the address |
+| Add an alias or pattern, attach a rule, add an endpoint or a forward | Receiving → Routes → the address |
 | Add a ready-made rule or write one | Receiving → Rules → New rule |
 | Turn a rule off, edit, trace or delete it | Receiving → Rules → its switch or ⋯ menu |
 | Edit, attach or try a script | Receiving → Rules → the rule (Edit as code for a ready-made one) |

@@ -8218,7 +8218,7 @@
               "null"
             ],
             "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
-            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
+            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key>, webhook:<key> and forward:<name>."
           },
           "match": {
             "type": "string",
@@ -8236,15 +8236,26 @@
               {
                 "type": "array",
                 "items": {
-                  "type": "string",
-                  "maxLength": 128,
-                  "pattern": "^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$",
-                  "description": "An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>)."
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$",
+                      "description": "An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>)."
+                    },
+                    {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(?:con_[a-zA-Z0-9_-]+|forward:[a-z0-9][a-z0-9-]{0,62})$",
+                      "description": "A forward endpoint (con_… or forward:<name>) its recipient confirmed: it gets the whole message, as a rule's endpoints.<name>() call sends it."
+                    }
+                  ],
+                  "description": "An inbox (mbx_… or inbox:<key>), a webhook (mwh_… or webhook:<key>) or a confirmed forward (con_… or forward:<name>)."
                 },
                 "maxItems": 10
               }
             ],
-            "description": "Inbox and webhook IDs, [] to keep, or 'drop'."
+            "description": "Inbox, webhook and forward IDs, [] to keep, or 'drop'."
           },
           "subaddresses": {
             "type": "boolean"
@@ -8292,7 +8303,7 @@
                     "null"
                   ],
                   "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
-                  "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
+                  "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key>, webhook:<key> and forward:<name>."
                 },
                 "match": {
                   "type": "string",
@@ -8310,15 +8321,26 @@
                     {
                       "type": "array",
                       "items": {
-                        "type": "string",
-                        "maxLength": 128,
-                        "pattern": "^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$",
-                        "description": "An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>)."
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 128,
+                            "pattern": "^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$",
+                            "description": "An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>)."
+                          },
+                          {
+                            "type": "string",
+                            "maxLength": 128,
+                            "pattern": "^(?:con_[a-zA-Z0-9_-]+|forward:[a-z0-9][a-z0-9-]{0,62})$",
+                            "description": "A forward endpoint (con_… or forward:<name>) its recipient confirmed: it gets the whole message, as a rule's endpoints.<name>() call sends it."
+                          }
+                        ],
+                        "description": "An inbox (mbx_… or inbox:<key>), a webhook (mwh_… or webhook:<key>) or a confirmed forward (con_… or forward:<name>)."
                       },
                       "maxItems": 10
                     }
                   ],
-                  "description": "Up to 10 destinations, [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it."
+                  "description": "Up to 10 destinations (inboxes, webhooks and confirmed forwards), [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it."
                 },
                 "subaddresses": {
                   "type": "boolean",
@@ -8418,7 +8440,7 @@
               "null"
             ],
             "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
-            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
+            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key>, webhook:<key> and forward:<name>."
           },
           "match": {
             "type": "string",
@@ -8436,15 +8458,26 @@
               {
                 "type": "array",
                 "items": {
-                  "type": "string",
-                  "maxLength": 128,
-                  "pattern": "^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$",
-                  "description": "An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>)."
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$",
+                      "description": "An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>)."
+                    },
+                    {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(?:con_[a-zA-Z0-9_-]+|forward:[a-z0-9][a-z0-9-]{0,62})$",
+                      "description": "A forward endpoint (con_… or forward:<name>) its recipient confirmed: it gets the whole message, as a rule's endpoints.<name>() call sends it."
+                    }
+                  ],
+                  "description": "An inbox (mbx_… or inbox:<key>), a webhook (mwh_… or webhook:<key>) or a confirmed forward (con_… or forward:<name>)."
                 },
                 "maxItems": 10
               }
             ],
-            "description": "Up to 10 destinations, [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it."
+            "description": "Up to 10 destinations (inboxes, webhooks and confirmed forwards), [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it."
           },
           "subaddresses": {
             "type": "boolean",
@@ -8474,7 +8507,7 @@
               "null"
             ],
             "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
-            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
+            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key>, webhook:<key> and forward:<name>."
           },
           "match": {
             "type": "string",
@@ -8492,15 +8525,26 @@
               {
                 "type": "array",
                 "items": {
-                  "type": "string",
-                  "maxLength": 128,
-                  "pattern": "^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$",
-                  "description": "An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>)."
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$",
+                      "description": "An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>)."
+                    },
+                    {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(?:con_[a-zA-Z0-9_-]+|forward:[a-z0-9][a-z0-9-]{0,62})$",
+                      "description": "A forward endpoint (con_… or forward:<name>) its recipient confirmed: it gets the whole message, as a rule's endpoints.<name>() call sends it."
+                    }
+                  ],
+                  "description": "An inbox (mbx_… or inbox:<key>), a webhook (mwh_… or webhook:<key>) or a confirmed forward (con_… or forward:<name>)."
                 },
                 "maxItems": 10
               }
             ],
-            "description": "Up to 10 destinations, [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it."
+            "description": "Up to 10 destinations (inboxes, webhooks and confirmed forwards), [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it."
           },
           "subaddresses": {
             "type": "boolean",
@@ -8763,7 +8807,8 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Webhook and forward endpoint IDs."
           },
           "skipBase": {
             "type": "boolean",
@@ -8985,6 +9030,10 @@
       "Endpoint": {
         "type": "object",
         "properties": {
+          "id": {
+            "type": "string",
+            "description": "Endpoint ID: mwh_… for a webhook, con_… for Slack, Discord or a forward. Routes list webhooks and forwards by ID."
+          },
           "name": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
@@ -9037,6 +9086,7 @@
           }
         },
         "required": [
+          "id",
           "name",
           "type",
           "status",
@@ -9230,7 +9280,7 @@
               "from": {
                 "type": "string",
                 "maxLength": 254,
-                "description": "Receiving address ID (mbx_…) or address that sends the confirmation request. Defaults to the oldest permanent receiving address."
+                "description": "Receiving address ID (mbx_…) or address that sends the confirmation request. Mail a route forwards for an address with no permanent inbox of its own is forwarded from it too. Defaults to the oldest permanent receiving address."
               },
               "preverify": {
                 "type": "boolean",
@@ -12104,7 +12154,7 @@
               "null"
             ],
             "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
-            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
+            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key>, webhook:<key> and forward:<name>."
           },
           "address": {
             "type": "string"
@@ -12250,7 +12300,7 @@
               "null"
             ],
             "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
-            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
+            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key>, webhook:<key> and forward:<name>."
           },
           "address": {
             "type": "string",
@@ -12348,7 +12398,7 @@
               "null"
             ],
             "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
-            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key> and webhook:<key>."
+            "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key>, webhook:<key> and forward:<name>."
           },
           "displayName": {
             "type": [
@@ -42220,7 +42270,7 @@
         ],
         "operationId": "getRouting",
         "summary": "Read the routing config",
-        "description": "Every explicit route and the current version (also the ETag). With format=config, routes omit IDs and refer to keyed inboxes and webhooks as inbox:<key> and webhook:<key>, ready to edit and PUT back. An inbox's own addresses route to it without a route.",
+        "description": "Every explicit route and the current version (also the ETag). With format=config, routes omit IDs and refer to keyed inboxes, webhooks and forwards as inbox:<key>, webhook:<key> and forward:<name>, ready to edit and PUT back. An inbox's own addresses route to it without a route.",
         "parameters": [
           {
             "schema": {
@@ -42716,7 +42766,7 @@
         ],
         "operationId": "createRoute",
         "summary": "Route a recipient",
-        "description": "Example: { \"match\": \"support@acme.com\", \"to\": [\"inbox:support\", \"webhook:helpdesk\"] } keeps the Support inbox and adds a webhook. Mail is routed by the new version as soon as this returns. Test first with testRouting.",
+        "description": "Example: { \"match\": \"support@acme.com\", \"to\": [\"inbox:support\", \"webhook:helpdesk\", \"forward:team\"] } keeps the Support inbox, adds a webhook and forwards each message whole to a confirmed forward endpoint. Mail is routed by the new version as soon as this returns. Test first with testRouting.",
         "parameters": [
           {
             "schema": {
@@ -46038,7 +46088,7 @@
         ],
         "operationId": "createEndpoint",
         "summary": "Create a named Slack, Discord, webhook or forward endpoint",
-        "description": "Slack and Discord URLs are credentials: stored encrypted, pinned to the provider host and never returned. A webhook endpoint is a route-only inbound webhook; its signing secret is returned once. A forward emails its recipient a single-use confirmation link (24 hours); it stays pending until they choose Allow. With preverify, an address on a domain this workspace has verified is ready at once.",
+        "description": "Slack and Discord URLs are credentials: stored encrypted, pinned to the provider host and never returned. A webhook endpoint is a route-only inbound webhook; its signing secret is returned once. A forward emails its recipient a single-use confirmation link (24 hours); it stays pending until they choose Allow. With preverify, an address on a domain this workspace has verified is ready at once. Once ready, a rule calls it as endpoints.<name>() and a route forwards to it as forward:<name>; either way the recipient gets each message whole: text, HTML and attachments.",
         "requestBody": {
           "required": true,
           "content": {

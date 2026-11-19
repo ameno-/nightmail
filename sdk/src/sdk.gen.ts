@@ -2632,7 +2632,7 @@ export const configureRegionAutoValidation = <ThrowOnError extends boolean = fal
 /**
  * Read the routing config
  *
- * Every explicit route and the current version (also the ETag). With format=config, routes omit IDs and refer to keyed inboxes and webhooks as inbox:<key> and webhook:<key>, ready to edit and PUT back. An inbox's own addresses route to it without a route.
+ * Every explicit route and the current version (also the ETag). With format=config, routes omit IDs and refer to keyed inboxes, webhooks and forwards as inbox:<key>, webhook:<key> and forward:<name>, ready to edit and PUT back. An inbox's own addresses route to it without a route.
  */
 export const getRouting = <ThrowOnError extends boolean = false>(options?: Options<GetRoutingData, ThrowOnError>): RequestResult<GetRoutingResponses, GetRoutingErrors, ThrowOnError> => (options?.client ?? client).get<GetRoutingResponses, GetRoutingErrors, ThrowOnError>({
     security: [
@@ -2703,7 +2703,7 @@ export const listRoutes = <ThrowOnError extends boolean = false>(options?: Optio
 /**
  * Route a recipient
  *
- * Example: { "match": "support@acme.com", "to": ["inbox:support", "webhook:helpdesk"] } keeps the Support inbox and adds a webhook. Mail is routed by the new version as soon as this returns. Test first with testRouting.
+ * Example: { "match": "support@acme.com", "to": ["inbox:support", "webhook:helpdesk", "forward:team"] } keeps the Support inbox, adds a webhook and forwards each message whole to a confirmed forward endpoint. Mail is routed by the new version as soon as this returns. Test first with testRouting.
  */
 export const createRoute = <ThrowOnError extends boolean = false>(options: Options<CreateRouteData, ThrowOnError>): RequestResult<CreateRouteResponses, CreateRouteErrors, ThrowOnError> => (options.client ?? client).post<CreateRouteResponses, CreateRouteErrors, ThrowOnError>({
     security: [
@@ -3095,7 +3095,7 @@ export const listEndpoints = <ThrowOnError extends boolean = false>(options?: Op
 /**
  * Create a named Slack, Discord, webhook or forward endpoint
  *
- * Slack and Discord URLs are credentials: stored encrypted, pinned to the provider host and never returned. A webhook endpoint is a route-only inbound webhook; its signing secret is returned once. A forward emails its recipient a single-use confirmation link (24 hours); it stays pending until they choose Allow. With preverify, an address on a domain this workspace has verified is ready at once.
+ * Slack and Discord URLs are credentials: stored encrypted, pinned to the provider host and never returned. A webhook endpoint is a route-only inbound webhook; its signing secret is returned once. A forward emails its recipient a single-use confirmation link (24 hours); it stays pending until they choose Allow. With preverify, an address on a domain this workspace has verified is ready at once. Once ready, a rule calls it as endpoints.<name>() and a route forwards to it as forward:<name>; either way the recipient gets each message whole: text, HTML and attachments.
  */
 export const createEndpoint = <ThrowOnError extends boolean = false>(options: Options<CreateEndpointData, ThrowOnError>): RequestResult<CreateEndpointResponses, CreateEndpointErrors, ThrowOnError> => (options.client ?? client).post<CreateEndpointResponses, CreateEndpointErrors, ThrowOnError>({
     security: [

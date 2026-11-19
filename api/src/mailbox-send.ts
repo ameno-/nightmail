@@ -56,16 +56,7 @@ export async function resolveAttachments(runtime:Runtime, mailbox:Pick<MailboxRo
       const [file]=await runtime.db.select({file:mailAttachments,region:mailMessages.region}).from(mailAttachments).innerJoin(mailMessages,eq(mailMessages.id,mailAttachments.messageId))
         .innerJoin(mailboxMessages,and(eq(mailboxMessages.messageId,mailAttachments.messageId),eq(mailboxMessages.mailboxId,mailbox.id))).where(and(eq(mailAttachments.workspaceId,scope.workspaceId),eq(mailAttachments.id,item.id),sql`coalesce(${mailMessages.verdicts}->>'virus',CASE WHEN ${mailMessages.direction}='outbound' THEN 'PASS' END)='PASS'`));
       if(!file?.region) throw new ApiError(404,'ATTACHMENT_NOT_FOUND','The attachment was not found in this mailbox.','attachments');
-      let bytes:Uint8Array;
-      try {
-        if(file.file.sizeBytes>MAX_TOTAL_ATTACHMENT_BYTES)throw new ApiError(413,'ATTACHMENT_LIMIT_EXCEEDED','The attachment is too large.');
-        bytes=await withMailObjects(runtime,scope.workspaceId,file.region,file.file.bucket,async(objects,s3)=>{
-          if(file.file.sourceId) await archiveMailboxFiles(runtime,scope.workspaceId,file.file.messageId,s3);
-          const key=s3 ? await readableMailboxKey(runtime,scope.workspaceId,file.region!,file.file.bucket,file.file.storageKey,'att',runtime.db,s3) : file.file.storageKey;
-          const object=await objects.get(key);if(!object)throw new Error('Missing attachment');
-          return readMailBytes(object,file.file.sizeBytes,MAX_TOTAL_ATTACHMENT_BYTES);
-        });
-      } catch (e) {if(e instanceof ModuleLoadError || e instanceof ApiError) throw e; throw new ApiError(503,'ATTACHMENT_UNAVAILABLE','The attachment could not be read.','attachments',true);}
+      const bytes=await mailAttachmentBytes(runtime,scope.workspaceId,file.region,file.file);
       out.push(await storeAttachmentBytes(runtime,scope,{filename:file.file.filename,contentType:file.file.contentType,disposition:file.file.disposition,contentId:file.file.contentId??undefined},bytes));
     } else {
       const [source]=await runtime.db.select().from(sendingAttachments).where(and(eq(sendingAttachments.workspaceId,scope.workspaceId),eq(sendingAttachments.id,item.id)));
@@ -75,6 +66,18 @@ export async function resolveAttachments(runtime:Runtime, mailbox:Pick<MailboxRo
     if(out.reduce((sum,file)=>sum+file.size,0)>MAX_TOTAL_ATTACHMENT_BYTES)throw new ApiError(413,'ATTACHMENT_LIMIT_EXCEEDED',`Attachments may not exceed ${mib(MAX_TOTAL_ATTACHMENT_BYTES)} combined.`,'attachments');
   }
   return out;
+}
+/** A stored attachment's bytes (received, or a sent copy archived from its upload), read from the mail store. At most 8 MiB. */
+export async function mailAttachmentBytes(runtime:Runtime,wid:string,region:string,file:typeof mailAttachments.$inferSelect):Promise<Uint8Array>{
+  try {
+    if(file.sizeBytes>MAX_TOTAL_ATTACHMENT_BYTES)throw new ApiError(413,'ATTACHMENT_LIMIT_EXCEEDED','The attachment is too large.');
+    return await withMailObjects(runtime,wid,region,file.bucket,async(objects,s3)=>{
+      if(file.sourceId) await archiveMailboxFiles(runtime,wid,file.messageId,s3);
+      const key=s3 ? await readableMailboxKey(runtime,wid,region,file.bucket,file.storageKey,'att',runtime.db,s3) : file.storageKey;
+      const object=await objects.get(key);if(!object)throw new Error('Missing attachment');
+      return readMailBytes(object,file.sizeBytes,MAX_TOTAL_ATTACHMENT_BYTES);
+    });
+  } catch (e) {if(e instanceof ModuleLoadError || e instanceof ApiError) throw e; throw new ApiError(503,'ATTACHMENT_UNAVAILABLE','The attachment could not be read.','attachments',true);}
 }
 
 /** Post-commit archival. If the request dies, the upload remains pinned and a download can finish the exact same copy. */

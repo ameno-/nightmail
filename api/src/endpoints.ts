@@ -5,17 +5,20 @@
 // /v1/inbound/webhooks (webhooks, named or not) are two views of it with the same checks and caps.
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, and, desc, eq, lt } from 'drizzle-orm';
-import { ApiError, digest, errors, id, isoTime, json, lasting, nextCursor, randomSecret, readCursor, receivingAdmin, response, security, WEBHOOK_CHANGE, webhookUrlHint, WebhookUrlHint, type App, type Ctx, type ClaimedWebhook, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { ApiError, digest, errors, id, isoTime, json, lasting, nextCursor, randomSecret, readCursor, receivingAdmin, response, security, WEBHOOK_CHANGE, webhookUrlHint, WebhookUrlHint, wrapModuleLoad, type App, type Ctx, type ClaimedWebhook, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { claimSends } from './states.js';
-import { endpoints, mailboxes, mailboxWebhookDeliveries, mailMessages, retainedMail, type EndpointRecord } from './db/mailbox.js';
+import { endpoints, mailAttachments, mailboxes, mailboxWebhookDeliveries, mailMessages, retainedMail, type EndpointRecord } from './db/mailbox.js';
 import { ownReceiving, resumeNeedsUrl } from './rituals.js';
 import { recordAudit } from './audit.js';
 import { approvalField, approvalTie, tiedNextStep } from './approval-ties.js';
 import { encrypt, decrypt, encryptWebhookHeaders, postWebhook, webhookHeaderViews, WebhookHeaders, WebhookHeaderViews, webhookSecret, webhookUrl } from './operations.js';
 import { inboundEventTypes, webhookSecretBinding } from './mailbox-events.js';
 import { InboundAddressId } from './inbound-threads.js';
-import { lockMailboxLane } from './mailbox-store.js';
-import { sendFromMailbox } from './mailbox-send.js';
+import { htmlToPlain, lockMailboxLane } from './mailbox-store.js';
+import { mailAttachmentBytes, safeForwardHtml, sendFromMailbox } from './mailbox-send.js';
+import { AttachmentContentId, AttachmentContentType, blockedExtension, mailAddress } from './outbound-content.js';
+import { SEND_LIMITS } from './send-limits.js';
+import { plusBase } from './routing-match.js';
 import { chargeManualDelivery, JobDeferred } from './jobs.js';
 import { detachDestination, enableRouting, RoutingKey } from './routing.js';
 import { endpointPolicy, DEFAULT_POLICY, type EndpointPolicy } from './ritual-retry.js';
@@ -96,6 +99,7 @@ const base = '/v1/endpoints',
     idempotent: z.boolean().describe('The receiver deduplicates by the Idempotency-Key header, so unknown outcomes are replayed. Webhooks only.'),
   }).openapi('EndpointPolicy');
 export const Endpoint = z.object({
+  id: z.string().describe('Endpoint ID: mwh_… for a webhook, con_… for Slack, Discord or a forward. Routes list webhooks and forwards by ID.'),
   name: Name,
   type: z.enum(types),
   status: Status,
@@ -116,7 +120,7 @@ const CreateEndpoint = z.discriminatedUnion('type', [
   }).strict(),
   z.object({
     type: z.literal('forward'), name: Name, address: z.email().max(254).toLowerCase().describe('Recipient. They confirm with an emailed link unless preverify applies.'),
-    from: z.string().max(254).optional().describe('Receiving address ID (mbx_…) or address that sends the confirmation request. Defaults to the oldest permanent receiving address.'),
+    from: z.string().max(254).optional().describe('Receiving address ID (mbx_…) or address that sends the confirmation request. Mail a route forwards for an address with no permanent inbox of its own is forwarded from it too. Defaults to the oldest permanent receiving address.'),
     preverify: z.boolean().default(false).describe('Skip the emailed confirmation. Only for addresses on a domain this workspace has verified.'),
   }).strict(),
 ]).openapi('CreateEndpoint');
@@ -135,13 +139,13 @@ export async function endpointView(runtime: Runtime, w: string, r: EndpointRow):
   const name = r.key!, policy = endpointPolicy(r.type, r), call = endpointCall(name), target = await endpointTarget(runtime, w, r), status = endpointStatus(r);
   const payload = endpointPayloads[r.type].signature(name).replace(/^endpoints\.[^(]+/, call);
   const nextStep = {
-    ready: `Call it from a rule: ${payload}.`,
+    ready: r.type === 'forward' ? `Call it from a rule: ${payload}. Or forward a route's mail to it: add forward:${name} to the route's to.` : `Call it from a rule: ${payload}.`,
     pending: `Waiting for ${target} to open the confirmation link (expires ${iso(r.expires_at)}). Only the recipient can confirm. Resend with sendEndpointVerification if it was lost.`,
     expired: `The confirmation link expired. Send a new one with sendEndpointVerification.`,
     declined: `${target} declined or stopped forwards. A new request is possible 30 days after ${iso(r.declined_at)}.`,
     paused: needsUrl(r) ? `Deliveries were held when the approval that created or changed this endpoint was removed. Resume by sending its URL again: updateEndpoint { "url": "…", "paused": false }.` : `Deliveries are held. Resume with updateEndpoint { "paused": false }.`,
   }[status];
-  return { name, type: r.type, status, call, target, policy, expiresAt: status === 'pending' || status === 'expired' ? iso(r.expires_at) : null, nextStep, createdAt: iso(r.created_at)! };
+  return { id: r.id, name, type: r.type, status, call, target, policy, expiresAt: status === 'pending' || status === 'expired' ? iso(r.expires_at) : null, nextStep, createdAt: iso(r.created_at)! };
 }
 const missingEndpoint = (name: string) => new ApiError(404, 'NOT_FOUND', `No endpoint named ${name}. List them with listEndpoints.`);
 
@@ -161,7 +165,7 @@ export async function assertEndpointUnused(tx: DbExecutor, w: string, endpoint: 
       ? `Remove the call or detach the ${them}, then delete.` : `To ${change} it, create a new endpoint, point the ${them} at it, then delete this one.`), change === 'delete' ? undefined : field);
   }
   if (change === 'delete' && (await tx.execute(sql`SELECT FROM mail_routes WHERE workspace_id=${w} AND destinations ? ${endpoint.id} LIMIT 1`)).rowCount)
-    throw new ApiError(409, 'ENDPOINT_IN_USE', `A route delivers to ${endpoint.name ?? endpoint.id}. Remove it from routes first (deleteInboundWebhook with detach=true does both).`);
+    throw new ApiError(409, 'ENDPOINT_IN_USE', `A route delivers to ${endpoint.name ?? endpoint.id}. Remove it from routes first with updateRoute (for a webhook, deleteInboundWebhook with detach=true does both).`);
 }
 /** One name space across every type (the unique index mailbox_webhooks_key backs it). Caller holds the address lane. */
 export async function assertEndpointName(tx: DbExecutor, w: string, name: string, exceptId = '', field = 'name') {
@@ -362,7 +366,7 @@ export function registerEndpoints(app: App) {
   });
   app.openapi(createRoute({
     ...meta, method: 'post', path: base, operationId: 'createEndpoint', summary: 'Create a named Slack, Discord, webhook or forward endpoint',
-    description: 'Slack and Discord URLs are credentials: stored encrypted, pinned to the provider host and never returned. A webhook endpoint is a route-only inbound webhook; its signing secret is returned once. A forward emails its recipient a single-use confirmation link (24 hours); it stays pending until they choose Allow. With preverify, an address on a domain this workspace has verified is ready at once.',
+    description: 'Slack and Discord URLs are credentials: stored encrypted, pinned to the provider host and never returned. A webhook endpoint is a route-only inbound webhook; its signing secret is returned once. A forward emails its recipient a single-use confirmation link (24 hours); it stays pending until they choose Allow. With preverify, an address on a domain this workspace has verified is ready at once. Once ready, a rule calls it as endpoints.<name>() and a route forwards to it as forward:<name>; either way the recipient gets each message whole: text, HTML and attachments.',
     request: { body: json(CreateEndpoint) }, responses: { 201: response(Endpoint.extend({ secret: z.string().optional().describe('Webhook signing secret, shown once.') }).openapi('CreatedEndpoint')), ...errors },
   }), async c => {
     const q = c.req.valid('json'), w = receivingAdmin(c, manage).workspaceId;
@@ -646,7 +650,7 @@ function registerForwardPages(app: App) {
     const token = c.req.param('token'), row = /^fwd_[0-9a-f]{64}$/.test(token) ? (await c.env.db.execute<Pending>(sql`SELECT workspace_id,id,encrypted_target,request_from FROM mailbox_webhooks WHERE ${await pendingWhere(token)}`)).rows[0] : undefined;
     if (!row) return page(c, 'This link has expired', '<p>It was already used, or more than 24 hours have passed. Nothing will be forwarded unless a new request is allowed.</p>', 410);
     const address = await decrypt(c.env, row.encrypted_target, targetBinding(row.workspace_id, row.id));
-    return page(c, 'Allow email forwarding?', `<p><strong>${escapeHtml(row.request_from ?? `A ${productName} workspace`)}</strong> wants to forward the email it receives to <strong>${escapeHtml(address)}</strong>.</p><p>Forwarded messages arrive as plain text from that address, each with a link to stop. If you decline, this sender cannot ask again for 30 days.</p><form method="post"><button name="choice" value="allow">Allow forwarding</button><button name="choice" value="decline">Decline</button></form>`);
+    return page(c, 'Allow email forwarding?', `<p><strong>${escapeHtml(row.request_from ?? `A ${productName} workspace`)}</strong> wants to forward the email it receives to <strong>${escapeHtml(address)}</strong>.</p><p>Forwarded messages arrive from that address with their attachments, each with a link to stop. If you decline, this sender cannot ask again for 30 days.</p><form method="post"><button name="choice" value="allow">Allow forwarding</button><button name="choice" value="decline">Decline</button></form>`);
   });
   app.post(confirm, async c => {
     const token = c.req.param('token');
@@ -691,45 +695,126 @@ function registerForwardPages(app: App) {
  */
 export async function sendToEndpoint(runtime: Runtime, w: string, h: ClaimedWebhook) {
   if (h.type === undefined || h.type === 'webhook') return (await import('./inbound-webhook.js')).deliverInboundWebhook(runtime, w, h);
-  const event = h.payload as { messageId: string; type: string; ritualBody?: unknown; data: { recipients?: string[]; junk?: boolean } },
+  const event = h.payload as { messageId: string; type: string; ritualBody?: unknown; grants?: string[]; data: { recipients?: string[]; junk?: boolean } },
     endpointId = h.webhook_id;
-  const d = (await runtime.db.execute<{ type: EndpointType; encrypted_target: string }>(sql`SELECT type,encrypted_target FROM mailbox_webhooks WHERE workspace_id=${w} AND id=${endpointId} AND type<>'webhook' AND verified AND declined_at IS NULL`)).rows[0];
+  const d = (await runtime.db.execute<{ type: EndpointType; encrypted_target: string; request_from: string | null }>(sql`SELECT type,encrypted_target,request_from FROM mailbox_webhooks WHERE workspace_id=${w} AND id=${endpointId} AND type<>'webhook' AND verified AND declined_at IS NULL`)).rows[0];
   if (!d || event.type !== 'message.received' || event.data.junk || !event.data.recipients?.length)
     throw new ApiError(422, 'CONNECTOR_UNAVAILABLE', 'Only confirmed endpoints receive routed, non-junk mail.');
   const value = await decrypt(runtime, d.encrypted_target, targetBinding(w, endpointId));
   if (d.type !== 'forward') return postWebhook(runtime, pinnedUrl(d.type, value), {}, JSON.stringify(renderChat(d.type, event.ritualBody)), null, targetBinding(w, endpointId));
+  await sendForward(runtime, w, endpointId, value, d.request_from, event.messageId, event.data.recipients[0]!, event.grants ?? []);
+  return { status: 202 };
+}
+
+// ── Forwards ──────────────────────────────────────────────────────────────────────────────
+/** One sent message's attachment limits (send-limits.ts, sending.ts AttachmentIds). */
+const FORWARD_FILES = 20, FORWARD_BODY = 500_000;
+const ReplyAddress = mailAddress();
+type Received = typeof mailMessages.$inferSelect;
+const forwardBlocked = () => new ApiError(422, 'FORWARD_BLOCKED', 'Automated, junk, unparsed, looped or unscanned mail is never forwarded.');
+/**
+ * The received attachments a forward carries, copied into sending uploads in order, as many as one sent message may
+ * (20 files, 8 MiB decoded together). The rest (over those limits, a type SES does not deliver, or past the workspace's
+ * stored attachment quota) are named in the forward instead. Hosted, forwarded files are someone else's, so each must
+ * pass the content screen's attachment check whatever the sender's standing (screenedAttachment, which the dispatcher
+ * applies on probation): one that doesn't is named too, rather than holding back the whole forward. Like every send,
+ * the copies are made before the send's transaction (resolveAttachments); an upload a failed attempt leaves unused
+ * expires with ordinary attachment retention.
+ */
+async function forwardAttachments(runtime: Runtime, w: string, m: Received) {
+  const rows = m.attachmentCount ? await runtime.db.select().from(mailAttachments).where(and(eq(mailAttachments.workspaceId, w), eq(mailAttachments.messageId, m.id))).orderBy(mailAttachments.id) : [];
+  const { storeAttachmentBytes } = rows.length ? await wrapModuleLoad(() => import('./sending.js')) : { storeAttachmentBytes: undefined };
+  const screened = rows.length && runtime.config.hostedScreen ? (await wrapModuleLoad(() => import('./screened-html.js'))).screenedAttachment : undefined;
+  const files: Awaited<ReturnType<NonNullable<typeof storeAttachmentBytes>>>[] = [], left: string[] = [], contentIds = new Set<string>();
+  let bytes = 0;
+  for (const file of rows) {
+    const filename = file.filename.replace(/[\x00-\x1f\x7f/\\]/g, '_').slice(0, 200) || 'attachment';
+    if (files.length >= FORWARD_FILES || !file.sizeBytes || bytes + file.sizeBytes > SEND_LIMITS.attachmentBytes || blockedExtension(filename)) { left.push(filename); continue; }
+    const contentId = file.contentId && AttachmentContentId.safeParse(file.contentId).success && !contentIds.has(file.contentId) ? file.contentId : undefined;
+    const metadata = { filename, contentType: AttachmentContentType.safeParse(file.contentType).success ? file.contentType : 'application/octet-stream',
+      disposition: contentId && file.disposition === 'inline' ? 'inline' as const : 'attachment' as const, contentId };
+    try {
+      const content = await mailAttachmentBytes(runtime, w, m.region ?? '', file);
+      if (screened) Object.assign(metadata, screened(metadata.filename, metadata.contentType, content, metadata.disposition === 'inline'));
+      files.push(await storeAttachmentBytes!(runtime, { workspaceId: w }, metadata, content));
+    } catch (e) {
+      // Refused for what it is (its name, type, content or the stored attachment quota): named instead. Anything else is retried.
+      if (!(e instanceof ApiError) || e.retryable || e.status >= 500) throw e;
+      left.push(filename); continue;
+    }
+    bytes += file.sizeBytes;
+    if (contentId) contentIds.add(contentId);
+  }
+  return { files, left };
+}
+/**
+ * The forward's sender: the permanent receiving address the mail was sent to (or its plus base), else the one that
+ * asked the recipient to confirm, else the workspace's oldest permanent receiving address. A route can forward mail
+ * for a pattern, a catch-all or an address without an inbox of its own, which has no address to send from.
+ */
+async function forwardSender(tx: DbExecutor, w: string, recipient: string, requestFrom: string | null) {
+  const candidates = sql.param([recipient, plusBase(recipient), ...(requestFrom ? [requestFrom] : [])]);
+  const [box] = await tx.select().from(mailboxes).where(and(eq(mailboxes.workspaceId, w), sql`${mailboxes.id}=(SELECT a.mailbox_id FROM mailbox_addresses a JOIN mailboxes b ON b.id=a.mailbox_id AND b.workspace_id=a.workspace_id
+    WHERE a.workspace_id=${w} AND a.address=ANY(${candidates}::text[]) AND b.kind<>'inbox' AND b.expires_at IS NULL ORDER BY array_position(${candidates}::text[],a.address) LIMIT 1)`));
+  return box ?? senderBox(tx, w);
+}
+/**
+ * Forwards a received message whole to a confirmed recipient: its text, its HTML through the same allow-list as every
+ * other received HTML Nightmail passes on (safeForwardHtml), and its attachments (forwardAttachments).
+ *
+ * Headers keep the forward deliverable under the original sender's DMARC policy: From is the workspace's own receiving
+ * address (SES signs it with that domain's DKIM, so SPF and DKIM align with From), with the original sender in the
+ * display name, and Reply-To is the original Reply-To or From, so a reply reaches the sender. Resent-* fields would
+ * leave the original From in place, which fails DMARC (and a p=reject domain is refused) once SES signs for another
+ * domain. Each forward carries Auto-Submitted and a loop token, and any message carrying either is never forwarded
+ * (forwardEligibility), so a forward that comes back, through another forwarder or another installation, stops there.
+ */
+async function sendForward(runtime: Runtime, w: string, endpointId: string, address: string, requestFrom: string | null, messageId: string, recipient: string, grants: string[]) {
   const stopUrl = await forwardStopUrl(runtime, endpointId);
+  // Whether it may be forwarded is decided once at ingest (forwardEligibility); only whether it is still kept changes.
+  // A message stored without the verdict (sandbox mail, an IMAP append) is never forwarded.
+  const received = async (db: DbExecutor) => {
+    const [m] = await db.select().from(mailMessages).where(and(eq(mailMessages.workspaceId, w), eq(mailMessages.id, messageId), eq(mailMessages.direction, 'inbound'), retainedMail()));
+    if (!m || m.verdicts.forwardEligible !== true) throw forwardBlocked();
+    return m;
+  };
+  const first = await received(runtime.db);
+  // A forward already sent copies nothing again; mail_forward_once below decides it.
+  if ((await runtime.db.execute(sql`SELECT FROM mail_forward_once WHERE workspace_id=${w} AND message_id=${first.id} AND endpoint=${endpointId}`)).rowCount) return;
+  const { files, left } = await forwardAttachments(runtime, w, first);
   await runtime.db.transaction(async tx => {
-    await checkExternal(tx, w, value);
-    const [m] = await tx.select().from(mailMessages).where(and(eq(mailMessages.workspaceId, w), eq(mailMessages.id, event.messageId), eq(mailMessages.direction, 'inbound'), retainedMail()));
-    // Whether it may be forwarded is decided once at ingest (forwardEligibility); only whether it is still kept changes.
-    // A message stored without the verdict (sandbox mail, an IMAP append) is never forwarded.
-    if (!m || m.verdicts.forwardEligible !== true)
-      throw new ApiError(422, 'FORWARD_BLOCKED', 'Automated, junk, unparsed, looped or unscanned mail is never forwarded.');
-    const recipient = event.data.recipients![0]!;
-    const [box] = await tx.select().from(mailboxes).where(and(eq(mailboxes.workspaceId, w), sql`id=(SELECT mailbox_id FROM mailbox_addresses WHERE workspace_id=${w} AND address IN (${recipient},regexp_replace(${recipient},'[+][^@]*@','@')) ORDER BY (address=${recipient}) DESC LIMIT 1)`));
-    if (!box || box.kind === 'inbox' || box.expiresAt) throw new ApiError(422, 'FORWARD_SENDER_REQUIRED', 'Forward from a permanent receiving address.');
+    await checkExternal(tx, w, address);
+    const m = await received(tx), box = await forwardSender(tx, w, recipient, requestFrom);
     // One forward per message and endpoint, decided in the same transaction as the send.
-    if (!(await tx.execute(sql`INSERT INTO mail_forward_once(workspace_id,message_id,endpoint,grants) VALUES(${w},${m.id},${endpointId},${JSON.stringify((h.payload as {grants?:string[]}).grants??[])}::jsonb) ON CONFLICT DO NOTHING RETURNING 1`)).rowCount) return;
+    if (!(await tx.execute(sql`INSERT INTO mail_forward_once(workspace_id,message_id,endpoint,grants) VALUES(${w},${m.id},${endpointId},${JSON.stringify(grants)}::jsonb) ON CONFLICT DO NOTHING RETURNING 1`)).rowCount) return;
     await debit(tx, w, 'forward-daily', 1000, 'day');
     await debit(tx, w, 'forward-hourly:' + endpointId, 200, 'hour');
     // Any incoming loop token blocks a forward (forwardEligibility), including tokens from other installations.
     const loop = await crypto.subtle.importKey('raw', Buffer.from(runtime.config.encryptionKey, 'hex'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
     const token = Buffer.from(await crypto.subtle.sign('HMAC', loop, new TextEncoder().encode(w + ':' + m.id))).toString('base64url');
     const sender = (((m.verdicts as { ritualVerified?: boolean }).ritualVerified && m.fromName) || m.fromAddress || 'Sender').replaceAll('@', ' at ').replace(/[\x00-\x1f<>\x7f]/g, ' ').slice(0, 100);
-    const sent=await sendFromMailbox(runtime, tx, {
+    const replyTo = [...new Set((m.replyTo.length ? m.replyTo.map(a => a.address) : [m.fromAddress ?? '']).map(a => a.toLowerCase()))]
+      .filter(a => a !== address && a !== box.address && ReplyAddress.safeParse(a).success).slice(0, 10);
+    const notes = [
+      ...(m.bodyTruncated ? ['Parts of the original were too large to forward.'] : []),
+      ...(left.length ? [`Not attached: ${left.slice(0, 10).join(', ')}${left.length > 10 ? ` and ${left.length - 10} more` : ''} (over the 20-file, 8 MiB limit, or a type that can't be sent).`] : []),
+    ].join(' ');
+    const text = (m.text || (m.html ? htmlToPlain(m.html) : '')).slice(0, FORWARD_BODY);
+    const rich = m.html ? safeForwardHtml(m.html) : null;
+    const footer = `<div style="margin-top:24px;padding-top:8px;border-top:1px solid #ddd;color:#666;font-size:12px">Forwarded by ${escapeHtml(box.address)}.${notes ? ' ' + escapeHtml(notes) : ''} <a href="${escapeHtml(stopUrl)}">Stop these forwards</a></div>`;
+    const sent = await sendFromMailbox(runtime, tx, {
       actor: { workspaceId: w, keyId: 'forward:' + endpointId, permissions: ['send'], domains: [] },
       scope: { workspaceId: w }, mailbox: box, from: box.address,
       fromName: `${sender} via ${(box.displayName || box.address.split('@')[0]!).replace(/[\x00-\x1f@<>\x7f]/g, ' ').slice(0, 80)}`,
-      to: [value], cc: [], bcc: [], replyTo: [],
+      to: [address], cc: [], bcc: [], replyTo,
       subject: 'Fwd: ' + m.subject.slice(0, 200),
-      text: `${(m.text || m.snippet || '(No plain text)').slice(0, 64000)}\n\n--\nForwarded by ${box.address}. Stop these forwards: ${stopUrl}`,
+      text: `${text || '(No plain text)'}\n\n--\nForwarded by ${box.address}.${notes ? ' ' + notes : ''} Stop these forwards: ${stopUrl}`,
+      ...(rich && rich.length <= FORWARD_BODY ? { html: rich + footer } : {}),
       screen: true, inReplyTo: null, references: [], autoSubmitted: 'auto-generated',
       headers: [{ name: loopHeader, value: 'v1.1.' + token }],
-      attachments: [],
+      attachments: files,
     });
     await tx.execute(sql`UPDATE mail_forward_once SET email_id=${sent.message.sendingEmailId} WHERE workspace_id=${w} AND message_id=${m.id} AND endpoint=${endpointId}`);
   });
-  return { status: 202 };
 }
 export { DEFAULT_POLICY };
