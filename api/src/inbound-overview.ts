@@ -147,7 +147,7 @@ export function registerInboundOverview(app: App, deps: Deps) {
   app.openapi(createRoute({
     method: 'get', path: '/v1/inbound/overview', operationId: 'getInboundOverview', tags: ['Inbound addresses'], security: deps.security,
     summary: 'Every route mail can take, with its rules and endpoints, in one read',
-    description: 'One page of routes (addresses, agent inboxes, address patterns, explicit routes and catch-alls) merged and ordered by host, kind and address, each resolved to the rules that run on it and where its mail goes. Also returns counts per kind, the rules, up to 100 endpoints and 100 inbound webhooks, and the domains. Members and scoped keys see only their addresses. Over MCP, it requires an owner or admin, like the other receiving reads.',
+    description: 'One page of routes (addresses, agent inboxes, address patterns, explicit routes and catch-alls) merged and ordered by host, kind and address, each resolved to the rules that run on it and where its mail goes. Also returns counts per kind, the rules, up to 100 endpoints and 100 inbound webhooks, and the domains. Members and scoped keys see only their addresses. With an MCP sign-in (approval), it requires an owner or admin, like the other receiving reads.',
     request: { query: z.object({
       kind: Kinds.optional(), origin: z.enum(['api', 'auto']).optional().describe('Filters address rows only: api (created on purpose) or auto (created by a catch-all). Other kinds are unaffected.'),
       domain: z.string().max(253).optional().describe('Receiving host, e.g. reply.acme.com.'), q: z.string().max(200).optional().describe('Matches the address, an alias or the display name.'),
