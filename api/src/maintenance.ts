@@ -154,7 +154,7 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   await drain('sending_email_events', batch(sql`sending_email_events`, sql`created_at < ${cutoff}`));
   // An email and its attachment links leave in the same statement, so no link can outlive its email.
   await drain('sending_emails', () => sql`WITH gone AS (
-      DELETE FROM sending_emails WHERE ctid IN (SELECT ctid FROM sending_emails WHERE created_at < ${cutoff} AND status NOT IN ('queued','attempting') LIMIT ${RETENTION_BATCH})
+      DELETE FROM sending_emails WHERE ctid IN (SELECT ctid FROM sending_emails WHERE created_at < ${cutoff} AND status NOT IN ('queued','attempting','scheduled') LIMIT ${RETENTION_BATCH})
       RETURNING id, workspace_id
     ), links AS (
       DELETE FROM sending_attachment_links l USING gone e WHERE l.owner_type = 'email' AND l.owner_id = e.id AND l.workspace_id = e.workspace_id

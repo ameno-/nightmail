@@ -19,6 +19,8 @@ import { errorText } from '../../data/types'
 // preview: as sent and in each client, side by side where there is room), and how to do better (the score, the fixes to
 // make first and every finding). The window decides where each sits (detail-layout.ts).
 
+// A scheduled email reads queued, with scheduled true, until it goes; the page calls it scheduled.
+const statusOf = (email: Email) => email.scheduled ? 'scheduled' : email.status
 // Statuses that can still change without user action; terminal emails are not polled.
 const pendingStatuses = ['queued', 'attempting', 'accepted', 'sent', 'deferred', 'delayed']
 export function EmailDetailPage() {
@@ -54,7 +56,7 @@ function EmailDetail({ email }: { email: Email }) {
   const subject = email.subject || '(no subject)'
   return <div className="email-detail" data-mode={mode}>
     {compact ? <PageHeader title={<Subject text={subject} />} backTo="/logs" subtitle={<StatusLine email={email} chip={<SendabilityChip check={check} onOpen={openSheet('sendability')} />} onOpen={openSheet('details')} />} />
-      : <PageHeader title={subject} backTo="/logs" subtitle={<EmailFacts email={email} />} actions={<StatusBadge status={email.status} />} />}
+      : <PageHeader title={subject} backTo="/logs" subtitle={<EmailFacts email={email} />} actions={<StatusBadge status={statusOf(email)} />} />}
     {mode === 'panel' && delivery}
     <div className="email-detail__body">
       <section className="email-detail__preview" aria-label="Preview">
@@ -110,7 +112,7 @@ function StatusLine({ email, chip, onOpen }: { email: Email; chip: ReactNode; on
   return <div className="email-status">
     <button type="button" className="email-status__facts" aria-haspopup="dialog" onClick={event => onOpen(event.currentTarget)}>
       <span className={`delivery__dot ui-tone--${toneOf(key)}`} aria-hidden="true" />
-      <span className="email-status__text"><span className="sr-only">Details: </span>{label(email.status)} <time dateTime={at}>{when}</time> · {label(email.stream)}</span>
+      <span className="email-status__text"><span className="sr-only">Details: </span>{label(statusOf(email))} <time dateTime={at}>{when}</time> · {label(email.stream)}</span>
       <ChevronRight size={14} aria-hidden="true" />
     </button>
     {chip}
@@ -151,6 +153,8 @@ function EmailFacts({ email }: { email: Email }) {
 
 // One short name and one line of meaning per event; the raw event type is in the meaning for support and logs.
 const eventCopy: Record<string, [name: string, meaning: string]> = {
+  scheduled: ['Scheduled', 'Waiting for its send time. Until then you can cancel or reschedule it from Logs.'],
+  rescheduled: ['Rescheduled', 'Its send time moved.'],
   queued: ['Queued', `${productName} took the email and queued it for sending.`],
   dispatch_attempt: ['Sent', `${productName} handed the email to Amazon SES.`],
   accepted: ['Accepted', 'SES took the email and gave it a message ID.'],

@@ -4,7 +4,8 @@ import type { SendingBinding } from '../domain-claims.js';
 import type { CampaignScreen } from '../screen.js';
 import { boolean, doublePrecision, index, integer, jsonb, pgTable, primaryKey, smallint, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
 
-export type EmailStatus = 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated';
+/** scheduled: a single send waiting for its time (admitted again then); the API shows it as queued with scheduled true. */
+export type EmailStatus = 'scheduled' | 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated';
 export type CampaignEditor = { format: 'react-email'; version: 1; document: Record<string, unknown> };
 export type EmailSnapshot = {
   /** Null: known non-test send. A campaign ID: test of that campaign. Missing: legacy/unknown. */
@@ -16,6 +17,8 @@ export type EmailSnapshot = {
   template?: { name: string; data: Record<string, unknown>; source: { Subject?: string; Html?: string; Text?: string }; render: 'ses' | 'simulated' };
   headers: { Name: string; Value: string }[];
   deferredCampaign?: boolean;
+  /** A scheduled send's own region request; without it, its release takes the sender's region at that time. */
+  requestedRegion?: string;
   /** Server-side bulk evidence on a message its caller labelled transactional (hosted-sending.ts bulkFlags): held like marketing. */
   bulk?: true;
   /** Present only on mailbox replies; recipients who actually wrote to this mailbox in this thread. */

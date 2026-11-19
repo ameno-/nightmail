@@ -30,8 +30,8 @@ type Privacy = typeof PUBLIC_STATS_PRIVACY;
 /** Two significant figures, and the nearest 10 below 100: coarse enough that one send never shows. */
 const coarse = (n: number) => n < 100 ? Math.round(n / 10) * 10 : (() => { const step = 10 ** (Math.floor(Math.log10(n)) - 1); return Math.round(n / step) * step; })();
 
-// Queued and attempting mail has no outcome yet; leaving it out also matches the partial index sending_emails_retire (created_at).
-const settled = sql`NOT e.simulated AND e.status NOT IN ('queued','attempting')`;
+// Scheduled, queued and attempting mail has no outcome yet; leaving it out still matches the partial index sending_emails_retire (created_at).
+const settled = sql`NOT e.simulated AND e.status NOT IN ('scheduled','queued','attempting')`;
 // The same "accepted" evidence as GET /v1/metrics: a provider ID, an accepted-or-later status, or the accepted outcome bit.
 const accepted = sql`(e.status <> 'suppressed' AND (e.provider_id IS NOT NULL OR e.status IN ('accepted','sent','delivered','bounced','complained','delayed') OR (e.event_outcomes & 1) <> 0))`;
 // A hosted installation counts only mail sent through its shared pool, never a BYO tenant's own account (as hosted_real_envelopes).

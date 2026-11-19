@@ -53,6 +53,8 @@ export type AdmissionRequest = {
   claim?: { path: string; key: string; hash: string; receipt: unknown };
   /** A campaign test admitted by itself: its row is locked first and must still be at the revision that was rendered. */
   campaign?: { id: string; revision: number };
+  /** A scheduled single send (UTC instant): admitted now without charges, and as a send again at its time. */
+  scheduledAt?: string;
   incoming?: number; autoPause?: boolean;
 };
 /** The send_admission(...) call. `actor` is a jsonb {id, domains}; `assets` the attachment IDs the sender may use. */
@@ -88,6 +90,8 @@ export function refusal(runtime: Runtime, d: Refused, local: { batch?: boolean; 
       const resetAt = h.resetAt ? new Date(h.resetAt).toISOString() : undefined, retryable = incoming <= h.cap! && marketing <= h.marketingCap!;
       return new ApiError(429, d.code, `Hosted sending is limited to ${h.cap} recipients per rolling 24 hours; ${count(h.used)} are used.${d.reserved ? ` Marketing stops at ${h.marketingCap} to reserve transactional capacity.` : ''}${resetAt ? ` Rolling usage expires at ${resetAt}.` : ''}${!retryable ? ' This submission exceeds the available limit.' : ''}`, undefined, retryable, resetAt);
     }
+    case 'INVALID_SCHEDULE': return new ApiError(422, d.code, `Schedule between now and ${SEND_LIMITS.schedule.horizonSeconds / 86_400} days from now.`, 'scheduledAt');
+    case 'SCHEDULED_EMAIL_LIMIT_EXCEEDED': return new ApiError(429, d.code, `This workspace already has ${count(d.cap!)} scheduled emails waiting. Cancel some or wait for them to send.`, 'scheduledAt', true);
     case 'PENDING_EMAIL_LIMIT_EXCEEDED': return new ApiError(429, d.code, `This submission exceeds the outstanding email limit of ${d.cap} for this workspace. Wait for queued mail to dispatch before retrying.`, undefined, true);
     case 'REGION_SETTINGS_NOT_INITIALIZED': return new ApiError(503, d.code, 'Run database migrations to initialize SES region settings.');
     case 'SENDER_DOMAIN_FORBIDDEN': return item(new ApiError(403, d.code, 'This API key cannot send from this domain or its parent domain.', 'from'));
