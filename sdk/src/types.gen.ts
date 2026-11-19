@@ -959,7 +959,7 @@ export type EmailEvent = {
 };
 
 /**
- * The conversation: a reply from a receiving address or inbox, or an email whose In-Reply-To header names a received or sent message, and the messages around it that you can read. Null for an email in none, and for credentials that cannot read received mail.
+ * The conversation: of a reply from a receiving address or inbox, or of an email whose In-Reply-To named a stored message its sender could read, with the messages around it that you can read. Null for an email in none, when you can read none of the conversation's received or stored messages, and for credentials that cannot read received mail.
  */
 export type EmailThread = {
     /**
@@ -978,7 +978,7 @@ export type EmailThread = {
 
 export type ThreadMessage = {
     /**
-     * The stored message (getInboundMessage). An email sent with sendEmail that answers the conversation by its In-Reply-To header has no stored copy: its email ID.
+     * The stored message (getInboundMessage). An email sent with sendEmail that joined the conversation by answering one of its messages has no stored copy: its email ID.
      */
     id: string;
     /**
@@ -4136,7 +4136,7 @@ export type LogEntry = {
      */
     attachmentCount: number | null;
     /**
-     * The conversation (getInboundThread): every received email's, and a sent email's when it is a reply from a receiving address or inbox, or its In-Reply-To header names a stored message. Null for credentials that cannot read received mail.
+     * The conversation (getInboundThread): every received email's, and a sent email's when it is a reply from a receiving address or inbox, or its In-Reply-To named a stored message its sender could read. Null when the caller can read none of the conversation's received or stored messages, and for credentials that cannot read received mail.
      */
     threadId: string | null;
     /**

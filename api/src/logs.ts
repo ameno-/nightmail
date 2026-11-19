@@ -13,9 +13,9 @@ import { EmailStatusFilter, listedSubject, literalSearch, mailWhere, pageBinding
 // carries the direction, so equal timestamps across the two tables still page exactly once: at one instant sent rows
 // come before received rows.
 //
-// Each row names its conversation (thread-view.ts): received mail its thread, sent mail its mailbox copy's or the one its
-// In-Reply-To joins, for credentials that read received mail; and how many of its messages the caller reads, counted
-// once per thread on the page after the merge.
+// Each row names its conversation (thread-view.ts): received mail its thread, sent mail its mailbox copy's or the one it
+// joined by replying, and how many of its messages the caller reads, counted once per thread on the page after the
+// merge. Only for credentials that read received mail, and only where they read one of its stored messages.
 //
 // Received mail follows listInboundMessages: manage credentials read every retained message, including unrouted mail;
 // dashboard members read mail on live addresses; credentials that can't read inbound mail (domain-restricted or
@@ -37,7 +37,7 @@ const LogEntry = z.object({
   scheduledAt: z.string().nullable().describe('Sent mail that is scheduled: when it goes (UTC). Null for received mail.'),
   simulated: z.boolean().describe('Sent through the SES mailbox simulator. Always false for received mail.'),
   attachmentCount: z.number().int().nullable().describe('Received mail only.'),
-  threadId: z.string().nullable().describe('The conversation (getInboundThread): every received email\'s, and a sent email\'s when it is a reply from a receiving address or inbox, or its In-Reply-To header names a stored message. Null for credentials that cannot read received mail.'),
+  threadId: z.string().nullable().describe('The conversation (getInboundThread): every received email\'s, and a sent email\'s when it is a reply from a receiving address or inbox, or its In-Reply-To named a stored message its sender could read. Null when the caller can read none of the conversation\'s received or stored messages, and for credentials that cannot read received mail.'),
   threadCount: z.number().int().nullable().describe('Messages in that conversation the caller can read, this one included; null without threadId.'),
   addresses: z.array(z.object({ id: z.string(), address: z.string() })).nullable().describe('Received mail only: the receiving addresses it was delivered to that the caller can read. Empty for unrouted mail.'),
   region: z.string().nullable().describe('Null for received mail unless the caller is an administrator.'),
@@ -123,7 +123,7 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
       data: rows.slice(0, q.limit).map(row => ({
         id: row.id, direction: row.direction, untrustedContent: row.untrusted, at: new Date(row.at).toISOString(), status: row.status, from: { name: row.from_name, address: row.from_address },
         to: (row.to ?? []).map(String), subject: listedSubject(a, row).subject, stream: row.stream, campaignId: row.campaign_id, scheduledAt: row.scheduled_at && new Date(row.scheduled_at).toISOString(), simulated: row.simulated, attachmentCount: row.attachment_count,
-        threadId: row.thread_id, threadCount: row.thread_count ?? null, addresses: row.addresses, region: row.region, envelopeTo: row.envelope_to,
+        threadId: row.thread_count == null ? null : row.thread_id, threadCount: row.thread_count ?? null, addresses: row.addresses, region: row.region, envelopeTo: row.envelope_to,
       })),
       nextCursor: last ? Buffer.from(JSON.stringify([last.at, last.direction, last.id, binding])).toString('base64url') : null,
       received,

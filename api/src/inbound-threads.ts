@@ -10,7 +10,7 @@ import { productName } from './brand.js';
 
 const loadS3Presign = lazyModule(() => Promise.all([import('@aws-sdk/client-s3'), import('@aws-sdk/s3-request-presigner')]));
 import { mailboxMessages as links, mailboxThreads, mailAttachments, mailMessages as messages } from './db/mailbox.js';
-import { accessibleMessages, EmailThread, liveBox, readThread, visibleLinks, type Filter } from './thread-view.js';
+import { accessibleMessages, EmailThread, liveBox, threadBlock, threadView, visibleLinks, type Filter, type RawThread } from './thread-view.js';
 import { htmlToPlain, replyText } from './mailbox-store.js';
 import { boundedHtmlFragment } from './bounded-html.js';
 import { archiveMailboxFiles, sendFromMailbox, finishMailboxArchive, type OutgoingMessage } from './mailbox-send.js';
@@ -212,22 +212,24 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
     // The same bounded parse every other reader of stored HTML uses; the body itself is returned as stored.
     const body=(html:string|null)=>q.includeHtml==='true'&&html?{html,htmlTooComplex:!boundedHtmlFragment(html,'document')}:{html:null,htmlTooComplex:false};
     const auth=(row:{verdicts:Verdicts|null;automated:boolean})=>q.includeAuthentication==='true'?authenticationView(row):{};
-    // Emails that answer it by header are ordinary sends: a workspace credential reads them, an address or inbox key doesn't.
+    // Its conversation, in the same statement. The emails that joined it by replying are ordinary sends: a workspace
+    // credential reads them, an address or inbox key doesn't.
     const a=c.get('actor') as Actor|undefined;
-    const conversation=async(threadId:string)=>q.includeThread==='true'?{thread:await readThread(c.env.db,{access:v,threadId,focus:id,addressId:q.addressId,sends:!!a&&!!actorMailAccess(a)&&!q.addressId,manage:!!a?.permissions.includes('manage')})}:{};
+    const thread=q.includeThread==='true'?threadBlock(v,{thread:sql`mail_messages.thread_id`,focus:sql`mail_messages.id`,addressId:q.addressId,sends:!!a&&!!actorMailAccess(a)&&!q.addressId}):sql<RawThread|null>`NULL`;
+    const conversation=(raw:RawThread|null)=>q.includeThread==='true'?{thread:threadView(raw,!!a?.permissions.includes('manage'))}:{};
     if (q.includeDelivery==='true') {
-      const [result]=await c.env.db.select({row:messages,addresses:deliveryAddresses(v,q),addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
+      const [result]=await c.env.db.select({row:messages,thread,addresses:deliveryAddresses(v,q),addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
       if (!result) throw new ApiError(404,'NOT_FOUND','Message was not found.');
       const {row,addresses,addressIds,isRead}=result;
-      const [files,thread]=await Promise.all([c.env.db.select().from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id)),conversation(row.threadId)]);
+      const files=await c.env.db.select().from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
       const {rawUrl,rawExpiresAt,urls}=await deliveryLinks(c.env,row,files);
-      return c.json({...messageView(row,addressIds,isRead),addresses,envelopeTo:row.envelopeTo,region:row.region,spam:row.spam,headers:row.headers,verdicts:row.verdicts,sentAt:row.sentAt?timestamp(row.sentAt):null,sizeBytes:row.sizeBytes,rawUrl,...body(row.html),...auth(row),...thread,
+      return c.json({...messageView(row,addressIds,isRead),addresses,envelopeTo:row.envelopeTo,region:row.region,spam:row.spam,headers:row.headers,verdicts:row.verdicts,sentAt:row.sentAt?timestamp(row.sentAt):null,sizeBytes:row.sizeBytes,rawUrl,...body(row.html),...auth(row),...conversation(result.thread),
         rawExpiresAt,attachments:files.map((f,i)=>({id:f.id,filename:f.filename,contentType:f.contentType,size:f.sizeBytes,disposition:f.disposition,contentId:f.contentId,url:urls[i]!}))},200);
     }
-    const [row] = await c.env.db.select({...messageFields,verdicts:messages.verdicts,automated:messages.automated,addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
+    const [row] = await c.env.db.select({...messageFields,thread,verdicts:messages.verdicts,automated:messages.automated,addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Message was not found.');
-    const [attachments,thread]=await Promise.all([c.env.db.select({id:mailAttachments.id,filename:mailAttachments.filename,contentType:mailAttachments.contentType,size:mailAttachments.sizeBytes,disposition:mailAttachments.disposition,contentId:mailAttachments.contentId}).from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id)),conversation(row.threadId)]);
-    return c.json({...messageView(row,row.addressIds,row.isRead),...body(row.html),...auth(row),...thread,attachments},200);
+    const attachments=await c.env.db.select({id:mailAttachments.id,filename:mailAttachments.filename,contentType:mailAttachments.contentType,size:mailAttachments.sizeBytes,disposition:mailAttachments.disposition,contentId:mailAttachments.contentId}).from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
+    return c.json({...messageView(row,row.addressIds,row.isRead),...body(row.html),...auth(row),...conversation(row.thread),attachments},200);
   });
   // rawUrl in webhook payloads is the delivery record (it names every recipient): only delivery-detail readers follow it.
   app.get('/v1/inbound/messages/:messageId/raw',async c=>{

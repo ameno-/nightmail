@@ -388,7 +388,8 @@ async function threads(db, workspaceId, box, list) {
 }
 // One support conversation (Logs' thread counts, the detail pages' Thread section): Jordan writes in, support replies
 // from its address (a mailbox reply, stored in the thread), Jordan answers, support answers that with an ordinary send
-// whose In-Reply-To names it (no stored copy: it joins the thread by its header), and Jordan writes back with a file.
+// whose In-Reply-To names it (no stored copy: it joined the thread, as sendEmail records it for a sender that can read
+// the message, snapshot.threadId), and Jordan writes back with a file.
 async function conversation(db, workspaceId, box) {
   const thread = rid('thr'), customer = { name: 'Jordan Lee', address: 'jordan.lee@example.net' }, support = { name: 'Northwind Support', address: box.address };
   const subject = 'What happened to my accounts?';
@@ -416,7 +417,7 @@ async function conversation(db, workspaceId, box) {
       const headers = [{ Name: 'In-Reply-To', Value: `<${previous}>` }, { Name: 'References', Value: references.map(r => `<${r}>`).join(' ') }];
       await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, created_at)
         VALUES ($1,$2,$3,'fixture',$4,$5::jsonb,'[]','[]',$6,$7::jsonb,false,'delivered',$8,3,$9)`,
-        [emailId, workspaceId, REGION, support.address, JSON.stringify([customer.address]), subj, JSON.stringify({ kind: 'transactional', testCampaignId: null, region: REGION, subject: subj, fromName: support.name, html, text: step.text, attachments: [], headers, ...step.out === 'mailbox' ? { mailbox: true } : {} }), messageId.split('@')[0], at]);
+        [emailId, workspaceId, REGION, support.address, JSON.stringify([customer.address]), subj, JSON.stringify({ kind: 'transactional', testCampaignId: null, region: REGION, subject: subj, fromName: support.name, html, text: step.text, attachments: [], headers, ...step.out === 'mailbox' ? { mailbox: true } : { threadId: thread } }), messageId.split('@')[0], at]);
       for (const [type, ms] of [['dispatch_attempt', 0], ['accepted', 400], ['delivery', 2300], ...step.out === 'header' ? [['open', 240_000]] : []])
         await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,provider_id,external_id,data,simulated,created_at) SELECT $1,workspace_id,id,$2,provider_id,$1,jsonb_build_object('emailId',id,'providerId',provider_id),false,created_at + $3 * interval '1 millisecond' FROM sending_emails WHERE id=$4`, [rid('event'), type, ms, emailId]);
       if (step.out === 'header') ids.email = emailId;
