@@ -16,6 +16,8 @@
      indicator). There is no header: the hero begins at the top of the window, or under a status bar the page runs under. */
   --srt-safe-t: env(safe-area-inset-top, 0px); --srt-safe-r: env(safe-area-inset-right, 0px); --srt-safe-b: env(safe-area-inset-bottom, 0px); --srt-safe-l: env(safe-area-inset-left, 0px); --srt-head: var(--srt-safe-t);
   display: flex; flex-direction: column; box-sizing: border-box; min-height: 100svh; padding-top: var(--srt-head); overflow-x: clip; background: var(--srt-floor); color: var(--srt-text); }
+/* The page ends where it ends: no rubber band past its top or its foot, and no pull to refresh. */
+:root:has(.srt-page), :root:has(.srt-page) body { overscroll-behavior-y: none; }
 :root[data-theme='dark'] .srt-page {
   --srt-floor: rgb(10 13 19); --srt-text: oklch(0.968 0.004 268); --srt-text-2: oklch(0.74 0.014 268); --srt-text-3: oklch(0.63 0.016 268); --srt-hair: oklch(1 0 0 / 9%); --srt-hover: oklch(1 0 0 / 6%);
   --srt-screen-text: oklch(0.955 0.014 92); --srt-screen-dim: oklch(0.62 0.018 268); --srt-plate: oklch(0.66 0.016 268);
