@@ -24173,7 +24173,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     assert.equal(name,'nightmail-byo-broker');
     // Trust: our own account as the principal, narrowed to the runtime user and its session name.
     assert.deepEqual(trust.Statement.map((s:Json)=>[s.Effect,s.Principal,s.Action]),[['Allow',{AWS:`arn:aws:iam::${account}:root`},'sts:AssumeRole']]);
-    const trusted=(arn:string,session='nightmail-broker')=>iamAllows(trust.Statement,'sts:AssumeRole',broker,{'aws:PrincipalArn':arn,'sts:RoleSessionName':session});
+    const trusted=(arn:string,session='nightmail-broker')=>iamAllows(trust.Statement.map((s:Json)=>({...s,Resource:broker})),'sts:AssumeRole',broker,{'aws:PrincipalArn':arn,'sts:RoleSessionName':session});
     assert.ok(trusted(`arn:aws:iam::${account}:user/nightmail-runtime`));
     for(const [arn,session] of [[`arn:aws:iam::${account}:user/bane-runtime`],[`arn:aws:iam::${account}:role/nightmail-deploy`],[`arn:aws:iam::${account}:user/nightmail-runtime`,'Bane']] as [string,string?][])
       assert.equal(trusted(arn,session),false,`${arn} ${session}`);
