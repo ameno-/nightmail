@@ -40,6 +40,14 @@
 .fac-still img { position: absolute; height: auto; opacity: 0; transition: opacity 300ms var(--srt-ease); }
 .fac-still img[data-on] { opacity: 1; }
 .fac-board { position: absolute; left: 0; height: auto; }
+/* A pipe's tag (factory-home.tsx): flat, the page's mono capitals in paper white on the button's ink, over the stencil
+   its box frames (`--fac-tag-w` × `--fac-tag-h` frame px), from the box's left edge and centred on its row, and moved
+   in where it would run past the stage's edge (`data-off`: left off where it cannot be shown whole). As large as the
+   stencil, never under 10 px type. The same in either theme: it is part of the picture, and dims with the plinth
+   (factory/player.ts). */
+.fac-tag { position: absolute; display: grid; place-items: center; box-sizing: border-box; min-width: calc(100cqw * var(--fac-tag-w) / var(--fac-w)); min-height: calc(100cqw * var(--fac-tag-h) / var(--fac-w)); padding: .42em .42em .42em .46em; border-radius: 2px; background: oklch(0.2 0.02 268); color: oklch(0.955 0.014 92); font-family: var(--font-mono); font-size: max(10px, 100cqw * 15 / var(--fac-w)); line-height: 1; letter-spacing: .04em; white-space: nowrap; translate: var(--fac-tag-dx, 0px) calc(-50% + var(--fac-tag-dy, 0px)); user-select: none; }
+.fac-tag > span { display: block; text-box: trim-both cap alphabetic; }
+.fac-tag[data-off] { visibility: hidden; }
 
 /* The button: the page's words on the machine's blank plate. Pointed at, the plate is lit brighter; pressed, it dims
    and the words go in with it. */

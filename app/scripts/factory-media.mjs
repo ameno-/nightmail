@@ -6,7 +6,8 @@
 //   node scripts/factory-media.mjs publish <dir> --stage dev [--dry-run] [--to <local dir>]
 //     Uploads a web-layers folder as a new version: the desktop set at its top (manifest.json, boards/, a folder per
 //     segment: the web-layers contract) and the phone set in its phone/ folder, each where there is one; then points
-//     current.json at it. --to writes the same keys into a local folder instead (previews).
+//     current.json at it. --to writes the same keys into a local folder instead (previews). Needs ffmpeg: each
+//     segment's `labelLight` is measured from its foreground on the way (labelLights, below).
 //   node scripts/factory-media.mjs promote <version> --stage production [--from <url>] [--dry-run]
 //     Copies a version published on dev, read from dev's public host (--from, default media.dev.nightmail.dev) and
 //     checked against its files.json, into the stage's bucket, then points current.json at it. Production is reached
@@ -17,12 +18,12 @@
 // Keys: factory/<version>/desktop/... and factory/<version>/phone/... (never written twice, cached for a year), with
 // factory/<version>/files.json (every file's size and sha256) and each format's manifest.json; and factory/current.json
 // (cached a minute): { version, formats: { desktop: <manifest>, phone: <manifest> } }. A version is the day and the start
-// of a hash over its files' hashes. Writes go through Wrangler (`r2 object put --remote`) in the stage's account:
-// WRANGLER names the command (wwrangler on a machine logged in to the work account; CI passes
+// of a hash over its files' hashes and its manifests. Writes go through Wrangler (`r2 object put --remote`) in the
+// stage's account: WRANGLER names the command (wwrangler on a machine logged in to the work account; CI passes
 // api/node_modules/.bin/wrangler with its minted CLOUDFLARE_API_TOKEN). What still needs a deploy: a set whose frame,
 // button, board or pipe geometry differs from the bundled manifest of its format, or whose first frame differs from the
 // bundled poster (the page keeps its poster until then).
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -64,7 +65,42 @@ function collect(dir) {
     if (!files.includes(need)) throw new Error(`${segment.name} needs ${need}`)
   const boards = manifest.boards.files ?? manifest.boards.y.map((_, k) => `boards/board${k}.png`)
   for (const board of boards) if (!existsSync(join(dir, board))) throw new Error(`missing ${board}`)
+  labelLights(dir, manifest)
   return { manifest, files: [...files, ...boards].map(path => { const body = readFileSync(join(dir, path)); return { path, bytes: body.length, sha256: sha256(body) } }) }
+}
+
+// How lit the plinth's labels are in each segment, frame by frame. The page draws a tag of its own over each label it
+// shows (factory-home.tsx) and dims it with the plinth: in x10's blackout the plinth goes dark while the hall's
+// boardLight does not follow it, and in shift the hall dims while the plinth stays lit. Measured from the segment's
+// foreground (fg-720.webm: the plinth is opaque there) over the labels the page tags, as a share of its first frame
+// (every segment starts on the poster's picture); never above 1, and put on a segment only where the plinth dims.
+function labelLights(dir, manifest) {
+  const boxes = (manifest.pipes ?? []).flatMap(pipe => pipe.labelBox && pipe.visible !== false ? [pipe.labelBox] : [])
+  if (!boxes.length) return
+  // (The 720 files are the frame at 720 on its short side; the boxes' rows, and the columns they cover, at that size.)
+  const scale = 720 / Math.min(manifest.width, manifest.height), width = Math.round(manifest.width * scale)
+  const top = Math.round(Math.min(...boxes.map(box => box.y)) * scale), height = Math.round(Math.max(...boxes.map(box => box.y + box.h)) * scale) - top
+  const columns = boxes.flatMap(box => { const from = Math.max(0, Math.round(box.x * scale)), to = Math.min(width, Math.round((box.x + box.w) * scale)); return Array.from({ length: Math.max(0, to - from) }, (_, i) => from + i) })
+  const measured = new Map()
+  for (const segment of manifest.segments) {
+    const fg = segment.fg ?? segment.name
+    if (!measured.has(fg)) {
+      let band
+      try { band = execFileSync('ffmpeg', ['-v', 'error', '-i', join(dir, fg, 'fg-720.webm'), '-vf', `crop=${width}:${height}:0:${top},format=gray`, '-f', 'rawvideo', '-'], { maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'pipe'] }) }
+      catch (error) { throw new Error(`measuring ${fg}/fg-720.webm's labels needs ffmpeg: ${error.message.split('\n')[0]}`) }
+      const means = []
+      for (let at = 0; at + width * height <= band.length; at += width * height) {
+        let sum = 0
+        for (let y = 0; y < height; y++) for (const x of columns) sum += band[at + y * width + x]
+        means.push(sum / (columns.length * height))
+      }
+      const lights = means.map(mean => { const light = Math.round(mean / means[0] * 100) / 100; return light >= .97 ? 1 : light })
+      measured.set(fg, lights.some(light => light < 1) ? lights : null)
+    }
+    const lights = measured.get(fg)
+    if (lights) segment.labelLight = lights
+    else delete segment.labelLight
+  }
 }
 
 // Where writes go: the stage's bucket through Wrangler, or a local folder laid out like it.
@@ -130,7 +166,7 @@ async function publish(dir) {
   }
   if (!files.length) fail(`no manifest.json in ${dir} or ${join(dir, 'phone')}`)
   const index = files.map(({ path, bytes, sha256 }) => ({ path, bytes, sha256 }))
-  const version = `${new Date().toISOString().slice(0, 10)}-${sha256(JSON.stringify(index)).slice(0, 8)}`
+  const version = `${new Date().toISOString().slice(0, 10)}-${sha256(JSON.stringify([index, formats])).slice(0, 8)}`
   const list = files.map(file => ({ ...file, key: `${prefix}${version}/${file.path}` }))
   console.log(`${dry ? 'would publish' : 'publishing'} ${Object.keys(formats).join(' and ')}, ${list.length} files, ${(list.reduce((sum, file) => sum + file.bytes, 0) / 1e6).toFixed(1)} MB as ${where()}${prefix}${version}/`)
   await putAll(list.map(file => ({ ...file, path: file.from })), '/')

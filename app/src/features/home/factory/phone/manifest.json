@@ -42,59 +42,119 @@
    "x": -31.3,
    "w": 12.2,
    "yEnd": 1706,
-   "offFrame": true
+   "offFrame": true,
+   "labelBox": {
+    "x": -13,
+    "y": 1620,
+    "w": 54,
+    "h": 21
+   },
+   "visible": false
   },
   {
    "label": "AGENTS",
    "x": 111.5,
    "w": 12.2,
-   "yEnd": 1706
+   "yEnd": 1706,
+   "labelBox": {
+    "x": 128,
+    "y": 1620,
+    "w": 63,
+    "h": 21
+   }
   },
   {
    "label": "ENDPOINTS",
    "x": 254.4,
    "w": 12.2,
-   "yEnd": 1706
+   "yEnd": 1706,
+   "labelBox": {
+    "x": 269,
+    "y": 1620,
+    "w": 90,
+    "h": 21
+   },
+   "visible": false
   },
   {
    "label": "THREADS",
    "x": 397.2,
    "w": 12.2,
    "yEnd": 1706,
-   "hidden": true
+   "hidden": true,
+   "labelBox": {
+    "x": 410,
+    "y": 1620,
+    "w": 72,
+    "h": 21
+   },
+   "visible": false
   },
   {
    "label": "OUTBOUND",
    "x": 540.0,
    "w": 12.2,
    "yEnd": 1706,
-   "hidden": true
+   "hidden": true,
+   "labelBox": {
+    "x": 551,
+    "y": 1620,
+    "w": 81,
+    "h": 21
+   },
+   "visible": false
   },
   {
    "label": "IMAP",
    "x": 682.8,
    "w": 12.2,
    "yEnd": 1706,
-   "hidden": true
+   "hidden": true,
+   "labelBox": {
+    "x": 692,
+    "y": 1620,
+    "w": 45,
+    "h": 21
+   },
+   "visible": false
   },
   {
    "label": "RULES",
    "x": 825.6,
    "w": 12.2,
-   "yEnd": 1706
+   "yEnd": 1706,
+   "labelBox": {
+    "x": 833,
+    "y": 1620,
+    "w": 54,
+    "h": 21
+   }
   },
   {
    "label": "CAMPAIGNS",
    "x": 968.5,
    "w": 12.2,
-   "yEnd": 1706
+   "yEnd": 1706,
+   "labelBox": {
+    "x": 974,
+    "y": 1620,
+    "w": 90,
+    "h": 21
+   }
   },
   {
    "label": "LOGS",
    "x": 1111.3,
    "w": 12.2,
    "yEnd": 1706,
-   "offFrame": true
+   "offFrame": true,
+   "labelBox": {
+    "x": 1115,
+    "y": 1620,
+    "w": 45,
+    "h": 21
+   },
+   "visible": false
   }
  ],
  "segments": [

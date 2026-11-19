@@ -4,26 +4,31 @@
 // poster is. `loop` segments make up the page's ordinary running, `rare` ones are the occasional event; a segment
 // with `then` is always followed by that one, which has `after` and never plays alone (burst, then rebuild: one
 // event). `bg` and `fg` name the segment whose files a layer is (rush's hall is steady's, convoy's machine is
-// steady's). `boardLight`, where the hall dims, is the billboards' brightness frame by frame (1 is as lit as ever).
+// steady's). `boardLight`, where the hall dims, is the billboards' brightness frame by frame (1 is as lit as ever);
+// `labelLight`, where the plinth dims, the same for the labels stencilled on it (measured from the segment's own
+// foreground when the set is published: app/scripts/factory-media.mjs).
 // The billboards are sprites at twice the frame's resolution that the page moves along their rail at
 // `speedPxPerSec`, `gapPx` apart, each at its `y` (its top edge: the hanger on the rail, over the board's face) and
 // `w` × `h` where the manifest says (else half its sprite's size); `button` is the blank plate on the machine's front
 // that the page writes its button on; `pipes` are the plinth's pipes the section under the hero carries on (on a
-// phone two are `offFrame`, just outside the picture's sides, and three `hidden` behind the button's console).
+// phone two are `offFrame`, just outside the picture's sides, and three `hidden` behind the button's console). Each
+// pipe's label is stencilled on the plinth beside it, inside its `labelBox`; `visible: false` where no crop shows the
+// stencil whole (the frame's edge, or the button's console, is in front of it).
 // There are two formats: a desktop's 1920 × 1080 frame and a phone's 1080 × 1920 (a camera and a front of its own).
 import desktop from './manifest.json'
 import phone from './phone/manifest.json'
 
 export type Format = 'desktop' | 'phone'
-export type Segment = { name: string; kind: 'loop' | 'rare'; frames: number; bg?: string; fg?: string; then?: string; after?: string; boardLight?: number[] }
+export type Segment = { name: string; kind: 'loop' | 'rare'; frames: number; bg?: string; fg?: string; then?: string; after?: string; boardLight?: number[]; labelLight?: number[] }
 export type Box = { x: number; y: number; w: number; h: number }
-export type Pipe = { label: string; x: number; w: number; yEnd: number; hidden?: boolean; offFrame?: boolean }
+export type Pipe = { label: string; x: number; w: number; yEnd: number; hidden?: boolean; offFrame?: boolean; labelBox?: Box; visible?: boolean }
 export type Manifest = {
   fps: number; loopFrames: number; width: number; height: number
   boards: { speedPxPerSec: number; gapPx: number; y: number[]; w?: number[]; h?: number[]; files?: string[]; periodPx?: number }
   button: Box
   segments: Segment[]
-  /** The plinth's labelled pipes, left to right: each one's centre and width, and the row where it goes into the floor. */
+  /** The plinth's labelled pipes, left to right: each one's centre and width, the row where it goes into the floor, and
+   *  where its label is stencilled. */
   pipes?: Pipe[]
 }
 
