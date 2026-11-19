@@ -1,14 +1,16 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router'
-import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, MutationError, PageHeader, Pagination, Tabs, useToast, SecretDialog } from '../../components/ui'
+import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, Disclosure, DropdownMenu, EmptyState, ErrorState, PageHeader, Pagination, Tabs, useToast, SecretDialog } from '../../components/ui'
 import { useApiMutation, useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
-import type { Agent, AgentTokenSummary, ApiKey, ApiKeyChange, AppPassword, ApprovalTie, InboundAddress } from '../../data/types'
+import type { Agent, AgentTokenSummary, ApiKey, AppPassword, ApprovalTie } from '../../data/types'
 import { date, shortDateTime } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { AdminOnlyPage } from './admin-only'
 import { KeySendExample } from '../docs/first-send'
-import { AddressChoice, chooseAddress, CreateKeyDialog, useDomainOptions, type CreatedSecret, type Purpose } from './create-key'
+import { CreateKeyDialog, EditKeyDialog, useDomainOptions, useInboxOptions, type CreatedSecret, type Purpose } from './create-key'
+import { actionLabel } from '../../data/activity'
+import { Who } from './activity'
 import { accessLabel, agentAccess, approvalLabel, connectionTitle, domainScope, mailLabel, protocolLabel } from './key-labels'
 import { keyTypes, settingsColumns, type KeyTypeFilter } from './skeletons'
 import { KeysGuide } from './keys-guide'
@@ -30,18 +32,20 @@ const lastUsed = (value: string | null) => value ? date(value) : 'Never'
 const usedLine = (value: string | null) => value ? `Used ${date(value)}` : 'Never used'
 const newestFirst = <T extends { createdAt: string }>(items: T[]) => [...items].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
 const past = (value: string | null) => value !== null && Date.parse(value) <= Date.now()
-/** Revoked, ended (an inbox key whose inbox is gone), or null while it works. */
-const keyState = (key: ApiKey) => key.revokedAt ? 'Revoked' : past(key.expiresAt) ? 'Ended' : null
+/** Revoked, ended (an inbox key past its end, usually its inbox's), expired, or null while it works. */
+const keyState = (key: ApiKey) => key.revokedAt ? 'Revoked' : past(key.expiresAt) ? key.access.type === 'inbox' ? 'Ended' : 'Expired' : null
+// An expired key can be given a later expiry, so it keeps its actions; a revoked or ended one has none.
+const keyLocked = (key: ApiKey) => Boolean(key.revokedAt) || keyState(key) === 'Ended'
 const tokenState = (token: AgentTokenSummary) => token.revokedAt ? 'Revoked' : past(token.expiresAt) ? 'Expired' : null
 const agentState = (agent: Agent) => agent.status === 'revoked' ? 'Revoked' : agent.status === 'expired' ? 'Expired' : null
 // Another member's agent can only lose the tokens it made here, so once none is active there is nothing to revoke.
 const rowState = (row: Row): ReactNode => {
-  const state = row.kind === 'key' ? keyState(row.key) : row.kind === 'token' ? tokenState(row.token) : row.kind === 'app' ? null : agentState(row.agent)
+  const state = row.kind === 'key' ? keyLocked(row.key) ? keyState(row.key) : null : row.kind === 'token' ? tokenState(row.token) : row.kind === 'app' ? null : agentState(row.agent)
   return state ? <span className="muted">{state}</span> : row.kind === 'agent' && !row.agent.own && !row.agent.tokens.some(token => !tokenState(token)) ? <span className="muted">—</span> : null
 }
 const rowName = (row: Row) => row.kind === 'key' ? row.key.name : row.kind === 'agent' ? connectionTitle(row.agent) : row.kind === 'token' ? row.token.purpose : row.password.name
-// A working key for chosen addresses (or every one) can have its addresses changed; a key that creates inboxes can't here.
-const editableAddresses = (row: Row): row is Extract<Row, { kind: 'key' }> => row.kind === 'key' && !keyState(row.key) && row.key.access.type === 'addresses' && !row.key.access.mail.includes('create')
+// Everything about an API key is edited on its secret, an expired one's expiry included.
+const editable = (row: Row): row is Extract<Row, { kind: 'key' }> => row.kind === 'key' && !keyLocked(row.key)
 const revokeLabel = (row: Row) => row.kind === 'key' ? 'Revoke key' : row.kind === 'agent' ? (row.agent.own ? 'Revoke agent' : 'Revoke its tokens') : row.kind === 'token' ? 'Revoke token' : 'Revoke password'
 const expiry = (token: AgentTokenSummary) => tokenState(token) ?? `Expires ${shortDateTime(token.expiresAt)} UTC`
 
@@ -88,6 +92,12 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   const [viewing, setViewing] = useState<Row | null>(null)
   const [editing, setEditing] = useState<ApiKey | null>(null)
   const address = (id: string) => addresses.data?.find(item => item.id === id)?.address ?? id
+  // Edit opens once what its form lists has loaded (a workspace key's domains, an inbox key's inboxes), so they don't
+  // push its fields down as they arrive.
+  const editDomains = useDomainOptions(editing?.access.type === 'workspace')
+  const editInboxes = useInboxOptions('key-options', {}, editing?.access.type === 'inbox')
+  const editReady = editing && !(editing.access.type === 'workspace' ? editDomains.isPending : editing.access.type === 'inbox' && editInboxes.isPending)
+  const actions = (row: Row) => [...editable(row) ? [{ label: 'Edit', onSelect: () => setEditing(row.key) }] : [], { label: revokeLabel(row), destructive: true, onSelect: () => setRevoking(row) }]
 
   // API keys page by cursor; agents and app passwords aren't paginated, so they join the first page. Each source fails
   // on its own: the others still list, with one error and a retry for every source that failed.
@@ -126,7 +136,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
     return { first: access.addressIds ? <>Addresses: <AddressList values={access.addressIds.map(address)} /></> : 'Every address', second: mailLabel(access.mail) }
   }
   const name = (row: Row): { first: ReactNode; second: ReactNode } => {
-    if (row.kind === 'key') return { first: row.key.name, second: `Created ${date(row.key.createdAt)}${row.key.expiresAt && !keyState(row.key) ? ` · ends ${date(row.key.expiresAt)}` : ''}` }
+    if (row.kind === 'key') return { first: row.key.name, second: `Created ${date(row.key.createdAt)}${row.key.expiresAt && !row.key.revokedAt ? ` · ${past(row.key.expiresAt) ? 'ended' : 'ends'} ${date(row.key.expiresAt)}` : ''}` }
     if (row.kind === 'agent') return { first: connectionTitle(row.agent), second: row.agent.own ? row.agent.clientId : <PrivateAddress value={row.agent.userEmail} /> }
     if (row.kind === 'token') return { first: row.token.purpose, second: expiry(row.token) }
     return { first: row.password.name, second: `Created ${date(row.password.createdAt)}` }
@@ -150,7 +160,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   // Everything a row shows, in full: the table and the phone's cards clip long names, scopes and address lists.
   const details = (row: Row): [string, ReactNode][] => {
     const { first, second } = access(row)
-    if (row.kind === 'key') return [['Type', typeName.key], ['Access', first], [row.key.access.type === 'workspace' ? 'Domains' : 'Mail', second], ['Key prefix', <code>{row.key.prefix}</code>], ['Created', date(row.key.createdAt)], ...(row.key.expiresAt ? [[past(row.key.expiresAt) ? 'Ended' : 'Ends', date(row.key.expiresAt)] as [string, ReactNode]] : []), ['Last used', lastUsed(row.key.lastUsedAt)], ...(row.key.approval ? [['Agent approval', tiedTo(row.key.approval)] as [string, ReactNode]] : []), ...(row.key.revokedAt ? [['Revoked', date(row.key.revokedAt)] as [string, ReactNode]] : [])]
+    if (row.kind === 'key') return [['Type', typeName.key], ['Access', first], [row.key.access.type === 'workspace' ? 'Domains' : 'Mail', second], ['Key prefix', <code>{row.key.prefix}</code>], ['Created', date(row.key.createdAt)], ['Expires', row.key.expiresAt ? `${past(row.key.expiresAt) ? 'Ended ' : ''}${shortDateTime(row.key.expiresAt)} UTC` : 'Never'], ['Last used', lastUsed(row.key.lastUsedAt)], ...(row.key.lastChange ? [['Last changed', <>{date(row.key.lastChange.at)} · <Who actor={row.key.lastChange.actor} /></>] as [string, ReactNode]] : []), ...(row.key.approval ? [['Agent approval', tiedTo(row.key.approval)] as [string, ReactNode]] : []), ...(row.key.revokedAt ? [['Revoked', date(row.key.revokedAt)] as [string, ReactNode]] : [])]
     if (row.kind === 'agent') return [['Type', typeName.agent], ['Access', first], ['Client', row.agent.clientId], ['Account', row.agent.own ? 'You' : <PrivateAddress value={row.agent.userEmail} />], ['Signed in', date(row.agent.createdAt)], ['Last used', lastUsed(row.agent.lastUsedAt)], ['Status', agentState(row.agent) ?? 'Active']]
     if (row.kind === 'token') return [['Type', typeName.token], ['Access', first], ['Domains', second], ['Expires', tokenState(row.token) ?? `${shortDateTime(row.token.expiresAt)} UTC`], ['Last used', lastUsed(row.token.lastUsedAt)]]
     return [['Type', typeName.app], ['Access', first], ['Inbox', second], ['Created', date(row.password.createdAt)]]
@@ -170,8 +180,8 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
             { ...accessColumn, render: row => <TwoLines first={access(row).first} second={access(row).second} />, cardRender: row => <span className={row.kind === 'token' ? 'keys-nested' : undefined}>{access(row).first} · {access(row).second}</span> },
             { ...prefixColumn, render: row => row.kind === 'key' ? <code>{row.key.prefix}</code> : <span className="muted">—</span> },
             { ...lastColumn, render: used, cardRender: row => <span className={row.kind === 'token' ? 'keys-nested' : undefined}>{cardLast(row)}</span> },
-            { ...actionsColumn, render: row => rowState(row) ?? <Button variant="danger" aria-label={`Revoke ${rowName(row)}`} onClick={() => setRevoking(row)}>Revoke</Button>,
-              cardRender: row => rowState(row) ? null : <DropdownMenu label={`Actions for ${rowName(row)}`} title={rowName(row)} items={[...editableAddresses(row) ? [{ label: 'Edit addresses', onSelect: () => setEditing(row.key) }] : [], { label: revokeLabel(row), destructive: true, onSelect: () => setRevoking(row) }]} /> },
+            { ...actionsColumn, render: row => rowState(row) ?? <DropdownMenu label={`Actions for ${rowName(row)}`} title={rowName(row)} items={actions(row)} />,
+              cardRender: row => rowState(row) ? null : <DropdownMenu label={`Actions for ${rowName(row)}`} title={rowName(row)} items={actions(row)} /> },
           ]} />}
         {failed.length > 0 && <ErrorState error={failed[0].query.error} onRetry={() => failed.forEach(source => void source.query.refetch())} />}
         {keysShown && !listLoading && (!keys.error || pagination.page > 1) && <Pagination page={pagination.page} pageSize={100} nextCursor={keys.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, keys.data?.nextCursor)} />}
@@ -181,7 +191,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
     <ConnectAgentDialog open={connecting} onOpenChange={setConnecting} onCreateKey={() => setOpen(true)} />
     <SecretDialog secret={secret?.secret ?? null} title={secret?.title ?? 'Key created'} description={secret?.description} onClose={() => setSecret(null)}>{secret?.sendExample && <KeySendExample apiKey={secret.secret} />}{secret?.agent && <McpKeySetup secret={secret.secret} env={apiKeyEnv} />}{secret?.mail && <MailSettings username={secret.mail.username} imap={secret.mail.imap} smtp={secret.mail.smtp} />}</SecretDialog>
     <KeyDetails row={viewing} fields={viewing ? details(viewing) : []} onClose={() => setViewing(null)} onRevoke={row => { setViewing(null); setRevoking(row) }} onEdit={key => { setViewing(null); setEditing(key) }} />
-    {editing && <EditAddressesDialog apiKey={editing} options={addresses.data ?? []} onClose={() => setEditing(null)} />}
+    {editing && editReady && <EditKeyDialog apiKey={editing} onClose={() => setEditing(null)} />}
     <RevokeDialog row={revoking} onClose={() => setRevoking(null)} pending={revokeKey.isPending || revokeAgent.isPending || revokeToken.isPending || revokePassword.isPending}
       onConfirm={async row => {
         if (row.kind === 'key') await revokeKey.mutateAsync(row.key.id)
@@ -192,49 +202,34 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   </div>
 }
 
-// One row in full, with its actions: the way to read a long name or address list on a phone, where a card clips it.
+// One row in full, with its actions: the way to read a long name or address list on a phone, where a card clips it. A
+// key's history opens below its fields; it loads with the dialog, closed, so its arrival moves nothing.
 function KeyDetails({ row, fields, onClose, onRevoke, onEdit }: { row: Row | null; fields: [string, ReactNode][]; onClose: () => void; onRevoke: (row: Row) => void; onEdit: (key: ApiKey) => void }) {
   return <Dialog open={row !== null} onOpenChange={next => { if (!next) onClose() }} title={row ? rowName(row) : ''} footer={<>
     <Button onClick={onClose}>Close</Button>
-    {row && editableAddresses(row) && <Button onClick={() => onEdit(row.key)}>Edit addresses</Button>}
+    {row && editable(row) && <Button onClick={() => onEdit(row.key)}>Edit</Button>}
     {row && !rowState(row) && <Button variant="danger" onClick={() => onRevoke(row)}>{revokeLabel(row)}</Button>}
   </>}>
     <dl className="keys-details">{fields.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
+    {row?.kind === 'key' && <Disclosure className="keys-changes" title="Changes"><KeyChanges keyId={row.key.id} /></Disclosure>}
   </Dialog>
 }
 
-// A key's addresses, changed in place: the key keeps its secret. Adds and removes only what changed, so an edit made
-// meanwhile elsewhere isn't undone. Rendered only while open, so the choices start from the key each time.
-function EditAddressesDialog({ apiKey, options, onClose }: { apiKey: ApiKey; options: InboundAddress[]; onClose: () => void }) {
-  const update = useApiMutation((api, change: ApiKeyChange) => api.keys.update(apiKey.id, change), 'Addresses updated')
-  const current = apiKey.access.addressIds
-  const [every, setEvery] = useState(current === null)
-  const [chosen, setChosen] = useState<string[]>(current ?? [])
-  const [error, setError] = useState('')
-  const pending = update.isPending
-  // Receiving addresses, and anything else the key already has (an inbox), so saving never drops it unseen.
-  const shown = [...options.filter(item => item.kind !== 'inbox' || current?.includes(item.id)), ...(current ?? []).filter(id => !options.some(item => item.id === id)).map(id => ({ id, address: id }))]
-  function toggle(id: string, checked: boolean) {
-    setError(''); setEvery(false)
-    setChosen(list => checked ? [...new Set([...list, id])] : list.filter(item => item !== id))
-  }
-  async function submit(event: FormEvent) {
-    event.preventDefault()
-    if (!every && !chosen.length) { setError(chooseAddress); return }
-    const add = chosen.filter(id => !current?.includes(id)), remove = (current ?? []).filter(id => !chosen.includes(id))
-    const change: ApiKeyChange | null = every ? current === null ? null : { access: { addressIds: null } }
-      : current === null ? { access: { addressIds: chosen } }
-      : add.length || remove.length ? { access: { ...add.length ? { addAddressIds: add } : {}, ...remove.length ? { removeAddressIds: remove } : {} } } : null
-    try { if (change) await update.mutateAsync(change); onClose() } catch { /* Shown in the form. */ }
-  }
-  return <Dialog open onOpenChange={next => { if (!next && !pending) onClose() }} title="Edit addresses"
-    footer={<><Button disabled={pending} onClick={onClose}>Cancel</Button><Button variant="primary" loading={pending} type="submit" form="edit-key-addresses">Save</Button></>}>
-    <form id="edit-key-addresses" className="stack" onSubmit={submit} noValidate>
-      <MutationError error={update.error} />
-      <AddressChoice id="edit-key-address" options={shown} every={every} chosen={chosen} disabled={pending} error={error}
-        onEvery={checked => { setEvery(checked); setChosen(checked ? [] : current ?? []); setError('') }} onToggle={toggle} />
-    </form>
-  </Dialog>
+// What changed in each entry, named by field: "name, domains".
+const fieldWords: Record<string, string> = { name: 'name', permissions: 'permissions', domains: 'domains', access: 'access', expiresAt: 'expiry' }
+function changedFields(summary: Record<string, unknown>) {
+  const before = (summary.before ?? {}) as Record<string, unknown>, after = (summary.after ?? {}) as Record<string, unknown>
+  return Object.keys(fieldWords).filter(field => (field in before || field in after) && JSON.stringify(before[field]) !== JSON.stringify(after[field])).map(field => fieldWords[field]).join(', ')
+}
+function KeyChanges({ keyId }: { keyId: string }) {
+  const changes = useApiDef(queries.keyChanges(keyId))
+  if (changes.error) return <ErrorState error={changes.error} onRetry={() => void changes.refetch()} />
+  if (!changes.data) return <p className="muted" role="status">Loading changes…</p>
+  if (!changes.data.length) return <EmptyState title="No changes in the last year" />
+  return <ol className="keys-change-list">{changes.data.map(entry => { const fields = entry.action === 'api_key.update' ? changedFields(entry.summary) : ''; return <li key={entry.id}>
+    <span>{actionLabel(entry.action)}{fields && <span className="muted">: {fields}</span>}</span>
+    <span className="muted">{shortDateTime(entry.at)} UTC · <Who actor={entry.actor} /></span>
+  </li> })}</ol>
 }
 
 // What revoking each one ends, said before it happens.

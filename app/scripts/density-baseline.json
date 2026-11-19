@@ -18,7 +18,15 @@
    "findings": []
   },
   "API keys · desktop": {
-   "score": 8,
+   "score": 16,
+   "findings": []
+  },
+  "API keys · edit key dialog · desktop": {
+   "score": 11,
+   "findings": []
+  },
+  "API keys · edit key dialog · phone": {
+   "score": 11,
    "findings": []
   },
   "API keys · phone": {

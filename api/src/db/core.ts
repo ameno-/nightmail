@@ -8,6 +8,8 @@ export const apiKeys = pgTable('api_keys', {
   createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
   lastUsedAt: timestamp('last_used_at', { withTimezone: true, mode: 'string' }),
   revokedAt: timestamp('revoked_at', { withTimezone: true, mode: 'string' }),
+  // When the key stops working; null: never (migration 360).
+  expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'string' }),
 });
 export const requestBudgets = pgTable('api_request_budgets', {
   workspaceId: text('workspace_id').notNull(), keyId: text('key_id').notNull(),

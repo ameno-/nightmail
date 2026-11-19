@@ -34,7 +34,7 @@ function sendOnlyKey(runtime: Runtime, kind: Kind, match: SQL) {
   const cfg = runtime.config, budget = sql`${cfg.apiRateLimitPerMinute}::int AS max_requests`;
   return kind === 'api_key'
     ? sql`SELECT k.id,k.workspace_id,k.id AS key_id,k.permissions,k.domains,${budget} FROM api_keys k WHERE ${match} AND k.revoked_at IS NULL
-        AND k.permissions ? 'send' AND NOT k.permissions ?| ARRAY['read','manage'] AND k.domains<>'[]'::jsonb AND ${tieAllows(cfg, sql`k.workspace_id`, sql`k.id`, 'api_key')}`
+        AND (k.expires_at IS NULL OR k.expires_at>now()) AND k.permissions ? 'send' AND NOT k.permissions ?| ARRAY['read','manage'] AND k.domains<>'[]'::jsonb AND ${tieAllows(cfg, sql`k.workspace_id`, sql`k.id`, 'api_key')}`
     : sql`SELECT k.id,k.workspace_id,k.id AS key_id,k.permissions,'[]'::jsonb AS domains,k.mailbox_ids,${budget} FROM mailbox_keys k WHERE ${match} AND k.revoked_at IS NULL
         AND (k.expires_at IS NULL OR k.expires_at>now()) AND k.inbox_id IS NULL
         AND k.permissions ? 'send' AND NOT k.permissions ?| ARRAY['read','modify','create'] AND ${tieAllows(cfg, sql`k.workspace_id`, sql`k.id`, 'key')}`;

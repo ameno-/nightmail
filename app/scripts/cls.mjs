@@ -171,6 +171,8 @@ const pages = ids => [
   ['API keys · create key dialog', '/api-keys', { dialog: 'Create key' }],
   // /api-keys?create=smtp opens Create key on an SMTP login: its domains load after it opens.
   ['API keys · SMTP login dialog', '/api-keys?create=smtp', {}],
+  // Edit key: a row's menu, then Edit; the dialog opens once the key's domains have loaded.
+  ['API keys · edit key dialog', '/api-keys', { menu: ['Actions for Production', 'Edit', 'Edit key'] }],
   ['Receiving · new address dialog', '/receiving', { dialog: 'New address' }],
   // The route editor opens once its inboxes, webhooks and forwards have loaded.
   ['Receiving · route editor dialog', `/receiving/addresses/${ids.address}`, { dialog: 'Add a route' }],
@@ -183,7 +185,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Overview · range', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · endpoints', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
+const phonePages = new Set(['Overview', 'Overview · range', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · endpoints', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -392,6 +394,19 @@ async function measure(browser, job, fx) {
       else await page.waitForSelector('[role=dialog][data-state=open]', { timeout: 10_000 }).catch(() => problems.push(`“${job.dialog}” opened no dialog`));
       await settle(page, net);
     }
+    if (job.menu) {
+      // A row's menu, then one of its items: a dropdown opens on pointer down, a phone's action sheet on click. The
+      // dialog the item opens is found by its title.
+      const [trigger, item, title] = job.menu;
+      const opened = await page.evaluate(label => { const el = [...document.querySelectorAll('button')].find(el => el.getClientRects().length && el.getAttribute('aria-label') === label); el?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerType: 'mouse' })); el?.click(); return Boolean(el); }, trigger);
+      const choice = opened && await page.waitForFunction(text => [...document.querySelectorAll('[role=menuitem], .ui-action-sheet__item')].find(el => el.getClientRects().length && el.textContent.trim() === text), item, { timeout: 10_000 }).catch(() => null);
+      if (!choice) problems.push(opened ? `no “${item}” in “${trigger}”` : `no control “${trigger}”`);
+      else {
+        await choice.evaluate(el => el.click());
+        await page.waitForFunction(text => [...document.querySelectorAll('[role=dialog][data-state=open]')].some(el => el.textContent.includes(text)), title, { timeout: 10_000 }).catch(() => problems.push(`“${item}” opened no “${title}” dialog`));
+      }
+      await settle(page, net);
+    }
     if (job.mode === 'in-app') {
       await page.evaluate(() => { window.__cls.reset(); window.__inApp = performance.now(); });
       if (job.switchTo) {
@@ -522,10 +537,10 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, notes, dialog, still, alone, phoneOnly }] of pages(ids)) {
+  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, notes, dialog, menu, still, alone, phoneOnly }] of pages(ids)) {
     if (only && !only.test(name) || device === 'phone' && !phonePages.has(name) || phoneOnly && device !== 'phone') continue;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    const load = { name, path, user, scheme, device, support, live, notes, dialog, still, alone, mode: 'load', slug: slug + '-load' };
+    const load = { name, path, user, scheme, device, support, live, notes, dialog, menu, still, alone, mode: 'load', slug: slug + '-load' };
     if (densityOnly && !density.wanted(load)) continue;
     jobs.push(load);
     if (from && !densityOnly) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });

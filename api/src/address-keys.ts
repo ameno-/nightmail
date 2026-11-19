@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import { ApiError, digest, id, isoTime, randomSecret, type Actor, type Ctx, type DbExecutor } from './core.js';
 import { mailboxKeys, type MailboxPermission } from './db/mailbox.js';
 import { recordAudit } from './audit.js';
-import { approvalMadeKey, createdInboxes, holdKeyAdmin, inactiveKey } from './auth.js';
+import { agentExpiryRefusal, approvalMadeKey, askedExpiry, createdInboxes, holdKeyAdmin, inactiveKey } from './auth.js';
 import { ownReceiving } from './rituals.js';
 import { secretPrefixes, shownPrefix } from './brand.js';
 
@@ -30,23 +30,21 @@ export const limitedKeyView = (row: Row, createdInboxIds: string[] = []) => ({
  * Creates a limited key; the secret is returned once. The caller has already checked that it may administer keys
  * (an unrestricted manage credential, never an agent token). A key an MCP approval creates is tied to it (ownReceiving)
  * and needs its receiving consent. `field` names the request field for errors: the API's access object, or the
- * deprecated createInboundKey's top-level fields.
+ * deprecated createInboundKey's top-level fields. `expiresAt`: a time to come, or none; an inbox key ends no later
+ * than its inbox.
  */
-export async function createLimitedKey(c: Ctx, workspaceId: string, name: string, access: LimitedAccess, field: { addresses: string; inbox: string; mail: string }) {
+export async function createLimitedKey(c: Ctx, workspaceId: string, name: string, access: LimitedAccess, field: { addresses: string; inbox: string; mail: string }, asked?: string | null) {
   const mail = [...new Set(access.mail)];
   let mailboxIds: string[] | null, inboxId: string | null = null;
-  if (access.type === 'inbox') {
-    if (mail.includes('create')) throw new ApiError(422, 'VALIDATION_FAILED', 'A key for one inbox can read, send and modify; create needs a key for addresses.', field.mail);
-    mailboxIds = [access.inboxId]; inboxId = access.inboxId;
-  } else {
+  if (access.type === 'inbox') { mailboxIds = [access.inboxId]; inboxId = access.inboxId; }
+  else {
     mailboxIds = access.addressIds ? [...new Set(access.addressIds)] : null;
-    if (mail.includes('create') && mailboxIds === null || mailboxIds?.length === 0 && !mail.includes('create'))
-      throw new ApiError(422, 'ADDRESS_SCOPE_REQUIRED', 'Provisioning keys need an explicit addressIds scope.', field.addresses);
+    if (mailboxIds?.length === 0 && !mail.includes('create')) throw noAddresses(field.addresses);
   }
   const secret = randomSecret(secretPrefixes.addressKey);
   const row = await c.env.db.transaction(async tx => {
     await holdKeyAdmin(tx, c, true);
-    let expiresAt: string | null = null;
+    let expiresAt: string | null = asked ?? null;
     if (mailboxIds?.length) {
       // Held until commit, so an inbox can't be deleted between this check and the insert (inbox_end locks the row).
       const found = (await tx.execute<{ id: string; kind: string; delete_after: string | null; active: boolean }>(sql`SELECT id, kind, delete_after::text, delete_after IS NULL OR delete_after > now() AS active
@@ -54,76 +52,116 @@ export async function createLimitedKey(c: Ctx, workspaceId: string, name: string
       if (access.type === 'inbox') {
         if (found[0]?.kind !== 'inbox' || !found[0].active) throw new ApiError(422, 'UNKNOWN_INBOX', 'Choose an active agent inbox in this workspace.', field.inbox);
         // It ends with the inbox (inbox_end), and with an expiring inbox's lease.
-        expiresAt = found[0].delete_after;
+        expiresAt = inboxExpiry(asked ?? null, found[0].delete_after, asked != null);
       } else if (found.length !== mailboxIds.length) throw new ApiError(422, 'MAILBOX_NOT_FOUND', 'Every ID must identify an existing receiving address.', field.addresses);
     }
     const [created] = await tx.insert(mailboxKeys).values({ id: id('mbk'), workspaceId, name, hash: await digest(secret), prefix: shownPrefix(secret), mailboxIds, inboxId, permissions: mail, expiresAt }).returning();
     await ownReceiving(tx, c, 'key', created!.id);
     await recordAudit(tx, c, { action: 'api_key.create', workspaceId, target: { type: 'api_key', id: created!.id },
-      after: { name, access: limitedAccess(created!), mcpGrant: c.get('actor')?.grantId } });
+      after: { name, access: limitedAccess(created!), expiresAt: isoTime(created!.expiresAt) ?? undefined, mcpGrant: c.get('actor')?.grantId } });
     return created!;
   });
   c.header('Cache-Control', 'no-store');
   return { row, secret };
 }
+const noAddresses = (field: string) => new ApiError(422, 'ADDRESS_SCOPE_REQUIRED', 'A key for no addresses needs create: it then reaches only the inboxes it creates. Choose addresses, or every address.', field);
+/** An inbox key's end: the expiry set on it, at most its inbox's end, or the inbox's end. `asked`: the caller chose
+ *  this expiry now, so one past the inbox's end is refused rather than cut short unseen. */
+function inboxExpiry(own: string | null, inboxEnd: string | null, asked: boolean) {
+  if (own === null) return inboxEnd;
+  if (inboxEnd === null || Date.parse(isoTime(own)!) <= Date.parse(isoTime(inboxEnd)!)) return own;
+  if (asked) throw new ApiError(422, 'VALIDATION_FAILED', `This key ends with its inbox at ${isoTime(inboxEnd)}: choose that time or earlier, or null to end with the inbox.`, 'expiresAt');
+  return inboxEnd;
+}
 
-export type LimitedChange = { name?: string; access?: { addressIds?: string[] | null; addAddressIds?: string[]; removeAddressIds?: string[]; mail?: MailboxPermission[] }; permissions?: unknown; domains?: unknown };
+export type LimitedChange = { name?: string; expiresAt?: string | null; permissions?: unknown; domains?: unknown; addDomains?: unknown; removeDomains?: unknown;
+  access?: { type?: 'addresses' | 'inbox'; inboxId?: string; addressIds?: string[] | null; addAddressIds?: string[]; removeAddressIds?: string[]; mail?: MailboxPermission[] } };
 /**
- * updateApiKey for a limited key: its name, its addresses and its mail, in place, under the rules createLimitedKey
- * applies to a new key, so a change never gives a key what a new one couldn't have. The caller isn't this key, and its
- * authority is checked again here (holdKeyAdmin). The change applies at once: every request with the key reads its row
- * (authorizeInboxKey), a long poll reads it again each second (auth.ts longPoll), and dispatch checks the sending
- * address against it (dispatcher.ts), so mail queued from a removed address is not sent. Returns the key's view, with
- * the access it has now: its addresses, and with create the inboxes it created.
+ * updateApiKey for a limited key: its name, expiry, addresses or inbox, and mail, in place, under the rules
+ * createLimitedKey applies to a new key, so a change never gives a key what a new one couldn't have. It becomes a key
+ * for addresses or an inbox key and back on the same secret. The caller isn't this key, and its authority is checked
+ * again here (holdKeyAdmin). The change applies at once: every request with the key reads its row (authorizeInboxKey),
+ * a long poll reads it again each second (auth.ts longPoll), and dispatch checks the sending address against it
+ * (dispatcher.ts), so mail queued from a removed address is not sent. Returns the key's view, with the access it has
+ * now: its addresses, and with create the inboxes it created.
  */
 export async function updateLimitedKey(tx: DbExecutor, c: Ctx, a: Actor, keyId: string, change: LimitedChange) {
-  if (change.permissions || change.domains) throw new ApiError(422, 'VALIDATION_FAILED', 'A key for addresses or an inbox takes its permissions in access.mail and has no sender domains.', change.permissions ? 'permissions' : 'domains');
+  const workspaceOnly = (['permissions', 'domains', 'addDomains', 'removeDomains'] as const).find(field => change[field] !== undefined);
+  if (workspaceOnly) throw new ApiError(422, 'VALIDATION_FAILED', 'A key for addresses or an inbox takes its permissions in access.mail and has no sender domains.', workspaceOnly);
   const access = change.access ?? {}, add = access.addAddressIds ?? [], remove = access.removeAddressIds ?? [];
+  const listed = access.addressIds !== undefined || add.length > 0 || remove.length > 0;
   if (access.addressIds !== undefined && (add.length || remove.length)) throw new ApiError(422, 'VALIDATION_FAILED', 'Replace the addresses with addressIds, or add and remove some; not both.', 'access.addressIds');
   if (add.some(id => remove.includes(id))) throw new ApiError(422, 'VALIDATION_FAILED', 'An address can\'t be both added and removed.', 'access.removeAddressIds');
+  const asked = askedExpiry(change.expiresAt);
   // An approval (or a key it made) changes a limited key as it creates one: with receiving consent.
   const row = await holdKeyAdmin(tx, c, true, { id: keyId, lock: async () => (await tx.select().from(mailboxKeys).where(sql`${mailboxKeys.workspaceId} = ${a.workspaceId} AND ${mailboxKeys.id} = ${keyId}`).for('update'))[0] });
   if (!row) throw new ApiError(404, 'NOT_FOUND', 'API key was not found.');
-  if (row.revokedAt || row.expiresAt && Date.parse(row.expiresAt) <= Date.now()) throw inactiveKey();
+  if (row.revokedAt) throw inactiveKey();
+  // An inbox key whose inbox ended ended with it. Any other key changes, and an expired one can be given a later expiry.
+  const own = row.inboxId ? (await tx.execute<{ end: string | null; active: boolean; follows: boolean }>(sql`SELECT b.delete_after::text AS end, b.delete_after IS NULL OR b.delete_after > now() AS active,
+      k.expires_at IS NOT DISTINCT FROM b.delete_after AS follows FROM mailboxes b JOIN mailbox_keys k ON k.workspace_id = b.workspace_id AND k.id = ${row.id}
+    WHERE b.workspace_id = ${a.workspaceId} AND b.id = ${row.inboxId} AND b.kind = 'inbox' FOR SHARE OF b`)).rows[0] : undefined;
+  if (row.inboxId && !own?.active) throw inactiveKey();
   await approvalMadeKey(tx, a, 'key', row.id);
-  const inbox = row.inboxId !== null, mail = access.mail ? [...new Set(access.mail)] : row.permissions;
-  if (inbox && (access.addressIds !== undefined || add.length || remove.length)) throw new ApiError(422, 'VALIDATION_FAILED', 'A key for one inbox keeps its inbox. Change its mail, or create a key for addresses.', 'access.addressIds');
-  if (inbox && mail.includes('create')) throw new ApiError(422, 'VALIDATION_FAILED', 'A key for one inbox can read, send and modify; create needs a key for addresses.', 'access.mail');
-  let ids = row.mailboxIds;
-  if (access.addressIds !== undefined) ids = access.addressIds && [...new Set(access.addressIds)];
-  else if (ids === null && remove.length) throw new ApiError(422, 'ADDRESS_SCOPE_REQUIRED', 'This key covers every address. Set addressIds to the ones it keeps.', 'access.removeAddressIds');
-  // A key for every address already has the ones added.
-  else if (ids !== null) ids = [...new Set([...ids, ...add])].filter(id => !remove.includes(id));
-  if (ids && ids.length > 500) throw new ApiError(422, 'VALIDATION_FAILED', 'A key covers at most 500 addresses. Use a key for every address instead.', access.addressIds ? 'access.addressIds' : 'access.addAddressIds');
-  if (!inbox && (mail.includes('create') && ids === null || ids?.length === 0 && !mail.includes('create')))
-    throw new ApiError(422, 'ADDRESS_SCOPE_REQUIRED', 'Provisioning keys need an explicit addressIds scope.', 'access.addressIds');
-  // Every address it gains is one of this workspace's, held until commit like createLimitedKey's.
-  const gained = ids?.filter(id => !row.mailboxIds?.includes(id)) ?? [];
-  if (gained.length) {
-    const found = (await tx.execute<{ id: string }>(sql`SELECT id FROM mailboxes WHERE workspace_id = ${a.workspaceId} AND id = ANY(${sql.param(gained)}::text[]) FOR SHARE`)).rows;
-    if (found.length !== gained.length) throw new ApiError(422, 'MAILBOX_NOT_FOUND', 'Every ID must identify an existing receiving address.', access.addressIds ? 'access.addressIds' : 'access.addAddressIds');
+  const type = access.type ?? (row.inboxId ? 'inbox' : 'addresses'), mail = access.mail ? [...new Set(access.mail)] : row.permissions;
+  if (type === 'inbox' && listed) throw new ApiError(422, 'VALIDATION_FAILED', 'An inbox key has one inbox: set access.inboxId to move it, or access.type "addresses" to make it a key for addresses.', 'access.addressIds');
+  if (type === 'addresses' && access.inboxId !== undefined) throw new ApiError(422, 'VALIDATION_FAILED', 'access.inboxId is for an inbox key: set access.type "inbox" with it, or addresses with addressIds.', 'access.inboxId');
+  let ids: string[] | null = row.mailboxIds, inboxId: string | null = null, inboxEnd: string | null = null;
+  if (type === 'inbox') {
+    inboxId = access.inboxId ?? row.inboxId;
+    if (!inboxId) throw new ApiError(422, 'VALIDATION_FAILED', 'Choose the agent inbox this key belongs to (access.inboxId).', 'access.inboxId');
+    if (inboxId === row.inboxId) inboxEnd = own!.end;
+    else {
+      // Held until commit, as createLimitedKey holds it.
+      const [box] = (await tx.execute<{ kind: string; end: string | null; active: boolean }>(sql`SELECT kind, delete_after::text AS end, delete_after IS NULL OR delete_after > now() AS active
+        FROM mailboxes WHERE workspace_id = ${a.workspaceId} AND id = ${inboxId} FOR SHARE`)).rows;
+      if (box?.kind !== 'inbox' || !box.active) throw new ApiError(422, 'UNKNOWN_INBOX', 'Choose an active agent inbox in this workspace.', 'access.inboxId');
+      inboxEnd = box.end;
+    }
+    ids = [inboxId];
+  } else {
+    if (access.addressIds !== undefined) ids = access.addressIds && [...new Set(access.addressIds)];
+    else if (ids === null && remove.length) throw new ApiError(422, 'ADDRESS_SCOPE_REQUIRED', 'This key covers every address. Set addressIds to the ones it keeps.', 'access.removeAddressIds');
+    // A key for every address already has the ones added.
+    else if (ids !== null) ids = [...new Set([...ids, ...add])].filter(id => !remove.includes(id));
+    if (ids && ids.length > 500) throw new ApiError(422, 'VALIDATION_FAILED', 'A key covers at most 500 addresses. Use a key for every address instead.', access.addressIds ? 'access.addressIds' : 'access.addAddressIds');
+    if (ids?.length === 0 && !mail.includes('create')) throw noAddresses(access.addressIds ? 'access.addressIds' : 'access.removeAddressIds');
+    // Every address it gains is one of this workspace's, held until commit like createLimitedKey's.
+    const gained = ids?.filter(id => !row.mailboxIds?.includes(id)) ?? [];
+    if (gained.length) {
+      const found = (await tx.execute<{ id: string }>(sql`SELECT id FROM mailboxes WHERE workspace_id = ${a.workspaceId} AND id = ANY(${sql.param(gained)}::text[]) FOR SHARE`)).rows;
+      if (found.length !== gained.length) throw new ApiError(422, 'MAILBOX_NOT_FOUND', 'Every ID must identify an existing receiving address.', access.addressIds ? 'access.addressIds' : 'access.addAddressIds');
+    }
   }
   // A key with create reaches every inbox it created (authorizeInboxKey), whatever its addresses say. Taking one of those
   // away while create stays would report a removal that didn't happen, so it is refused: the key keeps create for
   // future inboxes, and dropping create in the same request (or deleting the inbox) is what ends its reach. A replacement
-  // names everything the key keeps, so a live inbox it created that the new list leaves out is taken away too.
+  // (addressIds, or a new inbox) names everything the key keeps, so a live inbox it created that it leaves out is taken
+  // away too.
   const created = row.permissions.includes('create') || mail.includes('create')
     ? (await tx.execute<{ ids: string[] }>(sql`SELECT ${createdInboxes(sql`${a.workspaceId}`, sql`${row.id}`)} AS ids`)).rows[0]!.ids : [];
+  const replaced = type === 'inbox' ? inboxId !== row.inboxId ? ids : undefined : access.addressIds;
   const removed = ids === null ? [] : row.mailboxIds?.filter(id => !ids.includes(id)) ?? [];
-  const taken = [...new Set([...removed, ...remove, ...access.addressIds ? created.filter(id => !access.addressIds!.includes(id)) : []])];
+  const taken = [...new Set([...removed, ...remove, ...replaced ? created.filter(id => !replaced.includes(id)) : []])];
   if (mail.includes('create') && taken.length) {
     const { rows: kept } = await tx.execute<{ id: string }>(sql`SELECT id FROM mailboxes WHERE workspace_id = ${a.workspaceId} AND created_by = ${row.id}
       AND kind = 'inbox' AND delete_after > now() AND id = ANY(${sql.param(taken)}::text[]) ORDER BY id`);
     if (kept.length) throw new ApiError(409, 'CREATED_INBOX_REACHABLE', `This key created ${kept.map(k => k.id).join(', ')}, and a key with create reaches every inbox it created, so removing it here would leave it reachable. Remove create from access.mail in the same request, or delete the inbox.`,
-      remove.length ? 'access.removeAddressIds' : 'access.addressIds');
+      remove.length ? 'access.removeAddressIds' : type === 'inbox' ? 'access.inboxId' : 'access.addressIds');
   }
+  // Its expiry: as asked, or the one set on it. An inbox key whose expiry is its inbox's end follows its inbox: to the new
+  // inbox's end when it moves, and to none when it becomes a key for addresses.
+  const set = asked !== undefined ? asked : own?.follows ? null : row.expiresAt;
+  const expiresAt = type === 'inbox' ? inboxExpiry(set, inboxEnd, asked != null) : set, expiryChanged = isoTime(expiresAt) !== isoTime(row.expiresAt);
   const reach = (permissions: MailboxPermission[]) => permissions.includes('create') ? created : [];
   const name = change.name ?? row.name;
-  if (name === row.name && JSON.stringify(ids) === JSON.stringify(row.mailboxIds) && JSON.stringify(mail) === JSON.stringify(row.permissions)) return limitedKeyView(row, reach(mail));
-  const [updated] = await tx.update(mailboxKeys).set({ name, mailboxIds: ids, permissions: mail }).where(sql`${mailboxKeys.id} = ${row.id}`).returning();
+  if (name === row.name && inboxId === row.inboxId && !expiryChanged && JSON.stringify(ids) === JSON.stringify(row.mailboxIds) && JSON.stringify(mail) === JSON.stringify(row.permissions)) return limitedKeyView(row, reach(mail));
+  if (expiryChanged) await agentExpiryRefusal(tx, a, 'key', row.id, isoTime(row.expiresAt), isoTime(expiresAt));
+  const [updated] = await tx.update(mailboxKeys).set({ name, mailboxIds: ids, inboxId, permissions: mail, ...expiryChanged ? { expiresAt } : {} }).where(sql`${mailboxKeys.id} = ${row.id}`).returning();
   // Before and after are cut to 20 addresses in the trail; what changed is listed on its own.
+  const gained = ids?.filter(id => !row.mailboxIds?.includes(id)) ?? [];
   await recordAudit(tx, c, { action: 'api_key.update', workspaceId: a.workspaceId, target: { type: 'api_key', id: row.id },
-    before: { name: row.name, access: limitedAccess(row, reach(row.permissions)) }, after: { name, access: limitedAccess(updated!, reach(mail)) },
+    before: { name: row.name, access: limitedAccess(row, reach(row.permissions)), expiresAt: isoTime(row.expiresAt) }, after: { name, access: limitedAccess(updated!, reach(mail)), expiresAt: isoTime(updated!.expiresAt) },
     details: { ...gained.length && row.mailboxIds ? { addedAddressIds: gained } : {}, ...removed.length ? { removedAddressIds: removed } : {} } });
   return limitedKeyView(updated!, reach(mail));
 }

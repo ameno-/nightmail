@@ -193,6 +193,7 @@ export const guides: Guide[] = [
       <Section title="Which one do I need?">
         <Table head={['Credential', 'What it does', 'Where']} rows={credentials.map(c => [<strong key="n">{c.name}</strong>, c.line, c.where])} />
         <p>Keys are shown once when they’re made. Store them on your server, never in a browser. Revoke any of them in <Link to="/api-keys">API keys</Link>.</p>
+        <p>To change an API key’s access or expiry, choose Edit in its row’s menu. It keeps its secret, so nothing is redeployed.</p>
       </Section>
       <MailServers />
     </>,

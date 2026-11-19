@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { actorMailAccess, mailboxRoute, receivingConsentRoute, workspaceMailAccess, ApiError, denied, requiredOf, unrestrictedRequired, RECEIVING_HOST_CHANGE, digest, errors, getSes, id, isoTime, json, KEY_CHANGE, lasting, lazyModule, log, ModuleLoadError, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
-import { authenticate, chargeCredential, createdInboxes, delegatedInbox, longPoll, requireReceivingConsent, reservePolls } from './auth.js';
+import { authenticate, chargeCredential, createdInboxes, delegatedInbox, keyExpired, longPoll, requireReceivingConsent, reservePolls } from './auth.js';
 import { boundRequestBody } from './request-body.js';
 import { auditContext, auditInsert, recordAudit } from './audit.js';
 import { domains } from './db/operations.js';
@@ -50,9 +50,12 @@ async function mailboxFor(c: Ctx, mailboxId: string, permission: MailboxPermissi
 }
 
 export async function authorizeInboxKey(c:Ctx,token:string):Promise<MailboxAccess>{
-  const key=await chargeCredential<{id:string;workspace_id:string;grant_id:string|null;mailbox_ids:string[]|null;scope_ids:string[]|null;permissions:MailboxPermission[]}>(c, mailboxKeys,sql`
-    SELECT k.id,k.workspace_id,k.id AS key_id,g.grant_id,k.mailbox_ids AS scope_ids,CASE WHEN k.permissions ? 'create' THEN coalesce(k.mailbox_ids,'[]'::jsonb)||${createdInboxes(sql`k.workspace_id`, sql`k.id`)} ELSE k.mailbox_ids END AS mailbox_ids,k.permissions,${c.env.config.apiRateLimitPerMinute}::int AS max_requests FROM mailbox_keys k LEFT JOIN mail_grant_objects g ON g.workspace_id=k.workspace_id AND g.kind='key' AND g.resource=k.id WHERE hash=${await digest(token)} AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now())`);
-  if(!key)throw new ApiError(401,'AUTH_INVALID','The inbox key is invalid or expired.');
+  // An expired key is read too, uncharged, so its refusal can say when it ended. A key for every address with create
+  // already reaches the inboxes it creates.
+  const key=await chargeCredential<{id:string;workspace_id:string;grant_id:string|null;mailbox_ids:string[]|null;scope_ids:string[]|null;permissions:MailboxPermission[];inbox_id:string|null;expires_at:string|null;ended:boolean}>(c, mailboxKeys,sql`
+    SELECT k.id,k.workspace_id,k.id AS key_id,g.grant_id,k.mailbox_ids AS scope_ids,CASE WHEN k.permissions ? 'create' AND k.mailbox_ids IS NOT NULL THEN k.mailbox_ids||${createdInboxes(sql`k.workspace_id`, sql`k.id`)} ELSE k.mailbox_ids END AS mailbox_ids,k.permissions,k.inbox_id,k.expires_at::text AS expires_at,coalesce(k.expires_at<=now(),false) AS ended,${c.env.config.apiRateLimitPerMinute}::int AS max_requests FROM mailbox_keys k LEFT JOIN mail_grant_objects g ON g.workspace_id=k.workspace_id AND g.kind='key' AND g.resource=k.id WHERE hash=${await digest(token)} AND revoked_at IS NULL`,sql`NOT credential.ended`);
+  if(!key)throw new ApiError(401,'AUTH_INVALID','The inbox key is invalid or has been revoked.');
+  if(key.ended)throw keyExpired(key.expires_at!,key.inbox_id!==null);
   if(key.grant_id){
     const grant=await (await import('./mcp-auth.js')).getMcpGrantActor(c.env,'mcp_'+key.grant_id,key.workspace_id,undefined,'lasting');
     if(grant?.workspaceId!==key.workspace_id||!grant.receivingConsent||!grant.permissions.includes('manage'))throw new ApiError(401,'AUTH_INVALID','The originating receiving approval is no longer active.');

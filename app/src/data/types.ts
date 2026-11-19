@@ -96,6 +96,23 @@ export interface CampaignStats { tracking: boolean; totals: { accepted: number; 
 export type CampaignInput = Pick<Campaign, 'regionId' | 'name' | 'subject' | 'previewText' | 'fromName' | 'fromEmail' | 'listId' | 'segmentId' | 'html'> & { replyTo?: string[]; unsubscribePageUrl?: string; id?: string; revision?: number; draft?: Record<string, any>; attachments?: string[]; defaults?: Record<string, string>; templateId?: string; idempotencyKey?: string }
 export interface CampaignState { id: string; revision: number; updatedAt: ISODate; status: CampaignStatus; scheduledAt: ISODate | null; archivedAt: ISODate | null }
 export interface SendCampaignInput { revision?: number; id: string; mode: 'now' | 'schedule'; scheduledAt?: ISODate; pacing?: { perDay?: number | null; autoPause?: boolean; rateShare?: number } }
+// Settings → Activity's entries (data/activity.ts) and an API key's history: the workspace's audit trail.
+export type AuditActorType = 'member' | 'api_key' | 'mcp_grant' | 'agent_token' | 'inbox_key' | 'app_password' | 'operator' | 'support' | 'system' | 'stripe'
+export type AuditEntry = {
+  id: string
+  at: string
+  action: string
+  actor: { type: AuditActorType; id: string | null; label: string | null; email: string | null }
+  via: string
+  target: { type: string; id: string | null } | null
+  /** The member the event concerns when it is not the actor: whose role changed, or whose support request let Nightmail support in. */
+  subject: { userId: string; email: string | null } | null
+  summary: Record<string, unknown>
+  reason: string | null
+  requestId: string | null
+  network: string | null
+  client: string | null
+}
 export type KeyPermission = 'read' | 'send' | 'manage'
 /** What a key limited to mail may do there: read, send (reply and start conversations), modify (mark read, archive,
  *  label) and create (make agent inboxes and use the ones it made). */
@@ -103,15 +120,17 @@ export type MailPermission = 'read' | 'send' | 'modify' | 'create'
 /** One API key type. workspace: permissions and domains. addresses: only mail at chosen receiving addresses (null: every
  *  address, including new ones; [] with create: only the inboxes it creates). inbox: one agent inbox. */
 export interface ApiKeyAccess { type: 'workspace' | 'addresses' | 'inbox'; addressIds: string[] | null; inboxId: string | null; mail: MailPermission[] }
-export interface ApiKey { id: string; name: string; prefix: string; permissions: KeyPermission[]; domains: string[]; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null; expiresAt: ISODate | null; access: ApiKeyAccess; approval: ApprovalTie | null }
+export interface ApiKey { id: string; name: string; prefix: string; permissions: KeyPermission[]; domains: string[]; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null; expiresAt: ISODate | null; access: ApiKeyAccess; approval: ApprovalTie | null; lastChange: Pick<AuditEntry, 'at' | 'action' | 'actor'> | null }
 /** The MCP approvals a key or webhook is tied to: it works only while every one of them is active (active), until the earliest end (endsAt). */
 export interface ApprovalTie { active: boolean; endsAt: ISODate; owners: { id: string; endsAt: ISODate; active: boolean }[] }
-export type CreateApiKeyAccess = { type: 'workspace' } | { type: 'addresses'; addressIds?: string[]; mail?: MailPermission[] } | { type: 'inbox'; inboxId: string; mail?: Exclude<MailPermission, 'create'>[] }
-/** A limited access takes its abilities in access.mail, without permissions or domains. */
-export interface ApiKeyInput { name: string; permissions?: KeyPermission[]; domains?: string[]; access?: CreateApiKeyAccess }
+export type CreateApiKeyAccess = { type: 'workspace' } | { type: 'addresses'; addressIds?: string[]; mail?: MailPermission[] } | { type: 'inbox'; inboxId: string; mail?: MailPermission[] }
+/** A limited access takes its abilities in access.mail, without permissions or domains. expiresAt: null never expires. */
+export interface ApiKeyInput { name: string; permissions?: KeyPermission[]; domains?: string[]; access?: CreateApiKeyAccess; expiresAt?: ISODate | null }
 export interface CreatedApiKey { key: ApiKey; secret: string }
-/** updateApiKey: a key for addresses replaces its addresses (null: every address) or adds and removes some. */
-export interface ApiKeyChange { access: { addressIds?: string[] | null; addAddressIds?: string[]; removeAddressIds?: string[] } }
+/** updateApiKey: only the fields that change. Domains and addresses are added and removed rather than replaced where
+ *  they can be, so an edit made meanwhile elsewhere isn't undone. */
+export interface ApiKeyUpdate { name?: string; expiresAt?: ISODate | null; permissions?: KeyPermission[]; domains?: string[]; addDomains?: string[]; removeDomains?: string[];
+  access?: { type?: 'addresses' | 'inbox'; inboxId?: string; addressIds?: string[] | null; addAddressIds?: string[]; removeAddressIds?: string[]; mail?: MailPermission[] } }
 export interface AgentTokenSummary { id: string; grantId: string; permissions: KeyPermission[]; domains: string[]; purpose: string; expiresAt: ISODate; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null }
 /** A connected agent (GET /v1/agents): an MCP sign-in and the short-lived agent tokens it made in this workspace. `own`
  *  false is another member's agent that made tokens here (owners and admins see these). */
@@ -302,7 +321,7 @@ export interface Api {
   lists: { list(input?: PageRequest & { counts?: boolean }, signal?: AbortSignal): Promise<PageResult<AudienceList>>; get(id: string, signal?: AbortSignal): Promise<AudienceList>; create(input: { name: string }, signal?: AbortSignal): Promise<AudienceList>; remove(id: string, signal?: AbortSignal): Promise<void> }
   segments: { list(input?: PageRequest, signal?: AbortSignal): Promise<PageResult<Segment>>; get(id: string, signal?: AbortSignal): Promise<Segment>; save(input: SegmentInput, signal?: AbortSignal): Promise<Segment>; preview(input: { id: string; listId?: string }, signal?: AbortSignal): Promise<AudiencePreview> }
   /** Every API key, workspace-wide or limited to addresses or an inbox, in one cursor list (100 a page). */
-  keys: { list(signal?: AbortSignal, cursor?: string, includeRevoked?: boolean): Promise<CursorItems<ApiKey>>; create(input: ApiKeyInput, signal?: AbortSignal): Promise<CreatedApiKey>; update(id: string, change: ApiKeyChange, signal?: AbortSignal): Promise<ApiKey>; revoke(id: string, signal?: AbortSignal): Promise<void> }
+  keys: { list(signal?: AbortSignal, cursor?: string, includeRevoked?: boolean): Promise<CursorItems<ApiKey>>; create(input: ApiKeyInput, signal?: AbortSignal): Promise<CreatedApiKey>; update(id: string, change: ApiKeyUpdate, signal?: AbortSignal): Promise<ApiKey>; changes(id: string, signal?: AbortSignal): Promise<AuditEntry[]>; revoke(id: string, signal?: AbortSignal): Promise<void> }
   /** Agent tokens (connected agents and the tokens they made) and app passwords. */
   credentials: {
     agents(includeInactive?: boolean, signal?: AbortSignal): Promise<Agent[]>

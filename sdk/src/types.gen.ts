@@ -272,6 +272,38 @@ export type ApprovalOwner = {
     active: boolean;
 };
 
+/**
+ * The newest entry in its history (listApiKeyChanges): when it was created, changed or revoked, and by whom. Null when none is kept (after a year).
+ */
+export type ApiKeyLastChange = {
+    /**
+     * When it happened (ISO 8601, UTC).
+     */
+    at: string;
+    /**
+     * What happened, as <area>.<verb>: api_key.create, member.role_change, domain.delete, support.view.
+     */
+    action: string;
+    actor: {
+        /**
+         * member is a signed-in person; support is Nightmail support reading with your permission; system is Nightmail itself.
+         */
+        type: 'member' | 'api_key' | 'mcp_grant' | 'agent_token' | 'inbox_key' | 'app_password' | 'operator' | 'support' | 'system' | 'stripe';
+        /**
+         * The member user ID, key ID, grant ID or support grant ID.
+         */
+        id: string | null;
+        /**
+         * A short display name for the actor, such as a key name, or null.
+         */
+        label: string | null;
+        /**
+         * The member’s email address, for member actors.
+         */
+        email: string | null;
+    };
+} | null;
+
 export type ApiKey = {
     id: string;
     name: string;
@@ -286,10 +318,11 @@ export type ApiKey = {
     revokedAt: string | null;
     access: ApiKeyAccess;
     /**
-     * When a key limited to an expiring inbox stops working (the inbox's deletion time). Null otherwise.
+     * When the key stops working: the expiry set on it, or for an inbox key its inbox's end if that is sooner. Null: it never expires. updateApiKey changes it on the same secret.
      */
     expiresAt: string | null;
     approval: ApprovalTie;
+    lastChange: ApiKeyLastChange;
 };
 
 export type CreateApiKey = {
@@ -303,6 +336,10 @@ export type CreateApiKey = {
      */
     domains?: Array<string>;
     access?: CreateApiKeyAccess;
+    /**
+     * When the key stops working. Omit or null for a key that never expires; an inbox key also ends with its inbox, and its expiry is at most that end.
+     */
+    expiresAt?: string | null;
 };
 
 /**
@@ -323,7 +360,88 @@ export type CreateApiKeyAccess = {
      * An active agent inbox. The key stops working when the inbox is deleted, and when an expiring inbox ends.
      */
     inboxId: string;
-    mail?: Array<'read' | 'send' | 'modify'>;
+    /**
+     * read, send and modify, as for addresses; with create it also reaches the inboxes it creates, until its own inbox ends.
+     */
+    mail?: Array<'read' | 'send' | 'modify' | 'create'>;
+};
+
+export type ApiKeyChangePage = {
+    data: Array<AuditEntry>;
+    /**
+     * Pass as cursor for older entries; null at the end.
+     */
+    nextCursor: string | null;
+};
+
+export type AuditEntry = {
+    /**
+     * Stable ID of the entry; audit entries are prefixed aud_, ledger lines bill_, enforcement events enf_.
+     */
+    id: string;
+    /**
+     * When it happened (ISO 8601, UTC).
+     */
+    at: string;
+    /**
+     * What happened, as <area>.<verb>: api_key.create, member.role_change, domain.delete, support.view.
+     */
+    action: string;
+    actor: {
+        /**
+         * member is a signed-in person; support is Nightmail support reading with your permission; system is Nightmail itself.
+         */
+        type: 'member' | 'api_key' | 'mcp_grant' | 'agent_token' | 'inbox_key' | 'app_password' | 'operator' | 'support' | 'system' | 'stripe';
+        /**
+         * The member user ID, key ID, grant ID or support grant ID.
+         */
+        id: string | null;
+        /**
+         * A short display name for the actor, such as a key name, or null.
+         */
+        label: string | null;
+        /**
+         * The member’s email address, for member actors.
+         */
+        email: string | null;
+    };
+    /**
+     * Where the action came from: dashboard, api, mcp, support, job, webhook.
+     */
+    via: string;
+    /**
+     * The object acted on.
+     */
+    target: {
+        type: string;
+        id: string | null;
+    } | null;
+    /**
+     * The member the event concerns when it is not the actor: the member whose role changed or whose support request let Nightmail support in.
+     */
+    subject: {
+        userId: string;
+        email: string | null;
+    } | null;
+    /**
+     * Before and after, with secrets and message content removed.
+     */
+    summary: {
+        [key: string]: unknown;
+    };
+    reason: string | null;
+    /**
+     * The x-request-id of the API request that made the change.
+     */
+    requestId: string | null;
+    /**
+     * The client network (/24 or /48), never the full address.
+     */
+    network: string | null;
+    /**
+     * The client family, such as "Chrome 131 on macOS".
+     */
+    client: string | null;
 };
 
 export type UpdateApiKey = {
@@ -337,9 +455,29 @@ export type UpdateApiKey = {
      */
     domains?: Array<string>;
     /**
-     * A key limited to addresses or an inbox. Its type never changes, nor does an inbox key's inbox.
+     * Workspace keys: adds these sender domains and keeps the others. A key for all domains already has them.
+     */
+    addDomains?: Array<string>;
+    /**
+     * Workspace keys: removes these sender domains. Removing the last one is refused, since [] means all domains: set domains instead.
+     */
+    removeDomains?: Array<string>;
+    /**
+     * Any key: sets when it stops working, or null so it never expires (an inbox key then ends with its inbox). An expired key can be given a later expiry: it works again with the same secret. Over MCP, an agent moves an expiry later only up to its own approval's end, and never removes one; a key an approval created is exempt, as it ends with that approval anyway.
+     */
+    expiresAt?: string | null;
+    /**
+     * A key limited to addresses or an inbox: what it reaches. A workspace key stays a workspace key, and a key for addresses or an inbox stays one of those two.
      */
     access?: {
+        /**
+         * A key for addresses or an inbox: makes it the other one, on the same secret. inbox takes inboxId; addresses keeps the inbox as its address unless addressIds says otherwise.
+         */
+        type?: 'addresses' | 'inbox';
+        /**
+         * An inbox key: the active agent inbox it belongs to now. It ends with that inbox, and its expiry is at most that inbox's end.
+         */
+        inboxId?: string;
         /**
          * A key for addresses: replaces its addresses. null for every address, including ones added later.
          */
@@ -353,7 +491,7 @@ export type UpdateApiKey = {
          */
         removeAddressIds?: Array<string>;
         /**
-         * A key for addresses or an inbox: replaces what it may do with that mail. An inbox key takes read, send and modify.
+         * A key for addresses or an inbox: replaces what it may do with that mail: read, send, modify, and create (agent inboxes, which it then reaches as well).
          */
         mail?: Array<'read' | 'send' | 'modify' | 'create'>;
     };
@@ -5084,76 +5222,6 @@ export type OverviewSetup = {
     } | null;
 };
 
-export type AuditEntry = {
-    /**
-     * Stable ID of the entry; audit entries are prefixed aud_, ledger lines bill_, enforcement events enf_.
-     */
-    id: string;
-    /**
-     * When it happened (ISO 8601, UTC).
-     */
-    at: string;
-    /**
-     * What happened, as <area>.<verb>: api_key.create, member.role_change, domain.delete, support.view.
-     */
-    action: string;
-    actor: {
-        /**
-         * member is a signed-in person; support is Nightmail support reading with your permission; system is Nightmail itself.
-         */
-        type: 'member' | 'api_key' | 'mcp_grant' | 'agent_token' | 'inbox_key' | 'app_password' | 'operator' | 'support' | 'system' | 'stripe';
-        /**
-         * The member user ID, key ID, grant ID or support grant ID.
-         */
-        id: string | null;
-        /**
-         * A short display name for the actor, such as a key name, or null.
-         */
-        label: string | null;
-        /**
-         * The member’s email address, for member actors.
-         */
-        email: string | null;
-    };
-    /**
-     * Where the action came from: dashboard, api, mcp, support, job, webhook.
-     */
-    via: string;
-    /**
-     * The object acted on.
-     */
-    target: {
-        type: string;
-        id: string | null;
-    } | null;
-    /**
-     * The member the event concerns when it is not the actor: the member whose role changed or whose support request let Nightmail support in.
-     */
-    subject: {
-        userId: string;
-        email: string | null;
-    } | null;
-    /**
-     * Before and after, with secrets and message content removed.
-     */
-    summary: {
-        [key: string]: unknown;
-    };
-    reason: string | null;
-    /**
-     * The x-request-id of the API request that made the change.
-     */
-    requestId: string | null;
-    /**
-     * The client network (/24 or /48), never the full address.
-     */
-    network: string | null;
-    /**
-     * The client family, such as "Chrome 131 on macOS".
-     */
-    client: string | null;
-};
-
 export type SupportHandoff = {
     /**
      * The support reference (sho_…). Quote it to support.
@@ -7424,6 +7492,75 @@ export type CreateApiKeyResponses = {
 };
 
 export type CreateApiKeyResponse = CreateApiKeyResponses[keyof CreateApiKeyResponses];
+
+export type ListApiKeyChangesData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        /**
+         * nextCursor from the previous page.
+         */
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/v1/api-keys/{id}/changes';
+};
+
+export type ListApiKeyChangesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListApiKeyChangesError = ListApiKeyChangesErrors[keyof ListApiKeyChangesErrors];
+
+export type ListApiKeyChangesResponses = {
+    /**
+     * Success
+     */
+    200: ApiKeyChangePage;
+};
+
+export type ListApiKeyChangesResponse = ListApiKeyChangesResponses[keyof ListApiKeyChangesResponses];
 
 export type RevokeApiKeyData = {
     body?: never;

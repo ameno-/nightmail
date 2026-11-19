@@ -741,6 +741,76 @@
           "active"
         ]
       },
+      "ApiKeyLastChange": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "description": "When it happened (ISO 8601, UTC)."
+          },
+          "action": {
+            "type": "string",
+            "description": "What happened, as <area>.<verb>: api_key.create, member.role_change, domain.delete, support.view."
+          },
+          "actor": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "member",
+                  "api_key",
+                  "mcp_grant",
+                  "agent_token",
+                  "inbox_key",
+                  "app_password",
+                  "operator",
+                  "support",
+                  "system",
+                  "stripe"
+                ],
+                "description": "member is a signed-in person; support is Nightmail support reading with your permission; system is Nightmail itself."
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The member user ID, key ID, grant ID or support grant ID."
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "A short display name for the actor, such as a key name, or null."
+              },
+              "email": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The member’s email address, for member actors."
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "label",
+              "email"
+            ]
+          }
+        },
+        "required": [
+          "at",
+          "action",
+          "actor"
+        ],
+        "description": "The newest entry in its history (listApiKeyChanges): when it was created, changed or revoked, and by whom. Null when none is kept (after a year)."
+      },
       "ApiKey": {
         "type": "object",
         "properties": {
@@ -794,10 +864,13 @@
               "string",
               "null"
             ],
-            "description": "When a key limited to an expiring inbox stops working (the inbox's deletion time). Null otherwise."
+            "description": "When the key stops working: the expiry set on it, or for an inbox key its inbox's end if that is sooner. Null: it never expires. updateApiKey changes it on the same secret."
           },
           "approval": {
             "$ref": "#/components/schemas/ApprovalTie"
+          },
+          "lastChange": {
+            "$ref": "#/components/schemas/ApiKeyLastChange"
           }
         },
         "required": [
@@ -811,7 +884,8 @@
           "revokedAt",
           "access",
           "expiresAt",
-          "approval"
+          "approval",
+          "lastChange"
         ]
       },
       "CreateApiKey": {
@@ -847,6 +921,14 @@
           },
           "access": {
             "$ref": "#/components/schemas/CreateApiKeyAccess"
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the key stops working. Omit or null for a key that never expires; an inbox key also ends with its inbox, and its expiry is at most that end."
           }
         },
         "required": [
@@ -935,14 +1017,16 @@
                   "enum": [
                     "read",
                     "send",
-                    "modify"
+                    "modify",
+                    "create"
                   ]
                 },
                 "minItems": 1,
-                "maxItems": 3,
+                "maxItems": 4,
                 "default": [
                   "read"
-                ]
+                ],
+                "description": "read, send and modify, as for addresses; with create it also reaches the inboxes it creates, until its own inbox ends."
               }
             },
             "required": [
@@ -953,6 +1037,187 @@
           }
         ],
         "description": "What the key is limited to. Defaults to the workspace. A key for addresses or an inbox takes its permissions in access.mail and can never send from other addresses, read other mail or manage the workspace."
+      },
+      "ApiKeyChangePage": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditEntry"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as cursor for older entries; null at the end."
+          }
+        },
+        "required": [
+          "data",
+          "nextCursor"
+        ]
+      },
+      "AuditEntry": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable ID of the entry; audit entries are prefixed aud_, ledger lines bill_, enforcement events enf_."
+          },
+          "at": {
+            "type": "string",
+            "description": "When it happened (ISO 8601, UTC)."
+          },
+          "action": {
+            "type": "string",
+            "description": "What happened, as <area>.<verb>: api_key.create, member.role_change, domain.delete, support.view."
+          },
+          "actor": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "member",
+                  "api_key",
+                  "mcp_grant",
+                  "agent_token",
+                  "inbox_key",
+                  "app_password",
+                  "operator",
+                  "support",
+                  "system",
+                  "stripe"
+                ],
+                "description": "member is a signed-in person; support is Nightmail support reading with your permission; system is Nightmail itself."
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The member user ID, key ID, grant ID or support grant ID."
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "A short display name for the actor, such as a key name, or null."
+              },
+              "email": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The member’s email address, for member actors."
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "label",
+              "email"
+            ]
+          },
+          "via": {
+            "type": "string",
+            "description": "Where the action came from: dashboard, api, mcp, support, job, webhook."
+          },
+          "target": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "type",
+              "id"
+            ],
+            "description": "The object acted on."
+          },
+          "subject": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "userId": {
+                "type": "string"
+              },
+              "email": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "userId",
+              "email"
+            ],
+            "description": "The member the event concerns when it is not the actor: the member whose role changed or whose support request let Nightmail support in."
+          },
+          "summary": {
+            "type": "object",
+            "additionalProperties": {},
+            "description": "Before and after, with secrets and message content removed."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requestId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The x-request-id of the API request that made the change."
+          },
+          "network": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The client network (/24 or /48), never the full address."
+          },
+          "client": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The client family, such as \"Chrome 131 on macOS\"."
+          }
+        },
+        "required": [
+          "id",
+          "at",
+          "action",
+          "actor",
+          "via",
+          "target",
+          "subject",
+          "summary",
+          "reason",
+          "requestId",
+          "network",
+          "client"
+        ]
       },
       "UpdateApiKey": {
         "type": "object",
@@ -985,9 +1250,51 @@
             "maxItems": 50,
             "description": "Workspace keys: replaces the sender domains it is limited to. [] for all domains."
           },
+          "addDomains": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$"
+            },
+            "minItems": 1,
+            "maxItems": 50,
+            "description": "Workspace keys: adds these sender domains and keeps the others. A key for all domains already has them."
+          },
+          "removeDomains": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$"
+            },
+            "minItems": 1,
+            "maxItems": 50,
+            "description": "Workspace keys: removes these sender domains. Removing the last one is refused, since [] means all domains: set domains instead."
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Any key: sets when it stops working, or null so it never expires (an inbox key then ends with its inbox). An expired key can be given a later expiry: it works again with the same secret. Over MCP, an agent moves an expiry later only up to its own approval's end, and never removes one; a key an approval created is exempt, as it ends with that approval anyway."
+          },
           "access": {
             "type": "object",
             "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "addresses",
+                  "inbox"
+                ],
+                "description": "A key for addresses or an inbox: makes it the other one, on the same secret. inbox takes inboxId; addresses keeps the inbox as its address unless addressIds says otherwise."
+              },
+              "inboxId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "description": "An inbox key: the active agent inbox it belongs to now. It ends with that inbox, and its expiry is at most that inbox's end."
+              },
               "addressIds": {
                 "type": [
                   "array",
@@ -1036,11 +1343,11 @@
                 },
                 "minItems": 1,
                 "maxItems": 4,
-                "description": "A key for addresses or an inbox: replaces what it may do with that mail. An inbox key takes read, send and modify."
+                "description": "A key for addresses or an inbox: replaces what it may do with that mail: read, send, modify, and create (agent inboxes, which it then reaches as well)."
               }
             },
             "additionalProperties": false,
-            "description": "A key limited to addresses or an inbox. Its type never changes, nor does an inbox key's inbox."
+            "description": "A key limited to addresses or an inbox: what it reaches. A workspace key stays a workspace key, and a key for addresses or an inbox stays one of those two."
           }
         },
         "additionalProperties": false
@@ -16437,165 +16744,6 @@
           "invitations"
         ]
       },
-      "AuditEntry": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "description": "Stable ID of the entry; audit entries are prefixed aud_, ledger lines bill_, enforcement events enf_."
-          },
-          "at": {
-            "type": "string",
-            "description": "When it happened (ISO 8601, UTC)."
-          },
-          "action": {
-            "type": "string",
-            "description": "What happened, as <area>.<verb>: api_key.create, member.role_change, domain.delete, support.view."
-          },
-          "actor": {
-            "type": "object",
-            "properties": {
-              "type": {
-                "type": "string",
-                "enum": [
-                  "member",
-                  "api_key",
-                  "mcp_grant",
-                  "agent_token",
-                  "inbox_key",
-                  "app_password",
-                  "operator",
-                  "support",
-                  "system",
-                  "stripe"
-                ],
-                "description": "member is a signed-in person; support is Nightmail support reading with your permission; system is Nightmail itself."
-              },
-              "id": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "The member user ID, key ID, grant ID or support grant ID."
-              },
-              "label": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "A short display name for the actor, such as a key name, or null."
-              },
-              "email": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "The member’s email address, for member actors."
-              }
-            },
-            "required": [
-              "type",
-              "id",
-              "label",
-              "email"
-            ]
-          },
-          "via": {
-            "type": "string",
-            "description": "Where the action came from: dashboard, api, mcp, support, job, webhook."
-          },
-          "target": {
-            "type": [
-              "object",
-              "null"
-            ],
-            "properties": {
-              "type": {
-                "type": "string"
-              },
-              "id": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "type",
-              "id"
-            ],
-            "description": "The object acted on."
-          },
-          "subject": {
-            "type": [
-              "object",
-              "null"
-            ],
-            "properties": {
-              "userId": {
-                "type": "string"
-              },
-              "email": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "userId",
-              "email"
-            ],
-            "description": "The member the event concerns when it is not the actor: the member whose role changed or whose support request let Nightmail support in."
-          },
-          "summary": {
-            "type": "object",
-            "additionalProperties": {},
-            "description": "Before and after, with secrets and message content removed."
-          },
-          "reason": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "requestId": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The x-request-id of the API request that made the change."
-          },
-          "network": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The client network (/24 or /48), never the full address."
-          },
-          "client": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The client family, such as \"Chrome 131 on macOS\"."
-          }
-        },
-        "required": [
-          "id",
-          "at",
-          "action",
-          "actor",
-          "via",
-          "target",
-          "subject",
-          "summary",
-          "reason",
-          "requestId",
-          "network",
-          "client"
-        ]
-      },
       "SupportHandoff": {
         "type": "object",
         "properties": {
@@ -22891,7 +23039,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "One key type with permissions. By default a workspace key (permissions, optional sender domains). With access, a key limited to receiving addresses or to one agent inbox (bearer nm_mbx_…): it reads and, with send, replies only there, and never reaches the rest of the workspace. The secret is returned once. A key created over MCP, or with a key that was, is tied to that approval: approval and nextStep in the result say until when.",
+        "description": "One key type with permissions. By default a workspace key (permissions, optional sender domains). With access, a key limited to receiving addresses or to one agent inbox (bearer nm_mbx_…): it reads and, with send, replies only there, and never reaches the rest of the workspace. expiresAt ends it at a chosen time. The secret is returned once; everything else about the key changes later on the same secret (updateApiKey). A key created over MCP, or with a key that was, is tied to that approval: approval and nextStep in the result say until when.",
         "requestBody": {
           "required": true,
           "content": {
@@ -23070,7 +23218,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Every API key in the workspace, ordered by ID: workspace keys and keys limited to addresses or an inbox. includeRevoked=false also leaves out keys whose inbox was deleted or whose lease ended.",
+        "description": "Every API key in the workspace, ordered by ID: workspace keys and keys limited to addresses or an inbox, each with its latest change (lastChange). includeRevoked=false also leaves out expired keys, and keys whose inbox was deleted or whose lease ended.",
         "parameters": [
           {
             "schema": {
@@ -23254,6 +23402,192 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request GET \\\n  --url 'https://nightmail.dev/v1/api-keys' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/api-keys/{id}/changes": {
+      "get": {
+        "operationId": "listApiKeyChanges",
+        "tags": [
+          "ApiKeys"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "description": "One API key's history, newest first: when it was created, each change with who made it and what it was before and after (name, permissions, domains, addresses, mail, expiry), and its revocation. Secrets are never recorded. Kept for a year; the workspace's Activity lists the same entries.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "description": "nextCursor from the previous page."
+            },
+            "required": false,
+            "description": "nextCursor from the previous page.",
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyChangePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Configuration: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { listApiKeyChanges } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await listApiKeyChanges({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://nightmail.dev/v1/api-keys/resource_123/changes' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
           }
         ]
       }
@@ -23454,7 +23788,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Changes what a key can reach and keeps its secret, so nothing has to be redeployed. A workspace key takes name, permissions and domains. A key for addresses takes name and access: add or remove addresses (addAddressIds, removeAddressIds), replace them (addressIds) or change access.mail. An inbox key takes name and access.mail. A key's type and secret never change. Takes effect at once: requests already waiting lose a removed address, and mail the key queued is sent only within its new access. Needs the access createApiKey needs, checked again as the change is written, and no key changes itself. An agent signed in over MCP as a person changes any key that person could change in the dashboard; a key an MCP approval created changes only keys that approval created. Revoked and ended keys can't be changed.",
+        "description": "Changes anything about a key and keeps its secret, so nothing has to be redeployed: name and expiresAt on any key; a workspace key's permissions and sender domains (replace them with domains, or addDomains and removeDomains); a key for addresses or an inbox's access: its addresses (addressIds, addAddressIds, removeAddressIds), its mail (create included), its inbox (inboxId), or access.type to make an inbox key a key for addresses or back. A workspace key stays a workspace key. Takes effect from the next request: requests already waiting lose what was removed, and mail the key queued is sent only within its new access. Each change is recorded with who made it, before and after (lastChange, listApiKeyChanges, Activity). Needs the access createApiKey needs, checked again as the change is written, and no key changes itself. An agent signed in over MCP as a person changes any key that person could change in the dashboard; a key an MCP approval created changes only keys that approval created; temporary agent tokens change none. Revoked keys and keys whose inbox ended can't be changed; an expired key can be given a later expiry.",
         "parameters": [
           {
             "schema": {

@@ -23,6 +23,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `revokeAgentToken` | `keys` · `revokeToken` · admin |
 | `createApiKey` | `keys` · `create` · admin |
 | `listApiKeys` | `keys` · `list` · admin |
+| `listApiKeyChanges` | `keys` · `changes` · admin |
 | `revokeApiKey` | `keys` · `revoke` · admin |
 | `updateApiKey` | `keys` · `update` · admin |
 | `listContacts` | `contacts` · `list` · sending |

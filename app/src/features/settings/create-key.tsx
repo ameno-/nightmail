@@ -7,7 +7,8 @@ import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApi, useApiDef, useApiMutation } from '../../data/context'
 import { useMailServers } from '../docs/mail-settings'
 import { queries } from '../../data/queries'
-import type { ApiKeyInput, AppPasswordInput, AppPasswordProtocol, Inbox, KeyPermission, MailPermission, PageRequest } from '../../data/types'
+import type { ApiKey, ApiKeyInput, ApiKeyUpdate, AppPasswordInput, AppPasswordProtocol, Inbox, KeyPermission, MailPermission, PageRequest } from '../../data/types'
+import { accessLabel } from './key-labels'
 import '../inbound/inbound.css'
 import './api-keys.css'
 
@@ -16,7 +17,7 @@ import './api-keys.css'
 export type Purpose = 'manage' | 'send' | 'read_send' | 'read' | 'addresses' | 'inbox' | 'create'
 type WorkspacePurpose = Extract<Purpose, 'manage' | 'send' | 'read_send' | 'read'>
 const workspacePermissions: Record<WorkspacePurpose, KeyPermission[]> = { manage: ['read', 'send', 'manage'], send: ['send'], read_send: ['read', 'send'], read: ['read'] }
-const isWorkspace = (purpose: Purpose): purpose is WorkspacePurpose => purpose in workspacePermissions
+const isWorkspace = (purpose: Purpose | 'current'): purpose is WorkspacePurpose => purpose in workspacePermissions
 // Each choice is named for what it reaches; what it can and can't do is in "What this key can do", which opens under
 // the form and follows the choices.
 const purposes: { value: Purpose; label: string; does: string }[] = [
@@ -75,7 +76,7 @@ export function CreateKeyDialog({ open, onOpenChange, onCreated, onConnectAgent,
 }
 
 /** Active inboxes to choose from, a page of 50 at a time: Load more reaches the rest. */
-function useInboxOptions(key: string, filter: { type?: Inbox['type'] }, enabled: boolean) {
+export function useInboxOptions(key: string, filter: { type?: Inbox['type'] }, enabled: boolean) {
   const api = useApi()
   return useInfiniteQuery({
     queryKey: ['nightmail', 'agent-inboxes', key],
@@ -156,33 +157,64 @@ function DomainChoice({ query, chosen, onToggle, every, disabled, error, onLeave
 
 type FormProps = { open: boolean; onOpenChange: (open: boolean) => void; onPending: (pending: boolean) => void; onCreated: (created: CreatedSecret) => void }
 
-function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormProps & { initial?: { purpose?: Purpose; domain?: string } }) {
+/** The choice a key is now: one of the four permission sets, or what mail it reaches. A workspace key with another set
+ *  of permissions keeps it (current) until another is chosen. */
+type FormPurpose = Purpose | 'current'
+const workspacePurposes: WorkspacePurpose[] = ['manage', 'send', 'read_send', 'read']
+const sameSet = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every(item => b.includes(item))
+function purposeOf(key: ApiKey): FormPurpose {
+  if (key.access.type === 'workspace') return workspacePurposes.find(purpose => sameSet(workspacePermissions[purpose], key.permissions)) ?? 'current'
+  if (key.access.type === 'inbox') return 'inbox'
+  return key.access.addressIds?.length === 0 && key.access.mail.includes('create') ? 'create' : 'addresses'
+}
+const inWorkspace = (purpose: FormPurpose): purpose is WorkspacePurpose | 'current' => purpose === 'current' || isWorkspace(purpose)
+const mailOrder = (mail: MailPermission[]) => (['create', 'read', 'send', 'modify'] as const).filter(permission => mail.includes(permission))
+/** A datetime-local value in UTC, to the minute. */
+const utcInput = (iso: string) => iso.slice(0, 16)
+const in30Days = () => utcInput(new Date(Date.now() + 30 * 86_400_000).toISOString())
+
+/** Create key's API key form, and Edit key's: the same choices, prefilled from the key. An edit sends only what
+ *  changed, adding and removing domains and addresses rather than replacing them, so an edit made meanwhile elsewhere
+ *  isn't undone; the key keeps its secret. A key's kind stays: a workspace key edits as one, a key limited to mail as
+ *  one for addresses, one inbox or created inboxes. */
+function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial, editing }: FormProps & { initial?: { purpose?: Purpose; domain?: string }; editing?: ApiKey }) {
   const create = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input))
+  const update = useApiMutation((api, change: ApiKeyUpdate) => api.keys.update(editing!.id, change), 'Key updated')
+  const write = editing ? update : create
   const addresses = useApiDef(queries.inboundAddressOptions())
-  const [name, setName] = useState('')
-  const [purpose, setPurpose] = useState<Purpose>(initial?.purpose ?? 'send')
-  const [allDomains, setAllDomains] = useState(!initial?.domain)
-  const [selectedDomains, setSelectedDomains] = useState<string[]>(initial?.domain ? [initial.domain.toLowerCase()] : [])
-  const [allAddresses, setAllAddresses] = useState(false)
-  const [addressIds, setAddressIds] = useState<string[]>([])
-  const [inboxId, setInboxId] = useState('')
-  const [reply, setReply] = useState(false)
-  const [organize, setOrganize] = useState(true)
+  const was = editing?.access
+  const [name, setName] = useState(editing?.name ?? '')
+  const [purpose, setPurpose] = useState<FormPurpose>(editing ? purposeOf(editing) : initial?.purpose ?? 'send')
+  const startDomains = editing?.domains ?? (initial?.domain ? [initial.domain.toLowerCase()] : [])
+  const [allDomains, setAllDomains] = useState(editing ? !editing.domains.length : !initial?.domain)
+  const [selectedDomains, setSelectedDomains] = useState<string[]>(startDomains)
+  const [allAddresses, setAllAddresses] = useState(was?.type === 'addresses' && was.addressIds === null)
+  const [addressIds, setAddressIds] = useState<string[]>(was?.type === 'addresses' ? was.addressIds ?? [] : [])
+  const [inboxId, setInboxId] = useState(was?.inboxId ?? '')
+  const [mail, setMail] = useState<MailPermission[]>(was && was.type !== 'workspace' ? was.mail : ['read', 'modify'])
+  const [expires, setExpires] = useState(Boolean(editing?.expiresAt))
+  const [expiry, setExpiry] = useState(editing?.expiresAt ? utcInput(editing.expiresAt) : in30Days())
+  const [expiryTouched, setExpiryTouched] = useState(false)
   const [errors, setErrors] = useState<Record<string, string>>({})
-  const workspace = isWorkspace(purpose)
-  const pending = create.isPending
+  const workspace = inWorkspace(purpose)
+  const pending = write.isPending
   useEffect(() => onPending(pending), [pending, onPending])
   const domainOptions = useDomainOptions(open && workspace)
   const inboxes = useInboxOptions('key-options', {}, open && purpose === 'inbox')
   const domains = domainNames(domainOptions, selectedDomains)
-  // Inboxes have their own choice; this list is the receiving addresses.
-  const receiving = (addresses.data ?? []).filter(item => item.kind !== 'inbox')
+  // Inboxes have their own choice; this list is the receiving addresses, and when editing anything else the key has
+  // (an inbox), so saving never drops it unseen.
+  const receiving = (addresses.data ?? []).filter(item => item.kind !== 'inbox' || was?.addressIds?.includes(item.id))
+  const shownAddresses = [...receiving, ...(was?.type === 'addresses' ? was.addressIds ?? [] : []).filter(id => !receiving.some(item => item.id === id)).map(id => ({ id, address: id }))]
   const chosenInbox = inboxId || activeInboxes(inboxes)[0]?.id || ''
-  const nameError = errors.name || fieldError(create.error, 'name')
-  const domainError = errors.domains || fieldError(create.error, 'domains')
-  const addressError = errors.addressIds || fieldError(create.error, 'access.addressIds')
-  const inboxError = errors.inboxId || fieldError(create.error, 'access.inboxId')
-  const mailError = fieldError(create.error, 'access.mail')
+  const finalMail = mailOrder(purpose === 'create' ? [...new Set<MailPermission>(['create', ...mail])] : mail)
+  const failed = (...fields: string[]) => fields.map(field => fieldError(write.error, field)).find(Boolean)
+  const nameError = errors.name || failed('name')
+  const domainError = errors.domains || failed('domains', 'addDomains', 'removeDomains')
+  const addressError = errors.addressIds || failed('access.addressIds', 'access.addAddressIds', 'access.removeAddressIds')
+  const inboxError = errors.inboxId || failed('access.inboxId')
+  const mailError = errors.mail || failed('access.mail')
+  const expiryError = errors.expiresAt || failed('expiresAt')
 
   const clearError = (field: string) => setErrors(current => { const next = { ...current }; delete next[field]; return next })
   function toggleDomain(domain: string, checked: boolean) {
@@ -195,6 +227,39 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormP
     setAllAddresses(false)
     setAddressIds(current => checked ? [...new Set([...current, id])] : current.filter(item => item !== id))
   }
+  const setMailBit = (permission: MailPermission, on: boolean) => { clearError('mail'); setMail(current => on ? [...new Set([...current, permission])] : current.filter(item => item !== permission)) }
+  const reading = mail.includes('read') ? mail.includes('send') ? 'reply' : 'read' : mail.includes('send') ? 'send' : null
+  const setReading = (value: 'read' | 'reply' | 'send') => { clearError('mail'); setMail(current => [...current.filter(item => item !== 'read' && item !== 'send'), ...value !== 'send' ? ['read' as const] : [], ...value !== 'read' ? ['send' as const] : []]) }
+  const expiresAt = () => expires ? new Date(`${expiry}:00Z`).toISOString() : null
+
+  /** What an edit changes, and nothing else. */
+  function changes(key: ApiKey): ApiKeyUpdate {
+    const out: ApiKeyUpdate = {}
+    if (name.trim() !== key.name) out.name = name.trim()
+    if (expiryTouched && expiresAt() !== key.expiresAt) out.expiresAt = expiresAt()
+    if (key.access.type === 'workspace') {
+      if (purpose !== 'current' && isWorkspace(purpose) && !sameSet(workspacePermissions[purpose], key.permissions)) out.permissions = workspacePermissions[purpose]
+      const before = key.domains, add = selectedDomains.filter(domain => !before.includes(domain)), remove = before.filter(domain => !selectedDomains.includes(domain))
+      if (allDomains) { if (before.length) out.domains = [] }
+      else if (!before.length) out.domains = selectedDomains
+      else { if (add.length) out.addDomains = add; if (remove.length) out.removeDomains = remove }
+      return out
+    }
+    const access: NonNullable<ApiKeyUpdate['access']> = {}, before = key.access
+    if (!sameSet(finalMail, before.mail)) access.mail = finalMail
+    if (purpose === 'inbox') {
+      if (before.type !== 'inbox') Object.assign(access, { type: 'inbox', inboxId: chosenInbox })
+      else if (chosenInbox !== before.inboxId) access.inboxId = chosenInbox
+    } else {
+      const target = purpose === 'create' ? [] : allAddresses ? null : addressIds
+      const add = target?.filter(id => !before.addressIds?.includes(id)) ?? [], remove = before.addressIds?.filter(id => !target?.includes(id)) ?? []
+      if (before.type === 'inbox') Object.assign(access, { type: 'addresses', addressIds: target })
+      else if (target === null || before.addressIds === null || !target.length) { if (JSON.stringify(target) !== JSON.stringify(before.addressIds)) access.addressIds = target }
+      else { if (add.length) access.addAddressIds = add; if (remove.length) access.removeAddressIds = remove }
+    }
+    if (Object.keys(access).length) out.access = access
+    return out
+  }
   async function submit(event: FormEvent) {
     event.preventDefault()
     const next: Record<string, string> = {}
@@ -203,13 +268,20 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormP
     else if (workspace && !allDomains && selectedDomains.length > 50) next.domains = tooManyDomains
     if (purpose === 'addresses' && !allAddresses && !addressIds.length) next.addressIds = chooseAddress
     if (purpose === 'inbox' && !chosenInbox) next.inboxId = 'Choose an inbox.'
+    if (!workspace && !finalMail.length) next.mail = 'Choose what it can do.'
+    if (expires && (editing ? expiryTouched : true) && !(Date.parse(`${expiry}:00Z`) > Date.now())) next.expiresAt = 'Choose a time to come, in UTC.'
     setErrors(next)
     if (Object.keys(next).length) { if (next.name) document.getElementById('key-name')?.focus(); return }
-    const mail: MailPermission[] = ['read', ...(reply ? ['send' as const] : []), ...(organize ? ['modify' as const] : [])]
-    const input: ApiKeyInput = isWorkspace(purpose) ? { name: name.trim(), permissions: workspacePermissions[purpose], domains: allDomains ? [] : selectedDomains }
-      : purpose === 'addresses' ? { name: name.trim(), access: { type: 'addresses', ...(allAddresses ? {} : { addressIds }), mail } }
-      : purpose === 'inbox' ? { name: name.trim(), access: { type: 'inbox', inboxId: chosenInbox, mail: mail.filter(p => p !== 'create') as Exclude<MailPermission, 'create'>[] } }
-      : { name: name.trim(), access: { type: 'addresses', addressIds: [], mail: ['create', 'read', 'modify'] } }
+    if (editing) {
+      const change = changes(editing)
+      try { if (Object.keys(change).length) await update.mutateAsync(change); onOpenChange(false) } catch { /* Shown in the form. */ }
+      return
+    }
+    const ends = expires ? { expiresAt: expiresAt() } : {}
+    const input: ApiKeyInput = isWorkspace(purpose) ? { name: name.trim(), permissions: workspacePermissions[purpose], domains: allDomains ? [] : selectedDomains, ...ends }
+      : purpose === 'addresses' ? { name: name.trim(), access: { type: 'addresses', ...(allAddresses ? {} : { addressIds }), mail: finalMail }, ...ends }
+      : purpose === 'inbox' ? { name: name.trim(), access: { type: 'inbox', inboxId: chosenInbox, mail: finalMail }, ...ends }
+      : { name: name.trim(), access: { type: 'addresses', addressIds: [], mail: finalMail }, ...ends }
     try {
       const result = await create.mutateAsync(input)
       onOpenChange(false)
@@ -217,47 +289,73 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormP
     } catch { /* Shown in the form. */ }
   }
 
+  // An edit keeps the key's kind, so it chooses among that kind's purposes.
+  const choices: { value: FormPurpose; label: string; does: string }[] = !editing ? purposes
+    : editing.access.type !== 'workspace' ? purposes.filter(item => !isWorkspace(item.value))
+    : [...purposeOf(editing) === 'current' ? [{ value: 'current' as const, label: `As now: ${accessLabel(editing.permissions, false).toLowerCase()}`, does: 'Keeps the permissions it has.' }] : [], ...purposes.filter(item => isWorkspace(item.value))]
   // A sending domain covers its subdomains (SENDER_DOMAIN_FORBIDDEN names "this domain or its parent domain").
   const example = selectedDomains[0] ?? domains[0]
   const placeholder = workspace ? 'Order notifications' : purpose === 'create' ? 'End-to-end tests' : purpose === 'inbox' ? 'Sign-up test' : 'Support agent'
   const where = purpose === 'inbox' ? 'this inbox' : 'these addresses'
+  const reads = mail.includes('read'), replies = mail.includes('send'), organizes = mail.includes('modify')
   // What the choices above add up to, in plain lines: the detail behind "What this key can do".
   const can = [
-    purposes.find(item => item.value === purpose)!.does,
+    choices.find(item => item.value === purpose)!.does,
     ...workspace && !allDomains ? [`Sends and email logs are limited to the chosen domains and their subdomains${example ? `: ${example} also covers mail from news.${example}` : ''}.`, 'It can’t launch campaigns or reach contacts, lists, settings, webhooks or received mail.', ...purpose === 'manage' ? ['Limited to domains, it can’t manage keys or receiving.'] : []] : [],
-    ...purpose === 'addresses' || purpose === 'inbox' ? ['Lists and reads mail, events and attachments.', ...reply ? [`Replies and starts conversations, from ${where} only.${purpose === 'inbox' ? ' Needs replies on for the inbox.' : ''}`] : [], ...organize ? [`Marks read, archives, stars and labels${purpose === 'inbox' ? ', and can delete the inbox' : allAddresses ? ', and can delete agent inboxes' : ''}.`] : []] : [],
+    ...purpose === 'addresses' || purpose === 'inbox' ? [...reads ? ['Lists and reads mail, events and attachments.'] : [], ...replies ? [`Replies and starts conversations, from ${where} only.${purpose === 'inbox' ? ' Needs replies on for the inbox.' : ''}`] : [], ...organizes ? [`Marks read, archives, stars and labels${purpose === 'inbox' ? ', and can delete the inbox' : allAddresses ? ', and can delete agent inboxes' : ''}.`] : [], ...mail.includes('create') ? ['Creates agent inboxes and reaches the ones it created.'] : []] : [],
+    ...expires ? [`Stops working at ${expiry.replace('T', ' ')} UTC${purpose === 'inbox' ? ', or when its inbox ends' : ''}.`] : purpose === 'inbox' ? ['Stops working when its inbox ends.'] : [],
   ]
+  const formId = editing ? 'edit-key' : 'create-key'
 
   return <>
-    <form id="create-key" className="stack" onSubmit={submit} noValidate>
-      <MutationError error={create.error} />
-      <Field label="Name" htmlFor="key-name" error={nameError}><Input id="key-name" value={name} maxLength={100} onChange={event => setName(event.target.value)} autoFocus required disabled={pending} placeholder={placeholder} /></Field>
+    <form id={formId} className="stack" onSubmit={submit} noValidate>
+      <MutationError error={write.error} />
+      <Field label="Name" htmlFor="key-name" error={nameError}><Input id="key-name" value={name} maxLength={100} onChange={event => setName(event.target.value)} autoFocus={!editing} required disabled={pending} placeholder={placeholder} /></Field>
       <fieldset className="keys-purpose" disabled={pending}>
         <legend className="ui-field__label">What it can reach</legend>
-        {purposes.map(item => <label key={item.value} className="keys-choice">
-          <input type="radio" name="key-purpose" value={item.value} checked={purpose === item.value} onChange={() => { setPurpose(item.value); setErrors({}); create.reset() }} />
+        {choices.map(item => <label key={item.value} className="keys-choice">
+          <input type="radio" name="key-purpose" value={item.value} checked={purpose === item.value} onChange={() => { setPurpose(item.value); setErrors({}); write.reset() }} />
           <span>{item.label}</span>
         </label>)}
       </fieldset>
       {workspace && <DomainChoice query={domainOptions} chosen={selectedDomains} onToggle={toggleDomain} disabled={pending} error={domainError} onLeave={() => onOpenChange(false)}
         every={{ checked: allDomains, onChange: checked => { setAllDomains(checked); setSelectedDomains([]); clearError('domains') } }} />}
-      {purpose === 'addresses' && <AddressChoice id="key-address" options={receiving} every={allAddresses} chosen={addressIds} disabled={pending} error={addressError}
-        onEvery={checked => { setAllAddresses(checked); setAddressIds([]); clearError('addressIds') }} onToggle={toggleAddress}
-        empty={addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : !receiving.length ? <Link className="keys-form-note" to="/receiving" onClick={() => onOpenChange(false)}>Create an address</Link> : undefined} />}
+      {purpose === 'addresses' && <AddressChoice id="key-address" options={shownAddresses} every={allAddresses} chosen={addressIds} disabled={pending} error={addressError}
+        onEvery={checked => { setAllAddresses(checked); setAddressIds(checked ? [] : was?.type === 'addresses' ? was.addressIds ?? [] : []); clearError('addressIds') }} onToggle={toggleAddress}
+        empty={addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : !shownAddresses.length ? <Link className="keys-form-note" to="/receiving" onClick={() => onOpenChange(false)}>Create an address</Link> : undefined} />}
       {purpose === 'inbox' && <InboxChoice name="key-inbox" query={inboxes} value={chosenInbox} onChange={id => { setInboxId(id); clearError('inboxId') }} disabled={pending} error={inboxError}
         none={<Link to="/receiving/inboxes" onClick={() => onOpenChange(false)}>Create an agent inbox</Link>} />}
-      {(purpose === 'addresses' || purpose === 'inbox') && <fieldset className="keys-purpose" disabled={pending}>
+      {!workspace && <fieldset className="keys-purpose" disabled={pending}>
         <legend className="ui-field__label">What it can do</legend>
-        {[{ value: false, label: 'Read' }, { value: true, label: 'Read and reply' }].map(item => <label key={item.label} className="keys-choice">
-          <input type="radio" name="key-mail" checked={reply === item.value} onChange={() => setReply(item.value)} />
+        {[{ value: 'read' as const, label: 'Read' }, { value: 'reply' as const, label: 'Read and reply' }, ...was?.mail.includes('send') && !was.mail.includes('read') ? [{ value: 'send' as const, label: 'Reply only' }] : []].map(item => <label key={item.value} className="keys-choice">
+          <input type="radio" name="key-mail" checked={reading === item.value} onChange={() => setReading(item.value)} />
           <span>{item.label}</span>
         </label>)}
-        <Checkbox checked={organize} onCheckedChange={setOrganize} disabled={pending} label="Organize mail" />
+        <Checkbox checked={organizes} onCheckedChange={checked => setMailBit('modify', checked)} disabled={pending} label="Organize mail" />
+        {purpose !== 'create' && <Checkbox checked={mail.includes('create')} onCheckedChange={checked => setMailBit('create', checked)} disabled={pending} label="Create agent inboxes" />}
         {mailError && <p className="ui-field__error" role="alert">{mailError}</p>}
       </fieldset>}
+      <fieldset className="keys-purpose" disabled={pending} aria-describedby={expiryError ? 'key-expiry-error' : undefined}>
+        <legend className="ui-field__label">Expiry</legend>
+        {[{ value: false, label: purpose === 'inbox' ? 'When its inbox ends' : 'Never expires' }, { value: true, label: 'On a date (UTC)' }].map(item => <label key={item.label} className="keys-choice">
+          <input type="radio" name="key-expiry" checked={expires === item.value} onChange={() => { setExpires(item.value); setExpiryTouched(true); clearError('expiresAt') }} />
+          <span>{item.label}</span>
+        </label>)}
+        {expires && <Input id="key-expiry" type="datetime-local" aria-label="Expires at (UTC)" value={expiry} aria-invalid={Boolean(expiryError) || undefined} onChange={event => { setExpiry(event.target.value); setExpiryTouched(true); clearError('expiresAt') }} disabled={pending} />}
+        {expiryError && <p id="key-expiry-error" className="ui-field__error" role="alert">{expiryError}</p>}
+      </fieldset>
       <Disclosure className="keys-can" title="What this key can do"><ul>{can.map(line => <li key={line}>{line}</li>)}</ul></Disclosure>
     </form>
   </>
+}
+
+/** Edit key: the API key form, prefilled from the key. Render only while open, so its choices start from the key. */
+export function EditKeyDialog({ apiKey, onClose }: { apiKey: ApiKey; onClose: () => void }) {
+  const [pending, setPending] = useState(false)
+  return <Dialog open onOpenChange={next => { if (!next && !pending) onClose() }} title="Edit key"
+    footer={<><Button disabled={pending} onClick={onClose}>Cancel</Button><Button variant="primary" loading={pending} type="submit" form="edit-key">Save</Button></>}>
+    <ApiKeyForm open editing={apiKey} onOpenChange={next => { if (!next) onClose() }} onPending={setPending} onCreated={() => {}} />
+  </Dialog>
 }
 
 function AppPasswordForm({ open, onOpenChange, onPending, onCreated }: FormProps) {

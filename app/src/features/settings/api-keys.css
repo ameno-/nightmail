@@ -82,6 +82,12 @@
 .keys-details > div { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: var(--space-12); }
 .keys-details dt { color: var(--color-muted); }
 .keys-details dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+/* A key's history under its fields: newest first, what changed and then when and who. */
+.keys-changes { margin-top: var(--space-16); }
+.keys-change-list { display: flex; flex-direction: column; gap: var(--space-12); margin: 0; padding: 0; list-style: none; font-size: var(--text-sm); line-height: var(--leading-sm); }
+.keys-change-list li { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+/* Expiry's date and time sits under its two choices, as wide as a field. */
+.keys-purpose > .ui-input { max-width: 320px; }
 /* A card's title is a button once the card opens the details; keep its clipped name ending in an ellipsis. */
 .keys-table .ui-card__title > .ui-card__link { display: block; width: 100%; min-width: 0; }
 .keys-table .ui-card__link > span { display: block; overflow: clip; text-overflow: ellipsis; white-space: nowrap; }

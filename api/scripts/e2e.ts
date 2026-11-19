@@ -725,6 +725,12 @@ async function apiKey() {
   defer(`revoke throwaway key ${item.id}`, async () => check((await api('revokeApiKey', { path })).revoked, 'key not revoked'));
   check(item.name === prefix && item.domains.length === 1 && item.domains[0] === domain && item.permissions.join() === 'read', 'wrong child key scope');
   check(hasId(await api('listApiKeys', { query: { includeRevoked: 'false', limit: 100 } }), item.id), 'throwaway key not listed');
+  // Everything else about it changes on the same secret, and each change joins its history.
+  const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+  const edited = await api('updateApiKey', { path, headers: idKey('edit-throwaway-key'), body: { name: `${prefix}-edited`, expiresAt } });
+  check(edited.id === item.id && edited.prefix === item.prefix && edited.name === `${prefix}-edited` && edited.expiresAt === expiresAt && edited.lastChange?.action === 'api_key.update', 'key not edited in place');
+  const changes = await api('listApiKeyChanges', { path, query: { limit: 10 } });
+  check(changes.data.map(entry => entry.action).join() === 'api_key.update,api_key.create', 'key history differs');
 }
 
 const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
