@@ -15,6 +15,9 @@ import { mxResourceName, POOL_INSTALLATION, setupResources } from './ses-setup.j
 import { forDelivery, type ReadyConnection } from './provider-credentials.js';
 import { wakeWebhooks } from './jobs.js';
 import { screenSnapshot, type CampaignScreen } from './screen.js';
+import { SEND_LIMITS } from './send-limits.js';
+import { SesBodyError } from './ses-body.js';
+import { sendReservation, withMemory } from './isolate-memory.js';
 
 const loadSesv2 = lazyModule(() => import('@aws-sdk/client-sesv2'));
 const loadSimulatedSes = lazyModule(() => import('./adapters/simulated-ses.js'));
@@ -464,7 +467,10 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
   sizeCheck(s, rows);
   const content: SendEmailCommandInput['Content'] = s.raw
     ? { Raw: { Data: new TextEncoder().encode(s.raw) } }
-    : !leased.owner.tenantName && s.html && parts.some(part => part.ContentDisposition === 'INLINE')
+    // Inline images are built as multipart/related raw MIME (Simple places them beside the body). Raw MIME is
+    // base64-encoded again inside SES's JSON body, about 3.2 times the files at once, so a message with more than the
+    // lane budget of files goes as Simple content, as Hosted mail always does.
+    : !leased.owner.tenantName && s.html && parts.some(part => part.ContentDisposition === 'INLINE') && rows.reduce((n, row) => n + row.size, 0) <= SEND_LIMITS.laneBytes
       ? { Raw: { Data: inlineMessage(s, parts) } }
       : simpleContent(s, parts);
   return { ...leased, mail, snapshot: s, content, unsubscribe, stored, screened };
@@ -668,6 +674,8 @@ async function sendOne(runtime: Runtime, a: Actor, ses: SESv2Client, item: Prepa
     return { mail, type: 'accepted', providerId: result.MessageId, data: {} };
   } catch (error) {
     if (error instanceof ModuleLoadError) throw error;
+    // The request body could not be written: thrown before the request handler, so SES never saw this message.
+    if (error instanceof SesBodyError) return { mail, type: 'reject', errorCode: 'SES_REQUEST_UNBUILT', data: { code: 'SES_REQUEST_UNBUILT', providerCalled: false, retryable: false } };
     const failure = error as { name?: string; message?: string; $metadata?: { httpStatusCode?: number; requestId?: string } };
     const status = failure.$metadata?.httpStatusCode;
     const { denial, diagnostics } = redactDenial(runtime, failure);
@@ -965,11 +973,14 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
   if(ready.some(item=>item.contentBytes || item.mail.snapshot.attachments.length)) {
     // Reserve bytes, not a whole lane. Small pages overlap and share the result
     // writer; disjoint large bodies still cannot accumulate across sibling lanes.
-    const limit=8*1024*1024;let page:typeof ready=[],bytes=0;
+    const limit=SEND_LIMITS.laneBytes;let page:typeof ready=[],bytes=0,files=0,content=0;
     const flush=async()=>{
       while(lane.attachmentBytes+bytes>limit) await (lane.bytesReleased??=new Promise(resolve=>{lane.notifyBytes=resolve;}));
       lane.attachmentBytes+=bytes;
-      try {
+      // The page's files and bodies, and every buffer built from them, count against the isolate's budget, which every
+      // lane, dispatcher and HTTP request in the isolate shares (isolate-memory.ts). A message above the lane budget
+      // fills its page alone.
+      try { await withMemory(sendReservation(files,content),async()=>{
         // A single immutable review shares all object reads. With no external
         // classifier, prepare one full claim at a time; CPU speed is not a
         // reason to split it. Unrelated objects/probes still stream below.
@@ -981,13 +992,13 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
           }
           await dispatchPrepared(base,lane,prepared);
         } else await streamPage(page,true);
-      }finally{lane.attachmentBytes-=bytes;lane.bytesReleased=undefined;lane.notifyBytes?.();lane.notifyBytes=undefined;}
-      page=[];bytes=0;
+      });}finally{lane.attachmentBytes-=bytes;lane.bytesReleased=undefined;lane.notifyBytes?.();lane.notifyBytes=undefined;}
+      page=[];bytes=0;files=0;content=0;
     };
     for(const item of ready){
       // Invalid oversize metadata is rejected in prepare before reading the object.
-      const n=Math.min(limit,(await loadAttachments(item.mail)).reduce((s,r)=>s+r.size,item.contentBytes));
-      if(page.length && bytes+n>limit)await flush();page.push(item);bytes+=n;
+      const attached=(await loadAttachments(item.mail)).reduce((s,r)=>s+r.size,0),n=Math.min(limit,attached+item.contentBytes);
+      if(page.length && bytes+n>limit)await flush();page.push(item);bytes+=n;files+=attached;content+=item.contentBytes;
     }
     if(page.length)await flush();
   } else if (ready.some(({mail, owner}) => (mail.snapshot.screen || owner.tenantName && owner.runtime.config.hostedScreen) && owner.runtime.config.screen && !isSimulatedSes(owner.runtime))) {

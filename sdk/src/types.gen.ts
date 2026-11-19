@@ -613,7 +613,7 @@ export type TemplateAssetUpload = {
     disposition?: 'attachment' | 'inline';
     contentId?: string;
     /**
-     * Base64 (standard or URL-safe alphabet; line breaks are accepted). No data URLs. Maximum decoded bytes: 8 MiB.
+     * Base64 (standard or URL-safe alphabet; line breaks are accepted). No data URLs. At most 8 MiB decoded in JSON; upload larger files, up to 25 MiB, as raw bytes to POST /v1/attachments/upload.
      */
     content: string;
 };
@@ -970,7 +970,7 @@ export type AttachmentUpload = {
     disposition?: 'attachment' | 'inline';
     contentId?: string;
     /**
-     * Base64 (standard or URL-safe alphabet; line breaks are accepted). No data URLs. Maximum decoded bytes: 8 MiB.
+     * Base64 (standard or URL-safe alphabet; line breaks are accepted). No data URLs. At most 8 MiB decoded in JSON; upload larger files, up to 25 MiB, as raw bytes to POST /v1/attachments/upload.
      */
     content: string;
 };
@@ -4299,7 +4299,7 @@ export type CreateInboundThread = {
     text?: string;
     html?: string;
     /**
-     * Up to 20 files, 8 MiB combined. Any type Amazon SES delivers (executables and scripts are refused).
+     * Up to 20 files, 25 MiB combined. Any type Amazon SES delivers (executables and scripts are refused).
      */
     attachments?: Array<InboundAttachmentInput>;
     replyTo?: Array<string>;
@@ -4327,7 +4327,7 @@ export type CreateInboundThread = {
 export type InboundAttachmentInput = {
     filename: string;
     /**
-     * Base64; line breaks are accepted.
+     * Base64; line breaks are accepted. At most 8 MiB decoded: upload larger files with POST /v1/attachments/upload and pass their id.
      */
     content: string;
     contentType?: string;
@@ -4348,7 +4348,7 @@ export type ReplyToInboundThread = {
     text?: string;
     html?: string;
     /**
-     * Up to 20 files, 8 MiB combined. Any type Amazon SES delivers (executables and scripts are refused).
+     * Up to 20 files, 25 MiB combined. Any type Amazon SES delivers (executables and scripts are refused).
      */
     attachments?: Array<InboundAttachmentInput>;
     replyTo?: Array<string>;

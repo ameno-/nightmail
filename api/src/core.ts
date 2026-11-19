@@ -8,6 +8,7 @@ import { errorCodeOf, errorTypeOf, log, logFallback, stackFrames } from './log.j
 import type { ReadyConnection } from './provider-credentials.js';
 import { SECURITY_HEADERS } from './security-headers.js';
 import { clientIpHeader } from './brand.js';
+import { addSesBodySplice } from './ses-body.js';
 
 export type Database = NodePgDatabase;
 export const SuppressionReason = z.string().describe('Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.');
@@ -445,6 +446,7 @@ export async function preloadSesTransport(multiTenant = false) {
     let client = clients.get(key);
     if (!client) {
       client = new sesv2.SESv2Client({ region: selectedRegion, ...(runtime.config.multiTenant ? { credentials: () => creds.workspaceCredentials(runtime, selectedRegion, connection), ignoreConfiguredEndpointUrls: true } : { credentials: runtime.config.aws }), maxAttempts: 1, cacheMiddleware: !!runClients, requestHandler: new FetchHttpHandler({ requestTimeout: 15000 }) });
+      addSesBodySplice(client.middlewareStack);
       clients.set(key, client);
     }
     return client;

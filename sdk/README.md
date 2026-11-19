@@ -185,7 +185,7 @@ const attachment = await uploadAttachmentBytes({
 });
 ```
 
-The API verifies extension, MIME declaration and file signature/content, stores the object privately, and retains the 8 MiB attachment limit. Batch scripts can upload personalized files, reference each returned attachment ID, and submit emails in groups of 100.
+The API verifies extension, MIME declaration and file signature/content, stores the object privately, and allows 25 MiB of attachments per message (raw-byte uploads; base64 JSON uploads stay at 8 MiB per file). Batch scripts can upload personalized files, reference each returned attachment ID, and submit emails in groups of 100.
 
 The generated exports include contacts, lists, segments, campaigns, attachments, keys, webhooks, settings and message logs. Cursor responses use `nextCursor`. Error bodies include a stable `error.code` and `error.requestId`. Read-level responses redact app unsubscribe capabilities from content/events/delivery payloads and withhold raw MIME; management access is required for unredacted content. A key revoked before dispatch no longer authorizes its queued sends. Request/resource limits return explicit 429/413 errors; do not retry permanent configuration errors blindly.
 

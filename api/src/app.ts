@@ -226,7 +226,10 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // own scoped keys. Unknown routes and public forms are not upload routes.
     if (c.req.path!=='/internal/v1/mail' && c.req.path!=='/mcp' && !/^\/v1\/inboxes(?:\/|$)/.test(c.req.path) && !c.req.path.startsWith('/v1/inbound/')) {
       const matched=c.req.matchedRoutes.some(r=>r.method===c.req.method && !r.path.endsWith('*'));
-      await boundRequestBody(c,c.req.path==='/v1/events/ses'||c.req.path==='/v1/billing/stripe'?512*1024:matched && c.get('actor')?undefined:64*1024);
+      // The raw-byte attachment upload reads and bounds its own body (a whole file, up to 25 MiB) once it holds the
+      // isolate memory for it (sending.ts), so it is not buffered here first.
+      if (!(c.req.method==='POST' && c.req.path==='/v1/attachments/upload' && c.get('actor')))
+        await boundRequestBody(c,c.req.path==='/v1/events/ses'||c.req.path==='/v1/billing/stripe'?512*1024:matched && c.get('actor')?undefined:64*1024);
     }
     await next();
   });

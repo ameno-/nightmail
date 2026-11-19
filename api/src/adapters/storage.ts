@@ -1,6 +1,8 @@
 import { ApiError, lazyModule, ModuleLoadError } from '../core.js';
 import type { Storage } from '../core.js';
-const MAX_OBJECT_BYTES = 8 * 1024 * 1024;
+import { SEND_LIMITS } from '../send-limits.js';
+// The largest object written through Storage: an attachment.
+const MAX_OBJECT_BYTES = SEND_LIMITS.attachmentBytes;
 const loadS3Sdk = lazyModule(() => Promise.all([import('@aws-sdk/client-s3'), import('@smithy/fetch-http-handler')]));
 export function r2Storage(bucket: R2Bucket): Storage {
   return {

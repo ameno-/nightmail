@@ -551,13 +551,13 @@ export function registerMailbox(app: App) {
   // ---------- sending ----------
   const Recipients = z.array(Address).max(50);
   const AttachmentItem = z.union([
-    z.object({ filename: AttachmentFilename, content: z.string().min(4).max(MAX_ATTACHMENT_BASE64).describe('Base64; line breaks are accepted.'), contentType: AttachmentContentType.optional(), disposition: AttachmentDisposition.optional(), contentId: AttachmentContentId.optional() }).strict(),
+    z.object({ filename: AttachmentFilename, content: z.string().min(4).max(MAX_ATTACHMENT_BASE64).describe('Base64; line breaks are accepted. At most 8 MiB decoded: upload larger files with POST /v1/attachments/upload and pass their id.'), contentType: AttachmentContentType.optional(), disposition: AttachmentDisposition.optional(), contentId: AttachmentContentId.optional() }).strict(),
     z.object({ id: z.string().min(1).max(120).describe(`A received attachment in this mailbox (matt_…) or a ${productName} attachment upload (attachment_…).`) }).strict(),
   ]).openapi('InboundAttachmentInput');
   const Compose = {
     from: Address.optional().describe(`Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in ${productName} for the receiving region; replies still return to whatever address the recipient answers.`),
     text: z.string().min(1).max(524288).optional(), html: z.string().min(1).max(524288).optional(),
-    attachments: z.array(AttachmentItem).max(20).default([]).describe('Up to 20 files, 8 MiB combined. Any type Amazon SES delivers (executables and scripts are refused).'),
+    attachments: z.array(AttachmentItem).max(20).default([]).describe('Up to 20 files, 25 MiB combined. Any type Amazon SES delivers (executables and scripts are refused).'),
     replyTo: Recipients.max(10).default([]),
     headers: CustomHeaders.default([]),
     autoSubmitted: z.enum(['auto-generated', 'auto-replied']).optional().describe('Adds an RFC 3834 Auto-Submitted header so other automated systems do not reply to this message.'),

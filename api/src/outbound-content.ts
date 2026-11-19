@@ -2,6 +2,7 @@ import { z } from '@hono/zod-openapi';
 import { Buffer } from 'node:buffer';
 import { productName } from './brand.js';
 import { ApiError } from './core.js';
+import { SEND_LIMITS } from './send-limits.js';
 
 // Shared validation for sending, audience/consent and template reply addresses.
 export const mailAddress = (base=z.string()) => base.email({pattern:/^(?!\.)(?!.*\.\.)[a-z0-9_'+.\-]*[a-z0-9_+\-]@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:[a-z]{2,}|xn--[a-z0-9][a-z0-9-]*[a-z0-9])$/i}).max(254).regex(/^[\x21-\x7e]+$/, 'Use ASCII email addresses (punycode domains are supported).')
@@ -58,9 +59,12 @@ export function unsubscribePageLink(page: string, token: string): string {
   return url.href;
 }
 
-export const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+export const MAX_ATTACHMENT_BYTES = SEND_LIMITS.attachmentBytes;
+/** A file sent as base64 inside JSON: 8 MiB decoded (SEND_LIMITS.jsonAttachmentBytes). */
+export const MAX_JSON_ATTACHMENT_BYTES = SEND_LIMITS.jsonAttachmentBytes;
 // Base64 of 8 MiB plus padding and the line breaks MIME tools and SDKs insert.
 export const MAX_ATTACHMENT_BASE64 = 12 * 1024 * 1024;
+export const mib = (bytes: number) => `${bytes / 1024 / 1024} MiB`;
 // https://docs.aws.amazon.com/ses/latest/dg/mime-types.html: SES rejects these extensions; everything else is deliverable.
 const BANNED_EXTENSIONS = new Set(['ade', 'adp', 'app', 'asp', 'bas', 'bat', 'cer', 'chm', 'cmd', 'com', 'cpl', 'crt', 'csh', 'der', 'exe', 'fxp', 'gadget', 'hlp', 'hta', 'inf', 'ins', 'isp', 'its', 'js', 'jse', 'ksh', 'lib', 'lnk',
   'mad', 'maf', 'mag', 'mam', 'maq', 'mar', 'mas', 'mat', 'mau', 'mav', 'maw', 'mda', 'mdb', 'mde', 'mdt', 'mdw', 'mdz', 'msc', 'msh', 'msh1', 'msh2', 'mshxml', 'msh1xml', 'msh2xml', 'msi', 'msp', 'mst', 'ops', 'pcd', 'pif', 'plg', 'prf', 'prg',
@@ -71,7 +75,7 @@ export const AttachmentContentType = z.string().max(78).regex(/^[a-zA-Z0-9!#$&^_
 export const AttachmentContentId = z.string().min(1).max(78).regex(/^[a-zA-Z0-9_.@-]+$/);
 export const AttachmentDisposition = z.enum(['attachment', 'inline']);
 export const AttachmentMetadata = z.object({ filename: AttachmentFilename, contentType: AttachmentContentType.default('application/octet-stream'), disposition: AttachmentDisposition.default('attachment'), contentId: AttachmentContentId.optional() }).strict();
-export const AttachmentUpload = AttachmentMetadata.extend({ content: z.string().min(4).max(MAX_ATTACHMENT_BASE64).describe('Base64 (standard or URL-safe alphabet; line breaks are accepted). No data URLs. Maximum decoded bytes: 8 MiB.') }).strict().openapi('AttachmentUpload');
+export const AttachmentUpload = AttachmentMetadata.extend({ content: z.string().min(4).max(MAX_ATTACHMENT_BASE64).describe('Base64 (standard or URL-safe alphabet; line breaks are accepted). No data URLs. At most 8 MiB decoded in JSON; upload larger files, up to 25 MiB, as raw bytes to POST /v1/attachments/upload.') }).strict().openapi('AttachmentUpload');
 export type AttachmentMetadataInput = z.infer<typeof AttachmentMetadata>;
 
 /** Decodes base64 as SDKs actually emit it: standard or URL-safe alphabet, with or without padding, line breaks and spaces ignored. */
@@ -91,8 +95,8 @@ export function blockedExtension(filename: string) {
   const name = filename.replace(/[. ]+$/, ''), dot = name.lastIndexOf('.'), extension = dot > 0 ? name.slice(dot + 1).trim().toLowerCase() : '';
   return BANNED_EXTENSIONS.has(extension) ? extension : null;
 }
-export function validateAttachment<T extends AttachmentMetadataInput>(metadata: T, bytes: Uint8Array): T {
-  if (!bytes.length || bytes.length > MAX_ATTACHMENT_BYTES) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', `Attachment ${metadata.filename} must be nonempty and at most 8 MiB decoded.`);
+export function validateAttachment<T extends AttachmentMetadataInput>(metadata: T, bytes: Uint8Array, max = MAX_ATTACHMENT_BYTES): T {
+  if (!bytes.length || bytes.length > max) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', `Attachment ${metadata.filename} must be nonempty and at most ${mib(max)} decoded${max < MAX_ATTACHMENT_BYTES ? ` when sent as base64 in JSON; upload files up to ${mib(MAX_ATTACHMENT_BYTES)} as raw bytes to POST /v1/attachments/upload` : ''}.`);
   const extension = blockedExtension(metadata.filename);
   if (extension) throw new ApiError(422, 'UNSUPPORTED_ATTACHMENT_TYPE', `Amazon SES does not deliver .${extension} attachments.`, 'filename');
   if (metadata.disposition === 'inline' && !metadata.contentId) throw new ApiError(422, 'INLINE_ATTACHMENT_INVALID', 'Inline attachments require contentId.', 'contentId');

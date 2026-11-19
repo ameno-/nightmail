@@ -10469,6 +10469,82 @@ describe('Private attachment assets and campaign revisions', () => {
     error(await http('GET', `/v1/attachments/${attachment.id}`, key.secret), 404, 'ATTACHMENT_NOT_FOUND');
   });
 
+  test('25 MiB of attachments: raw uploads, downloads and sends at the boundary; SES request bodies carry each file once', async t => {
+    const key = await keyFixture(t), max = 25 * 1024 * 1024;
+    const upload = async (filename: string, size: number) => {
+      const response = await fetch(`${BASE}/v1/attachments/upload`, { method: 'POST', headers: { authorization: `Bearer ${key.secret}`, 'content-type': 'text/plain', 'x-nightmail-filename': filename }, body: Buffer.alloc(size, 0x61) });
+      return { status: response.status, body: await response.json(), headers: response.headers } satisfies Reply;
+    };
+    const big = ok(await upload('big.txt', max), 201), small = ok(await upload('small.txt', 1), 201);
+    // The sent email keeps its attachment (409 ATTACHMENT_IN_USE); the unused one goes.
+    cleanup(t, async () => { for (const file of [big, small]) ok(await http('DELETE', `/v1/attachments/${file.id}`, key.secret), [200, 404, 409]); });
+    assert.equal(big.size, max);
+    error(await upload('over.txt', max + 1), 413, 'ATTACHMENT_LIMIT_EXCEEDED');
+    const content = ok(await http('GET', `/v1/attachments/${big.id}/content`, key.secret, undefined, {}, 30_000)).content as string;
+    assert.ok(content.length === Math.ceil(max / 3) * 4 && Buffer.from(content, 'base64').equals(Buffer.alloc(max, 0x61)), 'The download is the whole file as canonical base64.');
+    // One message may carry 25 MiB of files; one byte more is refused before anything is queued.
+    ok(await http('POST', '/v1/emails/send', key.secret, mail({ attachments: [big.id] })), 202);
+    error(await http('POST', '/v1/emails/send', key.secret, mail({ attachments: [big.id, small.id] })), 413, 'ATTACHMENT_LIMIT_EXCEEDED');
+    // A file inside JSON stays at 8 MiB: exactly 8 MiB is accepted (8 MiB + 1 is refused above).
+    const json = ok(await http('POST', '/v1/attachments', key.secret, { filename: 'json.txt', content: Buffer.alloc(8 * 1024 * 1024, 0x62).toString('base64') }, {}, 30_000), 201);
+    cleanup(t, async () => { ok(await http('DELETE', `/v1/attachments/${json.id}`, key.secret), [200, 404]); });
+    // The largest message (25 MiB of files and both 512 KiB body parts) fits SES's 40 MB after encoding, and the estimate
+    // admission uses is never below the real size.
+    const [{ SESv2Client, SendEmailCommand }, { addSesBodySplice }, { inlineMessage }, { SEND_LIMITS, estimatedMimeBytes }] = await Promise.all([import('@aws-sdk/client-sesv2'), import('./src/ses-body.js'), import('./src/sending.js'), import('./src/send-limits.js')]);
+    const file = new Uint8Array(max).map((_, i) => (i * 2654435761) >>> 24), html = `<p>${'x'.repeat(512 * 1024 - 7)}</p>`, text = 'y'.repeat(512 * 1024);
+    const snapshot = { kind: 'transactional', from: 'sender@example.com', to: ['to@example.com'], cc: [], bcc: [], replyTo: [], subject: 'Largest', html, text, headers: [], attachments: [], region: REGION, tracking: false } as unknown as import('./src/db/sending.js').EmailSnapshot;
+    const parts = [{ FileName: 'big.bin', ContentType: 'application/octet-stream', ContentDisposition: 'ATTACHMENT' as const, RawContent: file }, { FileName: 'logo.png', ContentType: 'image/png', ContentDisposition: 'INLINE' as const, ContentId: 'logo', RawContent: new Uint8Array([137, 80, 78, 71]) }];
+    const raw = inlineMessage(snapshot, parts);
+    const estimate = estimatedMimeBytes(snapshot, [{ size: max }, { size: 4 }]);
+    assert.ok(raw.length <= estimate && estimate <= SEND_LIMITS.encodedBytes, `${raw.length} <= ${estimate} <= ${SEND_LIMITS.encodedBytes}`);
+    // The body splice sends exactly what the SDK would, for Simple attachments and raw MIME alike.
+    const body = async (splice: boolean, Content: import('@aws-sdk/client-sesv2').EmailContent) => {
+      let sent: unknown;
+      const client = new SESv2Client({ region: REGION, credentials: { accessKeyId: 'AKIDFIXTURE', secretAccessKey: 'fixture' }, maxAttempts: 1, requestHandler: { handle: async (request: { body: unknown }) => {
+        sent = request.body; return { response: { statusCode: 200, headers: { 'content-type': 'application/json' }, body: new Response('{"MessageId":"fixture"}').body } };
+      } } as never });
+      if (splice) addSesBodySplice(client.middlewareStack);
+      await client.send(new SendEmailCommand({ FromEmailAddress: 'sender@example.com', Destination: { ToAddresses: ['to@example.com'] }, Content }));
+      if (splice) assert.ok(sent instanceof Uint8Array && sent.constructor === Uint8Array, 'The spliced body is plain bytes.');
+      return JSON.parse(typeof sent === 'string' ? sent : Buffer.from(sent as Uint8Array).toString('utf8'));
+    };
+    const simple = { Simple: { Subject: { Data: 'Largest' }, Body: { Html: { Data: html } }, Attachments: parts.map(p => ({ ...p, ContentTransferEncoding: 'BASE64' as const })) } };
+    for (const content of [simple, { Raw: { Data: raw } }]) assert.deepEqual(await body(true, content), await body(false, content));
+    // Overlapping commands through one client, with and without cached middleware (the dispatcher's clients cache it):
+    // each request carries its own file. With the splice's state on the shared middleware context, five of six failed.
+    for (const cacheMiddleware of [false, true]) {
+      const seen: [string, number][] = [];
+      const client = new SESv2Client({ region: REGION, credentials: { accessKeyId: 'AKIDFIXTURE', secretAccessKey: 'fixture' }, maxAttempts: 1, cacheMiddleware, requestHandler: { handle: async (request: { body: Uint8Array }) => {
+        const sent = JSON.parse(Buffer.from(request.body).toString());
+        seen.push([sent.Content.Simple.Subject.Data, Buffer.from(sent.Content.Simple.Attachments[0].RawContent, 'base64').length]);
+        return { response: { statusCode: 200, headers: { 'content-type': 'application/json' }, body: new Response('{"MessageId":"fixture"}').body } };
+      } } as never });
+      addSesBodySplice(client.middlewareStack);
+      const results = await Promise.allSettled(Array.from({ length: 6 }, (_, i) => client.send(new SendEmailCommand({ FromEmailAddress: 'sender@example.com', Destination: { ToAddresses: ['to@example.com'] },
+        Content: { Simple: { Subject: { Data: String(i) }, Body: { Text: { Data: 'x' } }, Attachments: [{ FileName: 'f.txt', RawContent: new Uint8Array(65536 + i).fill(i) }] } } }))));
+      client.destroy();
+      assert.deepEqual(results.map(r => r.status === 'fulfilled' ? 'ok' : String(r.reason)), Array(6).fill('ok'), `cacheMiddleware: ${cacheMiddleware}`);
+      assert.deepEqual(seen.sort(), Array.from({ length: 6 }, (_, i) => [String(i), 65536 + i]));
+    }
+    // One isolate-wide budget: reservations start in arrival order, never together past the budget, a larger one runs
+    // alone, and a reservation inside one never waits on its holder.
+    const { withMemory, memoryInUse } = await import('./src/isolate-memory.js'), MiB = 1024 * 1024, started: number[] = [];
+    let peak = 0, active = 0, alone = true;
+    await Promise.all([40, 40, 10, 70].map((size, i) => withMemory(size * MiB, async () => {
+      started.push(i); active++; peak = Math.max(peak, memoryInUse());
+      if (size === 70 && active > 1) alone = false;
+      await withMemory(size * MiB, async () => undefined);
+      await new Promise(resolve => setTimeout(resolve, 20)); active--;
+    })));
+    assert.deepEqual([started, peak <= SEND_LIMITS.isolateWorkingBytes, alone, memoryInUse()], [[0, 1, 2, 3], true, true, 0]);
+    // A nested reservation past its holder's is added to the count at once (never waiting on its own holder).
+    assert.equal(await withMemory(MiB, () => withMemory(30 * MiB, async () => memoryInUse())), 30 * MiB);
+    assert.equal(memoryInUse(), 0);
+    // Five 25 MiB raw uploads at once all succeed; they wait their turn for the isolate's memory.
+    const five = await Promise.all(Array.from({ length: 5 }, (_, i) => upload(`five${i}.txt`, max)));
+    for (const response of five) { const file = ok(response, 201); cleanup(t, async () => { ok(await http('DELETE', `/v1/attachments/${file.id}`, key.secret), [200, 404]); }); }
+  });
+
   test('sending freezes the audience at launch and existing schedule/cancel contracts hold', async t => {
     const key = await keyFixture(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('async-review-list') });
@@ -22947,22 +23023,22 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         // Within one workspace, a forward to one of its own receiving hosts is refused when it is made.
         error(await local('POST','/v1/endpoints',{type:'forward',name:'self',address:'back@receive.example',from:box.id}),422,'FORWARD_LOOP');
       });
-      await t.test('forwards: attachments go along up to one message’s limits (20 files, 8 MiB); the rest are named in the forward',async it=>{
+      await t.test('forwards: attachments go along up to one message’s limits (20 files, 25 MiB); the rest are named in the forward',async it=>{
         const hookId=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='whole'",[wid])).rows[0].id as string;
         await route('files@receive.example',['forward:whole'],'files');
         const parts=[...Array.from({length:21},(_,n)=>[`note-${n}.txt`,`note ${n}`]),['tool.exe','MZ fixture'],['big.bin','big fixture']];
         const mime=['From: Ana Sender <ana@example.org>','To: files@receive.example','Subject: Many files','Message-ID: <fwd-files@example.org>','MIME-Version: 1.0','Content-Type: multipart/mixed; boundary="m"','',
           '--m','Content-Type: text/plain; charset=utf-8','','See attached.',...parts.flatMap(([name,body])=>['--m','Content-Type: application/octet-stream',`Content-Disposition: attachment; filename="${name}"`,'',body!]),'--m--',''].join('\r\n');
         const m=await receive('fwd-files',['files@receive.example'],mime);assert.equal(m.attachment_count,23);
-        // Received mail is parsed up to 6 MiB, so a file past the 8 MiB limit stands in by its recorded size; it is never read.
-        await db.query("UPDATE mail_attachments SET size_bytes=$3 WHERE workspace_id=$1 AND message_id=$2 AND filename='big.bin'",[wid,m.id,9*1024*1024]);
+        // Received mail is parsed up to 6 MiB, so a file past the 25 MiB limit stands in by its recorded size; it is never read.
+        await db.query("UPDATE mail_attachments SET size_bytes=$3 WHERE workspace_id=$1 AND message_id=$2 AND filename='big.bin'",[wid,m.id,26*1024*1024]);
         assert.deepEqual(await forwardDelivery(hookId,m.id),{status:'delivered',last_error:null,routed:true});
         const notes=(await db.query("SELECT filename FROM mail_attachments WHERE workspace_id=$1 AND message_id=$2 AND filename LIKE 'note-%' ORDER BY id",[wid,m.id])).rows.map((r:Json)=>r.filename as string);
         const [sent]=await dispatchedForward(it,m.id,hookId),files=sent.Content.Simple.Attachments as Json[];
         // The first 20 that fit, in the received order; a type SES won't deliver, the file over the limit and the 21st are named.
         assert.deepEqual(files.map(f=>f.FileName).sort(),notes.slice(0,20).sort());
         for(const f of files)assert.equal(Buffer.from(f.RawContent).toString(),`note ${f.FileName.slice(5,-4)}`);
-        const named=/Not attached: (.+) \(over the 20-file, 8 MiB limit/.exec(sent.Content.Simple.Body.Text.Data)![1]!.split(', ');
+        const named=/Not attached: (.+) \(over the 20-file, 25 MiB limit/.exec(sent.Content.Simple.Body.Text.Data)![1]!.split(', ');
         assert.deepEqual(named.sort(),['big.bin','tool.exe',notes[20]!].sort());
       });
       await t.test('forwards: hosted, a forwarded file the content screen can’t vouch for is named, and the rest still go',async()=>{
@@ -25491,6 +25567,36 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal((await db.query('SELECT count(*)::int AS count FROM operation_sns_receipts WHERE workspace_id = $1 AND processed_at IS NOT NULL', [runtime.config.workspaceId])).rows[0].count, 1);
       assert.equal(page(await local('GET', `/v1/emails/${email.id}/events`)).filter(event => event.type === 'delivery').length, 1);
       assert.equal((await jobs('operation.webhook')).length, 1);
+    });
+  });
+
+  test('attachment downloads: an unread response is ended and its file let go before its memory returns to the budget',async t=>{
+    await simulatedSesFixture(t,async({runtime,local,fetch})=>{
+      const [{attachmentDownload},{memoryInUse,sendReservation,withMemory}]=await Promise.all([import('./src/sending.js'),import('./src/isolate-memory.js')]);
+      const objects=new Map<string,Uint8Array>(),MiB=1024*1024,size=25*MiB,readMs=attachmentDownload.readMs;
+      runtime.storage={put:async(key:string,body:Uint8Array)=>{objects.set(key,body);},get:async(key:string)=>objects.has(key)?{body:objects.get(key)!,contentType:'text/plain'}:null,delete:async(key:string)=>{objects.delete(key);}};
+      const key=ok(await local('POST','/v1/api-keys',{name:'downloads',permissions:['send','read']}),201).secret as string;secrets.add(key);
+      const authorization=`Bearer ${key}`;
+      const upload=await fetch(new Request(`${PUBLIC_ORIGIN}/v1/attachments/upload`,{method:'POST',headers:{authorization,'content-type':'text/plain','x-nightmail-filename':'big.txt'},body:Buffer.alloc(size,0x61)}));
+      const file=await upload.json() as Json;assert.equal(upload.status,201);
+      attachmentDownload.readMs=50;
+      try {
+        // Two 25 MiB downloads nobody reads: each holds its file's share of the budget.
+        const unread=await Promise.all([0,1].map(()=>fetch(new Request(`${PUBLIC_ORIGIN}/v1/attachments/${file.id}/content`,{headers:{authorization}}))));
+        assert.deepEqual(unread.map(r=>r.status),[200,200]);
+        assert.equal(memoryInUse(),2*Math.ceil(size*1.15+MiB));
+        await new Promise(resolve=>setTimeout(resolve,200));
+        // Past the deadline both responses are ended (a read fails) and only then is their memory free again, so a
+        // 25 MiB send that follows is admitted at once.
+        for(const response of unread) await assert.rejects(response.text());
+        assert.equal(memoryInUse(),0);
+        assert.equal(await Promise.race([withMemory(sendReservation(size,0),async()=>memoryInUse()),new Promise(resolve=>setTimeout(()=>resolve('waiting'),100))]),Math.ceil(size*2.5));
+        // A download that is read to the end or canceled gives its share back once, and the timer then has nothing to do.
+        const read=await fetch(new Request(`${PUBLIC_ORIGIN}/v1/attachments/${file.id}/content`,{headers:{authorization}}));
+        assert.equal(Buffer.from((await read.json() as Json).content,'base64').length,size);
+        const canceled=await fetch(new Request(`${PUBLIC_ORIGIN}/v1/attachments/${file.id}/content`,{headers:{authorization}}));await canceled.body!.cancel();
+        await new Promise(resolve=>setTimeout(resolve,200));assert.equal(memoryInUse(),0);
+      } finally { attachmentDownload.readMs=readMs; }
     });
   });
 

@@ -16,10 +16,21 @@ export const SEND_LIMITS = {
   dmarcMaxAgeHours: 48,
   /** SES's limit on an attachment's MIME type and content ID, in printable ASCII characters. */
   mimeFieldChars: 78,
-  /** Decoded attachments per message. */
-  attachmentBytes: 8 * 1024 * 1024,
-  /** The estimated encoded message (estimatedMimeBytes): an application cap, not SES's 40 MB maximum. */
-  encodedBytes: 16 * 1024 * 1024,
+  /** Decoded attachments per message (so also per attachment). SES v2 takes messages up to 40 MB after base64
+   * encoding (https://docs.aws.amazon.com/ses/latest/dg/quotas.html); base64 with MIME line breaks grows a file by
+   * 4/3 × 78/76 (about 37%), so 25 MiB of files is about 36 MB on the wire and leaves room for the body and headers. */
+  attachmentBytes: 25 * 1024 * 1024,
+  /** A file sent as base64 inside a JSON request (uploadAttachment's JSON body, inbox mail's inline content, MCP): the
+   * request text, the parsed string and the decoded bytes are all held at once, so these stay at 8 MiB decoded.
+   * Larger files upload as raw bytes (POST /v1/attachments/upload). */
+  jsonAttachmentBytes: 8 * 1024 * 1024,
+  /** The estimated encoded message (estimatedMimeBytes) may not pass SES's own maximum: 40 MB after encoding. */
+  encodedBytes: 40_000_000,
+  /** Attachment and body bytes one dispatcher lane prepares at once; a larger message is a page of its own. */
+  laneBytes: 8 * 1024 * 1024,
+  /** What every large-attachment path in one isolate may hold at once (isolate-memory.ts): with the loaded app's
+   * ~25 MB this keeps a Worker isolate under ~90 MB of its 128 MB. */
+  isolateWorkingBytes: 64 * 1024 * 1024,
   /** How the encoded size is estimated: body parts grow by bodyFactor, each attachment is base64 grown by lineFactor
    * plus perAttachment of headers, and the message adds envelope. */
   mime: { bodyFactor: 1.4, lineFactor: 1.04, perAttachment: 2048, envelope: 16384 },

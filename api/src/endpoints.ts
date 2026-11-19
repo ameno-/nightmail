@@ -15,7 +15,8 @@ import { encrypt, decrypt, encryptWebhookHeaders, postWebhook, webhookHeaderView
 import { inboundEventTypes, webhookSecretBinding } from './mailbox-events.js';
 import { InboundAddressId } from './inbound-threads.js';
 import { htmlToPlain, lockMailboxLane } from './mailbox-store.js';
-import { mailAttachmentBytes, safeForwardHtml, sendFromMailbox } from './mailbox-send.js';
+import { mailAttachmentBytes, mailCopyReservation, safeForwardHtml, sendFromMailbox } from './mailbox-send.js';
+import { withMemory } from './isolate-memory.js';
 import { AttachmentContentId, AttachmentContentType, blockedExtension, mailAddress } from './outbound-content.js';
 import { SEND_LIMITS } from './send-limits.js';
 import { plusBase } from './routing-match.js';
@@ -714,7 +715,7 @@ type Received = typeof mailMessages.$inferSelect;
 const forwardBlocked = () => new ApiError(422, 'FORWARD_BLOCKED', 'Automated, junk, unparsed, looped or unscanned mail is never forwarded.');
 /**
  * The received attachments a forward carries, copied into sending uploads in order, as many as one sent message may
- * (20 files, 8 MiB decoded together). The rest (over those limits, a type SES does not deliver, or past the workspace's
+ * (20 files, 25 MiB decoded together). The rest (over those limits, a type SES does not deliver, or past the workspace's
  * stored attachment quota) are named in the forward instead. Hosted, forwarded files are someone else's, so each must
  * pass the content screen's attachment check whatever the sender's standing (screenedAttachment, which the dispatcher
  * applies on probation): one that doesn't is named too, rather than holding back the whole forward. Like every send,
@@ -734,9 +735,12 @@ async function forwardAttachments(runtime: Runtime, w: string, m: Received) {
     const metadata = { filename, contentType: AttachmentContentType.safeParse(file.contentType).success ? file.contentType : 'application/octet-stream',
       disposition: contentId && file.disposition === 'inline' ? 'inline' as const : 'attachment' as const, contentId };
     try {
-      const content = await mailAttachmentBytes(runtime, w, m.region ?? '', file);
-      if (screened) Object.assign(metadata, screened(metadata.filename, metadata.contentType, content, metadata.disposition === 'inline'));
-      files.push(await storeAttachmentBytes!(runtime, { workspaceId: w }, metadata, content));
+      // The file and its stored copy count against the isolate's memory budget (isolate-memory.ts).
+      files.push(await withMemory(await mailCopyReservation(runtime, w, file), async () => {
+        const content = await mailAttachmentBytes(runtime, w, m.region ?? '', file);
+        if (screened) Object.assign(metadata, screened(metadata.filename, metadata.contentType, content, metadata.disposition === 'inline'));
+        return storeAttachmentBytes!(runtime, { workspaceId: w }, metadata, content);
+      }));
     } catch (e) {
       // Refused for what it is (its name, type, content or the stored attachment quota): named instead. Anything else is retried.
       if (!(e instanceof ApiError) || e.retryable || e.status >= 500) throw e;
@@ -797,7 +801,7 @@ async function sendForward(runtime: Runtime, w: string, endpointId: string, addr
       .filter(a => a !== address && a !== box.address && ReplyAddress.safeParse(a).success).slice(0, 10);
     const notes = [
       ...(m.bodyTruncated ? ['Parts of the original were too large to forward.'] : []),
-      ...(left.length ? [`Not attached: ${left.slice(0, 10).join(', ')}${left.length > 10 ? ` and ${left.length - 10} more` : ''} (over the 20-file, 8 MiB limit, or a type that can't be sent).`] : []),
+      ...(left.length ? [`Not attached: ${left.slice(0, 10).join(', ')}${left.length > 10 ? ` and ${left.length - 10} more` : ''} (over the 20-file, 25 MiB limit, or a type that can't be sent).`] : []),
     ].join(' ');
     const text = (m.text || (m.html ? htmlToPlain(m.html) : '')).slice(0, FORWARD_BODY);
     const rich = m.html ? safeForwardHtml(m.html) : null;
