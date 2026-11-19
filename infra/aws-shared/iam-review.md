@@ -5,7 +5,7 @@ The production and dev Workers use separate `bane-runtime` users. Each user's ef
 * Ohio: `bane-{transactional,marketing,feedback,inbound}`, `bane-probation-ws_*` tenants and the account's `bane-<account>-mail-us-east-2` bucket. The operator activates the `bane-inbound` set once. The deploy role owns `bane-inbound-all`, the bucket controls, topics and inbound subscription; the Worker verifies these without repair.
 * Virginia: `bane-trusted-{transactional,marketing,feedback}` and `bane-trusted-ws_*` tenants. No receiving. The owned identity must carry the claim token, `bane:owner=bane`, `bane:installation-id=bane:pool` and the expected `bane:purpose`.
 * Both: `SendEmail` requires the regional set and tenant. SNS subscribe is HTTPS to the exact account origin plus `/v1/events/ses`. Classic receipt-rule actions cannot be scoped by name. Keep the runtime key out of clients and do not grant other principals access to the pool.
-* BYO: a separately reviewed `Bane-<20hex>` customer role requires the external ID and session name `Bane`; the platform user cannot assume a role in its own account. BYO templates are unpublished until explicitly released.
+* BYO: the runtime user may enter only `nightmail-byo-broker` in its own account, with the session name `nightmail-broker`; `bane-runtime` gets no such grant. The broker ([trust](byo-broker-trust-policy.json), [policy](byo-broker-policy.json), `node runtime-policies.mjs --broker <trust|policy> <account>`) may only assume `Nightmail-<20hex>` roles outside the hosted accounts, with a `nightmail-*` session name and the connection ID as source identity, and nothing else. The customer role requires the external ID. BYO templates are unpublished until explicitly released.
 
 ## Action inventory
 
@@ -13,7 +13,7 @@ H = Hosted, B = customer BYO v5, R = explicit customer receiving opt-in, Q = exp
 
 | Principal / IAM actions | Authorized use, resource and actual or required call site |
 |---|---|
-| H `sts:AssumeRole` | Exact external `role/Bane-<20>`, session `Bane`, excluding the platform account; caller must permit missing/wrong external-ID probes, customer trust denies them. `provider-credentials.ts:21–47,59–62`, `provider-connections.ts:135–147`. STS `GetCallerIdentity` needs **no Allow** (`provider-credentials.ts:15–17`). |
+| H `sts:AssumeRole`; broker `sts:AssumeRole`, `sts:SetSourceIdentity` | H: only `role/nightmail-byo-broker` in its own account, session `nightmail-broker`. Broker: exact external `role/Nightmail-<20>`, never a hosted account, session `nightmail-*`, source identity `conn_<32 hex>`; it must permit missing/wrong external-ID probes, customer trust denies them. `provider-credentials.ts:21–47,59–62`, `provider-connections.ts:135–147`. STS `GetCallerIdentity` needs **no Allow** (`provider-credentials.ts:15–17`). |
 | H/B `ses:GetAccount`; H `cloudwatch:GetMetricData` | Regional quota, sandbox, review and readiness: `ses-setup.ts:237–244`, `operations.ts:492`, `dispatcher.ts` quota read. Regional CloudWatch SES reputation: `ses-setup.ts:326–333`, `reputation-alerts.ts`. Both on `*`; CloudWatch can't constrain this read to the SES namespace. Remove it from B. |
 | B `ses:ListEmailIdentities`, `ses:GetEmailIdentity`, `ses:ListConfigurationSets`, `ses:GetConfigurationSet`, `ses:DescribeActiveReceiptRuleSet` | Read-only scan, paginated: `ses-setup.ts:247–265,359–374` and new regional scan in `provider-connections.ts`; `mailbox-setup.ts:179` already demonstrates the active-set read. Lists and classic active-set read require `*`. Read **domains**, not email-address identities; inspect old `configuration-set/bane-*` ownership and the two exact current sets. A denied scan isn't an empty result. No claims or SNS confirmations at scan time. |
 | H/B `ses:CreateEmailIdentity`, `ses:TagResource`, `ses:GetEmailIdentity`, `ses:PutEmailIdentityMailFromAttributes`, `ses:DeleteEmailIdentity` | `operations.ts:286–295,308–326,409,540–550,590–592`. Domain-shaped ARN, purpose `domain-identity`, MX owner, exact installation, exact tag keys, UUID-shaped claim. `TagResource` is a **dependent** authorization: only restate the same values, never first-tag a foreign identity. Edits require existing tags; Ohio historical identities keep their existing claim check. Application compares the actual token; imports/adoptions never repaired or removed. Disconnect retains identities. |
@@ -35,7 +35,7 @@ Use the [bootstrap commands](README.md) with the intended account and origin. Mi
 
 | Origin | Runtime | Ohio | Trusted |
 |---|---:|---:|---:|
-| `https://bane.mx` | 4,075 | 4,481 | 3,647 |
-| `https://dev.bane.mx` | 4,075 | 4,485 | 3,651 |
+| `https://bane.mx` | 4,279 | 5,235 | 3,723 |
+| `https://dev.bane.mx` | 4,279 | 5,239 | 3,727 |
 
 Before approving live traffic, verify effective policies, caller/account, receipt rule set, tenant scopes and signed simulator feedback in the intended account. Offline rendering and synthetic tests do not verify any live IAM attachment. Do not reuse versions, manifests or release instructions from the retired shared account.

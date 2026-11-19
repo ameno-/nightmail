@@ -24154,6 +24154,42 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('BYO broker: the runtime enters only the broker, and only the broker enters connected-account roles',async()=>{
+    const {render,renderBroker}=await import(new URL('../infra/aws-shared/runtime-policies.mjs',import.meta.url).href),{readFile}=await import('node:fs/promises');
+    const account='905840579680',customer='444455556666',broker=`arn:aws:iam::${account}:role/nightmail-byo-broker`,role=`arn:aws:iam::${customer}:role/Nightmail-0123456789abcdef0123`;
+    const statements=(docs:Record<string,{Statement:IamStatement[]}>)=>Object.values(docs).flatMap(d=>d.Statement);
+    const runtime=statements(render('--fresh',{account,origin:'https://dev.nightmail.dev'})),legacy=statements(render('--fresh',{account,origin:'https://dev.bane.mx',broker:false}));
+    const boundary=JSON.parse((await readFile(new URL('../infra/aws-shared/runtime-boundary-policy.json',import.meta.url),'utf8')).replaceAll('YOUR_AWS_ACCOUNT_ID',account)).Statement as IamStatement[];
+    const source='conn_'+'0f'.repeat(16);
+    for(const policy of [runtime,boundary]){
+      assert.ok(iamAllows(policy,'sts:AssumeRole',broker,{'sts:RoleSessionName':'nightmail-broker','aws:ResourceAccount':account,'aws:RequestedRegion':'us-east-1'}));
+      assert.equal(iamAllows(policy,'sts:AssumeRole',broker,{'sts:RoleSessionName':'Bane','aws:ResourceAccount':account}),false);
+      // No way around the broker: no customer role, under any name or session.
+      for(const name of ['Nightmail-0123456789abcdef0123','Bane-0123456789abcdef0123'])for(const session of ['Bane','nightmail-send'])
+        assert.equal(iamAllows(policy,'sts:AssumeRole',`arn:aws:iam::${customer}:role/${name}`,{'sts:RoleSessionName':session,'aws:ResourceAccount':customer,'sts:SourceIdentity':source}),false,`${name} ${session}`);
+    }
+    assert.equal(legacy.some(s=>s.Effect==='Allow' && [s.Action].flat().some(a=>a?.startsWith('sts:'))),false,'bane-runtime enters nothing');
+    const {name,trust,policy}=renderBroker(account),grants=policy.Statement as IamStatement[];
+    assert.equal(name,'nightmail-byo-broker');
+    // Trust: our own account as the principal, narrowed to the runtime user and its session name.
+    assert.deepEqual(trust.Statement.map((s:Json)=>[s.Effect,s.Principal,s.Action]),[['Allow',{AWS:`arn:aws:iam::${account}:root`},'sts:AssumeRole']]);
+    const trusted=(arn:string,session='nightmail-broker')=>iamAllows(trust.Statement,'sts:AssumeRole',broker,{'aws:PrincipalArn':arn,'sts:RoleSessionName':session});
+    assert.ok(trusted(`arn:aws:iam::${account}:user/nightmail-runtime`));
+    for(const [arn,session] of [[`arn:aws:iam::${account}:user/bane-runtime`],[`arn:aws:iam::${account}:role/nightmail-deploy`],[`arn:aws:iam::${account}:user/nightmail-runtime`,'Bane']] as [string,string?][])
+      assert.equal(trusted(arn,session),false,`${arn} ${session}`);
+    const context=(extra:Record<string,string>={})=>({'sts:RoleSessionName':'nightmail-send','sts:SourceIdentity':source,'aws:ResourceAccount':customer,...extra});
+    for(const action of ['sts:AssumeRole','sts:SetSourceIdentity'])assert.ok(iamAllows(grants,action,role,context()),action);
+    const refused:[string,string,Record<string,string>][]=[
+      ['sts:AssumeRole',role,{'sts:RoleSessionName':'Bane'}],['sts:AssumeRole',role,{'sts:SourceIdentity':'ws_'+'0f'.repeat(16)}],
+      ['sts:AssumeRole',`arn:aws:iam::${customer}:role/Bane-0123456789abcdef0123`,{}],['sts:AssumeRole',`arn:aws:iam::${customer}:role/Nightmail-admin`,{}],
+      ...['009882681002','905840579680','438095551154'].map(a=>['sts:AssumeRole',`arn:aws:iam::${a}:role/Nightmail-0123456789abcdef0123`,{'aws:ResourceAccount':a}] as [string,string,Record<string,string>]),
+      ['sts:TagSession',role,{}],['iam:PassRole',role,{}],['ses:SendEmail',`arn:aws:ses:us-east-2:${customer}:identity/example.com`,{}],
+    ];
+    for(const [action,arn,extra] of refused)assert.equal(iamAllows(grants,action,arn,context(extra)),false,`${action} ${arn} ${JSON.stringify(extra)}`);
+    const {['sts:SourceIdentity']:_,...unnamed}=context();
+    assert.equal(iamAllows(grants,'sts:AssumeRole',role,unnamed),false,'Every session names its connection');
+  });
+
   test('inbound IAM confines receiving storage and BYO sending cannot use another installation\'s identities',async()=>{
     const {render}=await import(new URL('../infra/aws-shared/runtime-policies.mjs',import.meta.url).href),{load}=await import('js-yaml'),{readFile}=await import('node:fs/promises');
     const account='905840579680',docs=render('--fresh',{account,origin:'https://dev.bane.mx'}),all=(Object.values(docs) as Json[]).flatMap(d=>d.Statement);

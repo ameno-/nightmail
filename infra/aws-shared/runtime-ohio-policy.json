@@ -10,8 +10,8 @@
       "Condition": {"StringEquals": {"ses:OpenTrackingEnabled": "${ses:ClickTrackingEnabled}", "aws:RequestedRegion": ["us-east-1", "us-east-2"]}}
     },
     {
-      "Effect": "Allow", "Action": "sts:AssumeRole", "Resource": "arn:aws:iam::*:role/Bane-????????????????????",
-      "Condition": {"StringEquals": {"sts:RoleSessionName": "Bane"}, "StringNotEquals": {"aws:ResourceAccount": "YOUR_AWS_ACCOUNT_ID"}}
+      "Sid": "ByoBroker", "Effect": "Allow", "Action": "sts:AssumeRole", "Resource": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/nightmail-byo-broker",
+      "Condition": {"StringEquals": {"sts:RoleSessionName": "nightmail-broker"}}
     },
     {
       "Effect": "Allow", "Resource": "*",

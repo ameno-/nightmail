@@ -1,0 +1,8 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Sid":"ConnectedAccountRoles","Effect":"Allow","Action":["sts:AssumeRole","sts:SetSourceIdentity"],"Resource":"arn:aws:iam::*:role/Nightmail-????????????????????","Condition":{"StringLike":{"sts:RoleSessionName":"nightmail-*","sts:SourceIdentity":"conn_????????????????????????????????"}}},
+    {"Sid":"NotNightmailAccounts","Effect":"Deny","Action":["sts:AssumeRole","sts:SetSourceIdentity"],"Resource":"*","Condition":{"StringEquals":{"aws:ResourceAccount":"NIGHTMAIL_ACCOUNTS"}}},
+    {"Sid":"NothingElse","Effect":"Deny","NotAction":["sts:AssumeRole","sts:SetSourceIdentity"],"Resource":"*"}
+  ]
+}
