@@ -5,7 +5,7 @@ import { ApiError, databaseConflict, databaseUnavailable, id, log, logError, Mod
 import type { ClaimedWebhook, DbExecutor, JobHandler, Runtime } from './core.js';
 import { jobs } from './db/core.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
-import { failCampaign } from './states.js';
+import { failCampaign, failScheduledRelease } from './states.js';
 import { storageBinding, ingestInput,type IngestInput } from './mailbox-ingest-input.js';
 export const MAX_ATTEMPTS = 6;
 export const WEBHOOK_ATTEMPTS = 10;
@@ -223,14 +223,20 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       ingestReserved+=slots;
       let claimed:{rows:(Claimed & {hook_cursor?:string})[]}|undefined;
       try { claimed = await runtime.db.execute<Claimed>(sql`WITH RECURSIVE ${hookPage} exhausted AS (
-        SELECT j.id,j.workspace_id,CASE WHEN starts_with(j.type,'campaign.') THEN j.payload->>'campaignId' END AS campaign_id
+        SELECT j.id,j.workspace_id,CASE WHEN starts_with(j.type,'campaign.') THEN j.payload->>'campaignId' END AS campaign_id,CASE WHEN j.type='sending.release' THEN j.payload->>'emailId' END AS email_id
         FROM jobs j WHERE j.status='running' AND j.lease_until < now() AND ${exhausted} ORDER BY j.lease_until,j.id LIMIT 100 FOR UPDATE SKIP LOCKED
       ), parents AS MATERIALIZED (
         SELECT c.workspace_id,c.id FROM sending_campaigns c WHERE (c.workspace_id,c.id) IN (SELECT workspace_id,campaign_id FROM exhausted)
         ORDER BY c.id FOR NO KEY UPDATE SKIP LOCKED
+      ), releases AS MATERIALIZED (
+        -- A scheduled email's release that ran out of leases ends with its email (failScheduledRelease), locked like a
+        -- campaign: one busy in a cancel, reschedule or release under way is left for the next claim.
+        SELECT e.workspace_id,e.id FROM sending_emails e WHERE (e.workspace_id,e.id) IN (SELECT workspace_id,email_id FROM exhausted)
+        ORDER BY e.id FOR NO KEY UPDATE SKIP LOCKED
       ), failed AS (UPDATE jobs j SET status='failed',last_error='JOB_LEASE_EXHAUSTED',lease_until=NULL FROM exhausted x WHERE j.id=x.id AND
         (x.campaign_id IS NULL OR EXISTS(SELECT FROM parents p WHERE (p.workspace_id,p.id)=(x.workspace_id,x.campaign_id)) OR NOT EXISTS(SELECT FROM sending_campaigns c WHERE (c.workspace_id,c.id)=(x.workspace_id,x.campaign_id)))
-        RETURNING j.workspace_id,j.type,j.payload,x.campaign_id), campaigns_failed AS (${failCampaign(sql`(workspace_id,id) IN (SELECT workspace_id,campaign_id FROM failed WHERE campaign_id IS NOT NULL)`,{code:'JOB_LEASE_EXHAUSTED',message:'The campaign worker exhausted its leases.'})}),
+        AND (x.email_id IS NULL OR EXISTS(SELECT FROM releases r WHERE (r.workspace_id,r.id)=(x.workspace_id,x.email_id)) OR NOT EXISTS(SELECT FROM sending_emails e WHERE (e.workspace_id,e.id)=(x.workspace_id,x.email_id)))
+        RETURNING j.workspace_id,j.type,j.payload,x.campaign_id,x.email_id), ${failScheduledRelease(sql`SELECT workspace_id,email_id AS id FROM failed WHERE email_id IS NOT NULL`)}, campaigns_failed AS (${failCampaign(sql`(workspace_id,id) IN (SELECT workspace_id,campaign_id FROM failed WHERE campaign_id IS NOT NULL)`,{code:'JOB_LEASE_EXHAUSTED',message:'The campaign worker exhausted its leases.'})}),
       deliveries_failed AS (UPDATE operation_deliveries d SET status='failed',last_error='JOB_LEASE_EXHAUSTED',updated_at=now() FROM failed f
         WHERE f.type='operation.webhook' AND d.workspace_id=f.workspace_id AND d.id=f.payload->>'deliveryId' AND to_jsonb(d.generation)=f.payload->'generation' AND d.status='pending'), mailbox_failed AS (
         UPDATE mailbox_webhook_deliveries d SET status='failed',last_error='JOB_LEASE_EXHAUSTED',updated_at=now() FROM failed f WHERE f.type='mailbox.webhook' AND d.id=f.payload->>'deliveryId' AND d.workspace_id=f.workspace_id AND d.status='pending' AND d.generation=coalesce((f.payload->>'generation')::int,0)), feedback AS (

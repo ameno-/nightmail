@@ -184,3 +184,5 @@
 .logs-table td .private-address { display: flex; }
 .ui-cards.logs-table .ui-card__segment:has(.private-address) { display: flex; gap: .3em; }
 .ui-cards.logs-table .ui-card__segment > .private-address { min-width: 0; }
+/* A scheduled email's Reschedule dialog: its buttons on the right, like every form dialog's. */
+.logs-dialog-actions { justify-content: flex-end; }

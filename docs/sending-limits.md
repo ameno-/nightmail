@@ -25,6 +25,7 @@ Everything here is in the API: `GET /v1/sender-score` (score, factors, `limit`, 
 - **Transactional reserve:** marketing may use at most `limit − max(100, 10% of limit)`. A small sender always keeps 100 a day for receipts and password resets; while calibrating, all 100 are for transactional mail.
 - **Grades:** A+ ≥ 95, A ≥ 90, B ≥ 80, C ≥ 70, D ≥ 60, F below.
 - Lowering a limit applies to new mail at once. Mail already accepted is never recalled.
+- **Scheduled sends** (`sendEmail` with `scheduledAt`) count when they go, not when they are scheduled: at its time an email is checked against the limit, the balance and the standing of that moment. One they refuse is rejected with the same code a send would get (`SEND_LIMIT_REACHED`, `BALANCE_EXHAUSTED`, …) and the `email.rejected` webhook; it is never sent late.
 
 ## What the score is made of
 

@@ -76,6 +76,8 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `getEmailDetail` | `logs` · `detail` · sending |
 | `getEmailContent` | `logs` · `content` · sending |
 | `listEmailEvents` | `logs` · `events` · sending |
+| `cancelEmail` | `send` · `cancel` · sending |
+| `rescheduleEmail` | `send` · `reschedule` · sending |
 | `uploadAttachment` | `attachments` · `upload` · admin |
 | `getAttachment` | `attachments` · `get` · admin |
 | `deleteAttachment` | `attachments` · `delete` · admin |
