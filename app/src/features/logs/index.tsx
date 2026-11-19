@@ -4,7 +4,7 @@ import { Download, Paperclip, Search, X } from 'lucide-react'
 import { useApiDef, useApiQuery, useRegion, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { LogDirection, LogEntry, ReceivedEmailDetail } from '../../data/types'
-import { Alert, Button, CopyButton, DataTable, EmptyState, ErrorState, Input, PaginationSkeleton, PageHeader, Pagination, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
+import { Alert, Button, CopyButton, DataTable, EmptyState, ErrorState, Input, PaginationSkeleton, PageHeader, Pagination, SectionHeader, Select, Sheet, StatusBadge, Tabs } from '../../components/ui'
 import { ReceivedEmailPreview } from '../../components/EmailPreview'
 import { date, fileSize, label, time } from '../../lib/format'
 import { downloadCsv } from '../../lib/download'
@@ -14,6 +14,8 @@ import { useAdaptivePageSize, useSearchDraft } from '../../lib/pagination'
 import { AddressList, PrivateAddress, Sender } from '../../components/PrivateAddress'
 import { EmailDetailPage } from './email-detail'
 import { useScheduledActions } from './scheduled'
+import { ThreadChip, ThreadTimeline, threaded, threadItems, useThreadPrefetch } from './thread'
+import { useMediaQuery } from '../../lib/media'
 
 const directions = [{ value: 'all', label: 'All' }, { value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]
 // Sent statuses, most looked-for first; received and spam filter received mail (spam is visible to owners and admins).
@@ -113,14 +115,22 @@ export function ReceivedEmailDetailPage() {
   const { id = '' } = useParams()
   // Delivery details (envelope, region, verdicts, headers, the raw .eml) are for owners and admins; members read the message.
   const { canAdminister } = useWorkspaceAccess()
-  const query = useApiDef(queries.receivedEmail(id, canAdminister))
+  // Moving to another message of its thread keeps this one up until that one arrives, as a sent email does.
+  const query = useApiDef(queries.receivedEmail(id, canAdminister), { keepPrevious: true })
   if (query.isPending) return <ReceivedEmailSkeleton />
   if (query.isError) return <><PageHeader title="Received email" backTo="/logs" /><ErrorState error={query.error} onRetry={() => query.refetch()} /></>
-  return <ReceivedEmailDetailView email={query.data} />
+  return <ReceivedEmailDetailView key={query.data.id} email={query.data} focus={id} />
 }
-function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
+function ReceivedEmailDetailView({ email, focus }: { email: ReceivedEmailDetail; focus: string }) {
   const { multiTenant } = useWorkspaceAccess()
   const [view, setView] = useState('preview')
+  // Its conversation heads the details beside the body; where they stack under it (850 px and narrower), a sheet opens it from the header.
+  const thread = threaded(email.thread) ? email.thread : null
+  const items = threadItems(thread, focus)
+  const [sheet, setSheet] = useState(false)
+  const opener = useRef<HTMLElement | null>(null)
+  const open = { warm: useThreadPrefetch(items), onNavigate: () => setSheet(false) }
+  const stacked = useMediaQuery('(max-width: 850px)')
   // Inline images reference attachments by Content-ID. The preview swaps in the signed S3 link only for an
   // exact img[src="cid:…"] after sanitizing, never by text replacement in sender-controlled HTML (L15).
   const html = email.html ?? ''
@@ -132,7 +142,8 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
   const recipients = email.envelopeTo?.length ? email.envelopeTo : email.to.map(to => to.address)
   const inboxFor = (address: string) => email.addresses?.find(mailbox => mailbox.address.toLowerCase() === address.toLowerCase())
   const routed = Boolean(email.addresses?.length) && recipients.every(address => inboxFor(address))
-  return <div className="email-detail-page"><PageHeader title={email.subject || '(no subject)'} backTo="/logs" actions={email.rawUrl ? <a className="ui-button ui-button--secondary ui-button--md" href={email.rawUrl}><Download size={16} />Download .eml</a> : undefined} />
+  const chip = thread && stacked && <ThreadChip count={thread.count} onOpen={from => { opener.current = from; setSheet(true) }} />
+  return <div className="email-detail-page"><PageHeader title={email.subject || '(no subject)'} backTo="/logs" actions={email.rawUrl || chip ? <>{chip}{email.rawUrl && <a className="ui-button ui-button--secondary ui-button--md" href={email.rawUrl}><Download size={16} />Download .eml</a>}</> : undefined} />
     <dl className="email-metadata"><div><dt>From</dt><dd><Sender name={email.from.name} address={email.from.address} /></dd></div><div><dt>To</dt><dd>{recipients.map((address, index) => <Fragment key={`${index}:${address}`}>{index > 0 && ', '}{inboxFor(address) ? <Link to={`/receiving/inbox?address=${encodeURIComponent(inboxFor(address)!.id)}&thread=${encodeURIComponent(email.threadId)}&message=${encodeURIComponent(email.id)}`}><PrivateAddress value={address} /></Link> : <PrivateAddress value={address} />}</Fragment>)}</dd></div>{email.addresses && !routed && <div><dt>Address</dt><dd>{email.addresses.length ? email.addresses.map((mailbox, index) => <Fragment key={mailbox.id}>{index > 0 && ', '}<Link to={`/receiving/inbox?address=${encodeURIComponent(mailbox.id)}&thread=${encodeURIComponent(email.threadId)}&message=${encodeURIComponent(email.id)}`}><PrivateAddress value={mailbox.address} /></Link></Fragment>) : 'Unrouted'}</dd></div>}</dl>
     {email.spam && <Alert tone="warning">SES flagged this message as spam or a virus.</Alert>}
     {email.bodyTruncated && <Alert tone="info">Part of this message was too large to store. Download the original for the full content.</Alert>}
@@ -142,6 +153,7 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
         : view === 'html' ? <pre className="message-source">{email.html || 'No HTML body.'}</pre>
         : <pre className="message-source">{(email.headers ?? []).map(header => `${header.name}: ${header.value}`).join('\n') || 'No headers stored.'}</pre>}
     </section><section className="delivery-timeline received-details">
+      {thread && !stacked && <ThreadTimeline thread={thread} items={items} open={open} />}
       <SectionHeader title="Details" />
       <dl className="received-facts">
         <div><dt>Received</dt><dd>{date(email.receivedAt)} · {time(email.receivedAt)} UTC</dd></div>
@@ -156,5 +168,8 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
       </li>)}</ul></div>}
     </section></div>
     <div className="message-identifiers"><span className="cluster">Message ID <span className="identifier">{email.id}</span><CopyButton value={email.id} label="Copy message ID" /></span>{email.messageId && <span className="cluster">Message-ID <span className="identifier" title={email.messageId}>{email.messageId}</span><CopyButton value={email.messageId} label="Copy Message-ID header" /></span>}{!multiTenant && <span>SES · {email.region ?? '—'}</span>}</div>
+    {thread && stacked && <Sheet open={sheet} onOpenChange={setSheet} title={`Thread · ${thread.count}`} className="email-detail-sheet" returnFocus={opener}>
+      <ThreadTimeline thread={thread} items={items} open={open} titled={false} />
+    </Sheet>}
   </div>
 }

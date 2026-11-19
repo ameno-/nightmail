@@ -1,4 +1,4 @@
-import { ChevronRight, Paperclip } from 'lucide-react'
+import { ChevronRight, Paperclip, Reply } from 'lucide-react'
 import { StatusBadge, type Column, type SkeletonColumn } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import type { LogEntry } from '../../data/types'
@@ -31,6 +31,10 @@ export function useLogRowIntent() {
   return (row: Pick<LogEntry, 'id'>) => { void routeChunks['/logs']?.().catch(() => {}); void warm([isReceivedId(row.id) ? queries.receivedEmail(row.id, canAdminister) : queries.email(row.id)]) }
 }
 
+// A threaded row's message count, after its subject (the detail page lists them).
+function ThreadCount({ count }: { count: number }) {
+  return <span className="log-thread" title={`${count} messages in this thread`}><Reply size={12} aria-hidden="true" />{count}<span className="sr-only"> messages in this thread</span></span>
+}
 // Who received mail was for (lib/private-address.ts), masked like every address.
 function ReceivedTo({ row }: { row: LogEntry }) {
   const to = receivedTo(row)
@@ -47,7 +51,7 @@ export const logColumns: Column<LogEntry>[] = [
   { ...logColumnDefs[2]!, render: row => row.direction === 'sent' ? <StatusBadge status={row.status} /> : row.status === 'spam' ? <StatusBadge status="Spam" tone="danger" /> : <StatusBadge status="Received" tone="success" /> },
   { ...logColumnDefs[3]!, render: row => <PrivateAddress value={row.from.address} />, cardRender: row => row.direction === 'sent' ? <>To <SentTo to={row.to} /></> : <>From <PrivateAddress value={row.from.address} /></> },
   { ...logColumnDefs[4]!, render: row => row.direction === 'sent' ? <SentTo to={row.to} /> : <ReceivedTo row={row} /> },
-  { ...logColumnDefs[5]!, render: row => <span className="log-subject" title={row.subject}>{(row.attachmentCount ?? 0) > 0 && <Paperclip size={12} aria-label={`${row.attachmentCount} attachment${row.attachmentCount === 1 ? '' : 's'}`} />}<span className={row.subject ? undefined : 'muted'}>{row.subject || '(no subject)'}</span></span> },
+  { ...logColumnDefs[5]!, render: row => <span className="log-subject" title={row.subject}>{(row.attachmentCount ?? 0) > 0 && <Paperclip size={12} aria-label={`${row.attachmentCount} attachment${row.attachmentCount === 1 ? '' : 's'}`} />}<span className={row.subject ? undefined : 'muted'}>{row.subject || '(no subject)'}</span>{(row.threadCount ?? 0) > 1 && <ThreadCount count={row.threadCount!} />}</span> },
   { ...logColumnDefs[6]!, render: row => <span className="muted">{row.stream ? label(row.stream) : '—'}</span> },
   { ...logColumnDefs[7]!, render: () => <ChevronRight size={14} aria-hidden /> },
 ]

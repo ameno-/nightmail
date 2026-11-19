@@ -208,8 +208,8 @@ export function createLiveApi(): Api {
     emails: {
       list: (input, signal) => page('/emails', input, mapEmail, { region: input.regionId, campaignId: input.campaignId, kind: input.stream, status: input.status, search: input.search, to: input.to, from: input.from }, signal),
       get: async (id, signal) => {
-        const { email, content, events, contact } = await call(`/emails/${idPath(id)}/detail`, 'GET', undefined, signal)
-        return { ...mapEmail(email), html: content.html ?? '', text: content.text, attachments: content.attachments, events: events.data.map(mapEmailEvent), eventsNextCursor: events.nextCursor, contact }
+        const { email, content, events, contact, thread } = await call(`/emails/${idPath(id)}/detail`, 'GET', undefined, signal)
+        return { ...mapEmail(email), html: content.html ?? '', text: content.text, attachments: content.attachments, events: events.data.map(mapEmailEvent), eventsNextCursor: events.nextCursor, contact, thread: thread ?? null }
       },
       cancel: async (id, signal) => mapEmail(await call(`/emails/${idPath(id)}/cancel`, 'POST', undefined, signal)),
       reschedule: async (id, scheduledAt, signal) => mapEmail(await call(`/emails/${idPath(id)}/reschedule`, 'POST', { scheduledAt }, signal)),
@@ -312,7 +312,7 @@ export function createLiveApi(): Api {
       enableDomain: (id, input, signal) => inboundCall<MailboxDomain>(`/domains/${idPath(id)}/enable`, 'POST', { force: input.force ?? false }, signal),
       disableDomain: (id, signal) => inboundCall<MailboxDomain>(`/domains/${idPath(id)}/disable`, 'POST', undefined, signal),
       checkDomain: (id, signal) => inboundCall<MailboxDomain>(`/domains/${idPath(id)}/check`, 'POST', undefined, signal),
-      receivedEmail: (id, signal, delivery = true) => inboundCall<ReceivedEmailDetail>(`/messages/${idPath(id)}?includeDelivery=${delivery}&includeHtml=true`, 'GET', undefined, signal),
+      receivedEmail: (id, signal, delivery = true) => inboundCall<ReceivedEmailDetail>(`/messages/${idPath(id)}?includeDelivery=${delivery}&includeHtml=true&includeThread=true`, 'GET', undefined, signal),
     },
     inboxes: {
       folders:async(id,signal)=>{
