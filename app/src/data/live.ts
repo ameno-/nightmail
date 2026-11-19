@@ -1,6 +1,6 @@
 import { ApiError, type MailRoute, type RoutingTestResult, type Api, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type AudiencePreview, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxWebhookDelivery, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity, type OverviewSetup } from './types'
 
-import type { Agent, ApiKey, AppPassword, CreatedAppPassword } from './types'
+import type { Agent, ApiKey, AppPassword, CreatedAppPassword, DomainQuota } from './types'
 import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogEntry, SenderScore } from './types'
 import { headerPrefix, productName } from '../../../api/src/brand'
 type Json = Record<string, any>
@@ -135,7 +135,7 @@ export function createLiveApi(): Api {
     for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192))
     return call<any>(path, 'POST', {filename: file.name, contentType: file.type || 'application/octet-stream', content: btoa(binary), ...(inline ? {disposition: 'inline', contentId: inline.contentId} : {})})
   }
-  async function page<T>(path: string, input: PageRequest = {}, map: (r: Json) => T, filters: Json = {}, signal?: AbortSignal): Promise<PageResult<T>> {
+  async function page<T, X extends object = object>(path: string, input: PageRequest = {}, map: (r: Json) => T, filters: Json = {}, signal?: AbortSignal, extra?: (data: Json) => X): Promise<PageResult<T> & X> {
     const limit = Math.min(path === '/domains' ? 10 : 100, input.pageSize ?? 20)
     const key = JSON.stringify([path, limit, filters])
     const history = cursors.get(key) ?? new Map([[1, undefined]])
@@ -149,7 +149,7 @@ export function createLiveApi(): Api {
     const data = await call(`${path}?${params}`, 'GET', undefined, signal)
     if (data.nextCursor) history.set(current + 1, data.nextCursor)
     else history.delete(current + 1)
-    return { items: data.data.map(map), page: current, pageSize: limit, nextCursor: data.nextCursor, total: undefined }
+    return { items: data.data.map(map), page: current, pageSize: limit, nextCursor: data.nextCursor, total: undefined, ...extra?.(data) as X }
   }
   const getCampaign = async (id: string, signal?: AbortSignal) => mapCampaign(await call(`/campaigns/${idPath(id)}`, 'GET', undefined, signal))
   const getContact = async (id: string, signal?: AbortSignal) => mapContact(await call(`/contacts/${idPath(id)}`, 'GET', undefined, signal))
@@ -298,7 +298,7 @@ export function createLiveApi(): Api {
       remove: async (id, signal) => { await call(`/templates/${idPath(id)}`, 'DELETE', undefined, signal) },
       preview: (id, published = false, signal) => call(`/templates/${idPath(id)}/preview?published=${published}`, 'GET', undefined, signal),
     },
-    domains: { list: (input, signal) => page('/domains', input, mapDomain, {region: input.regionId, refresh: input.refresh === false ? 'false' : undefined}, signal), get: async (id, signal) => mapDomain(await call(`/domains/${idPath(id)}`, 'GET', undefined, signal)), create: async (input, signal) => mapDomain(await call('/domains', 'POST', {name: input.name, region: input.regionId || undefined}, signal)), configureMailFrom: async (id, mailFromDomain, signal) => mapDomain(await call(`/domains/${idPath(id)}/mail-from`, 'POST', {mailFromDomain}, signal)), verify: async (id, signal) => mapDomain(await call(`/domains/${idPath(id)}/verify`, 'POST', undefined, signal)), chooseReceivingHost: async (id, input, signal) => mapDomain(await call(`/domains/${idPath(id)}/receiving-host`, 'POST', {host: input.host, confirm: input.confirm ?? false}, signal)), remove: async (id, signal) => { await call(`/domains/${idPath(id)}`, 'DELETE', undefined, signal) } },
+    domains: { list: (input, signal) => page('/domains', input, mapDomain, {region: input.regionId, refresh: input.refresh === false ? 'false' : undefined}, signal, data => ({ quota: data.quota as DomainQuota | undefined })), get: async (id, signal) => mapDomain(await call(`/domains/${idPath(id)}`, 'GET', undefined, signal)), create: async (input, signal) => mapDomain(await call('/domains', 'POST', {name: input.name, region: input.regionId || undefined}, signal)), configureMailFrom: async (id, mailFromDomain, signal) => mapDomain(await call(`/domains/${idPath(id)}/mail-from`, 'POST', {mailFromDomain}, signal)), verify: async (id, signal) => mapDomain(await call(`/domains/${idPath(id)}/verify`, 'POST', undefined, signal)), chooseReceivingHost: async (id, input, signal) => mapDomain(await call(`/domains/${idPath(id)}/receiving-host`, 'POST', {host: input.host, confirm: input.confirm ?? false}, signal)), remove: async (id, signal) => { await call(`/domains/${idPath(id)}`, 'DELETE', undefined, signal) } },
     mailboxes: {
       domains: async signal => (await inboundCall<{ data: MailboxDomain[] }>('/domains', 'GET', undefined, signal)).data,
       domain: (id, signal) => inboundCall<MailboxDomain>(`/domains/${idPath(id)}`, 'GET', undefined, signal),

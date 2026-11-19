@@ -1518,6 +1518,19 @@ export type SesAccount = {
 export type DomainPage = {
     data: Array<DomainReadiness>;
     nextCursor: string | null;
+    /**
+     * Hosted only, and only for credentials without domain restrictions. Adding a domain past the limit fails with DOMAIN_LIMIT_REACHED; at most 10 of them may be unproven at once.
+     */
+    quota?: {
+        /**
+         * Domains in the workspace, across every region and page.
+         */
+        used: number;
+        /**
+         * How many domains the workspace may have: 100 unless Nightmail set another limit on request.
+         */
+        limit: number;
+    };
 };
 
 export type DomainReadiness = {

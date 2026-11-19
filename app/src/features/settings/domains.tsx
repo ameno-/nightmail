@@ -80,6 +80,7 @@ function DomainsList() {
   const domains = useApiDef(queries.domains(regionId, page), { keepPrevious: previous => previous[1] === regionId })
   const inbound = useApiDef(queries.inboundDomains())
   const receivingOf = (id: string) => inbound.data?.find(d => d.id === id)
+  const quota = domains.data?.quota
   const create = useApiMutation((api, input: { regionId: string; name: string }) => api.domains.create(input), 'Domain added', true)
   const [open, setOpen] = useState(false)
   const [name, setName] = useState('')
@@ -112,6 +113,7 @@ function DomainsList() {
     </>}
     <Dialog open={open} onOpenChange={next => { if (!create.isPending) setOpen(next) }} title="Add domain" footer={<><Button disabled={create.isPending} onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="add-domain">Add domain</Button></>}>
       <form id="add-domain" className="stack" onSubmit={submit} noValidate>
+        {quota && quota.used >= quota.limit && !create.error && <Alert tone="warning">{`This workspace has ${quota.used.toLocaleString('en-US')} of its ${quota.limit.toLocaleString('en-US')} domains. Remove one, or ask support for a higher limit.`}</Alert>}
         <MutationError error={create.error} />
         <Field label="Domain name" htmlFor="domain-name" error={invalid || fieldError(create.error, 'name')}><Input id="domain-name" autoFocus required value={name} onChange={event => setName(event.target.value)} disabled={create.isPending} placeholder="updates.acme.com" /></Field>
         {!multiTenant && <Field label="Sending region" htmlFor="domain-region"><Input id="domain-region" value={regionId} readOnly /></Field>}
