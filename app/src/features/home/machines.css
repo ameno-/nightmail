@@ -162,6 +162,14 @@
 .mx-consent { margin-top: 18px; color: var(--mx-text-2); font-size: 13px; line-height: 18px; text-wrap: balance; }
 .mx-consent a { color: var(--mx-text); }
 
+/* A tablet's page, or a narrow window's: the machines are narrower, so each screen is as tall as what is on it (the
+   log's tape as tall as six lines of it). */
+@container mx (width < 1200px) {
+  .mx-screen { height: auto; min-height: calc(var(--mx-font) * 18); }
+  .mx-mail { height: auto; }
+  .mx-machine[data-kind='route'] .mx-screen { height: calc(var(--mx-font) * 27); }
+}
+
 /* ── A phone's page: the machine across it, its words under its floor, nothing on a screen under 13 px. ── */
 @container mx (width < 760px) {
   .mx-storey { --mx-in: 64px; --mx-rise: 40px; --mx-font: 13px; --mx-small: 13px; }
@@ -170,7 +178,7 @@
   .mx-copy, .mx-storey[data-side='r'] .mx-copy { grid-area: 3 / 2; padding: 24px 4px 0; }
   .mx-copy h2 { font-size: 30px; }
   .mx-copy p { margin-top: 10px; font-size: 16px; }
-  .mx-screen { height: auto; padding: 12px 12px; }
+  .mx-screen { min-height: 0; padding: 12px 12px; }
   .mx-base { height: 88px; margin-inline: -6px; }
   .mx-stencil { font-size: 13px; }
   .mx-out, .mx-collar-3, .mx-collar-4, .mx-collar-2 { display: none; }
