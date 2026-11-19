@@ -1607,6 +1607,25 @@ test('mail gateway: SMTP queues dispatchable content with a single database conn
   assert.equal((await submit('Subject: revoked\r\n\r\nNo send\r\n')).status,403);
   assert.equal((await db.query('SELECT count(*)::int n FROM sending_emails WHERE actor_key_id=$1',[kid])).rows[0].n,4);
 });
+// Migration 346: the gateway closes a send-only key's sessions and drops its cached sign-ins when this names the key.
+test('send-only SMTP: revoking a key, or changing what it may send, tells the gateway; using or renaming it does not', async t => {
+  const listener = await fixtureDatabase(t), db = await fixtureDatabase(t), heard: string[] = [];
+  const keyId = unique('key'), addressKey = unique('mbk'), mine = new Set([keyId, addressKey]);
+  listener.on('notification', n => { if (n.channel === 'bane_protocol_auth' && mine.has(n.payload!)) heard.push(n.payload!); });
+  await listener.query('LISTEN bane_protocol_auth');
+  cleanup(t, async () => { await db.query('DELETE FROM api_keys WHERE id=$1', [keyId]); await db.query('DELETE FROM mailbox_keys WHERE id=$1', [addressKey]); });
+  await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,'default','fixture',$2,'nm_fixture','["send"]','["relay.example"]')`, [keyId, randomUUID()]);
+  await db.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) VALUES($1,'default','fixture',$2,'nm_mbx_fixture','[]','["send"]')`, [addressKey, randomUUID()]);
+  await db.query("UPDATE api_keys SET name='renamed',last_used_at=now() WHERE id=$1", [keyId]);
+  await db.query("UPDATE mailbox_keys SET name='renamed',last_used_at=now() WHERE id=$1", [addressKey]);
+  await db.query(`UPDATE api_keys SET domains='["other.example"]' WHERE id=$1`, [keyId]);
+  await db.query('UPDATE api_keys SET revoked_at=now() WHERE id=$1', [keyId]);
+  await db.query(`UPDATE mailbox_keys SET mailbox_ids='["mbx_fixture"]' WHERE id=$1`, [addressKey]);
+  await db.query('DELETE FROM mailbox_keys WHERE id=$1', [addressKey]);
+  for (const until = Date.now() + 5000; heard.length < 4 && Date.now() < until;) await new Promise(resolve => setTimeout(resolve, 20));
+  // Notifications arrive in commit order, so a notice from the rename or the use would come first.
+  assert.deepEqual(heard, [keyId, keyId, addressKey, addressKey]);
+});
 test('mail gateway: the IMAP/SMTP score cap is the cap admission uses for the stored standing',async t=>{
   const {drizzle}=await import('drizzle-orm/node-postgres'),{protocolScoreCap}=await import('./src/sender-score.js');
   const db=await fixtureDatabase(t),wid=unique('protocol-cap');
@@ -19432,6 +19451,143 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual((await db.query('SELECT status,error_code,attempt_started_at FROM sending_emails WHERE id=$1',[guarded.id])).rows,[{status:'queued',error_code:'CONTENT_SCREEN_UNAVAILABLE',attempt_started_at:null}]);
       assert.deepEqual((await db.query("SELECT hosted_burst_ok($1,'bench.invalid',50) ok",[wid])).rows,[{ok:true}]);
       assert.deepEqual((await db.query("SELECT hosted_burst_ok($1,'other.invalid',1) ok",[wid])).rows,[{ok:false}]);
+    });
+  });
+
+  // Send-only SMTP (src/protocol-relay.ts): the gateway's signed RPC, as the gateway calls it.
+  test('send-only SMTP: a key that can only send signs in to SMTP and sends exactly as sendEmail does, never reads mail, and stops at once when revoked', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request, fetch, run }) => {
+      const wid = runtime.config.workspaceId, gatewayToken = randomUUID() + randomUUID(), objects = new Map<string, Uint8Array>();
+      runtime.config.mailGatewayToken = gatewayToken;
+      runtime.storage = { async put(key, body) { objects.set(key, body); }, async get(key) { const body = objects.get(key); return body ? { body, contentType: 'application/octet-stream' } : null; }, async delete(key) { objects.delete(key); } };
+      const hash = (s: string) => createHash('sha256').update(s).digest('hex');
+      const gateway = async (body: Json) => {
+        const raw = JSON.stringify(body), ts = String(Math.floor(Date.now() / 1000)), digest = hash(raw), scope = hash(String(body.kid ?? body.user).toLowerCase());
+        const res = await fetch(new Request(`${PUBLIC_ORIGIN}/internal/v1/mail`, { method: 'POST', body: raw, headers: { 'content-type': 'application/json', 'x-bane-content': digest, 'x-bane-timestamp': ts, 'x-bane-scope': scope,
+          'x-bane-signature': createHmac('sha256', gatewayToken).update(['POST', '/internal/v1/mail', ts, digest, scope].join('\n')).digest('hex') } }));
+        return { status: res.status, body: await res.json() as Json };
+      };
+      const login = (password: string, protocol = 'smtp', user = 'apikey') => gateway({ op: 'login', user, password, protocol });
+      const mime = (lines: string[], body = 'Synthetic relay message.') => Buffer.from([...lines, '', body, ''].join('\r\n')).toString('base64');
+      const submit = (kid: string, from: string, to: string[], lines: string[], body?: string) => gateway({ op: 'submit', kid, from, to, content: mime(lines, body) });
+      const refusal = async (reply: Promise<{ status: number; body: Json }>) => { const r = await reply; return [r.status, r.body.error?.code]; };
+      const key = async (body: Json) => { const k = ok(await local('POST', '/v1/api-keys', { name: unique('smtp'), ...body }), 201); secrets.add(k.secret); return k; };
+      const smtp = await key({ permissions: ['send'], domains: ['relay.example'] });
+      // A receiving address, for a key limited to it.
+      const domain = unique('mdom');
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,'relay.example',$3,'active')", [domain, wid, REGION]);
+      await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture','fixture-topic')", [wid, REGION]);
+      const box = ok(await local('POST', '/v1/inbound/addresses', { address: 'alerts@relay.example', aliases: ['ops@relay.example'] }), 201);
+      const addressKey = await key({ access: { type: 'addresses', addressIds: [box.id], mail: ['send'] } });
+
+      // Sign-in: only SMTP, only as apikey, and only a key that can send and nothing else, limited to domains or addresses.
+      const signedIn = await login(smtp.secret);
+      assert.equal(signedIn.status, 200, JSON.stringify(signedIn.body));
+      assert.deepEqual(signedIn.body, { kid: smtp.id, inbox: smtp.id, workspace: wid, account: 'unsponsored', addresses: [], domains: ['relay.example'], anySender: false, folders: [] });
+      assert.deepEqual((await login(addressKey.secret)).body.addresses, ['alerts@relay.example', 'ops@relay.example']);
+      const refused = [await login(smtp.secret, 'imap'), await login(smtp.secret, 'smtp', 'alerts@relay.example'), await login(addressKey.secret, 'imap')];
+      for (const permissions of [['read', 'send'], ['send', 'manage']]) refused.push(await login((await key({ permissions, domains: ['relay.example'] })).secret));
+      refused.push(await login((await key({ permissions: ['send'] })).secret)); // Not limited to any domain.
+      refused.push(await login((await key({ access: { type: 'addresses', addressIds: [box.id], mail: ['read', 'send'] } })).secret));
+      refused.push(await login(`nm_${'0'.repeat(64)}`));
+      assert.deepEqual(refused.map(r => [r.status, r.body.error.code]), Array(refused.length).fill([403, 'PROTOCOL_DENIED']));
+      // It has no mailbox: every IMAP operation refuses its ID.
+      for (const op of [{ op: 'snapshot', kid: smtp.id, path: 'INBOX' }, { op: 'edit', kid: smtp.id, action: 'create', folder: 'x', path: 'x', sub: null }])
+        assert.equal((await gateway(op)).status, 403, op.op);
+
+      // A submission is POST /v1/emails/send with the same key: the same row, status, events and dispatch.
+      const headers = ['From: Relay App <app@relay.example>', 'To: Reader <reader@example.net>', 'Cc: copy@example.net', 'Subject: Relay fixture', 'X-Entity-Ref-ID: order-42', 'Precedence: first-class', 'Received: from somewhere'];
+      const relayed = await submit(smtp.id, 'bounces@relay.example', ['reader@example.net', 'copy@example.net', 'hidden@example.net'], headers);
+      assert.equal(relayed.status, 200, JSON.stringify(relayed.body));
+      const direct = ok(await request('POST', '/v1/emails/send', smtp.secret, { from: 'app@relay.example', fromName: 'Relay App', to: ['reader@example.net'], cc: ['copy@example.net'], bcc: ['hidden@example.net'],
+        subject: 'Relay fixture', text: 'Synthetic relay message.\r\n', headers: [{ name: 'Precedence', value: 'first-class' }, { name: 'X-Entity-Ref-ID', value: 'order-42' }] }), 202);
+      const row = async (id: string) => (await db.query(`SELECT actor_key_id,status,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,simulated,error_code,suppression_reason,
+        snapshot-'text' AS snapshot,snapshot->>'text' AS text FROM sending_emails WHERE workspace_id=$1 AND id=$2`, [wid, id])).rows[0];
+      const sent = await row(relayed.body.id);
+      assert.deepEqual({ ...sent, text: sent.text.trimEnd() }, { ...await row(direct.id), text: 'Synthetic relay message.' });
+      assert.equal(sent.actor_key_id, smtp.id); assert.deepEqual(sent.bcc_addresses, ['hidden@example.net']);
+      assert.deepEqual(sent.snapshot.headers, [{ Name: 'Precedence', Value: 'first-class' }, { Name: 'X-Entity-Ref-ID', Value: 'order-42' }], 'Allowed headers pass through, list and threading headers first; Received is Nightmail’s own.');
+      // Suppression and events: a suppressed recipient is accepted and suppressed at dispatch, as sendEmail's is.
+      await db.query("INSERT INTO audience_contacts(id,workspace_id,email,suppressed) VALUES($1,$2,'blocked@example.net',true)", [unique('contact'), wid]);
+      const blocked = await submit(smtp.id, 'app@relay.example', ['blocked@example.net'], ['From: app@relay.example', 'To: blocked@example.net', 'Subject: Blocked']);
+      assert.equal(blocked.status, 200, JSON.stringify(blocked.body));
+      const blockedDirect = ok(await request('POST', '/v1/emails/send', smtp.secret, { from: 'app@relay.example', to: 'blocked@example.net', subject: 'Blocked', text: 'Synthetic relay message.' }), 202);
+      const fromAddress = await submit(addressKey.id, 'ops@relay.example', ['reader@example.net'], ['From: Alerts <ops@relay.example>', 'To: reader@example.net', 'Subject: Address key']);
+      assert.equal(fromAddress.status, 200, JSON.stringify(fromAddress.body));
+      await run('email.dispatch');
+      const outcome = async (id: string) => { const r = await row(id); return { status: r.status, suppression: r.suppression_reason, events: page(await local('GET', `/v1/emails/${id}/events`)).map(e => e.type) }; };
+      assert.deepEqual(await outcome(relayed.body.id), await outcome(direct.id));
+      assert.equal((await outcome(relayed.body.id)).status, 'accepted');
+      assert.deepEqual(await outcome(blocked.body.id), await outcome(blockedDirect.id));
+      assert.equal((await outcome(blocked.body.id)).status, 'suppressed');
+      assert.deepEqual([(await row(fromAddress.body.id)).actor_key_id, (await outcome(fromAddress.body.id)).status], [addressKey.id, 'accepted']);
+      // An attachment is uploaded by the key, then sent with the mail.
+      const withAttachment = (kid: string, from: string, body = ['Content-Type: text/plain', '', 'See attached.']) => submit(kid, from, ['reader@example.net'], [`From: ${from}`, 'To: reader@example.net', 'Subject: Invoice', 'MIME-Version: 1.0', 'Content-Type: multipart/mixed; boundary=b'],
+        ['--b', ...body, '--b', 'Content-Type: application/pdf; name="invoice.pdf"', 'Content-Disposition: attachment; filename="invoice.pdf"', 'Content-Transfer-Encoding: base64', '', Buffer.from('%PDF-fixture').toString('base64'), '--b--'].join('\r\n'));
+      // A refused submission stores nothing: no object and no attachment row.
+      const stored = async () => [objects.size, Number((await db.query('SELECT count(*) FROM sending_attachments WHERE workspace_id=$1', [wid])).rows[0].count)];
+      const writesNothing = async (reply: Promise<{ status: number; body: Json }>, expected: [number, string]) => {
+        const before = await stored();
+        assert.deepEqual(await refusal(reply), expected);
+        assert.deepEqual(await stored(), before, `${expected[1]} stored an attachment`);
+      };
+      const withFile = await withAttachment(smtp.id, 'app@relay.example');
+      assert.equal(withFile.status, 200, JSON.stringify(withFile.body));
+      assert.deepEqual((await db.query(`SELECT a.filename,a.uploaded_by FROM sending_emails e JOIN sending_attachments a ON a.workspace_id=e.workspace_id AND a.id=e.snapshot->'attachments'->>0 WHERE e.id=$1`, [withFile.body.id])).rows,
+        [{ filename: 'invoice.pdf', uploaded_by: smtp.id }]);
+      // A message sendEmail would refuse is refused before its attachments are uploaded.
+      await writesNothing(withAttachment(smtp.id, 'app@relay.example', ['Content-Type: text/html', '', '<a href="javascript:alert(1)">Pay</a>']), [422, 'UNSAFE_HTML_URL']);
+      // A To-less message (every recipient Bcc, as SMTP allows) goes out with no To or Cc.
+      const blind = await submit(smtp.id, 'app@relay.example', ['hidden@example.net'], ['From: app@relay.example', 'Subject: Blind copy']);
+      assert.equal(blind.status, 200, JSON.stringify(blind.body));
+      const blindRow = await row(blind.body.id);
+      assert.deepEqual([blindRow.to_addresses, blindRow.cc_addresses, blindRow.bcc_addresses, blindRow.snapshot.to], [[], [], ['hidden@example.net'], []]);
+      await run('email.dispatch');
+      assert.equal((await row(blind.body.id)).status, 'accepted');
+
+      // The sender: the envelope, From and Sender all within the key's domains (or its addresses), checked before anything is sent.
+      const before = Number((await db.query('SELECT count(*) FROM sending_emails WHERE workspace_id=$1', [wid])).rows[0].count);
+      for (const [kid, envelope, lines] of [
+        [smtp.id, 'app@other.example', ['From: app@relay.example', 'To: reader@example.net', 'Subject: x']],
+        [smtp.id, 'app@relay.example', ['From: app@other.example', 'To: reader@example.net', 'Subject: x']],
+        [smtp.id, 'app@relay.example', ['From: app@relay.example.other.example', 'To: reader@example.net', 'Subject: x']],
+        [smtp.id, 'app@relay.example', ['From: app@relay.example', 'Sender: app@other.example', 'To: reader@example.net', 'Subject: x']],
+        [smtp.id, 'app@relay.example', ['From: app@relay.example', 'From: app@relay.example', 'To: reader@example.net', 'Subject: x']],
+        [addressKey.id, 'alerts@relay.example', ['From: someone@relay.example', 'To: reader@example.net', 'Subject: x']],
+        [addressKey.id, 'someone@relay.example', ['From: alerts@relay.example', 'To: reader@example.net', 'Subject: x']],
+      ] as [string, string, string[]][]) assert.deepEqual(await refusal(submit(kid, envelope, ['reader@example.net'], lines)), [403, 'SENDER_NOT_OWNED'], lines.join(' | '));
+      assert.equal(Number((await db.query('SELECT count(*) FROM sending_emails WHERE workspace_id=$1', [wid])).rows[0].count), before);
+      // A key changed to more than sending stops relaying, as does a key whose domains no longer cover the sender.
+      ok(await local('PATCH', `/v1/api-keys/${smtp.id}`, { domains: ['other.example'] }));
+      assert.deepEqual(await refusal(submit(smtp.id, 'app@relay.example', ['reader@example.net'], ['From: app@relay.example', 'To: reader@example.net', 'Subject: x'])), [403, 'SENDER_NOT_OWNED']);
+      ok(await local('PATCH', `/v1/api-keys/${smtp.id}`, { domains: ['relay.example'] }));
+
+      // Limits: a submission is one request against the key's minute budget, which API requests with the key share.
+      const minute = async () => (await db.query("SELECT date_trunc('minute',now())::text AS m")).rows[0].m;
+      for (;;) {
+        const at = await minute();
+        await db.query('UPDATE api_request_budgets SET used=$3,window_start=date_trunc(\'minute\',now()) WHERE workspace_id=$1 AND key_id=$2', [wid, smtp.id, runtime.config.apiRateLimitPerMinute]);
+        const before = await stored(), limited = await withAttachment(smtp.id, 'app@relay.example');
+        if (await minute() !== at) continue; // The window turned over while it ran.
+        // A spent key is refused before anything is decided or stored, and its API requests stay over budget.
+        assert.deepEqual([limited.status, limited.body.error.code], [429, 'REQUEST_RATE_LIMITED']);
+        assert.deepEqual(await stored(), before, 'A spent key stored an attachment.');
+        error(await request('POST', '/v1/emails/send', smtp.secret, { from: 'app@relay.example', to: 'reader@example.net', subject: 'Over', text: 'x' }), 429, 'REQUEST_RATE_LIMITED');
+        break;
+      }
+      await db.query('DELETE FROM api_request_budgets WHERE workspace_id=$1 AND key_id=$2', [wid, smtp.id]);
+
+      // Revoked: the next sign-in and submission are refused at once, and what the key queued is not sent.
+      const queued = await submit(smtp.id, 'app@relay.example', ['reader@example.net'], ['From: app@relay.example', 'To: reader@example.net', 'Subject: Queued before revoking']);
+      assert.equal(queued.status, 200);
+      ok(await local('POST', `/v1/api-keys/${smtp.id}/revoke`));
+      ok(await local('POST', `/v1/api-keys/${addressKey.id}/revoke`));
+      assert.equal((await login(smtp.secret)).status, 403);
+      assert.equal((await login(addressKey.secret)).status, 403);
+      for (const [kid, from] of [[smtp.id, 'app@relay.example'], [addressKey.id, 'alerts@relay.example']])
+        await writesNothing(withAttachment(kid, from), [403, 'CREDENTIAL_REVOKED']);
+      await run('email.dispatch');
+      assert.deepEqual((await db.query('SELECT status,error_code FROM sending_emails WHERE id=$1', [queued.body.id])).rows, [{ status: 'canceled', error_code: 'ORIGIN_KEY_REVOKED' }]);
     });
   });
 

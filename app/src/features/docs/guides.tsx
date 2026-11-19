@@ -8,6 +8,7 @@ import { builtins, ctxFields, emailFields, endpointPayloads, RITUALS_PER_ADDRESS
 import { webhookSignatureGuide } from '../../../../api/src/webhook-signature-guide'
 import { McpSetup } from './agent-setup'
 import { credentials } from './credentials'
+import { imapPorts, smtpPorts, useMailServers } from './mail-settings'
 import { usePublicOrigin } from '../../data/context'
 import { apiKeyEnv, productName, publicOrigin } from '../../../../api/src/brand'
 
@@ -33,6 +34,21 @@ function fieldRows(prefix: string, fields: Record<string, Field>): ReactNode[][]
     [<code key="n">{`${prefix}.${name}`}</code>, field.doc],
     ...(field.type === 'object' && field.fields ? Object.entries(field.fields).map(([child, f]) => [<code key="n">{`${prefix}.${name}.${child}`}</code>, f.doc]) : []),
   ])
+}
+
+// What a mail app or an app's SMTP settings take. Only where the installation has an IMAP/SMTP gateway.
+function MailServers() {
+  const servers = useMailServers()
+  if (!servers) return null
+  return <Section title="IMAP and SMTP settings">
+    <Table head={['Setting', 'App password', 'SMTP login']} rows={[
+      ['Server', <><code>{servers.imap}</code> (IMAP), <code>{servers.smtp}</code> (SMTP)</>, <code key="s">{servers.smtp}</code>],
+      ['Port', `IMAP ${imapPorts}, SMTP ${smtpPorts}`, smtpPorts],
+      ['Username', 'The inbox address', <code key="u">apikey</code>],
+      ['Password', 'The app password', 'The SMTP login'],
+    ]} />
+    <p>An SMTP login sends like an API key: the same limits, suppressions and events. It can’t read mail. <Link to="/api-keys?create=smtp">Create an SMTP login</Link></p>
+  </Section>
 }
 
 const ruleExample = `export default function route(email, ctx) {
@@ -172,12 +188,13 @@ export const guides: Guide[] = [
     </>,
   },
   {
-    id: 'keys', title: 'Keys and tokens', summary: 'API keys, agent tokens and app passwords.',
+    id: 'keys', title: 'Keys and tokens', summary: 'API keys, SMTP logins, agent tokens and app passwords.',
     body: () => <>
       <Section title="Which one do I need?">
         <Table head={['Credential', 'What it does', 'Where']} rows={credentials.map(c => [<strong key="n">{c.name}</strong>, c.line, c.where])} />
         <p>Keys are shown once when they’re made. Store them on your server, never in a browser. Revoke any of them in <Link to="/api-keys">API keys</Link>.</p>
       </Section>
+      <MailServers />
     </>,
   },
   {

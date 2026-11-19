@@ -6891,6 +6891,13 @@ export type GetCurrentIdentityResponses = {
             receiving: 'ok' | 'grace' | 'held';
             autoRecharge: 'off' | 'on' | 'pending' | 'failed' | 'capped';
         } | null;
+        /**
+         * The hosts mail apps connect to: IMAP on 993 (TLS) or 143 (STARTTLS), SMTP on 465 (TLS) or 587 (STARTTLS). An app password signs in to both; a send-only API key signs in to SMTP as apikey. Null when this installation has no IMAP/SMTP gateway.
+         */
+        mailServers?: {
+            imap: string;
+            smtp: string;
+        } | null;
     };
 };
 

@@ -29,7 +29,9 @@ export function mailGateway(stage: "dev" | "production", { account, cloudflareAc
   // The deploy reads the same committed flag: true binds the Worker's MAILGW_API_TOKEN (and fails
   // without it), false removes it. Tasks only run against a Worker that can authenticate them.
   const enabled = config.getBoolean("mailGatewayEnabled") ?? false;
-  if (green && stage === 'production' && (desired !== 0 || config.getBoolean('nightmailGatewayDns'))) throw new Error('The staged production gateway must have zero tasks and no published DNS');
+  // Production's mail hosts are imap. and smtp.nightmail.dev (api/wrangler.prod.jsonc MAILGW_PUBLIC_DOMAIN), outside the
+  // bane.mx zone this stack would write: their DNS is created by hand (gateway/PHASE2.md, production turn-on).
+  if (green && stage === 'production' && config.getBoolean('nightmailGatewayDns')) throw new Error('Production mail hosts are in the nightmail.dev zone: create imap.nightmail.dev and smtp.nightmail.dev by hand, not with bane:nightmailGatewayDns');
   if (desired > 0 && !enabled) throw new Error("Set bane:mailGatewayEnabled to true before scaling bane:mailGatewayDesired above 0");
   const image = config.get(green ? 'nightmailGatewayImage' : 'mailGatewayImage');
   const repoUrl = `${account}.dkr.ecr.us-east-2.amazonaws.com/${name}`;

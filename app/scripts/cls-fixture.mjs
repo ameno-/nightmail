@@ -144,6 +144,8 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
       ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-in-session-fixture', BANE_ROOT_SECRET: secret,
       WEBHOOK_ALLOWED_HOSTS: 'northwind.example', S3_ACCESS_KEY_ID: 'fixture', S3_SECRET_ACCESS_KEY: 'fixture', S3_BUCKET: 'fixture', S3_ENDPOINT: 'http://127.0.0.1:9',
       SIMULATED_SES_LATENCY_MS: '0', SIMULATED_SES_DELIVERY_DELAY_MS: '0',
+      // A mail gateway, as both stages have: the dashboard then shows IMAP and SMTP settings and offers SMTP logins.
+      MAILGW_API_TOKEN: randomBytes(24).toString('hex'), MAILGW_PUBLIC_DOMAIN: 'northwind.example',
     });
     execFileSync('node', ['--import', 'tsx', 'src/migrate.ts'], { cwd: api, env: envFor(0), stdio: ['ignore', 'ignore', 'inherit'] });
     log('postgres: migrated');

@@ -4,7 +4,8 @@ import { useInfiniteQuery } from '@tanstack/react-query'
 import { ChevronRight } from 'lucide-react'
 import { Button, Checkbox, Dialog, Disclosure, Field, Input, fieldError, MutationError } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { useApi, useApiDef, useApiMutation, useWorkspaceAccess } from '../../data/context'
+import { useApi, useApiDef, useApiMutation } from '../../data/context'
+import { useMailServers } from '../docs/mail-settings'
 import { queries } from '../../data/queries'
 import type { ApiKeyInput, AppPasswordInput, AppPasswordProtocol, Inbox, KeyPermission, MailPermission, PageRequest } from '../../data/types'
 import '../inbound/inbound.css'
@@ -27,31 +28,43 @@ const purposes: { value: Purpose; label: string; does: string }[] = [
   { value: 'inbox', label: 'One agent inbox', does: 'Reads one agent inbox. Stops working when the inbox is deleted.' },
   { value: 'create', label: 'Creates agent inboxes', does: 'Creates agent inboxes and reads only the ones it created.' },
 ]
-type Kind = 'api' | 'agent' | 'app'
+type Kind = 'api' | 'smtp' | 'agent' | 'app'
 // The type's name says who uses it; the page's "Which key to use" compares them.
 const kinds: { value: Kind; label: string }[] = [
   { value: 'api', label: 'API key for your app or script' },
+  { value: 'smtp', label: 'SMTP login for an app' },
   { value: 'agent', label: 'Connect an agent over MCP' },
   { value: 'app', label: 'App password for a mail app' },
 ]
-/** sendExample: a workspace key's first send. agent: an API key, which also connects an agent over MCP. */
-export type CreatedSecret = { secret: string; title: string; description?: string; sendExample?: boolean; agent?: boolean }
+const forms: Partial<Record<Kind, { title: string; id: string; submit: string }>> = {
+  api: { title: 'Create API key', id: 'create-key', submit: 'Create key' },
+  smtp: { title: 'Create SMTP login', id: 'create-smtp-login', submit: 'Create login' },
+  app: { title: 'Create app password', id: 'create-app-password', submit: 'Create password' },
+}
+/** sendExample: a workspace key's first send. agent: an API key, which also connects an agent over MCP. mail: the
+ *  server settings a mail app or an app's SMTP needs, with the username it signs in with. */
+export type CreatedSecret = { secret: string; title: string; description?: string; sendExample?: boolean; agent?: boolean; mail?: { username: ReactNode; imap: boolean; smtp: boolean } }
 
-/** Create key: the type first (API key, agent token, app password), then what it can reach. An agent token is the
- *  Connect an agent flow, so choosing it hands over to that dialog. `initial` opens straight on an API key's form, as
- *  Overview's "Create key" does with the domain it just verified. Render only while open, so form state and the created
+/** Create key: the type first (API key, SMTP login, agent token, app password), then what it can reach. An agent token
+ *  is the Connect an agent flow, so choosing it hands over to that dialog. `initial` opens straight on an API key's form,
+ *  as Overview's "Create key" does with the domain it just verified, or on an SMTP login's. Render only while open, so form state and the created
  *  secret in mutation state go away on close. */
-export function CreateKeyDialog({ open, onOpenChange, onCreated, onConnectAgent, initial }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: (created: CreatedSecret) => void; onConnectAgent: () => void; initial?: { purpose?: Purpose; domain?: string } }) {
-  const [kind, setKind] = useState<Kind | null>(initial ? 'api' : null)
+export function CreateKeyDialog({ open, onOpenChange, onCreated, onConnectAgent, initial }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: (created: CreatedSecret) => void; onConnectAgent: () => void; initial?: { purpose?: Purpose; domain?: string; smtp?: boolean } }) {
+  // SMTP needs the installation's mail gateway: without one, the form never opens.
+  const servers = useMailServers()
+  const [kind, setKind] = useState<Kind | null>(initial?.smtp && servers ? 'smtp' : initial?.purpose ? 'api' : null)
   const [pending, setPending] = useState(false)
+  useDomainOptions(open)
   // One dialog for every step, so moving between them keeps focus inside it.
-  const form = kind === 'api' ? { title: 'Create API key', id: 'create-key', submit: 'Create key' } : kind === 'app' ? { title: 'Create app password', id: 'create-app-password', submit: 'Create password' } : null
+  const form = kind && (kind !== 'smtp' || servers) ? forms[kind] : undefined
+  const props = { open, onOpenChange, onPending: setPending, onCreated }
   return <Dialog open={open} onOpenChange={next => { if (!pending) onOpenChange(next) }} title={form?.title ?? 'Create key'}
     footer={form ? <><Button disabled={pending} onClick={() => setKind(null)}>Back</Button><Button variant="primary" loading={pending} type="submit" form={form.id}>{form.submit}</Button></> : <Button onClick={() => onOpenChange(false)}>Cancel</Button>}>
-    {kind === 'api' ? <ApiKeyForm open={open} onOpenChange={onOpenChange} onPending={setPending} onCreated={onCreated} initial={initial} />
-      : kind === 'app' ? <AppPasswordForm open={open} onOpenChange={onOpenChange} onPending={setPending} onCreated={onCreated} />
+    {kind === 'api' ? <ApiKeyForm {...props} initial={initial} />
+      : kind === 'smtp' && servers ? <SmtpLoginForm {...props} />
+      : kind === 'app' ? <AppPasswordForm {...props} />
       : <ul className="keys-types" aria-label="What kind of key?">
-        {kinds.map(item => <li key={item.value}>
+        {kinds.filter(item => item.value !== 'smtp' || servers).map(item => <li key={item.value}>
           <button type="button" className="keys-type" onClick={() => { if (item.value === 'agent') { onOpenChange(false); onConnectAgent() } else setKind(item.value) }}>
             <span className="keys-type__label">{item.label}</span>
             <ChevronRight size={16} aria-hidden="true" />
@@ -94,6 +107,7 @@ function InboxChoice({ name, query, value, onChange, disabled, error, none }: { 
 }
 
 export const chooseAddress = 'Choose an address, or Every address.'
+const tooManyDomains = 'Select up to 50 domains.'
 /** Which receiving addresses a key reaches, or every one: one control for Create key and a key's Edit addresses.
  *  `empty` takes the options' place while they load or when there are none. */
 export function AddressChoice({ id, options, every, chosen, onEvery, onToggle, disabled, error, empty }: { id: string; options: { id: string; address: string }[]; every: boolean; chosen: string[];
@@ -108,10 +122,41 @@ export function AddressChoice({ id, options, every, chosen, onEvery, onToggle, d
   </fieldset>
 }
 
+/** The workspace's sending domains, 10 at a time: Load more reaches the rest. Create key loads them as it opens, and
+ *  the API keys page before it opens a form from a link, so a form's domain list never grows under its other fields. */
+export function useDomainOptions(enabled: boolean) {
+  const api = useApi()
+  return useInfiniteQuery({
+    queryKey: ['nightmail', 'domains', 'key-options'],
+    enabled,
+    initialPageParam: { page: 1 } as Pick<PageRequest, 'page' | 'cursor'>,
+    queryFn: ({ pageParam, signal }) => api.domains.list({ ...pageParam, pageSize: 10 }, signal),
+    getNextPageParam: last => last.nextCursor ? { cursor: last.nextCursor } : undefined,
+    staleTime: 60_000,
+    retry: false,
+  })
+}
+const domainNames = (query: ReturnType<typeof useDomainOptions>, chosen: string[]) => [...new Set([...(query.data?.pages.flatMap(page => page.items) ?? []).map(domain => domain.name.toLowerCase()), ...chosen])].sort()
+
+/** Which domains a key sends from. `every`: the All domains choice, which an SMTP login doesn't have. */
+function DomainChoice({ query, chosen, onToggle, every, disabled, error, onLeave }: { query: ReturnType<typeof useDomainOptions>; chosen: string[]; onToggle: (domain: string, checked: boolean) => void;
+  every?: { checked: boolean; onChange: (checked: boolean) => void }; disabled: boolean; error?: string; onLeave: () => void }) {
+  const domains = domainNames(query, chosen)
+  return <fieldset className="settings-key-domains" disabled={disabled} aria-describedby={error ? 'key-domain-error' : undefined}>
+    <legend className="ui-field__label">Domains it can send from</legend>
+    {every && <Checkbox label="All domains, including new ones" checked={every.checked} onCheckedChange={every.onChange} disabled={disabled} />}
+    <div className="settings-key-domain-options">
+      {query.isPending ? <p className="muted" role="status">Loading domains…</p> : domains.length === 0 && !query.isError ? <Link className="keys-form-note" to="/domains" onClick={onLeave}>Add a domain</Link> : domains.map(domain => <Checkbox key={domain} label={domain} checked={!every?.checked && chosen.includes(domain)} onCheckedChange={checked => onToggle(domain, checked)} disabled={disabled} />)}
+    </div>
+    {query.isError && <div className="stack"><MutationError error={query.error} /><Button onClick={() => { void (query.isFetchNextPageError ? query.fetchNextPage() : query.refetch()) }}>Retry loading domains</Button></div>}
+    {query.hasNextPage && !query.isError && <Button variant="ghost" loading={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>Load more domains</Button>}
+    {error && <p id="key-domain-error" className="ui-field__error" role="alert">{error}</p>}
+  </fieldset>
+}
+
 type FormProps = { open: boolean; onOpenChange: (open: boolean) => void; onPending: (pending: boolean) => void; onCreated: (created: CreatedSecret) => void }
 
 function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormProps & { initial?: { purpose?: Purpose; domain?: string } }) {
-  const api = useApi()
   const create = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input))
   const addresses = useApiDef(queries.inboundAddressOptions())
   const [name, setName] = useState('')
@@ -127,18 +172,9 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormP
   const workspace = isWorkspace(purpose)
   const pending = create.isPending
   useEffect(() => onPending(pending), [pending, onPending])
-  const domainOptions = useInfiniteQuery({
-    queryKey: ['nightmail', 'domains', 'key-options'],
-    enabled: open && workspace,
-    initialPageParam: { page: 1 } as Pick<PageRequest, 'page' | 'cursor'>,
-    queryFn: ({ pageParam, signal }) => api.domains.list({ ...pageParam, pageSize: 10 }, signal),
-    getNextPageParam: last => last.nextCursor ? { cursor: last.nextCursor } : undefined,
-    staleTime: 60_000,
-    retry: false,
-  })
+  const domainOptions = useDomainOptions(open && workspace)
   const inboxes = useInboxOptions('key-options', {}, open && purpose === 'inbox')
-  const options = (domainOptions.data?.pages.flatMap(page => page.items) ?? []).map(domain => domain.name.toLowerCase())
-  const domains = [...new Set([...options, ...selectedDomains])].sort()
+  const domains = domainNames(domainOptions, selectedDomains)
   // Inboxes have their own choice; this list is the receiving addresses.
   const receiving = (addresses.data ?? []).filter(item => item.kind !== 'inbox')
   const chosenInbox = inboxId || activeInboxes(inboxes)[0]?.id || ''
@@ -164,7 +200,7 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormP
     const next: Record<string, string> = {}
     if (!name.trim()) next.name = 'Enter a name for this key.'
     if (workspace && !allDomains && !selectedDomains.length) next.domains = 'Select at least one domain, or choose All domains.'
-    else if (workspace && !allDomains && selectedDomains.length > 50) next.domains = 'Select up to 50 domains.'
+    else if (workspace && !allDomains && selectedDomains.length > 50) next.domains = tooManyDomains
     if (purpose === 'addresses' && !allAddresses && !addressIds.length) next.addressIds = chooseAddress
     if (purpose === 'inbox' && !chosenInbox) next.inboxId = 'Choose an inbox.'
     setErrors(next)
@@ -203,16 +239,8 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormP
           <span>{item.label}</span>
         </label>)}
       </fieldset>
-      {workspace && <fieldset className="settings-key-domains" disabled={pending} aria-describedby={domainError ? 'key-domain-error' : undefined}>
-        <legend className="ui-field__label">Domains it can send from</legend>
-        <Checkbox label="All domains, including new ones" checked={allDomains} onCheckedChange={checked => { setAllDomains(checked); setSelectedDomains([]); clearError('domains') }} disabled={pending} />
-        <div className="settings-key-domain-options">
-          {domainOptions.isPending ? <p className="muted" role="status">Loading domains…</p> : domains.length === 0 && !domainOptions.isError ? <Link className="keys-form-note" to="/domains" onClick={() => onOpenChange(false)}>Add a domain</Link> : domains.map(domain => <Checkbox key={domain} label={domain} checked={!allDomains && selectedDomains.includes(domain)} onCheckedChange={checked => toggleDomain(domain, checked)} disabled={pending} />)}
-        </div>
-        {domainOptions.isError && <div className="stack"><MutationError error={domainOptions.error} /><Button onClick={() => { void (domainOptions.isFetchNextPageError ? domainOptions.fetchNextPage() : domainOptions.refetch()) }}>Retry loading domains</Button></div>}
-        {domainOptions.hasNextPage && !domainOptions.isError && <Button variant="ghost" loading={domainOptions.isFetchingNextPage} onClick={() => void domainOptions.fetchNextPage()}>Load more domains</Button>}
-        {domainError && <p id="key-domain-error" className="ui-field__error" role="alert">{domainError}</p>}
-      </fieldset>}
+      {workspace && <DomainChoice query={domainOptions} chosen={selectedDomains} onToggle={toggleDomain} disabled={pending} error={domainError} onLeave={() => onOpenChange(false)}
+        every={{ checked: allDomains, onChange: checked => { setAllDomains(checked); setSelectedDomains([]); clearError('domains') } }} />}
       {purpose === 'addresses' && <AddressChoice id="key-address" options={receiving} every={allAddresses} chosen={addressIds} disabled={pending} error={addressError}
         onEvery={checked => { setAllAddresses(checked); setAddressIds([]); clearError('addressIds') }} onToggle={toggleAddress}
         empty={addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : !receiving.length ? <Link className="keys-form-note" to="/receiving" onClick={() => onOpenChange(false)}>Create an address</Link> : undefined} />}
@@ -233,7 +261,6 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormP
 }
 
 function AppPasswordForm({ open, onOpenChange, onPending, onCreated }: FormProps) {
-  const { multiTenant } = useWorkspaceAccess()
   const create = useApiMutation((api, input: AppPasswordInput) => api.credentials.createAppPassword(input))
   const inboxes = useInboxOptions('app-password-options', { type: 'persistent' }, open)
   const [inboxId, setInboxId] = useState('')
@@ -255,7 +282,9 @@ function AppPasswordForm({ open, onOpenChange, onPending, onCreated }: FormProps
     try {
       const result = await create.mutateAsync({ inboxId: chosen, name: name.trim(), protocols })
       onOpenChange(false)
-      onCreated({ secret: result.password, title: 'App password created', description: 'Shown once: copy it now and use it as your mail app’s password.' })
+      const inbox = activeInboxes(inboxes).find(box => box.id === chosen)
+      onCreated({ secret: result.password, title: 'App password created', description: 'Shown once: copy it now and use it as your mail app’s password.',
+        mail: { username: inbox ? <PrivateAddress value={inbox.address} /> : 'The inbox address', imap: protocols.includes('imap'), smtp: protocols.includes('smtp') } })
     } catch { /* Shown in the form. */ }
   }
   const protocolError = errors.protocols || fieldError(create.error, 'protocols')
@@ -270,9 +299,67 @@ function AppPasswordForm({ open, onOpenChange, onPending, onCreated }: FormProps
         <legend className="ui-field__label">What the mail app can do</legend>
         <Checkbox checked={protocols.includes('imap')} onCheckedChange={checked => toggle('imap', checked)} disabled={pending} label="Read and file its mail (IMAP)" />
         <Checkbox checked={protocols.includes('smtp')} onCheckedChange={checked => toggle('smtp', checked)} disabled={pending} label="Send from its address (SMTP)" />
-        {multiTenant && <p className="ui-field__hint">Billed by the day while the inbox has an app password.</p>}
         {protocolError && <p className="ui-field__error" role="alert">{protocolError}</p>}
       </fieldset>
     </form>
   </>
+}
+
+/** An SMTP login: an API key that can only send, from chosen domains or receiving addresses. An app signs in to SMTP
+ *  as apikey with it; its mail goes out like an API send. */
+function SmtpLoginForm({ open, onOpenChange, onPending, onCreated }: FormProps) {
+  const create = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input))
+  const domainOptions = useDomainOptions(open)
+  const addresses = useApiDef(queries.inboundAddressOptions())
+  const [name, setName] = useState('')
+  const [scope, setScope] = useState<'domains' | 'addresses'>('domains')
+  const [domains, setDomains] = useState<string[]>([])
+  const [allAddresses, setAllAddresses] = useState(false)
+  const [addressIds, setAddressIds] = useState<string[]>([])
+  const [errors, setErrors] = useState<Record<string, string>>({})
+  const pending = create.isPending
+  useEffect(() => onPending(pending), [pending, onPending])
+  const receiving = (addresses.data ?? []).filter(item => item.kind !== 'inbox')
+  const clearError = (field: string) => setErrors(current => { const next = { ...current }; delete next[field]; return next })
+  const servers = useMailServers()
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (!servers) return
+    const next: Record<string, string> = {}
+    if (!name.trim()) next.name = 'Enter a name, such as the app it’s for.'
+    if (scope === 'domains' && !domains.length) next.domains = 'Select at least one domain.'
+    else if (scope === 'domains' && domains.length > 50) next.domains = tooManyDomains
+    if (scope === 'addresses' && !allAddresses && !addressIds.length) next.addressIds = chooseAddress
+    setErrors(next)
+    if (Object.keys(next).length) { if (next.name) document.getElementById('smtp-login-name')?.focus(); return }
+    const input: ApiKeyInput = scope === 'domains' ? { name: name.trim(), permissions: ['send'], domains }
+      : { name: name.trim(), access: { type: 'addresses', ...(allAddresses ? {} : { addressIds }), mail: ['send'] } }
+    try {
+      const result = await create.mutateAsync(input)
+      onOpenChange(false)
+      onCreated({ secret: result.secret, title: 'SMTP login created', description: 'Shown once: copy it now and use it as the app’s SMTP password.', mail: { username: <code>apikey</code>, imap: false, smtp: true } })
+    } catch { /* Shown in the form. */ }
+  }
+  return <form id="create-smtp-login" className="stack" onSubmit={submit} noValidate>
+    <MutationError error={create.error} />
+    <Field label="Name" htmlFor="smtp-login-name" error={errors.name || fieldError(create.error, 'name')}><Input id="smtp-login-name" value={name} maxLength={100} onChange={event => setName(event.target.value)} autoFocus required disabled={pending} placeholder="Sign-in emails" autoComplete="off" /></Field>
+    <fieldset className="keys-purpose" disabled={pending}>
+      <legend className="ui-field__label">Sends from</legend>
+      {([['domains', 'Chosen domains'], ['addresses', 'Chosen addresses']] as const).map(([value, label]) => <label key={value} className="keys-choice">
+        <input type="radio" name="smtp-login-scope" value={value} checked={scope === value} onChange={() => { setScope(value); setErrors({}); create.reset() }} />
+        <span>{label}</span>
+      </label>)}
+    </fieldset>
+    {scope === 'domains' ? <DomainChoice query={domainOptions} chosen={domains} disabled={pending} error={errors.domains || fieldError(create.error, 'domains')} onLeave={() => onOpenChange(false)}
+      onToggle={(domain, checked) => { clearError('domains'); setDomains(current => checked ? [...new Set([...current, domain])] : current.filter(item => item !== domain)) }} />
+      : <AddressChoice id="smtp-login-address" options={receiving} every={allAddresses} chosen={addressIds} disabled={pending} error={errors.addressIds || fieldError(create.error, 'access.addressIds')}
+        onEvery={checked => { setAllAddresses(checked); setAddressIds([]); clearError('addressIds') }}
+        onToggle={(id, checked) => { clearError('addressIds'); setAllAddresses(false); setAddressIds(current => checked ? [...new Set([...current, id])] : current.filter(item => item !== id)) }}
+        empty={addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : !receiving.length ? <Link className="keys-form-note" to="/receiving" onClick={() => onOpenChange(false)}>Create an address</Link> : undefined} />}
+    <Disclosure className="keys-can" title="What this login can do"><ul>
+      <li>Sends from an app over SMTP, as {scope === 'domains' ? 'any address on these domains and their subdomains' : 'these addresses'}.</li>
+      <li>Mail goes out like an API send: the same limits, suppressions and events.</li>
+      <li>Can’t read mail, logs or settings.</li>
+    </ul></Disclosure>
+  </form>
 }

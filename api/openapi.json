@@ -21840,6 +21840,25 @@
                         "autoRecharge"
                       ],
                       "description": "Hosted dashboard sessions: whether the workspace is free, whether an empty balance has paused sending or held received mail, and auto-recharge, so the dashboard can show it on its first frame. Null otherwise; GET /v1/billing has the detail."
+                    },
+                    "mailServers": {
+                      "type": [
+                        "object",
+                        "null"
+                      ],
+                      "properties": {
+                        "imap": {
+                          "type": "string"
+                        },
+                        "smtp": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "imap",
+                        "smtp"
+                      ],
+                      "description": "The hosts mail apps connect to: IMAP on 993 (TLS) or 143 (STARTTLS), SMTP on 465 (TLS) or 587 (STARTTLS). An app password signs in to both; a send-only API key signs in to SMTP as apikey. Null when this installation has no IMAP/SMTP gateway."
                     }
                   },
                   "required": [

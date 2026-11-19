@@ -1,6 +1,14 @@
 {
  "about": "Density lint: each page’s score and findings accepted so far (app/scripts/density.mjs). A new finding or a score more than 5% higher fails; a local run lowers these as pages improve. Regenerate with: node scripts/density.mjs --update-baseline",
  "pages": {
+  "API keys · SMTP login dialog · desktop": {
+   "score": 8,
+   "findings": []
+  },
+  "API keys · SMTP login dialog · phone": {
+   "score": 8,
+   "findings": []
+  },
   "API keys · create key dialog · desktop": {
    "score": 7,
    "findings": []
