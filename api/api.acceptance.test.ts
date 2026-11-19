@@ -27,6 +27,9 @@ function iamAllows(statements:IamStatement[],action:string,resource:string,conte
       case 'StringEquals':case 'Bool':case 'ArnEquals':return values.length>0 && values.some(v=>wanted.includes(v));
       case 'StringLike':case 'ArnLike':return values.length>0 && values.some(v=>wanted.some(w=>like(w,v)));
       case 'StringNotEquals':return !values.some(v=>wanted.includes(v));
+      case 'StringNotEqualsIfExists':return !values.length || !values.some(v=>wanted.includes(v));
+      case 'ForAnyValue:StringLike':return values.some(v=>wanted.some(w=>like(w,v)));
+      case 'ForAllValues:StringLike':return values.every(v=>wanted.some(w=>like(w,v)));
       case 'StringEqualsIfExists':return !values.length || values.some(v=>wanted.includes(v));
       case 'ForAllValues:StringEquals':return values.every(v=>wanted.includes(v));
       case 'Null':return (wanted[0]==='true')===(have===undefined);
@@ -24225,14 +24228,20 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const ses=`arn:aws:ses:${region}:${account}:`,sets=[`${prefix}-transactional`,`${prefix}-marketing`].map(n=>ses+'configuration-set/'+n),topic=`arn:aws:sns:${region}:${account}:${prefix}-feedback`;
     const domain=ses+'identity/example.com',own={'aws:ResourceTag/nightmail:owner':'nightmail','aws:ResourceTag/nightmail:installation-id':connection,'aws:ResourceTag/nightmail:purpose':'domain-identity','aws:ResourceTag/nightmail:domain-claim':randomUUID()};
     const tagKeys=['nightmail:owner','nightmail:installation-id','nightmail:purpose','nightmail:domain-claim'];
+    // Nightmail's own configuration sets and topics carry these tags from the moment they're created.
+    const mine={'aws:ResourceTag/nightmail:owner':'nightmail','aws:ResourceTag/nightmail:installation-id':connection,'aws:ResourceTag/nightmail:purpose':'ses-feedback'};
+    const tagging={'aws:RequestTag/nightmail:owner':'nightmail','aws:RequestTag/nightmail:installation-id':connection,'aws:RequestTag/nightmail:purpose':'ses-feedback','aws:TagKeys':['nightmail:owner','nightmail:installation-id','nightmail:purpose']};
     type Call=[string,string,Record<string,string|string[]>?];
     // What the scan, provisioning, sending, domain and cleanup sessions ask for, and features still to come in Nightmail's own namespace.
     const allowed:Call[]=[
       ...['ses:GetAccount','ses:ListEmailIdentities','ses:ListConfigurationSets','ses:DescribeActiveReceiptRuleSet','ses:PutAccountDetails'].map(a=>[a,'*'] as Call),
       ['ses:GetEmailIdentity',domain],['ses:GetConfigurationSet',ses+'configuration-set/bane-legacy'],['ses:GetConfigurationSet',ses+'configuration-set/nightmail-0123456789abcdef0123-marketing'],
-      ...sets.flatMap(set=>['ses:GetConfigurationSet','ses:CreateConfigurationSet','ses:TagResource','ses:PutConfigurationSetSuppressionOptions','ses:GetConfigurationSetEventDestinations','ses:CreateConfigurationSetEventDestination','ses:UpdateConfigurationSetEventDestination','ses:DeleteConfigurationSet','ses:SendEmail'].map(a=>[a,set] as Call)),
-      ...['sns:CreateTopic','sns:TagResource','sns:GetTopicAttributes','sns:ListTagsForResource','sns:SetTopicAttributes','sns:ListSubscriptionsByTopic','sns:GetSubscriptionAttributes','sns:DeleteTopic'].map(a=>[a,topic] as Call),
-      ['sns:Subscribe',topic,{'sns:Protocol':'https','sns:Endpoint':'https://events.nightmail.dev/v1/events/ses'}],
+      ...sets.flatMap(set=>[['ses:CreateConfigurationSet',set,tagging],['ses:TagResource',set,{...mine,...tagging}],['ses:SendEmail',set,{'ses:ApiVersion':'2'}],
+        ...['ses:GetConfigurationSet','ses:PutConfigurationSetSuppressionOptions','ses:GetConfigurationSetEventDestinations','ses:CreateConfigurationSetEventDestination','ses:UpdateConfigurationSetEventDestination','ses:DeleteConfigurationSet'].map(a=>[a,set,mine])] as Call[]),
+      ['sns:CreateTopic',topic,tagging],['sns:TagResource',topic,{...mine,...tagging}],...['sns:GetTopicAttributes','sns:ListTagsForResource','sns:SetTopicAttributes','sns:ListSubscriptionsByTopic','sns:GetSubscriptionAttributes','sns:DeleteTopic'].map(a=>[a,topic,mine] as Call),
+      ['sns:Subscribe',topic,{...mine,'sns:Protocol':'https','sns:Endpoint':'https://events.nightmail.dev/v1/events/ses'}],
+      // Reads need only the name: provisioning first checks whether a matching name is Nightmail's.
+      ['ses:GetConfigurationSet',sets[0]!],['sns:GetTopicAttributes',topic],['sns:ListTagsForResource',topic],
       ['ses:SendEmail',domain,{'ses:ApiVersion':'2'}],['ses:SendEmail',domain,{'ses:ApiVersion':'2',...own}],['ses:GetEmailTemplate',ses+'template/bane-pilot'],
       ['ses:CreateEmailIdentity',domain,{'aws:RequestTag/nightmail:owner':'nightmail','aws:RequestTag/nightmail:installation-id':connection,'aws:RequestTag/nightmail:purpose':'domain-identity','aws:RequestTag/nightmail:domain-claim':randomUUID(),'aws:TagKeys':tagKeys}],
       ['ses:PutEmailIdentityMailFromAttributes',domain,own],['ses:DeleteEmailIdentity',domain,own],
@@ -24241,7 +24250,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // An update is prepared from Nightmail's own published templates; only the customer runs it.
       ['cloudformation:DescribeStacks',`arn:aws:cloudformation:us-east-2:${account}:stack/${stack}/guid`,{'aws:RequestedRegion':'us-east-2'}],
       ['cloudformation:CreateChangeSet',`arn:aws:cloudformation:us-east-2:${account}:stack/${stack}/guid`,{'aws:RequestedRegion':'us-east-2','cloudformation:TemplateUrl':`https://nightmail-byo-templates-${platform}.s3.us-east-2.amazonaws.com/byo/6.1.yaml`,'cloudformation:ChangeSetName':'nightmail-update-6-1'}],
-      ['ses:CreateContactList',ses+`contact-list/${prefix}-subscribers`],['ses:CreateEmailTemplate',ses+`template/${prefix}-receipt`],['ses:CreateConfigurationSet',ses+`configuration-set/${prefix}-notifications`],['sns:CreateTopic',`arn:aws:sns:${region}:${account}:${prefix}-inbound`],
+      ['ses:CreateContactList',ses+`contact-list/${prefix}-subscribers`,tagging],['ses:CreateConfigurationSet',ses+`configuration-set/${prefix}-notifications`,tagging],['sns:CreateTopic',`arn:aws:sns:${region}:${account}:${prefix}-inbound`,tagging],
+      ['ses:UpdateContactList',ses+`contact-list/${prefix}-subscribers`,mine],
     ];
     for(const [action,resource,context] of allowed)assert.ok(iamAllows(all,action,resource,{'aws:RequestedRegion':region,...context}),`${action} ${resource}`);
     const refused:Call[]=[
@@ -24256,6 +24266,19 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       ...([{'cloudformation:TemplateUrl':'https://elsewhere.s3.amazonaws.com/byo/6.1.yaml','cloudformation:ChangeSetName':'nightmail-update-6-1'},{'cloudformation:TemplateUrl':`https://nightmail-byo-templates-${platform}.s3.us-east-2.amazonaws.com/byo/6.1.yaml`,'cloudformation:ChangeSetName':'nightmail-update-6-1','cloudformation:RoleArn':`arn:aws:iam::${account}:role/Admin`}] as Record<string,string>[]).map(c=>['cloudformation:CreateChangeSet',`arn:aws:cloudformation:us-east-2:${account}:stack/${stack}/guid`,{'aws:RequestedRegion':'us-east-2',...c}] as Call),
       ['cloudformation:ExecuteChangeSet',`arn:aws:cloudformation:us-east-2:${account}:stack/${stack}/guid`,{'aws:RequestedRegion':'us-east-2'}],['cloudformation:CreateChangeSet',`arn:aws:cloudformation:us-east-2:${account}:stack/OtherStack/guid`,{'aws:RequestedRegion':'us-east-2','cloudformation:TemplateUrl':`https://nightmail-byo-templates-${platform}.s3.us-east-2.amazonaws.com/byo/6.1.yaml`,'cloudformation:ChangeSetName':'nightmail-update-6-1'}],
     ];
+    // A resource Nightmail didn't create is never changed, even under a matching name: untagged, another installation's, or another system's.
+    const foreign=[{},{...mine,'aws:ResourceTag/nightmail:installation-id':`conn_${'ef'.repeat(16)}`},{...mine,'aws:ResourceTag/nightmail:owner':'other-system'}];
+    for(const tags of foreign){
+      refused.push(...['ses:DeleteConfigurationSet','ses:PutConfigurationSetSuppressionOptions','ses:CreateConfigurationSetEventDestination','ses:UpdateConfigurationSetEventDestination','ses:PutConfigurationSetDeliveryOptions'].map(a=>[a,sets[0]!,tags] as Call),
+        ...['sns:DeleteTopic','sns:SetTopicAttributes','sns:Subscribe','sns:Publish'].map(a=>[a,topic,{...tags,'sns:Protocol':'https','sns:Endpoint':'https://events.nightmail.dev/v1/events/ses'}] as Call),
+        ['ses:DeleteContactList',ses+`contact-list/${prefix}-subscribers`,tags],['ses:TagResource',sets[0]!,{...tags,...tagging}],['sns:TagResource',topic,{...tags,...tagging}]);
+    }
+    // Creating needs this connection's tags; tags are never rewritten to another owner or removed.
+    const {['aws:RequestTag/nightmail:purpose']:_,...unlabelled}=tagging;
+    refused.push(['ses:CreateConfigurationSet',sets[0]!,{}],['sns:CreateTopic',topic,{...tagging,'aws:RequestTag/nightmail:installation-id':`conn_${'ef'.repeat(16)}`}],['ses:CreateConfigurationSet',sets[0]!,unlabelled],
+      ['ses:TagResource',sets[0]!,{...mine,...tagging,'aws:RequestTag/nightmail:installation-id':`conn_${'ef'.repeat(16)}`}],['sns:TagResource',topic,{...mine,...tagging,'aws:RequestTag/nightmail:owner':'other-system'}],
+      ['ses:UntagResource',sets[0]!,{...mine,'aws:TagKeys':['nightmail:installation-id']}],['sns:UntagResource',topic,{...mine,'aws:TagKeys':['nightmail:owner']}],
+      ['ses:CreateEmailTemplate',ses+`template/${prefix}-receipt`,tagging]);
     for(const [action,resource,context] of refused)assert.equal(iamAllows(all,action,resource,{'aws:RequestedRegion':region,...context}),false,`${action} ${resource} ${JSON.stringify(context??{})}`);
   });
 
@@ -24272,12 +24295,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const sending=resources.Role.Properties.Policies.find((p:Json)=>p.PolicyName==='Sending').PolicyDocument.Statement;
     const grants=sending.filter((s:Json)=>s.Effect==='Allow' && [s.Action].flat().includes('ses:SendEmail')) as Json[];
     const identity='arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*';
-    // Domains are the only SendEmail grant outside Nightmail's own (ResourcePrefix-named) resources.
-    assert.deepEqual(grants.flatMap(g=>g.Resource),[identity]);
-    assert.deepEqual(grants[0].Condition.StringEquals,{'ses:ApiVersion':'2'});
+    // SendEmail reaches domains and Nightmail's own configuration sets, never another installation's.
+    assert.deepEqual(grants.flatMap(g=>g.Resource),[identity,'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-*']);
+    for(const g of grants){assert.deepEqual(g.Condition.StringEquals,{'ses:ApiVersion':'2'});assert.deepEqual(g.Condition.Null,{'ses:TenantName':'true','ses:MultiRegionEndpointId':'true'});}
     // Imported identities carry no Nightmail tags; tagged ones must belong to this installation.
     assert.deepEqual(grants[0].Condition.StringEqualsIfExists,{'aws:ResourceTag/nightmail:owner':'nightmail','aws:ResourceTag/nightmail:installation-id':'ConnectionId','aws:ResourceTag/nightmail:purpose':'domain-identity'});
-    assert.deepEqual(grants[0].Condition.Null,{'ses:TenantName':'true','ses:MultiRegionEndpointId':'true'});
     for(const [rows,bucket] of [[all,`arn:aws:s3:::bane-${account}-mail-us-east-2`]] as [Json[],string][]){
       assert.ok(rows.some(s=>s.Effect==='Allow' && s.Action==='s3:ListBucket' && s.Resource===bucket && s.Condition.StringEquals['s3:prefix']==='staging/'));
       assert.ok(rows.some(s=>s.Effect==='Allow' && s.Action==='s3:PutObject' && s.Resource===bucket+'/quarantine/?*'));

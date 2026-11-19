@@ -137,18 +137,52 @@ Resources:
                 Effect: Allow
                 Action: ses:GetConfigurationSet
                 Resource: [!Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/bane-*', !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/nightmail-*']
-              # Everything Nightmail creates here is named with ResourcePrefix, so new features need no new permissions.
-              - Sid: OwnSesResources
+              # Everything Nightmail creates here is named with ResourcePrefix and tagged with this connection when it's
+              # created. Reads need the name; every change needs the tags too, so a resource Nightmail didn't create is
+              # never changed, even under a matching name. New features in this namespace need no new permissions.
+              - Sid: ReadOwnResources
                 Effect: Allow
-                Action: 'ses:*'
+                Action: ['ses:Get*', 'ses:List*', 'sns:Get*', 'sns:List*']
                 Resource:
                   - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-*'
-                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:template/${ResourcePrefix}-*'
                   - !Sub 'arn:aws:ses:*:${AWS::AccountId}:contact-list/${ResourcePrefix}-*'
-              - Sid: OwnTopics
+                  - !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-*'
+              - Sid: CreateOwnResources
                 Effect: Allow
-                Action: 'sns:*'
-                Resource: !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-*'
+                Action: ['ses:CreateConfigurationSet', 'ses:CreateContactList', 'sns:CreateTopic']
+                Resource:
+                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-*'
+                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:contact-list/${ResourcePrefix}-*'
+                  - !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-*'
+                Condition:
+                  StringEquals: {'aws:RequestTag/nightmail:owner': nightmail, 'aws:RequestTag/nightmail:installation-id': !Ref ConnectionId}
+                  'Null': {'aws:RequestTag/nightmail:purpose': 'false'}
+                  'ForAllValues:StringLike': {'aws:TagKeys': 'nightmail:*'}
+              - Sid: ChangeOwnResources
+                Effect: Allow
+                Action: ['ses:*', 'sns:*']
+                Resource:
+                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-*'
+                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:contact-list/${ResourcePrefix}-*'
+                  - !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-*'
+                Condition:
+                  StringEquals: {'aws:ResourceTag/nightmail:owner': nightmail, 'aws:ResourceTag/nightmail:installation-id': !Ref ConnectionId}
+              # Tags are the ownership record: never rewrite or remove them.
+              - Sid: KeepOwnershipTags
+                Effect: Deny
+                Action: ['ses:UntagResource', 'sns:UntagResource']
+                Resource: '*'
+                Condition: {'ForAnyValue:StringLike': {'aws:TagKeys': 'nightmail:*'}}
+              - Sid: NoOtherOwner
+                Effect: Deny
+                Action: ['ses:TagResource', 'sns:TagResource']
+                Resource: '*'
+                Condition: {StringNotEqualsIfExists: {'aws:RequestTag/nightmail:owner': nightmail}}
+              - Sid: NoOtherInstallation
+                Effect: Deny
+                Action: ['ses:TagResource', 'sns:TagResource']
+                Resource: '*'
+                Condition: {StringNotEqualsIfExists: {'aws:RequestTag/nightmail:installation-id': !Ref ConnectionId}}
               # Imported identities are never tagged, so the tags are IfExists: an identity Nightmail tagged
               # for another installation in this account cannot be sent from through this role.
               - Sid: Send
@@ -158,6 +192,14 @@ Resources:
                 Condition:
                   StringEquals: {'ses:ApiVersion': '2'}
                   StringEqualsIfExists: {'aws:ResourceTag/nightmail:owner': nightmail, 'aws:ResourceTag/nightmail:installation-id': !Ref ConnectionId, 'aws:ResourceTag/nightmail:purpose': domain-identity}
+                  'Null': {'ses:TenantName': 'true', 'ses:MultiRegionEndpointId': 'true'}
+              # Sending through Nightmail's own configuration sets changes nothing, so it needs only the name.
+              - Sid: SendThroughOwnSets
+                Effect: Allow
+                Action: ses:SendEmail
+                Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-*'
+                Condition:
+                  StringEquals: {'ses:ApiVersion': '2'}
                   'Null': {'ses:TenantName': 'true', 'ses:MultiRegionEndpointId': 'true'}
               - Sid: Tracking
                 Effect: Allow
