@@ -3,7 +3,6 @@ import type { MiddlewareHandler } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { allowMalformedSns } from './core.js';
 import { boundRequestBody } from './request-body.js';
-import { SEND_LIMITS } from './send-limits.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
 import { mailboxRoute, memberRefused, receivingConsentRoute, unrestrictedRoute, ApiError, databaseCodeOf, databaseConflict, databaseUnavailable, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, newRequestId, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
@@ -227,9 +226,10 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // own scoped keys. Unknown routes and public forms are not upload routes.
     if (c.req.path!=='/internal/v1/mail' && c.req.path!=='/mcp' && !/^\/v1\/inboxes(?:\/|$)/.test(c.req.path) && !c.req.path.startsWith('/v1/inbound/')) {
       const matched=c.req.matchedRoutes.some(r=>r.method===c.req.method && !r.path.endsWith('*'));
-      // The raw-byte attachment upload is the one route whose body is a whole file (up to 25 MiB; just over it, the
-      // route answers ATTACHMENT_LIMIT_EXCEEDED itself).
-      await boundRequestBody(c,c.req.path==='/v1/events/ses'||c.req.path==='/v1/billing/stripe'?512*1024:!c.get('actor')?64*1024:c.req.path==='/v1/attachments/upload'?SEND_LIMITS.attachmentBytes+64*1024:matched?undefined:64*1024);
+      // The raw-byte attachment upload reads and bounds its own body (a whole file, up to 25 MiB) once it holds the
+      // isolate memory for it (sending.ts), so it is not buffered here first.
+      if (!(c.req.method==='POST' && c.req.path==='/v1/attachments/upload' && c.get('actor')))
+        await boundRequestBody(c,c.req.path==='/v1/events/ses'||c.req.path==='/v1/billing/stripe'?512*1024:matched && c.get('actor')?undefined:64*1024);
     }
     await next();
   });

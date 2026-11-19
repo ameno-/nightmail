@@ -34,7 +34,7 @@ import { canonical, idempotencyGate, idempotencyKey, idempotent, IdempotencyHead
 import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, registerPreviewImages, renderPreview } from './preview-images.js';
 import { actorJson, admission, admitted, charges, duplicateAttachment, type AdmissionMail, type Admitted, type Refused, type Released } from './admission.js';
 import { contentBytes, estimatedMimeBytes, SEND_LIMITS } from './send-limits.js';
-import { oneLargeMessage, spliceBody } from './ses-body.js';
+import { reserveMemory, withMemory } from './isolate-memory.js';
 import { RATES } from './billing/money.js';
 
 type HtmlParser = typeof import('parse5').parse;
@@ -897,6 +897,39 @@ export async function tryAtomicKeyAdmission(c:Ctx,credentialCtes:(charge?:SQL)=>
   return c.json(await admitSends(call,input,await directMessages(c.env,mails,batch),{credential,authorize},{batch}),202);
 }
 
+/** The raw upload's body, at most MAX_ATTACHMENT_BYTES, read from the request stream without another copy when its length is known. */
+async function uploadBody(request: Request, length: number | null): Promise<Uint8Array> {
+  const tooLarge = () => new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', `Attachments must be at most ${mib(MAX_ATTACHMENT_BYTES)}.`);
+  if (!request.body) return new Uint8Array(0);
+  const reader = request.body.getReader();
+  try {
+    if (length !== null) {
+      const out = new Uint8Array(length);
+      let at = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (at + value.byteLength > length) throw new ApiError(400, 'REQUEST_BODY_INVALID', 'The body is longer than its Content-Length.');
+        out.set(value, at); at += value.byteLength;
+      }
+      if (at !== length) throw new ApiError(400, 'REQUEST_BODY_INVALID', 'The body is shorter than its Content-Length.');
+      return out;
+    }
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_ATTACHMENT_BYTES) throw tooLarge();
+      chunks.push(value);
+    }
+    const out = new Uint8Array(size);
+    let at = 0;
+    for (const chunk of chunks) { out.set(chunk, at); at += chunk.byteLength; }
+    return out;
+  } finally { void reader.cancel().catch(() => {}); }
+}
 async function saveAttachment(c: Ctx, a: Actor, metadata: AttachmentMetadataInput, bytes: Uint8Array, max = MAX_ATTACHMENT_BYTES) {
   sesAttachment(metadata);
   const input = validateAttachment(metadata, bytes, max);
@@ -1169,8 +1202,10 @@ export function registerSending(app: App) {
     if (Number.isFinite(contentLength) && contentLength > MAX_ATTACHMENT_BYTES) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', `Attachments must be at most ${mib(MAX_ATTACHMENT_BYTES)}.`);
     const parsed = AttachmentMetadata.safeParse({ filename, contentType: c.req.header('content-type') ?? 'application/octet-stream', disposition: requestHeader(c.req.raw.headers, 'disposition') ?? 'attachment', contentId: requestHeader(c.req.raw.headers, 'content-id') ?? undefined });
     if (!parsed.success) throw new ApiError(422, 'ATTACHMENT_METADATA_INVALID', 'Attachment headers are invalid.', parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean).join(', '));
-    const bytes = new Uint8Array(await c.req.arrayBuffer());
-    const result = await saveAttachment(c, a, parsed.data, bytes);
+    // The isolate's memory for this file is held before a byte is read (isolate-memory.ts): with a Content-Length the
+    // body is read into one buffer of that size; without one, into chunks of at most the limit, then one copy.
+    const known = Number.isFinite(contentLength) && contentLength >= 0;
+    const result = await withMemory(known ? contentLength * 1.15 + 1024 * 1024 : 2.15 * MAX_ATTACHMENT_BYTES, async () => saveAttachment(c, a, parsed.data, await uploadBody(c.req.raw, known ? contentLength : null)));
     return c.json(AttachmentInfo.parse(result), 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/attachments/{id}', operationId: 'getAttachment', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(AttachmentInfo), ...errors } }), async c => {
@@ -1178,13 +1213,30 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/attachments/{id}/content', operationId: 'getAttachmentContent', description: 'Returns the private attachment as canonical base64 JSON, scoped like its metadata. At most 25 MiB decoded; never a public object URL or executable inline response.', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(AttachmentInfo.extend({ content: z.string().max(Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4) }).openapi('AttachmentContent')), ...errors } }), async c => {
     const [row] = await attachmentRows(c.env.db, actor(c), [c.req.valid('param').id]);
-    // The JSON is written once as bytes with the base64 straight from the file (ses-body.ts), not built as strings:
-    // a 25 MiB file then holds about 60 MB instead of 120.
-    const body = await oneLargeMessage(row!.size, async () => {
+    // The file counts against the isolate's budget (isolate-memory.ts) until its response has been read, and the JSON
+    // streams out with the base64 written from the file a chunk at a time: the file is the only large buffer.
+    const lease = await reserveMemory(row!.size * 1.15 + 1024 * 1024);
+    let file: Uint8Array;
+    try {
       const asset = await c.env.storage.get(row!.storageKey);
       if (!asset || asset.body.length !== row!.size || asset.body.length > MAX_ATTACHMENT_BYTES || await bytesDigest(asset.body) !== row!.checksum) throw new ApiError(503, 'ATTACHMENT_STORAGE_UNAVAILABLE', 'An immutable attachment is missing or changed.', undefined, true);
-      const marker = Buffer.from(crypto.getRandomValues(new Uint8Array(24))).toString('base64');
-      return spliceBody(JSON.stringify({ ...AttachmentInfo.parse(row), content: marker }), new Map([[marker, asset.body]]));
+      file = asset.body;
+    } catch (error) { lease.release(); throw error; }
+    // A reader that never finishes still gives the budget back.
+    const guard = setTimeout(() => lease.release(), 120_000) as unknown as { unref?: () => void };
+    guard.unref?.();
+    const done = () => { clearTimeout(guard as never); lease.release(); };
+    const json = JSON.stringify({ ...AttachmentInfo.parse(row), content: '' }), encoder = new TextEncoder();
+    let at = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(encoder.encode(json.slice(0, -2))); },
+      pull(controller) {
+        if (at >= file.length) { controller.enqueue(encoder.encode(json.slice(-2))); controller.close(); done(); return; }
+        const end = Math.min(file.length, at + 3 * 64 * 1024);
+        controller.enqueue(encoder.encode(Buffer.from(file.buffer, file.byteOffset + at, end - at).toString('base64')));
+        at = end;
+      },
+      cancel() { done(); },
     });
     c.header('X-Content-Type-Options', 'nosniff');
     return c.body(body, 200, { 'content-type': 'application/json' }) as never;

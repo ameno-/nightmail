@@ -26,9 +26,11 @@ export const SEND_LIMITS = {
   jsonAttachmentBytes: 8 * 1024 * 1024,
   /** The estimated encoded message (estimatedMimeBytes) may not pass SES's own maximum: 40 MB after encoding. */
   encodedBytes: 40_000_000,
-  /** Attachment and body bytes one dispatcher lane prepares at once. A larger message runs alone in its isolate
-   * (oneLargeMessage in ses-body.ts). */
+  /** Attachment and body bytes one dispatcher lane prepares at once; a larger message is a page of its own. */
   laneBytes: 8 * 1024 * 1024,
+  /** What every large-attachment path in one isolate may hold at once (isolate-memory.ts): with the loaded app's
+   * ~25 MB this keeps a Worker isolate under ~90 MB of its 128 MB. */
+  isolateWorkingBytes: 64 * 1024 * 1024,
   /** How the encoded size is estimated: body parts grow by bodyFactor, each attachment is base64 grown by lineFactor
    * plus perAttachment of headers, and the message adds envelope. */
   mime: { bodyFactor: 1.4, lineFactor: 1.04, perAttachment: 2048, envelope: 16384 },

@@ -10193,6 +10193,36 @@ describe('Private attachment assets and campaign revisions', () => {
     };
     const simple = { Simple: { Subject: { Data: 'Largest' }, Body: { Html: { Data: html } }, Attachments: parts.map(p => ({ ...p, ContentTransferEncoding: 'BASE64' as const })) } };
     for (const content of [simple, { Raw: { Data: raw } }]) assert.deepEqual(await body(true, content), await body(false, content));
+    // Overlapping commands through one client, with and without cached middleware (the dispatcher's clients cache it):
+    // each request carries its own file. With the splice's state on the shared middleware context, five of six failed.
+    for (const cacheMiddleware of [false, true]) {
+      const seen: [string, number][] = [];
+      const client = new SESv2Client({ region: REGION, credentials: { accessKeyId: 'AKIDFIXTURE', secretAccessKey: 'fixture' }, maxAttempts: 1, cacheMiddleware, requestHandler: { handle: async (request: { body: Uint8Array }) => {
+        const sent = JSON.parse(Buffer.from(request.body).toString());
+        seen.push([sent.Content.Simple.Subject.Data, Buffer.from(sent.Content.Simple.Attachments[0].RawContent, 'base64').length]);
+        return { response: { statusCode: 200, headers: { 'content-type': 'application/json' }, body: new Response('{"MessageId":"fixture"}').body } };
+      } } as never });
+      addSesBodySplice(client.middlewareStack);
+      const results = await Promise.allSettled(Array.from({ length: 6 }, (_, i) => client.send(new SendEmailCommand({ FromEmailAddress: 'sender@example.com', Destination: { ToAddresses: ['to@example.com'] },
+        Content: { Simple: { Subject: { Data: String(i) }, Body: { Text: { Data: 'x' } }, Attachments: [{ FileName: 'f.txt', RawContent: new Uint8Array(65536 + i).fill(i) }] } } }))));
+      client.destroy();
+      assert.deepEqual(results.map(r => r.status === 'fulfilled' ? 'ok' : String(r.reason)), Array(6).fill('ok'), `cacheMiddleware: ${cacheMiddleware}`);
+      assert.deepEqual(seen.sort(), Array.from({ length: 6 }, (_, i) => [String(i), 65536 + i]));
+    }
+    // One isolate-wide budget: reservations start in arrival order, never together past the budget, a larger one runs
+    // alone, and a reservation inside one never waits on its holder.
+    const { withMemory, memoryInUse } = await import('./src/isolate-memory.js'), MiB = 1024 * 1024, started: number[] = [];
+    let peak = 0, active = 0, alone = true;
+    await Promise.all([40, 40, 10, 70].map((size, i) => withMemory(size * MiB, async () => {
+      started.push(i); active++; peak = Math.max(peak, memoryInUse());
+      if (size === 70 && active > 1) alone = false;
+      await withMemory(size * MiB, async () => undefined);
+      await new Promise(resolve => setTimeout(resolve, 20)); active--;
+    })));
+    assert.deepEqual([started, peak <= SEND_LIMITS.isolateWorkingBytes, alone, memoryInUse()], [[0, 1, 2, 3], true, true, 0]);
+    // Five 25 MiB raw uploads at once all succeed; they wait their turn for the isolate's memory.
+    const five = await Promise.all(Array.from({ length: 5 }, (_, i) => upload(`five${i}.txt`, max)));
+    for (const response of five) { const file = ok(response, 201); cleanup(t, async () => { ok(await http('DELETE', `/v1/attachments/${file.id}`, key.secret), [200, 404]); }); }
   });
 
   test('sending freezes the audience at launch and existing schedule/cancel contracts hold', async t => {
@@ -22526,22 +22556,22 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         // Within one workspace, a forward to one of its own receiving hosts is refused when it is made.
         error(await local('POST','/v1/endpoints',{type:'forward',name:'self',address:'back@receive.example',from:box.id}),422,'FORWARD_LOOP');
       });
-      await t.test('forwards: attachments go along up to one message’s limits (20 files, 8 MiB); the rest are named in the forward',async it=>{
+      await t.test('forwards: attachments go along up to one message’s limits (20 files, 25 MiB); the rest are named in the forward',async it=>{
         const hookId=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='whole'",[wid])).rows[0].id as string;
         await route('files@receive.example',['forward:whole'],'files');
         const parts=[...Array.from({length:21},(_,n)=>[`note-${n}.txt`,`note ${n}`]),['tool.exe','MZ fixture'],['big.bin','big fixture']];
         const mime=['From: Ana Sender <ana@example.org>','To: files@receive.example','Subject: Many files','Message-ID: <fwd-files@example.org>','MIME-Version: 1.0','Content-Type: multipart/mixed; boundary="m"','',
           '--m','Content-Type: text/plain; charset=utf-8','','See attached.',...parts.flatMap(([name,body])=>['--m','Content-Type: application/octet-stream',`Content-Disposition: attachment; filename="${name}"`,'',body!]),'--m--',''].join('\r\n');
         const m=await receive('fwd-files',['files@receive.example'],mime);assert.equal(m.attachment_count,23);
-        // Received mail is parsed up to 6 MiB, so a file past the 8 MiB limit stands in by its recorded size; it is never read.
-        await db.query("UPDATE mail_attachments SET size_bytes=$3 WHERE workspace_id=$1 AND message_id=$2 AND filename='big.bin'",[wid,m.id,9*1024*1024]);
+        // Received mail is parsed up to 6 MiB, so a file past the 25 MiB limit stands in by its recorded size; it is never read.
+        await db.query("UPDATE mail_attachments SET size_bytes=$3 WHERE workspace_id=$1 AND message_id=$2 AND filename='big.bin'",[wid,m.id,26*1024*1024]);
         assert.deepEqual(await forwardDelivery(hookId,m.id),{status:'delivered',last_error:null,routed:true});
         const notes=(await db.query("SELECT filename FROM mail_attachments WHERE workspace_id=$1 AND message_id=$2 AND filename LIKE 'note-%' ORDER BY id",[wid,m.id])).rows.map((r:Json)=>r.filename as string);
         const [sent]=await dispatchedForward(it,m.id,hookId),files=sent.Content.Simple.Attachments as Json[];
         // The first 20 that fit, in the received order; a type SES won't deliver, the file over the limit and the 21st are named.
         assert.deepEqual(files.map(f=>f.FileName).sort(),notes.slice(0,20).sort());
         for(const f of files)assert.equal(Buffer.from(f.RawContent).toString(),`note ${f.FileName.slice(5,-4)}`);
-        const named=/Not attached: (.+) \(over the 20-file, 8 MiB limit/.exec(sent.Content.Simple.Body.Text.Data)![1]!.split(', ');
+        const named=/Not attached: (.+) \(over the 20-file, 25 MiB limit/.exec(sent.Content.Simple.Body.Text.Data)![1]!.split(', ');
         assert.deepEqual(named.sort(),['big.bin','tool.exe',notes[20]!].sort());
       });
       await t.test('forwards: hosted, a forwarded file the content screen can’t vouch for is named, and the rest still go',async()=>{

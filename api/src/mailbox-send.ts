@@ -19,6 +19,7 @@ import { attachToMailboxes, htmlToPlain, messageIdList, normalizeSubject, sesMes
 import type { SendRequest } from './sending.js';
 import { decodeBase64, MAX_JSON_ATTACHMENT_BYTES, mib, validateAttachment } from './outbound-content.js';
 import { SEND_LIMITS } from './send-limits.js';
+import { withMemory } from './isolate-memory.js';
 import { productName } from './brand.js';
 
 export const DEFAULT_SEND_LIMITS: SendLimits = { perHour: 100, perDay: 1000, perRecipientPerHour: 20, perThreadPer10Minutes: 10 };
@@ -56,8 +57,9 @@ export async function resolveAttachments(runtime:Runtime, mailbox:Pick<MailboxRo
       const [file]=await runtime.db.select({file:mailAttachments,region:mailMessages.region}).from(mailAttachments).innerJoin(mailMessages,eq(mailMessages.id,mailAttachments.messageId))
         .innerJoin(mailboxMessages,and(eq(mailboxMessages.messageId,mailAttachments.messageId),eq(mailboxMessages.mailboxId,mailbox.id))).where(and(eq(mailAttachments.workspaceId,scope.workspaceId),eq(mailAttachments.id,item.id),sql`coalesce(${mailMessages.verdicts}->>'virus',CASE WHEN ${mailMessages.direction}='outbound' THEN 'PASS' END)='PASS'`));
       if(!file?.region) throw new ApiError(404,'ATTACHMENT_NOT_FOUND','The attachment was not found in this mailbox.','attachments');
-      const bytes=await mailAttachmentBytes(runtime,scope.workspaceId,file.region,file.file);
-      out.push(await storeAttachmentBytes(runtime,scope,{filename:file.file.filename,contentType:file.file.contentType,disposition:file.file.disposition,contentId:file.file.contentId??undefined},bytes));
+      // The file and its stored copy count against the isolate's memory budget (isolate-memory.ts).
+      out.push(await withMemory(copyReservation(file.file.sizeBytes),async()=>storeAttachmentBytes(runtime,scope,{filename:file.file.filename,contentType:file.file.contentType,disposition:file.file.disposition,contentId:file.file.contentId??undefined},
+        await mailAttachmentBytes(runtime,scope.workspaceId,file.region!,file.file))));
     } else {
       const [source]=await runtime.db.select().from(sendingAttachments).where(and(eq(sendingAttachments.workspaceId,scope.workspaceId),eq(sendingAttachments.id,item.id)));
       if(!source || !ownsUpload(scope.workspaceId,source))throw new ApiError(404,'ATTACHMENT_NOT_FOUND','The upload was not found.','attachments');
@@ -67,7 +69,9 @@ export async function resolveAttachments(runtime:Runtime, mailbox:Pick<MailboxRo
   }
   return out;
 }
-/** A stored attachment's bytes (received, or a sent copy archived from its upload), read from the mail store. At most 8 MiB. */
+/** What reading one stored file and writing a copy of it holds: the file, a copy the store may make, and slack. */
+export const copyReservation = (bytes: number) => bytes * 2.15 + 1024 * 1024;
+/** A stored attachment's bytes (received, or a sent copy archived from its upload), read from the mail store. At most 25 MiB. */
 export async function mailAttachmentBytes(runtime:Runtime,wid:string,region:string,file:typeof mailAttachments.$inferSelect):Promise<Uint8Array>{
   try {
     if(file.sizeBytes>MAX_TOTAL_ATTACHMENT_BYTES)throw new ApiError(413,'ATTACHMENT_LIMIT_EXCEEDED','The attachment is too large.');
@@ -90,11 +94,12 @@ export async function archiveMailboxFiles(runtime:Runtime,wid:string,messageId:s
   const {region,file:first}=rows[0]!;
   if(!region || rows.some(r=>r.file.bucket!==first.bucket))throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','Inconsistent storage binding.');
   const {verifiedAttachment}=await wrapModuleLoad(()=>import('./sending.js'));
-  await withMailObjects(runtime,wid,region,first.bucket,async objects=>{for(const {file,source} of rows){
+  // One file at a time: the largest file and its stored copy count against the isolate's budget (isolate-memory.ts).
+  await withMemory(copyReservation(Math.max(...rows.map(r=>r.source.size))),()=>withMailObjects(runtime,wid,region,first.bucket,async objects=>{for(const {file,source} of rows){
     if(!ownsUpload(wid,source) || source.checksum!==file.sha256)throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','Invalid archive source.');
     const bytes=await verifiedAttachment(runtime,source);
     await objects.put(file.storageKey,bytes,file.contentType);
-  }},{client});
+  }},{client}));
   await runtime.db.execute(sql`WITH copied AS (UPDATE mail_attachments SET source_attachment_id=NULL WHERE workspace_id=${wid} AND message_id=${messageId} AND source_attachment_id IS NOT NULL RETURNING id)
     DELETE FROM sending_attachment_links l USING copied c WHERE l.workspace_id=${wid} AND l.owner_type='mailbox' AND l.owner_id=c.id`);
 }
@@ -111,7 +116,9 @@ export async function archiveSentMessage(runtime:Runtime,wid:string,mid:string){
   const key=isS3Bucket(m.rawBucket)?`workspaces/${wid}/raw/sent/${mid}.eml`:mailKey(wid,m.lifecycle==='kept'?'kept':'ephemeral',m.senderMailboxId,mid);
   const files=await runtime.db.select().from(mailAttachments).where(and(eq(mailAttachments.workspaceId,wid),eq(mailAttachments.messageId,mid))).orderBy(mailAttachments.id);
   const {inlineMessage}=await import('./sending.js');
-  await withMailObjects(runtime,wid,m.region,m.rawBucket,async objects=>{
+  // The files, the Sent message built from them (about 1.37 times their size, plus the body) and its copy in the store
+  // count against the isolate's budget (isolate-memory.ts). The files' own archive above held its share and is done.
+  await withMemory(files.reduce((n,f)=>n+f.sizeBytes,0)*2.6+((m.html?.length??0)+(m.text?.length??0))*4+1024*1024,()=>withMailObjects(runtime,wid,m.region!,m.rawBucket!,async objects=>{
     const parts=[];let total=0;
     for(const f of files){
       if(f.bucket!==m.rawBucket||(total+=f.sizeBytes)>MAX_TOTAL_ATTACHMENT_BYTES)throw new Error('Invalid Sent attachment binding');
@@ -122,7 +129,7 @@ export async function archiveSentMessage(runtime:Runtime,wid:string,mid:string){
     await objects.put(key,wire,'message/rfc822');
     const done=await runtime.db.execute(sql`WITH updated AS (UPDATE mail_messages SET raw_key=${key},size_bytes=${wire.length},mime=${JSON.stringify(mimeIndex(wire))}::jsonb WHERE workspace_id=${wid} AND id=${mid} AND raw_key IS NULL RETURNING sender_mailbox_id), usage AS (UPDATE inbox_state s SET bytes=bytes+${wire.length} FROM updated WHERE s.inbox_id=sender_mailbox_id AND EXISTS(SELECT FROM mailbox_messages WHERE mailbox_id=s.inbox_id AND message_id=${mid})) SELECT FROM mail_messages WHERE workspace_id=${wid} AND id=${mid}`);
     if(!done.rowCount)await objects.delete([key]);
-  });
+  }));
 }
 
 const wireId = (v: string, header: string) => /^[\x21-\x3b\x3d\x3f-\x7e]+$/.test(v) && v.length + 2 + header.length <= 996;
