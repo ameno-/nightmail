@@ -7501,7 +7501,7 @@
               "auth",
               "engagement"
             ],
-            "description": "complaints, content (the spam screen), bounces (to known recipients), hygiene (list quality: first sends and suppression hits), auth, engagement."
+            "description": "complaints, content (the spam screen), bounces (to known recipients), hygiene (list quality: campaign first sends and their suppression hits; neutral without campaign mail), auth, engagement."
           },
           "label": {
             "type": "string"

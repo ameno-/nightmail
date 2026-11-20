@@ -12485,6 +12485,73 @@ describe('Dashboard API capabilities', () => {
     });
   });
 
+  test('sender score: list quality counts campaign mail only: a transactional sender\'s suppressed sends leave the factor out and its weight out of the score; a campaign sender\'s list quality is unchanged; migration 362 recounts stored evidence', async t => {
+    const m = await import('./src/standing-model.js');
+    const day = (o: Partial<import('./src/standing-model.js').DayEvidence> = {}) => ({ day: '2026-11-12', emails: 1000, accepted: 1000, delivered: 1000, bounced: 0, first_sends: 0, first_bounced: 0, complained: 0, screened: 0, rejected: 0, suppressed: 0, marketing_delivered: 0, unsubscribed: 0, clicked: 0, ...o });
+    const hygiene = (d: ReturnType<typeof day>) => m.quality([d], [], false, '2026-11-12').factors.find(f => f.key === 'hygiene')!;
+    // Before: 20 suppressed transactional emails were a 100% list-quality rate, a 0 with weight 15 (target 75).
+    assert.deepEqual([hygiene(day({ suppressed: 20 })).source, m.quality([day({ suppressed: 20 })], [], false, '2026-11-12').target], ['neutral', 100], 'Suppressions without campaign mail are no list: the factor drops out.');
+    const listed = hygiene(day({ first_sends: 400, first_bounced: 8, suppressed: 20 }));
+    assert.deepEqual([listed.source, listed.value, listed.score], ['measured', 0.066667, 41.7], 'Campaign mail: first-send bounces and suppressions ÷ first sends and suppressions, as before.');
+
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = runtime.config.workspaceId;
+      const { refreshStanding } = await import('./src/standing.js');
+      const insert = (count: number, options: { status?: string; outcomes?: number; campaign?: boolean } = {}) => db.query(
+        `INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, created_at)
+         SELECT $1 || n, $2, $3, 'fixture', $7, 'hello@score.example', '["recipient@example.com"]', '[]', '[]', 'List quality fixture', '{}', false, $4::text, CASE WHEN $4::text = 'suppressed' THEN NULL ELSE 'provider-' || $1 || n END, $5, least(now(), date_trunc('day', now(), 'UTC') + make_interval(secs => n))
+         FROM generate_series(1, $6::int) n`,
+        [unique('hygiene-'), wid, REGION, options.status ?? 'delivered', options.outcomes ?? 3, count, options.campaign ? 'campaign_fixture' : null]);
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'List quality reader', permissions: ['read'] }), 201); secrets.add(key.secret);
+      const read = async () => ok(await request('GET', '/v1/sender-score', key.secret));
+      const factor = (view: Json, k: string) => view.factors.find((f: Json) => f.key === k);
+      const measured = (view: Json) => view.factors.filter((f: Json) => f.source === 'measured').map((f: Json) => [f.key, f.weight]);
+      // A transactional sender: 200 delivered, 2 hard bounces, 5 refused for a suppressed address. Complaints (30) and
+      // bounces (15) are measured; with list quality at 0 for weight 15 this was 72.3, under good standing.
+      await insert(200); await insert(2, { status: 'bounced', outcomes: 5 }); await insert(5, { status: 'suppressed', outcomes: 0 });
+      const expected = m.round((30 * 100 + 15 * 100 * (0.05 - 2 / 202) / 0.045) / 45);
+      const shown = await read();
+      assert.deepEqual([factor(shown, 'hygiene').source, factor(shown, 'hygiene').value, measured(shown), shown.raw, expected], ['neutral', null, [['complaints', 30], ['bounces', 15]], 96.4, 96.4], 'Read on display (no stored standing).');
+      // Hosted: the standing job stores the same factors and score, in good standing.
+      Object.assign(runtime.config, { multiTenant: true });
+      await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state) VALUES ($1,$1,'shared',$2,'ready')", [wid, REGION]);
+      await refreshStanding(runtime, { only: wid });
+      const hosted = await read();
+      assert.deepEqual([hosted.state, factor(hosted, 'hygiene').source, measured(hosted), hosted.score, hosted.limit.unlimited], ['graded', 'neutral', [['complaints', 30], ['bounces', 15]], expected, true]);
+      assert.equal((await db.query("SELECT suppressed FROM sender_score_daily WHERE workspace_id=$1 AND day=(now() AT TIME ZONE 'UTC')::date", [wid])).rows[0].suppressed, 0, 'Stored evidence counts no transactional suppression.');
+
+      // Migration 362 on evidence stored the old way (every suppression counted): a day with no campaign mail drops to 0
+      // and the next standing run recounts the retained 30 days, here today's (stored as one campaign email and 5
+      // suppressions). Run on temporary copies of this workspace's rows.
+      await db.query("UPDATE sender_score_daily SET first_sends=1,suppressed=5 WHERE workspace_id=$1 AND day=(now() AT TIME ZONE 'UTC')::date", [wid]);
+      await db.query("INSERT INTO sender_score_daily(workspace_id,day,emails,accepted,delivered,first_sends,suppressed) VALUES ($1,(now() AT TIME ZONE 'UTC')::date-40,110,100,100,0,3),($1,(now() AT TIME ZONE 'UTC')::date-41,110,100,100,50,4)", [wid]);
+      const { rows: [{ lock_timeout: lockTimeout }] } = await db.query('SHOW lock_timeout');
+      for (const table of ['sender_score_daily', 'sender_standing']) {
+        await db.query(`CREATE TEMP TABLE ${table} (LIKE public.${table} INCLUDING DEFAULTS INCLUDING INDEXES) ON COMMIT DROP`);
+        await db.query(`INSERT INTO pg_temp.${table} SELECT * FROM public.${table} WHERE workspace_id=$1`, [wid]);
+      }
+      await db.query(await readFile(new URL('./migrations/362_hygiene_campaign_only.sql', import.meta.url), 'utf8'));
+      await db.query("UPDATE public.sender_score_daily p SET suppressed=c.suppressed FROM pg_temp.sender_score_daily c WHERE p.workspace_id=c.workspace_id AND p.day=c.day");
+      await db.query('UPDATE public.sender_standing p SET evidence_at=c.evidence_at FROM pg_temp.sender_standing c WHERE p.workspace_id=c.workspace_id');
+      await db.query('DROP TABLE pg_temp.sender_score_daily, pg_temp.sender_standing');
+      await db.query("SELECT set_config('lock_timeout',$1,true)", [lockTimeout]);
+      const stored = async () => (await db.query("SELECT (now() AT TIME ZONE 'UTC')::date-day AS age,suppressed FROM sender_score_daily WHERE workspace_id=$1 ORDER BY day DESC", [wid])).rows.map(r => [r.age, r.suppressed]);
+      assert.deepEqual([await stored(), (await db.query('SELECT evidence_at FROM sender_standing WHERE workspace_id=$1', [wid])).rows[0].evidence_at], [[[0, 5], [40, 0], [41, 4]], null], 'Only a day with campaign mail keeps its suppressions; the evidence is due again.');
+      await refreshStanding(runtime, { only: wid });
+      assert.deepEqual(await stored(), [[0, 0], [40, 0], [41, 4]], 'The retained days are recounted.');
+      await db.query("DELETE FROM sender_score_daily WHERE workspace_id=$1 AND day<(now() AT TIME ZONE 'UTC')::date", [wid]);
+
+      // A campaign sender: 100 first sends delivered, 4 hard-bounced and 6 refused for a suppressed address. List quality is
+      // (4 + 6) ÷ (104 + 6), as before; the 5 transactional suppressions stay out of it.
+      await insert(100, { campaign: true }); await insert(4, { status: 'bounced', outcomes: 5, campaign: true }); await insert(6, { status: 'suppressed', outcomes: 0, campaign: true });
+      await db.query('UPDATE sender_standing SET evidence_at=NULL WHERE workspace_id=$1', [wid]);
+      await refreshStanding(runtime, { only: wid });
+      const campaign = await read();
+      assert.deepEqual([factor(campaign, 'hygiene').source, factor(campaign, 'hygiene').value, factor(campaign, 'hygiene').score, factor(campaign, 'bounces').value], ['measured', m.round(10 / 110, 6), 11.4, m.round(2 / 202, 6)]);
+      assert.deepEqual(measured(campaign), [['complaints', 30], ['bounces', 15], ['hygiene', 15], ['engagement', 10]]);
+    });
+  });
+
   test('sender score: a new sender\'s first 100 recipients are its evaluation; after it a good sender grows from 1,000 an hour and sends past 10,000 a day, a bad one is capped, a queued burst does not raise a freeze, bouncing caps and recovery lifts it, and the pace bounds every minute', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const { refreshStanding } = await import('./src/standing.js');

@@ -11,7 +11,7 @@ import { burstFor, EVALUATION, evaluateLadder, FACTOR_KEYS, FREEZE_FLOOR, GOOD_S
 // its score is computed from its last 30 days of mail on read and only displayed. docs/sending-limits.md has the tables.
 
 const FactorSchema = z.object({
-  key: z.enum(FACTOR_KEYS).describe('complaints, content (the spam screen), bounces (to known recipients), hygiene (list quality: first sends and suppression hits), auth, engagement.'),
+  key: z.enum(FACTOR_KEYS).describe('complaints, content (the spam screen), bounces (to known recipients), hygiene (list quality: campaign first sends and their suppression hits; neutral without campaign mail), auth, engagement.'),
   label: z.string(), weight: z.number().int().describe('Share of the score, out of 100, when every factor is measured.'),
   value: z.number().nullable().describe('The measured rate or ratio, decayed with a 30-day half-life; null when neutral.'),
   score: z.number().nullable().describe('0–100 for this factor; null when neutral.'),
@@ -124,7 +124,7 @@ export async function loadStanding(runtime: Runtime, wid: string): Promise<Row> 
         count(*) FILTER (WHERE campaign_id IS NOT NULL AND (status='bounced' OR event_outcomes & 4 <> 0))::int AS first_bounced,
         count(*) FILTER (WHERE status='complained' OR event_outcomes & 8 <> 0)::int AS complained,
         count(*) FILTER (WHERE error_code='CONTENT_REJECTED_SPAM' OR (status<>'suppressed' AND (provider_id IS NOT NULL OR event_outcomes & 1 <> 0)))::int AS screened,
-        count(*) FILTER (WHERE error_code='CONTENT_REJECTED_SPAM')::int AS rejected,count(*) FILTER (WHERE status='suppressed')::int AS suppressed,
+        count(*) FILTER (WHERE error_code='CONTENT_REJECTED_SPAM')::int AS rejected,count(*) FILTER (WHERE campaign_id IS NOT NULL AND status='suppressed')::int AS suppressed,
         count(*) FILTER (WHERE (kind='marketing' OR campaign_id IS NOT NULL) AND (status='delivered' OR event_outcomes & 2 <> 0))::int AS marketing_delivered,0 AS unsubscribed,
         count(*) FILTER (WHERE (kind='marketing' OR campaign_id IS NOT NULL) AND event_outcomes & 32 <> 0)::int AS clicked FROM mail GROUP BY day) x) AS days,
       (SELECT json_agg(json_build_object('name',dc.name,'dkim',dc.identity #>> '{ses,DkimAttributes,Status}'='SUCCESS' AND dc.identity #>> '{ses,DkimAttributes,SigningEnabled}'='true',

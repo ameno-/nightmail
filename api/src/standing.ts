@@ -131,7 +131,7 @@ async function refreshEvidence(db: DbExecutor, limit: number) {
     ), days AS (
       SELECT workspace_id,day,count(*)::int AS emails,count(*) FILTER (WHERE accepted)::int AS accepted,count(*) FILTER (WHERE delivered)::int AS delivered,
         count(*) FILTER (WHERE bounced)::int AS bounced,count(*) FILTER (WHERE accepted AND first_send)::int AS first_sends,count(*) FILTER (WHERE bounced AND first_send)::int AS first_bounced,
-        count(*) FILTER (WHERE complained)::int AS complained,count(*) FILTER (WHERE suppressed)::int AS suppressed,
+        count(*) FILTER (WHERE complained)::int AS complained,count(*) FILTER (WHERE suppressed AND first_send)::int AS suppressed,
         count(*) FILTER (WHERE delivered AND marketing)::int AS marketing_delivered,count(*) FILTER (WHERE clicked AND marketing)::int AS clicked
       FROM mail GROUP BY 1,2
     ), screen AS (
