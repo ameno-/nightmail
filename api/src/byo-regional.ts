@@ -445,13 +445,14 @@ const disconnect:JobHandler=retryDatabaseFailures(async(r,p,j)=>{
       // Fence the worker through one bounded AWS removal and its checkpoint. Losing
       // the response leaves the old journal; a retry proves absence or checks ownership anew.
       if (!(await db.execute(sql`SELECT FROM jobs WHERE ${ticket} AND lease_until>clock_timestamp() FOR UPDATE`)).rowCount) return false;
-      // After a forced fence, setup still running finishes first: it could otherwise create a resource after its region was cleaned.
-      if ((await db.execute(sql`SELECT FROM jobs WHERE ${setupJobs(c)} AND status='running' AND lease_until>clock_timestamp() LIMIT 1`)).rowCount) return 'wait';
+      // After a forced fence, setup still running and mail still queued or mid-attempt settle before anything is removed:
+      // setup could create a resource after its region was cleaned, and the dispatcher cancels queued mail and marks an
+      // interrupted attempt unknown. Feedback SES sends later for mail already accepted is lost with the topic.
+      if ((await db.execute(sql`SELECT FROM jobs WHERE ${setupJobs(c)} AND status='running' AND lease_until>clock_timestamp() LIMIT 1`)).rowCount ||
+          (await db.execute(sql`SELECT FROM sending_emails WHERE workspace_id=${c.workspace_id} AND status IN ('queued','attempting') LIMIT 1`)).rowCount) return 'wait';
       const rr=(await db.execute<{region:string;ownership_journal:JournalEntry[];feedback_topic_arn:string|null}>(sql`SELECT region,ownership_journal,feedback_topic_arn FROM provider_connection_regions WHERE connection_id=${c.id} AND
         (feedback_topic_arn IS NOT NULL OR EXISTS(SELECT FROM jsonb_array_elements(ownership_journal) e WHERE e->>'kind' IS DISTINCT FROM 'identity')) ORDER BY region LIMIT 1 FOR UPDATE`)).rows[0];
       if (!rr) {
-        // ...and mail it left queued or mid-attempt settles: the dispatcher cancels the one and marks the other unknown.
-        if ((await db.execute(sql`SELECT FROM sending_emails WHERE workspace_id=${c.workspace_id} AND status IN ('queued','attempting') LIMIT 1`)).rowCount) return 'wait';
         const left=c.disconnect_summary?.leftBehind??[];
         if (left.length) await recordAudit(db,systemContext('job'),{action:'connection.cleanup',workspaceId:c.workspace_id,target:{type:'connection',id:c.id},after:{leftBehind:left.slice(0,50)},internal:false});
         await db.execute(sql`WITH ${releaseConnectionClaims(c.workspace_id,sql`SELECT ${c.id}::text AS id`)} SELECT 1`);
