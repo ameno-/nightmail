@@ -204,7 +204,7 @@ export function SorterHome({ start, notice }: HomeProps) {
           {p.tally && <span className="srt-tally" ref={tally} style={{ left: p.ox + p.tally.x + DX * p.tally.z, top: p.oy - p.tally.y - p.tally.h - DY * p.tally.z, width: p.tally.w, height: p.tally.h }} aria-hidden="true">00000</span>}
           {/* The two facts: instruments in the base, a legend over a window each. */}
           <p className="srt-fact" ref={el => { veiled.current[3] = el }} style={pane(p.facts[0])}><span className="srt-fact-label">Responds in</span><span className="srt-fact-value"><span><b>~100</b><i>ms</i></span><span className="srt-scale" aria-hidden="true" /></span></p>
-          <p className="srt-fact" ref={el => { veiled.current[4] = el }} style={pane(p.facts[1])}><span className="srt-fact-label">Free every month</span><span className="srt-fact-value"><span><b>3,000</b><i>sent</i></span><span><b>3,000</b><i>received</i></span></span></p>
+          <p className="srt-fact" ref={el => { veiled.current[4] = el }} style={pane(p.facts[1])}><span className="srt-fact-label">Free every month</span><span className="srt-fact-value"><span><b>5,000</b><i>sent</i></span><span><b>5,000</b><i>received</i></span></span></p>
           <StartButton start={start} className="srt-cta" ref={cta} style={at(p.cta)} />
           {/* What signing in agrees to, directly under a phone's button (a wide page has it under the slab's lip). */}
           {p.consent && <div className="srt-consent-on" style={at(p.consent)}><SignInConsent className="srt-consent" /></div>}

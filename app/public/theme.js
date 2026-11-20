@@ -19,6 +19,16 @@
   }
 })()
 
+// home.html's first screen (app/home-shell.ts) is the plain homepage's: off at any other address, and where "/" shows
+// something else (an invitation, another account, ?home=); with the member's button where this browser has had a
+// dashboard ready. (Only home.html's script tag has data-home.)
+;(() => {
+  if (!document.currentScript?.hasAttribute('data-home')) return
+  const root = document.documentElement, query = new URLSearchParams(location.search)
+  if (location.pathname !== '/' || ['invitation', 'account', 'home'].some(name => query.has(name))) { root.dataset.shell = 'off'; return }
+  try { if (localStorage.getItem('nightmail.dashboard-ready')) root.dataset.member = '' } catch {}
+})()
+
 ;(() => {
   // The homepage has no theme switch: it is in the system's theme (lib/theme.tsx). Elsewhere a saved choice wins.
   let saved = null

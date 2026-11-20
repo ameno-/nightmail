@@ -52,8 +52,9 @@ export type Layers = { stage: HTMLElement; bg: HTMLElement; boards: HTMLElement;
 /** Starts the factory in `layers` once the first segment and the boards can play; until then (and for good, where
  *  they cannot: `failed` is called) the page's poster is what is seen. `base` is where the renders are, ending in a
  *  slash; `height` which of their sizes. With `rail: false` the boards aren't put on the rail: the page hangs its own
- *  in `layers.boards`, which only dims with the hall. The stage gets `data-playing` when the videos are up. */
-export function mountPlayer(layers: Layers, { base, manifest: m, format, height, failed, rail: onRail = true }: { base: string; manifest: Manifest; format: AlphaFormat; height: 720 | 1080; failed?: () => void; rail?: boolean }): Player {
+ *  in `layers.boards`, which only dims with the hall; `boardSprites` are the rail's sprites where the page has its own
+ *  (else the set's). The stage gets `data-playing` when the videos are up. */
+export function mountPlayer(layers: Layers, { base, manifest: m, format, height, failed, rail: onRail = true, boardSprites }: { base: string; manifest: Manifest; format: AlphaFormat; height: 720 | 1080; failed?: () => void; rail?: boolean; boardSprites?: string[] }): Player {
   const order = schedule(m.segments), frame = 1 / m.fps
   // (A layer one segment shares with another is the other's file: rush's hall is steady's bg-1080.mp4, so it is
   // downloaded once.)
@@ -78,7 +79,7 @@ export function mountPlayer(layers: Layers, { base, manifest: m, format, height,
   const W = m.width, H = m.height, { speedPxPerSec: speed, gapPx: gap } = m.boards, period = m.boards.periodPx ?? gap * m.boards.y.length
   const boards = (onRail ? m.boards.y : []).map((y, k) => {
     const rail = document.createElement('div'), img = document.createElement('img')
-    rail.className = 'fac-rail'; img.className = 'fac-board'; img.alt = ''; img.decoding = 'async'; img.src = `${base}${m.boards.files?.[k] ?? `boards/board${k}.png`}`
+    rail.className = 'fac-rail'; img.className = 'fac-board'; img.alt = ''; img.decoding = 'async'; img.src = boardSprites?.[k] ?? `${base}${m.boards.files?.[k] ?? `boards/board${k}.png`}`
     rail.append(img); layers.boards.append(rail)
     return { rail, img, y, k, motion: null as Animation | null }
   })
