@@ -21443,6 +21443,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Past its expiry a key signs in no more; a later expiry brings it back.
       await db.query("UPDATE api_keys SET expires_at=now()-interval '1 second' WHERE id=$1", [smtp.id]);
       assert.deepEqual(await refusal(login(smtp.secret)), [403, 'PROTOCOL_DENIED']);
+      // A gateway that still holds the login (a cached sign-in, an open session, an image that ignores expiresInMs) can't
+      // send with it: every submission reads the key again, so nothing is written or sent.
+      const sentBefore = (await db.query('SELECT count(*)::int n FROM sending_emails WHERE actor_key_id=$1', [smtp.id])).rows[0].n;
+      assert.deepEqual(await refusal(submit(smtp.id, 'app@relay.example', ['reader@example.net'], ['From: app@relay.example', 'To: reader@example.net', 'Subject: After expiry'])), [403, 'CREDENTIAL_REVOKED']);
+      assert.equal((await db.query('SELECT count(*)::int n FROM sending_emails WHERE actor_key_id=$1', [smtp.id])).rows[0].n, sentBefore);
       ok(await local('PATCH', `/v1/api-keys/${smtp.id}`, { expiresAt: null }));
       assert.equal((await login(smtp.secret)).status, 200);
       const refused = [await login(smtp.secret, 'imap'), await login(smtp.secret, 'smtp', 'alerts@relay.example'), await login(addressKey.secret, 'imap')];
