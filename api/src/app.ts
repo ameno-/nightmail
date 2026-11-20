@@ -14,12 +14,13 @@ import { countEnqueued } from './jobs.js';
 import { authenticatedCreates } from './idempotency.js';
 import { clientIpHeader, headerPrefix, healthService, productName, requestHeaderNames } from './brand.js';
 
-type RouteGroup = 'auth-ui' | 'mcp' | 'auth' | 'operator' | 'support' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview' | 'billing';
+type RouteGroup = 'analytics' | 'auth-ui' | 'mcp' | 'auth' | 'operator' | 'support' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview' | 'billing';
 // Internal areas: /v1/operator/* answers only Nightmail operators and /v1/support/* only support grants (src/support.ts).
 const operatorPath = (pathname: string) => pathname === '/v1/operator' || pathname.startsWith('/v1/operator/');
 const supportPath = (pathname: string) => pathname === '/v1/support' || pathname.startsWith('/v1/support/');
 function routeGroupFor(pathname: string): RouteGroup | null {
   if(pathname==='/internal/v1/mail')return 'mailbox';
+  if (pathname === '/internal/v1/analytics') return 'analytics';
   if (pathname === '/v1/public/stats') return 'public-stats';
   // Billing: balance, usage, ledger, payments, the Stripe webhook and the operator's billing tools (behind the operator gate).
   if (pathname === '/v1/billing' || pathname.startsWith('/v1/billing/') || pathname.startsWith('/v1/operator/billing/')) return 'billing';
@@ -62,6 +63,7 @@ const groupRegistrars: Partial<Record<RouteGroup, Promise<(app: App) => void>>> 
 function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: App) => void> {
   return groupRegistrars[group] ??= wrapModuleLoad(async () => {
     switch (group) {
+      case 'analytics': return (await import('./analytics.js')).registerAnalytics;
       case 'auth': return registerAuth;
       case 'auth-ui': {
         const [{ registerMcpAuth }, { registerDashboardAuth }] = await Promise.all([import('./mcp-auth.js'), import('./dashboard-auth.js')]);
@@ -338,8 +340,8 @@ export async function createOpenApiApp(): Promise<App> {
   registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full); registerOverviewSetup(full); registerOperator(full);
   registerAudit(full); registerSupport(full); registerSupportOperator(full); registerSupportConversations(full); registerSupportInbox(full); registerUiNotes(full);
   registerBilling(full); registerStripeWebhook(full);
-  const { registerSupportNotes } = await wrapModuleLoad(() => import('./support-notes.js'));
-  registerSupportNotes(full);
+  const [{ registerSupportNotes }, { registerAnalytics }] = await wrapModuleLoad(() => Promise.all([import('./support-notes.js'), import('./analytics.js')]));
+  registerSupportNotes(full); registerAnalytics(full);
   return full;
 }
 

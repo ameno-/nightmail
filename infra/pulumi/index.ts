@@ -108,6 +108,18 @@ new cf.R2BucketLifecycle("media-lifecycle", { accountId: cloudflareAccountId, bu
 ] }, { provider: cloudflare });
 export const mediaUrl = `https://${stage.media.domain}/factory/`;
 
+// Dashboard usage analytics (docs/analytics.md), bound to the Worker as ANALYTICS. The Worker writes raw batches under
+// analytics/v1/raw/ and its hourly upkeep compacts them into analytics/v1/events/ and deletes days past 400. These rules
+// are the backstop: raw batches a compaction never reached go after 30 days, everything after 400.
+const analyticsR2 = new cf.R2Bucket("analytics", { accountId: cloudflareAccountId, name: `${cloudPrefix}-analytics`, jurisdiction: "default", location: "enam", storageClass: "Standard" }, {
+  provider: cloudflare, protect: true, ignoreChanges: ["location"],
+});
+new cf.R2BucketLifecycle("analytics-lifecycle", { accountId: cloudflareAccountId, bucketName: analyticsR2.name, jurisdiction: "default", rules: [
+  { id: "raw-30d", enabled: true, conditions: { prefix: "analytics/v1/raw/" }, deleteObjectsTransition: { condition: { type: "Age", maxAge: 30 * day } } },
+  { id: "events-400d", enabled: true, conditions: { prefix: "analytics/v1/events/" }, deleteObjectsTransition: { condition: { type: "Age", maxAge: 400 * day } } },
+  { id: "abort-multipart-1d", enabled: true, conditions: { prefix: "" }, abortMultipartUploadsTransition: { condition: { type: "Age", maxAge: day } } },
+] }, { provider: cloudflare });
+
 // Keep existing R2 resources protected under the original URNs. Adopt the standby pair in
 // addition; changing either existing physical name would request a bucket replacement.
 if (nightmailCloud) {

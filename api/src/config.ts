@@ -40,6 +40,8 @@ const values = z.object({
   // Hosted: who may use staff UI notes (src/ui-notes.ts), as "issuer subject" pairs separated by commas. They must also
   // hold the operator role. Empty turns the feature off: its routes answer 404 and the dashboard shows none of it.
   UI_NOTES_SUBJECTS: z.string().default(''),
+  // Dashboard usage analytics (docs/analytics.md): first-party, stored in this installation's own bucket. Off by default.
+  NIGHTMAIL_DASHBOARD_ANALYTICS: z.enum(['true', 'false']).default('false'),
   MULTI_TENANT: z.enum(['true', 'false']).default('false'),
   NIGHTMAIL_PLATFORM_AWS_ACCOUNT: optional(accountId),
   // Hosted only: the one workspace allowed to own PUBLIC_URL's own domain (see scripts/adopt-platform-domain.ts).
@@ -213,7 +215,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     byoV2: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL, byoEventsOrigin: v.BYO_EVENTS_ORIGIN,
     hostedSendCaps: { firstWeek: v.HOSTED_SEND_CAP_FIRST_WEEK },
     domainConnect,
-    allowedSubjects, staffGoogleDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr, uiNotesSubjects,
+    allowedSubjects, staffGoogleDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr, uiNotesSubjects, dashboardAnalytics: v.NIGHTMAIL_DASHBOARD_ANALYTICS === 'true',
     accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly', oauthScopePrefix: v.OAUTH_SCOPE_PREFIX, previousOrigins, byoStackPrefix: v.BYO_STACK_PREFIX,
     accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG, requiredAcr } : undefined,
     encryptionKey: deriveEncryptionKey(v.NIGHTMAIL_ROOT_SECRET),

@@ -29252,3 +29252,130 @@ test('Audit trail: sensitive actions each write one redacted row', async t => {
     for (const value of secrets) assert.ok(trail.every(summary => !summary.includes(value)), `A summary repeats ${value.slice(0, 12)}…`);
   });
 });
+
+// Dashboard analytics (src/analytics.ts, docs/analytics.md): the ingest runs in-process here with an in-memory bucket and
+// a database that fails the test if anything touches it.
+describe('dashboard analytics', () => {
+  const origin = 'https://analytics.example.org', path = '/internal/v1/analytics';
+  const bucket = () => {
+    const map = new Map<string, Uint8Array>();
+    const storage: import('./src/core.js').Storage = {
+      async put(key, body) { map.set(key, body); },
+      async get(key) { const body = map.get(key); return body ? { body, contentType: 'application/octet-stream' } : null; },
+      async delete(key) { map.delete(key); },
+      async list(prefix, after) {
+        const keys = [...map.keys()].filter(key => key.startsWith(prefix) && (!after || key > after)).sort(), page = keys.slice(0, 1000);
+        return { objects: page.map(key => ({ key, uploaded: new Date() })), cursor: keys.length > page.length ? page.at(-1) : undefined };
+      },
+    };
+    return { map, storage };
+  };
+  const setup = async (env: Record<string, string> = {}) => {
+    const [{ createApp }, { loadConfig }] = await Promise.all([import('./src/app.js'), import('./src/config.js')]);
+    const { map, storage } = bucket();
+    const db = new Proxy({}, { get(_target, prop) { throw new Error('Dashboard analytics touched Postgres (' + String(prop) + ').'); } }) as import('./src/core.js').Runtime['db'];
+    const runtime: import('./src/core.js').Runtime = { config: loadConfig({ PUBLIC_URL: origin, BANE_ROOT_SECRET: 'fixture-only-'.repeat(4), NIGHTMAIL_DASHBOARD_ANALYTICS: 'true', ...env }), db, storage };
+    const app = createApp();
+    const post = async (body: unknown, headers: Record<string, string> = {}, peer = '198.51.100.' + Math.floor(Math.random() * 250)) => {
+      const { clientIpHeader } = await import('./src/brand.js');
+      return app.fetch(new Request(origin + path, { method: 'POST', headers: { origin, 'content-type': 'application/json', [clientIpHeader]: peer, ...headers }, body: typeof body === 'string' ? body : JSON.stringify(body) }), runtime);
+    };
+    const rows = (prefix = 'analytics/v1/raw/') => [...map].filter(([key]) => key.startsWith(prefix)).sort(([a], [b]) => a.localeCompare(b))
+      .flatMap(([, body]) => new TextDecoder().decode(body).trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>));
+    return { app, runtime, map, post, rows };
+  };
+  const envelope = (events: unknown[]) => ({ v: 1, sid: 'sess_0001abcd', vid: 'visitor_0001', ws: 'ws_' + 'a'.repeat(32), uid: '0b5c7e1e-2f6c-4a51-9d0e-3c1f2a4b5c6d', app: 'abc123def456', vp: 'desktop', events });
+
+  test('dashboard analytics: the ingest stores scrubbed, templated rows and nothing it was not asked to keep', async () => {
+    const { post, map, rows } = await setup(), now = Date.now();
+    const typed = 'dana.lee@example.com', card = '4111 1111 1111 1111';
+    const response = await post({ ...envelope([
+      { id: 'evt_00000001', seq: 1, t: now, type: 'page_view', route: '/domains/dom_0123456789abcdef0123456789abcdef?tab=dns#records', ref: '/onboarding', ms: 1200 },
+      { id: 'evt_00000002', seq: 2, t: now, type: 'click', route: '/domains/:id', role: 'button', label: 'Send to ' + typed + ' at acme.io (2 pending) ' + card, value: typed },
+      { id: 'evt_00000003', seq: 3, t: now, type: 'click', route: '/domains/:id', name: 'domains/verify', label: 'Verify acme.io' },
+      { id: 'evt_00000004', seq: 4, t: now, type: 'form_invalid', route: '/settings', name: 'settings/invite', field: 'invites[2].email', reason: 'typeMismatch', value: typed },
+      { id: 'evt_00000005', seq: 5, t: now, type: 'api_error', route: '/domains/:id', code: 'VALIDATION_FAILED', op: 'POST /v1/domains/dom_0123456789abcdef/verify?to=' + typed, status: 422, field: 'to.0.email' },
+      { id: 'evt_00000006', seq: 6, t: now - 3 * 86_400_000, type: 'track', route: '/receiving/rules/support-' + typed, step: 'domain_added' },
+      // Dropped, one by one: an unknown step, a short ID, a URL for a route, an api_error without a code, an unknown type.
+      { id: 'evt_00000007', seq: 7, t: now, type: 'track', route: '/overview', step: 'wrote_a_letter' },
+      { id: 'bad', seq: 8, t: now, type: 'click', route: '/overview' },
+      { id: 'evt_00000009', seq: 9, t: now, type: 'page_hide', route: 'https://' + typed.split('@')[1] + '/inbox', ms: 10 },
+      { id: 'evt_00000010', seq: 10, t: now, type: 'api_error', route: '/overview' },
+      { id: 'evt_00000011', seq: 11, t: now, type: 'keypress', route: '/overview', label: typed },
+    ]), email: typed, ws: 'dana@example.com', uid: typed });
+    assert.equal(response.status, 204);
+    const keys = [...map.keys()];
+    assert.equal(keys.length, 1);
+    assert.match(keys[0]!, /^analytics\/v1\/raw\/dt=\d{4}-\d{2}-\d{2}\/h=\d{2}\/\d+-[0-9a-f]{16}\.ndjson$/);
+    const stored = new TextDecoder().decode(map.get(keys[0]!)!);
+    for (const leak of ['dana', 'example', 'acme', '4111', '1111', 'dom_0123', 'tab=dns', 'records', '"value"', '"email"', 'support-']) assert.ok(!stored.includes(leak), 'Stored analytics contain ' + leak + ': ' + stored);
+    const [view, click, named, invalid, failure, step, ...rest] = rows();
+    assert.equal(rest.length, 0);
+    assert.deepEqual([view!.type, view!.route, view!.ref, view!.ms, view!.target], ['page_view', '/domains/:id', '/onboarding', 1200, null]);
+    assert.deepEqual([click!.role, click!.label, click!.target], ['button', 'Send to [email] at [domain] (# pending)', 'button:Send to [email] at [domain] (# pending)']);
+    assert.deepEqual([named!.name, named!.label, named!.target], ['domains/verify', null, 'domains/verify']);
+    assert.deepEqual([invalid!.field, invalid!.reason, invalid!.target], ['invites.#.email', 'typeMismatch', 'settings/invite']);
+    assert.deepEqual([failure!.code, failure!.op, failure!.status, failure!.field], ['VALIDATION_FAILED', 'POST /v1/domains/:id/verify', 422, 'to.#.email']);
+    assert.deepEqual([step!.step, step!.route, step!.t], ['domain_added', '/receiving/rules/:id', step!.received]);
+    // The envelope is copied onto each row; IDs that aren't Nightmail's shapes are dropped, never kept as text.
+    assert.deepEqual([view!.sid, view!.vid, view!.ws, view!.uid, view!.app, view!.vp, view!.v], ['sess_0001abcd', 'visitor_0001', null, null, 'abc123def456', 'desktop', 1]);
+    assert.equal((await post(envelope([{ id: 'evt_00000012', seq: 12, t: now, type: 'page_view', route: '/overview' }]))).status, 204);
+    assert.deepEqual([rows().at(-1)!.ws, rows().at(-1)!.uid], ['ws_' + 'a'.repeat(32), '0b5c7e1e-2f6c-4a51-9d0e-3c1f2a4b5c6d']);
+  });
+
+  test('dashboard analytics: off by default, the dashboard origin only, DNT and GPC honored, and bounded', async t => {
+    const batch = envelope([{ id: 'evt_00000001', seq: 1, t: Date.now(), type: 'page_view', route: '/overview' }]);
+    const off = await setup({ NIGHTMAIL_DASHBOARD_ANALYTICS: 'false' });
+    assert.equal((await off.post(batch)).status, 404);
+    assert.equal(off.runtime.config.dashboardAnalytics, false);
+    const { post, map, runtime } = await setup();
+    assert.equal((await post(batch, { origin: 'https://elsewhere.example' })).status, 403);
+    const anonymous = await (await import('./src/app.js')).createApp().fetch(new Request(origin + path, { method: 'POST', body: JSON.stringify(batch) }), runtime);
+    assert.equal(anonymous.status, 403);
+    assert.equal((await post(batch, { dnt: '1' })).status, 204);
+    assert.equal((await post(batch, { 'sec-gpc': '1' })).status, 204);
+    assert.equal(map.size, 0, 'Do Not Track and GPC batches are dropped');
+    assert.equal((await post('{"v":1,')).status, 400);
+    assert.equal((await post({ ...batch, v: 2 })).status, 422);
+    assert.equal((await post({ ...batch, events: [] })).status, 422);
+    assert.equal((await post({ ...batch, events: Array.from({ length: 51 }, () => batch.events[0]) })).status, 422);
+    assert.equal((await post({ ...batch, events: [{ ...batch.events[0] as object, label: 'x'.repeat(40_000) }] })).status, 413);
+    assert.equal(map.size, 0);
+    // Batches per client address a minute: the per-process cap, then the Workers limiter (runtime.allowAnalytics).
+    t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:10Z') });
+    const statuses: number[] = [];
+    for (let i = 0; i < 61; i++) statuses.push((await post(batch, {}, '203.0.113.50')).status);
+    assert.deepEqual([statuses.filter(s => s === 204).length, statuses.at(-1)], [60, 429]);
+    assert.equal((await post(batch, {}, '203.0.113.51')).status, 204);
+    runtime.allowAnalytics = async peer => { assert.match(peer, /^[0-9a-f]{64}$/); return false; };
+    assert.equal((await post(batch, {}, '203.0.113.52')).status, 429);
+    t.mock.timers.setTime(Date.parse('2026-11-20T10:01:10Z'));
+    delete runtime.allowAnalytics;
+    assert.equal((await post(batch, {}, '203.0.113.50')).status, 204);
+  });
+
+  test('dashboard analytics: hourly compaction folds settled hours into one gzip object and expires old days', async t => {
+    const { post, map, runtime, rows } = await setup(), { compactAnalytics } = await import('./src/analytics.js'), { gunzipSync } = await import('node:zlib');
+    const at = (iso: string) => t.mock.timers.setTime(Date.parse(iso));
+    t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-19T10:30:00Z') });
+    for (let i = 1; i <= 3; i++) assert.equal((await post(envelope([{ id: 'evt_0000000' + i, seq: i, t: Date.now(), type: 'page_view', route: '/overview' }]))).status, 204);
+    at('2026-11-19T11:02:00Z');
+    assert.equal((await post(envelope([{ id: 'evt_00000004', seq: 4, t: Date.now(), type: 'page_view', route: '/logs' }]))).status, 204);
+    const old = 'analytics/v1/events/dt=2025-10-14/h=09/expired.ndjson.gz', kept = 'analytics/v1/events/dt=2025-10-19/h=09/kept.ndjson.gz';
+    map.set(old, new Uint8Array([1])); map.set(kept, new Uint8Array([1]));
+    // Five minutes after an hour ends, a batch written in it has landed: 11:03 is too early for 10:00 to 11:00.
+    assert.deepEqual(await compactAnalytics(runtime, Date.parse('2026-11-19T11:03:00Z')), { hours: 0, batches: 0, expired: 1 });
+    assert.ok(!map.has(old) && map.has(kept), 'Days past 400 are deleted; younger ones stay');
+    assert.deepEqual(await compactAnalytics(runtime, Date.parse('2026-11-19T11:07:00Z')), { hours: 1, batches: 3, expired: 0 });
+    const compacted = [...map.keys()].filter(key => key.startsWith('analytics/v1/events/dt=2026-11-19/'));
+    assert.equal(compacted.length, 1);
+    assert.match(compacted[0]!, /^analytics\/v1\/events\/dt=2026-11-19\/h=10\/[0-9a-f]{16}\.ndjson\.gz$/);
+    const lines = new TextDecoder().decode(gunzipSync(map.get(compacted[0]!)!)).trim().split('\n').map(line => JSON.parse(line) as { id: string });
+    assert.deepEqual(lines.map(line => line.id).sort(), ['evt_00000001', 'evt_00000002', 'evt_00000003']);
+    assert.deepEqual(rows().map(row => row.id), ['evt_00000004'], 'The current hour stays raw');
+    assert.deepEqual(await compactAnalytics(runtime, Date.parse('2026-11-19T11:07:00Z')), { hours: 0, batches: 0, expired: 0 });
+    runtime.config.dashboardAnalytics = false;
+    assert.deepEqual(await compactAnalytics(runtime, Date.parse('2026-11-19T12:07:00Z')), { hours: 0, batches: 0, expired: 0 });
+  });
+});
+

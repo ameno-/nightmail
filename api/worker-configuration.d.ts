@@ -3,6 +3,7 @@
 interface __BaseEnv_Env {
 	ATTACHMENTS: R2Bucket;
 	MAIL: R2Bucket;
+	ANALYTICS?: R2Bucket;
 	HYPERDRIVE: Hyperdrive;
 	WAKE_QUEUE: Queue;
 	WEBHOOK_QUEUE: Queue;
@@ -11,6 +12,7 @@ interface __BaseEnv_Env {
 	FEEDBACK_QUEUE: Queue;
 	ADMISSION: RateLimit;
 	SNS_CERT_MISSES: RateLimit;
+	ANALYTICS_INGEST?: RateLimit;
 	BROWSER: BrowserRun;
 	BANE_MAIL_BUCKET: "bane-prod-mail";
 	BANE_MAIL_STORE: "r2";
