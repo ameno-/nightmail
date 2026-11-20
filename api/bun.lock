@@ -5,6 +5,7 @@
     "": {
       "name": "bane-api",
       "dependencies": {
+        "@aws-sdk/client-cloudformation": "^3.1128.0",
         "@aws-sdk/client-cloudwatch": "^3.1128.0",
         "@aws-sdk/client-s3": "^3.1128.0",
         "@aws-sdk/client-ses": "^3.1128.0",
@@ -52,6 +53,8 @@
     "@asteasolutions/zod-to-openapi": ["@asteasolutions/zod-to-openapi@9.1.0", "", { "dependencies": { "openapi3-ts": "^4.6.0" }, "peerDependencies": { "zod": "^4.0.0" } }, "sha512-pLMeRgRYS7/vZIgAAkOe2P6+XGTifR1MT9pqDoxZ11EmcJJ+DPmdPqLN8ZZF4U8R9KHCCQCS9c2wtuE8wSrfkw=="],
 
     "@aws-sdk/checksums": ["@aws-sdk/checksums@3.1000.29", "", { "dependencies": { "@aws-sdk/core": "^3.977.9", "@aws-sdk/types": "^3.974.5", "@smithy/core": "^3.33.3", "@smithy/types": "^4.17.2", "tslib": "^2.6.2" } }, "sha512-Dtu0gr4dnATZAPwEYbpCsG+MpLM7OAliy2gTepEFQwl1vZ6DL3QMH2FveMa3HLvPsOdhJsPRB3KtxVhph9T75A=="],
+
+    "@aws-sdk/client-cloudformation": ["@aws-sdk/client-cloudformation@3.1128.0", "", { "dependencies": { "@aws-sdk/core": "^3.977.9", "@aws-sdk/credential-provider-node": "^3.972.82", "@aws-sdk/types": "^3.974.5", "@smithy/core": "^3.33.3", "@smithy/fetch-http-handler": "^5.7.2", "@smithy/node-http-handler": "^4.11.3", "@smithy/types": "^4.17.2", "tslib": "^2.6.2" } }, "sha512-JZHDgu9HSXk4kbaqhNWTeomC3D/XmMqeztwEG0V8CeiOD8q9T4wcQD0ekKAon1lI5rrtyryYHyIR9oda7PJdJw=="],
 
     "@aws-sdk/client-cloudwatch": ["@aws-sdk/client-cloudwatch@3.1128.0", "", { "dependencies": { "@aws-sdk/core": "^3.977.9", "@aws-sdk/credential-provider-node": "^3.972.82", "@aws-sdk/types": "^3.974.5", "@smithy/core": "^3.33.3", "@smithy/fetch-http-handler": "^5.7.2", "@smithy/middleware-compression": "^4.6.2", "@smithy/node-http-handler": "^4.11.3", "@smithy/types": "^4.17.2", "tslib": "^2.6.2" } }, "sha512-Vv1mweEGhSctbOJ04b2v0/GIIbn7+gYbgxWpnIL5QN8vQ+jASBWys51jEDw3DcX5t6Y1Ep0MgcPbmAI9sm0rYg=="],
 

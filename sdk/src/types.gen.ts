@@ -5047,6 +5047,23 @@ export type ProviderConnection = {
     roleArn: string | null;
     templateVersion: string | null;
     quickCreateUrl: string | null;
+    /**
+     * A connected AWS account's CloudFormation stack (regional bring-your-own AWS only).
+     */
+    stack: {
+        /**
+         * The role template version the stack reports.
+         */
+        version: string | null;
+        /**
+         * The stack was deleted in AWS.
+         */
+        deleted: boolean;
+        /**
+         * Why the last stack was refused, to show in setup.
+         */
+        error: string | null;
+    } | null;
     scan?: {
         revision: number;
         cursor: {
@@ -14366,6 +14383,67 @@ export type RetryWebhookDeliveryResponses = {
 };
 
 export type RetryWebhookDeliveryResponse = RetryWebhookDeliveryResponses[keyof RetryWebhookDeliveryResponses];
+
+export type ReceiveCloudFormationSnsEventData = {
+    body: SnsSignedEnvelope;
+    path?: never;
+    query?: never;
+    url: '/v1/events/cloudformation';
+};
+
+export type ReceiveCloudFormationSnsEventErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ReceiveCloudFormationSnsEventError = ReceiveCloudFormationSnsEventErrors[keyof ReceiveCloudFormationSnsEventErrors];
+
+export type ReceiveCloudFormationSnsEventResponses = {
+    /**
+     * Success
+     */
+    202: SnsAccepted;
+};
+
+export type ReceiveCloudFormationSnsEventResponse = ReceiveCloudFormationSnsEventResponses[keyof ReceiveCloudFormationSnsEventResponses];
 
 export type ReceiveSesSnsEventData = {
     body: SnsSignedEnvelope;

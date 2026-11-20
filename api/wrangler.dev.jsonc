@@ -5,7 +5,7 @@
   "define": { "NIGHTMAIL_AWS_NAMES": "true" },
   "account_id": "d8e944f537ceef3f06a5bd3aec1d7a53",
   "workers_dev": false,
-  "routes": [{ "pattern": "dev.nightmail.dev", "custom_domain": true }, { "pattern": "dev.bane.mx", "custom_domain": true }],
+  "routes": [{ "pattern": "dev.nightmail.dev", "custom_domain": true }, { "pattern": "dev.bane.mx", "custom_domain": true }, { "pattern": "events.dev.nightmail.dev", "custom_domain": true }],
   "main": "src/worker.ts",
   "compatibility_date": "2026-09-08",
   "compatibility_flags": ["nodejs_compat"],
@@ -41,6 +41,8 @@
     "ACCOUNT_CLIENT_ID": "bane-dev",
     "MULTI_TENANT": "true",
     "BYO_STACK_PREFIX": "Nightmail",
+    // Connected AWS accounts' SNS topics and stacks report here, and their role allows only this host.
+    "BYO_EVENTS_ORIGIN": "https://events.dev.nightmail.dev",
     "BANE_PLATFORM_AWS_ACCOUNT": "905840579680",
     // The dedicated account only has the v8 policies: tenants and identities must be created with their pool tags.
     "BANE_REGIONAL_SENDING": "true",

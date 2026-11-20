@@ -128,6 +128,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `listWebhookDeliveries` | `webhooks` · `deliveries` · admin |
 | `getWebhookDelivery` | `webhooks` · `delivery` · admin |
 | `retryWebhookDelivery` | `webhooks` · `retry` · admin |
+| `receiveCloudFormationSnsEvent` | Signed by Amazon SNS for a connected account's stack; never an agent call. |
 | `receiveSesSnsEvent` | Signed by Amazon SNS; never an agent call. |
 | `unsubscribeByLink` | Recipient capability link; never an agent call. |
 | `unsubscribeOneClick` | Recipient one-click unsubscribe; never an agent call. |

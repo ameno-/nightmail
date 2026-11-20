@@ -190,6 +190,9 @@ export default {
       return fastSecure(Response.json({ error: { code: 'HTTPS_REQUIRED', message: 'Use HTTPS.', retryable: false } }, { status: 403, headers: { 'cache-control': 'no-store' } }));
     }
     const pathname = getPath(request);
+    // The events host (BYO_EVENTS_ORIGIN) takes AWS's signed notifications and nothing else.
+    let eventsHost: string | undefined; try { eventsHost = new URL(String((env as { BYO_EVENTS_ORIGIN?: unknown }).BYO_EVENTS_ORIGIN)).host; } catch { eventsHost = undefined; }
+    if (eventsHost && url.host === eventsHost && pathname !== '/health' && !(request.method === 'POST' && (pathname === '/v1/events/ses' || pathname === '/v1/events/cloudformation'))) return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
     if (pathname === '/health' && (request.method === 'GET' || request.method === 'HEAD') && !requestHeaderNames('environment').some(name => request.headers.has(name))) {
       const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;
       const multiTenant = ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true', analytics = (env as unknown as { DASHBOARD_ANALYTICS?: unknown }).DASHBOARD_ANALYTICS === 'on';
@@ -214,7 +217,7 @@ export default {
       const peer = await core.digest(core.admissionKey(address, request.headers.get('CF-Worker')));
       // SNS shares egress IPs across subscriptions. This byte-bounded route
       // verifies the signature before looking up a topic or queuing feedback.
-      const feedbackIngress = pathname === '/v1/events/ses' && request.method === 'POST';
+      const feedbackIngress = core.snsIngress(pathname) && request.method === 'POST';
       const lane = gatewayLane(request.method,pathname,request.headers,'MAILGW_API_TOKEN' in env ? env.MAILGW_API_TOKEN : undefined);
       if (!feedbackIngress && !(await env.ADMISSION.limit({ key: lane ?? `bane:default:${peer}` })).success) return core.admissionDenied();
       const admissionMs = performance.now() - admissionStarted;

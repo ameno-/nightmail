@@ -611,9 +611,11 @@ export function hasSessionCookie(headers: Headers): boolean {
   const cookie = headers.get('cookie');
   return Boolean(cookie && /(?:^|;\s*)(?:__Host-)?(?:nightmail|bane)\.session_token(?:\.\d+)?=[^;\s]/.test(cookie));
 }
+/** The routes Amazon SNS posts signed notifications to: SES feedback and connected accounts' stack requests. */
+export const snsIngress = (path: string) => path === '/v1/events/ses' || path === '/v1/events/cloudformation';
 export function publicFailureBucket(path: string, status: number, headers?: Headers): 'auth' | 'unsubscribe' | null {
   // SNS callers share egress addresses; reject untrusted topics/signatures without charging that pool.
-  if (status < 400 || status >= 500 || path === '/v1/events/ses') return null;
+  if (status < 400 || status >= 500 || snsIngress(path)) return null;
   if (/^\/unsubscribe(?:\/|$)/.test(path) || /^\/v1\/forwarding\//.test(path)) return 'unsubscribe';
   if (status !== 401 || !/^\/v1(?:\/|$)/.test(path)) return null;
   return headers && !headers.has('authorization') && !hasSessionCookie(headers) ? null : 'auth';

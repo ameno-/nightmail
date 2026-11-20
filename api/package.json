@@ -21,6 +21,7 @@
     "mcp:coverage": "tsx scripts/mcp-coverage.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-cloudformation": "^3.1128.0",
     "@aws-sdk/client-cloudwatch": "^3.1128.0",
     "@aws-sdk/client-s3": "^3.1128.0",
     "@aws-sdk/client-ses": "^3.1128.0",

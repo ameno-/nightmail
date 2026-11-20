@@ -34,6 +34,7 @@ const safeModeSkips: Partial<Record<Op, string>> = {
   deleteDomain: 'The verified claim is shared by every run.', configureDomainMailFrom: shared,
   getDomainDnsSetup: dashboard, completeDomainDnsSetup: 'Browser return with signed Domain Connect token and OIDC session.',
   receiveSesSnsEvent: 'Authenticated AWS ingress; indirect coverage via real SES feedback, never forge SNS.',
+  receiveCloudFormationSnsEvent: 'AWS-signed ingress from connected accounts\' stacks only; never forge SNS.',
   unsubscribeOneClick: 'Leaves a persistent recipient opt-out; consent CRUD uses a fresh simulator contact instead.',
   importTemplateImage: 'Requires a remote HTTPS image source; test assets are generated in-process.',
   updateInboundDomain: shared, enableInboundDomain: 'Hosted receiving follows DNS; there is no run-owned domain to enable.',
@@ -54,6 +55,7 @@ const SKIP: Partial<Record<Op,string>> = destructive ? {
   createInboundSubdomain: 'Hosted receiving has no wildcard claim; creating the first child could enable catch-all routing on the shared fixture.',
   completeDomainDnsSetup: 'Needs the signed Domain Connect consent return and an initiating OIDC session for the success flow.',
   receiveSesSnsEvent: 'AWS-signed ingress only. Verified indirectly by real deliveries and feedback; never forge SNS.',
+  receiveCloudFormationSnsEvent: 'AWS-signed ingress from connected accounts\' stacks only; never forge SNS.',
 } : safeModeSkips;
 SKIP.updateInboundScanPolicy='Changes a shared workspace-wide quarantine policy; covered by isolated acceptance.';
 // The audit trail's customer view and the support integration: a Google dashboard session, or a support grant minted by

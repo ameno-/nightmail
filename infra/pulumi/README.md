@@ -124,6 +124,19 @@ aws iam create-policy-version --profile "$profile" --policy-arn "$arn" --policy-
 
 IAM keeps at most five versions of a policy; if the boundary already has five, delete its oldest non-default version first. [runtime-boundary-policy.json](../aws-shared/runtime-boundary-policy.json) carries the same `ByoBroker` statement for reference.
 
+## Bring your own AWS: template bucket and setup topic
+
+[byo-setup.ts](byo-setup.ts) creates, with `bane:byoSetup: "true"` in the stage's settings:
+
+- **`nightmail-byo-templates-<account>`** (Ohio, protected, versioned): customers' CloudFormation reads the role templates from `byo/<version>.yaml`, one object per [api/byo-templates/](../../api/byo-templates/) file. Only `byo/*` is publicly readable; the bucket blocks ACLs. Published objects are never changed (`check-premerge.ts`) and survive their removal from the program.
+- **`nightmail-byo-setup`** (Ohio, protected): customers' stacks publish their Create, Update and Delete requests here (any account may publish), and an HTTPS subscription delivers them to the stage's events host (`/v1/events/cloudformation`), which verifies each signature and proves the customer's role before answering.
+
+Customer stacks name both forever (the template's `ServiceToken` and its update permission), so never rename or delete them.
+
+### Dax: one-time IAM for BYO setup
+
+The deploy role's S3 and SNS permissions name their resources, so it can't create these until it has [byo-setup-deploy-policy.json](../aws-shared/byo-setup-deploy-policy.json), with `YOUR_AWS_ACCOUNT_ID` and `YOUR_EVENTS_ORIGIN` substituted (dev: `905840579680`, `https://events.dev.nightmail.dev`; production: `009882681002`, `https://events.nightmail.dev`), as an inline policy on the stage's deploy role. It has no delete permissions. Then set `bane:byoSetup: "true"` in that stage's settings.
+
 ## Tenant status events
 
 EventBridge rules, targets (including their entire input), delivery roles and their grants are operator-owned. CI verifies the exact rule patterns and unchanged SNS envelopes; it cannot rewrite them. Signed SNS notifications are hints only: Bane checks workspace/topic ownership and reads `GetReputationEntity` for the exact tenant and origin before recording a transition. Stale notifications do nothing, lookup failures retry, and enables never resume a workspace.

@@ -16100,6 +16100,38 @@
             ],
             "format": "uri"
           },
+          "stack": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "version": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The role template version the stack reports."
+              },
+              "deleted": {
+                "type": "boolean",
+                "description": "The stack was deleted in AWS."
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Why the last stack was refused, to show in setup."
+              }
+            },
+            "required": [
+              "version",
+              "deleted",
+              "error"
+            ],
+            "description": "A connected AWS account's CloudFormation stack (regional bring-your-own AWS only)."
+          },
           "scan": {
             "type": "object",
             "properties": {
@@ -16540,7 +16572,8 @@
           "awsAccountId",
           "roleArn",
           "templateVersion",
-          "quickCreateUrl"
+          "quickCreateUrl",
+          "stack"
         ]
       },
       "ConnectionRegions": {
@@ -42084,6 +42117,159 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/webhooks/resource_123/deliveries/delivery_123/retry' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/events/cloudformation": {
+      "post": {
+        "operationId": "receiveCloudFormationSnsEvent",
+        "tags": [
+          "Events"
+        ],
+        "security": [],
+        "description": "CloudFormation requests from connected AWS accounts' role stacks, delivered by SNS from the platform's setup topic. AWS-signed ingress only.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SnsSignedEnvelope"
+              }
+            },
+            "text/plain": {
+              "schema": {
+                "$ref": "#/components/schemas/SnsPlainTextEnvelope"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnsAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-nightmail-permission": {
+          "access": "public",
+          "text": "Needs no credential."
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { receiveCloudFormationSnsEvent } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await receiveCloudFormationSnsEvent({\n  client,\n  body: {\n    \"Type\": \"Notification\",\n    \"MessageId\": \"message_123\",\n    \"TopicArn\": \"example\",\n    \"Message\": \"example\",\n    \"Timestamp\": \"2026-09-18T19:00:00Z\",\n    \"SignatureVersion\": \"1\",\n    \"Signature\": \"example\",\n    \"SigningCertURL\": \"https://example.com/webhook\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/events/cloudformation' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"Type\": \"Notification\",\n  \"MessageId\": \"message_123\",\n  \"TopicArn\": \"example\",\n  \"Message\": \"example\",\n  \"Timestamp\": \"2026-09-18T19:00:00Z\",\n  \"SignatureVersion\": \"1\",\n  \"Signature\": \"example\",\n  \"SigningCertURL\": \"https://example.com/webhook\"\n}'"
           }
         ]
       }
@@ -73535,7 +73721,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Choose a sending provider. Regional BYO enrollment requires an account ID and returns a role-only stack link and a read-only scan operation. Legacy enrollment and Hosted mail return 201.",
+        "description": "Choose a sending provider. Regional BYO enrollment returns a quick-create link for a role-only stack; the stack reports its AWS account when it is created, so the account ID is optional (given, it must match). Then a read-only scan runs. Legacy enrollment and Hosted mail return 201.",
         "requestBody": {
           "required": true,
           "content": {

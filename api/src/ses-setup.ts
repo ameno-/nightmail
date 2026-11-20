@@ -98,7 +98,7 @@ export const byoStackName = (prefix: 'Bane' | 'Nightmail' | undefined, connectio
 export function setupResources(installationId: string, namespace?:MxNamespace): { transactional: string; marketing: string; topicName: string; eventDestinationName: string } {
   if (!installationId) throw new ApiError(503, 'INSTALLATION_ID_REQUIRED', 'The persisted installation ID is missing.');
   const hash=createHash('sha256').update(installationId).digest('hex').slice(0,20);
-  // A connected account's resources are named nightmail-<hash>: its role template (api/byo-template.yaml) allows that prefix only.
+  // A connected account's resources are named nightmail-<hash>: its role template (api/byo-templates/) allows that prefix only.
   const prefix = installationId === POOL_INSTALLATION && namespace !== 'byo' ? (namespace ? `${TAG_PREFIX}-${namespace}` : TAG_PREFIX) : namespace === 'byo' ? `nightmail-${hash}` : namespace ? mxResourceName(namespace) : `bane-${hash}`;
   return { transactional: `${prefix}-transactional`, marketing: `${prefix}-marketing`, topicName: `${prefix}-feedback`, eventDestinationName: `${prefix}-events` };
 }

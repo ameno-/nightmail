@@ -50,7 +50,7 @@ async function byoTemplate(file:string,params:Record<string,string>,regions:stri
 }
 async function byoTemplates() {
   const {readdir}=await import('node:fs/promises'),published=await readdir(new URL('./byo-templates/',import.meta.url)).catch(()=>[] as string[]);
-  return ['byo-template.yaml',...published.filter(n=>/^\d+\.\d+\.yaml$/.test(n)).map(n=>'byo-templates/'+n)];
+  return published.filter(n=>/^\d+\.\d+\.yaml$/.test(n)).sort().map(n=>'byo-templates/'+n);
 }
 // The role's identity policy statements: inline policies, conditional ones (!If) included.
 const byoRoleStatements=(cfn:Json)=>cfn.Resources.Role.Properties.Policies.map((p:Json)=>Array.isArray(p)?p[1]:p).flatMap((p:Json)=>p.PolicyDocument.Statement) as IamStatement[];
@@ -17400,6 +17400,96 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('BYO stack callback: a stack connects itself once its role is proved, and only its own stack updates or deletes it',async t=>{
+    const [{nodeRuntime},{createApp},{regionalByoJobs},{JobDeferred},{ensureRegionSettings},{STSClient},{CloudFormationClient},{setByoV2}]=await Promise.all([
+      import('./src/adapters/node.js'),import('./src/app.js'),import('./src/byo-regional.js'),import('./src/jobs.js'),import('./src/ses-region-state.js'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-cloudformation'),import('./scripts/set-byo-v2.js')]);
+    const db=await fixtureDatabase(t),user=await sessionFixture(t),account='333344445555',other='666677778888',platform='000044445555',endpoint='https://byo-acceptance.bane.dev/v1/events/ses';
+    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'stack-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:`https://nightmail-byo-templates-${platform}.s3.us-east-2.amazonaws.com/byo/6.0.yaml`,BYO_EVENTS_ORIGIN:'https://events.byo-acceptance.bane.dev'});
+    const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);runtime.snsCertificateState=new SnsCertificateState();
+    const workspaces=['ws_'+randomUUID().replaceAll('-',''),'ws_'+randomUUID().replaceAll('-','')],[wid,wid2]=workspaces;
+    for(const w of workspaces){
+      await db.query('INSERT INTO workspaces(id,slug,name) VALUES($1,$1,$1)',[w]);
+      cleanup(t,async()=>{await db.query('DELETE FROM jobs WHERE workspace_id=$1',[w]);await db.query('DELETE FROM ses_installation_settings WHERE workspace_id=$1',[w]);await db.query('DELETE FROM workspaces WHERE id=$1',[w]);});
+      await db.query("INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES($1,$2,$3,'owner')",[unique('member'),w,user.userId]);
+      await ensureRegionSettings(runtime.db,{...runtime.config,workspaceId:w});await setByoV2(db,[w,'enable']);
+    }
+    const api=async(w:string,method:string,path:string,body?:Json):Promise<Reply>=>{const res=await app.fetch(new Request(PUBLIC_ORIGIN+path,{method,headers:{cookie:user.cookie,origin:PUBLIC_ORIGIN,'x-bane-workspace':w,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
+    // Connect without an account ID: the link carries every parameter, and nothing is proved until the stack reports.
+    const v5=ok(await api(wid,'POST','/v1/connection',{kind:'byo'}),202),params=new URLSearchParams(new URL(v5.quickCreateUrl).hash.split('?')[1]),cid=v5.id as string,external=params.get('param_ExternalId')!;
+    const stack=params.get('stackName')!,role=`arn:aws:iam::${account}:role/${stack}`,stackId=`arn:aws:cloudformation:us-east-2:${account}:stack/${stack}/${randomUUID()}`;
+    assert.equal(v5.awsAccountId,null);assert.equal(params.get('param_EventsHost'),'events.byo-acceptance.bane.dev');assert.equal(params.get('templateURL'),`https://nightmail-byo-templates-${platform}.s3.us-east-2.amazonaws.com/byo/6.0.yaml`);
+    assert.equal((await db.query("SELECT FROM jobs WHERE workspace_id=$1 AND type='byo.prove'",[wid])).rowCount,0);
+    const signedKey=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey,pem=await selfSignedPem(signedKey),topic=`arn:aws:sns:us-east-2:${platform}:nightmail-byo-setup`,host='https://sns.us-east-2.amazonaws.com/';
+    const answers:Json[]=[],confirmed:string[]=[];
+    t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL,init?:RequestInit)=>{
+      const u=new URL(input instanceof Request?input.url:String(input));
+      if(u.pathname.endsWith('.pem'))return new Response(pem);
+      if(u.hostname==='sns.us-east-2.amazonaws.com'){confirmed.push(u.searchParams.get('TopicArn')!);return new Response(null);}
+      assert.equal(u.hostname,'cloudformation-custom-resource-response-useast2.s3.us-east-2.amazonaws.com');assert.equal(init?.method,'PUT');assert.equal(new Headers(init?.headers).get('content-type'),null);
+      answers.push(JSON.parse(new TextDecoder().decode(init!.body as Uint8Array)));return new Response(null);
+    });
+    let propagating=true,stackStatus='CREATE_COMPLETE';
+    t.mock.method(STSClient.prototype,'send',async function(this:InstanceType<typeof STSClient>,cmd:any){
+      const key=(await this.config.credentials()).accessKeyId,i=cmd.input;assert.equal(cmd.constructor.name,'AssumeRoleCommand');
+      if(i.RoleArn===`arn:aws:iam::${platform}:role/nightmail-byo-broker`){assert.equal(key,'stack-fixture-platform');assert.equal(i.RoleSessionName,'nightmail-broker');return {Credentials:{AccessKeyId:'stack-fixture-broker',SecretAccessKey:'fixture-only',SessionToken:'broker',Expiration:new Date(Date.now()+3600000)}};}
+      assert.equal(key,'stack-fixture-broker');assert.equal(i.SourceIdentity,cid);assert.match(i.RoleSessionName,/^nightmail-(?:scan|stack)$/);
+      if(propagating || i.RoleArn!==role || i.ExternalId!==external)throw Object.assign(new Error('fixture denial'),{name:'AccessDenied'});
+      return {AssumedRoleUser:{Arn:`arn:aws:sts::${account}:assumed-role/${stack}/${i.RoleSessionName}`},Credentials:{AccessKeyId:'stack-fixture-customer',SecretAccessKey:'fixture-only',SessionToken:i.Policy,Expiration:new Date(Date.now()+900000)}};
+    });
+    t.mock.method(CloudFormationClient.prototype,'send',async function(this:InstanceType<typeof CloudFormationClient>,cmd:any){
+      assert.equal(cmd.constructor.name,'DescribeStacksCommand');assert.equal(cmd.input.StackName,stackId);
+      const policy=JSON.parse((await this.config.credentials()).sessionToken!);assert.ok(iamAllows(policy.Statement,'cloudformation:DescribeStacks',stackId,{'aws:RequestedRegion':'us-east-2'}));
+      return {Stacks:[{StackId:stackId,StackStatus:stackStatus,Outputs:[{OutputKey:'TemplateVersion',OutputValue:'6.0'}]}]};
+    });
+    const publish=async(message:string,type='Notification',topicArn=topic)=>{
+      const signed:Record<string,string>=type==='Notification'?{Message:message,MessageId:randomUUID(),Timestamp:new Date().toISOString(),TopicArn:topicArn,Type:type}
+        :{Message:'fixture',MessageId:randomUUID(),SubscribeURL:host+'?'+new URLSearchParams({Action:'ConfirmSubscription',TopicArn:topicArn,Token:'fixture'}),Timestamp:new Date().toISOString(),Token:'fixture',TopicArn:topicArn,Type:type};
+      const body={...signed,SignatureVersion:'2',SigningCertURL:host+snsCertName(),Signature:Buffer.from(sign('RSA-SHA256',Buffer.from(Object.entries(signed).map(([k,v])=>k+'\n'+v+'\n').join('')),signedKey)).toString('base64')};
+      const res=await app.fetch(new Request(PUBLIC_ORIGIN+'/v1/events/cloudformation',{method:'POST',headers:{'content-type':'text/plain; charset=UTF-8'},body:JSON.stringify(body)}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};
+    };
+    const request=(type:'Create'|'Update'|'Delete',extra:Json={})=>JSON.stringify({RequestType:type,ResponseURL:`https://cloudformation-custom-resource-response-useast2.s3.us-east-2.amazonaws.com/${encodeURIComponent(stackId)}%7CConnection%7C${randomUUID()}?X-Amz-Signature=fixture`,
+      StackId:stackId,RequestId:randomUUID(),ResourceType:'Custom::NightmailConnection',LogicalResourceId:'Connection',ResourceProperties:{ServiceToken:topic,ConnectionId:cid,RoleArn:role,TemplateVersion:'6.0'},...extra});
+    const run=async()=>{
+      const j=(await db.query("UPDATE jobs SET status='running',attempts=1,lease_until=now()+interval '3 minutes' WHERE id=(SELECT id FROM jobs WHERE type='byo.stack' AND status='pending' AND workspace_id=ANY($1) ORDER BY created_at LIMIT 1) RETURNING id,workspace_id,payload",[workspaces])).rows[0];assert.ok(j,'a queued stack request');
+      try{await regionalByoJobs['byo.stack']!(runtime,j.payload,{workspaceId:j.workspace_id,id:j.id,attempts:1});await db.query("UPDATE jobs SET status='completed' WHERE id=$1",[j.id]);return 'done';}
+      catch(e){if(!(e instanceof JobDeferred))throw e;await db.query("UPDATE jobs SET status='pending' WHERE id=$1",[j.id]);return 'deferred';}
+    };
+    const last=()=>answers.at(-1)!,row=async(c=cid)=>(await db.query('SELECT * FROM provider_connections WHERE id=$1',[c])).rows[0];
+    // Only the platform's setup topic, AWS-signed; its subscription is confirmed.
+    error(await publish(request('Create'),'Notification',`arn:aws:sns:us-east-2:${platform}:other`),403,'SNS_TOPIC_NOT_ALLOWED');
+    ok(await publish('fixture','SubscriptionConfirmation'),202);assert.deepEqual(confirmed,[topic]);
+    // A request for no connection is answered at once; a response URL outside CloudFormation's is refused.
+    ok(await publish(request('Create',{ResourceProperties:{ConnectionId:'conn_'+'0'.repeat(32),TemplateVersion:'6.0'}})),202);assert.equal(last().Status,'FAILED');assert.match(last().Reason,/Connect AWS/);
+    ok(await publish(request('Delete',{ResourceProperties:{ConnectionId:'conn_'+'0'.repeat(32),TemplateVersion:'6.0'},PhysicalResourceId:'conn_'+'0'.repeat(32)})),202);assert.equal(last().Status,'SUCCESS');
+    error(await publish(JSON.parse(JSON.stringify(request('Create')).replace('cloudformation-custom-resource-response-useast2.s3.us-east-2.amazonaws.com','example.com'))),400,'STACK_REQUEST_INVALID');assert.equal(answers.length,2);
+    // A renamed stack is refused with what to do.
+    ok(await publish(request('Create',{StackId:stackId.replace(stack,'Nightmail-ffffffffffffffffffff')})),202);assert.equal(await run(),'done');assert.equal(last().Status,'FAILED');assert.match(last().Reason,new RegExp('Name the stack '+stack));
+    // The reason shows in setup too, not only in the AWS console.
+    assert.match(ok(await api(wid,'GET','/v1/connection')).connection.stack.error,new RegExp('Name the stack '+stack));
+    // The genuine stack: one job however often SNS delivers it, retried while the new role isn't usable yet.
+    const create=request('Create');ok(await publish(create),202);ok(await publish(create),202);
+    assert.equal((await db.query("SELECT FROM jobs WHERE type='byo.stack' AND status='pending' AND workspace_id=$1",[wid])).rowCount,1);
+    const before=answers.length;assert.equal(await run(),'deferred');assert.equal(answers.length,before);
+    propagating=false;assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.equal(last().PhysicalResourceId,cid);
+    const bound=await row();assert.equal(bound.aws_account_id,account);assert.equal(bound.role_arn,role);assert.equal(bound.stack_id,stackId);assert.equal(bound.stack_template_version,'6.0');assert.equal(bound.state,'scanning');assert.equal(bound.stack_error,null);
+    assert.ok((await db.query("SELECT FROM jobs WHERE workspace_id=$1 AND type='byo.scan'",[wid])).rowCount);
+    // Update: a stack can't move to another connection; otherwise the version comes from the stack itself.
+    ok(await publish(request('Update',{PhysicalResourceId:cid,OldResourceProperties:{ConnectionId:'conn_'+'f'.repeat(32)}})),202);assert.equal(await run(),'done');assert.equal(last().Status,'FAILED');
+    await db.query('UPDATE provider_connections SET stack_template_version=NULL WHERE id=$1',[cid]);
+    ok(await publish(request('Update',{PhysicalResourceId:cid,OldResourceProperties:{ConnectionId:cid}})),202);assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.equal(last().PhysicalResourceId,cid);assert.equal((await row()).stack_template_version,'6.0');
+    // Delete: another stack's is acknowledged and ignored; ours only while the stack itself says it's being deleted.
+    ok(await publish(request('Delete',{PhysicalResourceId:cid,StackId:stackId.replace(/[0-9a-f-]{36}$/,randomUUID())})),202);assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.equal((await row()).stack_deleted_at,null);
+    const forged=answers.length;ok(await publish(request('Delete',{PhysicalResourceId:cid})),202);assert.equal(await run(),'done');assert.equal(answers.length,forged);assert.equal((await row()).stack_deleted_at,null);
+    stackStatus='DELETE_IN_PROGRESS';ok(await publish(request('Delete',{PhysicalResourceId:cid})),202);assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.ok((await row()).stack_deleted_at);
+    // A typed account must match the stack's, and the platform's own account is never connected.
+    const typed=ok(await api(wid2,'POST','/v1/connection',{kind:'byo',awsAccountId:other}),202),stack2=new URLSearchParams(new URL(typed.quickCreateUrl).hash.split('?')[1]).get('stackName')!;
+    for(const [inAccount,reason] of [[platform,/own AWS account/],[account,new RegExp(`chose AWS account ${other}.*stack is in ${account}`)]] as const){
+      ok(await publish(request('Create',{StackId:`arn:aws:cloudformation:us-east-2:${inAccount}:stack/${stack2}/${randomUUID()}`,ResourceProperties:{ConnectionId:typed.id,TemplateVersion:'6.0'}})),202);
+      assert.equal(await run(),'done');assert.equal(last().Status,'FAILED');assert.match(last().Reason,reason);
+    }
+    assert.equal((await row(typed.id)).aws_account_id,null);
+  });
+
   test('the dashboard test email goes only to the signed-in user, whatever the request says', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const domain = unique('test-send-domain');
@@ -25291,7 +25381,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const prefix=setupResources(connection,'byo').topicName.slice(0,-9),stack='Nightmail-'+connection.slice(-20);
     assert.match(prefix,/^nightmail-[0-9a-f]{20}$/);
     const params:Record<string,string>={PlatformAccount:platform,'AWS::AccountId':account,ResourcePrefix:prefix,ConnectionId:connection,WorkspaceId:wid,EventsHost:'events.nightmail.dev','AWS::StackName':stack,'AWS::Region':'us-east-2',ExternalId:'external'};
-    const cfn=await byoTemplate('byo-template.yaml',params,[region]);
+    const cfn=await byoTemplate('byo-templates/6.0.yaml',params,[region]);
     // Every parameter is plain, so a quick-create link can fill it in; production access requests are on by default.
     for(const [name,p] of Object.entries(cfn.Parameters as Json))assert.equal(p.NoEcho,undefined,name);
     assert.equal(cfn.Parameters.EnableAccountRequests.Default,'true');assert.equal(cfn.Outputs.TemplateVersion.Value,'6.0');
@@ -25367,11 +25457,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   });
 
   test('BYO contract: every session the code asks for is allowed by every supported role template',async()=>{
-    const {byoSessionStatements}=await import('./src/byo-permissions.js'),{setupResources}=await import('./src/ses-setup.js');
+    const {byoSessionStatements,BYO_TEMPLATE_VERSIONS}=await import('./src/byo-permissions.js'),{setupResources}=await import('./src/ses-setup.js');
     const account='123456789012',connection=`conn_${'ab'.repeat(16)}`,region='eu-west-1',claim=randomUUID(),prefix=setupResources(connection,'byo').topicName.slice(0,-9);
     const params:Record<string,string>={PlatformAccount:'009882681002','AWS::AccountId':account,'AWS::Region':'us-east-2',ResourcePrefix:prefix,ConnectionId:connection,WorkspaceId:`ws_${'cd'.repeat(16)}`,EventsHost:'events.nightmail.dev','AWS::StackName':'Nightmail-'+connection.slice(-20),ExternalId:'external'};
     // A pattern in a session policy stands for the resources it names: check one of each.
-    const sample=(arn:string)=>arn.replace('identity/?*.??*','identity/example.com').replace(/configuration-set\/(bane|nightmail)-\*$/,'configuration-set/$1-0123456789abcdef0123-transactional');
+    const sample=(arn:string)=>arn.replace(/(:stack\/[^/]+)\/\*$/,'$1/0e9b1f40-0000-4000-8000-000000000000').replace('identity/?*.??*','identity/example.com').replace(/configuration-set\/(bane|nightmail)-\*$/,'configuration-set/$1-0123456789abcdef0123-transactional');
     const tags={owner:'nightmail','installation-id':connection,purpose:'domain-identity','domain-claim':claim};
     const feedback=(kind:'Resource'|'Request')=>({[`aws:${kind}Tag/nightmail:owner`]:'nightmail',[`aws:${kind}Tag/nightmail:installation-id`]:connection,[`aws:${kind}Tag/nightmail:purpose`]:'ses-feedback'});
     const own=Object.fromEntries(Object.entries(tags).map(([k,v])=>['aws:ResourceTag/nightmail:'+k,v])),create={...Object.fromEntries(Object.entries(tags).map(([k,v])=>['aws:RequestTag/nightmail:'+k,v])),'aws:TagKeys':Object.keys(tags).map(k=>'nightmail:'+k)};
@@ -25381,12 +25471,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       ...(resource.includes(':identity/')?{...(action==='ses:CreateEmailIdentity'?{}:own),...(['ses:CreateEmailIdentity','ses:TagResource'].includes(action)?create:{})}
         // Nightmail's own configuration sets and topic carry this connection's tags from creation on.
         :resource!=='*'?{...feedback('Resource'),...(['ses:CreateConfigurationSet','sns:CreateTopic','ses:TagResource','sns:TagResource'].includes(action)?{...feedback('Request'),'aws:TagKeys':['nightmail:owner','nightmail:installation-id','nightmail:purpose']}:{})}:{})});
-    const purposes=['scan','provision','cleanup','send','template','quota','verify','read','delete','mailfrom'] as const,templates=await byoTemplates();
-    assert.ok(templates.includes('byo-template.yaml'));
+    const purposes=['scan','provision','cleanup','send','template','quota','verify','read','delete','mailfrom','stack'] as const,templates=await byoTemplates();
+    // The code knows exactly the published versions.
+    assert.deepEqual(templates,BYO_TEMPLATE_VERSIONS.map(v=>`byo-templates/${v}.yaml`));
     let checked=0;
     for(const file of templates){
       const role=byoRoleStatements(await byoTemplate(file,params,[region]));
-      for(const purpose of purposes)for(const s of byoSessionStatements(purpose,{region,account,connectionId:connection,domain:'example.com',template:'bane-pilot'}))
+      for(const purpose of purposes)for(const s of byoSessionStatements(purpose,{region,account,connectionId:connection,domain:'example.com',template:'bane-pilot',stack:params['AWS::StackName']}))
         for(const action of s.Action)for(const resource of [s.Resource].flat().map(sample)){
           checked++;assert.ok(iamAllows(role,action,resource,context(action,resource)),`${file}: the ${purpose} session's ${action} on ${resource} isn't allowed by the role`);
         }
@@ -25401,9 +25492,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // N7: event feedback cannot be redirected, disabled or un-suppressed with the runtime key.
       'ses:CreateConfigurationSet','ses:DeleteConfigurationSet','ses:PutConfigurationSetSuppressionOptions','ses:CreateConfigurationSetEventDestination','ses:UpdateConfigurationSetEventDestination','ses:DeleteConfigurationSetEventDestination','ses:PutConfigurationSetSendingOptions'];
     for(const s of all.filter(s=>s.Effect==='Allow'))for(const action of [s.Action].flat())assert.ok(!forbidden.some(f=>new RegExp('^'+action.replaceAll('*','.*').replaceAll('?','.')+'$','i').test(f)),`runtime grants ${action}`);
-    const template=await readFile(new URL('./byo-template.yaml',import.meta.url),'utf8'),resources=(load(template.replace(/!(?:Ref|Sub|If|Equals|Not|GetAtt|Select|Split|Join)\b/g,'')) as Json).Resources;
+    const template=await readFile(new URL('./byo-templates/6.0.yaml',import.meta.url),'utf8'),resources=(load(template.replace(/!(?:Ref|Sub|If|Equals|Not|GetAtt|Select|Split|Join)\b/g,'')) as Json).Resources;
     // 6.0 has no receiving permissions at all: classic receipt rules can't be limited to Nightmail's own.
-    assert.deepEqual(Object.keys(resources),['Role']);
+    assert.deepEqual(Object.keys(resources),['Role','Connection']);
     const sending=resources.Role.Properties.Policies.find((p:Json)=>p.PolicyName==='Sending').PolicyDocument.Statement;
     const grants=sending.filter((s:Json)=>s.Effect==='Allow' && [s.Action].flat().includes('ses:SendEmail')) as Json[];
     const identity='arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*';
