@@ -2178,7 +2178,7 @@ export type SenderScore = {
 
 export type SenderScoreFactor = {
     /**
-     * complaints, content (the spam screen), bounces (to known recipients), hygiene (list quality: first sends and suppression hits), auth, engagement.
+     * complaints, content (the spam screen), bounces (to known recipients), hygiene (list quality: campaign first sends and their suppression hits; neutral without campaign mail), auth, engagement.
      */
     key: 'complaints' | 'content' | 'bounces' | 'hygiene' | 'auth' | 'engagement';
     label: string;

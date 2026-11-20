@@ -38,7 +38,7 @@ In `GET /v1/sender-score`, no daily limit is `limit.daily: null` with `limit.unl
 | Complaints ÷ delivered | 30 | ≤ 0.01% | ≥ 0.3% |
 | Spam screen rejections ÷ screened | 20 | ≤ 0.1% | ≥ 3% |
 | Hard bounces to known recipients ÷ accepted | 15 | ≤ 0.5% | ≥ 5% |
-| List quality: first-send bounces and suppression hits | 15 | ≤ 2% | ≥ 10% |
+| List quality (campaign mail): first-send bounces and suppression hits | 15 | ≤ 2% | ≥ 10% |
 | Authentication: DKIM 40%, aligned SPF 30%, DMARC enforcing 30% | 10 | all three | none |
 | Engagement: marketing unsubscribes ÷ delivered, lifted by clicks | 10 | ≤ 0.2% | ≥ 2% |
 

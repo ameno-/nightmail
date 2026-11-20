@@ -99,11 +99,12 @@ export const FACTORS: Record<FactorKey, { label: string; weight: number; good: n
   complaints: { label: 'Complaints', weight: 30, good: 0.0001, bad: 0.003, basis: 'Spam complaints ÷ delivered emails. 0.3% is the line mailbox providers enforce.' },
   content: { label: 'Spam screen', weight: 20, good: 0.001, bad: 0.03, basis: 'Emails the content screen rejected as spam ÷ emails it screened. Neutral when the workspace is not screened.' },
   bounces: { label: 'Bounces', weight: 15, good: 0.005, bad: 0.05, basis: 'Hard bounces to known recipients ÷ accepted emails to them. Mail sent through the API counts as known.' },
-  hygiene: { label: 'List quality', weight: 15, good: 0.02, bad: 0.10, basis: 'Hard bounces of first sends (campaign mail) plus suppression-list hits ÷ those emails. First sends are expected to bounce more.' },
+  hygiene: { label: 'List quality', weight: 15, good: 0.02, bad: 0.10, basis: 'Campaign mail only: hard bounces of first sends plus campaign emails to suppressed addresses ÷ those emails. First sends are expected to bounce more. Neutral without campaign mail.' },
   auth: { label: 'Authentication', weight: 10, good: 1, bad: 0, basis: 'By sending volume: DKIM signing 40%, a verified custom MAIL FROM (aligned SPF) 30%, DMARC enforcing 30% (p=none 15%). Neutral without verified domains.' },
   engagement: { label: 'Engagement', weight: 10, good: 0.002, bad: 0.02, basis: 'Marketing unsubscribes ÷ delivered marketing email, lifted up to 10 points by tracked clicks. Opens are ignored. Neutral without marketing mail.' },
 };
 
+/** One UTC day of a workspace's real mail. first_sends, first_bounced and suppressed count campaign mail only (list quality). */
 export type DayEvidence = { day: string; emails: number; accepted: number; delivered: number; bounced: number; first_sends: number; first_bounced: number;
   complained: number; screened: number; rejected: number; suppressed: number; marketing_delivered: number; unsubscribed: number; clicked: number };
 export type DomainAuth = { name: string; dkim: boolean; mailFrom: boolean; dmarc: string | null; emails: number };
@@ -124,14 +125,14 @@ export function authShare(domains: DomainAuth[]): number | null {
 
 /** Quality, decayed volume and target (the quality itself) from daily evidence (30-day half-life) and the domains' authentication. */
 export function quality(days: DayEvidence[], domains: DomainAuth[], screened: boolean, today: string): Quality {
-  const end = Date.parse(today + 'T00:00:00Z'), t = { accepted: 0, delivered: 0, bounced: 0, known: 0, firstSends: 0, firstBad: 0, complained: 0, screened: 0, rejected: 0, mDelivered: 0, unsub: 0, clicked: 0 };
+  const end = Date.parse(today + 'T00:00:00Z'), t = { accepted: 0, delivered: 0, bounced: 0, known: 0, campaign: 0, firstSends: 0, firstBad: 0, complained: 0, screened: 0, rejected: 0, mDelivered: 0, unsub: 0, clicked: 0 };
   for (const d of days) {
     const age = Math.max(0, (end - Date.parse(d.day + 'T00:00:00Z')) / DAY_MS);
     if (age > SCORE.historyDays) continue;
     const w = 2 ** (-age / SCORE.halfLifeDays);
     t.accepted += w * d.accepted; t.delivered += w * d.delivered; t.complained += w * d.complained;
     t.known += w * (d.accepted - d.first_sends); t.bounced += w * (d.bounced - d.first_bounced);
-    t.firstSends += w * (d.first_sends + d.suppressed); t.firstBad += w * (d.first_bounced + d.suppressed);
+    t.campaign += w * d.first_sends; t.firstSends += w * (d.first_sends + d.suppressed); t.firstBad += w * (d.first_bounced + d.suppressed);
     t.screened += w * d.screened; t.rejected += w * d.rejected;
     t.mDelivered += w * d.marketing_delivered; t.unsub += w * d.unsubscribed; t.clicked += w * d.clicked;
   }
@@ -139,7 +140,8 @@ export function quality(days: DayEvidence[], domains: DomainAuth[], screened: bo
     complaints: t.delivered >= 1 ? t.complained / t.delivered : null,
     content: screened && t.screened >= 1 ? t.rejected / t.screened : null,
     bounces: t.known >= 1 ? t.bounced / t.known : null,
-    hygiene: t.firstSends >= 1 ? t.firstBad / t.firstSends : null,
+    // A list is campaign mail: without a campaign email sent there is no list to judge, whatever was suppressed.
+    hygiene: t.campaign > 0 && t.firstSends >= 1 ? t.firstBad / t.firstSends : null,
     auth: authShare(domains),
     engagement: t.mDelivered >= 1 ? t.unsub / t.mDelivered : null,
   };
