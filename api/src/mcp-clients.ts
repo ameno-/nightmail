@@ -7,6 +7,19 @@
  *   `oauth.scope` to request. https://opencode.ai/docs/mcp-servers
  * - Claude Code: `.mcp.json` `mcpServers.<name>` with `type: "http"`, or `claude mcp add --transport http`.
  * - Cursor: `.cursor/mcp.json` `mcpServers.<name>` with `url` and optional `headers`.
+ *
+ * Signed in (OAuth), more clients connect, each with its own one-line setup (mcpSignIn): a command, an install link, or
+ * the URL pasted into the client's connector settings. Checked against each client's docs in November 2026:
+ * - OpenCode: `opencode mcp add <name> --global --url <url>`, then /mcps → Sign in. https://opencode.ai/docs/mcp-servers
+ * - Claude Code: `claude mcp add --transport http --scope user <name> <url>`, then /mcp → Authenticate. https://code.claude.com/docs/en/mcp
+ * - Codex: `codex mcp add <name> --url <url>` starts the OAuth sign-in itself; `codex mcp login <name>` repeats it. https://developers.openai.com/codex/mcp
+ * - Cursor: `cursor://anysphere.cursor-deeplink/mcp/install?name=<name>&config=<base64 JSON>`. https://cursor.com/docs/mcp/install-links
+ * - Claude and Claude Desktop: Customize → Connectors → Add → Custom → Web, with the URL. https://support.claude.com/en/articles/11175166
+ * - ChatGPT (web): Plugins → + → Add custom MCP server, with the URL and OAuth. https://help.openai.com/en/articles/12584461
+ * - VS Code: `vscode:mcp/install?<URL-encoded JSON>` (`code --add-mcp` writes the editor's own config, which the Copilot
+ *   harness no longer reads). https://code.visualstudio.com/api/extension-guides/ai/mcp
+ * None needs a query parameter or a scope in its setup: each asks for the scopes the server's 401 challenge names (read,
+ * send and manage), so the agent gets the person's own access in each workspace unless they approve less.
  */
 import { mcpServerName } from './brand.js';
 
@@ -46,9 +59,9 @@ export function mcpClientConfig(client: McpClient, url: string, auth: McpAuth): 
   return { url, ...headers };
 }
 
-/** Claude Code's one-line setup for OAuth. It takes no key: a key on a command line stays in shell history and in
- * the process list, so a key always goes in a JSON config instead (mcpSnippet). */
-export const claudeAddCommand = (url: string) => `claude mcp add --transport http ${mcpServerName} ${url}`;
+/** Claude Code's one-line setup for OAuth, for every project (user scope). It takes no key: a key on a command line
+ * stays in shell history and in the process list, so a key always goes in a JSON config instead (mcpSnippet). */
+export const claudeAddCommand = (url: string) => `claude mcp add --transport http --scope user ${mcpServerName} ${url}`;
 
 /** What to paste for a client: Claude Code's command for OAuth, otherwise (and always with a key) a JSON config. */
 export function mcpSnippet(client: McpClient, url: string, auth: McpAuth): string {
@@ -76,4 +89,28 @@ function clientSteps(client: McpClient, auth: 'key' | 'oauth'): string[] {
   return auth === 'key'
     ? ['Add a remote (Streamable HTTP) server with this URL and Authorization header.']
     : ['Add a remote (Streamable HTTP) server with this URL. Your client signs in with OAuth; approve the access in your browser.'];
+}
+
+/** The clients a person connects as themselves (OAuth), in the order Connect an agent shows them. */
+export const mcpSignInClients = ['opencode', 'claude', 'codex', 'cursor', 'claude-app', 'chatgpt', 'vscode', 'other'] as const;
+export type McpSignInClient = typeof mcpSignInClients[number];
+export const mcpSignInNames: Record<McpSignInClient, string> = { opencode: 'OpenCode', claude: 'Claude Code', codex: 'Codex', cursor: 'Cursor', 'claude-app': 'Claude', chatgpt: 'ChatGPT', vscode: 'VS Code', other: 'Other' };
+/** One client's setup: a command to paste in a terminal, a link that opens the client (an install link, or its connector
+ *  settings, where the URL is pasted), and the steps after it. */
+export type McpSignIn = { command?: string; link?: { href: string; label: string }; steps: string[] };
+const approve = 'Approve the access in your browser.';
+export function mcpSignIn(client: McpSignInClient, url: string): McpSignIn {
+  const name = mcpServerName;
+  if (client === 'opencode') return { command: `opencode mcp add ${name} --global --url ${url}`, steps: ['Run it in a terminal.', `In OpenCode, run /mcps, select ${name} and choose Sign in.`, approve] };
+  if (client === 'claude') return { command: claudeAddCommand(url), steps: ['Run it in a terminal.', `In Claude Code, run /mcp, select ${name} and choose Authenticate.`, approve] };
+  if (client === 'codex') return { command: `codex mcp add ${name} --url ${url}`, steps: ['Run it in a terminal. Codex opens your browser to sign in.', approve, `To sign in again later, run codex mcp login ${name}.`] };
+  if (client === 'cursor') return { link: { href: `cursor://anysphere.cursor-deeplink/mcp/install?name=${name}&config=${encodeURIComponent(btoa(JSON.stringify({ url })))}`, label: 'Add to Cursor' },
+    steps: ['Cursor opens and asks to install it: choose Install.', `In Cursor Settings → MCP, choose Connect beside ${name}.`, approve] };
+  if (client === 'claude-app') return { link: { href: 'https://claude.ai/customize/connectors', label: 'Open Claude connectors' },
+    steps: ['In Claude or Claude Desktop, open Customize → Connectors and choose Add → Custom → Web.', `Name it ${name}, paste the URL above and choose Connect.`, approve] };
+  if (client === 'chatgpt') return { link: { href: 'https://chatgpt.com/plugins', label: 'Open ChatGPT plugins' },
+    steps: ['In ChatGPT on the web, open Plugins, choose + and then Add custom MCP server.', `Name it ${name}, paste the URL above and choose OAuth.`, `Choose Create as a plugin. ${approve}`] };
+  if (client === 'vscode') return { link: { href: `vscode:mcp/install?${encodeURIComponent(JSON.stringify({ name, type: 'http', url }))}`, label: 'Add to VS Code' },
+    steps: ['VS Code opens and asks to install it: choose Install.', `When VS Code asks, let ${name} sign in.`, approve] };
+  return { steps: ['Add a remote (Streamable HTTP) server with the URL above.', `It signs in with OAuth. ${approve}`] };
 }

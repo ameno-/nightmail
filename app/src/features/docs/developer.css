@@ -46,3 +46,28 @@
 .developer-code.developer-code--prompt { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* The send example takes the height of the tab shown: cURL doesn't leave the gap TypeScript needs. A click resizes it, which is not a layout shift. */
 .developer-client-panels--fit > .developer-client-panel:not([data-active]) { display: none; }
+/* Connect an agent: a fixed height, so the client panels (one shared cell) and the agents list loading or growing move
+   nothing; the body scrolls. */
+@media (min-width: 641px) { .ui-dialog.connect-agent-dialog { height: min(680px, calc(100dvh - var(--dialog-top) - 16px)); } }
+.ui-dialog.ui-dialog--sheet.connect-agent-dialog { height: calc(100dvh - var(--keyboard-inset, 0px) - max(24px, env(safe-area-inset-top))); }
+.connect-agent-dialog .ui-dialog__body { flex: 1; }
+.connect-agent { gap: var(--space-24); }
+.connect-agent-dialog .ui-dialog__footer > .connect-agent__aside + :not(.connect-agent__aside) { margin-left: auto; }
+:is(.connect-agent__url, .developer-client-panels)[data-pending] { visibility: hidden; }
+/* A command wraps inside its box at every width, so all of it is in view. */
+.developer-snippet > .developer-code.connect-agent__command { white-space: pre-wrap; overflow-wrap: anywhere; }
+.connect-agent__open { align-self: flex-start; gap: var(--space-6); }
+.connect-agent__open svg { width: 14px; height: 14px; }
+.connect-agent__heading { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
+.connect-agent__agents { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--color-border-muted); }
+.connect-agent__agent { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); height: 53px; border-bottom: 1px solid var(--color-border-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
+.connect-agent__agent[data-fresh] { animation: ui-appear 240ms ease-out; }
+.connect-agent__who { display: flex; flex-direction: column; min-width: 0; }
+.connect-agent__who > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.connect-agent__who a { color: var(--color-text); text-decoration: none; }
+.connect-agent__who a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.connect-agent__done { display: inline-flex; flex-shrink: 0; align-items: center; gap: var(--space-4); color: var(--color-success); }
+.connect-agent__waiting { justify-content: flex-start; gap: var(--space-8); }
+.connect-agent__pulse { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--color-muted); animation: connect-agent-pulse 1.6s ease-in-out infinite; }
+@keyframes connect-agent-pulse { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .connect-agent__pulse, .connect-agent__agent[data-fresh] { animation: none; } }

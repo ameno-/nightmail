@@ -9,8 +9,7 @@ import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApiDef, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { Agent } from '../../data/types'
-import type { McpClient } from '../../../../api/src/mcp-clients'
-import { McpClientSetup, useMcpScope, useMcpUrl } from '../docs/connect-agent'
+import { McpSignInSetup } from '../docs/connect-agent'
 import { guides } from './concepts'
 import { connectionTitle } from '../settings/key-labels'
 import '../docs/developer.css'
@@ -45,14 +44,11 @@ export function AskAgentLink({ address }: { address: string | null }) {
 }
 
 function AgentSetup({ address }: { address: string | null }) {
-  const [client, setClient] = useState<McpClient>('opencode')
   const identity = useSession()?.identity
   const admin = useWorkspaceAccess().canAdminister
   const several = (identity?.workspaces?.length ?? 0) > 1
   const workspace = several ? identity?.workspaces?.find(w => w.id === identity.workspaceId)?.name ?? null : null
   const apps = useApiDef(queries.agents(true))
-  const url = useMcpUrl()
-  const scope = useMcpScope('manage')
   const active = (apps.data ?? []).filter(app => app.own && app.status === 'active')
   const connected = active.find(app => canEdit(app, admin))
   // Connected but not able to edit rules here: read or send access only, or a member of this workspace.
@@ -66,7 +62,7 @@ function AgentSetup({ address }: { address: string | null }) {
     {limited && <p className="ritual-agent__note">{admin ? <>Connect it again and approve full access, or <Link to={`/settings/mcp/${encodeURIComponent(limited.id)}`}>revoke it in Settings</Link> first.</> : 'Rules need an owner or admin of this workspace.'}</p>}
     {/* The setup opens from its heading, so the prompts stay in view under it. */}
     {!connected && <Disclosure className="ritual-agent__setup" title="Connect it, with full access">
-      <McpClientSetup client={client} onClient={setClient} url={url} auth={{ scope }} />
+      <McpSignInSetup />
     </Disclosure>}
     <div className="stack ritual-agent__step">
       <h3 className="ritual-agent__heading">Ask it</h3>

@@ -1,19 +1,19 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import * as DropdownPrimitive from '@radix-ui/react-dropdown-menu'
 import { useQueryClient } from '@tanstack/react-query'
-import { Check, ChevronDown, LifeBuoy, LogOut, Plus, StickyNote, UserPlus } from 'lucide-react'
+import { Check, ChevronDown, LifeBuoy, LogOut, Plug, Plus, StickyNote, UserPlus } from 'lucide-react'
 import { sectionPath, useApiMutation, useSession } from '../data/context'
 import { accountApi, accountsKey, initials, useAccounts, type ConnectedAccount } from '../data/accounts'
 import { useMembershipCache, workspaceApi } from '../data/workspaces'
-import { usePhone } from '../lib/media'
+import { useCompactShell, usePhone } from '../lib/media'
 import { PrivateAddress } from './PrivateAddress'
 import { Button, Dialog, Field, Input, Sheet, useToast, fieldError, MutationError } from './ui'
 import { ContactSupportDialog } from './ContactSupport'
 import { toggleUiNotesMode, useUiNotesMode } from '../lib/ui-notes-mode'
 import { errorText } from '../data/types'
 
-// One menu for who and where: the accounts this browser connected, each with its workspaces, then Add account,
-// Contact support and sign-out. Picking a workspace of another account switches account and workspace together. Multi-tenant only; shown
+// One menu for who and where: the accounts this browser connected, each with its workspaces, then Connect an agent (the
+// dashboard's, `onConnectAgent`, on a phone or tablet, which have no sidebar), Contact support, Add account and sign-out. Picking a workspace of another account switches account and workspace together. Multi-tenant only; shown
 // in the dashboard sidebar, the phone's top bar (as a sheet) and the onboarding header.
 type Entry = { key: string; label: ReactNode; text: string; icon?: ReactNode; checked?: boolean; disabled?: boolean; destructive?: boolean; heading?: boolean; onSelect: () => void }
 export function AccountAvatar({ name, email }: { name: string | null | undefined; email?: string | null }) {
@@ -22,10 +22,11 @@ export function AccountAvatar({ name, email }: { name: string | null | undefined
 function Who({ account }: { account: Pick<ConnectedAccount, 'name' | 'email'> }) {
   return <span className="account-menu__who"><span className="account-menu__name">{account.name || account.email || 'Account'}</span>{account.email && <PrivateAddress className="account-menu__email" value={account.email} />}</span>
 }
-export function AccountSwitcher() {
+export function AccountSwitcher({ onConnectAgent }: { onConnectAgent?: () => void } = {}) {
   const session = useSession()
   const toast = useToast()
   const phone = usePhone()
+  const compact = useCompactShell()
   const client = useQueryClient()
   const memberships = useMembershipCache()
   const identity = session?.identity
@@ -83,6 +84,7 @@ export function AccountSwitcher() {
     // Nightmail staff: UI notes mode, for leaving design and bug notes on the dashboard (⇧N anywhere).
     ...identity.uiNotes === true ? [{ key: 'ui-notes', text: `UI notes ${notesOn ? 'on' : 'off'}`, icon: <StickyNote />, onSelect: () => { setOpen(false); toggleUiNotesMode() },
       label: <span className="account-menu__toggle">UI notes<span className="account-menu__toggle-state">{notesOn ? 'On' : 'Off'}{!phone && <kbd>⇧N</kbd>}</span></span> }] : [],
+    ...compact && onConnectAgent ? [{ key: 'connect-agent', text: 'Connect an agent…', label: 'Connect an agent…', icon: <Plug />, onSelect: () => { setOpen(false); onConnectAgent() } }] : [],
     { key: 'support', text: 'Contact support…', label: 'Contact support…', icon: <LifeBuoy />, onSelect: () => { setOpen(false); setSupport(true) } },
     // At the limit, Add account says why it can't, only when it is chosen.
     { key: 'add', text: 'Add account', label: 'Add account', icon: <UserPlus />, onSelect: () => { setOpen(false); if (full) toast(`Up to ${limit} accounts. Sign out of one first.`, 'error'); else session!.addAccount() } },

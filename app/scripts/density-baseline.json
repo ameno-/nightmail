@@ -178,11 +178,11 @@
    "findings": []
   },
   "Onboarding · desktop": {
-   "score": 7,
+   "score": 5,
    "findings": []
   },
   "Onboarding · phone": {
-   "score": 7,
+   "score": 5,
    "findings": []
   },
   "Operator · desktop": {
@@ -199,6 +199,14 @@
   },
   "Operator · workspace · phone": {
    "score": 27,
+   "findings": []
+  },
+  "Overview · connect agent dialog · desktop": {
+   "score": 18,
+   "findings": []
+  },
+  "Overview · connect agent sheet · phone": {
+   "score": 18,
    "findings": []
   },
   "Overview · desktop": {
