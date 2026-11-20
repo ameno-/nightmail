@@ -22610,7 +22610,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const uploads=new Map<string,Uint8Array>();const adapter={put:async(k:string,b:Uint8Array)=>{uploads.set(k,b);},get:async()=>null,delete:async()=>{}};
         for(const msg of [defaultMsg,s3]){const file=(await db.query('SELECT id FROM mail_attachments WHERE message_id=$1',[msg.id])).rows[0];const out=await resolveAttachments({...runtime,storage:adapter},sender,[{id:file.id}],sender.address);assert.equal(out.length,1);assert.equal(Buffer.from(uploads.get(out[0].storageKey)!).toString(),'fixture');}
       });
-      await t.test('ephemeral inbox: sending is off by default, reply-only to inbound authors when on, and capped at 20 per day',async()=>{
+      await t.test('ephemeral inbox: sending is off by default, reply-only to inbound authors when on, with no daily cap',async()=>{
         const reply=(bid:string,thread:string,to:string,replyToMessageId?:string)=>local('POST',`/v1/inbound/threads/${thread}/reply`,{addressId:bid,text:'Test',to:[to],replyToMessageId},'live',{'idempotency-key':unique('idem')});
         error(await reply(box.id,first.thread_id,'fixture@example.net'),403,'EPHEMERAL_SEND_DISABLED');error(await local('POST','/v1/inbound/threads',{addressId:box.id,to:['fixture@example.net'],subject:'Start',text:'Test'}),422,'EPHEMERAL_REPLY_ONLY');
         const sender=ok(await create({send:{enabled:true,perDay:20}}),201),mail=await deliver('sender-test',[sender.address],false,true,'sender-test',false,{dmarcVerdict:{status:'PASS'}});error(await reply(sender.id,mail.thread_id,'outsider@example.net'),403,'RECIPIENT_NOT_ALLOWED');
@@ -22623,7 +22623,28 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const plain=ok(await request('GET',`/v1/inbound/messages/${mail.id}`,provision));assert.equal(plain.authentication,undefined);assert.equal(plain.automated,undefined);
         error(await request('GET',`/v1/inbound/messages/${mail.id}?includeDelivery=true`,provision),403,'ADMIN_REQUIRED');
         ok(await reply(sender.id,mail.thread_id,'fixture@example.net'),202);
-        await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,sender_mailbox_id,direction) SELECT 'out_'||i,$1,$2,$3,'outbound' FROM generate_series(1,19)i",[wid,mail.thread_id,sender.id]);error(await reply(sender.id,mail.thread_id,'fixture@example.net',mail.id),429,'MAILBOX_SEND_LIMIT');
+        // send.perDay (20) is deprecated: 25 more replies today, over an hour ago, don't stop the next one.
+        await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,sender_mailbox_id,direction,created_at) SELECT 'out_'||i,$1,$2,$3,'outbound',now()-interval '2 hours' FROM generate_series(1,25)i",[wid,mail.thread_id,sender.id]);
+        ok(await reply(sender.id,mail.thread_id,'fixture@example.net',mail.id),202);
+      });
+      await t.test('addresses: no hourly or daily send cap; the loop guards and a 0 still refuse',async()=>{
+        const desk=ok(await local('POST','/v1/inbound/addresses',{address:'desk@'+host}),201),addressPath=`/v1/inbound/addresses/${desk.id}`;
+        const mail=await deliver('desk-in',[desk.address],false,true,'desk-in',false,{dmarcVerdict:{status:'PASS'}});
+        const send=(to:string)=>local('POST','/v1/inbound/threads',{addressId:desk.id,to:[to],subject:'Update',text:'Test'},'live',{'idempotency-key':unique('idem')});
+        const reply=()=>local('POST',`/v1/inbound/threads/${mail.thread_id}/reply`,{addressId:desk.id,replyToMessageId:mail.id,text:'Test'},'live',{'idempotency-key':unique('idem')});
+        const seed=(n:number,age:string,thread:string,to:string|null=null)=>db.query(`INSERT INTO mail_messages(id,workspace_id,thread_id,sender_mailbox_id,direction,"to",created_at)
+          SELECT $5||i,$1,$2,$3,'outbound',CASE WHEN $4::text IS NULL THEN '[]'::jsonb ELSE jsonb_build_array(jsonb_build_object('name',NULL,'address',$4::text)) END,now()-$6::interval FROM generate_series(1,$7::int)i`,[wid,thread,desk.id,to,unique('seed'),age,n]);
+        // 1,000 sent today, 100 of them in the last hour: the old caps (100 an hour, 1,000 a day) refused the next send.
+        const seedThread=ok(await send('seed@example.net'),202).threadId;
+        await seed(900,'3 hours',seedThread);await seed(100,'30 minutes',seedThread);
+        ok(await send('fresh@example.net'),202);ok(await reply(),202);
+        assert.deepEqual(ok(await local('GET',addressPath)).sendLimits,{perHour:100,perDay:1000,perRecipientPerHour:20,perThreadPer10Minutes:10},'perHour and perDay are still shown, unenforced');
+        // The loop guards still refuse: 20 to one recipient in an hour, and 10 in one conversation in 10 minutes.
+        await seed(20,'5 minutes',seedThread,'loop@example.net');error(await send('loop@example.net'),429,'RECIPIENT_SEND_LIMIT');
+        await seed(9,'1 minute',mail.thread_id);error(await reply(),429,'THREAD_LOOP_SUSPECTED');
+        // A deprecated cap of 0 is still the off switch; any other number no longer limits anything.
+        ok(await local('PATCH',addressPath,{sendLimits:{perDay:0}}));error(await send('fresh@example.net'),403,'MAILBOX_SEND_DISABLED');
+        ok(await local('PATCH',addressPath,{sendLimits:{perDay:5,perHour:1}}));ok(await send('fresh@example.net'),202);
       });
       await t.test('folder entries keep independent UIDs and shared flags, not shared state across inboxes',async()=>{
         const p=ok(await local('POST',root,{type:'persistent',localPart:'persistent',send:{enabled:true},credential:{name:'owner',permissions:['read','modify']}}),201);

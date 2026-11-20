@@ -22,6 +22,9 @@ import { SEND_LIMITS } from './send-limits.js';
 import { withMemory } from './isolate-memory.js';
 import { productName } from './brand.js';
 
+/** An address or inbox has no hourly or daily send cap: the workspace's sending limits apply (standing, pacing, the
+ * evaluation). Only the loop guards are per address. perHour and perDay are deprecated and shown as set (these values
+ * when never set); 0 in either still turns sending off. */
 export const DEFAULT_SEND_LIMITS: SendLimits = { perHour: 100, perDay: 1000, perRecipientPerHour: 20, perThreadPer10Minutes: 10 };
 export const sendLimitsFor = (mailbox: typeof mailboxes.$inferSelect): SendLimits => ({ ...DEFAULT_SEND_LIMITS, ...mailbox.sendLimits });
 const MAX_TOTAL_ATTACHMENT_BYTES = SEND_LIMITS.attachmentBytes;
@@ -185,27 +188,27 @@ export type OutgoingMessage = {
 /** Withholds single-use capabilities from stored, workspace-visible copies of sealed mail. */
 export const sealCapabilities = (value: string) => value.replace(/fwd_[0-9a-f]{64}/g, '[link withheld: only the recipient can use it]');
 
-/** Enforces per-mailbox limits and loop guards. Caller holds the mailbox row lock. */
+/** Enforces the loop guards. There is no hourly or daily cap per address: the send admission applies the workspace's
+ * limits. Caller holds the mailbox row lock. */
 async function enforceLimits(tx: DbExecutor, message: OutgoingMessage) {
-  const limits = sendLimitsFor(message.mailbox);
-  const counts = await tx.execute<{ hour: number; day: number; thread:number; recent:string[][] }>(sql`SELECT count(*) FILTER (WHERE created_at > now() - interval '1 hour')::int AS hour, count(*)::int AS day,
-    coalesce(jsonb_agg(jsonb_path_query_array("to"||cc||bcc,'$[*].address')) FILTER (WHERE created_at>now()-interval '1 hour'),'[]') AS recent,
-    (SELECT count(*)::int FROM mail_messages WHERE direction='outbound' AND sender_mailbox_id=${message.mailbox.id} AND thread_id=${message.threadId??null} AND created_at>now()-interval '10 minutes') AS thread
-    FROM mail_messages WHERE sender_mailbox_id = ${message.mailbox.id} AND direction = 'outbound' AND created_at > now() - interval '1 day'`);
-  const { hour, day } = counts.rows[0]!;
-  if (hour >= limits.perHour) throw new ApiError(429, 'MAILBOX_SEND_LIMIT', `This mailbox reached its limit of ${limits.perHour} messages per hour.`, undefined, true);
-  if (!message.protocolArchive && day >= limits.perDay) throw new ApiError(429, 'MAILBOX_SEND_LIMIT', `This mailbox reached its limit of ${limits.perDay} messages per day.`, undefined, true);
+  const limits = sendLimitsFor(message.mailbox), stored = message.mailbox.sendLimits;
+  // A deprecated cap set to 0 was the documented way to turn an address's sending off, and still is. A mail-client
+  // submission never read perDay (a persistent inbox without send.enabled stores 0 there).
+  if (stored.perHour === 0 || (stored.perDay === 0 && !message.protocolArchive))
+    throw new ApiError(403, 'MAILBOX_SEND_DISABLED', 'Sending is off for this address: its sendLimits.perHour or perDay is 0. Set it to any other number to turn sending on.');
   const recipients = [...message.to, ...message.cc, ...message.bcc];
-  const { recent,thread }=counts.rows[0]!;
-  if (message.protocolArchive && recent.reduce((n,row)=>n+row.length,0)+recipients.length>limits.perHour)
-    throw new ApiError(429,'MAILBOX_SEND_LIMIT','This mailbox reached its hourly recipient limit.',undefined,true);
+  // Counted here, per recipient: an address without a cap can send thousands an hour, so no list of them leaves the database.
+  const { rows: [counts] } = await tx.execute<{ thread: number; recent: Record<string, number> }>(sql`SELECT
+    (SELECT count(*)::int FROM mail_messages WHERE direction='outbound' AND sender_mailbox_id=${message.mailbox.id} AND thread_id=${message.threadId??null} AND created_at>now()-interval '10 minutes') AS thread,
+    (SELECT coalesce(jsonb_object_agg(address,sent),'{}') FROM (SELECT r.address,count(*)::int AS sent FROM mail_messages m
+      CROSS JOIN LATERAL (SELECT DISTINCT lower(e->>'address') AS address FROM jsonb_array_elements(m."to"||m.cc||m.bcc) e) r
+      WHERE m.sender_mailbox_id=${message.mailbox.id} AND m.direction='outbound' AND m.created_at>now()-interval '1 hour'
+        AND r.address=ANY(${sql.param([...new Set(recipients.map(r=>r.toLowerCase()))])}::text[]) GROUP BY r.address) s) AS recent`);
   for (const recipient of recipients) {
-    const sent = recent.filter(row=>row.some(address=>address.toLowerCase()===recipient.toLowerCase())).length;
+    const sent = counts!.recent[recipient.toLowerCase()] ?? 0;
     if (sent >= limits.perRecipientPerHour) throw new ApiError(429, 'RECIPIENT_SEND_LIMIT', `This mailbox already sent ${sent} messages to ${recipient} in the last hour. This guards against reply loops.`, undefined, true);
   }
-  if (message.threadId) {
-    if (thread >= limits.perThreadPer10Minutes) throw new ApiError(429, 'THREAD_LOOP_SUSPECTED', `This mailbox sent ${thread} messages in this conversation in the last 10 minutes. Wait before replying again.`, undefined, true);
-  }
+  if (message.threadId && counts!.thread >= limits.perThreadPer10Minutes) throw new ApiError(429, 'THREAD_LOOP_SUSPECTED', `This mailbox sent ${counts!.thread} messages in this conversation in the last 10 minutes. Wait before replying again.`, undefined, true);
 }
 
 /** Queues an email from a mailbox through the sending pipeline and stores it in the conversation. Runs inside the caller's transaction. */

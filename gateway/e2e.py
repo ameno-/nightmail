@@ -239,10 +239,6 @@ def gateway(tmp, **overrides):
     if REAL:
         env.pop("MAILGW_FIXTURE_PASSWORD")
         env.update({k: v for k, v in REAL.items() if k != "pg"})
-        if "MAILGW_MONTHLY" in overrides:
-            sql(
-                "UPDATE inbox_state SET protocol_monthly=(SELECT count(*)+1 FROM mail_messages WHERE sender_mailbox_id='mbx_fixture') WHERE inbox_id='mbx_fixture'"
-            )
     with sp.Popen(
         [ROOT / "target/debug/mailgw"], env=env, stdout=sp.PIPE, text=True
     ) as proc:
@@ -257,8 +253,6 @@ def gateway(tmp, **overrides):
             yield ports, proc.pid
         finally:
             proc.terminate()
-            if REAL and "MAILGW_MONTHLY" in overrides:
-                sql("UPDATE inbox_state SET protocol_monthly=2000")
 
 
 def connect(port,user=USER,password=PASS):
@@ -557,7 +551,8 @@ def admission(tmp):
         for accepted, login in [(True, ALIAS), (False, USER)]:
             with smtplib.SMTP_SSL("localhost", p["SMTPS"], context=CTX, timeout=5) as c:
                 c.login(login, PASS)
-                if accepted:
+                # The fixture backend's MAILGW_MONTHLY budget; the real API has no per-inbox cap.
+                if accepted and not REAL:
                     c.mail(ALIAS);c.rcpt('first@example.invalid');c.rcpt('second@example.invalid')
                     assert c.data(RAW)[0]==451, 'recipient budget must reject the whole submission'
                 c.mail(ALIAS)

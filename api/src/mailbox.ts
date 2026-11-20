@@ -109,7 +109,11 @@ const InboundAddressSchema = z.object({
   metadata: z.record(z.string(), z.unknown()), origin: z.enum(['api', 'auto']), createdAt: z.string(), updatedAt: z.string(),
   expiresAt: z.string().datetime().nullable().describe('UTC lease expiry, or null for a permanent address. After expiry, new delivery and sending stop. History stays readable and the address remains reserved until an admin deletes it.'),
   stats: z.object({ threads: z.number().int(), unreadThreads: z.number().int(), lastMessageAt: z.string().nullable() }),
-  sendLimits: z.object({ perHour: z.number().int(), perDay: z.number().int(), perRecipientPerHour: z.number().int(), perThreadPer10Minutes: z.number().int() }).describe('Outbound limits that guard against runaway agents and reply loops.'),
+  sendLimits: z.object({
+    perHour: z.number().int().openapi({ deprecated: true, description: 'Deprecated and not enforced: an address has no hourly send cap. The value last set (100 if never set); 0 means sending is off.' }),
+    perDay: z.number().int().openapi({ deprecated: true, description: 'Deprecated and not enforced: an address has no daily send cap. The value last set (1000 if never set); 0 means sending is off.' }),
+    perRecipientPerHour: z.number().int(), perThreadPer10Minutes: z.number().int(),
+  }).describe('Loop guards against runaway agents and reply loops: messages to one recipient per hour, and in one conversation per 10 minutes. The workspace’s sending limits apply on top; there is no hourly or daily cap per address.'),
   requireDmarc: z.boolean().describe('When true, received mail without a DMARC pass for its From domain is stored with the unverified label and does not emit message.received.'),
   kind: z.enum(['address', 'inbox']).describe('inbox: an agent inbox; manage it with /v1/inboxes.'),
 }).openapi('InboundAddress');
@@ -401,8 +405,12 @@ function registerAddresses(app: App) {
     ttlSeconds: z.number().int().min(60).max(30 * 24 * 60 * 60).optional().describe('Lease duration in seconds, 60–2592000 (30 days). Omit for a permanent address. Temporary addresses accept plus-tags, not aliases, wildcard rules or historical backfill. Expiry is fixed at creation.'),
     aliases: z.array(z.string().trim().toLowerCase().max(254).regex(ADDRESS)).max(50).default([]), rules: z.array(z.string().max(254)).max(20).default([]).describe('Wildcard address patterns, e.g. support+*@acme.com or *@help.acme.com.'),
     metadata: z.record(z.string(), z.unknown()).refine(value => JSON.stringify(value).length <= 16384, 'Metadata must be at most 16 KB.').default({}),
-    sendLimits: z.object({ perHour: z.number().int().min(0).max(10000), perDay: z.number().int().min(0).max(100000), perRecipientPerHour: z.number().int().min(0).max(1000), perThreadPer10Minutes: z.number().int().min(0).max(1000) }).partial().strict().optional()
-      .describe(`Override outbound limits. Defaults: ${Object.entries(DEFAULT_SEND_LIMITS).map(([key, value]) => `${key} ${value}`).join(', ')}. 0 blocks sending.`),
+    sendLimits: z.object({
+      perHour: z.number().int().min(0).max(10000).openapi({ deprecated: true, description: 'Deprecated and not enforced. 0 turns sending off; any other number has no effect.' }),
+      perDay: z.number().int().min(0).max(100000).openapi({ deprecated: true, description: 'Deprecated and not enforced. 0 turns sending off; any other number has no effect.' }),
+      perRecipientPerHour: z.number().int().min(0).max(1000), perThreadPer10Minutes: z.number().int().min(0).max(1000),
+    }).partial().strict().optional()
+      .describe(`Override the loop guards. Defaults: perRecipientPerHour ${DEFAULT_SEND_LIMITS.perRecipientPerHour}, perThreadPer10Minutes ${DEFAULT_SEND_LIMITS.perThreadPer10Minutes}. 0 blocks sending. There is no hourly or daily cap per address.`),
     requireDmarc: z.boolean().default(false).describe('Hold received mail without a DMARC pass for its From domain: it is stored with the unverified label and does not emit message.received.'),
   }).strict().openapi('CreateInboundAddress');
   app.openapi(createRoute({ ...meta, method: 'get', path: collection, ...addressAlias('listInboundAddresses'), summary: 'List receivable addresses', description: 'An address key sees only addresses it can access.',

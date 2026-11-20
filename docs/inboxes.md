@@ -55,7 +55,7 @@ flowchart LR
   mcp["Hosted MCP /mcp<br/>agent with an inbox API key"] --> api
   sdk["SDK waitForMessage<br/>30-second long polls"] --> api
   api --> inbox
-  inbox -->|"reply-only, 20 a day,<br/>to verified authors"| out["Outbound mail via SES"]
+  inbox -->|"reply-only,<br/>to verified authors"| out["Outbound mail via SES"]
   inbox -->|events| hooks["Webhooks and event feed"]
   sweep["Hourly sweep"] -->|"erase ended inboxes, GC messages"| inbox
   sweep -->|"mail.deleteObjects"| r2[("R2 objects")]
@@ -71,7 +71,7 @@ flowchart LR
 | Read-only or domain-restricted API key | – | – | – | – | – | – | – |
 | Hourly sweep | – | – | – | erases ended inboxes | – | – | – |
 
-¹ Only if the inbox was created with `send.enabled`, only as a reply in an existing thread, only to people in that thread whose delivered message passed sender authentication, at most 20 a day. Inboxes never start new threads (`EPHEMERAL_REPLY_ONLY`), and sandbox inboxes never send. An inbox principal on MCP sees only the inbox tools its permissions allow; OAuth clients with unrestricted manage access see them too.
+¹ Only if the inbox was created with `send.enabled`, only as a reply in an existing thread, only to people in that thread whose delivered message passed sender authentication. There is no daily cap: the loop guards (20 messages to one recipient an hour, 10 in one conversation per 10 minutes) and the workspace’s sending limits apply. Inboxes never start new threads (`EPHEMERAL_REPLY_ONLY`), and sandbox inboxes never send. An inbox principal on MCP sees only the inbox tools its permissions allow; OAuth clients with unrestricted manage access see them too.
 
 ## Lifecycle
 

@@ -43,8 +43,8 @@ const create = z.object({
   limits: limits.optional().describe('Optional delivery caps. Temporary inboxes default to 200 messages and 25 MiB; persistent inboxes have no default delivery cap. Held mail is stored and readable, never dropped.'),
   send: z.object({
     enabled: z.boolean().default(false).describe('Allow replies through POST /v1/inbound/threads/{threadId}/reply.'),
-    perDay: z.number().int().min(1).max(20).default(20).describe('Replies per day, at most 20.'),
-  }).strict().default({ enabled: false, perDay: 20 }).describe('Replies only go to people who wrote to this inbox. Sandbox inboxes never send.'),
+    perDay: z.number().int().min(1).max(20).default(20).openapi({ deprecated: true, description: 'Deprecated and not enforced: replies have no daily cap. Accepted for compatibility.' }),
+  }).strict().default({ enabled: false, perDay: 20 }).describe('Replies only go to people who wrote to this inbox, within the loop guards and the workspace’s sending limits. Sandbox inboxes never send.'),
   credential: z.object({ name: z.string().min(1).max(100), permissions }).strict().optional()
     .describe('Also create a key that can use only this inbox. Its secret is returned once and it expires with the inbox. Use it as a bearer token for this API or hosted MCP.'),
 }).strict();
@@ -65,7 +65,7 @@ const Inbox = z.object({
   deleteAfter: z.string().nullable().describe('When the inbox, its mail and its keys are erased.'),
   retention: z.object({mode:z.enum(['forever','ephemeral'])}),
   limits: z.object({messages:z.number().nullable(),bytes:z.number().nullable()}),
-  send: z.object({ enabled: z.boolean(), perDay: z.number(), replyOnly: z.literal(true) }),
+  send: z.object({ enabled: z.boolean(), perDay: z.number().openapi({ deprecated: true, description: 'Deprecated and not enforced: replies have no daily cap. The value set at creation.' }), replyOnly: z.literal(true) }),
   usage: z.object({
     messages: z.number().describe('Messages stored, including held ones.'), bytes: z.number().describe('Bytes stored, including held mail.'),
     held: z.number().describe('Messages stored but not delivered (over a limit or after expiry). List them with include=held.'),

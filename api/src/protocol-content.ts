@@ -56,8 +56,8 @@ export async function contentWrite(c: Ctx, p: Content) {
     // Acquire the issuer/revoker's fence BEFORE taking the statement snapshot used to authorize.
     await tx.execute(sql`SELECT FROM inbox_state WHERE workspace_id=${who.w} AND inbox_id=${who.b} FOR UPDATE`);
     const active = (
-      await tx.execute<{ owned: string[]; suppressed: boolean; space: boolean; daily: number; monthly: number }>(
-        sql`WITH a AS (${auth}) SELECT ${ownership} AS owned,s.protocol_daily daily,s.protocol_monthly monthly,
+      await tx.execute<{ owned: string[]; suppressed: boolean; space: boolean }>(
+        sql`WITH a AS (${auth}) SELECT ${ownership} AS owned,
           (s.messages < coalesce(b.quota_messages,100000) AND s.bytes + ${raw.length} <= coalesce(b.quota_bytes,1073741824)) AS space,
           EXISTS(SELECT FROM audience_contacts WHERE workspace_id=a.w AND email=ANY(${sql.param(p.to.map(v=>v.toLowerCase()))}::text[]) AND suppressed) AS suppressed
           FROM a JOIN inbox_state s ON s.inbox_id=a.b JOIN mailboxes b ON b.id=a.b FOR UPDATE OF s`,
@@ -72,13 +72,15 @@ export async function contentWrite(c: Ctx, p: Content) {
     // known undeliverable mail; dispatch still rechecks for changes after this commit.
     if (active.suppressed) throw new ApiError(422, 'RECIPIENT_INELIGIBLE', 'Recipient is not eligible for delivery.');
     const stamp = m?.messageId?.trim() ?? null;
+    // An inbox has no daily or monthly cap of its own (inbox_state.protocol_daily and protocol_monthly are no longer
+    // read): only the workspace's daily limit, which the send admission applies again.
     const used = (
-      await tx.execute<{ day: number; month: number }>(
-        sql`SELECT coalesce(sum(accepted) FILTER(WHERE day=(now() AT TIME ZONE 'UTC')::date),0)::int AS day,coalesce(sum(accepted),0)::int AS month FROM inbox_protocol_sends WHERE inbox_id=${who.b} AND day>=date_trunc('month',now() AT TIME ZONE 'UTC')::date`,
+      await tx.execute<{ day: number }>(
+        sql`SELECT coalesce(sum(accepted),0)::int AS day FROM inbox_protocol_sends WHERE inbox_id=${who.b} AND day=(now() AT TIME ZONE 'UTC')::date`,
       )
     ).rows[0]!;
-    if (used.day + p.to.length > Math.min(active.daily, cap) || used.month + p.to.length > active.monthly)
-      throw new ApiError(429, 'INBOX_SEND_LIMIT', 'Inbox send cap reached.');
+    if (used.day + p.to.length > cap)
+      throw new ApiError(429, 'INBOX_SEND_LIMIT', 'The workspace’s daily sending limit is reached.');
     const actor: Actor = { workspaceId: who.w, keyId: p.kid, domains: [], permissions: ['send'] };
     c.set('actor', actor);
     const { message } = await sendFromMailbox(rt, tx, {
