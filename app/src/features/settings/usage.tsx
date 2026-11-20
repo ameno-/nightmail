@@ -45,14 +45,14 @@ export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; child
       <details className="usage-limit">
         <summary className="settings-row">
           <span className="settings-row__label"><span className="usage-limit__title">Daily limit<ChevronDown size={14} aria-hidden="true" />{custom && <StatusBadge status="Limited" tone="neutral" />}</span></span>
-          <span className="settings-row__control">{value(usage, () => !daily ? <span className="muted">Connect sending first</span> : daily.cap === null ? 'No daily limit' : <DailyMeter used={daily.used} cap={daily.cap} resetAt={daily.resetAt} />, 160)}</span>
+          <span className="settings-row__control">{value(usage, () => !daily ? <span className="muted">Connect sending first</span> : daily.cap === null ? 'No daily limit' : <DailyMeter used={daily.used} cap={daily.cap} resetAt={daily.resetAt} evaluating={daily.step === 0} />, 160)}</span>
         </summary>
         <div className="usage-steps-section">
           <ol className="usage-steps">{steps.map((step, index) => {
             const current = at === index, done = at != null && index < at
             return <li key={index} data-current={current || undefined} data-done={done || undefined} style={{ '--i': index } as CSSProperties}>
               <span className="usage-steps__mark" aria-hidden="true">{done ? <Check size={12} strokeWidth={2.75} /> : index + 1}</span>
-              {step ? <span className="usage-steps__body"><span><b>{number(step.cap)}</b> recipients a day{current && <span className="usage-steps__badge">You’re here</span>}</span><span className="muted">{step.requires}</span></span> : <span className="usage-steps__body"><Skeleton width={160} height={20} /><Skeleton width={280} height={16} /><Skeleton width={200} height={16} /></span>}
+              {step ? <span className="usage-steps__body"><span><b>Evaluation</b> · first {number(step.cap)} recipients, once{current && <span className="usage-steps__badge">You’re here</span>}</span><span className="muted">{step.requires}</span></span> : <span className="usage-steps__body"><Skeleton width={160} height={20} /><Skeleton width={280} height={16} /><Skeleton width={200} height={16} /></span>}
             </li>
           })}
             <li data-current={at === steps.length || undefined} style={{ '--i': steps.length } as CSSProperties}>
@@ -98,10 +98,11 @@ function Meter({ used, cap, label }: { used: number; cap: number; label: string 
   </span>
 }
 
-function DailyMeter({ used, cap, resetAt }: { used: number; cap: number; resetAt: string | null }) {
+// The evaluation is once, not a day: its meter counts toward the first recipients, whose results take about an hour.
+function DailyMeter({ used, cap, resetAt, evaluating }: { used: number; cap: number; resetAt: string | null; evaluating: boolean }) {
   const share = Math.min(1, used / Math.max(1, cap))
-  return <span className="usage-meter" title={resetAt ? `Capacity frees up from ${date(resetAt, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })} UTC` : undefined}>
-    <span className="usage-meter__track" data-full={share >= 0.9 || undefined} role="meter" aria-label="Recipients used in the last 24 hours" aria-valuemin={0} aria-valuemax={cap} aria-valuenow={used}><i style={{ transform: `scaleX(${share})` }} /></span>
+  return <span className="usage-meter" title={evaluating ? `Evaluation: the first ${number(cap)} recipients, once. Their results take about an hour.` : resetAt ? `Capacity frees up from ${date(resetAt, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })} UTC` : undefined}>
+    <span className="usage-meter__track" data-full={share >= 0.9 || undefined} role="meter" aria-label={evaluating ? 'Evaluation recipients sent' : 'Recipients used in the last 24 hours'} aria-valuemin={0} aria-valuemax={cap} aria-valuenow={used}><i style={{ transform: `scaleX(${share})` }} /></span>
     <span className="usage-meter__count">{number(used)} / {number(cap)}</span>
   </span>
 }

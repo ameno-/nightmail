@@ -9,7 +9,7 @@ import type { Agent, WorkspaceMembership } from '../../data/types'
 import { roleLabel, useMembershipCache, workspaceApi } from '../../data/workspaces'
 import { label, number } from '../../lib/format'
 import { useSenderScore } from '../score'
-import { limitSummary, useSendingLimit } from '../overview/setup'
+import { inEvaluation, limitSummary, useSendingLimit } from '../overview/setup'
 import { openScoreAbout } from '../../lib/score-about'
 import { useCompactShell } from '../../lib/media'
 import { AdminOnly } from './admin-only'
@@ -109,6 +109,7 @@ function SendingRows() {
   const connection = useApiDef(queries.connection())
   const summary = useSession()?.identity?.connection
   const limit = useSendingLimit()
+  const evaluating = inEvaluation(useSenderScore().data)
   const current = connection.data, kind = current?.kind ?? summary?.kind, region = current?.region ?? summary?.region
   return <>
     <div className="settings-rows">
@@ -116,7 +117,7 @@ function SendingRows() {
       {region && <Row title="AWS region"><code>{region}</code></Row>}
       {kind === 'byo' && <Row title="AWS account"><code>{current?.awsAccountId ?? '—'}</code></Row>}
       <ScoreRow />
-      {limit && limit.cap !== null && <Row title="Daily limit"><Link to="/settings#usage" replace className="settings-score" title={limitSummary(limit)}><span>{number(limit.used)} / {number(limit.cap)}</span><span className="muted">Plan & usage</span><ArrowUpRight size={14} aria-hidden="true" /></Link></Row>}
+      {limit && limit.cap !== null && <Row title="Daily limit"><Link to="/settings#usage" replace className="settings-score" title={limitSummary(limit, evaluating)}><span>{number(limit.used)} / {number(limit.cap)}</span><span className="muted">Plan & usage</span><ArrowUpRight size={14} aria-hidden="true" /></Link></Row>}
     </div>
     <DisconnectRow kind={kind} />
   </>

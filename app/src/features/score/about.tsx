@@ -5,7 +5,7 @@ import type { SenderScore, SenderScoreFactor } from '../../data/types'
 import { closeScoreAbout, useScoreAbout } from '../../lib/score-about'
 import { number, relativeTime } from '../../lib/format'
 import { gradeKey } from '../../lib/standing'
-import { GOOD_STANDING, GRADE_BANDS } from '../../../../api/src/standing-model'
+import { EVALUATION, GOOD_STANDING, GRADE_BANDS } from '../../../../api/src/standing-model'
 
 const percent = (digits: number) => (value: number) => `${(value * 100).toFixed(digits)}%`
 // Engagement is the marketing unsubscribe rate.
@@ -37,7 +37,7 @@ export function ScoreAbout({ report, error, onRetry }: { report: SenderScore | u
   const low = days.length ? Math.min(...days.map(day => day.score)) - 4 : 0, high = days.length ? Math.max(...days.map(day => day.score)) : 1
   const moved = graded && report.history.length ? Math.round(report.score! - report.history[0].score) : 0
   const limit = report?.limit
-  const limitLine = !limit ? null : [limit.daily === null ? 'No daily limit' : `Daily limit ${number(limit.daily)}${limit.source === 'override' ? ' (override)' : ''}`,
+  const limitLine = !limit ? null : [limit.source === 'calibrating' ? `Evaluation: first ${number(EVALUATION.recipients)} recipients, once` : limit.daily === null ? 'No daily limit' : `Daily limit ${number(limit.daily)}${limit.source === 'override' ? ' (override)' : ''}`,
     limit.growth ? `growing: up to ${number(limit.growth.hourly)} this hour` : null,
     graded && limit.next ? limit.next.unlimited ? `none from ${limit.next.atScore}` : `next ${number(limit.next.limit)} at ${limit.next.atScore}` : null, `${number(limit.perMinute)} a minute`, limit.transactionalReserve ? `${number(limit.transactionalReserve)} kept for receipts` : null].filter(Boolean).join(' · ')
   return <Dialog open={open} onOpenChange={next => { if (!next) closeScoreAbout() }} className="score-about" title="Sender score"

@@ -566,7 +566,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   const [scheduleProblem, setScheduleProblem] = useState('')
   const [confirmation, setConfirmation] = useState<SendCampaignInput | null>(null)
   const [testOpen, setTestOpen] = useState(false)
-  const [pace, setPace] = useState({ limit: false, perDay: '50000', autoPause: true, share: '50' })
+  const [pace, setPace] = useState({ limit: false, perDay: '50000', autoPause: true, share: '100' })
   const [paceToggled, setPaceToggled] = useState(false)
   const guard = useRef(false)
   const { canAdminister, multiTenant } = useWorkspaceAccess()
@@ -587,7 +587,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   const shareError = ratePercentError(sharePercent)
   // A value that needs fixing keeps the fields open.
   const paceOpen = paceToggled || Boolean(paceError || shareError)
-  const paceLine = [pace.limit && `${number(perDay)} per day`, `${pace.share.trim()}% speed`, pace.autoPause ? 'auto-pause on' : 'auto-pause off'].filter(Boolean).join(' · ')
+  const paceLine = [pace.limit && `${number(perDay)} per day`, `${pace.share.trim()}% speed`, !multiTenant && (pace.autoPause ? 'auto-pause on' : 'auto-pause off')].filter(Boolean).join(' · ')
   const paceSummary = (input: SendCampaignInput | null) => !input?.pacing ? '' : `${input.pacing.perDay ? ` Sends to up to ${number(input.pacing.perDay)} recipients per day${paceDays ? ` (about ${paceDays} ${paceDays === 1 ? 'day' : 'days'})` : ''}.` : ''}${input.pacing.rateShare != null && input.pacing.rateShare < 1 ? ` Uses at most ${Math.round(input.pacing.rateShare * 100)}% of your sending speed.` : ''}${input.pacing.autoPause === false ? ' Auto-pause on high bounces or complaints is off.' : ''}`
   const [receipt, setReceipt] = useState('')
   const sendMutation = useApiMutation((api, input: SendCampaignInput) => api.campaigns.send(input))
@@ -684,7 +684,8 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
             <Checkbox label="Limit recipients per day" checked={pace.limit} disabled={sendMutation.isPending} onCheckedChange={limit => { setPace({ ...pace, limit }); setError('') }} />
             {pace.limit && <Field label="Recipients per day" htmlFor="campaign-per-day" error={paceError}><Input id="campaign-per-day" type="number" inputMode="numeric" min={minPerDay} max={maxPerDay} step={1} value={pace.perDay} onChange={event => { setPace({ ...pace, perDay: event.target.value }); setError('') }} disabled={sendMutation.isPending} /></Field>}
             <Field label="Sending speed limit (%)" htmlFor="campaign-rate-share" error={shareError}><Input id="campaign-rate-share" type="number" inputMode="numeric" min={minRatePercent} max={maxRatePercent} step={1} value={pace.share} onChange={event => { setPace({ ...pace, share: event.target.value }); setError('') }} disabled={sendMutation.isPending} /></Field>
-            <Checkbox label="Pause automatically on high bounces or complaints" checked={pace.autoPause} disabled={sendMutation.isPending} onCheckedChange={autoPause => setPace({ ...pace, autoPause })} />
+            {/* Hosted always pauses on high bounces or complaints. */}
+            {!multiTenant && <Checkbox label="Pause automatically on high bounces or complaints" checked={pace.autoPause} disabled={sendMutation.isPending} onCheckedChange={autoPause => setPace({ ...pace, autoPause })} />}
           </div>}
         </div>
         {error && <Alert tone="danger">{error}</Alert>}
