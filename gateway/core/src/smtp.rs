@@ -300,6 +300,7 @@ impl Smtp {
                 r.line("250-PIPELINING");
                 r.line(format!("250-SIZE {MAX_SIZE}"));
                 r.line("250-8BITMIME");
+                r.line("250-ENHANCEDSTATUSCODES");
                 r.line(if !self.tls {
                     "250 STARTTLS"
                 } else if !self.authenticated {
@@ -604,6 +605,116 @@ mod tests {
         );
         assert_eq!(spool.bytes, expected);
         assert_eq!((spool.head, spool.size), (HEAD, expected.len()));
+    }
+    /// RFC 2034: EHLO advertises ENHANCEDSTATUSCODES before and after TLS, and every final reply but the greeting and
+    /// EHLO's starts with a status code of its own class (334 and 354 are intermediate).
+    #[test]
+    fn every_final_reply_carries_an_enhanced_status_code() {
+        struct Accept;
+        impl Submitter for Accept {
+            fn submit(&mut self, _: Submission<'_>) -> Result<Sent, SubmitError> {
+                Ok(Sent { copy: true })
+            }
+        }
+        fn enhanced(reply: &str) -> bool {
+            let mut words = reply.split(' ');
+            let (Some(code), Some(status)) = (words.next(), words.next()) else {
+                return false;
+            };
+            let parts: Vec<_> = status.split('.').collect();
+            code.len() == 3
+                && code[..1] == status[..1]
+                && parts.len() == 3
+                && parts
+                    .iter()
+                    .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        }
+        let a = Account::new(
+            "mbx_test".into(),
+            vec!["x@example.invalid".into()],
+            "fixture".into(),
+            false,
+        );
+        let date: Date = "2025-01-17T00:00:00Z".parse().unwrap();
+        let mut smtp = Smtp::new(false);
+        let mut step = |line: &str| {
+            let r = smtp.step(line.as_bytes(), &a, &mut Accept, date);
+            String::from_utf8(r.bytes).unwrap()
+        };
+        let mut finals = vec![];
+        for (line, code) in [
+            ("EHLO client.invalid\r\n", "250"),
+            ("MAIL FROM:<x@example.invalid>\r\n", "530"),
+            ("STARTTLS\r\n", "220"),
+        ] {
+            let reply = step(line);
+            assert!(reply.starts_with(code), "{line}: {reply}");
+            if line.starts_with("EHLO") {
+                assert!(reply.contains("\r\n250-ENHANCEDSTATUSCODES\r\n"), "{reply}");
+            } else {
+                finals.push(reply);
+            }
+        }
+        let mut smtp = Smtp::new(true);
+        let mut step = |line: &str| {
+            let r = smtp.step(line.as_bytes(), &a, &mut Accept, date);
+            String::from_utf8(r.bytes).unwrap()
+        };
+        for (line, code) in [
+            ("NOOP\r\n", "250"),
+            ("MAIL FROM:<x@example.invalid>\r\n", "503"),
+            ("BOGUS\r\n", "500"),
+            ("EHLO client.invalid\r\n", "250"),
+            ("AUTH CRAM-MD5\r\n", "504"),
+            ("AUTH PLAIN\r\n", "334"),
+            ("*\r\n", "501"),
+            ("AUTH PLAIN AGJhZABiYWQ=\r\n", "535"),
+            ("MAIL FROM:<x@example.invalid>\r\n", "530"),
+            ("RSET\r\n", "250"),
+            ("AUTH PLAIN AHhAZXhhbXBsZS5pbnZhbGlkAGZpeHR1cmU=\r\n", "235"),
+            ("MAIL FROM:<x@example.invalid> SIZE=99999999999\r\n", "552"),
+            ("MAIL FROM:<x@example.invalid> RET=FULL\r\n", "555"),
+            ("MAIL FROM:<y@example.invalid>\r\n", "553"),
+            ("MAIL FROM:<x@example.invalid>\r\n", "250"),
+            ("MAIL FROM:<x@example.invalid>\r\n", "503"),
+            ("RCPT TO:<ü@example.invalid>\r\n", "553"),
+            ("RCPT TO:<r@example.invalid> NOTIFY=NEVER\r\n", "555"),
+            ("RCPT TO:<r@example.invalid>\r\n", "250"),
+            ("DATA\r\n", "354"),
+            ("From: y@example.invalid\r\n", ""),
+            (".\r\n", "553"),
+            ("MAIL FROM:<x@example.invalid>\r\n", "250"),
+            ("RCPT TO:<r@example.invalid>\r\n", "250"),
+            ("DATA\r\n", "354"),
+            ("From: x@example.invalid\r\n", ""),
+            (".\r\n", "250"),
+            ("QUIT\r\n", "221"),
+        ] {
+            let reply = step(line);
+            assert!(reply.starts_with(code), "{line}: {reply}");
+            if line.starts_with("EHLO") {
+                assert!(reply.contains("\r\n250-ENHANCEDSTATUSCODES\r\n"), "{reply}");
+            } else if !reply.is_empty() && !["334", "354"].contains(&code) {
+                finals.push(reply);
+            }
+        }
+        finals.extend(
+            [
+                SubmitError::Cap,
+                SubmitError::Balance,
+                SubmitError::Unavailable,
+                SubmitError::TooLarge,
+                SubmitError::SealedTooLarge,
+                SubmitError::SealedUnavailable,
+                SubmitError::Rejected,
+            ]
+            .iter()
+            .map(ToString::to_string),
+        );
+        finals.push(Sent { copy: false }.reply().into());
+        for reply in &finals {
+            assert!(enhanced(reply), "{reply}");
+        }
     }
     #[test]
     fn scrub_only_bcc_headers_including_folded_lines() {

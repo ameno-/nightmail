@@ -127,7 +127,7 @@ impl Imap {
     }
     pub fn capabilities(&self) -> String {
         format!(
-            "IMAP4rev1 IDLE UIDPLUS MOVE SPECIAL-USE LITERAL+ NAMESPACE ENABLE UNSELECT ID APPENDLIMIT={}{}",
+            "IMAP4rev1 IDLE UIDPLUS MOVE SPECIAL-USE LITERAL+ NAMESPACE ENABLE UNSELECT ID ESEARCH LIST-STATUS APPENDLIMIT={}{}",
             wire::MAX_APPEND,
             if !self.tls {
                 " STARTTLS LOGINDISABLED"
@@ -234,22 +234,8 @@ impl Imap {
                     .is_some_and(|v| account.plain(Protocol::Imap, &v)),
             );
         }
-        // imap-codec doesn't yet decode SPECIAL-USE RETURN on a basic LIST.
-        let mut plain = Vec::new();
-        let suff = b" RETURN (SPECIAL-USE)\r\n";
-        let cmd = if bytes.len() > suff.len()
-            && bytes[bytes.len() - suff.len()..].eq_ignore_ascii_case(suff)
-            && bytes
-                .split(|&b| b == b' ')
-                .nth(1)
-                .is_some_and(|s| s.eq_ignore_ascii_case(b"LIST"))
-        {
-            plain.extend(&bytes[..bytes.len() - suff.len()]);
-            plain.extend(b"\r\n");
-            wire::imap(&plain)
-        } else {
-            wire::imap(bytes)
-        };
+        let (plain, ret) = cut_return(bytes).unwrap_or_default();
+        let cmd = wire::imap(if plain.is_empty() { bytes } else { &plain });
         let Ok(cmd) = cmd else {
             let tag = bytes
                 .split(|&b| b == b' ')
@@ -319,7 +305,7 @@ impl Imap {
                 {
                     return self.update(store);
                 }
-                match self.command(t, &c, store, now, &mut r) {
+                match self.command(t, &c, store, now, &mut r, &ret) {
                     Ok(Some(code)) => r.line(format!("{t} OK {code} Completed")),
                     Ok(None) => (),
                     Err(Error::Denied) => r.line(format!(
@@ -342,6 +328,7 @@ impl Imap {
         s: &mut dyn MailStore,
         now: Date,
         r: &mut Reply,
+        ret: &Return,
     ) -> Result<Option<String>, Error> {
         let mut code = String::new();
         match c {
@@ -398,7 +385,12 @@ impl Imap {
                                     f.role.unwrap_or("")
                                 },
                                 fetch::quoted(name)
-                            ))
+                            ));
+                            if let Some(items) = &ret.status
+                                && !parent
+                            {
+                                r.line(status_line(name, f, items))
+                            }
                         }
                     }
                 }
@@ -451,13 +443,7 @@ impl Imap {
                 item_names,
             } => {
                 let p = path(mailbox)?;
-                let f = s.folder(p)?;
-                let fields = item_names
-                    .iter()
-                    .map(|item| status(f, item))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                r.line(format!("* STATUS {} ({fields})", fetch::quoted(p)))
+                r.line(status_line(p, s.folder(p)?, item_names))
             }
             C::Append {
                 mailbox,
@@ -668,6 +654,16 @@ impl Imap {
                         if !criteria.as_ref().iter().all(search::bounded) {
                             return Err(Error::Limit);
                         }
+                        let answer = |found: Vec<u32>| match ret.search {
+                            Some(o) => esearch(t, *uid, found, o),
+                            None => {
+                                let mut line = String::from("* SEARCH");
+                                for n in found {
+                                    line.push_str(&format!(" {n}"))
+                                }
+                                line
+                            }
+                        };
                         if charset.as_ref().is_some_and(|c| {
                             !["utf-8", "us-ascii"]
                                 .iter()
@@ -681,16 +677,13 @@ impl Imap {
                             && let Some((field, term)) = search::indexed(key)
                             && let Some(hits) = s.indexed(&p, field, term)?
                         {
-                            let mut line = String::from("* SEARCH");
+                            let mut found = Vec::new();
                             for u in hits {
                                 if let Ok(i) = sel.view.binary_search_by_key(&u, |x| x.0) {
-                                    line.push_str(&format!(
-                                        " {}",
-                                        if *uid { u } else { i as u32 + 1 }
-                                    ));
+                                    found.push(if *uid { u } else { i as u32 + 1 });
                                 }
                             }
-                            r.line(line);
+                            r.line(answer(found));
                             return Ok(Some(String::new()));
                         }
                         let mut terms = std::collections::BTreeSet::new();
@@ -717,7 +710,7 @@ impl Imap {
                                     }
                                 }
                                 if hits.len() == terms.len() {
-                                    let mut line = String::from("* SEARCH");
+                                    let mut found = Vec::new();
                                     let max = sel.view.last().map_or(0, |v| v.0);
                                     for (i, (u, _)) in sel.view.iter().enumerate() {
                                         if let Ok(j) = f.entries.binary_search_by_key(u, |e| e.uid)
@@ -732,13 +725,10 @@ impl Imap {
                                                 )
                                             })
                                         {
-                                            line.push_str(&format!(
-                                                " {}",
-                                                if *uid { *u } else { i as u32 + 1 }
-                                            ));
+                                            found.push(if *uid { *u } else { i as u32 + 1 });
                                         }
                                     }
-                                    r.line(line);
+                                    r.line(answer(found));
                                     return Ok(Some(String::new()));
                                 }
                             }
@@ -749,7 +739,7 @@ impl Imap {
                             .map(search::need)
                             .max()
                             .unwrap_or_default();
-                        let mut text = String::from("* SEARCH");
+                        let mut found = Vec::new();
                         let scans = criteria
                             .as_ref()
                             .iter()
@@ -813,14 +803,11 @@ impl Imap {
                                         sel.view.last().map_or(0, |v| v.0),
                                     )
                                 }) {
-                                    text.push_str(&format!(
-                                        " {}",
-                                        if *uid { *u } else { i as u32 + 1 }
-                                    ))
+                                    found.push(if *uid { *u } else { i as u32 + 1 })
                                 }
                             }
                         }
-                        r.line(text)
+                        r.line(answer(found))
                     }
                     C::Copy {
                         sequence_set,
@@ -922,6 +909,122 @@ fn status(f: &Folder, s: &Status) -> String {
         Status::UidNext => ("UIDNEXT", f.next as usize),
     };
     format!("{name} {n}")
+}
+fn status_line(p: &str, f: &Folder, items: &[Status]) -> String {
+    let fields = items
+        .iter()
+        .map(|item| status(f, item))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("* STATUS {} ({fields})", fetch::quoted(p))
+}
+/// RETURN options imap-codec doesn't decode, cut from the command before it is: ESEARCH's on SEARCH (RFC 4731), and
+/// SPECIAL-USE and STATUS on a basic LIST (RFC 6154, RFC 5819). SPECIAL-USE changes nothing: LIST always shows roles.
+#[derive(Default)]
+struct Return {
+    /// MIN, MAX, COUNT and ALL.
+    search: Option<[bool; 4]>,
+    status: Option<Vec<Status>>,
+}
+fn cut_return(bytes: &[u8]) -> Option<(Vec<u8>, Return)> {
+    let word = |at: usize| {
+        let rest = bytes.get(at..)?;
+        Some(&rest[..rest.iter().position(|&b| b == b' ').unwrap_or(rest.len())])
+    };
+    let starts = |s: &[u8], p: &[u8]| s.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p));
+    let tag = word(0)?.len() + 1;
+    let uid = word(tag)?.eq_ignore_ascii_case(b"UID");
+    let at = tag + if uid { 4 } else { 0 };
+    let verb = word(at)?;
+    let at = at + verb.len();
+    let key = b" RETURN (";
+    let mut ret = Return::default();
+    let (from, to) = if verb.eq_ignore_ascii_case(b"SEARCH") && starts(&bytes[at..], key) {
+        let open = at + key.len();
+        let close = open + bytes[open..].iter().position(|&b| b == b')')?;
+        let mut opts = [false; 4];
+        for o in bytes[open..close]
+            .split(|&b| b == b' ')
+            .filter(|o| !o.is_empty())
+        {
+            let names: [&[u8]; 4] = [b"MIN", b"MAX", b"COUNT", b"ALL"];
+            opts[names.iter().position(|n| o.eq_ignore_ascii_case(n))?] = true;
+        }
+        // `RETURN ()` asks for ALL.
+        if opts == [false; 4] {
+            opts[3] = true
+        }
+        ret.search = Some(opts);
+        (at, close + 1)
+    } else if verb.eq_ignore_ascii_case(b"LIST") && !uid {
+        let from = bytes
+            .windows(key.len())
+            .rposition(|w| w.eq_ignore_ascii_case(key))?;
+        let mut rest = bytes[from + key.len()..].strip_suffix(b")\r\n")?;
+        while !rest.is_empty() {
+            rest = if starts(rest, b"SPECIAL-USE") {
+                &rest[11..]
+            } else if starts(rest, b"STATUS ") {
+                let list = &rest[7..];
+                let close = list.iter().position(|&b| b == b')')? + 1;
+                ret.status = Some(status_items(&list[..close])?);
+                &list[close..]
+            } else {
+                return None;
+            };
+            rest = match rest {
+                [b' ', r @ ..] if !r.is_empty() => r,
+                [] => rest,
+                _ => return None,
+            };
+        }
+        (from, bytes.len() - 2)
+    } else {
+        return None;
+    };
+    Some(([&bytes[..from], &bytes[to..]].concat(), ret))
+}
+/// A parenthesized list of STATUS data items, in the STATUS command's grammar.
+fn status_items(list: &[u8]) -> Option<Vec<Status>> {
+    match wire::imap(&[&b"x STATUS INBOX "[..], list, &b"\r\n"[..]].concat())
+        .ok()?
+        .body
+    {
+        C::Status { item_names, .. } => Some(item_names.into_owned()),
+        _ => None,
+    }
+}
+/// RFC 4731: the requested MIN, MAX, COUNT and ALL of the matches, without MIN, MAX and ALL when nothing matched.
+fn esearch(t: &str, uid: bool, mut found: Vec<u32>, [min, max, count, all]: [bool; 4]) -> String {
+    found.sort_unstable();
+    found.dedup();
+    let mut line = format!("* ESEARCH (TAG {})", fetch::quoted(t));
+    if uid {
+        line.push_str(" UID")
+    }
+    if let (Some(lo), Some(hi)) = (found.first(), found.last()) {
+        if min {
+            line.push_str(&format!(" MIN {lo}"))
+        }
+        if max {
+            line.push_str(&format!(" MAX {hi}"))
+        }
+    }
+    if count {
+        line.push_str(&format!(" COUNT {}", found.len()))
+    }
+    if all && !found.is_empty() {
+        let set = found
+            .chunk_by(|a, b| a.checked_add(1) == Some(*b))
+            .map(|run| match run {
+                [a, .., b] => format!("{a}:{b}"),
+                _ => run[0].to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        line.push_str(&format!(" ALL {set}"))
+    }
+    line
 }
 const WILD: &[u8] = b"*%";
 /// Matching steps one LIST may spend past the pattern's literal start, across every folder:
@@ -1281,6 +1384,195 @@ mod tests {
             "y".repeat(8)
         ));
         assert_eq!(text, "a OK  Completed\r\n");
+    }
+
+    /// A header index that finds UIDs 2 and 6 for any term, so SEARCH takes its indexed paths.
+    struct Indexed(Memory);
+    impl MailStore for Indexed {
+        fn folders(&self) -> Vec<String> {
+            self.0.folders()
+        }
+        fn folder(&self, path: &str) -> Result<&Folder, Error> {
+            self.0.folder(path)
+        }
+        fn edit_folder(&mut self, path: &str, op: FolderOp<'_>) -> Result<(), Error> {
+            self.0.edit_folder(path, op)
+        }
+        fn change(&mut self, path: &str, change: Change<'_>) -> Result<Applied, Error> {
+            self.0.change(path, change)
+        }
+        fn indexed(&self, _: &str, _: search::Field, _: &str) -> Result<Option<Vec<u32>>, Error> {
+            Ok(Some(vec![2, 6]))
+        }
+    }
+
+    /// RFC 4731: SEARCH and UID SEARCH with RETURN answer one ESEARCH line with what was asked, on the indexed,
+    /// planned and scanning paths. No match leaves only COUNT 0; plain SEARCH still answers * SEARCH.
+    #[test]
+    fn search_return_answers_one_esearch_line() {
+        let account = Account::new("mbx_test".into(), vec![], "x".into(), true);
+        let mut store = Indexed(Memory::default());
+        let now = Date::default();
+        for _ in 0..6 {
+            store
+                .0
+                .change(
+                    "INBOX",
+                    Change::Append {
+                        raw: b"Subject: x\r\n\r\nbody",
+                        date: now,
+                        flags: Flags::new(),
+                        source: crate::store::Origin::Client { now },
+                    },
+                )
+                .unwrap();
+        }
+        let mut imap = Imap::new(true);
+        imap.authenticated = true;
+        let mut step = |command: &str| {
+            let r = imap.step(
+                format!("{command}\r\n").as_bytes(),
+                &account,
+                &mut store,
+                now,
+            );
+            String::from_utf8(r.bytes).unwrap()
+        };
+        assert!(step("a CAPABILITY").contains(" ESEARCH LIST-STATUS "));
+        step("a SELECT INBOX");
+        step("a STORE 3 +FLAGS (\\Deleted)");
+        step("a EXPUNGE");
+        // UIDs 1, 2, 4, 5 and 6 at 1 to 5; UIDs 2 and 5 (2 and 4) seen.
+        step("a STORE 2,4 +FLAGS (\\Seen)");
+        for (command, answer) in [
+            (
+                "SEARCH RETURN (MIN MAX COUNT ALL) ALL",
+                "* ESEARCH (TAG \"b\") MIN 1 MAX 5 COUNT 5 ALL 1:5",
+            ),
+            (
+                "UID SEARCH RETURN (MIN MAX COUNT ALL) ALL",
+                "* ESEARCH (TAG \"b\") UID MIN 1 MAX 6 COUNT 5 ALL 1:2,4:6",
+            ),
+            (
+                "UID SEARCH RETURN () SEEN",
+                "* ESEARCH (TAG \"b\") UID ALL 2,5",
+            ),
+            (
+                "search return (count min) seen",
+                "* ESEARCH (TAG \"b\") MIN 2 COUNT 2",
+            ),
+            (
+                "SEARCH RETURN (MIN MAX COUNT ALL) DELETED",
+                "* ESEARCH (TAG \"b\") COUNT 0",
+            ),
+            (
+                "UID SEARCH RETURN (MIN MAX ALL) DELETED",
+                "* ESEARCH (TAG \"b\") UID",
+            ),
+            (
+                "SEARCH RETURN (ALL COUNT) SUBJECT x",
+                "* ESEARCH (TAG \"b\") COUNT 2 ALL 2,5",
+            ),
+            (
+                "UID SEARCH RETURN (MIN MAX) SUBJECT x SEEN",
+                "* ESEARCH (TAG \"b\") UID MIN 2 MAX 2",
+            ),
+            ("SEARCH SEEN", "* SEARCH 2 4"),
+            ("UID SEARCH SEEN", "* SEARCH 2 5"),
+            ("SEARCH SUBJECT x", "* SEARCH 2 5"),
+        ] {
+            assert_eq!(
+                step(&format!("b {command}")),
+                format!("{answer}\r\nb OK  Completed\r\n"),
+                "{command}"
+            );
+        }
+        for command in ["SEARCH RETURN (SAVE) ALL", "SEARCH RETURN (MIN)"] {
+            assert_eq!(
+                step(&format!("b {command}")),
+                "b BAD Invalid command\r\n",
+                "{command}"
+            );
+        }
+    }
+
+    /// RFC 5819: RETURN (STATUS (...)) follows each selectable mailbox's LIST line with its STATUS line, alone or
+    /// with SPECIAL-USE in either order. The \Noselect root gets none, and RETURN (SPECIAL-USE) is a plain LIST.
+    #[test]
+    fn list_return_status_follows_each_selectable_mailbox() {
+        let account = Account::new("mbx_test".into(), vec![], "x".into(), true);
+        let mut store = Memory::default();
+        let now = Date::default();
+        store.edit_folder("Work", FolderOp::Create).unwrap();
+        for flags in [Flags::new(), Flags::from(["\\Seen".into()])] {
+            store
+                .change(
+                    "INBOX",
+                    Change::Append {
+                        raw: b"Subject: x\r\n\r\nbody",
+                        date: now,
+                        flags,
+                        source: crate::store::Origin::Client { now },
+                    },
+                )
+                .unwrap();
+        }
+        let validity = store.folder("INBOX").unwrap().validity;
+        let mut imap = Imap::new(true);
+        imap.authenticated = true;
+        let mut step = |command: &str| {
+            let r = imap.step(
+                format!("a {command}\r\n").as_bytes(),
+                &account,
+                &mut store,
+                now,
+            );
+            String::from_utf8(r.bytes).unwrap()
+        };
+        let plain = step("LIST \"\" \"*\"");
+        let lists: Vec<_> = plain.lines().filter(|l| l.starts_with("* LIST")).collect();
+        assert_eq!(lists.len(), 7, "{plain}");
+        let text = step("LIST \"\" \"*\" RETURN (STATUS (MESSAGES UNSEEN UIDNEXT UIDVALIDITY))");
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 2 * lists.len() + 1, "{text}");
+        for (i, list) in lists.iter().enumerate() {
+            assert_eq!(lines[2 * i], *list);
+            let name = list.rsplit(' ').next().unwrap();
+            assert!(
+                lines[2 * i + 1].starts_with(&format!("* STATUS {name} (MESSAGES ")),
+                "{text}"
+            );
+        }
+        assert!(text.contains(&format!(
+            "* LIST () \"/\" \"INBOX\"\r\n* STATUS \"INBOX\" (MESSAGES 2 UNSEEN 1 UIDNEXT 3 UIDVALIDITY {validity})\r\n"
+        )));
+        assert!(text.ends_with("a OK  Completed\r\n"));
+        let both = step("LIST \"\" \"*\" RETURN (SPECIAL-USE STATUS (MESSAGES))");
+        assert_eq!(
+            both,
+            step("LIST \"\" \"*\" return (status (messages) special-use)")
+        );
+        assert_eq!(both.matches("* STATUS").count(), lists.len());
+        assert!(
+            both.contains("* LIST (\\Sent) \"/\" \"Sent\"\r\n* STATUS \"Sent\" (MESSAGES 0)\r\n")
+        );
+        assert_eq!(step("LIST \"\" \"*\" RETURN (SPECIAL-USE)"), plain);
+        assert_eq!(step("LIST \"\" \"*\" RETURN ()"), plain);
+        assert_eq!(
+            step("LIST \"\" \"\" RETURN (STATUS (MESSAGES))"),
+            "* LIST (\\Noselect) \"/\" \"\"\r\na OK  Completed\r\n"
+        );
+        for bad in [
+            "RETURN (STATUS (BOGUS))",
+            "RETURN (STATUS (MESSAGES) BOGUS)",
+            "RETURN (SPECIAL-USE )",
+        ] {
+            assert_eq!(
+                step(&format!("LIST \"\" \"*\" {bad}")),
+                "a BAD Invalid command\r\n",
+                "{bad}"
+            );
+        }
     }
 
     /// Found by gateway/tear on the Remote store (witness: B create Work, A select Work,
