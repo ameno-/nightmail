@@ -328,6 +328,7 @@ impl Imap {
                     return self.update(store);
                 }
                 match self.command(t, &c, store, now, &mut r, &ret) {
+                    Ok(Some(code)) if code.is_empty() => ok(&mut r),
                     Ok(Some(code)) => r.line(format!("{t} OK {code} Completed")),
                     Ok(None) => (),
                     Err(Error::Denied) => r.line(format!(
@@ -1812,7 +1813,7 @@ mod tests {
         assert_eq!([pieces.concat(), rest.clone()].concat(), whole);
         let rest = String::from_utf8_lossy(&rest);
         assert!(
-            rest.starts_with("* 5 FETCH") && rest.ends_with(" Completed\r\n"),
+            rest.starts_with("* 5 FETCH") && rest.ends_with("b OK Completed\r\n"),
             "{}",
             &rest[rest.len() - 40..]
         );
@@ -1983,12 +1984,12 @@ mod tests {
         ] {
             let text = list(command.clone());
             let shown = &command[..command.len().min(40)];
-            assert!(text.ends_with("a OK  Completed\r\n"), "{shown}: {text}");
+            assert!(text.ends_with("a OK Completed\r\n"), "{shown}: {text}");
             assert_eq!(text.matches("\r\n").count() - 1, lines, "{shown}");
         }
         let fits = LIST_WORK / listed;
         let text = list(format!("LIST \"\" \"%{}\"", "y".repeat(fits - 1)));
-        assert_eq!(text, "a OK  Completed\r\n");
+        assert_eq!(text, "a OK Completed\r\n");
         for command in ["LIST", "LSUB"] {
             let text = list(format!("{command} \"\" \"%{}\"", "y".repeat(fits)));
             assert_eq!(text, "a NO [LIMIT] Inbox limit exceeded\r\n");
@@ -1998,7 +1999,7 @@ mod tests {
             "x".repeat(fits),
             "y".repeat(8)
         ));
-        assert_eq!(text, "a OK  Completed\r\n");
+        assert_eq!(text, "a OK Completed\r\n");
     }
 
     /// A header index that finds UIDs 2 and 6 for any term, so SEARCH takes its indexed paths.
@@ -2098,7 +2099,7 @@ mod tests {
         ] {
             assert_eq!(
                 step(&format!("b {command}")),
-                format!("{answer}\r\nb OK  Completed\r\n"),
+                format!("{answer}\r\nb OK Completed\r\n"),
                 "{command}"
             );
         }
@@ -2161,7 +2162,7 @@ mod tests {
         assert!(text.contains(&format!(
             "* LIST () \"/\" \"INBOX\"\r\n* STATUS \"INBOX\" (MESSAGES 2 UNSEEN 1 UIDNEXT 3 UIDVALIDITY {validity})\r\n"
         )));
-        assert!(text.ends_with("a OK  Completed\r\n"));
+        assert!(text.ends_with("a OK Completed\r\n"));
         let both = step("LIST \"\" \"*\" RETURN (SPECIAL-USE STATUS (MESSAGES))");
         assert_eq!(
             both,
@@ -2176,7 +2177,7 @@ mod tests {
         // An extended LIST matches nothing with an empty pattern (RFC 5258 3).
         assert_eq!(
             step("LIST \"\" \"\" RETURN (STATUS (MESSAGES))"),
-            "a OK  Completed\r\n"
+            "a OK Completed\r\n"
         );
         for bad in [
             "RETURN (STATUS (BOGUS))",
@@ -2216,14 +2217,14 @@ mod tests {
         ] {
             assert_eq!(
                 step(&mut one, &format!("a {command}")),
-                format!("{enabled}\r\na OK  Completed\r\n")
+                format!("{enabled}\r\na OK Completed\r\n")
             );
         }
         let mut two = Imap::new(true);
         two.authenticated = true;
         assert_eq!(
             step(&mut two, "a ENABLE QRESYNC"),
-            "* ENABLED QRESYNC\r\na OK  Completed\r\n"
+            "* ENABLED QRESYNC\r\na OK Completed\r\n"
         );
         assert!(step(&mut two, "b SELECT INBOX").contains("* OK [HIGHESTMODSEQ 1] Highest\r\n"));
     }
@@ -2273,7 +2274,7 @@ mod tests {
             let text = step(&mut one, command);
             let expected = match &command[..1] {
                 "b" => {
-                    "* OK [HIGHESTMODSEQ 5] Highest\r\n* 1 FETCH (MODSEQ (2))\r\nb OK  Completed\r\n"
+                    "* OK [HIGHESTMODSEQ 5] Highest\r\n* 1 FETCH (MODSEQ (2))\r\nb OK Completed\r\n"
                 }
                 "c" => {
                     assert!(
@@ -2284,8 +2285,8 @@ mod tests {
                     assert!(text.starts_with("* OK [CLOSED] Previous mailbox closed\r\n"));
                     continue;
                 }
-                "d" => "* 2 FETCH (UID 2 FLAGS (\\Seen) MODSEQ (6))\r\nd OK  Completed\r\n",
-                "e" => "* 2 FETCH (FLAGS (\\Seen) MODSEQ (6))\r\ne OK  Completed\r\n",
+                "d" => "* 2 FETCH (UID 2 FLAGS (\\Seen) MODSEQ (6))\r\nd OK Completed\r\n",
+                "e" => "* 2 FETCH (FLAGS (\\Seen) MODSEQ (6))\r\ne OK Completed\r\n",
                 // UID 2 changed after 5: MODIFIED. The rest is .SILENT, which still answers MODSEQ.
                 "f" => {
                     "* 1 FETCH (UID 1 MODSEQ (7))\r\n* 3 FETCH (UID 3 MODSEQ (7))\r\nf OK [MODIFIED 2] Completed\r\n"
@@ -2298,7 +2299,7 @@ mod tests {
         }
         assert_eq!(
             step(&mut one, "b FETCH 1 (MODSEQ)"),
-            "* 1 FETCH (MODSEQ (7))\r\nb OK  Completed\r\n"
+            "* 1 FETCH (MODSEQ (7))\r\nb OK Completed\r\n"
         );
         // MODSEQ now: UIDs 1 and 3 at 7, 2 and 4 at 8.
         for (command, answer) in [
@@ -2331,7 +2332,7 @@ mod tests {
         ] {
             assert_eq!(
                 step(&mut one, &format!("h {command}")),
-                format!("{answer}\r\nh OK  Completed\r\n"),
+                format!("{answer}\r\nh OK Completed\r\n"),
                 "{command}"
             );
         }
@@ -2428,7 +2429,7 @@ mod tests {
         );
         assert_eq!(
             step("e UID FETCH 1:* (FLAGS) (CHANGEDSINCE 7 VANISHED)"),
-            "* VANISHED (EARLIER) 2,4\r\n* 3 FETCH (FLAGS (\\Seen) UID 5 MODSEQ (10))\r\ne OK  Completed\r\n"
+            "* VANISHED (EARLIER) 2,4\r\n* 3 FETCH (FLAGS (\\Seen) UID 5 MODSEQ (10))\r\ne OK Completed\r\n"
         );
         for command in [
             "f FETCH 1:* (FLAGS) (CHANGEDSINCE 7 VANISHED)",
@@ -2501,7 +2502,7 @@ mod tests {
         step(&mut two, "a SELECT INBOX");
         assert_eq!(
             step(&mut one, "b STORE 2,3 +FLAGS.SILENT (\\Deleted)"),
-            "* 2 FETCH (UID 2 MODSEQ (6))\r\n* 3 FETCH (UID 3 MODSEQ (6))\r\nb OK  Completed\r\n"
+            "* 2 FETCH (UID 2 MODSEQ (6))\r\n* 3 FETCH (UID 3 MODSEQ (6))\r\nb OK Completed\r\n"
         );
         assert_eq!(
             step(&mut one, "c EXPUNGE"),
@@ -2515,7 +2516,7 @@ mod tests {
         step(&mut two, "e STORE 1 +FLAGS (\\Deleted)");
         assert_eq!(
             step(&mut two, "e EXPUNGE"),
-            "* 1 EXPUNGE\r\ne OK  Completed\r\n"
+            "* 1 EXPUNGE\r\ne OK Completed\r\n"
         );
         assert_eq!(
             step(&mut one, "f NOOP"),
@@ -2563,7 +2564,7 @@ mod tests {
             String::from_utf8(r.bytes).unwrap()
         };
         let lists = |text: String| {
-            assert!(text.ends_with("a OK  Completed\r\n"), "{text}");
+            assert!(text.ends_with("a OK Completed\r\n"), "{text}");
             text.lines()
                 .filter(|l| l.starts_with("* LIST"))
                 .map(str::to_owned)
@@ -2655,9 +2656,9 @@ mod tests {
         for (command, answer) in [
             (
                 "GETQUOTAROOT INBOX",
-                format!("* QUOTAROOT \"INBOX\" \"\"\r\n{quota}a OK  Completed\r\n"),
+                format!("* QUOTAROOT \"INBOX\" \"\"\r\n{quota}a OK Completed\r\n"),
             ),
-            ("GETQUOTA \"\"", format!("{quota}a OK  Completed\r\n")),
+            ("GETQUOTA \"\"", format!("{quota}a OK Completed\r\n")),
             (
                 "GETQUOTA \"other\"",
                 "a NO [NONEXISTENT] No such quota root\r\n".into(),
@@ -2676,7 +2677,7 @@ mod tests {
                 &mut store,
                 "STATUS INBOX (MESSAGES DELETED DELETED-STORAGE)"
             ),
-            "* STATUS \"INBOX\" (MESSAGES 1 DELETED 1 DELETED-STORAGE 3)\r\na OK  Completed\r\n"
+            "* STATUS \"INBOX\" (MESSAGES 1 DELETED 1 DELETED-STORAGE 3)\r\na OK Completed\r\n"
         );
         let mut imap = Imap::new(true);
         imap.authenticated = true;
@@ -2691,7 +2692,7 @@ mod tests {
         };
         assert_eq!(
             step("GETQUOTAROOT INBOX"),
-            "* QUOTAROOT \"INBOX\"\r\na OK  Completed\r\n"
+            "* QUOTAROOT \"INBOX\"\r\na OK Completed\r\n"
         );
         assert_eq!(
             step("GETQUOTA \"\""),
