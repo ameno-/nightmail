@@ -9202,7 +9202,8 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
   test('scheduled sends: 100,000 may wait per workspace, and the next waits for one to go or be canceled', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db }) => {
       const wid = runtime.config.workspaceId, at = new Date(Date.now() + 3_600_000).toISOString();
-      // 99,999 already waiting, ten times the former limit.
+      // 99,999 already waiting, ten times the former limit: one statement, given the time 100,000 rows take to index.
+      await db.query("SET LOCAL statement_timeout='60s'");
       await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status)
         SELECT 'email_'||md5($1||n),$1,'fixture',$2,'sender@example.com','["one@example.net"]','[]','[]','Waiting','{}',true,'scheduled' FROM generate_series(1,99999) n`, [wid, REGION]);
       const last = ok(await local('POST', '/v1/emails/send', mail({ scheduledAt: at })), 202);
