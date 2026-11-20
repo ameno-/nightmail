@@ -517,7 +517,7 @@ async function autoAct(words: string[]): Promise<unknown> {
       return settled;
     });
     case 'release': return autoTxn(statement(words, auto));
-    case 'hour': hours++; await shift('1 hour', [['mail_receive_windows', 'window_at'], ['mail_receipts', 'budget_retry_at'], ['mail_receipts', 'created_at'], ['hosted_usage_hourly', 'hour'], ['sending_emails', 'created_at'], ['api_request_budgets', 'window_start']]); return 'ok';
+    case 'hour': hours++; await shift('1 hour', [['mail_receive_windows', 'window_at'], ['mail_receive_windows', 'level_at'], ['mail_receipts', 'budget_retry_at'], ['mail_receipts', 'created_at'], ['hosted_usage_hourly', 'hour'], ['sending_emails', 'created_at'], ['api_request_budgets', 'window_start']]); return 'ok';
     case 'days': await shift('70 hours', [['mail_receipts', 'created_at']]); return 'ok';
     case 'h23': hours += 23; await shift('23 hours', [['hosted_usage_hourly', 'hour'], ['sending_emails', 'created_at'], ['api_request_budgets', 'window_start']]); return 'ok';
     case 'minute': await shift('1 minute', [['api_request_budgets', 'window_start']]); return 'ok';

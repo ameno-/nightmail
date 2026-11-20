@@ -521,21 +521,27 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
     copied=await copyWorkspaceRaw(s3,receipt.region,receipt.bucket,sourceKey,store.rawKey,receipt.recipients,initiallyKept?'kept':'raw',receipt.notification.stagingEtag as string|undefined,async size=>{
       reserveMime(size);
       // The window row before the receipt, the order every route statement takes them in (157).
-      const reserved=await runtime.db.execute<{ok:boolean;fits:boolean;billing:BillingPosition|null}>(sql`WITH r AS MATERIALIZED (SELECT r.reserved_bytes FROM (SELECT 1) one
+      const reserved=await runtime.db.execute<{ok:boolean;fits:boolean;due:string|null;billing:BillingPosition|null}>(sql`WITH r AS MATERIALIZED (SELECT r.reserved_bytes FROM (SELECT 1) one
           LEFT JOIN LATERAL (SELECT FROM mail_receive_windows WHERE workspace_id=${scope.workspaceId} FOR UPDATE) w ON true
           CROSS JOIN LATERAL (SELECT reserved_bytes FROM mail_receipts WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND status='pending' FOR UPDATE) r),
-        policy AS MATERIALIZED (SELECT bytes FROM mail_receive_policy(${scope.workspaceId})),
-        debit AS (INSERT INTO mail_receive_windows AS w SELECT ${scope.workspaceId},date_trunc('hour',now()),0,${size}::bigint FROM r WHERE reserved_bytes IS NULL AND ${size}::bigint<=(SELECT bytes FROM policy)
-          ON CONFLICT(workspace_id) DO UPDATE SET bytes=CASE WHEN w.window_at=excluded.window_at THEN w.bytes ELSE 0 END+excluded.bytes,messages=CASE WHEN w.window_at=excluded.window_at THEN w.messages ELSE 0 END,window_at=excluded.window_at
-          WHERE (CASE WHEN w.window_at=excluded.window_at THEN w.bytes ELSE 0 END)+excluded.bytes<=(SELECT bytes FROM policy) RETURNING 1),
+        policy AS MATERIALIZED (SELECT messages,bytes FROM mail_receive_policy(${scope.workspaceId})),
+        -- The byte budget refills continuously (354): a message takes its bytes now, or the next bytes free up to a
+        -- quarter of an hour of refill ahead and waits for them (due); past that it waits for the next hour.
+        debit AS (INSERT INTO mail_receive_windows AS w(workspace_id,window_at,messages,bytes,level_at,byte_level) SELECT ${scope.workspaceId},date_trunc('hour',now()),0,${size}::bigint,now(),${size}::bigint FROM r WHERE reserved_bytes IS NULL AND ${size}::bigint<=(SELECT bytes FROM policy)
+          ON CONFLICT(workspace_id) DO UPDATE SET byte_level=mail_receive_level(w.byte_level,w.level_at,(SELECT bytes FROM policy))+excluded.byte_level,message_level=mail_receive_level(w.message_level,w.level_at,(SELECT messages FROM policy)),level_at=greatest(w.level_at,excluded.level_at),
+            bytes=CASE WHEN w.window_at=excluded.window_at THEN w.bytes ELSE 0 END+excluded.bytes,messages=CASE WHEN w.window_at=excluded.window_at THEN w.messages ELSE 0 END,window_at=excluded.window_at
+          WHERE mail_receive_level(w.byte_level,w.level_at,(SELECT bytes FROM policy))+excluded.byte_level<=(SELECT bytes FROM policy)*1.25 RETURNING w.byte_level AS level),
         charged AS (UPDATE mail_receipts SET reserved_bytes=${size} WHERE workspace_id=${scope.workspaceId} AND ses_message_id=${sesMessageId} AND EXISTS(SELECT FROM debit) RETURNING 1)
         ${mightKeep?sql`, candidate AS (INSERT INTO mail_candidate_uploads(batch,workspace_id,ses_message_id,bucket,region,message_id,keys) SELECT ${'raw:'+messageRowId},${scope.workspaceId},${sesMessageId},${keptStore.bucket},${receipt.region},${messageRowId},ARRAY[${keptStore.rawKey}] FROM r ON CONFLICT(batch) DO UPDATE SET check_at=now()+interval '1 hour')`:sql``}
         SELECT EXISTS(SELECT FROM charged UNION ALL SELECT FROM r WHERE reserved_bytes=${size}) AS ok,${size}::bigint<=bytes AND EXISTS(SELECT FROM r WHERE reserved_bytes IS NULL) AS fits,
+          (SELECT to_char((now()+make_interval(secs=>(level-bytes)*3600/bytes)) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') FROM debit WHERE level>bytes) AS due,
           ${billed(runtime.config,scope.workspaceId)?sql`billing_position(${scope.workspaceId})`:sql`NULL::jsonb`} AS billing FROM policy`);
       if(!reserved.rows[0]?.ok){
         if(reserved.rows[0]?.fits) throw new JobDeferred(new Date((Math.floor(Date.now()/3600000)+1)*3600000).toISOString());
         throw new ApiError(422,'MAILBOX_BYTE_BUDGET','Receipt exceeds the workspace byte budget.');
       }
+      // Charged ahead: the job runs again when those bytes have refilled, and then finds them reserved.
+      if(reserved.rows[0]!.due) throw new JobDeferred(reserved.rows[0]!.due);
       const billing=bill.position=reserved.rows[0]!.billing;
       // BYO workspaces pay SES themselves and are never held; their storage and AI decisions still bill and stop.
       if(billing?.receiveHeld && receipt.binding?.kind!=='byo')throw new BillingHold();

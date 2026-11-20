@@ -2743,7 +2743,7 @@ export type Endpoint = {
 
 export type EndpointPolicy = {
     /**
-     * Calls per minute; extra calls wait for the next minute.
+     * Calls per minute; extra calls wait for the next minute. Defaults: 600 for webhooks, 60 for Slack and forwards, 30 for Discord.
      */
     perMinute: number;
     /**
@@ -2824,7 +2824,7 @@ export type CreateEndpoint = {
 
 export type UpdateEndpoint = {
     /**
-     * Calls per minute; extra calls wait for the next minute.
+     * Calls per minute; extra calls wait for the next minute. Defaults: 600 for webhooks, 60 for Slack and forwards, 30 for Discord.
      */
     perMinute?: number;
     /**

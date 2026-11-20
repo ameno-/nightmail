@@ -128,7 +128,7 @@ function createError(r: CreateResult, input: z.infer<typeof create>): ApiError {
       ? new ApiError(409, r.error, `${input.localPart}@${where} is already in use. Omit localPart for a random address, or choose another.`, 'localPart')
       : new ApiError(409, r.error, 'No free random address was found. Retry the request.', undefined, true);
     case 'ADDRESS_RETIRED': return new ApiError(409, r.error, `${input.localPart}@${where} belonged to a deleted inbox and stays reserved for 30 days. Omit localPart for a random address.`, 'localPart');
-    case 'EPHEMERAL_INBOX_LIMIT': return new ApiError(409, r.error, 'This workspace already has 1,000 retained inboxes (including grace and pending erasure). Delete ones you no longer need with DELETE /v1/inboxes/{id}, then retry.');
+    case 'EPHEMERAL_INBOX_LIMIT': return new ApiError(409, r.error, 'This workspace already has 50,000 retained inboxes (including grace and pending erasure). Delete ones you no longer need with DELETE /v1/inboxes/{id}, then retry.');
     case 'INBOX_CREATE_RATE': return new ApiError(429, r.error, 'A workspace can create 60 inboxes per minute. Retry after the Retry-After header’s seconds.', undefined, true);
     case 'IDEMPOTENCY_CONFLICT': return new ApiError(409, r.error, `clientId ${JSON.stringify(input.clientId)} was already used for a different request. Reuse a clientId only to retry the same create.`, 'clientId');
     default: return new ApiError(409, 'INBOX_CREATE_FAILED', 'The inbox could not be created.');
@@ -179,7 +179,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
   }).openapi('CreatedInbox');
   app.openapi(createRoute({
     ...meta, method: 'post', path: base, operationId: 'createInbox', summary: 'Create an agent inbox',
-    description: 'Creates an inbox with a fresh address. Set type=persistent for forever retention (no lease or default per-inbox cap; workspace manage permission). The default is an expiring inbox on one of the workspace’s active receiving domains, or a sandbox inbox that needs no DNS. Then wait for mail with GET /v1/inboxes/{id}/messages?wait=30 (or the SDK’s waitForMessage). Needs a workspace admin or a key with create permission. Limits: 60 creates per minute and 1,000 retained inboxes (including grace and pending erasure) per workspace. Errors: RECEIVING_DOMAIN_REQUIRED and RECEIVING_NOT_ACTIVE name the DNS step to take; ADDRESS_TAKEN, ADDRESS_RETIRED, EPHEMERAL_INBOX_LIMIT, INBOX_CREATE_RATE (with Retry-After) and IDEMPOTENCY_CONFLICT.',
+    description: 'Creates an inbox with a fresh address. Set type=persistent for forever retention (no lease or default per-inbox cap; workspace manage permission). The default is an expiring inbox on one of the workspace’s active receiving domains, or a sandbox inbox that needs no DNS. Then wait for mail with GET /v1/inboxes/{id}/messages?wait=30 (or the SDK’s waitForMessage). Needs a workspace admin or a key with create permission. Limits: 60 creates per minute and 50,000 retained inboxes (including grace and pending erasure) per workspace. Errors: RECEIVING_DOMAIN_REQUIRED and RECEIVING_NOT_ACTIVE name the DNS step to take; ADDRESS_TAKEN, ADDRESS_RETIRED, EPHEMERAL_INBOX_LIMIT, INBOX_CREATE_RATE (with Retry-After) and IDEMPOTENCY_CONFLICT.',
     request: { body: json(create) }, responses: { 200: response(Inbox), 201: response(created), ...errors },
   }), async c => {
     const v = access(c, 'create'), input = c.req.valid('json');

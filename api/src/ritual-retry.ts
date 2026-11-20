@@ -29,7 +29,7 @@ export type EndpointPolicy = { perMinute: number; retryOnTimeout: boolean; idemp
 export const DEFAULT_POLICY: Record<EndpointType, EndpointPolicy> = {
   slack: { perMinute: 60, retryOnTimeout: false, idempotent: false },
   discord: { perMinute: 30, retryOnTimeout: false, idempotent: false },
-  webhook: { perMinute: 60, retryOnTimeout: false, idempotent: false },
+  webhook: { perMinute: 600, retryOnTimeout: false, idempotent: false },
   forward: { perMinute: 60, retryOnTimeout: true, idempotent: true },
 };
 export function endpointPolicy(type: EndpointType, row?: { per_minute?: number | null; retry_on_timeout?: boolean | null; idempotent?: boolean | null } | null): EndpointPolicy {

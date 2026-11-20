@@ -9,7 +9,7 @@ import { connectionReady, poolReceives } from './states.js';
 
 const loadS3Staging = lazyModule(() => import('@aws-sdk/client-s3'));
 
-const sweep='mailbox.sweepStaging', orphan='mailbox.recoverStaging', holds='mailbox.replayHolds';
+const sweep='mailbox.sweepStaging', orphan='mailbox.recoverStaging', holds='mailbox.replayHolds', dueHolds=holds+':due';
 // Derive the bucket, topic and credential scope from live bindings, never from a listed key or mail header.
 const resources=(runtime:Runtime)=>runtime.config.multiTenant ? sql`SELECT inbound_bucket AS bucket,region,inbound_topic_arn AS topic,NULL::text AS owner FROM provider_pool_regions p WHERE ${poolReceives()} AND inbound_bucket IS NOT NULL AND inbound_topic_arn IS NOT NULL
   UNION ALL SELECT r.bucket,r.region,r.topic_arn,r.workspace_id FROM mailbox_regions r JOIN provider_connections c ON c.workspace_id=r.workspace_id AND c.region=r.region AND c.aws_account_id=r.account_id WHERE c.kind='byo' AND c.template_version<>'v5' AND ${connectionReady(sql`c`)} AND r.bucket IS NOT NULL AND r.topic_arn IS NOT NULL` : sql`SELECT bucket,region,topic_arn AS topic,workspace_id AS owner FROM mailbox_regions WHERE workspace_id=${runtime.config.workspaceId} AND bucket IS NOT NULL AND topic_arn IS NOT NULL`;
@@ -22,6 +22,15 @@ export async function scheduleMailRecovery(runtime:Runtime) {
     INSERT INTO jobs(id,type,workspace_id,payload) SELECT w.id,w.type,w.wid,w.payload FROM work w LEFT JOIN jobs j ON j.id=w.id
     WHERE j.id IS NULL OR (j.status NOT IN ('pending','running') AND j.created_at<=now()-interval '50 minutes') ORDER BY j.created_at NULLS FIRST,w.id LIMIT 100
     ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id,payload=excluded.payload,attempts=0,status='pending',lease_until=NULL,last_error=NULL,available_at=now(),created_at=now() WHERE jobs.status NOT IN ('pending','running')`);
+}
+
+/** Queued receipts come due within minutes, when their slot of the refilling budget comes up (354), so the minute cron
+ * starts the release of budget holds whenever one is due. Backlog holds stay with the job-end drain; the hourly upkeep
+ * above stays the backstop for both. */
+export async function scheduleHoldRelease(runtime:Runtime) {
+  await runtime.db.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT ${dueHolds},${holds},${runtime.config.workspaceId},'{"budget":true}'::jsonb
+    WHERE EXISTS(SELECT FROM mail_receipts WHERE status='held' AND budget_retry_at<=now() AND error<>'MAILBOX_RECEIVE_BACKLOG' ${runtime.config.multiTenant?sql``:sql`AND workspace_id=${runtime.config.workspaceId}`})
+    ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,lease_until=NULL,last_error=NULL,available_at=now() WHERE jobs.status NOT IN ('pending','running')`);
 }
 
 // SES's own leading Received (optionally preceded by Return-Path), never To, Cc, Bcc or a later Received.
@@ -111,7 +120,8 @@ export const cleanCandidates:JobHandler=async(runtime)=>{
   else await runtime.db.execute(sql`UPDATE mail_candidate_uploads SET keys=${sql.param(missing.slice(8))}::text[],check_at=now() WHERE ${fence}`);
   throw new JobDeferred(new Date().toISOString());
 };
-export const stagingJobs:Record<string,JobHandler>={'mailbox.cleanUploads':retryDatabaseFailures(cleanCandidates),[sweep]:retryDatabaseFailures(stagingJob),[orphan]:retryDatabaseFailures(stagingJob),[holds]:retryDatabaseFailures(async runtime=>{
-  const budget=await runtime.db.execute<{scanned:number}>(sql`SELECT release_receive_budget_holds(${runtime.config.multiTenant?null:runtime.config.workspaceId}) AS scanned`);
-  if (await recoverHeldReceipts(runtime)===100 || budget.rows[0]?.scanned===100) throw new JobDeferred(new Date().toISOString());
+export const stagingJobs:Record<string,JobHandler>={'mailbox.cleanUploads':retryDatabaseFailures(cleanCandidates),[sweep]:retryDatabaseFailures(stagingJob),[orphan]:retryDatabaseFailures(stagingJob),[holds]:retryDatabaseFailures(async (runtime,payload)=>{
+  const budget=await runtime.db.execute<{scanned:number}>(sql`SELECT release_receive_holds(${runtime.config.multiTenant?null:runtime.config.workspaceId},${payload.budget===true}) AS scanned`);
+  // The minute release (scheduleHoldRelease) leaves held envelopes to the hourly pass.
+  if (payload.budget ? budget.rows[0]?.scanned===100 : await recoverHeldReceipts(runtime)===100 || budget.rows[0]?.scanned===100) throw new JobDeferred(new Date().toISOString());
 })};

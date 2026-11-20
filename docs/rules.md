@@ -400,7 +400,7 @@ sequenceDiagram
 
 | | Slack | Discord | Webhook | Forward |
 |---|---|---|---|---|
-| Calls per minute (default) | 60 | 30 | 60 | 60 |
+| Calls per minute (default) | 60 | 30 | 600 | 60 |
 | Replays an unknown outcome | only with `retryOnTimeout` | only with `retryOnTimeout` | with `retryOnTimeout` or `idempotent` | always (deduplicated in the send transaction) |
 
 Backoff starts at 15 seconds and grows ×4 up to 12 hours, with ±25% jitter, never sooner than `Retry-After` (seconds, decimals or an HTTP date). The attempt limit is the endpoint's `retryAttempts` (default 9). Every action has an ID that stays the same across retries.
