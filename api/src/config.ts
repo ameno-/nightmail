@@ -84,9 +84,8 @@ const values = z.object({
   DOMAIN_CONNECT_KEY_ID: optional(z.string().regex(/^_?[a-z0-9][a-z0-9-]{0,60}[a-z0-9]$/)),
   // Comma-separated regions offered for MX shared sending.
   SHARED_SENDING_REGIONS: z.string().default('us-east-2'),
+  // The daily limit of a workspace the standing job has not graded yet: the evaluation's 100 (docs/sending-limits.md).
   HOSTED_SEND_CAP_FIRST_WEEK: z.coerce.number().int().positive().max(2147483647).default(100),
-  HOSTED_SEND_CAP_SECOND_WEEK: z.coerce.number().int().positive().max(2147483647).default(1000),
-  HOSTED_SEND_CAP_MATURE: z.coerce.number().int().positive().max(2147483647).default(10000),
   // Upgrade-only decryption input for pre-OIDC installations. Never used as the new encryption key.
   ENCRYPTION_KEY: optional(z.string().regex(/^[a-f0-9]{64}$/i)),
   PUBLIC_URL: z.string().url(),
@@ -210,7 +209,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     billing: v.MULTI_TENANT==='true' ? { stripe: v.STRIPE_SECRET_KEY && v.STRIPE_WEBHOOK_SECRET ? { secretKey: v.STRIPE_SECRET_KEY, webhookSecret: v.STRIPE_WEBHOOK_SECRET, automaticTax: v.STRIPE_AUTOMATIC_TAX === 'true', apiBase: v.STRIPE_API_BASE.replace(/\/$/, '') } : undefined } : undefined,
     placementShadow: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_PLACEMENT_SHADOW === 'true', placementDblZone: v.NIGHTMAIL_PLACEMENT_DBL_ZONE,
     byoV2: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL, byoEventsOrigin: v.BYO_EVENTS_ORIGIN,
-    hostedSendCaps: { firstWeek: v.HOSTED_SEND_CAP_FIRST_WEEK, secondWeek: v.HOSTED_SEND_CAP_SECOND_WEEK, mature: v.HOSTED_SEND_CAP_MATURE },
+    hostedSendCaps: { firstWeek: v.HOSTED_SEND_CAP_FIRST_WEEK },
     domainConnect,
     allowedSubjects, staffGoogleDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr, uiNotesSubjects,
     accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly', oauthScopePrefix: v.OAUTH_SCOPE_PREFIX, previousOrigins, byoStackPrefix: v.BYO_STACK_PREFIX,

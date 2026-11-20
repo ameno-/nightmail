@@ -6,8 +6,11 @@ import { Buffer } from 'node:buffer';
  * score read the same values.
  */
 export const SEND_LIMITS = {
-  /** Outstanding (queued or attempting) direct mail per workspace: a day of the account's own SES quota within these
-   * bounds; Hosted gets the floor (the ceiling when exempt) unless an operator overrides it. */
+  /** Outstanding (queued or attempting) direct mail per workspace: a day of what it may send within these bounds. That
+   * is the account's own SES quota (BYO), or a Hosted workspace's pace in good standing (a quarter of its pool's SES
+   * rate a minute, at least 500); during the evaluation, the growth pace or under a daily limit Hosted gets the floor,
+   * exempt the ceiling, unless an operator overrides it. Not a volume cap: it bounds the dispatch queue (queued rows are
+   * the queue) so one workspace's backlog drains within a day and never fills the database. */
   pendingFloor: 10_000,
   pendingCeiling: 200_000,
   /** Recipients in a rolling 24 hours from which Hosted transactional mail needs aligned DMARC, as marketing always does. */
@@ -40,7 +43,7 @@ export const SEND_LIMITS = {
   /** Scheduled single sends (sendEmail scheduledAt): at most 30 days ahead, as long as the email's log and events are
    * kept, so a scheduled email is visible for its whole wait (longer plans are campaigns, up to a year); up to a minute
    * in the past for a sender's clock (it then sends at once); and how many may wait per workspace. */
-  schedule: { horizonSeconds: 30 * 86_400, skewSeconds: 60, workspace: 10_000 },
+  schedule: { horizonSeconds: 30 * 86_400, skewSeconds: 60, workspace: 100_000 },
 } as const;
 
 /** UTF-8 bytes of the parts a message's MIME carries, counted without copying them. */

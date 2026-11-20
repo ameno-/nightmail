@@ -304,7 +304,7 @@ async function deleteEndpointRecord(tx: DbExecutor, c: Ctx, row: EndpointRecord,
   await assertEndpointUnused(tx, row.workspaceId, { name: row.key, id: row.id }, 'delete');
   await tx.delete(endpoints).where(and(eq(endpoints.workspaceId, row.workspaceId), eq(endpoints.id, row.id)));
 }
-async function debit(tx: DbExecutor, w: string, key: string, limit: number, window: 'day' | 'hour', message = 'Forwarding budget reached for this window.') {
+async function debit(tx: DbExecutor, w: string, key: string, limit: number, window: 'day' | 'hour', message: string) {
   const charge = await tx.execute(sql`INSERT INTO api_request_budgets AS b(workspace_id,key_id,window_start,used) VALUES(${w},${key},date_trunc(${window},now()),1)
     ON CONFLICT(workspace_id,key_id) DO UPDATE SET used=CASE WHEN b.window_start=excluded.window_start THEN b.used+1 ELSE 1 END,window_start=excluded.window_start
     WHERE b.window_start<>excluded.window_start OR b.used<${limit} RETURNING 1`);
@@ -710,6 +710,8 @@ export async function sendToEndpoint(runtime: Runtime, w: string, h: ClaimedWebh
 // ── Forwards ──────────────────────────────────────────────────────────────────────────────
 /** One sent message's attachment limits (send-limits.ts, sending.ts AttachmentIds). */
 const FORWARD_FILES = 20, FORWARD_BODY = 500_000;
+/** Forwards one endpoint may send in an hour (FORWARD_LIMIT): a loop guard, not a volume cap. */
+const FORWARDS_PER_HOUR = 1000;
 const ReplyAddress = mailAddress();
 type Received = typeof mailMessages.$inferSelect;
 const forwardBlocked = () => new ApiError(422, 'FORWARD_BLOCKED', 'Automated, junk, unparsed, looped or unscanned mail is never forwarded.');
@@ -791,8 +793,9 @@ async function sendForward(runtime: Runtime, w: string, endpointId: string, addr
     const m = await received(tx), box = await forwardSender(tx, w, recipient, requestFrom);
     // One forward per message and endpoint, decided in the same transaction as the send.
     if (!(await tx.execute(sql`INSERT INTO mail_forward_once(workspace_id,message_id,endpoint,grants) VALUES(${w},${m.id},${endpointId},${JSON.stringify(grants)}::jsonb) ON CONFLICT DO NOTHING RETURNING 1`)).rowCount) return;
-    await debit(tx, w, 'forward-daily', 1000, 'day');
-    await debit(tx, w, 'forward-hourly:' + endpointId, 200, 'hour');
+    // A forward is a send: the send admission applies the workspace's sending limits. Per endpoint, an hourly bound
+    // stops a runaway alias (a loop through a forwarder that strips the loop header) without capping a busy one.
+    await debit(tx, w, 'forward-hourly:' + endpointId, FORWARDS_PER_HOUR, 'hour', `At most ${FORWARDS_PER_HOUR.toLocaleString('en-US')} forwards per endpoint per hour.`);
     // Any incoming loop token blocks a forward (forwardEligibility), including tokens from other installations.
     const loop = await crypto.subtle.importKey('raw', Buffer.from(runtime.config.encryptionKey, 'hex'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
     const token = Buffer.from(await crypto.subtle.sign('HMAC', loop, new TextEncoder().encode(w + ':' + m.id))).toString('base64url');

@@ -16,8 +16,9 @@ export type HostedAllowance = ({ cap: number; marketingCap: number } | { cap: nu
 // Admission keeps hosted_allowance, which locks the policy rows FOR SHARE against a concurrent pause or cap change.
 export function hostedAllowance(config: Config, wid: string, incoming: number, marketing = 0, read = false) {
   if (!config.multiTenant) return sql<HostedAllowance | null>`NULL`;
-  const { firstWeek, secondWeek, mature } = config.hostedSendCaps, fn = read ? sql`hosted_allowance_read` : sql`hosted_allowance`;
-  return sql<HostedAllowance | null>`(SELECT allowance FROM ${fn}(${wid},${incoming},${marketing},${firstWeek},${secondWeek},${mature},${config.dispatch.dailyHeadroomPercent}))`;
+  // The two NULLs are the retired second-week and mature caps, which the functions no longer read.
+  const fn = read ? sql`hosted_allowance_read` : sql`hosted_allowance`;
+  return sql<HostedAllowance | null>`(SELECT allowance FROM ${fn}(${wid},${incoming},${marketing},${config.hostedSendCaps.firstWeek},NULL,NULL,${config.dispatch.dailyHeadroomPercent}))`;
 }
 /**
  * The stream a marketing hold stops, as an expression over a sending_emails row: marketing mail and every campaign

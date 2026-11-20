@@ -48,8 +48,10 @@ const loadScreen = lazyModule(() => import('./screen.js'));
 const loadSendingSesv2 = lazyModule(() => import('@aws-sdk/client-sesv2'));
 
 const MAX_BODY = 512 * 1024;
-// Upload storage and batch expansion; the limits a send is admitted against are in send-limits.ts.
-const SENDING_LIMITS = { storedAttachmentBytes: 1024 * 1024 * 1024, expandedCampaignBytes: 128 * 1024 * 1024 } as const;
+// Upload storage and batch expansion; the limits a send is admitted against are in send-limits.ts. Stored uploads are
+// kept as long as their emails (30 days) and unused ones 30 days, so the stored quota is a rolling volume: it is set far
+// above any month of real attachments (100 GiB is about 100,000 emails with a 1 MB file) and only stops runaway uploads.
+const SENDING_LIMITS = { storedAttachmentBytes: 100 * 1024 * 1024 * 1024, expandedCampaignBytes: 128 * 1024 * 1024 } as const;
 const limitsTable = (runtime: Pick<Runtime, 'config'>) => sql.identifier(runtime.config.multiTenant ? 'regional_workspace_limits' : 'sending_region_limits');
 // Preparation is bounded by bytes (4 MiB) and time (10 s) per job; a large row limit keeps small
 // campaigns to one scheduler hop instead of one per thousand recipients.
@@ -1092,7 +1094,7 @@ function attachmentUpload(runtime:Runtime,a:Pick<Actor,'workspaceId'>,input:Retu
       await runtime.db.transaction(async db=>{
         await lockSendScope(db,a.workspaceId);
         const {rows}=await db.execute<{bytes:string}>(sql`SELECT bytes FROM sending_asset_usage WHERE workspace_id=${a.workspaceId}`);
-        if(Number(rows[0]?.bytes??0)+bytes.length>SENDING_LIMITS.storedAttachmentBytes) throw new ApiError(413,'STORED_ATTACHMENT_LIMIT_EXCEEDED','Stored attachment quota exceeded. Delete unused attachments.');
+        if(Number(rows[0]?.bytes??0)+bytes.length>SENDING_LIMITS.storedAttachmentBytes) throw new ApiError(413,'STORED_ATTACHMENT_LIMIT_EXCEEDED',`Stored attachments may not exceed ${SENDING_LIMITS.storedAttachmentBytes/1024**3} GiB per workspace. Delete unused attachments.`);
         await db.execute(sql`INSERT INTO sending_upload_reservations(id,workspace_id,storage_key,size) VALUES(${attachmentId},${a.workspaceId},${storageKey},${bytes.length})`);
       });
       reserved=true;

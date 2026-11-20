@@ -777,7 +777,7 @@ export type SendEmailInput = {
      */
     replyMailboxId?: string;
     /**
-     * Send at this time instead of now: an RFC 3339 instant with Z or an offset, such as 2026-11-20T09:00:00Z; times without an offset are refused, and the time is returned in UTC. From now (up to a minute in the past, which sends at once) to 30 days ahead; up to 10,000 scheduled emails may wait per workspace (SCHEDULED_EMAIL_LIMIT_EXCEEDED). The email is stored now and reads status queued with scheduled true until then; cancel it with cancelEmail or move it with rescheduleEmail. Sending limits and the balance apply at that time, not now: an email they refuse then is rejected with their code (email.rejected). Not with replyAddressId.
+     * Send at this time instead of now: an RFC 3339 instant with Z or an offset, such as 2026-11-20T09:00:00Z; times without an offset are refused, and the time is returned in UTC. From now (up to a minute in the past, which sends at once) to 30 days ahead; up to 100,000 scheduled emails may wait per workspace (SCHEDULED_EMAIL_LIMIT_EXCEEDED). The email is stored now and reads status queued with scheduled true until then; cancel it with cancelEmail or move it with rescheduleEmail. Sending limits and the balance apply at that time, not now: an email they refuse then is rejected with their code (email.rejected). Not with replyAddressId.
      */
     scheduledAt?: string;
 };

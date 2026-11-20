@@ -101,7 +101,7 @@ export interface Config {
   domainConnect?: { privateKey: import('node:crypto').KeyObject; keyId: string };
   /** Regions offered for MX shared sending; defaults to us-east-2. */
   sharedRegions?: string[];
-  hostedSendCaps: { firstWeek: number; secondWeek: number; mature: number };
+  hostedSendCaps: { firstWeek: number };
   publicUrl: string;
   sesFeedbackUrl?: string;
   regions: string[];
