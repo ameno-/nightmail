@@ -21,7 +21,7 @@ import { productName, secretPrefixes } from './brand.js';
 // 2. The support platform's server verifies who the customer is (that handoff, or an email whose From passed DMARC
 //    alignment or a magic link: POST /v1/operator/support/verify-email) and mints a grant for that one user
 //    (POST /v1/operator/support/grants) with its operator credential.
-// 3. The agent gets only the grant (bane_support_…) in its environment. Every /v1/support/* route derives the customer
+// 3. The agent gets only the grant (nm_support_…) in its environment. Every /v1/support/* route derives the customer
 //    from the grant alone; a workspaceId filter can only narrow it. Every call is written to audit_events, and each
 //    workspace's Activity shows "Nightmail support viewed this workspace" once per grant. Never secrets; message content only
 //    with the customer's own opt-in from the handoff.
@@ -194,7 +194,7 @@ const Page = z.object({ cursor: z.string().max(200).optional().describe('nextCur
 const Since = z.object({ since: z.iso.datetime().optional().describe('Only items at or after this time (default: 7 days ago).') });
 const tags = ['Support (internal)'];
 const supportSecurity: Record<string, string[]>[] = [{ bearerAuth: [] }];
-const describe = (text: string) => `${text} Internal: for ${productName} support with a support grant (bane_support_…), never for customers.`;
+const describe = (text: string) => `${text} Internal: for ${productName} support with a support grant (${secretPrefixes.supportGrant}…), never for customers.`;
 function scoped(c: Ctx, roles?: ('owner' | 'admin' | 'member')[]) {
   const scope = c.get('support')!, filter = c.req.query('workspaceId');
   const workspaces = scope.workspaces.filter(w => (!filter || w.id === filter) && (!roles || roles.includes(w.role)));

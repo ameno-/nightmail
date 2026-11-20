@@ -59,11 +59,11 @@ const workers = Number(process.env.CLS_WORKERS) || Math.min(32, availableParalle
 const began = Date.now();
 const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 
-// [name, path, { user, from, click, row, switchTo, support, notes, dialog, still, alone, phoneOnly }]. The in-app navigation starts on `from` and clicks the
+// [name, path, { user, from, click, row, switchTo, support, notes, dialog, still, alone, phoneOnly, notFound }]. The in-app navigation starts on `from` and clicks the
 // control whose text starts with `click`, the table row containing `row`, picks the workspace `switchTo` in the account
 // switcher, or else a link to `path`; with none of those (pages reached from a dropdown menu) it pushes `path` through
 // the router's history. It must land on `path`. `support` opens the support chat first, `dialog` a dialog (see above);
-// `phoneOnly` measures a page in the phone pass alone (a control only a phone shows).
+// `phoneOnly` measures a page in the phone pass alone (a control only a phone shows); `notFound` is a page that must say "Page not found".
 // dana owns an established hosted workspace (and is a Bane operator), nia a brand-new one with a verified domain, ona one
 // still onboarding, rae a restricted one that also owes $12.40 (the standing and billing banners on every page).
 // A list of users is one browser signed in to each of them (one session cookie per account, the first the default).
@@ -157,6 +157,9 @@ const pages = ids => [
   // Two accounts in one browser: a cold load as the default (dana), then switching to nia's workspace from the switcher.
   ['Two accounts · switch', '/overview', { user: ['dana', 'nia'], from: '/overview', switchTo: 'Lumen Labs' }],
   ['Signed out', '/', { user: null, alone: true }],
+  // Signed out on a dashboard page (a link from an email) and on an address the dashboard doesn't have.
+  ['Signed out · deep link', '/overview', { user: null }],
+  ['Signed out · page not found', '/no-such-page', { user: null, notFound: true }],
   // The public legal pages: signed out from the homepage and between documents, and signed in from the sidebar.
   ['Legal', '/legal', { user: null, from: '/legal/terms', click: 'Overview' }],
   ['Legal · terms', '/legal/terms', { user: null, from: '/', still: true }],
@@ -185,7 +188,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Overview · range', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · endpoints', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
+const phonePages = new Set(['Overview', 'Overview · range', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · endpoints', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -458,7 +461,7 @@ async function measure(browser, job, fx) {
       for (const what of leak) problems.push(`${what} for an operator outside UI_NOTES_SUBJECTS`);
     }
     const broken = await page.evaluate(() => document.querySelector('.fatal-error') ? 'the error boundary rendered' : [...document.querySelectorAll('h1,h2')].some(h => h.textContent === 'Page not found') ? 'Page not found' : null);
-    if (broken) problems.push(broken);
+    if (job.notFound ? broken !== 'Page not found' : broken) problems.push(broken ?? 'expected "Page not found"');
     problems.push(...await masking(page, job.mode === 'load' && job.device === 'desktop'));
     // Overview's latest emails reserve as many 34px rows as reach the card's bottom inset (features/overview/latest.ts):
     // the list must end less than a row above that inset (the card's top padding: Help's taller bottom padding only
@@ -537,10 +540,10 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, notes, dialog, menu, still, alone, phoneOnly }] of pages(ids)) {
+  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, notes, dialog, menu, still, alone, phoneOnly, notFound }] of pages(ids)) {
     if (only && !only.test(name) || device === 'phone' && !phonePages.has(name) || phoneOnly && device !== 'phone') continue;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    const load = { name, path, user, scheme, device, support, live, notes, dialog, menu, still, alone, mode: 'load', slug: slug + '-load' };
+    const load = { name, path, user, scheme, device, support, live, notes, dialog, menu, still, alone, notFound, mode: 'load', slug: slug + '-load' };
     if (densityOnly && !density.wanted(load)) continue;
     jobs.push(load);
     if (from && !densityOnly) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });

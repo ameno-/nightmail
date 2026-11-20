@@ -1,6 +1,5 @@
 import { Component, Suspense, useEffect, type ErrorInfo, type ReactNode } from 'react'
 import { Navigate, Route, Routes, Link, createRoutesFromChildren, useLocation, useParams, type Params } from 'react-router'
-import { setAnalyticsRoutes } from './components/Analytics'
 import { AppShell } from './components/AppShell'
 import { BootLoader } from './components/BootLoader'
 import { Button, EmptyState } from './components/ui'
@@ -9,6 +8,7 @@ import { selectedWorkspace } from './data/live'
 import { dashboardLikelyReady, rememberDashboardReady } from './data/onboarding'
 import { routeChunks } from './data/prefetch'
 import { chunk, ChunkFallback } from './lib/preloadable'
+import { setRouteTable } from './lib/routes'
 import { composer } from './features/campaigns/composer-chunk'
 import { DocsStandalone, useDocsAudience } from './features/docs/frame'
 const onboarding = chunk(() => import('./features/onboarding'))
@@ -144,7 +144,7 @@ export function App() {
   useRememberDashboardReady()
   return <AppErrorBoundary><Routes>{routes}</Routes></AppErrorBoundary>
 }
-// The route table, also given to analytics so a page view names its template (/domains/:id), never its path.
+// The route table, also given to analytics (a page view names its template) and to the signed-out pages (lib/routes.ts).
 const routes = <><Route path="legal/:doc?" element={<ChunkFallback.Provider value={<BootLoader />}><Suspense fallback={<BootLoader />}><LegalPage /></Suspense></ChunkFallback.Provider>} /><Route path="onboarding" element={<OnboardingRoute />} /><Route index element={<RootPage />} /><Route element={<DashboardGate />}>
     <Route path="overview" element={<OverviewPage />} />
     <Route path="logs" element={<LogsPage />} /><Route path="logs/received/:id" element={<Moved to={params => `/logs/${encodeURIComponent(params.id ?? '')}`} />} /><Route path="logs/:id" element={<LogDetailPage />} />
@@ -168,4 +168,4 @@ const routes = <><Route path="legal/:doc?" element={<ChunkFallback.Provider valu
     <Route path="operator" element={<OperatorPage />} /><Route path="operator/notes" element={<OperatorNotesPage />} /><Route path="operator/workspaces/:id" element={<OperatorWorkspacePage />} />
     <Route path="*" element={<EmptyState headingAs="h1" title="Page not found" action={<Link to="/overview">Return to overview</Link>} />} />
   </Route></>
-setAnalyticsRoutes(createRoutesFromChildren(routes))
+setRouteTable(createRoutesFromChildren(routes))

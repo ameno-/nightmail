@@ -1,20 +1,14 @@
 import { useEffect, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { matchRoutes, useLocation, type RouteObject } from 'react-router'
+import { useLocation } from 'react-router'
 import type { Identity } from '../data/types'
 import { analytics } from '../lib/analytics'
+import { routeTemplateOf } from '../lib/routes'
 
 // Starts the page's analytics (lib/analytics.ts) once the API says whether they are on: /v1/me signed in, /health on a
 // signed-out page (the homepage and sign-in). A page view names its route template, never its path.
 declare const __NIGHTMAIL_BUILD__: string
 const build = typeof __NIGHTMAIL_BUILD__ === 'string' ? __NIGHTMAIL_BUILD__ : null
-let routes: RouteObject[] = []
-/** The dashboard's route table (App.tsx). */
-export function setAnalyticsRoutes(table: RouteObject[]) { routes = table }
-export function routeTemplateOf(pathname: string) {
-  const matches = matchRoutes(routes, pathname)
-  return matches ? '/' + matches.map(match => match.route.path ?? '').filter(Boolean).join('/').replaceAll('?', '') : '/*'
-}
 let viewed: string | undefined
 export function Analytics({ identity, signedOut }: { identity: Identity | null; signedOut: boolean }) {
   const { pathname } = useLocation()

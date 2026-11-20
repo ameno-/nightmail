@@ -36,7 +36,7 @@
 .fac-boards { overflow: hidden; opacity: 0; }
 .fac-stage[data-playing] .fac-boards { opacity: 1; }
 .fac-rail { position: absolute; inset: 0; will-change: transform; }
-/* A phone's boards where nothing plays: hung still from the rail, one at a time (factory-home.tsx). */
+/* A phone's boards: hung still from the rail, one at a time (factory-home.tsx). */
 .fac-still img { position: absolute; height: auto; opacity: 0; transition: opacity 300ms var(--srt-ease); }
 .fac-still img[data-on] { opacity: 1; }
 .fac-board { position: absolute; left: 0; height: auto; }

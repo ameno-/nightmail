@@ -41,6 +41,7 @@ export const addresses = {
   abuse: `abuse@${hostedDomain}`,
   privacy: `privacy@${hostedDomain}`,
   legal: `legal@${hostedDomain}`,
+  security: `security@${hostedDomain}`,
 } as const;
 
 /** The npm package (@banemx/sdk before the rename, now deprecated), the environment variable examples keep an API key
