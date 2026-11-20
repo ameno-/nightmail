@@ -75,7 +75,7 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
 export function CampaignPacing({ campaign }: { campaign: Campaign }) {
   const cache = useQueryClient()
   // Pausing, resuming and pacing are delivery controls: owners and admins only.
-  const { canAdminister } = useWorkspaceAccess()
+  const { canAdminister, multiTenant } = useWorkspaceAccess()
   const expansion = campaign.delivery
   const pacing = expansion?.pacing
   // A campaign that failed after releasing recipients resumes from its cursor on the same snapshot, like a paused one.
@@ -146,7 +146,8 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
         <Input id="campaign-pacing-share" className="campaign-pacing-share" type="number" inputMode="numeric" min={minRatePercent} max={maxRatePercent} step={1} value={share} aria-invalid={Boolean(shareError) || undefined} onChange={event => { setShare(event.target.value); setError('') }} disabled={busy} />
         <Button type="submit" size="sm" loading={update.isPending} disabled={busy || !changed}>Save</Button>
       </div>
-      <Checkbox label="Auto-pause on high bounces or complaints" checked={autoPause} onCheckedChange={value => { setAutoPause(value); setError('') }} disabled={busy} />
+      {/* Hosted always pauses on high bounces or complaints. */}
+      {!multiTenant && <Checkbox label="Auto-pause on high bounces or complaints" checked={autoPause} onCheckedChange={value => { setAutoPause(value); setError('') }} disabled={busy} />}
     </form>}
     {error && <Alert tone="danger">{error}</Alert>}
   </div>

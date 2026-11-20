@@ -120,7 +120,7 @@ export function CampaignSenderInput({ name, email, domains, disabled = false, on
       <span className="campaign-sender-mask__text"><NamedAddress name={parsed.name} address={parsed.email} /></span>
     </div>}
     <Input ref={input} hidden={masked || undefined} id="campaign-from-email" role="combobox" type="text" autoComplete="off" autoCapitalize="none" spellCheck={false}
-      placeholder={`Name <sender@${verified[0] ?? 'example.com'}>`} value={draft} maxLength={458} disabled={disabled} required
+      placeholder={`Name <sender@${verified[0] ?? 'example.com'}>`} value={draft} maxLength={460} disabled={disabled} required
       aria-autocomplete="list" aria-expanded={expanded} aria-controls={expanded ? listId : undefined}
       aria-activedescendant={activeIndex >= 0 ? `${listId}-${activeIndex}` : undefined}
       title={draft || undefined} aria-invalid={showError || undefined} aria-describedby={showError ? errorId : undefined}
