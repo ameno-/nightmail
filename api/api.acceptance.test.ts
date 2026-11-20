@@ -816,8 +816,6 @@ function seedPool(topics:Map<string,Json>,region:string,account:string,endpoint:
 }
 type Key = { id: string; secret: string };
 const cleanups = new WeakMap<TestContext, Array<() => Promise<void>>>();
-// An operator's fixture session signed in with Google Workspace: staff tools need that (src/operator.ts).
-const staffSession = (db: { query: (text: string, values: unknown[]) => Promise<unknown> }, ...userIds: string[]) => db.query('UPDATE nightmail_sessions SET staff=true WHERE user_id=ANY($1)', [userIds]);
 function cleanup(t: TestContext, action: () => Promise<void>) {
   let stack = cleanups.get(t);
   if (!stack) {
@@ -842,7 +840,9 @@ type SessionFixture = { userId: string; sessionId: string; token: string; cookie
 let authDb: pg.Client | undefined;
 let manager: SessionFixture | undefined;
 let fixtureWorker: ReturnType<typeof import('./src/adapters/node.js').nodeRuntime> | undefined;
-async function seedSession(db: pg.Client, options: { email?: string; hostedDomain?: string | null; verified?: boolean; linked?: boolean; userId?: string } = {}): Promise<SessionFixture> {
+// staff: the session signed in with Google Workspace, as Nightmail staff do; staff tools (src/operator.ts) and hosted
+// workspace creation need it. Any other session is an ordinary member's.
+async function seedSession(db: pg.Client, options: { email?: string; hostedDomain?: string | null; verified?: boolean; linked?: boolean; userId?: string; staff?: boolean } = {}): Promise<SessionFixture> {
   const userId = options.userId ?? unique('acceptance-user');
   const sessionId = unique('acceptance-session');
   const token = createHash('sha256').update(randomUUID()).digest('base64url');
@@ -857,7 +857,7 @@ async function seedSession(db: pg.Client, options: { email?: string; hostedDomai
     const issuer = process.env.ACCOUNT_ISSUER ?? 'https://account.anoma.ly';
     await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$2,$3,$4)',[userId,'Synthetic acceptance operator',email,options.verified??true]);
     await db.query('INSERT INTO nightmail_oidc_identities VALUES($1,$2,$3)',[issuer,userId,userId]);
-    await db.query("INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES($1,$2,$3,$2,$4,now()+interval '1 hour')",[createHash('sha256').update(token).digest('hex'),userId,issuer,email]);
+    await db.query("INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,verified_email,staff,expires_at) VALUES($1,$2,$3,$2,$4,$5,now()+interval '1 hour')",[createHash('sha256').update(token).digest('hex'),userId,issuer,email,options.staff??false]);
     await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,'default','owner')",[randomUUID(),userId]);
     await db.query('COMMIT');
   } catch (cause) {
@@ -875,7 +875,8 @@ async function sessionFixture(t: TestContext, options: Parameters<typeof seedSes
 before(async () => {
   authDb = new pg.Client({ connectionString: FIXTURE_DATABASE_URL, connectionTimeoutMillis: 5_000, statement_timeout: 5_000 });
   await authDb.connect();
-  manager = await seedSession(authDb, { email: AUTH_EMAIL, userId: AUTH_SUBJECT, hostedDomain: null });
+  // The synthetic acceptance operator, signed in with Google Workspace as staff are.
+  manager = await seedSession(authDb, { email: AUTH_EMAIL, userId: AUTH_SUBJECT, hostedDomain: null, staff: true });
   const identity = ok(await http('GET', '/v1/me', MANAGER));
   assert.equal(identity.id, manager.userId, 'Fixture DB, session secret and API must match; no machine keys may be provisioned otherwise.');
   assert.equal(identity.email, AUTH_EMAIL);
@@ -6782,7 +6783,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const service = async (method: string, path: string, body?: Json): Promise<Reply> => { const r = await platform.call<Json>(method, path, body); return { status: r.status, body: r.body, headers: new Headers(r.requestId ? { 'x-request-id': r.requestId } : {}) }; };
       const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
       const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
-      const admin = await sessionFixture(t), member = await sessionFixture(t), operator = await sessionFixture(t), outsider = await sessionFixture(t);
+      const admin = await sessionFixture(t), member = await sessionFixture(t), operator = await sessionFixture(t, { staff: true }), outsider = await sessionFixture(t);
       const other = unique('other-ws'), ops = unique('ops-ws');
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2)', [other, ops]);
       await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'admin'),($4,$2,$5,'member'),($6,$7,$8,'member'),($9,$10,$11,'owner')`,
@@ -6855,7 +6856,6 @@ describe('Hosted MCP OAuth and tools', () => {
 
       // Operators: everything about a workspace or a user, and each read is itself on the trail.
       await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'audit trail acceptance fixture')`, [operator.userId]);
-      await staffSession(db, operator.userId);
       const trail = ok(await send('GET', `/v1/operator/workspaces/${wid}/audit?include=enforcement,billing&action=api_key.`, session(operator)));
       assert.deepEqual(trail.data.map((e: Json) => e.action), ['api_key.revoke', 'api_key.create']);
       assert.equal(trail.data[1].requestId, createdRequest); assert.equal(trail.data[1].actor.email, manager!.email);
@@ -7057,14 +7057,13 @@ describe('Hosted MCP OAuth and tools', () => {
 
       // Acme has an owner, an admin and a member; the member also owns Beta; the outsider owns Other. The support
       // addresses live in the platform workspace.
-      const owner = await sessionFixture(t), admin = await sessionFixture(t), member = await sessionFixture(t), outsider = await sessionFixture(t), lonely = await sessionFixture(t), operator = await sessionFixture(t);
+      const owner = await sessionFixture(t), admin = await sessionFixture(t), member = await sessionFixture(t), outsider = await sessionFixture(t), lonely = await sessionFixture(t), operator = await sessionFixture(t, { staff: true });
       const acme = unique('acme-ws'), beta = unique('beta-ws'), other = unique('other-ws'), home = unique('platform-ws');
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2),($3,$3,$3),($4,$4,$4)', [acme, beta, other, home]);
       await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$2,$5,'admin'),($6,$2,$7,'member'),($8,$9,$7,'owner'),($10,$11,$12,'owner')`,
         [unique('mem'), acme, owner.userId, unique('mem'), admin.userId, unique('mem'), member.userId, unique('mem'), beta, unique('mem'), other, outsider.userId]);
       await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[owner, admin, member, outsider, lonely, operator].map(f => f.userId)]);
       await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support conversations acceptance fixture')`, [operator.userId]);
-      await staffSession(db, operator.userId);
       await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'member')`, [unique('mem'), home, operator.userId]);
       const supportDomain = `sup-${hex().slice(0, 10)}.example`, acmeDomain = `acme-${hex().slice(0, 10)}.example`, thread = unique('thread'), acmeThread = unique('thread');
       await db.query('INSERT INTO mail_threads(id, workspace_id) VALUES ($1, $2), ($3, $4)', [thread, home, acmeThread, acme]);
@@ -7547,14 +7546,13 @@ describe('Hosted MCP OAuth and tools', () => {
       const inbox = '/v1/operator/support-inbox';
 
       // Acme's owner (who also administers Beta) and member; an operator and a read-only operator in the platform workspace.
-      const owner = await sessionFixture(t), member = await sessionFixture(t), operator = await sessionFixture(t), reader = await sessionFixture(t);
+      const owner = await sessionFixture(t), member = await sessionFixture(t), operator = await sessionFixture(t, { staff: true }), reader = await sessionFixture(t, { staff: true });
       const acme = unique('acme-ws'), beta = unique('beta-ws'), home = unique('platform-ws');
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2),($3,$3,$3)', [acme, beta, home]);
       await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$2,$5,'member'),($6,$7,$3,'admin'),($8,$9,$10,'member'),($11,$9,$12,'member')`,
         [unique('mem'), acme, owner.userId, unique('mem'), member.userId, unique('mem'), beta, unique('mem'), home, operator.userId, unique('mem'), reader.userId]);
       await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[owner, member, operator, reader].map(f => f.userId)]);
       await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator', 'support inbox acceptance fixture'), ($2, 'operator:read', 'support inbox acceptance fixture')`, [operator.userId, reader.userId]);
-      await staffSession(db, operator.userId, reader.userId);
       const chat = async (f: SessionFixture, workspace = acme, body: Json = {}) => {
         const handoff = ok(await send('POST', '/v1/contact-support', session(f, workspace), body), 201), id = conversation();
         ok(reply(await platform.registerConversation({ conversationId: id, evidence: { kind: 'handoff', token: handoff.token } })), 201);
@@ -7822,9 +7820,8 @@ describe('Hosted MCP OAuth and tools', () => {
         return { status: res.status, body: parsed, headers: res.headers };
       };
       const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN }), bearer = (token: string) => ({ authorization: `Bearer ${token}` });
-      const operator = await sessionFixture(t), reader = await sessionFixture(t), owner = await sessionFixture(t), other = await sessionFixture(t);
+      const operator = await sessionFixture(t, { staff: true }), reader = await sessionFixture(t, { staff: true }), owner = await sessionFixture(t), other = await sessionFixture(t, { staff: true });
       await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator', 'UI notes acceptance fixture'), ($2, 'operator:read', 'UI notes acceptance fixture'), ($3, 'operator', 'UI notes acceptance fixture')`, [operator.userId, reader.userId, other.userId]);
-      await staffSession(db, operator.userId, reader.userId, other.userId);
       // Only `operator` is allowlisted, by issuer subject (seedSession binds the subject to the user ID). `other` is an
       // operator too, and `reader` is listed but only operator:read: both must see nothing of the feature.
       const issuer = process.env.ACCOUNT_ISSUER ?? 'https://account.anoma.ly';
@@ -8014,13 +8011,12 @@ describe('Hosted MCP OAuth and tools', () => {
       };
       const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN }), bearer = (token: string) => ({ authorization: `Bearer ${token}` });
       // Grants come from an operator's dashboard session (the support platform mints them the same way).
-      const operator = await sessionFixture(t), outsider = await sessionFixture(t), other = unique('other-ws'), second = unique('second-ws'), ops = unique('ops-ws');
+      const operator = await sessionFixture(t, { staff: true }), outsider = await sessionFixture(t), other = unique('other-ws'), second = unique('second-ws'), ops = unique('ops-ws');
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2),($3,$3,$3)', [other, second, ops]);
       await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$5,$6,'member'),($7,$8,$9,'member')`,
         [unique('mem'), other, outsider.userId, unique('mem'), second, manager!.userId, unique('mem'), ops, operator.userId]);
       await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[operator.userId, outsider.userId]]);
       await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support deliverability acceptance fixture')`, [operator.userId]);
-      await staffSession(db, operator.userId);
       const mint = async (body: Json) => { const grant = ok(await send('POST', '/v1/operator/support/grants', session(operator), { reason: 'Customer asked why mail goes to spam', ...body }), 201); secrets.add(grant.token); return grant; };
       const handoff = ok(await local('POST', '/v1/contact-support', { shareContent: true, message: 'Gmail puts our newsletter in spam' }), 201);
       const content = await mint({ userId: manager!.userId, ticketRef: 'D-1', verification: 'handoff', handoffId: handoff.id });
@@ -8242,13 +8238,12 @@ describe('Hosted MCP OAuth and tools', () => {
       };
       const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN }), bearer = (token: string) => ({ authorization: `Bearer ${token}` });
       const rid = () => `req_${randomUUID().replaceAll('-', '')}`;
-      const operator = await sessionFixture(t), outsider = await sessionFixture(t), other = unique('other-ws'), second = unique('second-ws'), ops = unique('ops-ws');
+      const operator = await sessionFixture(t, { staff: true }), outsider = await sessionFixture(t), other = unique('other-ws'), second = unique('second-ws'), ops = unique('ops-ws');
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2),($3,$3,$3)', [other, second, ops]);
       await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$5,$6,'member'),($7,$8,$9,'member')`,
         [unique('mem'), other, outsider.userId, unique('mem'), second, manager!.userId, unique('mem'), ops, operator.userId]);
       await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[operator.userId, outsider.userId]]);
       await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support request logs acceptance fixture')`, [operator.userId]);
-      await staffSession(db, operator.userId);
       const mint = async (body: Json) => { const grant = ok(await send('POST', '/v1/operator/support/grants', session(operator), { reason: 'Customer asked why their sends fail', verification: 'dmarc', ...body }), 201); secrets.add(grant.token); return grant; };
       const grant = await mint({ userId: manager!.userId, ticketRef: 'L-1', workspaceIds: [wid] }), both = await mint({ userId: manager!.userId, ticketRef: 'L-2' });
       const support = bearer(grant.token), get = async (path: string, who = support) => ok(await send('GET', path, who));
@@ -8405,9 +8400,8 @@ describe('Hosted MCP OAuth and tools', () => {
       const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
       const { supportPlatform, supportPlatformAllows, signSupportToken } = await import('./src/support-platform.js');
       const platform = supportPlatform(async req => app.fetch(req, { ...runtime, platformCaller: 'bane-support' }), () => runtime.config);
-      const operator = await sessionFixture(t), member = await sessionFixture(t);
+      const operator = await sessionFixture(t, { staff: true }), member = await sessionFixture(t);
       await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support staff sign-in acceptance fixture')`, [operator.userId]);
-      await staffSession(db, operator.userId);
       const callback = 'https://support.example.com/staff/callback';
       const signIn = (to: string, who = operator) => send('GET', `/v1/operator/support/staff-sign-in?return=${encodeURIComponent(to)}`, session(who));
 
