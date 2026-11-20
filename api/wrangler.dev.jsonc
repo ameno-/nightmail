@@ -29,11 +29,13 @@
     // for this endpoint (hosted_topic_cutover); the legacy bane-* subscriptions stay on dev.bane.mx.
     "SES_FEEDBACK_URL": "https://dev.nightmail.dev/v1/events/ses",
     "ACCOUNT_ISSUER": "https://account.dev.anoma.ly",
-    "ACCOUNT_REQUIRED_ACR": "urn:anomaly:acr:google",
+    // Sign-in with GitHub or Google at the account service (its chooser offers both); nothing else is accepted.
+    "ACCOUNT_REQUIRED_ACR": "urn:anomaly:acr:github urn:anomaly:acr:google",
     // MCP asks for nightmail:* scopes, on both hosts; bane:* grants are still accepted until the cutover.
     "OAUTH_SCOPE_PREFIX": "nightmail",
-    // Staff sign-up: the Google Workspace domain (hd) of the sign-in's provider identity, never an address.
-    "AUTH_STAFF_GOOGLE_DOMAINS": "anoma.ly",
+    // Staff sign-up, from the sign-in's provider identity and never the account's own address: the Google Workspace
+    // domain (hd), or the domain of GitHub's verified primary address (api/src/account-policy.ts).
+    "AUTH_STAFF_DOMAINS": "anoma.ly",
     // Staff UI notes (src/ui-notes.ts): off on dev until Ryan's account.dev.anoma.ly subject is listed here.
     "UI_NOTES_SUBJECTS": "",
     // Dashboard usage analytics (docs/analytics.md): batches go to the ANALYTICS bucket, never Postgres. "off" discards them.

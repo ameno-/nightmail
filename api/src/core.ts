@@ -62,13 +62,14 @@ export interface Config {
   previousOrigins?: string[];
   /** The stack and role name prefix a new BYO connection gets (BYO_STACK_PREFIX). */
   byoStackPrefix?: 'Bane' | 'Nightmail';
-  accountClient?: { id: string; privateKey: string; algorithm: 'RS256' | 'ES256'; requiredAcr?: string };
-  /** Required `acr` on ID tokens and on every MCP access token. Hosted installations always require Google. */
-  accountRequiredAcr?: string;
+  accountClient?: { id: string; privateKey: string; algorithm: 'RS256' | 'ES256' };
+  /** The `acr` values accepted on ID tokens and on every MCP access token, one of which each must carry. Hosted
+   * installations accept only the account service's sign-in methods (GitHub and Google). */
+  accountRequiredAcr?: string[];
   /** Self-hosted access policy: exact issuer subjects. Identity is (issuer, subject); addresses never admit anyone. */
   allowedSubjects: string[];
-  /** Hosted staff: Google Workspace domains of the sign-in's provider identity (see account-policy.ts). */
-  staffGoogleDomains: string[];
+  /** Hosted staff: domains of the sign-in's provider identity (see account-policy.ts). */
+  staffDomains: string[];
   /** Hosted: the issuer subjects allowed to use staff UI notes (src/ui-notes.ts); empty turns the feature off. */
   uiNotesSubjects?: { issuer: string; subject: string }[];
   /** Dashboard usage analytics (src/analytics.ts, DASHBOARD_ANALYTICS=on): off unless set. */
