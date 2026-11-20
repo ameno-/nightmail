@@ -159,6 +159,21 @@ impl Bucket {
             last: now,
         }
     }
+    /// Takes `cost` now or later: when the credit is short, the time it is there, which the next caller queues behind.
+    pub fn reserve(&mut self, now: Instant, cost: u64) -> Instant {
+        if self.take(now, cost) {
+            return now;
+        }
+        let at = self.last.max(now)
+            + Duration::from_millis(
+                (cost * 1000)
+                    .saturating_sub(self.credit)
+                    .div_ceil(self.rate),
+            );
+        self.credit = 0;
+        self.last = at;
+        at
+    }
     pub fn take(&mut self, now: Instant, cost: u64) -> bool {
         let ms = now
             .duration_since(self.last)
@@ -178,7 +193,9 @@ impl Bucket {
     }
 }
 const ANONYMOUS: u32 = 128;
-const PER_SUBNET: u32 = 16; // Six busy networks still leave a quarter of the task available.
+// An office or a carrier-grade NAT shares one /24, and every client reconnects at once after a deploy. Two busy
+// networks still leave half the task available.
+const PER_SUBNET: u32 = 64;
 pub struct Slot {
     pub accepted: Instant,
     pub after: Instant,
@@ -265,36 +282,47 @@ mod tests {
     use super::*;
     #[test]
     fn anonymous_slots_are_scoped_and_returned_for_both_address_families() {
-        for (peers, other) in [
-            (
-                ["192.0.2.1", "::ffff:192.0.2.2", "192.0.2.3", "192.0.2.4"],
-                "192.0.3.1",
-            ),
-            (
-                [
-                    "2001:db8:1::1",
-                    "2001:db8:1:2::2",
-                    "2001:db8:1:3::3",
-                    "2001:db8:1:4::4",
-                ],
-                "2001:db8:2::1",
-            ),
-        ] {
+        // Eight addresses of one /24 (or /48) fill its 64 slots; the ninth waits, another network doesn't.
+        type Family = (fn(u32) -> String, &'static str);
+        let families: [Family; 2] = [
+            (|i| format!("192.0.2.{i}"), "192.0.3.1"),
+            (|i| format!("2001:db8:1:{i}::1"), "2001:db8:2::1"),
+        ];
+        for (peer, other) in families {
             let limits = Arc::new(Mutex::new(Limits::default()));
             let take = |ip: &str| Slot::take(limits.clone(), ip.parse().unwrap(), Instant::now());
             let mut held = Vec::new();
-            for ip in &peers[..2] {
+            for i in 1..=PER_SUBNET / 8 {
+                let ip = if i == 2 && other.contains('.') {
+                    "::ffff:192.0.2.2".to_owned()
+                } else {
+                    peer(i)
+                };
                 for _ in 0..8 {
-                    held.push(take(ip).unwrap());
+                    held.push(take(&ip).unwrap());
                 }
-                assert!(take(ip).is_none());
+                assert!(take(&ip).is_none());
             }
-            assert!(take(peers[3]).is_none());
+            assert!(take(&peer(9)).is_none());
             assert!(take(other).is_some());
             held.clear();
             assert!(limits.lock().unwrap().blocks.is_empty());
-            assert!(take(peers[3]).is_some());
+            assert!(take(&peer(9)).is_some());
         }
+    }
+    #[test]
+    fn a_short_byte_credit_delays_in_arrival_order() {
+        let t = Instant::now();
+        let mut b = Bucket::new(t, 64, 8000);
+        assert_eq!(b.reserve(t, 64), t);
+        // 32 more at 8 a millisecond: ready in 4 ms; the next 16 queue 2 ms behind it.
+        assert_eq!(b.reserve(t, 32), t + Duration::from_millis(4));
+        assert_eq!(b.reserve(t, 16), t + Duration::from_millis(6));
+        assert!(!b.take(t + Duration::from_millis(5), 1));
+        assert_eq!(
+            b.reserve(t + Duration::from_millis(100), 1),
+            t + Duration::from_millis(100)
+        );
     }
     #[tokio::test]
     async fn a_waiting_share_never_reserves_another_tenants_capacity() {

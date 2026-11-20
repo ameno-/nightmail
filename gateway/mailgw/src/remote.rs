@@ -412,6 +412,8 @@ fn submit_error(status: u16, code: &str) -> SubmitError {
 pub struct Login {
     pub deadline: Instant,
     pub unavailable: std::sync::atomic::AtomicBool,
+    /// The last refusal was a lockout (admission.rs Limits::blocked), not a wrong password.
+    pub locked: std::sync::atomic::AtomicBool,
     pub limits: Arc<Mutex<crate::admission::Limits>>,
     pub ip: std::net::IpAddr,
     pub api: Arc<Api>,
@@ -430,6 +432,8 @@ impl Identity for Login {
         let k = failure_key(u, pw);
         let now = tokio::time::Instant::now();
         if self.limits.lock().is_ok_and(|l| l.blocked(self.ip, k, now)) {
+            self.locked
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             return false;
         }
         let v = match self.api.login(u, pw, p, self.deadline) {
@@ -558,10 +562,11 @@ impl Store {
                 workspace: p.workspace.clone(),
                 account: p.account.clone(),
                 last: Instant::now(),
+                // KiB: a 64 MiB burst, then 8 MiB/s per credential (APPEND waits, admission.rs reserve).
                 bytes: Arc::new(Mutex::new(crate::admission::Bucket::new(
                     tokio::time::Instant::now(),
-                    16384,
-                    2048,
+                    65536,
+                    8192,
                 ))),
                 calls: crate::admission::Bucket::new(tokio::time::Instant::now(), 200, 50),
             });
@@ -2039,6 +2044,35 @@ mod tests {
         assert!(matches!(edit("ALREADYEXISTS"), store::Error::Exists));
         assert!(matches!(edit("FOLDER_LIMIT"), store::Error::Limit));
         assert!(matches!(edit("INVALID_PATH"), store::Error::Cannot));
+    }
+
+    /// A locked-out name is refused without asking the API, and the refusal is marked as a lockout, so the shell can say
+    /// "try again later" instead of that the password is wrong.
+    #[test]
+    fn a_lockout_refuses_without_asking_and_says_so() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _enter = rt.enter();
+        let limits = Arc::new(Mutex::new(crate::admission::Limits::default()));
+        let ip: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+        let key = failure_key("box@example.invalid", "secret");
+        for _ in 0..20 {
+            limits
+                .lock()
+                .unwrap()
+                .failure(ip, key, tokio::time::Instant::now());
+        }
+        let login = Login {
+            deadline: Instant::now() + Duration::from_secs(5),
+            unavailable: false.into(),
+            locked: false.into(),
+            limits,
+            ip,
+            api: Arc::new(Api::new("http://127.0.0.1:9".into(), "k".repeat(32)).unwrap()),
+            principal: Mutex::new(None),
+        };
+        assert!(!login.login(Protocol::Imap, b"box@example.invalid", b"secret"));
+        assert!(login.locked.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!login.unavailable.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     /// Found by gateway/tear (witness with one credential: B append Work, A append Work,

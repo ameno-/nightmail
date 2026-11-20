@@ -38,6 +38,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Transport for T {}
 type Stream = Box<dyn Transport>;
 const IO: Duration = Duration::from_secs(30);
 const IDLE: Duration = Duration::from_secs(1800);
+/// SMTP DATA may pause this long between reads (RFC 5321 4.5.3.2.6 suggests minutes for slow links).
+const DATA_IDLE: Duration = Duration::from_secs(180);
+/// Between commands before sign-in: long enough for a mobile client on a slow link.
+const PREAUTH_IDLE: Duration = Duration::from_secs(15);
 struct State {
     store: Memory,
     caps: Caps,
@@ -52,7 +56,9 @@ struct Gateway {
     responses: Arc<Semaphore>,
     handshakes: Semaphore,
     per_inbox: Mutex<std::collections::HashMap<String, std::sync::Weak<Semaphore>>>,
+    /// Open sessions per inbox (IMAP and SMTP together) and per send-only key.
     limit: usize,
+    key_limit: usize,
     tls: TlsAcceptor,
     account: Account,
     state: Mutex<State>,
@@ -113,7 +119,6 @@ impl Gateway {
     async fn serve(&self, tcp: TcpStream, port: Port, ip: IpAddr, slot: Slot) -> Result<()> {
         let start = slot.accepted;
         let auth_deadline = start + self.preauth;
-        const PREAUTH_IDLE: Duration = Duration::from_secs(4);
         let greeting_deadline = auth_deadline.min(start + PREAUTH_IDLE);
         // SMTP never closes silently: a client that waits too long learns why (RFC 5321 4.5.3.2).
         let smtp = port.protocol == Protocol::Smtp;
@@ -155,6 +160,7 @@ impl Gateway {
             api: api.clone(),
             principal: Mutex::new(None),
             unavailable: false.into(),
+            locked: false.into(),
             limits: self.limits.clone(),
             ip,
         });
@@ -272,7 +278,7 @@ impl Gateway {
                     }
                 };
                 if login.is_some() && !was_partial && frame.partial() {
-                    deadline = Instant::now() + IO
+                    deadline = Instant::now() + if data_permit.is_some() { DATA_IDLE } else { IO }
                 }
                 let bytes = match event {
                     Event::AppendBody { len, sync } => {
@@ -283,13 +289,7 @@ impl Gateway {
                             1,
                         )
                         .await;
-                        let permitted = permit.is_some()
-                            && store
-                                .upload_rate
-                                .lock()
-                                .map_err(|_| anyhow!("limits unavailable"))?
-                                .take(Instant::now(), len.div_ceil(1024).max(1) as u64);
-                        if !permitted {
+                        if permit.is_none() {
                             let mut no = frame.tag().to_vec();
                             no.extend_from_slice(b" NO [LIMIT] Upload capacity busy\r\n");
                             write(&mut stream, &no).await?;
@@ -302,11 +302,20 @@ impl Gateway {
                             }
                             continue;
                         }
+                        // The byte rate delays an upload rather than refusing it: an import tool
+                        // (imapsync) keeps going at the credential's pace.
+                        let wait = store
+                            .upload_rate
+                            .lock()
+                            .map_err(|_| anyhow!("limits unavailable"))?
+                            .reserve(Instant::now(), len.div_ceil(1024).max(1) as u64);
+                        tokio::time::sleep_until(wait).await;
                         spool = Some(upload::Upload::new(
                             len,
                             permit.context("reservation missing")?,
                         )?);
-                        deadline = Instant::now() + Duration::from_secs(180);
+                        // No total for the upload: the read loop's 30 s without progress (IO) bounds it.
+                        deadline = Instant::now() + IDLE;
                         if sync {
                             write(&mut stream, b"+ Ready for literal\r\n").await?;
                         }
@@ -423,7 +432,15 @@ impl Gateway {
                         let slots = m
                             .get(&p.inbox)
                             .and_then(std::sync::Weak::upgrade)
-                            .unwrap_or_else(|| Arc::new(Semaphore::new(self.limit)));
+                            .unwrap_or_else(|| {
+                                // A send-only key's principal is the key itself (api/src/protocol-relay.ts).
+                                let relay = p.kid.starts_with("key_") || p.kid.starts_with("mbk_");
+                                Arc::new(Semaphore::new(if relay {
+                                    self.key_limit
+                                } else {
+                                    self.limit
+                                }))
+                            });
                         m.insert(p.inbox.clone(), Arc::downgrade(&slots));
                         let sub = self.events.subscribe(&p.inbox);
                         login_generation = sub.1.borrow().auth;
@@ -460,7 +477,33 @@ impl Gateway {
                         Protocol::Imap => "imap",
                         Protocol::Smtp => "smtp",
                     };
-                    if identity.as_ref().is_some_and(|i| {
+                    if identity
+                        .as_ref()
+                        .is_some_and(|i| i.locked.swap(false, std::sync::atomic::Ordering::Relaxed))
+                    {
+                        // Locked out after repeated failures: even the right password is refused for now,
+                        // so say to try later rather than that the password is wrong.
+                        failures -= 1;
+                        tracing::info!(
+                            service = "gateway",
+                            event = "auth",
+                            code = "GATEWAY_AUTH_LOCKED",
+                            protocol,
+                            "login refused during lockout"
+                        );
+                        if matches!(port.protocol, Protocol::Imap) {
+                            let tag = r
+                                .bytes
+                                .split(|b| *b == b' ')
+                                .next()
+                                .unwrap_or(b"*")
+                                .to_vec();
+                            r.bytes = tag;
+                            r.bytes.extend(b" NO [UNAVAILABLE] Try again later\r\n")
+                        } else {
+                            r = Reply::one("454 4.7.0 Try again later");
+                        }
+                    } else if identity.as_ref().is_some_and(|i| {
                         i.unavailable
                             .swap(false, std::sync::atomic::Ordering::Relaxed)
                     }) {
@@ -523,7 +566,7 @@ impl Gateway {
                     core = Core::new(port.protocol, true);
                 }
                 deadline = if data_permit.is_some() {
-                    Instant::now() + IO
+                    Instant::now() + DATA_IDLE
                 } else if login.is_some() {
                     Instant::now() + IDLE
                 } else {
@@ -634,7 +677,8 @@ async fn main() -> Result<()> {
         api.is_some() || bind.is_loopback(),
         "fixture must stay on loopback"
     );
-    let limit = setting("MAILGW_LOGIN_LIMIT", 10)?;
+    // Thunderbird alone opens five connections per account; a phone and a desktop on one inbox need more.
+    let limit = setting("MAILGW_LOGIN_LIMIT", 30)?;
     if let Some(api) = &api {
         use std::sync::atomic::Ordering::Relaxed;
         let open = &api.tenant_sessions;
@@ -654,6 +698,7 @@ async fn main() -> Result<()> {
         handshakes: Semaphore::new(32),
         per_inbox: Mutex::default(),
         limit,
+        key_limit: setting("MAILGW_KEY_LOGIN_LIMIT", 50)?,
         tls: TlsAcceptor::from(Arc::new(config)),
         account: Account::new(
             "mbx_fixture".into(),
@@ -672,9 +717,9 @@ async fn main() -> Result<()> {
             ),
         }),
         changed: watch::channel(0).0,
-        slots: Arc::new(Semaphore::new(setting("MAILGW_LOGIN_LIMIT", 10)?)),
+        slots: Arc::new(Semaphore::new(limit)),
         limits: Arc::default(),
-        preauth: Duration::from_secs(setting("MAILGW_AUTH_SECONDS", 15u64)?.min(20)),
+        preauth: Duration::from_secs(setting("MAILGW_AUTH_SECONDS", 60u64)?.min(60)),
     });
     let mut listeners = JoinSet::new();
     if let Some(api) = api {
