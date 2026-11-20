@@ -1,7 +1,7 @@
 ---
 title: Terms of Service
 description: The agreement between you and Anomaly for using Nightmail: accounts, prepaid billing, refunds and credit expiry, sending limits, your data, and how disputes are resolved.
-updated: 19 November 2026
+updated: 20 November 2026
 effective: 13 November 2026
 ---
 
@@ -195,8 +195,9 @@ We'll tell you why and what to do, unless the law or an active investigation pre
 
 ## 10. Support access
 
-- When you choose **Contact support** in the dashboard, you can tick a box to let support read message content **for that one request**. It's off by default.
-- Support then gets short-lived (at most 2 hours), read-only access tied to your request and the workspaces you belong to. Without your tick, support sees settings, delivery events and error codes, but no message bodies. A request made by email never includes message content.
+- Support email and the dashboard's **Help** chat are answered first by an AI agent. Its answers can be wrong. You can ask for a person at any time, and a person decides every appeal and review.
+- Support reads only the workspaces you belong to, only while your request is open, and changes nothing in them unless you confirm it, signed in. Anomaly staff can read your conversation and answer it themselves; a staff member who looks at your workspace gets read-only access for at most 2 hours.
+- In **Contact support** or the Help chat, you can let support read message content **for that one request**. It's off by default. Without it, support sees settings, delivery events and error codes, but no message bodies. A request made by email never includes message content.
 - Your workspace's **Activity** page shows "Nightmail support viewed this workspace" with the request. Every support read is logged and kept for 90 days.
 
 ## 11. Third-party services you connect
