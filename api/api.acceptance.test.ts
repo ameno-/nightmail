@@ -3885,7 +3885,8 @@ describe('Hosted MCP OAuth and tools', () => {
     const updatedTemplate = await callTool(token, 'updateCampaignTemplate', { templateId: template.id, body: { revision: template.revision, draft: templateDraft }, confirm: true });
     assert.equal(updatedTemplate.revision, 2);
     assert.equal(updatedTemplate.published, null);
-    error(await http('PATCH', `/v1/templates/${template.id}`, MANAGER, { revision: 2, draft: { ...updatedTemplate.draft, html: '<h1>Hello, {{name}}</h1>' } }), 422, 'TEMPLATE_PLACEHOLDERS_UNSUPPORTED');
+    // Templates may use placeholders, as campaigns do.
+    assert.equal(ok(await http('PATCH', `/v1/templates/${template.id}`, MANAGER, { revision: 2, draft: { ...updatedTemplate.draft, html: '<h1>Hello, {{name}}</h1>' } })).draft.html, '<h1>Hello, {{name}}</h1>');
     assert.equal(context.origin, PUBLIC_ORIGIN);
     assert.equal(context.host, new URL(PUBLIC_ORIGIN).host);
     assert.deepEqual(context.domains, []);
@@ -8671,8 +8672,8 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       const bad=ok(await check(risky)), ids=bad.findings.map((f:Json)=>f.ruleId);
       assert.ok(bad.score<report.score-20); for(const id of ['part-mismatch','display-name','off-brand-links','short-url','script','form','unsubscribe-post','postal-address','shouting'])assert.ok(ids.includes(id),id);
       assert.ok(bad.findings.every((f:Json)=>f.title && f.detail && f.fix && f.category && f.severity));assert.doesNotMatch(JSON.stringify(bad),/never-fetch|192\.0\.2\.1|<script/i);
-      const bytes=ok(await check({...good,html:undefined,text:'é'.repeat(12289)})).findings.find((f:Json)=>f.ruleId==='screen-bytes');
-      assert.deepEqual(bytes.evidence,{screenedBytes:24578,limitBytes:24576,remainingBytes:-2});assert.equal(bytes.severity,'error');
+      const bytes=ok(await check({...good,html:undefined,text:'é'.repeat(32769)})).findings.find((f:Json)=>f.ruleId==='screen-bytes');
+      assert.deepEqual(bytes.evidence,{screenedBytes:65538,limitBytes:65536,remainingBytes:-2});assert.equal(bytes.severity,'error');
       error(await check({...good,html:'<div>'.repeat(400)}),413,'EMAIL_CHECK_LIMIT_EXCEEDED');
       const foreign=unique('foreign-check');await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)',[foreign]);
       const email=async (workspace:string)=>{const id=unique('checked-mail');await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,status,simulated) VALUES ($1,$2,$3,'fixture','orders@shop.example.com','[]','[]','[]',$4,$5,'delivered',true)`,[id,workspace,REGION,good.subject,{...good,kind:'transactional',testCampaignId:null,attachments:[]}]);return id;};
@@ -8957,6 +8958,39 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       const c=ok(await local('POST','/v1/campaigns',{name:'Wire',from:'a@example.net',subject:'Wire',html:'<p>Wire</p>',attachments:[asset],audience:{listId:list.id}}),201);
       error(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision}),422,'ATTACHMENT_METADATA_INVALID');
       assert.equal(ok(await local('GET',`/v1/campaigns/${c.id}`)).state,'draft');
+    });
+  });
+
+  test('a batch holds 10 MiB of html and text, and one past 2 MiB waits for its memory in the isolate', async t => {
+    await simulatedSesFixture(t, async ({ local }) => {
+      const { reserveMemory } = await import('./src/isolate-memory.js');
+      const unit = 'Order line, price and a short description. ', limit = 10 * 1024 * 1024, each = Math.floor(limit / 100), fill = limit - each * 100;
+      const html = (chars: number) => `<p>${unit.repeat(Math.ceil(chars / unit.length)).slice(0, chars - 7)}</p>`;
+      const batch = (extra: number) => ({ emails: Array.from({ length: 100 }, (_, i) => mail({ html: html(each + (i ? 0 : extra)), text: undefined, subject: `Digest ${i}` })) });
+      assert.equal(batch(fill).emails.reduce((n: number, m: Json) => n + m.html.length, 0), limit);
+      assert.match(error(await local('POST', '/v1/emails/batch', batch(fill + 1)), 413, 'BATCH_CONTENT_TOO_LARGE').message, /10 MiB/);
+      // Admitting a batch past 2 MiB builds about three times its content beside the request (the rows' JSON and the
+      // statement's buffers), reserved in the isolate's memory budget first: it waits while the budget is spent, and a
+      // small batch doesn't.
+      const held = await reserveMemory(Infinity);
+      let settled = false;
+      const largest = local('POST', '/v1/emails/batch', batch(fill)).finally(() => { settled = true; });
+      ok(await local('POST', '/v1/emails/batch', { emails: [mail(), mail()] }), 202);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      assert.equal(settled, false, 'The 10 MiB batch waits for the memory it reserves.');
+      held.release();
+      assert.equal(ok(await largest, 202).data.length, 100);
+    });
+  });
+
+  test('a message carries up to 100 attachments, through every route that sends one', async t => {
+    await simulatedSesFixture(t, async ({ local, db, runtime }) => {
+      const files = (await db.query(`INSERT INTO sending_attachments(id,workspace_id,filename,content_type,storage_key,checksum,size,disposition)
+        SELECT 'attachment_many_'||i,$1,'part-'||i||'.txt','text/plain','many/'||i,'fixture',1,'attachment' FROM generate_series(1,100) i RETURNING id`, [runtime.config.workspaceId])).rows.map((row: Json) => row.id as string);
+      ok(await local('POST', '/v1/emails/send', mail({ attachments: files })), 202);
+      assert.equal(error(await local('POST', '/v1/emails/send', mail({ attachments: [...files, 'attachment_101'] })), 422, 'VALIDATION_FAILED').field, 'attachments');
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('many-files'), from: 'sender@example.com', subject: 'Files', html: '<p>Files</p>', attachments: files }), 201);
+      assert.equal(campaign.draft.attachments.length, 100);
     });
   });
 
@@ -11197,6 +11231,25 @@ describe('Private attachment assets and campaign revisions', () => {
     ok(await http('POST', `/v1/campaigns/${campaign.id}/test`, key.secret, { to: address(), data: { name: 'Sample' } }), 202);
     const withFallback = ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, html: '<p>Hi {{name}}</p>', defaults: { name: 'there' } } }));
     ok(await http('POST', `/v1/campaigns/${withFallback.id}/test`, key.secret, { to: address() }), 202);
+  });
+
+  test('a template may use placeholders: a campaign made from it copies them and personalizes each copy', async t => {
+    const key = await keyFixture(t);
+    const template = await resource(t, key.secret, '/v1/templates', { name: unique('placeholder-template') });
+    const html = '<h1>Hello {{firstName}}</h1><p><a href="{{link}}">Your account</a></p>';
+    const edited = ok(await http('PATCH', `/v1/templates/${template.id}`, key.secret, { revision: template.revision, draft: { ...template.draft, subject: 'Hi {{firstName}}', html } }));
+    assert.deepEqual([edited.draft.subject, edited.draft.html], ['Hi {{firstName}}', html]);
+    assert.match(ok(await http('GET', `/v1/templates/${template.id}/preview`, key.secret)).html, /Hello \{\{firstName\}\}/, 'A template previews its placeholders as written.');
+    ok(await http('POST', `/v1/templates/${template.id}/publish`, key.secret, { revision: edited.revision }));
+    const copied = ok(await http('POST', '/v1/campaigns', key.secret, { name: unique('from-placeholders'), templateId: template.id }), 201);
+    cleanup(t, async () => { ok(await http('DELETE', `/v1/campaigns/${copied.id}`, key.secret), [200, 404]); });
+    assert.deepEqual([copied.draft.subject, copied.draft.html], ['Hi {{firstName}}', html]);
+    // The campaign fills them from the contact (here a test's data) and its own defaults.
+    const ready = ok(await http('PATCH', `/v1/campaigns/${copied.id}`, key.secret, { revision: copied.revision, draft: { ...copied.draft, from: 'sender@example.com', region: REGION, defaults: { firstName: 'there', link: 'https://example.com/account' } } }));
+    const sent = ok(await http('POST', `/v1/campaigns/${ready.id}/test`, key.secret, { to: address(), data: { firstName: 'Ada' } }), 202);
+    const content = ok(await http('GET', `/v1/emails/${sent.id}/content`, key.secret));
+    assert.equal(ok(await http('GET', `/v1/emails/${sent.id}`, key.secret)).subject, 'Hi Ada');
+    assert.ok(content.html.includes('Hello Ada') && content.html.includes('href="https://example.com/account"') && !content.html.includes('{{'), content.html);
   });
 });
 
@@ -19355,7 +19408,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         }
         assert.ok(bodies.at(-2)!.replace(/\s+/g,'').includes(reading(copy)),`${name}: screened as delivered`);
       }
-      const calls=bodies.length;await assert.rejects(screenSnapshot(runtime,{...s,kind:'marketing',html:'a'.repeat(40000)},true),{code:'CONTENT_TOO_LARGE_TO_SCREEN'});
+      const calls=bodies.length;await assert.rejects(screenSnapshot(runtime,{...s,kind:'marketing',html:'a'.repeat(70000)},true),{code:'CONTENT_TOO_LARGE_TO_SCREEN'});
       assert.equal(bodies.length,calls);
       const wide='<p '+Array.from({length:257},(_,i)=>`data-note-${i}`).join(' ')+'>Notes</p>';
       for (const html of [wide,'<div>'.repeat(257),...(BENCH?['<br>'.repeat(21_000)]:[])]) {
@@ -19485,20 +19538,23 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Submission measures what the screen will read and refuses an over-limit message at once, with the numbers.
       const key = ok(await local('POST', '/v1/api-keys', { name: 'sized', permissions: ['send', 'read'] }), 201).secret;
       const bearer = { authorization: `Bearer ${key}` }, send = (body: Json, path = '/v1/emails/send', headers: Record<string, string> = bearer) => local('POST', path, body, 'live', headers);
-      const long = Array.from({ length: 260 }, (_, i) => `<p>Line ${i}: your order ships within two business days and you can track it from your account page.</p>`).join('');
+      const long = Array.from({ length: 700 }, (_, i) => `<p>Line ${i}: your order ships within two business days and you can track it from your account page.</p>`).join('');
       const over = { from: 'a@sized.invalid', to: 'r@example.invalid', subject: 'Too long', html: long }, size = (await measureScreen({ html: long })).screenedBytes;
-      assert.ok(size > 24_576);
+      assert.ok(size > 65_536);
       const rows = async () => Number((await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1', [wid])).rows[0].n), before = await rows();
       for (const headers of [bearer, {}]) { // The fused key admission and the dashboard's.
         const refused = error(await send(over, '/v1/emails/send', headers), 422, 'CONTENT_TOO_LARGE_TO_SCREEN');
-        assert.deepEqual(refused.details, [{ screenedBytes: size, limitBytes: 24_576 }]); assert.match(refused.message, /24,576 per message/);
+        assert.deepEqual(refused.details, [{ screenedBytes: size, limitBytes: 65_536 }]); assert.match(refused.message, /65,536 per message/);
       }
       const batch = error(await send({ emails: [{ ...over, subject: 'Fits', html: '<p>Fits.</p>' }, over] }, '/v1/emails/batch'), 422, 'CONTENT_TOO_LARGE_TO_SCREEN');
-      assert.deepEqual([batch.field, batch.details], ['emails.1', [{ screenedBytes: size, limitBytes: 24_576, index: 1 }]]);
-      const hosts = Array.from({ length: 61 }, (_, i) => `<a href="https://ref${i}.invalid/">Reference ${i}</a>`).join(' ');
-      assert.deepEqual(error(await send({ ...over, html: hosts }), 422, 'CONTENT_TOO_LARGE_TO_SCREEN').details, [{ linkHosts: 61, linkHostLimit: 60 }]);
+      assert.deepEqual([batch.field, batch.details], ['emails.1', [{ screenedBytes: size, limitBytes: 65_536, index: 1 }]]);
+      // 150 distinct link hosts are read (each classifier request repeats them); the 151st is refused.
+      const hosts = (n: number) => Array.from({ length: n }, (_, i) => `<a href="https://ref${i}.invalid/">Reference ${i}</a>`).join(' ');
+      const many = error(await send({ ...over, html: hosts(151) }), 422, 'CONTENT_TOO_LARGE_TO_SCREEN');
+      assert.deepEqual(many.details, [{ linkHosts: 151, linkHostLimit: 150 }]); assert.match(many.message, /at most 150, with 3,000 bytes of host names/);
       assert.equal(await rows(), before, 'Nothing of a refused request is queued.');
       ok(await send({ ...over, subject: 'Fits', html: receipt.html, text: receipt.text }), 202);
+      ok(await send({ ...over, subject: 'Links', html: hosts(150) }), 202);
       // Bring-your-own AWS mail is admitted as before, with screen: true or without: its screen (if any) runs at dispatch.
       await db.query(`UPDATE provider_connections SET kind='byo',aws_account_id='112223330012',role_arn='fixture-role',external_id=gen_random_uuid(),template_version='v1',platform_principal_arn='fixture-platform',feedback_topic_arn=$2 WHERE id=$1`, [wid, `arn:aws:sns:${REGION}:112223330012:fixture`]);
       for (const headers of [bearer, {}]) for (const extra of [{}, { screen: true }]) ok(await send({ ...over, ...extra }, '/v1/emails/send', headers), 202);
@@ -19635,20 +19691,20 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const exhausted = await settle(edited);
       assert.deepEqual([exhausted.state, exhausted.delivery.error.code, exhausted.delivery.expanded], ['failed', 'CONTENT_SCREEN_BUDGET_EXCEEDED', 0]);
 
-      // A campaign's copies and its tests may hold 48 KiB; a message is still 24 KiB.
-      // A link printed in the text part makes it differ from the HTML's text, so both count: about 29 KB.
-      const long = await campaign('Long digest', `${paragraphs(140)}<p><a href="https://held.invalid/notes">Read the notes</a></p>`, names(2)), preview = ok(await local('GET', `/v1/campaigns/${long.id}/preview`));
+      // A campaign's copies and its tests may hold 128 KiB; a message is still 64 KiB.
+      // A link printed in the text part makes it differ from the HTML's text, so both count: about 93 KB.
+      const long = await campaign('Long digest', `${paragraphs(450)}<p><a href="https://held.invalid/notes">Read the notes</a></p>`, names(2)), preview = ok(await local('GET', `/v1/campaigns/${long.id}/preview`));
       const longBytes = (await measureScreen(preview)).screenedBytes;
-      assert.ok(longBytes > 24_576 && longBytes < 49_152, `${longBytes}`);
+      assert.ok(longBytes > 65_536 && longBytes < 131_072, `${longBytes}`);
       start = screened.length;
       const tested = ok(await local('POST', `/v1/campaigns/${long.id}/test`, { to: 'me@example.net', data: {} }), 202);
-      assert.equal((await dispatch()).sent, 1); assert.ok(screened.length - start >= 4 && screened.length - start <= 8, `${screened.length - start}`);
+      assert.equal((await dispatch()).sent, 1); assert.ok(screened.length - start >= 10 && screened.length - start <= 28, `${screened.length - start}`);
       assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1', [tested.id])).rows[0].status, 'accepted');
-      await send(long); assert.equal((await dispatch()).sent, 2); assert.ok([...delivered.values()].some(d => d.html?.includes('Section 139')));
-      const tooLong = await campaign('Too long', `${paragraphs(240)}<p><a href="https://held.invalid/notes">Read the notes</a></p>`, names(1));
+      await send(long); assert.equal((await dispatch()).sent, 2); assert.ok([...delivered.values()].some(d => d.html?.includes('Section 449')));
+      const tooLong = await campaign('Too long', `${paragraphs(700)}<p><a href="https://held.invalid/notes">Read the notes</a></p>`, names(1));
       for (const how of ['send', 'schedule', 'test']) {
         const refused = error(await local('POST', `/v1/campaigns/${tooLong.id}/${how}`, how === 'test' ? { to: 'me@example.net', data: {} } : { revision: tooLong.revision, ...(how === 'schedule' ? { scheduledAt: new Date(Date.now() + 3_600_000).toISOString() } : {}) }), 422, 'CONTENT_TOO_LARGE_TO_SCREEN');
-        assert.equal(refused.details[0].limitBytes, 49_152); assert.ok(refused.details[0].screenedBytes > 49_152); assert.match(refused.message, /per campaign/);
+        assert.equal(refused.details[0].limitBytes, 131_072); assert.ok(refused.details[0].screenedBytes > 131_072); assert.match(refused.message, /per campaign/);
       }
       assert.equal((await view(tooLong)).state, 'draft');
 
@@ -23939,23 +23995,24 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         // Within one workspace, a forward to one of its own receiving hosts is refused when it is made.
         error(await local('POST','/v1/endpoints',{type:'forward',name:'self',address:'back@receive.example',from:box.id}),422,'FORWARD_LOOP');
       });
-      await t.test('forwards: attachments go along up to one message’s limits (20 files, 25 MiB); the rest are named in the forward',async it=>{
+      await t.test('forwards: attachments go along up to one message’s limits (100 files, 25 MiB); the rest are named in the forward',async it=>{
         const hookId=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='whole'",[wid])).rows[0].id as string;
         await route('files@receive.example',['forward:whole'],'files');
-        const parts=[...Array.from({length:21},(_,n)=>[`note-${n}.txt`,`note ${n}`]),['tool.exe','MZ fixture'],['big.bin','big fixture']];
+        // Received mail keeps at most 100 files, as many as one message sends, so every note that fits goes along.
+        const parts=[...Array.from({length:98},(_,n)=>[`note-${n}.txt`,`note ${n}`]),['tool.exe','MZ fixture'],['big.bin','big fixture']];
         const mime=['From: Ana Sender <ana@example.org>','To: files@receive.example','Subject: Many files','Message-ID: <fwd-files@example.org>','MIME-Version: 1.0','Content-Type: multipart/mixed; boundary="m"','',
           '--m','Content-Type: text/plain; charset=utf-8','','See attached.',...parts.flatMap(([name,body])=>['--m','Content-Type: application/octet-stream',`Content-Disposition: attachment; filename="${name}"`,'',body!]),'--m--',''].join('\r\n');
-        const m=await receive('fwd-files',['files@receive.example'],mime);assert.equal(m.attachment_count,23);
+        const m=await receive('fwd-files',['files@receive.example'],mime);assert.equal(m.attachment_count,100);
         // Received mail is parsed up to 6 MiB, so a file past the 25 MiB limit stands in by its recorded size; it is never read.
         await db.query("UPDATE mail_attachments SET size_bytes=$3 WHERE workspace_id=$1 AND message_id=$2 AND filename='big.bin'",[wid,m.id,26*1024*1024]);
         assert.deepEqual(await forwardDelivery(hookId,m.id),{status:'delivered',last_error:null,routed:true});
         const notes=(await db.query("SELECT filename FROM mail_attachments WHERE workspace_id=$1 AND message_id=$2 AND filename LIKE 'note-%' ORDER BY id",[wid,m.id])).rows.map((r:Json)=>r.filename as string);
         const [sent]=await dispatchedForward(it,m.id,hookId),files=sent.Content.Simple.Attachments as Json[];
-        // The first 20 that fit, in the received order; a type SES won't deliver, the file over the limit and the 21st are named.
-        assert.deepEqual(files.map(f=>f.FileName).sort(),notes.slice(0,20).sort());
+        // Every note, in the received order; a type SES won't deliver and the file over the limit are named.
+        assert.deepEqual(files.map(f=>f.FileName).sort(),notes.slice().sort());
         for(const f of files)assert.equal(Buffer.from(f.RawContent).toString(),`note ${f.FileName.slice(5,-4)}`);
-        const named=/Not attached: (.+) \(over the 20-file, 25 MiB limit/.exec(sent.Content.Simple.Body.Text.Data)![1]!.split(', ');
-        assert.deepEqual(named.sort(),['big.bin','tool.exe',notes[20]!].sort());
+        const named=/Not attached: (.+) \(over the 100-file, 25 MiB limit/.exec(sent.Content.Simple.Body.Text.Data)![1]!.split(', ');
+        assert.deepEqual(named.sort(),['big.bin','tool.exe'].sort());
       });
       await t.test('forwards: hosted, a forwarded file the content screen can’t vouch for is named, and the rest still go',async()=>{
         const hookId=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='whole'",[wid])).rows[0].id as string;
@@ -23969,7 +24026,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         try{assert.deepEqual(await forwardDelivery(hookId,m.id),{status:'delivered',last_error:null,routed:true});}finally{runtime.config.hostedScreen=prior;}
         const sent=(await db.query("SELECT id,text FROM mail_messages WHERE workspace_id=$1 AND direction='outbound' AND subject='Fwd: Screened files'",[wid])).rows[0];
         assert.deepEqual((await db.query('SELECT filename,content_type FROM mail_attachments WHERE message_id=$1',[sent.id])).rows,[{filename:'photo.png',content_type:'image/png'}]);
-        assert.deepEqual(/Not attached: (.+) \(over the 20-file/.exec(sent.text)![1]!.split(', ').sort(),['fake.pdf','page.html']);
+        assert.deepEqual(/Not attached: (.+) \(over the 100-file/.exec(sent.text)![1]!.split(', ').sort(),['fake.pdf','page.html']);
       });
       await t.test('delivery: an endpoint paused between the claim and the fence parks the delivery and posts nothing until resumed',async()=>{
         // tear/delivery witness: ingest m1 a, claim K m1:W, pause W, go K.
@@ -27480,7 +27537,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(loadConfig({ ...base, TYPESAFE_API_KEY: 'synthetic-typesafe-key' }).screen, { apiKey: 'synthetic-typesafe-key', endpoint: 'https://api.typesafe.ai/v1/systemone', model: 'jev-latest', mode: 'reject', threshold: 0.7 });
       assert.equal(loadConfig({ ...base, TYPESAFE_API_KEY: 'synthetic-console-key', JEV_ENDPOINT: 'https://opencode.ai/inference/systemone/v1/systemone', JEV_MODEL: 'jev-1.13-free' }).screen?.endpoint, 'https://opencode.ai/inference/systemone/v1/systemone');
       // Screened-text limits: 24 KiB per message, 48 KiB per campaign (screened once), both configurable.
-      assert.deepEqual(loadConfig(base).screenLimits, { messageBytes: 24576, campaignBytes: 49152 });
+      assert.deepEqual(loadConfig(base).screenLimits, { messageBytes: 65536, campaignBytes: 131072 });
       assert.deepEqual(loadConfig({ ...base, JEV_MESSAGE_LIMIT_BYTES: '16384', JEV_CAMPAIGN_LIMIT_BYTES: '65536' }).screenLimits, { messageBytes: 16384, campaignBytes: 65536 });
       // Synthetic live provider: the SDK prototype is intercepted, so no credential or AWS endpoint is used.
       runtime.config.liveEnabled = true;

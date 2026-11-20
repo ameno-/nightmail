@@ -576,7 +576,7 @@ export type CampaignTemplateDraft = {
     fromName?: string;
     replyTo?: Array<string>;
     /**
-     * Concrete Nightmail block HTML shared with the visual editor and renderer. Email-safe inline styles support color, typography, spacing, borders, radius and dimensions. Templates do not accept {{placeholders}}; edit the copied campaign when personalization is needed. Call getContentGuide before writing.
+     * Nightmail block HTML shared with the visual editor and renderer. Email-safe inline styles support color, typography, spacing, borders, radius and dimensions. May use {{placeholders}}, as campaigns do: a campaign created from the template copies them and fills them from each contact and its own defaults. Call getContentGuide before writing.
      */
     html?: string;
     attachments?: Array<string>;
@@ -793,6 +793,9 @@ export type EmailQueued = {
 };
 
 export type SendEmailBatchInput = {
+    /**
+     * Up to 100 messages. Their html and text together may hold 10 MiB (413 BATCH_CONTENT_TOO_LARGE).
+     */
     emails: Array<BatchSendEmailItem>;
 };
 
@@ -4469,7 +4472,7 @@ export type CreateInboundThread = {
     text?: string;
     html?: string;
     /**
-     * Up to 20 files, 25 MiB combined. Any type Amazon SES delivers (executables and scripts are refused).
+     * Up to 100 files, 25 MiB combined. Any type Amazon SES delivers (executables and scripts are refused).
      */
     attachments?: Array<InboundAttachmentInput>;
     replyTo?: Array<string>;
@@ -4518,7 +4521,7 @@ export type ReplyToInboundThread = {
     text?: string;
     html?: string;
     /**
-     * Up to 20 files, 25 MiB combined. Any type Amazon SES delivers (executables and scripts are refused).
+     * Up to 100 files, 25 MiB combined. Any type Amazon SES delivers (executables and scripts are refused).
      */
     attachments?: Array<InboundAttachmentInput>;
     replyTo?: Array<string>;

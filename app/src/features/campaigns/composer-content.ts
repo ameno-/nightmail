@@ -1,5 +1,6 @@
 import type { AttachmentApi } from '../../data/types'
 import { imageTags } from '../../lib/html-scan'
+import { MAX_ATTACHMENTS } from './copy'
 
 export function isRasterDataUrl(value: string): boolean {
   const content = value.slice(value.indexOf(',') + 1)
@@ -9,27 +10,57 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
+// A GIF keeps its animation: it goes up unchanged, within the 8 MiB an inline image may hold (a template asset's JSON
+// upload). Other images are redrawn as JPEG at most 1,200 px wide, so their source may be large: up to 40 MB and about
+// 50 megapixels, measured before the image is decoded (50 MP decodes to 200 MB of pixels).
+const MAX_GIF_BYTES = 8 * 1024 * 1024, MAX_SOURCE_BYTES = 40 * 1024 * 1024, MAX_SOURCE_PIXELS = 50_000_000
+const unreadable = 'Couldn’t open this image. Export it as a PNG or JPEG and try again.'
+const tooManyPixels = 'Choose an image under 50 megapixels.'
+function dataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error(unreadable))
+    reader.onerror = () => reject(new Error(unreadable))
+    reader.readAsDataURL(blob)
+  })
+}
+// An image's size from its header: the browser reads it on load and decodes the pixels only when they are drawn.
+async function imagePixels(file: File): Promise<number> {
+  const url = URL.createObjectURL(file), image = new Image()
+  try {
+    await new Promise<void>((resolve, reject) => { image.onload = () => resolve(); image.onerror = () => reject(new Error(unreadable)); image.src = url })
+    return image.naturalWidth * image.naturalHeight
+  } finally { URL.revokeObjectURL(url) }
+}
+
 export async function prepareLocalImage(file: File): Promise<{ url: string }> {
-  const supported = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/avif'])
-  if (file.type === 'image/gif') throw new Error('GIF animation cannot be preserved. Choose a PNG, JPEG, WebP, or AVIF image instead.')
-  if (!supported.has(file.type)) throw new Error('Choose a PNG, JPEG, WebP, or AVIF image.')
-  if (file.size > 10 * 1024 * 1024) throw new Error('Choose an image smaller than 10 MB.')
+  const supported = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif'])
+  if (!supported.has(file.type)) throw new Error('Choose a PNG, JPEG, GIF, WebP, or AVIF image.')
   if (!file.size) throw new Error('This image is empty. Choose another image.')
+  const header = new Uint8Array(await file.slice(0, 32).arrayBuffer())
+  const ascii = (start: number, end: number) => String.fromCharCode(...header.slice(start, end))
+  if (ascii(0, 6) === 'GIF87a' || ascii(0, 6) === 'GIF89a') {
+    if (file.size > MAX_GIF_BYTES) throw new Error('Choose a GIF smaller than 8 MiB.')
+    // The logical screen's width and height follow the signature, little-endian.
+    const width = header[6] | header[7] << 8, height = header[8] | header[9] << 8
+    if (!width || !height) throw new Error(unreadable)
+    if (width * height > MAX_SOURCE_PIXELS) throw new Error(tooManyPixels)
+    return { url: await dataUrl(new Blob([file], { type: 'image/gif' })) }
+  }
+  if (file.size > MAX_SOURCE_BYTES) throw new Error('Choose an image smaller than 40 MiB.')
   if (typeof createImageBitmap !== 'function') throw new Error('This browser cannot optimize images. Try a current browser.')
 
   let bitmap: ImageBitmap
   try {
-    const header = new Uint8Array(await file.slice(0, 32).arrayBuffer())
-    const ascii = (start: number, end: number) => String.fromCharCode(...header.slice(start, end))
-    if (ascii(0, 3) === 'GIF') throw new Error('unsupported')
     const raster = (header[0] === 0x89 && ascii(1, 4) === 'PNG' && header[4] === 13 && header[5] === 10 && header[6] === 26 && header[7] === 10)
       || (header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff)
       || (ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP')
       || (ascii(4, 8) === 'ftyp' && ascii(8, 12) === 'avif')
-    if (!raster) throw new Error('unsupported')
+    if (!raster) throw new Error(unreadable)
+    if (await imagePixels(file) > MAX_SOURCE_PIXELS) throw new Error(tooManyPixels)
     bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' })
-  } catch {
-    throw new Error('Couldn’t open this image. Export it as a PNG or JPEG and try again.')
+  } catch (cause) {
+    throw new Error(cause instanceof Error && cause.message === tooManyPixels ? tooManyPixels : unreadable)
   }
 
   const canvas = document.createElement('canvas')
@@ -112,7 +143,7 @@ export async function loadInlineAttachments(attachments: AttachmentApi, attachme
   const sources = new Map<string, string>()
   if (!needed.size) return {sources}
   const ids = [...new Set(attachmentIds)]
-  if (ids.length > 20) throw new Error('Too many attachments to preview.')
+  if (ids.length > MAX_ATTACHMENTS) throw new Error('Too many attachments to preview.')
   const metadata = await Promise.all(ids.map(id => attachments.get(id, signal)))
   const inline = metadata.filter(item => item.disposition === 'inline' && item.contentId && needed.has(item.contentId) && rasterTypes.has(item.contentType.toLowerCase()))
   if (inline.reduce((total, item) => total + item.size, 0) > 8 * 1024 * 1024) throw new Error('Inline images exceed the 8 MiB preview limit.')

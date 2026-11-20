@@ -27,6 +27,17 @@ export const SEND_LIMITS = {
    * request text, the parsed string and the decoded bytes are all held at once, so these stay at 8 MiB decoded.
    * Larger files upload as raw bytes (POST /v1/attachments/upload). */
   jsonAttachmentBytes: 8 * 1024 * 1024,
+  /** Files per message: sends, batch items, campaigns and templates, inbox mail, the SMTP relay and forwards. The bytes are
+   * bounded by attachmentBytes together; the dispatcher reads each file from storage once (cached), one subrequest each,
+   * far inside a Worker invocation's 10,000, and inbound mail parses as many (mailbox-ingest.ts MAX_ATTACHMENTS). */
+  attachments: 100,
+  /** The html and text of one batch's messages together, in characters. The request itself stays bounded at 12 MiB
+   * (request-body.ts), so this is what lets a batch of 100 ordinary 30-100 KB HTML emails through. */
+  batchContentChars: 10 * 1024 * 1024,
+  /** What the content screen reads (screen.ts): the default screened-text limits in UTF-8 bytes per message and per
+   * campaign copy (JEV_MESSAGE_LIMIT_BYTES and JEV_CAMPAIGN_LIMIT_BYTES override them), and the link hosts every
+   * classifier request repeats, by count and by bytes. */
+  screen: { messageBytes: 64 * 1024, campaignBytes: 128 * 1024, linkHosts: 150, linkHostBytes: 3000 },
   /** The estimated encoded message (estimatedMimeBytes) may not pass SES's own maximum: 40 MB after encoding. */
   encodedBytes: 40_000_000,
   /** Attachment and body bytes one dispatcher lane prepares at once; a larger message is a page of its own. */

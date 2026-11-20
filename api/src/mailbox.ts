@@ -15,6 +15,7 @@ import { detachDestination, registerRouting, RoutingKey } from './routing.js';
 import { registerRituals } from './rituals.js';
 import { Ok, registerInboundWebhooks } from './endpoints.js';
 import { AttachmentContentId, AttachmentContentType, AttachmentDisposition, AttachmentFilename, MAX_ATTACHMENT_BASE64 } from './outbound-content.js';
+import { SEND_LIMITS } from './send-limits.js';
 import { CustomHeaders, splitThreadingHeaders } from './custom-headers.js';
 import { assertRegisteredSender, assertReplyable, DEFAULT_SEND_LIMITS, safeForwardHtml, replyParentId, replyRecipients, replyReferences, replySubject, resolveAttachments, sendLimitsFor } from './mailbox-send.js';
 import { withRegionSettings } from './ses-region-state.js';
@@ -565,7 +566,7 @@ export function registerMailbox(app: App) {
   const Compose = {
     from: Address.optional().describe(`Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in ${productName} for the receiving region; replies still return to whatever address the recipient answers.`),
     text: z.string().min(1).max(524288).optional(), html: z.string().min(1).max(524288).optional(),
-    attachments: z.array(AttachmentItem).max(20).default([]).describe('Up to 20 files, 25 MiB combined. Any type Amazon SES delivers (executables and scripts are refused).'),
+    attachments: z.array(AttachmentItem).max(SEND_LIMITS.attachments).default([]).describe(`Up to ${SEND_LIMITS.attachments} files, 25 MiB combined. Any type Amazon SES delivers (executables and scripts are refused).`),
     replyTo: Recipients.max(10).default([]),
     headers: CustomHeaders.default([]),
     autoSubmitted: z.enum(['auto-generated', 'auto-replied']).optional().describe('Adds an RFC 3834 Auto-Submitted header so other automated systems do not reply to this message.'),

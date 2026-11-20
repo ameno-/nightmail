@@ -709,7 +709,7 @@ export async function sendToEndpoint(runtime: Runtime, w: string, h: ClaimedWebh
 
 // ── Forwards ──────────────────────────────────────────────────────────────────────────────
 /** One sent message's attachment limits (send-limits.ts, sending.ts AttachmentIds). */
-const FORWARD_FILES = 20, FORWARD_BODY = 500_000;
+const FORWARD_FILES = SEND_LIMITS.attachments, FORWARD_BODY = 500_000;
 /** Forwards one endpoint may send in an hour (FORWARD_LIMIT): a loop guard, not a volume cap. */
 const FORWARDS_PER_HOUR = 1000;
 const ReplyAddress = mailAddress();
@@ -717,7 +717,7 @@ type Received = typeof mailMessages.$inferSelect;
 const forwardBlocked = () => new ApiError(422, 'FORWARD_BLOCKED', 'Automated, junk, unparsed, looped or unscanned mail is never forwarded.');
 /**
  * The received attachments a forward carries, copied into sending uploads in order, as many as one sent message may
- * (20 files, 25 MiB decoded together). The rest (over those limits, a type SES does not deliver, or past the workspace's
+ * (SEND_LIMITS.attachments files, 25 MiB decoded together). The rest (over those limits, a type SES does not deliver, or past the workspace's
  * stored attachment quota) are named in the forward instead. Hosted, forwarded files are someone else's, so each must
  * pass the content screen's attachment check whatever the sender's standing (screenedAttachment, which the dispatcher
  * applies on probation): one that doesn't is named too, rather than holding back the whole forward. Like every send,
@@ -804,7 +804,7 @@ async function sendForward(runtime: Runtime, w: string, endpointId: string, addr
       .filter(a => a !== address && a !== box.address && ReplyAddress.safeParse(a).success).slice(0, 10);
     const notes = [
       ...(m.bodyTruncated ? ['Parts of the original were too large to forward.'] : []),
-      ...(left.length ? [`Not attached: ${left.slice(0, 10).join(', ')}${left.length > 10 ? ` and ${left.length - 10} more` : ''} (over the 20-file, 25 MiB limit, or a type that can't be sent).`] : []),
+      ...(left.length ? [`Not attached: ${left.slice(0, 10).join(', ')}${left.length > 10 ? ` and ${left.length - 10} more` : ''} (over the ${FORWARD_FILES}-file, 25 MiB limit, or a type that can't be sent).`] : []),
     ].join(' ');
     const text = (m.text || (m.html ? htmlToPlain(m.html) : '')).slice(0, FORWARD_BODY);
     const rich = m.html ? safeForwardHtml(m.html) : null;
