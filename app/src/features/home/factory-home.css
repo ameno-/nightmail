@@ -7,19 +7,25 @@
    poster is in its place in the first paint and nothing moves after it. Everything on the frame is placed in the
    frame's own pixels, as percentages of it, and the button's type is sized by the frame's width. */
 .fac-hero { position: relative; display: flex; flex: none; flex-direction: column; height: calc(100svh - var(--srt-head)); }
-/* The stage's own dark is the hall's, for where a window too wide or too narrow for the frame shows it smaller. */
-.fac-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; container-type: size; background: rgb(36 40 46); }
+/* Where a window is too wide for the frame (or, on a phone, a little too wide) it is shown smaller, on the page's own
+   floor, as the strip under it is. */
+.fac-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; container-type: size; background: var(--srt-floor); }
+/* A wide frame's stage is the window's height at most, and no taller than the frame's safe width shows down to the
+   floor line: a more upright window has the hero end there and the page go on under it (factory-home.tsx). */
+.fac-page[data-format='desktop'] .fac-hero { height: auto; }
+.fac-page[data-format='desktop'] .fac-stage { flex: none; aspect-ratio: var(--fac-safe-w) / var(--fac-floor); max-height: calc(100svh - var(--srt-head) - var(--fac-under)); }
 .fac-frame {
   --fac-fw: min(max(100cqw, 100cqh * var(--fac-w) / var(--fac-floor)), 100cqh * var(--fac-w) / var(--fac-safe-h), 100cqw * var(--fac-w) / var(--fac-safe-w));
   --fac-fh: calc(var(--fac-fw) * var(--fac-h) / var(--fac-w));
   position: absolute; top: clamp(min(100cqh - var(--fac-fw) * var(--fac-floor) / var(--fac-w), (100cqh - var(--fac-fh)) / 2), 50cqh - var(--fac-fw) * var(--fac-mid) / var(--fac-w), max(0px, (100cqh - var(--fac-fh)) / 2));
   left: calc((100cqw - var(--fac-fw)) / 2); width: var(--fac-fw); height: var(--fac-fh); container-type: inline-size; }
 /* A phone's frame: as large as covers the stage down to the strip of floor under the console (`--fac-cut`, the stage's
-   foot: the floor further in front is cut off), and no larger than shows the boards' faces down to there and the middle
-   76% across. */
+   foot: the floor further in front is cut off), and no larger than shows the boards' faces (`--fac-safe-top`) down to
+   just under the console and the middle 76% across. Its foot is at the strip's end where that shows the boards' faces,
+   and higher, up to just under the console, where it would not. */
 .fac-page[data-format='phone'] .fac-frame {
   --fac-fw: min(max(100cqw, 100cqh * var(--fac-w) / var(--fac-cut)), 100cqh * var(--fac-w) / var(--fac-safe-h), 100cqw * var(--fac-w) / var(--fac-safe-w));
-  top: calc(100cqh - var(--fac-fw) * var(--fac-cut) / var(--fac-w)); }
+  top: max(100cqh - var(--fac-fw) * var(--fac-cut) / var(--fac-w), -1 * var(--fac-fw) * var(--fac-safe-top) / var(--fac-w)); }
 .fac-poster, .fac-layer, .fac-video { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
 .fac-poster { user-select: none; pointer-events: none; }
 /* Each layer is its own stack, so the video put over the other one in it (`data-top`) stays under the next layer. */
@@ -50,8 +56,15 @@
 .fac-tag[data-off] { visibility: hidden; }
 
 /* The button: the page's words on the machine's blank plate. Pointed at, the plate is lit brighter; pressed, it dims
-   and the words go in with it. */
-.fac-cta { position: absolute; z-index: 1; display: flex; align-items: center; justify-content: center; padding: 0; border: 0; background: none; color: var(--srt-on-cta); font-family: var(--font-body); font-size: max(13px, 100cqw * var(--fac-label) / var(--fac-w)); font-weight: 600; line-height: 1; letter-spacing: -.012em; text-decoration: none; cursor: pointer; }
+   and the words go in with it. The words are as large as the plate is made for (`--fac-label` frame px), and never
+   under 13 px; on a plate too narrow for them at 13 px with the arrow (a phone on its side) the arrow is left off, and
+   only on one too narrow for the words alone (Open dashboard, there) do they fill it. `--fac-ems` is the label's width
+   in its own type, with a little to spare. */
+.fac-cta { position: absolute; z-index: 1; display: flex; align-items: center; justify-content: center; padding: 0; border: 0; background: none; color: var(--srt-on-cta); font-family: var(--font-body); font-weight: 600; line-height: 1; letter-spacing: -.012em; white-space: nowrap; text-decoration: none; cursor: pointer; container-type: inline-size; }
+.fac-cta .srt-cta-label { --fac-ems: 7.6; font-size: max(min(13px, 100cqw / var(--fac-ems)), 100cqw * var(--fac-label) / var(--fac-plate)); }
+a.fac-cta .srt-cta-label { --fac-ems: 10.2; }
+@container (width < 99px) { .fac-cta .srt-cta-arrow { display: none; } .fac-cta .srt-cta-label { --fac-ems: 5.9; } }
+@container (width < 133px) { a.fac-cta .srt-cta-arrow { display: none; } a.fac-cta .srt-cta-label { --fac-ems: 8.4; } }
 .fac-cta::before { content: ''; position: absolute; inset: 0; background: rgb(255 255 255); opacity: 0; pointer-events: none; transition: opacity 150ms var(--srt-ease), background-color 90ms var(--srt-ease); }
 .fac-cta svg { width: 1em; height: 1em; }
 @media (hover: hover) and (pointer: fine) { .fac-cta:hover:not(:disabled)::before { opacity: .35; } .fac-cta:hover:not(:disabled) .srt-cta-arrow { translate: .25em 0; } }

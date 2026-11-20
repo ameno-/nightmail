@@ -11,6 +11,7 @@ import { chunk, ChunkFallback } from './lib/preloadable'
 import { setRouteTable } from './lib/routes'
 import { composer } from './features/campaigns/composer-chunk'
 import { DocsStandalone, useDocsAudience } from './features/docs/frame'
+import { preloadFirstPicture } from './features/home/first-picture'
 const onboarding = chunk(() => import('./features/onboarding'))
 const overview = chunk(() => import('./features/overview'))
 const logs = chunk(() => import('./features/logs'))
@@ -85,7 +86,8 @@ else if (initialPath === '/onboarding') loadOnboarding().catch(noop)
 else if (['/docs', '/developer'].some(path => initialPath.startsWith(path))) loadDocs().catch(noop)
 // "/" is the homepage, signed in or out, on a hosted installation: a remembered workspace means one, and so does a first
 // visit. A self-hosted installation remembered as ready has no homepage: "/" opens Overview there.
-else if (initialPath === '/') { if (selectedWorkspace() || !dashboardLikelyReady(null)) loadHome().catch(noop); else loadOverview().catch(noop) }
+// Its first picture starts loading with its code.
+else if (initialPath === '/') { if (selectedWorkspace() || !dashboardLikelyReady(null)) { preloadFirstPicture(); loadHome().catch(noop) } else loadOverview().catch(noop) }
 else if (!dashboardLikelyReady(selectedWorkspace())) { /* /v1/me decides between onboarding and the dashboard. */ }
 else if (initialPath === '/overview') loadOverview().catch(noop)
 else if (initialPath.startsWith('/logs')) loadLogs().catch(noop)

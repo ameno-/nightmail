@@ -8,11 +8,7 @@ import { toneVars } from './sorter/tones'
 import { Machines } from './machines'
 import { MANIFESTS, published, type Format, type Manifest } from './factory/manifest'
 import { alphaFormat, mountPlayer, type Player } from './factory/player'
-import desktopPoster from './factory/poster.jpg'
-import phoneBare from './factory/phone/poster-bare.jpg'
-import phoneBoard0 from './factory/phone/board0.webp'
-import phoneBoard1 from './factory/phone/board1.webp'
-import phoneBoard2 from './factory/phone/board2.webp'
+import { POSTER_SIZES, POSTERS, STILL_BOARDS, STILL_SPRITES } from './first-picture'
 import './factory-home.css'
 
 // The homepage: the factory, in a wide frame on a desktop and a tall one on a phone (index.tsx picks), from the very top
@@ -35,27 +31,35 @@ const saveData = () => connection()?.saveData === true
 const slow = () => saveData() || ['slow-2g', '2g', '3g'].includes(connection()?.effectiveType ?? '')
 
 // What must be seen at any window's shape, in the frame's pixels (factory-home.css places the frame from these).
-// Desktop: from the top of the boards' faces (a sprite's top third is its hanger) to a little under the button, and the
-// machine's width. The frame covers the stage, cropped about the middle of that; a window too wide or too narrow for it
-// to be seen whole shows the frame smaller, on the stage's own dark. And the stage's foot is never below the floor line,
-// where the plinth's pipes go into the hall's floor (`--fac-floor`), so the picture never ends on bare floor.
+// Desktop: from the top of the boards' faces (a sprite's top third is its hanger) to a little under the button, and
+// across, the boards where the poster has them (the sprites, about the middle), so a board is never cut off while it
+// stands still. The frame covers the stage, cropped about the middle of that, and the stage is never taller than the
+// frame shows that whole width: a window more upright than that has the page under the hero, not bands over and under
+// the picture. Only a window wider than the frame can cover (an ultrawide, or a phone on its side) shows it smaller,
+// on the page's own floor either side. And the stage's foot is never below the floor line, where the plinth's pipes go
+// into the hall's floor (`--fac-floor`), so the picture never ends on bare floor.
 // Phone: the button stands on its own console on the floor in front of the plinth, below the floor line. The stage's
 // foot (`--fac-cut`) is a strip of floor under the console: as much as burst's letters land on (they pile up there and
 // fly home in rebuild); the rest of the floor is cut off (the renders allow the bottom tenth). What signing in agrees to
-// stands directly under it. Seen from the boards' faces (a phone sprite's hanger is its
-// top seventh) down to that foot, and the middle 76% of the width (all the renders keep what must be read inside it).
+// stands directly under it. Seen from just over the boards' faces (a phone sprite's hanger is its top seventh) down to
+// that foot, and the middle 76% of the width (all the renders keep what must be read inside it); a window a little
+// less upright than that covers keeps the frame as large and has less of the strip, down to just under the console,
+// before it is shown smaller.
 const pct = (value: number, of: number) => `${value / of * 100}%`
 function frameOf(m: Manifest, format: Format) {
-  const faces = Math.min(...m.boards.y.map((y, k) => y + (m.boards.h?.[k] ?? 0) / (format === 'phone' ? 7 : 3))), safeTop = faces - 16
+  const faces = Math.min(...m.boards.y.map((y, k) => y + (m.boards.h?.[k] ?? 0) / (format === 'phone' ? 7 : 3)))
   const button = { left: pct(m.button.x, m.width), top: pct(m.button.y, m.height), width: pct(m.button.w, m.width), height: pct(m.button.h, m.height) }
-  // (The button's label, in the frame's pixels: as tall as the plate is made for.)
-  const label = format === 'phone' ? 40 : 19
+  // (The button's label, in the frame's pixels: as tall as the plate is made for; and the plate's width, which it never overruns.)
+  const label = { '--fac-label': format === 'phone' ? 40 : 19, '--fac-plate': m.button.w }
   if (format === 'phone') {
-    const cut = m.button.y + m.button.h + 72
-    return { button, vars: { '--fac-w': m.width, '--fac-h': m.height, '--fac-safe-h': cut - safeTop, '--fac-safe-w': m.width * .76, '--fac-cut': cut, '--fac-label': label } as CSSProperties }
+    const safeTop = faces - 8, cut = m.button.y + m.button.h + 72, cutMin = m.button.y + m.button.h + 24
+    return { button, vars: { '--fac-w': m.width, '--fac-h': m.height, '--fac-safe-top': safeTop, '--fac-safe-h': cutMin - safeTop, '--fac-safe-w': m.width * .76, '--fac-cut': cut, ...label } as CSSProperties }
   }
-  const safeBottom = m.button.y + m.button.h + 40, floor = Math.min(m.height, ...(m.pipes ?? []).map(pipe => pipe.yEnd))
-  return { button, vars: { '--fac-w': m.width, '--fac-h': m.height, '--fac-safe-h': safeBottom - safeTop, '--fac-safe-w': 1120, '--fac-mid': (safeTop + safeBottom) / 2, '--fac-floor': floor, '--fac-label': label } as CSSProperties }
+  // (Board k stands k gaps along its rail in the poster: factory/player.ts.)
+  const safeTop = faces - 16, safeBottom = m.button.y + m.button.h + 40, floor = Math.min(m.height, ...(m.pipes ?? []).map(pipe => pipe.yEnd))
+  const still = m.boards.y.map((_, k) => [k * m.boards.gapPx - (m.boards.w?.[k] ?? 0), k * m.boards.gapPx]).filter(([from, to]) => to > 0 && from < m.width)
+  const safeW = Math.max(1120, ...still.map(([from, to]) => 2 * Math.max(m.width / 2 - from, to - m.width / 2)))
+  return { button, vars: { '--fac-w': m.width, '--fac-h': m.height, '--fac-safe-h': safeBottom - safeTop, '--fac-safe-w': safeW, '--fac-mid': (safeTop + safeBottom) / 2, '--fac-floor': floor, ...label } as CSSProperties }
 }
 const FRAMES = { desktop: frameOf(MANIFESTS.desktop, 'desktop'), phone: frameOf(MANIFESTS.phone, 'phone') }
 
@@ -67,21 +71,19 @@ const FRAMES = { desktop: frameOf(MANIFESTS.desktop, 'desktop'), phone: frameOf(
 // the narrowest phones there is no room for both) is left off too.
 const tagsOf = (m: Manifest) => (m.pipes ?? []).flatMap(pipe => pipe.labelBox && pipe.visible !== false ? [{ label: pipe.label, box: pipe.labelBox }] : [])
 const TAGS = { desktop: tagsOf(MANIFESTS.desktop), phone: tagsOf(MANIFESTS.phone) }
-const POSTERS: Record<Format, string> = { desktop: desktopPoster, phone: phoneBare }
 
 // A phone's frame has room for one billboard at a time, and too little for one sliding along the rail to be read: at
 // 390 px a board is whole in the frame about a quarter of the time, and the first one is cut off at the edge. So on a
 // phone the free tier and the response time are said by the three boards hung in turn from the rail in the middle of
 // the frame, a new one every four seconds, over the hall without its boards (poster-bare.jpg, the same first frame),
 // whether or not the videos play. Nothing moves: one is put in the other's place (a short fade, or a cut where motion
-// is reduced), and they dim with the hall.
-const STILL_BOARDS = [1, 2, 0], STILL_SPRITES = [phoneBoard0, phoneBoard1, phoneBoard2]
+// is reduced), and they dim with the hall. The first is in the first picture; the others wait their turn to load.
 function StillBoards({ m }: { m: Manifest }) {
   const [shown, setShown] = useState(0)
   useEffect(() => { const timer = setInterval(() => setShown(i => (i + 1) % STILL_BOARDS.length), 4000); return () => clearInterval(timer) }, [])
   return <div className="fac-layer fac-still" aria-hidden="true">{STILL_BOARDS.map((k, i) => {
     const w = m.boards.w?.[k] ?? 0
-    return <img key={k} src={STILL_SPRITES[k]} alt="" decoding="async" data-on={i === shown || undefined} style={{ left: pct((m.width - w) / 2, m.width), top: pct(m.boards.y[k], m.height), width: pct(w, m.width) }} />
+    return <img key={k} src={STILL_SPRITES[k]} alt="" decoding="async" fetchPriority={i ? 'low' : undefined} data-on={i === shown || undefined} style={{ left: pct((m.width - w) / 2, m.width), top: pct(m.boards.y[k], m.height), width: pct(w, m.width) }} />
   })}</div>
 }
 
@@ -143,8 +145,8 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
     void published(MEDIA, format).then(set => {
       if (gone || !set) return
       // (A desktop takes the smaller files, 1280 wide, where the frame is shown no wider than that has pixels for; a
-      // phone the 1080 × 1920 ones, and the 720 × 1280 ones where it is saving data or on 3G or slower.)
-      const height = format === 'phone' ? slow() ? 720 : 1080 : frame.current!.getBoundingClientRect().width * devicePixelRatio > 1280 ? 1080 : 720
+      // phone the 1080 × 1920 ones. Either takes the smaller ones where it is saving data or on 3G or slower.)
+      const height = slow() ? 720 : format === 'phone' || frame.current!.getBoundingClientRect().width * devicePixelRatio > 1280 ? 1080 : 720
       player = mountPlayer({ stage: stage.current!, bg: bg.current!, boards: boards.current!, fg: fg.current!, tags: tags.current! }, { ...set, format: codec, height, rail: !still })
       observer.observe(stage.current!)
       document.addEventListener('visibilitychange', update)
@@ -159,9 +161,9 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
         {/* What the machine and its boards say, for whoever cannot see them. */}
         <h1 className="sr-only">$0.20 per 1,000 emails, sent or received via API.</h1>
         <p className="sr-only">Free every month: 3,000 emails sent and 3,000 received. Responds in about 100 ms.</p>
-        <div className="fac-stage" ref={stage}>
-          <div className="fac-frame" ref={frame} style={frameVars}>
-            <img className="fac-poster" src={POSTERS[format]} alt="" width={m.width} height={m.height} fetchPriority="high" decoding="async" />
+        <div className="fac-stage" ref={stage} style={frameVars}>
+          <div className="fac-frame" ref={frame}>
+            <img className="fac-poster" src={POSTERS[format].src} srcSet={POSTERS[format].srcSet} sizes={POSTER_SIZES} alt="" width={m.width} height={m.height} fetchPriority="high" decoding="async" />
             <div className="fac-layer" ref={bg} />
             {still ? <div className="fac-layer" ref={boards}><StillBoards m={m} /></div> : <div className="fac-layer fac-boards" ref={boards} />}
             <div className="fac-layer" ref={fg} />

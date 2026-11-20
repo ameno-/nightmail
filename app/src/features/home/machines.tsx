@@ -6,6 +6,7 @@ import type { HomeStart } from '.'
 import { StartButton } from './start'
 import type { Plan } from './sorter/plan'
 import { EndBand, endBand } from './end-band'
+import { afterFirstPicture } from './first-picture'
 import './machines.css'
 
 // Under the hero, the factory goes on down the page: one storey for each thing the product does, each with one
@@ -31,7 +32,7 @@ const MACHINES: { kind: Kind; name: string; title: string; line: string }[] = [
 
 export function Machines({ plan: p, start }: { plan: Plan | null; start: HomeStart }) {
   const root = useRef<HTMLElement>(null)
-  // The kit's pictures: when the page is next idle, or as soon as the factory comes into view.
+  // The kit's pictures: when the page is next idle after the hero's picture, or as soon as the factory comes into view.
   useEffect(() => {
     let done = false
     const load = () => {
@@ -44,10 +45,13 @@ export function Machines({ plan: p, start }: { plan: Plan | null; start: HomeSta
         document.head.append(style)
       }).catch(() => { /* the factory keeps its plain tones */ })
     }
-    const idle = typeof requestIdleCallback === 'function' ? requestIdleCallback(load, { timeout: 2000 }) : window.setTimeout(load, 1200)
-    const observer = new IntersectionObserver(([entry]) => { if (entry.isIntersecting) load() })
+    // (Idle comes no sooner than the hero's picture is in: on a slow connection the kit would take its bandwidth.)
+    let idle = 0
+    const wait = afterFirstPicture(() => { idle = typeof requestIdleCallback === 'function' ? requestIdleCallback(load, { timeout: 2000 }) : window.setTimeout(load, 1200) })
+    // (Only once some of it is on the screen: its top touching the screen's foot does not count.)
+    const observer = new IntersectionObserver(([entry]) => { if (entry.isIntersecting) load() }, { rootMargin: '0px 0px -1px 0px' })
     observer.observe(root.current!)
-    return () => { observer.disconnect(); if (typeof cancelIdleCallback === 'function') cancelIdleCallback(idle); else clearTimeout(idle) }
+    return () => { wait(); observer.disconnect(); if (typeof cancelIdleCallback === 'function') cancelIdleCallback(idle); else clearTimeout(idle) }
   }, [])
   // A machine's screen moves only while it is on the page.
   useEffect(() => {
