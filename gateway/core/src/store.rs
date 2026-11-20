@@ -119,6 +119,10 @@ pub trait MailStore {
     fn materialize(&self, _path: &str, entry: &Entry) -> Result<Entry, Error> {
         Ok(entry.clone())
     }
+    /// The UIDs expunged from a folder after a MODSEQ (RFC 7162 QRESYNC), or None when the store can't tell.
+    fn vanished(&self, _path: &str, _since: u64) -> Result<Option<Vec<u32>>, Error> {
+        Ok(None)
+    }
     fn folders(&self) -> Vec<String>;
     fn folder(&self, path: &str) -> Result<&Folder, Error>;
     fn edit_folder(&mut self, path: &str, op: FolderOp<'_>) -> Result<(), Error>;
@@ -130,6 +134,9 @@ pub struct Memory {
     seq: u64,
     validity: u32,
     submitted: BTreeMap<String, (Date, u32)>,
+    /// Expunged (UID, MODSEQ) per folder, oldest first, for QRESYNC. At most 5000 are kept; the first number is the
+    /// MODSEQ of the newest one dropped, below which the list is incomplete.
+    gone: BTreeMap<String, (u64, Vec<(u32, u64)>)>,
 }
 impl Default for Memory {
     fn default() -> Self {
@@ -138,6 +145,7 @@ impl Default for Memory {
             seq: 1,
             validity: 0,
             submitted: Default::default(),
+            gone: BTreeMap::new(),
         };
         for (i, name) in ["INBOX", "Sent", "Drafts", "Archive", "Junk", "Trash"]
             .into_iter()
@@ -170,6 +178,15 @@ impl Default for Memory {
 impl Memory {
     pub fn revision(&self) -> u64 {
         self.seq
+    }
+    fn bury(&mut self, path: &str, uids: impl IntoIterator<Item = u32>, seq: u64) {
+        let (floor, list) = self.gone.entry(path.into()).or_default();
+        list.extend(uids.into_iter().map(|u| (u, seq)));
+        if list.len() > 5000 {
+            let cut = list.len() - 5000;
+            *floor = list[cut - 1].1;
+            list.drain(..cut);
+        }
     }
 }
 impl MailStore for Memory {
@@ -231,12 +248,23 @@ impl MailStore for Memory {
                     }
                     let f = self.folders.remove(path).ok_or(Error::Missing)?;
                     self.folders.insert(to.into(), f);
+                    if let Some(g) = self.gone.remove(path) {
+                        self.gone.insert(to.into(), g);
+                    }
                 } else {
                     self.folders.remove(path);
+                    self.gone.remove(path);
                 }
             }
         }
         Ok(())
+    }
+    fn vanished(&self, path: &str, since: u64) -> Result<Option<Vec<u32>>, Error> {
+        self.folder(path)?;
+        let Some((floor, list)) = self.gone.get(path) else {
+            return Ok(Some(vec![]));
+        };
+        Ok((since >= *floor).then(|| list.iter().filter(|g| g.1 > since).map(|g| g.0).collect()))
     }
     fn change(&mut self, path: &str, change: Change<'_>) -> Result<Applied, Error> {
         let f = self.folder(path)?;
@@ -349,11 +377,17 @@ impl MailStore for Memory {
             }
             Change::Expunge(uids) => {
                 let f = self.folders.get_mut(path).ok_or(Error::Missing)?;
+                let mut removed = vec![];
                 f.entries.retain(|e| {
-                    !(e.flags.contains("\\Deleted")
-                        && uids.is_none_or(|list| list.contains(&e.uid)))
+                    let expunge = e.flags.contains("\\Deleted")
+                        && uids.is_none_or(|list| list.contains(&e.uid));
+                    if expunge {
+                        removed.push(e.uid)
+                    }
+                    !expunge
                 });
                 f.highest = seq;
+                self.bury(path, removed, seq);
             }
             Change::Transfer(uids, to, moving) => {
                 let mut copies: Vec<_> = self
@@ -382,6 +416,8 @@ impl MailStore for Memory {
                     let src = self.folders.get_mut(path).ok_or(Error::Missing)?;
                     src.entries.retain(|e| !uids.contains(&e.uid));
                     src.highest = seq;
+                    let moved: Vec<_> = result.pairs.iter().map(|p| p.0).collect();
+                    self.bury(path, moved, seq);
                 }
             }
         }

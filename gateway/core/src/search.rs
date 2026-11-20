@@ -90,6 +90,18 @@ pub fn matches(k: &K<'_>, e: &Entry, seq: u32, last: u32, uidmax: u32) -> bool {
                 })
         }
         K::Subject(n) => hdr(b"Subject", n.as_ref()),
+        // One MODSEQ per message: a flag's entry name and type narrow nothing (RFC 7162 3.1.5).
+        K::ModSequence { modseq, .. } => e.modseq >= *modseq,
+    }
+}
+/// Whether a MODSEQ criterion appears anywhere in the key.
+pub fn has_modseq(k: &K<'_>) -> bool {
+    match k {
+        K::ModSequence { .. } => true,
+        K::Not(q) => has_modseq(q),
+        K::Or(a, b) => has_modseq(a) || has_modseq(b),
+        K::And(v) => v.as_ref().iter().any(has_modseq),
+        _ => false,
     }
 }
 

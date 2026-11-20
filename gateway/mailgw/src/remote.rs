@@ -986,6 +986,24 @@ impl MailStore for Store {
             other => other,
         }
     }
+    /// The snapshot op's changes since a MODSEQ, paged by UID like `reload`; only `gone` is kept. Below the API's
+    /// floor it no longer has every expunge, so the answer is unknown.
+    fn vanished(&self, p: &str, since: u64) -> Result<Option<Vec<u32>>, store::Error> {
+        let mut gone = vec![];
+        let mut after = 0;
+        loop {
+            let page: Snapshot = self.api.json(json!({"op":"snapshot","kid":self.principal.kid,"path":p,"since":since,"after":after,"handles":false}))?;
+            if since < page.floor {
+                return Ok(None);
+            }
+            gone.extend(page.gone);
+            match page.more {
+                None => return Ok(Some(gone)),
+                Some(next) if next > after && Instant::now() < self.deadline => after = next,
+                Some(_) => return Err(store::Error::Limit),
+            }
+        }
+    }
 
     fn list_fresh(&mut self) -> Result<(), store::Error> {
         // Cached LOGIN data can predate a folder edit. Read only folder metadata;
@@ -1312,6 +1330,9 @@ impl MailStore for Streaming<'_> {
     }
     fn indexed(&self, p: &str, f: Field, t: &str) -> Result<Option<Vec<u32>>, store::Error> {
         self.store.indexed(p, f, t)
+    }
+    fn vanished(&self, p: &str, since: u64) -> Result<Option<Vec<u32>>, store::Error> {
+        self.store.vanished(p, since)
     }
     fn list_fresh(&mut self) -> Result<(), store::Error> {
         self.store.list_fresh()

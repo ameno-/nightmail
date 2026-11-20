@@ -6,7 +6,7 @@ use crate::{
 };
 use imap_codec::imap_types::{
     auth::AuthMechanism,
-    command::CommandBody as C,
+    command::{CommandBody as C, FetchModifier, SelectParameter, StoreModifier},
     core::Tag,
     extensions::binary::LiteralOrLiteral8,
     fetch::{MacroOrMessageDataItemNames as Items, MessageDataItemName as Item},
@@ -110,6 +110,10 @@ pub struct Imap {
     sasl: Option<String>,
     /// A BYE found while a command ran; sent after that command's tagged response.
     bye: Option<Vec<u8>>,
+    /// RFC 7162: after a CONDSTORE enabling command, every untagged FETCH carries UID and MODSEQ; once QRESYNC is
+    /// enabled, expunges are reported as VANISHED.
+    condstore: bool,
+    qresync: bool,
 }
 impl Imap {
     pub fn new(tls: bool) -> Self {
@@ -120,6 +124,8 @@ impl Imap {
             idle: None,
             sasl: None,
             bye: None,
+            condstore: false,
+            qresync: false,
         }
     }
     pub fn idling(&self) -> bool {
@@ -127,7 +133,7 @@ impl Imap {
     }
     pub fn capabilities(&self) -> String {
         format!(
-            "IMAP4rev1 IDLE UIDPLUS MOVE SPECIAL-USE LITERAL+ NAMESPACE ENABLE UNSELECT ID ESEARCH LIST-STATUS APPENDLIMIT={}{}",
+            "IMAP4rev1 IDLE UIDPLUS MOVE SPECIAL-USE LITERAL+ NAMESPACE ENABLE UNSELECT ID ESEARCH LIST-STATUS CONDSTORE QRESYNC APPENDLIMIT={}{}",
             wire::MAX_APPEND,
             if !self.tls {
                 " STARTTLS LOGINDISABLED"
@@ -183,22 +189,44 @@ impl Imap {
         s.announce_flags(f, &mut r, false);
         let entries: BTreeMap<_, _> = f.entries.iter().map(|e| (e.uid, e)).collect();
         let mut i = 0;
+        // With QRESYNC the expunged UIDs go first, in one VANISHED, and the FETCHes follow with the new numbers.
+        let mut gone = vec![];
+        let mut changed = Reply::default();
+        let (condstore, qresync) = (self.condstore, self.qresync);
         s.view.retain_mut(|(uid, modseq)| {
             if let Some(e) = entries.get(uid) {
                 i += 1;
                 if e.modseq != *modseq {
-                    r.line(format!(
-                        "* {i} FETCH (UID {uid} FLAGS ({}))",
-                        fetch::flags(&e.flags)
-                    ));
+                    let line = format!(
+                        "* {i} FETCH (UID {uid} FLAGS ({}){})",
+                        fetch::flags(&e.flags),
+                        if condstore {
+                            format!(" MODSEQ ({})", e.modseq)
+                        } else {
+                            String::new()
+                        }
+                    );
+                    if qresync {
+                        changed.line(line)
+                    } else {
+                        r.line(line)
+                    }
                     *modseq = e.modseq
                 }
                 true
             } else {
-                r.line(format!("* {} EXPUNGE", i + 1));
+                if qresync {
+                    gone.push(*uid)
+                } else {
+                    r.line(format!("* {} EXPUNGE", i + 1));
+                }
                 false
             }
         });
+        if !gone.is_empty() {
+            r.line(format!("* VANISHED {}", set(&runs(&gone))))
+        }
+        r.bytes.extend(changed.bytes);
         let n = s.view.len();
         s.view
             .extend(f.entries[n..].iter().map(|e| (e.uid, e.modseq)));
@@ -333,7 +361,24 @@ impl Imap {
         let mut code = String::new();
         match c {
             C::Namespace => r.line("* NAMESPACE ((\"\" \"/\")) NIL NIL"),
-            C::Enable { .. } if self.selected.is_none() => r.line("* ENABLED"),
+            C::Enable { capabilities } if self.selected.is_none() => {
+                // RFC 5161: only what this command turned on. QRESYNC implies CONDSTORE (RFC 7162 3.2.3).
+                let mut on = String::new();
+                for c in capabilities.as_ref() {
+                    let name = c.to_string().to_ascii_uppercase();
+                    let flag = match name.as_str() {
+                        "CONDSTORE" => &mut self.condstore,
+                        "QRESYNC" => &mut self.qresync,
+                        _ => continue,
+                    };
+                    if !std::mem::replace(flag, true) {
+                        on.push(' ');
+                        on.push_str(&name)
+                    }
+                }
+                self.condstore |= self.qresync;
+                r.line(format!("* ENABLED{on}"))
+            }
             C::Idle => {
                 let updates = self.update(s);
                 r.bytes.extend(updates.bytes);
@@ -404,7 +449,36 @@ impl Imap {
                 path(mailbox)?,
                 FolderOp::Subscribe(matches!(c, C::Subscribe { .. })),
             )?,
-            C::Select { mailbox, .. } | C::Examine { mailbox, .. } => {
+            C::Select {
+                mailbox,
+                parameters,
+            }
+            | C::Examine {
+                mailbox,
+                parameters,
+            } => {
+                let mut resync = None;
+                for param in parameters {
+                    match param {
+                        SelectParameter::CondStore => self.condstore = true,
+                        // RFC 7162 3.2.5: QRESYNC only after ENABLE QRESYNC.
+                        SelectParameter::QResync { .. } if !self.qresync => {
+                            return Err(Error::Denied);
+                        }
+                        SelectParameter::QResync {
+                            uid_validity,
+                            mod_sequence_value,
+                            known_uids,
+                            ..
+                        } => {
+                            resync =
+                                Some((uid_validity.get(), mod_sequence_value.get(), known_uids))
+                        }
+                    }
+                }
+                if self.qresync && self.selected.is_some() {
+                    r.line("* OK [CLOSED] Previous mailbox closed")
+                }
                 self.selected = None;
                 let p = path(mailbox)?;
                 s.select(p)?;
@@ -425,6 +499,9 @@ impl Imap {
                 }
                 r.line(format!("* OK [UIDVALIDITY {}] Validity", f.validity));
                 r.line(format!("* OK [UIDNEXT {}] Next UID", f.next));
+                if self.condstore {
+                    r.line(format!("* OK [HIGHESTMODSEQ {}] Highest", f.highest))
+                }
                 code = if ro { "[READ-ONLY]" } else { "[READ-WRITE]" }.into();
                 let mut selected = Selected {
                     path: p.into(),
@@ -436,12 +513,38 @@ impl Imap {
                     synced: f.highest,
                 };
                 selected.announce_flags(f, r, true);
+                // RFC 7162 3.2.5: what changed since the client's MODSEQ, as UID FETCH known-uids (FLAGS)
+                // (CHANGEDSINCE modseq VANISHED) would answer. A different UIDVALIDITY is a plain SELECT.
+                if let Some((validity, since, known)) = resync
+                    && validity == f.validity
+                {
+                    let want = known
+                        .as_ref()
+                        .map_or_else(|| vec![(1, u32::MAX)], |k| uid_runs(k, u32::MAX));
+                    if let Some(line) = earlier(&*s, p, f, &selected.view, since, &want)? {
+                        r.line(line)
+                    }
+                    for (i, e) in f.entries.iter().enumerate() {
+                        if e.modseq > since && within(&want, e.uid) {
+                            r.line(format!(
+                                "* {} FETCH (UID {} FLAGS ({}) MODSEQ ({}))",
+                                i + 1,
+                                e.uid,
+                                fetch::flags(&e.flags),
+                                e.modseq
+                            ))
+                        }
+                    }
+                }
                 self.selected = Some(selected);
             }
             C::Status {
                 mailbox,
                 item_names,
             } => {
+                if item_names.contains(&Status::HighestModSeq) {
+                    enable_condstore(&mut self.condstore, self.selected.as_ref(), r)
+                }
                 let p = path(mailbox)?;
                 r.line(status_line(p, s.folder(p)?, item_names))
             }
@@ -490,15 +593,45 @@ impl Imap {
                         sequence_set,
                         macro_or_item_names,
                         uid,
-                        ..
+                        modifiers,
                     } => {
-                        let uids = sel.targets(sequence_set, *uid);
+                        let mut since = None;
+                        let mut vanished = false;
+                        for m in modifiers {
+                            match m {
+                                FetchModifier::ChangedSince(n) => since = Some(n.get()),
+                                FetchModifier::Vanished => vanished = true,
+                            }
+                        }
+                        // RFC 7162 3.2.6: VANISHED only on UID FETCH with CHANGEDSINCE, after ENABLE QRESYNC.
+                        if vanished && !(*uid && since.is_some() && self.qresync) {
+                            return Err(Error::Denied);
+                        }
+                        let mut uids = sel.targets(sequence_set, *uid);
                         let mut items = match macro_or_item_names {
                             Items::Macro(m) => m.expand(),
                             Items::MessageDataItemNames(v) => v.clone(),
                         };
                         if *uid && !items.contains(&Item::Uid) {
                             items.push(Item::Uid)
+                        }
+                        if since.is_some() || items.contains(&Item::ModSeq) {
+                            enable_condstore(&mut self.condstore, Some(&*sel), r)
+                        }
+                        if let Some(n) = since {
+                            let f = s.folder(&p)?;
+                            uids.retain(|u| {
+                                f.entries
+                                    .binary_search_by_key(u, |e| e.uid)
+                                    .is_ok_and(|j| f.entries[j].modseq > n)
+                            });
+                            if vanished {
+                                let star = sel.view.last().map_or(0, |v| v.0);
+                                let want = uid_runs(sequence_set, star);
+                                if let Some(line) = earlier(&*s, &p, f, &sel.view, n, &want)? {
+                                    r.line(line)
+                                }
+                            }
                         }
                         let seen = !ro
                             && items.iter().any(|i| {
@@ -532,13 +665,26 @@ impl Imap {
                                 if !items.contains(&Item::Flags) {
                                     items.push(Item::Flags)
                                 }
+                                if self.condstore && !items.contains(&Item::Uid) {
+                                    items.push(Item::Uid)
+                                }
                             }
+                        }
+                        // CHANGEDSINCE implies MODSEQ, and once CONDSTORE is on, flags carry theirs.
+                        if (since.is_some() || (self.condstore && items.contains(&Item::Flags)))
+                            && !items.contains(&Item::ModSeq)
+                        {
+                            items.push(Item::ModSeq)
                         }
                         let f = s.folder(&p)?;
                         let meta_only = items.iter().all(|x| {
                             matches!(
                                 x,
-                                Item::Flags | Item::Uid | Item::InternalDate | Item::Rfc822Size
+                                Item::Flags
+                                    | Item::Uid
+                                    | Item::ModSeq
+                                    | Item::InternalDate
+                                    | Item::Rfc822Size
                             )
                         });
                         let mut next_page = 0;
@@ -557,13 +703,14 @@ impl Imap {
                                         x,
                                         Item::Flags
                                             | Item::Uid
+                                            | Item::ModSeq
                                             | Item::InternalDate
                                             | Item::Rfc822Size
                                     )
                                 }) {
                                     e
                                 } else {
-                                    let header_only=items.iter().all(|x|matches!(x,Item::Flags|Item::Uid|Item::InternalDate|Item::Rfc822Size|Item::Envelope|Item::Rfc822Header|Item::BodyExt{section:Some(imap_codec::imap_types::fetch::Section::Header(None)|imap_codec::imap_types::fetch::Section::HeaderFields(None,_)|imap_codec::imap_types::fetch::Section::HeaderFieldsNot(None,_)),..}));
+                                    let header_only=items.iter().all(|x|matches!(x,Item::Flags|Item::Uid|Item::ModSeq|Item::InternalDate|Item::Rfc822Size|Item::Envelope|Item::Rfc822Header|Item::BodyExt{section:Some(imap_codec::imap_types::fetch::Section::Header(None)|imap_codec::imap_types::fetch::Section::HeaderFields(None,_)|imap_codec::imap_types::fetch::Section::HeaderFieldsNot(None,_)),..}));
                                     loaded = if header_only {
                                         s.header(&p, e)?
                                     } else {
@@ -593,10 +740,37 @@ impl Imap {
                         response,
                         flags,
                         uid,
-                        ..
+                        modifiers,
                     } => {
                         write()?;
-                        let uids = sel.targets(sequence_set, *uid);
+                        let mut uids = sel.targets(sequence_set, *uid);
+                        // RFC 7162 3.1.3: UNCHANGEDSINCE leaves the messages changed since alone and names
+                        // them in MODIFIED.
+                        let mut modified = vec![];
+                        if let Some(n) = modifiers
+                            .iter()
+                            .map(|StoreModifier::UnchangedSince(n)| *n)
+                            .next()
+                        {
+                            enable_condstore(&mut self.condstore, Some(&*sel), r);
+                            let f = s.folder(&p)?;
+                            uids.retain(|u| {
+                                let changed = f
+                                    .entries
+                                    .binary_search_by_key(u, |e| e.uid)
+                                    .is_ok_and(|j| f.entries[j].modseq > n);
+                                if changed {
+                                    modified.push(if *uid {
+                                        *u
+                                    } else {
+                                        sel.view
+                                            .binary_search_by_key(u, |v| v.0)
+                                            .map_or(0, |i| i as u32 + 1)
+                                    })
+                                }
+                                !changed
+                            });
+                        }
                         let applied = s.change(
                             &p,
                             Change::Flags(
@@ -617,6 +791,7 @@ impl Imap {
                         }
                         let f = s.folder(&p)?;
                         sel.announce_flags(f, r, false);
+                        let condstore = self.condstore;
                         for (i, (u, ms)) in sel.view.iter_mut().enumerate() {
                             if uids.binary_search(u).is_ok()
                                 && let Ok(j) = f.entries.binary_search_by_key(u, |e| e.uid)
@@ -624,26 +799,30 @@ impl Imap {
                                 let e = &f.entries[j];
                                 // .SILENT leaves the recorded MODSEQ alone, so the next update
                                 // reports the merged flags, including another session's earlier
-                                // change (RFC 3501 6.4.6).
-                                if *response == StoreResponse::Answer
-                                    && (!partial || e.modseq != *ms)
-                                {
-                                    *ms = e.modseq;
-                                    r.line(format!(
-                                        "* {} FETCH ({}FLAGS ({}))",
-                                        i + 1,
-                                        if *uid {
-                                            format!("UID {u} ")
-                                        } else {
-                                            String::new()
-                                        },
-                                        fetch::flags(&e.flags)
-                                    ))
+                                // change (RFC 3501 6.4.6). With CONDSTORE it still answers the
+                                // MODSEQ (RFC 7162 3.1.3).
+                                let answer = *response == StoreResponse::Answer;
+                                if (answer || condstore) && (!partial || e.modseq != *ms) {
+                                    let mut data = vec![];
+                                    if *uid || condstore {
+                                        data.push(format!("UID {u}"))
+                                    }
+                                    if answer {
+                                        *ms = e.modseq;
+                                        data.push(format!("FLAGS ({})", fetch::flags(&e.flags)))
+                                    }
+                                    if condstore {
+                                        data.push(format!("MODSEQ ({})", e.modseq))
+                                    }
+                                    r.line(format!("* {} FETCH ({})", i + 1, data.join(" ")))
                                 }
                             }
                         }
                         if partial {
                             return Err(Error::Partial);
+                        }
+                        if !modified.is_empty() {
+                            code = format!("[MODIFIED {}]", set(&runs(&modified)))
                         }
                     }
                     C::Search {
@@ -654,14 +833,50 @@ impl Imap {
                         if !criteria.as_ref().iter().all(search::bounded) {
                             return Err(Error::Limit);
                         }
-                        let answer = |found: Vec<u32>| match ret.search {
-                            Some(o) => esearch(t, *uid, found, o),
-                            None => {
-                                let mut line = String::from("* SEARCH");
-                                for n in found {
-                                    line.push_str(&format!(" {n}"))
+                        let modseq_key = criteria.as_ref().iter().any(search::has_modseq);
+                        if modseq_key {
+                            enable_condstore(&mut self.condstore, Some(&*sel), r)
+                        }
+                        // RFC 7162 3.1.6 and 3.1.10: a MODSEQ criterion adds the highest MODSEQ of the
+                        // messages answered; with only MIN or MAX, of those.
+                        let answer = |found: Vec<u32>, f: &Folder| {
+                            let modseq = |n: &u32| {
+                                let u = if *uid {
+                                    *n
+                                } else {
+                                    sel.view.get((*n as usize).checked_sub(1)?)?.0
+                                };
+                                let j = f.entries.binary_search_by_key(&u, |e| e.uid).ok()?;
+                                Some(f.entries[j].modseq)
+                            };
+                            match ret.search {
+                                Some(o) => {
+                                    let [min, max, count, all] = o;
+                                    let highest = if !modseq_key {
+                                        None
+                                    } else if all || count {
+                                        found.iter().filter_map(modseq).max()
+                                    } else {
+                                        let ends = [
+                                            found.iter().min().filter(|_| min),
+                                            found.iter().max().filter(|_| max),
+                                        ];
+                                        ends.into_iter().flatten().filter_map(modseq).max()
+                                    };
+                                    esearch(t, *uid, found, o, highest)
                                 }
-                                line
+                                None => {
+                                    let mut line = String::from("* SEARCH");
+                                    for n in &found {
+                                        line.push_str(&format!(" {n}"))
+                                    }
+                                    if modseq_key
+                                        && let Some(m) = found.iter().filter_map(modseq).max()
+                                    {
+                                        line.push_str(&format!(" (MODSEQ {m})"))
+                                    }
+                                    line
+                                }
                             }
                         };
                         if charset.as_ref().is_some_and(|c| {
@@ -683,7 +898,7 @@ impl Imap {
                                     found.push(if *uid { u } else { i as u32 + 1 });
                                 }
                             }
-                            r.line(answer(found));
+                            r.line(answer(found, f));
                             return Ok(Some(String::new()));
                         }
                         let mut terms = std::collections::BTreeSet::new();
@@ -728,7 +943,7 @@ impl Imap {
                                             found.push(if *uid { *u } else { i as u32 + 1 });
                                         }
                                     }
-                                    r.line(answer(found));
+                                    r.line(answer(found, f));
                                     return Ok(Some(String::new()));
                                 }
                             }
@@ -807,7 +1022,7 @@ impl Imap {
                                 }
                             }
                         }
-                        r.line(answer(found))
+                        r.line(answer(found, f))
                     }
                     C::Copy {
                         sequence_set,
@@ -863,12 +1078,20 @@ impl Imap {
                         } else {
                             None
                         };
+                        let shown = sel.view.len();
                         // Batches that committed before a failure are reported, then NO.
                         let applied = s.change(&p, Change::Expunge(uids.as_deref()));
                         if matches!(applied, Ok(_) | Err(Error::Partial)) {
                             self.merge(s, r);
                         }
                         applied?;
+                        // RFC 7162 3.2.7: with QRESYNC, an expunge answers the new HIGHESTMODSEQ.
+                        if self.qresync
+                            && let Some(sel) = &self.selected
+                            && sel.view.len() < shown
+                        {
+                            code = format!("[HIGHESTMODSEQ {}]", sel.synced)
+                        }
                     }
                     _ => return Err(Error::Denied),
                 }
@@ -907,6 +1130,7 @@ fn status(f: &Folder, s: &Status) -> String {
         ),
         Status::UidValidity => ("UIDVALIDITY", f.validity as usize),
         Status::UidNext => ("UIDNEXT", f.next as usize),
+        Status::HighestModSeq => ("HIGHESTMODSEQ", f.highest as usize),
     };
     format!("{name} {n}")
 }
@@ -994,8 +1218,122 @@ fn status_items(list: &[u8]) -> Option<Vec<Status>> {
         _ => None,
     }
 }
-/// RFC 4731: the requested MIN, MAX, COUNT and ALL of the matches, without MIN, MAX and ALL when nothing matched.
-fn esearch(t: &str, uid: bool, mut found: Vec<u32>, [min, max, count, all]: [bool; 4]) -> String {
+/// The first CONDSTORE enabling command (RFC 7162 3.1) with a mailbox selected answers its HIGHESTMODSEQ: the
+/// highest this session has reported every change up to, so an update not yet sent is never skipped.
+fn enable_condstore(on: &mut bool, sel: Option<&Selected>, r: &mut Reply) {
+    if !std::mem::replace(on, true)
+        && let Some(sel) = sel
+    {
+        r.line(format!("* OK [HIGHESTMODSEQ {}] Highest", sel.synced))
+    }
+}
+/// Sorted numbers as ranges of consecutive ones.
+fn runs(sorted: &[u32]) -> Vec<(u32, u32)> {
+    sorted
+        .chunk_by(|a, b| a.checked_add(1) == Some(*b))
+        .map(|run| (run[0], run[run.len() - 1]))
+        .collect()
+}
+/// Ranges as a sequence set: `1:3,5`.
+fn set(runs: &[(u32, u32)]) -> String {
+    runs.iter()
+        .map(|&(a, b)| {
+            if a == b {
+                a.to_string()
+            } else {
+                format!("{a}:{b}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+/// A UID set as sorted, merged ranges, with `*` as `star`.
+fn uid_runs(set: &SequenceSet, star: u32) -> Vec<(u32, u32)> {
+    use imap_codec::imap_types::sequence::{SeqOrUid, Sequence};
+    let v = |x: SeqOrUid| match x {
+        SeqOrUid::Asterisk => star,
+        SeqOrUid::Value(n) => n.get(),
+    };
+    let mut ranges: Vec<_> = set
+        .0
+        .as_ref()
+        .iter()
+        .map(|s| match *s {
+            Sequence::Single(a) => (v(a), v(a)),
+            Sequence::Range(a, b) => (v(a).min(v(b)), v(a).max(v(b))),
+        })
+        .collect();
+    ranges.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = vec![];
+    for (a, b) in ranges {
+        match merged.last_mut() {
+            Some(last) if a <= last.1.saturating_add(1) => last.1 = last.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+    merged
+}
+fn within(runs: &[(u32, u32)], n: u32) -> bool {
+    runs.get(runs.partition_point(|r| r.1 < n))
+        .is_some_and(|r| r.0 <= n)
+}
+/// VANISHED (EARLIER) for the UIDs in `want` expunged after `since` that this session no longer shows (RFC 7162 3.2.5,
+/// 3.2.6). When the store can't tell, it names every UID in `want` below UIDNEXT that the mailbox doesn't hold, as RFC
+/// 7162 3.2.6 allows a server that keeps no MODSEQ for expunged messages to.
+fn earlier(
+    s: &dyn MailStore,
+    p: &str,
+    f: &Folder,
+    view: &[(u32, u64)],
+    since: u64,
+    want: &[(u32, u32)],
+) -> Result<Option<String>, Error> {
+    let mut held: Vec<u32> = view
+        .iter()
+        .map(|v| v.0)
+        .chain(f.entries.iter().map(|e| e.uid))
+        .collect();
+    held.sort_unstable();
+    held.dedup();
+    let gone = match s.vanished(p, since)? {
+        Some(mut uids) => {
+            uids.sort_unstable();
+            uids.dedup();
+            uids.retain(|u| within(want, *u) && held.binary_search(u).is_err());
+            runs(&uids)
+        }
+        None => {
+            let top = f.next.saturating_sub(1);
+            let mut gaps = vec![];
+            for &(a, b) in want {
+                let (mut next, b) = (a.max(1), b.min(top));
+                for &u in held[held.partition_point(|&h| h < next)..]
+                    .iter()
+                    .take_while(|&&u| u <= b)
+                {
+                    if u > next {
+                        gaps.push((next, u - 1))
+                    }
+                    next = u + 1;
+                }
+                if next <= b {
+                    gaps.push((next, b))
+                }
+            }
+            gaps
+        }
+    };
+    Ok((!gone.is_empty()).then(|| format!("* VANISHED (EARLIER) {}", set(&gone))))
+}
+/// RFC 4731: the requested MIN, MAX, COUNT and ALL of the matches, without MIN, MAX and ALL when nothing matched, and
+/// the MODSEQ a MODSEQ criterion asks for (RFC 7162 3.1.10).
+fn esearch(
+    t: &str,
+    uid: bool,
+    mut found: Vec<u32>,
+    [min, max, count, all]: [bool; 4],
+    modseq: Option<u64>,
+) -> String {
     found.sort_unstable();
     found.dedup();
     let mut line = format!("* ESEARCH (TAG {})", fetch::quoted(t));
@@ -1014,15 +1352,10 @@ fn esearch(t: &str, uid: bool, mut found: Vec<u32>, [min, max, count, all]: [boo
         line.push_str(&format!(" COUNT {}", found.len()))
     }
     if all && !found.is_empty() {
-        let set = found
-            .chunk_by(|a, b| a.checked_add(1) == Some(*b))
-            .map(|run| match run {
-                [a, .., b] => format!("{a}:{b}"),
-                _ => run[0].to_string(),
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        line.push_str(&format!(" ALL {set}"))
+        line.push_str(&format!(" ALL {}", set(&runs(&found))))
+    }
+    if let Some(m) = modseq {
+        line.push_str(&format!(" MODSEQ {m}"))
     }
     line
 }
@@ -1573,6 +1906,340 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    /// RFC 5161 and RFC 7162 3.2.3: ENABLED lists what each command turned on, and QRESYNC implies CONDSTORE.
+    #[test]
+    fn enable_lists_what_it_turned_on() {
+        let account = Account::new("mbx_test".into(), vec![], "x".into(), true);
+        let mut store = Memory::default();
+        let now = Date::default();
+        let mut step = |imap: &mut Imap, command: &str| {
+            let r = imap.step(
+                format!("{command}\r\n").as_bytes(),
+                &account,
+                &mut store,
+                now,
+            );
+            String::from_utf8(r.bytes).unwrap()
+        };
+        let mut one = Imap::new(true);
+        one.authenticated = true;
+        assert!(step(&mut one, "a CAPABILITY").contains(" CONDSTORE QRESYNC "));
+        for (command, enabled) in [
+            ("ENABLE CONDSTORE", "* ENABLED CONDSTORE"),
+            ("ENABLE condstore QRESYNC X-NONE", "* ENABLED QRESYNC"),
+            ("ENABLE QRESYNC", "* ENABLED"),
+        ] {
+            assert_eq!(
+                step(&mut one, &format!("a {command}")),
+                format!("{enabled}\r\na OK  Completed\r\n")
+            );
+        }
+        let mut two = Imap::new(true);
+        two.authenticated = true;
+        assert_eq!(
+            step(&mut two, "a ENABLE QRESYNC"),
+            "* ENABLED QRESYNC\r\na OK  Completed\r\n"
+        );
+        assert!(step(&mut two, "b SELECT INBOX").contains("* OK [HIGHESTMODSEQ 1] Highest\r\n"));
+    }
+
+    /// RFC 7162 3.1: the first CONDSTORE enabling command answers HIGHESTMODSEQ, then SELECT does; FETCH MODSEQ and
+    /// CHANGEDSINCE, STORE UNCHANGEDSINCE with MODIFIED, SEARCH MODSEQ (with the ESEARCH MIN/MAX rule of 3.1.10),
+    /// STATUS HIGHESTMODSEQ, and unsolicited FETCHes that carry MODSEQ.
+    #[test]
+    fn condstore_reports_and_conditions_on_modseq() {
+        let account = Account::new("mbx_test".into(), vec![], "x".into(), true);
+        let mut store = Memory::default();
+        let now = Date::default();
+        // UIDs 1 to 4 at MODSEQ 2 to 5.
+        for _ in 0..4 {
+            store
+                .change(
+                    "INBOX",
+                    Change::Append {
+                        raw: b"Subject: x\r\n\r\nbody",
+                        date: now,
+                        flags: Flags::new(),
+                        source: crate::store::Origin::Client { now },
+                    },
+                )
+                .unwrap();
+        }
+        let mut step = |imap: &mut Imap, command: &str| {
+            let r = imap.step(
+                format!("{command}\r\n").as_bytes(),
+                &account,
+                &mut store,
+                now,
+            );
+            String::from_utf8(r.bytes).unwrap()
+        };
+        let mut one = Imap::new(true);
+        one.authenticated = true;
+        assert!(!step(&mut one, "a SELECT INBOX").contains("HIGHESTMODSEQ"));
+        for command in [
+            "b FETCH 1 (MODSEQ)",
+            "c SELECT INBOX",
+            "d STORE 2 +FLAGS (\\Seen)",
+            "e FETCH 1:* (FLAGS) (CHANGEDSINCE 5)",
+            "f STORE 1:3 (UNCHANGEDSINCE 5) +FLAGS.SILENT (\\Flagged)",
+            "g UID STORE 1:4 (UNCHANGEDSINCE 6) -FLAGS (\\Flagged)",
+        ] {
+            let text = step(&mut one, command);
+            let expected = match &command[..1] {
+                "b" => {
+                    "* OK [HIGHESTMODSEQ 5] Highest\r\n* 1 FETCH (MODSEQ (2))\r\nb OK  Completed\r\n"
+                }
+                "c" => {
+                    assert!(
+                        text.contains("* OK [HIGHESTMODSEQ 5] Highest\r\n"),
+                        "{text}"
+                    );
+                    continue;
+                }
+                "d" => "* 2 FETCH (UID 2 FLAGS (\\Seen) MODSEQ (6))\r\nd OK  Completed\r\n",
+                "e" => "* 2 FETCH (FLAGS (\\Seen) MODSEQ (6))\r\ne OK  Completed\r\n",
+                // UID 2 changed after 5: MODIFIED. The rest is .SILENT, which still answers MODSEQ.
+                "f" => {
+                    "* 1 FETCH (UID 1 MODSEQ (7))\r\n* 3 FETCH (UID 3 MODSEQ (7))\r\nf OK [MODIFIED 2] Completed\r\n"
+                }
+                _ => {
+                    "* 2 FETCH (UID 2 FLAGS (\\Seen) MODSEQ (8))\r\n* 4 FETCH (UID 4 FLAGS () MODSEQ (8))\r\ng OK [MODIFIED 1,3] Completed\r\n"
+                }
+            };
+            assert_eq!(text, expected, "{command}");
+        }
+        assert_eq!(
+            step(&mut one, "b FETCH 1 (MODSEQ)"),
+            "* 1 FETCH (MODSEQ (7))\r\nb OK  Completed\r\n"
+        );
+        // MODSEQ now: UIDs 1 and 3 at 7, 2 and 4 at 8.
+        for (command, answer) in [
+            ("SEARCH MODSEQ 8", "* SEARCH 2 4 (MODSEQ 8)"),
+            ("SEARCH MODSEQ 9", "* SEARCH"),
+            (
+                "SEARCH MODSEQ \"/flags/\\\\seen\" all 7 UNSEEN",
+                "* SEARCH 1 3 4 (MODSEQ 8)",
+            ),
+            (
+                "UID SEARCH RETURN (MIN) MODSEQ 7",
+                "* ESEARCH (TAG \"h\") UID MIN 1 MODSEQ 7",
+            ),
+            (
+                "SEARCH RETURN (MIN MAX) 1:3 MODSEQ 7",
+                "* ESEARCH (TAG \"h\") MIN 1 MAX 3 MODSEQ 7",
+            ),
+            (
+                "SEARCH RETURN (ALL) MODSEQ 7",
+                "* ESEARCH (TAG \"h\") ALL 1:4 MODSEQ 8",
+            ),
+            (
+                "SEARCH RETURN (COUNT) MODSEQ 9",
+                "* ESEARCH (TAG \"h\") COUNT 0",
+            ),
+            (
+                "STATUS INBOX (HIGHESTMODSEQ MESSAGES)",
+                "* STATUS \"INBOX\" (HIGHESTMODSEQ 8 MESSAGES 4)",
+            ),
+        ] {
+            assert_eq!(
+                step(&mut one, &format!("h {command}")),
+                format!("{answer}\r\nh OK  Completed\r\n"),
+                "{command}"
+            );
+        }
+        let mut two = Imap::new(true);
+        two.authenticated = true;
+        step(&mut two, "x SELECT INBOX");
+        step(&mut two, "x STORE 3 -FLAGS (\\Flagged)");
+        // The .SILENT STORE left 1 and 3 to the next update, which now carries their MODSEQ.
+        assert_eq!(
+            step(&mut one, "i NOOP"),
+            "* 1 FETCH (UID 1 FLAGS (\\Flagged) MODSEQ (7))\r\n* 3 FETCH (UID 3 FLAGS () MODSEQ (9))\r\ni OK Completed\r\n"
+        );
+    }
+
+    /// RFC 7162 3.2.5 and 3.2.6: SELECT (QRESYNC ...) answers VANISHED (EARLIER) from the store's tombstones and the
+    /// changed messages' FETCHes, within known UIDs; a different UIDVALIDITY is a plain SELECT; UID FETCH VANISHED
+    /// answers the same. A store that can't tell names every known UID the mailbox doesn't hold.
+    #[test]
+    fn qresync_select_reports_what_vanished_and_changed() {
+        let account = Account::new("mbx_test".into(), vec![], "x".into(), true);
+        let now = Date::default();
+        // UIDs 1 to 6 at MODSEQ 2 to 7; 2 and 4 expunged at 9; 5 seen at 10.
+        let inbox = || {
+            let mut m = Memory::default();
+            for _ in 0..6 {
+                m.change(
+                    "INBOX",
+                    Change::Append {
+                        raw: b"Subject: x\r\n\r\nbody",
+                        date: now,
+                        flags: Flags::new(),
+                        source: crate::store::Origin::Client { now },
+                    },
+                )
+                .unwrap();
+            }
+            let deleted = Flags::from(["\\Deleted".into()]);
+            m.change("INBOX", Change::Flags(&[2, 4], Mode::Add, deleted))
+                .unwrap();
+            m.change("INBOX", Change::Expunge(None)).unwrap();
+            let seen = Flags::from(["\\Seen".into()]);
+            m.change("INBOX", Change::Flags(&[5], Mode::Add, seen))
+                .unwrap();
+            m
+        };
+        let mut store = inbox();
+        let mut fallback = Indexed(inbox());
+        assert_eq!(store.vanished("INBOX", 7).unwrap(), Some(vec![2, 4]));
+        assert_eq!(store.vanished("INBOX", 9).unwrap(), Some(vec![]));
+        let changed = "* 3 FETCH (UID 5 FLAGS (\\Seen) MODSEQ (10))\r\n";
+        let tail = |code: &str| format!("* FLAGS ({FLAGS})\r\n{code}");
+        let mut imap = Imap::new(true);
+        imap.authenticated = true;
+        let mut step = |command: &str| {
+            let r = imap.step(
+                format!("{command}\r\n").as_bytes(),
+                &account,
+                &mut store,
+                now,
+            );
+            String::from_utf8(r.bytes).unwrap()
+        };
+        assert_eq!(
+            step("a SELECT INBOX (QRESYNC (1 7))"),
+            "a BAD Not permitted in this state or unsupported\r\n"
+        );
+        step("a ENABLE QRESYNC");
+        let text = step("b SELECT INBOX (QRESYNC (1 7))");
+        assert!(
+            text.contains("* OK [HIGHESTMODSEQ 10] Highest\r\n"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(&tail(&format!(
+                "* VANISHED (EARLIER) 2,4\r\n{changed}b OK [READ-WRITE] Completed\r\n"
+            ))),
+            "{text}"
+        );
+        let text = step("c EXAMINE INBOX (QRESYNC (1 7 1:3))");
+        assert!(
+            text.starts_with("* OK [CLOSED] Previous mailbox closed\r\n"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(&tail(
+                "* VANISHED (EARLIER) 2\r\nc OK [READ-ONLY] Completed\r\n"
+            )),
+            "{text}"
+        );
+        let text = step("d SELECT INBOX (QRESYNC (99 7))");
+        assert!(
+            text.ends_with(&tail("d OK [READ-WRITE] Completed\r\n")),
+            "{text}"
+        );
+        assert_eq!(
+            step("e UID FETCH 1:* (FLAGS) (CHANGEDSINCE 7 VANISHED)"),
+            "* VANISHED (EARLIER) 2,4\r\n* 3 FETCH (FLAGS (\\Seen) UID 5 MODSEQ (10))\r\ne OK  Completed\r\n"
+        );
+        for command in [
+            "f FETCH 1:* (FLAGS) (CHANGEDSINCE 7 VANISHED)",
+            "f UID FETCH 1:* (FLAGS) (VANISHED)",
+        ] {
+            assert_eq!(
+                step(command),
+                "f BAD Not permitted in this state or unsupported\r\n"
+            );
+        }
+        let mut imap = Imap::new(true);
+        imap.authenticated = true;
+        let mut step = |command: &str| {
+            let r = imap.step(
+                format!("{command}\r\n").as_bytes(),
+                &account,
+                &mut fallback,
+                now,
+            );
+            String::from_utf8(r.bytes).unwrap()
+        };
+        step("a ENABLE QRESYNC");
+        assert!(
+            step("b SELECT INBOX (QRESYNC (1 7))").ends_with(&tail(&format!(
+                "* VANISHED (EARLIER) 2,4\r\n{changed}b OK [READ-WRITE] Completed\r\n"
+            )))
+        );
+        assert!(
+            step("c SELECT INBOX (QRESYNC (1 7 1:3,9))").ends_with(&tail(
+                "* VANISHED (EARLIER) 2\r\nc OK [READ-WRITE] Completed\r\n"
+            ))
+        );
+    }
+
+    /// RFC 7162 3.2.7 and 3.2.10: once QRESYNC is on, expunges, this session's and another's, are VANISHED, ahead
+    /// of the FETCHes renumbered after them, and EXPUNGE answers the new HIGHESTMODSEQ. Other sessions keep EXPUNGE.
+    #[test]
+    fn qresync_reports_vanished_instead_of_expunge() {
+        let account = Account::new("mbx_test".into(), vec![], "x".into(), true);
+        let mut store = Memory::default();
+        let now = Date::default();
+        // UIDs 1 to 4 at MODSEQ 2 to 5.
+        for _ in 0..4 {
+            store
+                .change(
+                    "INBOX",
+                    Change::Append {
+                        raw: b"Subject: x\r\n\r\nbody",
+                        date: now,
+                        flags: Flags::new(),
+                        source: crate::store::Origin::Client { now },
+                    },
+                )
+                .unwrap();
+        }
+        let mut step = |imap: &mut Imap, command: &str| {
+            let r = imap.step(
+                format!("{command}\r\n").as_bytes(),
+                &account,
+                &mut store,
+                now,
+            );
+            String::from_utf8(r.bytes).unwrap()
+        };
+        let (mut one, mut two) = (Imap::new(true), Imap::new(true));
+        one.authenticated = true;
+        two.authenticated = true;
+        step(&mut one, "a ENABLE QRESYNC");
+        step(&mut one, "a SELECT INBOX");
+        step(&mut two, "a SELECT INBOX");
+        assert_eq!(
+            step(&mut one, "b STORE 2,3 +FLAGS.SILENT (\\Deleted)"),
+            "* 2 FETCH (UID 2 MODSEQ (6))\r\n* 3 FETCH (UID 3 MODSEQ (6))\r\nb OK  Completed\r\n"
+        );
+        assert_eq!(
+            step(&mut one, "c EXPUNGE"),
+            "* VANISHED 2:3\r\nc OK [HIGHESTMODSEQ 7] Completed\r\n"
+        );
+        assert_eq!(
+            step(&mut two, "d NOOP"),
+            "* 2 EXPUNGE\r\n* 2 EXPUNGE\r\nd OK Completed\r\n"
+        );
+        step(&mut two, "e UID STORE 4 +FLAGS (\\Flagged)");
+        step(&mut two, "e STORE 1 +FLAGS (\\Deleted)");
+        assert_eq!(
+            step(&mut two, "e EXPUNGE"),
+            "* 1 EXPUNGE\r\ne OK  Completed\r\n"
+        );
+        assert_eq!(
+            step(&mut one, "f NOOP"),
+            "* VANISHED 1\r\n* 1 FETCH (UID 4 FLAGS (\\Flagged) MODSEQ (8))\r\nf OK Completed\r\n"
+        );
+        assert!(
+            step(&mut one, "g SELECT Archive")
+                .starts_with("* OK [CLOSED] Previous mailbox closed\r\n")
+        );
     }
 
     /// Found by gateway/tear on the Remote store (witness: B create Work, A select Work,
