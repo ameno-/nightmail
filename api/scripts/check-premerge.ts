@@ -267,6 +267,24 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   if (failed === before) console.log(`Permissions: all ${operations.length} operations state the permission they need.`);
 }
 
+// 9. Published BYO role templates. Customers' stacks run byo/<version>.yaml from S3, and Nightmail keeps working with
+// every supported version, so a published file never changes or disappears: a change is a new, higher version. The
+// acceptance test "BYO contract" checks every session the code asks for against each of them.
+{
+  const before = failed, dir = 'api/byo-templates', named = /^(\d+)\.(\d+)\.yaml$/;
+  const head = (() => { try { return readdirSync(new URL('byo-templates/', api)).filter(n => !n.startsWith('.')).sort(); } catch { return []; } })();
+  for (const name of head) if (!named.test(name)) fail('BYO templates', `${name} must be named <major>.<minor>.yaml, the version its stack reports.`, `${dir}/${name}`);
+  const baseList = base ? (tryGit('ls-tree', '--name-only', `${base}:${dir}`) ?? '').split('\n').filter(Boolean) : [];
+  for (const name of baseList) {
+    if (!head.includes(name)) fail('BYO templates', `${name} is published and connected accounts may run it. Restore it; publish changes as a new version.`, `${dir}/${name}`);
+    else if (atBase(`${dir}/${name}`) !== readFileSync(new URL(`byo-templates/${name}`, api), 'utf8').trim()) fail('BYO templates', `${name} is published and connected accounts may run it. Revert the edit and publish the change as a new version.`, `${dir}/${name}`);
+  }
+  const version = (name: string) => { const m = named.exec(name); return m ? Number(m[1]) * 1e6 + Number(m[2]) : -1; };
+  const newest = Math.max(-1, ...baseList.map(version));
+  for (const name of head.filter(n => !baseList.includes(n))) if (version(name) <= newest) fail('BYO templates', `${name} isn't newer than the newest published version. Use a higher version.`, `${dir}/${name}`);
+  if (failed === before) console.log(`BYO templates: ${head.length} published, ${head.filter(n => !baseList.includes(n)).length} new.`);
+}
+
 if (failed) {
   console.log(`\n${failed} pre-merge check${failed === 1 ? '' : 's'} failed. docs/ci.md explains each one and how to fix it.`);
   process.exitCode = 1;

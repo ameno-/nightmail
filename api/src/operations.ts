@@ -26,7 +26,7 @@ import { discover, groupIds, pendingGroups, signedApply, verifyReturn } from './
 import { dmarcView, localDmarc, observeDmarc, type DmarcObservation } from './dmarc.js';
 import { forDelivery, workspaceConnection, type ReadyConnection } from './provider-credentials.js';
 import { byoEnabled } from './byo-pilot.js';
-import { awsError, claimTenantName, feedbackUrl, mxOwnerTag, POOL_INSTALLATION } from './ses-setup.js';
+import { awsError, byoFeedbackUrl, claimTenantName, feedbackUrl, mxOwnerTag, POOL_INSTALLATION } from './ses-setup.js';
 import type { RoutineIngress } from './sending.js';
 import type { FeedbackItem } from './core.js';
 import { realDestination } from './hosted-sending.js';
@@ -1335,12 +1335,14 @@ function registerPublicEvents(app: App) {
     const cached = sendingTopics.get(arn);
     if (!confirming && cached && cached.expires > Date.now()) return cached.binding;
     // Only a confirmation matches a journaled, not-yet-ready subscription. Without a public endpoint there is none to match.
-    let subscription:string|null=null;
+    let subscription:string|null=null,byoSubscription:string|null=null;
     if (confirming) try { subscription=JSON.stringify([{kind:'subscription',resource:arn,target:feedbackUrl(runtime.config)}]); } catch {}
+    // A connected account's topics subscribe to BYO_EVENTS_ORIGIN when it's set (byoFeedbackUrl).
+    if (confirming) try { byoSubscription=JSON.stringify([{kind:'subscription',resource:arn,target:byoFeedbackUrl(runtime.config)}]); } catch {}
     const binding = (await runtime.db.execute<TopicBinding>(sql`
       SELECT r.region,c.aws_account_id,c.kind,r.sending_state='ready' AS ready,false AS inbound,CASE WHEN NOT r.legacy THEN c.id END AS managed_id,r.generation
         FROM provider_connection_regions r JOIN provider_connections c ON c.id=r.connection_id WHERE c.kind='byo' AND r.feedback_topic_arn=${arn} AND (r.legacy OR r.sending_state='ready' OR
-          (r.sending_state='provisioning' AND r.ownership_journal @> ${subscription}::jsonb))
+          (r.sending_state='provisioning' AND r.ownership_journal @> ${byoSubscription}::jsonb))
       UNION ALL SELECT region, aws_account_id, 'shared', ${poolSends()},false,CASE WHEN NOT legacy_names THEN 'pool' END,generation FROM provider_pool_regions p WHERE feedback_topic_arn=${arn} AND (legacy_names OR ${poolSends()} OR
         (${!!runtime.config.trustedPool} AND p.region='us-east-1' AND pool_tier='trusted' AND ownership_journal @> ${subscription}::jsonb))
       UNION ALL SELECT region,aws_account_id,'shared',${poolReceives()},true,NULL,NULL FROM provider_pool_regions p WHERE inbound_topic_arn=${arn}

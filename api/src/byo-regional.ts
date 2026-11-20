@@ -2,10 +2,10 @@ import { sql } from 'drizzle-orm';
 import { z } from '@hono/zod-openapi';
 import { createHash } from 'node:crypto';
 import { ApiError, denied, id, ModuleLoadError, notFound, type Runtime, type DbExecutor, type JobHandler } from './core.js';
-import { assume, loadStsSdk } from './provider-credentials.js';
+import { assume, brokerRoleArn, loadStsSdk } from './provider-credentials.js';
+import { byoSessionPolicy } from './byo-permissions.js';
 import { requirePlatformAccount } from './config.js';
-import {TAG_PREFIX} from './resource-tags.js';
-import { awsError, loadSetupSdk, provisionJournaledFeedback, readSelectedDomains, removeByoFeedbackResource, scanRegionPage, setupResources, type Inventory, type CandidateIdentity, type JournalEntry, type ScanStage, byoStackName } from './ses-setup.js';
+import { awsError, byoFeedbackUrl, loadSetupSdk, provisionJournaledFeedback, readSelectedDomains, removeByoFeedbackResource, scanRegionPage, setupResources, type Inventory, type CandidateIdentity, type JournalEntry, type ScanStage, byoStackName } from './ses-setup.js';
 import { JobDeferred, retryDatabaseFailures } from './jobs.js';
 import { acquireRegionProvisioning, campaignReserved, finishRegionProvisioning, verifyImportedClaims } from './states.js';
 import { claimNameAllowed, domainLimitError, releaseConnectionClaims } from './domain-claims.js';
@@ -55,20 +55,23 @@ const regionJobId=(c:V5Connection,region:string)=>`byo.provision:${c.id}:${regio
 const job=(db:DbExecutor,c:V5Connection,type:string,jobId:string,extra:Record<string,unknown>={})=>db.execute(sql`INSERT INTO jobs(id,workspace_id,type,payload) VALUES(${jobId},${c.workspace_id},${type},${JSON.stringify({connectionId:c.id,...extra,run:id('run')})}::jsonb)
   ON CONFLICT(id) DO UPDATE SET status='pending',available_at=now(),attempts=0,last_error=NULL,lease_until=NULL,payload=excluded.payload WHERE jobs.status IN ('completed','failed')`);
 
+// The role template (api/byo-template.yaml) takes every value as a plain parameter: quick-create links ignore NoEcho ones.
 export function v5Link(r:Runtime,c:{id:string;workspace_id:string;external_id:string|null;region:string;stack_name?:string|null}) {
   if (!r.config.byoV5TemplateUrl) throw new ApiError(503,'BYO_NOT_CONFIGURED','The v5 role template URL is not configured.');
-  const params=new URLSearchParams({templateURL:r.config.byoV5TemplateUrl,stackName:c.stack_name ?? byoStackName('Bane',c.id),param_ExternalId:c.external_id!,param_ConnectionId:c.id,param_WorkspaceId:c.workspace_id,param_ResourcePrefix:setupResources(c.id,'byo').topicName.slice(0,-9)});
+  const params=new URLSearchParams({templateURL:r.config.byoV5TemplateUrl,stackName:c.stack_name ?? byoStackName('Nightmail',c.id),param_PlatformAccount:requirePlatformAccount(r.config.platformAccount),
+    param_ExternalId:c.external_id!,param_ConnectionId:c.id,param_WorkspaceId:c.workspace_id,param_ResourcePrefix:setupResources(c.id,'byo').topicName.slice(0,-9),param_EventsHost:new URL(byoFeedbackUrl(r.config)).hostname});
   return `https://${c.region}.console.aws.amazon.com/cloudformation/home?region=${c.region}#/stacks/create/review?${params}`;
 }
 export async function enrollV5(r:Runtime,wid:string,account:string) {
-  const platformAccount=requirePlatformAccount(r.config.platformAccount),platformArn=`arn:aws:iam::${platformAccount}:user/${TAG_PREFIX}-runtime`;
+  // The template trusts the platform account through its broker role only, which may assume only Nightmail-<20> roles.
+  const platformAccount=requirePlatformAccount(r.config.platformAccount),platformArn=brokerRoleArn(r);
   if (account===platformAccount) throw conflict('AWS_ACCOUNT_IN_USE','The shared sending account cannot be connected.');
   const cid=id('conn'),roleRegion='us-east-2',external=crypto.randomUUID();
-  v5Link(r,{id:cid,region:roleRegion,workspace_id:wid,external_id:external,stack_name:byoStackName(r.config.byoStackPrefix,cid)});
+  v5Link(r,{id:cid,region:roleRegion,workspace_id:wid,external_id:external,stack_name:byoStackName('Nightmail',cid)});
   return r.db.transaction(async db=>{
     await writable(r,wid,db);
     const inserted=await db.execute(sql`INSERT INTO provider_connections(id,workspace_id,kind,region,state,tenant_state,external_id,platform_principal_arn,template_version,resource_prefix,requested_account,inventory_revision,stack_name)
-      VALUES(${cid},${wid},'byo',${roleRegion},'awaiting_role','ready',${external},${platformArn},'v5',${setupResources(cid,'byo').topicName.slice(0,-9)},${account},1,${byoStackName(r.config.byoStackPrefix,cid)}) ON CONFLICT(workspace_id) DO NOTHING`);
+      VALUES(${cid},${wid},'byo',${roleRegion},'awaiting_role','ready',${external},${platformArn},'v5',${setupResources(cid,'byo').topicName.slice(0,-9)},${account},1,${byoStackName('Nightmail',cid)}) ON CONFLICT(workspace_id) DO NOTHING`);
     const c=await connection(db,wid,true);if (c) usable(c);
     if (!c || c.requested_account!==account) throw conflict('CONNECTION_EXISTS','A different sending connection already exists.');
     if (inserted.rowCount) await job(db,c,'byo.prove',proofId(c),{revision:c.inventory_revision});
@@ -82,15 +85,9 @@ export async function enrollV5(r:Runtime,wid:string,account:string) {
 async function scoped(r:Runtime,c:V5Connection,region:string,purpose:'scan'|'provision'|'cleanup',verify=false) {
   const account=c.requested_account, role=`arn:aws:iam::${account}:role/${c.stack_name ?? byoStackName('Bane',c.id)}`;
   if (account===requirePlatformAccount(r.config.platformAccount) || !/^\d{12}$/.test(account) || !(region in regionLabels) || (!verify && (c.aws_account_id!==account || c.role_arn!==role))) throw conflict('AWS_ACCOUNT_MISMATCH','The regional role is not bound to this account.');
-  const names=setupResources(c.id,'byo'),ses=`arn:aws:ses:${region}:${account}:`,sets=[names.transactional,names.marketing].map(n=>ses+'configuration-set/'+n),topic=`arn:aws:sns:${region}:${account}:${names.topicName}`;
-  const allow=(Action:string[],Resource:string|string[])=>({Effect:'Allow',Action,Resource,Condition:{StringEquals:{'aws:RequestedRegion':region}}});
-  const Statement=purpose==='cleanup'?[
-    allow(['ses:GetConfigurationSet','ses:GetConfigurationSetEventDestinations','ses:DeleteConfigurationSet'],sets),allow(['sns:GetTopicAttributes','sns:ListTagsForResource','sns:ListSubscriptionsByTopic','sns:GetSubscriptionAttributes','sns:DeleteTopic'],topic)
-  ]:purpose==='scan'?[allow(['ses:GetAccount','ses:ListEmailIdentities','ses:ListConfigurationSets','ses:DescribeActiveReceiptRuleSet'],'*'),allow(['ses:GetEmailIdentity'],ses+'identity/?*.??*'),allow(['ses:GetConfigurationSet'],[...sets,ses+'configuration-set/bane-*'])]:[
-    allow(['ses:GetAccount'],'*'),allow(['ses:GetConfigurationSet','ses:CreateConfigurationSet','ses:TagResource','ses:PutConfigurationSetSuppressionOptions','ses:GetConfigurationSetEventDestinations','ses:CreateConfigurationSetEventDestination'],sets),
-    allow(['sns:CreateTopic','sns:TagResource','sns:GetTopicAttributes','sns:ListTagsForResource','sns:SetTopicAttributes','sns:ListSubscriptionsByTopic','sns:GetSubscriptionAttributes','sns:Subscribe'],topic)];
-  const aws=await assume(r,region,role,c.external_id,verify,JSON.stringify({Version:'2012-10-17',Statement}));
-  return {...r,config:{...r.config,workspaceId:c.workspace_id,aws,awsAccountId:account}};
+  const aws=await assume(r,region,role,c.external_id,verify,byoSessionPolicy(purpose,{region,account,connectionId:c.id}),{connectionId:c.id,purpose});
+  // The feedback subscription goes to the one endpoint the role allows (EventsHost).
+  return {...r,config:{...r.config,workspaceId:c.workspace_id,aws,awsAccountId:account,sesFeedbackUrl:byoFeedbackUrl(r.config)}};
 }
 async function beginScan(db:DbExecutor,c:V5Connection) {
   await db.execute(sql`DELETE FROM byo_candidates WHERE connection_id=${c.id}`);

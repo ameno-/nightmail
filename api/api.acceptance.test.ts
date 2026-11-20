@@ -22,11 +22,15 @@ function iamAllows(statements:IamStatement[],action:string,resource:string,conte
   const like=(pattern:string,value:string)=>new RegExp('^'+pattern.replace(/[.+^${}()|[\]\\]/g,'\\$&').replaceAll('*','.*').replaceAll('?','.')+'$','is').test(value);
   const matches=(list:string|string[]|undefined,not:string|string[]|undefined,value:string)=>list!==undefined ? [list].flat().some(p=>like(p,value)) : not!==undefined && ![not].flat().some(p=>like(p,value));
   const condition=(op:string,key:string,want:string|string[])=>{
-    const have=context[key],values=have===undefined?[]:[have].flat(),wanted=[want].flat();
+    // A policy variable (${aws:ResourceTag/x}) stands for that key's value in the same request.
+    const have=context[key],values=have===undefined?[]:[have].flat(),wanted=[want].flat().map(w=>{const v=/^\$\{([^}]+)\}$/.exec(w)?.[1];return v===undefined?w:String(context[v]??'');});
     switch(op){
       case 'StringEquals':case 'Bool':case 'ArnEquals':return values.length>0 && values.some(v=>wanted.includes(v));
       case 'StringLike':case 'ArnLike':return values.length>0 && values.some(v=>wanted.some(w=>like(w,v)));
       case 'StringNotEquals':return !values.some(v=>wanted.includes(v));
+      case 'StringNotEqualsIfExists':return !values.length || !values.some(v=>wanted.includes(v));
+      case 'ForAnyValue:StringLike':return values.some(v=>wanted.some(w=>like(w,v)));
+      case 'ForAllValues:StringLike':return values.every(v=>wanted.some(w=>like(w,v)));
       case 'StringEqualsIfExists':return !values.length || values.some(v=>wanted.includes(v));
       case 'ForAllValues:StringEquals':return values.every(v=>wanted.includes(v));
       case 'Null':return (wanted[0]==='true')===(have===undefined);
@@ -35,6 +39,31 @@ function iamAllows(statements:IamStatement[],action:string,resource:string,conte
   };
   const applies=(s:IamStatement)=>matches(s.Action,s.NotAction,action) && matches(s.Resource,s.NotResource,resource) && Object.entries(s.Condition??{}).every(([op,keys])=>Object.entries(keys).every(([key,want])=>condition(op,key,want)));
   return statements.some(s=>s.Effect==='Allow' && applies(s)) && !statements.some(s=>s.Effect==='Deny' && applies(s));
+}
+// A connected account's role template rendered for one connection: parameters and pseudo-parameters substituted,
+// intrinsic-function tags stripped. byoTemplates() lists every supported one: the current and each published version.
+async function byoTemplate(file:string,params:Record<string,string>,regions:string[]) {
+  const {load}=await import('js-yaml'),src=await readFile(new URL(file,import.meta.url),'utf8');
+  return load(src.replace(/!Sub '([^']*)'/g,(_,v:string)=>JSON.stringify(v.replace(/\$\{(!?)([^}]+)\}/g,(m,bang:string,k:string)=>bang?'${'+k+'}':params[k]??m)))
+    .replace(/!Ref (?:AccountRequestRegions|ReceivingRegions)\b/g,JSON.stringify(regions)).replace(/!Ref '?([A-Za-z:]+)'?/g,(m,k:string)=>k in params?JSON.stringify(params[k]):m)
+    .replace(/!(?:Ref|If|Equals|Not|GetAtt)\b/g,'')) as Json;
+}
+async function byoTemplates() {
+  const {readdir}=await import('node:fs/promises'),published=await readdir(new URL('./byo-templates/',import.meta.url)).catch(()=>[] as string[]);
+  return ['byo-template.yaml',...published.filter(n=>/^\d+\.\d+\.yaml$/.test(n)).map(n=>'byo-templates/'+n)];
+}
+// The role's identity policy statements: inline policies, conditional ones (!If) included.
+const byoRoleStatements=(cfn:Json)=>cfn.Resources.Role.Properties.Policies.map((p:Json)=>Array.isArray(p)?p[1]:p).flatMap((p:Json)=>p.PolicyDocument.Statement) as IamStatement[];
+// The IAM action and resource an SES v2 or SNS command asks for, and a check that a connected account's session (whose
+// fixture credentials carry their session policy as the token) allows it: code calls stay inside their session.
+function sessionCall(service:'ses'|'sns',cmd:any,region:string,account:string):[string,string] {
+  const i=cmd.input,action=`${service}:${cmd.constructor.name.replace(/Command$/,'')}`,ses=`arn:aws:ses:${region}:${account}:`;
+  if (service==='sns') return [action,i.TopicArn??i.ResourceArn??(i.Name?`arn:aws:sns:${region}:${account}:${i.Name}`:i.SubscriptionArn?.split(':').slice(0,6).join(':')??'*')];
+  return [action,i.ResourceArn??(i.ConfigurationSetName?ses+'configuration-set/'+i.ConfigurationSetName:i.EmailIdentity?ses+'identity/'+i.EmailIdentity:i.TemplateName?ses+'template/'+i.TemplateName:'*')];
+}
+async function withinSession(client:{config:{credentials:()=>Promise<{sessionToken?:string}>}},service:'ses'|'sns',cmd:any,region:string,account:string) {
+  const [action,resource]=sessionCall(service,cmd,region,account),policy=JSON.parse((await client.config.credentials()).sessionToken!);
+  assert.ok(iamAllows(policy.Statement,action,resource,{'aws:RequestedRegion':region,'ses:ApiVersion':'2'}),`${action} on ${resource} is outside its session policy`);
 }
 // The S3 calls Bane makes on one attachment object: ingest/archive PutObject, signed-link and
 // reuse GetObject, and the orphan expiry tag (any other tag value must stay refused).
@@ -16439,7 +16468,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const {setupResources}=await import('./src/ses-setup.js'),{SESv2Client,GetEmailTemplateCommand,TestRenderEmailTemplateCommand}=await import('@aws-sdk/client-sesv2');
       const wid=runtime.config.workspaceId,oh='us-east-2',va='us-east-1',account='444455556666';
       Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:true,aws:{accessKeyId:'unused',secretAccessKey:'fixture'}});
-      const names=setupResources(wid,'byo');assert.match(names.topicName,/^bane-[0-9a-f]{20}-feedback$/);
+      const names=setupResources(wid,'byo');assert.match(names.topicName,/^nightmail-[0-9a-f]{20}-feedback$/);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,external_id,template_version,role_arn,platform_principal_arn) VALUES($1,$1,$2,'provisioning','byo',$3,gen_random_uuid(),'v5','fixture-role','fixture-platform')`,[wid,oh,account]);
       const publish=async(region:string)=>{
         const ref={connectionId:wid,region},topic=`arn:aws:sns:${region}:${account}:${names.topicName}`;
@@ -16501,13 +16530,18 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     let external='',failOnce=true,revoked:boolean|string=false,loseSubscribe=true,throttlePoll=false,failDelete=true,createdIdentity:Json|undefined,denyCleanup=false,loseSetDelete=false;
     t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));assert.match(u.hostname,/^sns\.us-east-[12]\.amazonaws\.com$/);if(u.pathname.endsWith('.pem'))return new Response(pem);const topic=topics.get(u.searchParams.get('TopicArn')!)!;topic.confirmed=true;return new Response(null);});
     t.mock.method(STSClient.prototype,'send',async function(this:InstanceType<typeof STSClient>,cmd:any){
-      if(cmd.constructor.name==='GetCallerIdentityCommand')return {Account:account,Arn:`arn:aws:sts::${account}:assumed-role/Nightmail-${v5.id.slice(-20)}/Bane`};
-      assert.equal(cmd.constructor.name,'AssumeRoleCommand');assert.equal(cmd.input.RoleSessionName,'Bane');assert.equal(cmd.input.DurationSeconds,900);assert.ok(cmd.input.Policy.length<=2048);policies.push(cmd.input.Policy);
+      if(cmd.constructor.name==='GetCallerIdentityCommand')return {Account:account,Arn:`arn:aws:sts::${account}:assumed-role/Nightmail-${v5.id.slice(-20)}/nightmail-cleanup`};
+      assert.equal(cmd.constructor.name,'AssumeRoleCommand');const key=(await this.config.credentials()).accessKeyId;
+      // Only the broker enters a connected account: the platform key assumes the broker, the broker the customer role.
+      if(cmd.input.RoleArn===`arn:aws:iam::${platform}:role/nightmail-byo-broker`){assert.equal(key,'v5-fixture-platform');assert.equal(cmd.input.RoleSessionName,'nightmail-broker');assert.equal(cmd.input.SourceIdentity,undefined);
+        return {Credentials:{AccessKeyId:'v5-fixture-broker',SecretAccessKey:'fixture-only',SessionToken:'broker',Expiration:new Date(Date.now()+3600000)}};}
+      assert.equal(key,'v5-fixture-broker');assert.match(cmd.input.RoleSessionName,/^nightmail-(?:scan|provision|cleanup|send|template|quota|verify|read|delete|mailfrom)$/);assert.equal(cmd.input.SourceIdentity,v5.id);
+      assert.equal(cmd.input.DurationSeconds,900);assert.ok(cmd.input.Policy.length<=2048);policies.push(cmd.input.Policy);
       if (!external || cmd.input.ExternalId!==external) throw denied();
-      return {AssumedRoleUser:{Arn:`arn:aws:sts::${account}:assumed-role/${cmd.input.RoleArn.split('/')[1]}/Bane`},Credentials:{AccessKeyId:'v5-fixture-customer',SecretAccessKey:'fixture-only',SessionToken:cmd.input.Policy,Expiration:new Date(Date.now()+900000)}};
+      return {AssumedRoleUser:{Arn:`arn:aws:sts::${account}:assumed-role/${cmd.input.RoleArn.split('/')[1]}/${cmd.input.RoleSessionName}`},Credentials:{AccessKeyId:'v5-fixture-customer',SecretAccessKey:'fixture-only',SessionToken:cmd.input.Policy,Expiration:new Date(Date.now()+900000)}};
     });
     t.mock.method(SESClient.prototype,'send',async function(this:InstanceType<typeof SESClient>,cmd:any){assert.equal(cmd.constructor.name,'DescribeActiveReceiptRuleSetCommand');trace.push({region:await this.config.region(),op:cmd.constructor.name});return {Metadata:{Name:'customer'},Rules:[{Name:'existing',Enabled:true,Actions:[{StopAction:{Scope:'RuleSet'}}]}]};});
-    t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){const region=await this.config.region(),op=cmd.constructor.name,i=cmd.input,key=region+':'+i.ConfigurationSetName;trace.push({region,op});assert.equal((await this.config.credentials()).accessKeyId,'v5-fixture-customer');
+    t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){const region=await this.config.region(),op=cmd.constructor.name,i=cmd.input,key=region+':'+i.ConfigurationSetName;trace.push({region,op});assert.equal((await this.config.credentials()).accessKeyId,'v5-fixture-customer');await withinSession(this,'ses',cmd,region,account);
       switch(op){
         case 'GetEmailTemplateCommand':case 'TestRenderEmailTemplateCommand':{
           const [s]=JSON.parse((await this.config.credentials()).sessionToken!).Statement;assert.deepEqual(s.Action,['ses:GetEmailTemplate','ses:TestRenderEmailTemplate']);assert.equal(s.Resource,`arn:aws:ses:${region}:${account}:template/bane-pilot`);
@@ -16534,7 +16568,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         default:throw Error('unexpected SES call '+op);
       }
     });
-    t.mock.method(SNSClient.prototype,'send',async function(this:InstanceType<typeof SNSClient>,cmd:any){const region=await this.config.region(),op=cmd.constructor.name,i=cmd.input,arn=i.TopicArn??i.ResourceArn??i.SubscriptionArn?.split(':').slice(0,6).join(':')??`arn:aws:sns:${region}:${account}:${i.Name}`,topic=topics.get(arn);trace.push({region,op});
+    t.mock.method(SNSClient.prototype,'send',async function(this:InstanceType<typeof SNSClient>,cmd:any){const region=await this.config.region(),op=cmd.constructor.name,i=cmd.input,arn=i.TopicArn??i.ResourceArn??i.SubscriptionArn?.split(':').slice(0,6).join(':')??`arn:aws:sns:${region}:${account}:${i.Name}`,topic=topics.get(arn);trace.push({region,op});await withinSession(this,'sns',cmd,region,account);
       switch(op){
         case 'CreateTopicCommand':assert.ok(!topic);assert.equal(JSON.parse(i.Attributes.Policy).Statement.length,1);topics.set(arn,{Tags:i.Tags,Attributes:{...i.Attributes,Owner:account,TopicArn:arn},subs:[]});return {TopicArn:arn};
         case 'GetTopicAttributesCommand':if(denyCleanup)throw denied();if(!topic)throw missing();return {Attributes:topic.Attributes};
@@ -16565,15 +16599,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     error(await post('/scan'),404);error(await post('',{kind:'byo',awsAccountId:account}),422,'VALIDATION_ERROR');
     const {setByoV2}=await import('./scripts/set-byo-v2.js');await setByoV2(db,[wid,'enable']);
     error(await post('',{kind:'byo',awsAccountId:platform}),409,'AWS_ACCOUNT_IN_USE');assert.equal(policies.length,0);
-    // A connection made after BYO_STACK_PREFIX switches names its stack and role Nightmail-<id>, for good.
-    runtime.config.byoStackPrefix='Nightmail';
+    // The stack and role are named Nightmail-<id> whatever BYO_STACK_PREFIX says: the broker may assume only those.
+    runtime.config.byoStackPrefix='Bane';
     const v5=ok(await post('',{kind:'byo',awsAccountId:account}),202),params=new URLSearchParams(new URL(v5.quickCreateUrl).hash.split('?')[1]);external=params.get('param_ExternalId')!;
     runtime.config.byoStackPrefix=undefined;
     assert.equal(params.get('stackName'),'Nightmail-'+v5.id.slice(-20));
+    // Every template parameter is a plain one: quick-create links drop NoEcho parameters.
+    assert.match(external,/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);assert.equal(params.get('param_PlatformAccount'),platform);assert.equal(params.get('param_EventsHost'),new URL(endpoint).hostname);
     const {v5Link}=await import('./src/byo-regional.js'),stored=(await db.query('SELECT * FROM provider_connections WHERE id=$1',[v5.id])).rows[0];
     assert.equal(stored.stack_name,'Nightmail-'+v5.id.slice(-20));
-    assert.equal(new URLSearchParams(new URL(v5Link(runtime,stored)).hash.split('?')[1]).get('stackName'),stored.stack_name,'Switching back never renames a launched stack.');
-    assert.equal(params.get('param_WorkspaceId'),wid);assert.equal(params.get('param_ResourcePrefix'),'bane-'+createHash('sha256').update(v5.id).digest('hex').slice(0,20));assert.equal(params.has('param_ReceiveMail'),false);assert.equal(v5.awsAccountId,null);
+    assert.equal(new URLSearchParams(new URL(v5Link(runtime,stored)).hash.split('?')[1]).get('stackName'),stored.stack_name,'The link keeps the stored stack name.');
+    assert.equal(params.get('param_WorkspaceId'),wid);assert.equal(params.get('param_ResourcePrefix'),'nightmail-'+createHash('sha256').update(v5.id).digest('hex').slice(0,20));assert.equal(params.has('param_ReceiveMail'),false);assert.equal(v5.awsAccountId,null);
     await run('byo.prove');assert.equal(policies.length,3);
     await assert.rejects(setByoV2(db,[wid,'disable']),/Disconnect/);
     const rs=(await db.query('SELECT region FROM provider_connection_regions WHERE connection_id=$1',[v5.id])).rows;assert.equal(rs.length,32);
@@ -24188,6 +24224,115 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     assert.equal(iamAllows(grants,'sts:AssumeRole',role,unnamed),false,'Every session names its connection');
   });
 
+  test('BYO template 6.0: only this connection\'s broker session gets in, and the role reaches mail and nothing account-wide',async()=>{
+    const {setupResources}=await import('./src/ses-setup.js');
+    const account='123456789012',platform='009882681002',connection=`conn_${'ab'.repeat(16)}`,wid=`ws_${'cd'.repeat(16)}`,region='eu-west-1';
+    const prefix=setupResources(connection,'byo').topicName.slice(0,-9),stack='Nightmail-'+connection.slice(-20);
+    assert.match(prefix,/^nightmail-[0-9a-f]{20}$/);
+    const params:Record<string,string>={PlatformAccount:platform,'AWS::AccountId':account,ResourcePrefix:prefix,ConnectionId:connection,WorkspaceId:wid,EventsHost:'events.nightmail.dev','AWS::StackName':stack,'AWS::Region':'us-east-2',ExternalId:'external'};
+    const cfn=await byoTemplate('byo-template.yaml',params,[region]);
+    // Every parameter is plain, so a quick-create link can fill it in; production access requests are on by default.
+    for(const [name,p] of Object.entries(cfn.Parameters as Json))assert.equal(p.NoEcho,undefined,name);
+    assert.equal(cfn.Parameters.EnableAccountRequests.Default,'true');assert.equal(cfn.Outputs.TemplateVersion.Value,'6.0');
+    const role=cfn.Resources.Role.Properties;
+    assert.deepEqual(Object.fromEntries(role.Tags.map((t:Json)=>[t.Key,t.Value])),{'nightmail:owner':'nightmail','nightmail:installation-id':connection,'nightmail:workspace':wid,'nightmail:purpose':'byo-role','nightmail:template-version':'6.0'});
+    // Trust: the Nightmail account, only through its broker roles, with this connection's external ID and source identity.
+    assert.deepEqual(role.AssumeRolePolicyDocument.Statement.map((s:Json)=>s.Principal),[{AWS:`arn:aws:iam::${platform}:root`}]);
+    const trust=role.AssumeRolePolicyDocument.Statement.map((s:Json)=>({...s,Resource:'*'}));
+    const enter=(context:Record<string,string>)=>['sts:AssumeRole','sts:SetSourceIdentity'].every(action=>iamAllows(trust,action,'*',context));
+    const broker={'aws:PrincipalArn':`arn:aws:iam::${platform}:role/nightmail-byo-broker`,'sts:ExternalId':'external','sts:SourceIdentity':connection,'sts:RoleSessionName':'nightmail-send'};
+    assert.ok(enter(broker));
+    for(const [key,value] of [['aws:PrincipalArn',`arn:aws:iam::${platform}:user/nightmail-runtime`],['aws:PrincipalArn',`arn:aws:iam::${platform}:role/nightmail-deploy`],['aws:PrincipalArn','arn:aws:iam::111122223333:role/nightmail-byo-broker'],
+      ['sts:ExternalId','other'],['sts:SourceIdentity',`conn_${'ef'.repeat(16)}`],['sts:RoleSessionName','Bane']])assert.equal(enter({...broker,[key]:value}),false,`${key} ${value}`);
+    for(const key of ['sts:ExternalId','sts:SourceIdentity']){const {[key]:_,...rest}=broker as Record<string,string>;assert.equal(enter(rest),false,key);}
+    const sending=role.Policies.find((p:Json)=>p.PolicyName==='Sending').PolicyDocument,requests=role.Policies.find((p:Json)=>Array.isArray(p)&&p[1]?.PolicyName==='AccountRequests')[1].PolicyDocument;
+    assert.ok(JSON.stringify(sending).length+JSON.stringify(requests).length<=10240,'Inline role policies share a 10,240-character quota.');
+    const all=[...sending.Statement,...requests.Statement] as IamStatement[];
+    const ses=`arn:aws:ses:${region}:${account}:`,sets=[`${prefix}-transactional`,`${prefix}-marketing`].map(n=>ses+'configuration-set/'+n),topic=`arn:aws:sns:${region}:${account}:${prefix}-feedback`;
+    const domain=ses+'identity/example.com',own={'aws:ResourceTag/nightmail:owner':'nightmail','aws:ResourceTag/nightmail:installation-id':connection,'aws:ResourceTag/nightmail:purpose':'domain-identity','aws:ResourceTag/nightmail:domain-claim':randomUUID()};
+    const tagKeys=['nightmail:owner','nightmail:installation-id','nightmail:purpose','nightmail:domain-claim'];
+    // Nightmail's own configuration sets and topics carry these tags from the moment they're created.
+    const mine={'aws:ResourceTag/nightmail:owner':'nightmail','aws:ResourceTag/nightmail:installation-id':connection,'aws:ResourceTag/nightmail:purpose':'ses-feedback'};
+    const tagging={'aws:RequestTag/nightmail:owner':'nightmail','aws:RequestTag/nightmail:installation-id':connection,'aws:RequestTag/nightmail:purpose':'ses-feedback','aws:TagKeys':['nightmail:owner','nightmail:installation-id','nightmail:purpose']};
+    type Call=[string,string,Record<string,string|string[]>?];
+    // What the scan, provisioning, sending, domain and cleanup sessions ask for, and features still to come in Nightmail's own namespace.
+    const allowed:Call[]=[
+      ...['ses:GetAccount','ses:ListEmailIdentities','ses:ListConfigurationSets','ses:DescribeActiveReceiptRuleSet','ses:PutAccountDetails'].map(a=>[a,'*'] as Call),
+      ['ses:GetEmailIdentity',domain],['ses:GetConfigurationSet',ses+'configuration-set/bane-legacy'],['ses:GetConfigurationSet',ses+'configuration-set/nightmail-0123456789abcdef0123-marketing'],
+      ...sets.flatMap(set=>[['ses:CreateConfigurationSet',set,tagging],['ses:TagResource',set,{...mine,...tagging}],['ses:SendEmail',set,{'ses:ApiVersion':'2'}],
+        ...['ses:GetConfigurationSet','ses:PutConfigurationSetSuppressionOptions','ses:GetConfigurationSetEventDestinations','ses:CreateConfigurationSetEventDestination','ses:UpdateConfigurationSetEventDestination','ses:DeleteConfigurationSet'].map(a=>[a,set,mine])] as Call[]),
+      ['sns:CreateTopic',topic,tagging],['sns:TagResource',topic,{...mine,...tagging}],...['sns:GetTopicAttributes','sns:ListTagsForResource','sns:SetTopicAttributes','sns:ListSubscriptionsByTopic','sns:GetSubscriptionAttributes','sns:DeleteTopic'].map(a=>[a,topic,mine] as Call),
+      ['sns:Subscribe',topic,{...mine,'sns:Protocol':'https','sns:Endpoint':'https://events.nightmail.dev/v1/events/ses'}],
+      // Reads need only the name: provisioning first checks whether a matching name is Nightmail's.
+      ['ses:GetConfigurationSet',sets[0]!],['sns:GetTopicAttributes',topic],['sns:ListTagsForResource',topic],
+      ['ses:SendEmail',domain,{'ses:ApiVersion':'2'}],['ses:SendEmail',domain,{'ses:ApiVersion':'2',...own}],['ses:GetEmailTemplate',ses+'template/bane-pilot'],
+      ['ses:CreateEmailIdentity',domain,{'aws:RequestTag/nightmail:owner':'nightmail','aws:RequestTag/nightmail:installation-id':connection,'aws:RequestTag/nightmail:purpose':'domain-identity','aws:RequestTag/nightmail:domain-claim':randomUUID(),'aws:TagKeys':tagKeys}],
+      ['ses:PutEmailIdentityMailFromAttributes',domain,own],['ses:DeleteEmailIdentity',domain,own],
+      ['servicequotas:RequestServiceQuotaIncrease',`arn:aws:servicequotas:${region}:${account}:ses/L-804C8AE8`,{'servicequotas:service':'ses'}],
+      ...['iam:GetRole','iam:ListRoleTags','iam:GetRolePolicy'].map(a=>[a,`arn:aws:iam::${account}:role/${stack}`,{'aws:RequestedRegion':'us-east-1'}] as Call),
+      // An update is prepared from Nightmail's own published templates; only the customer runs it.
+      ['cloudformation:DescribeStacks',`arn:aws:cloudformation:us-east-2:${account}:stack/${stack}/guid`,{'aws:RequestedRegion':'us-east-2'}],
+      ['cloudformation:CreateChangeSet',`arn:aws:cloudformation:us-east-2:${account}:stack/${stack}/guid`,{'aws:RequestedRegion':'us-east-2','cloudformation:TemplateUrl':`https://nightmail-byo-templates-${platform}.s3.us-east-2.amazonaws.com/byo/6.1.yaml`,'cloudformation:ChangeSetName':'nightmail-update-6-1'}],
+      ['ses:CreateContactList',ses+`contact-list/${prefix}-subscribers`,tagging],['ses:CreateConfigurationSet',ses+`configuration-set/${prefix}-notifications`,tagging],['sns:CreateTopic',`arn:aws:sns:${region}:${account}:${prefix}-inbound`,tagging],
+      ['ses:UpdateContactList',ses+`contact-list/${prefix}-subscribers`,mine],
+    ];
+    for(const [action,resource,context] of allowed)assert.ok(iamAllows(all,action,resource,{'aws:RequestedRegion':region,...context}),`${action} ${resource}`);
+    const refused:Call[]=[
+      ['sns:Subscribe',topic,{'sns:Protocol':'https','sns:Endpoint':'https://elsewhere.example/v1/events/ses'}],['sns:Subscribe',topic,{'sns:Protocol':'email','sns:Endpoint':'https://events.nightmail.dev/v1/events/ses'}],
+      ...['ses:CreateDedicatedIpPool','ses:PutDedicatedIpInPool','ses:PutDeliverabilityDashboardOption','ses:PutAccountVdmAttributes','ses:PutAccountSuppressionAttributes','ses:PutAccountSendingAttributes','ses:SetActiveReceiptRuleSet','ses:DeleteReceiptRuleSet','ses:ListSuppressedDestinations'].map(a=>[a,'*'] as Call),
+      ['ses:PutConfigurationSetVdmOptions',sets[0]!],['sns:AddPermission',topic],['ses:CreateDedicatedIpPool',ses+`dedicated-ip-pool/${prefix}-pool`],
+      ['ses:GetContactList',ses+'contact-list/customers'],['ses:DeleteConfigurationSet',ses+'configuration-set/customer-set'],['ses:SendEmail',ses+'configuration-set/customer-set'],['sns:DeleteTopic',`arn:aws:sns:${region}:${account}:customer-topic`],
+      ['ses:SendEmail',ses+'identity/someone@example.com',{'ses:ApiVersion':'2'}],['ses:SendEmail',domain,{'ses:ApiVersion':'2',...own,'aws:ResourceTag/nightmail:installation-id':`conn_${'ef'.repeat(16)}`}],
+      ['ses:SendEmail',domain,{'ses:ApiVersion':'2','ses:TenantName':'tenant'}],['ses:DeleteEmailIdentity',domain],['ses:CreateEmailIdentity',domain],
+      ['s3:GetObject','arn:aws:s3:::customer-bucket/key'],['iam:PassRole',`arn:aws:iam::${account}:role/${stack}`],['iam:GetRole',`arn:aws:iam::${account}:role/Admin`],['sts:AssumeRole',`arn:aws:iam::${account}:role/Admin`],['lambda:InvokeFunction','*'],
+      ['ses:GetAccount','*',{'aws:RequestedRegion':'cn-north-1'}],
+      ...([{'cloudformation:TemplateUrl':'https://elsewhere.s3.amazonaws.com/byo/6.1.yaml','cloudformation:ChangeSetName':'nightmail-update-6-1'},{'cloudformation:TemplateUrl':`https://nightmail-byo-templates-${platform}.s3.us-east-2.amazonaws.com/byo/6.1.yaml`,'cloudformation:ChangeSetName':'nightmail-update-6-1','cloudformation:RoleArn':`arn:aws:iam::${account}:role/Admin`}] as Record<string,string>[]).map(c=>['cloudformation:CreateChangeSet',`arn:aws:cloudformation:us-east-2:${account}:stack/${stack}/guid`,{'aws:RequestedRegion':'us-east-2',...c}] as Call),
+      ['cloudformation:ExecuteChangeSet',`arn:aws:cloudformation:us-east-2:${account}:stack/${stack}/guid`,{'aws:RequestedRegion':'us-east-2'}],['cloudformation:CreateChangeSet',`arn:aws:cloudformation:us-east-2:${account}:stack/OtherStack/guid`,{'aws:RequestedRegion':'us-east-2','cloudformation:TemplateUrl':`https://nightmail-byo-templates-${platform}.s3.us-east-2.amazonaws.com/byo/6.1.yaml`,'cloudformation:ChangeSetName':'nightmail-update-6-1'}],
+    ];
+    // A resource Nightmail didn't create is never changed, even under a matching name: untagged, another installation's, or another system's.
+    const foreign=[{},{...mine,'aws:ResourceTag/nightmail:installation-id':`conn_${'ef'.repeat(16)}`},{...mine,'aws:ResourceTag/nightmail:owner':'other-system'}];
+    for(const tags of foreign){
+      refused.push(...['ses:DeleteConfigurationSet','ses:PutConfigurationSetSuppressionOptions','ses:CreateConfigurationSetEventDestination','ses:UpdateConfigurationSetEventDestination','ses:PutConfigurationSetDeliveryOptions'].map(a=>[a,sets[0]!,tags] as Call),
+        ...['sns:DeleteTopic','sns:SetTopicAttributes','sns:Subscribe','sns:Publish'].map(a=>[a,topic,{...tags,'sns:Protocol':'https','sns:Endpoint':'https://events.nightmail.dev/v1/events/ses'}] as Call),
+        ['ses:DeleteContactList',ses+`contact-list/${prefix}-subscribers`,tags],['ses:TagResource',sets[0]!,{...tags,...tagging}],['sns:TagResource',topic,{...tags,...tagging}]);
+    }
+    // Creating needs this connection's tags; tags are never rewritten to another owner or removed.
+    const {['aws:RequestTag/nightmail:purpose']:_,...unlabelled}=tagging;
+    refused.push(['ses:CreateConfigurationSet',sets[0]!,{}],['sns:CreateTopic',topic,{...tagging,'aws:RequestTag/nightmail:installation-id':`conn_${'ef'.repeat(16)}`}],['ses:CreateConfigurationSet',sets[0]!,unlabelled],
+      ['ses:TagResource',sets[0]!,{...mine,...tagging,'aws:RequestTag/nightmail:installation-id':`conn_${'ef'.repeat(16)}`}],['sns:TagResource',topic,{...mine,...tagging,'aws:RequestTag/nightmail:owner':'other-system'}],
+      ['ses:UntagResource',sets[0]!,{...mine,'aws:TagKeys':['nightmail:installation-id']}],['sns:UntagResource',topic,{...mine,'aws:TagKeys':['nightmail:owner']}],
+      ['ses:CreateEmailTemplate',ses+`template/${prefix}-receipt`,tagging]);
+    for(const [action,resource,context] of refused)assert.equal(iamAllows(all,action,resource,{'aws:RequestedRegion':region,...context}),false,`${action} ${resource} ${JSON.stringify(context??{})}`);
+  });
+
+  test('BYO contract: every session the code asks for is allowed by every supported role template',async()=>{
+    const {byoSessionStatements}=await import('./src/byo-permissions.js'),{setupResources}=await import('./src/ses-setup.js');
+    const account='123456789012',connection=`conn_${'ab'.repeat(16)}`,region='eu-west-1',claim=randomUUID(),prefix=setupResources(connection,'byo').topicName.slice(0,-9);
+    const params:Record<string,string>={PlatformAccount:'009882681002','AWS::AccountId':account,'AWS::Region':'us-east-2',ResourcePrefix:prefix,ConnectionId:connection,WorkspaceId:`ws_${'cd'.repeat(16)}`,EventsHost:'events.nightmail.dev','AWS::StackName':'Nightmail-'+connection.slice(-20),ExternalId:'external'};
+    // A pattern in a session policy stands for the resources it names: check one of each.
+    const sample=(arn:string)=>arn.replace('identity/?*.??*','identity/example.com').replace(/configuration-set\/(bane|nightmail)-\*$/,'configuration-set/$1-0123456789abcdef0123-transactional');
+    const tags={owner:'nightmail','installation-id':connection,purpose:'domain-identity','domain-claim':claim};
+    const feedback=(kind:'Resource'|'Request')=>({[`aws:${kind}Tag/nightmail:owner`]:'nightmail',[`aws:${kind}Tag/nightmail:installation-id`]:connection,[`aws:${kind}Tag/nightmail:purpose`]:'ses-feedback'});
+    const own=Object.fromEntries(Object.entries(tags).map(([k,v])=>['aws:ResourceTag/nightmail:'+k,v])),create={...Object.fromEntries(Object.entries(tags).map(([k,v])=>['aws:RequestTag/nightmail:'+k,v])),'aws:TagKeys':Object.keys(tags).map(k=>'nightmail:'+k)};
+    // The request facts AWS adds: tags of the identity and the request for domain calls, and the subscription endpoint.
+    const context=(action:string,resource:string)=>({'aws:RequestedRegion':region,'ses:ApiVersion':'2','ses:OpenTrackingEnabled':'true','ses:ClickTrackingEnabled':'true',
+      ...(action==='sns:Subscribe'?{'sns:Protocol':'https','sns:Endpoint':'https://events.nightmail.dev/v1/events/ses'}:{}),
+      ...(resource.includes(':identity/')?{...(action==='ses:CreateEmailIdentity'?{}:own),...(['ses:CreateEmailIdentity','ses:TagResource'].includes(action)?create:{})}
+        // Nightmail's own configuration sets and topic carry this connection's tags from creation on.
+        :resource!=='*'?{...feedback('Resource'),...(['ses:CreateConfigurationSet','sns:CreateTopic','ses:TagResource','sns:TagResource'].includes(action)?{...feedback('Request'),'aws:TagKeys':['nightmail:owner','nightmail:installation-id','nightmail:purpose']}:{})}:{})});
+    const purposes=['scan','provision','cleanup','send','template','quota','verify','read','delete','mailfrom'] as const,templates=await byoTemplates();
+    assert.ok(templates.includes('byo-template.yaml'));
+    let checked=0;
+    for(const file of templates){
+      const role=byoRoleStatements(await byoTemplate(file,params,[region]));
+      for(const purpose of purposes)for(const s of byoSessionStatements(purpose,{region,account,connectionId:connection,domain:'example.com',template:'bane-pilot'}))
+        for(const action of s.Action)for(const resource of [s.Resource].flat().map(sample)){
+          checked++;assert.ok(iamAllows(role,action,resource,context(action,resource)),`${file}: the ${purpose} session's ${action} on ${resource} isn't allowed by the role`);
+        }
+    }
+    assert.ok(checked>=50*templates.length,'Every purpose contributes its calls.');
+  });
+
   test('inbound IAM confines receiving storage and BYO sending cannot use another installation\'s identities',async()=>{
     const {render}=await import(new URL('../infra/aws-shared/runtime-policies.mjs',import.meta.url).href),{load}=await import('js-yaml'),{readFile}=await import('node:fs/promises');
     const account='905840579680',docs=render('--fresh',{account,origin:'https://dev.bane.mx'}),all=(Object.values(docs) as Json[]).flatMap(d=>d.Statement);
@@ -24196,20 +24341,17 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       'ses:CreateConfigurationSet','ses:DeleteConfigurationSet','ses:PutConfigurationSetSuppressionOptions','ses:CreateConfigurationSetEventDestination','ses:UpdateConfigurationSetEventDestination','ses:DeleteConfigurationSetEventDestination','ses:PutConfigurationSetSendingOptions'];
     for(const s of all.filter(s=>s.Effect==='Allow'))for(const action of [s.Action].flat())assert.ok(!forbidden.some(f=>new RegExp('^'+action.replaceAll('*','.*').replaceAll('?','.')+'$','i').test(f)),`runtime grants ${action}`);
     const template=await readFile(new URL('./byo-template.yaml',import.meta.url),'utf8'),resources=(load(template.replace(/!(?:Ref|Sub|If|Equals|Not|GetAtt|Select|Split|Join)\b/g,'')) as Json).Resources;
-    const byo=resources.ReceivingPolicy.Properties.PolicyDocument.Statement;
-    const sending=resources.BaneRole.Properties.Policies.find((p:Json)=>p.PolicyName==='Sending').PolicyDocument.Statement;
+    // 6.0 has no receiving permissions at all: classic receipt rules can't be limited to Nightmail's own.
+    assert.deepEqual(Object.keys(resources),['Role']);
+    const sending=resources.Role.Properties.Policies.find((p:Json)=>p.PolicyName==='Sending').PolicyDocument.Statement;
     const grants=sending.filter((s:Json)=>s.Effect==='Allow' && [s.Action].flat().includes('ses:SendEmail')) as Json[];
-    const identity='arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*',set='arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-';
-    assert.deepEqual(grants.flatMap(g=>g.Resource).sort(),[identity,set+'transactional',set+'marketing'].sort());
-    for(const g of grants){
-      const identityGrant=[g.Resource].flat().includes(identity);
-      assert.deepEqual(g.Condition.StringEquals,{'ses:ApiVersion':'2'});
-      // Imported identities carry no Bane tags; tagged ones must belong to this installation.
-      assert.deepEqual(g.Condition.StringEqualsIfExists,identityGrant?{'aws:ResourceTag/bane:owner':'bane','aws:ResourceTag/bane:installation-id':'ConnectionId','aws:ResourceTag/bane:purpose':'domain-identity'}:undefined);
-      assert.deepEqual(g.Condition.Null,{'ses:TenantName':'true','ses:MultiRegionEndpointId':'true'});
-      if(identityGrant)assert.deepEqual([g.Resource].flat(),[identity]); // Don't apply identity tags to configuration sets.
-    }
-    for(const [rows,bucket] of [[all,`arn:aws:s3:::bane-${account}-mail-us-east-2`],[byo,'arn:aws:s3:::${ResourcePrefix}-mail-${!aws:RequestedRegion}']] as [Json[],string][]){
+    const identity='arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*';
+    // SendEmail reaches domains and Nightmail's own configuration sets, never another installation's.
+    assert.deepEqual(grants.flatMap(g=>g.Resource),[identity,'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-*']);
+    for(const g of grants){assert.deepEqual(g.Condition.StringEquals,{'ses:ApiVersion':'2'});assert.deepEqual(g.Condition.Null,{'ses:TenantName':'true','ses:MultiRegionEndpointId':'true'});}
+    // Imported identities carry no Nightmail tags; tagged ones must belong to this installation.
+    assert.deepEqual(grants[0].Condition.StringEqualsIfExists,{'aws:ResourceTag/nightmail:owner':'nightmail','aws:ResourceTag/nightmail:installation-id':'ConnectionId','aws:ResourceTag/nightmail:purpose':'domain-identity'});
+    for(const [rows,bucket] of [[all,`arn:aws:s3:::bane-${account}-mail-us-east-2`]] as [Json[],string][]){
       assert.ok(rows.some(s=>s.Effect==='Allow' && s.Action==='s3:ListBucket' && s.Resource===bucket && s.Condition.StringEquals['s3:prefix']==='staging/'));
       assert.ok(rows.some(s=>s.Effect==='Allow' && s.Action==='s3:PutObject' && s.Resource===bucket+'/quarantine/?*'));
       assert.ok(rows.some(s=>s.Action.includes('s3:AbortMultipartUpload') && s.Effect==='Allow' && s.Resource.startsWith(bucket+'/workspaces/') && s.Resource.endsWith('/raw/?*.eml')));
@@ -24228,13 +24370,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     assert.equal(commands.length,2);assert.equal(store.rawKey,`workspaces/${w}/raw/kept/${mid}.eml`);
     const hosted=Object.values(render('--fresh',{account,origin:'https://dev.bane.mx'}) as Record<string,{Statement:IamStatement[]}>).flatMap(doc=>doc.Statement);
     const cases:[IamStatement[],string][]=[[hosted,`bane-${account}-mail-${region}`]];
-    for(const file of ['byo-template.yaml','byo-template-v4.yaml']){
+    for(const file of ['byo-template-v4.yaml']){
       const src=await readFile(new URL(file,import.meta.url),'utf8'),params:Record<string,string>={ResourcePrefix:prefix,WorkspaceId:w,'AWS::Region':region,'!aws:RequestedRegion':region,'AWS::AccountId':account};
       const cfn=load(src.replace(/\$\{([^}]+)\}/g,(m,k:string)=>params[k]??m).replaceAll("!Ref 'AWS::AccountId'",JSON.stringify(account)).replaceAll('!Ref ReceivingRegions','[us-east-2]').replace(/!(?:Ref|Sub|If|Equals|Not|GetAtt|Select|Split|Join)\b/g,'')) as Json;
       const policy=cfn.Resources.KeptReceivingV1.Properties.PolicyDocument;
       assert.ok(JSON.stringify(policy).length<=6144);assert.equal(cfn.Outputs.KeptReceivingPolicy.Value,`kept-v1:${w}`);
       // Include the old receiving permissions as well, not just the new grant.
-      const legacy=file==='byo-template.yaml'?cfn.Resources.ReceivingPolicy.Properties.PolicyDocument:cfn.Resources.BaneRole.Properties.Policies.find((p:Json)=>Array.isArray(p)&&p[1]?.PolicyName==='Receiving')[1].PolicyDocument;
+      const legacy=cfn.Resources.BaneRole.Properties.Policies.find((p:Json)=>Array.isArray(p)&&p[1]?.PolicyName==='Receiving')[1].PolicyDocument;
       cases.push([[...legacy.Statement,...policy.Statement],bucket]);
     }
     for(const [policy,b] of cases){
@@ -24244,27 +24386,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     }
   });
 
-  test('attachment keys built by the code are authorized by the hosted, BYO and self-hosted IAM policies, and nothing wider (N1)',async()=>{
-    const {receivedAttachmentKey,sentAttachmentKey,mailboxResources}=await import('./src/mailbox-setup.js'),{digest}=await import('./src/core.js'),{load}=await import('js-yaml');
+  test('attachment keys built by the code are authorized by the hosted and self-hosted IAM policies, and nothing wider (N1)',async()=>{
+    const {receivedAttachmentKey,sentAttachmentKey,mailboxResources}=await import('./src/mailbox-setup.js'),{digest}=await import('./src/core.js'),account='123456789012';
     const wid=`ws_${'a1'.repeat(16)}`,other=`ws_${'c3'.repeat(16)}`,msg=`msg_${(await digest('fixture')).slice(0,32)}`,matt=`matt_${(await digest(`${msg}:0`)).slice(0,32)}`,batch=await digest('batch');
     const received=receivedAttachmentKey(wid,msg,batch,matt),sent=sentAttachmentKey(wid,msg,matt);
     assert.match(received,/^workspaces\/ws_[0-9a-f]{32}\/att\/msg_[0-9a-f]{32}\/[0-9a-f]{64}\/matt_[0-9a-f]{32}$/);
     const none={get:false,put:false,orphan:false,otherTag:false},near=[`workspaces/${wid}/att/${msg}/${batch}/x/${matt}`,`workspaces/${wid}/att/${msg}/${batch.slice(1)}/${matt}`,`workspaces/${wid}/raw/${msg}/${batch}/${matt}`,receivedAttachmentKey(other,msg,batch,matt).replace(other,'ws_x')];
     for(const key of [received,sent])assert.deepEqual(await hostedAttachmentAccess(key),{get:true,put:true,orphan:true,otherTag:false},key);
     for(const key of near)assert.deepEqual(await hostedAttachmentAccess(key),none,key);
-    // BYO v5: resolve the CloudFormation parameters, and the IAM policy variable the way a request in Ohio sees it.
-    const account='123456789012',connection=`conn_${'b2'.repeat(16)}`,{bucket,prefix}=mailboxResources(connection,'us-east-2');
-    assert.equal(bucket,`${prefix}-mail-us-east-2`);
-    const template=await readFile(new URL('./byo-template.yaml',import.meta.url),'utf8'),params:Record<string,string>={ResourcePrefix:prefix,WorkspaceId:wid,'AWS::AccountId':account};
-    const receiving=(region?:string)=>(load(template.replace(/!Sub '([^']*)'/g,(_,s:string)=>JSON.stringify(s.replace(/\$\{(!?)([^}]+)\}/g,(m,bang:string,k:string)=>bang?(region??'${'+k+'}'):params[k]??m)))
-      .replace(/!Ref '?(ConnectionId|AWS::AccountId)'?/g,(_,k:string)=>JSON.stringify(k==='ConnectionId'?connection:account)).replace(/!Ref (?:ReceivingRegions|AccountRequestRegions)/g,'[us-east-2]')
-      .replace(/!(?:Ref|If|Equals|Not|GetAtt)\b/g,'')) as Json).Resources.ReceivingPolicy.Properties.PolicyDocument;
-    const byo=receiving('us-east-2').Statement as IamStatement[],arn=(key:string)=>`arn:aws:s3:::${bucket}/${key}`;
-    assert.deepEqual(attachmentAccess(byo,arn(received),account),{get:true,put:true,orphan:true,otherTag:false});
-    assert.deepEqual({...attachmentAccess(byo,arn(sent),account),orphan:false},{get:true,put:true,orphan:false,otherTag:false});
-    for(const key of near)assert.deepEqual(attachmentAccess(byo,arn(key),account),none,key);
-    assert.deepEqual(attachmentAccess(byo,arn(received.replace(wid,other)),account),none,'Another workspace in the same BYO account');
-    assert.ok(JSON.stringify(receiving()).length<=6144,'The BYO receiving managed policy must stay within the 6,144-character IAM quota.');
     // Self-hosted: one installation's bucket, any object (the account and bucket prefix bound it).
     const selfHosted=JSON.parse((await readFile(new URL('./iam-policy.json',import.meta.url),'utf8')).replaceAll('YOUR_AWS_ACCOUNT_ID',account)).Statement as IamStatement[],own=mailboxResources(randomUUID(),'us-east-2').bucket;
     for(const key of [received,sent])assert.deepEqual(attachmentAccess(selfHosted,`arn:aws:s3:::${own}/${key}`,account),{get:true,put:true,orphan:true,otherTag:true},key);

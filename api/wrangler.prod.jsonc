@@ -28,8 +28,8 @@
     // The earlier origin: still served, its /mcp audience valid for tokens minted there, and bane.mx stays a platform
     // domain (its adopted claim keeps receiving support@ and friends). Removed by the cutover.
     "PREVIOUS_PUBLIC_URLS": "https://bane.mx",
-    // SNS keeps delivering to bane.mx: BYO stacks' IAM conditions pin https://bane.mx/v1/events/ses, and the pool's
-    // subscriptions (infra/pulumi, stage.origin) stay on it. bane.mx serves this path for good.
+    // SNS keeps delivering to bane.mx: the pool's subscriptions (infra/pulumi, stage.origin) stay on it, so bane.mx serves
+    // this path for good. Connected accounts (BYO) deliver to BYO_EVENTS_ORIGIN instead.
     "SES_FEEDBACK_URL": "https://bane.mx/v1/events/ses",
     "ACCOUNT_ISSUER": "https://account.anoma.ly",
     "ACCOUNT_REQUIRED_ACR": "urn:anomaly:acr:google",

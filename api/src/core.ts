@@ -96,6 +96,8 @@ export interface Config {
   byoTemplateUrl?: string;
   byoV2?: boolean;
   byoV5TemplateUrl?: string;
+  /** BYO_EVENTS_ORIGIN: where connected accounts' SNS topics deliver. */
+  byoEventsOrigin?: string;
   domainConnect?: { privateKey: import('node:crypto').KeyObject; keyId: string };
   /** Regions offered for MX shared sending; defaults to us-east-2. */
   sharedRegions?: string[];
