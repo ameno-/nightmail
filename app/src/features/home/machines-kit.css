@@ -1,0 +1,20 @@
+/* The station kit's pictures for the factory under the hero (machines.css lays it out): each piece rendered once in the
+   hero's materials and light (kit/, 2x files drawn at half their pixels), inlined here (vite.config.ts), and this file
+   put on the page once the hero has been painted (machines.tsx). Never turned or mirrored: the light is baked in, hence
+   two elbows. Housings are 9-sliced with round (a stretched one smears its concrete). What the kit leaves to the page
+   is the shadow: one drop-shadow over each machine's whole run of pipe, so its joints don't show (a housing's is a
+   box-shadow in machines.css: they are rectangles). Nothing here takes room. */
+.mx { background: url('./kit/wall.webp') 0 0 / 288px 288px; }
+.mx-floor { background: url('./kit/floor.webp') 0 0 / 192px 48px repeat-x; }
+.mx-screen { border-image: url('./kit/housing-screen.webp') 64 fill / 32px round; }
+.mx-base { border-image: url('./kit/housing.webp') 64 fill / 32px round; }
+.mx-plate { background: none; border-image: url('./kit/label-plate.webp') 20 fill / 10px stretch; }
+.mx-lamp { background: url('./kit/lamp-on.webp') 0 0 / 32px 32px; }
+.mx-feet i { background: url('./kit/foot.webp') 0 0 / 64px 20px; }
+.mx-pipes { filter: drop-shadow(4px 9px 5px rgb(0 0 0 / 50%)); }
+.mx-run, .mx-out { background: url('./kit/pipe-h.webp') 0 0 / 128px 16px repeat-x; }
+.mx-elbow { background: url('./kit/pipe-elbow-sw.webp') 0 0 / 32px 32px; }
+.mx-storey[data-side='r'] .mx-elbow { background-image: url('./kit/pipe-elbow-se.webp'); }
+.mx-drop { background: url('./kit/pipe-v.webp') 0 0 / 16px 128px repeat-y; }
+.mx-collar { background: url('./kit/pipe-collar-h.webp') 0 0 / 12px 20px; }
+.mx-collar-v { background: url('./kit/pipe-collar-v.webp') 0 0 / 20px 12px; }

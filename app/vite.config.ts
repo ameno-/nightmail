@@ -109,7 +109,8 @@ const commercialPage = (): Plugin => {
 
 export default defineConfig({
   define: { __NIGHTMAIL_BUILD__: JSON.stringify(buildSha) },
-  build: { rolldownOptions: { input: { index: fileURLToPath(new URL('./index.html', import.meta.url)), commercial: commercial.script } } },
+  // (The homepage's station kit is inlined whatever its size: it is one lazily loaded stylesheet, features/home/machines.tsx.)
+  build: { assetsInlineLimit: file => file.includes('/features/home/kit/') || undefined, rolldownOptions: { input: { index: fileURLToPath(new URL('./index.html', import.meta.url)), commercial: commercial.script } } },
   plugins: [slimReactEmail, legalMarkdown, react(), fileHeaders(), publicOrigin, brandedBootScript(), commercialPage()],
   server: {
     host: '127.0.0.1', port: 5173, strictPort: true,

@@ -154,13 +154,13 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   // cannon's breech. `x, y, z` is where the cannon's base stands.
   // (On a wide page it stands clear of the riser as it is seen.)
   const made = gun(U, lw, lh, tubeR), cannon = { x: phone ? .64 * Xw : Xc + .2 * U + riser + 12 + 5.4 * made.cs - DX * made.z, y: phone ? yTop : 0, ...made }
-  // (The outbound tube runs up the page behind the appliances that lean right and beside those that lean left;
-  // sorter-stations.tsx places them from the same numbers.)
+  // (Where the outbound tube goes over the lip: where it ran up the page when the column under the machine held a
+  // row of appliances, clear of each one's edge. It stays there, so the machine is drawn as it was.)
   const room = inner - 2 * (phone ? 20 : 74), widest = Math.min(446, room), lean = phone ? 0 : Math.min(46, Math.max(0, (room - widest) / 2)), boxDx = -DX * (phone ? 40 : 60)
   let out = -widest / 2 + lean + boxDx / 2 + Math.min(408, room) - (phone ? 10 : 26)
   if (!phone) for (const w of [446, 430, 420, 384]) { const edge = -widest / 2 - lean + boxDx / 2 + Math.min(w, room); if (Math.abs(out - edge) < 18) out = edge - 18 }
   // The renderer's canvas runs on this far below the hero, under the top of the next section: what the burst throws
-  // past the slab falls on down the page and dwindles there (it is gone before it reaches the first appliance), and
+  // past the slab falls on down the page and dwindles there (it is gone before it reaches the first machine), and
   // is never cut off at the hero's edge.
   const ext = phone ? 84 : 260
   // A phone's three tubes hang from under the slab's lip: the two wide ones the mail goes down, and the outbound main
@@ -222,7 +222,7 @@ export function plan(W: number, fold: number, inset: Inset = { left: 0, right: 0
   // price's, and half way between the price and the frame's top. `x, y` is its left end on its baseline, `cap` its cap
   // height (its width is 10.8 of them: lib/marks.ts), `z` the plane its face is in, proud of the frame by `depth`.
   const name = { x: -COLS * U / 2, y: yMan - over * V / 2 - COLS * U / 21.6, cap: COLS * U / 10.8, z: -.6 * U, depth: .6 * U }
-  return { phone, routes, fit, pods, eject, tight, name, W, H, fold, inset, ext, cannon, out: Math.round(out), room, widest, lean, ox, oy, sx, U, V, side, over, under, Xw, Xc, Xb, D, base, band, wall, manifold, slot, cavity, fascia, yBand, yWall, yMan, ySlot, yCav, yFas, yTop, P, lanes, label, lw, lh, cavD, zL, hang, hangZ, tubeR, tubes, post, zt, zProud, riser, fan, heads, drops, mouthRoom, hung, front, lip, floor, zLip, zOver, zBack, slabX, hopper: hopperU * U, cta, consent, plate, facts, tally, readout, fromMax, subjectMax, gauge, lamps }
+  return { phone, routes, fit, pods, eject, tight, name, W, H, fold, inset, ext, cannon, out: Math.round(out), ox, oy, sx, U, V, side, over, under, Xw, Xc, Xb, D, base, band, wall, manifold, slot, cavity, fascia, yBand, yWall, yMan, ySlot, yCav, yFas, yTop, P, lanes, label, lw, lh, cavD, zL, hang, hangZ, tubeR, tubes, post, zt, zProud, riser, fan, heads, drops, mouthRoom, hung, front, lip, floor, zLip, zOver, zBack, slabX, hopper: hopperU * U, cta, consent, plate, facts, tally, readout, fromMax, subjectMax, gauge, lamps }
 }
 
 /** A box on the machine's front, as the page places it: left and top in the scene, width and height. */

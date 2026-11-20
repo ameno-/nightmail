@@ -9,7 +9,7 @@ import { DX, DY, onFront, plan, type Plan, type Rect } from './sorter/plan'
 import { drawStill } from './sorter/still'
 import { toneVars } from './sorter/tones'
 import { COLS } from './sorter/price'
-import { Stations } from './sorter-stations'
+import { Machines } from './machines'
 import type { Hooks, Letter, Phase, Sorter } from './sorter/engine'
 import './sorter-home.css'
 
@@ -18,8 +18,8 @@ const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').match
 // The homepage: the page is a mail-sorting machine. Letters fall into its hopper, are read, and leave by the
 // tube for wherever they are routed; the price of a thousand of them is spelt by the thousand letters filed in its
 // sorting frame. It runs faster and faster until it bursts, and the letters settle where they fall. Below it the tubes
-// run on down the page to each place mail can go. The price is api/src/billing/money.ts's rate, the response time the
-// API's acceptance time as measured on 2026-11-15.
+// go down into the floor, and the factory goes on down the page (machines.tsx). The price is api/src/billing/money.ts's
+// rate, the response time the API's acceptance time as measured on 2026-11-15.
 const SEEN = 'sorter.seen'
 /** The seven routes by the names the product uses (a phone's machine has a lane for four of them: sorter/plan.ts); a scam's route is the laser. */
 export const LANE_NAMES = ['Threads', 'Endpoints', 'Agents', 'Inbox', 'IMAP', 'Rules', 'Campaigns'] as const
@@ -223,7 +223,7 @@ export function SorterHome({ start, notice }: HomeProps) {
         </>}
         {notice && <div className="srt-notice">{notice}</div>}
       </section>
-      <Stations plan={p} start={start} />
+      <Machines plan={p} start={start} />
     </main>
   </div>
 }
