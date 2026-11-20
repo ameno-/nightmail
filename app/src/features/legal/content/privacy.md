@@ -31,7 +31,7 @@ Nightmail handles personal data in two different roles.
 | **Activity (audit trail)** | Who did what in a workspace (for example, created a key or changed a role), when, the reason, the request ID, your network (shortened to the first three parts of an IPv4 address, or a /48 for IPv6) and browser family. Never secrets or message content. | Our systems |
 | **Billing** | Stripe customer ID; card brand, last four digits, expiry and fingerprint; top-ups, refunds, disputes, balance and usage history. **Stripe holds your full card number; we never see it.** | You and Stripe |
 | **Usage** | How much each workspace sends, receives and stores, and its sender score and standing | Our systems |
-| **Support** | Your support request: the page you were on, recent request IDs, your message, and whether you allowed support to read message content | You |
+| **Support** | Your support conversations by chat or email, with the AI support agent or with staff: your messages and screenshots, the page you were on, recent request IDs, notes support keeps about you between conversations, and whether you allowed support to read message content | You and our support agent |
 | **Notices** | Emails we send you about billing, limits, standing and these policies | Our systems |
 | **Dashboard usage** | Pages you open, what you click, dialogs, form errors and error messages in the dashboard, tied to your account and workspace IDs. Never what you type, email addresses or message content. Nothing is stored on your device, and nothing is recorded when your browser sends Do Not Track or Global Privacy Control. Kept 400 days and used to improve the product. | Your browser |
 | **Technical logs** | Request logs (method, path, status, timing and error codes), and connection logs from the IMAP and SMTP gateway, which may include the connecting IP address. Request logs are kept about 3 days; gateway logs 30 days. | Our systems |
@@ -66,7 +66,7 @@ Customers can send their data to places they choose: their webhooks, Slack or Di
 | Provide the service: sign you in, run workspaces, send and receive mail as customers instruct | Account data; customer mail as processor | Contract |
 | Billing: take payments, keep the balance, send receipts and notices, handle refunds and disputes | Billing and usage data | Contract; legal obligation (tax and accounting records) |
 | Security, fraud and abuse prevention: spam screening, sender scores and limits, card-fraud checks, investigating abuse reports | Usage data; screening results; message metadata and content as screened ([section 5](#automated-screening-and-ai)) | Legitimate interests (protecting recipients, customers and our infrastructure) |
-| Support | Account data; message content only with your permission | Contract; consent for message content |
+| Support, including the AI support agent | Account data; support conversations; message content only with your permission | Contract; consent for message content |
 | Service and policy notices | Contact details | Contract; legitimate interests |
 | Improve the dashboard: find where people get stuck or run into errors | Dashboard usage | Legitimate interests (making the product easier to use) |
 | Improve the service and publish aggregate statistics (for example, total mail volume on our homepage) | Aggregated usage | Legitimate interests. Aggregates don't identify anyone. |
@@ -107,12 +107,21 @@ The classifier is **Jev**, from **TypeSafe AI**. Nightmail calls TypeSafe's API 
 - **Anomaly doesn't use customer mail or AI decision questions to train AI models.**
 - **TypeSafe has confirmed to us in writing that it doesn't retain or train on** the content Nightmail sends to it.
 
+### 5.6 AI support agent
+
+- Support email and the dashboard's **Help** chat are answered first by an AI agent that runs on **Claude**, a model from **Anthropic**, through Anomaly's own model gateway.
+- To answer, Anthropic receives your messages and screenshots, what the agent looks up in your account ([section 6](#support-access)), and the notes support keeps about you. It gets message content only with your permission.
+- The agent's answers can be wrong. You can ask for a person at any time: say so, or use **Talk to a person** in the chat.
+- **Neither Anomaly nor Anthropic uses support conversations to train AI models.**
+
 ## 6. Support access
 
-- Support can't browse your workspace. A support person gets access only for a specific request, after we've confirmed who you are (through the dashboard, or a verified email).
-- Access is **read-only**, expires within **2 hours**, and is limited to the workspaces you belong to.
-- **Message content only with your permission.** When you use "Contact support" in the dashboard, a checkbox (off by default) lets support read message content for that one request, in that one workspace. A request by email never includes message content.
-- Without your permission, support sees settings, domains, delivery events, error codes, webhook delivery status (not payloads or URLs), standing, billing and your workspace's activity trail. Never keys, passwords or webhook secrets.
+- **An AI agent answers first.** Mail to [support@nightmail.dev](mailto:support@nightmail.dev) and the dashboard's **Help** chat go first to our AI support agent ([section 5.6](#ai-support-agent)).
+- **It confirms who you are first.** In the dashboard, Help knows you're signed in. By email, it checks that the message really came from your account's address. Until then, it looks at no account.
+- **It works with your own access.** It sees only the workspaces you belong to, never another customer's, and only while your conversation is open. It reads; it never changes anything in your workspace on its own. A change happens only after you confirm it, signed in to the dashboard.
+- **Message content only with your permission.** A checkbox in "Contact support", or a prompt in the Help chat, lets support read message content for that one conversation, in that one workspace. Both are off until you choose. A request by email never includes message content.
+- Without your permission, support sees settings, domains, the addresses, subjects and status of mail, delivery events, error codes and failed API requests, webhook delivery status (not payloads or URLs), standing, billing, campaigns (not their content) and your workspace's activity trail. Never keys, passwords or webhook secrets.
+- **People at Anomaly.** Support staff can read support conversations and the notes support keeps, and can step in to answer you themselves. A staff member who needs to look at your workspace gets read-only access for your request, limited to the workspaces you belong to, that expires within **2 hours**.
 - Your workspace's **Activity** page shows "Nightmail support viewed this workspace" with the request. Every support read is logged and kept 90 days.
 - Any other access to systems that hold message content is limited to Anomaly personnel who need it to run, secure or repair Nightmail.
 
@@ -142,6 +151,9 @@ Nightmail stores and processes data mainly in the **United States**. Cloudflare 
 | Contacts, lists, consent and suppression records | Until the customer deletes them. Unsubscribe and suppression records may be kept after a contact is deleted so the opt-out keeps working. |
 | Routing and rule version history | Up to 1 year |
 | Audit trail | 1 year; billing and payment events 7 years; support reads 90 days |
+| Support conversations (messages, screenshots and what the agent looked up) | 90 days after the conversation ends. Email to support@ also stays in our support mailbox until we delete it. |
+| Support tickets, and each conversation's summary | 1 year after the ticket is resolved or the conversation is closed |
+| Notes support keeps about you | Until deleted; support keeps the latest 50 |
 | Billing ledger and payment records | 7 years, including after a workspace is closed |
 | Stripe webhook events | 90 days |
 | Sign-in attempts | 30 days; refused sign-in requests 90 days |
@@ -159,7 +171,7 @@ When a workspace is closed, we delete its data as described in the [Terms of Ser
 - Webhook secrets and endpoint URLs are encrypted in the database. API keys and support tokens are stored as hashes.
 - Customers' data is separated by workspace in every database query and storage path.
 - The audit trail can't be changed or deleted before its retention ends, even by administrators.
-- Support access is short-lived, read-only, limited to one customer, and logged.
+- Support access, by the AI agent or a person, is limited to the workspaces of the person it's helping and lasts only while their request is open (for a person, at most 2 hours). It reads, changes nothing without that person's confirmation, and is logged.
 
 We'll notify affected customers and authorities of a personal data breach as the law requires.
 
