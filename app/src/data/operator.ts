@@ -29,6 +29,8 @@ export type FreeInput = OperatorWhy & { free: boolean; until?: string | null }
 export type TimelineKind = 'standing' | 'limit' | 'quarantine' | 'release' | 'tenant' | 'operator' | 'score' | 'audit' | 'bounces' | 'rejection'
 export interface OperatorTimelineItem { at: string; kind: TimelineKind; title: string; detail: unknown }
 export interface OperatorAction { at: string; workspaceId: string; action: string; operatorId: string | null; via: string | null; reason: string | null; ticketRef: string | null; requestId: string | null; before: unknown; after: unknown; details: unknown }
+/** One address on the waitlist: a verified sign-in nothing admitted yet (api/src/account-login.ts). */
+export interface WaitlistEntry { email: string; name: string | null; attempts: number; firstAt: string; lastAt: string }
 export type OperatorReceipt = { ok: true; version: number | null; step: string | null }
 /** Every mutation carries why (10–1000 characters) and optionally the support ticket. */
 export type OperatorWhy = { reason: string; ticketRef?: string }
@@ -59,6 +61,10 @@ export const operatorApi = {
   actions: async (input: { workspaceId?: string; cursor?: string }, signal?: AbortSignal) => {
     const page = await request<{ data: OperatorAction[]; nextCursor: string | null }>(`${base}/actions${query({ workspaceId: input.workspaceId, cursor: input.cursor, limit: 50 })}`, { signal })
     return { items: page.data, nextCursor: page.nextCursor }
+  },
+  waitlist: async (input: { q?: string; cursor?: string; limit?: number }, signal?: AbortSignal) => {
+    const page = await request<{ data: WaitlistEntry[]; nextCursor: string | null; total: number }>(`${base}/waitlist${query({ q: input.q?.trim(), cursor: input.cursor, limit: input.limit ?? 100 })}`, { signal })
+    return { items: page.data, nextCursor: page.nextCursor, total: page.total }
   },
   pause: (workspaceId: string, input: OperatorWhy, guard: OperatorGuard) => write(`/workspaces/${id(workspaceId)}/pause`, 'POST', why(input), guard),
   liftGrowth: (workspaceId: string, input: OperatorWhy, guard: OperatorGuard) => write(`/workspaces/${id(workspaceId)}/growth/lift`, 'POST', why(input), guard),

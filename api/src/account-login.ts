@@ -12,6 +12,8 @@ const verifiedEmail = z.email().max(320);
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
 class AuthenticationMethodRequired extends Error {}
 class NotAdmitted extends Error { constructor(readonly reason: string) { super(reason); } }
+/** A refused hosted sign-in whose verified address is now on the waitlist: the refusal screen names it. */
+class Waitlisted extends Error { constructor(readonly email: string) { super('waitlist'); } }
 
 function loginIssue(error: unknown, requiredAcr?: string) {
   const issuerError = error instanceof oidc.AuthorizationResponseError || error instanceof oidc.ResponseBodyError ? error.error : undefined;
@@ -121,6 +123,15 @@ async function recordAttempt(runtime: Runtime, claims: oidc.IDToken, upstream: P
       name=excluded.name,outcome=excluded.outcome,attempts=nightmail_signin_attempts.attempts+1,last_at=now()`).catch(() => {});
 }
 
+// The waitlist (migration 366): a verified address nothing admitted, one row per address, every attempt counted. An
+// address that is already a verified user's isn't added. True when the address is on it now.
+async function joinWaitlist(runtime: Runtime, email: string, name: string | null) {
+  const { rowCount } = await runtime.db.execute(sql`INSERT INTO nightmail_waitlist(email,name) SELECT lower(${email}),${name}
+    WHERE NOT EXISTS (SELECT FROM nightmail_users WHERE email_verified AND lower(email)=lower(${email}))
+    ON CONFLICT(email) DO UPDATE SET name=coalesce(excluded.name,nightmail_waitlist.name),attempts=nightmail_waitlist.attempts+1,last_at=now()`);
+  return !!rowCount;
+}
+
 // One retry when the server asks for a DPoP nonce: the handle stored it from the refusal.
 async function retryDPoPNonce<T>(attempt: () => Promise<T>) {
   try { return await attempt(); } catch (error) { if (!oidc.isDPoPNonceError(error)) throw error; return attempt(); }
@@ -219,9 +230,17 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   } catch (error) {
     if (!(error instanceof NotAdmitted)) throw error;
     await recordAttempt(runtime, claims, upstream, address, error.reason);
+    // Hosted, and no invitation: the verified address joins the waitlist, and the refusal says we'll email it at launch.
+    // Without a verified address, or when the write fails, nothing is promised.
+    if (error.reason === 'not_approved' && runtime.config.multiTenant && emailAtLogin) {
+      const name = [claims.name, profile.name].find((value): value is string => typeof value === 'string' && value.trim() !== '')?.trim().slice(0, 200) ?? null;
+      if (await joinWaitlist(runtime, emailAtLogin, name).catch(() => false)) throw new Waitlisted(emailAtLogin.toLowerCase());
+    }
     throw loginFailed();
   }
   await recordAttempt(runtime, claims, upstream, address, admitted);
+  // Admitted with a verified address: nothing is left to tell it at launch.
+  if (emailAtLogin && runtime.config.multiTenant) await runtime.db.execute(sql`DELETE FROM nightmail_waitlist WHERE email=lower(${emailAtLogin})`).catch(() => {});
   return {session, slot, userId, returnUrl:returnUrl.href};
 }
 
@@ -383,6 +402,7 @@ export async function accountBrowserRoute(c: Ctx) {
       setCookie(c,cookieName(runtime,slotName(slot)),session,cookieOptions(runtime,SESSION_SECONDS));
       // The account just signed in becomes this browser's default, and the page it returns to opens as it.
       setCookie(c,cookieName(runtime,'account'),userId,cookieOptions(runtime,SESSION_SECONDS));
+      if (cookieValue(c.req.raw.headers,cookieName(runtime,'waitlist')) !== null) clearCookie(c,'waitlist');
       const target = new URL(returnUrl);
       target.searchParams.set('account', userId);
       // A signed-out page's analytics session (docs/analytics.md): linked to the account here, and never shown to the browser.
@@ -393,12 +413,14 @@ export async function accountBrowserRoute(c: Ctx) {
       }
       return c.redirect(target.href,303);
     } catch (error) {
-      const issue = error instanceof AccountLimit ? {reason:'account_limit'} : loginIssue(error, runtime.config.accountClient?.requiredAcr);
+      const issue = error instanceof AccountLimit ? {reason:'account_limit'} : error instanceof Waitlisted ? {reason:'waitlist'} : loginIssue(error, runtime.config.accountClient?.requiredAcr);
+      // The waitlist screen names the address it joined: readable by the page, for as long as a sign-in cookie lives.
+      if (error instanceof Waitlisted) setCookie(c,cookieName(runtime,'waitlist'),error.email,{...cookieOptions(runtime,600),httpOnly:false});
       // What failed, never a token or a claim: the error class, the issuer's error code and the library's message.
       const failure = error as { name?: string; error?: unknown; status?: unknown; message?: unknown };
       log('warn', { code: 'SIGN_IN_DENIED', reason: issue?.reason ?? (error instanceof ApiError ? error.code : 'error'), errorType: failure?.name,
         issuerError: typeof failure?.error === 'string' ? failure.error.slice(0, 80) : undefined, issuerStatus: typeof failure?.status === 'number' ? failure.status : undefined,
-        detail: error instanceof ApiError || error instanceof AccountLimit ? undefined : String(failure?.message ?? '').slice(0, 200) });
+        detail: error instanceof ApiError || error instanceof AccountLimit || error instanceof Waitlisted ? undefined : String(failure?.message ?? '').slice(0, 200) });
       // An account added in a popup reports back to the page that opened it; every other failure lands on the homepage,
       // where a visitor's sign-in starts, with what went wrong.
       const back = started && new URL(started).pathname === POPUP_PATH ? new URL(started) : new URL(`${origin}/`);

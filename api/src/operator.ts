@@ -37,6 +37,7 @@ const Action = z.object({ at: z.string(), workspaceId: z.string(), action: z.str
   requestId: z.string().nullable(), before: z.unknown().nullable(), after: z.unknown().nullable(), details: z.unknown() }).openapi('OperatorAction');
 const TimelineItem = z.object({ at: z.string(), kind: z.enum(['standing', 'limit', 'quarantine', 'release', 'tenant', 'operator', 'score', 'audit', 'bounces', 'rejection']),
   title: z.string(), detail: z.unknown() }).openapi('OperatorTimelineItem');
+const WaitlistEntry = z.object({ email: z.string(), name: z.string().nullable(), attempts: z.number().int(), firstAt: z.string(), lastAt: z.string() }).openapi('OperatorWaitlistEntry');
 const DomainLimit = z.object({ used: z.number().int(), limit: z.number().int(), custom: z.boolean().describe('An operator set this limit; otherwise it is the default of 100.') }).openapi('OperatorDomainLimit');
 const domainLimitOf = (wid: string) => sql`SELECT json_build_object('used',(SELECT count(*)::int FROM domain_claims WHERE workspace_id=${wid}),'limit',workspace_domain_limit(${wid}),'custom',domain_limit IS NOT NULL) FROM workspaces WHERE id=${wid}`;
 const WorkspaceView = z.object({ workspace: z.object({ id: z.string(), name: z.string(), createdAt: z.string() }), score: z.unknown(), standing: StandingSchema.nullable(),
@@ -288,5 +289,19 @@ export function registerOperator(app: App) {
       ${after ? sql`WHERE (a.ts,a.key)<(${after.at}::timestamptz,${after.key})` : sql``} ORDER BY a.ts DESC,a.key DESC LIMIT ${q.limit + 1}`);
     const page = rows.slice(0, q.limit), last = page.at(-1);
     return c.json({ data: page.map(({ key: _, ts: __, ...row }) => row as z.infer<typeof Action>), nextCursor: rows.length > q.limit && last ? `${last.at}|${last.key}` : null }, 200);
+  });
+  // The waitlist (migration 366): verified sign-ins nothing admitted yet, to email when Nightmail opens. Full
+  // addresses, for staff only; newest attempt first, searched by address or name.
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'get', path: '/v1/operator/waitlist', operationId: 'operatorListWaitlist',
+    request: { query: z.object({ q: z.string().trim().max(200).optional(), cursor: Cursor, limit: z.coerce.number().int().min(1).max(1000).default(100) }) },
+    responses: { 200: response(z.object({ data: z.array(WaitlistEntry), nextCursor: z.string().nullable(), total: z.number().int().describe('Entries matching q, every page.') })), ...errors } }), async c => {
+    await operatorActor(c, 'operator:read');
+    const q = c.req.valid('query'), after = readCursor(q.cursor), search = q.q ? `%${q.q.replace(/[\\%_]/g, m => '\\' + m)}%` : null;
+    const match = search ? sql`(email ILIKE ${search} OR name ILIKE ${search})` : sql`true`;
+    const { rows } = await c.env.db.execute<z.infer<typeof WaitlistEntry>>(sql`SELECT email,name,attempts,${isoAt(sql`first_at`)} AS "firstAt",${isoAt(sql`last_at`)} AS "lastAt"
+      FROM nightmail_waitlist WHERE ${match} ${after ? sql`AND (last_at,email)<(${after.at}::timestamptz,${after.key})` : sql``} ORDER BY last_at DESC,email DESC LIMIT ${q.limit + 1}`);
+    const { rows: [count] } = await c.env.db.execute<{ total: number }>(sql`SELECT count(*)::int AS total FROM nightmail_waitlist WHERE ${match}`);
+    const page = rows.slice(0, q.limit), last = page.at(-1);
+    return c.json({ data: page, nextCursor: rows.length > q.limit && last ? `${last.lastAt}|${last.email}` : null, total: count?.total ?? 0 }, 200);
   });
 }

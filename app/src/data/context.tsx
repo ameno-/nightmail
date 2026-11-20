@@ -51,6 +51,7 @@ const authMessages: Record<string, string> = {
   method_required: 'Sign in again using the authentication method required by this installation.',
   interaction_required: 'Your identity provider needs you to complete sign-in. Try again and follow its prompts.',
   account_limit: 'This browser has the most accounts it can hold. Sign out of one to add another.',
+  waitlist: `${productName} isn’t open to the public yet. We’ll email you when it opens.`,
   error: 'Sign-in didn’t finish. Check that you used your invited or approved account.',
 }
 // The section of the current page, without a record from the previous account or workspace in it.
@@ -108,6 +109,21 @@ function SignedOutPage({ title, children }: { title: string; children: ReactNode
     <Link className="wordmark" to="/" aria-label={`${productName.toLowerCase()} home`}><NightmailWordmark /></Link>
     <div className="signed-out__body"><h1>{title}</h1>{children}</div>
   </main>
+}
+// A hosted sign-in nothing admitted (not staff, no invitation): the API put its verified address on the waitlist and
+// left the address in a short-lived cookie for this screen (api/src/account-login.ts). Without it, the screen says "you".
+function waitlistAddress() {
+  const cookie = document.cookie.split(';').map(part => part.trim()).find(part => /^(?:__Host-)?nightmail\.waitlist=/.test(part))
+  try { return cookie ? decodeURIComponent(cookie.slice(cookie.indexOf('=') + 1)) || null : null } catch { return null }
+}
+function WaitlistPage({ busy, error, onSwitch }: { busy: boolean; error: unknown; onSwitch: () => void }) {
+  const [email] = useState(waitlistAddress)
+  return <SignedOutPage title={`${productName} isn’t open to the public yet`}>
+    <p>We’ll email {email ? <PrivateAddress value={email} /> : 'you'} when it opens.</p>
+    {error ? <Alert tone="danger">{errorText(error)}</Alert> : null}
+    <Button variant="primary" loading={busy} onClick={onSwitch} data-analytics="sign-in/waitlist-switch">Use a different account</Button>
+    <nav className="signed-out__links" aria-label={productName}><Link to="/">Homepage</Link><Link to="/docs">Docs</Link></nav>
+  </SignedOutPage>
 }
 /** Pages anyone can open, signed in or not. */
 export const isPublicPath = (path: string) => path === '/docs' || path.startsWith('/docs/') || path === '/legal' || path.startsWith('/legal/')
@@ -264,7 +280,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
       if (!event.tab || event.tab !== pending?.tab) return
       window.clearTimeout(pending.fallback)
       adding.current = null
-      if (event.auth || !event.account) { toast(authMessages[event.auth ?? 'error'] ?? authMessages.error, 'error'); return }
+      if (event.auth || !event.account) { toast(authMessages[event.auth ?? 'error'] ?? authMessages.error, event.auth === 'waitlist' ? 'info' : 'error'); return }
       void switchAccount(event.account, pending.path ?? sectionPath()).then(() => toast('Account added', 'success'), () => toast('Couldn’t open the account.', 'error'))
       return
     }
@@ -308,7 +324,8 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   // (the click that follows is milliseconds away) rather than on hover or focus. The pending request is
   // used by that click only; a pointer down that never becomes a click is dropped after a few seconds.
   const signIn = useRef<{ at: number; url: Promise<string> } | null>(null)
-  function accountUrl() {
+  // select: the account service shows its account chooser first (the waitlist screen's "Use a different account").
+  function accountUrl(select = false) {
     // Assign path components rather than resolving an untrusted redirect parameter. Signing in from the homepage, or
     // from an address the dashboard doesn't have, opens Overview.
     const callback = new URL(window.location.origin), path = window.location.pathname
@@ -320,7 +337,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     // account and removes it before the browser opens the page (docs/analytics.md).
     const session = analytics().signInSession()
     if (session) callback.searchParams.set(ANALYTICS_SESSION_PARAM, session)
-    return request<{url: string}>('/api/auth/sign-in/account', {method: 'POST', body: {callbackURL: callback.href}}).then(result => {
+    return request<{url: string}>('/api/auth/sign-in/account', {method: 'POST', body: {callbackURL: callback.href, ...select ? {prompt: 'select_account'} : {}}}).then(result => {
       const url = new URL(result.url)
       if (url.protocol !== 'https:') throw new Error('Invalid sign-in redirect.')
       return url.href
@@ -332,11 +349,12 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     signIn.current = {at: Date.now(), url}
     url.catch(() => { if (signIn.current?.url === url) signIn.current = null })
   }
-  async function login() {
+  const login = () => startLogin(false)
+  async function startLogin(select: boolean) {
     setBusy(true); setAuthError(null)
     const pending = signIn.current
     signIn.current = null
-    try { const url = await (pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl()); expectAccount(); analytics().flush(); window.location.assign(url) }
+    try { const url = await (!select && pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl(select)); expectAccount(); analytics().flush(); window.location.assign(url) }
     catch (error) { setAuthError(error); setBusy(false) }
   }
   const signedOut = identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED'
@@ -344,17 +362,15 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   // Multi-tenant installations greet everyone at "/" with the public homepage (signed in, it is App's index route);
   // /health says which this is.
   // Start alongside /v1/me when no ready dashboard session is remembered so signed-out visitors avoid a second round trip.
-  const checkHome = window.location.pathname === '/' && (signedOut || (!invitation && !dashboardLikelyReady(selectedWorkspace())))
+  const authResult = new URLSearchParams(window.location.search).get('auth')
+  const checkHome = window.location.pathname === '/' && authResult !== 'waitlist' && (signedOut || (!invitation && !dashboardLikelyReady(selectedWorkspace())))
   const home = useQuery({ queryKey: ['public-home'], enabled: checkHome, staleTime: Infinity, retry: false, queryFn: async ({signal}) => {
     const multiTenant = (await request<{multiTenant?: boolean} | null>('/health', {signal}))?.multiTenant === true
     if (multiTenant) await loadHome()
     return multiTenant
   } })
-  const authResult = new URLSearchParams(window.location.search).get('auth')
-  // not_approved: a verified OIDC account outside the invite list. The API has already saved it as an access request.
   const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert>
-    : authResult === 'not_approved' ? <Alert tone="info" title={`${productName} is invite-only right now`}>{home.data ? 'We saved your request for access. If you were invited, open the invitation link and sign in again.' : 'This account isn’t approved here. Ask an owner or admin to add it.'}</Alert>
-    : authResult && authMessages[authResult] ? <Alert tone={authResult === 'interaction_required' ? 'info' : 'danger'}>{authMessages[authResult]}</Alert>
+    : authResult && authMessages[authResult] ? <Alert tone={authResult === 'interaction_required' || authResult === 'waitlist' ? 'info' : 'danger'}>{authMessages[authResult]}</Alert>
     : notice ? <Alert tone="danger">{notice}</Alert>
     : invitation && <Alert tone="info" title="You have a workspace invitation">Sign in with the invited account to review it. You join only after you confirm.</Alert>
   // M9: an account whose only way in is the invitation signs in with no workspace, so /v1/me is 401 while
@@ -364,7 +380,8 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, notice, dismissNotice: () => setNotice(null)}}>
     <Analytics identity={identity.data && !identity.isError ? identity.data : null} signedOut={signedOut} />
     {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
-    : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage start={{ signedIn: false, onSignIn: login, onSignInIntent: prepareLogin, busy }} notice={authNotice} /></Suspense>
+    : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending ? <BootLoader /> : authResult === 'waitlist' && window.location.pathname === '/' ? <WaitlistPage busy={busy} error={authError} onSwitch={() => void startLogin(true)} />
+    : home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage start={{ signedIn: false, onSignIn: login, onSignInIntent: prepareLogin, busy }} notice={authNotice} /></Suspense>
     // A dashboard page (a deep link from an email, or a bookmark) asks to sign in and opens once signed in; any other
     // address says there is no page there.
     : signedOut ? isKnownPath(pathname) ? <SignedOutPage title={`Sign in to ${productName}`}>

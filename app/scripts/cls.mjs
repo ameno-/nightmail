@@ -59,11 +59,12 @@ const workers = Number(process.env.CLS_WORKERS) || Math.min(32, availableParalle
 const began = Date.now();
 const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 
-// [name, path, { user, from, click, row, switchTo, support, notes, dialog, still, alone, phoneOnly, notFound }]. The in-app navigation starts on `from` and clicks the
+// [name, path, { user, from, click, row, switchTo, support, notes, dialog, still, alone, phoneOnly, notFound, waitlist }]. The in-app navigation starts on `from` and clicks the
 // control whose text starts with `click`, the table row containing `row`, picks the workspace `switchTo` in the account
 // switcher, or else a link to `path`; with none of those (pages reached from a dropdown menu) it pushes `path` through
 // the router's history. It must land on `path`. `support` opens the support chat first, `dialog` a dialog (see above);
-// `phoneOnly` measures a page in the phone pass alone (a control only a phone shows); `notFound` is a page that must say "Page not found".
+// `phoneOnly` measures a page in the phone pass alone (a control only a phone shows); `notFound` is a page that must say "Page not found";
+// `waitlist` is the address the refused sign-in's cookie names.
 // dana owns an established hosted workspace (and is a Bane operator), nia a brand-new one with a verified domain, ona one
 // still onboarding, rae a restricted one that also owes $12.40 (the standing and billing banners on every page).
 // A list of users is one browser signed in to each of them (one session cookie per account, the first the default).
@@ -138,6 +139,7 @@ const pages = ids => [
   ['Operator', '/operator', { from: '/overview' }],
   ['Operator · workspace', `/operator/workspaces/${ids.restricted}`, { from: '/operator', row: 'Harbor Supply' }],
   ['Operator · UI notes', '/operator/notes', { from: '/operator', click: 'UI notes' }],
+  ['Operator · waitlist', '/operator?view=waitlist', { from: '/operator', click: 'Waitlist' }],
   // UI notes mode on (a staff overlay): its pins, tray and lazy code load over the page without moving anything.
   ['Overview · UI notes mode', '/overview', { from: '/logs', notes: true }],
   // An operator outside UI_NOTES_SUBJECTS with the mode forced on: no tab, toggle, pill or pins, and the API says 404.
@@ -169,6 +171,8 @@ const pages = ids => [
   // Signed out on a dashboard page (a link from an email) and on an address the dashboard doesn't have.
   ['Signed out · deep link', '/overview', { user: null }],
   ['Signed out · page not found', '/no-such-page', { user: null, notFound: true }],
+  // A hosted sign-in nothing admitted lands here, with its address in a short-lived cookie (api/src/account-login.ts).
+  ['Signed out · waitlist', '/?auth=waitlist', { user: null, waitlist: 'mara.quinn@example.net' }],
   // The public legal pages: signed out from the homepage and between documents, and signed in from the sidebar.
   ['Legal', '/legal', { user: null, from: '/legal/terms', click: 'Overview' }],
   ['Legal · terms', '/legal/terms', { user: null, from: '/', still: true }],
@@ -201,7 +205,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Overview · range', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · endpoints', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
+const phonePages = new Set(['Overview', 'Overview · range', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · endpoints', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -320,7 +324,7 @@ const maskedState = index => {
   const el = document.querySelectorAll('.private-address')[index], rect = node => { const r = node.getBoundingClientRect(); return [r.x, r.y, r.width, r.height].map(n => Math.round(n * 100) / 100).join(' '); };
   return { revealed: el.hasAttribute('data-revealed'), text: el.querySelector('.private-address__value').textContent, own: rect(el), around: rect(el.closest('tr, li, dd, h1, p, section') ?? el.parentElement) };
 };
-async function masking(page, hover) {
+async function masking(page, hover, shell) {
   const problems = await page.evaluate(maskedLeaks);
   if (!hover) return problems;
   const frame = () => page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
@@ -335,8 +339,9 @@ async function masking(page, hover) {
     if (after.revealed || after.text !== before.text || after.own !== before.own) problems.push(`${before.text}… stayed revealed or moved after the pointer left`);
   }
   // Privacy mode off (⇧P, lib/privacy.ts) reveals every address at once without moving anything; on again masks them.
+  // ⇧P is the dashboard shell's shortcut (components/AppShell.tsx): a signed-out page (the waitlist) reveals by hover only.
   const count = await page.evaluate(() => document.querySelectorAll('.private-address').length);
-  if (!count) return problems;
+  if (!count || !shell) return problems;
   const states = async () => { const all = []; for (let i = 0; i < Math.min(count, 5); i++) all.push(await page.evaluate(maskedState, i)); return all; };
   // ⇧P is ignored while typing (the support chat's box, a rule's editor), so leave whatever field has focus first.
   await page.evaluate(() => document.activeElement?.blur());
@@ -362,6 +367,7 @@ async function measure(browser, job, fx) {
   let page, net;
   const problems = [];
   const work = (async () => {
+    if (job.waitlist) await context.addCookies([{ name: 'nightmail.waitlist', value: encodeURIComponent(job.waitlist), url: origin }]);
     if (job.user) await context.addCookies([job.user].flat().map((user, slot) => ({ name: slot ? `nightmail.session_token.${slot}` : 'nightmail.session_token', value: encodeURIComponent(fx.sessions[user].cookie), url: origin, httpOnly: true })));
     await context.addInitScript(probe);
     // Data Saver turns off the shell's idle warm-up of every other sidebar section: in-app clicks then load the next
@@ -480,7 +486,7 @@ async function measure(browser, job, fx) {
     }
     const broken = await page.evaluate(() => document.querySelector('.fatal-error') ? 'the error boundary rendered' : [...document.querySelectorAll('h1,h2')].some(h => h.textContent === 'Page not found') ? 'Page not found' : null);
     if (job.notFound ? broken !== 'Page not found' : broken) problems.push(broken ?? 'expected "Page not found"');
-    problems.push(...await masking(page, job.mode === 'load' && job.device === 'desktop'));
+    problems.push(...await masking(page, job.mode === 'load' && job.device === 'desktop', job.user !== null));
     // Overview's latest emails reserve as many 34px rows as reach the card's bottom inset (features/overview/latest.ts):
     // the list must end less than a row above that inset (the card's top padding: Help's taller bottom padding only
     // applies in one column) and never past it.
@@ -558,10 +564,10 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, notes, dialog, menu, still, alone, phoneOnly, notFound }] of pages(ids)) {
+  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, notes, dialog, menu, still, alone, phoneOnly, notFound, waitlist }] of pages(ids)) {
     if (only && !only.test(name) || device === 'phone' && !phonePages.has(name) || phoneOnly && device !== 'phone') continue;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    const load = { name, path, user, scheme, device, support, live, notes, dialog, menu, still, alone, notFound, mode: 'load', slug: slug + '-load' };
+    const load = { name, path, user, scheme, device, support, live, notes, dialog, menu, still, alone, notFound, waitlist, mode: 'load', slug: slug + '-load' };
     if (densityOnly && !density.wanted(load)) continue;
     jobs.push(load);
     if (from && !densityOnly) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
