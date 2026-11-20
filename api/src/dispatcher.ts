@@ -567,7 +567,7 @@ export function forwardStillAllowed(runtime: Pick<Runtime, 'config'>, x: SQL) {
 function claimCtes(runtime: Runtime, region: string, input: SQL) {
   return sql`input AS MATERIALIZED (${input}
     ), key_state AS MATERIALIZED (
-      SELECT id, workspace_id, permissions, domains FROM api_keys WHERE revoked_at IS NULL
+      SELECT id, workspace_id, permissions, domains FROM api_keys WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())
         AND (workspace_id, id) IN (SELECT workspace_id, actor_key_id FROM input)
         AND ${tieAllows(runtime.config, sql`workspace_id`, sql`id`, 'api_key')} FOR SHARE
     ), campaign_state AS MATERIALIZED (
@@ -605,7 +605,7 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
             JOIN mailbox_addresses addr ON addr.workspace_id=a.w AND addr.mailbox_id=a.b AND addr.address=x.sender FOR SHARE OF addr)
           WHEN starts_with(x.actor_key_id, 'mbk_') THEN EXISTS (
             SELECT 1 FROM mailbox_keys k JOIN mailbox_addresses b ON b.workspace_id = k.workspace_id AND b.address = x.sender
-            WHERE k.workspace_id = x.workspace_id AND k.id = x.actor_key_id AND k.revoked_at IS NULL AND k.permissions ? 'send'
+            WHERE k.workspace_id = x.workspace_id AND k.id = x.actor_key_id AND k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > now()) AND k.permissions ? 'send'
               AND mail_key_grant_allows(k.workspace_id,k.id,'key',${receivingPolicy(runtime.config)}::jsonb)
               AND (k.mailbox_ids IS NULL OR k.mailbox_ids ? b.mailbox_id) FOR SHARE OF k, b)
           ELSE EXISTS (SELECT 1 FROM key_state k WHERE k.workspace_id = x.workspace_id AND k.id = x.actor_key_id

@@ -48,7 +48,7 @@ export function registerOverviewSetup(app: App) {
     const quota = domains !== null && c.env.config.multiTenant && !a.domains.length;
     const row = (await c.env.db.execute<Counts>(sql`/* overview-setup: counts */ SELECT
       ${quota ? sql`(SELECT json_build_object('used',count(*)::int,'limit',workspace_domain_limit(${w})) FROM domain_claims WHERE workspace_id=${w} HAVING NOT ${byoWorkspace(w)})` : sql`NULL::json`} AS domain_quota,
-      ${keys ? sql`(SELECT count(*)::int FROM ${apiKeys} WHERE ${and(eq(apiKeys.workspaceId, w), isNull(apiKeys.revokedAt))})` : sql`NULL::int`} AS api_keys,
+      ${keys ? sql`(SELECT count(*)::int FROM ${apiKeys} WHERE ${and(eq(apiKeys.workspaceId, w), isNull(apiKeys.revokedAt))} AND (${apiKeys.expiresAt} IS NULL OR ${apiKeys.expiresAt} > now()))` : sql`NULL::int`} AS api_keys,
       EXISTS (SELECT FROM ${emails} WHERE ${mailWhere(a)}) AS any_email,
       ${hooks ? sql`(SELECT count(*)::int FROM ${webhooks} WHERE ${eq(webhooks.workspaceId, w)})` : sql`NULL::int`} AS webhooks,
       ${invites ? sql`(SELECT count(*)::int FROM ${workspaceInvitations} WHERE ${and(eq(workspaceInvitations.workspaceId, w), eq(workspaceInvitations.status, 'pending'), gt(workspaceInvitations.expiresAt, sql`now()`))})` : sql`NULL::int`} AS invitations`)).rows[0]!;

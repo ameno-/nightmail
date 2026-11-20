@@ -150,6 +150,8 @@ impl Gateway {
         let mut changed = self.changed.subscribe();
         let mut feed = None;
         let mut login_generation = 0;
+        // A send-only key's expiry (remote.rs Principal::until): the session ends then, as when it is revoked.
+        let mut expiry: Option<Instant> = None;
         let mut stop = self.stop.subscribe();
         if *stop.borrow() {
             return Ok(());
@@ -189,6 +191,7 @@ impl Gateway {
                 biased;
                 _=tokio::time::sleep_until(read_deadline)=>{if smtp{refuse(&mut stream,TIMED_OUT).await}break},
                 _=stop.changed()=>{write(&mut stream,match port.protocol{Protocol::Imap=>b"* BYE [UNAVAILABLE] Restarting\r\n",Protocol::Smtp=>b"421 4.3.2 Restarting\r\n"}).await?;break},
+                _=async {match expiry{Some(at)=>tokio::time::sleep_until(at).await,None=>std::future::pending().await}}=>{write(&mut stream,match port.protocol{Protocol::Imap=>b"* BYE Credential expired\r\n",Protocol::Smtp=>b"421 4.7.0 Credential expired\r\n"}).await?;break},
                 event=async {match &mut feed{Some((_,rx))=>next_hint(rx).await,None=>std::future::pending().await}}=>{
                     let generation=event?;
                     if generation.auth!=login_generation{write(&mut stream,match port.protocol{Protocol::Imap=>b"* BYE Credential changed\r\n",Protocol::Smtp=>b"421 4.7.0 Credential changed\r\n"}).await?;break}
@@ -457,6 +460,7 @@ impl Gateway {
                         m.insert(p.inbox.clone(), Arc::downgrade(&slots));
                         let sub = self.events.subscribe(&p.inbox);
                         login_generation = sub.1.borrow().auth;
+                        expiry = p.until().map(Instant::from_std);
                         anyhow::ensure!(
                             auth.api.current(&p),
                             "authentication changed during login"

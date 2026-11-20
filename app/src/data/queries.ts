@@ -42,6 +42,7 @@ export const queries = {
   overviewSetup: () => def(['overview-setup'], (api, signal) => api.overview.setup(signal)),
   domains: (regionId: string, page: number) => def(['domains', regionId, page], (api, signal) => api.domains.list({ regionId, page, pageSize: 10 }, signal)),
   keys: (cursor: string | undefined, showRevoked: boolean) => def(['keys', cursor, showRevoked], (api, signal) => api.keys.list(signal, cursor, showRevoked)),
+  keyChanges: (id: string) => def(['key-changes', id], (api, signal) => api.keys.changes(id, signal)),
   // Connected agents with the tokens they made here. With inactive ones: Settings → Account and the rules page read
   // the same list (your own sign-ins, `own`), so they share the cache.
   agents: (includeInactive: boolean) => def(['agents', includeInactive], (api, signal) => api.credentials.agents(includeInactive, signal)),

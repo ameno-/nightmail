@@ -18,7 +18,7 @@ export const settingsColumns = {
     { key: 'access', label: 'Access', width: '30%', skeleton: twoLines, card: 'line' },
     { key: 'prefix', label: 'Key prefix', width: '13%', card: 'hide' },
     { key: 'last', label: 'Last used', card: 'line' },
-    { key: 'actions', label: '', align: 'right', width: 100, skeleton: <ControlSkeleton width={76} />, card: 'end' },
+    { key: 'actions', label: '', align: 'right', width: 100, skeleton: <ControlSkeleton width={32} />, card: 'end' },
   ],
   // A domain's card: its name and sending status, then the host it receives at (or Off). Every cell is one line.
   domains: [

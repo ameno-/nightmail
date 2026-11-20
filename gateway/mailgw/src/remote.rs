@@ -51,8 +51,21 @@ pub struct Principal {
     #[serde(default, rename = "anySender")]
     any_sender: bool,
     folders: Vec<FolderMeta>,
+    /// A send-only key with an expiry: milliseconds left when the API answered. Measured from the login, so the
+    /// gateway's clock doesn't matter.
+    #[serde(default, rename = "expiresInMs")]
+    expires_in_ms: Option<f64>,
+    /// When that is: a cached login stops being reused then, and an open session ends then (main.rs).
+    #[serde(skip)]
+    until: Option<Instant>,
 }
 impl Principal {
+    pub fn until(&self) -> Option<Instant> {
+        self.until
+    }
+    fn live(&self, now: Instant) -> bool {
+        self.until.is_none_or(|u| now < u)
+    }
     /// Whether this credential may send as `address`: one of its addresses, or an address on one of its domains or
     /// below. The API checks again when the message is submitted.
     fn sends_as(&self, address: &str) -> bool {
@@ -288,11 +301,12 @@ impl Api {
         .map_err(|_| store::Error::Unavailable)
     }
     pub fn current(&self, p: &Principal) -> bool {
-        p.started.is_some_and(|s| {
-            self.revoked
-                .lock()
-                .is_ok_and(|v| v.current(&p.inbox, s, Instant::now()))
-        })
+        p.live(Instant::now())
+            && p.started.is_some_and(|s| {
+                self.revoked
+                    .lock()
+                    .is_ok_and(|v| v.current(&p.inbox, s, Instant::now()))
+            })
     }
     /// One database notification: every change drops the wake cache; an auth change also
     /// drops cached logins for that inbox. Then the inbox's sessions are woken.
@@ -342,7 +356,7 @@ impl Api {
             .lock()
             .map_err(|_| 503u16)?
             .get(&k)
-            .filter(|(t, _)| t.elapsed() < Duration::from_secs(5))
+            .filter(|(t, p)| t.elapsed() < Duration::from_secs(5) && p.live(Instant::now()))
         {
             let mut cached = v.clone();
             cached.started = started;
@@ -356,6 +370,9 @@ impl Api {
         .map_err(|_| 503u16)?;
         let mut c = self.cache.lock().map_err(|_| 503u16)?;
         principal.started = started;
+        principal.until = principal
+            .expires_in_ms
+            .map(|ms| Instant::now() + Duration::from_millis(ms.max(0.0) as u64));
         if !self.current(&principal) {
             return Err(503);
         }
@@ -1558,6 +1575,30 @@ pub async fn listen(
 #[cfg(test)]
 mod auth_tests {
     use super::*;
+    /// A send-only key that expires: its login is current until then, and not after, so neither the 5 s login cache
+    /// nor an open session outlives it.
+    #[test]
+    fn an_expiring_key_is_current_only_until_it_expires() {
+        let api = Api::new("http://localhost".into(), "x".repeat(32)).unwrap();
+        let now = Instant::now();
+        let key = |until: Option<Instant>| Principal {
+            workspace: "w".into(),
+            account: "owner".into(),
+            inbox: "key_1".into(),
+            kid: "key_1".into(),
+            addresses: vec![],
+            domains: vec!["example.com".into()],
+            any_sender: false,
+            folders: vec![],
+            started: Some(now),
+            cached: false,
+            expires_in_ms: None,
+            until,
+        };
+        assert!(api.current(&key(None)));
+        assert!(api.current(&key(Some(now + Duration::from_secs(60)))));
+        assert!(!api.current(&key(Some(now))));
+    }
     /// A credential keeps its rate state for a minute after its last session. When the
     /// table is full that state gives way to the next login; a credential with an open
     /// session keeps its place and its lanes.
@@ -1578,6 +1619,8 @@ mod auth_tests {
                     folders: vec![],
                     started: None,
                     cached: false,
+                    expires_in_ms: None,
+                    until: None,
                 },
             )
         };
@@ -1617,6 +1660,8 @@ mod auth_tests {
                     folders: vec![],
                     started: None,
                     cached: false,
+                    expires_in_ms: None,
+                    until: None,
                 },
             )
             .unwrap()
@@ -1700,6 +1745,8 @@ mod auth_tests {
                     folders: vec![],
                     started: None,
                     cached: false,
+                    expires_in_ms: None,
+                    until: None,
                 },
             )
             .unwrap();

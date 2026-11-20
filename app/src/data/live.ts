@@ -1,6 +1,6 @@
 import { ApiError, type MailRoute, type RoutingTestResult, type Api, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type AudiencePreview, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxWebhookDelivery, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type ForwardEndpoint, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity, type OverviewSetup } from './types'
 
-import type { Agent, ApiKey, AppPassword, CreatedAppPassword, DomainQuota } from './types'
+import type { Agent, ApiKey, AppPassword, AuditEntry, CreatedAppPassword, DomainQuota } from './types'
 import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogEntry, SenderScore } from './types'
 import { headerPrefix, productName } from '../../../api/src/brand'
 import { analytics } from '../lib/analytics'
@@ -288,6 +288,7 @@ export function createLiveApi(): Api {
       list: async (signal, cursor, includeRevoked = true) => { const result = await call<{ data: ApiKey[]; nextCursor: string | null }>(`/api-keys?limit=100&includeRevoked=${includeRevoked}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
       create: async (input, signal) => { const { secret, ...key } = await call<ApiKey & { secret: string }>('/api-keys', 'POST', input, signal); return { key, secret } },
       update: (id, change, signal) => call<ApiKey>(`/api-keys/${idPath(id)}`, 'PATCH', change, signal),
+      changes: async (id, signal) => (await call<{ data: AuditEntry[] }>(`/api-keys/${idPath(id)}/changes?limit=20`, 'GET', undefined, signal)).data,
       revoke: async (id, signal) => { await call(`/api-keys/${idPath(id)}/revoke`, 'POST', undefined, signal) }
     },
     credentials: {

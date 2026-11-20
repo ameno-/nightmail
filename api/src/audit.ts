@@ -268,6 +268,24 @@ export async function customerTrail(db: DbExecutor, workspaceIds: string[], f: F
   return entries(rows, f.limit);
 }
 
+// An API key's own history: the customer-visible rows about it (created, each change, revoked). Keys limited to
+// addresses or an inbox were once audited as inbox_key, so both target types count.
+const keyRows = (workspaceId: string, keys: SQL) => sql`e.workspace_id = ${workspaceId} AND e.target_type IN ('api_key','inbox_key') AND e.target_id = ${keys} AND NOT e.internal`;
+/** One key's history, newest first (listApiKeyChanges). */
+export async function keyTrail(db: DbExecutor, workspaceId: string, keyId: string, f: Pick<Filters, 'cursor' | 'limit'>) {
+  const { rows } = await db.execute<Row>(sql`SELECT ${entrySelect} FROM audit_events e
+    WHERE ${keyRows(workspaceId, sql`${keyId}`)} AND ${filterSql(f, columns)} ORDER BY e.at DESC, uid DESC LIMIT ${f.limit + 1}`);
+  return entries(rows, f.limit);
+}
+export const LastChange = z.object({ at: AuditEntry.shape.at, action: AuditEntry.shape.action, actor: AuditEntry.shape.actor }).openapi('ApiKeyLastChange');
+/** The newest entry of each key's history, by key ID; keys with none kept are missing. */
+export async function lastChanges(db: DbExecutor, workspaceId: string, ids: string[]): Promise<Map<string, z.infer<typeof LastChange>>> {
+  if (!ids.length) return new Map();
+  const { rows } = await db.execute<Row>(sql`SELECT DISTINCT ON (e.target_id) ${entrySelect} FROM audit_events e
+    WHERE ${keyRows(workspaceId, sql`ANY(${sql.param(ids)}::text[])`)} ORDER BY e.target_id, e.at DESC, e.id DESC`);
+  return new Map(entries(rows, rows.length).data.map((entry, i) => [rows[i]!.target_id!, { at: entry.at, action: entry.action, actor: entry.actor }]));
+}
+
 // Enforcement (#111/#115) and the billing ledger join the operator view when their tables exist on this database.
 // They are read through to_jsonb(row), so only id, workspace_id and the time column are assumed.
 let sources: Promise<{ standing: boolean; billing: boolean }> | undefined;
