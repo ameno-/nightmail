@@ -3345,6 +3345,11 @@ export type Inbox = {
     };
     send: {
         enabled: boolean;
+        /**
+         * Deprecated and not enforced: replies have no daily cap. The value set at creation.
+         *
+         * @deprecated
+         */
         perDay: number;
         replyOnly: true;
     };
@@ -3810,10 +3815,20 @@ export type InboundAddress = {
         lastMessageAt: string | null;
     };
     /**
-     * Outbound limits that guard against runaway agents and reply loops.
+     * Loop guards against runaway agents and reply loops: messages to one recipient per hour, and in one conversation per 10 minutes. The workspace’s sending limits apply on top; there is no hourly or daily cap per address.
      */
     sendLimits: {
+        /**
+         * Deprecated and not enforced: an address has no hourly send cap. The value last set (100 if never set); 0 means sending is off.
+         *
+         * @deprecated
+         */
         perHour: number;
+        /**
+         * Deprecated and not enforced: an address has no daily send cap. The value last set (1000 if never set); 0 means sending is off.
+         *
+         * @deprecated
+         */
         perDay: number;
         perRecipientPerHour: number;
         perThreadPer10Minutes: number;
@@ -3852,10 +3867,20 @@ export type CreateInboundAddress = {
         [key: string]: unknown;
     };
     /**
-     * Override outbound limits. Defaults: perHour 100, perDay 1000, perRecipientPerHour 20, perThreadPer10Minutes 10. 0 blocks sending.
+     * Override the loop guards. Defaults: perRecipientPerHour 20, perThreadPer10Minutes 10. 0 blocks sending. There is no hourly or daily cap per address.
      */
     sendLimits?: {
+        /**
+         * Deprecated and not enforced: any whole number from 0 is accepted. 0 turns sending off; any other number has no effect.
+         *
+         * @deprecated
+         */
         perHour?: number;
+        /**
+         * Deprecated and not enforced: any whole number from 0 is accepted. 0 turns sending off; any other number has no effect.
+         *
+         * @deprecated
+         */
         perDay?: number;
         perRecipientPerHour?: number;
         perThreadPer10Minutes?: number;
@@ -3878,10 +3903,20 @@ export type UpdateInboundAddress = {
         [key: string]: unknown;
     };
     /**
-     * Override outbound limits. Defaults: perHour 100, perDay 1000, perRecipientPerHour 20, perThreadPer10Minutes 10. 0 blocks sending.
+     * Override the loop guards. Defaults: perRecipientPerHour 20, perThreadPer10Minutes 10. 0 blocks sending. There is no hourly or daily cap per address.
      */
     sendLimits?: {
+        /**
+         * Deprecated and not enforced: any whole number from 0 is accepted. 0 turns sending off; any other number has no effect.
+         *
+         * @deprecated
+         */
         perHour?: number;
+        /**
+         * Deprecated and not enforced: any whole number from 0 is accepted. 0 turns sending off; any other number has no effect.
+         *
+         * @deprecated
+         */
         perDay?: number;
         perRecipientPerHour?: number;
         perThreadPer10Minutes?: number;
@@ -20747,7 +20782,17 @@ export type CreateInboxAppPasswordData = {
     body: {
         name: string;
         protocols: Array<'imap' | 'smtp'>;
+        /**
+         * Deprecated and not enforced: an inbox has no daily send cap of its own.
+         *
+         * @deprecated
+         */
         perDay?: number;
+        /**
+         * Deprecated and not enforced: an inbox has no monthly send cap of its own.
+         *
+         * @deprecated
+         */
         perMonth?: number;
     };
     path: {
@@ -21070,7 +21115,7 @@ export type CreateInboxData = {
             bytes?: number;
         };
         /**
-         * Replies only go to people who wrote to this inbox. Sandbox inboxes never send.
+         * Replies only go to people who wrote to this inbox, within the loop guards and the workspace’s sending limits. Sandbox inboxes never send.
          */
         send?: {
             /**
@@ -21078,7 +21123,9 @@ export type CreateInboxData = {
              */
             enabled?: boolean;
             /**
-             * Replies per day, at most 20.
+             * Deprecated and not enforced: replies have no daily cap. Accepted for compatibility.
+             *
+             * @deprecated
              */
             perDay?: number;
         };

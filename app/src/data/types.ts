@@ -150,7 +150,7 @@ export type InboxStatus = 'active' | 'expired' | 'deleting'
 export interface Inbox {
   id: string; kind: 'inbox'; type: 'ephemeral' | 'sandbox' | 'persistent'; address: string; domain: string; name: string | null; metadata: Record<string, unknown>; clientId: string | null
   status: InboxStatus; createdAt: ISODate; expiresAt: ISODate; deleteAfter: ISODate; limits: { messages: number; bytes: number }
-  send: { enabled: boolean; perDay: number; replyOnly: true }; usage: { messages: number; bytes: number; held: number; unread: number; lastMessageAt: ISODate | null }
+  send: { enabled: boolean; replyOnly: true }; usage: { messages: number; bytes: number; held: number; unread: number; lastMessageAt: ISODate | null }
 }
 export interface InboxInput { type: Inbox['type']; domain?: string; name?: string; ttlSeconds: number; send?: { enabled: boolean }; credential?: { name: string; permissions: ('read' | 'modify' | 'send')[] } }
 export interface CreatedInbox extends Inbox { credential?: { id: string; secret: string; permissions: string[]; expiresAt: ISODate } }

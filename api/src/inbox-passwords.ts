@@ -40,8 +40,8 @@ export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAcce
             .object({
               name: z.string().trim().min(1).max(100),
               protocols: z.array(protocol).min(1).max(2),
-              perDay: z.number().int().min(1).max(2000).optional(),
-              perMonth: z.number().int().min(1).max(62000).optional(),
+              perDay: z.number().int().min(1).max(2000).optional().openapi({ deprecated: true, description: 'Deprecated and not enforced: an inbox has no daily send cap of its own.' }),
+              perMonth: z.number().int().min(1).max(62000).optional().openapi({ deprecated: true, description: 'Deprecated and not enforced: an inbox has no monthly send cap of its own.' }),
             })
             .strict(),
         ),
@@ -59,7 +59,7 @@ export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAcce
       const actor = c.get('actor');
       const grant = actor?.grantId ?? null;
       const { rows } = await c.env.db.execute<{ created: string }>(
-        sql`WITH allowed AS (UPDATE inbox_state s SET protocol_passwords=protocol_passwords+1, protocol_daily=coalesce(${q.perDay ?? null}::int,protocol_daily),protocol_monthly=coalesce(${q.perMonth ?? null}::int,protocol_monthly) FROM mailboxes b WHERE b.id=s.inbox_id AND b.workspace_id=${wid} AND b.id=${bid} AND b.kind='inbox' AND b.retention_mode='forever' AND b.delete_after IS NULL AND inbox_lock_visible(b.workspace_id,b.id,true) AND protocol_passwords<20 RETURNING s.inbox_id), issued AS (INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols) SELECT ${kid},inbox_id,${q.name},${hash},${sql.param(protocols)}::text[] FROM allowed RETURNING id,created_at), bound AS (INSERT INTO mail_grant_objects SELECT ${grant}::text,${wid},'protocol',id FROM issued WHERE ${grant}::text IS NOT NULL),
+        sql`WITH allowed AS (UPDATE inbox_state s SET protocol_passwords=protocol_passwords+1 FROM mailboxes b WHERE b.id=s.inbox_id AND b.workspace_id=${wid} AND b.id=${bid} AND b.kind='inbox' AND b.retention_mode='forever' AND b.delete_after IS NULL AND inbox_lock_visible(b.workspace_id,b.id,true) AND protocol_passwords<20 RETURNING s.inbox_id), issued AS (INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols) SELECT ${kid},inbox_id,${q.name},${hash},${sql.param(protocols)}::text[] FROM allowed RETURNING id,created_at), bound AS (INSERT INTO mail_grant_objects SELECT ${grant}::text,${wid},'protocol',id FROM issued WHERE ${grant}::text IS NOT NULL),
           audit AS (${auditInsert(auditContext(c), { action: 'app_password.create', workspaceId: wid, target: { type: 'app_password', id: sql`issued.id` }, after: { name: q.name, inboxId: bid, protocols } }, { from: sql`issued` })}) SELECT created_at::text AS created FROM issued`,
       );
       if (!rows.length)
