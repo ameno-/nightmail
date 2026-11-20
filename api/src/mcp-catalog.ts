@@ -46,7 +46,7 @@ export interface McpOperation {
   readonly lasting: boolean;
   /** Only a signed-in dashboard session may call it; never listed to an MCP connection. */
   readonly dashboardOnly: boolean;
-  /** Members and invitations (memberAdminRoute): an owner's or admin's own sign-in, never a key or agent token. */
+  /** Members, invitations and Activity (memberAdminRoute): an owner's or admin's own sign-in, never a key or agent token. */
   readonly memberAdmin: boolean;
   /** What the tool returns in place of the REST response, where they differ (INVITATIONS). */
   readonly view?: (response: ObjectValue) => ObjectValue;
@@ -63,8 +63,8 @@ const INVITATIONS: Record<string, { output: Tool['inputSchema']; view?: (respons
   revokeWorkspaceInvitation: { output: { type: 'object', required: ['email', 'deleted'], properties: { email: { type: 'string' }, deleted: { const: true } } } },
 };
 // Provider-signed notifications are never agent calls, and REST refuses revealWebhookSecret to every delegated credential
-// (an approval, the API keys it makes, agent tokens). Everything else with bearer auth becomes a tool, and so do members
-// and invitations (memberAdminRoute): session routes that an owner's or admin's own sign-in may also call.
+// (an approval, the API keys it makes, agent tokens). Everything else with bearer auth becomes a tool, and so do members,
+// invitations and Activity (memberAdminRoute): session routes that an owner's or admin's own sign-in may also call.
 // Money moves only from a signed-in owner or admin: charging the saved card, auto-recharge and the payment method are
 // never agent calls (an agent may create a top-up link that a person opens and pays: createBillingTopUpLink).
 export const DASHBOARD_MONEY = ['createBillingTopUp', 'updateBillingAutoRecharge', 'createBillingCardSetup', 'deleteBillingPaymentMethod'] as const;
@@ -85,7 +85,7 @@ const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 // agent token; it still needs confirm=true), and manageKeys() reads.
 const SEND_LEVEL = new Set(['sendEmail', 'sendEmailBatch', 'cancelEmail', 'rescheduleEmail', 'uploadAttachment', 'deleteAttachment', 'createCampaign', 'updateCampaign', 'setCampaignArchived', 'deleteCampaign', 'testCampaign', 'sendCampaign', 'scheduleCampaign', 'cancelCampaign', 'unscheduleCampaign', 'rescheduleCampaign', 'pauseCampaign', 'resumeCampaign', 'setCampaignPacing', 'renderCampaignPreviewImage', 'renderCampaignTemplatePreviewImage']);
 const READ_LEVEL_WRITES = new Set(['createAgentToken']);
-const MANAGE_LEVEL_READS = new Set(['listApiKeys', 'listAgentTokens', 'listAppPasswords', 'listBillingLedger', 'listBillingPayments', 'getBillingPayment']);
+const MANAGE_LEVEL_READS = new Set(['listApiKeys', 'listAgentTokens', 'listAppPasswords', 'listBillingLedger', 'listBillingPayments', 'getBillingPayment', 'listActivity']);
 // No permission check in REST: GET /v1/me reads c.get('actor'), so a send-only grant may call it.
 const ANY_AUTHENTICATED = new Set(['getCurrentIdentity']);
 const DASHBOARD_ONLY = new Set(['listMcpConnections', 'revokeMcpConnection', 'bindMcpConnection', 'listAgents', 'revokeAgent']);
@@ -267,6 +267,7 @@ const DESCRIPTIONS: Record<string, string> = {
   createWorkspaceInvitation: 'Invite an email address as admin or member (owners are invited in the dashboard). No email is sent: share the returned acceptUrl with the invitee yourself; it is shown only here. They join by signing in with that verified address within 7 days.',
   listWorkspaceInvitations: 'List pending invitations: address, role and expiry. An invitation\'s link is shown only when it is made.',
   revokeWorkspaceInvitation: 'Revoke the pending invitation for an email address; its link stops working. Only an owner revokes an owner invitation.',
+  listActivity: 'Read the workspace’s audit trail, newest first: who changed members, keys, domains, webhooks, routes, rules and settings, and when support viewed it. Filter by since, until, action, actorType, actorId or requestId. Only an owner’s or admin’s own sign-in approved for manage.',
   createWebhook: 'Subscribe a public HTTPS URL to sending events. Set up over MCP it delivers only while this approval is active and is paused when the approval is removed (approval.endsAt); a lasting webhook is made in the dashboard.',
   createInboundWebhook: 'Subscribe a public HTTPS URL to inbound mail events, signed with Standard Webhooks headers. Set up over MCP it delivers only while this approval is active and is paused when the approval is removed (approval.endsAt); a lasting webhook is made in the dashboard.',
 };
@@ -424,7 +425,6 @@ export const HUMAN_STEPS: Record<string, string> = {
   getDomainDnsSetup: 'Human step: Domain Connect opens the DNS provider in a browser. Agents can read the domain’s DNS records instead.',
   completeDomainDnsSetup: 'Human step: the DNS provider redirects the person’s browser back.',
   sendDomainTestEmail: 'Human step: sends only to the signed-in person’s own address. Agents use sendEmail.',
-  listActivity: 'Human step: a workspace’s Activity is for its signed-in owners and admins (Settings → Activity).',
   contactSupport: `Human step: a signed-in person contacts ${productName} support from the dashboard.`,
   createBillingTopUp: 'Human step: only a signed-in owner or admin charges the saved card or opens Checkout from the dashboard. Agents create a link a person pays (billing · topUpLink).',
   updateBillingAutoRecharge: 'Human step: auto-recharge spends from the saved card, so only a signed-in owner or admin sets it in the dashboard.',

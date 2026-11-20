@@ -1617,7 +1617,7 @@ export type DomainPage = {
     data: Array<DomainReadiness>;
     nextCursor: string | null;
     /**
-     * Hosted only, and only for credentials without domain restrictions. Adding a domain past the limit fails with DOMAIN_LIMIT_REACHED; at most 10 of them may be unproven at once.
+     * Hosted only, and only for credentials without domain restrictions. Absent when the workspace sends through its own AWS account, which has no domain total. Adding a domain past the limit fails with DOMAIN_LIMIT_REACHED; at most 10 of them may be unproven at once.
      */
     quota?: {
         /**
@@ -6612,11 +6612,11 @@ export type BillingAutoRecharge = {
      */
     thresholdCents: number;
     /**
-     * Credit to add each time ($20 to $1,000).
+     * Credit to add each time ($20 to $10,000).
      */
     amountCents: number;
     /**
-     * At most this much auto-recharge per calendar month (UTC), at least amountCents.
+     * At most this much auto-recharge per calendar month (UTC), at least amountCents and up to $250,000.
      */
     monthlyCapCents: number;
 };

@@ -222,8 +222,8 @@ export function registerBilling(app: App) {
   const AutoRecharge = z.object({
     enabled: z.boolean(),
     thresholdCents: z.number().int().min(500).max(100_000).describe('Recharge when the balance falls below this ($5 to $1,000).'),
-    amountCents: z.number().int().min(2000).max(100_000).describe('Credit to add each time ($20 to $1,000).'),
-    monthlyCapCents: z.number().int().min(2000).max(1_000_000).describe('At most this much auto-recharge per calendar month (UTC), at least amountCents.'),
+    amountCents: z.number().int().min(2000).max(1_000_000).describe('Credit to add each time ($20 to $10,000).'),
+    monthlyCapCents: z.number().int().min(2000).max(25_000_000).describe('At most this much auto-recharge per calendar month (UTC), at least amountCents and up to $250,000.'),
   }).strict().refine(v => v.monthlyCapCents >= v.amountCents, { message: 'monthlyCapCents must be at least amountCents.', path: ['monthlyCapCents'] }).openapi('BillingAutoRecharge');
   app.openapi(createRoute({ method: 'put', path: '/v1/billing/auto-recharge', operationId: 'updateBillingAutoRecharge', tags: ['Billing'], security, summary: 'Set auto-recharge',
     description: `Hosted only; a signed-in owner or admin in the dashboard. ${productName} charges the saved card when the balance falls below the threshold, up to the monthly limit. Turning it on needs a saved card (409 PAYMENT_METHOD_REQUIRED) and clears a previous decline.`,

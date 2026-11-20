@@ -207,11 +207,11 @@ async function saveIntent(db:DbExecutor,c:V5Connection,region:string,name:string
     ON CONFLICT(connection_id,name) DO UPDATE SET id=CASE WHEN i.closed_reason IS NULL THEN i.id ELSE excluded.id END,region=excluded.region,importing=excluded.importing,closed_reason=NULL
     WHERE i.closed_reason IS NOT NULL OR (i.region=excluded.region AND i.importing=excluded.importing) RETURNING *`)).rows[0];
   if (!intent) throw conflict('DOMAIN_REGION_CONFLICT','Only one sending region may be selected for a domain.');
-  const cap=(await db.execute<{total:number;unproven:number;limit:number}>(sql`SELECT workspace_domain_limit(${c.workspace_id}) AS "limit",
-    (SELECT count(*) FROM domain_claims WHERE workspace_id=${c.workspace_id})+(SELECT count(*) FROM byo_domain_intents WHERE connection_id=${c.id} AND closed_reason IS NULL) AS total,
+  // The identities live in the customer's own SES account, so no workspace total applies: only the 10 unproven domains,
+  // counting this intent.
+  const cap=(await db.execute<{unproven:number}>(sql`SELECT
     (SELECT count(*) FROM domain_claims WHERE workspace_id=${c.workspace_id} AND NOT ever_proven)+(SELECT count(*) FROM byo_domain_intents WHERE connection_id=${c.id} AND closed_reason IS NULL AND NOT importing) AS unproven`)).rows[0]!;
-  // The total includes this intent, so it may reach the limit but not pass it.
-  if (Number(cap.total)>cap.limit || !importing && Number(cap.unproven)>10) throw domainLimitError(Number(cap.total)>cap.limit ? Number(cap.total)-1 : 0,cap.limit);
+  if (!importing && Number(cap.unproven)>10) throw domainLimitError(0,null);
   if (row.sending_state==='ready') await queueBinding(db,c,intent);
   else await job(db,c,'byo.provision',regionJobId(c,region),{region});
 }

@@ -283,8 +283,8 @@ export async function setAutoRecharge(runtime: Runtime, workspaceId: string, set
   stripeConfig(runtime);
   const { enabled, thresholdCents, amountCents, monthlyCapCents } = settings;
   const whole = (v: number, min: number, max: number) => Number.isInteger(v) && v >= min && v <= max;
-  if (!whole(thresholdCents, 500, 100_000) || !whole(amountCents, 2000, 100_000) || !whole(monthlyCapCents, amountCents, 1_000_000))
-    throw new ApiError(422, 'TOP_UP_AMOUNT_INVALID', 'Use a threshold of $5–$1,000, an amount of $20–$1,000 and a monthly limit of at least the amount, up to $10,000.');
+  if (!whole(thresholdCents, 500, 100_000) || !whole(amountCents, 2000, 1_000_000) || !whole(monthlyCapCents, amountCents, 25_000_000))
+    throw new ApiError(422, 'TOP_UP_AMOUNT_INVALID', 'Use a threshold of $5–$1,000, an amount of $20–$10,000 and a monthly limit of at least the amount, up to $250,000.');
   await runtime.db.transaction(async tx => {
     await lockAccount(tx, workspaceId);
     const [a] = await rows<{ stripe_payment_method: string | null; blocked: boolean }>(tx, sql`SELECT stripe_payment_method,

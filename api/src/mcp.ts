@@ -1,7 +1,7 @@
 import { createMcpHandler, Server, type CallToolResult, type Tool } from '@modelcontextprotocol/server';
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/server/validators/cf-worker';
 import { bearerActor, dispatchAsActor, dispatchAsMailboxAccess, workspaceBearer } from './auth.js';
-import { agentTokenMintRefusal, denied, digest, keyAdminRefusal, requiredFor, type Required, lastingRefusal, memberAdminRefusal, ModuleLoadError, receivingAdminRefusal, requestOrigin, withOuterRequest, workspaceMailAccess, type Actor, type MailboxAccess, type App, type RequestOrigin, type Runtime } from './core.js';
+import { agentTokenMintRefusal, denied, digest, keyAdminRefusal, requiredFor, type Required, lastingRefusal, memberAdminManage, memberAdminRefusal, ModuleLoadError, receivingAdminRefusal, requestOrigin, withOuterRequest, workspaceMailAccess, type Actor, type MailboxAccess, type App, type RequestOrigin, type Runtime } from './core.js';
 import { getMcpGrantActor, withMcpAuthorization } from './mcp-auth.js';
 import { chooseWorkspace, setDefaultWorkspace, WorkspaceChoice, type McpConnection } from './oidc-resource.js';
 import { buildMcpCatalog, mcpAliases, TOOLSETS, EMAIL_SEND_CONFIRMATION, EMAIL_SEND_ROUTING, type McpOperation } from './mcp-catalog.js';
@@ -126,7 +126,7 @@ function refusal(op: McpOperation, actor: Actor): Required | null {
   if ((op.receivingConsent && actor.grantId && !actor.receivingConsent) || (op.ownerOnly && actor.role === 'member')) return { ...need, person: 'admin' };
   const guard = (op.keyAdmin && keyAdminRefusal(actor)) || (op.agentTokenMint && agentTokenMintRefusal(actor))
     || (op.receivingAdmin && receivingAdminRefusal(actor, op.write ? 'change receiving configuration' : undefined))
-    || (op.lasting && lastingRefusal(actor, 'make lasting changes', need)) || (op.memberAdmin && memberAdminRefusal(actor, op.write));
+    || (op.lasting && lastingRefusal(actor, 'make lasting changes', need)) || (op.memberAdmin && memberAdminRefusal(actor, memberAdminManage(op.method, op.path)));
   if (guard) return guard.required ?? need;
   return permits(actor, op.permission) ? null : need;
 }
@@ -158,7 +158,7 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
   const key = 'key' in principal ? principal : null;
   const credential = request.headers.get('authorization')?.match(/^(?:Bearer|DPoP)\s+(.+)$/i)?.[1];
   const redact = (text: string) => credential ? text.split(credential).join('[REDACTED]') : text;
-  // Members and invitations are Hosted workspace administration; a self-hosted installation answers them 404.
+  // Members, invitations and Activity are Hosted workspace administration; a self-hosted installation answers them 404.
   const allowed = ([, op]: [string, McpOperation]) => inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : (!op.memberAdmin || runtime.config.multiTenant) && authorized(op, connection ? connection.listing : key!.key);
   const operations = new Map([...catalog].filter(allowed));
   // The rule tools under their names before the rename: authorized as the listed tools are, never listed (so the listing

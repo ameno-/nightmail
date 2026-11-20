@@ -68,7 +68,7 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 /* The standing banner (restrict, pause) on every dashboard page. What happened has a reserved line (two below 1100 px, three
    below 640 px), so the reason arriving after the page never moves anything; it doesn't crossfade with route changes. */
 .page-surface > .standing-banner { animation: none; }
-/* The billing banner (an empty balance) shares it; its two lines are fixed text, so both always fit their reserved lines. */
+/* The billing banner (an empty balance) and the setup banner (a member before sending is set up) share it; its two lines are fixed text, so both always fit their reserved lines. */
 .standing-banner + .standing-banner { margin-top: calc(-1 * var(--page-gap) + var(--space-8)); }
 .standing-banner { flex-shrink: 0; display: flex; align-items: center; gap: var(--space-12); margin-bottom: var(--page-gap); padding: var(--space-8) var(--space-12); border: 1px solid var(--tone-border); border-radius: var(--radius-sm); background: var(--tone-bg); color: var(--color-text); font-size: var(--text-sm); line-height: var(--leading-sm); }
 .standing-banner__icon { flex: none; align-self: flex-start; margin-top: 2px; color: var(--tone-ink); }
@@ -85,7 +85,7 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
   .standing-banner__text > .standing-banner__what { display: -webkit-box; height: calc(2 * var(--leading-sm)); -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
   .standing-banner__text > .standing-banner__what:has(.ui-skeleton-block) { display: flex; align-items: flex-start; padding-top: 4px; }
   /* The billing banner's text is fixed, so it needs no reserved lines. */
-  .billing-banner .standing-banner__text > .standing-banner__what { display: block; height: auto; -webkit-line-clamp: unset; }
+  .billing-banner .standing-banner__text > .standing-banner__what, .setup-banner .standing-banner__text > .standing-banner__what { display: block; height: auto; -webkit-line-clamp: unset; }
 }
 @media (max-width: 899px) {
   .standing-banner { flex-wrap: wrap; align-items: flex-start; }
@@ -94,7 +94,7 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 }
 @media (max-width: 640px) {
   .standing-banner__text > .standing-banner__what { height: calc(3 * var(--leading-sm)); -webkit-line-clamp: 3; }
-  .billing-banner .standing-banner__text > .standing-banner__what { height: auto; -webkit-line-clamp: unset; }
+  .billing-banner .standing-banner__text > .standing-banner__what, .setup-banner .standing-banner__text > .standing-banner__what { height: auto; -webkit-line-clamp: unset; }
 }
 .skip-link { position: fixed; top: -80px; left: var(--space-24); z-index: 150; padding: var(--space-8) var(--space-12); background: var(--color-accent); color: var(--color-on-accent); border-radius: var(--radius-sm); }
 .skip-link:focus { top: var(--space-8); }

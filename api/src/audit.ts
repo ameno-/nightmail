@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { SQL, sql } from 'drizzle-orm';
 import type { OperatorRole } from './operator-identity.js';
-import { ApiError, dashboardSession, errors, notFound, requestOrigin, response, webhookUrlHint, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
+import { ApiError, errors, memberAdminRefusal, notFound, requestOrigin, response, webhookUrlHint, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
 import { productName } from './brand.js';
 
 // The per-account audit trail (migration 260): one append-only table, written by recordAudit() inside the
@@ -309,9 +309,11 @@ const OperatorQuery = AuditFilters.extend({ include: z.string().regex(/^(?:billi
 
 export function registerAudit(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/activity', operationId: 'listActivity', tags: ['Workspaces'], security: sessionOnly,
-    description: `What happened in this workspace and who did it: members, roles and invitations, API keys, inbox keys and app passwords, domains, webhooks, endpoints, routes and rules, settings, exports and deletions, and each time ${productName} support viewed the workspace with a support grant. Newest first. Owners and admins only; secrets and message content are never recorded.`,
+    description: `What happened in this workspace and who did it: members, roles and invitations, API keys, inbox keys and app passwords, domains, webhooks, endpoints, routes and rules, settings, exports and deletions, and each time ${productName} support viewed the workspace with a support grant. Newest first. Owners and admins, in the dashboard or over their own MCP sign-in approved for manage; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED. Secrets and message content are never recorded.`,
     request: { query: AuditFilters }, responses: { 200: response(AuditPage), ...errors } }), async c => {
-    const a = dashboardSession(c, true);
+    if (!c.env.config.multiTenant) notFound('Endpoint');
+    const a = c.get('actor'), refusal = memberAdminRefusal(a, true);
+    if (refusal) throw refusal;
     return c.json(await customerTrail(c.env.db, [a.workspaceId], c.req.valid('query')), 200);
   });
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'get', path: '/v1/operator/workspaces/{id}/audit', operationId: 'operatorWorkspaceAudit',

@@ -626,8 +626,8 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   for(const op of catalog.values()){assert.ok((TOOLSETS as readonly string[]).includes(op.toolset),op.tool.name);assert.equal(op.tool.outputSchema?.type,'object',op.tool.name);assert.match(op.tool.name,/^[a-z][A-Za-z]+$/,op.tool.name)}
   // Internal routes (operators and support grants) are never tools, whatever their security scheme.
   const bearer=Object.entries(spec.paths??{}).filter(([path])=>!/^\/v1\/(?:support|operator)\//.test(path)).flatMap(([,item])=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&!o.operationId.endsWith('Ritual')&&!/Ritual[A-Z]|Rituals|OmenOptIns/.test(o.operationId)&&!['receiveSesSnsEvent','revealWebhookSecret','downloadInboundAttachment','getRuleVersion','createBillingTopUp','updateBillingAutoRecharge','createBillingCardSetup','deleteBillingPaymentMethod'].includes(o.operationId)).map((o:Json)=>o.operationId as string);
-  // Members and invitations are session routes that an owner's or admin's own sign-in also calls (core.ts memberAdminRoute).
-  assert.deepEqual([...catalog.keys()].sort(), [...bearer,'waitForMessage','listWorkspaceMembers','listWorkspaceInvitations','createWorkspaceInvitation','revokeWorkspaceInvitation'].sort());
+  // Members, invitations and Activity are session routes that an owner's or admin's own sign-in also calls (core.ts memberAdminRoute).
+  assert.deepEqual([...catalog.keys()].sort(), [...bearer,'waitForMessage','listWorkspaceMembers','listWorkspaceInvitations','createWorkspaceInvitation','revokeWorkspaceInvitation','listActivity'].sort());
   const { resourceTools, resourceInventory, listedTool } = await import('./src/mcp-resources.js'), { workspaceTools, workspaceResource } = await import('./src/mcp.js');
   assert.deepEqual(resourceInventory().map(x=>x.operation).sort(), [...catalog.keys()].sort());
   // The listing's byte budget is measured as sent, for the largest credential (Hosted MCP members and invitations).
@@ -3359,7 +3359,7 @@ test('permission refusals: every refusal helper names the permission, scope, cre
     ['keyAdminRefusal: agent token', () => core.keyAdminRefusal(agentToken), 'CREDENTIAL_DELEGATION_FORBIDDEN', `Temporary agent tokens cannot ${core.KEY_CHANGE}. Use the dashboard, an API key or the MCP approval itself.`, { permission: 'configuration', level: 'write', credential: 'lasting' }, 'configuration=write; credential=lasting'],
     ['keyAdminRefusal: sender domains', () => core.keyAdminRefusal(key(['manage'], { domains: ['example.com'] })), 'PERMISSION_DENIED', 'Key administration requires unrestricted management access.', { permission: 'configuration', level: 'write', scope: 'workspace' }, 'configuration=write; scope="workspace"'],
     ['agentTokenMintRefusal', () => core.agentTokenMintRefusal(key(['read'])), 'MCP_AUTHORIZATION_REQUIRED', 'Temporary agent tokens can only be delegated directly from an MCP OAuth approval.', { credential: 'signIn' }, 'credential=sign_in'],
-    ['memberAdminRefusal: API key', () => core.memberAdminRefusal(key(['manage']), true), 'DASHBOARD_AUTH_REQUIRED', 'Members and invitations are managed by an owner or admin in person: a signed-in dashboard session or their own MCP sign-in. API keys and agent tokens cannot.', { person: 'admin' }, 'person=admin'],
+    ['memberAdminRefusal: API key', () => core.memberAdminRefusal(key(['manage']), true), 'DASHBOARD_AUTH_REQUIRED', 'Members, invitations and Activity are for an owner or admin in person: a signed-in dashboard session or their own MCP sign-in. API keys and agent tokens cannot.', { person: 'admin' }, 'person=admin'],
     ['memberAdminRefusal: member', () => core.memberAdminRefusal(session('member'), false), 'PERMISSION_DENIED', 'Workspace administration requires an owner or admin.', { person: 'admin' }, 'person=admin'],
     ['memberAdminRefusal: read sign-in', () => core.memberAdminRefusal(signIn(['read']), true), 'PERMISSION_DENIED', 'This operation requires manage permission.', { person: 'admin', level: 'write' }, 'level=write; person=admin'],
     ['dashboardSession: API key', () => core.dashboardSession(ctx(key(['manage']), 'GET', '/v1/workspaces')), 'DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' }, 'credential=dashboard'],
@@ -6081,6 +6081,20 @@ describe('Hosted MCP OAuth and tools', () => {
         ['member.invite', 'member', manager!.userId, 'dashboard', dashboardOwner.id], ['member.invite_revoke', 'mcp_grant', ownerGrant, 'mcp', dashboardOwner.id],
       ]);
       assert.deepEqual(trail[0].summary, { after: { email: guest.email, role: 'admin' } });
+
+      // Activity: an owner's or admin's sign-in approved for manage reads the same trail as Settings → Activity, in Code
+      // Mode and as the plain settings resource; a read-only sign-in, a member's, keys and agent tokens never do.
+      const dashboard = ok(await local('GET', '/v1/activity?action=member.invite&limit=10')).data.map((e: Json) => e.id);
+      assert.ok(dashboard.length >= 4);
+      assert.deepEqual(done(await call(owner.token, 'listActivity', { action: 'member.invite', limit: 10 })).data.map((e: Json) => e.id), dashboard);
+      assert.ok(done(await mcp(adminSignIn.token, 'tools/call', { name: 'settings', arguments: { action: 'activity', workspace: wid } }, '/mcp')).data.length > 0);
+      assert.ok(!readerTools.includes('listActivity'), 'A read-only sign-in is not offered Activity.');
+      refused(await call(reader.token, 'listActivity'), null, 'TOOL_UNAVAILABLE');
+      refused(await call(memberSignIn.token, 'listActivity', { workspace: wid }), 403, 'PERMISSION_DENIED');
+      for (const secret of [personKey, approvalKey, agentToken]) {
+        error(await request('GET', '/v1/activity', secret), 403, 'DASHBOARD_AUTH_REQUIRED');
+        assert.ok(!(await listed(secret)).includes('listActivity'));
+      }
     });
   });
 
@@ -6184,7 +6198,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const agentToken = (await rpc('tools/call', { name: 'createAgentToken', arguments: { body: { permissions: ['read'], expiresInSeconds: 600, purpose: 'audit trail fixture' }, confirm: true } })).structuredContent.token as string;
       assert.match(agentToken, /^nm_agent_/); secrets.add(agentToken);
       const tools = (await rpc('tools/list', {})).tools.map((tool: Json) => tool.name as string);
-      assert.ok(tools.length > 10 && !tools.some((name: string) => /support|operator|activity/i.test(name)), 'Internal routes are never MCP tools.');
+      assert.ok(tools.length > 10 && !tools.some((name: string) => /support|operator/i.test(name)), 'Internal routes are never MCP tools.');
       const appPassword = hex().slice(0, 32).match(/.{4}/g)!.join('-'); secrets.add(appPassword);
       const customers: [string, Record<string, string>][] = [
         ['owner session', session(manager!)], ['admin session', session(admin)], ['member session', session(member)],
@@ -13012,6 +13026,11 @@ describe('Billing: Stripe', () => {
     const setupParams = fake.calls.find(c => c.path === '/v1/checkout/sessions' && c.params.mode === 'setup')!.params;
     assert.deepEqual([setupParams.currency, setupParams.payment_method_types, setupParams.allowed_payment_method_types], ['usd', undefined, { 0: 'card' }]);
     await assert.rejects(stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 1999, monthlyCapCents: 5000 }), { status: 422 });
+    // The bounds are the customer's own ceiling: up to $10,000 each time and $250,000 a month, and no further.
+    await stripe.setAutoRecharge(runtime, wid, { enabled: false, thresholdCents: 1000, amountCents: 1_000_000, monthlyCapCents: 25_000_000 });
+    assert.deepEqual([(await account()).recharge_amount_uc, (await account()).recharge_month_cap_uc], [String(1_000_000n * 1_000_000n), String(25_000_000n * 1_000_000n)]);
+    for (const over of [{ amountCents: 1_000_001, monthlyCapCents: 25_000_000 }, { amountCents: 2500, monthlyCapCents: 25_000_001 }])
+      await assert.rejects(stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, ...over }), { status: 422, code: 'TOP_UP_AMOUNT_INVALID' });
     await stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 5000 });
     const recharges = async () => (await db.query("SELECT id, status, failure_code FROM billing_payment_attempts WHERE workspace_id = $1 AND kind = 'recharge' ORDER BY created_at", [wid])).rows;
     // Five triggers at once with a $0 balance: one attempt, one invoice, one credit.
@@ -13668,6 +13687,9 @@ describe('Billing: API, MCP and notices', () => {
 
       // The owner session reaches package B (not configured here); a member is refused everything that moves money.
       error(await local('PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 2000 }), 422, 'VALIDATION_FAILED');
+      error(await local('PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1000, amountCents: 1_000_001, monthlyCapCents: 25_000_000 }), 422, 'VALIDATION_FAILED');
+      error(await local('PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 25_000_001 }), 422, 'VALIDATION_FAILED');
+      error(await local('PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1000, amountCents: 1_000_000, monthlyCapCents: 25_000_000 }), 503, 'BILLING_NOT_CONFIGURED');
       error(await local('PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 50000 }), 503, 'BILLING_NOT_CONFIGURED');
       error(await local('POST', '/v1/billing/top-ups', { amountCents: 5000, method: 'checkout' }), 503, 'BILLING_NOT_CONFIGURED');
       await asRole(db, wid, 'member');
@@ -16703,11 +16725,19 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query("INSERT INTO domain_claims(name,workspace_id,ever_proven) VALUES($1,'default',true)",[overlap]);
       try {await assert.rejects(run('byo.bind',oh),{code:'DOMAIN_CLAIMED'});} finally {await db.query("DELETE FROM domain_claims WHERE name=$1 AND workspace_id='default'",[overlap]);}
       const failed=await regionStatus(oh);assert.deepEqual(failed.pending,[]);assert.ok(failed.failedIntents.some((i:Json)=>i.domain===overlap && i.error==='DOMAIN_CLAIMED'));
-      // Fill all but the final active slot in both the 100-total and 10-unproven quotas.
-      await db.query(`INSERT INTO byo_domain_intents(connection_id,region,name,importing,id) SELECT $1,$2,'cap-'||n||'.example',n>9-(SELECT count(*) FROM domain_claims WHERE workspace_id=$3 AND NOT ever_proven),'cap-'||n FROM generate_series(1,99-(SELECT count(*)::int FROM domain_claims WHERE workspace_id=$3)) n`,[v5.id,oh,wid]);
-      try {ok(await api('POST','/v1/domains',{name:'last-slot.example'}),202);error(await api('POST','/v1/domains',{name:'overflow.example'}),409,'DOMAIN_LIMIT_REACHED');}
-      finally {await db.query("DELETE FROM byo_domain_intents WHERE connection_id=$1 AND id LIKE 'cap-%'",[v5.id]);}
-      ok(await select(va+':reselect.example'),202);await run('byo.bind',va);
+      // The identities live in the customer's own SES account, so the workspace's domain total (100) doesn't apply: with
+      // 150 domains, all but the final unproven slot filled, one more is taken and the next is refused by the 10 unproven.
+      await db.query(`INSERT INTO byo_domain_intents(connection_id,region,name,importing,id) SELECT $1,$2,'cap-'||n||'.example',n>9-(SELECT count(*) FROM domain_claims WHERE workspace_id=$3 AND NOT ever_proven),'cap-'||n FROM generate_series(1,149-(SELECT count(*)::int FROM domain_claims WHERE workspace_id=$3)) n`,[v5.id,oh,wid]);
+      try {
+        ok(await api('POST','/v1/domains',{name:'last-slot.example'}),202);
+        const over=await api('POST','/v1/domains',{name:'overflow.example'});error(over,409,'DOMAIN_LIMIT_REACHED');assert.match(over.body.error.message,/at most 10 domains whose ownership is not yet proven/);
+      } finally {await db.query("DELETE FROM byo_domain_intents WHERE connection_id=$1 AND id LIKE 'cap-%'",[v5.id]);}
+      // The reservation itself skips the total too, and listDomains shows no quota for such a workspace.
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,ever_proven) SELECT 'filler-'||n||'.total.test',$1,true FROM generate_series(1,150) n`,[wid]);
+      try {
+        assert.equal(ok(await api('GET','/v1/domains?refresh=false&limit=1')).quota,undefined);
+        ok(await select(va+':reselect.example'),202);await run('byo.bind',va);
+      } finally {await db.query("DELETE FROM domain_claims WHERE workspace_id=$1 AND name LIKE 'filler-%.total.test'",[wid]);}
       assert.equal((await db.query("SELECT region FROM domain_sending_bindings WHERE workspace_id=$1 AND name='reselect.example'",[wid])).rows[0].region,va);
     });
     await t.test('deleting a managed identity prunes only the matching journal and only on success',async()=>{

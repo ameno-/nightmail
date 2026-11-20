@@ -5656,7 +5656,7 @@
               "used",
               "limit"
             ],
-            "description": "Hosted only, and only for credentials without domain restrictions. Adding a domain past the limit fails with DOMAIN_LIMIT_REACHED; at most 10 of them may be unproven at once."
+            "description": "Hosted only, and only for credentials without domain restrictions. Absent when the workspace sends through its own AWS account, which has no domain total. Adding a domain past the limit fails with DOMAIN_LIMIT_REACHED; at most 10 of them may be unproven at once."
           }
         },
         "required": [
@@ -20972,14 +20972,14 @@
           "amountCents": {
             "type": "integer",
             "minimum": 2000,
-            "maximum": 100000,
-            "description": "Credit to add each time ($20 to $1,000)."
+            "maximum": 1000000,
+            "description": "Credit to add each time ($20 to $10,000)."
           },
           "monthlyCapCents": {
             "type": "integer",
             "minimum": 2000,
-            "maximum": 1000000,
-            "description": "At most this much auto-recharge per calendar month (UTC), at least amountCents."
+            "maximum": 25000000,
+            "description": "At most this much auto-recharge per calendar month (UTC), at least amountCents and up to $250,000."
           }
         },
         "required": [
@@ -74782,7 +74782,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "What happened in this workspace and who did it: members, roles and invitations, API keys, inbox keys and app passwords, domains, webhooks, endpoints, routes and rules, settings, exports and deletions, and each time Nightmail support viewed the workspace with a support grant. Newest first. Owners and admins only; secrets and message content are never recorded.",
+        "description": "What happened in this workspace and who did it: members, roles and invitations, API keys, inbox keys and app passwords, domains, webhooks, endpoints, routes and rules, settings, exports and deletions, and each time Nightmail support viewed the workspace with a support grant. Newest first. Owners and admins, in the dashboard or over their own MCP sign-in approved for manage; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED. Secrets and message content are never recorded.",
         "parameters": [
           {
             "schema": {
@@ -75012,8 +75012,8 @@
         },
         "x-nightmail-permission": {
           "person": "admin",
-          "credential": "dashboard",
-          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
+          "level": "write",
+          "text": "People only: an owner or admin, in the dashboard or over their own MCP sign-in with write access. Never an API key."
         },
         "x-codeSamples": [
           {
