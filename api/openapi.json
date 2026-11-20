@@ -9355,7 +9355,7 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 6000,
-            "description": "Calls per minute; extra calls wait for the next minute."
+            "description": "Calls per minute; extra calls wait for the next minute. Defaults: 600 for webhooks, 60 for Slack and forwards, 30 for Discord."
           },
           "retryOnTimeout": {
             "type": "boolean",
@@ -9554,7 +9554,7 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 6000,
-            "description": "Calls per minute; extra calls wait for the next minute."
+            "description": "Calls per minute; extra calls wait for the next minute. Defaults: 600 for webhooks, 60 for Slack and forwards, 30 for Discord."
           },
           "retryOnTimeout": {
             "type": "boolean",
@@ -60373,7 +60373,7 @@
         ],
         "operationId": "createInbox",
         "summary": "Create an agent inbox",
-        "description": "Creates an inbox with a fresh address. Set type=persistent for forever retention (no lease or default per-inbox cap; workspace manage permission). The default is an expiring inbox on one of the workspace’s active receiving domains, or a sandbox inbox that needs no DNS. Then wait for mail with GET /v1/inboxes/{id}/messages?wait=30 (or the SDK’s waitForMessage). Needs a workspace admin or a key with create permission. Limits: 60 creates per minute and 1,000 retained inboxes (including grace and pending erasure) per workspace. Errors: RECEIVING_DOMAIN_REQUIRED and RECEIVING_NOT_ACTIVE name the DNS step to take; ADDRESS_TAKEN, ADDRESS_RETIRED, EPHEMERAL_INBOX_LIMIT, INBOX_CREATE_RATE (with Retry-After) and IDEMPOTENCY_CONFLICT.",
+        "description": "Creates an inbox with a fresh address. Set type=persistent for forever retention (no lease or default per-inbox cap; workspace manage permission). The default is an expiring inbox on one of the workspace’s active receiving domains, or a sandbox inbox that needs no DNS. Then wait for mail with GET /v1/inboxes/{id}/messages?wait=30 (or the SDK’s waitForMessage). Needs a workspace admin or a key with create permission. Limits: 60 creates per minute and 50,000 retained inboxes (including grace and pending erasure) per workspace. Errors: RECEIVING_DOMAIN_REQUIRED and RECEIVING_NOT_ACTIVE name the DNS step to take; ADDRESS_TAKEN, ADDRESS_RETIRED, EPHEMERAL_INBOX_LIMIT, INBOX_CREATE_RATE (with Retry-After) and IDEMPOTENCY_CONFLICT.",
         "requestBody": {
           "required": true,
           "content": {
@@ -70356,7 +70356,7 @@
           "Inbound webhooks"
         ],
         "summary": "Redeliver a message to its route webhooks",
-        "description": "Queues this message again for every route webhook that already finished with it (delivered or failed), or only destination. Returns how many deliveries were queued; 0 means none are eligible. Previously redelivered successes have a 10-minute cooldown. The workspace gets 60 manual posts per hour. Receivers deduplicate by Webhook-Id.",
+        "description": "Queues this message again for every route webhook that already finished with it (delivered or failed), or only destination. Returns how many deliveries were queued; 0 means none are eligible. Previously redelivered successes have a 10-minute cooldown. The workspace gets 1,000 manual posts per hour. Receivers deduplicate by Webhook-Id.",
         "parameters": [
           {
             "schema": {

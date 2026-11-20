@@ -4454,7 +4454,7 @@ export const listInboxes = <ThrowOnError extends boolean = false>(options?: Opti
 /**
  * Create an agent inbox
  *
- * Creates an inbox with a fresh address. Set type=persistent for forever retention (no lease or default per-inbox cap; workspace manage permission). The default is an expiring inbox on one of the workspace’s active receiving domains, or a sandbox inbox that needs no DNS. Then wait for mail with GET /v1/inboxes/{id}/messages?wait=30 (or the SDK’s waitForMessage). Needs a workspace admin or a key with create permission. Limits: 60 creates per minute and 1,000 retained inboxes (including grace and pending erasure) per workspace. Errors: RECEIVING_DOMAIN_REQUIRED and RECEIVING_NOT_ACTIVE name the DNS step to take; ADDRESS_TAKEN, ADDRESS_RETIRED, EPHEMERAL_INBOX_LIMIT, INBOX_CREATE_RATE (with Retry-After) and IDEMPOTENCY_CONFLICT.
+ * Creates an inbox with a fresh address. Set type=persistent for forever retention (no lease or default per-inbox cap; workspace manage permission). The default is an expiring inbox on one of the workspace’s active receiving domains, or a sandbox inbox that needs no DNS. Then wait for mail with GET /v1/inboxes/{id}/messages?wait=30 (or the SDK’s waitForMessage). Needs a workspace admin or a key with create permission. Limits: 60 creates per minute and 50,000 retained inboxes (including grace and pending erasure) per workspace. Errors: RECEIVING_DOMAIN_REQUIRED and RECEIVING_NOT_ACTIVE name the DNS step to take; ADDRESS_TAKEN, ADDRESS_RETIRED, EPHEMERAL_INBOX_LIMIT, INBOX_CREATE_RATE (with Retry-After) and IDEMPOTENCY_CONFLICT.
  */
 export const createInbox = <ThrowOnError extends boolean = false>(options: Options<CreateInboxData, ThrowOnError>): RequestResult<CreateInboxResponses, CreateInboxErrors, ThrowOnError> => (options.client ?? client).post<CreateInboxResponses, CreateInboxErrors, ThrowOnError>({
     security: [
@@ -5679,7 +5679,7 @@ export const testInboundWebhook = <ThrowOnError extends boolean = false>(options
 /**
  * Redeliver a message to its route webhooks
  *
- * Queues this message again for every route webhook that already finished with it (delivered or failed), or only destination. Returns how many deliveries were queued; 0 means none are eligible. Previously redelivered successes have a 10-minute cooldown. The workspace gets 60 manual posts per hour. Receivers deduplicate by Webhook-Id.
+ * Queues this message again for every route webhook that already finished with it (delivered or failed), or only destination. Returns how many deliveries were queued; 0 means none are eligible. Previously redelivered successes have a 10-minute cooldown. The workspace gets 1,000 manual posts per hour. Receivers deduplicate by Webhook-Id.
  */
 export const redeliverInboundMessage = <ThrowOnError extends boolean = false>(options: Options<RedeliverInboundMessageData, ThrowOnError>): RequestResult<RedeliverInboundMessageResponses, RedeliverInboundMessageErrors, ThrowOnError> => (options.client ?? client).post<RedeliverInboundMessageResponses, RedeliverInboundMessageErrors, ThrowOnError>({
     security: [

@@ -662,7 +662,7 @@ test('rules: compiler diagnostics, linear regex, plain scores and atomic step/ou
   // Diagnostics name the problem, point at it and suggest the fix.
   for(const [body,pattern] of [['email.subjet',/column 7: email has no field subjet\. Did you mean email\.subject\?/],['slack.billing({text:"x"})',/called by name.*endpoints\.billing\(\{ text \}\)/],['lable("x")',/Did you mean label\(\)\?/],['let x=1',/Use const, not let/],['const r=omens(email,{refund:"Is this a refund?"});if(r.refnd)label("x")',/Did you mean r\.refund\?/],['const r=decisions(email,{refund:"Is this a refund?"});if(r.refnd)label("x")',/has no decision named refnd\. Did you mean r\.refund\?/],['decision(email,{a:"Is this a refund?"})',/Did you mean decisions\(\)\?/],['inbox.delver("x")',/Did you mean inbox\.deliver\(\)\?/],['for(;;){}',/Loops are not available/],['x==1',/Use === instead of ==/]] as const)assert.throws(()=>compileRitual(source(body)),pattern);
   const {retryAfterMs,actionDelay,endpointPolicy}=await import('./src/ritual-retry.js');assert.equal(retryAfterMs('1.5'),1500);assert.equal(retryAfterMs('120'),120000);assert.ok(retryAfterMs(new Date(Date.now()+5000).toUTCString())>3000);assert.equal(retryAfterMs('soon'),0);
-  for(const r of [0,0.5,0.999]){const d=actionDelay(2,0,()=>r);assert.ok(d>=45000&&d<=75000,String(d))}assert.equal(actionDelay(1,90000,()=>0),90000);assert.deepEqual(endpointPolicy('slack'),{perMinute:60,retryOnTimeout:false,idempotent:false});assert.equal(endpointPolicy('forward',{retry_on_timeout:false}).retryOnTimeout,true);
+  for(const r of [0,0.5,0.999]){const d=actionDelay(2,0,()=>r);assert.ok(d>=45000&&d<=75000,String(d))}assert.equal(actionDelay(1,90000,()=>0),90000);assert.deepEqual(endpointPolicy('slack'),{perMinute:60,retryOnTimeout:false,idempotent:false});assert.equal(endpointPolicy('webhook').perMinute,600);assert.equal(endpointPolicy('forward',{retry_on_timeout:false}).retryOnTimeout,true);
   const {ritualTemplates,ritualTypings}=await import('./src/ritual-schema.js');for(const t of ritualTemplates)assert.doesNotThrow(()=>compileRitual(t.source()),t.id);assert.ok(ritualTemplates.length>=9);
   const dts=ritualTypings({endpoints:[{name:'billing',type:'slack',status:'ready'},{name:'support-hook',type:'webhook',status:'ready'}],inboxes:['support'],lists:['vip']});assert.match(dts,/billing\(message: \{ text: string \}\): void/);assert.match(dts,/"support-hook"\(payload\?: Record<string, unknown>\): void/);assert.match(dts,/deliver\(key: "support"\)/);assert.match(dts,/has\(list: "vip", value: string\)/);assert.match(dts,/declare function decisions</);assert.match(dts,/@deprecated The earlier name for decisions\(\)[^\n]*\ndeclare function omens</);
   for(const r of [runRitual(ir,{subject:'news',text:'x'.repeat(65537)},{},{}),runRitual(ir,{subject:'news',text:'hi'},{},{},{},2)]){assert.ok(r.error);assert.deepEqual(r.intents,[])}
@@ -5601,6 +5601,11 @@ describe('Hosted MCP OAuth and tools', () => {
       error(await local('GET', '/v1/inbound/endpoints?cursor=forged'), 422, 'INVALID_CURSOR');
       // Every endpoint is a row of one kind: no Slack endpoint carries a URL or a signing secret any more.
       assert.deepEqual((await db.query("SELECT type,url,encrypted_secret,encrypted_target IS NOT NULL AS target FROM mailbox_webhooks WHERE workspace_id=$1 AND key='ops'", [w])).rows, [{ type: 'slack', url: null, encrypted_secret: null, target: true }]);
+      // Slack, Discord and forward endpoints share a cap of their own, 500 a workspace: ops and copies of it fill all but one.
+      const { ENDPOINT_CAPS } = await import('./src/endpoints.js');
+      await db.query("INSERT INTO mailbox_webhooks SELECT (jsonb_populate_record(m, jsonb_build_object('id', 'con_cap' || n, 'key', 'cap-' || n))).* FROM mailbox_webhooks m CROSS JOIN generate_series(1, $2::int) n WHERE m.workspace_id=$1 AND m.key='ops'", [w, ENDPOINT_CAPS.other - 2]);
+      ok(await local('POST', '/v1/endpoints', { type: 'discord', name: 'cap-last', url: 'https://discord.com/api/webhooks/78/onemodelfixture0003' }), 201);
+      assert.equal(error(await local('POST', '/v1/endpoints', { type: 'discord', name: 'cap-over', url: 'https://discord.com/api/webhooks/79/onemodelfixture0004' }), 409, 'ENDPOINT_LIMIT').message, 'At most 500 Slack, Discord and forward endpoints per workspace. Delete one first.');
     });
   });
 
@@ -14702,7 +14707,7 @@ describe('Operational configuration and public event boundaries', () => {
         // redeliveries; a refused charge leaves no delivery or job behind.
         const budget = await db.query('SELECT used FROM mailbox_manual_delivery_budget WHERE workspace_id=$1', [runtime.config.workspaceId]);
         assert.equal(budget.rows[0].used, 2, 'One endpoint test and one manual retry were charged.');
-        await db.query('UPDATE mailbox_manual_delivery_budget SET used=60 WHERE workspace_id=$1', [runtime.config.workspaceId]);
+        await db.query('UPDATE mailbox_manual_delivery_budget SET used=$2 WHERE workspace_id=$1', [runtime.config.workspaceId, (await import('./src/jobs.js')).MANUAL_DELIVERY_BUDGET]);
         error(await local('POST', `${path}/test`), 429, 'WEBHOOK_REDELIVERY_LIMIT');
         error(await local('POST', `${path}/deliveries/${queued.id}/retry`), 429, 'WEBHOOK_REDELIVERY_LIMIT');
         assert.equal((await db.query("SELECT count(*)::int AS n FROM operation_deliveries WHERE workspace_id=$1", [runtime.config.workspaceId])).rows[0].n, 1);
@@ -14718,7 +14723,7 @@ describe('Operational configuration and public event boundaries', () => {
         assert.deepEqual((await db.query('SELECT status, last_error, generation FROM operation_deliveries WHERE id=$1', [parked[0]])).rows, [{ status: 'failed', last_error: 'WEBHOOK_RETRIES_EXHAUSTED', generation: 2 }]);
         assert.deepEqual((await db.query('SELECT status, generation FROM operation_deliveries WHERE id=$1', [parked[1]])).rows, [{ status: 'pending', generation: 3 }]);
         assert.deepEqual((await db.query("SELECT attempts, payload->>'generation' AS generation FROM jobs WHERE workspace_id=$1 AND type='operation.webhook' AND status='pending' AND payload->>'deliveryId' = ANY($2)", [runtime.config.workspaceId, parked])).rows, [{ attempts: 4, generation: '3' }]);
-        assert.equal((await db.query('SELECT used FROM mailbox_manual_delivery_budget WHERE workspace_id=$1', [runtime.config.workspaceId])).rows[0].used, 60);
+        assert.equal((await db.query('SELECT used FROM mailbox_manual_delivery_budget WHERE workspace_id=$1', [runtime.config.workspaceId])).rows[0].used, (await import('./src/jobs.js')).MANUAL_DELIVERY_BUDGET);
         throw rollback;
       });
     } catch (cause) { if (cause !== rollback) throw cause; }
@@ -21427,6 +21432,31 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     assert.equal(await race(()=>accept(a,'m2',many),()=>accept(b,'m2',['a@rwin.invalid'])),null);
     assert.deepEqual(await state(),{window:1,active:1,receipts:{m1:'pending',m2:'failed'}});
   });
+  test('receive budget: mail over the budget waits for its slot, not for the next hour',async t=>{
+    const {a,w,accept,state}=await receiptRace(t,{messages:4,backlog:10});
+    for(const m of ['m1','m2','m3','m4'])assert.equal(await accept(a,m,['a@rwin.invalid']),'pending');
+    // At 4 an hour a slot refills every 15 minutes. m5 takes the next one, charged now; m6's would be further ahead than
+    // a quarter of an hour, so it waits for the next hour, as a flood does.
+    assert.equal(await accept(a,'m5',['a@rwin.invalid']),'held');assert.equal(await accept(a,'m6',['a@rwin.invalid']),'held');
+    const hold=async(mid:string)=>(await a.query(`SELECT error,round(extract(epoch FROM budget_retry_at-now())/60)::int AS minutes,budget_retry_at=date_trunc('hour',now())+interval '1 hour' AS next_hour
+      FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2`,[w,mid])).rows[0];
+    assert.deepEqual(await hold('m5'),{error:'MAILBOX_RECEIVE_QUEUED',minutes:15,next_hour:false});
+    assert.deepEqual([(await hold('m6')).error,(await hold('m6')).next_hour],['MAILBOX_RECEIVE_BUDGET',true]);
+    // Time passes for the budget and for one hold.
+    const later=async(minutes:number,mid:string)=>{
+      await a.query('UPDATE mail_receive_windows SET level_at=level_at-make_interval(mins=>$2) WHERE workspace_id=$1',[w,minutes]);
+      await a.query('UPDATE mail_receipts SET budget_retry_at=budget_retry_at-make_interval(mins=>$3) WHERE workspace_id=$1 AND ses_message_id=$2',[w,mid,minutes]);
+      return (await a.query('SELECT release_receive_budget_holds($1) n',[w])).rows[0].n;
+    };
+    // 15 minutes on, m5's slot has come up. It was charged when it queued, so the release only counts it in this hour's
+    // window, and the next message queues behind it.
+    assert.equal(await later(15,'m5'),1);
+    assert.equal(await accept(a,'m7',['a@rwin.invalid']),'held');assert.deepEqual(await hold('m7'),{error:'MAILBOX_RECEIVE_QUEUED',minutes:15,next_hour:false});
+    assert.deepEqual(await state(),{window:5,active:5,receipts:{m1:'pending',m2:'pending',m3:'pending',m4:'pending',m5:'pending',m6:'held',m7:'held'}});
+    // An hour on, the budget has refilled: m6 takes a slot.
+    assert.equal(await later(60,'m6'),1);
+    assert.deepEqual((await state()).receipts,{m1:'pending',m2:'pending',m3:'pending',m4:'pending',m5:'pending',m6:'pending',m7:'held'});
+  });
   // tear witnesses: W accept m1, V accept m2, W commit (backlog 1) -> m2 pending; and a release pass waiting
   // behind an admission released past the backlog (8 steps). Since 156 the release does not wait at all.
   test('receive backlog: an admission or release waiting on the window row counts the backlog committed meanwhile',async t=>{
@@ -22598,7 +22628,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await t.test('ephemeral inbox: one-statement create is idempotent, rate-limited and workspace-capped',async()=>{
         const replay=ok(await charged(2,()=>create(input)));assert.equal(replay.id,box.id);assert.equal(replay.credential,undefined);error(await create({...input,name:'different'}),409,'IDEMPOTENCY_CONFLICT');
         await db.query("UPDATE api_request_budgets SET used=60 WHERE workspace_id=$1 AND key_id='inbox-create:'||$1",[wid]);error(await create({}),429,'INBOX_CREATE_RATE');await db.query("UPDATE api_request_budgets SET used=0 WHERE workspace_id=$1 AND key_id='inbox-create:'||$1",[wid]);
-        await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode,expires_at,delete_after) SELECT 'cap'||i,$1,$2,'cap'||i||'@inbox.example','inbox','ephemeral',now()-interval '1 hour',now()+interval '1 day' FROM generate_series(1,998)i",[wid,domain]);error(await create({}),409,'EPHEMERAL_INBOX_LIMIT');await db.query("DELETE FROM mailboxes WHERE workspace_id=$1 AND id LIKE 'cap%'",[wid]);
+        await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode,expires_at,delete_after) SELECT 'cap'||i,$1,$2,'cap'||i||'@inbox.example','inbox','ephemeral',now()-interval '1 hour',now()+interval '1 day' FROM generate_series(1,49998)i",[wid,domain]);error(await create({}),409,'EPHEMERAL_INBOX_LIMIT');await db.query("DELETE FROM mailboxes WHERE workspace_id=$1 AND id LIKE 'cap%'",[wid]);
       });
       await t.test('ephemeral inbox: a create key reads only its own creations, not other addresses, threads or events',async()=>{
         const list=ok(await charged(2,()=>request('GET',root,provision)));assert.deepEqual(list.data.map((r:Json)=>r.id),[box.id]);error(await charged(2,()=>request('GET',`${root}/${other.id}`,key)),404,'NOT_FOUND');
@@ -22928,7 +22958,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   test('ephemeral inbox: extract finds codes and links only in visible text and flags hidden content',async()=>{const {visibleMail}=await import('./src/inbox-content.js');const m=visibleMail('code 000000','<div hidden>code 111111</div><p style="font-size:0">code 222222</p><p>Verify: A3B4</p><a href="https://real.invalid/">other.invalid</a><span>zero\u200bwidth</span>','codes,links');assert.equal(m.hiddenContent,true);assert.deepEqual(m.extract,{codes:['A3B4'],links:[{text:'other.invalid',href:'https://real.invalid/',mismatch:true}]});assert.ok(!m.text.includes('111111'));});
   test('inbound staging recovery and ingest limits',async t=>{
     await simulatedSesFixture(t,async({runtime,db,jobs,local,request,fetch:rawFetch})=>{
-      const {acceptInboundNotification,mailboxIngestJobs,recoverMailReceipts}=await import('./src/mailbox-ingest.js'),{scheduleMailRecovery}=await import('./src/mailbox-staging.js'),{S3Client}=await import('@aws-sdk/client-s3');
+      const {acceptInboundNotification,mailboxIngestJobs,recoverMailReceipts}=await import('./src/mailbox-ingest.js'),{scheduleHoldRelease,scheduleMailRecovery}=await import('./src/mailbox-staging.js'),{S3Client}=await import('@aws-sdk/client-s3');
       const wid=runtime.config.workspaceId,bucket=unique('bucket'),topic=`arn:aws:sns:${REGION}:111122223333:inbound`,domain=unique('mdom');
       runtime.config.aws={accessKeyId:'synthetic',secretAccessKey:'synthetic'};
       await db.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,$3,$4)',[wid,REGION,bucket,topic]);
@@ -22998,14 +23028,40 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal((await db.query("SELECT FROM mail_messages WHERE workspace_id=$1 AND ses_message_id LIKE ANY(ARRAY['unsafe-%','spam-%'])",[wid])).rowCount,0);ok(await local('PATCH','/v1/inbound/policy',{spam:'store'},'live'));
       });
       await t.test('noisy workspace budgets do not suppress a neighbor and never fetch over-budget MIME',async()=>{
-        assert.deepEqual((await db.query('SELECT * FROM mail_receive_policy($1)',[wid+'-no-row'])).rows,[{messages:5000,bytes:'2147483648',backlog:5000}]);
+        assert.deepEqual((await db.query('SELECT * FROM mail_receive_policy($1)',[wid+'-no-row'])).rows,[{messages:50000,bytes:'21474836480',backlog:20000}]);
         await db.query('UPDATE mail_receive_limits SET backlog_limit=0 WHERE workspace_id=$1',[wid]);assert.equal(await submit('blocked',['a@receive.example']),0);assert.equal((await db.query("SELECT error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='blocked'",[wid])).rows[0].error,'MAILBOX_RECEIVE_BACKLOG');
         const other=wid+'-neighbor';await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,'healthy',$2,$3,'key','[]','{}')",[other,REGION,bucket]);assert.equal((await db.query('SELECT status FROM mail_receipts WHERE workspace_id=$1',[other])).rows[0].status,'pending');
         await db.query('UPDATE mail_receive_limits SET backlog_limit=50000,byte_limit=1 WHERE workspace_id=$1',[wid]);raw.set('big',Buffer.from('test'));await submit('big',['a@receive.example']);await run('mailbox.ingest',{sesMessageId:'big'});assert.equal((await db.query("SELECT error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='big'",[wid])).rows[0].error,'MAILBOX_BYTE_BUDGET');await db.query('UPDATE mail_receive_limits SET byte_limit=68719476736 WHERE workspace_id=$1',[wid]);
         // This fixture's run() calls handlers without ending their job rows, so no job end drains: the release admits it.
+        // The minute release leaves a backlog hold to the drain and the hourly pass.
         await db.query("UPDATE mail_receipts SET budget_retry_at=now() WHERE workspace_id=$1 AND status='held'",[wid]);
+        const minuteRelease=async()=>{await scheduleHoldRelease(runtime);return (await db.query("SELECT type,status,payload FROM jobs WHERE id='mailbox.replayHolds:due' AND status='pending'")).rows[0];};
+        await db.query("DELETE FROM jobs WHERE id='mailbox.replayHolds:due'");assert.equal(await minuteRelease(),undefined);
         assert.equal((await db.query('SELECT release_receive_budget_holds($1) AS n',[wid])).rows[0].n,1);
         assert.equal((await db.query("SELECT status FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='blocked'",[wid])).rows[0].status,'pending');
+        // A queued receipt whose slot has come up: the minute cron starts the release, which queues it.
+        await db.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,status,error,budget_retry_at)
+          VALUES($1,'queued',$2,$3,'key','["a@receive.example"]','{}','held','MAILBOX_RECEIVE_QUEUED',now())`,[wid,REGION,bucket]);
+        const release=await minuteRelease();assert.deepEqual(release,{type:'mailbox.replayHolds',status:'pending',payload:{budget:true}});
+        await run('mailbox.replayHolds',release.payload);await db.query("DELETE FROM jobs WHERE id='mailbox.replayHolds:due'");
+        assert.equal((await db.query("SELECT status FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='queued'",[wid])).rows[0].status,'pending');
+        for(const table of ['jobs','mail_receipts'])await db.query(`DELETE FROM ${table} WHERE workspace_id=$1 AND ${table==='jobs'?"payload->>'sesMessageId'":'ses_message_id'}='queued'`,[wid]);
+        // The byte budget refills too: a message whose bytes free up within a quarter of an hour of refill is charged now
+        // and runs again when they have; one further ahead waits for the next hour.
+        const {JobDeferred}=await import('./src/jobs.js');
+        const ingest=async(mid:string)=>{raw.set(mid,Buffer.alloc(400,'a'));await submit(mid,['a@receive.example']);return run('mailbox.ingest',{sesMessageId:mid}).then(()=>null,(e:Json)=>e);};
+        const reservedBytes=async(mid:string)=>(await db.query('SELECT reserved_bytes FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0].reserved_bytes;
+        await db.query('UPDATE mail_receive_windows SET byte_level=0 WHERE workspace_id=$1',[wid]);
+        assert.equal(await ingest('bytes-1'),null);
+        const size=Number(await reservedBytes('bytes-1'));await db.query('UPDATE mail_receive_limits SET byte_limit=$2 WHERE workspace_id=$1',[wid,Math.floor(size*1.75)]);
+        const queued=await ingest('bytes-2');assert.ok(queued instanceof JobDeferred,String(queued));
+        const wait=Date.parse(queued.availableAt)-Date.now();assert.ok(wait>8*60e3&&wait<9*60e3,String(wait));assert.equal(Number(await reservedBytes('bytes-2')),size);
+        const flood=await ingest('bytes-3');assert.ok(flood instanceof JobDeferred,String(flood));
+        assert.equal(Date.parse(flood.availableAt),(Math.floor(Date.now()/3600000)+1)*3600000);assert.equal(await reservedBytes('bytes-3'),null);
+        assert.equal(await run('mailbox.ingest',{sesMessageId:'bytes-2'}).then(()=>null),null);
+        assert.equal((await db.query("SELECT status FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='bytes-2'",[wid])).rows[0].status,'processed');
+        for(const table of ['jobs','mail_receipts'])await db.query(`DELETE FROM ${table} WHERE workspace_id=$1 AND ${table==='jobs'?"payload->>'sesMessageId'":'ses_message_id'}='bytes-3'`,[wid]);
+        await db.query('UPDATE mail_receive_limits SET byte_limit=68719476736 WHERE workspace_id=$1',[wid]);
       });
       await t.test('deduplicated uploads are reclaimed without expiring the owned attachment',async()=>{
         const mime=Buffer.from('From: fixture@example.net\r\nMessage-ID: <same@fixture.invalid>\r\nContent-Type: multipart/mixed; boundary=p\r\n\r\n--p\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=a.bin\r\n\r\nbody\r\n--p--\r\n');for(const mid of ['physical-1','physical-2']){raw.set(mid,mime);await submit(mid,['a@receive.example']);await run('mailbox.ingest',{sesMessageId:mid});}
@@ -23071,16 +23127,22 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal((await db.query("SELECT FROM mailbox_events WHERE workspace_id=$1 AND message_id=$2 AND type='message.stored'",[wid,m.id])).rowCount,1);
         assert.deepEqual((await db.query('SELECT address FROM mail_unrouted WHERE workspace_id=$1 AND message_id=$2 ORDER BY address',[wid,m.id])).rows,[{address:first},{address:late}]);
       });
-      await t.test('inbound catch-all enforces hourly, domain and workspace caps with unrouted fallback',async()=>{
+      await t.test('inbound catch-all enforces the hourly and workspace caps with unrouted fallback',async()=>{
         await db.query("UPDATE mailbox_domains SET catch_all='create_mailbox' WHERE id=$1",[domain]);
         const seed=(count:number,d:string)=>db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,origin,created_at) SELECT gen_random_uuid()::text,$1,$2,gen_random_uuid()||'@receive.example','auto',now()-interval '2 days' FROM generate_series(1,$3)",[wid,d,count]);
         const burst=async(mid:string,n:number)=>{raw.set(mid,Buffer.from('Subject: '+mid+'\r\n\r\nhello'));await submit(mid,Array.from({length:n},(_,i)=>`${mid}${i}@receive.example`));await run('mailbox.ingest',{sesMessageId:mid});return (await db.query('SELECT count(*)::int AS n FROM mail_unrouted u JOIN mail_messages m ON m.id=u.message_id AND m.workspace_id=u.workspace_id WHERE m.workspace_id=$1 AND m.ses_message_id=$2',[wid,mid])).rows[0].n;};
         assert.equal(await burst('hour',51),1);
         await db.query("UPDATE mailboxes SET created_at=now()-interval '2 days' WHERE workspace_id=$1",[wid]);await seed(449,domain);
-        assert.equal(await burst('domain',2),1);
-        const other=unique('mdom');await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,'other.example',$3,'active')",[other,wid,REGION]);await seed(1500,other);
-        await db.query('DELETE FROM mailboxes WHERE domain_id=$1 AND id IN (SELECT id FROM mailboxes WHERE domain_id=$1 AND address NOT IN (SELECT address FROM mailbox_addresses WHERE workspace_id=$2) LIMIT 1)',[domain,wid]);await seed(1,other);
-        assert.equal(await burst('workspace',1),1);
+        // No lifetime total per domain: its 500th and 501st addresses are created.
+        assert.equal(await burst('domain',2),0);
+        const other=unique('mdom');await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,'other.example',$3,'active')",[other,wid,REGION]);
+        // The workspace total counts every auto-created row; these stand-ins skip the per-address inbox adoption, which
+        // would take minutes for 50,000 rows.
+        const used=(await db.query("SELECT count(*)::int AS n FROM mailboxes WHERE workspace_id=$1 AND origin='auto'",[wid])).rows[0].n;
+        await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,origin,kind,created_at) SELECT 'auto-cap'||i,$1,$2,'auto-cap'||i||'@other.example','auto','inbox',now()-interval '2 days' FROM generate_series(1,$3::int) i",[wid,other,49999-used]);
+        // One address short of 50,000 in the workspace: one more is created and the other recipient stays unrouted.
+        assert.equal(await burst('workspace',2),1);
+        await db.query("DELETE FROM mailboxes WHERE workspace_id=$1 AND id LIKE 'auto-cap%'",[wid]);
       });
       await t.test('inbound ingest keeps accepted mail pending after an unclassified database disconnect',async it=>{
         const mid='disconnect';raw.set(mid,Buffer.from('Subject: retry\r\n\r\nbody'));await submit(mid,['a@receive.example']);
@@ -23319,7 +23381,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const {mailboxEventJobs}=await import('./src/mailbox-events.js');await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:delivery.id,generation:delivery.generation},{id:'bounded',workspaceId:wid,attempts:1});assert.ok(posted);
         const path=`/v1/inbound/messages/${mid}/redeliver`;assert.equal((await call('POST',path,{},202)).queued,0);
         await db.query("UPDATE mailbox_webhook_deliveries SET last_redelivery_at=now()-interval '11 minutes' WHERE id=$1",[delivery.id]);
-        await db.query('UPDATE mailbox_manual_delivery_budget SET used=60 WHERE workspace_id=$1',[wid]);error(await local('POST',path,{}),429,'WEBHOOK_REDELIVERY_LIMIT');assert.equal((await db.query('SELECT status FROM mailbox_webhook_deliveries WHERE id=$1',[delivery.id])).rows[0].status,'delivered');
+        await db.query('UPDATE mailbox_manual_delivery_budget SET used=1000 WHERE workspace_id=$1',[wid]);error(await local('POST',path,{}),429,'WEBHOOK_REDELIVERY_LIMIT');assert.equal((await db.query('SELECT status FROM mailbox_webhook_deliveries WHERE id=$1',[delivery.id])).rows[0].status,'delivered');
       });
       await t.test('routing: junk reaches only webhooks with junk include, as message.junk', async () => {
         await call('PATCH', '/v1/inbound/policy', { spam: 'store' });

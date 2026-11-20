@@ -9,6 +9,7 @@ import { reconcileSharedConnections } from './provider-connections.js';
 import { publicStatsTick } from './public-stats.js';
 import { standingTick } from './standing.js';
 import { syncOutboundMessages } from './mailbox-send.js';
+import { scheduleHoldRelease } from './mailbox-staging.js';
 import { queueStartupDiscovery } from './ses-regions.js';
 import { ApiError, log, logError, setLogContext } from './core.js';
 setLogContext({ service: 'runner', deploy: process.env.DEPLOY_SHA });
@@ -63,6 +64,7 @@ try {
           try { await syncOutboundMessages(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
         }
         const recover = Date.now() - lastRecovery >= 60_000;
+        if (recover) try { await scheduleHoldRelease(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'MAILBOX_HOLD_RELEASE_FAILED' }); }
         if (recover && runtime.config.multiTenant) try { await (await import('./billing/stripe-jobs.js')).billingMinute(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'BILLING_MINUTE_FAILED' }); }
         const count = await drain(runtime, concurrency * 10, concurrency, 5000, gates, recover, priorityWake,'work');
         if (recover) lastRecovery = Date.now();

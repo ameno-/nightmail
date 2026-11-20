@@ -20,7 +20,7 @@ import { withMemory } from './isolate-memory.js';
 import { AttachmentContentId, AttachmentContentType, blockedExtension, mailAddress } from './outbound-content.js';
 import { SEND_LIMITS } from './send-limits.js';
 import { plusBase } from './routing-match.js';
-import { chargeManualDelivery, JobDeferred } from './jobs.js';
+import { chargeManualDelivery, JobDeferred, MANUAL_DELIVERY_BUDGET } from './jobs.js';
 import { detachDestination, enableRouting, RoutingKey } from './routing.js';
 import { endpointPolicy, DEFAULT_POLICY, type EndpointPolicy } from './ritual-retry.js';
 import { endpointCall, endpointPayloads, type EndpointType } from './ritual-schema.js';
@@ -30,7 +30,7 @@ import { legacyWebhookFormat, loopHeader, productName, webhookFormat } from './b
 type HeaderList = z.infer<typeof WebhookHeaders>;
 type StoredFormat = EndpointRecord['format'];
 /** Caps, per workspace. Paused webhooks don't count; chat and forward endpoints count whatever their state. */
-export const ENDPOINT_CAPS = { subscribed: 32, routeOnly: 500, other: 50 } as const;
+export const ENDPOINT_CAPS = { subscribed: 32, routeOnly: 500, other: 500 } as const;
 const targetBinding = (w: string, endpointId: string) => w + ':endpoint:' + endpointId;
 /** Slack, Discord and forward endpoints keep the con_ ID prefix they always had, webhooks mwh_. */
 const newEndpointId = (type: EndpointType) => id(type === 'webhook' ? 'mwh' : 'con');
@@ -95,7 +95,7 @@ const base = '/v1/endpoints',
   Name = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/).describe('Endpoint name, unique in the workspace across every type. Rules call endpoints.<name>(…).'),
   Status = z.enum(['ready', 'pending', 'expired', 'declined', 'paused']).describe('ready: callable. pending: a forward waiting for its recipient to confirm. expired: the confirmation link lapsed. declined: the recipient declined or stopped forwards. paused: deliveries are held.'),
   Policy = z.object({
-    perMinute: z.number().int().min(1).max(6000).describe('Calls per minute; extra calls wait for the next minute.'),
+    perMinute: z.number().int().min(1).max(6000).describe(`Calls per minute; extra calls wait for the next minute. Defaults: ${DEFAULT_POLICY.webhook.perMinute} for webhooks, ${DEFAULT_POLICY.slack.perMinute} for Slack and forwards, ${DEFAULT_POLICY.discord.perMinute} for Discord.`),
     retryOnTimeout: z.boolean().describe('Replay an attempt whose outcome is unknown (timeout, dropped connection). Off by default for chat and webhooks; always on for forwards.'),
     idempotent: z.boolean().describe('The receiver deduplicates by the Idempotency-Key header, so unknown outcomes are replayed. Webhooks only.'),
   }).openapi('EndpointPolicy');
@@ -564,7 +564,7 @@ export function registerInboundWebhooks(app: App, deps: Access) {
     }
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/inbound/messages/{messageId}/redeliver', operationId: 'redeliverInboundMessage', security, tags, summary: 'Redeliver a message to its route webhooks',
-    description: 'Queues this message again for every route webhook that already finished with it (delivered or failed), or only destination. Returns how many deliveries were queued; 0 means none are eligible. Previously redelivered successes have a 10-minute cooldown. The workspace gets 60 manual posts per hour. Receivers deduplicate by Webhook-Id.',
+    description: `Queues this message again for every route webhook that already finished with it (delivered or failed), or only destination. Returns how many deliveries were queued; 0 means none are eligible. Previously redelivered successes have a 10-minute cooldown. The workspace gets ${MANUAL_DELIVERY_BUDGET.toLocaleString('en-US')} manual posts per hour. Receivers deduplicate by Webhook-Id.`,
     request: { params: z.object({ messageId: z.string().max(120) }), body: json(z.object({ destination: z.string().max(128).optional().describe('A webhook ID: redeliver to that webhook only.') }).strict().openapi('RedeliverInboundMessage')) }, responses: { 202: response(z.object({ queued: z.number().int() }).openapi('InboundRedelivery')), ...errors } }), async c => {
     const { workspaceId: w } = deps.admin(c), { messageId } = c.req.valid('param'), { destination } = c.req.valid('json');
     const queued = await c.env.db.transaction(async tx => {

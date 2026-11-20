@@ -339,7 +339,7 @@ export interface Api {
     reply(threadId: string, input: InboundReplyInput, signal?: AbortSignal): Promise<InboundMessage>
     startThread(input: InboundThreadInput, signal?: AbortSignal): Promise<InboundMessage>
     webhooks(signal?: AbortSignal): Promise<InboundWebhook[]>
-    /** Every forward endpoint (a workspace has at most 50): what a route can forward its mail to once confirmed. */
+    /** Every forward endpoint (a workspace has at most 500): what a route can forward its mail to once confirmed. */
     forwards(signal?: AbortSignal): Promise<ForwardEndpoint[]>
     /** One page of inbound webhooks; addressId keeps those that get that address's received mail. */
     webhook(id: string, signal?: AbortSignal): Promise<InboundWebhook>

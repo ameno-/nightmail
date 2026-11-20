@@ -86,7 +86,7 @@ Never ask for passwords, API keys, app passwords, webhook secrets or sign-in cod
 
 - A 4xx or 5xx comes from the customer's endpoint. Timeouts and TLS errors are on their side too.
 - Endpoints must be public HTTPS hostnames.
-- Transient failures retry up to 10 attempts over about 42 hours. Manual retries and tests share 60 an hour per workspace.
+- Transient failures retry up to 10 attempts over about 42 hours. Manual retries and tests share 1,000 an hour per workspace.
 - `APPROVAL_INACTIVE` means the MCP approval behind the webhook isn't active. `WEBHOOK_URL_REQUIRED` means the webhook was paused when its approval was removed: save the URL again.
 - Signature failures usually come from verifying a re-serialized body instead of the raw bytes, or from using another endpoint's secret. The headers are `webhook-id`, `webhook-timestamp` and `webhook-signature`, and `verifyWebhook` in `@nightmail/sdk/webhooks` handles it. Deduplicate on `webhook-id`.
 
@@ -95,7 +95,7 @@ Never ask for passwords, API keys, app passwords, webhook secrets or sign-in cod
 - The domain must be verified before **Enable receiving**.
 - An MX on the root domain takes all of that domain's mail, including mailboxes hosted elsewhere today. `reply.<domain>` avoids that.
 - Receiving → Trace shows where an address routes.
-- Catch-all auto-creation stops at 50 new addresses per domain an hour, 500 per domain and 2,000 per workspace. Mail past those caps is stored as unrouted.
+- Catch-all auto-creation stops at 50 new addresses per domain an hour and 50,000 per workspace. Mail past those caps is stored as unrouted.
 - Messages over 6 MiB or 30,000 lines are kept raw (`unparsed`).
 - When the balance runs out, receiving continues for 7 days. After that, new mail is held (not deleted) until credit is added.
 
