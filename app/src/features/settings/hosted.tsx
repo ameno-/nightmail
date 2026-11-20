@@ -116,7 +116,7 @@ function SendingRows() {
     <div className="settings-rows">
       <Row title="Connection">{kind ? <span className="cluster settings-inline"><span>{connectionKindLabel[kind]}</span><StatusBadge status={label(current?.state ?? summary?.state ?? 'pending')} /></span> : <Skeleton width={160} height={20} />}</Row>
       {region && <Row title={kind === 'byo' ? 'AWS region' : 'Region'}><code>{region}</code></Row>}
-      {kind === 'byo' && <Row title="AWS account"><code>{current?.awsAccountId ?? '—'}</code></Row>}
+      {kind === 'byo' && <Row title="AWS account">{current ? <code>{current.awsAccountId ?? '—'}</code> : <Skeleton width={93} height={20} />}</Row>}
       {kind === 'byo' && current?.templateVersion !== 'v4' && <ConnectedAccountRows connection={current ?? null} />}
       <ScoreRow />
       {limit && limit.cap !== null && <Row title="Daily limit"><Link to="/settings#usage" replace className="settings-score" title={limitSummary(limit, evaluating)}><span>{number(limit.used)} / {number(limit.cap)}</span><span className="muted">Plan & usage</span><ArrowUpRight size={14} aria-hidden="true" /></Link></Row>}
@@ -131,7 +131,7 @@ function SendingRows() {
 function ConnectedAccountRows({ connection }: { connection: ProviderConnection | null }) {
   const update = useApiMutation(() => connectionApi.updateStack(), undefined, true)
   // The template row keeps its code element while loading: on a phone that decides whether the row stacks.
-  if (!connection) return <><Row title="Role template"><span className="cluster settings-inline"><code><Skeleton width={32} height={16} /></code></span></Row>{['Production access', 'Health'].map(title => <Row key={title} title={title}><Skeleton width={140} height={20} /></Row>)}</>
+  if (!connection) return <><Row title="Role template"><span className="cluster settings-inline"><code><Skeleton width={32} height={20} /></code></span></Row>{['Production access', 'Health'].map(title => <Row key={title} title={title}><Skeleton width={140} height={20} /></Row>)}</>
   const { stack, health } = connection
   const ready = connection.scan?.regions.filter(region => region.sendingState === 'ready') ?? []
   const sandboxed = ready.filter(region => !region.facts.production)
@@ -150,7 +150,7 @@ function ScoreRow() {
   const { data: report } = useSenderScore()
   const compact = useCompactShell()
   return <Row title="Sender score">
-    {!report ? <Skeleton width={96} height={20} /> : <button type="button" onClick={() => openScoreAbout()} className="settings-score">{report.state !== 'graded' ? <><span>Not graded yet</span><span className="muted">{number(report.emails.firstEmails)}/{number(report.needed)} real emails</span></> : compact ? <><b>{Math.round(report.score!)}</b><span className="settings-score__grade">{report.grade}</span></> : <span>Breakdown</span>}<ChevronRight size={14} aria-hidden="true" /></button>}
+    {!report ? <span className="settings-score"><Skeleton width={96} height={20} /></span> : <button type="button" onClick={() => openScoreAbout()} className="settings-score">{report.state !== 'graded' ? <><span>Not graded yet</span><span className="muted">{number(report.emails.firstEmails)}/{number(report.needed)} real emails</span></> : compact ? <><b>{Math.round(report.score!)}</b><span className="settings-score__grade">{report.grade}</span></> : <span>Breakdown</span>}<ChevronRight size={14} aria-hidden="true" /></button>}
   </Row>
 }
 function DisconnectRow({ kind }: { kind: 'shared' | 'byo' | undefined }) {
