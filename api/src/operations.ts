@@ -521,6 +521,10 @@ async function ensureIdentity(client: Awaited<ReturnType<typeof getSes>>, name: 
   } catch(e) {
     if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_EXISTS') throw e;
     const existing=await sesCall(({ GetEmailIdentityCommand })=>client.send(new GetEmailIdentityCommand({EmailIdentity:name})));
+    // A connected account's identity Nightmail didn't create is never changed: it can only be imported, as it is.
+    if (regionalByo && !ownsIdentity(existing,token)) throw new ApiError(409,'DOMAIN_EXISTS_IN_ACCOUNT',`${name} already exists in this AWS account's SES, set up outside ${productName}. Import it from the domains found in your account, and ${productName} uses it as it is, or remove it in SES first.`);
+    // A connected account's identity Nightmail didn't create is never changed: it can only be imported, as it is.
+    if (regionalByo && !ownsIdentity(existing,token)) throw new ApiError(409,'DOMAIN_EXISTS_IN_ACCOUNT',`${name} already exists in this AWS account's SES, set up outside ${productName}. Import it from the domains found in your account, and ${productName} uses it as it is, or remove it in SES first.`);
     if (!ownsIdentity(existing,token) || regionalByo && !hasTags(existing.Tags,[mxOwnerTag,{Key:tagKey('installation-id'),Value:installation!},{Key:tagKey('purpose'),Value:'domain-identity'}])) throw unavailableDomain();
     return existing;
   }
@@ -1222,6 +1226,7 @@ export function registerOperations(app: App) {
 
 const snsSchema = z.object({ Type: z.enum(['Notification', 'SubscriptionConfirmation', 'UnsubscribeConfirmation']), MessageId: z.string().min(1).max(200), TopicArn: z.string().min(1).max(300), Message: z.string().max(262144), Timestamp: z.string().datetime(), SignatureVersion: z.enum(['1', '2']), Signature: z.string().min(1).max(4096), SigningCertURL: z.string().url().max(2048), Subject: z.string().max(1000).optional(), SubscribeURL: z.string().url().max(4096).optional(), Token: z.string().max(4096).optional() }).openapi('SnsSignedEnvelope');
 type SnsEnvelope = z.infer<typeof snsSchema>;
+const SnsAccepted = z.object({ accepted: z.boolean() }).openapi('SnsAccepted');
 function snsHost(envelope: SnsEnvelope) {
   const match = /^arn:aws:sns:([a-z]{2}(?:-[a-z]+)+-\d):\d{12}:[A-Za-z0-9_-]+$/.exec(envelope.TopicArn);
   if (!match) throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'Only registered standard AWS regional SNS topics are supported.');
@@ -1359,7 +1364,7 @@ function registerPublicEvents(app: App) {
     sendingTopics.set(arn, { binding, expires: Date.now() + 60_000 });
     return binding;
   }
-  app.use('/v1/events/ses', async (c, next) => {
+  const snsText: Parameters<App['use']>[1] = async (c, next) => {
     // SNS sends JSON envelopes as text/plain. Normalize only the media type before
     // OpenAPI's required JSON validator; preserve the signed envelope bytes.
     if (c.req.method === 'POST' && c.req.header('content-type')?.split(';', 1)[0]?.trim().toLowerCase() === 'text/plain') {
@@ -1368,8 +1373,27 @@ function registerPublicEvents(app: App) {
       c.req.raw = new Request(c.req.raw, { headers });
     }
     await next();
+  };
+  app.use('/v1/events/ses', snsText);
+  app.use('/v1/events/cloudformation', snsText);
+  // Connected AWS accounts' stacks (api/byo-templates/) report through the platform's setup topic.
+  app.openapi(createRoute({ method: 'post', path: '/v1/events/cloudformation', operationId: 'receiveCloudFormationSnsEvent', tags: ['Events'], security: [], description: 'CloudFormation requests from connected AWS accounts\' role stacks, delivered by SNS from the platform\'s setup topic. AWS-signed ingress only.', request: { body: { required: true, content: { 'application/json': { schema: snsSchema }, 'text/plain': { schema: z.string().openapi('SnsPlainTextEnvelope') } } } }, responses: { 202: response(SnsAccepted), ...errors } }), async c => {
+    let raw: unknown; try { raw = JSON.parse(await c.req.text()); } catch { throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Expected an SNS JSON envelope.'); }
+    const parsed = snsSchema.safeParse(raw); if (!parsed.success) throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Expected a complete signed SNS envelope.');
+    const envelope = parsed.data, trusted = await verifySns(envelope, c.env, c.req.header(clientIpHeader) ?? 'unknown'), account = c.env.config.platformAccount;
+    if (!c.env.config.multiTenant || !account || envelope.TopicArn !== `arn:aws:sns:us-east-2:${account}:nightmail-byo-setup`) throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'Only the platform\'s stack topic is accepted here.');
+    if (envelope.Type === 'SubscriptionConfirmation') {
+      const url = trustedSnsUrl(envelope.SubscribeURL!, trusted.host, false);
+      if (url.searchParams.get('Action') !== 'ConfirmSubscription' || url.searchParams.get('TopicArn') !== envelope.TopicArn || url.searchParams.get('Token') !== envelope.Token || url.searchParams.size !== 3) throw new ApiError(403, 'SNS_UNTRUSTED_URL', 'SNS confirmation fields differ.');
+      const result = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(8000) }); await result.body?.cancel();
+      if (!result.ok) throw new ApiError(503, 'SNS_CONFIRMATION_FAILED', 'SNS did not confirm the subscription.', undefined, true);
+      return c.json({ accepted: true }, 202);
+    }
+    if (envelope.Type !== 'Notification') return c.json({ accepted: false }, 202);
+    if (await (await wrapModuleLoad(() => import('./byo-regional.js'))).stackNotification(c.env, envelope.Message)) try { await c.env.wake?.(1); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED' }); }
+    return c.json({ accepted: true }, 202);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/events/ses', operationId: 'receiveSesSnsEvent', tags: ['Events'], security: [], request: { body: { required: true, content: { 'application/json': { schema: snsSchema }, 'text/plain': { schema: z.string().openapi('SnsPlainTextEnvelope') } } } }, responses: { 202: response(z.object({ accepted: z.boolean() }).openapi('SnsAccepted')), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/events/ses', operationId: 'receiveSesSnsEvent', tags: ['Events'], security: [], request: { body: { required: true, content: { 'application/json': { schema: snsSchema }, 'text/plain': { schema: z.string().openapi('SnsPlainTextEnvelope') } } } }, responses: { 202: response(SnsAccepted), ...errors } }), async c => {
     let raw: unknown; try { raw = JSON.parse(await c.req.text()); } catch { throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Expected an SNS JSON envelope.'); }
     const parsed = snsSchema.safeParse(raw); if (!parsed.success) throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Expected a complete signed SNS envelope.');
     const envelope = parsed.data;

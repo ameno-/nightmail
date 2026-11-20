@@ -8,7 +8,7 @@ import { nodeRuntime } from './adapters/node.js';
 import { sql } from 'drizzle-orm';
 import { dispatchWakeKey } from './dispatcher.js';
 import { clientIpHeader, legacyClientIpHeaders } from './brand.js';
-import { admissionDenied, admissionPeer, ApiError, digest, log, logError, guardPublicRequest, setLogContext } from './core.js';
+import { admissionDenied, admissionPeer, ApiError, digest, log, logError, guardPublicRequest, setLogContext, snsIngress } from './core.js';
 import { brotliCompress, constants, gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 
@@ -78,7 +78,7 @@ try {
     const address = admissionPeer(connection.incoming.socket.remoteAddress ?? 'unknown');
     const lane = gatewayLane(request.method,getPath(request),request.headers,runtime.config.mailGatewayToken);
     const buckets = lane ? protocol : peers;
-    if (!(getPath(request)==='/v1/events/ses' && request.method==='POST')) {
+    if (!(snsIngress(getPath(request)) && request.method==='POST')) {
       const key = lane ?? address;
       const bucket = buckets.size < 1024 || buckets.has(key) ? key : 'overflow';
       const count = (buckets.get(bucket) ?? 0) + 1; buckets.set(bucket, count);

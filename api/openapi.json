@@ -16100,6 +16100,38 @@
             ],
             "format": "uri"
           },
+          "stack": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "version": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The role template version the stack reports."
+              },
+              "deleted": {
+                "type": "boolean",
+                "description": "The stack was deleted in AWS."
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Why the last stack was refused, to show in setup."
+              }
+            },
+            "required": [
+              "version",
+              "deleted",
+              "error"
+            ],
+            "description": "A connected AWS account's CloudFormation stack (regional bring-your-own AWS only)."
+          },
           "scan": {
             "type": "object",
             "properties": {
@@ -16180,6 +16212,31 @@
                       "properties": {
                         "production": {
                           "type": "boolean"
+                        },
+                        "review": {
+                          "type": [
+                            "object",
+                            "null"
+                          ],
+                          "properties": {
+                            "status": {
+                              "type": "string"
+                            },
+                            "caseId": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "status",
+                            "caseId"
+                          ],
+                          "description": "AWS's review of a production access request."
+                        },
+                        "enforcement": {
+                          "type": "string"
                         },
                         "sendingEnabled": {
                           "type": "boolean"
@@ -16540,7 +16597,8 @@
           "awsAccountId",
           "roleArn",
           "templateVersion",
-          "quickCreateUrl"
+          "quickCreateUrl",
+          "stack"
         ]
       },
       "ConnectionRegions": {
@@ -16587,6 +16645,81 @@
         },
         "required": [
           "kind"
+        ],
+        "additionalProperties": false
+      },
+      "ProductionAccessState": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string"
+          },
+          "production": {
+            "type": "boolean"
+          },
+          "review": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "caseId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "status",
+              "caseId"
+            ]
+          }
+        },
+        "required": [
+          "region",
+          "production",
+          "review"
+        ]
+      },
+      "ProductionAccessRequest": {
+        "type": "object",
+        "properties": {
+          "websiteUrl": {
+            "type": "string",
+            "maxLength": 1000,
+            "format": "uri",
+            "example": "https://example.com"
+          },
+          "useCase": {
+            "type": "string",
+            "minLength": 40,
+            "maxLength": 5000,
+            "description": "How the account sends mail and to whom, for AWS's review.",
+            "example": "We send receipts and account notices to our own customers, who signed up for them."
+          },
+          "mailType": {
+            "type": "string",
+            "enum": [
+              "TRANSACTIONAL",
+              "MARKETING"
+            ]
+          },
+          "confirm": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        },
+        "required": [
+          "websiteUrl",
+          "useCase",
+          "mailType",
+          "confirm"
         ],
         "additionalProperties": false
       },
@@ -42084,6 +42217,159 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/webhooks/resource_123/deliveries/delivery_123/retry' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/events/cloudformation": {
+      "post": {
+        "operationId": "receiveCloudFormationSnsEvent",
+        "tags": [
+          "Events"
+        ],
+        "security": [],
+        "description": "CloudFormation requests from connected AWS accounts' role stacks, delivered by SNS from the platform's setup topic. AWS-signed ingress only.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SnsSignedEnvelope"
+              }
+            },
+            "text/plain": {
+              "schema": {
+                "$ref": "#/components/schemas/SnsPlainTextEnvelope"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnsAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-nightmail-permission": {
+          "access": "public",
+          "text": "Needs no credential."
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { receiveCloudFormationSnsEvent } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await receiveCloudFormationSnsEvent({\n  client,\n  body: {\n    \"Type\": \"Notification\",\n    \"MessageId\": \"message_123\",\n    \"TopicArn\": \"example\",\n    \"Message\": \"example\",\n    \"Timestamp\": \"2026-09-18T19:00:00Z\",\n    \"SignatureVersion\": \"1\",\n    \"Signature\": \"example\",\n    \"SigningCertURL\": \"https://example.com/webhook\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/events/cloudformation' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"Type\": \"Notification\",\n  \"MessageId\": \"message_123\",\n  \"TopicArn\": \"example\",\n  \"Message\": \"example\",\n  \"Timestamp\": \"2026-09-18T19:00:00Z\",\n  \"SignatureVersion\": \"1\",\n  \"Signature\": \"example\",\n  \"SigningCertURL\": \"https://example.com/webhook\"\n}'"
           }
         ]
       }
@@ -73535,7 +73821,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Choose a sending provider. Regional BYO enrollment requires an account ID and returns a role-only stack link and a read-only scan operation. Legacy enrollment and Hosted mail return 201.",
+        "description": "Choose a sending provider. Regional BYO enrollment returns a quick-create link for a role-only stack; the stack reports its AWS account when it is created, so the account ID is optional (given, it must match). Then a read-only scan runs. Legacy enrollment and Hosted mail return 201.",
         "requestBody": {
           "required": true,
           "content": {
@@ -74382,6 +74668,174 @@
         ]
       }
     },
+    "/v1/connection/regions/{region}/production-access": {
+      "post": {
+        "operationId": "requestConnectionProductionAccess",
+        "tags": [
+          "Workspaces"
+        ],
+        "security": [
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "description": "Ask AWS for SES production access in one region of the connected account, with the details the owner confirmed. Refused when the region already has access or a request is under review, so existing account details are never overwritten. Sending in a region starts only once AWS grants access.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^[a-z]{2}(?:-[a-z]+)+-\\d$"
+            },
+            "required": true,
+            "name": "region",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductionAccessRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductionAccessState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { requestConnectionProductionAccess } from '@nightmail/sdk';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await requestConnectionProductionAccess({\n  client,\n  path: {\n    \"region\": \"us-east-1\"\n  },\n  body: {\n    \"websiteUrl\": \"https://example.com\",\n    \"useCase\": \"We send receipts and account notices to our own customers, who signed up for them.\",\n    \"mailType\": \"TRANSACTIONAL\",\n    \"confirm\": true\n  },\n  throwOnError: true,\n});\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/connection/regions/us-east-1/production-access\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"websiteUrl\": \"https://example.com\",\n  \"useCase\": \"We send receipts and account notices to our own customers, who signed up for them.\",\n  \"mailType\": \"TRANSACTIONAL\",\n  \"confirm\": true\n}'"
+          }
+        ]
+      }
+    },
     "/v1/connection/regions/status": {
       "get": {
         "operationId": "getConnectionRegionStatus",
@@ -74442,6 +74896,31 @@
                             "properties": {
                               "production": {
                                 "type": "boolean"
+                              },
+                              "review": {
+                                "type": [
+                                  "object",
+                                  "null"
+                                ],
+                                "properties": {
+                                  "status": {
+                                    "type": "string"
+                                  },
+                                  "caseId": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "status",
+                                  "caseId"
+                                ],
+                                "description": "AWS's review of a production access request."
+                              },
+                              "enforcement": {
+                                "type": "string"
                               },
                               "sendingEnabled": {
                                 "type": "boolean"

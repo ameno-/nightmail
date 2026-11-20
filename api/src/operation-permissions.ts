@@ -111,7 +111,7 @@ export const OPERATION_PERMISSIONS: Record<string, OperationPermission> = {
   testWebhook: needs('configuration', 'write', 'workspace', admin), listWebhookDeliveries: needs('configuration', 'read', 'workspace', admin),
   getWebhookDelivery: needs('configuration', 'read', 'workspace', admin), retryWebhookDelivery: needs('configuration', 'write', 'workspace', admin),
   // Signed by Amazon SNS, and the recipient's own unsubscribe links.
-  receiveSesSnsEvent: PUBLIC, unsubscribeByLink: PUBLIC, unsubscribeOneClick: PUBLIC,
+  receiveSesSnsEvent: PUBLIC, receiveCloudFormationSnsEvent: PUBLIC, unsubscribeByLink: PUBLIC, unsubscribeOneClick: PUBLIC,
   // Metrics, standing and regions.
   getMetrics: needs('sentMail', 'read', 'workspace'), getSenderScore: needs('sentMail', 'read', 'workspace'), releaseSenderStanding: people('admin', 'dashboard'), getUsage: needs('sentMail', 'read', 'workspace'),
   listRegions: needs('configuration', 'read', 'workspace'), configureRegion: needs('configuration', 'write', 'workspace', admin), discoverRegion: needs('configuration', 'read', 'workspace', admin),
@@ -159,7 +159,7 @@ export const OPERATION_PERMISSIONS: Record<string, OperationPermission> = {
   revokeWorkspaceInvitation: signedIn('admin', 'write'), updateWorkspaceMember: people('admin', 'dashboard'), removeWorkspaceMember: people('admin', 'dashboard'),
   getWorkspaceInvitation: people('any', 'dashboard'), acceptWorkspaceInvitation: people('any', 'dashboard'),
   getConnection: people('admin', 'dashboard'), createConnection: people('admin', 'dashboard'), deleteConnection: people('admin', 'dashboard'), listConnectionRegions: people('admin', 'dashboard'),
-  refreshConnectionScan: people('admin', 'dashboard'), importConnectionDomains: people('admin', 'dashboard'), getConnectionRegionStatus: people('admin', 'dashboard'), verifyConnection: people('admin', 'dashboard'),
+  refreshConnectionScan: people('admin', 'dashboard'), importConnectionDomains: people('admin', 'dashboard'), requestConnectionProductionAccess: people('admin', 'dashboard'), getConnectionRegionStatus: people('admin', 'dashboard'), verifyConnection: people('admin', 'dashboard'),
   getPublicStats: PUBLIC, getOverviewSetup: needs('sentMail', 'read', 'domain'), listActivity: signedIn('admin', 'write'), contactSupport: people('any', 'dashboard'),
   // Support and operator tooling (internal).
   getSupportContext: STAFF, listSupportWorkspaces: STAFF, listSupportDomains: STAFF, listSupportEmails: STAFF, getSupportEmail: STAFF, listSupportEvents: STAFF,

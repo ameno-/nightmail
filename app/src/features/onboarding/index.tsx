@@ -9,7 +9,8 @@ import { ThemeToggle } from '../../components/ThemeToggle'
 import { AccountSwitcher } from '../../components/AccountSwitcher'
 import { useApiMutation, useApiQuery, usePublicOrigin, useSession } from '../../data/context'
 import { connectionApi, retryableConnectionErrors, useConnectionCache } from '../../data/connections'
-import { agentStep, finishedStep, setDomainStep, type OnboardingStage } from '../../data/onboarding'
+import { agentStep, finishedStep, readRegionalDomain, setDomainStep, setRegionalDomain, type OnboardingStage } from '../../data/onboarding'
+import { ConnectAwsRegional, PendingDomain, createStack, domainHint, waitingForStack } from './aws'
 import { DnsWaitNote, DomainRecords, useDnsSetup, useDomain } from '../settings/domain-records'
 import { AgentPrompt, McpSetup, agentPrompt } from '../docs/agent-setup'
 import { FirstSend } from '../docs/first-send'
@@ -31,7 +32,6 @@ async function retrying<T>(run: () => Promise<T>) {
     }
   }
 }
-const createStack = 'Create stack in AWS'
 const code = (error: unknown) => error instanceof ApiError ? error.code : undefined
 
 // The connection cache keeps only a short summary on the identity; a fresh /v1/me brings back the rest (the daily
@@ -123,6 +123,9 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   const [addAnother, setAddAnother] = useState(false)
   const [draft, setDraft] = useState('')
   const [queued, setQueued] = useState(false)
+  // A domain added while a connected AWS account sets up its region opens its records once it exists.
+  const [regionalDomain, setPendingDomain] = useState(() => workspaceId ? readRegionalDomain(workspaceId) : null)
+  const chooseRegional = (name: string | null) => { setRegionalDomain(workspaceId, name); setPendingDomain(name) }
   // Polls every 3 s while a BYO setup waits on AWS (only while the page is visible) and on focus.
   const connection = useQuery({
     queryKey: ['nightmail', 'connection'],
@@ -191,12 +194,18 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   else if (stage.step === 'domain' && stage.domainId) { view = 'records'; content = <DomainSetup domainId={stage.domainId} onContinue={() => setDomainStep(workspaceId, agentStep(stage.domainId))} onMissing={() => setDomainStep(workspaceId, '')} /> }
   else if (awsPhase === 'connecting' || awsPhase === 'connected') {
     view = 'connect'
-    content = <ConnectAwsStep state={connectionState} connection={current} onBack={() => leaveAws(offerByo ? null : 'shared')} onHosted={() => leaveAws('shared')} />
+    content = current?.templateVersion === 'v5'
+      ? <ConnectAwsRegional connection={current} onBack={() => leaveAws(offerByo ? null : 'shared')} onHosted={() => leaveAws('shared')} onChosen={chooseRegional} />
+      : <ConnectAwsStep state={connectionState} connection={current} onBack={() => leaveAws(offerByo ? null : 'shared')} onHosted={() => leaveAws('shared')} />
   }
   else if (autoHosted && shared.error) { view = 'error'; content = <HostedError error={shared.error} onRetry={() => shared.reset()} /> }
   else if (sending && !picked && connection.error) { view = 'error'; content = <ErrorState error={connection.error} onRetry={() => void connection.refetch()} /> }
   else if ((sending && !picked && connection.isPending) || (choosingDomain && flow === 'byo' && connection.isPending)) { view = 'loading'; content = <BootLoader inline /> }
   else if (sending && !flow) { view = 'choose'; content = <ChooseSending onChoose={choose} error={shared.error ?? byo.error} /> }
+  else if (choosingDomain && flow === 'byo' && regionalDomain) {
+    view = 'loading'
+    content = <PendingDomain name={regionalDomain} onFound={id => { chooseRegional(null); setDomainStep(workspaceId, id ?? '') }} />
+  }
   else if (choosingDomain && flow === 'byo' && imported > 0 && !addAnother) {
     view = 'imported'
     content = <ImportedDomains count={imported} onContinue={id => setDomainStep(workspaceId, agentStep(id))} onAddAnother={() => setAddAnother(true)} fallback={domainForm()} />
@@ -300,7 +309,7 @@ function verifyError(error: unknown, region: string) {
 // One line per state: the live status names what is happening; the buttons above and below are what to do about it.
 const connectStates: { key: ConnectionState | 'creating'; title: string }[] = [
   { key: 'creating', title: 'Preparing your AWS link…' },
-  { key: 'awaiting_role', title: 'Waiting for the stack in AWS…' },
+  { key: 'awaiting_role', title: waitingForStack },
   { key: 'provisioning', title: 'Creating sending resources…' },
   { key: 'ready', title: 'Connected' },
   { key: 'failed', title: 'Setup didn’t finish' },
@@ -389,7 +398,7 @@ function AddDomain({ draft, onDraftChange, queued, onQueuedChange, ready, onAdde
   // A pasted URL or address still works: https://www.acme.com/pricing becomes acme.com.
   const value = normalizeDomain(draft)
   async function add() {
-    if (!domainPattern.test(value)) { setInvalid('Enter a domain like acme.com.'); return }
+    if (!domainPattern.test(value)) { setInvalid(domainHint); return }
     setInvalid('')
     if (value !== draft) onDraftChange(value)
     if (!ready) { onQueuedChange(true); return }

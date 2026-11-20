@@ -2,15 +2,19 @@ import { ApiError } from './core.js';
 import { setupResources } from './ses-setup.js';
 
 /** Why a connected account's role is assumed: the session's name is nightmail-<purpose>. */
-export type ByoPurpose = 'scan' | 'provision' | 'cleanup' | 'send' | 'template' | 'quota' | 'verify' | 'read' | 'delete' | 'mailfrom';
-export type ByoScope = { region: string; account: string; connectionId: string; domain?: string; template?: string };
+export type ByoPurpose = 'scan' | 'provision' | 'cleanup' | 'send' | 'template' | 'quota' | 'verify' | 'read' | 'delete' | 'mailfrom' | 'stack' | 'account';
+export type ByoScope = { region: string; account: string; connectionId: string; domain?: string; template?: string; stack?: string };
+/** The published role templates (api/byo-templates/<version>.yaml) a connected account may run. */
+export const BYO_TEMPLATE_VERSIONS = ['6.0'] as const;
+export const BYO_TEMPLATE_BUCKET = (platformAccount: string) => `nightmail-byo-templates-${platformAccount}`;
+export const byoTemplateUrl = (platformAccount: string, version: string = BYO_TEMPLATE_VERSIONS.at(-1)!) => `https://${BYO_TEMPLATE_BUCKET(platformAccount)}.s3.us-east-2.amazonaws.com/byo/${version}.yaml`;
 type Statement = { Effect: 'Allow'; Action: string[]; Resource: string | string[]; Condition?: { StringEquals: Record<string, string> } };
 const domainName = /^(?:[a-z0-9-]+\.)+[a-z]{2,63}$/;
 
 /**
  * The only place a connected account's session policies are written. Each session is narrowed to one purpose, so
  * the role's broader namespace grants are never handed out whole. The acceptance test "BYO contract" checks every
- * statement here against every supported role template (api/byo-template.yaml and api/byo-templates/).
+ * statement here against every published role template (api/byo-templates/).
  */
 export function byoSessionStatements(purpose: ByoPurpose, s: ByoScope): Statement[] {
   const names = setupResources(s.connectionId, 'byo'), ses = `arn:aws:ses:${s.region}:${s.account}:`;
@@ -35,10 +39,16 @@ export function byoSessionStatements(purpose: ByoPurpose, s: ByoScope): Statemen
       if (!s.template || !/^bane-[A-Za-z0-9_-]+$/.test(s.template)) throw new ApiError(422, 'TEMPLATE_SCOPE_REQUIRED', 'Regional BYO may render only bane- templates.');
       return [allow(['ses:GetEmailTemplate', 'ses:TestRenderEmailTemplate'], ses + 'template/' + s.template)];
     case 'quota': return [allow(['ses:GetAccount'], '*')];
+    // Requesting production access: read the account's state, then ask once (requestProductionAccess).
+    case 'account': return [allow(['ses:GetAccount', 'ses:PutAccountDetails'], '*')];
     case 'read': return identity([]);
     case 'verify': return identity(['ses:CreateEmailIdentity', 'ses:TagResource']);
     case 'delete': return identity(['ses:DeleteEmailIdentity']);
     case 'mailfrom': return identity(['ses:PutEmailIdentityMailFromAttributes']);
+    // The stack is always in us-east-2 (the template asserts it); Nightmail reads its status and outputs.
+    case 'stack':
+      if (!s.stack || !/^Nightmail-[0-9a-f]{20}$/.test(s.stack)) throw new ApiError(409, 'BYO_SESSION_SCOPE_REQUIRED', 'A purpose-scoped regional AWS session is required.');
+      return [{ Effect: 'Allow', Action: ['cloudformation:DescribeStacks', 'cloudformation:DescribeStackResource'], Resource: `arn:aws:cloudformation:us-east-2:${s.account}:stack/${s.stack}/*`, Condition: { StringEquals: { 'aws:RequestedRegion': 'us-east-2' } } }];
   }
 }
 export const byoSessionPolicy = (purpose: ByoPurpose, scope: ByoScope) => JSON.stringify({ Version: '2012-10-17', Statement: byoSessionStatements(purpose, scope) });

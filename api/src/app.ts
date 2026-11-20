@@ -1,7 +1,7 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
 import type { MiddlewareHandler } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import { allowMalformedSns, notFound } from './core.js';
+import { allowMalformedSns, notFound, snsIngress } from './core.js';
 import { boundRequestBody } from './request-body.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
@@ -29,7 +29,7 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   if (pathname === '/v1/me' || pathname === '/v1/mcp-connections' || pathname.startsWith('/v1/mcp-connections/') || pathname === '/v1/agents' || pathname.startsWith('/v1/agents/') || pathname === '/api/auth' || pathname.startsWith('/api/auth/') || pathname.startsWith('/.well-known/') || pathname === '/mcp/login' || pathname === '/mcp/consent') return 'auth-ui';
   if (pathname === '/mcp' || pathname.startsWith('/mcp/')) return 'mcp';
   if (pathname === '/v1/api-keys' || pathname.startsWith('/v1/api-keys/') || pathname === '/v1/agent-tokens' || pathname.startsWith('/v1/agent-tokens/')) return 'auth';
-  if (pathname === '/v1/events/ses') return 'ops-events';
+  if (snsIngress(pathname)) return 'ops-events';
   if (pathname === '/v1/domains' || pathname.startsWith('/v1/domains/')) return 'ops-domains';
   if (/^\/v1\/(?:settings|webhooks|metrics|sender-score|usage)(?:\/|$)/.test(pathname) || pathname === '/unsubscribe' || pathname.startsWith('/unsubscribe/')) return 'ops-other';
   if (pathname === '/v1/emails' || pathname.startsWith('/v1/emails/')) return 'sending-emails';
@@ -48,9 +48,9 @@ function routeGroupFor(pathname: string): RouteGroup | null {
 
 function allowPathFor(group: Exclude<RouteGroup, 'mcp'>): ((path: string) => boolean) | undefined {
   switch (group) {
-    case 'ops-events': return p => p === '/v1/events/ses';
+    case 'ops-events': return snsIngress;
     case 'ops-domains': return p => p === '/v1/domains' || p.startsWith('/v1/domains/');
-    case 'ops-other': return p => p !== '/v1/events/ses' && p !== '/v1/domains' && !p.startsWith('/v1/domains/');
+    case 'ops-other': return p => !snsIngress(p) && p !== '/v1/domains' && !p.startsWith('/v1/domains/');
     case 'sending-emails': return p => p === '/v1/emails' || p.startsWith('/v1/emails/');
     case 'sending-other': return p => p !== '/v1/emails' && !p.startsWith('/v1/emails/');
     case 'operator': return operatorPath;
@@ -174,7 +174,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!c.res.headers.has(name)) c.header(name, value);
     const timings = c.get('serverTimings');
     if (c.get('actor') && timings.length) c.header('server-timing', timings.map(item => `${item.name};dur=${item.durationMs.toFixed(1)}`).join(', '));
-    if (!(c.req.path==='/v1/events/ses' && [400,429].includes(c.res.status))) logRequest(c, Date.now() - start);
+    if (!(snsIngress(c.req.path) && [400,429].includes(c.res.status))) logRequest(c, Date.now() - start);
     // Wake only after this request committed jobs: each wake locks the shared job_schedule row and starts a drain.
     const wakeJobs = c.get('actor')?.wakeJobs;
     const wake = (wakeJobs || (enqueued > 0 && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method))) && c.req.path !== '/v1/events/ses' && !/^\/mcp(?:\/|$)/.test(c.req.path) && c.res.status < 300 ? c.env.wake : undefined;
@@ -218,7 +218,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // Provider redirects cannot carry a workspace header. This route authenticates the OIDC
     // session itself, then authorizes and selects the workspace from the signed return token.
     if (c.req.method === 'GET' && /^\/v1\/domains\/[^/]+\/dns-setup\/return\/[^/]+$/.test(c.req.path)) return next();
-    if (c.req.path === '/v1/events/ses') return next();
+    if (snsIngress(c.req.path)) return next();
     // Stripe's webhook authenticates with its own signature (billing/stripe-webhook.ts).
     if (c.req.method === 'POST' && c.req.path === '/v1/billing/stripe') return next();
     return authenticate(c, next);
@@ -231,7 +231,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
       // The raw-byte attachment upload reads and bounds its own body (a whole file, up to 25 MiB) once it holds the
       // isolate memory for it (sending.ts), so it is not buffered here first.
       if (!(c.req.method==='POST' && c.req.path==='/v1/attachments/upload' && c.get('actor')))
-        await boundRequestBody(c,c.req.path==='/v1/events/ses'||c.req.path==='/v1/billing/stripe'?512*1024:matched && c.get('actor')?undefined:64*1024);
+        await boundRequestBody(c,snsIngress(c.req.path)||c.req.path==='/v1/billing/stripe'?512*1024:matched && c.get('actor')?undefined:64*1024);
     }
     await next();
   });
@@ -292,7 +292,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
       : grantRevoked ? new ApiError(401, 'AUTH_INVALID', 'The MCP approval behind this request was revoked while it ran. Nothing was created.')
       : keyTaken ? new ApiError(409, 'KEY_TAKEN', `Another ${database.constraint === 'mailboxes_key' ? 'address' : 'webhook'} in this workspace already uses that key. Choose another.`, 'key')
       : new ApiError(500, 'INTERNAL_ERROR', 'Unexpected server failure. Use the request ID to locate the server log.');
-    if(invalidJson && c.req.path==='/v1/events/ses') {
+    if(invalidJson && snsIngress(c.req.path)) {
       const peer=c.req.header(clientIpHeader)??'unknown';
       if(!allowMalformedSns(peer) || c.env.allowMalformedSns && !await c.env.allowMalformedSns(peer)) responseError=new ApiError(429,'PUBLIC_RATE_LIMITED','Too many malformed requests.',undefined,true);
     }

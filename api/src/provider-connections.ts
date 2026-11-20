@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
-import { auditContext, auditInsert, type AuditContext } from './audit.js';
+import { auditContext, auditInsert, recordAudit, type AuditContext } from './audit.js';
 import { ApiError, assertSesConfigured, denied, isSimulatedSes, errors, id, json, log, ModuleLoadError, notFound, response, wrapModuleLoad, type App, type Ctx, type Runtime, type JobHandler } from './core.js';
 import { caller, assume, platformCredentials } from './provider-credentials.js';
 import { awsError, discoverSes, feedbackUrl, loadSetupSdk, POOL_INSTALLATION, poolTenantName, provisionSes, provisionTenant, setupResources, verifiedByoDomains, type SesDiscovery, byoStackName } from './ses-setup.js';
@@ -11,7 +11,7 @@ import { loadMailboxSetupSdk, preparePoolReceiving } from './mailbox-setup.js';
 import { byoEnabled } from './byo-pilot.js';
 import { hostedAllowance, type HostedAllowance } from './hosted-sending.js';
 import { requirePlatformAccount } from './config.js';
-import { Accepted, Imports, InventoryFields, RegionStatus, disconnectV5, enrollV5, inventory, refreshScan, regionLabels, selectImports, statuses, v5Link, type V5Connection } from './byo-regional.js';
+import { Accepted, Imports, InventoryFields, ProductionAccess, ProductionAccessState, RegionStatus, disconnectV5, enrollV5, inventory, refreshScan, regionLabels, requestProductionAccess, selectImports, statuses, v5Link, type V5Connection } from './byo-regional.js';
 import { CONNECTION_STATES, TENANT_STATES, assertConnectionTransition, campaignActive, desiredTenantStatus, finishProvisioning, notProvisioning, poolReceives, poolSends, setPoolState, setTenantState, startProvisioning, queueTenantJob, type ConnectionState, type TenantState } from './states.js';
 
 const tags = ['Workspaces'], security = [{ dashboardSession: [] }, { secureDashboardSession: [] }] as Record<string, string[]>[];
@@ -20,7 +20,7 @@ const AccountId = z.string().regex(/^\d{12}$/).openapi({ example: '123456789012'
 const Create = z.object({ kind: Kind, region: z.string().max(32).regex(regionPattern).optional(), awsAccountId:AccountId.optional() }).strict().openapi('CreateConnection');
 const State = z.enum(CONNECTION_STATES).describe('awaiting_role: waiting for the BYO stack. provisioning: verifying regional resources and importing verified domains. ready: sending allowed once the tenant is ready. failed: the last setup attempt failed; verify again.');
 const Tenant = z.enum(TENANT_STATES).describe('Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready.');
-const Connection = z.object({ id: z.string(), kind: Kind, region: z.string(), state: State, tenant: Tenant, importedDomains: z.number().int().nonnegative().describe('Number of currently claimed domains imported from this BYO account.'), awsAccountId: z.string().nullable(), roleArn: z.string().nullable(), templateVersion: z.string().nullable(), quickCreateUrl: z.url().nullable(),...InventoryFields }).openapi('ProviderConnection');
+const Connection = z.object({ id: z.string(), kind: Kind, region: z.string(), state: State, tenant: Tenant, importedDomains: z.number().int().nonnegative().describe('Number of currently claimed domains imported from this BYO account.'), awsAccountId: z.string().nullable(), roleArn: z.string().nullable(), templateVersion: z.string().nullable(), quickCreateUrl: z.url().nullable(), stack: z.object({ version: z.string().nullable().describe('The role template version the stack reports.'), deleted: z.boolean().describe('The stack was deleted in AWS.'), error: z.string().nullable().describe('Why the last stack was refused, to show in setup.') }).nullable().describe('A connected AWS account\'s CloudFormation stack (regional bring-your-own AWS only).'),...InventoryFields }).openapi('ProviderConnection');
 // Safe for every workspace member: no account IDs, role ARNs or external IDs.
 export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), state: State, tenant: Tenant,
   sendingPause: z.object({ at: z.iso.datetime(), reason: z.string() }).nullable().describe('Hosted reputation hold: sending and dispatch are paused until operator review. Receiving is unaffected.'),
@@ -35,7 +35,7 @@ export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), stat
     .describe('Hosted only: the enforcement step summary. GET /v1/sender-score has the reasons, the limit math and what an owner can release.'),
   domains: z.object({ total: z.number().int(), verified: z.number().int() }).optional().describe('Domains claimed in this workspace and how many can send.'),
 }).openapi('ConnectionSummary');
-type Row = { id: string; stack_name?: string | null; workspace_id: string; kind: 'shared' | 'byo'; region: string; state: ConnectionState; tenant_state: TenantState; aws_account_id: string | null; role_arn: string | null; external_id: string | null; platform_principal_arn: string | null; template_version: string | null; confirmed_message_id: string | null; imported_domains?: number };
+type Row = { id: string; stack_name?: string | null; workspace_id: string; kind: 'shared' | 'byo'; region: string; state: ConnectionState; tenant_state: TenantState; aws_account_id: string | null; role_arn: string | null; external_id: string | null; platform_principal_arn: string | null; template_version: string | null; confirmed_message_id: string | null; imported_domains?: number; stack_template_version?: string | null; stack_deleted_at?: string | null; stack_error?: string | null };
 
 function owner(c: Ctx) {
   if (!c.env.config.multiTenant) return notFound('Endpoint');
@@ -78,7 +78,8 @@ function view(runtime: Runtime, row: Row) {
       param_ConnectionId: row.id, param_ResourcePrefix: setupResources(row.id).topicName.replace(/-feedback$/, ''), param_FeedbackUrl: feedbackUrl({ publicUrl: runtime.config.publicUrl }) });
     quickCreateUrl = `https://${row.region}.console.aws.amazon.com/cloudformation/home?region=${row.region}#/stacks/create/review?${params}`;
   }
-  return { id: row.id, kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, importedDomains: row.imported_domains ?? 0, awsAccountId: row.aws_account_id, roleArn: row.role_arn, templateVersion: row.template_version, quickCreateUrl };
+  return { id: row.id, kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, importedDomains: row.imported_domains ?? 0, awsAccountId: row.aws_account_id, roleArn: row.role_arn, templateVersion: row.template_version, quickCreateUrl,
+    stack: row.template_version==='v5' ? { version: row.stack_template_version ?? null, deleted: !!row.stack_deleted_at, error: row.stack_error ?? null } : null };
 }
 async function get(runtime: Runtime, wid: string) {
   return (await runtime.db.execute<Row>(sql`SELECT c.*, (SELECT count(*)::int FROM domain_claims dc WHERE dc.connection_id=c.id AND dc.identity @> '{"imported":true}') AS imported_domains FROM provider_connections c WHERE workspace_id=${wid}`)).rows[0];
@@ -428,7 +429,7 @@ export function registerProviderConnections(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/connection/regions', operationId: 'listConnectionRegions', tags, security, description: 'Regions offered for shared sending, and the commercial AWS regions where Amazon SES supports sending for bring-your-own AWS. Owner/admin dashboard only.', responses: { 200: response(z.object({ shared: z.array(z.string()), byo: z.array(z.string()) }).openapi('ConnectionRegions')), ...errors } }), async c => {
     const wid=owner(c); return c.json({ shared: sharedRegions(c.env), byo: await byoEnabled(c.env,wid)?Object.keys(regionLabels):byoRegions }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path, operationId: 'createConnection', tags, security, description: 'Choose a sending provider. Regional BYO enrollment requires an account ID and returns a role-only stack link and a read-only scan operation. Legacy enrollment and Hosted mail return 201.', request: { body: json(Create) }, responses: { 201: response(Connection),202:response(Connection.extend({operationId:z.string(),revision:z.number()})), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path, operationId: 'createConnection', tags, security, description: 'Choose a sending provider. Regional BYO enrollment returns a quick-create link for a role-only stack; the stack reports its AWS account when it is created, so the account ID is optional (given, it must match). Then a read-only scan runs. Legacy enrollment and Hosted mail return 201.', request: { body: json(Create) }, responses: { 201: response(Connection),202:response(Connection.extend({operationId:z.string(),revision:z.number()})), ...errors } }), async c => {
     const wid = owner(c);
     try {
       const input=c.req.valid('json');
@@ -436,7 +437,7 @@ export function registerProviderConnections(app: App) {
         if (input.awsAccountId===requirePlatformAccount(c.env.config.platformAccount)) throw new ApiError(409,'AWS_ACCOUNT_IN_USE','The shared sending account cannot be connected.');
         const existing=await get(c.env,wid);
         if (!existing || existing.template_version==='v5') {
-          if (!input.awsAccountId || input.region) throw new ApiError(422,'INVALID_CONNECTION','Provide the AWS account ID, not a sending region.');
+          if (input.region) throw new ApiError(422,'INVALID_CONNECTION','A connected AWS account chooses its regions after it connects.','region');
           assertSesConfigured(c.env);
           const op=await enrollV5(c.env,wid,input.awsAccountId);c.get('actor').wakeJobs=1;
           return c.json({...view(c.env,(await get(c.env,wid))!),...op},202);
@@ -454,6 +455,10 @@ export function registerProviderConnections(app: App) {
   });
   app.openapi(createRoute({method:'post',path:path+'/imports',operationId:'importConnectionDomains',tags,security,description:'Select verified regional candidates explicitly. Sending requires confirmed regional feedback. Imported identities are never modified.',request:{body:json(Imports)},responses:{202:response(Accepted),...errors}}),async c=>{
     const result=await selectImports(c.env,owner(c),c.req.valid('json'),c.req.header('Idempotency-Key'));c.get('actor').wakeJobs=1;return c.json(result,202);
+  });
+  app.openapi(createRoute({method:'post',path:path+'/regions/{region}/production-access',operationId:'requestConnectionProductionAccess',tags,security,description:'Ask AWS for SES production access in one region of the connected account, with the details the owner confirmed. Refused when the region already has access or a request is under review, so existing account details are never overwritten. Sending in a region starts only once AWS grants access.',request:{params:z.object({region:z.string().max(32).regex(regionPattern)}),body:json(ProductionAccess)},responses:{200:response(ProductionAccessState),...errors}}),async c=>{
+    const wid=owner(c),{region}=c.req.valid('param'),input=c.req.valid('json');
+    return c.json(await requestProductionAccess(c.env,wid,region,input,(db,id)=>recordAudit(db,c,{action:'connection.production_access',workspaceId:wid,target:{type:'connection',id},after:{region,mailType:input.mailType,websiteUrl:input.websiteUrl}})),200);
   });
   app.openapi(createRoute({method:'get',path:path+'/regions/status',operationId:'getConnectionRegionStatus',tags,security,description:'Read regional AWS inventory, access, ownership journals and setup errors. Does not contact AWS.',responses:{200:response(RegionStatus),...errors}}),async c=>{
     const wid=owner(c),row=await get(c.env,wid);if (row?.template_version!=='v5') return notFound('Regional connection');return c.json({regions:await statuses(c.env.db,row.id)},200);

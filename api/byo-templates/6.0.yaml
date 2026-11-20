@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Nightmail BYO 6.0. Creates one IAM role that Nightmail assumes to send mail through this account's Amazon SES. Install once, in us-east-2.
+Description: Nightmail BYO 6.0. Creates one IAM role that Nightmail assumes to send mail through this account's Amazon SES, and tells Nightmail when the stack is created, updated or deleted. Install once, in us-east-2.
 # Versions are additive: a later 6.x only adds permissions and keeps the role's name, logical IDs and parameters.
 # Receiving isn't part of 6.0: classic SES can't limit receipt rules to Nightmail's own, and an account's active rule set
-# is never Nightmail's to change. Unpublished: the stack callback resource lands before 6.0 is published.
+# is never Nightmail's to change. Published: never edit this file; publish a change as a new version.
 Metadata:
   TemplateVersion: '6.0'
 Parameters:
@@ -41,6 +41,10 @@ Parameters:
     Default: us-east-1,us-east-2,us-west-1,us-west-2,af-south-1,ap-south-1,ap-south-2,ap-southeast-1,ap-southeast-2,ap-southeast-3,ap-southeast-4,ap-southeast-5,ap-southeast-6,ap-southeast-7,ap-northeast-1,ap-northeast-2,ap-northeast-3,ca-central-1,ca-west-1,eu-central-1,eu-central-2,eu-west-1,eu-west-2,eu-west-3,eu-south-1,eu-south-2,eu-north-1,il-central-1,mx-central-1,me-south-1,me-central-1,sa-east-1
     AllowedValues: [us-east-1, us-east-2, us-west-1, us-west-2, af-south-1, ap-south-1, ap-south-2, ap-southeast-1, ap-southeast-2, ap-southeast-3, ap-southeast-4, ap-southeast-5, ap-southeast-6, ap-southeast-7, ap-northeast-1, ap-northeast-2, ap-northeast-3, ca-central-1, ca-west-1, eu-central-1, eu-central-2, eu-west-1, eu-west-2, eu-west-3, eu-south-1, eu-south-2, eu-north-1, il-central-1, mx-central-1, me-south-1, me-central-1, sa-east-1]
 Rules:
+  OhioOnly:
+    Assertions:
+      - Assert: !Equals [!Ref 'AWS::Region', us-east-2]
+        AssertDescription: Launch this stack in us-east-2 (Ohio), where Nightmail listens for it.
   NotNightmail:
     Assertions:
       - Assert: !Not [!Equals [!Ref 'AWS::AccountId', '009882681002']]
@@ -86,7 +90,7 @@ Resources:
                 Condition: {StringNotEquals: {'aws:RequestedRegion': [us-east-1, us-east-2, us-west-1, us-west-2, af-south-1, ap-south-1, ap-south-2, ap-southeast-1, ap-southeast-2, ap-southeast-3, ap-southeast-4, ap-southeast-5, ap-southeast-6, ap-southeast-7, ap-northeast-1, ap-northeast-2, ap-northeast-3, ca-central-1, ca-west-1, eu-central-1, eu-central-2, eu-west-1, eu-west-2, eu-west-3, eu-south-1, eu-south-2, eu-north-1, il-central-1, mx-central-1, me-south-1, me-central-1, sa-east-1]}}
               - Sid: OnlyMailServices
                 Effect: Deny
-                NotAction: ['ses:*', 'sns:*', 'servicequotas:*', 'iam:GetRole', 'iam:ListRoleTags', 'iam:ListRolePolicies', 'iam:GetRolePolicy', 'iam:ListAttachedRolePolicies', 'cloudformation:DescribeStacks', 'cloudformation:CreateChangeSet', 'cloudformation:DescribeChangeSet', 'cloudformation:DeleteChangeSet']
+                NotAction: ['ses:*', 'sns:*', 'servicequotas:*', 'iam:GetRole', 'iam:ListRoleTags', 'iam:ListRolePolicies', 'iam:GetRolePolicy', 'iam:ListAttachedRolePolicies', 'cloudformation:DescribeStacks', 'cloudformation:DescribeStackResource', 'cloudformation:CreateChangeSet', 'cloudformation:DescribeChangeSet', 'cloudformation:DeleteChangeSet']
                 Resource: '*'
               # Nothing that costs money or changes the whole account's mail settings.
               - Sid: NeverAccountWide
@@ -111,10 +115,11 @@ Resources:
                 Effect: Allow
                 Action: ['iam:GetRole', 'iam:ListRoleTags', 'iam:ListRolePolicies', 'iam:GetRolePolicy', 'iam:ListAttachedRolePolicies']
                 Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}'
-              # Nightmail can prepare an update of this stack from its own published templates. Only you can run it.
+              # Nightmail reads this stack (and its Connection resource, to check a request from CloudFormation is real) and
+              # can prepare an update of it from its own published templates. Only you can run it.
               - Sid: ReadOwnStack
                 Effect: Allow
-                Action: ['cloudformation:DescribeStacks', 'cloudformation:DescribeChangeSet', 'cloudformation:DeleteChangeSet']
+                Action: ['cloudformation:DescribeStacks', 'cloudformation:DescribeStackResource', 'cloudformation:DescribeChangeSet', 'cloudformation:DeleteChangeSet']
                 Resource:
                   - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*'
                   - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/nightmail-update-*/*'
@@ -250,6 +255,17 @@ Resources:
                     - !Sub 'arn:aws:servicequotas:*:${AWS::AccountId}:ses/L-CDEF9B6B'
                   Condition: {StringEquals: {'aws:RequestedRegion': !Ref AccountRequestRegions, 'servicequotas:service': ses}}
           - !Ref AWS::NoValue
+  # CloudFormation tells Nightmail (an SNS topic in its account) when this stack is created, updated or deleted, so
+  # nothing has to be copied back and deleting the stack cleans up what Nightmail created. Nightmail answers only after it
+  # has proved it can use the role with this connection's external ID.
+  Connection:
+    Type: Custom::NightmailConnection
+    Properties:
+      ServiceToken: !Sub 'arn:aws:sns:us-east-2:${PlatformAccount}:nightmail-byo-setup'
+      ServiceTimeout: 900
+      ConnectionId: !Ref ConnectionId
+      RoleArn: !GetAtt Role.Arn
+      TemplateVersion: '6.0'
 Outputs:
   AccountId: {Value: !Ref 'AWS::AccountId'}
   RoleArn: {Value: !GetAtt Role.Arn}

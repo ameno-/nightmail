@@ -1,0 +1,9 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Sid":"TemplateBucket","Effect":"Allow","Action":["s3:CreateBucket","s3:ListBucket","s3:Get*","s3:PutBucketTagging","s3:PutBucketPolicy","s3:PutBucketPublicAccessBlock","s3:PutBucketOwnershipControls","s3:PutBucketVersioning"],"Resource":"arn:aws:s3:::nightmail-byo-templates-YOUR_AWS_ACCOUNT_ID","Condition":{"StringEquals":{"aws:RequestedRegion":"us-east-2"}}},
+    {"Sid":"Templates","Effect":"Allow","Action":["s3:PutObject","s3:Get*"],"Resource":"arn:aws:s3:::nightmail-byo-templates-YOUR_AWS_ACCOUNT_ID/byo/*","Condition":{"StringEquals":{"aws:RequestedRegion":"us-east-2"}}},
+    {"Sid":"SetupTopic","Effect":"Allow","Action":["sns:CreateTopic","sns:TagResource","sns:ListTagsForResource","sns:GetTopicAttributes","sns:SetTopicAttributes","sns:ListSubscriptionsByTopic","sns:GetSubscriptionAttributes"],"Resource":"arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:nightmail-byo-setup"},
+    {"Sid":"SetupSubscription","Effect":"Allow","Action":"sns:Subscribe","Resource":"arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:nightmail-byo-setup","Condition":{"StringEquals":{"sns:Protocol":"https","sns:Endpoint":"YOUR_EVENTS_ORIGIN/v1/events/cloudformation"}}}
+  ]
+}

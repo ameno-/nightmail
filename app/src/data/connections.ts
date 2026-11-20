@@ -9,6 +9,11 @@ export const connectionApi = {
   create: (input: { kind: ConnectionKind; region?: string }) => request<ProviderConnection>(path, { method: 'POST', body: input }),
   verify: (awsAccountId: string) => request<ProviderConnection>(`${path}/verify`, { method: 'POST', body: { awsAccountId } }),
   remove: () => request<{ deleted: true }>(path, { method: 'DELETE' }),
+  // A connected AWS account: import domains found in it, add a new one in a region, and ask AWS for production access.
+  importDomains: (revision: number, candidateIds: string[]) => request<{ operationId: string; regions: string[] }>(`${path}/imports`, { method: 'POST', body: { revision, candidateIds, confirm: true } }),
+  addDomain: (name: string, region: string) => request<{ operationId: string; regions: string[] }>('/v1/domains', { method: 'POST', body: { name, region } }),
+  rescan: () => request<{ operationId: string; revision: number }>(`${path}/scan`, { method: 'POST' }),
+  requestProductionAccess: (region: string, input: { websiteUrl: string; useCase: string; mailType: 'TRANSACTIONAL' | 'MARKETING' }) => request<{ region: string; production: boolean; review: { status: string; caseId: string | null } | null }>(`${path}/regions/${encodeURIComponent(region)}/production-access`, { method: 'POST', body: { ...input, confirm: true } }),
 }
 export const connectionKindLabel: Record<ConnectionKind, string> = { shared: 'Hosted mail', byo: 'Your AWS account' }
 // AWS still confirming a bring-your-own setup; repeating the verify request resumes it.

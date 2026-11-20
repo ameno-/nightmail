@@ -9,7 +9,7 @@ The production and dev Workers use separate `bane-runtime` users. Each user's ef
 
 ## Action inventory
 
-H = Hosted, B = the customer's BYO role ([`api/byo-template.yaml`](../../api/byo-template.yaml), 6.0), R = explicit customer receiving opt-in (v4 only; 6.0 has no receiving permissions), Q = customer account requests (on by default in 6.0). The checked-in JSON and templates are authoritative for the complete action, condition and resource sets.
+H = Hosted, B = the customer's BYO role ([`api/byo-templates/6.0.yaml`](../../api/byo-templates/6.0.yaml)), R = explicit customer receiving opt-in (v4 only; 6.0 has no receiving permissions), Q = customer account requests (on by default in 6.0). The checked-in JSON and templates are authoritative for the complete action, condition and resource sets.
 
 | Principal / IAM actions | Authorized use, resource and actual or required call site |
 |---|---|

@@ -69,7 +69,7 @@ const INVITATIONS: Record<string, { output: Tool['inputSchema']; view?: (respons
 // never agent calls (an agent may create a top-up link that a person opens and pays: createBillingTopUpLink).
 export const DASHBOARD_MONEY = ['createBillingTopUp', 'updateBillingAutoRecharge', 'createBillingCardSetup', 'deleteBillingPaymentMethod'] as const;
 // getRuleVersion is the dashboard's long poll for an agent's saves; an agent reads the version from getRules.
-const EXCLUDED = new Set<string>(['receiveSesSnsEvent', 'revealWebhookSecret', 'downloadInboundAttachment', 'getRuleVersion', 'getRitualVersion', ...DASHBOARD_MONEY]);
+const EXCLUDED = new Set<string>(['receiveSesSnsEvent', 'receiveCloudFormationSnsEvent', 'revealWebhookSecret', 'downloadInboundAttachment', 'getRuleVersion', 'getRitualVersion', ...DASHBOARD_MONEY]);
 // POST operations that change nothing: no confirm argument, read-only hint, read permission.
 const READ_ONLY_POSTS = new Set(['testRouting', 'testRules', 'checkRule', 'testRituals', 'checkRitual', 'queryAudience', 'previewSegment', 'previewEmail', 'checkEmail']);
 // Writes whose calls need no confirm argument. Access to every operation is decided by its
@@ -420,6 +420,7 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
 /** Operations that are not agent calls, with the reason. Everything else must be covered by a tool. */
 export const HUMAN_STEPS: Record<string, string> = {
   receiveSesSnsEvent: 'Signed by Amazon SNS; never an agent call.',
+  receiveCloudFormationSnsEvent: 'Signed by Amazon SNS for a connected account\'s stack; never an agent call.',
   unsubscribeByLink: 'Recipient capability link; never an agent call.',
   unsubscribeOneClick: 'Recipient one-click unsubscribe; never an agent call.',
   getPublicStats: 'Public, installation-wide homepage numbers; no workspace data.',
@@ -441,7 +442,7 @@ export const HUMAN_STEPS: Record<string, string> = {
 export const INTERNAL_PATH = /^\/v1\/(?:support|operator)(?:\/|$)/;
 /** Account administration that the API keeps to signed-in people (members, invitations, workspaces, BYO AWS). Owners
  *  and admins also list members and invitations, invite and revoke over their own MCP sign-in (memberAdminRoute). */
-export const ACCOUNT_STEPS = /^(?:listWorkspaces|createWorkspace|renameCurrentWorkspace|updateWorkspaceMember|removeWorkspaceMember|getWorkspaceInvitation|acceptWorkspaceInvitation|getConnection|createConnection|deleteConnection|listConnectionRegions|refreshConnectionScan|importConnectionDomains|getConnectionRegionStatus|verifyConnection)$/;
+export const ACCOUNT_STEPS = /^(?:listWorkspaces|createWorkspace|renameCurrentWorkspace|updateWorkspaceMember|removeWorkspaceMember|getWorkspaceInvitation|acceptWorkspaceInvitation|getConnection|createConnection|deleteConnection|listConnectionRegions|refreshConnectionScan|importConnectionDomains|requestConnectionProductionAccess|getConnectionRegionStatus|verifyConnection)$/;
 /** docs/mcp-coverage.md, generated from the catalog so the document cannot drift from the code. */
 export function coverageMarkdown(catalog: ReadonlyMap<string, McpOperation>, spec: ObjectValue): string {
   const byOperation = new Map<string, string>();

@@ -4,7 +4,7 @@ import { ApiError, assertSharedAccount, lazyModule, type Config, type Runtime } 
 import { connectionReady } from './states.js';
 import { productName } from './brand.js';
 import { requirePlatformAccount } from './config.js';
-import { byoSessionPolicy } from './byo-permissions.js';
+import { byoSessionPolicy, type ByoPurpose } from './byo-permissions.js';
 export { assertSharedAccount };
 
 type Credentials = NonNullable<Config['aws']>;
@@ -43,7 +43,7 @@ async function brokerCredentials(runtime: Runtime, region: string) {
   } finally { client.destroy(); }
 }
 /** A connected-account session from the broker: named nightmail-<purpose>, carrying the connection ID as its source identity. */
-export type ByoSession = { connectionId: string; purpose: 'scan' | 'provision' | 'cleanup' | 'send' | 'template' | 'quota' | 'verify' | 'read' | 'delete' | 'mailfrom' };
+export type ByoSession = { connectionId: string; purpose: ByoPurpose };
 export async function assume(runtime: Runtime, region: string, roleArn: string, externalId: string, verify = false, policy?: string, session?: ByoSession) {
   // Without a session: the legacy v4 path, which assumes customer roles with the platform credentials directly.
   const platform = session ? await brokerCredentials(runtime, region) : platformCredentials(runtime);

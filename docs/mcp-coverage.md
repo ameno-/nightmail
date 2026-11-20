@@ -128,6 +128,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `listWebhookDeliveries` | `webhooks` · `deliveries` · admin |
 | `getWebhookDelivery` | `webhooks` · `delivery` · admin |
 | `retryWebhookDelivery` | `webhooks` · `retry` · admin |
+| `receiveCloudFormationSnsEvent` | Signed by Amazon SNS for a connected account's stack; never an agent call. |
 | `receiveSesSnsEvent` | Signed by Amazon SNS; never an agent call. |
 | `unsubscribeByLink` | Recipient capability link; never an agent call. |
 | `unsubscribeOneClick` | Recipient one-click unsubscribe; never an agent call. |
@@ -286,6 +287,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `listConnectionRegions` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `refreshConnectionScan` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `importConnectionDomains` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
+| `requestConnectionProductionAccess` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `getConnectionRegionStatus` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `verifyConnection` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `getPublicStats` | Public, installation-wide homepage numbers; no workspace data. |

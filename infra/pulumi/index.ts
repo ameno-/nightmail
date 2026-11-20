@@ -4,6 +4,7 @@ import * as cfV5 from "@pulumi/cloudflare-v5";
 import * as pulumi from "@pulumi/pulumi";
 import { render } from "../aws-shared/runtime-policies.mjs";
 import { byoBroker } from "./byo-broker.js";
+import { byoSetup } from "./byo-setup.js";
 import { mailGateway } from "./mail-gateway.js";
 import {prepareDevMail,prepareProductionMail,prepareRuntime} from './nightmail-dev.js';
 import { deadLetterAlarm, receivingAlarm } from './receiving-alarm.js';
@@ -214,6 +215,8 @@ const user = new aws.iam.User(runtime, {
 const policies = render("--fresh", { account: stage.account, origin: stage.origin });
 const legacyPolicies = render("--fresh", { account: stage.account, origin: stage.legacyOrigin, broker: false });
 export const byoBrokerArn = byoBroker(iam, stage.account);
+// Off until the deploy role may manage the template bucket and setup topic (README, "Dax: one-time IAM for BYO setup").
+export const byo = config.getBoolean("byoSetup") ? byoSetup(ohio, stage.account, production ? "https://events.nightmail.dev" : "https://events.dev.nightmail.dev") : undefined;
 const renamedKey = !production && config.getBoolean('prepareNightmailMail') ? prepareDevMail(ohio,iam,stage.account,config.require('permissionsBoundary'),policies,config.getBoolean('nightmailMailActive')===true) : undefined;
 if (production && config.getBoolean('prepareNightmailMail')) prepareProductionMail(ohio,iam,stage.account);
 const standbyRuntime = production && config.getBoolean('stageNightmailRuntime');

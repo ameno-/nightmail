@@ -1,9 +1,10 @@
 import { sql } from 'drizzle-orm';
 import { z } from '@hono/zod-openapi';
 import { createHash } from 'node:crypto';
-import { ApiError, denied, id, ModuleLoadError, notFound, type Runtime, type DbExecutor, type JobHandler } from './core.js';
+import { ApiError, denied, id, lazyModule, log, ModuleLoadError, notFound, type Runtime, type DbExecutor, type JobHandler } from './core.js';
+import { productName } from './brand.js';
 import { assume, brokerRoleArn, loadStsSdk } from './provider-credentials.js';
-import { byoSessionPolicy } from './byo-permissions.js';
+import { BYO_TEMPLATE_VERSIONS, byoSessionPolicy, type ByoPurpose } from './byo-permissions.js';
 import { requirePlatformAccount } from './config.js';
 import { awsError, byoFeedbackUrl, loadSetupSdk, provisionJournaledFeedback, readSelectedDomains, removeByoFeedbackResource, scanRegionPage, setupResources, type Inventory, type CandidateIdentity, type JournalEntry, type ScanStage, byoStackName } from './ses-setup.js';
 import { JobDeferred, retryDatabaseFailures } from './jobs.js';
@@ -14,7 +15,7 @@ import { lockSendScope } from './send-scope.js';
 import { byoEnabled } from './byo-pilot.js';
 
 export const regionLabels:Record<string,string>={'us-east-2':'Ohio','us-east-1':'N. Virginia','us-west-1':'N. California','us-west-2':'Oregon','af-south-1':'Cape Town','ap-south-1':'Mumbai','ap-south-2':'Hyderabad','ap-southeast-1':'Singapore','ap-southeast-2':'Sydney','ap-southeast-3':'Jakarta','ap-southeast-4':'Melbourne','ap-southeast-5':'Malaysia','ap-southeast-6':'New Zealand','ap-southeast-7':'Thailand','ap-northeast-1':'Tokyo','ap-northeast-2':'Seoul','ap-northeast-3':'Osaka','ca-central-1':'Canada Central','ca-west-1':'Calgary','eu-central-1':'Frankfurt','eu-central-2':'Zurich','eu-west-1':'Ireland','eu-west-2':'London','eu-west-3':'Paris','eu-south-1':'Milan','eu-south-2':'Spain','eu-north-1':'Stockholm','il-central-1':'Tel Aviv','mx-central-1':'Mexico Central','me-south-1':'Bahrain','me-central-1':'UAE','sa-east-1':'São Paulo'};
-export type V5Connection={id:string;stack_name:string|null;workspace_id:string;requested_account:string;aws_account_id:string|null;role_arn:string|null;external_id:string;inventory_revision:number;state:string;region:string;disconnect_error:{region:string|null;code:string}|null};
+export type V5Connection={id:string;stack_name:string|null;workspace_id:string;requested_account:string|null;stack_id:string|null;stack_template_version:string|null;stack_deleted_at:string|null;stack_error:string|null;resource_prefix:string;aws_account_id:string|null;role_arn:string|null;external_id:string;inventory_revision:number;state:string;region:string;disconnect_error:{region:string|null;code:string}|null};
 type ScanRow={region:string;scan_state:string;scan_error:string|null;scan_facts:Inventory;scan_revision:string;sending_state:string;receiving_state:string;provision_error:string|null;ownership_journal:JournalEntry[]};
 const conflict=(code:string,message:string)=>new ApiError(409,code,message);
 const stale=()=>conflict('SCAN_STALE','Refresh the list and select verified domains from a completed regional scan.');
@@ -55,14 +56,16 @@ const regionJobId=(c:V5Connection,region:string)=>`byo.provision:${c.id}:${regio
 const job=(db:DbExecutor,c:V5Connection,type:string,jobId:string,extra:Record<string,unknown>={})=>db.execute(sql`INSERT INTO jobs(id,workspace_id,type,payload) VALUES(${jobId},${c.workspace_id},${type},${JSON.stringify({connectionId:c.id,...extra,run:id('run')})}::jsonb)
   ON CONFLICT(id) DO UPDATE SET status='pending',available_at=now(),attempts=0,last_error=NULL,lease_until=NULL,payload=excluded.payload WHERE jobs.status IN ('completed','failed')`);
 
-// The role template (api/byo-template.yaml) takes every value as a plain parameter: quick-create links ignore NoEcho ones.
+// The role template (api/byo-templates/) takes every value as a plain parameter: quick-create links ignore NoEcho ones.
 export function v5Link(r:Runtime,c:{id:string;workspace_id:string;external_id:string|null;region:string;stack_name?:string|null}) {
   if (!r.config.byoV5TemplateUrl) throw new ApiError(503,'BYO_NOT_CONFIGURED','The v5 role template URL is not configured.');
   const params=new URLSearchParams({templateURL:r.config.byoV5TemplateUrl,stackName:c.stack_name ?? byoStackName('Nightmail',c.id),param_PlatformAccount:requirePlatformAccount(r.config.platformAccount),
     param_ExternalId:c.external_id!,param_ConnectionId:c.id,param_WorkspaceId:c.workspace_id,param_ResourcePrefix:setupResources(c.id,'byo').topicName.slice(0,-9),param_EventsHost:new URL(byoFeedbackUrl(r.config)).hostname});
   return `https://${c.region}.console.aws.amazon.com/cloudformation/home?region=${c.region}#/stacks/create/review?${params}`;
 }
-export async function enrollV5(r:Runtime,wid:string,account:string) {
+// The account is optional: the stack reports its own account when it's created (stackNotification), so nothing has to
+// be typed. Given, it's checked against the stack's, and it starts the polling proof (the manual path).
+export async function enrollV5(r:Runtime,wid:string,account?:string) {
   // The template trusts the platform account through its broker role only, which may assume only Nightmail-<20> roles.
   const platformAccount=requirePlatformAccount(r.config.platformAccount),platformArn=brokerRoleArn(r);
   if (account===platformAccount) throw conflict('AWS_ACCOUNT_IN_USE','The shared sending account cannot be connected.');
@@ -71,10 +74,14 @@ export async function enrollV5(r:Runtime,wid:string,account:string) {
   return r.db.transaction(async db=>{
     await writable(r,wid,db);
     const inserted=await db.execute(sql`INSERT INTO provider_connections(id,workspace_id,kind,region,state,tenant_state,external_id,platform_principal_arn,template_version,resource_prefix,requested_account,inventory_revision,stack_name)
-      VALUES(${cid},${wid},'byo',${roleRegion},'awaiting_role','ready',${external},${platformArn},'v5',${setupResources(cid,'byo').topicName.slice(0,-9)},${account},1,${byoStackName('Nightmail',cid)}) ON CONFLICT(workspace_id) DO NOTHING`);
+      VALUES(${cid},${wid},'byo',${roleRegion},'awaiting_role','ready',${external},${platformArn},'v5',${setupResources(cid,'byo').topicName.slice(0,-9)},${account??null},1,${byoStackName('Nightmail',cid)}) ON CONFLICT(workspace_id) DO NOTHING`);
     const c=await connection(db,wid,true);if (c) usable(c);
-    if (!c || c.requested_account!==account) throw conflict('CONNECTION_EXISTS','A different sending connection already exists.');
-    if (inserted.rowCount) await job(db,c,'byo.prove',proofId(c),{revision:c.inventory_revision});
+    if (!c) throw conflict('CONNECTION_EXISTS','A different sending connection already exists.');
+    if (account!==undefined && c.requested_account!==account) {
+      if (c.requested_account!==null || c.aws_account_id) throw conflict('CONNECTION_EXISTS','A different sending connection already exists.');
+      await db.execute(sql`UPDATE provider_connections SET requested_account=${account} WHERE id=${c.id} AND requested_account IS NULL AND aws_account_id IS NULL`);
+      c.requested_account=account;await job(db,c,'byo.prove',proofId(c),{revision:c.inventory_revision});
+    } else if (inserted.rowCount && account!==undefined) await job(db,c,'byo.prove',proofId(c),{revision:c.inventory_revision});
     return {operationId:proofId(c),revision:c.inventory_revision};
   });
 }
@@ -82,10 +89,10 @@ export async function enrollV5(r:Runtime,wid:string,account:string) {
 // Inline STS policies intersect with v5's tag, endpoint, and trust conditions. No
 // scanner can send, provision, or read an email address identity; provisioning cannot
 // read other sets/topics. The proof probes use the same limited policy.
-async function scoped(r:Runtime,c:V5Connection,region:string,purpose:'scan'|'provision'|'cleanup',verify=false) {
-  const account=c.requested_account, role=`arn:aws:iam::${account}:role/${c.stack_name ?? byoStackName('Bane',c.id)}`;
+async function scoped(r:Runtime,c:V5Connection,region:string,purpose:Extract<ByoPurpose,'scan'|'provision'|'cleanup'|'stack'>,verify=false) {
+  const account=c.requested_account ?? '', role=`arn:aws:iam::${account}:role/${c.stack_name ?? byoStackName('Bane',c.id)}`;
   if (account===requirePlatformAccount(r.config.platformAccount) || !/^\d{12}$/.test(account) || !(region in regionLabels) || (!verify && (c.aws_account_id!==account || c.role_arn!==role))) throw conflict('AWS_ACCOUNT_MISMATCH','The regional role is not bound to this account.');
-  const aws=await assume(r,region,role,c.external_id,verify,byoSessionPolicy(purpose,{region,account,connectionId:c.id}),{connectionId:c.id,purpose});
+  const aws=await assume(r,region,role,c.external_id,verify,byoSessionPolicy(purpose,{region,account,connectionId:c.id,stack:c.stack_name??undefined}),{connectionId:c.id,purpose});
   // The feedback subscription goes to the one endpoint the role allows (EventsHost).
   return {...r,config:{...r.config,workspaceId:c.workspace_id,aws,awsAccountId:account,sesFeedbackUrl:byoFeedbackUrl(r.config)}};
 }
@@ -101,7 +108,8 @@ export async function refreshScan(r:Runtime,wid:string,key?:string) {
   await writable(r,wid);return r.db.transaction(async db=>{
     const c=usable(await connection(db,wid,true));
     const op=receipt<ScanOp>(c,'scan',key,''),prior=await op.read(db);if (prior) return prior;
-    if (!c.aws_account_id) { await job(db,c,'byo.prove',proofId(c),{revision:c.inventory_revision});return op.save(db,{revision:c.inventory_revision,operationId:proofId(c)}); }
+    // Not connected yet: the stack reports itself, or (manual path) the typed account is proved.
+    if (!c.aws_account_id) { if (c.requested_account) await job(db,c,'byo.prove',proofId(c),{revision:c.inventory_revision});return op.save(db,{revision:c.inventory_revision,operationId:proofId(c)}); }
     if (!(await db.execute(sql`SELECT FROM provider_connection_regions WHERE connection_id=${c.id} AND scan_state='scanning' LIMIT 1`)).rowCount) {
       c.inventory_revision++;await db.execute(sql`UPDATE provider_connections SET inventory_revision=${c.inventory_revision},state=CASE WHEN state='ready' THEN state ELSE 'scanning' END WHERE id=${c.id}`);await beginScan(db,c);
     }
@@ -115,7 +123,7 @@ const runV5=(handler:(r:Runtime,c:V5Connection,p:Record<string,unknown>,attempt:
   await handler(r,c,p,j.attempts);
 });
 const prove=runV5(async(r,c,p)=>{
-  if (c.aws_account_id || p.revision!==c.inventory_revision) return;
+  if (c.aws_account_id || !c.requested_account || p.revision!==c.inventory_revision) return;
   try { await scoped(r,c,c.region,'scan',true); }
   catch(e) {
     if (e instanceof ModuleLoadError) throw e;
@@ -156,7 +164,7 @@ const scan=runV5(async(r,c,p)=>{
 });
 
 const Candidate=z.object({id:z.string(),domain:z.string(),region:z.string(),regionLabel:z.string(),selectable:z.boolean(),status:z.enum(['verified','signing_pending','not_verified','incomplete','already_bound','overlap']),sandbox:z.boolean().nullable(),defaultConfigurationSet:z.string().nullable(),dkimStatus:z.string().nullable(),signingOrigin:z.string().nullable(),mailFromDomain:z.string().nullable(),overlap:z.boolean()});
-const Facts=z.object({production:z.boolean().optional(),sendingEnabled:z.boolean().optional(),max24HourSend:z.number().optional(),maxSendRate:z.number().optional(),sentLast24Hours:z.number().optional(),configurationSets:z.record(z.string(),z.object({installation:z.boolean().nullable()})).optional(),receiving:z.object({supported:z.boolean(),set:z.string().nullable(),rules:z.array(z.object({name:z.string(),enabled:z.boolean(),recipients:z.array(z.string()),actions:z.array(z.string())}))}).optional()});
+const Facts=z.object({production:z.boolean().optional(),review:z.object({status:z.string(),caseId:z.string().nullable()}).nullable().optional().describe('AWS\'s review of a production access request.'),enforcement:z.string().optional(),sendingEnabled:z.boolean().optional(),max24HourSend:z.number().optional(),maxSendRate:z.number().optional(),sentLast24Hours:z.number().optional(),configurationSets:z.record(z.string(),z.object({installation:z.boolean().nullable()})).optional(),receiving:z.object({supported:z.boolean(),set:z.string().nullable(),rules:z.array(z.object({name:z.string(),enabled:z.boolean(),recipients:z.array(z.string()),actions:z.array(z.string())}))}).optional()});
 const Pending=z.object({domain:z.string(),importing:z.boolean(),error:z.string().nullable()});
 const FailedIntent=Pending.extend({error:z.string()});
 const Region=z.object({region:z.string(),regionLabel:z.string(),scanState:z.string(),scanError:z.string().nullable(),sendingState:z.string(),receivingState:z.string(),error:z.string().nullable(),facts:Facts,resources:z.array(z.object({kind:z.string(),resource:z.string(),target:z.string().optional(),state:z.enum(['creating','created']).optional()})),pending:z.array(Pending),failedIntents:z.array(FailedIntent)});
@@ -194,10 +202,12 @@ export const Imports=z.object({revision:z.number().int().positive(),candidateIds
 export const Accepted=z.object({operationId:z.string(),regions:z.array(z.string())});
 type Intent={id:string;region:string;name:string;importing:boolean};
 async function saveIntent(db:DbExecutor,c:V5Connection,region:string,name:string,importing:boolean) {
-  const row=(await db.execute<{sending_state:string;scan_state:string;bound:string|null;imported:boolean|null}>(sql`SELECT r.sending_state,r.scan_state,b.region AS bound,(dc.identity @> '{"imported":true}') AS imported FROM provider_connection_regions r
+  const row=(await db.execute<{sending_state:string;scan_state:string;production:boolean|null;bound:string|null;imported:boolean|null}>(sql`SELECT r.sending_state,r.scan_state,(r.scan_facts->>'production')::boolean AS production,b.region AS bound,(dc.identity @> '{"imported":true}') AS imported FROM provider_connection_regions r
     LEFT JOIN domain_sending_bindings b ON b.workspace_id=${c.workspace_id} AND b.name=${name} LEFT JOIN domain_claims dc ON dc.workspace_id=b.workspace_id AND dc.name=b.name
     WHERE r.connection_id=${c.id} AND r.region=${region} FOR SHARE OF r`)).rows[0];
   if (!row || row.sending_state==='disabled' || row.scan_state!=='ready_to_import' && (importing || row.sending_state!=='ready')) throw stale();
+  // Mail starts only where AWS granted production access: the SES sandbox delivers to verified addresses alone.
+  if (row.production!==true) throw conflict('PRODUCTION_ACCESS_REQUIRED',`${regionLabels[region]} is in the SES sandbox, which delivers only to verified addresses. Request production access for it first.`);
   if (row.bound) {
     if (row.bound!==region || importing && !row.imported) throw conflict('DOMAIN_REGION_CONFLICT','This domain already has a sending binding.');
     return;
@@ -415,4 +425,199 @@ const disconnect:JobHandler=retryDatabaseFailures(async(r,p,j)=>{
     const err=awsError(e);await r.db.execute(sql`UPDATE provider_connections SET disconnect_error=${JSON.stringify({region,code:err.code})}::jsonb WHERE id=${p.connectionId} AND state='disconnecting' AND EXISTS(SELECT FROM jobs WHERE ${ticket})`);throw err;
   }
 });
-export const regionalByoJobs:Record<string,JobHandler>={'byo.prove':prove,'byo.scan':scan,'byo.provision':provision,'byo.bind':bind,'byo.disconnect':disconnect};
+// Production access. A new SES account sends only to verified addresses until AWS grants production access, region by
+// region. The role (template 6.0's AccountRequests, on by default) lets Nightmail file that request for the customer,
+// once, with the details they confirm. PutAccountDetails could also turn production access off and overwrite an
+// account's existing details, so it is never called once access is granted or while AWS is reviewing a request.
+export const ProductionAccess=z.object({websiteUrl:z.url({protocol:/^https?$/}).max(1000).openapi({example:'https://example.com'}),useCase:z.string().trim().min(40).max(5000).describe('How the account sends mail and to whom, for AWS\'s review.').openapi({example:'We send receipts and account notices to our own customers, who signed up for them.'}),mailType:z.enum(['TRANSACTIONAL','MARKETING']),confirm:z.literal(true)}).strict().openapi('ProductionAccessRequest');
+export const ProductionAccessState=z.object({region:z.string(),production:z.boolean(),review:z.object({status:z.string(),caseId:z.string().nullable()}).nullable()}).openapi('ProductionAccessState');
+export async function requestProductionAccess(r:Runtime,wid:string,region:string,input:z.infer<typeof ProductionAccess>,audit:(db:DbExecutor,connectionId:string)=>Promise<void>) {
+  const c=await requiredV5(r,wid);
+  if (!c.aws_account_id) throw conflict('CONNECTION_REQUIRED','Connect the AWS account first.');
+  if (!(region in regionLabels) || !(await r.db.execute(sql`SELECT FROM provider_connection_regions WHERE connection_id=${c.id} AND region=${region}`)).rowCount) throw new ApiError(422,'INVALID_REGION','Choose a commercial SES sending region.','region');
+  await Promise.all([loadStsSdk(),loadSetupSdk()]);
+  const aws=await assume(r,region,c.role_arn!,c.external_id,false,byoSessionPolicy('account',{region,account:c.aws_account_id,connectionId:c.id}),{connectionId:c.id,purpose:'account'});
+  const [{SESv2Client,GetAccountCommand,PutAccountDetailsCommand},{FetchHttpHandler}]=await Promise.all([import('@aws-sdk/client-sesv2'),import('@smithy/fetch-http-handler')]);
+  const client=new SESv2Client({region,credentials:aws,ignoreConfiguredEndpointUrls:true,maxAttempts:2,requestHandler:new FetchHttpHandler({requestTimeout:8000})});
+  const save=(production:boolean,review:{status:string;caseId:string|null}|null)=>r.db.execute(sql`UPDATE provider_connection_regions SET scan_facts=scan_facts||${JSON.stringify({production,review})}::jsonb WHERE connection_id=${c.id} AND region=${region}`);
+  try {
+    const now=await client.send(new GetAccountCommand({})),current=now.Details?.ReviewDetails;
+    const review=current?{status:current.Status??'UNKNOWN',caseId:current.CaseId??null}:null;
+    if (now.ProductionAccessEnabled) { await save(true,review);throw conflict('PRODUCTION_ACCESS_GRANTED',`${regionLabels[region]} already has production access. Nothing was changed.`); }
+    if (review?.status==='PENDING') { await save(false,review);throw conflict('PRODUCTION_ACCESS_PENDING',`AWS is already reviewing a request for ${regionLabels[region]}${review.caseId?` (case ${review.caseId})`:''}.`); }
+    // The audit row is written before AWS is asked, so a request never goes unrecorded.
+    await r.db.transaction(async db=>{
+      await audit(db,c.id);
+      await client.send(new PutAccountDetailsCommand({ProductionAccessEnabled:true,MailType:input.mailType,WebsiteURL:input.websiteUrl,ContactLanguage:'EN',UseCaseDescription:input.useCase}));
+    });
+    const after=(await client.send(new GetAccountCommand({}))).Details?.ReviewDetails;
+    const state={status:after?.Status??'PENDING',caseId:after?.CaseId??null};
+    await save(false,state);
+    return {region,production:false,review:state};
+  } catch(e) {
+    if (e instanceof ApiError) throw e;
+    if (awsError(e).code==='AWS_ACCESS_DENIED') throw conflict('ACCOUNT_REQUESTS_OFF',`The ${productName} stack was created with account requests turned off. Request production access for ${regionLabels[region]} in the SES console instead.`);
+    throw awsError(e);
+  } finally { client.destroy(); }
+}
+
+// Stack requests. A published role template (api/byo-templates/) has a Custom::NightmailConnection resource:
+// CloudFormation publishes a request to the platform's setup topic when the customer's stack is created, updated or
+// deleted, and waits for Nightmail's answer at a presigned URL. Anyone may publish to that topic, so a request proves
+// nothing by itself. What needs no AWS call is refused before any work is queued, and the work a connection can queue
+// is bounded. A request is then acted on only as the stack reports itself through the role: Create binds the stack
+// that has this connection's name and parameters and is creating its Connection resource now; Delete counts only when
+// that resource is being deleted, and AccessDenied says nothing about whether it is.
+const stackArn=/^arn:aws:cloudformation:us-east-2:(\d{12}):stack\/([A-Za-z][A-Za-z0-9-]{0,127})\/[0-9a-f-]{36}$/;
+const StackProps=z.object({ServiceToken:z.string().max(256).optional(),ConnectionId:z.string().regex(/^conn_[0-9a-f]{32}$/),RoleArn:z.string().max(256).optional(),TemplateVersion:z.string().max(16)});
+// Only these fields are kept (unknown ones are dropped), each bounded, so a stored request stays small.
+export const StackRequest=z.object({
+  RequestType:z.enum(['Create','Update','Delete']),ResponseURL:z.string().url().max(4096),StackId:z.string().regex(stackArn),RequestId:z.string().min(1).max(200),
+  ResourceType:z.literal('Custom::NightmailConnection'),LogicalResourceId:z.literal('Connection'),PhysicalResourceId:z.string().min(1).max(1024).optional(),
+  ResourceProperties:StackProps,OldResourceProperties:StackProps.partial().optional(),
+}).refine(v=>v.RequestType==='Create' || !!v.PhysicalResourceId);
+type StackRequest=z.infer<typeof StackRequest>;
+// Per connection: requests in flight, and requests in the last hour.
+const STACK_IN_FLIGHT=3,STACK_PER_HOUR=20;
+// The presigned S3 URL CloudFormation waits on in us-east-2 (the template asserts that region): nowhere else.
+function stackResponseUrl(value:string) {
+  const u=new URL(value);
+  if (u.protocol!=='https:' || u.username || u.password || u.port || u.hash || !/^cloudformation-custom-resource-response-useast2\.s3(?:[.-]us-east-2)?\.amazonaws\.com$/.test(u.hostname)) throw new ApiError(400,'STACK_REQUEST_INVALID','The stack request has no CloudFormation response URL.');
+  return u;
+}
+async function answerStack(req:StackRequest,Status:'SUCCESS'|'FAILED',Reason:string) {
+  // Keep the physical ID CloudFormation already has: a new one would make it delete the old resource.
+  const body=JSON.stringify({Status,Reason:Reason.slice(0,900),PhysicalResourceId:req.PhysicalResourceId??req.ResourceProperties.ConnectionId,StackId:req.StackId,RequestId:req.RequestId,LogicalResourceId:req.LogicalResourceId,NoEcho:false,Data:{}});
+  // The URL is presigned without a content type, so send the bytes with none.
+  const res=await fetch(stackResponseUrl(req.ResponseURL),{method:'PUT',body:new TextEncoder().encode(body),redirect:'manual',signal:AbortSignal.timeout(8000)});
+  await res.body?.cancel();
+  if (!res.ok) throw new ApiError(503,'STACK_RESPONSE_FAILED','CloudFormation did not accept the stack response.',undefined,true);
+  log('info',{code:'BYO_STACK_ANSWERED',requestType:req.RequestType,status:Status});
+}
+const nobody=(req:StackRequest)=>req.RequestType==='Create'?answerStack(req,'FAILED',`${productName} has no connection waiting for this stack. Start again from Connect AWS in ${productName}.`):answerStack(req,'SUCCESS',`No ${productName} connection uses this stack.`);
+// The checks that need no AWS call, before a request is queued and again when it runs: the answer to send now, or null
+// to go on. A refused Create is also shown in setup, so the reason isn't only in the AWS console.
+async function refusal(r:Runtime,c:V5Connection,req:StackRequest):Promise<(()=>Promise<void>)|null> {
+  const [,account,name]=stackArn.exec(req.StackId)!,ours=c.stack_id===req.StackId;
+  const fail=(reason:string)=>async()=>{if (req.RequestType==='Create') await r.db.execute(sql`UPDATE provider_connections SET stack_error=${reason} WHERE id=${c.id} AND aws_account_id IS NULL`);await answerStack(req,'FAILED',reason);};
+  if (req.RequestType!=='Create') {
+    // A rollback of an update that tried to move the stack names this connection again, and is answered as usual.
+    if (!ours && req.RequestType==='Update' && req.OldResourceProperties?.ConnectionId && req.OldResourceProperties.ConnectionId!==req.ResourceProperties.ConnectionId) return fail(`A stack can't move to another ${productName} connection. Create a new stack from Connect AWS instead.`);
+    // Nightmail's physical ID for the resource is the connection's ID: never act for another connection's.
+    if (!ours || (req.PhysicalResourceId && /^conn_[0-9a-f]{32}$/.test(req.PhysicalResourceId) && req.PhysicalResourceId!==c.id)) return ()=>answerStack(req,'SUCCESS',`No ${productName} connection uses this stack.`);
+    return null;
+  }
+  if (!r.config.byoV2 || !await byoEnabled(r,c.workspace_id)) return fail(`Bring your own AWS isn't turned on for this ${productName} workspace.`);
+  if (account===requirePlatformAccount(r.config.platformAccount)) return fail(`${productName}'s own AWS account can't be connected. Sign in to your AWS account and use the Connect AWS link again.`);
+  if (name!==c.stack_name) return fail(`Name the stack ${c.stack_name}, as the Connect AWS link does.`);
+  if (c.state==='disconnecting') return fail(`This connection is being disconnected in ${productName}.`);
+  if (c.aws_account_id && (c.aws_account_id!==account || (c.stack_id && !ours))) return fail(`This ${productName} connection already uses another stack. Start again from Connect AWS.`);
+  if (c.requested_account && c.requested_account!==account) return fail(`You chose AWS account ${c.requested_account} in ${productName}, but this stack is in ${account}. Sign in to ${c.requested_account}, or start again from Connect AWS.`);
+  return null;
+}
+/** One verified SNS notification from the setup topic: answers at once what needs no AWS call, else queues byo.stack. */
+export async function stackNotification(r:Runtime,message:string) {
+  let req:StackRequest;
+  try { req=StackRequest.parse(JSON.parse(message)); stackResponseUrl(req.ResponseURL); } catch { throw new ApiError(400,'STACK_REQUEST_INVALID','Expected a Nightmail stack request.'); }
+  const c=(await r.db.execute<V5Connection>(sql`SELECT * FROM provider_connections WHERE id=${req.ResourceProperties.ConnectionId} AND kind='byo' AND template_version='v5'`)).rows[0];
+  if (!c) { await nobody(req);return false; }
+  const answer=await refusal(r,c,req);
+  if (answer) { await answer();return false; }
+  // A role can take seconds to be usable everywhere; keep trying well inside the stack's 15-minute wait. The same request
+  // delivered again is one job; past the limits a request is dropped (CloudFormation then times out on it).
+  const jobId='byo.stack:'+hash(req.StackId+'\n'+req.RequestId),payload={connectionId:c.id,request:req,deadline:Date.now()+12*60_000,run:id('run')};
+  const queued=!!(await r.db.execute(sql`INSERT INTO jobs(id,workspace_id,type,payload) SELECT ${jobId},${c.workspace_id},'byo.stack',${JSON.stringify(payload)}::jsonb
+    FROM (SELECT count(*) FILTER (WHERE status IN ('pending','running')) AS open,count(*) AS recent FROM jobs WHERE workspace_id=${c.workspace_id} AND type='byo.stack' AND payload->>'connectionId'=${c.id}
+      AND (status IN ('pending','running') OR created_at>now()-interval '1 hour')) n WHERE n.open<${STACK_IN_FLIGHT} AND n.recent<${STACK_PER_HOUR} ON CONFLICT(id) DO NOTHING`)).rowCount;
+  if (!queued) log('warn',{code:'BYO_STACK_REQUEST_DROPPED',connectionId:c.id,requestType:req.RequestType});
+  return queued;
+}
+const loadCloudFormation=lazyModule(()=>Promise.all([import('@aws-sdk/client-cloudformation'),import('@smithy/fetch-http-handler')]));
+type OwnStack={stack:import('@aws-sdk/client-cloudformation').Stack;resource:import('@aws-sdk/client-cloudformation').StackResourceDetail|undefined};
+/** The stack (by name or ID) and its Connection resource as they report themselves through the role, or null when that
+ * can't be read: the role is gone, changed or not usable yet, or AWS refused. Null is never evidence of a deletion. */
+async function readStack(r:Runtime,c:V5Connection,stackName:string,verify=false):Promise<OwnStack|null> {
+  let scope;
+  try { scope=await scoped(r,c,'us-east-2','stack',verify); } catch(e) { if (e instanceof ModuleLoadError) throw e; if (awsError(e).code==='AWS_ACCESS_DENIED') return null; throw e; }
+  const [{CloudFormationClient,DescribeStacksCommand,DescribeStackResourceCommand},{FetchHttpHandler}]=await loadCloudFormation();
+  const client=new CloudFormationClient({region:'us-east-2',credentials:scope.config.aws,ignoreConfiguredEndpointUrls:true,maxAttempts:2,requestHandler:new FetchHttpHandler({requestTimeout:5000})});
+  const unreadable=(e:unknown)=>(e as Error)?.name==='ValidationError' || awsError(e).code==='AWS_ACCESS_DENIED';
+  try {
+    const stack=(await client.send(new DescribeStacksCommand({StackName:stackName}))).Stacks?.[0];
+    if (!stack) return null;
+    let resource;
+    try { resource=(await client.send(new DescribeStackResourceCommand({StackName:stack.StackId,LogicalResourceId:'Connection'}))).StackResourceDetail; }
+    catch(e) { if (!unreadable(e)) throw awsError(e); }
+    return {stack,resource};
+  }
+  catch(e) { if (e instanceof ApiError) throw e; if (unreadable(e)) return null; throw awsError(e); }
+  finally { client.destroy(); }
+}
+const knownVersion=(v:unknown)=>typeof v==='string' && (BYO_TEMPLATE_VERSIONS as readonly string[]).includes(v) ? v : null;
+const parameters=(stack:OwnStack['stack'])=>Object.fromEntries((stack.Parameters??[]).map(p=>[p.ParameterKey,p.ParameterValue]));
+// A Create is this connection's when the stack named for it is that very stack, has its parameters, and is creating its
+// Connection resource now (a new stack, or an update adding the resource).
+function creating(own:OwnStack,c:V5Connection,req:StackRequest) {
+  const p=parameters(own.stack);
+  return own.stack.StackId===req.StackId && /^(?:CREATE|UPDATE)_IN_PROGRESS$/.test(own.stack.StackStatus ?? '') && p.ExternalId===c.external_id && p.ConnectionId===c.id && p.WorkspaceId===c.workspace_id
+    && p.ResourcePrefix===c.resource_prefix && own.resource?.ResourceType==='Custom::NightmailConnection' && own.resource.ResourceStatus==='CREATE_IN_PROGRESS';
+}
+// A Delete is real when the stack's Connection resource, with this physical ID, is being deleted. The role goes with it
+// when the stack itself is being deleted or a failed create is rolling back; otherwise only the resource goes.
+const deleting=(own:OwnStack,req:StackRequest)=>own.stack.StackId===req.StackId && own.resource?.ResourceStatus==='DELETE_IN_PROGRESS' && own.resource.PhysicalResourceId===req.PhysicalResourceId;
+export const roleGoing=(own:OwnStack)=>own.stack.StackStatus==='DELETE_IN_PROGRESS' || own.stack.StackStatus==='ROLLBACK_IN_PROGRESS';
+const unreadableStack=`${productName} couldn't read this stack through its role, so it kept the connection. Disconnect in ${productName} first, then delete the stack again.`;
+async function stackDelete(r:Runtime,c:V5Connection,req:StackRequest,deadline:number) {
+  const own=await readStack(r,c,c.stack_id!);
+  if (!own) { if (Date.now()<deadline) throw defer(30_000);return answerStack(req,'FAILED',unreadableStack); }
+  if (!deleting(own,req)) { log('warn',{code:'BYO_STACK_REQUEST_IGNORED',requestType:req.RequestType,stackStatus:own.stack.StackStatus,resourceStatus:own.resource?.ResourceStatus});return; }
+  if (!roleGoing(own)) return answerStack(req,'SUCCESS',`The stack keeps its role, so ${productName} keeps using this account.`);
+  await r.db.execute(sql`UPDATE provider_connections SET stack_deleted_at=coalesce(stack_deleted_at,now()) WHERE id=${c.id} AND stack_id=${req.StackId}`);
+  return answerStack(req,'SUCCESS',`${productName} stopped using this account.`);
+}
+const stackJob:JobHandler=retryDatabaseFailures(async(r,p)=>{
+  const req=StackRequest.parse(p.request),[,account,name]=stackArn.exec(req.StackId)!,deadline=Number(p.deadline);
+  await Promise.all([loadStsSdk(),loadSetupSdk()]);
+  const c=(await r.db.execute<V5Connection>(sql`SELECT * FROM provider_connections WHERE id=${p.connectionId} AND kind='byo' AND template_version='v5'`)).rows[0];
+  if (!c) return nobody(req);
+  // The connection may have changed since the request was queued.
+  const answer=await refusal(r,c,req);
+  if (answer) return answer();
+  if (req.RequestType==='Delete') return stackDelete(r,c,req,deadline);
+  if (req.RequestType==='Update') {
+    const version=knownVersion((await readStack(r,c,c.stack_id!))?.stack.Outputs?.find(o=>o.OutputKey==='TemplateVersion')?.OutputValue);
+    if (version) await r.db.execute(sql`UPDATE provider_connections SET stack_template_version=${version} WHERE id=${c.id} AND stack_id=${req.StackId}`);
+    return answerStack(req,'SUCCESS',`${productName} uses template ${version ?? 'unknown'}.`);
+  }
+  const fail=async(reason:string)=>{await r.db.execute(sql`UPDATE provider_connections SET stack_error=${reason} WHERE id=${c.id} AND aws_account_id IS NULL`);return answerStack(req,'FAILED',reason);};
+  const bound=c.aws_account_id?c:{...c,requested_account:account};
+  if (!c.aws_account_id) try { await scoped(r,bound,c.region,'scan',true); }
+  catch(e) {
+    if (e instanceof ModuleLoadError) throw e;
+    const err=awsError(e);
+    if ((err.code==='AWS_ACCESS_DENIED' || err.retryable) && Date.now()<deadline) throw defer(15_000);
+    return fail(err.code==='AWS_ACCESS_DENIED' ? `${productName} couldn't use the role this stack created. Delete the stack and use the Connect AWS link again without changing its parameters.` : `${productName} couldn't check the role: ${err.message}`);
+  }
+  // The external ID proves the role; the stack itself proves this request is its own.
+  const own=await readStack(r,bound,name,!c.aws_account_id);
+  if (!own) { if (Date.now()<deadline) throw defer(15_000);return fail(`${productName} couldn't read this stack through its role. Delete the stack and use the Connect AWS link again without changing its parameters.`); }
+  if (!creating(own,c,req)) { log('warn',{code:'BYO_STACK_REQUEST_IGNORED',requestType:req.RequestType,stackStatus:own.stack.StackStatus,resourceStatus:own.resource?.ResourceStatus});return; }
+  if (c.aws_account_id) {
+    await r.db.execute(sql`UPDATE provider_connections SET stack_id=${req.StackId} WHERE id=${c.id} AND stack_id IS NULL`);
+    return answerStack(req,'SUCCESS',`Connected to ${productName}.`);
+  }
+  try {
+    await r.db.transaction(async db=>{
+      const role=`arn:aws:iam::${account}:role/${c.stack_name}`;
+      if (!(await db.execute(sql`UPDATE provider_connections SET requested_account=${account},aws_account_id=${account},role_arn=${role},state='scanning',stack_id=${req.StackId},stack_template_version=${knownVersion(req.ResourceProperties.TemplateVersion)},stack_error=NULL
+        WHERE id=${c.id} AND aws_account_id IS NULL AND (requested_account IS NULL OR requested_account=${account}) AND state<>'disconnecting'`)).rowCount) throw conflict('CONNECTION_CHANGED','The connection changed while its stack was checked.');
+      await beginScan(db,bound);
+    });
+  } catch(e) {
+    if ((e as {cause?:{constraint?:string}}).cause?.constraint==='provider_connections_byo_account') return fail(`This AWS account is already connected to another ${productName} workspace.`);
+    if (e instanceof ApiError && e.code==='CONNECTION_CHANGED') return fail(`This ${productName} connection changed while the stack was created. Start again from Connect AWS.`);
+    throw e;
+  }
+  return answerStack(req,'SUCCESS',`Connected to ${productName}.`);
+});
+export const regionalByoJobs:Record<string,JobHandler>={'byo.prove':prove,'byo.scan':scan,'byo.provision':provision,'byo.bind':bind,'byo.disconnect':disconnect,'byo.stack':stackJob};
