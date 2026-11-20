@@ -1,17 +1,20 @@
 import { sql, eq, and } from 'drizzle-orm';
-import { parseInboundMime,SMTP_WIRE_LIMIT } from './mailbox-ingest.js';
 import { ApiError, id, type Actor, type Ctx } from './core.js';
 import { mailboxes } from './db/mailbox.js';
 import { principal } from './mail-gateway.js';
 import { boundMailBucket, mailKey, withMailObjects } from './mail-objects.js';
 import { mimeIndex } from './mailbox-mime-index.js';
-import { stripBlindRecipients, submissionParties, unrepresentableMime } from './mailbox-mime.js';
+import { stripBlindRecipients, submissionParties } from './mailbox-mime.js';
 import { sendFromMailbox, resolveAttachments } from './mailbox-send.js';
 import { protocolScoreCap } from './sender-score.js';
 import {savePreview} from './protocol-preview.js';
+import { sealedPassthrough, submittedFile, type Submitted } from './protocol-submit.js';
+import { parseSubmission, sealedMime } from './submission-mime.js';
 
-type Content = { kid: string; content: string; op: 'submit'; from: string; to: string[] };
-export async function contentWrite(c: Ctx, p: Content) {
+/** An app password's SMTP submission: sent from its inbox and kept, as the app wrote it without blind recipients, in
+ *  its Sent folder. When the copy doesn't fit the inbox's quota the message is still sent, without the copy, and the
+ *  answer says so (sentCopy false). */
+export async function contentWrite(c: Ctx, p: Submitted) {
   const rt = c.env;
   const auth = principal(rt, 'smtp', sql`p.id=${p.kid}`);
   const ownership = sql`ARRAY(SELECT lower(address) FROM mailbox_addresses WHERE workspace_id=a.w AND mailbox_id=a.b)`;
@@ -19,11 +22,11 @@ export async function contentWrite(c: Ctx, p: Content) {
     sql`WITH a AS (${auth}) SELECT a.*,b.domain_id AS domain,${ownership} AS owned FROM a JOIN mailboxes b ON b.id=a.b`,
   )).rows[0];
   if (!who) throw new ApiError(403, 'CREDENTIAL_REVOKED', 'Protocol access denied.');
-  const input = Buffer.from(p.content, 'base64');
-  if (input.length > SMTP_WIRE_LIMIT) throw new ApiError(413, 'MESSAGE_SIZE', 'Message is too large.');
-  const scrubbed = stripBlindRecipients(input), raw = Buffer.from(scrubbed.buffer, scrubbed.byteOffset, scrubbed.byteLength);
-  const m = await parseInboundMime(raw,'submission');
-  if (!m) throw new ApiError(422, 'MIME_LIMIT', 'Message could not be safely parsed.');
+  // The submission's buffer is its own: Bcc goes in place, so a large message isn't held twice.
+  const raw = stripBlindRecipients(p.raw, true);
+  const parsed = await parseSubmission(raw);
+  if (!parsed) throw new ApiError(422, 'MIME_LIMIT', 'Message could not be safely parsed.');
+  const m = parsed.mail;
   const mid = id('msg'),
     bucket = boundMailBucket(rt) ?? (!rt.config.multiTenant ? 'local:' : null);
   if (!bucket) throw new ApiError(503, 'MAIL_STORE_UNAVAILABLE', 'Kept mail storage unavailable.');
@@ -33,14 +36,10 @@ export async function contentWrite(c: Ctx, p: Content) {
   const ownsSenders = (addresses: string[]) => !!senders?.every(a => addresses.includes(a));
   const denied = () => new ApiError(403, 'SENDER_NOT_OWNED', 'Use an address owned by this inbox.');
   if (!sender || !ownsSenders(who.owned)) throw denied();
-  if (unrepresentableMime(raw)) throw new ApiError(422, 'UNSUPPORTED_MESSAGE', 'This MIME submission cannot be represented by the sending adapter.');
+  const mime = sealedMime(raw) ? await sealedPassthrough(rt, who.w, raw) : undefined;
   // Uploads reserve quota and commit immutable objects using their own transactions.
   // Never ask for a second connection while the Worker holds its only one.
-  const attachments = await resolveAttachments(rt, {id:who.b, workspaceId:who.w, domainId:who.domain}, m.attachments.map(f => ({
-    filename: f.filename ?? 'attachment', contentType: f.mimeType,
-    content: Buffer.from(new Uint8Array(f.content as ArrayBuffer)).toString('base64'),
-    disposition: f.disposition === 'inline' ? 'inline' : 'attachment', contentId: f.contentId?.replace(/^<|>$/g, ''),
-  })), sender);
+  const attachments = mime ? [] : await resolveAttachments(rt, {id:who.b, workspaceId:who.w, domainId:who.domain}, parsed.files.map(submittedFile), sender);
   const cap = await protocolScoreCap(rt, who.w);
   const persist = () => withMailObjects(rt, who.w, '', bucket, (objects) => objects.put(key, raw, 'message/rfc822'));
   // An uncertain transaction outcome must not remove a committed object. Orphan cleanup
@@ -55,19 +54,20 @@ export async function contentWrite(c: Ctx, p: Content) {
     )[0];
     // Acquire the issuer/revoker's fence BEFORE taking the statement snapshot used to authorize.
     await tx.execute(sql`SELECT FROM inbox_state WHERE workspace_id=${who.w} AND inbox_id=${who.b} FOR UPDATE`);
+    // A quota is only what the inbox sets (null: none), as for received mail and APPEND.
     const active = (
       await tx.execute<{ owned: string[]; suppressed: boolean; space: boolean }>(
         sql`WITH a AS (${auth}) SELECT ${ownership} AS owned,
-          (s.messages < coalesce(b.quota_messages,100000) AND s.bytes + ${raw.length} <= coalesce(b.quota_bytes,1073741824)) AS space,
+          ((b.quota_messages IS NULL OR s.messages<b.quota_messages) AND (b.quota_bytes IS NULL OR s.bytes+${raw.length}<=b.quota_bytes)) AS space,
           EXISTS(SELECT FROM audience_contacts WHERE workspace_id=a.w AND email=ANY(${sql.param(p.to.map(v=>v.toLowerCase()))}::text[]) AND suppressed) AS suppressed
           FROM a JOIN inbox_state s ON s.inbox_id=a.b JOIN mailboxes b ON b.id=a.b FOR UPDATE OF s`,
       )
     ).rows[0];
     if (!box || !active) throw new ApiError(403, 'CREDENTIAL_REVOKED', 'Protocol access denied.');
     if (!ownsSenders(active.owned)) throw denied();
-    // Same limits as mailgw_append. Hold inbox_state until the membership insert
-    // charges these bytes and one message; do not charge the counters twice.
-    if (!active.space) throw new ApiError(507, 'INBOX_OVER_QUOTA', 'The Sent copy exceeds the inbox storage quota.');
+    // A full inbox doesn't stop mail going out: only its Sent copy is left out. Otherwise hold inbox_state until the
+    // membership insert charges these bytes and one message; do not charge the counters twice.
+    const stored = active.space;
     // SMTP submissions have no reply-author suppression exemption. Don't acknowledge
     // known undeliverable mail; dispatch still rechecks for changes after this commit.
     if (active.suppressed) throw new ApiError(422, 'RECIPIENT_INELIGIBLE', 'Recipient is not eligible for delivery.');
@@ -97,6 +97,7 @@ export async function contentWrite(c: Ctx, p: Content) {
       text: m.text ?? ' ',
       html: m.html,
       attachments,
+      mime,
       inReplyTo: m.inReplyTo && /^<[^<>\s\x00-\x1f]{1,990}>$/.test(m.inReplyTo) ? m.inReplyTo.slice(1, -1) : null,
       references: (m.references ?? '')
         .split(/\s+/)
@@ -106,13 +107,15 @@ export async function contentWrite(c: Ctx, p: Content) {
       headers: [],
       screen: true,
       tracking: false,
-      protocolArchive: { mid, key, bucket, bytes: raw.length, mime: index, clientId: stamp },
+      protocolArchive: { mid, key, bucket, bytes: raw.length, mime: index, clientId: stamp, stored },
     });
     await tx.execute(
       sql`INSERT INTO inbox_protocol_sends VALUES(${who.b},(now() AT TIME ZONE 'UTC')::date,${p.to.length}) ON CONFLICT(inbox_id,day) DO UPDATE SET accepted=inbox_protocol_sends.accepted+excluded.accepted`,
     );
-    await persist();
-    await savePreview(tx,mid,key,raw,raw.length);
-    return { id: message.sendingEmailId };
+    if (stored) {
+      await persist();
+      await savePreview(tx,mid,key,raw,raw.length);
+    }
+    return { id: message.sendingEmailId!, sentCopy: stored };
   });
 }

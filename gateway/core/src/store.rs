@@ -38,8 +38,14 @@ pub enum Error {
     Exists,
     #[error("[CANNOT] Not permitted")]
     Denied,
+    /// A valid command the store refuses (an invalid or protected folder name, a keyword it can't keep): NO, not BAD.
+    #[error("[CANNOT] Not permitted")]
+    Cannot,
     #[error("[LIMIT] Inbox limit exceeded")]
     Limit,
+    /// The inbox's own storage quota (RFC 9208).
+    #[error("[OVERQUOTA] Inbox storage quota exceeded")]
+    OverQuota,
     /// The inbox's fair-use download allowance (per UTC day or month) is spent.
     #[error("[LIMIT] Daily download limit reached")]
     DownloadLimit,
@@ -169,18 +175,18 @@ impl MailStore for Memory {
                 && s.is_ascii()
                 && s.bytes().all(|b| (32..127).contains(&b))
                 && s.split('/').all(|p| !p.is_empty())
-                && s.split('/').count() <= 8
+                && s.split('/').count() <= 16
         }
         self.seq += 1;
         match op {
             FolderOp::Create => {
                 if !valid(path) {
-                    return Err(Error::Denied);
+                    return Err(Error::Cannot);
                 }
                 if self.folders.contains_key(path) {
                     return Err(Error::Exists);
                 }
-                if self.folders.len() >= 200 {
+                if self.folders.len() >= 1000 {
                     return Err(Error::Limit);
                 }
                 self.validity = self.validity.checked_add(1).ok_or(Error::Limit)?;
@@ -203,11 +209,11 @@ impl MailStore for Memory {
             action => {
                 let f = self.folder(path)?;
                 if f.role.is_some() || path == "INBOX" {
-                    return Err(Error::Denied);
+                    return Err(Error::Cannot);
                 }
                 if let FolderOp::Rename(to) = action {
                     if !valid(to) {
-                        return Err(Error::Denied);
+                        return Err(Error::Cannot);
                     }
                     if self.folders.contains_key(to) {
                         return Err(Error::Exists);

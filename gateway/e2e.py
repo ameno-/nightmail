@@ -336,7 +336,7 @@ def mail(p):
         )
     # Exactly-sized RFC messages, including the terminating message CRLF but not DATA's dot.
     with smtplib.SMTP_SSL('localhost',p['SMTPS'],context=CTX,timeout=20) as c:
-        c.ehlo();limit=int(c.esmtp_features['size']);assert limit==8<<20
+        c.ehlo();limit=int(c.esmtp_features['size']);assert limit==36<<20
         c.login(ALIAS,PASS)
         prefix=(f'From: {ALIAS}\r\nTo: reader@example.invalid\r\nContent-Type: multipart/mixed; boundary=fixture\r\n\r\n'
                 '--fixture\r\nContent-Type: application/octet-stream; name="fixture.bin"\r\nContent-Disposition: attachment; filename="fixture.bin"\r\nContent-Transfer-Encoding: base64\r\n\r\n').encode()
@@ -1102,9 +1102,10 @@ def quotas(tmp):
                     ok(c.append('Quota',None,None,RAW))
                 before=ok(c.search(None,'ALL'))
                 assert c.append('Quota',None,None,RAW)[0]=='NO'
+                # A full inbox still sends: only the Sent copy is left out, and the reply says so.
                 with smtplib.SMTP_SSL('localhost',p['SMTPS'],context=CTX,timeout=10) as smtp:
                     smtp.login(ALIAS,PASS); smtp.mail(ALIAS); smtp.rcpt('sink@example.invalid')
-                    assert smtp.data(RAW) == (552,b'5.2.2 Inbox storage quota exceeded')
+                    assert smtp.data(RAW) == (250,b'2.0.0 Submission accepted; no Sent copy kept: the inbox is full')
                 assert ok(c.search(None,'ALL'))==before
                 sql(f"UPDATE mailboxes SET {column}=NULL WHERE id='mbx_fixture'")
         finally:

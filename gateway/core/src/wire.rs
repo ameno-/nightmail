@@ -3,7 +3,8 @@ use imap_codec::{CommandCodec, decode::Decoder, imap_types::command::Command};
 use std::borrow::Cow;
 use zeroize::Zeroizing;
 
-pub const MAX_APPEND: usize = 8 << 20;
+/// The largest APPEND literal (APPENDLIMIT): 40 MiB, as much as received mail can be. It is spooled to disk, not held.
+pub const MAX_APPEND: usize = 40 << 20;
 pub const MAX_LINE: usize = 64 << 10;
 
 #[derive(Debug, thiserror::Error, PartialEq)]

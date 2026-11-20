@@ -57,11 +57,12 @@ export const SEND_LIMITS = {
   schedule: { horizonSeconds: 30 * 86_400, skewSeconds: 60, workspace: 100_000 },
 } as const;
 
-/** UTF-8 bytes of the parts a message's MIME carries, counted without copying them. */
-export const contentBytes = (parts: { raw?: string; html?: string; text?: string; subject?: string }) =>
-  [parts.raw, parts.html, parts.text, parts.subject].reduce<number>((n, part) => n + (part ? Buffer.byteLength(part) : 0), 0);
+/** UTF-8 bytes of the parts a message's MIME carries, counted without copying them. A message sent as written (mime)
+ *  carries its own bytes; its html and text are what it shows, counted too, as an upper bound. */
+export const contentBytes = (parts: { raw?: string; mime?: string; html?: string; text?: string; subject?: string }) =>
+  [parts.raw, parts.mime, parts.html, parts.text, parts.subject].reduce<number>((n, part) => n + (part ? Buffer.byteLength(part) : 0), 0);
 /** A conservative estimate of the encoded message: base64/MIME expansion, line folding and headers. */
-export function estimatedMimeBytes(parts: { raw?: string; html?: string; text?: string; subject?: string }, rows: { size: number }[]) {
+export function estimatedMimeBytes(parts: { raw?: string; mime?: string; html?: string; text?: string; subject?: string }, rows: { size: number }[]) {
   const { bodyFactor, lineFactor, perAttachment, envelope } = SEND_LIMITS.mime;
   return Math.ceil(Math.ceil(contentBytes(parts) * bodyFactor) + rows.reduce((sum, r) => sum + Math.ceil(r.size / 3) * 4 * lineFactor + perAttachment, 0) + envelope);
 }

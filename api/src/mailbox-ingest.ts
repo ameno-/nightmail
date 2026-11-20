@@ -407,10 +407,14 @@ const escapeGuardInstalled = (() => {
 })();
 if (!escapeGuardInstalled) warnMissingEscapeGuard();
 export const isPostalMimeEscapeGuardInstalled = () => escapeGuardInstalled && postalProto.renderTextContent === guardedRenderTextContent;
-export const SMTP_WIRE_LIMIT=8*1024*1024;
+/** A mail app's SMTP submission on the wire: 25 MiB of attachments (SEND_LIMITS.attachmentBytes), base64 with line
+ * breaks, is about 34.3 MiB, and the rest leaves room for its text and headers. The gateway advertises it as SIZE. */
+export const SMTP_WIRE_LIMIT=36*1024*1024;
+/** What the parser reads of a submission at once: submission-mime.ts lifts attachments out of larger ones. */
+export const SUBMISSION_PARSE_LIMIT=8*1024*1024;
 export async function parseInboundMime(raw: Uint8Array, mode:'receipt'|'submission'='receipt'): Promise<Email | null> {
   const submission=mode==='submission',budget=mimeBudget(submission?5000:MIME_PARSE_MS);
-  if (raw.byteLength > (submission?SMTP_WIRE_LIMIT:PARSE_LIMIT) || !withinMimeLimits(raw,submission?150_000:PARSE_LINE_LIMIT)) return null;
+  if (raw.byteLength > (submission?SUBMISSION_PARSE_LIMIT:PARSE_LIMIT) || !withinMimeLimits(raw,submission?150_000:PARSE_LINE_LIMIT)) return null;
   if (!isPostalMimeEscapeGuardInstalled()) {
     warnMissingEscapeGuard();
     if (raw.byteLength > DEGRADED_PARSE_LIMIT) return null;

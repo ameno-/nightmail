@@ -334,6 +334,64 @@ test('feedback queue: only platform-dated pre-cutover legacy items drain unsigne
     assert.equal(legacyFeedbackCutover(c.vars.LEGACY_FEEDBACK_CUTOVER),undefined,'checked-in cutover stays closed until the operator records it');
   }
 });
+// submission-mime.ts: a mail app's message is parsed from a skeleton with its large files lifted out, and each file is
+// decoded from the message alone. The result must be what parsing it whole gives, in every shape a file can take.
+test('mail gateway: a submission parses as it would whole, its large files lifted out and decoded one at a time',async()=>{
+  const [{parseSubmission,sealedMime},{parseInboundMime},{stripBlindRecipients}]=await Promise.all([import('./src/submission-mime.js'),import('./src/mailbox-ingest.js'),import('./src/mailbox-mime.js')]);
+  const bytes=(n:number,seed:number)=>{const b=Buffer.alloc(n);for(let i=0;i<n;i++)b[i]=(i*31+seed*7+(i>>8))&255;return b;};
+  const b64=(b:Uint8Array,width=76)=>Buffer.from(b).toString('base64').replace(new RegExp(`.{${width}}`,'g'),(m:string)=>m+'\r\n');
+  // Several base64 units, each padded, as some mailers write them; invalid characters and a blank line between.
+  const units=[bytes(70001,2),bytes(40000,3),bytes(5,4)].map(b=>b64(b)).join('\r\n!!\r\n\r\n');
+  // Quoted-printable with soft breaks, escapes, an invalid escape kept literal, and white space added in transit.
+  const qp=Array.from({length:3000},(_,i)=>`row ${i} caf=C3=A9 a=3Db =ZZ \t=\r\ncontinued ${i}   `).join('\r\n');
+  const text=Array.from({length:3000},(_,i)=>`plain line ${i}`).join('\r\n')+'\n'+'mixed LF line\n'.repeat(2000)+'no final break';
+  const part=(type:string,headers:string[],body:string)=>[`Content-Type: ${type}`,...headers,'',body];
+  const message=(headers:string[],body:string[],crlf='\r\n')=>Buffer.from([...headers,'',...body].join('\r\n').replace(/\r\n/g,crlf),'latin1');
+  const top=['From: app@example.invalid','To: reader@example.invalid','Subject: Fixture','MIME-Version: 1.0'];
+  const mixed=(boundary:string,parts:string[][])=>[...parts.flatMap(p=>['--'+boundary,...p]),'--'+boundary+'--',''];
+  const nested=message(['Subject: Inner','MIME-Version: 1.0','Content-Type: multipart/mixed; boundary=in'],mixed('in',[part('text/plain',[],'Inner text.'),part('image/png; name="inner.png"',['Content-Transfer-Encoding: base64','Content-Disposition: attachment; filename="inner.png"'],b64(bytes(90000,5)))])).toString('latin1');
+  const cases:Record<string,Buffer>={
+    mixed:message([...top,'Content-Type: multipart/mixed; boundary="b"'],mixed('b',[
+      part('multipart/alternative; boundary=a',[],mixed('a',[part('text/plain; charset=utf-8',[],'Hello'),part('text/html; charset=utf-8',[],'<p>Hello</p>')]).join('\r\n')),
+      part('application/octet-stream; name="units.bin"',['Content-Transfer-Encoding: base64 (several units)','Content-Disposition: attachment; filename="units.bin"'],units),
+      part('application/octet-stream; name="qp.bin"',['Content-Transfer-Encoding: quoted-printable','Content-Disposition: attachment; filename="qp.bin"'],qp),
+      part('application/x-log',['Content-Disposition: attachment; filename="log.txt"'],text),
+      part('text/plain; name="notes.txt"',['Content-Disposition: attachment; filename="notes.txt"','Content-Transfer-Encoding: 8bit'],text.replace(/plain/g,'pl\xe4in')),
+      part('message/rfc822',['Content-Disposition: attachment; filename="forwarded.eml"'],nested),
+      part('message/rfc822',[],nested),
+      part('multipart/related; boundary=r',[],mixed('r',[part('text/html',[],'<img src="cid:logo">'),part('image/gif',['Content-ID: <logo>','Content-Disposition: inline','Content-Transfer-Encoding: base64'],b64(bytes(80000,6),64))]).join('\r\n')),
+      part('text/calendar; method=REQUEST',[],'BEGIN:VCALENDAR\r\n'+'X-FIXTURE:value\r\n'.repeat(5000)+'END:VCALENDAR'),
+    ])),
+    lf:message([...top,'Content-Type: multipart/mixed; boundary=b'],mixed('b',[part('text/plain',[],'Hello'),part('application/pdf',['Content-Transfer-Encoding: base64','Content-Disposition: attachment; filename="lf.pdf"'],b64(bytes(100000,7)))]),'\n'),
+    'root base64':message([...top,'Content-Type: application/pdf; name="root.pdf"','Content-Transfer-Encoding: base64','Content-Disposition: attachment; filename="root.pdf"'],[b64(bytes(100000,8))]),
+    'root 7bit':message([...top,'Content-Type: application/octet-stream'],[text]),
+    'root qp':message([...top,'Content-Type: application/octet-stream','Content-Transfer-Encoding: quoted-printable'],[qp+'\r\n']),
+  };
+  type File={filename:string|null;mimeType:string;disposition:string|null;contentId?:string;bytes:Buffer};
+  const shape=(m:{text?:string;html?:string;subject?:string},files:File[])=>({text:m.text,html:m.html,subject:m.subject,files:files.map(f=>({...f,bytes:createHash('sha256').update(f.bytes).digest('hex'),size:f.bytes.length}))});
+  for(const [name,raw] of Object.entries(cases)){
+    const whole=(await parseInboundMime(raw,'submission'))!,lifted=(await parseSubmission(raw))!;
+    assert.ok(whole && lifted,name);
+    assert.ok(lifted.files.some(f=>f.size>64*1024),`${name}: a file was lifted`);
+    assert.deepEqual(shape(lifted.mail,lifted.files.map(f=>({filename:f.filename,mimeType:f.mimeType,disposition:f.disposition,contentId:f.contentId,bytes:Buffer.from(f.bytes())}))),
+      shape(whole,whole.attachments.map(a=>({filename:a.filename,mimeType:a.mimeType,disposition:a.disposition,contentId:a.contentId,bytes:Buffer.from(a.content as ArrayBuffer)}))),name);
+    assert.ok(lifted.files.every(f=>f.size>=f.bytes().length),`${name}: a lifted file's size bounds its bytes`);
+  }
+  // Past the 8 MiB the parser reads at once: only the lifted parse can read it.
+  const file=bytes(12*1024*1024,9),large=message([...top,'Content-Type: multipart/mixed; boundary=b'],mixed('b',[part('text/plain',[],'Large.'),part('application/zip',['Content-Transfer-Encoding: base64','Content-Disposition: attachment; filename="large.zip"'],b64(file))]));
+  assert.equal(await parseInboundMime(large,'submission'),null);
+  const parsed=(await parseSubmission(large))!;assert.equal(parsed.mail.text?.trim(),'Large.');assert.ok(Buffer.from(parsed.files[0]!.bytes()).equals(file));
+  // A large message whose structure the index can't read is refused, not parsed whole.
+  assert.equal(await parseSubmission(Buffer.concat([Buffer.from('Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: application/zip\r\n\r\n'),Buffer.alloc(9*1024*1024,'a')])),null);
+  // Bcc stripped in place is the copy stripped.
+  const blind=Buffer.from('To: a@example.invalid\r\nBcc: b@example.invalid,\r\n c@example.invalid\r\nSubject: s\r\nResent-Bcc: d@example.invalid\r\n\r\nBody Bcc: e\r\n');
+  const copy=Buffer.from(stripBlindRecipients(blind));assert.ok(Buffer.from(stripBlindRecipients(Buffer.from(blind),true)).equals(copy));
+  assert.equal(copy.toString(),'To: a@example.invalid\r\nSubject: s\r\n\r\nBody Bcc: e\r\n');
+  // Only the top-level type makes a message signed or encrypted.
+  assert.deepEqual(['multipart/signed; protocol="application/pgp-signature"','Multipart/Encrypted','application/pkcs7-mime; smime-type=enveloped-data','application/x-pkcs7-mime','text/plain'].map(t=>sealedMime(Buffer.from(`Content-Type: ${t}\r\n\r\nx`))),[true,true,true,true,false]);
+  assert.equal(sealedMime(cases.mixed!),false);
+  assert.equal(sealedMime(Buffer.from('Subject: x\r\n\r\nContent-Type: multipart/signed\r\n')),false,'A body line is not a header.');
+});
 test('mail gateway: receipt parser distinguishes readable forwards from unparsed mail',async()=>{
   const {parseInboundMime}=await import('./src/mailbox-ingest.js');
   const base='Subject: fixture\r\nContent-Type: text/plain\r\n\r\nHello\r\n';
@@ -1586,11 +1644,20 @@ test('mail gateway: SMTP queues dispatchable content with a single database conn
   await db.query('INSERT INTO inbox_state(inbox_id,workspace_id,protocol_passwords) VALUES($1,$2,1)',[bid,wid]);
   await db.query("INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols) VALUES($1,$2,'fixture',$1,ARRAY['smtp'])",[kid,bid]);
   const path='/internal/v1/mail',app=(await import('./src/app.js')).createApp();
+  const hash=(s:string|Uint8Array)=>createHash('sha256').update(s).digest('hex');
+  // An older gateway's submission: base64 inside the JSON RPC.
   async function submit(mime:string){
     const body=JSON.stringify({op:'submit',kid,from,to:['sink@example.invalid'],content:Buffer.from(`From: ${from}\r\n${mime}`).toString('base64')});
-    const hash=(s:string)=>createHash('sha256').update(s).digest('hex'),ts=String(Math.floor(Date.now()/1000)),scope=hash(kid),digest=hash(body);
+    const ts=String(Math.floor(Date.now()/1000)),scope=hash(kid),digest=hash(body);
     const headers={'x-bane-content':digest,'x-bane-timestamp':ts,'x-bane-scope':scope,'x-bane-signature':createHmac('sha256',key).update(['POST',path,ts,digest,scope].join('\n')).digest('hex')};
     return app.fetch(new Request('http://127.0.0.1'+path,{method:'POST',body,headers}),rt);
+  }
+  // The current gateway's: the message itself as the body, the envelope in x-bane-submit, both signed, the kind too.
+  async function stream(raw:Buffer,to=['sink@example.invalid'],{signedAs='submit',body=raw}:{signedAs?:'submit'|'append';body?:Buffer}={}){
+    const meta=Buffer.from(JSON.stringify({kid,from,to,size:raw.length})).toString('base64'),ts=String(Math.floor(Date.now()/1000)),scope=hash(kid),digest=hash(raw);
+    const signed=['POST',path,ts,digest,scope,...signedAs==='submit'?['submit']:[],hash(meta)].join('\n');
+    const headers={'x-bane-submit':meta,'content-length':String(raw.length),'x-bane-content':digest,'x-bane-timestamp':ts,'x-bane-scope':scope,'x-bane-signature':createHmac('sha256',key).update(signed).digest('hex')};
+    return app.fetch(new Request('http://127.0.0.1'+path,{method:'POST',body,headers,duplex:'half'} as RequestInit),rt);
   }
   for(const [label,mime] of [
     ['plain','Subject: plain\r\n\r\nHello\r\n'],
@@ -1621,20 +1688,138 @@ test('mail gateway: SMTP queues dispatchable content with a single database conn
     assert.deepEqual(fields.filter((name:string)=>name==='bcc'||name==='resent-bcc'),[]);
     for(const hidden of ['hidden@example.invalid','folded@example.invalid','resent@example.invalid'])assert.ok(!copy.toLowerCase().includes(hidden),hidden);
   });
+  // A file past the parser's 8 MiB, up to the API's 25 MiB of attachments: streamed, lifted out of the parse and
+  // decoded once, byte for byte; the Sent copy is the message as sent.
+  await t.test('25 MiB of attachments',async()=>{
+    const file=Buffer.alloc(20*1024*1024);for(let i=0;i<file.length;i+=4096)file.writeUInt32BE(i,i);
+    const raw=Buffer.from([`From: ${from}`,'To: sink@example.invalid','Subject: large','MIME-Version: 1.0','Content-Type: multipart/mixed; boundary=b','','--b','Content-Type: text/plain','','See the file.',
+      '--b','Content-Type: application/octet-stream; name="big.bin"','Content-Disposition: attachment; filename="big.bin"','Content-Transfer-Encoding: base64','',file.toString('base64').replace(/.{76}/g,(m:string)=>m+'\r\n'),'--b--',''].join('\r\n'));
+    assert.ok(raw.length>24*1024*1024);
+    const res=await stream(raw),body=await res.json() as Json;assert.equal(res.status,200,JSON.stringify(body));assert.equal(body.sentCopy,true);
+    const {rows:[sent]}=await db.query(`SELECT m.raw_key,a.storage_key,a.size FROM mail_messages m JOIN sending_emails e ON e.id=m.sending_email_id JOIN sending_attachments a ON a.workspace_id=e.workspace_id AND a.id=e.snapshot->'attachments'->>0 WHERE m.workspace_id=$1 AND m.sending_email_id=$2`,[wid,body.id]);
+    assert.equal(Number(sent.size),file.length);
+    const read=async(key:string)=>Buffer.from(await new Response((await rt.storage.stream!(key))!.body).arrayBuffer());
+    assert.ok((await read(sent.storage_key)).equals(file),'The stored file is the attachment, byte for byte.');
+    assert.ok((await read(sent.raw_key)).equals(raw),'The Sent copy is the message as sent.');
+    // Past 36 MiB the envelope itself is refused, before the body is read.
+    assert.equal((await stream(Buffer.alloc(36*1024*1024+1,'a'))).status,422);
+    // A body that isn't what was signed is refused, and an append's signature isn't a submission's: the kind is signed.
+    const hello=Buffer.from(`From: ${from}\r\n\r\nHello\r\n`);
+    assert.equal((await stream(hello,undefined,{body:Buffer.from(`From: ${from}\r\n\r\nJello\r\n`)})).status,422);
+    assert.equal((await stream(hello,undefined,{signedAs:'append'})).status,403);
+  });
+  // RFC 5321 4.5.3.1.8: an envelope takes 100 recipients. SES takes 50 a message: two emails, visible recipients
+  // first, admitted together; the Sent copy is one message that follows the first.
+  await t.test('100 recipients',async()=>{
+    // The workspace's daily limit before its evaluation is 100 recipients: this inbox's earlier sends don't count here.
+    await db.query('DELETE FROM inbox_protocol_sends WHERE inbox_id=$1',[bid]);
+    const to=Array.from({length:100},(_,i)=>`r${String(i).padStart(3,'0')}@example.invalid`);
+    const res=await stream(Buffer.from([`From: ${from}`,`To: ${to.slice(0,60).join(', ')}`,'Subject: many','','Hello',''].join('\r\n')),to),body=await res.json() as Json;
+    assert.equal(res.status,200,JSON.stringify(body));
+    const {rows}=await db.query("SELECT id,to_addresses,bcc_addresses FROM sending_emails WHERE actor_key_id=$1 AND subject='many' ORDER BY jsonb_array_length(to_addresses) DESC",[kid]);
+    assert.deepEqual(rows.map(r=>[r.to_addresses.length,r.bcc_addresses.length]),[[50,0],[10,40]]);
+    assert.equal(rows[0].id,body.id);
+    assert.equal((await db.query('SELECT count(*)::int n FROM mail_messages WHERE workspace_id=$1 AND sending_email_id=ANY($2)',[wid,rows.map(r=>r.id)])).rows[0].n,1);
+    assert.equal((await stream(Buffer.from(`From: ${from}\r\n\r\nHello\r\n`),[...to,'late@example.invalid'])).status,422);
+    await db.query('DELETE FROM inbox_protocol_sends WHERE inbox_id=$1',[bid]);
+  });
+  // Signed or encrypted as a whole: sent as written. Forwarded as an attachment, a signed message is an ordinary file.
+  await t.test('signed and encrypted mail',async()=>{
+    const signed=Buffer.from([`From: ${from}`,'To: sink@example.invalid','Subject: signed','MIME-Version: 1.0','Content-Type: multipart/signed; protocol="application/pkcs7-signature"; micalg=sha-256; boundary=s','',
+      '--s','Content-Type: text/plain; charset=utf-8','','Signed text, ünïcode.','--s','Content-Type: application/pkcs7-signature; name="smime.p7s"','Content-Transfer-Encoding: base64','Content-Disposition: attachment; filename="smime.p7s"','',Buffer.from('signature').toString('base64'),'--s--',''].join('\r\n'));
+    const res=await stream(signed),body=await res.json() as Json;assert.equal(res.status,200,JSON.stringify(body));
+    const {rows:[mail]}=await db.query("SELECT snapshot->>'mime' AS mime,snapshot->'attachments' AS files,snapshot->>'text' AS text FROM sending_emails WHERE id=$1",[body.id]);
+    assert.ok(Buffer.from(mail.mime).equals(signed),'The message goes out byte for byte.');assert.deepEqual(mail.files,[]);assert.match(mail.text,/Signed text, ünïcode\./);
+    const attached=Buffer.from([`From: ${from}`,'To: sink@example.invalid','Subject: forwarded','MIME-Version: 1.0','Content-Type: multipart/mixed; boundary=f','','--f','Content-Type: text/plain','','See attached.',
+      '--f','Content-Type: message/rfc822','Content-Disposition: attachment; filename="signed.eml"','',signed.toString('latin1'),'--f--',''].join('\r\n'),'latin1');
+    const fwd=await stream(attached),fwdBody=await fwd.json() as Json;assert.equal(fwd.status,200,JSON.stringify(fwdBody));
+    const {rows:[forwarded]}=await db.query("SELECT snapshot->>'mime' AS mime,jsonb_array_length(snapshot->'attachments') AS files FROM sending_emails WHERE id=$1",[fwdBody.id]);
+    assert.deepEqual(forwarded,{mime:null,files:1});
+    // Past the lane budget it is refused: its bytes travel in SES's JSON whole.
+    const huge=Buffer.concat([signed.subarray(0,signed.indexOf('--s--')),Buffer.from('--s\r\nContent-Type: application/octet-stream\r\n\r\n'+'x'.repeat(8*1024*1024)+'\r\n--s--\r\n')]);
+    const big=await stream(huge);assert.equal(big.status,413);assert.equal(((await big.json()) as Json).error.code,'SEALED_MESSAGE_SIZE');
+  });
+  // A full inbox doesn't stop mail going out: it is sent without its Sent copy, which nothing charges, and the answer
+  // says so. A quota is only what the inbox sets: without one, nothing is full however large it grows.
   const usage=()=>db.query('SELECT messages,bytes FROM inbox_state WHERE inbox_id=$1',[bid]).then(r=>r.rows[0]);
   const before=await usage();
   for(const [quota,value] of [['quota_messages',before.messages],['quota_bytes',Number(before.bytes)+1]] as const){
     await db.query(`UPDATE mailboxes SET ${quota}=$2 WHERE id=$1`,[bid,value]);
-    const full=await submit('Subject: no space\r\n\r\nNo send\r\n');assert.equal(full.status,507);
-    assert.equal(((await full.json()) as Json).error.code,'INBOX_OVER_QUOTA');assert.deepEqual(await usage(),before);
+    const full=await submit('Subject: no space\r\n\r\nSent anyway\r\n'),body=await full.json() as Json;
+    assert.equal(full.status,200,JSON.stringify(body));assert.equal(body.sentCopy,false);assert.deepEqual(await usage(),before);
+    const {rows:[sent]}=await db.query('SELECT m.raw_key,(SELECT count(*)::int FROM mailbox_messages l WHERE l.message_id=m.id) AS kept FROM mail_messages m WHERE m.workspace_id=$1 AND m.sending_email_id=$2',[wid,body.id]);
+    assert.deepEqual(sent,{raw_key:null,kept:0},'Sent, with no copy in the inbox.');
     await db.query(`UPDATE mailboxes SET ${quota}=NULL WHERE id=$1`,[bid]);
   }
+  await db.query('UPDATE inbox_state SET messages=200000,bytes=5368709120 WHERE inbox_id=$1',[bid]);
+  const unlimited=await submit('Subject: no quota\r\n\r\nKept\r\n'),kept=await unlimited.json() as Json;
+  assert.equal(unlimited.status,200,JSON.stringify(kept));assert.equal(kept.sentCopy,true);
   await db.query("INSERT INTO audience_contacts(id,workspace_id,email,suppressed) VALUES($1,$2,'sink@example.invalid',true)",[unique('contact'),wid]);
   const denied=await submit('Subject: suppressed\r\n\r\nNo send\r\n');assert.equal(denied.status,422);
   assert.equal(((await denied.json()) as Json).error.code,'RECIPIENT_INELIGIBLE');
   await db.query('SELECT inbox_revoke_password($1,$2,$3)',[wid,bid,kid]);
   assert.equal((await submit('Subject: revoked\r\n\r\nNo send\r\n')).status,403);
-  assert.equal((await db.query('SELECT count(*)::int n FROM sending_emails WHERE actor_key_id=$1',[kid])).rows[0].n,4);
+  // plain, attachment, large text, blind, 25 MiB, 100 recipients (two), signed, forwarded, two without a copy, no quota.
+  assert.equal((await db.query('SELECT count(*)::int n FROM sending_emails WHERE actor_key_id=$1',[kid])).rows[0].n,12);
+});
+// Mail apps get the API's limits (migration 356): an APPEND up to 40 MiB, no quota but the one an inbox sets, any RFC
+// 3501 atom as a keyword, and 1,000 folders 16 levels deep, each refusal with the code the gateway answers.
+test('mail gateway: APPEND, keywords and folders follow the inbox, not defaults',async t=>{
+  if(!fixtureWorker)return t.skip('requires isolated loopback storage and simulated SES');
+  const {drizzle}=await import('drizzle-orm/node-postgres');
+  const db=await fixtureDatabase(t),pool=new pg.Pool({connectionString:FIXTURE_DATABASE_URL,max:1,connectionTimeoutMillis:1000});
+  t.after(()=>pool.end());
+  const wid=unique('imap'),bid=unique('mbx'),kid='app_'+randomUUID(),address=`box@${wid}.invalid`,key=randomUUID();
+  const rt={...fixtureWorker.runtime,db:drizzle(pool),config:{...fixtureWorker.runtime.config,workspaceId:wid,mailGatewayToken:key}};
+  await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
+  await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,$3,$4,'active')",[bid,wid,address.split('@')[1],REGION]);
+  await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,$3,'inbox','forever')",[bid,wid,address]);
+  await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')",[wid,address,bid]);
+  await db.query('INSERT INTO inbox_state(inbox_id,workspace_id,protocol_passwords) VALUES($1,$2,1)',[bid,wid]);
+  await db.query("INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols) VALUES($1,$2,'fixture',$1,ARRAY['imap'])",[kid,bid]);
+  const path='/internal/v1/mail',app=(await import('./src/app.js')).createApp(),hash=(s:string|Uint8Array)=>createHash('sha256').update(s).digest('hex');
+  const rpc=async(body:Json)=>{
+    const raw=JSON.stringify(body),ts=String(Math.floor(Date.now()/1000)),scope=hash(kid),digest=hash(raw);
+    const res=await app.fetch(new Request('http://127.0.0.1'+path,{method:'POST',body:raw,headers:{'x-bane-content':digest,'x-bane-timestamp':ts,'x-bane-scope':scope,'x-bane-signature':createHmac('sha256',key).update(['POST',path,ts,digest,scope].join('\n')).digest('hex')}}),rt);
+    return {status:res.status,body:await res.json() as Json};
+  };
+  const append=async(raw:Buffer,flags:string[]=[])=>{
+    const meta=Buffer.from(JSON.stringify({kid,folder:'inbox',date:new Date().toISOString(),flags,size:raw.length})).toString('base64'),ts=String(Math.floor(Date.now()/1000)),scope=hash(kid),digest=hash(raw);
+    const res=await app.fetch(new Request('http://127.0.0.1'+path,{method:'POST',body:raw,duplex:'half',headers:{'x-bane-append':meta,'content-length':String(raw.length),'x-bane-content':digest,'x-bane-timestamp':ts,'x-bane-scope':scope,
+      'x-bane-signature':createHmac('sha256',key).update(['POST',path,ts,digest,scope,hash(meta)].join('\n')).digest('hex')}} as RequestInit),rt);
+    return {status:res.status,body:await res.json() as Json};
+  };
+  const mail=(subject:string,size=0)=>Buffer.concat([Buffer.from(`From: a@example.invalid\r\nSubject: ${subject}\r\n\r\n`),Buffer.alloc(size,'x'),Buffer.from('\r\n')]);
+  // Past the 8 MiB mail apps had, and with keywords any atom may be; others are not kept.
+  const large=await append(mail('large',9*1024*1024),['$Label/Work','project.x','[tag','\\Seen','bad]one']);
+  assert.equal(large.status,200,JSON.stringify(large.body));
+  const flags=async()=>(await rpc({op:'snapshot',kid,path:'INBOX'})).body.entries.map((e:Json)=>[e.uid,[...e.flags].sort()]);
+  const uid=large.body.pairs[0][1];
+  assert.deepEqual(await flags(),[[uid,['$Label/Work','[tag','\\Seen','project.x'].sort()]]);
+  const store=(keyword:string,mode='add')=>rpc({op:'mutate',kid,action:'flags',folder:'inbox',to:null,uids:[uid],flags:[keyword],mode});
+  assert.equal((await store('a~b|c^d')).status,200);
+  const bad=await store('a]b');assert.deepEqual([bad.status,bad.body.error.code],[422,'INVALID_FLAG']);
+  assert.equal((await store('project.x','replace')).status,200);
+  assert.deepEqual(await flags(),[[uid,['project.x']]],'Replace removes every keyword it does not name, any atom included.');
+  // No quota unless the inbox sets one, however much it holds; over one, OVERQUOTA (the gateway's [OVERQUOTA]).
+  await db.query('UPDATE inbox_state SET messages=500000,bytes=10737418240 WHERE inbox_id=$1',[bid]);
+  assert.equal((await append(mail('unlimited'))).status,200);
+  await db.query('UPDATE mailboxes SET quota_bytes=1 WHERE id=$1',[bid]);
+  const over=await append(mail('over'));assert.deepEqual([over.status,over.body.error.code],[409,'OVERQUOTA']);
+  await db.query('UPDATE mailboxes SET quota_bytes=NULL,quota_messages=500000 WHERE id=$1',[bid]);
+  const count=await append(mail('count'));assert.deepEqual([count.status,count.body.error.code],[409,'OVERQUOTA']);
+  // Folders: 16 levels deep, not 17; 1,000 of them; each refusal with its own code.
+  const edit=async(action:string,p:string|null,folder='')=>{const r=await rpc({op:'edit',kid,action,folder,path:p,sub:null});return [r.status,r.body.error?.code];};
+  const deep=Array.from({length:16},(_,i)=>`L${i}`).join('/');
+  assert.deepEqual(await edit('create',deep),[200,undefined]);
+  assert.deepEqual(await edit('create',deep+'/L16'),[409,'INVALID_PATH']);
+  assert.deepEqual(await edit('create',deep),[409,'ALREADYEXISTS']);
+  assert.deepEqual(await edit('rename','Elsewhere','inbox'),[409,'PROTECTED_FOLDER']);
+  assert.deepEqual(await edit('delete',null,'fld_'+'0'.repeat(32)),[404,'NOT_FOUND']);
+  const {rows:[{n}]}=await db.query('SELECT count(*)::int n FROM inbox_folders WHERE inbox_id=$1',[bid]);
+  await db.query("INSERT INTO inbox_folders(inbox_id,role,custom_path,subscribed,uid_validity) SELECT $1,'fld_'||md5(g::text),'Bulk/'||g,false,nextval('inbox_custom_validity') FROM generate_series(1,$2::int-1) g",[bid,1000-n]);
+  assert.deepEqual(await edit('create','Last'),[200,undefined]);
+  assert.deepEqual(await edit('create','One more'),[409,'FOLDER_LIMIT']);
 });
 // Migration 346: the gateway closes a send-only key's sessions and drops its cached sign-ins when this names the key.
 test('send-only SMTP: revoking a key, or changing what it may send, tells the gateway; using or renaming it does not', async t => {
@@ -20628,6 +20813,57 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await writesNothing(withAttachment(kid, from), [403, 'CREDENTIAL_REVOKED']);
       await run('email.dispatch');
       assert.deepEqual((await db.query('SELECT status,error_code FROM sending_emails WHERE id=$1', [queued.body.id])).rows, [{ status: 'canceled', error_code: 'ORIGIN_KEY_REVOKED' }]);
+    });
+  });
+
+  // A send-only key's submission as the current gateway sends it (src/protocol-submit.ts): streamed, so past the JSON
+  // RPC's 8 MiB; an envelope of 100 admitted as one batch of two emails; a signed message sent as written.
+  test('send-only SMTP: a streamed submission carries 25 MiB of files and 100 recipients, and signed mail goes out as written', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, fetch, run }) => {
+      const wid = runtime.config.workspaceId, gatewayToken = randomUUID() + randomUUID(), objects = new Map<string, Uint8Array>();
+      runtime.config.mailGatewayToken = gatewayToken;
+      runtime.storage = { async put(key, body) { objects.set(key, body); }, async get(key) { const body = objects.get(key); return body ? { body, contentType: 'application/octet-stream' } : null; }, async delete(key) { objects.delete(key); } };
+      const hash = (s: string | Uint8Array) => createHash('sha256').update(s).digest('hex');
+      const k = ok(await local('POST', '/v1/api-keys', { name: unique('smtp'), permissions: ['send'], domains: ['relay.example'] }), 201); secrets.add(k.secret);
+      const stream = async (raw: Buffer, to: string[]) => {
+        const meta = Buffer.from(JSON.stringify({ kid: k.id, from: 'app@relay.example', to, size: raw.length })).toString('base64'), ts = String(Math.floor(Date.now() / 1000)), scope = hash(k.id.toLowerCase()), digest = hash(raw);
+        const res = await fetch(new Request(`${PUBLIC_ORIGIN}/internal/v1/mail`, { method: 'POST', body: raw, duplex: 'half', headers: { 'x-bane-submit': meta, 'content-length': String(raw.length), 'x-bane-content': digest, 'x-bane-timestamp': ts, 'x-bane-scope': scope,
+          'x-bane-signature': createHmac('sha256', gatewayToken).update(['POST', '/internal/v1/mail', ts, digest, scope, 'submit', hash(meta)].join('\n')).digest('hex') } } as RequestInit));
+        return { status: res.status, body: await res.json() as Json };
+      };
+      const { SESv2Client, SendEmailCommand } = await import('@aws-sdk/client-sesv2'), send = SESv2Client.prototype.send, sent: Json[] = [];
+      t.mock.method(SESv2Client.prototype, 'send', async function (this: unknown, cmd: unknown, ...rest: unknown[]) { if (cmd instanceof SendEmailCommand) sent.push(cmd.input); return (send as (...a: unknown[]) => unknown).call(this, cmd, ...rest); });
+      const emails = async (subject: string) => (await db.query('SELECT id,to_addresses,cc_addresses,bcc_addresses,snapshot FROM sending_emails WHERE workspace_id=$1 AND actor_key_id=$2 AND subject=$3 ORDER BY id', [wid, k.id, subject])).rows;
+      const top = (subject: string, to = 'reader@example.net') => ['From: app@relay.example', `To: ${to}`, `Subject: ${subject}`, 'MIME-Version: 1.0'];
+
+      // 100 recipients, To first: one email of 50 and one of the other 50, both from one admission.
+      const to = Array.from({ length: 100 }, (_, i) => `r${String(i).padStart(3, '0')}@example.net`);
+      const many = await stream(Buffer.from([...top('Many', to.slice(0, 3).join(', ')), '', 'Hello all.', ''].join('\r\n')), to);
+      assert.equal(many.status, 200, JSON.stringify(many.body));
+      assert.deepEqual((await emails('Many')).map(e => [e.to_addresses.length, e.cc_addresses.length, e.bcc_addresses.length]).sort(), [[0, 0, 50], [3, 0, 47]]);
+
+      // 12 MiB of files, past what the JSON RPC carried: stored by the key and sent byte for byte.
+      const file = Buffer.alloc(12 * 1024 * 1024); for (let i = 0; i < file.length; i += 4096) file.writeUInt32BE(i, i);
+      const large = await stream(Buffer.from([...top('Large'), 'Content-Type: multipart/mixed; boundary=b', '', '--b', 'Content-Type: text/plain', '', 'Attached.', '--b', 'Content-Type: application/zip; name="large.zip"',
+        'Content-Disposition: attachment; filename="large.zip"', 'Content-Transfer-Encoding: base64', '', file.toString('base64').replace(/.{76}/g, (m: string) => m + '\r\n'), '--b--', ''].join('\r\n')), ['reader@example.net']);
+      assert.equal(large.status, 200, JSON.stringify(large.body));
+      // Signed as a whole: its own bytes go to SES as raw content.
+      const signed = Buffer.from([...top('Signed'), 'Content-Type: multipart/signed; protocol="application/pgp-signature"; micalg=pgp-sha256; boundary=s', '', '--s', 'Content-Type: text/plain', '', 'Signed text.',
+        '--s', 'Content-Type: application/pgp-signature; name="signature.asc"', '', '-----BEGIN PGP SIGNATURE-----', 'fixture', '-----END PGP SIGNATURE-----', '--s--', ''].join('\r\n'));
+      const sealed = await stream(signed, ['reader@example.net']);
+      assert.equal(sealed.status, 200, JSON.stringify(sealed.body));
+      await run('email.dispatch');
+      const input = (id: string) => sent.find(s => s.EmailTags.some((tag: Json) => tag.Name === 'bane_email_id' && tag.Value === id))!;
+      assert.ok(Buffer.from(input(large.body.id).Content.Simple.Attachments[0].RawContent).equals(file), 'The file reaches SES byte for byte.');
+      assert.equal(input(sealed.body.id).Content.Simple, undefined);
+      assert.ok(Buffer.from(input(sealed.body.id).Content.Raw.Data).equals(signed), 'The signed message reaches SES as written.');
+      for (const e of await emails('Many')) assert.ok(input(e.id), 'Both parts of the envelope are sent.');
+      // On Hosted, a sender still on probation can't send it as written.
+      runtime.config.multiTenant = true;
+      try {
+        const refused = await stream(signed, ['reader@example.net']);
+        assert.deepEqual([refused.status, refused.body.error?.code], [422, 'SEALED_MAIL_UNAVAILABLE']);
+      } finally { runtime.config.multiTenant = false; }
     });
   });
 

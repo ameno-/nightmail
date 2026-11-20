@@ -58,12 +58,13 @@ const subjectSearch = z.object({
   folder: name,
   term: z.string().min(1).max(1024),
 });
+// An older gateway's submission: base64 inside the JSON, at most 8 MiB. A current one streams it (protocol-submit.ts).
 const submit = z.object({
   op: z.literal('submit'),
   kid: token,
   from: z.email(),
-  to: z.array(z.email()).min(1).max(50),
-  content: z.string().max(22369624),
+  to: z.array(z.email()).min(1).max(100),
+  content: z.string().max(11184812),
 });
 const projections = z.object({
   op: z.literal('projections'),
@@ -80,6 +81,10 @@ export const principal = (runtime: Runtime, protocol: 'imap' | 'smtp', identity:
   sql`SELECT b.workspace_id AS w,b.id AS b,p.id AS k FROM inbox_app_passwords p JOIN mailboxes b ON b.id=p.inbox_id WHERE ${identity} AND p.revoked_at IS NULL AND ${protocol}=ANY(p.protocols) AND b.kind='inbox' AND b.retention_mode='forever' AND b.delete_after IS NULL AND NOT EXISTS(SELECT FROM mail_grant_objects g WHERE g.kind='protocol' AND g.workspace_id=b.workspace_id AND g.resource=p.id AND NOT mail_receiving_grant(b.workspace_id,g.grant_id,${receivingPolicy(runtime.config)}::jsonb))`;
 const folders = sql`(SELECT jsonb_agg(jsonb_build_object('key',f.role,'path',inbox_folder_path(f),'next',f.uid_next,'validity',f.uid_validity,'highest',f.highest_modseq,'subscribed',f.subscribed,'total',f.total,'unseen',f.unseen) ORDER BY role) FROM inbox_folders f WHERE f.inbox_id=a.b)`;
 const fields = ['flagged', 'answered', 'draft', 'forwarded', 'junk', 'notJunk', 'mdnSent'] as const;
+/** An IMAP keyword is any RFC 3501 atom (printable ASCII but ( ) { % * " \ ] and space), at most 64 characters;
+ *  delivery's own labels are not keywords. Migration 356 applies the same rule in SQL. */
+export const KEYWORD = /^[!#$&'+-[^-z|}~]{1,64}$/;
+const keyword = (label: string) => KEYWORD.test(label) && !['unverified', 'spam', 'guard-allowed'].includes(label);
 const names = ['\\Flagged', '\\Answered', '\\Draft', '$Forwarded', '$Junk', '$NotJunk', '$MDNSent'] as const;
 type ObjectRef = {
   w: string;
@@ -101,10 +106,14 @@ export function registerMailGateway(app: App) {
     const runtime = c.env,
       hash = c.req.header('x-bane-content') ?? '';
     if (!gatewayLane(c.req.method, c.req.path, c.req.raw.headers, runtime.config.mailGatewayToken)) throw bad();
-    const meta = c.req.header('x-bane-append');
+    const meta = c.req.header('x-bane-append'), submission = c.req.header('x-bane-submit');
     if (meta !== undefined) {
       const { streamedAppend } = await import('./protocol-append.js');
       return c.json(await streamedAppend(c, meta, hash));
+    }
+    if (submission !== undefined) {
+      const { streamedSubmit } = await import('./protocol-submit.js');
+      return c.json(await streamedSubmit(c, submission, hash));
     }
     await boundRequestBody(c, 23 * 1024 * 1024);
     const raw = await c.req.text();
@@ -155,9 +164,9 @@ export function registerMailGateway(app: App) {
       return new Response(stream, { headers: { 'content-type': 'application/octet-stream' } });
     }
     if (p.op === 'submit') {
-      if (/^(?:key|mbk)_/.test(p.kid)) return c.json(await (await import('./protocol-relay.js')).relaySubmit(c, p));
-      const { contentWrite } = await import('./protocol-content.js');
-      return c.json(await contentWrite(c, p));
+      const { submit } = await import('./protocol-submit.js'), raw = Buffer.from(p.content, 'base64');
+      if (raw.length > 8 * 1024 * 1024) throw new ApiError(413, 'MESSAGE_SIZE', 'Message is too large.');
+      return c.json(await submit(c, { kid: p.kid, from: p.from, to: p.to, raw }));
     }
     const auth = principal(runtime, 'imap', sql`p.id=${p.kid}`);
     // MATERIALIZED ensures the write fence is acquired before calling the writer.
@@ -222,9 +231,7 @@ export function registerMailGateway(app: App) {
             date: e.date,
             size: e.size,
             flags: [
-              ...e.labels.filter(
-                (l) => /^[A-Za-z0-9_$-]{1,64}$/.test(l) && !['unverified', 'spam', 'guard-allowed'].includes(l),
-              ),
+              ...e.labels.filter(keyword),
               ...names.filter((_, i) => e.bits & (1 << i)),
               ...(e.seen ? ['\\Seen'] : []),
               ...(e.deleted ? ['\\Deleted'] : []),
@@ -253,7 +260,9 @@ export function registerMailGateway(app: App) {
         )
       ).rows[0];
       if (!row) throw bad();
-      if (row.r.error) throw new ApiError(409, 'FOLDER_REFUSED', 'Folder mutation refused.');
+      // The refusal's own code (ALREADYEXISTS, FOLDER_LIMIT, INVALID_PATH, PROTECTED_FOLDER, NOT_FOUND) tells the
+      // gateway which IMAP response code to answer.
+      if (row.r.error) throw new ApiError(row.r.error === 'NOT_FOUND' ? 404 : 409, row.r.error, 'Folder mutation refused.');
       return c.json(row.r);
     }
     // A single statement takes the phase-2 inbox fence, resolves UIDs and performs the batch.
@@ -268,8 +277,7 @@ export function registerMailGateway(app: App) {
     const labels = p.flags.filter(
       (x) => !x.startsWith('\\') && !names.some((n) => n.toLowerCase() === x.toLowerCase()),
     );
-    if (labels.some((x) => !/^[$\w-]{1,64}$/.test(x) || ['unverified', 'spam', 'guard-allowed'].includes(x)))
-      throw new ApiError(422, 'INVALID_FLAG', 'Invalid keyword.');
+    if (!labels.every(keyword)) throw new ApiError(422, 'INVALID_FLAG', 'Invalid keyword.');
     if ((p.action==='flags'||p.action==='copy') && (!p.uids || p.uids.length>1000))throw new ApiError(413,'MUTATION_LIMIT','Request at most 1000 UIDs.');
     if(p.action==='copy'&&(!p.ticket||!p.to))throw new ApiError(422,'MISSING_COPY_TICKET','COPY requires a replay ticket.');
     const mutation=p.action==='copy'&&p.ticket

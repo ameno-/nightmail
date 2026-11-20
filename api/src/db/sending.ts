@@ -14,6 +14,9 @@ export type EmailSnapshot = {
   from: string; fromName?: string; previewText?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region: string;
   kind: 'transactional' | 'marketing'; subject: string; html?: string; text?: string;
   attachments: string[]; tracking: boolean; raw?: string;
+  /** A mail app's signed or encrypted submission, sent as these bytes (Raw content); subject, html and text are what
+   *  it shows, for the screen and the log. */
+  mime?: string;
   template?: { name: string; data: Record<string, unknown>; source: { Subject?: string; Html?: string; Text?: string }; render: 'ses' | 'simulated' };
   headers: { Name: string; Value: string }[];
   deferredCampaign?: boolean;
