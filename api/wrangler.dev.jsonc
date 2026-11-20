@@ -36,8 +36,8 @@
     "AUTH_STAFF_GOOGLE_DOMAINS": "anoma.ly",
     // Staff UI notes (src/ui-notes.ts): off on dev until Ryan's account.dev.anoma.ly subject is listed here.
     "UI_NOTES_SUBJECTS": "",
-    // Dashboard usage analytics (docs/analytics.md): batches go to the ANALYTICS bucket, never Postgres.
-    "NIGHTMAIL_DASHBOARD_ANALYTICS": "true",
+    // Dashboard usage analytics (docs/analytics.md): batches go to the ANALYTICS bucket, never Postgres. "off" discards them.
+    "DASHBOARD_ANALYTICS": "on",
     "ACCOUNT_CLIENT_ID": "bane-dev",
     "MULTI_TENANT": "true",
     "BYO_STACK_PREFIX": "Nightmail",

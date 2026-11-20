@@ -308,7 +308,8 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   });
   app.notFound(c => { c.set('failure', { code: 'NOT_FOUND', unmatched: true }); return c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
   // origin is PUBLIC_URL's, never the request's Host: the dashboard and Docs build every example and connection URL from it.
-  app.get('/health', c => c.json({status:'ok',service:healthService,multiTenant:c.env.config.multiTenant,origin:new URL(c.env.config.publicUrl).origin}));
+  // analytics: whether a signed-out dashboard page records its use (DASHBOARD_ANALYTICS); signed in, /v1/me says so.
+  app.get('/health', c => c.json({status:'ok',service:healthService,multiTenant:c.env.config.multiTenant,origin:new URL(c.env.config.publicUrl).origin,analytics:c.env.config.dashboardAnalytics===true}));
   app.get('/health/receiving', async c => {const h=await (await import('./receiving-health.js')).cachedHealth(c.env);return c.json(h,h.status==='ok'?200:503);});
   app.get('/openapi.json', async c => { const { doc } = await loadDocs(); c.header('cache-control', 'public, max-age=300'); return c.json(doc); });
   const markdown = (c: Ctx, value: string) => { c.header('content-type', 'text/markdown; charset=utf-8'); c.header('cache-control', 'public, max-age=300'); return c.body(value); };

@@ -991,9 +991,9 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const request = (path:string, method:string, cookie='', body?:object) => app.fetch(new Request(origin+path,{method,headers:{origin,cookie,'content-type':'application/json','x-nightmail-client-ip':`192.0.2.${peer}`},body:body?JSON.stringify(body):undefined}),runtime);
   // The account service sends the browser back with response_mode=query: a cross-site top-level GET, without Origin.
   const navigate = (path:string, cookie='') => app.fetch(new Request(origin+path,{method:'GET',headers:{cookie,referer:issuer+'/','sec-fetch-site':'cross-site','sec-fetch-mode':'navigate','x-nightmail-client-ip':`192.0.2.${peer}`}}),runtime);
-  async function login(authorizationError?:string) {
+  async function login(authorizationError?:string, callbackURL=origin+'/') {
     peer++; pushed=undefined;
-    const start=await request('/api/auth/sign-in/account','POST','',{callbackURL:origin+'/'});
+    const start=await request('/api/auth/sign-in/account','POST','',{callbackURL});
     assert.equal(start.status,200); const front=new URL((await start.json() as {url:string}).url).searchParams;
     if (runtime.config.accountClient?.requiredAcr) assert.deepEqual([...front],[['client_id','dashboard'],['request_uri','urn:fixture:request']]);
     else assert.deepEqual(JSON.parse(front.get('claims')!),{id_token:{[PROVIDER_IDENTITY_CLAIM]:{essential:true}}});
@@ -1081,6 +1081,17 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const seatSession=seated.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))!.split(';')[0]!;
   const seatMe=await (await request('/v1/me','GET',seatSession)).json() as {id:string;workspaceId:string;role:string;email:string};
   assert.deepEqual([seatMe.id,seatMe.workspaceId,seatMe.role,seatMe.email],[seatId,me.workspaceId,'admin',email]);
+  // Dashboard analytics (docs/analytics.md): a signed-out page's session rides in its return URL. The callback links it
+  // to the account in one sign_in row and redirects without it, so the browser never opens a URL that carries it.
+  const objects=new Map<string,Uint8Array>();
+  runtime.analyticsStorage={async put(key,body){objects.set(key,body);},async get(){return null;},async delete(){}};
+  runtime.config.dashboardAnalytics=true;
+  assert.equal(landed(await login(undefined,origin+'/overview?tab=dns&analyticsSession=sess_link00001')),origin+'/overview?tab=dns');
+  assert.deepEqual([...objects.values()].map(body=>{const row=JSON.parse(new TextDecoder().decode(body));return [row.type,row.sid,row.uid,row.ws,row.route];}),[['sign_in','sess_link00001',seatId,null,'/overview']]);
+  runtime.config.dashboardAnalytics=false;
+  assert.equal(landed(await login(undefined,origin+'/overview?analyticsSession=sess_link00002')),origin+'/overview','Off, the session is dropped and nothing is written');
+  assert.equal(objects.size,1);
+  delete runtime.analyticsStorage;
   subject=randomUUID();subjects.push(subject);
   assert.equal((await login()).headers.get('location'),origin+'/?auth=error','The same verified address under another subject is refused');
   // Workspace creation follows the sign-in's staff status, not the address.
@@ -29283,7 +29294,7 @@ describe('dashboard analytics', () => {
     const [{ createApp }, { loadConfig }] = await Promise.all([import('./src/app.js'), import('./src/config.js')]);
     const { map, storage } = bucket();
     const db = new Proxy({}, { get(_target, prop) { throw new Error('Dashboard analytics touched Postgres (' + String(prop) + ').'); } }) as import('./src/core.js').Runtime['db'];
-    const runtime: import('./src/core.js').Runtime = { config: loadConfig({ PUBLIC_URL: origin, BANE_ROOT_SECRET: 'fixture-only-'.repeat(4), NIGHTMAIL_DASHBOARD_ANALYTICS: 'true', ...env }), db, storage };
+    const runtime: import('./src/core.js').Runtime = { config: loadConfig({ PUBLIC_URL: origin, BANE_ROOT_SECRET: 'fixture-only-'.repeat(4), DASHBOARD_ANALYTICS: 'on', ...env }), db, storage };
     const app = createApp();
     const post = async (body: unknown, headers: Record<string, string> = {}, peer = '198.51.100.' + Math.floor(Math.random() * 250)) => {
       const { clientIpHeader } = await import('./src/brand.js');
@@ -29293,7 +29304,7 @@ describe('dashboard analytics', () => {
       .flatMap(([, body]) => new TextDecoder().decode(body).trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>));
     return { app, runtime, map, post, rows };
   };
-  const envelope = (events: unknown[]) => ({ v: 1, sid: 'sess_0001abcd', vid: 'visitor_0001', ws: 'ws_' + 'a'.repeat(32), uid: '0b5c7e1e-2f6c-4a51-9d0e-3c1f2a4b5c6d', app: 'abc123def456', vp: 'desktop', events });
+  const envelope = (events: unknown[]) => ({ v: 1, sid: 'sess_0001abcd', ws: 'ws_' + 'a'.repeat(32), uid: '0b5c7e1e-2f6c-4a51-9d0e-3c1f2a4b5c6d', app: 'abc123def456', vp: 'desktop', events });
 
   test('dashboard analytics: the ingest stores scrubbed, templated rows and nothing it was not asked to keep', async () => {
     const { post, map, rows } = await setup(), now = Date.now();
@@ -29311,13 +29322,13 @@ describe('dashboard analytics', () => {
       { id: 'evt_00000009', seq: 9, t: now, type: 'page_hide', route: 'https://' + typed.split('@')[1] + '/inbox', ms: 10 },
       { id: 'evt_00000010', seq: 10, t: now, type: 'api_error', route: '/overview' },
       { id: 'evt_00000011', seq: 11, t: now, type: 'keypress', route: '/overview', label: typed },
-    ]), email: typed, ws: 'dana@example.com', uid: typed });
+    ]), email: typed, vid: 'visitor_0001', ws: 'dana@example.com', uid: typed });
     assert.equal(response.status, 204);
     const keys = [...map.keys()];
     assert.equal(keys.length, 1);
     assert.match(keys[0]!, /^analytics\/v1\/raw\/dt=\d{4}-\d{2}-\d{2}\/h=\d{2}\/\d+-[0-9a-f]{16}\.ndjson$/);
     const stored = new TextDecoder().decode(map.get(keys[0]!)!);
-    for (const leak of ['dana', 'example', 'acme', '4111', '1111', 'dom_0123', 'tab=dns', 'records', '"value"', '"email"', 'support-']) assert.ok(!stored.includes(leak), 'Stored analytics contain ' + leak + ': ' + stored);
+    for (const leak of ['dana', 'example', 'acme', '4111', '1111', 'dom_0123', 'tab=dns', 'records', '"value"', '"email"', 'support-', 'visitor']) assert.ok(!stored.includes(leak), 'Stored analytics contain ' + leak + ': ' + stored);
     const [view, click, named, invalid, failure, step, ...rest] = rows();
     assert.equal(rest.length, 0);
     assert.deepEqual([view!.type, view!.route, view!.ref, view!.ms, view!.target], ['page_view', '/domains/:id', '/onboarding', 1200, null]);
@@ -29327,17 +29338,27 @@ describe('dashboard analytics', () => {
     assert.deepEqual([failure!.code, failure!.op, failure!.status, failure!.field], ['VALIDATION_FAILED', 'POST /v1/domains/:id/verify', 422, 'to.#.email']);
     assert.deepEqual([step!.step, step!.route, step!.t], ['domain_added', '/receiving/rules/:id', step!.received]);
     // The envelope is copied onto each row; IDs that aren't Nightmail's shapes are dropped, never kept as text.
-    assert.deepEqual([view!.sid, view!.vid, view!.ws, view!.uid, view!.app, view!.vp, view!.v], ['sess_0001abcd', 'visitor_0001', null, null, 'abc123def456', 'desktop', 1]);
+    assert.deepEqual([view!.sid, view!.ws, view!.uid, view!.app, view!.vp, view!.v], ['sess_0001abcd', null, null, 'abc123def456', 'desktop', 1]);
+    // Only the sign-in callback writes sign_in (it links a signed-out session to its account); a batch can't.
+    assert.equal((await post(envelope([{ id: 'evt_00000013', seq: 13, t: now, type: 'sign_in', route: '/overview' }]))).status, 204);
+    assert.ok(!rows().some(row => row.type === 'sign_in'));
     assert.equal((await post(envelope([{ id: 'evt_00000012', seq: 12, t: now, type: 'page_view', route: '/overview' }]))).status, 204);
     assert.deepEqual([rows().at(-1)!.ws, rows().at(-1)!.uid], ['ws_' + 'a'.repeat(32), '0b5c7e1e-2f6c-4a51-9d0e-3c1f2a4b5c6d']);
   });
 
-  test('dashboard analytics: off by default, the dashboard origin only, DNT and GPC honored, and bounded', async t => {
+  test('dashboard analytics: off by default and then discarded unread, the dashboard origin only, DNT and GPC honored, and bounded', async t => {
     const batch = envelope([{ id: 'evt_00000001', seq: 1, t: Date.now(), type: 'page_view', route: '/overview' }]);
-    const off = await setup({ NIGHTMAIL_DASHBOARD_ANALYTICS: 'false' });
-    assert.equal((await off.post(batch)).status, 404);
+    const health = async (app: import('./src/app.js').HttpApp, runtime: import('./src/core.js').Runtime) => ((await (await app.fetch(new Request(origin + '/health'), runtime)).json()) as { analytics: boolean }).analytics;
+    const { loadConfig } = await import('./src/config.js');
+    assert.equal(loadConfig({ PUBLIC_URL: origin, BANE_ROOT_SECRET: 'fixture-only-'.repeat(4) }).dashboardAnalytics, false, 'Off unless DASHBOARD_ANALYTICS=on');
+    const off = await setup({ DASHBOARD_ANALYTICS: 'off' });
     assert.equal(off.runtime.config.dashboardAnalytics, false);
-    const { post, map, runtime } = await setup();
+    assert.equal(await health(off.app, off.runtime), false);
+    // Off, the ingest answers 204 to anything, from anywhere, and keeps nothing.
+    for (const [body, headers] of [[batch, {}], ['{"v":1,', {}], [batch, { origin: 'https://elsewhere.example' }]] as const) assert.equal((await off.post(body, headers)).status, 204);
+    assert.equal(off.map.size, 0);
+    const { post, map, runtime, app } = await setup();
+    assert.equal(await health(app, runtime), true);
     assert.equal((await post(batch, { origin: 'https://elsewhere.example' })).status, 403);
     const anonymous = await (await import('./src/app.js')).createApp().fetch(new Request(origin + path, { method: 'POST', body: JSON.stringify(batch) }), runtime);
     assert.equal(anonymous.status, 403);
@@ -29361,6 +29382,91 @@ describe('dashboard analytics', () => {
     t.mock.timers.setTime(Date.parse('2026-11-20T10:01:10Z'));
     delete runtime.allowAnalytics;
     assert.equal((await post(batch, {}, '203.0.113.50')).status, 204);
+  });
+
+  test('dashboard analytics: the dashboard tracker stores nothing on the device, never reads what was typed and sends no address, name or ID', async () => {
+    const { createTracker } = await import('../app/src/lib/analytics.js');
+    type El = { tagName: string; parentElement: El | null; textContent: string | null; getAttribute(name: string): string | null; validity?: Record<string, boolean> };
+    const el = (tagName: string, attributes: Record<string, string> = {}, text = '', parent: El | null = null): El => ({ tagName: tagName.toUpperCase(), parentElement: parent, textContent: text, getAttribute: name => attributes[name] ?? null });
+    const typed = 'dana.lee@example.com', ws = 'ws_' + 'b'.repeat(32), uid = '0b5c7e1e-2f6c-4a51-9d0e-3c1f2a4b5c6d';
+    let clock = Date.parse('2026-11-20T10:00:00Z'), ids = 0, visibility = 'visible', valueReads = 0, optedOut = false;
+    const page = () => {
+      const listeners = new Map<string, (event: unknown) => void>(), sent: string[] = [];
+      // No storage in the host: the tracker has nowhere to keep anything but this page's memory.
+      const tracker = createTracker({ document: { get visibilityState() { return visibility; }, addEventListener: (type, listener) => { listeners.set(type, listener); }, removeEventListener: type => { listeners.delete(type); } },
+        send: body => { sent.push(body); return true; }, now: () => clock, width: () => 390, id: () => 'id' + String(++ids).padStart(10, '0'), optedOut: () => optedOut, every: () => () => {} });
+      const fire = (type: string, event: object) => listeners.get(type)!(event);
+      return { tracker, listeners, sent, fire };
+    };
+    const { tracker, listeners, sent, fire } = page();
+    // Until the API says analytics are on, events wait in memory and nothing listens or sends.
+    tracker.route('/settings');
+    tracker.apiResult('GET', '/v1/me', { multiTenant: true, connection: null });
+    assert.equal(listeners.size, 0);
+    tracker.configure({ enabled: true, ws, uid, app: 'abc123def456' });
+    assert.deepEqual([...listeners.keys()].sort(), ['click', 'invalid', 'submit', 'visibilitychange']);
+    // Someone types an address into the invitation form, gets it wrong, then sends it.
+    const form = el('form', { 'data-analytics': 'members/invite' });
+    const field = Object.defineProperty(el('input', { type: 'email', name: 'email', id: 'invite-email', placeholder: 'name@company.com' }, '', form), 'value', { get() { valueReads++; return typed; } }) as El;
+    field.validity = { typeMismatch: true };
+    const submit = el('button', { type: 'submit' }, 'Invite ' + typed, form);
+    fire('click', { target: field });
+    fire('invalid', { target: field });
+    tracker.fieldError('Email', 'invite-email');
+    fire('submit', { target: form, submitter: submit });
+    fire('click', { target: submit });
+    // People's data on the page: a member's row, a contact link, the account switcher and a masked address.
+    fire('click', { target: el('button', { 'aria-label': 'Remove Dana Lee' }, 'Remove', el('td', {}, 'Dana Lee ' + typed, el('tr', {}, 'Dana Lee'))) });
+    fire('click', { target: el('a', { href: '/audience/contacts/con_0123456789abcdef?ref=' + typed }, 'Dana Lee') });
+    fire('click', { target: el('span', {}, 'Dana Lee', el('button', { 'data-private': '', 'aria-label': 'Dana Lee, Acme. Switch account' }, 'Acme')) });
+    fire('click', { target: el('span', { class: 'private-address' }, typed) });
+    tracker.dialog(true, 'Invite ' + typed); clock += 1500; tracker.dialog(false, 'Invite ' + typed, undefined, 1500);
+    tracker.apiError('POST', '/v1/workspaces/current/invitations?email=' + encodeURIComponent(typed), 422, 'VALIDATION_FAILED', 'email');
+    tracker.apiError('POST', '/v1/workspaces/current/invitations', 422, 'VALIDATION_FAILED', 'email');
+    clock += 2000; tracker.route('/receiving/rules/' + typed);
+    visibility = 'hidden'; fire('visibilitychange', {});
+    assert.equal(valueReads, 0, 'The tracker read what was typed');
+    const payload = sent.join('\n');
+    for (const leak of ['dana', 'Dana', 'Lee', 'example', 'Acme', 'con_0123', 'ref=', 'visitor', 'vid']) assert.ok(!payload.includes(leak), 'The batch contains ' + leak + ': ' + payload);
+    const batches = sent.map(body => JSON.parse(body) as { sid: string; ws: string; uid: string; app: string; vp: string; v: number; events: Record<string, unknown>[] });
+    assert.equal(batches.length, 1);
+    const { events, ...envelope } = batches[0]!;
+    assert.deepEqual(envelope, { v: 1, sid: 'id0000000001', ws, uid, app: 'abc123def456', vp: 'phone' });
+    assert.deepEqual(events.map(event => [event.type, event.name ?? (event.role ?? '') + ':' + (event.label ?? event.step ?? event.code ?? '')]), [
+      ['page_view', ':'], ['track', ':signed_up'], ['click', 'textbox:[email]'], ['form_invalid', 'members/invite'], ['form_invalid', 'field:Email'], ['form_submit', 'members/invite'],
+      ['click', 'button:Invite [email]'], ['click', 'button:'], ['click', 'link:/audience/contacts/:id'], ['click', 'button:'], ['click', 'none:'],
+      ['dialog_open', 'dialog:Invite [email]'], ['dialog_close', 'dialog:Invite [email]'], ['api_error', ':VALIDATION_FAILED'], ['page_view', ':'], ['page_hide', ':'],
+    ]);
+    assert.deepEqual(events.filter(event => event.type === 'page_view').map(event => [event.route, event.ref ?? null, event.ms ?? null]), [['/settings', null, null], ['/receiving/rules/:id', '/settings', 3500]]);
+    assert.deepEqual([events[3]!.field, events[3]!.reason, events[13]!.op, events[13]!.field], ['email', 'typeMismatch', 'POST /v1/workspaces/current/invitations', 'email']);
+    // What the ingest stores from it is just as clean.
+    const ingest = await setup();
+    assert.equal((await ingest.post(sent[0]!)).status, 204);
+    const stored = ingest.rows();
+    assert.equal(stored.length, events.length);
+    assert.ok(!JSON.stringify(stored).match(/dana|Dana|Lee|example|Acme|con_0123/), JSON.stringify(stored));
+    assert.deepEqual(stored.map(row => row.target).filter(Boolean), ['textbox:[email]', 'members/invite', 'field:Email', 'members/invite', 'button:Invite [email]', 'button:', 'link:/audience/contacts/:id', 'button:', 'none:', 'dialog:Invite [email]', 'dialog:Invite [email]']);
+    // Do Not Track or Global Privacy Control: on or not, nothing listens and nothing is sent.
+    optedOut = true;
+    const dnt = page();
+    dnt.tracker.route('/overview');
+    dnt.tracker.configure({ enabled: true, ws, uid });
+    dnt.tracker.flush();
+    assert.deepEqual([dnt.listeners.size, dnt.sent.length], [0, 0]);
+    // Off: what waited is discarded, and later events too.
+    optedOut = false;
+    const off = page();
+    off.tracker.route('/overview');
+    off.tracker.configure({ enabled: false, ws, uid });
+    off.tracker.track('domain_added'); off.tracker.flush();
+    assert.deepEqual([off.listeners.size, off.sent.length, off.tracker.signInSession()], [0, 0, null]);
+    // Signed out and on: no account in the batch, and the session goes with sign-in (the callback links it).
+    const out = page();
+    out.tracker.configure({ enabled: true, ws: null, uid: null });
+    out.tracker.route('/');
+    out.tracker.flush();
+    const signedOut = JSON.parse(out.sent[0]!) as { sid: string; ws: unknown; uid: unknown };
+    assert.deepEqual([signedOut.ws, signedOut.uid, out.tracker.signInSession()], [null, null, signedOut.sid]);
   });
 
   test('dashboard analytics: hourly compaction folds settled hours into one gzip object and expires old days', async t => {

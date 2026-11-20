@@ -336,7 +336,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
         </> : <>
           {!accepted && <Button variant="ghost" disabled={pending} onClick={() => setTemplatesOpen(true)}>Use a template</Button>}
           <Button variant="ghost" disabled={!accepted || saveDisabled || pending || autosavePaused} title={!accepted ? 'Name the campaign first' : undefined} onClick={() => save('test')}>Send test</Button>
-          <Button variant="primary" disabled={saveDisabled || pending || autosavePaused} loading={preparing} onClick={() => save('review')}>Continue to review</Button>
+          <Button variant="primary" disabled={saveDisabled || pending || autosavePaused} loading={preparing} onClick={() => save('review')} data-analytics="campaigns/review">Continue to review</Button>
         </>}
       </div>
     </>} />
@@ -690,7 +690,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
         </div>
         {error && <Alert tone="danger">{error}</Alert>}
         {!canAdminister && <Alert tone="info">Only owners and admins can send or schedule campaigns.</Alert>}
-        <div className="campaign-delivery-actions"><Button variant="secondary" disabled={sendMutation.isPending} onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Back to draft</Button><Button variant="primary" loading={sendMutation.isPending} disabled={!canAdminister || Boolean(readinessError) || Boolean(audience.data && !audience.data.eligible)} onClick={requestConfirmation}>{mode === 'schedule' ? 'Schedule campaign' : 'Send campaign now'}</Button></div>
+        <div className="campaign-delivery-actions"><Button variant="secondary" disabled={sendMutation.isPending} onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Back to draft</Button><Button variant="primary" loading={sendMutation.isPending} disabled={!canAdminister || Boolean(readinessError) || Boolean(audience.data && !audience.data.eligible)} onClick={requestConfirmation} data-analytics={mode === 'schedule' ? 'campaigns/schedule' : 'campaigns/send'}>{mode === 'schedule' ? 'Schedule campaign' : 'Send campaign now'}</Button></div>
         {/* Below the actions, so the result never moves them. */}
         {lowScore && <SendabilityWarning report={sendability.data!} action={<p className="campaign-sendability-link"><Link to={campaignRoute(campaign, 'edit')}>See all findings</Link></p>} />}
       </section>}

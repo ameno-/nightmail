@@ -250,12 +250,12 @@ function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) =
       <h1 className="onboarding-title">Where should your email send from?</h1>
     </div>
     <div className="onboarding-options">
-      <button type="button" className="onboarding-option onb-rise" style={rise(1)} onClick={() => onChoose('shared')}>
+      <button type="button" className="onboarding-option onb-rise" style={rise(1)} data-analytics="onboarding/sending/hosted" onClick={() => onChoose('shared')}>
         <span className="onboarding-option-icon" aria-hidden="true"><Send size={18} /></span>
         <span className="onboarding-option-title">Hosted mail</span>
         <span className="onboarding-option-value"><strong>Unlimited in good standing</strong><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
-      <button type="button" className="onboarding-option onb-rise" style={rise(2)} onClick={() => onChoose('byo')}>
+      <button type="button" className="onboarding-option onb-rise" style={rise(2)} data-analytics="onboarding/sending/byo" onClick={() => onChoose('byo')}>
         <span className="onboarding-option-icon onboarding-option-icon--aws" aria-hidden="true"><AwsLogo /></span>
         <span className="onboarding-option-title">Your AWS account</span>
         <span className="onboarding-option-value"><strong>You pay AWS directly</strong><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
@@ -349,13 +349,13 @@ function VerifyAccount({ connection }: { connection: ProviderConnection | null }
     setAccountError('')
     try { await verify.mutateAsync(id) } catch { /* Shown inline. */ }
   }
-  return <form className="onboarding-inline-form" onSubmit={submit} noValidate>
+  return <form className="onboarding-inline-form" data-analytics="onboarding/byo/verify" onSubmit={submit} noValidate>
     <div className="onboarding-field">
       <Field label="AWS account ID" htmlFor="onboarding-aws-account" error={accountError || (verify.error ? verifyError(verify.error, connection?.region ?? 'your region') : undefined)}>
         <Input id="onboarding-aws-account" inputMode="numeric" autoComplete="off" autoFocus value={account} onChange={event => setAccount(event.target.value)} placeholder="123456789012" maxLength={14} disabled={verify.isPending} />
       </Field>
     </div>
-    <Button type="submit" loading={verify.isPending} disabled={!connection}>Verify</Button>
+    <Button type="submit" loading={verify.isPending} disabled={!connection} data-analytics="onboarding/byo/verify">Verify</Button>
   </form>
 }
 
@@ -374,8 +374,8 @@ function ImportedDomains({ count, onContinue, onAddAnother, fallback }: { count:
       {verified.map(domain => <li key={domain.id}><code>{domain.name}</code><LiveStatus state="verified" plain /></li>)}
     </ul>
     <div className="onboarding-connect-actions onb-rise" style={rise(2)}>
-      <Button variant="primary" onClick={() => onContinue(verified[0].id)}>Continue<ArrowRight size={16} aria-hidden /></Button>
-      <Button variant="ghost" onClick={onAddAnother}>Add another domain</Button>
+      <Button variant="primary" data-analytics="onboarding/domains/continue" onClick={() => onContinue(verified[0].id)}>Continue<ArrowRight size={16} aria-hidden /></Button>
+      <Button variant="ghost" data-analytics="onboarding/domains/add-another" onClick={onAddAnother}>Add another domain</Button>
     </div>
   </div>
 }
@@ -405,15 +405,15 @@ function AddDomain({ draft, onDraftChange, queued, onQueuedChange, ready, onAdde
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <h1 className="onboarding-title">Add your domain</h1>
     </div>
-    <form className="onboarding-inline-form onb-rise" style={rise(2)} onSubmit={event => { event.preventDefault(); void add() }} noValidate>
+    <form className="onboarding-inline-form onb-rise" style={rise(2)} data-analytics="onboarding/domain/add" onSubmit={event => { event.preventDefault(); void add() }} noValidate>
       <div className="onboarding-field">
         <Field label="Domain" htmlFor="onboarding-domain" error={invalid || (create.error ? <ErrorText error={create.error} /> : undefined)}>
           <Input id="onboarding-domain" autoFocus autoComplete="off" autoCapitalize="none" spellCheck={false} value={draft} onChange={event => { setInvalid(''); onDraftChange(event.target.value); onQueuedChange(false) }} placeholder="acme.com" disabled={create.isPending} />
         </Field>
       </div>
-      <Button type="submit" variant="primary" loading={create.isPending || queued}>Add domain<ArrowRight size={16} aria-hidden /></Button>
+      <Button type="submit" variant="primary" loading={create.isPending || queued} data-analytics="onboarding/domain/add">Add domain<ArrowRight size={16} aria-hidden /></Button>
     </form>
-    <div className="onb-rise onboarding-reserve" style={rise(3)} data-hidden={!ready || undefined} inert={!ready}><button type="button" className="onboarding-skip" disabled={create.isPending} onClick={onFinish}>Skip for now</button></div>
+    <div className="onb-rise onboarding-reserve" style={rise(3)} data-hidden={!ready || undefined} inert={!ready}><button type="button" className="onboarding-skip" disabled={create.isPending} data-analytics="onboarding/domain/skip" onClick={onFinish}>Skip for now</button></div>
   </div>
 }
 
@@ -440,7 +440,7 @@ function DomainSetup({ domainId, onContinue, onMissing }: { domainId: string; on
     <div className="onb-rise" style={rise(1)}><DomainRecords domain={current} guided setup={dns.setup} /></div>
     <div className="onb-rise" style={rise(2)}><DnsWaitNote domain={current} /></div>
     <div className="onboarding-actions">
-      <Button variant="primary" className="onboarding-continue" data-timer={verified || undefined} onClick={onContinue}>Continue<ArrowRight size={16} aria-hidden /></Button>
+      <Button variant="primary" className="onboarding-continue" data-timer={verified || undefined} data-analytics="onboarding/verify/continue" onClick={onContinue}>Continue<ArrowRight size={16} aria-hidden /></Button>
     </div>
   </div>
 }
@@ -487,7 +487,7 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
         <p className={create.error ? 'developer-copy onboarding-error onboarding-key-copy' : 'muted developer-copy onboarding-key-copy'} role={create.error ? 'alert' : undefined}>{create.error ? <ErrorText error={create.error} /> : <>Store it as <code>{apiKeyEnv}</code> in your project’s environment. It’s shown once.</>}</p>
         {/* The key replaces the button in a slot sized for both, so the sections below never move. */}
         <div className="onboarding-slot onboarding-key">
-          <div data-active={!secret || undefined} inert={!!secret}><Button loading={create.isPending} onClick={() => void createKey()}>Create API key</Button></div>
+          <div data-active={!secret || undefined} inert={!!secret}><Button loading={create.isPending} data-analytics="onboarding/agent/create-key" onClick={() => void createKey()}>Create API key</Button></div>
           <div className="developer-url onboarding-reveal" data-active={secret ? true : undefined} inert={!secret}><SecretCode>{secret ?? keyPlaceholder}</SecretCode><CopyAction value={secret ?? ''} label="Copy API key" variant="ghost" size="sm" compact className="developer-copy-icon" /></div>
         </div>
         <span className="sr-only" role="status">{secret ? 'API key created. It is shown once.' : ''}</span>

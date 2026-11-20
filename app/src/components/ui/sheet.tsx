@@ -1,5 +1,6 @@
 import { useEffect, useRef, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
+import { useDialogAnalytics } from '../Analytics'
 
 // Swipe a bottom sheet down to close it: past a quarter of its height, or a quick flick at any distance. Dragging up
 // past the top meets friction instead of a wall. Starts on the sheet's grab area, or anywhere on it while its content
@@ -59,8 +60,9 @@ export function useKeyboardInset() {
 
 /** A bottom sheet on Radix Dialog: focus trapped, Esc and a swipe down close it, focus returns to the opener. A sheet
  *  opened by a plain button (no Radix trigger) names it in `returnFocus`: a tap doesn't always focus the button first. */
-export function Sheet({ open, onOpenChange, title, description, children, className, hideTitle = false, returnFocus }: { open: boolean; onOpenChange: (open: boolean) => void; title: ReactNode; description?: ReactNode; children: ReactNode; className?: string; hideTitle?: boolean; returnFocus?: RefObject<HTMLElement | null> }) {
+export function Sheet({ open, onOpenChange, title, description, children, className, hideTitle = false, returnFocus, analytics }: { open: boolean; onOpenChange: (open: boolean) => void; title: ReactNode; description?: ReactNode; children: ReactNode; className?: string; hideTitle?: boolean; returnFocus?: RefObject<HTMLElement | null>; analytics?: string }) {
   const handlers = useSheetDrag(() => onOpenChange(false))
+  useDialogAnalytics(open, title, analytics)
   return <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}><DialogPrimitive.Portal>
     <DialogPrimitive.Overlay className="ui-dialog-overlay ui-sheet-overlay" />
     <DialogPrimitive.Content data-component="Sheet" className={['ui-sheet', className].filter(Boolean).join(' ')} aria-describedby={undefined} onCloseAutoFocus={event => { const opener = returnFocus?.current; if (opener?.isConnected) { event.preventDefault(); opener.focus(); } }} {...handlers}>

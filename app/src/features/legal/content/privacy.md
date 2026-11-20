@@ -1,7 +1,7 @@
 ---
 title: Privacy Policy
 description: How Anomaly handles personal data in Nightmail: what we collect about customers, how we process the mail customers send and receive, screening and AI, retention, and your rights.
-updated: 13 November 2026
+updated: 20 November 2026
 effective: 13 November 2026
 ---
 
@@ -33,9 +33,10 @@ Nightmail handles personal data in two different roles.
 | **Usage** | How much each workspace sends, receives and stores, and its sender score and standing | Our systems |
 | **Support** | Your support request: the page you were on, recent request IDs, your message, and whether you allowed support to read message content | You |
 | **Notices** | Emails we send you about billing, limits, standing and these policies | Our systems |
+| **Dashboard usage** | Pages you open, what you click, dialogs, form errors and error messages in the dashboard, tied to your account and workspace IDs. Never what you type, email addresses or message content. Nothing is stored on your device, and nothing is recorded when your browser sends Do Not Track or Global Privacy Control. Kept 400 days and used to improve the product. | Your browser |
 | **Technical logs** | Request logs (method, path, status, timing and error codes), and connection logs from the IMAP and SMTP gateway, which may include the connecting IP address. Request logs are kept about 3 days; gateway logs 30 days. | Our systems |
 
-**Cookies.** Nightmail uses a session cookie (up to 7 days) and a short-lived sign-in cookie (10 minutes). The Nightmail website and dashboard use **no analytics or advertising cookies**.
+**Cookies.** Nightmail uses a session cookie (up to 7 days) and a short-lived sign-in cookie (10 minutes). The Nightmail website and dashboard use **no analytics or advertising cookies**, and dashboard usage records store nothing on your device.
 
 ## 3. Data in our customers' mail
 
@@ -67,6 +68,7 @@ Customers can send their data to places they choose: their webhooks, Slack or Di
 | Security, fraud and abuse prevention: spam screening, sender scores and limits, card-fraud checks, investigating abuse reports | Usage data; screening results; message metadata and content as screened ([section 5](#automated-screening-and-ai)) | Legitimate interests (protecting recipients, customers and our infrastructure) |
 | Support | Account data; message content only with your permission | Contract; consent for message content |
 | Service and policy notices | Contact details | Contract; legitimate interests |
+| Improve the dashboard: find where people get stuck or run into errors | Dashboard usage | Legitimate interests (making the product easier to use) |
 | Improve the service and publish aggregate statistics (for example, total mail volume on our homepage) | Aggregated usage | Legitimate interests. Aggregates don't identify anyone. |
 | Comply with the law and respond to valid legal requests | As needed | Legal obligation |
 
@@ -145,6 +147,7 @@ Nightmail stores and processes data mainly in the **United States**. Cloudflare 
 | Sign-in attempts | 30 days; refused sign-in requests 90 days |
 | Sessions | Until they expire (up to 7 days) |
 | Request logs | About 3 days; IMAP and SMTP gateway logs 30 days |
+| Dashboard usage | 400 days |
 | Database backups | Until they expire on our database provider's backup schedule. Deleting data doesn't remove it from backups before then. |
 
 When a workspace is closed, we delete its data as described in the [Terms of Service](/legal/terms#ending-the-agreement).

@@ -7062,6 +7062,10 @@ export type GetCurrentIdentityResponses = {
          */
         uiNotes?: boolean;
         /**
+         * Whether this installation records how its dashboard is used (DASHBOARD_ANALYTICS). The dashboard sends nothing when false.
+         */
+        analytics?: boolean;
+        /**
          * Hosted dashboard sessions: an operator lets this workspace connect its own AWS account (POST /v1/connection with kind byo). False otherwise, and the dashboard offers Hosted mail only.
          */
         byo?: boolean;

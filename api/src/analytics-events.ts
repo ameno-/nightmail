@@ -3,7 +3,8 @@
 // one set of rules. No imports: the dashboard bundles this file.
 
 export const ANALYTICS_PATH = '/internal/v1/analytics';
-export const ANALYTICS_EVENT_TYPES = ['page_view', 'page_hide', 'click', 'dialog_open', 'dialog_close', 'form_submit', 'form_invalid', 'api_error', 'track'] as const;
+/** sign_in is written by the API alone, at the sign-in callback: it links a signed-out page's session to the account. */
+export const ANALYTICS_EVENT_TYPES = ['page_view', 'page_hide', 'click', 'dialog_open', 'dialog_close', 'form_submit', 'form_invalid', 'api_error', 'track', 'sign_in'] as const;
 export type AnalyticsEventType = typeof ANALYTICS_EVENT_TYPES[number];
 /** The funnel steps the dashboard reports with track(). */
 export const FUNNEL_STEPS = ['signed_up', 'domain_added', 'domain_verified', 'first_send', 'key_created', 'inbox_created', 'campaign_sent', 'byo_connected'] as const;
@@ -12,6 +13,12 @@ export type FunnelStep = typeof FUNNEL_STEPS[number];
 export const VALIDITY_REASONS = ['badInput', 'customError', 'patternMismatch', 'rangeOverflow', 'rangeUnderflow', 'stepMismatch', 'tooLong', 'tooShort', 'typeMismatch', 'valueMissing'] as const;
 export const VIEWPORTS = ['phone', 'tablet', 'desktop'] as const;
 export const ANALYTICS_LIMITS = { bodyBytes: 32 * 1024, events: 50, label: 40 } as const;
+
+/** The return-URL parameter that carries a signed-out page's session ID through sign-in (src/account-login.ts). The
+ *  callback removes it before redirecting, so the browser never opens a URL with it. */
+export const ANALYTICS_SESSION_PARAM = 'analyticsSession';
+/** A session or event ID: random letters and digits, held in a page's memory. */
+export const analyticsId = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9_-]{8,40}$/.test(value) ? value : null;
 
 /** A data-analytics name: lowercase words joined by - and /, such as domains/add. Code names it, so it is never data. */
 export const analyticsName = (value: unknown) => typeof value === 'string' && /^[a-z][a-z0-9-]{0,31}(?:\/[a-z0-9-]{1,32}){0,5}$/.test(value) ? value : null;
@@ -26,7 +33,7 @@ export function scrubLabel(value: unknown, max: number = ANALYTICS_LIMITS.label)
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '[id]')
     .replace(/\b[a-z]{1,12}_[a-z0-9_]{6,}\b/gi, '[id]')
     .replace(/(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?\.)+\p{L}{2,}\b/gu, '[domain]')
-    .replace(/\S{25,}/g, '[token]')
+    .replace(/\S{25,}/g, run => /\d/.test(run) ? '[token]' : run)
     .replace(/\p{N}+/gu, '#')
     .replace(/\s+/g, ' ').trim();
   return text ? text.slice(0, max).trim() : null;

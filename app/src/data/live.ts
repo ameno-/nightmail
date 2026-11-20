@@ -3,6 +3,7 @@ import { ApiError, type MailRoute, type RoutingTestResult, type Api, type PageRe
 import type { Agent, ApiKey, AppPassword, CreatedAppPassword, DomainQuota } from './types'
 import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogEntry, SenderScore } from './types'
 import { headerPrefix, productName } from '../../../api/src/brand'
+import { analytics } from '../lib/analytics'
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
 // The account this tab acts as (a browser can connect several, data/accounts.ts), sent as X-Nightmail-Account. It is per tab
@@ -66,6 +67,7 @@ export async function request<T = Json>(path: string, options: { method?: string
       body: options.file?.bytes ?? (options.body === undefined ? undefined : JSON.stringify(options.body)) })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error
+    analytics().apiError(options.method ?? 'GET', path, undefined, 'NETWORK_UNAVAILABLE')
     throw new ApiError(`Cannot reach ${productName}. Check the API service and try again.`, 'NETWORK_UNAVAILABLE')
   }
   const data = await response.json().catch(() => null)
@@ -84,12 +86,14 @@ export async function request<T = Json>(path: string, options: { method?: string
     const code = typeof error?.code === 'string' ? error.code : `HTTP_${response.status}`
     const message = typeof error?.message === 'string' ? error.message : 'Couldn’t complete the request.'
     if (response.status === 401 && path.startsWith('/v1/') && path !== '/v1/me') window.dispatchEvent(new Event(code === 'ACCOUNT_SIGNED_OUT' ? 'nightmail:account-signed-out' : 'nightmail:unauthorized'))
+    analytics().apiError(options.method ?? 'GET', path, response.status, code, typeof error?.field === 'string' ? error.field : undefined)
     const failure = new ApiError(message, code, error?.field ? { [error.field]: message } : {}, error?.requestId ?? response.headers.get('x-request-id') ?? undefined, response.status)
     if (failure.requestId) rememberFailedRequest(failure.requestId)
     if (Array.isArray(error?.details)) failure.details = error.details
     throw failure
   }
   if (data === null && response.status !== 204 && path !== '/api/auth/get-session') throw new ApiError('The API returned an invalid response.', 'INVALID_RESPONSE')
+  analytics().apiResult(options.method ?? 'GET', path, data)
   return data as T
 }
 const mapContact = (r: Json): Contact => ({ ...r, name: r.name ?? '', country: typeof r.properties?.country === 'string' ? r.properties.country : '', status: r.suppressed ? 'suppressed' : r.marketingConsent, listIds: r.listIds ?? [], lastOpenedAt: r.lastOpenAt, suppressionReason: r.suppressionReason ?? undefined } as Contact)
