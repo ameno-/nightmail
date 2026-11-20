@@ -5,7 +5,7 @@ config:
   bane:stageNightmailRuntime: "true"
   bane:nightmailGateway: "true"
   bane:nightmailGatewayDesired: "2"
-  bane:nightmailGatewayImage: 009882681002.dkr.ecr.us-east-2.amazonaws.com/nightmail-mail-gateway@sha256:122544ba74d206dd867992bf17f20eac26e7313a716665ded45f44c948fca972
+  bane:nightmailGatewayImage: 009882681002.dkr.ecr.us-east-2.amazonaws.com/nightmail-mail-gateway@sha256:ba55eb285e12aa364ac339987ede5f780495a41154aeb4920cc4049152b4b16f
   bane:nightmailGatewayDns: "false"
   bane:mailGatewayEnabled: "true"
   # Original S3 expiration dates observed before copying to the inactive bucket.
