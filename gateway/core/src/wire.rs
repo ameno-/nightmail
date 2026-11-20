@@ -138,6 +138,14 @@ impl Frame {
     }
 }
 
+/// A command's tag, when its first word is a valid one, whether or not the rest parses.
+pub fn tag(bytes: &[u8]) -> Option<&str> {
+    let first = bytes.split(|&b| b == b' ').next()?;
+    let t = str::from_utf8(first).ok()?;
+    imap_codec::imap_types::core::Tag::try_from(t)
+        .is_ok()
+        .then_some(t)
+}
 pub fn imap(bytes: &[u8]) -> Result<Command<'_>, Error> {
     match CommandCodec::new().decode(bytes) {
         Ok(([], cmd)) => Ok(cmd),

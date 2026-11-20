@@ -28,6 +28,8 @@ const read = z.object({
   after: z.number().int().nonnegative().default(0),
   // A current gateway reads bodies by folder and UID (body below) and keeps no per-message handle.
   handles: z.boolean().default(true),
+  // false: only what was expunged since `since` (gone), for IMAP QRESYNC; no changed messages.
+  changed: z.boolean().default(true),
 });
 const edit = z.object({
   op: z.literal('edit'),
@@ -47,6 +49,9 @@ const mutate = z.object({
   uids: z.array(z.number().int().positive()).max(5000).nullable(),
   flags: z.array(z.string().max(64)).max(64),
   mode: z.enum(['add', 'remove', 'replace']),
+  // IMAP STORE UNCHANGEDSINCE (RFC 7162), flags only: entries changed after this MODSEQ are left alone and answered
+  // as modified.
+  unchangedsince: z.number().int().nonnegative().optional(),
 });
 const body = z.union([
   z.object({ op: z.literal('body'), kid: token, handle: z.string().max(8192), headers: z.boolean().optional() }),
@@ -76,7 +81,10 @@ const projections = z.object({
   folder: name,
   uids: z.array(z.number().int().positive()).min(1).max(256),
 });
-const rpc = z.union([login, read, edit, mutate, body, subjectSearch, fieldSearch, submit, projections]);
+/** The inbox's storage and message limits and use (IMAP QUOTA, RFC 9208); with a folder, also its \Deleted messages
+ *  and their bytes (STATUS DELETED and DELETED-STORAGE). */
+const quota = z.object({ op: z.literal('quota'), kid: token, folder: name.optional() });
+const rpc = z.union([login, read, edit, mutate, body, subjectSearch, fieldSearch, submit, projections, quota]);
 const mac = (key: string, value: string) => createHmac('sha256', key).update(value).digest('hex');
 function equal(a: string, b: string) {
   return /^[a-f0-9]{64}$/.test(a) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -224,6 +232,19 @@ export function registerMailGateway(app: App) {
       if (row.uids.length > 100000) throw new ApiError(413, 'SEARCH_LIMIT', 'Narrow the search.');
       return c.json(row.uids);
     }
+    if (p.op === 'quota') {
+      // The limits (null: none) and use APPEND checks (protocol-append.ts).
+      const deleted = p.folder === undefined ? sql`NULL::jsonb`
+        : sql`(SELECT jsonb_build_object('messages',count(*)::float8,'bytes',coalesce(sum(m.size_bytes),0)::float8) FROM inbox_entries e JOIN mailbox_messages l ON l.mailbox_id=e.inbox_id AND l.message_id=e.message_id JOIN mail_messages m ON m.id=e.message_id AND m.workspace_id=a.w WHERE e.inbox_id=a.b AND e.role=${p.folder} AND e.deleted AND l.held_reason IS NULL)`;
+      const row = (
+        await runtime.db.execute<{ bytes: number; messages: number; quotaBytes: number | null; quotaMessages: number | null; deleted: { messages: number; bytes: number } | null }>(
+          sql`WITH a AS (${auth}) SELECT s.bytes::float8 AS bytes,s.messages::float8 AS messages,b.quota_bytes::float8 AS "quotaBytes",b.quota_messages::float8 AS "quotaMessages",${deleted} AS deleted FROM a JOIN inbox_state s ON s.inbox_id=a.b JOIN mailboxes b ON b.id=a.b`,
+        )
+      ).rows[0];
+      if (!row) throw bad();
+      const { deleted: marked, ...use } = row;
+      return c.json(marked ? { ...use, deleted: marked } : use);
+    }
     if (p.op === 'snapshot') {
       type E = {
         uid: number;
@@ -240,9 +261,13 @@ export function registerMailGateway(app: App) {
         mid: string;
         header: number | null;
       };
+      // Changed messages, unless only expunges are asked for.
+      const entries = p.changed
+        ? sql`coalesce((SELECT jsonb_agg(to_jsonb(x) ORDER BY uid) FROM (SELECT e.uid,e.modseq,e.internal_date AS date,l.flags bits,l.read seen,e.deleted,l.labels,coalesce(m.size_bytes,0) size,m.raw_key key,m.raw_bucket bucket,m.region,m.id mid,(m.mime->>'headerLength')::int header FROM inbox_folders f JOIN inbox_entries e USING(inbox_id,role) JOIN mailbox_messages l ON l.mailbox_id=e.inbox_id AND l.message_id=e.message_id JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=a.w WHERE e.inbox_id=a.b AND inbox_folder_path(f)=${p.path} AND l.held_reason IS NULL AND e.uid>${p.after} AND e.modseq>${p.since} ORDER BY uid LIMIT ${PAGE + 1})x),'[]')`
+        : sql`'[]'::jsonb`;
       const r = (
         await runtime.db.execute<{ w: string; folders: unknown; entries: E[]; gone: { uid: number }[]; floor: string }>(
-          sql`WITH a AS (${auth}) SELECT a.w,${folders} folders,(SELECT changes_floor::text FROM inbox_state WHERE inbox_id=a.b) floor,coalesce((SELECT jsonb_agg(x ORDER BY uid) FROM (SELECT v.uid FROM inbox_vanished v JOIN inbox_folders f USING(inbox_id,role) WHERE ${p.since}::bigint>0 AND v.inbox_id=a.b AND inbox_folder_path(f)=${p.path} AND v.modseq>${p.since} AND v.uid>${p.after} ORDER BY uid LIMIT ${PAGE + 1})x),'[]') AS gone,coalesce((SELECT jsonb_agg(to_jsonb(x) ORDER BY uid) FROM (SELECT e.uid,e.modseq,e.internal_date AS date,l.flags bits,l.read seen,e.deleted,l.labels,coalesce(m.size_bytes,0) size,m.raw_key key,m.raw_bucket bucket,m.region,m.id mid,(m.mime->>'headerLength')::int header FROM inbox_folders f JOIN inbox_entries e USING(inbox_id,role) JOIN mailbox_messages l ON l.mailbox_id=e.inbox_id AND l.message_id=e.message_id JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=a.w WHERE e.inbox_id=a.b AND inbox_folder_path(f)=${p.path} AND l.held_reason IS NULL AND e.uid>${p.after} AND e.modseq>${p.since} ORDER BY uid LIMIT ${PAGE + 1})x),'[]') AS entries FROM a`,
+          sql`WITH a AS (${auth}) SELECT a.w,${folders} folders,(SELECT changes_floor::text FROM inbox_state WHERE inbox_id=a.b) floor,coalesce((SELECT jsonb_agg(x ORDER BY uid) FROM (SELECT v.uid FROM inbox_vanished v JOIN inbox_folders f USING(inbox_id,role) WHERE ${p.since}::bigint>0 AND v.inbox_id=a.b AND inbox_folder_path(f)=${p.path} AND v.modseq>${p.since} AND v.uid>${p.after} ORDER BY uid LIMIT ${PAGE + 1})x),'[]') AS gone,${entries} AS entries FROM a`,
         )
       ).rows[0];
       if (!r) throw bad();
@@ -313,16 +338,23 @@ export function registerMailGateway(app: App) {
     if (!labels.every(keyword)) throw new ApiError(422, 'INVALID_FLAG', 'Invalid keyword.');
     if ((p.action==='flags'||p.action==='copy') && (!p.uids || p.uids.length>1000))throw new ApiError(413,'MUTATION_LIMIT','Request at most 1000 UIDs.');
     if(p.action==='copy'&&(!p.ticket||!p.to))throw new ApiError(422,'MISSING_COPY_TICKET','COPY requires a replay ticket.');
+    // UNCHANGEDSINCE: keep holds the entries at or below it. FOR UPDATE reads each as it is once the inbox lock (the
+    // writer fence, taken first) is held, so the check and the change are one; the rest are answered as modified.
+    const conditional = p.action === 'flags' && p.unchangedsince !== undefined;
+    const uids = conditional ? sql`ARRAY(SELECT uid FROM keep)::bigint[]` : sql`${sql.param(p.uids)}::bigint[]`;
     const mutation=p.action==='copy'&&p.ticket
       ?sql`mailgw_copy_once(a.w,a.b,a.k,${p.folder},${p.to},${sql.param(p.uids)}::bigint[],${p.ticket.nonce},${p.ticket.issued},${createHash('sha256').update(JSON.stringify([p.folder,p.to,p.uids])).digest('hex')})`
-      :sql`mailgw_mutate(a.w,a.b,${p.folder},${p.to},${p.action},${sql.param(p.uids)}::bigint[],${p.mode},${JSON.stringify(flags)}::jsonb,${sql.param(labels)}::text[])`;
+      :sql`mailgw_mutate(a.w,a.b,${p.folder},${p.to},${p.action},${uids},${p.mode},${JSON.stringify(flags)}::jsonb,${sql.param(labels)}::text[])`;
+    const named = sql`e.inbox_id=a.b AND e.role=${p.folder} AND e.uid=ANY(${sql.param(p.uids)}::bigint[])`;
     const row = (
-      await runtime.db.execute<{ r: { pairs: number[][]; validity: number; error?: string } }>(
-        sql`WITH a AS MATERIALIZED (${writer(p.action === 'expunge')}) SELECT ${mutation} r FROM a`,
+      await runtime.db.execute<{ r: { pairs: number[][]; validity: number; error?: string }; modified?: number[] }>(
+        conditional
+          ? sql`WITH a AS MATERIALIZED (${writer(false)}), keep AS MATERIALIZED (SELECT e.uid FROM a JOIN inbox_entries e ON ${named} WHERE e.modseq<=${p.unchangedsince}::bigint FOR UPDATE OF e) SELECT ${mutation} r,ARRAY(SELECT e.uid::float8 FROM inbox_entries e WHERE ${named} AND e.uid NOT IN (SELECT uid FROM keep) ORDER BY e.uid) modified FROM a`
+          : sql`WITH a AS MATERIALIZED (${writer(p.action === 'expunge')}) SELECT ${mutation} r FROM a`,
       )
     ).rows[0];
     if (!row) throw bad();
     if (row.r.error) throw new ApiError(409, 'MUTATION_REFUSED', 'Mutation refused.');
-    return c.json(row.r);
+    return c.json(conditional ? { ...row.r, modified: row.modified } : row.r);
   });
 }

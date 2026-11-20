@@ -1,13 +1,12 @@
 use crate::{
     fetch, search,
     session::{Action, Identity, Protocol, Reply, decode64},
-    store::{Change, Date, Error, Flags, Folder, FolderOp, MailStore, Mode},
+    store::{Change, Date, Error, Flags, Folder, FolderOp, MailStore, Mode, Quota},
     wire,
 };
 use imap_codec::imap_types::{
     auth::AuthMechanism,
     command::{CommandBody as C, FetchModifier, SelectParameter, StoreModifier},
-    core::Tag,
     extensions::binary::LiteralOrLiteral8,
     fetch::{MacroOrMessageDataItemNames as Items, MessageDataItemName as Item},
     flag::{StoreResponse, StoreType},
@@ -133,7 +132,7 @@ impl Imap {
     }
     pub fn capabilities(&self) -> String {
         format!(
-            "IMAP4rev1 IDLE UIDPLUS MOVE SPECIAL-USE LITERAL+ NAMESPACE ENABLE UNSELECT ID ESEARCH LIST-STATUS CONDSTORE QRESYNC APPENDLIMIT={}{}",
+            "IMAP4rev1 IDLE UIDPLUS MOVE SPECIAL-USE LITERAL+ NAMESPACE ENABLE UNSELECT ID LIST-EXTENDED ESEARCH LIST-STATUS CONDSTORE QRESYNC QUOTA QUOTA=RES-STORAGE QUOTA=RES-MESSAGE APPENDLIMIT={}{}",
             wire::MAX_APPEND,
             if !self.tls {
                 " STARTTLS LOGINDISABLED"
@@ -265,14 +264,9 @@ impl Imap {
         let (plain, ret) = cut_return(bytes).unwrap_or_default();
         let cmd = wire::imap(if plain.is_empty() { bytes } else { &plain });
         let Ok(cmd) = cmd else {
-            let tag = bytes
-                .split(|&b| b == b' ')
-                .next()
-                .and_then(|b| str::from_utf8(b).ok())
-                .and_then(|s| Tag::try_from(s).ok());
             return Reply::one(&format!(
                 "{} BAD Invalid command",
-                tag.as_ref().map_or("*", |t| t.inner())
+                wire::tag(bytes).unwrap_or("*")
             ));
         };
         let t = cmd.tag.inner();
@@ -401,7 +395,10 @@ impl Imap {
                     ListMailbox::String(x) => x.as_ref(),
                     ListMailbox::Token(x) => x.as_ref(),
                 };
-                if pat.is_empty() {
+                if !lsub && let Some(o) = &ret.list {
+                    let patterns = o.patterns.clone().unwrap_or_else(|| vec![pat.to_vec()]);
+                    list_extended(&*s, path(reference)?.as_bytes(), &patterns, o, r)?
+                } else if pat.is_empty() {
                     r.line(format!("* {kind} (\\Noselect) \"/\" \"\""))
                 } else {
                     let pat = [path(reference)?.as_bytes(), pat].concat();
@@ -430,12 +427,7 @@ impl Imap {
                                     f.role.unwrap_or("")
                                 },
                                 fetch::quoted(name)
-                            ));
-                            if let Some(items) = &ret.status
-                                && !parent
-                            {
-                                r.line(status_line(name, f, items))
-                            }
+                            ))
                         }
                     }
                 }
@@ -476,7 +468,8 @@ impl Imap {
                         }
                     }
                 }
-                if self.qresync && self.selected.is_some() {
+                // RFC 7162 3.2.11: a server advertising CONDSTORE or QRESYNC marks every implicit close.
+                if self.selected.is_some() {
                     r.line("* OK [CLOSED] Previous mailbox closed")
                 }
                 self.selected = None;
@@ -532,7 +525,10 @@ impl Imap {
                                 e.uid,
                                 fetch::flags(&e.flags),
                                 e.modseq
-                            ))
+                            ));
+                            if r.bytes.len() >= FLUSH {
+                                s.flush(&mut r.bytes)?;
+                            }
                         }
                     }
                 }
@@ -546,7 +542,35 @@ impl Imap {
                     enable_condstore(&mut self.condstore, self.selected.as_ref(), r)
                 }
                 let p = path(mailbox)?;
-                r.line(status_line(p, s.folder(p)?, item_names))
+                let f = s.folder(p)?;
+                let deleted = if wants_deleted(item_names) {
+                    s.deleted(p)?
+                } else {
+                    None
+                };
+                r.line(status_line(p, f, item_names, deleted))
+            }
+            // RFC 9208: one quota root, "", for the whole inbox. A store that can't tell has none.
+            C::GetQuotaRoot { mailbox } => {
+                let p = path(mailbox)?;
+                match s.quota()? {
+                    Some(q) => {
+                        r.line(format!("* QUOTAROOT {} \"\"", fetch::quoted(p)));
+                        r.line(quota_line(&q))
+                    }
+                    None => r.line(format!("* QUOTAROOT {}", fetch::quoted(p))),
+                }
+            }
+            C::GetQuota { root } => match s.quota()? {
+                Some(q) if root.as_ref().is_empty() => r.line(quota_line(&q)),
+                _ => {
+                    r.line(format!("{t} NO [NONEXISTENT] No such quota root"));
+                    return Ok(None);
+                }
+            },
+            C::SetQuota { .. } => {
+                r.line(format!("{t} NO [CANNOT] Quotas can't be changed here"));
+                return Ok(None);
             }
             C::Append {
                 mailbox,
@@ -660,6 +684,7 @@ impl Imap {
                                         &unseen,
                                         Mode::Add,
                                         Flags::from(["\\Seen".into()]),
+                                        None,
                                     ),
                                 )?;
                                 if !items.contains(&Item::Flags) {
@@ -747,11 +772,11 @@ impl Imap {
                         // RFC 7162 3.1.3: UNCHANGEDSINCE leaves the messages changed since alone and names
                         // them in MODIFIED.
                         let mut modified = vec![];
-                        if let Some(n) = modifiers
+                        let unchanged_since = modifiers
                             .iter()
                             .map(|StoreModifier::UnchangedSince(n)| *n)
-                            .next()
-                        {
+                            .next();
+                        if let Some(n) = unchanged_since {
                             enable_condstore(&mut self.condstore, Some(&*sel), r);
                             let f = s.folder(&p)?;
                             uids.retain(|u| {
@@ -781,13 +806,31 @@ impl Imap {
                                     StoreType::Replace => Mode::Replace,
                                 },
                                 flags.iter().map(ToString::to_string).collect(),
+                                unchanged_since,
                             ),
                         );
                         // A large STORE goes in batches. If it stops partway, report the
                         // targets whose flags did change (their MODSEQ moved), then NO.
                         let partial = matches!(applied, Err(Error::Partial));
-                        if !partial {
-                            applied?;
+                        // The store checks UNCHANGEDSINCE again as it applies the change, so a
+                        // change from another session in between is MODIFIED too.
+                        let left = match applied {
+                            Ok(a) => a.modified,
+                            Err(Error::Partial) => vec![],
+                            Err(e) => return Err(e),
+                        };
+                        if !left.is_empty() {
+                            uids.retain(|u| !left.contains(u));
+                            modified.extend(left.iter().map(|u| {
+                                if *uid {
+                                    *u
+                                } else {
+                                    sel.view
+                                        .binary_search_by_key(u, |v| v.0)
+                                        .map_or(0, |i| i as u32 + 1)
+                                }
+                            }));
+                            modified.sort_unstable();
                         }
                         let f = s.folder(&p)?;
                         sel.announce_flags(f, r, false);
@@ -1043,6 +1086,7 @@ impl Imap {
                             r.line(format!("{t} NO [TRYCREATE] No such mailbox"));
                             return Ok(None);
                         }
+                        let shown = sel.view.len();
                         let a = match s.change(
                             &p,
                             Change::Transfer(&sel.targets(sequence_set, *uid), to, moving),
@@ -1069,7 +1113,15 @@ impl Imap {
                                 code.clear()
                             }
                         }
-                        self.merge(s, r)
+                        self.merge(s, r);
+                        // As for EXPUNGE (RFC 7162 3.2.7): with QRESYNC, a MOVE answers the new HIGHESTMODSEQ.
+                        if moving
+                            && self.qresync
+                            && let Some(sel) = &self.selected
+                            && sel.view.len() < shown
+                        {
+                            code = format!("[HIGHESTMODSEQ {}]", sel.synced)
+                        }
                     }
                     C::Expunge | C::ExpungeUid { .. } => {
                         write()?;
@@ -1100,7 +1152,10 @@ impl Imap {
         Ok(Some(code))
     }
 }
-fn status(f: &Folder, s: &Status) -> String {
+/// One STATUS item. `deleted`: the store's own count of a folder's \Deleted messages and their bytes, for a folder
+/// whose messages it doesn't hold (MailStore::deleted).
+fn status(f: &Folder, s: &Status, deleted: Option<(u64, u64)>) -> String {
+    let marked = || f.entries.iter().filter(|e| e.flags.contains("\\Deleted"));
     let (name, n) = match s {
         Status::Messages => ("MESSAGES", f.counts.map_or(f.entries.len(), |c| c.0)),
         Status::Unseen if f.counts.is_some() => ("UNSEEN", f.counts.map_or(0, |c| c.1)),
@@ -1114,18 +1169,13 @@ fn status(f: &Folder, s: &Status) -> String {
         Status::Recent => ("RECENT", 0),
         Status::Deleted => (
             "DELETED",
-            f.entries
-                .iter()
-                .filter(|e| e.flags.contains("\\Deleted"))
-                .count(),
+            deleted.map_or_else(|| marked().count(), |d| d.0 as usize),
         ),
+        // RFC 9208 4.1.4: in KiB, the RFC822.SIZE of the \Deleted messages.
         Status::DeletedStorage => (
             "DELETED-STORAGE",
-            f.entries
-                .iter()
-                .filter(|e| e.flags.contains("\\Deleted"))
-                .map(|e| e.raw.len())
-                .sum::<usize>()
+            deleted
+                .map_or_else(|| marked().map(|e| e.size).sum(), |d| d.1 as usize)
                 .div_ceil(1024),
         ),
         Status::UidValidity => ("UIDVALIDITY", f.validity as usize),
@@ -1134,28 +1184,91 @@ fn status(f: &Folder, s: &Status) -> String {
     };
     format!("{name} {n}")
 }
-fn status_line(p: &str, f: &Folder, items: &[Status]) -> String {
+fn wants_deleted(items: &[Status]) -> bool {
+    items
+        .iter()
+        .any(|i| matches!(i, Status::Deleted | Status::DeletedStorage))
+}
+fn status_line(p: &str, f: &Folder, items: &[Status], deleted: Option<(u64, u64)>) -> String {
     let fields = items
         .iter()
-        .map(|item| status(f, item))
+        .map(|item| status(f, item, deleted))
         .collect::<Vec<_>>()
         .join(" ");
     format!("* STATUS {} ({fields})", fetch::quoted(p))
 }
-/// RETURN options imap-codec doesn't decode, cut from the command before it is: ESEARCH's on SEARCH (RFC 4731), and
-/// SPECIAL-USE and STATUS on a basic LIST (RFC 6154, RFC 5819). SPECIAL-USE changes nothing: LIST always shows roles.
+/// Options imap-codec doesn't decode, cut from the command before it is: ESEARCH's RETURN on SEARCH (RFC 4731), and an
+/// extended LIST's selection options, patterns and RETURN options (RFC 5258; SPECIAL-USE RFC 6154, STATUS RFC 5819).
 #[derive(Default)]
 struct Return {
     /// MIN, MAX, COUNT and ALL.
     search: Option<[bool; 4]>,
+    list: Option<ListExt>,
+}
+/// An extended LIST (RFC 5258). SPECIAL-USE changes nothing: LIST always shows roles.
+#[derive(Default)]
+struct ListExt {
+    /// Selection options: SUBSCRIBED and RECURSIVEMATCH. REMOTE adds nothing here.
+    subscribed: bool,
+    recursive: bool,
+    /// Return options: SUBSCRIBED, CHILDREN and STATUS.
+    show_subscribed: bool,
+    children: bool,
     status: Option<Vec<Status>>,
+    /// A list of patterns; None: the command's one pattern.
+    patterns: Option<Vec<Vec<u8>>>,
+}
+fn strip<'a>(s: &'a [u8], p: &[u8]) -> Option<&'a [u8]> {
+    s.get(..p.len())
+        .filter(|h| h.eq_ignore_ascii_case(p))
+        .map(|_| &s[p.len()..])
+}
+/// The astring or list-mailbox at the start of `b`, decoded, and how many bytes it takes: a quoted string, a literal
+/// or an atom (which may hold LIST wildcards).
+fn token(b: &[u8]) -> Option<(std::borrow::Cow<'_, [u8]>, usize)> {
+    match *b.first()? {
+        b'"' => {
+            let mut out = vec![];
+            let mut i = 1;
+            loop {
+                match *b.get(i)? {
+                    b'\\' => {
+                        out.push(*b.get(i + 1)?);
+                        i += 2
+                    }
+                    b'"' => return Some((out.into(), i + 1)),
+                    c => {
+                        out.push(c);
+                        i += 1
+                    }
+                }
+            }
+        }
+        b'{' => {
+            let close = b.iter().position(|&c| c == b'}')?;
+            let digits = b[1..close].strip_suffix(b"+").unwrap_or(&b[1..close]);
+            let n: usize = str::from_utf8(digits).ok()?.parse().ok()?;
+            let start = close + 3;
+            if b.get(close + 1..start)? != b"\r\n" {
+                return None;
+            }
+            let end = start.checked_add(n)?;
+            Some((b.get(start..end)?.into(), end))
+        }
+        _ => {
+            let n = b
+                .iter()
+                .position(|c| b" ()\"{\r\n".contains(c))
+                .unwrap_or(b.len());
+            (n > 0).then(|| (b[..n].into(), n))
+        }
+    }
 }
 fn cut_return(bytes: &[u8]) -> Option<(Vec<u8>, Return)> {
     let word = |at: usize| {
         let rest = bytes.get(at..)?;
         Some(&rest[..rest.iter().position(|&b| b == b' ').unwrap_or(rest.len())])
     };
-    let starts = |s: &[u8], p: &[u8]| s.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p));
     let tag = word(0)?.len() + 1;
     let uid = word(tag)?.eq_ignore_ascii_case(b"UID");
     let at = tag + if uid { 4 } else { 0 };
@@ -1163,7 +1276,7 @@ fn cut_return(bytes: &[u8]) -> Option<(Vec<u8>, Return)> {
     let at = at + verb.len();
     let key = b" RETURN (";
     let mut ret = Return::default();
-    let (from, to) = if verb.eq_ignore_ascii_case(b"SEARCH") && starts(&bytes[at..], key) {
+    if verb.eq_ignore_ascii_case(b"SEARCH") && strip(&bytes[at..], key).is_some() {
         let open = at + key.len();
         let close = open + bytes[open..].iter().position(|&b| b == b')')?;
         let mut opts = [false; 4];
@@ -1179,22 +1292,34 @@ fn cut_return(bytes: &[u8]) -> Option<(Vec<u8>, Return)> {
             opts[3] = true
         }
         ret.search = Some(opts);
-        (at, close + 1)
-    } else if verb.eq_ignore_ascii_case(b"LIST") && !uid {
-        let from = bytes
-            .windows(key.len())
-            .rposition(|w| w.eq_ignore_ascii_case(key))?;
-        let mut rest = bytes[from + key.len()..].strip_suffix(b")\r\n")?;
+        return Some(([&bytes[..at], &bytes[close + 1..]].concat(), ret));
+    }
+    if !verb.eq_ignore_ascii_case(b"LIST") || uid {
+        return None;
+    }
+    // LIST [SP "(" selection ")"] SP reference SP (pattern / "(" patterns ")") [SP RETURN (options)]
+    let mut o = ListExt::default();
+    let mut extended = false;
+    let mut end = bytes.len().checked_sub(2)?;
+    if let Some(from) = bytes
+        .windows(key.len())
+        .rposition(|w| w.eq_ignore_ascii_case(key))
+        && let Some(mut rest) = bytes[from + key.len()..].strip_suffix(b")\r\n")
+    {
         while !rest.is_empty() {
-            rest = if starts(rest, b"SPECIAL-USE") {
-                &rest[11..]
-            } else if starts(rest, b"STATUS ") {
-                let list = &rest[7..];
-                let close = list.iter().position(|&b| b == b')')? + 1;
-                ret.status = Some(status_items(&list[..close])?);
-                &list[close..]
+            rest = if let Some(r) = strip(rest, b"SPECIAL-USE") {
+                r
+            } else if let Some(r) = strip(rest, b"SUBSCRIBED") {
+                o.show_subscribed = true;
+                r
+            } else if let Some(r) = strip(rest, b"CHILDREN") {
+                o.children = true;
+                r
             } else {
-                return None;
+                let list = strip(rest, b"STATUS ")?;
+                let close = list.iter().position(|&b| b == b')')? + 1;
+                o.status = Some(status_items(&list[..close])?);
+                &list[close..]
             };
             rest = match rest {
                 [b' ', r @ ..] if !r.is_empty() => r,
@@ -1202,11 +1327,166 @@ fn cut_return(bytes: &[u8]) -> Option<(Vec<u8>, Return)> {
                 _ => return None,
             };
         }
-        (from, bytes.len() - 2)
-    } else {
-        return None;
+        (end, extended) = (from, true);
+    }
+    let mut next = at;
+    if bytes.get(at..at + 2) == Some(b" (") {
+        let close = at + 2 + bytes.get(at + 2..end)?.iter().position(|&b| b == b')')?;
+        for opt in bytes[at + 2..close]
+            .split(|&b| b == b' ')
+            .filter(|o| !o.is_empty())
+        {
+            if opt.eq_ignore_ascii_case(b"SUBSCRIBED") {
+                o.subscribed = true
+            } else if opt.eq_ignore_ascii_case(b"RECURSIVEMATCH") {
+                o.recursive = true
+            } else if !opt.eq_ignore_ascii_case(b"REMOTE") {
+                return None;
+            }
+        }
+        // RFC 5258 3.1: RECURSIVEMATCH refines another selection option.
+        if o.recursive && !o.subscribed {
+            return None;
+        }
+        (next, extended) = (close + 1, true);
+    }
+    let rest = bytes.get(next..end)?.strip_prefix(b" ")?;
+    let (reference, rest) = rest.split_at(token(rest)?.1);
+    let rest = rest.strip_prefix(b" ")?;
+    let pattern = match rest.strip_prefix(b"(") {
+        Some(mut list) => {
+            let mut patterns = vec![];
+            loop {
+                let (p, n) = token(list)?;
+                patterns.push(p.into_owned());
+                list = match &list[n..] {
+                    [b')'] => break,
+                    [b' ', r @ ..] => r,
+                    _ => return None,
+                };
+            }
+            (o.patterns, extended) = (Some(patterns), true);
+            &b"\"\""[..]
+        }
+        None => rest,
     };
-    Some(([&bytes[..from], &bytes[to..]].concat(), ret))
+    if !extended {
+        return None;
+    }
+    ret.list = Some(o);
+    let plain = [
+        &bytes[..at],
+        &b" "[..],
+        reference,
+        &b" "[..],
+        pattern,
+        &b"\r\n"[..],
+    ]
+    .concat();
+    Some((plain, ret))
+}
+/// RFC 9208: STORAGE in KiB and MESSAGE, for the limits the inbox has; an empty list means none.
+fn quota_line(q: &Quota) -> String {
+    let mut list = vec![];
+    if let Some(max) = q.max_bytes {
+        list.push(format!("STORAGE {} {}", q.bytes.div_ceil(1024), max / 1024))
+    }
+    if let Some(max) = q.max_messages {
+        list.push(format!("MESSAGE {} {max}", q.messages))
+    }
+    format!("* QUOTA \"\" ({})", list.join(" "))
+}
+/// An extended LIST (RFC 5258) over every pattern, where an empty pattern matches nothing. With RECURSIVEMATCH the
+/// parents of subscribed folders are candidates too, whether or not they exist.
+fn list_extended(
+    s: &dyn MailStore,
+    reference: &[u8],
+    patterns: &[Vec<u8>],
+    o: &ListExt,
+    r: &mut Reply,
+) -> Result<(), Error> {
+    use std::{collections::BTreeSet, ops::Bound};
+    let names = s.folders();
+    let held: BTreeSet<&str> = names.iter().map(String::as_str).collect();
+    let mut candidates = held.clone();
+    if o.recursive {
+        for n in &names {
+            candidates.extend(n.match_indices('/').map(|(i, _)| &n[..i]));
+        }
+    }
+    let globs: Vec<Vec<u8>> = patterns
+        .iter()
+        .filter(|p| !p.is_empty())
+        .map(|p| widest(&[reference, p].concat()))
+        .collect();
+    let listed: usize = candidates.iter().map(|n| n.len() + 1).sum();
+    let work: usize = globs
+        .iter()
+        .map(|g| g.len() - g.iter().take_while(|c| !WILD.contains(c)).count())
+        .sum();
+    if work.saturating_mul(listed) > LIST_WORK {
+        return Err(Error::Limit);
+    }
+    let below = |n: &str| -> Vec<&str> {
+        let (lo, hi) = (format!("{n}/"), format!("{n}0"));
+        held.range::<str, _>((Bound::Included(lo.as_str()), Bound::Excluded(hi.as_str())))
+            .copied()
+            .collect()
+    };
+    for n in candidates {
+        if !globs.iter().any(|g| wildcard(g, n.as_bytes())) {
+            continue;
+        }
+        let f = if held.contains(n) {
+            Some(s.folder(n)?)
+        } else {
+            None
+        };
+        let meets = f.is_some_and(|f| !o.subscribed || f.subscribed);
+        let below = below(n);
+        // RFC 5258 3.5: with RECURSIVEMATCH, a match with a subscribed descendant says so.
+        let childinfo = o.recursive
+            && below
+                .iter()
+                .any(|d| s.folder(d).is_ok_and(|f| f.subscribed));
+        if !meets && !childinfo {
+            continue;
+        }
+        let mut attrs = vec![];
+        match f {
+            Some(f) => attrs.extend(f.role),
+            None => attrs.push("\\NonExistent"),
+        }
+        if (o.subscribed || o.show_subscribed) && f.is_some_and(|f| f.subscribed) {
+            attrs.push("\\Subscribed")
+        }
+        if o.children {
+            attrs.push(if below.is_empty() {
+                "\\HasNoChildren"
+            } else {
+                "\\HasChildren"
+            })
+        }
+        r.line(format!(
+            "* LIST ({}) \"/\" {}{}",
+            attrs.join(" "),
+            fetch::quoted(n),
+            if childinfo {
+                " (\"CHILDINFO\" (\"SUBSCRIBED\"))"
+            } else {
+                ""
+            }
+        ));
+        if meets && let (Some(f), Some(items)) = (f, &o.status) {
+            let deleted = if wants_deleted(items) {
+                s.deleted(n)?
+            } else {
+                None
+            };
+            r.line(status_line(n, f, items, deleted))
+        }
+    }
+    Ok(())
 }
 /// A parenthesized list of STATUS data items, in the STATUS command's grammar.
 fn status_items(list: &[u8]) -> Option<Vec<Status>> {
@@ -1448,9 +1728,11 @@ mod tests {
         }
         fn change(&mut self, path: &str, change: Change<'_>) -> Result<Applied, Error> {
             match change {
-                Change::Flags(uids, mode, flags) => {
-                    self.0
-                        .change(path, Change::Flags(&uids[..uids.len() / 2], mode, flags))?;
+                Change::Flags(uids, mode, flags, since) => {
+                    self.0.change(
+                        path,
+                        Change::Flags(&uids[..uids.len() / 2], mode, flags, since),
+                    )?;
                     Err(Error::Partial)
                 }
                 Change::Transfer(uids, to, moving) => {
@@ -1830,7 +2112,7 @@ mod tests {
     }
 
     /// RFC 5819: RETURN (STATUS (...)) follows each selectable mailbox's LIST line with its STATUS line, alone or
-    /// with SPECIAL-USE in either order. The \Noselect root gets none, and RETURN (SPECIAL-USE) is a plain LIST.
+    /// with SPECIAL-USE in either order, and RETURN (SPECIAL-USE) is a plain LIST.
     #[test]
     fn list_return_status_follows_each_selectable_mailbox() {
         let account = Account::new("mbx_test".into(), vec![], "x".into(), true);
@@ -1891,9 +2173,10 @@ mod tests {
         );
         assert_eq!(step("LIST \"\" \"*\" RETURN (SPECIAL-USE)"), plain);
         assert_eq!(step("LIST \"\" \"*\" RETURN ()"), plain);
+        // An extended LIST matches nothing with an empty pattern (RFC 5258 3).
         assert_eq!(
             step("LIST \"\" \"\" RETURN (STATUS (MESSAGES))"),
-            "* LIST (\\Noselect) \"/\" \"\"\r\na OK  Completed\r\n"
+            "a OK  Completed\r\n"
         );
         for bad in [
             "RETURN (STATUS (BOGUS))",
@@ -1997,6 +2280,8 @@ mod tests {
                         text.contains("* OK [HIGHESTMODSEQ 5] Highest\r\n"),
                         "{text}"
                     );
+                    // RFC 7162 3.2.11: CLOSED on every implicit close, QRESYNC or not.
+                    assert!(text.starts_with("* OK [CLOSED] Previous mailbox closed\r\n"));
                     continue;
                 }
                 "d" => "* 2 FETCH (UID 2 FLAGS (\\Seen) MODSEQ (6))\r\nd OK  Completed\r\n",
@@ -2084,11 +2369,11 @@ mod tests {
                 .unwrap();
             }
             let deleted = Flags::from(["\\Deleted".into()]);
-            m.change("INBOX", Change::Flags(&[2, 4], Mode::Add, deleted))
+            m.change("INBOX", Change::Flags(&[2, 4], Mode::Add, deleted, None))
                 .unwrap();
             m.change("INBOX", Change::Expunge(None)).unwrap();
             let seen = Flags::from(["\\Seen".into()]);
-            m.change("INBOX", Change::Flags(&[5], Mode::Add, seen))
+            m.change("INBOX", Change::Flags(&[5], Mode::Add, seen, None))
                 .unwrap();
             m
         };
@@ -2236,10 +2521,283 @@ mod tests {
             step(&mut one, "f NOOP"),
             "* VANISHED 1\r\n* 1 FETCH (UID 4 FLAGS (\\Flagged) MODSEQ (8))\r\nf OK Completed\r\n"
         );
+        // MOVE answers its HIGHESTMODSEQ as EXPUNGE does.
+        assert_eq!(
+            step(&mut one, "h MOVE 1 Archive"),
+            "* OK [COPYUID 4 4 1] Moved\r\n* VANISHED 4\r\nh OK [HIGHESTMODSEQ 11] Completed\r\n"
+        );
         assert!(
             step(&mut one, "g SELECT Archive")
                 .starts_with("* OK [CLOSED] Previous mailbox closed\r\n")
         );
+    }
+
+    /// RFC 5258: selection options SUBSCRIBED (with RECURSIVEMATCH's CHILDINFO, also on a parent that doesn't exist)
+    /// and REMOTE, return options SUBSCRIBED and CHILDREN, several patterns (a literal among them, and an empty one that
+    /// matches nothing), and BAD for RECURSIVEMATCH alone or an unknown option. A plain LIST is unchanged.
+    #[test]
+    fn list_extended_selects_and_returns() {
+        let account = Account::new("mbx_test".into(), vec![], "x".into(), true);
+        let mut store = Memory::default();
+        let now = Date::default();
+        for (name, subscribed) in [
+            ("Work", false),
+            ("Work/A", true),
+            ("Work/B", false),
+            ("Proj/X", true),
+        ] {
+            store.edit_folder(name, FolderOp::Create).unwrap();
+            if subscribed {
+                store.edit_folder(name, FolderOp::Subscribe(true)).unwrap();
+            }
+        }
+        let mut imap = Imap::new(true);
+        imap.authenticated = true;
+        let mut step = |command: &str| {
+            let r = imap.step(
+                format!("a {command}\r\n").as_bytes(),
+                &account,
+                &mut store,
+                now,
+            );
+            String::from_utf8(r.bytes).unwrap()
+        };
+        let lists = |text: String| {
+            assert!(text.ends_with("a OK  Completed\r\n"), "{text}");
+            text.lines()
+                .filter(|l| l.starts_with("* LIST"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let plain = lists(step("LIST \"\" \"*\""));
+        assert_eq!(plain.len(), 10);
+        assert!(plain.contains(&"* LIST () \"/\" \"Work/A\"".to_owned()));
+        assert_eq!(
+            lists(step("LIST (SUBSCRIBED) \"\" \"*\"")),
+            [
+                "* LIST (\\Archive \\Subscribed) \"/\" \"Archive\"",
+                "* LIST (\\Drafts \\Subscribed) \"/\" \"Drafts\"",
+                "* LIST (\\Subscribed) \"/\" \"INBOX\"",
+                "* LIST (\\Junk \\Subscribed) \"/\" \"Junk\"",
+                "* LIST (\\Subscribed) \"/\" \"Proj/X\"",
+                "* LIST (\\Sent \\Subscribed) \"/\" \"Sent\"",
+                "* LIST (\\Trash \\Subscribed) \"/\" \"Trash\"",
+                "* LIST (\\Subscribed) \"/\" \"Work/A\"",
+            ]
+        );
+        assert_eq!(
+            lists(step("LIST (SUBSCRIBED RECURSIVEMATCH) \"\" \"%\"")),
+            [
+                "* LIST (\\Archive \\Subscribed) \"/\" \"Archive\"",
+                "* LIST (\\Drafts \\Subscribed) \"/\" \"Drafts\"",
+                "* LIST (\\Subscribed) \"/\" \"INBOX\"",
+                "* LIST (\\Junk \\Subscribed) \"/\" \"Junk\"",
+                "* LIST (\\NonExistent) \"/\" \"Proj\" (\"CHILDINFO\" (\"SUBSCRIBED\"))",
+                "* LIST (\\Sent \\Subscribed) \"/\" \"Sent\"",
+                "* LIST (\\Trash \\Subscribed) \"/\" \"Trash\"",
+                "* LIST () \"/\" \"Work\" (\"CHILDINFO\" (\"SUBSCRIBED\"))",
+            ]
+        );
+        assert_eq!(
+            lists(step(
+                "LIST (REMOTE) \"\" (\"INBOX\" {6}\r\nWork/% \"\") RETURN (CHILDREN SUBSCRIBED)"
+            )),
+            [
+                "* LIST (\\Subscribed \\HasNoChildren) \"/\" \"INBOX\"",
+                "* LIST (\\Subscribed \\HasNoChildren) \"/\" \"Work/A\"",
+                "* LIST (\\HasNoChildren) \"/\" \"Work/B\"",
+            ]
+        );
+        assert_eq!(
+            lists(step("LIST \"\" Work RETURN (CHILDREN)")),
+            ["* LIST (\\HasChildren) \"/\" \"Work\""]
+        );
+        assert!(lists(step("LIST () \"\" \"\"")).is_empty());
+        for bad in [
+            "LIST (RECURSIVEMATCH) \"\" \"*\"",
+            "LIST (REMOTE RECURSIVEMATCH) \"\" \"*\"",
+            "LIST (BOGUS) \"\" \"*\"",
+            "LIST \"\" \"*\" RETURN (BOGUS)",
+            "LIST \"\" () RETURN (CHILDREN)",
+        ] {
+            assert_eq!(step(bad), "a BAD Invalid command\r\n", "{bad}");
+        }
+        assert_eq!(lists(step("LIST \"\" \"*\"")), plain);
+    }
+
+    /// RFC 9208: one quota root for the inbox, here the memory store's own bound; GETQUOTA of another root and
+    /// SETQUOTA answer NO; STATUS DELETED and DELETED-STORAGE count \Deleted messages. A store that can't tell has no
+    /// quota root.
+    #[test]
+    fn quota_answers_one_root_for_the_inbox() {
+        let account = Account::new("mbx_test".into(), vec![], "x".into(), true);
+        let now = Date::default();
+        let mut store = Memory::default();
+        store
+            .change(
+                "INBOX",
+                Change::Append {
+                    raw: &[b'x'; 3000],
+                    date: now,
+                    flags: Flags::new(),
+                    source: crate::store::Origin::Client { now },
+                },
+            )
+            .unwrap();
+        let mut unknown = Indexed(Memory::default());
+        let mut imap = Imap::new(true);
+        imap.authenticated = true;
+        let mut step = |store: &mut dyn MailStore, command: &str| {
+            let r = imap.step(format!("a {command}\r\n").as_bytes(), &account, store, now);
+            String::from_utf8(r.bytes).unwrap()
+        };
+        let quota = "* QUOTA \"\" (STORAGE 3 131072)\r\n";
+        for (command, answer) in [
+            (
+                "GETQUOTAROOT INBOX",
+                format!("* QUOTAROOT \"INBOX\" \"\"\r\n{quota}a OK  Completed\r\n"),
+            ),
+            ("GETQUOTA \"\"", format!("{quota}a OK  Completed\r\n")),
+            (
+                "GETQUOTA \"other\"",
+                "a NO [NONEXISTENT] No such quota root\r\n".into(),
+            ),
+            (
+                "SETQUOTA \"\" (STORAGE 10)",
+                "a NO [CANNOT] Quotas can't be changed here\r\n".into(),
+            ),
+        ] {
+            assert_eq!(step(&mut store, command), answer, "{command}");
+        }
+        step(&mut store, "SELECT INBOX");
+        step(&mut store, "STORE 1 +FLAGS (\\Deleted)");
+        assert_eq!(
+            step(
+                &mut store,
+                "STATUS INBOX (MESSAGES DELETED DELETED-STORAGE)"
+            ),
+            "* STATUS \"INBOX\" (MESSAGES 1 DELETED 1 DELETED-STORAGE 3)\r\na OK  Completed\r\n"
+        );
+        let mut imap = Imap::new(true);
+        imap.authenticated = true;
+        let mut step = |command: &str| {
+            let r = imap.step(
+                format!("a {command}\r\n").as_bytes(),
+                &account,
+                &mut unknown,
+                now,
+            );
+            String::from_utf8(r.bytes).unwrap()
+        };
+        assert_eq!(
+            step("GETQUOTAROOT INBOX"),
+            "* QUOTAROOT \"INBOX\"\r\na OK  Completed\r\n"
+        );
+        assert_eq!(
+            step("GETQUOTA \"\""),
+            "a NO [NONEXISTENT] No such quota root\r\n"
+        );
+    }
+
+    /// A store that changes UID 1 just before a conditional flag change, as another session can between the core's
+    /// check of its snapshot and the change.
+    struct Racing(Memory);
+    impl MailStore for Racing {
+        fn folders(&self) -> Vec<String> {
+            self.0.folders()
+        }
+        fn folder(&self, path: &str) -> Result<&Folder, Error> {
+            self.0.folder(path)
+        }
+        fn edit_folder(&mut self, path: &str, op: FolderOp<'_>) -> Result<(), Error> {
+            self.0.edit_folder(path, op)
+        }
+        fn change(&mut self, path: &str, change: Change<'_>) -> Result<Applied, Error> {
+            if let Change::Flags(_, _, _, Some(_)) = &change {
+                let other = Flags::from(["$Other".into()]);
+                self.0
+                    .change(path, Change::Flags(&[1], Mode::Add, other, None))?;
+            }
+            self.0.change(path, change)
+        }
+    }
+
+    /// RFC 7162 3.1.3: the store checks UNCHANGEDSINCE again as it applies the change, so a message changed in between
+    /// is MODIFIED and not answered as stored.
+    #[test]
+    fn unchanged_since_takes_the_stores_answer_too() {
+        let account = Account::new("mbx_test".into(), vec![], "x".into(), true);
+        let now = Date::default();
+        // UIDs 1 and 2 at MODSEQ 2 and 3.
+        let mut store = Racing(Memory::default());
+        for _ in 0..2 {
+            store
+                .0
+                .change(
+                    "INBOX",
+                    Change::Append {
+                        raw: b"Subject: x\r\n\r\nbody",
+                        date: now,
+                        flags: Flags::new(),
+                        source: crate::store::Origin::Client { now },
+                    },
+                )
+                .unwrap();
+        }
+        let mut imap = Imap::new(true);
+        imap.authenticated = true;
+        imap.step(b"a SELECT INBOX\r\n", &account, &mut store, now);
+        let r = imap.step(
+            b"b STORE 1:2 (UNCHANGEDSINCE 3) +FLAGS (\\Seen)\r\n",
+            &account,
+            &mut store,
+            now,
+        );
+        let text = String::from_utf8(r.bytes).unwrap();
+        assert!(
+            text.ends_with(
+                "* 2 FETCH (UID 2 FLAGS (\\Seen) MODSEQ (5))\r\nb OK [MODIFIED 1] Completed\r\n"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("* 1 FETCH"), "{text}");
+    }
+
+    /// A SELECT (QRESYNC ...) that reports many changed messages goes to the store in pieces as a long FETCH does,
+    /// and the pieces and the rest are the whole response.
+    #[test]
+    fn a_long_qresync_select_is_handed_on_as_it_is_built() {
+        let account = Account::new("mbx_test".into(), vec![], "x".into(), true);
+        let now = Date::default();
+        let mut plain = Memory::default();
+        let flags = Flags::from(["$a-keyword-long-enough-to-fill-a-response-quickly".into()]);
+        for _ in 0..4000 {
+            plain
+                .change(
+                    "INBOX",
+                    Change::Append {
+                        raw: b"Subject: x\r\n\r\nbody",
+                        date: now,
+                        flags: flags.clone(),
+                        source: crate::store::Origin::Client { now },
+                    },
+                )
+                .unwrap();
+        }
+        let select = |store: &mut dyn MailStore| {
+            let mut imap = Imap::new(true);
+            imap.authenticated = true;
+            imap.step(b"a ENABLE QRESYNC\r\n", &account, store, now);
+            imap.step(b"b SELECT INBOX (QRESYNC (1 1))\r\n", &account, store, now)
+                .bytes
+        };
+        let whole = select(&mut plain);
+        let mut streamed = Flushing(plain, Default::default());
+        let rest = select(&mut streamed);
+        let pieces = streamed.1.into_inner();
+        assert!(!pieces.is_empty());
+        assert!(rest.ends_with(b"b OK [READ-WRITE] Completed\r\n"));
+        assert_eq!([pieces.concat(), rest].concat(), whole);
     }
 
     /// Found by gateway/tear on the Remote store (witness: B create Work, A select Work,

@@ -61,7 +61,9 @@ pub enum Change<'a> {
         flags: Flags,
         source: Origin,
     },
-    Flags(&'a [u32], Mode, Flags),
+    /// With a MODSEQ (STORE UNCHANGEDSINCE, RFC 7162 3.1.3), messages changed after it are left alone and named in
+    /// Applied::modified.
+    Flags(&'a [u32], Mode, Flags, Option<u64>),
     Transfer(&'a [u32], &'a str, bool),
     Expunge(Option<&'a [u32]>),
 }
@@ -81,9 +83,19 @@ pub enum FolderOp<'a> {
     Rename(&'a str),
     Subscribe(bool),
 }
+/// An inbox's storage (bytes) and messages, used and allowed (RFC 9208); None: no limit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Quota {
+    pub bytes: u64,
+    pub messages: u64,
+    pub max_bytes: Option<u64>,
+    pub max_messages: Option<u64>,
+}
 pub struct Applied {
     pub validity: u32,
     pub pairs: Vec<(u32, u32)>,
+    /// The UIDs a conditional flag change left alone.
+    pub modified: Vec<u32>,
 }
 
 pub trait MailStore {
@@ -123,12 +135,23 @@ pub trait MailStore {
     fn vanished(&self, _path: &str, _since: u64) -> Result<Option<Vec<u32>>, Error> {
         Ok(None)
     }
+    /// The inbox's quota (RFC 9208), or None when the store can't tell.
+    fn quota(&self) -> Result<Option<Quota>, Error> {
+        Ok(None)
+    }
+    /// A folder's \Deleted messages and their bytes when the store doesn't hold its messages (STATUS DELETED and
+    /// DELETED-STORAGE); None: they are counted from the folder's own.
+    fn deleted(&self, _path: &str) -> Result<Option<(u64, u64)>, Error> {
+        Ok(None)
+    }
     fn folders(&self) -> Vec<String>;
     fn folder(&self, path: &str) -> Result<&Folder, Error>;
     fn edit_folder(&mut self, path: &str, op: FolderOp<'_>) -> Result<(), Error>;
     /// Atomic, with one inbox-wide MODSEQ. Returns the destination UID mapping for UIDPLUS.
     fn change(&mut self, path: &str, change: Change<'_>) -> Result<Applied, Error>;
 }
+/// What the memory store keeps in all.
+const MEMORY_BYTES: usize = 128 << 20;
 pub struct Memory {
     folders: BTreeMap<String, Folder>,
     seq: u64,
@@ -259,6 +282,16 @@ impl MailStore for Memory {
         }
         Ok(())
     }
+    /// The fixture's own bound on what it keeps (Change::Append).
+    fn quota(&self) -> Result<Option<Quota>, Error> {
+        let entries = || self.folders.values().flat_map(|f| &f.entries);
+        Ok(Some(Quota {
+            bytes: entries().map(|e| e.raw.len() as u64).sum(),
+            messages: entries().count() as u64,
+            max_bytes: Some(MEMORY_BYTES as u64),
+            max_messages: None,
+        }))
+    }
     fn vanished(&self, path: &str, since: u64) -> Result<Option<Vec<u32>>, Error> {
         self.folder(path)?;
         let Some((floor, list)) = self.gone.get(path) else {
@@ -271,6 +304,7 @@ impl MailStore for Memory {
         let mut result = Applied {
             validity: f.validity,
             pairs: vec![],
+            modified: vec![],
         };
         self.seq += 1;
         let seq = self.seq;
@@ -317,7 +351,7 @@ impl MailStore for Memory {
                     .map(|e| e.raw.len())
                     .sum::<usize>()
                     + raw.len()
-                    > 128 << 20
+                    > MEMORY_BYTES
                 {
                     return Err(Error::Limit);
                 }
@@ -344,7 +378,14 @@ impl MailStore for Memory {
                     self.submitted.insert(id, (now, uid));
                 }
             }
-            Change::Flags(uids, mode, flags) => {
+            Change::Flags(uids, mode, flags, unchanged_since) => {
+                let held = &self.folder(path)?.entries;
+                let (uids, modified): (Vec<u32>, Vec<u32>) = uids.iter().partition(|u| {
+                    held.iter()
+                        .find(|e| e.uid == **u)
+                        .is_none_or(|e| unchanged_since.is_none_or(|n| e.modseq <= n))
+                });
+                result.modified = modified;
                 let ids: BTreeSet<_> = self
                     .folder(path)?
                     .entries
@@ -458,6 +499,7 @@ mod tests {
                 &[copied],
                 Mode::Add,
                 Flags::from(["\\Seen".into(), "\\Deleted".into()]),
+                None,
             ),
         )
         .unwrap();
