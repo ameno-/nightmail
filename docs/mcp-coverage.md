@@ -288,6 +288,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `refreshConnectionScan` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `importConnectionDomains` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `requestConnectionProductionAccess` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
+| `updateConnectionStack` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `getConnectionRegionStatus` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `verifyConnection` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `getPublicStats` | Public, installation-wide homepage numbers; no workspace data. |

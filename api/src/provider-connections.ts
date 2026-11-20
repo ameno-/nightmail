@@ -11,7 +11,8 @@ import { loadMailboxSetupSdk, preparePoolReceiving } from './mailbox-setup.js';
 import { byoEnabled } from './byo-pilot.js';
 import { hostedAllowance, type HostedAllowance } from './hosted-sending.js';
 import { requirePlatformAccount } from './config.js';
-import { Accepted, Imports, InventoryFields, ProductionAccess, ProductionAccessState, RegionStatus, disconnectV5, enrollV5, inventory, refreshScan, regionLabels, requestProductionAccess, selectImports, statuses, v5Link, type V5Connection } from './byo-regional.js';
+import { Accepted, Imports, InventoryFields, ProductionAccess, ProductionAccessState, RegionStatus, StackUpdate, disconnectV5, enrollV5, inventory, prepareStackUpdate, refreshScan, regionLabels, requestProductionAccess, selectImports, statuses, v5Link, type V5Connection } from './byo-regional.js';
+import { BYO_TEMPLATE_VERSIONS, byoFeatures, versionAtLeast } from './byo-permissions.js';
 import { CONNECTION_STATES, TENANT_STATES, assertConnectionTransition, campaignActive, desiredTenantStatus, finishProvisioning, notProvisioning, poolReceives, poolSends, setPoolState, setTenantState, startProvisioning, queueTenantJob, type ConnectionState, type TenantState } from './states.js';
 
 const tags = ['Workspaces'], security = [{ dashboardSession: [] }, { secureDashboardSession: [] }] as Record<string, string[]>[];
@@ -20,7 +21,7 @@ const AccountId = z.string().regex(/^\d{12}$/).openapi({ example: '123456789012'
 const Create = z.object({ kind: Kind, region: z.string().max(32).regex(regionPattern).optional(), awsAccountId:AccountId.optional() }).strict().openapi('CreateConnection');
 const State = z.enum(CONNECTION_STATES).describe('awaiting_role: waiting for the BYO stack. provisioning: verifying regional resources and importing verified domains. ready: sending allowed once the tenant is ready. failed: the last setup attempt failed; verify again.');
 const Tenant = z.enum(TENANT_STATES).describe('Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready.');
-const Connection = z.object({ id: z.string(), kind: Kind, region: z.string(), state: State, tenant: Tenant, importedDomains: z.number().int().nonnegative().describe('Number of currently claimed domains imported from this BYO account.'), awsAccountId: z.string().nullable(), roleArn: z.string().nullable(), templateVersion: z.string().nullable(), quickCreateUrl: z.url().nullable(), stack: z.object({ version: z.string().nullable().describe('The role template version the stack reports.'), deleted: z.boolean().describe('The stack was deleted in AWS.'), error: z.string().nullable().describe('Why the last stack was refused, to show in setup.') }).nullable().describe('A connected AWS account\'s CloudFormation stack (regional bring-your-own AWS only).'),...InventoryFields }).openapi('ProviderConnection');
+const Connection = z.object({ id: z.string(), kind: Kind, region: z.string(), state: State, tenant: Tenant, importedDomains: z.number().int().nonnegative().describe('Number of currently claimed domains imported from this BYO account.'), awsAccountId: z.string().nullable(), roleArn: z.string().nullable(), templateVersion: z.string().nullable(), quickCreateUrl: z.url().nullable(), stack: z.object({ version: z.string().nullable().describe('The role template version the stack reports.'), latest: z.string().describe('The newest published role template.'), updateAvailable: z.boolean().describe('updateConnectionStack can prepare an update to the newest template.'), features: z.array(z.string()).describe('Features the stack\'s template grants.'), deleted: z.boolean().describe('The stack was deleted in AWS.'), error: z.string().nullable().describe('Why the last stack was refused, to show in setup.') }).nullable().describe('A connected AWS account\'s CloudFormation stack (regional bring-your-own AWS only).'), health: z.object({ checkedAt: z.iso.datetime(), issues: z.array(z.object({ code: z.string(), region: z.string().optional(), message: z.string() })) }).nullable().describe('The connected account\'s last health check: what needs attention.'),...InventoryFields }).openapi('ProviderConnection');
 // Safe for every workspace member: no account IDs, role ARNs or external IDs.
 export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), state: State, tenant: Tenant,
   sendingPause: z.object({ at: z.iso.datetime(), reason: z.string() }).nullable().describe('Hosted reputation hold: sending and dispatch are paused until operator review. Receiving is unaffected.'),
@@ -34,8 +35,9 @@ export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), stat
   standing: z.object({ step: z.enum(['ok', 'notice', 'warn', 'restrict', 'pause']), marketingHeld: z.boolean() }).nullable().optional()
     .describe('Hosted only: the enforcement step summary. GET /v1/sender-score has the reasons, the limit math and what an owner can release.'),
   domains: z.object({ total: z.number().int(), verified: z.number().int() }).optional().describe('Domains claimed in this workspace and how many can send.'),
+  attention: z.string().optional().describe('A connected AWS account\'s most pressing health finding, for a banner; absent when nothing needs attention.'),
 }).openapi('ConnectionSummary');
-type Row = { id: string; stack_name?: string | null; workspace_id: string; kind: 'shared' | 'byo'; region: string; state: ConnectionState; tenant_state: TenantState; aws_account_id: string | null; role_arn: string | null; external_id: string | null; platform_principal_arn: string | null; template_version: string | null; confirmed_message_id: string | null; imported_domains?: number; stack_template_version?: string | null; stack_deleted_at?: string | null; stack_error?: string | null };
+type Row = { id: string; stack_name?: string | null; workspace_id: string; kind: 'shared' | 'byo'; region: string; state: ConnectionState; tenant_state: TenantState; aws_account_id: string | null; role_arn: string | null; external_id: string | null; platform_principal_arn: string | null; template_version: string | null; confirmed_message_id: string | null; imported_domains?: number; stack_template_version?: string | null; stack_deleted_at?: string | null; stack_error?: string | null; stack_id?: string | null; health?: { checkedAt: string; issues: { code: string; region?: string; message: string }[] } | null };
 
 function owner(c: Ctx) {
   if (!c.env.config.multiTenant) return notFound('Endpoint');
@@ -79,15 +81,16 @@ function view(runtime: Runtime, row: Row) {
     quickCreateUrl = `https://${row.region}.console.aws.amazon.com/cloudformation/home?region=${row.region}#/stacks/create/review?${params}`;
   }
   return { id: row.id, kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, importedDomains: row.imported_domains ?? 0, awsAccountId: row.aws_account_id, roleArn: row.role_arn, templateVersion: row.template_version, quickCreateUrl,
-    stack: row.template_version==='v5' ? { version: row.stack_template_version ?? null, deleted: !!row.stack_deleted_at, error: row.stack_error ?? null } : null };
+    stack: row.template_version==='v5' ? { version: row.stack_template_version ?? null, latest: BYO_TEMPLATE_VERSIONS.at(-1)!, updateAvailable: !!row.stack_id && !versionAtLeast(row.stack_template_version, BYO_TEMPLATE_VERSIONS.at(-1)!), features: byoFeatures(row.stack_template_version), deleted: !!row.stack_deleted_at, error: row.stack_error ?? null } : null,
+    health: row.template_version==='v5' ? row.health ?? null : null };
 }
 async function get(runtime: Runtime, wid: string) {
   return (await runtime.db.execute<Row>(sql`SELECT c.*, (SELECT count(*)::int FROM domain_claims dc WHERE dc.connection_id=c.id AND dc.identity @> '{"imported":true}') AS imported_domains FROM provider_connections c WHERE workspace_id=${wid}`)).rows[0];
 }
 export async function connectionSummary(runtime: Runtime, wid: string): Promise<z.infer<typeof ConnectionSummary> | null> {
   // One statement: the same allowance admission charges against (incoming=1 reads the current usage), read without row locks.
-  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {paused_at: string | null; pause_reason: string | null; domains: number; verified_domains: number; allowance: HostedAllowance | null}>(sql`
-    SELECT c.kind, c.region, c.state, c.tenant_state, c.paused_at, c.pause_reason,
+  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {attention: string | null; paused_at: string | null; pause_reason: string | null; domains: number; verified_domains: number; allowance: HostedAllowance | null}>(sql`
+    SELECT c.kind, c.region, c.state, c.tenant_state, c.paused_at, c.pause_reason, c.health->'issues'->0->>'message' AS attention,
       (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id) AS domains,
       (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND dc.sending_state IN ('verified','lost')) AS verified_domains,
       CASE WHEN c.kind='shared' THEN ${hostedAllowance(runtime.config, wid, 1, 0, true)} END AS allowance
@@ -98,7 +101,7 @@ export async function connectionSummary(runtime: Runtime, wid: string): Promise<
   return { kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, sendingPause: row.paused_at ? { at: new Date(row.paused_at).toISOString(), reason: row.pause_reason! } : null,
     sendingLimit: allowance ? { cap: allowance.cap, used: Number(allowance.used), resetAt: iso(allowance.resetAt), nextCap: allowance.nextCap ?? null, nextCapAt: iso(allowance.nextCapAt) } : null,
     standing: allowance ? { step: (allowance.step ?? 'ok') as 'ok', marketingHeld: !!allowance.marketingHeld } : null,
-    domains: { total: row.domains, verified: row.verified_domains } };
+    domains: { total: row.domains, verified: row.verified_domains }, ...(row.attention ? { attention: row.attention } : {}) };
 }
 function checkProvisioned(report: SesDiscovery, pooled: boolean, allowSandbox = false) {
   // Domain verification and a BYO customer's production-access request are separate onboarding steps.
@@ -459,6 +462,9 @@ export function registerProviderConnections(app: App) {
   app.openapi(createRoute({method:'post',path:path+'/regions/{region}/production-access',operationId:'requestConnectionProductionAccess',tags,security,description:'Ask AWS for SES production access in one region of the connected account, with the details the owner confirmed. Refused when the region already has access or a request is under review, so existing account details are never overwritten. Sending in a region starts only once AWS grants access.',request:{params:z.object({region:z.string().max(32).regex(regionPattern)}),body:json(ProductionAccess)},responses:{200:response(ProductionAccessState),...errors}}),async c=>{
     const wid=owner(c),{region}=c.req.valid('param'),input=c.req.valid('json');
     return c.json(await requestProductionAccess(c.env,wid,region,input,(db,id)=>recordAudit(db,c,{action:'connection.production_access',workspaceId:wid,target:{type:'connection',id},after:{region,mailType:input.mailType,websiteUrl:input.websiteUrl}})),200);
+  });
+  app.openapi(createRoute({method:'post',path:path+'/stack/update',operationId:'updateConnectionStack',tags,security,description:'Prepare an update of the connected account\'s stack to the newest published role template, keeping every parameter. Returns the AWS console page of the change set, which the customer reviews and runs; nothing changes until they do.',responses:{200:response(StackUpdate),...errors}}),async c=>{
+    return c.json(await prepareStackUpdate(c.env,owner(c)),200);
   });
   app.openapi(createRoute({method:'get',path:path+'/regions/status',operationId:'getConnectionRegionStatus',tags,security,description:'Read regional AWS inventory, access, ownership journals and setup errors. Does not contact AWS.',responses:{200:response(RegionStatus),...errors}}),async c=>{
     const wid=owner(c),row=await get(c.env,wid);if (row?.template_version!=='v5') return notFound('Regional connection');return c.json({regions:await statuses(c.env.db,row.id)},200);

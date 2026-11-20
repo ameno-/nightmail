@@ -485,8 +485,12 @@
    "score": 13,
    "findings": []
   },
+  "Settings · sending · AWS · desktop": {
+   "score": 15,
+   "findings": []
+  },
   "Settings · sending · desktop": {
-   "score": 10,
+   "score": 7,
    "findings": []
   },
   "Settings · webhook · desktop": {

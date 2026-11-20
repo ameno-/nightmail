@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { ApiError, denied, id, lazyModule, log, ModuleLoadError, notFound, type Runtime, type DbExecutor, type JobHandler } from './core.js';
 import { productName } from './brand.js';
 import { assume, brokerRoleArn, loadStsSdk } from './provider-credentials.js';
-import { BYO_TEMPLATE_VERSIONS, byoSessionPolicy, type ByoPurpose } from './byo-permissions.js';
+import { BYO_TEMPLATE_VERSIONS, byoSessionPolicy, byoTemplateUrl, versionAtLeast, type ByoPurpose } from './byo-permissions.js';
 import { requirePlatformAccount } from './config.js';
 import { awsError, byoFeedbackUrl, loadSetupSdk, provisionJournaledFeedback, readSelectedDomains, removeByoFeedbackResource, scanRegionPage, setupResources, type Inventory, type CandidateIdentity, type JournalEntry, type ScanStage, byoStackName } from './ses-setup.js';
 import { JobDeferred, retryDatabaseFailures } from './jobs.js';
@@ -15,7 +15,7 @@ import { lockSendScope } from './send-scope.js';
 import { byoEnabled } from './byo-pilot.js';
 
 export const regionLabels:Record<string,string>={'us-east-2':'Ohio','us-east-1':'N. Virginia','us-west-1':'N. California','us-west-2':'Oregon','af-south-1':'Cape Town','ap-south-1':'Mumbai','ap-south-2':'Hyderabad','ap-southeast-1':'Singapore','ap-southeast-2':'Sydney','ap-southeast-3':'Jakarta','ap-southeast-4':'Melbourne','ap-southeast-5':'Malaysia','ap-southeast-6':'New Zealand','ap-southeast-7':'Thailand','ap-northeast-1':'Tokyo','ap-northeast-2':'Seoul','ap-northeast-3':'Osaka','ca-central-1':'Canada Central','ca-west-1':'Calgary','eu-central-1':'Frankfurt','eu-central-2':'Zurich','eu-west-1':'Ireland','eu-west-2':'London','eu-west-3':'Paris','eu-south-1':'Milan','eu-south-2':'Spain','eu-north-1':'Stockholm','il-central-1':'Tel Aviv','mx-central-1':'Mexico Central','me-south-1':'Bahrain','me-central-1':'UAE','sa-east-1':'São Paulo'};
-export type V5Connection={id:string;stack_name:string|null;workspace_id:string;requested_account:string|null;stack_id:string|null;stack_template_version:string|null;stack_deleted_at:string|null;stack_error:string|null;resource_prefix:string;aws_account_id:string|null;role_arn:string|null;external_id:string;inventory_revision:number;state:string;region:string;disconnect_error:{region:string|null;code:string}|null};
+export type V5Connection={id:string;stack_name:string|null;workspace_id:string;requested_account:string|null;stack_id:string|null;stack_template_version:string|null;stack_deleted_at:string|null;stack_error:string|null;resource_prefix:string;health:{checkedAt:string;issues:{code:string;region?:string;message:string}[]}|null;aws_account_id:string|null;role_arn:string|null;external_id:string;inventory_revision:number;state:string;region:string;disconnect_error:{region:string|null;code:string}|null};
 type ScanRow={region:string;scan_state:string;scan_error:string|null;scan_facts:Inventory;scan_revision:string;sending_state:string;receiving_state:string;provision_error:string|null;ownership_journal:JournalEntry[]};
 const conflict=(code:string,message:string)=>new ApiError(409,code,message);
 const stale=()=>conflict('SCAN_STALE','Refresh the list and select verified domains from a completed regional scan.');
@@ -618,6 +618,78 @@ const stackJob:JobHandler=retryDatabaseFailures(async(r,p)=>{
     if (e instanceof ApiError && e.code==='CONNECTION_CHANGED') return fail(`This ${productName} connection changed while the stack was created. Start again from Connect AWS.`);
     throw e;
   }
+  await r.db.execute(sql`INSERT INTO jobs(id,workspace_id,type,payload,available_at) VALUES(${'byo.health:'+c.id+':connected'},${c.workspace_id},'byo.health',${JSON.stringify({connectionId:c.id,run:id('run')})}::jsonb,now()+interval '2 minutes') ON CONFLICT(id) DO NOTHING`);
   return answerStack(req,'SUCCESS',`Connected to ${productName}.`);
 });
-export const regionalByoJobs:Record<string,JobHandler>={'byo.prove':prove,'byo.scan':scan,'byo.provision':provision,'byo.bind':bind,'byo.disconnect':disconnect,'byo.stack':stackJob};
+// Health. Hourly (maintenance.ts) and once a stack connects: can the role still be used, is the stack still there, and is
+// each sending region still enabled, healthy and out of the sandbox. Findings are shown to the workspace (the connection
+// view and /v1/me); nothing is changed in AWS, and only the affected region or feature is reported.
+type Issue={code:string;region?:string;message:string};
+export async function queueByoHealth(r:Runtime) {
+  if (!r.config.multiTenant || !r.config.byoV2) return 0;
+  return (await r.db.execute(sql`INSERT INTO jobs(id,workspace_id,type,payload) SELECT 'byo.health:'||c.id||':'||to_char(date_trunc('hour',now()),'YYYYMMDDHH24'),c.workspace_id,'byo.health',jsonb_build_object('connectionId',c.id,'run',gen_random_uuid())
+    FROM provider_connections c JOIN workspaces w ON w.id=c.workspace_id WHERE c.kind='byo' AND c.template_version='v5' AND c.aws_account_id IS NOT NULL AND c.state<>'disconnecting' AND w.byo_v2_enabled ON CONFLICT(id) DO NOTHING`)).rowCount ?? 0;
+}
+const healthJob=runV5(async(r,c)=>{
+  if (!c.aws_account_id) return;
+  await Promise.all([loadStsSdk(),loadSetupSdk()]);
+  const issues:Issue[]=[];let version=c.stack_template_version;
+  if (c.stack_id) {
+    const own=await readStack(r,c,c.stack_id),stack=own?.stack;
+    if (!stack) issues.push({code:'ROLE_UNREACHABLE',message:`${productName} can’t use the role in your AWS account. If its stack was deleted or changed, disconnect and connect again.`});
+    else if (/^DELETE_/.test(stack.StackStatus ?? '')) issues.push({code:'STACK_DELETED',message:`The ${productName} stack was deleted in AWS. Disconnect, then connect again to keep sending.`});
+    else version=knownVersion(stack.Outputs?.find(o=>o.OutputKey==='TemplateVersion')?.OutputValue) ?? version;
+  }
+  const regions=(await r.db.execute<{region:string}>(sql`SELECT region FROM provider_connection_regions WHERE connection_id=${c.id} AND sending_state='ready' ORDER BY region`)).rows;
+  if (!issues.some(i=>i.code==='ROLE_UNREACHABLE')) for (const {region} of regions) {
+    const label=regionLabels[region] ?? region;
+    try {
+      const aws=await assume(r,region,c.role_arn!,c.external_id,false,byoSessionPolicy('quota',{region,account:c.aws_account_id,connectionId:c.id}),{connectionId:c.id,purpose:'quota'});
+      const [{SESv2Client,GetAccountCommand},{FetchHttpHandler}]=await Promise.all([import('@aws-sdk/client-sesv2'),import('@smithy/fetch-http-handler')]);
+      const client=new SESv2Client({region,credentials:aws,ignoreConfiguredEndpointUrls:true,maxAttempts:2,requestHandler:new FetchHttpHandler({requestTimeout:8000})});
+      let a;try { a=await client.send(new GetAccountCommand({})); } finally { client.destroy(); }
+      const review=a.Details?.ReviewDetails,q=a.SendQuota;
+      await r.db.execute(sql`UPDATE provider_connection_regions SET scan_facts=scan_facts||${JSON.stringify({production:a.ProductionAccessEnabled,review:review?{status:review.Status??'UNKNOWN',caseId:review.CaseId??null}:null,enforcement:a.EnforcementStatus,sendingEnabled:a.SendingEnabled,
+        ...(q?{max24HourSend:q.Max24HourSend,maxSendRate:q.MaxSendRate,sentLast24Hours:q.SentLast24Hours}:{})})}::jsonb WHERE connection_id=${c.id} AND region=${region}`);
+      if (a.SendingEnabled===false) issues.push({code:'SENDING_PAUSED',region,message:`AWS paused sending for this account in ${label}. Check the SES console.`});
+      else if (a.EnforcementStatus==='SHUTDOWN' || a.EnforcementStatus==='PROBATION') issues.push({code:'SES_'+a.EnforcementStatus,region,message:`AWS put SES in ${label} on ${a.EnforcementStatus==='SHUTDOWN'?'shutdown':'probation'}. Check the SES console.`});
+      if (a.ProductionAccessEnabled===false) issues.push({code:'PRODUCTION_ACCESS_LOST',region,message:`${label} is back in the SES sandbox: mail reaches only verified addresses.`});
+    } catch(e) {
+      if (e instanceof ModuleLoadError) throw e;
+      const err=awsError(e);
+      if (err.code==='AWS_ACCESS_DENIED') issues.push({code:'ROLE_CHANGED',region,message:`AWS refused a permission ${productName} needs in ${label}. Update the stack, or check changes made to its role.`});
+      else if (!err.retryable) throw err;
+    }
+  }
+  await r.db.execute(sql`UPDATE provider_connections SET health=${JSON.stringify({checkedAt:new Date().toISOString(),issues})}::jsonb,stack_template_version=coalesce(${version},stack_template_version) WHERE id=${c.id}`);
+  log(issues.length?'warn':'info',{code:'BYO_HEALTH',connectionId:c.id,issues:issues.map(i=>i.code)});
+});
+
+// Updating the stack. Nightmail prepares a change set of the customer's own stack from its newest published template,
+// keeping every parameter (so the stack name, role and external ID stay); the customer reviews and runs it in AWS.
+export const StackUpdate=z.object({version:z.string(),changeSetId:z.string(),consoleUrl:z.url()}).openapi('ConnectionStackUpdate');
+export async function prepareStackUpdate(r:Runtime,wid:string) {
+  const c=await requiredV5(r,wid);
+  if (!c.aws_account_id || !c.stack_id || !c.stack_name) throw conflict('STACK_UNKNOWN',`This connection has no stack ${productName} can update. Update it in the CloudFormation console.`);
+  const latest=BYO_TEMPLATE_VERSIONS.at(-1)!;
+  if (versionAtLeast(c.stack_template_version,latest)) throw conflict('STACK_UP_TO_DATE',`The stack already runs template ${latest}.`);
+  const platform=requirePlatformAccount(r.config.platformAccount),templateUrl=byoTemplateUrl(platform,latest),changeSet=`nightmail-update-${latest.replace('.','-')}-${Date.now().toString(36)}`;
+  await Promise.all([loadStsSdk(),loadSetupSdk()]);
+  const aws=await assume(r,'us-east-2',c.role_arn!,c.external_id,false,byoSessionPolicy('update',{region:'us-east-2',account:c.aws_account_id,connectionId:c.id,stack:c.stack_name,templateUrl,changeSet}),{connectionId:c.id,purpose:'update'});
+  const [{CloudFormationClient,DescribeStacksCommand,CreateChangeSetCommand},{FetchHttpHandler}]=await loadCloudFormation();
+  const client=new CloudFormationClient({region:'us-east-2',credentials:aws,ignoreConfiguredEndpointUrls:true,maxAttempts:2,requestHandler:new FetchHttpHandler({requestTimeout:8000})});
+  try {
+    const stack=(await client.send(new DescribeStacksCommand({StackName:c.stack_id}))).Stacks?.[0];
+    if (!stack || /^DELETE_/.test(stack.StackStatus ?? '')) throw conflict('STACK_UNKNOWN',`The ${productName} stack is gone. Disconnect, then connect again.`);
+    const out=await client.send(new CreateChangeSetCommand({StackName:c.stack_id,ChangeSetName:changeSet,ChangeSetType:'UPDATE',TemplateURL:templateUrl,Capabilities:['CAPABILITY_NAMED_IAM'],
+      Parameters:(stack.Parameters ?? []).map(p=>({ParameterKey:p.ParameterKey,UsePreviousValue:true})),Description:`${productName} role template ${latest}`}));
+    const id=out.Id!;
+    return {version:latest,changeSetId:id,consoleUrl:`https://us-east-2.console.aws.amazon.com/cloudformation/home?region=us-east-2#/stacks/changesets/changes?stackId=${encodeURIComponent(c.stack_id)}&changeSetId=${encodeURIComponent(id)}`};
+  } catch(e) {
+    if (e instanceof ApiError) throw e;
+    if (awsError(e).code==='AWS_ACCESS_DENIED') throw conflict('STACK_UPDATE_DENIED',`AWS refused to prepare the update. In the CloudFormation console, update the stack with ${templateUrl} and keep every parameter.`);
+    throw awsError(e);
+  } finally { client.destroy(); }
+}
+
+export const regionalByoJobs:Record<string,JobHandler>={'byo.prove':prove,'byo.scan':scan,'byo.provision':provision,'byo.bind':bind,'byo.disconnect':disconnect,'byo.stack':stackJob,'byo.health':healthJob};

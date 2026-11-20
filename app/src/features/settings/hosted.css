@@ -30,6 +30,8 @@
 .settings-row__label .muted { font-size: var(--text-xs); line-height: var(--leading-xs); }
 .settings-row__control { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); min-width: 0; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .settings-inline { flex-wrap: nowrap; }
+/* A connected AWS account's health finding: the message, in the warning tone. */
+.settings-attention { color: var(--color-warning); text-align: right; }
 .settings-name { position: relative; display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); width: 100%; }
 .settings-name-input.ui-input { width: min(440px, 100%); }
 .settings-name .ui-button[data-hidden] { visibility: hidden; }

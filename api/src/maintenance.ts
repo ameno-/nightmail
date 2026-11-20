@@ -239,6 +239,8 @@ export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promi
     ['ANALYTICS_COMPACT_FAILED', async () => { if (runtime.config.dashboardAnalytics) await (await import('./analytics.js')).compactAnalytics(runtime); }],
     // Billing settles the closed hours (and once a UTC day its storage, unpaid, drift and expiry work).
     ['BILLING_HOURLY_FAILED', async () => { if (runtime.config.multiTenant) await (await import('./billing/cron.js')).billingHourly(runtime); }],
+    // Connected AWS accounts: one health check each (byo-regional.ts).
+    ['BYO_HEALTH_QUEUE_FAILED', async () => { await (await import('./byo-regional.js')).queueByoHealth(runtime); }],
   ] as const) {
     try { await step(); } catch (error) { failed.push(code); log('warn', { code: error instanceof ApiError ? error.code : code, step: code }); }
   }

@@ -165,6 +165,8 @@ const pages = ids => [
   ['Onboarding · AWS sandbox', '/onboarding', { user: 'di' }],
   ['Onboarding · AWS production access', '/onboarding', { user: 'di', dialog: 'Request production access' }],
   ['Onboarding · AWS setting up', '/onboarding', { user: 'ed' }],
+  // Sending from a connected AWS account: its rows in Settings → Sending, and the banner for a health finding.
+  ['Settings · sending · AWS', '/settings#sending', { user: 'gil' }],
   // Two accounts in one browser: a cold load as the default (dana), then switching to nia's workspace from the switcher.
   ['Two accounts · switch', '/overview', { user: ['dana', 'nia'], from: '/overview', switchTo: 'Lumen Labs' }],
   ['Signed out', '/', { user: null, alone: true }],

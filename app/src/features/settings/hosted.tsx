@@ -5,9 +5,9 @@ import { Button, ConfirmDialog, CopyButton, ErrorState, Input, SectionHeader, Se
 import { useApiDef, useApiMutation, useSession, useWorkspaceAccess } from '../../data/context'
 import { connectionApi, connectionKindLabel, useConnectionCache } from '../../data/connections'
 import { queries } from '../../data/queries'
-import type { Agent, WorkspaceMembership } from '../../data/types'
+import type { Agent, ProviderConnection, WorkspaceMembership } from '../../data/types'
 import { roleLabel, useMembershipCache, workspaceApi } from '../../data/workspaces'
-import { label, number } from '../../lib/format'
+import { ago, label, number } from '../../lib/format'
 import { useSenderScore } from '../score'
 import { inEvaluation, limitSummary, useSendingLimit } from '../overview/setup'
 import { openScoreAbout } from '../../lib/score-about'
@@ -117,11 +117,31 @@ function SendingRows() {
       <Row title="Connection">{kind ? <span className="cluster settings-inline"><span>{connectionKindLabel[kind]}</span><StatusBadge status={label(current?.state ?? summary?.state ?? 'pending')} /></span> : <Skeleton width={160} height={20} />}</Row>
       {region && <Row title={kind === 'byo' ? 'AWS region' : 'Region'}><code>{region}</code></Row>}
       {kind === 'byo' && <Row title="AWS account"><code>{current?.awsAccountId ?? '—'}</code></Row>}
+      {kind === 'byo' && current?.templateVersion !== 'v4' && <ConnectedAccountRows connection={current ?? null} />}
       <ScoreRow />
       {limit && limit.cap !== null && <Row title="Daily limit"><Link to="/settings#usage" replace className="settings-score" title={limitSummary(limit, evaluating)}><span>{number(limit.used)} / {number(limit.cap)}</span><span className="muted">Plan & usage</span><ArrowUpRight size={14} aria-hidden="true" /></Link></Row>}
     </div>
     {/* Hosted mail is the only connection to switch to without an operator's go-ahead, and onboarding would start it again. */}
     {(kind === 'byo' || offerByo) && <DisconnectRow kind={kind} />}
+  </>
+}
+// A connected AWS account: its stack's template and the update to the newest one, each sending region's production
+// access, and the last health check's first finding.
+// Three rows whatever loads, so the rows below never move.
+function ConnectedAccountRows({ connection }: { connection: ProviderConnection | null }) {
+  const update = useApiMutation(() => connectionApi.updateStack(), undefined, true)
+  // The template row keeps its code element while loading: on a phone that decides whether the row stacks.
+  if (!connection) return <><Row title="Role template"><span className="cluster settings-inline"><code><Skeleton width={32} height={16} /></code></span></Row>{['Production access', 'Health'].map(title => <Row key={title} title={title}><Skeleton width={140} height={20} /></Row>)}</>
+  const { stack, health } = connection
+  const ready = connection.scan?.regions.filter(region => region.sendingState === 'ready') ?? []
+  const sandboxed = ready.filter(region => !region.facts.production)
+  return <>
+    <Row title="Role template" error={update.error ? <MutationError error={update.error} /> : undefined}><span className="cluster settings-inline"><code>{stack?.version ?? '—'}</code>
+      {update.data ? <a href={update.data.consoleUrl} target="_blank" rel="noopener noreferrer">Review update in AWS<ArrowUpRight size={14} aria-hidden="true" /></a>
+        : stack?.updateAvailable ? <Button size="sm" loading={update.isPending} onClick={() => update.mutate(undefined)}>Prepare update</Button> : null}</span></Row>
+    <Row title="Production access">{!ready.length ? '—' : sandboxed.length ? `SES sandbox in ${sandboxed.map(region => region.regionLabel).join(', ')}` : ready.map(region => region.regionLabel).join(', ')}</Row>
+    {/* The banner above shows the first finding; this row adds any others. */}
+    <Row title="Health">{!health ? 'Not checked yet' : health.issues.length ? <span className="settings-attention">{health.issues.length === 1 ? 'Needs attention' : health.issues.slice(1).map(issue => issue.message).join(' ')}</span> : `Checked ${ago(health.checkedAt)}`}</Row>
   </>
 }
 // The sidebar shows the score beside every page, so on a desktop this row opens its breakdown instead of repeating
