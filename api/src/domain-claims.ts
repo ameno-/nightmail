@@ -88,7 +88,7 @@ export async function reserveClaim(runtime: Runtime, workspace: string, name: st
   return { ...row, connection: row.connection, token: row.token, claim: row.claim ?? { sending_state: 'pending', receiving_state: 'off', receiving_host: null, lost_since: null, receiving_lost_since: null, identity: null, proof_label: PROOF_LABELS[0], created_at: row.reserved_at, ever_proven: false } }; // A new claim's created_at is this transaction's now(), its proof_label the column default.
 }
 
-/** Whether the workspace sends through its own AWS account: its identities live in that account's SES, so no domain total applies (migration 351). */
+/** Whether the workspace sends through its own AWS account: its identities live in that account's SES, so no domain total applies (migration 354). */
 export const byoWorkspace = (workspace: string) => sql`EXISTS (SELECT FROM provider_connections WHERE workspace_id=${workspace} AND kind='byo')`;
 /** Domains the workspace holds and how many it may hold: 100 unless an operator set another limit, and no total (null) with its own AWS account. */
 export const domainQuota = async (db: DbExecutor, workspace: string) => (await db.execute<{ used: number; limit: number | null; unproven: number }>(sql`SELECT count(*)::int AS used,
