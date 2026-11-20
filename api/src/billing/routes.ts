@@ -104,6 +104,9 @@ function period(from: unknown, to: unknown) {
 function describe(kind: LedgerKind, detail: Record<string, unknown>) {
   switch (kind) {
     case 'usage': {
+      // A month settled at an earlier rate version, posted again at the larger free allowance that replaced it (migration 367).
+      const repriced = detail.repriced as { freeSent?: unknown; freeReceived?: unknown } | undefined;
+      if (repriced && typeof repriced === 'object') return `Usage ${detail.usageMonth}: repriced at ${count(repriced.freeSent)} sent and ${count(repriced.freeReceived)} received free`;
       const meters = (typeof detail.meters === 'object' && detail.meters ? detail.meters : detail) as Record<string, MeterDetail | undefined>;
       const q = (m: string) => Number(meters[m]?.quantity ?? 0);
       const parts = [q('send') + q('receive') ? `${count(q('send') + q('receive'))} emails` : '', q('omen') ? `${count(q('omen'))} AI decisions` : '', q('storage') ? 'stored mail' : '',

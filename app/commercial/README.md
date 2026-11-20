@@ -58,8 +58,8 @@ taking up.
 No arms on anyone: Doug works his phone by leaning over and putting his forehead on it.
 
 The band along the bottom only ever shows the line being spoken, with the fine print that keeps
-that line honest under it (accepted means queued; $0.20 per 1,000 sent or received, prepaid, 3,000
-+ 3,000 free a month; new workspaces start at 100 recipients a day; open tracking isn't always
+that line honest under it (accepted means queued; $0.20 per 1,000 sent or received, prepaid, 5,000
++ 5,000 free a month; new workspaces start at 100 recipients a day; open tracking isn't always
 accurate; forwarding needs the recipient's OK; AI scores can be wrong, opt-in, $0.10 per 1,000;
 hosted limits apply).
 

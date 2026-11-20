@@ -496,7 +496,7 @@ async function standing(db, workspaceId, { score, limit, step, reasons = [], sin
 // Harbor owes $12.40 after its free allowance, so sending is paused and received mail is in its 7-day grace.
 // A workspace's month as the settler leaves it: charged sends and received settled, and the cost posted for them.
 const month = (db, wid, sent, received, costUc) => db.query(`INSERT INTO billing_months(workspace_id,month,sent,received,other_uc,posted_uc)
-  VALUES ($1,(date_trunc('month',now() AT TIME ZONE 'UTC'))::date,$2,$3,$4::numeric-billing_month_cost($2,$3,0),$4::bigint)`, [wid, sent, received, String(costUc)]);
+  VALUES ($1,(date_trunc('month',now() AT TIME ZONE 'UTC'))::date,$2,$3,$4::numeric-billing_month_cost((date_trunc('month',now() AT TIME ZONE 'UTC'))::date,$2,$3,0),$4::bigint)`, [wid, sent, received, String(costUc)]);
 async function billing(db) {
   const post = (wid, kind, source, paid, promo = 0n, detail = {}, who = 'system') => db.query('SELECT billing_post($1,$2,$3,$4::bigint,$5::bigint,$6::jsonb,$7)', [wid, kind, source, String(paid), String(promo), JSON.stringify(detail), who]);
   const usage = (wid, i, send, receive, omen = 0) => {
@@ -520,7 +520,7 @@ async function billing(db) {
   await post('ws_harbor', 'topup', 'attempt:bpa_cls_harbor', 2_000_000_000n, 0n, {}, 'stripe');
   await usage('ws_harbor', 0, 158_000, 4000);
   await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '2 days',empty_since=now()-interval '2 days' WHERE workspace_id='ws_harbor'`);
-  await month(db, 'ws_harbor', 3000, 3000, 3_240_000_000n);
+  await month(db, 'ws_harbor', 5000, 5000, 3_240_000_000n);
 }
 
 // The support inbox (Operator → Support): Sam's ticketed chat that Dana answered (agent paused), Lee's emailed question

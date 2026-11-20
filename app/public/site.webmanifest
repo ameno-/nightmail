@@ -1,7 +1,7 @@
 {
   "name": "nightmail",
   "short_name": "nightmail",
-  "description": "$0.20 per 1,000 emails, sent or received via API. Free every month: 3,000 sent and 3,000 received.",
+  "description": "$0.20 per 1,000 emails, sent or received via API. Free every month: 5,000 sent and 5,000 received.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

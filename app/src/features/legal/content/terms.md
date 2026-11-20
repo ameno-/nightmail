@@ -74,7 +74,7 @@ By creating an account, joining a workspace or using the Service, you accept the
 
 ### 5.3 Free tier
 
-- Each workspace gets, every calendar month (UTC): **3,000 sent emails** and **3,000 received emails**, counted separately, and **1 GB** of storage for received mail older than 90 days. Unused allowance in one direction doesn't cover the other.
+- Each workspace gets, every calendar month (UTC): **5,000 sent emails** and **5,000 received emails**, counted separately, and **1 GB** of storage for received mail older than 90 days. Unused allowance in one direction doesn't cover the other.
 - Unused free usage doesn't roll over and has no cash value.
 - We may limit the free tier to one per person or organization, or change it, with notice.
 
