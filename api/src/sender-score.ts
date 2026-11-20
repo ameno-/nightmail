@@ -1,6 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { DASHBOARD_CACHE_NOTE, dashboardRead } from './dashboard-cache.js';
+import { probationReason, type ProbationReason } from './hosted-sending.js';
 import { productName } from './brand.js';
 import { actor, ApiError, dashboardSession, requiredOf, unrestrictedRequired, errors, json, response, security, type App, type Runtime } from './core.js';
 import { burstFor, EVALUATION, evaluateLadder, FACTOR_KEYS, FREEZE_FLOOR, GOOD_STANDING, GROWTH, GRADE_BANDS, GRADES, gradeOf, marketingHourFor, nextBand, quality, reserveFor, round, stepRank, STEPS, type DayEvidence, type DomainAuth, type Factor, type Reason, type Step } from './standing-model.js';
@@ -32,6 +33,7 @@ export const StandingSchema = z.object({
   selfService: z.object({ available: z.boolean(), action: z.enum(['release_marketing', 'resume_sending']).nullable(), reason: z.string().nullable(), availableAt: z.iso.datetime().nullable() })
     .describe('Whether an owner or admin can release this step from the dashboard (POST /v1/sender-score/release), and if not, why.'),
   version: z.number().int().describe('Changes with every change of standing; account.standing.changed carries it.'), sequence: z.number().int(),
+  probation: z.enum(['evaluation', 'growth', 'standing']).nullable().describe(`Why ${productName} still checks this workspace as a new sender; null in good standing, which it reaches by itself. evaluation: its first ${EVALUATION.recipients} real recipients; growth: the growth pace after them; standing: a daily limit set by the score, a freeze or a strike, or a step from warn up. Until then a campaign over ${EVALUATION.recipients} recipients sends a list probe first, and mail is delivered as the copy the content screen read (style sheets inlined, @media and dark-mode rules left out) with the attachment allowlist, except from domains ${productName} placed on its trusted tier. The image-to-text rule applies in good standing too.`),
 }).openapi('SenderStanding');
 const LimitSchema = z.object({
   daily: z.number().int().nullable().describe(`Recipients per rolling 24 hours that admission enforces now. Null when there is no daily limit (unlimited): a workspace in good standing (score ${GOOD_STANDING} and up, no warning) or an exempt one.`),
@@ -74,7 +76,7 @@ type Stored = { workspace_id: string; phase: 'seed' | 'calibrating' | 'graded'; 
   factors: Factor[]; band_limit: number | null; daily_limit: number | null; step: Step; reasons: Reason[]; since: string; pause_kind: 'bounce' | 'full' | null; marketing_hold: boolean; release_until: string | null;
   release_percent: number | null; last_release_at: string | null; last_self_resume_at: string | null; strikes: unknown[]; strike_until: string | null; version: number; sequence: number; computed_at: string | null };
 type Row = { standing: Stored | null; history: { date: string; score: number }[]; last30: number; override: number | null; override_expires_at: string | null; exempt: boolean; minute_cap: number | null; pool_pace: number | null;
-  growth: { cap: number; used: number; until: string } | null;
+  growth: { cap: number; used: number; until: string } | null; probation: ProbationReason | null;
   restore_until: string | null; restore_cap: number | null; paused_at: string | null; days: DayEvidence[] | null; domains: DomainAuth[] | null; screened: boolean };
 const iso = (v: string | null | undefined) => v ? new Date(v).toISOString() : null;
 /** The standing job runs every ten minutes (standingTick), so an evaluation's wait ends at most this much later. */
@@ -113,7 +115,7 @@ export async function loadStanding(runtime: Runtime, wid: string): Promise<Row> 
       coalesce((SELECT sum(d.accepted) FROM sender_score_daily d WHERE d.workspace_id=${wid} AND d.day>(now() AT TIME ZONE 'UTC')::date-30),0)::int AS last30,
       (SELECT send_cap_override FROM workspaces WHERE id=${wid}) AS override,(SELECT send_cap_override_expires_at FROM workspaces WHERE id=${wid}) AS override_expires_at,
       coalesce((SELECT exempt_hosted_quotas FROM workspaces WHERE id=${wid}),false) AS exempt,(SELECT hosted_minute_cap(${wid}) FROM s) AS minute_cap,(SELECT hosted_pool_pace(${wid}) FROM s) AS pool_pace,
-      (SELECT json_build_object('cap',g.cap,'used',g.used,'until',(SELECT growth_until FROM s)) FROM hosted_growth(${wid}) g) AS growth,
+      (SELECT json_build_object('cap',g.cap,'used',g.used,'until',(SELECT growth_until FROM s)) FROM hosted_growth(${wid}) g) AS growth,${probationReason(sql`${wid}::text`)} AS probation,
       (SELECT restore_until FROM pc) AS restore_until,(SELECT restore_cap FROM pc) AS restore_cap,(SELECT CASE WHEN resume_pending_at IS NULL THEN paused_at END FROM pc) AS paused_at,${screened} AND EXISTS (SELECT FROM pc) AS screened,
       (SELECT json_agg(x) FROM (SELECT to_char(day,'YYYY-MM-DD') AS day,count(*)::int AS emails,
         count(*) FILTER (WHERE status<>'suppressed' AND (provider_id IS NOT NULL OR status IN ('accepted','sent','delivered','bounced','complained','delayed') OR event_outcomes & 1 <> 0))::int AS accepted,
@@ -165,7 +167,7 @@ export function scoreView(row: Row, now = new Date()): SenderScore {
       perMinute, marketingPerHour: daily === null ? perMinute * 60 : marketingHourFor(daily), transactionalReserve: daily === null ? 0 : overrideActive ? Math.ceil(daily * 0.1) : reserveFor(daily) },
     standing: { step: s.step, reasons: s.reasons, since: iso(s.since)!, pauseKind: s.step === 'pause' ? s.pause_kind : null,
       marketingHeld: (stepRank(s.step) >= stepRank('restrict') && !release) || s.marketing_hold, marketingRelease: release, strikes: s.strikes.length,
-      selfService: selfService(s, now.getTime()), version: s.version, sequence: Number(s.sequence) },
+      selfService: selfService(s, now.getTime()), version: s.version, sequence: Number(s.sequence), probation: row.probation },
     computedAt: iso(s.computed_at) ?? now.toISOString(),
   };
 }

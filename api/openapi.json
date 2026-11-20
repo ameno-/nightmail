@@ -7519,6 +7519,19 @@
           },
           "sequence": {
             "type": "integer"
+          },
+          "probation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "evaluation",
+              "growth",
+              "standing",
+              null
+            ],
+            "description": "Why Nightmail still checks this workspace as a new sender; null in good standing, which it reaches by itself. evaluation: its first 100 real recipients; growth: the growth pace after them; standing: a daily limit set by the score, a freeze or a strike, or a step from warn up. Until then a campaign over 100 recipients sends a list probe first, and mail is delivered as the copy the content screen read (style sheets inlined, @media and dark-mode rules left out) with the attachment allowlist, except from domains Nightmail placed on its trusted tier. The image-to-text rule applies in good standing too."
           }
         },
         "required": [
@@ -7531,7 +7544,8 @@
           "strikes",
           "selfService",
           "version",
-          "sequence"
+          "sequence",
+          "probation"
         ],
         "description": "Hosted only: the enforcement step and why."
       },

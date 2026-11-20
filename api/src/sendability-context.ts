@@ -1,13 +1,14 @@
 import { sql } from 'drizzle-orm';
 import { type Actor, type Runtime } from './core.js';
-import { hostedAllowance, type HostedAllowance } from './hosted-sending.js';
+import { hostedAllowance, probationReason, type HostedAllowance } from './hosted-sending.js';
 import type { IdentityFacts } from './states.js';
 import { dmarcView } from './dmarc.js';
 import { cachedDashboardRead } from './dashboard-cache.js';
 import { loadStanding, scoreView } from './sender-score.js';
 
 export type CheckContext = {
-  domain?: { verified: boolean; dkim?: boolean; mailFrom?: boolean; spf?: boolean; fromSpf?: boolean; dmarc?: string; rua?: boolean; ageDays?: number; pool?: string };
+  /** probation: Hosted delivers this sender's mail as the copy the screen read (src/hosted-sending.ts probationReason). */
+  domain?: { verified: boolean; dkim?: boolean; mailFrom?: boolean; spf?: boolean; fromSpf?: boolean; dmarc?: string; rua?: boolean; ageDays?: number; pool?: string; probation?: boolean };
   standing?: {score: number | null; warmup: boolean; accepted: number; bounced: number; complained: number; daily: number | null};
   /** The Hosted screened-text limit that applies: per message, or per campaign (screened once for every recipient). */
   screenLimitBytes?: number;
@@ -15,11 +16,12 @@ export type CheckContext = {
 // Never run placement probes, look up remote assets or lock admission rows.
 // Fresh facts for the exact From only: a parent's DMARC record does not prove the subdomain has no override.
 export async function checkContext(runtime: Runtime, a: Actor, fromDomain: string): Promise<CheckContext> {
-  type Row = {identity: IdentityFacts | null; state: string; age: number | null; pool: string | null; from_spf: boolean | null};
+  type Row = {identity: IdentityFacts | null; state: string; age: number | null; pool: string | null; probation: boolean | null; from_spf: boolean | null};
   const domainRead = runtime.db.execute<Row>(sql`SELECT c.identity,c.sending_state AS state,
     (s.signals->>'ageDays')::int + floor(extract(epoch FROM now()-s.started_at)/86400)::int AS age,
     CASE WHEN s.started_at>now()-interval '48 hours' THEN (s.signals #>> '{exact,spf}')::boolean END AS from_spf,
-    CASE WHEN pc.kind='shared' THEN coalesce(p.pool_tier,'probation') END AS pool
+    CASE WHEN pc.kind='shared' THEN coalesce(p.pool_tier,'probation') END AS pool,
+    CASE WHEN pc.kind='shared' THEN coalesce(p.pool_tier,'probation')='probation' AND ${probationReason(sql`c.workspace_id`)} IS NOT NULL END AS probation
     FROM domain_claims c LEFT JOIN domain_sending_bindings b ON (b.workspace_id,b.name)=(c.workspace_id,c.name)
     LEFT JOIN domain_placement_shadow s ON s.domain_id=b.domain_id LEFT JOIN provider_connections pc ON pc.id=c.connection_id
     LEFT JOIN provider_pool_regions p ON p.region=b.region WHERE c.workspace_id=${a.workspaceId} AND c.name=${fromDomain}`);
@@ -44,6 +46,6 @@ export async function checkContext(runtime: Runtime, a: Actor, fromDomain: strin
   },60)).value;
   return {domain: d && {verified: d.state==='verified', dkim: ses?.DkimAttributes ? ses.DkimAttributes.SigningEnabled===true && ses.DkimAttributes.Status==='SUCCESS' : undefined,
     mailFrom: ses && !!ses.MailFromAttributes?.MailFromDomain, spf: dm?.alignment.spf, fromSpf:d?.from_spf??undefined, dmarc: dm?.status,
-    rua: dm?.record ? /(?:^|;)\s*rua\s*=\s*mailto:/i.test(dm.record) : undefined, ageDays: d.age ?? undefined, pool: d.pool ?? undefined},
+    rua: dm?.record ? /(?:^|;)\s*rua\s*=\s*mailto:/i.test(dm.record) : undefined, ageDays: d.age ?? undefined, pool: d.pool ?? undefined, probation: d.probation ?? undefined},
     standing: rep, screenLimitBytes: runtime.config.screenLimits.messageBytes};
 }

@@ -74,7 +74,7 @@ export function SendingLimitsGuide({ headings = 'h3', limit, compact = false }: 
     </Part>
     <Part title="Campaign list probe" H={H} compact={compact}>
       <ul className="limits-notes limits-notes--plain">
-        <li>Campaigns to over 100 recipients go to 10% first (100 to 500).</li>
+        <li>Campaigns to over 100 recipients go to 10% first (100 to 500). In good standing, lists you mailed cleanly skip it.</li>
         <li>Over 3% hard bounces or 2 complaints pause it and suppress the bounces.</li>
         <li>Clean the list and resume; a second quarantine needs a review.</li>
       </ul>
