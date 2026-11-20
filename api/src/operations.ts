@@ -521,6 +521,10 @@ async function ensureIdentity(client: Awaited<ReturnType<typeof getSes>>, name: 
   } catch(e) {
     if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_EXISTS') throw e;
     const existing=await sesCall(({ GetEmailIdentityCommand })=>client.send(new GetEmailIdentityCommand({EmailIdentity:name})));
+    // A connected account's identity Nightmail didn't create is never changed: it can only be imported, as it is.
+    if (regionalByo && !ownsIdentity(existing,token)) throw new ApiError(409,'DOMAIN_EXISTS_IN_ACCOUNT',`${name} already exists in this AWS account's SES, set up outside ${productName}. Import it from the domains found in your account, and ${productName} uses it as it is, or remove it in SES first.`);
+    // A connected account's identity Nightmail didn't create is never changed: it can only be imported, as it is.
+    if (regionalByo && !ownsIdentity(existing,token)) throw new ApiError(409,'DOMAIN_EXISTS_IN_ACCOUNT',`${name} already exists in this AWS account's SES, set up outside ${productName}. Import it from the domains found in your account, and ${productName} uses it as it is, or remove it in SES first.`);
     if (!ownsIdentity(existing,token) || regionalByo && !hasTags(existing.Tags,[mxOwnerTag,{Key:tagKey('installation-id'),Value:installation!},{Key:tagKey('purpose'),Value:'domain-identity'}])) throw unavailableDomain();
     return existing;
   }

@@ -5083,6 +5083,14 @@ export type ProviderConnection = {
             error: string | null;
             facts: {
                 production?: boolean;
+                /**
+                 * AWS's review of a production access request.
+                 */
+                review?: {
+                    status: string;
+                    caseId: string | null;
+                } | null;
+                enforcement?: string;
                 sendingEnabled?: boolean;
                 max24HourSend?: number;
                 maxSendRate?: number;
@@ -5163,6 +5171,25 @@ export type CreateConnection = {
     kind: 'shared' | 'byo';
     region?: string;
     awsAccountId?: string;
+};
+
+export type ProductionAccessState = {
+    region: string;
+    production: boolean;
+    review: {
+        status: string;
+        caseId: string | null;
+    } | null;
+};
+
+export type ProductionAccessRequest = {
+    websiteUrl: string;
+    /**
+     * How the account sends mail and to whom, for AWS's review.
+     */
+    useCase: string;
+    mailType: 'TRANSACTIONAL' | 'MARKETING';
+    confirm: true;
 };
 
 export type PublicStats = {
@@ -26288,6 +26315,69 @@ export type ImportConnectionDomainsResponses = {
 
 export type ImportConnectionDomainsResponse = ImportConnectionDomainsResponses[keyof ImportConnectionDomainsResponses];
 
+export type RequestConnectionProductionAccessData = {
+    body: ProductionAccessRequest;
+    path: {
+        region: string;
+    };
+    query?: never;
+    url: '/v1/connection/regions/{region}/production-access';
+};
+
+export type RequestConnectionProductionAccessErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RequestConnectionProductionAccessError = RequestConnectionProductionAccessErrors[keyof RequestConnectionProductionAccessErrors];
+
+export type RequestConnectionProductionAccessResponses = {
+    /**
+     * Success
+     */
+    200: ProductionAccessState;
+};
+
+export type RequestConnectionProductionAccessResponse = RequestConnectionProductionAccessResponses[keyof RequestConnectionProductionAccessResponses];
+
 export type GetConnectionRegionStatusData = {
     body?: never;
     path?: never;
@@ -26355,6 +26445,14 @@ export type GetConnectionRegionStatusResponses = {
             error: string | null;
             facts: {
                 production?: boolean;
+                /**
+                 * AWS's review of a production access request.
+                 */
+                review?: {
+                    status: string;
+                    caseId: string | null;
+                } | null;
+                enforcement?: string;
                 sendingEnabled?: boolean;
                 max24HourSend?: number;
                 maxSendRate?: number;

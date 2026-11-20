@@ -22,6 +22,13 @@ export function useDomainStep(workspaceId: string | undefined) {
   return useSyncExternalStore(subscribe, () => workspaceId ? readDomainStep(workspaceId) : null)
 }
 
+// A domain added while a connected AWS account sets up a region: the add-domain step opens its records once it exists.
+const regionalKey = (workspaceId: string) => `nightmail.onboarding.aws-domain.${workspaceId}`
+export function readRegionalDomain(workspaceId: string) { try { return localStorage.getItem(regionalKey(workspaceId)) } catch { return null } }
+export function setRegionalDomain(workspaceId: string, name: string | null) {
+  try { if (name === null) localStorage.removeItem(regionalKey(workspaceId)); else localStorage.setItem(regionalKey(workspaceId), name) } catch { /* Then the add-domain step asks again. */ }
+}
+
 // Hosted workspaces need a ready sending connection (summarised in /v1/me) before the dashboard opens for an owner or
 // admin, who sets it up. Members open the dashboard at once, with a banner until it is ready (SetupBanner).
 export type OnboardingStage = { step: 'sending' } | { step: 'domain'; domainId: string } | { step: 'agent'; domainId: string } | null

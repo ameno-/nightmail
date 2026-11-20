@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
-import { auditContext, auditInsert, type AuditContext } from './audit.js';
+import { auditContext, auditInsert, recordAudit, type AuditContext } from './audit.js';
 import { ApiError, assertSesConfigured, denied, isSimulatedSes, errors, id, json, log, ModuleLoadError, notFound, response, wrapModuleLoad, type App, type Ctx, type Runtime, type JobHandler } from './core.js';
 import { caller, assume, platformCredentials } from './provider-credentials.js';
 import { awsError, discoverSes, feedbackUrl, loadSetupSdk, POOL_INSTALLATION, poolTenantName, provisionSes, provisionTenant, setupResources, verifiedByoDomains, type SesDiscovery, byoStackName } from './ses-setup.js';
@@ -11,7 +11,7 @@ import { loadMailboxSetupSdk, preparePoolReceiving } from './mailbox-setup.js';
 import { byoEnabled } from './byo-pilot.js';
 import { hostedAllowance, type HostedAllowance } from './hosted-sending.js';
 import { requirePlatformAccount } from './config.js';
-import { Accepted, Imports, InventoryFields, RegionStatus, disconnectV5, enrollV5, inventory, refreshScan, regionLabels, selectImports, statuses, v5Link, type V5Connection } from './byo-regional.js';
+import { Accepted, Imports, InventoryFields, ProductionAccess, ProductionAccessState, RegionStatus, disconnectV5, enrollV5, inventory, refreshScan, regionLabels, requestProductionAccess, selectImports, statuses, v5Link, type V5Connection } from './byo-regional.js';
 import { CONNECTION_STATES, TENANT_STATES, assertConnectionTransition, campaignActive, desiredTenantStatus, finishProvisioning, notProvisioning, poolReceives, poolSends, setPoolState, setTenantState, startProvisioning, queueTenantJob, type ConnectionState, type TenantState } from './states.js';
 
 const tags = ['Workspaces'], security = [{ dashboardSession: [] }, { secureDashboardSession: [] }] as Record<string, string[]>[];
@@ -455,6 +455,10 @@ export function registerProviderConnections(app: App) {
   });
   app.openapi(createRoute({method:'post',path:path+'/imports',operationId:'importConnectionDomains',tags,security,description:'Select verified regional candidates explicitly. Sending requires confirmed regional feedback. Imported identities are never modified.',request:{body:json(Imports)},responses:{202:response(Accepted),...errors}}),async c=>{
     const result=await selectImports(c.env,owner(c),c.req.valid('json'),c.req.header('Idempotency-Key'));c.get('actor').wakeJobs=1;return c.json(result,202);
+  });
+  app.openapi(createRoute({method:'post',path:path+'/regions/{region}/production-access',operationId:'requestConnectionProductionAccess',tags,security,description:'Ask AWS for SES production access in one region of the connected account, with the details the owner confirmed. Refused when the region already has access or a request is under review, so existing account details are never overwritten. Sending in a region starts only once AWS grants access.',request:{params:z.object({region:z.string().max(32).regex(regionPattern)}),body:json(ProductionAccess)},responses:{200:response(ProductionAccessState),...errors}}),async c=>{
+    const wid=owner(c),{region}=c.req.valid('param'),input=c.req.valid('json');
+    return c.json(await requestProductionAccess(c.env,wid,region,input,(db,id)=>recordAudit(db,c,{action:'connection.production_access',workspaceId:wid,target:{type:'connection',id},after:{region,mailType:input.mailType,websiteUrl:input.websiteUrl}})),200);
   });
   app.openapi(createRoute({method:'get',path:path+'/regions/status',operationId:'getConnectionRegionStatus',tags,security,description:'Read regional AWS inventory, access, ownership journals and setup errors. Does not contact AWS.',responses:{200:response(RegionStatus),...errors}}),async c=>{
     const wid=owner(c),row=await get(c.env,wid);if (row?.template_version!=='v5') return notFound('Regional connection');return c.json({regions:await statuses(c.env.db,row.id)},200);

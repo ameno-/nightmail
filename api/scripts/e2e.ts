@@ -42,7 +42,7 @@ const safeModeSkips: Partial<Record<Op, string>> = {
   createInboundSubdomain: subdomain, updateInboundSubdomain: subdomain, removeInboundSubdomain: subdomain,
   getInboundSubdomain: subdomain,
   addReceivingHost: hostChange, updateReceivingHost: hostChange, removeReceivingHost: hostChange,
-  refreshConnectionScan: byoV2, importConnectionDomains: byoV2, getConnectionRegionStatus: byoV2,
+  refreshConnectionScan: byoV2, importConnectionDomains: byoV2, getConnectionRegionStatus: byoV2, requestConnectionProductionAccess: byoV2,
 };
 const destructive = process.env.BANE_E2E_ALLOW_DESTRUCTIVE === '1';
 const SKIP: Partial<Record<Op,string>> = destructive ? {
@@ -329,6 +329,7 @@ async function devBoundaries() {
   for (const op of ['getConnection','listConnectionRegions','refreshConnectionScan','getConnectionRegionStatus'] as const) await denied(op,{},403,'PERMISSION_DENIED');
   await denied('verifyConnection',{body:{awsAccountId:'000000000000'}},403,'PERMISSION_DENIED');
   await denied('importConnectionDomains',{body:{revision:1,candidateIds:[prefix],confirm:true}},403,'PERMISSION_DENIED');
+  await denied('requestConnectionProductionAccess',{path:{region:'us-east-2'},body:{websiteUrl:'https://example.com',useCase:'Fixture request that must be refused before it reaches AWS.',mailType:'TRANSACTIONAL',confirm:true}},403,'PERMISSION_DENIED');
   await denied('getDomainDnsSetup',{path},403,'PERMISSION_DENIED');
   await denied('configureDomainMailFrom',{path,body:{mailFromDomain:domain}},422,'MAIL_FROM_DOMAIN_INVALID');
   await denied('deleteDomain',{path:fake},404,'NOT_FOUND');

@@ -417,7 +417,7 @@ export async function discoverSes(runtime: Runtime, options: SesSetupOptions): P
 // job checkpoints its page before continuing; nothing here registers a topic or a claim.
 export type ScanStage = 'account'|'receipt'|'sets'|'domains';
 export type CandidateIdentity = IdentityFacts['ses'] & { ConfigurationSetName?:string };
-export type Inventory = { production?:boolean; sendingEnabled?:boolean; max24HourSend?:number; maxSendRate?:number; sentLast24Hours?:number;
+export type Inventory = { production?:boolean; review?:{status:string;caseId:string|null}|null; enforcement?:string; sendingEnabled?:boolean; max24HourSend?:number; maxSendRate?:number; sentLast24Hours?:number;
   configurationSets?:Record<string,{installation:boolean|null}>; receiving?:{supported:boolean;set:string|null;rules:{name:string;enabled:boolean;recipients:string[];actions:string[]}[]} };
 export type ScanPage = { facts:Inventory; domains:{name:string;identity:CandidateIdentity}[]; next?:{stage:ScanStage;token?:string} };
 const receivingRegions = new Set('us-east-1 us-east-2 us-west-1 us-west-2 af-south-1 ap-southeast-3 ap-south-1 ap-northeast-3 ap-northeast-2 ap-southeast-1 ap-southeast-2 ap-northeast-1 ca-central-1 eu-central-1 eu-west-1 eu-west-2 eu-south-1 eu-west-3 eu-north-1 il-central-1 me-south-1 sa-east-1'.split(' '));
@@ -437,7 +437,8 @@ export async function scanRegionPage(runtime:Runtime,region:string,installation:
     if (stage==='account') {
       const a=await c.ses.send(new GetAccountCommand({}),opts), q=a.SendQuota;
       if (a.ProductionAccessEnabled===undefined || a.SendingEnabled===undefined || q?.Max24HourSend===undefined || q.MaxSendRate===undefined || q.SentLast24Hours===undefined) throw unknownInventory();
-      page.facts={production:a.ProductionAccessEnabled,sendingEnabled:a.SendingEnabled,max24HourSend:q.Max24HourSend,maxSendRate:q.MaxSendRate,sentLast24Hours:q.SentLast24Hours};
+      const review=a.Details?.ReviewDetails;
+      page.facts={production:a.ProductionAccessEnabled,review:review?{status:review.Status??'UNKNOWN',caseId:review.CaseId??null}:null,enforcement:a.EnforcementStatus,sendingEnabled:a.SendingEnabled,max24HourSend:q.Max24HourSend,maxSendRate:q.MaxSendRate,sentLast24Hours:q.SentLast24Hours};
       page.next={stage:'receipt'};
     } else if (stage==='receipt') {
       const supported=receivingRegions.has(region);

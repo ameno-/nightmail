@@ -385,9 +385,19 @@ export interface WorkspaceMembership { id: string; name: string; slug: string; r
 export interface OverviewSetup { domains: Domain[] | null; apiKeys: { active: number } | null; emails: { any: boolean }; webhooks: { total: number } | null; invitations: { pending: number } | null }
 export interface WorkspaceMember { id: string; userId: string; email: string; name: string; role: WorkspaceRole }
 export type ConnectionKind = 'shared' | 'byo'
-export type ConnectionState = 'awaiting_role' | 'provisioning' | 'ready' | 'failed'
+export type ConnectionState = 'awaiting_role' | 'provisioning' | 'ready' | 'failed' | 'scanning' | 'ready_to_import' | 'disconnecting'
 export type TenantState = 'pending' | 'ready' | 'failed'
-export interface ProviderConnection { id: string; kind: ConnectionKind; region: string; state: ConnectionState; tenant: TenantState; awsAccountId: string | null; roleArn: string | null; templateVersion: string | null; quickCreateUrl: string | null; importedDomains?: number }
+export interface ProviderConnection { id: string; kind: ConnectionKind; region: string; state: ConnectionState; tenant: TenantState; awsAccountId: string | null; roleArn: string | null; templateVersion: string | null; quickCreateUrl: string | null; importedDomains?: number
+  /** A connected AWS account's stack (regional bring-your-own AWS): its template version, deletion, and why it was last refused. */
+  stack?: { version: string | null; deleted: boolean; error: string | null } | null
+  /** The connected account's read-only inventory, region by region. */
+  scan?: { revision: number; cursor: { checked: number; total: number }; state: 'awaiting_role' | 'failed' | 'scanning' | 'partial' | 'ready_to_import'; error: string | null; alreadySendsEmail: boolean | null; regions: ByoRegion[] }
+  /** Verified domains found in the account, to import as they are. */
+  candidates?: ByoCandidate[] }
+export interface ByoRegion { region: string; regionLabel: string; scanState: string; scanError: string | null; sendingState: string; receivingState: string; error: string | null
+  facts: { production?: boolean; review?: { status: string; caseId: string | null } | null; enforcement?: string; sendingEnabled?: boolean; max24HourSend?: number; maxSendRate?: number }
+  pending: { domain: string; importing: boolean; error: string | null }[]; failedIntents: { domain: string; importing: boolean; error: string }[] }
+export interface ByoCandidate { id: string; domain: string; region: string; regionLabel: string; selectable: boolean; status: 'verified' | 'signing_pending' | 'not_verified' | 'incomplete' | 'already_bound' | 'overlap'; sandbox: boolean | null }
 export interface WorkspaceInvitation { id: string; workspaceId: string; email: string; role: WorkspaceRole; expiresAt: string; acceptUrl: string }
 export interface WorkspaceInvitationPreview { id: string; workspaceId: string; workspaceName: string; workspaceSlug: string; inviterName: string; inviterEmail: string; role: WorkspaceRole; expiresAt: string; status: 'pending' | 'accepted' }
 export interface Attachment { disposition?: 'attachment' | 'inline'; contentId?: string | null; id: string; filename: string; contentType: string; size: number }

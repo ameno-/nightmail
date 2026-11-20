@@ -164,7 +164,7 @@ const scan=runV5(async(r,c,p)=>{
 });
 
 const Candidate=z.object({id:z.string(),domain:z.string(),region:z.string(),regionLabel:z.string(),selectable:z.boolean(),status:z.enum(['verified','signing_pending','not_verified','incomplete','already_bound','overlap']),sandbox:z.boolean().nullable(),defaultConfigurationSet:z.string().nullable(),dkimStatus:z.string().nullable(),signingOrigin:z.string().nullable(),mailFromDomain:z.string().nullable(),overlap:z.boolean()});
-const Facts=z.object({production:z.boolean().optional(),sendingEnabled:z.boolean().optional(),max24HourSend:z.number().optional(),maxSendRate:z.number().optional(),sentLast24Hours:z.number().optional(),configurationSets:z.record(z.string(),z.object({installation:z.boolean().nullable()})).optional(),receiving:z.object({supported:z.boolean(),set:z.string().nullable(),rules:z.array(z.object({name:z.string(),enabled:z.boolean(),recipients:z.array(z.string()),actions:z.array(z.string())}))}).optional()});
+const Facts=z.object({production:z.boolean().optional(),review:z.object({status:z.string(),caseId:z.string().nullable()}).nullable().optional().describe('AWS\'s review of a production access request.'),enforcement:z.string().optional(),sendingEnabled:z.boolean().optional(),max24HourSend:z.number().optional(),maxSendRate:z.number().optional(),sentLast24Hours:z.number().optional(),configurationSets:z.record(z.string(),z.object({installation:z.boolean().nullable()})).optional(),receiving:z.object({supported:z.boolean(),set:z.string().nullable(),rules:z.array(z.object({name:z.string(),enabled:z.boolean(),recipients:z.array(z.string()),actions:z.array(z.string())}))}).optional()});
 const Pending=z.object({domain:z.string(),importing:z.boolean(),error:z.string().nullable()});
 const FailedIntent=Pending.extend({error:z.string()});
 const Region=z.object({region:z.string(),regionLabel:z.string(),scanState:z.string(),scanError:z.string().nullable(),sendingState:z.string(),receivingState:z.string(),error:z.string().nullable(),facts:Facts,resources:z.array(z.object({kind:z.string(),resource:z.string(),target:z.string().optional(),state:z.enum(['creating','created']).optional()})),pending:z.array(Pending),failedIntents:z.array(FailedIntent)});
@@ -202,10 +202,12 @@ export const Imports=z.object({revision:z.number().int().positive(),candidateIds
 export const Accepted=z.object({operationId:z.string(),regions:z.array(z.string())});
 type Intent={id:string;region:string;name:string;importing:boolean};
 async function saveIntent(db:DbExecutor,c:V5Connection,region:string,name:string,importing:boolean) {
-  const row=(await db.execute<{sending_state:string;scan_state:string;bound:string|null;imported:boolean|null}>(sql`SELECT r.sending_state,r.scan_state,b.region AS bound,(dc.identity @> '{"imported":true}') AS imported FROM provider_connection_regions r
+  const row=(await db.execute<{sending_state:string;scan_state:string;production:boolean|null;bound:string|null;imported:boolean|null}>(sql`SELECT r.sending_state,r.scan_state,(r.scan_facts->>'production')::boolean AS production,b.region AS bound,(dc.identity @> '{"imported":true}') AS imported FROM provider_connection_regions r
     LEFT JOIN domain_sending_bindings b ON b.workspace_id=${c.workspace_id} AND b.name=${name} LEFT JOIN domain_claims dc ON dc.workspace_id=b.workspace_id AND dc.name=b.name
     WHERE r.connection_id=${c.id} AND r.region=${region} FOR SHARE OF r`)).rows[0];
   if (!row || row.sending_state==='disabled' || row.scan_state!=='ready_to_import' && (importing || row.sending_state!=='ready')) throw stale();
+  // Mail starts only where AWS granted production access: the SES sandbox delivers to verified addresses alone.
+  if (row.production!==true) throw conflict('PRODUCTION_ACCESS_REQUIRED',`${regionLabels[region]} is in the SES sandbox, which delivers only to verified addresses. Request production access for it first.`);
   if (row.bound) {
     if (row.bound!==region || importing && !row.imported) throw conflict('DOMAIN_REGION_CONFLICT','This domain already has a sending binding.');
     return;
@@ -423,6 +425,42 @@ const disconnect:JobHandler=retryDatabaseFailures(async(r,p,j)=>{
     const err=awsError(e);await r.db.execute(sql`UPDATE provider_connections SET disconnect_error=${JSON.stringify({region,code:err.code})}::jsonb WHERE id=${p.connectionId} AND state='disconnecting' AND EXISTS(SELECT FROM jobs WHERE ${ticket})`);throw err;
   }
 });
+// Production access. A new SES account sends only to verified addresses until AWS grants production access, region by
+// region. The role (template 6.0's AccountRequests, on by default) lets Nightmail file that request for the customer,
+// once, with the details they confirm. PutAccountDetails could also turn production access off and overwrite an
+// account's existing details, so it is never called once access is granted or while AWS is reviewing a request.
+export const ProductionAccess=z.object({websiteUrl:z.url({protocol:/^https?$/}).max(1000).openapi({example:'https://example.com'}),useCase:z.string().trim().min(40).max(5000).describe('How the account sends mail and to whom, for AWS\'s review.').openapi({example:'We send receipts and account notices to our own customers, who signed up for them.'}),mailType:z.enum(['TRANSACTIONAL','MARKETING']),confirm:z.literal(true)}).strict().openapi('ProductionAccessRequest');
+export const ProductionAccessState=z.object({region:z.string(),production:z.boolean(),review:z.object({status:z.string(),caseId:z.string().nullable()}).nullable()}).openapi('ProductionAccessState');
+export async function requestProductionAccess(r:Runtime,wid:string,region:string,input:z.infer<typeof ProductionAccess>,audit:(db:DbExecutor,connectionId:string)=>Promise<void>) {
+  const c=await requiredV5(r,wid);
+  if (!c.aws_account_id) throw conflict('CONNECTION_REQUIRED','Connect the AWS account first.');
+  if (!(region in regionLabels) || !(await r.db.execute(sql`SELECT FROM provider_connection_regions WHERE connection_id=${c.id} AND region=${region}`)).rowCount) throw new ApiError(422,'INVALID_REGION','Choose a commercial SES sending region.','region');
+  await Promise.all([loadStsSdk(),loadSetupSdk()]);
+  const aws=await assume(r,region,c.role_arn!,c.external_id,false,byoSessionPolicy('account',{region,account:c.aws_account_id,connectionId:c.id}),{connectionId:c.id,purpose:'account'});
+  const [{SESv2Client,GetAccountCommand,PutAccountDetailsCommand},{FetchHttpHandler}]=await Promise.all([import('@aws-sdk/client-sesv2'),import('@smithy/fetch-http-handler')]);
+  const client=new SESv2Client({region,credentials:aws,ignoreConfiguredEndpointUrls:true,maxAttempts:2,requestHandler:new FetchHttpHandler({requestTimeout:8000})});
+  const save=(production:boolean,review:{status:string;caseId:string|null}|null)=>r.db.execute(sql`UPDATE provider_connection_regions SET scan_facts=scan_facts||${JSON.stringify({production,review})}::jsonb WHERE connection_id=${c.id} AND region=${region}`);
+  try {
+    const now=await client.send(new GetAccountCommand({})),current=now.Details?.ReviewDetails;
+    const review=current?{status:current.Status??'UNKNOWN',caseId:current.CaseId??null}:null;
+    if (now.ProductionAccessEnabled) { await save(true,review);throw conflict('PRODUCTION_ACCESS_GRANTED',`${regionLabels[region]} already has production access. Nothing was changed.`); }
+    if (review?.status==='PENDING') { await save(false,review);throw conflict('PRODUCTION_ACCESS_PENDING',`AWS is already reviewing a request for ${regionLabels[region]}${review.caseId?` (case ${review.caseId})`:''}.`); }
+    // The audit row is written before AWS is asked, so a request never goes unrecorded.
+    await r.db.transaction(async db=>{
+      await audit(db,c.id);
+      await client.send(new PutAccountDetailsCommand({ProductionAccessEnabled:true,MailType:input.mailType,WebsiteURL:input.websiteUrl,ContactLanguage:'EN',UseCaseDescription:input.useCase}));
+    });
+    const after=(await client.send(new GetAccountCommand({}))).Details?.ReviewDetails;
+    const state={status:after?.Status??'PENDING',caseId:after?.CaseId??null};
+    await save(false,state);
+    return {region,production:false,review:state};
+  } catch(e) {
+    if (e instanceof ApiError) throw e;
+    if (awsError(e).code==='AWS_ACCESS_DENIED') throw conflict('ACCOUNT_REQUESTS_OFF',`The ${productName} stack was created with account requests turned off. Request production access for ${regionLabels[region]} in the SES console instead.`);
+    throw awsError(e);
+  } finally { client.destroy(); }
+}
+
 // Stack requests. A published role template (api/byo-templates/) has a Custom::NightmailConnection resource:
 // CloudFormation publishes a request to the platform's setup topic when the customer's stack is created, updated or
 // deleted, and waits for Nightmail's answer at a presigned URL. Anyone may publish to that topic, so a request proves

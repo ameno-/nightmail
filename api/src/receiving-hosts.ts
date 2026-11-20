@@ -54,6 +54,12 @@ export function hostView(row: Row, addressCount: number, claim?: ClaimFacts | nu
 export type HostView = ReturnType<typeof hostView>;
 
 /** The domain's hosts, its own row first, then by when they were added. */
+// A connected AWS account is never received for: classic receipt rules can't be limited to Nightmail's own, and its
+// active rule set isn't Nightmail's to change. A domain added for sending only isn't received for either.
+function receivable(row: HostedDomain) {
+  if (row.connection.kind === 'byo' && row.connection.legacy === false) throw new ApiError(409, 'RECEIVING_UNAVAILABLE', `${row.name} sends through your own AWS account, which ${productName} doesn’t receive for: it never changes an account’s receipt rules.`);
+  if (row.claim_scope === 'account' || row.connection.legacy === false) throw new ApiError(409, 'RECEIVING_UNAVAILABLE', `${row.name} can’t receive mail through ${productName}: it was added for sending only.`);
+}
 export async function hostRows(db: DbExecutor, workspaceId: string, domainId: string, lock = false) {
   // Also the hosts an earlier life of the domain left below its own row (a domain added again takes that row back).
   const query = db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, workspaceId), sql`(${mailboxDomains.domainId}=${domainId} OR ${mailboxDomains.parentId} IN (SELECT o.id FROM mailbox_domains o WHERE o.workspace_id=${workspaceId} AND o.domain_id=${domainId} AND o.parent_id IS NULL))`)).orderBy(sql`${mailboxDomains.parentId} IS NOT NULL`, asc(mailboxDomains.createdAt), asc(mailboxDomains.id));
@@ -86,7 +92,7 @@ async function addHosted(c: Ctx, wid: string, row: HostedDomain, input: AddInput
   if (reservedPlatformName(host, c.env.config)) throw new ApiError(409, 'RECEIVING_HOST_RESERVED', `${host} is one of ${productName}’s own hosts, so it can’t receive mail for ${row.name}.`, 'name');
   const existing = row.hosts.find(h => h.host === host && !removed(h.status));
   if (existing) return { view: (await listHosts(c, { id: row.id, workspaceId: wid }, existing.id))[0]!, created: false };
-  if (row.claim_scope === 'account' || row.connection.legacy === false) throw new ApiError(409, 'RECEIVING_UNAVAILABLE', `${row.name} can’t receive mail through ${productName}: it was added for sending only.`);
+  receivable(row);
   if (row.hosts.filter(h => !removed(h.status)).length >= MAX_HOSTS) throw new ApiError(409, 'RECEIVING_HOST_LIMIT', `A domain receives on at most ${MAX_HOSTS} hosts. Remove one first.`, 'name');
   const { mx, issue } = await inspectReceivingHost(c.env.db, row, wid, host, dnsUnavailable);
   if (issue?.code === 'cname') throw new ApiError(409, 'RECEIVING_HOST_CNAME', issue.message, 'name');
@@ -155,7 +161,7 @@ async function addHosted(c: Ctx, wid: string, row: HostedDomain, input: AddInput
 export async function enableHosted(c: Ctx, domain: Domain) {
   const wid = domain.workspaceId, row = await hostedDomain(c.env.db, wid, domain.id);
   if (!row) return;
-  if (row.claim_scope === 'account' || row.connection.legacy === false) throw new ApiError(409, 'RECEIVING_UNAVAILABLE', `${row.name} can’t receive mail through ${productName}: it was added for sending only.`);
+  receivable(row);
   const queued = await c.env.db.transaction(async db => {
     // The claim first, then its hosts: the order every receiving write takes.
     const current = await hostedDomain(db, wid, domain.id, true);

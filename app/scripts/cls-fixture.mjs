@@ -146,6 +146,8 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
       SIMULATED_SES_LATENCY_MS: '0', SIMULATED_SES_DELIVERY_DELAY_MS: '0',
       // A mail gateway, as both stages have: the dashboard then shows IMAP and SMTP settings and offers SMTP logins.
       MAILGW_API_TOKEN: randomBytes(24).toString('hex'), MAILGW_PUBLIC_DOMAIN: 'northwind.example',
+      // Bring your own AWS (regional): the hosted connections' account is the platform's, as in production.
+      BANE_PLATFORM_AWS_ACCOUNT: '111122223333', BANE_BYO_V2: 'true', BYO_V5_TEMPLATE_URL: 'https://nightmail-byo-templates-111122223333.s3.us-east-2.amazonaws.com/byo/6.0.yaml', BYO_EVENTS_ORIGIN: 'https://events.nightmail.dev',
     });
     execFileSync('node', ['--import', 'tsx', 'src/migrate.ts'], { cwd: api, env: envFor(0), stdio: ['ignore', 'ignore', 'inherit'] });
     log('postgres: migrated');
@@ -561,6 +563,34 @@ async function supportInbox(db) {
  *  (and the editor's height) stays the same. A longer script grows the editor, which is the content changing. */
 export const liveSource = n => `export default function route(email, ctx) {\n  if (email.headers.has("list-unsubscribe")) return junk("newsletter")\n  label(${JSON.stringify(n ? `refund-${n}` : 'support')})\n  endpoints.support({ text: \`\${email.from.address}: \${email.subject}\` })\n}\n`;
 
+// A workspace connecting its own AWS account (regional, role template 6.0), at one moment of setup: the stack link
+// (stack), the stack refused for the wrong account (refused), the account being checked (checking), domains to choose
+// with Ohio granted and Virginia in the sandbox (choose), Ohio in the sandbox (sandbox), or Ohio being set up (setup).
+const BYO_REGIONS = ['us-east-2','us-east-1','us-west-1','us-west-2','af-south-1','ap-south-1','ap-south-2','ap-southeast-1','ap-southeast-2','ap-southeast-3','ap-southeast-4','ap-southeast-5','ap-southeast-6','ap-southeast-7','ap-northeast-1','ap-northeast-2','ap-northeast-3','ca-central-1','ca-west-1','eu-central-1','eu-central-2','eu-west-1','eu-west-2','eu-west-3','eu-south-1','eu-south-2','eu-north-1','il-central-1','mx-central-1','me-south-1','me-central-1','sa-east-1'];
+async function connectedAccount(fx, db, key, name, phase) {
+  const id = 'ws_aws_' + key, slug = name.toLowerCase();
+  await fx.signIn(key, `${key}@${slug}.example`, `${name} Owner`, { id, name });
+  await db.query('UPDATE workspaces SET byo_v2_enabled=true WHERE id=$1', [id]);
+  const conn = 'conn_' + createHash('sha256').update(id).digest('hex').slice(0, 32), stack = 'Nightmail-' + conn.slice(-20), account = '44445555' + String(['refused', 'checking', 'choose', 'sandbox', 'setup'].indexOf(phase) + 1).padStart(4, '0');
+  const prefix = 'nightmail-' + createHash('sha256').update(conn).digest('hex').slice(0, 20), bound = !['stack', 'refused'].includes(phase);
+  await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,region,state,tenant_state,external_id,platform_principal_arn,template_version,resource_prefix,requested_account,inventory_revision,stack_name,aws_account_id,role_arn,stack_id,stack_template_version,stack_error)
+    VALUES($1,$2,'byo','us-east-2',$3,'ready',gen_random_uuid(),'arn:aws:iam::111122223333:role/nightmail-byo-broker','v5',$4,$5,1,$6,$7,$8,$9,$10,$11)`,
+    [conn, id, bound ? (phase === 'checking' ? 'scanning' : 'ready_to_import') : 'awaiting_role', prefix, phase === 'refused' ? account : bound ? account : null, stack, bound ? account : null, bound ? `arn:aws:iam::${account}:role/${stack}` : null,
+      bound ? `arn:aws:cloudformation:us-east-2:${account}:stack/${stack}/0e9b1f40-1111-4000-8000-000000000000` : null, bound ? '6.0' : null,
+      phase === 'refused' ? `You chose AWS account ${account} in Nightmail, but this stack is in 777788889999. Sign in to ${account}, or start again from Connect AWS.` : null]);
+  if (!bound) return;
+  const facts = region => ({ production: region === 'us-east-2' ? phase !== 'sandbox' : region !== 'us-east-1', review: null, enforcement: 'HEALTHY', sendingEnabled: true, max24HourSend: region === 'us-east-2' ? 50000 : 200, maxSendRate: 14, sentLast24Hours: 0, configurationSets: {}, receiving: { supported: true, set: null, rules: [] } });
+  for (const [i, region] of BYO_REGIONS.entries()) {
+    const scanning = phase === 'checking' && i >= 12, setup = phase === 'setup' && region === 'us-east-2';
+    await db.query(`INSERT INTO provider_connection_regions(connection_id,region,managed_tenant,tenant_state,scan_revision,scan_state,scan_facts,sending_state) VALUES($1,$2,false,'ready',1,$3,$4,$5)`,
+      [conn, region, scanning ? 'scanning' : 'ready_to_import', JSON.stringify(scanning ? {} : facts(region)), setup ? 'provisioning' : 'unprovisioned']);
+  }
+  const verified = { VerificationStatus: 'SUCCESS', VerifiedForSendingStatus: true, DkimAttributes: { SigningEnabled: true, Status: 'SUCCESS', SigningAttributesOrigin: 'AWS_SES' } };
+  for (const [region, domain, identity] of [['us-east-2', `mail.${slug}.example`, verified], ['us-east-2', `${slug}.example`, verified], ['us-east-2', `old.${slug}.example`, { ...verified, VerificationStatus: 'FAILED', VerifiedForSendingStatus: false }], ['us-east-1', `news.${slug}.example`, verified]])
+    await db.query('INSERT INTO byo_candidates VALUES($1,$2,$3,1,$4)', [conn, region, domain, JSON.stringify(identity)]);
+  if (phase === 'setup') await db.query("INSERT INTO byo_domain_intents(connection_id,region,name,importing,id) VALUES($1,'us-east-2',$2,true,$3)", [conn, `mail.${slug}.example`, 'dom_' + conn.slice(5)]);
+}
+
 export async function seed(fx) {
   const { db } = fx;
   const dana = await fx.signIn('dana', 'dana@northwind.example', 'Dana Rivera', { id: 'ws_northwind', name: 'Northwind' });
@@ -704,6 +734,13 @@ export async function seed(fx) {
   const nia = await fx.signIn('nia', 'nia@lumenlabs.example', 'Nia Moreau', { id: 'ws_fresh', name: 'Lumen Labs' });
   await domain(db, 'ws_fresh', await hosted(db, 'ws_fresh'), 'lumenlabs.example');
   await fx.signIn('ona', 'ona@fieldnotes.example', 'Ona Field', { id: 'ws_new', name: 'Field Notes' });
+  // Connecting their own AWS account, one workspace per moment of the connect step (onboarding/aws.tsx).
+  await connectedAccount(fx, db, 'bea', 'Juniper', 'stack');
+  await connectedAccount(fx, db, 'bo', 'Kestrel', 'refused');
+  await connectedAccount(fx, db, 'fay', 'Larkspur', 'checking');
+  await connectedAccount(fx, db, 'cy', 'Marlow', 'choose');
+  await connectedAccount(fx, db, 'di', 'Nettle', 'sandbox');
+  await connectedAccount(fx, db, 'ed', 'Osier', 'setup');
   void nia;
   // Lumen Labs is a design partner: free (not billed) for 60 days, so its Billing page shows the free plan.
   await db.query("SELECT billing_set_workspace_free('ws_fresh', true, 'Design partner', now()+interval '60 days', 'operator:user_dana')");

@@ -2,7 +2,7 @@ import { ApiError } from './core.js';
 import { setupResources } from './ses-setup.js';
 
 /** Why a connected account's role is assumed: the session's name is nightmail-<purpose>. */
-export type ByoPurpose = 'scan' | 'provision' | 'cleanup' | 'send' | 'template' | 'quota' | 'verify' | 'read' | 'delete' | 'mailfrom' | 'stack';
+export type ByoPurpose = 'scan' | 'provision' | 'cleanup' | 'send' | 'template' | 'quota' | 'verify' | 'read' | 'delete' | 'mailfrom' | 'stack' | 'account';
 export type ByoScope = { region: string; account: string; connectionId: string; domain?: string; template?: string; stack?: string };
 /** The published role templates (api/byo-templates/<version>.yaml) a connected account may run. */
 export const BYO_TEMPLATE_VERSIONS = ['6.0'] as const;
@@ -39,6 +39,8 @@ export function byoSessionStatements(purpose: ByoPurpose, s: ByoScope): Statemen
       if (!s.template || !/^bane-[A-Za-z0-9_-]+$/.test(s.template)) throw new ApiError(422, 'TEMPLATE_SCOPE_REQUIRED', 'Regional BYO may render only bane- templates.');
       return [allow(['ses:GetEmailTemplate', 'ses:TestRenderEmailTemplate'], ses + 'template/' + s.template)];
     case 'quota': return [allow(['ses:GetAccount'], '*')];
+    // Requesting production access: read the account's state, then ask once (requestProductionAccess).
+    case 'account': return [allow(['ses:GetAccount', 'ses:PutAccountDetails'], '*')];
     case 'read': return identity([]);
     case 'verify': return identity(['ses:CreateEmailIdentity', 'ses:TagResource']);
     case 'delete': return identity(['ses:DeleteEmailIdentity']);

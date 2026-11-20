@@ -17156,6 +17156,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const pem=await selfSignedPem(signedKey);
     const topics=new Map<string,Json>(),sets=new Map<string,Json>(),trace:{region:string;op:string}[]=[], policies:string[]=[];
     const denied=()=>Object.assign(new Error('fixture denial'),{name:'AccessDenied'}), missing=()=>Object.assign(new Error('fixture missing'),{name:'NotFoundException'});
+    const granted=new Set([va,west]),reviews=new Map<string,Json>(),accountRequests:Json[]=[];let denyAccountRequests=false;
     let external='',failOnce=true,revoked:boolean|string=false,loseSubscribe=true,throttlePoll=false,failDelete=true,createdIdentity:Json|undefined,denyCleanup=false,loseSetDelete=false;
     t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));assert.match(u.hostname,/^sns\.us-east-[12]\.amazonaws\.com$/);if(u.pathname.endsWith('.pem'))return new Response(pem);const topic=topics.get(u.searchParams.get('TopicArn')!)!;topic.confirmed=true;return new Response(null);});
     t.mock.method(STSClient.prototype,'send',async function(this:InstanceType<typeof STSClient>,cmd:any){
@@ -17164,7 +17165,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // Only the broker enters a connected account: the platform key assumes the broker, the broker the customer role.
       if(cmd.input.RoleArn===`arn:aws:iam::${platform}:role/nightmail-byo-broker`){assert.equal(key,'v5-fixture-platform');assert.equal(cmd.input.RoleSessionName,'nightmail-broker');assert.equal(cmd.input.SourceIdentity,undefined);
         return {Credentials:{AccessKeyId:'v5-fixture-broker',SecretAccessKey:'fixture-only',SessionToken:'broker',Expiration:new Date(Date.now()+3600000)}};}
-      assert.equal(key,'v5-fixture-broker');assert.match(cmd.input.RoleSessionName,/^nightmail-(?:scan|provision|cleanup|send|template|quota|verify|read|delete|mailfrom)$/);assert.equal(cmd.input.SourceIdentity,v5.id);
+      assert.equal(key,'v5-fixture-broker');assert.match(cmd.input.RoleSessionName,/^nightmail-(?:scan|provision|cleanup|send|template|quota|verify|read|delete|mailfrom|account)$/);assert.equal(cmd.input.SourceIdentity,v5.id);
       assert.equal(cmd.input.DurationSeconds,900);assert.ok(cmd.input.Policy.length<=2048);policies.push(cmd.input.Policy);
       if (!external || cmd.input.ExternalId!==external) throw denied();
       return {AssumedRoleUser:{Arn:`arn:aws:sts::${account}:assumed-role/${cmd.input.RoleArn.split('/')[1]}/${cmd.input.RoleSessionName}`},Credentials:{AccessKeyId:'v5-fixture-customer',SecretAccessKey:'fixture-only',SessionToken:cmd.input.Policy,Expiration:new Date(Date.now()+900000)}};
@@ -17182,7 +17183,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           assert.equal(statements[0].Condition.StringEquals['aws:RequestedRegion'],oh);assert.equal(i.ConfigurationSetName,resource+'-transactional');assert.ok(i.Content.Raw);
           assert.equal(Buffer.from(i.Content.Raw.Data).toString(),'From: pilot@sub.both.example\r\nTo: success@simulator.amazonses.com\r\nSubject: Fixture\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nBody line.\r\nSender: body text');return {MessageId:randomUUID()};
         }
-        case 'GetAccountCommand':if(![oh,ie,va,west].includes(region))throw denied();return {SendingEnabled:true,EnforcementStatus:'HEALTHY',ProductionAccessEnabled:region===va,SendQuota:{SentLast24Hours:1,Max24HourSend:1000,MaxSendRate:8}};
+        case 'GetAccountCommand':if(![oh,ie,va,west].includes(region))throw denied();return {SendingEnabled:true,EnforcementStatus:'HEALTHY',ProductionAccessEnabled:granted.has(region),Details:reviews.has(region)?{ReviewDetails:reviews.get(region)}:undefined,SendQuota:{SentLast24Hours:1,Max24HourSend:1000,MaxSendRate:8}};
+        case 'PutAccountDetailsCommand':if(denyAccountRequests)throw denied();accountRequests.push(i);reviews.set(region,{Status:'PENDING',CaseId:'case-'+region});return {};
         case 'ListConfigurationSetsCommand':return i.NextToken?{ConfigurationSets:['bane-legacy']}:{ConfigurationSets:['existing'],NextToken:'sets2'};
         case 'GetConfigurationSetCommand':if(i.ConfigurationSetName==='bane-legacy')return {Tags:[{Key:'bane:installation-id',Value:'legacy'}]};if(!sets.has(key))throw missing();return sets.get(key);
         case 'DeleteConfigurationSetCommand':{const s=JSON.parse((await this.config.credentials()).sessionToken!).Statement;assert.ok(s[0].Action.includes('ses:DeleteConfigurationSet'));assert.ok(s[0].Resource.includes(`arn:aws:ses:${region}:${account}:configuration-set/${i.ConfigurationSetName}`));assert.ok(sets.delete(key));if(loseSetDelete){loseSetDelete=false;throw Object.assign(Error('lost delete acknowledgement'),{name:'TimeoutError'});}return {};}
@@ -17250,6 +17252,20 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const select=(...ids:string[])=>post('/imports',{revision:rev,confirm:true,candidateIds:ids}),ohId=oh+':both.example',vaId=va+':'+va+'.example';
     error(await select(ohId,va+':both.example'),409,'DUPLICATE_DOMAIN_SELECTION');error(await select(ie+':both.example'),409,'SCAN_STALE');
     revoked=true;error(await select(ohId),409,'CANDIDATE_NO_LONGER_VERIFIED');revoked=false;
+    // Mail starts only where AWS granted production access. Nightmail asks for it once, with what the owner confirmed,
+    // and never where access is granted or a request is under review (that would overwrite the account's details).
+    const useCase='Receipts and account notices for our own customers, who signed up for them.';
+    const access=(region:string,body:Json={})=>api('POST',path+`/regions/${region}/production-access`,{websiteUrl:'https://both.example',useCase,mailType:'TRANSACTIONAL',confirm:true,...body});
+    error(await select(ohId),409,'PRODUCTION_ACCESS_REQUIRED');error(await api('POST','/v1/domains',{name:'sandboxed.example',region:oh}),409,'PRODUCTION_ACCESS_REQUIRED');
+    error(await access(va),409,'PRODUCTION_ACCESS_GRANTED');error(await access(oh,{confirm:false}),422);
+    denyAccountRequests=true;error(await access(oh),409,'ACCOUNT_REQUESTS_OFF');denyAccountRequests=false;
+    assert.deepEqual(ok(await access(oh)),{region:oh,production:false,review:{status:'PENDING',caseId:'case-'+oh}});
+    assert.deepEqual(accountRequests,[{ProductionAccessEnabled:true,MailType:'TRANSACTIONAL',WebsiteURL:'https://both.example',ContactLanguage:'EN',UseCaseDescription:useCase}]);
+    error(await access(oh),409,'PRODUCTION_ACCESS_PENDING');assert.equal(accountRequests.length,1);
+    assert.deepEqual((await poll()).scan.regions.find((r:Json)=>r.region===oh).facts.review,{status:'PENDING',caseId:'case-'+oh});
+    assert.equal((await db.query("SELECT FROM audit_events WHERE action='connection.production_access' AND workspace_id=$1",[wid])).rowCount,1);
+    // AWS grants it, and the region's next scan reads that.
+    granted.add(oh);await db.query(`UPDATE provider_connection_regions SET scan_facts=scan_facts||'{"production":true}' WHERE connection_id=$1 AND region=$2`,[v5.id,oh]);
     assert.equal((await db.query("SELECT FROM jobs WHERE type='byo.provision' AND workspace_id=$1",[wid])).rowCount,0);
     const regionStatus=async(region:string)=>ok(await api('GET',path+'/regions/status')).regions.find((r:Json)=>r.region===region);
     await t.test('revocation before regional provisioning releases the selection without AWS writes',async()=>{
@@ -25514,7 +25530,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       ...(resource.includes(':identity/')?{...(action==='ses:CreateEmailIdentity'?{}:own),...(['ses:CreateEmailIdentity','ses:TagResource'].includes(action)?create:{})}
         // Nightmail's own configuration sets and topic carry this connection's tags from creation on.
         :resource!=='*'?{...feedback('Resource'),...(['ses:CreateConfigurationSet','sns:CreateTopic','ses:TagResource','sns:TagResource'].includes(action)?{...feedback('Request'),'aws:TagKeys':['nightmail:owner','nightmail:installation-id','nightmail:purpose']}:{})}:{})});
-    const purposes=['scan','provision','cleanup','send','template','quota','verify','read','delete','mailfrom','stack'] as const,templates=await byoTemplates();
+    const purposes=['scan','provision','cleanup','send','template','quota','verify','read','delete','mailfrom','stack','account'] as const,templates=await byoTemplates();
     // The code knows exactly the published versions.
     assert.deepEqual(templates,BYO_TEMPLATE_VERSIONS.map(v=>`byo-templates/${v}.yaml`));
     let checked=0;

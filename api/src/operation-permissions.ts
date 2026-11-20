@@ -159,7 +159,7 @@ export const OPERATION_PERMISSIONS: Record<string, OperationPermission> = {
   revokeWorkspaceInvitation: signedIn('admin', 'write'), updateWorkspaceMember: people('admin', 'dashboard'), removeWorkspaceMember: people('admin', 'dashboard'),
   getWorkspaceInvitation: people('any', 'dashboard'), acceptWorkspaceInvitation: people('any', 'dashboard'),
   getConnection: people('admin', 'dashboard'), createConnection: people('admin', 'dashboard'), deleteConnection: people('admin', 'dashboard'), listConnectionRegions: people('admin', 'dashboard'),
-  refreshConnectionScan: people('admin', 'dashboard'), importConnectionDomains: people('admin', 'dashboard'), getConnectionRegionStatus: people('admin', 'dashboard'), verifyConnection: people('admin', 'dashboard'),
+  refreshConnectionScan: people('admin', 'dashboard'), importConnectionDomains: people('admin', 'dashboard'), requestConnectionProductionAccess: people('admin', 'dashboard'), getConnectionRegionStatus: people('admin', 'dashboard'), verifyConnection: people('admin', 'dashboard'),
   getPublicStats: PUBLIC, getOverviewSetup: needs('sentMail', 'read', 'domain'), listActivity: signedIn('admin', 'write'), contactSupport: people('any', 'dashboard'),
   // Support and operator tooling (internal).
   getSupportContext: STAFF, listSupportWorkspaces: STAFF, listSupportDomains: STAFF, listSupportEmails: STAFF, getSupportEmail: STAFF, listSupportEvents: STAFF,

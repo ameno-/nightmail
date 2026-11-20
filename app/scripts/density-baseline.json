@@ -125,6 +125,58 @@
    "score": 18,
    "findings": []
   },
+  "Onboarding · AWS checking · desktop": {
+   "score": 6,
+   "findings": []
+  },
+  "Onboarding · AWS choose · desktop": {
+   "score": 14,
+   "findings": []
+  },
+  "Onboarding · AWS choose · phone": {
+   "score": 13,
+   "findings": []
+  },
+  "Onboarding · AWS production access · desktop": {
+   "score": 6,
+   "findings": []
+  },
+  "Onboarding · AWS production access · phone": {
+   "score": 6,
+   "findings": []
+  },
+  "Onboarding · AWS refused · desktop": {
+   "score": 13,
+   "findings": []
+  },
+  "Onboarding · AWS refused · phone": {
+   "score": 13,
+   "findings": []
+  },
+  "Onboarding · AWS sandbox · desktop": {
+   "score": 14,
+   "findings": []
+  },
+  "Onboarding · AWS sandbox · phone": {
+   "score": 13,
+   "findings": []
+  },
+  "Onboarding · AWS setting up · desktop": {
+   "score": 3,
+   "findings": []
+  },
+  "Onboarding · AWS setting up · phone": {
+   "score": 3,
+   "findings": []
+  },
+  "Onboarding · AWS stack · desktop": {
+   "score": 7,
+   "findings": []
+  },
+  "Onboarding · AWS stack · phone": {
+   "score": 7,
+   "findings": []
+  },
   "Onboarding · desktop": {
    "score": 7,
    "findings": []

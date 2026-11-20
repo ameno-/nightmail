@@ -125,6 +125,20 @@
 @media (hover: hover) and (pointer: fine) { .onboarding-disclosure:hover { color: var(--color-text); transition-duration: 0ms; } }
 .onboarding-trouble-body { margin-top: var(--space-12); animation: onboarding-rise 220ms var(--ease-out-strong) both; }
 
+/* Connect AWS for a connected account: the note under the link, then the choice of region and domains. */
+.onboarding-aws-choice { display: flex; flex-direction: column; gap: var(--space-16); }
+.onboarding-access { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8) var(--space-12); min-height: 32px; margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); color: var(--color-muted); }
+.onboarding-access[data-state='granted'] { color: var(--color-success); }
+.onboarding-access[data-state='denied'] { color: var(--color-danger); }
+.onboarding-access > span { flex: 1 1 220px; }
+.onboarding-found { display: flex; flex-direction: column; min-width: 0; margin: 0; padding: 0; border: 0; border-top: 1px solid var(--color-border-muted); }
+.onboarding-found legend { padding: 0 0 var(--space-8); font-size: var(--text-sm); font-weight: var(--font-weight-bold); }
+.onboarding-found-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-height: 44px; border-bottom: 1px solid var(--color-border-muted); }
+.onboarding-found-row code { font-size: var(--text-sm); overflow-wrap: anywhere; }
+.onboarding-found-note { flex-shrink: 0; color: var(--color-muted); font-size: var(--text-xs); }
+.onboarding-access-form { display: flex; flex-direction: column; gap: var(--space-16); }
+.onboarding-failed-intent { display: block; }
+
 /* Imported domains: plain hairline rows, like the DNS records. */
 .onboarding-imported { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--color-border-muted); }
 .onboarding-imported li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); padding-block: 10px; border-bottom: 1px solid var(--color-border-muted); }
