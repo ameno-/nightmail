@@ -92,7 +92,7 @@ Every message is screened either way. In good standing it goes out as written, a
 
 The screen reads no picture, so every sender keeps the picture rules, in good standing too:
 
-- **Words beside images.** A 200 × 200 logo needs none; every further 600 × 300 px of images needs 25 words (422 `CONTENT_IMAGE_ONLY`). For a message delivered as written, every picture it can show counts, including images that are hidden, only some clients show, backgrounds and images its style sheets draw.
+- **Words beside images.** A 200 × 200 logo needs none; every further 600 × 300 px of images needs 25 words (422 `CONTENT_IMAGE_ONLY`). For a message delivered as written, every picture it can show counts, including images that are hidden, only some clients show, backgrounds and images its style sheets draw; an image whose size its CSS could change (its own `style`, or any style sheet rule, media queries included, that could select it) counts at full size, at least 600 × 400.
 - **No SVG**, and inline images only as PNG, JPEG, GIF, WebP or BMP whose bytes match (422 `ATTACHMENT_TYPE_UNSCREENABLE`).
 
 ## Campaign list probe
@@ -105,7 +105,7 @@ A sender in good standing skips the probe when its recipients were **mailed clea
 - has mature feedback for them: at least 90% delivered or bounced, and ten minutes since the last result;
 - stayed within 3% hard bounces and 0.08% complaints for them.
 
-Over 10,000 recipients, an evenly spaced sample of 10,000 is read. This is decided once, before the first recipient is released. If the sender falls below good standing while such a campaign is sending, release stops: what was already released is checked as a probe (it leaves the queue, ten minutes pass, then the same lines) before the rest goes out.
+A campaign over 10,000 recipients is always probed. This is decided once, before the first recipient is released. If the sender falls below good standing while such a campaign is sending, release stops: what was already released is checked as a probe (it leaves the queue, ten minutes pass, then the same lines) before the rest goes out.
 
 Every campaign, probed or not, still pauses at more than 2% bounces after 1,000 accepted or more than 0.08% complaints after 2,000.
 

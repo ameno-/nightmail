@@ -2157,9 +2157,9 @@ async function campaignHealth(db: DbExecutor, a: Actor, campaignId: string, host
 }
 /**
  * Whether a sender in good standing may skip this campaign's list probe: an earlier campaign delivered to these
- * recipients, by address, and their feedback is in and clean. It reads this launch's frozen recipients (all of them, or an
- * evenly spaced sample of at most 10,000), whatever list or segment they came from, against what one of the workspace's
- * last three campaigns finished in the last 90 days did with the same addresses:
+ * recipients, by address, and their feedback is in and clean. It reads every one of this launch's frozen recipients,
+ * whatever list or segment they came from, against what one of the workspace's last three campaigns finished in the last
+ * 90 days did with the same addresses. A campaign over 10,000 recipients is always probed: it is never read in part.
  *  - it delivered to at least 90% of them: an address it bounced, drew a complaint from, never mailed or has no result
  *    for counts against it;
  *  - their feedback is mature: at least 90% of those it mailed resolved as delivered or bounced, and the probe's ten-minute
@@ -2167,26 +2167,28 @@ async function campaignHealth(db: DbExecutor, a: Actor, campaignId: string, host
  *  - it was clean: hard bounces within the probe's 3% and complaints within the automatic pause's 0.08% of those it mailed.
  * That campaign finished without a quarantine and was not one released only to earlier recipients after one.
  */
-const CLEAN_LIST = { days: 90, coverage: 0.9, resolved: 0.9, candidates: 3, sample: 10_000 } as const;
-async function listMailedCleanly(db: DbExecutor, a: Actor, row: RunRow) {
-  const step = Math.max(1, Math.ceil(row.total / CLEAN_LIST.sample));
-  const [found] = (await db.execute<{ clean: boolean }>(sql`WITH sample AS MATERIALIZED (
-      SELECT DISTINCT lower(r.recipient->>'email') AS email FROM sending_review_recipients r
-      WHERE r.review_id=${row.reviewId} AND r.ordinal IN (SELECT generate_series(1, ${row.total}::int, ${step}::int))
-    ), candidates AS (
+const CLEAN_LIST = { days: 90, coverage: 0.9, resolved: 0.9, candidates: 3, largest: 10_000 } as const;
+export async function listMailedCleanly(db: DbExecutor, a: Pick<Actor, 'workspaceId'>, row: Pick<RunRow, 'id' | 'reviewId' | 'total'>) {
+  if (row.total > CLEAN_LIST.largest) return false;
+  // This launch's addresses (at most 10,000), then each candidate's mail to them, matched by a hashed array lookup.
+  const emails = (await db.execute<{ email: string }>(sql`SELECT DISTINCT lower(recipient->>'email') AS email FROM sending_review_recipients WHERE review_id=${row.reviewId}`)).rows.map(r => r.email);
+  if (!emails.length) return false;
+  const [found] = (await db.execute<{ clean: boolean }>(sql`WITH candidates AS MATERIALIZED (
       SELECT c.id FROM sending_campaigns c WHERE c.workspace_id=${a.workspaceId} AND c.id<>${row.id} AND c.state='done' AND NOT c.simulated AND c.quarantines=0 AND NOT c.delivered_only
         AND c.updated_at>now()-make_interval(days=>${CLEAN_LIST.days}::int) ORDER BY c.updated_at DESC LIMIT ${CLEAN_LIST.candidates}
+    ), mailed AS MATERIALIZED (
+      SELECT e.campaign_id,lower(e.to_addresses->>0) AS email,bool_or(e.status='delivered' OR e.event_outcomes & 2 <> 0) AS delivered,
+        bool_or(e.status='bounced' OR e.event_outcomes & 4 <> 0) AS bounced,bool_or(e.status='complained' OR e.event_outcomes & 8 <> 0) AS complained,max(e.updated_at) AS changed
+      FROM candidates c JOIN sending_emails e ON e.workspace_id=${a.workspaceId} AND e.campaign_id=c.id AND lower(e.to_addresses->>0)=ANY(${sql.param(emails)}::text[])
+        AND e.status<>'suppressed' AND (e.provider_id IS NOT NULL OR e.status IN ('accepted','sent','delivered','bounced','complained','delayed') OR e.event_outcomes & 1 <> 0)
+      GROUP BY 1,2
+    ), history AS (
+      SELECT campaign_id,count(*) FILTER (WHERE delivered AND NOT bounced AND NOT complained) AS covered,count(*) AS mailed,count(*) FILTER (WHERE delivered OR bounced) AS resolved,
+        count(*) FILTER (WHERE bounced) AS bounced,count(*) FILTER (WHERE complained) AS complained,max(changed) AS changed
+      FROM mailed GROUP BY campaign_id
     )
-    SELECT EXISTS (SELECT FROM candidates c CROSS JOIN LATERAL (
-        SELECT count(*) FILTER (WHERE m.delivered AND NOT m.bounced AND NOT m.complained) AS covered, count(*) AS mailed, count(*) FILTER (WHERE m.delivered OR m.bounced) AS resolved,
-          count(*) FILTER (WHERE m.bounced) AS bounced, count(*) FILTER (WHERE m.complained) AS complained, max(m.changed) AS changed
-        FROM (SELECT s.email, bool_or(e.status='delivered' OR e.event_outcomes & 2 <> 0) AS delivered, bool_or(e.status='bounced' OR e.event_outcomes & 4 <> 0) AS bounced,
-            bool_or(e.status='complained' OR e.event_outcomes & 8 <> 0) AS complained, max(e.updated_at) AS changed
-          FROM sample s JOIN sending_emails e ON e.workspace_id=${a.workspaceId} AND e.campaign_id=c.id AND lower(e.to_addresses->>0)=s.email
-            AND e.status<>'suppressed' AND (e.provider_id IS NOT NULL OR e.status IN ('accepted','sent','delivered','bounced','complained','delayed') OR e.event_outcomes & 1 <> 0)
-          GROUP BY s.email) m
-      ) h
-      WHERE h.covered>0 AND h.covered>=ceil(${CLEAN_LIST.coverage}::numeric*(SELECT count(*) FROM sample)) AND h.resolved>=h.mailed*${CLEAN_LIST.resolved}::numeric
+    SELECT EXISTS (SELECT FROM history h
+      WHERE h.covered>0 AND h.covered>=${Math.ceil(CLEAN_LIST.coverage * emails.length)}::int AND h.resolved>=h.mailed*${CLEAN_LIST.resolved}::numeric
         AND h.changed<=now()-make_interval(secs=>${PROBE.waitMs / 1000}::int) AND h.bounced<=h.mailed*${PROBE.bounceRate}::numeric AND h.complained<=h.mailed*${AUTO_PAUSE.complaintRate}::numeric) AS clean`)).rows;
   return found!.clean;
 }
@@ -2520,7 +2522,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     return 'done' as const;
   };
   // The list probe: release only the probe, wait for its feedback, then check it before releasing the rest. A sender in
-  // good standing skips it for recipients an earlier campaign delivered to cleanly (listMailedCleanly): decided once,
+  // good standing skips it for up to 10,000 recipients an earlier campaign delivered to cleanly (listMailedCleanly): decided once,
   // before the first release, and recorded as skipped, not passed. While the sender stays in good standing a skipped
   // campaign releases on; once it is below (or a check has started), everything released so far is the probe: nothing
   // more is released until it has left the queue, waited ten minutes and passed the probe's check, and a check that

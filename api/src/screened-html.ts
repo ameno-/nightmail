@@ -435,13 +435,36 @@ const UA_SCALE: Record<string, number> = { small: 1 / 1.2, sub: 1 / 1.2, sup: 1 
 const PREHEADER_STYLE = 'display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all';
 const hides = (style: string) => /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0(?:\.0+)?|max-height\s*:\s*0(?:px)?|font-size\s*:\s*[01](?:\.\d+)?(?:px|pt)?)\s*(?:;|$)/i.test(style);
 
+const lengthOf = (v: string | undefined) => v === undefined ? undefined : /%$/.test(v) ? Math.round(parseFloat(v) * 6) : /^\d+$/.test(v) ? Number(v) : px(v);
 /** The area a client draws a picture at: per side the larger of the attribute and the style, full width when neither is declared. */
 function drawnArea(attribute: (name: string) => string | undefined, style: (name: string) => string | undefined) {
-  const length = (v: string | undefined) => v === undefined ? undefined : /%$/.test(v) ? Math.round(parseFloat(v) * 6) : /^\d+$/.test(v) ? Number(v) : px(v);
-  const side = (name: 'width' | 'height') => { const sizes = [length(style(name)), length(attribute(name))].filter((n): n is number => n !== undefined); return sizes.length ? Math.max(...sizes) : undefined; };
+  const side = (name: 'width' | 'height') => { const sizes = [lengthOf(style(name)), lengthOf(attribute(name))].filter((n): n is number => n !== undefined); return sizes.length ? Math.max(...sizes) : undefined; };
   const width = side('width'), height = side('height');
   return (width ?? 600) * (height ?? (width === undefined ? 400 : Math.round(width * 2 / 3)));
 }
+// Properties that can change the size a client draws a picture at.
+const SIZING = new Set(['width', 'height', 'min-width', 'min-height', 'max-width', 'max-height', 'zoom', 'inline-size', 'block-size', 'min-inline-size', 'min-block-size',
+  'max-inline-size', 'max-block-size', 'aspect-ratio', 'transform', 'scale', 'all']);
+type SizingRule = { tag?: string; classes: string[]; ids: string[]; any: boolean; decls: Declaration[] };
+/** Every style sheet rule that sets a size property, rules inside at-rules (media queries) included, by the subject it
+ *  could select: its last compound's type, classes and id (an escaped one could be anything). Null past the sheet budget. */
+function sizingRules(sheets: string[]): SizingRule[] | null {
+  const css = stripComments(sheets.join('\n'));
+  if (css.length > MAX_SHEET_BYTES) return null;
+  const out: SizingRule[] = [];
+  for (const m of css.matchAll(/([^{}]*)\{([^{}]*)\}/g)) {
+    const prelude = m[1]!.trim(), decls = declarations(unescapeCss(m[2]!)).filter(d => SIZING.has(d.property));
+    if (!decls.length || prelude.startsWith('@')) continue;
+    for (const selector of prelude.split(',')) {
+      const subject = selector.replace(/\[[^\]]*\]|\([^)]*\)/g, '').trim().split(/[\s>+~]+/).at(-1)!.toLowerCase();
+      out.push(subject.includes('\\') ? { classes: [], ids: [], any: true, decls }
+        : { tag: /^[a-z][\w:-]*/.exec(subject)?.[0], classes: [...subject.matchAll(/\.([-\w]+)/g)].map(c => c[1]!), ids: [...subject.matchAll(/#([-\w]+)/g)].map(c => c[1]!), any: false, decls });
+    }
+  }
+  return out;
+}
+/** The elements that draw a picture: images, inline SVG, image inputs and Office VML with a source. */
+const isPicture = (element: Element) => { const tag = element.tagName; return tag === 'img' || tag === 'image' || tag === 'svg' || (tag === 'input' && element.attrs.find(a => a.name === 'type')?.value.toLowerCase() === 'image') || (/:(?:imagedata|image|fill)$/.test(tag) && element.attrs.some(a => a.name === 'src')); };
 type State = { fontPx: number; color: Rgb; background: Rgb };
 export function screenedHtml(html: string, previewText?: string): string {
   let copy = pass(html, previewText);
@@ -506,6 +529,21 @@ function pass(html: string, previewText?: string, stats?: HtmlStats, kept = fals
   let seenText = false, words = 0, imageArea = 0;
   // Kept markup: an element's own background image, and every picture under a node this reading leaves out.
   const attribute = (element: Element, name: string) => element.attrs.find(a => a.name === name)?.value;
+  // Kept markup: a picture whose size delivered CSS could change (its own style, or a sheet rule, media queries included,
+  // that could select it) counts at full size: at least a full-width 600 x 400, more if the CSS or attributes declare
+  // more, times any zoom. Only a picture with no such CSS keeps the size it declares (drawnArea).
+  const sizing = kept ? sizingRules(sheets) : [];
+  const fullSize = (element: Element): number | undefined => {
+    if (!kept) return undefined;
+    const own = declarations(stripComments(unescapeCss(attribute(element, 'style') ?? ''))).filter(d => SIZING.has(d.property));
+    const classes = new Set((attribute(element, 'class') ?? '').toLowerCase().split(/\s+/)), id = attribute(element, 'id')?.toLowerCase();
+    const rules = sizing?.filter(r => r.any || ((!r.tag || r.tag === element.tagName) && r.classes.every(c => classes.has(c)) && r.ids.every(i => i === id)));
+    if (rules && !rules.length && !own.length) return undefined;
+    const decls = [...own, ...(rules ?? []).flatMap(r => r.decls)], value = (d: Declaration) => d.value.replace(/!\s*important\s*$/i, '').trim().toLowerCase();
+    const longest = (names: string[], attr: string, least: number) => Math.max(least, ...[lengthOf(attribute(element, attr)), ...decls.filter(d => names.includes(d.property)).map(d => lengthOf(value(d)))].filter((n): n is number => n !== undefined && n > 0));
+    const zoom = Math.max(1, ...decls.filter(d => d.property === 'zoom').map(d => { const v = value(d); return /%$/.test(v) ? parseFloat(v) / 100 : parseFloat(v); }).filter(n => Number.isFinite(n)));
+    return longest(['width', 'min-width', 'inline-size', 'min-inline-size'], 'width', 600) * longest(['height', 'min-height', 'block-size', 'min-block-size'], 'height', 400) * zoom * zoom;
+  };
   const background = (element: Element) => {
     if (!kept) return 0;
     const own = new Map(declarations(stripComments(unescapeCss(attribute(element, 'style') ?? ''))).map(d => [d.property, d.value.toLowerCase()]));
@@ -519,8 +557,7 @@ function pass(html: string, previewText?: string, stats?: HtmlStats, kept = fals
       const element = node as Element, tag = element.tagName, own = new Map(declarations(stripComments(attribute(element, 'style') ?? '')).map(d => [d.property, d.value.toLowerCase()]));
       if (tag === 'script' || tag === 'style' || tag === 'template') return 0;
       area += background(element);
-      if (tag === 'img' || tag === 'image' || tag === 'svg' || (tag === 'input' && attribute(element, 'type')?.toLowerCase() === 'image') || (/:(?:imagedata|image|fill)$/.test(tag) && element.attrs.some(a => a.name === 'src')))
-        area += drawnArea(name => attribute(element, name), name => own.get(name));
+      if (isPicture(element)) area += fullSize(element) ?? drawnArea(name => attribute(element, name), name => own.get(name));
       if (tag === 'svg') return area;
     }
     if ('childNodes' in node) for (const child of node.childNodes) area += pictures(child);
@@ -590,7 +627,7 @@ function pass(html: string, previewText?: string, stats?: HtmlStats, kept = fals
         i++; continue;
       }
       if (!isElement(node) || node.namespaceURI !== HTML || DROPPED.has(node.tagName) || node.attrs.some(a => a.name === 'data-bane-preview' || a.name === 'data-opensend-preview')) { imageArea += pictures(node); detach(node); continue; }
-      const merged = styles(node), style = merged.map(d => `${d.property}:${d.value}`).join(';');
+      const merged = styles(node), style = merged.map(d => `${d.property}:${d.value}`).join(';'), full = isPicture(node) ? fullSize(node) : undefined;
       const text = node.childNodes.every(isText) ? node.childNodes.map(child => (child as DefaultTreeAdapterMap['textNode']).value).join('') : undefined;
       if (!seenText && (node.tagName === 'div' || node.tagName === 'p') && hides(style) && text?.trim() && text.normalize('NFKC').replace(/\p{Cf}/gu, '').replace(/\s+/g, ' ').trim().length <= 300) {
         node.attrs = [{ name: 'style', value: PREHEADER_STYLE }];
@@ -614,7 +651,7 @@ function pass(html: string, previewText?: string, stats?: HtmlStats, kept = fals
         // The size a client draws it at: the larger of the attribute and the style (a minimum could only enlarge it,
         // so none is kept), a full-width picture when neither is declared.
         for (const property of ['min-width', 'min-height']) declared.delete(property);
-        imageArea += drawnArea(name => node.attrs.find(a => a.name === name)?.value, name => declared.get(name));
+        imageArea += full ?? drawnArea(name => node.attrs.find(a => a.name === name)?.value, name => declared.get(name));
         if (stats) stats.images++;
       }
       const applied = [...declared].map(([property, value]) => `${property}:${value}`).join(';');

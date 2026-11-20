@@ -19789,8 +19789,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         {subject:'outlookImage',html:`${short}<!--[if mso]><v:rect style="width:600px;height:400px"><v:fill type="frame" src="https://cdn.brand.example/hero.png"/></v:rect><![endif]-->`},
         {subject:'background',html:`<table><tr><td background="https://cdn.brand.example/hero.png" ${hero}>${short}</td></tr></table>`},
         {subject:'sheetImage',html:`<style>.h{background-image:url(https://cdn.brand.example/hero.png)}</style><div class="h">${short}</div>`},
-        {subject:'inlineSvg',html:`${short}<svg ${hero} viewBox="0 0 600 400"><path d="M0 0h600v400H0z"/></svg>`}];
+        {subject:'inlineSvg',html:`${short}<svg ${hero} viewBox="0 0 600 400"><path d="M0 0h600v400H0z"/></svg>`},
+        // A free 100 x 100 logo by its attributes that delivered CSS enlarges, inline or from a sheet's media query, counts
+        // at full size: the CSS is delivered as written, so it is measured as written.
+        {subject:'minSizedLogo',html:'<p>Receipt.</p>\n<img width="100" height="100"\n     style="min-width:600px;min-height:400px"\n     src="https://images.example.test/message.png">'},
+        {subject:'darkSizedLogo',html:'<style>@media (prefers-color-scheme: dark){.hero{width:600px!important;height:400px!important}}</style><p>Receipt.</p><img class="hero" width="100" height="100" src="https://images.example.test/message.png">'}];
       assert.deepEqual(await send('good',pictures),Object.fromEntries(pictures.map(m=>[m.subject,'CONTENT_IMAGE_ONLY'])));
+      // A logo no CSS can resize keeps the size its attributes declare, even beside a rule for other elements.
+      assert.deepEqual(await send('good',[{subject:'plainLogo',html:'<style>.banner{width:600px;height:400px}</style><p>Receipt.</p><img class="logo" width="100" height="100" src="https://images.example.test/logo.png">'}]),{plainLogo:'accepted'});
       // How hidden copy stays screened when the markup is kept (src/screen.ts readHtml): the screen reads every text node
       // whatever CSS does to it, so a block only a media query, dark mode, Outlook or the hidden attribute's override shows
       // is read as plain copy (the mobile-only line left out under probation is screened here); it reads what style sheets
@@ -20593,6 +20599,28 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await standing('band_limit=NULL,daily_limit=NULL');
       await list('new', 1, 100, again);
       assert.equal((await launch('Grown issue', again).then(c => c.view())).expanded, 100);
+      // Over 10,000 recipients the probe always runs. The review's case, on the decision itself with seeded rows (this
+      // fixture cannot prepare a real 20,000-recipient launch in one statement): 20,000 frozen recipients, and an earlier
+      // clean, mature campaign that delivered to the 10,000 at odd ordinals (50% coverage), then to all 20,000. Neither
+      // exempts them; at 10,000 recipients the same full, mature history does.
+      const { listMailedCleanly } = await import('./src/sending.js');
+      const review = async (total: number) => {
+        const id = unique('rev_big');
+        await db.query(`INSERT INTO sending_review_recipients(review_id,ordinal,recipient,recipient_bytes) SELECT $1,n,jsonb_build_object('id','con_big_'||n,'email','big-'||n||'@example.net'),64 FROM generate_series(1,$2::int) n`, [id, total]);
+        return id;
+      };
+      const prior = unique('cmp_big_prior');
+      await db.query(`INSERT INTO sending_campaigns(id,workspace_id,draft,state,total,prepared,expanded,simulated,updated_at) VALUES($1,$2,'{"audience":{}}','done',20000,20000,20000,false,now())`, [prior, wid]);
+      const history = (oddOnly: boolean) => db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,campaign_id,created_at,updated_at)
+        SELECT $4||'_'||n,$1,$2,'fixture',$3,jsonb_build_array('big-'||n||'@example.net'),'[]','[]','Earlier issue','{}',false,'delivered',$4||'_'||n,$4,now()-interval '1 day',now()-interval '1 day'
+        FROM generate_series(1,20000) n WHERE NOT $5::boolean OR n%2=1 ON CONFLICT (id) DO NOTHING`, [wid, REGION, from, prior, oddOnly]);
+      const exempt = (reviewId: string, total: number) => listMailedCleanly(runtime.db, { workspaceId: wid } as never, { id: unique('cmp_big'), reviewId, total } as never);
+      const twenty = await review(20000);
+      await history(true);
+      assert.equal(await exempt(twenty, 20000), false, 'Half the recipients mailed: probed.');
+      await history(false);
+      assert.equal(await exempt(twenty, 20000), false, 'Every recipient mailed, but over 10,000: probed.');
+      assert.equal(await exempt(await review(10000), 10000), true, 'At 10,000, every recipient delivered to cleanly and mature: no probe.');
     });
   });
 
