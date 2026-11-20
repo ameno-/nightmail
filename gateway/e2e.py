@@ -524,13 +524,13 @@ def framing(p):
 
 def deadline(p):
     for proto,greeting in [('IMAP',b'* OK'),('SMTP',b'220')]:
-        with socket.create_connection(('localhost',p[proto]),timeout=5) as s:
+        with socket.create_connection(('localhost',p[proto]),timeout=8) as s:
             assert s.recv(2048).startswith(greeting)
             if proto=='IMAP': s.sendall(b'a CAP')
             else: assert s.recv(2048).startswith(b'421 4.4.2'), 'SMTP closed without a timeout reply'
             assert not s.recv(1), 'idle or unfinished pre-auth command survived deadline'
-    # The fixture allows five seconds total, four seconds idle. A successful
-    # command three seconds in must not buy another four idle seconds.
+    # The fixture allows five seconds total, which ends it before the 15 s idle
+    # limit. A successful command three seconds in must not extend the total.
     with socket.create_connection(('localhost',p['IMAP']),timeout=4) as s:
         assert s.recv(2048).startswith(b'* OK');time.sleep(3)
         s.sendall(b'a NOOP\r\n');assert s.recv(2048).startswith(b'a OK')
