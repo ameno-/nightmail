@@ -234,6 +234,7 @@ export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promi
     ['PREVIEW_SWEEP_FAILED', async () => (await import('./preview-images.js')).sweepPreviews(runtime)],
     ['REPUTATION_ALERT_CHECK_FAILED', async () => (await import('./reputation-alerts.js')).checkReputationAlerts(runtime)],
     ['MAILBOX_HOURLY_FAILED', async () => (await import('./mailbox-ingest.js')).mailboxHourly(await mailboxRuntime())],
+    ['ANALYTICS_COMPACT_FAILED', async () => { if (runtime.config.dashboardAnalytics) await (await import('./analytics.js')).compactAnalytics(runtime); }],
     // Billing settles the closed hours (and once a UTC day its storage, unpaid, drift and expiry work).
     ['BILLING_HOURLY_FAILED', async () => { if (runtime.config.multiTenant) await (await import('./billing/cron.js')).billingHourly(runtime); }],
   ] as const) {

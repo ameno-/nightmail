@@ -110,7 +110,12 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
       // 6,000 units of 16 KiB a minute per workspace in each location: about 94 MiB of preview memory, eight previews at the limit.
       // The per-isolate budget is the memory bound, so a limiter that rejects the weight fails open.
       allowPreview:(workspaceId,bytes)=>env.ADMISSION.limit({key:`bane:preview:${workspaceId}`,delta:Math.max(1,Math.ceil(bytes/16384))} as RateLimitOptions).then(r=>r.success,()=>{core.log('warn',{code:'PREVIEW_RATE_LIMIT_UNAVAILABLE'});return true;}),
-      allowFeedbackTopic:async arn=>(await env.ADMISSION.limit({key:`feedback:${arn}`})).success, placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1, immediate) => {
+      allowFeedbackTopic:async arn=>(await env.ADMISSION.limit({key:`feedback:${arn}`})).success,
+      // Dashboard analytics (src/analytics.ts): their own bucket and limiter where the config binds them. A limiter that
+      // fails lets the batch through; the per-process cap still applies.
+      analyticsStorage: env.ANALYTICS ? r2Storage(env.ANALYTICS) : undefined,
+      allowAnalytics: env.ANALYTICS_INGEST ? peer => env.ANALYTICS_INGEST!.limit({ key: `analytics:${peer}` }).then(r => r.success, () => true) : undefined,
+      placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1, immediate) => {
       if (immediate === 'webhook' && env.WEBHOOK_QUEUE) return workWake(env.WEBHOOK_QUEUE,concurrency)(readyJobs);
       if (immediate || readyJobs > concurrency) return notify(readyJobs);
       // Only orchestration singletons coalesce. Delay past the window so the signal cannot

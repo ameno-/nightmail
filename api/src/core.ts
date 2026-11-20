@@ -71,6 +71,8 @@ export interface Config {
   staffGoogleDomains: string[];
   /** Hosted: the issuer subjects allowed to use staff UI notes (src/ui-notes.ts); empty turns the feature off. */
   uiNotesSubjects?: { issuer: string; subject: string }[];
+  /** Dashboard usage analytics (src/analytics.ts, NIGHTMAIL_DASHBOARD_ANALYTICS): off unless set. */
+  dashboardAnalytics?: boolean;
   /** Self-hosted: subjects (or '*') that become owners of 'default' at their first sign-in. */
   defaultWorkspaceOwners: '*' | string[];
   multiTenant: boolean;
@@ -145,6 +147,10 @@ export interface Runtime {
   allowMalformedSns?: (peer: string) => Promise<boolean>;
   // A workspace's preview memory a minute (Workers: the ADMISSION limiter, weighted by bytes). Node has only the per-process budget.
   allowPreview?: (workspaceId: string, bytes: number) => Promise<boolean>;
+  // Dashboard analytics (src/analytics.ts): the Workers ANALYTICS bucket and the ANALYTICS_INGEST limiter. Node uses
+  // the installation's bucket and a per-process cap.
+  analyticsStorage?: Storage;
+  allowAnalytics?: (peer: string) => Promise<boolean>;
   jwksCacheScope?: object; // Workers create a new DB adapter per request; scope public keys to the binding instead.
   // Set only by the SupportPlatform service-binding entrypoint (src/support-platform.ts), never from a request.
   platformCaller?: 'bane-support';
