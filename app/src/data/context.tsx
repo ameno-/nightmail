@@ -1,6 +1,6 @@
 import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffect, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useLocation, useNavigate } from 'react-router'
+import { Link, useLocation, useNavigate } from 'react-router'
 import { ApiError, type Identity, type Api, type WorkspaceInvitationPreview, errorText } from './types'
 import { roleLabel, workspaceApi } from './workspaces'
 import { createLiveApi, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace } from './live'
@@ -20,6 +20,8 @@ import { productName } from '../../../api/src/brand'
 import { ANALYTICS_SESSION_PARAM } from '../../../api/src/analytics-events'
 import { analytics } from '../lib/analytics'
 import { Analytics } from '../components/Analytics'
+import { NightmailWordmark } from '../components/NightmailLogo'
+import { isKnownPath } from '../lib/routes'
 
 // The tab's account and workspace. logout signs out of this tab's account only; another connected account takes its place.
 type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>
@@ -99,11 +101,19 @@ function InvitationReview({ invitation, email, firstWorkspace, joining, error, o
     <div className="cluster"><Button variant="primary" loading={joining} onClick={onJoin}>Join workspace</Button><Button disabled={joining} onClick={onCancel}>{firstWorkspace ? 'Cancel and sign out' : 'Cancel'}</Button></div>
   </div></main>
 }
+// Signed out, or the session couldn't be checked, on a page that needs one: the wordmark (to the homepage) over one
+// centred column, as the account page it leads to is laid out.
+function SignedOutPage({ title, children }: { title: string; children: ReactNode }) {
+  return <main className="signed-out">
+    <Link className="wordmark" to="/" aria-label={`${productName.toLowerCase()} home`}><NightmailWordmark /></Link>
+    <div className="signed-out__body"><h1>{title}</h1>{children}</div>
+  </main>
+}
 /** Pages anyone can open, signed in or not. */
 export const isPublicPath = (path: string) => path === '/docs' || path.startsWith('/docs/') || path === '/legal' || path.startsWith('/legal/')
 export function ApiProvider({ children }: { children: ReactNode }) {
   // The docs and the legal pages are public: they render signed out, and /v1/me only adds the workspace's context.
-  const publicRoute = isPublicPath(useLocation().pathname)
+  const { pathname } = useLocation(), publicRoute = isPublicPath(pathname)
   const navigate = useNavigate()
   // A sign-in (or a return from a provider) this tab started names the account the page opens as; the tab then stays
   // with it. The server names only an account this browser has a session for; a link alone never moves the tab.
@@ -299,10 +309,10 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   // used by that click only; a pointer down that never becomes a click is dropped after a few seconds.
   const signIn = useRef<{ at: number; url: Promise<string> } | null>(null)
   function accountUrl() {
-    // Assign path components rather than resolving an untrusted redirect parameter. Signing in from the homepage opens
-    // the dashboard.
-    const callback = new URL(window.location.origin)
-    callback.pathname = window.location.pathname === '/' ? '/overview' : window.location.pathname
+    // Assign path components rather than resolving an untrusted redirect parameter. Signing in from the homepage, or
+    // from an address the dashboard doesn't have, opens Overview.
+    const callback = new URL(window.location.origin), path = window.location.pathname
+    callback.pathname = path === '/' || !isKnownPath(path) ? '/overview' : path
     callback.search = window.location.search
     callback.hash = window.location.hash
     callback.searchParams.delete('auth')
@@ -354,18 +364,24 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, notice, dismissNotice: () => setNotice(null)}}>
     <Analytics identity={identity.data && !identity.isError ? identity.data : null} signedOut={signedOut} />
     {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
-    : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage start={{ signedIn: false, onSignIn: login, onSignInIntent: prepareLogin, busy }} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title={productName} /><div className="stack" style={{maxWidth: 520}}>
-      {signedOut ? <>
-        <h2>Sign in to {productName}</h2>
+    : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage start={{ signedIn: false, onSignIn: login, onSignInIntent: prepareLogin, busy }} notice={authNotice} /></Suspense>
+    // A dashboard page (a deep link from an email, or a bookmark) asks to sign in and opens once signed in; any other
+    // address says there is no page there.
+    : signedOut ? isKnownPath(pathname) ? <SignedOutPage title={`Sign in to ${productName}`}>
         {authNotice}
         <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin} data-analytics="sign-in/continue">Continue to sign in</Button>
         <SignInConsent className="muted" />
-      </> : <>
-        <h2>Couldn’t check your session</h2>
-        <Alert tone="warning">{unconfigured ? 'Sign-in is not configured on this installation.' : `${productName} couldn’t verify your session. Try again without signing in.`}</Alert>
-      </>}
-      <Button loading={identity.isFetching} onClick={() => void identity.refetch()}>Check session again</Button>
-    </div></main>}
+      </SignedOutPage>
+      : <SignedOutPage title="Page not found">
+        {authNotice}
+        <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin} data-analytics="sign-in/not-found">Sign in</Button>
+        <SignInConsent className="muted" />
+        <Link className="signed-out__link" to="/">Go to {productName}</Link>
+      </SignedOutPage>
+    : <SignedOutPage title="Couldn’t check your session">
+        <Alert tone="warning">{unconfigured ? 'Sign-in is not configured on this installation.' : `${productName} couldn’t verify your session.`}</Alert>
+        <Button loading={identity.isFetching} onClick={() => void identity.refetch()}>Try again</Button>
+      </SignedOutPage>}
   </SessionContext.Provider></ApiContext.Provider>
 }
 // The installation's canonical address (lib/public-origin.ts), for examples and connection URLs: PUBLIC_URL from

@@ -1,7 +1,7 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
 import type { MiddlewareHandler } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import { allowMalformedSns } from './core.js';
+import { allowMalformedSns, notFound } from './core.js';
 import { boundRequestBody } from './request-body.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
@@ -12,7 +12,7 @@ import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
 import { withRegionSettings } from './ses-region-state.js';
 import { countEnqueued } from './jobs.js';
 import { authenticatedCreates } from './idempotency.js';
-import { clientIpHeader, headerPrefix, healthService, productName, requestHeaderNames } from './brand.js';
+import { addresses, clientIpHeader, headerPrefix, healthService, productName, requestHeaderNames } from './brand.js';
 
 type RouteGroup = 'analytics' | 'auth-ui' | 'mcp' | 'auth' | 'operator' | 'support' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview' | 'billing';
 // Internal areas: /v1/operator/* answers only Nightmail operators and /v1/support/* only support grants (src/support.ts).
@@ -309,6 +309,13 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   app.notFound(c => { c.set('failure', { code: 'NOT_FOUND', unmatched: true }); return c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
   // origin is PUBLIC_URL's, never the request's Host: the dashboard and Docs build every example and connection URL from it.
   // analytics: whether a signed-out dashboard page records its use (DASHBOARD_ANALYTICS); signed in, /v1/me says so.
+  // security.txt (RFC 9116) for the hosted service; a self-hosted installation has its own contact, so it has none.
+  // Renew Expires (at most a year ahead) before it passes.
+  app.get('/.well-known/security.txt', c => {
+    if (!c.env.config.multiTenant) notFound('Endpoint');
+    c.header('content-type', 'text/plain; charset=utf-8');
+    return c.body(`Contact: mailto:${addresses.security}\nExpires: 2027-11-20T00:00:00.000Z\nPreferred-Languages: en\nCanonical: ${new URL('/.well-known/security.txt', c.env.config.publicUrl).href}\n`);
+  });
   app.get('/health', c => c.json({status:'ok',service:healthService,multiTenant:c.env.config.multiTenant,origin:new URL(c.env.config.publicUrl).origin,analytics:c.env.config.dashboardAnalytics===true}));
   app.get('/health/receiving', async c => {const h=await (await import('./receiving-health.js')).cachedHealth(c.env);return c.json(h,h.status==='ok'?200:503);});
   app.get('/openapi.json', async c => { const { doc } = await loadDocs(); c.header('cache-control', 'public, max-age=300'); return c.json(doc); });

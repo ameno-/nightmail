@@ -9,7 +9,6 @@ import { Machines } from './machines'
 import { MANIFESTS, published, type Format, type Manifest } from './factory/manifest'
 import { alphaFormat, mountPlayer, type Player } from './factory/player'
 import desktopPoster from './factory/poster.jpg'
-import phonePoster from './factory/phone/poster.jpg'
 import phoneBare from './factory/phone/poster-bare.jpg'
 import phoneBoard0 from './factory/phone/board0.webp'
 import phoneBoard1 from './factory/phone/board1.webp'
@@ -18,7 +17,8 @@ import './factory-home.css'
 
 // The homepage: the factory, in a wide frame on a desktop and a tall one on a phone (index.tsx picks), from the very top
 // of the window: there is no header (the machine carries the name). A rendered hall with the sorting machine standing in it, the price on the
-// machine's front, and billboards with the free tier on them sliding slowly along a rail behind it (factory/player.ts).
+// machine's front, and billboards with the free tier on them behind it: sliding slowly along a rail on a desktop
+// (factory/player.ts), hung in the middle in turn on a phone.
 // The page writes the button, on the blank plate the machine's front has for it, and a tag over each pipe's label on
 // the plinth (the render's stencils are too small and too grey to read). The first picture is the poster,
 // laid out by CSS alone before anything loads (factory-home.css), so nothing moves when the videos take over from it;
@@ -67,13 +67,14 @@ const FRAMES = { desktop: frameOf(MANIFESTS.desktop, 'desktop'), phone: frameOf(
 // the narrowest phones there is no room for both) is left off too.
 const tagsOf = (m: Manifest) => (m.pipes ?? []).flatMap(pipe => pipe.labelBox && pipe.visible !== false ? [{ label: pipe.label, box: pipe.labelBox }] : [])
 const TAGS = { desktop: tagsOf(MANIFESTS.desktop), phone: tagsOf(MANIFESTS.phone) }
-const POSTERS: Record<Format, string> = { desktop: desktopPoster, phone: phonePoster }
+const POSTERS: Record<Format, string> = { desktop: desktopPoster, phone: phoneBare }
 
-// A phone's frame has room for one billboard at a time, so its poster shows one (3,000 sent). Where nothing plays (reduced
-// motion, no renders' host or no alpha video, or the videos would not start) the free tier and the response time are
-// still all said: the hall without its boards (poster-bare.jpg, the same first frame), and the three boards hung in turn
-// from the rail in the middle of the frame, a new one every four seconds. Nothing moves: one is put in the other's place
-// (a short fade, or a cut where motion is reduced).
+// A phone's frame has room for one billboard at a time, and too little for one sliding along the rail to be read: at
+// 390 px a board is whole in the frame about a quarter of the time, and the first one is cut off at the edge. So on a
+// phone the free tier and the response time are said by the three boards hung in turn from the rail in the middle of
+// the frame, a new one every four seconds, over the hall without its boards (poster-bare.jpg, the same first frame),
+// whether or not the videos play. Nothing moves: one is put in the other's place (a short fade, or a cut where motion
+// is reduced), and they dim with the hall.
 const STILL_BOARDS = [1, 2, 0], STILL_SPRITES = [phoneBoard0, phoneBoard1, phoneBoard2]
 function StillBoards({ m }: { m: Manifest }) {
   const [shown, setShown] = useState(0)
@@ -86,10 +87,7 @@ function StillBoards({ m }: { m: Manifest }) {
 
 export function FactoryHome({ start, notice, format }: HomeProps & { format: Format }) {
   const m = MANIFESTS[format], { vars: frameVars, button: buttonBox } = FRAMES[format]
-  // (Whether the phone's boards are shown still: known before the first paint where nothing will play, and turned on
-  // later where the set or its videos fail. The poster is chosen once: the hall without boards where they start still.)
-  const [still, setStill] = useState(() => format === 'phone' && (reducedMotion() || !MEDIA || !alphaFormat()))
-  const [bare] = useState(still)
+  const still = format === 'phone'
   const visitor = start.signedIn ? null : start
   const dark = useTheme().theme === 'dark'
   const scene = useRef<HTMLElement>(null), probe = useRef<HTMLDivElement>(null), stage = useRef<HTMLDivElement>(null), frame = useRef<HTMLDivElement>(null)
@@ -138,18 +136,16 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
   useEffect(() => {
     const codec = alphaFormat()
     if (!MEDIA || !codec || reducedMotion() || (format === 'desktop' && saveData())) return
-    const fail = () => { if (format === 'phone') setStill(true) }
     let player: Player | null = null, seen = true, gone = false
     // Off screen, or in a hidden tab, it stands still.
     const update = () => player?.setShown(seen && document.visibilityState === 'visible')
     const observer = new IntersectionObserver(([entry]) => { seen = entry.isIntersecting; update() }, { threshold: .02 })
     void published(MEDIA, format).then(set => {
-      if (gone) return
-      if (!set) { fail(); return }
+      if (gone || !set) return
       // (A desktop takes the smaller files, 1280 wide, where the frame is shown no wider than that has pixels for; a
       // phone the 1080 × 1920 ones, and the 720 × 1280 ones where it is saving data or on 3G or slower.)
       const height = format === 'phone' ? slow() ? 720 : 1080 : frame.current!.getBoundingClientRect().width * devicePixelRatio > 1280 ? 1080 : 720
-      player = mountPlayer({ stage: stage.current!, bg: bg.current!, boards: boards.current!, fg: fg.current!, tags: tags.current! }, { ...set, format: codec, height, failed: fail })
+      player = mountPlayer({ stage: stage.current!, bg: bg.current!, boards: boards.current!, fg: fg.current!, tags: tags.current! }, { ...set, format: codec, height, rail: !still })
       observer.observe(stage.current!)
       document.addEventListener('visibilitychange', update)
     })
@@ -165,11 +161,9 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
         <p className="sr-only">Free every month: 3,000 emails sent and 3,000 received. Responds in about 100 ms.</p>
         <div className="fac-stage" ref={stage}>
           <div className="fac-frame" ref={frame} style={frameVars}>
-            <img className="fac-poster" src={bare ? phoneBare : POSTERS[format]} alt="" width={m.width} height={m.height} fetchPriority="high" decoding="async" />
-            {still && !bare && <img className="fac-poster" src={phoneBare} alt="" width={m.width} height={m.height} decoding="async" />}
-            {still && <StillBoards m={m} />}
+            <img className="fac-poster" src={POSTERS[format]} alt="" width={m.width} height={m.height} fetchPriority="high" decoding="async" />
             <div className="fac-layer" ref={bg} />
-            <div className="fac-layer fac-boards" ref={boards} />
+            {still ? <div className="fac-layer" ref={boards}><StillBoards m={m} /></div> : <div className="fac-layer fac-boards" ref={boards} />}
             <div className="fac-layer" ref={fg} />
             <div className="fac-layer" ref={tags} aria-hidden="true">{TAGS[format].map(({ label, box }) =>
               <span key={label} className="fac-tag" style={{ left: pct(box.x, m.width), top: pct(box.y + box.h / 2, m.height), '--fac-tag-w': box.w, '--fac-tag-h': box.h } as CSSProperties}><span>{label}</span></span>)}</div>

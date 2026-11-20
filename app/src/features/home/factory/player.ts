@@ -51,8 +51,9 @@ export type Layers = { stage: HTMLElement; bg: HTMLElement; boards: HTMLElement;
 
 /** Starts the factory in `layers` once the first segment and the boards can play; until then (and for good, where
  *  they cannot: `failed` is called) the page's poster is what is seen. `base` is where the renders are, ending in a
- *  slash; `height` which of their sizes. The stage gets `data-playing` when the videos are up. */
-export function mountPlayer(layers: Layers, { base, manifest: m, format, height, failed }: { base: string; manifest: Manifest; format: AlphaFormat; height: 720 | 1080; failed?: () => void }): Player {
+ *  slash; `height` which of their sizes. With `rail: false` the boards aren't put on the rail: the page hangs its own
+ *  in `layers.boards`, which only dims with the hall. The stage gets `data-playing` when the videos are up. */
+export function mountPlayer(layers: Layers, { base, manifest: m, format, height, failed, rail: onRail = true }: { base: string; manifest: Manifest; format: AlphaFormat; height: 720 | 1080; failed?: () => void; rail?: boolean }): Player {
   const order = schedule(m.segments), frame = 1 / m.fps
   // (A layer one segment shares with another is the other's file: rush's hall is steady's bg-1080.mp4, so it is
   // downloaded once.)
@@ -75,7 +76,7 @@ export function mountPlayer(layers: Layers, { base, manifest: m, format, height,
   // left edge across it and off its right (`gapPx` times the number of boards in all), the next one `gapPx` behind.
   // The first picture is the poster's: board k starts k gaps along.
   const W = m.width, H = m.height, { speedPxPerSec: speed, gapPx: gap } = m.boards, period = m.boards.periodPx ?? gap * m.boards.y.length
-  const boards = m.boards.y.map((y, k) => {
+  const boards = (onRail ? m.boards.y : []).map((y, k) => {
     const rail = document.createElement('div'), img = document.createElement('img')
     rail.className = 'fac-rail'; img.className = 'fac-board'; img.alt = ''; img.decoding = 'async'; img.src = `${base}${m.boards.files?.[k] ?? `boards/board${k}.png`}`
     rail.append(img); layers.boards.append(rail)

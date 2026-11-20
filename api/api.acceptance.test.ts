@@ -14038,6 +14038,15 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     const unknown = error(await http('GET', `/unsubscribe/u_${randomUUID().replaceAll('-', '')}${randomUUID().replaceAll('-', '')}`), 404, 'NOT_FOUND');
     assert.equal(invalid.message, unknown.message, 'Tampered and nonexistent tokens must have indistinguishable public errors.');
     assert.ok(!JSON.stringify(invalid).includes(email) && !JSON.stringify(unknown).includes(email));
+    // A browser that opens a tampered, unknown or cut-short link gets a page saying so; API clients keep the JSON error.
+    for (const bad of [tampered, `/unsubscribe/u_${'1'.repeat(64)}`, path.slice(0, -9)]) {
+      const page = await http('GET', bad, undefined, undefined, { accept: 'text/html,application/xhtml+xml' });
+      assert.equal(page.status, 404, bad);
+      assert.match(page.headers.get('content-type') ?? '', /^text\/html/);
+      assert.match(String(page.body), /unsubscribe link isn’t valid/);
+      assert.ok(!String(page.body).includes(email) && !/<form\b/i.test(String(page.body)));
+    }
+    error(await http('GET', path.slice(0, -9)), 422, 'VALIDATION_FAILED');
     await authDb!.query('UPDATE sending_campaigns SET scheduled_at=now() WHERE id=$1',[campaign.id]);
     await authDb!.query('UPDATE jobs SET available_at=now() WHERE id=$1',[`campaign.run:${campaign.id}`]);
     await poll(`/v1/campaigns/${campaign.id}`, key.secret, body => body.counts?.byStatus?.suppressed === 1);

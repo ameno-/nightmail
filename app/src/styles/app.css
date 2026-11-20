@@ -105,6 +105,14 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 @keyframes boot-loader-in { to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .boot-loader > svg { opacity: 1; } }
 .fatal-error { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-20); min-height: 100dvh; padding: var(--space-40) var(--space-24); text-align: center; }
+/* Signed out on a page that needs a session (data/context.tsx): the wordmark over one centred column. */
+.signed-out { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-32); min-height: 100dvh; padding: max(var(--space-40), env(safe-area-inset-top)) max(var(--space-24), env(safe-area-inset-right)) max(var(--space-40), env(safe-area-inset-bottom)) max(var(--space-24), env(safe-area-inset-left)); text-align: center; }
+.signed-out__body { display: flex; flex-direction: column; gap: var(--space-16); width: min(100%, 360px); }
+.signed-out__body h1 { font-size: var(--text-lg); line-height: var(--leading-lg); text-wrap: balance; }
+.signed-out__body > p { text-wrap: pretty; }
+.signed-out__body > .ui-alert { text-align: start; }
+.signed-out__link { align-self: center; color: var(--color-muted); text-decoration: underline; text-underline-offset: .18em; }
+.signed-out__link:hover { color: var(--color-text); }
 .between { justify-content: space-between; }
 .nowrap { white-space: nowrap; }
 .text-warning { color: var(--color-warning); }

@@ -14451,7 +14451,7 @@ export type UnsubscribeByLinkErrors = {
      */
     403: ApiError;
     /**
-     * Request failed; use error.code and requestId to diagnose.
+     * The link is malformed or unknown: an HTML page saying so to a browser (Accept: text/html), the JSON error otherwise.
      */
     404: ApiError;
     /**
