@@ -1,0 +1,47 @@
+/* The homepage's first screen, painted from home.html before any of the app's code (home-shell.ts inlines this with
+   factory-home.css, which lays the frame out): the factory's hero, in the frame the window's shape gets (frame.ts
+   UPRIGHT; both are in the page and one is shown), over the place the page will take, until the page's own hero is up
+   (factory-home.tsx removes it). The homepage is in the system's theme. The tones are sorter-home.css's and
+   sorter/tones.ts's; --hs-floor-* are filled in by home-shell.ts. The words are set in Inter cut down to their letters
+   (inter-shell.woff2: `fonttools varLib.instancer inter-latin.woff2 wght=400:600`, then `pyftsubset --text=…
+   --flavor=woff2 --layout-features=kern,liga,calt`), with the app's own size-matched fallback until it is in. */
+@font-face { font-family: 'Inter Shell'; src: url(%FONT%) format('woff2'); font-weight: 400 600; font-display: swap; }
+@font-face { font-family: 'Inter Fallback'; src: local('Arial'), local('ArialMT'), local('Liberation Sans'), local('LiberationSans'), local('Helvetica'); font-weight: 400; size-adjust: 107.2%; ascent-override: 90.4%; descent-override: 22.5%; line-gap-override: 0%; }
+@font-face { font-family: 'Inter Fallback'; src: local('Arial Bold'), local('Arial-BoldMT'), local('Liberation Sans Bold'), local('LiberationSans-Bold'), local('Helvetica Bold'); font-weight: 700; size-adjust: 100.3%; ascent-override: 96.6%; descent-override: 24.1%; line-gap-override: 0%; }
+/* What the app's stylesheet does to the whole page (styles/ui.css), so nothing moves when it arrives. */
+* { box-sizing: border-box; scrollbar-width: none; }
+::-webkit-scrollbar { display: none; }
+html { background: var(--hs-floor-light); color-scheme: light; }
+body { margin: 0; }
+/* The button's and the strip's words stay in the cut-down Inter once the page's own hero takes over (it is the same
+   face), so they don't change when the whole of Inter arrives. */
+.fac-page .fac-cta, .fac-page .fac-consent { font-family: 'Inter Shell', 'Inter', 'Inter Fallback', sans-serif; }
+@media (prefers-color-scheme: dark) { html { background: var(--hs-floor-dark); color-scheme: dark; } }
+#home-shell { position: absolute; top: 0; left: 0; z-index: 2147483000; width: 100%; font-family: var(--font-body); font-size: 14px; line-height: 20px; font-synthesis: none; letter-spacing: -.04px; -webkit-font-smoothing: antialiased; text-rendering: geometricPrecision;
+  --font-body: 'Inter Shell', 'Inter', 'Inter Fallback', sans-serif; --font-mono: 'OpenTUI Mono', monospace; --space-16: 16px; --focus-width: 2px; --color-focus: #7698FD; }
+html[data-shell='off'] #home-shell { display: none; }
+#home-shell h1, #home-shell p { margin: 0; }
+#home-shell a { color: inherit; }
+#home-shell button svg { stroke-width: 1.5; }
+#home-shell .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+#home-shell .srt-page { --srt-floor: var(--hs-floor-light); --srt-text: oklch(0.21 0.02 268); --srt-text-2: oklch(0.42 0.02 268); --srt-on-cta: oklch(0.2 0.02 268); --srt-ease: cubic-bezier(.22, 1, .36, 1);
+  --srt-safe-t: env(safe-area-inset-top, 0px); --srt-safe-r: env(safe-area-inset-right, 0px); --srt-safe-b: env(safe-area-inset-bottom, 0px); --srt-safe-l: env(safe-area-inset-left, 0px); --srt-head: var(--srt-safe-t);
+  display: flex; flex-direction: column; box-sizing: border-box; padding-top: var(--srt-head); overflow-x: clip; background: var(--srt-floor); color: var(--srt-text); }
+@media (prefers-color-scheme: dark) { #home-shell .srt-page { --srt-floor: var(--hs-floor-dark); --srt-text: oklch(0.968 0.004 268); --srt-text-2: oklch(0.74 0.014 268); } }
+#home-shell .srt-page > main { display: flex; flex: 1; flex-direction: column; }
+/* The frame the window's shape gets. */
+#home-shell .fac-page[data-format='phone'] { display: none; }
+@media %UPRIGHT% { #home-shell .fac-page[data-format='phone'] { display: flex; } #home-shell .fac-page[data-format='desktop'] { display: none; } }
+/* Until the poster is in: the same picture, small and soft (first.avif), under it. */
+#home-shell .hs-first { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+#home-shell .fac-consent a { text-decoration-line: underline; text-decoration-thickness: from-font; text-underline-offset: .18em; }
+/* A browser that has had a dashboard gets its button (the hero has no strip under it then); pressed before the
+   page's code is in, Get started shows it is on its way. */
+#home-shell .fac-cta.hs-member, html[data-member] #home-shell .fac-cta.hs-visitor, html[data-member] #home-shell .fac-under { display: none; }
+html[data-member] #home-shell .fac-cta.hs-member { display: flex; }
+#home-shell .srt-cta-label { position: relative; display: inline-flex; align-items: center; gap: .4em; }
+#home-shell .hs-busy { display: none; }
+#home-shell .fac-cta[data-busy] .srt-cta-arrow { display: none; }
+#home-shell .fac-cta[data-busy] .hs-busy { display: block; animation: hs-turn 800ms linear infinite; }
+@keyframes hs-turn { to { rotate: 360deg; } }
+@media (prefers-reduced-motion: reduce) { #home-shell .fac-cta[data-busy] .hs-busy { animation: none; } }

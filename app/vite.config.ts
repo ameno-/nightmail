@@ -6,6 +6,7 @@ import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import { MAX_RULES, withFileRules } from './asset-headers.ts'
 import { renderLegal } from './legal-markdown.ts'
+import { homeFirstFiles, homeShell } from './home-shell.ts'
 import { headerPrefix, publicOrigin as hostedOrigin } from '../api/src/brand.ts'
 
 // @react-email/editor's own "react-email" imports resolve to a slim shim (src/features/campaigns/react-email-shim.ts
@@ -32,8 +33,10 @@ const fileHeaders = (): Plugin => {
         first.add(name)
         if (file.type === 'chunk') for (const dependency of [...file.imports, ...file.viteMetadata?.importedCss ?? []]) add(dependency)
       }
-      // The dashboard's entry only: the commercial's two files (below) take their turn in the sorted list after it.
+      // The dashboard's entry only: the commercial's two files (below) take their turn in the sorted list after it. Then
+      // what the homepage's first screen loads (home-shell.ts).
       for (const file of Object.values(bundle)) if (file.type === 'chunk' && file.isEntry && file.name === 'index') add(file.fileName)
+      for (const file of homeFirstFiles(Object.keys(bundle))) add(file)
       const fonts = readdirSync(resolve(publicDir, 'fonts')).sort().map(name => `fonts/${name}`)
       const { headers, uncached } = withFileRules(readFileSync(resolve(publicDir, '_headers'), 'utf8'), [...first, ...fonts, ...Object.keys(bundle).sort()])
       writeFileSync(resolve(outDir, '_headers'), headers)
@@ -111,7 +114,7 @@ export default defineConfig({
   define: { __NIGHTMAIL_BUILD__: JSON.stringify(buildSha) },
   // (The homepage's station kit is inlined whatever its size: it is one lazily loaded stylesheet, features/home/machines.tsx.)
   build: { assetsInlineLimit: file => file.includes('/features/home/kit/') || undefined, rolldownOptions: { input: { index: fileURLToPath(new URL('./index.html', import.meta.url)), commercial: commercial.script } } },
-  plugins: [slimReactEmail, legalMarkdown, react(), fileHeaders(), publicOrigin, brandedBootScript(), commercialPage()],
+  plugins: [slimReactEmail, legalMarkdown, react(), fileHeaders(), publicOrigin, brandedBootScript(), commercialPage(), homeShell()],
   server: {
     host: '127.0.0.1', port: 5173, strictPort: true,
     proxy: Object.fromEntries(['/v1', '/api/auth', '/mcp', '/.well-known', '/unsubscribe', '/health', '/openapi.json', '/internal'].map(path => [path, {target: 'http://127.0.0.1:8793', changeOrigin: false}])),

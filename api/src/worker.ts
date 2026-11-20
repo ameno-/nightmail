@@ -203,8 +203,12 @@ export default {
     const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/') || pathname.startsWith('/docs/tags/'));
     const assets = (env as unknown as { ASSETS?: Fetcher }).ASSETS;
     if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|internal)(?:\/|$)/.test(pathname)) {
-      // Existing files are served asset-first. Only dashboard routes get the shell on a miss.
+      // Existing files are served asset-first. Only dashboard routes get the shell on a miss. "/" on a hosted
+      // installation is the homepage: home.html, the dashboard's shell with the homepage's first screen painted in it
+      // (app/home-shell.ts); Workers Assets answers /home with it.
       if (pathname.startsWith('/assets/')) return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
+      const home = pathname === '/' && ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true';
+      if (home) { const page = await assets.fetch(new Request(new URL('/home', url), request)); if (page.ok) return fastSecure(page); }
       return fastSecure(await assets.fetch(new Request(new URL('/', url), request)));
     }
     let deps: Awaited<ReturnType<typeof loadHttpDeps>> | undefined;

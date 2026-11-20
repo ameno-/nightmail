@@ -7,8 +7,12 @@ import { plan, type Plan } from './sorter/plan'
 import { toneVars } from './sorter/tones'
 import { Machines } from './machines'
 import { MANIFESTS, published, type Format, type Manifest } from './factory/manifest'
+import { frameOf, pct } from './frame'
 import { alphaFormat, mountPlayer, type Player } from './factory/player'
-import { POSTER_SIZES, POSTERS, STILL_BOARDS, STILL_SPRITES } from './first-picture'
+import { afterFirstPicture, POSTER_SIZES, POSTERS, STILL_BOARDS, STILL_SPRITES } from './first-picture'
+import deskBoard0 from './factory/boards/board0.webp'
+import deskBoard1 from './factory/boards/board1.webp'
+import deskBoard2 from './factory/boards/board2.webp'
 import './factory-home.css'
 
 // The homepage: the factory, in a wide frame on a desktop and a tall one on a phone (index.tsx picks), from the very top
@@ -18,9 +22,11 @@ import './factory-home.css'
 // The page writes the button, on the blank plate the machine's front has for it, and a tag over each pipe's label on
 // the plinth (the render's stencils are too small and too grey to read). The first picture is the poster,
 // laid out by CSS alone before anything loads (factory-home.css), so nothing moves when the videos take over from it;
-// with reduced motion, without the renders' host (VITE_FACTORY_MEDIA), or where alpha video cannot play, the poster
-// is what is seen. The hall's pipes go down out of the picture, into its floor; under it the factory goes on down the
-// page, a storey and a machine for each thing it does (machines.tsx).
+// with reduced motion, when saving data or on 3G or slower, without the renders' host (VITE_FACTORY_MEDIA), or where
+// alpha video cannot play, the poster is what is seen. The hall's pipes go down out of the picture, into its floor;
+// under it the factory goes on down the page, a storey and a machine for each thing it does (machines.tsx).
+// On a hosted installation the first screen is painted before any of this code, from home.html (home-shell.ts); the
+// page takes its place once its own picture is up.
 
 /** Where the render sets are published (their current.json and versions), ending in a slash: a build without it shows the poster alone. */
 const MEDIA = (import.meta.env.VITE_FACTORY_MEDIA as string | undefined)?.replace(/\/*$/, '/') || null
@@ -29,39 +35,9 @@ const connection = () => (navigator as Navigator & { connection?: { saveData?: b
 const saveData = () => connection()?.saveData === true
 /** Saving data, or on a connection no faster than 3G (as far as the browser says: Safari does not). */
 const slow = () => saveData() || ['slow-2g', '2g', '3g'].includes(connection()?.effectiveType ?? '')
+/** The desktop's billboards, for the rail: bundled, so what they say changes with the page, not the renders' host. */
+const RAIL_BOARDS = [deskBoard0, deskBoard1, deskBoard2]
 
-// What must be seen at any window's shape, in the frame's pixels (factory-home.css places the frame from these).
-// Desktop: from the top of the boards' faces (a sprite's top third is its hanger) to a little under the button, and
-// across, the boards where the poster has them (the sprites, about the middle), so a board is never cut off while it
-// stands still. The frame covers the stage, cropped about the middle of that, and the stage is never taller than the
-// frame shows that whole width: a window more upright than that has the page under the hero, not bands over and under
-// the picture. Only a window wider than the frame can cover (an ultrawide, or a phone on its side) shows it smaller,
-// on the page's own floor either side. And the stage's foot is never below the floor line, where the plinth's pipes go
-// into the hall's floor (`--fac-floor`), so the picture never ends on bare floor.
-// Phone: the button stands on its own console on the floor in front of the plinth, below the floor line. The stage's
-// foot (`--fac-cut`) is a strip of floor under the console: as much as burst's letters land on (they pile up there and
-// fly home in rebuild); the rest of the floor is cut off (the renders allow the bottom tenth). What signing in agrees to
-// stands directly under it. Seen from just over the boards' faces (a phone sprite's hanger is its top seventh) down to
-// that foot, and the middle 76% of the width (all the renders keep what must be read inside it); a window a little
-// less upright than that covers keeps the frame as large and has less of the strip, down to just under the console,
-// before it is shown smaller.
-const pct = (value: number, of: number) => `${value / of * 100}%`
-function frameOf(m: Manifest, format: Format) {
-  const faces = Math.min(...m.boards.y.map((y, k) => y + (m.boards.h?.[k] ?? 0) / (format === 'phone' ? 7 : 3)))
-  const button = { left: pct(m.button.x, m.width), top: pct(m.button.y, m.height), width: pct(m.button.w, m.width), height: pct(m.button.h, m.height) }
-  // (The button's label, in the frame's pixels: as tall as the plate is made for; and the plate's width, which it never overruns.)
-  const label = { '--fac-label': format === 'phone' ? 40 : 19, '--fac-plate': m.button.w }
-  if (format === 'phone') {
-    const safeTop = faces - 8, cut = m.button.y + m.button.h + 72, cutMin = m.button.y + m.button.h + 24
-    return { button, vars: { '--fac-w': m.width, '--fac-h': m.height, '--fac-safe-top': safeTop, '--fac-safe-h': cutMin - safeTop, '--fac-safe-w': m.width * .76, '--fac-cut': cut, ...label } as CSSProperties }
-  }
-  // (Board k stands k gaps along its rail in the poster: factory/player.ts.)
-  const safeTop = faces - 16, safeBottom = m.button.y + m.button.h + 40, floor = Math.min(m.height, ...(m.pipes ?? []).map(pipe => pipe.yEnd))
-  const still = m.boards.y.map((_, k) => [k * m.boards.gapPx - (m.boards.w?.[k] ?? 0), k * m.boards.gapPx]).filter(([from, to]) => to > 0 && from < m.width)
-  const safeW = Math.max(1120, ...still.map(([from, to]) => 2 * Math.max(m.width / 2 - from, to - m.width / 2)))
-  return { button, vars: { '--fac-w': m.width, '--fac-h': m.height, '--fac-safe-h': safeBottom - safeTop, '--fac-safe-w': safeW, '--fac-mid': (safeTop + safeBottom) / 2, '--fac-floor': floor, ...label } as CSSProperties }
-}
-const FRAMES = { desktop: frameOf(MANIFESTS.desktop, 'desktop'), phone: frameOf(MANIFESTS.phone, 'phone') }
 
 // The pipes' labels: a tag over each stencil some crop shows whole (the manifest's `labelBox`; none where `visible` is
 // false), placed in the frame's pixels like the button and sized by factory-home.css: as large as the stencil, and
@@ -71,19 +47,20 @@ const FRAMES = { desktop: frameOf(MANIFESTS.desktop, 'desktop'), phone: frameOf(
 // the narrowest phones there is no room for both) is left off too.
 const tagsOf = (m: Manifest) => (m.pipes ?? []).flatMap(pipe => pipe.labelBox && pipe.visible !== false ? [{ label: pipe.label, box: pipe.labelBox }] : [])
 const TAGS = { desktop: tagsOf(MANIFESTS.desktop), phone: tagsOf(MANIFESTS.phone) }
+const FRAMES = { desktop: frameOf(MANIFESTS.desktop, 'desktop'), phone: frameOf(MANIFESTS.phone, 'phone') }
 
 // A phone's frame has room for one billboard at a time, and too little for one sliding along the rail to be read: at
 // 390 px a board is whole in the frame about a quarter of the time, and the first one is cut off at the edge. So on a
 // phone the free tier and the response time are said by the three boards hung in turn from the rail in the middle of
-// the frame, a new one every four seconds, over the hall without its boards (poster-bare.jpg, the same first frame),
-// whether or not the videos play. Nothing moves: one is put in the other's place (a short fade, or a cut where motion
-// is reduced), and they dim with the hall. The first is in the first picture; the others wait their turn to load.
+// the frame, a new one every four seconds, over the hall (the poster has the first one hung already), whether or not
+// the videos play. Nothing moves: one is put in the other's place (a short fade, or a cut where motion is reduced),
+// and they dim with the hall. None of them is needed for the first picture, so they load after it.
 function StillBoards({ m }: { m: Manifest }) {
   const [shown, setShown] = useState(0)
   useEffect(() => { const timer = setInterval(() => setShown(i => (i + 1) % STILL_BOARDS.length), 4000); return () => clearInterval(timer) }, [])
   return <div className="fac-layer fac-still" aria-hidden="true">{STILL_BOARDS.map((k, i) => {
     const w = m.boards.w?.[k] ?? 0
-    return <img key={k} src={STILL_SPRITES[k]} alt="" decoding="async" fetchPriority={i ? 'low' : undefined} data-on={i === shown || undefined} style={{ left: pct((m.width - w) / 2, m.width), top: pct(m.boards.y[k], m.height), width: pct(w, m.width) }} />
+    return <img key={k} src={STILL_SPRITES[k]} alt="" decoding="async" fetchPriority="low" data-on={i === shown || undefined} style={{ left: pct((m.width - w) / 2, m.width), top: pct(m.boards.y[k], m.height), width: pct(w, m.width) }} />
   })}</div>
 }
 
@@ -94,6 +71,7 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
   const dark = useTheme().theme === 'dark'
   const scene = useRef<HTMLElement>(null), probe = useRef<HTMLDivElement>(null), stage = useRef<HTMLDivElement>(null), frame = useRef<HTMLDivElement>(null)
   const bg = useRef<HTMLDivElement>(null), boards = useRef<HTMLDivElement>(null), fg = useRef<HTMLDivElement>(null), tags = useRef<HTMLDivElement>(null)
+  const poster = useRef<HTMLImageElement>(null), cta = useRef<HTMLElement>(null)
   // The page's foot (machines.tsx, end-band.tsx) is measured as the sorter's page would measure it for this window (sorter/plan.ts).
   const [p, setP] = useState<Plan | null>(null)
   useLayoutEffect(() => {
@@ -133,25 +111,49 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
     return () => observer.disconnect()
   }, [])
 
-  // After the first paint: the set published on the renders' host, and its videos where they can play. (720p where the
-  // frame is shown no wider than that has pixels for.)
+  // home.html's first screen (home-shell.ts), over this page until now: it goes once this page's picture is up (the
+  // same file, so at once), handing on the button's focus, and a press made on it while this code loaded is acted on.
+  useEffect(() => {
+    const shell = document.getElementById('home-shell')
+    if (!shell) return
+    shell.inert = true; shell.setAttribute('aria-hidden', 'true')
+    let done = false
+    const swap = () => {
+      if (done) return
+      done = true
+      const focused = shell.contains(document.activeElement)
+      shell.remove()
+      if (focused) cta.current?.focus()
+    }
+    const img = poster.current!, decoded = () => void img.decode().then(swap, swap)
+    if (img.complete) decoded()
+    else { img.addEventListener('load', decoded, { once: true }); img.addEventListener('error', swap, { once: true }) }
+    const pressed = window as Window & { __nightmailHomeStart?: boolean }
+    if (pressed.__nightmailHomeStart && !start.signedIn) { delete pressed.__nightmailHomeStart; start.onSignIn() }
+    return () => { done = true }
+  }, [])
+
+  // Once the first picture is in and the page is idle: the set published on the renders' host, and its videos where
+  // they can play, and not when saving data or on 3G or slower (the poster stands). (720p where the frame is shown no
+  // wider than that has pixels for.)
   useEffect(() => {
     const codec = alphaFormat()
-    if (!MEDIA || !codec || reducedMotion() || (format === 'desktop' && saveData())) return
-    let player: Player | null = null, seen = true, gone = false
+    if (!MEDIA || !codec || reducedMotion() || slow()) return
+    let player: Player | null = null, seen = true, gone = false, idle = 0
     // Off screen, or in a hidden tab, it stands still.
     const update = () => player?.setShown(seen && document.visibilityState === 'visible')
     const observer = new IntersectionObserver(([entry]) => { seen = entry.isIntersecting; update() }, { threshold: .02 })
-    void published(MEDIA, format).then(set => {
+    const begin = () => void published(MEDIA, format).then(set => {
       if (gone || !set) return
       // (A desktop takes the smaller files, 1280 wide, where the frame is shown no wider than that has pixels for; a
-      // phone the 1080 × 1920 ones. Either takes the smaller ones where it is saving data or on 3G or slower.)
-      const height = slow() ? 720 : format === 'phone' || frame.current!.getBoundingClientRect().width * devicePixelRatio > 1280 ? 1080 : 720
-      player = mountPlayer({ stage: stage.current!, bg: bg.current!, boards: boards.current!, fg: fg.current!, tags: tags.current! }, { ...set, format: codec, height, rail: !still })
+      // phone the 1080 × 1920 ones.)
+      const height = format === 'phone' || frame.current!.getBoundingClientRect().width * devicePixelRatio > 1280 ? 1080 : 720
+      player = mountPlayer({ stage: stage.current!, bg: bg.current!, boards: boards.current!, fg: fg.current!, tags: tags.current! }, { ...set, format: codec, height, rail: !still, boardSprites: RAIL_BOARDS })
       observer.observe(stage.current!)
       document.addEventListener('visibilitychange', update)
     })
-    return () => { gone = true; observer.disconnect(); document.removeEventListener('visibilitychange', update); player?.destroy() }
+    const wait = afterFirstPicture(() => { idle = typeof requestIdleCallback === 'function' ? requestIdleCallback(begin, { timeout: 2000 }) : window.setTimeout(begin, 500) })
+    return () => { gone = true; wait(); if (typeof cancelIdleCallback === 'function') cancelIdleCallback(idle); else clearTimeout(idle); observer.disconnect(); document.removeEventListener('visibilitychange', update); player?.destroy() }
   }, [])
 
   return <div className="srt-page fac-page" data-format={format} data-visitor={visitor ? '' : undefined} style={toneVars(dark) as CSSProperties}>
@@ -160,16 +162,19 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
         <div className="srt-fold" ref={probe} aria-hidden="true" />
         {/* What the machine and its boards say, for whoever cannot see them. */}
         <h1 className="sr-only">$0.20 per 1,000 emails, sent or received via API.</h1>
-        <p className="sr-only">Free every month: 3,000 emails sent and 3,000 received. Responds in about 100 ms.</p>
+        <p className="sr-only">Free every month: 5,000 emails sent and 5,000 received. Responds in about 100 ms.</p>
         <div className="fac-stage" ref={stage} style={frameVars}>
           <div className="fac-frame" ref={frame}>
-            <img className="fac-poster" src={POSTERS[format].src} srcSet={POSTERS[format].srcSet} sizes={POSTER_SIZES} alt="" width={m.width} height={m.height} fetchPriority="high" decoding="async" />
+            <picture>
+              <source type="image/avif" srcSet={POSTERS[format].avif} sizes={POSTER_SIZES} />
+              <img className="fac-poster" ref={poster} src={POSTERS[format].src} srcSet={POSTERS[format].jpeg} sizes={POSTER_SIZES} alt="" width={m.width} height={m.height} fetchPriority="high" decoding="async" />
+            </picture>
             <div className="fac-layer" ref={bg} />
             {still ? <div className="fac-layer" ref={boards}><StillBoards m={m} /></div> : <div className="fac-layer fac-boards" ref={boards} />}
             <div className="fac-layer" ref={fg} />
             <div className="fac-layer" ref={tags} aria-hidden="true">{TAGS[format].map(({ label, box }) =>
               <span key={label} className="fac-tag" style={{ left: pct(box.x, m.width), top: pct(box.y + box.h / 2, m.height), '--fac-tag-w': box.w, '--fac-tag-h': box.h } as CSSProperties}><span>{label}</span></span>)}</div>
-            <StartButton start={start} className="fac-cta" style={buttonBox} />
+            <StartButton start={start} className="fac-cta" style={buttonBox} ref={cta} />
           </div>
         </div>
         {/* Under the button, off the frame (on a phone directly under it): what signing in agrees to, and the way to
