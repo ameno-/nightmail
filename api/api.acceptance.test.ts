@@ -1660,7 +1660,7 @@ test('mail gateway: the IMAP/SMTP score cap is the cap admission uses for the st
   const db=await fixtureDatabase(t),wid=unique('protocol-cap');
   await db.query('BEGIN');
   try {
-    const rt={db:drizzle(db),config:{hostedSendCaps:{firstWeek:100,secondWeek:500,mature:1000}}} as unknown as import('./src/core.js').Runtime;
+    const rt={db:drizzle(db),config:{hostedSendCaps:{firstWeek:100}}} as unknown as import('./src/core.js').Runtime;
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
     assert.equal(await protocolScoreCap(rt,wid),100,'No stored standing: the calibration limit.');
     await gradedSender(db,wid,500);
@@ -9196,6 +9196,20 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       assert.equal(await status(), 'queued');
       await run('email.dispatch');
       assert.equal(await status(), 'accepted');
+    });
+  });
+
+  test('scheduled sends: 100,000 may wait per workspace, and the next waits for one to go or be canceled', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const wid = runtime.config.workspaceId, at = new Date(Date.now() + 3_600_000).toISOString();
+      // 99,999 already waiting, ten times the former limit: one statement, given the time 100,000 rows take to index.
+      await db.query("SET LOCAL statement_timeout='60s'");
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status)
+        SELECT 'email_'||md5($1||n),$1,'fixture',$2,'sender@example.com','["one@example.net"]','[]','[]','Waiting','{}',true,'scheduled' FROM generate_series(1,99999) n`, [wid, REGION]);
+      const last = ok(await local('POST', '/v1/emails/send', mail({ scheduledAt: at })), 202);
+      assert.match(error(await local('POST', '/v1/emails/send', mail({ scheduledAt: at })), 429, 'SCHEDULED_EMAIL_LIMIT_EXCEEDED').message, /100,000 scheduled emails/);
+      ok(await local('POST', `/v1/emails/${last.id}/cancel`));
+      ok(await local('POST', '/v1/emails/send', mail({ scheduledAt: at })), 202);
     });
   });
 });
@@ -17753,6 +17767,33 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('MX: outstanding mail is a queue bound: good standing queues a day of its pace, the evaluation, growth and a daily limit keep 10,000', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = runtime.config.workspaceId, pool = '111122223333', domain = 'backlog.example', from = `sender@${domain}`;
+      Object.assign(runtime.config, { multiTenant:true, liveEnabled:true, aws:{ accessKeyId:'fixture-platform', secretAccessKey:'fixture-only' } });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`, [REGION,pool,`arn:aws:sns:${REGION}:${pool}:feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid,REGION,pool]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [domain,wid]);
+      const key = ok(await local('POST','/v1/api-keys',{name:'Backlog fixture',permissions:['send']}),201).secret;
+      // Queued mail as admission counts it (sending_stream_depth), without writing the rows.
+      const queued = async (n: number) => { await db.query('DELETE FROM sending_stream_depth WHERE workspace_id=$1',[wid]); await db.query('INSERT INTO sending_stream_depth VALUES($1,0,false,$2)',[wid,n]); };
+      const send = () => request('POST','/v1/emails/send',key,mail({from,to:'success@simulator.amazonses.com'}));
+      const refused = async (cap: string) => assert.match(error(await send(),429,'PENDING_EMAIL_LIMIT_EXCEEDED').message, new RegExp(`limit of ${cap} `));
+      // Good standing (no daily limit, past the growth pace): a day of its pace, at least 500 a minute, is more than the
+      // 200,000 ceiling, so 200,000 may wait. The former 10,000 was twenty minutes at that pace.
+      await db.query(`INSERT INTO sender_standing(workspace_id,phase,first_recipients,score,target,quality,band_limit,daily_limit,step,computed_at) VALUES ($1,'graded',100,92,92,95,NULL,NULL,'ok',now())`,[wid]);
+      await queued(10_000); ok(await send(),202);
+      await queued(199_999); ok(await send(),202);
+      await queued(200_000); await refused('200000');
+      // The growth pace, a daily limit and the evaluation keep 10,000.
+      await queued(10_000);
+      await db.query(`UPDATE sender_standing SET growth_until=now()+interval '48 hours',growth_cap=1000 WHERE workspace_id=$1`,[wid]); await refused('10000');
+      await db.query(`UPDATE sender_standing SET growth_until=NULL,growth_cap=NULL,score=72,band_limit=500,daily_limit=500 WHERE workspace_id=$1`,[wid]); await refused('10000');
+      await db.query('DELETE FROM sender_standing WHERE workspace_id=$1',[wid]); await refused('10000');
+      await queued(9_999); ok(await send(),202);
+    });
+  });
+
   test('MX: Hosted admission, campaign release and dispatch share the rolling recipient cap and reputation hold', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db, run }) => {
       const { checkHostedHealth } = await import('./src/maintenance.js');
@@ -18748,9 +18789,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
   test('MX: migration 060 preserves a mature ready workspace’s tier without provisioning-job history', async t => {
-    await simulatedSesFixture(t, async ({runtime,db}) => {
-      const {readFile}=await import('node:fs/promises'), {sql}=await import('drizzle-orm');
-      const {hostedAllowance}=await import('./src/hosted-sending.js');
+    await simulatedSesFixture(t, async ({db}) => {
+      const {readFile}=await import('node:fs/promises');
       // Replay the actual migration over isolated pre-060 tables; this schema rolls back with the fixture.
       await db.query(`CREATE SCHEMA upgrade060; SET LOCAL search_path TO upgrade060;
         CREATE TABLE workspaces AS SELECT id,created_at FROM public.workspaces WITH NO DATA;
@@ -18770,8 +18810,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(await readFile(new URL('./migrations/063_direct_admission.sql',import.meta.url),'utf8'));
       assert.deepEqual((await db.query('SELECT recipients::int FROM hosted_usage_hourly')).rows,[{recipients:2}]);
       assert.deepEqual((await db.query('SELECT accepted::int, complaints::int FROM hosted_health_hourly')).rows,[{accepted:2,complaints:1}]);
-      runtime.config.multiTenant=true;
-      const getCap=async(wid:string)=>(await runtime.db.execute<{cap:number}>(sql`SELECT (${hostedAllowance(runtime.config,wid,1)}->>'cap')::int AS cap`)).rows[0].cap;
+      // 063's allowance with the tiers it was written for (the retired HOSTED_SEND_CAP_* defaults 100, 1,000 and 10,000).
+      const getCap=async(wid:string)=>(await db.query('SELECT (allowance->>\'cap\')::int AS cap FROM hosted_allowance($1,1,0,100,1000,10000,10)',[wid])).rows[0].cap;
       assert.equal(await getCap('mature'),10000);
       await db.query(`INSERT INTO workspaces(id,created_at) VALUES('new',now()); INSERT INTO provider_connections(id,workspace_id,kind,tenant_state,state) VALUES('new','new','shared','ready','ready')`);
       assert.equal(await getCap('new'),100);
@@ -22627,7 +22667,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,sender_mailbox_id,direction,created_at) SELECT 'out_'||i,$1,$2,$3,'outbound',now()-interval '2 hours' FROM generate_series(1,25)i",[wid,mail.thread_id,sender.id]);
         ok(await reply(sender.id,mail.thread_id,'fixture@example.net',mail.id),202);
       });
-      await t.test('addresses: no hourly or daily send cap; the loop guards and a 0 still refuse',async()=>{
+      await t.test('addresses: no hourly or daily send cap, and a copy to their own address; the loop guards and a 0 still refuse',async()=>{
         // Console (opencode-console, email-opensend.ts) creates and updates its addresses with sendLimits {perHour, perDay}
         // from its own rate limits: they answer 2xx with the same shape, are stored as given and limit nothing.
         const consoleBody={displayName:'Support',metadata:{workspaceID:'wrk_fixture',inboxID:'inb_fixture'}},guards={perRecipientPerHour:20,perThreadPer10Minutes:10};
@@ -22642,6 +22682,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const seedThread=ok(await send('seed@example.net'),202).threadId;
         await seed(900,'3 hours',seedThread);await seed(100,'30 minutes',seedThread);
         ok(await send('fresh@example.net'),202);ok(await reply(),202);
+        // Sending itself a copy is ordinary mail: the loop guards below count it like any recipient.
+        ok(await send(desk.address),202);
         for(const sendLimits of [{perHour:200,perDay:2000},{perHour:10000,perDay:100000},{perHour:50000,perDay:1000000}])
           assert.deepEqual(ok(await local('PATCH',addressPath,{...consoleBody,sendLimits})).sendLimits,{...sendLimits,...guards});
         assert.deepEqual(ok(await local('GET',addressPath)).sendLimits,{perHour:50000,perDay:1000000,...guards},'perHour and perDay are still shown, unenforced');
@@ -22649,6 +22691,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.deepEqual(fresh.sendLimits,{perHour:100,perDay:1000,...guards},'never set, they show the former defaults');
         // The loop guards still refuse: 20 to one recipient in an hour, and 10 in one conversation in 10 minutes.
         await seed(20,'5 minutes',seedThread,'loop@example.net');error(await send('loop@example.net'),429,'RECIPIENT_SEND_LIMIT');
+        await seed(19,'5 minutes',seedThread,desk.address);error(await send(desk.address),429,'RECIPIENT_SEND_LIMIT');
         await seed(9,'1 minute',mail.thread_id);error(await reply(),429,'THREAD_LOOP_SUSPECTED');
         // A deprecated cap of 0 is still the off switch; any other number no longer limits anything.
         ok(await local('PATCH',addressPath,{sendLimits:{perDay:0}}));error(await send('fresh@example.net'),403,'MAILBOX_SEND_DISABLED');
@@ -23720,6 +23763,15 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const m=await ingest('forward-handler',[box.address]);await send(m.id);await send(m.id);const rows=(await db.query("SELECT from_address,from_name,text FROM mail_messages WHERE workspace_id=$1 AND direction='outbound' AND subject='Fwd: Test forward-handler'",[wid])).rows;assert.equal(rows.length,1);assert.equal(rows[0].from_address,box.address);assert.match(rows[0].from_name,/ via /);
         await (await import('./src/dispatcher.js')).dispatchDue(runtime,REGION);
         assert.equal((await db.query('SELECT e.status FROM sending_emails e JOIN mail_forward_once f ON f.email_id=e.id WHERE f.message_id=$1 AND f.endpoint=$2',[m.id,hookId])).rows[0].status,'accepted');
+        // No daily forwarding budget: a forward is a send and its admission applies the workspace's limits. 1,000 forwards
+        // today and 999 this hour (the former 1,000 a day and 200 an hour) still forward; the endpoint's 1,000th in an hour is its last.
+        const budgets=(day:number,hour:number)=>db.query(`INSERT INTO api_request_budgets(workspace_id,key_id,window_start,used) VALUES($1,'forward-daily',date_trunc('day',now()),$3),($1,$2,date_trunc('hour',now()),$4)
+          ON CONFLICT(workspace_id,key_id) DO UPDATE SET used=excluded.used,window_start=excluded.window_start`,[wid,'forward-hourly:'+hookId,day,hour]);
+        await budgets(1000,999);const busy=await ingest('forward-busy',[box.address]);await send(busy.id);
+        assert.equal((await db.query('SELECT FROM mail_forward_once WHERE message_id=$1 AND endpoint=$2',[busy.id,hookId])).rowCount,1);
+        const over=await ingest('forward-over',[box.address]);await assert.rejects(send(over.id),{code:'FORWARD_LIMIT'});
+        assert.equal((await db.query('SELECT FROM mail_forward_once WHERE message_id=$1',[over.id])).rowCount,0);
+        await db.query("DELETE FROM api_request_budgets WHERE workspace_id=$1 AND key_id IN ('forward-daily',$2)",[wid,'forward-hourly:'+hookId]);
         // Every forward carries a signed stop link; a forged one is refused and stopping blocks new requests for 30 days.
         const stop=new URL(/Stop these forwards: (\S+)/.exec(rows[0].text)![1]).pathname;assert.equal((await page('GET',stop.replace(/\.[^.]+$/,'.forged'))).status,404);assert.equal((await page('POST',stop,'choice=decline',{origin:PUBLIC_ORIGIN})).status,200);assert.equal((await call('GET',`${dest}/team`)).status,'declined');error(await local('POST',`${dest}/team/verification`,{}),409,'FORWARD_DECLINED');await db.query('DELETE FROM mail_forward_declines WHERE workspace_id=$1',[wid]);await db.query("UPDATE mailbox_webhooks SET verified=true,declined_at=NULL WHERE workspace_id=$1 AND key='team' AND type='forward'",[wid]);
         const mid='forward-loop';raw.set(mid,Buffer.from(`From: Agent <a@example.org>\r\nX-Bane-Loop: synthetic\r\nSubject: Loop\r\n\r\nHello`));await submit(mid,[box.address]);await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);const loop=(await db.query('SELECT id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];await assert.rejects(send(loop.id));assert.equal((await db.query('SELECT FROM mail_forward_once WHERE message_id=$1',[loop.id])).rowCount,0);await call('PUT',root,{});
@@ -26562,6 +26614,19 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal((await db.query('SELECT count(*)::int AS count FROM operation_sns_receipts WHERE workspace_id = $1 AND processed_at IS NOT NULL', [runtime.config.workspaceId])).rows[0].count, 1);
       assert.equal(page(await local('GET', `/v1/emails/${email.id}/events`)).filter(event => event.type === 'delivery').length, 1);
       assert.equal((await jobs('operation.webhook')).length, 1);
+    });
+  });
+
+  test('stored attachments: a workspace may keep 100 GiB of uploads, and an upload past that is refused',async t=>{
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const wid=runtime.config.workspaceId,GiB=1024**3,objects=new Map<string,Uint8Array>();
+      runtime.storage={put:async(key:string,body:Uint8Array)=>{objects.set(key,body);},get:async(key:string)=>objects.has(key)?{body:objects.get(key)!,contentType:'text/plain'}:null,delete:async(key:string)=>{objects.delete(key);}};
+      const stored=(bytes:number)=>db.query('INSERT INTO sending_asset_usage VALUES($1,$2) ON CONFLICT(workspace_id) DO UPDATE SET bytes=excluded.bytes',[wid,bytes]);
+      const upload=()=>local('POST','/v1/attachments',{filename:'invoice.txt',contentType:'text/plain',content:Buffer.from('fixture').toString('base64')});
+      // Past the former 1 GiB (a month of a 1 MB invoice on 1,000 emails): still uploads.
+      await stored(2*GiB);ok(await upload(),201);
+      await stored(100*GiB-7);ok(await upload(),201);
+      assert.match(error(await upload(),413,'STORED_ATTACHMENT_LIMIT_EXCEEDED').message,/100 GiB/);
     });
   });
 

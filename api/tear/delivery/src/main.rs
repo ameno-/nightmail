@@ -67,8 +67,8 @@
 //! - L5 [x] The transport breaker: a fourth call after three timeouts defers without sending
 //!   (its 30 s window is real time, so walks that trip it skip the drain's liveness check).
 //! - L6 [x] retryAttempts 0 (one attempt only), 1 and 2.
-//! - L7 [ ] Fan-out caps (10 inboxes, 20 webhooks), 50 endpoints, 200 forwards per hour, 1,000 per
-//!   day, the 250,000-step message budget: unreachable at model sizes (the step budget needs loops,
+//! - L7 [ ] Fan-out caps (10 inboxes, 20 webhooks), 50 endpoints, 1,000 forwards per endpoint per
+//!   hour, the 250,000-step message budget: unreachable at model sizes (the step budget needs loops,
 //!   which rituals do not have); bounded in code and covered by acceptance tests.
 //! - L8 [x] Empty: a message with no destinations (route off, drop, endpoint deleted), and
 //!   rituals none.

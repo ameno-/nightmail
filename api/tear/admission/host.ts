@@ -206,7 +206,7 @@ async function resetSend() {
   Object.assign(runtime.config, structuredClone(baseConfig), {
     workspaceId: ws[0], multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'tear-fixture', secretAccessKey: 'tear-fixture' },
     regionalSending: true, trustedPool: true, requireDmarcForBulk: true, apiRateLimitPerMinute: cfg.rate,
-    hostedSendCaps: { firstWeek: cfg.caps[0], secondWeek: cfg.caps[1], mature: cfg.caps[2] }, dispatch: { ...baseConfig.dispatch, dailyHeadroomPercent: cfg.headroom },
+    hostedSendCaps: { firstWeek: cfg.caps[0] }, dispatch: { ...baseConfig.dispatch, dailyHeadroomPercent: cfg.headroom },
   });
   const c = auto.client;
   await c.query('BEGIN');
@@ -375,7 +375,7 @@ async function operator(words: string[], c: Awaited<ReturnType<typeof client>>):
     case 'limits': await setHostedLimits(c.client, [w, '--send-cap', v, '--pending-cap', p, '--reason', 'tear fixture limits']); return 'ok';
     case 'exempt': await setWorkspaceExemption(c.client, [w, v, '--reason', 'tear fixture exemption']); return 'ok';
     case 'pause': return (await c.db.execute(pauseHostedSending(sql`SELECT ${w}::text AS id,(SELECT resumed_at FROM provider_connections WHERE id=${w}) AS resumed_at,'tear fixture hold'::text AS reason,'all'::text AS scope,0 AS sends,0 AS bounces,0 AS complaints,0 AS rejected,0 AS screened`))).rowCount ? 'ok' : 'noop';
-    case 'resume': return (await c.db.execute(resumeHostedSending(w, { reason: 'tear fixture resume', percent: 100, caps: { firstWeek: 100, secondWeek: 1000, mature: 10000 } }))).rowCount ? 'ok' : 'noop';
+    case 'resume': return (await c.db.execute(resumeHostedSending(w, { reason: 'tear fixture resume', percent: 100, caps: { firstWeek: 100 } }))).rowCount ? 'ok' : 'noop';
   }
   throw new Error(`unknown operator verb ${verb}`);
 }

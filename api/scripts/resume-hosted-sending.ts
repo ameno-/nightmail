@@ -8,8 +8,8 @@ import { log } from '../src/core.js';
 // Resumes a paused or marketing-held Hosted workspace after review, in one statement with its audit row. The limit is
 // min(current limit, 50% of the limit before the resume) for 48 hours (--restore 100 opts out, audited). A pause whose
 // SES tenants were disabled restarts once the tenant job has enabled them again.
-// The installation's limit tiers, as the API reads them (HOSTED_SEND_CAP_*), so the restore is a share of the same limit.
-export const hostedCaps = (env: Record<string, string | undefined>) => ({ firstWeek: Number(env.HOSTED_SEND_CAP_FIRST_WEEK ?? 100), secondWeek: Number(env.HOSTED_SEND_CAP_SECOND_WEEK ?? 1000), mature: Number(env.HOSTED_SEND_CAP_MATURE ?? 10000) });
+// The evaluation's limit, as the API reads it (HOSTED_SEND_CAP_FIRST_WEEK), so the restore is a share of the same limit.
+export const hostedCaps = (env: Record<string, string | undefined>) => ({ firstWeek: Number(env.HOSTED_SEND_CAP_FIRST_WEEK ?? 100) });
 export async function resumeHosted(db: Client, args: string[], env: Record<string, string | undefined> = process.env) {
   const { positionals, values } = parseArgs({ args, allowPositionals: true, options: { reason: { type: 'string' }, restore: { type: 'string', default: '50' } } });
   const [wid] = positionals, reason = values.reason?.trim();

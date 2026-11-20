@@ -179,8 +179,8 @@ function grades(score: number | null) {
  * standing (an active override, none when exempt or in good standing, else the daily limit; a resume's restore cap
  * lowers it, with or without one), or 100 during the evaluation. */
 export async function protocolScoreCap(runtime: Runtime, w: string) {
-  const { firstWeek, secondWeek, mature } = runtime.config.hostedSendCaps;
-  const { rows: [row] } = await runtime.db.execute<{ cap: number | null }>(sql`WITH b AS (SELECT hosted_base_cap(${w},${firstWeek},${secondWeek},${mature}) AS base,
+  const { firstWeek } = runtime.config.hostedSendCaps;
+  const { rows: [row] } = await runtime.db.execute<{ cap: number | null }>(sql`WITH b AS (SELECT hosted_base_cap(${w},${firstWeek},NULL,NULL) AS base,
       (SELECT exempt_hosted_quotas FROM workspaces WHERE id=${w}) AS exempt FROM sender_standing WHERE workspace_id=${w})
     SELECT CASE WHEN (b.base IS NOT NULL OR NOT b.exempt) AND pc.restore_cap IS NOT NULL AND pc.restore_until>now() THEN least(b.base,pc.restore_cap) ELSE b.base END AS cap
     FROM b LEFT JOIN LATERAL (SELECT restore_cap,restore_until FROM provider_connections WHERE workspace_id=${w} AND kind='shared' LIMIT 1) pc ON true`);

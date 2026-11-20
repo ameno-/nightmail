@@ -216,8 +216,6 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   const recipients = [...message.to, ...message.cc, ...message.bcc];
   if (!recipients.length) throw new ApiError(422, 'RECIPIENT_REQUIRED', 'Add at least one recipient.', 'to');
   if (recipients.length > 50) throw new ApiError(422, 'TOO_MANY_RECIPIENTS', 'At most 50 recipients across to, cc and bcc.', 'to');
-  const own = await tx.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(and(eq(mailboxAddresses.mailboxId, message.mailbox.id), inArray(mailboxAddresses.address, recipients.map(address => address.toLowerCase()))));
-  if (own.length) throw new ApiError(422, 'SELF_SEND', `A mailbox cannot send to its own address (${own[0]!.address}).`, 'to');
   // Only a reply to an existing thread can carry this internal exemption. Snapshot its
   // actual inbound authors, not Reply-To, copied recipients, or a caller's threading headers.
   const [locked] = await tx.select({box:mailboxes,replyAuthors:message.threadId ? sql<string[]>`ARRAY(
