@@ -22076,6 +22076,10 @@
                       "type": "boolean",
                       "description": "Nightmail staff only: this session may use staff UI notes. False for everyone else."
                     },
+                    "byo": {
+                      "type": "boolean",
+                      "description": "Hosted dashboard sessions: an operator lets this workspace connect its own AWS account (POST /v1/connection with kind byo). False otherwise, and the dashboard offers Hosted mail only."
+                    },
                     "billing": {
                       "type": [
                         "object",

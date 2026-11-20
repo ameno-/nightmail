@@ -107,19 +107,21 @@ function EditableName({ initial }: { initial: string }) {
 
 function SendingRows() {
   const connection = useApiDef(queries.connection())
-  const summary = useSession()?.identity?.connection
+  const identity = useSession()?.identity
+  const summary = identity?.connection, offerByo = identity?.byo === true
   const limit = useSendingLimit()
   const evaluating = inEvaluation(useSenderScore().data)
   const current = connection.data, kind = current?.kind ?? summary?.kind, region = current?.region ?? summary?.region
   return <>
     <div className="settings-rows">
       <Row title="Connection">{kind ? <span className="cluster settings-inline"><span>{connectionKindLabel[kind]}</span><StatusBadge status={label(current?.state ?? summary?.state ?? 'pending')} /></span> : <Skeleton width={160} height={20} />}</Row>
-      {region && <Row title="AWS region"><code>{region}</code></Row>}
+      {region && <Row title={kind === 'byo' ? 'AWS region' : 'Region'}><code>{region}</code></Row>}
       {kind === 'byo' && <Row title="AWS account"><code>{current?.awsAccountId ?? '—'}</code></Row>}
       <ScoreRow />
       {limit && limit.cap !== null && <Row title="Daily limit"><Link to="/settings#usage" replace className="settings-score" title={limitSummary(limit, evaluating)}><span>{number(limit.used)} / {number(limit.cap)}</span><span className="muted">Plan & usage</span><ArrowUpRight size={14} aria-hidden="true" /></Link></Row>}
     </div>
-    <DisconnectRow kind={kind} />
+    {/* Hosted mail is the only connection to switch to without an operator's go-ahead, and onboarding would start it again. */}
+    {(kind === 'byo' || offerByo) && <DisconnectRow kind={kind} />}
   </>
 }
 // The sidebar shows the score beside every page, so on a desktop this row opens its breakdown instead of repeating

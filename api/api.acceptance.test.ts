@@ -7558,6 +7558,15 @@ describe('Hosted MCP OAuth and tools', () => {
       ok(await send('DELETE', `/v1/operator/ui-notes/${exposed.id}`, session(operator)));
       // GET /v1/me tells the dashboard whether to show any of it: true for the allowlisted operator alone.
       assert.deepEqual(await Promise.all([operator, other, reader, owner].map(async who => ok(await send('GET', '/v1/me', session(who))).uiNotes)), [true, false, false, false]);
+      // And whether to offer the workspace its own AWS account: only once an operator adds it to the pilot.
+      const me = ok(await send('GET', '/v1/me', session(owner)));
+      assert.equal(me.byo, false);
+      const byoV2 = runtime.config.byoV2; runtime.config.byoV2 = true;
+      try {
+        assert.equal(ok(await send('GET', '/v1/me', session(owner))).byo, false);
+        await db.query('UPDATE workspaces SET byo_v2_enabled=true WHERE id=$1', [me.workspaceId]);
+        assert.equal(ok(await send('GET', '/v1/me', session(owner))).byo, true);
+      } finally { runtime.config.byoV2 = byoV2; await db.query('UPDATE workspaces SET byo_v2_enabled=false WHERE id=$1', [me.workspaceId]); }
       // Every other operator, read-only or not, gets 404 on every route, as if the feature didn't exist.
       const notFound: string[] = [];
       for (const who of [other, reader]) for (const [method, path] of [...routes.map(([m, p]) => [m, p.replace(nid, created.id)] as const), ['GET', `/v1/operator/ui-notes?status=open`] as const]) {

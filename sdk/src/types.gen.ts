@@ -7062,6 +7062,10 @@ export type GetCurrentIdentityResponses = {
          */
         uiNotes?: boolean;
         /**
+         * Hosted dashboard sessions: an operator lets this workspace connect its own AWS account (POST /v1/connection with kind byo). False otherwise, and the dashboard offers Hosted mail only.
+         */
+        byo?: boolean;
+        /**
          * Hosted dashboard sessions: whether the workspace is free, whether an empty balance has paused sending or held received mail, and auto-recharge, so the dashboard can show it on its first frame. Null otherwise; GET /v1/billing has the detail.
          */
         billing?: {
