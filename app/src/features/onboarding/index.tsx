@@ -108,6 +108,8 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   const identity = useSession()?.identity
   const workspaceId = identity?.workspaceId ?? ''
   const sending = stage.step === 'sending'
+  // Hosted mail is the only way to send unless an operator offers this workspace its own AWS account.
+  const offerByo = identity?.byo === true
   const choosingDomain = stage.step === 'domain' && !stage.domainId
   const sync = useConnectionCache()
   const refreshIdentity = useRefreshIdentity()
@@ -164,7 +166,10 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
       if (next === 'shared') shared.mutate(undefined, { onError: () => setPicked(null) })
     })()
   }
-  const flow: ConnectionKind | null = sending ? picked ?? current?.kind ?? null : identity?.connection?.kind ?? null
+  // Without a choice to make, a workspace with no connection starts Hosted mail at once, as choosing it would.
+  const autoHosted = sending && !offerByo && !picked && connection.data === null
+  useEffect(() => { if (autoHosted && !shared.error) choose('shared') }, [autoHosted, shared.error]) // eslint-disable-line react-hooks/exhaustive-deps
+  const flow: ConnectionKind | null = sending ? picked ?? current?.kind ?? (offerByo ? null : 'shared') : identity?.connection?.kind ?? null
   const ready = stage.step !== 'sending'
   if (sending && flow === 'byo' && awsPhase === 'idle') setAwsPhase('connecting')
   if (sending && flow !== 'byo' && awsPhase === 'connecting') setAwsPhase('idle')
@@ -186,8 +191,9 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   else if (stage.step === 'domain' && stage.domainId) { view = 'records'; content = <DomainSetup domainId={stage.domainId} onContinue={() => setDomainStep(workspaceId, agentStep(stage.domainId))} onMissing={() => setDomainStep(workspaceId, '')} /> }
   else if (awsPhase === 'connecting' || awsPhase === 'connected') {
     view = 'connect'
-    content = <ConnectAwsStep state={connectionState} connection={current} onBack={() => leaveAws(null)} onHosted={() => leaveAws('shared')} />
+    content = <ConnectAwsStep state={connectionState} connection={current} onBack={() => leaveAws(offerByo ? null : 'shared')} onHosted={() => leaveAws('shared')} />
   }
+  else if (autoHosted && shared.error) { view = 'error'; content = <HostedError error={shared.error} onRetry={() => shared.reset()} /> }
   else if (sending && !picked && connection.error) { view = 'error'; content = <ErrorState error={connection.error} onRetry={() => void connection.refetch()} /> }
   else if ((sending && !picked && connection.isPending) || (choosingDomain && flow === 'byo' && connection.isPending)) { view = 'loading'; content = <BootLoader inline /> }
   else if (sending && !flow) { view = 'choose'; content = <ChooseSending onChoose={choose} error={shared.error ?? byo.error} /> }
@@ -203,10 +209,13 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   const motion = previous === null || view === 'loading' ? undefined : 'fade'
   useEffect(() => { if (previous !== null) document.getElementById('main-content')?.scrollTo({ top: 0 }) }, [view]) // eslint-disable-line react-hooks/exhaustive-deps
   const aws = flow === 'byo'
-  const step = stepOf(view, aws, choosingDomain)
+  // Hosted mail alone has no Choose step.
+  const chosen = !aws && !offerByo
+  const base = stepOf(view, aws, choosingDomain)
+  const step = chosen && base ? Math.max(1, base - 1) : base
   return <>
     {/* Keyed by flow: switching between 3 and 4 steps mounts a new indicator instead of moving the old one. */}
-    {step && <StepIndicator key={aws ? 'aws' : 'hosted'} steps={aws ? awsSteps : hostedSteps} current={step} />}
+    {step && <StepIndicator key={aws ? 'aws' : 'hosted'} steps={aws ? awsSteps : chosen ? hostedSteps.slice(1) : hostedSteps} current={step} />}
     <div key={view} className="onboarding-step" data-motion={motion}>{content}</div>
   </>
 }
@@ -253,6 +262,13 @@ function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) =
       </button>
     </div>
     {error ? <ChooseError error={error} /> : null}
+  </div>
+}
+
+// Starting Hosted mail by itself failed: the reason, and the same request again.
+function HostedError({ error, onRetry }: { error: unknown; onRetry: () => void }) {
+  return <div className="onboarding onboarding--narrow">
+    <Alert tone="danger" title="Couldn’t set up sending">{connectionError(error)}{error instanceof ApiError && <span className="ui-error-reference">{error.reference}</span>}<div className="ui-error-state__retry"><Button onClick={onRetry}>Try again</Button></div></Alert>
   </div>
 }
 

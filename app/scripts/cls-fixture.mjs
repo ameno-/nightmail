@@ -232,6 +232,24 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
           if (cached) { res.writeHead(cached.status, cached.headers); res.end(req.method === 'HEAD' ? undefined : cached.body); return; }
         }
         if (pathname.startsWith('/v1/') && delay) { await sleep(delay(rawUrl)); if (res.destroyed || res.writableEnded) return; }
+        // Onboarding starts Hosted mail by itself, which simulated SES refuses (SES_NOT_CONFIGURED): stand in for the
+        // shared pool with the connection the seed gives every hosted workspace, and answer as the API would.
+        let body = null;
+        if (req.method === 'POST' && pathname === '/v1/connection') {
+          body = Buffer.concat(await Array.fromAsync(req));
+          let kind = null; try { kind = JSON.parse(body.toString()).kind; } catch { /* forwarded as is */ }
+          if (kind === 'shared') {
+            const headers = { cookie: req.headers.cookie ?? '', origin: req.headers.origin ?? origin, ...req.headers['x-nightmail-workspace'] ? { 'x-nightmail-workspace': req.headers['x-nightmail-workspace'] } : {} };
+            const me = await fetch(apiOrigin + '/v1/me', { headers }).then(r => r.ok ? r.json() : null, () => null);
+            if (me?.multiTenant) {
+              await hosted(db, me.workspaceId);
+              const read = await fetch(apiOrigin + '/v1/connection', { headers }), json = await read.json();
+              res.writeHead(read.ok ? 201 : read.status, { 'content-type': 'application/json' });
+              res.end(JSON.stringify(read.ok ? json.connection : json));
+              return;
+            }
+          }
+        }
         // A kept-alive socket the API closed for idling (Node's 5 s keepAliveTimeout) just as it was reused resets
         // before any response: a GET or HEAD has no body to lose, so it goes again once on a fresh socket. Without this
         // the page saw an empty response (ERR_EMPTY_RESPONSE), now and then, on whichever load drew that socket.
@@ -254,7 +272,7 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
         let answered = false;
         const up = forward(bodyless);
         req.on('error', () => up.destroy());
-        if (!bodyless) req.pipe(up);
+        if (body) up.end(body); else if (!bodyless) req.pipe(up);
       });
       await new Promise((resolve, reject) => { proxy.once('error', reject); proxy.listen(proxyPort, '127.0.0.1', resolve); });
       cleanups.push(async () => { proxy.closeAllConnections(); await new Promise(r => proxy.close(r)); });
@@ -302,7 +320,7 @@ async function hosted(db, workspaceId) {
   const conn = 'conn_' + workspaceId;
   await db.query("INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,'111122223333','ready',$2) ON CONFLICT DO NOTHING", [REGION, `arn:aws:sns:${REGION}:111122223333:bane-feedback`]);
   await db.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$2,$3,$4::jsonb) ON CONFLICT DO NOTHING", [workspaceId, 'install_' + workspaceId, REGION, JSON.stringify([REGION])]);
-  await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state,aws_account_id,tenant_state) VALUES($1,$2,'shared',$3,'ready','111122223333','ready')", [conn, workspaceId, REGION]);
+  await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state,aws_account_id,tenant_state) VALUES($1,$2,'shared',$3,'ready','111122223333','ready') ON CONFLICT DO NOTHING", [conn, workspaceId, REGION]);
   await db.query("INSERT INTO provider_connection_regions(connection_id,region,sending_state,tenant_state) VALUES($1,$2,'ready','ready') ON CONFLICT (connection_id,region) DO UPDATE SET sending_state='ready',tenant_state='ready'", [conn, REGION]);
   return conn;
 }
