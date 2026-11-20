@@ -1043,10 +1043,10 @@ def budgets(tmp):
         measure("SELECT", 1, lambda: ok(a.select("Budget")))
         ok(b.select("Budget"))
         measure("FETCH flags", 0, lambda: ok(a.fetch("1", "(UID FLAGS)")))
-        assert measure("FETCH headers",0,lambda:ok(a.fetch('1','BODY.PEEK[HEADER]')))[0][1] == RAW.split(b'\r\n\r\n')[0]+b'\r\n\r\n'
+        assert measure("FETCH headers",1,lambda:ok(a.fetch('1','BODY.PEEK[HEADER]')))[0][1] == RAW.split(b'\r\n\r\n')[0]+b'\r\n\r\n'
         assert measure("SEARCH subject",1,lambda:ok(a.uid('SEARCH',None,'SUBJECT','caf'))) == [b'1']
         assert (
-            measure("FETCH body PEEK", 0, lambda: ok(a.fetch("1", "BODY.PEEK[]")))[0][1]
+            measure("FETCH body PEEK", 1, lambda: ok(a.fetch("1", "BODY.PEEK[]")))[0][1]
             == RAW
         )
         for c in (a, b):

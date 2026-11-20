@@ -5,6 +5,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hmac::{Hmac, Mac};
 use mailgw_core::{
     imap::Imap,
+    search::Field,
     session::{Identity, Protocol, Reply},
     smtp::{Sent, Submission, SubmitError, Submitter},
     store::{self, Applied, Change, Entry, Flags, Folder, FolderOp, MailStore, Mode},
@@ -128,6 +129,8 @@ pub struct Api {
     gates: Mutex<HashMap<String, Gate>>,
     views: Arc<tokio::sync::Semaphore>,
     heavy: Arc<tokio::sync::Semaphore>,
+    /// KiB of message bodies held at once on this task, while FETCH and SEARCH read them.
+    bodies: Arc<tokio::sync::Semaphore>,
     pub online: std::sync::atomic::AtomicBool,
     /// Sessions one workspace, and one sponsoring account, may hold open on this task.
     pub tenant_sessions: std::sync::atomic::AtomicUsize,
@@ -152,8 +155,11 @@ impl Api {
             online: false.into(),
             tenant_sessions: 256.into(),
             gates: Mutex::default(),
-            views: Arc::new(tokio::sync::Semaphore::new(192 * 1024)),
-            heavy: Arc::new(tokio::sync::Semaphore::new(4)),
+            // KiB: open folders' snapshots (about 200 B a message) and bodies being read. Responses stream
+            // and DATA spools to disk, so these are what a task holds of mail.
+            views: Arc::new(tokio::sync::Semaphore::new(512 * 1024)),
+            bodies: Arc::new(tokio::sync::Semaphore::new(256 * 1024)),
+            heavy: Arc::new(tokio::sync::Semaphore::new(64)),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(20))
                 .redirect(reqwest::redirect::Policy::none())
@@ -364,6 +370,10 @@ impl Api {
 }
 /// How long an upload to the API (an APPEND or an SMTP submission, up to 40 MiB) may take.
 const UPLOAD: Duration = Duration::from_secs(120);
+/// What one command (a FETCH, SEARCH or SELECT, each batch of a large change) may spend on API calls.
+pub const COMMAND: Duration = Duration::from_secs(60);
+/// What the view reserves for each message of an open folder, besides its flags.
+const ENTRY: usize = 200;
 /// A refusal's status and the API's error code (`{"error":{"code":…}}`), from at most 8 KiB of its body.
 async fn refusal(mut r: reqwest::Response) -> (u16, String) {
     let status = r.status().as_u16();
@@ -479,7 +489,13 @@ fn failure_key(user: &str, password: &str) -> u64 {
     h.finish()
 }
 type PreviewPage = BTreeMap<u32, (Arc<[u8]>, bool)>;
+/// Where a streamed response goes: true once the bytes are sent (main.rs writes them to the client).
+pub type Sink<'a> = &'a mut dyn FnMut(&[u8]) -> bool;
 pub struct Store {
+    /// The body FETCH or SEARCH is reading now (Store::materialize).
+    body_permit: std::cell::RefCell<Option<crate::admission::Reservation>>,
+    /// A message SMTP DATA is spooling (Submitter::begin).
+    spool: Option<crate::upload::Spool>,
     pending_copy: Option<([u8; 32], Value)>,
     page_wait: std::cell::Cell<Duration>,
     page: std::cell::RefCell<PreviewPage>,
@@ -531,7 +547,7 @@ impl Store {
                 .find(|g| g.account == p.account)
                 .map(|g| g.lanes.0[3].clone())
                 .unwrap_or_else(|| {
-                    let share = crate::admission::Shares::new(4, 2, 4, 144);
+                    let share = crate::admission::Shares::new(32, 16, 16, 144);
                     // The fallback lane is no one's account: its workspaces keep only their own share.
                     Arc::new(if p.account.starts_with("sponsor:") {
                         share.with_sessions(tenant)
@@ -544,16 +560,16 @@ impl Store {
                 .find(|g| g.workspace == p.workspace)
                 .map(|g| g.lanes.0[2].clone())
                 .unwrap_or_else(|| {
-                    Arc::new(crate::admission::Shares::new(4, 2, 4, 144).with_sessions(tenant))
+                    Arc::new(crate::admission::Shares::new(32, 16, 16, 144).with_sessions(tenant))
                 });
             let inbox_share = gates
                 .values()
                 .find(|g| g.inbox == p.inbox)
                 .map(|g| g.lanes.0[1].clone())
-                .unwrap_or_else(|| Arc::new(crate::admission::Shares::new(3, 2, 3, 136)));
+                .unwrap_or_else(|| Arc::new(crate::admission::Shares::new(16, 8, 8, 136)));
             let g = gates.entry(p.kid.clone()).or_insert_with(|| Gate {
                 lanes: crate::admission::Lanes([
-                    Arc::new(crate::admission::Shares::new(3, 2, 3, 128)),
+                    Arc::new(crate::admission::Shares::new(16, 8, 8, 128)),
                     inbox_share,
                     workspace_share,
                     account_share,
@@ -574,6 +590,8 @@ impl Store {
             (g.lanes.clone(), g.bytes.clone())
         };
         let mut s = Self {
+            body_permit: Default::default(),
+            spool: None,
             pending_copy: None,
             page_wait: Default::default(),
             page: Default::default(),
@@ -594,7 +612,7 @@ impl Store {
             // SELECT/EXAMINE refreshes it, so APPEND or COPY to a folder created since
             // doesn't answer TRYCREATE.
             dirty: cached,
-            deadline: Instant::now() + Duration::from_secs(5),
+            deadline: Instant::now() + COMMAND,
         };
         s.install(meta);
         Ok(s)
@@ -672,6 +690,8 @@ impl Store {
     }
     /// One IMAP command on a logged-in connection. A snapshot marked stale by a change
     /// hint, or older than 240 s, is refreshed first; SELECT and EXAMINE load their own.
+    /// A long response goes to `sink` as it is built (MailStore::flush) rather than being held whole; the returned
+    /// reply is what is left. Without a sink all of it is returned.
     pub fn imap(
         &mut self,
         core: &mut Imap,
@@ -679,6 +699,7 @@ impl Store {
         identity: &dyn Identity,
         stale: &mut bool,
         now: store::Date,
+        sink: Option<Sink<'_>>,
     ) -> Result<Reply, store::Error> {
         let selects = bytes.split(|b| *b == b' ').nth(1).is_some_and(|w| {
             w.eq_ignore_ascii_case(b"SELECT") || w.eq_ignore_ascii_case(b"EXAMINE")
@@ -707,7 +728,19 @@ impl Store {
         if !local && selects {
             *stale = false;
         }
-        let reply = core.step(bytes, identity, self, now);
+        let reply = match sink {
+            Some(sink) => core.step(
+                bytes,
+                identity,
+                &mut Streaming {
+                    store: self,
+                    sink: std::cell::RefCell::new(sink),
+                },
+                now,
+            ),
+            None => core.step(bytes, identity, self, now),
+        };
+        drop(self.body_permit.get_mut().take());
         // A parse, folder or access refusal can bypass Store::change.
         // No uploaded literal ever belongs to the next command.
         self.finish_command();
@@ -722,7 +755,7 @@ impl Store {
     pub fn reload(&mut self, wake: bool) -> Result<(), store::Error> {
         let checkpoint = self.checkpoint;
         if wake {
-            self.deadline = Instant::now() + Duration::from_secs(5);
+            self.deadline = Instant::now() + COMMAND;
         }
         let since = checkpoint.map_or(0, |x| x.1);
         let read = || {
@@ -730,17 +763,19 @@ impl Store {
             let mut estimated = 0usize;
             let mut result: Option<Snapshot> = None;
             loop {
-                let mut page:Snapshot=self.api.json(json!({"op":"snapshot","kid":self.principal.kid,"path":self.selected,"since":since,"after":after}))?;
+                // No per-message body handles: a body is read by folder and UID (materialize).
+                let mut page:Snapshot=self.api.json(json!({"op":"snapshot","kid":self.principal.kid,"path":self.selected,"since":since,"after":after,"handles":false}))?;
                 estimated += page
                     .entries
                     .iter()
                     .map(|m| {
-                        512 + m.handle.as_ref().map_or(0, String::len)
+                        ENTRY
+                            + m.handle.as_ref().map_or(0, String::len)
                             + m.flags.iter().map(|s| s.len() + 96).sum::<usize>()
                     })
                     .sum::<usize>();
                 self.reserve_view(
-                    estimated.max(self.folders.values().map(|f| f.entries.len() * 512).sum()),
+                    estimated.max(self.folders.values().map(|f| f.entries.len() * ENTRY).sum()),
                 )?;
                 let cursor = page.more;
                 if let Some(first) = &mut result {
@@ -857,7 +892,7 @@ impl Store {
             .folders
             .values()
             .flat_map(|f| &f.entries)
-            .map(|e| 512 + e.flags.iter().map(|s| 96 + s.len()).sum::<usize>())
+            .map(|e| ENTRY + e.flags.iter().map(|s| 96 + s.len()).sum::<usize>())
             .sum::<usize>()
             + self.handles.values().map(String::len).sum::<usize>();
         self.reserve_view(weight)?;
@@ -870,6 +905,18 @@ impl Store {
         self.stamp = Instant::now();
         self.dirty = false;
         Ok(())
+    }
+}
+impl Store {
+    /// A body read: by the snapshot's handle when an older API sent one, else by folder and UID.
+    fn body(&self, p: &str, uid: u32, headers: bool) -> Result<Value, store::Error> {
+        let kid = &self.principal.kid;
+        Ok(match self.handles.get(&uid) {
+            Some(h) => json!({"op":"body","handle":h,"kid":kid,"headers":headers}),
+            None => {
+                json!({"op":"body","folder":self.keys.get(p).ok_or(store::Error::Missing)?,"uid":uid,"kid":kid,"headers":headers})
+            }
+        })
     }
 }
 impl MailStore for Store {
@@ -921,12 +968,25 @@ impl MailStore for Store {
         }
         Ok(n)
     }
-    fn subject(&self, p: &str, term: &str) -> Result<Option<Vec<u32>>, store::Error> {
+    fn indexed(&self, p: &str, field: Field, term: &str) -> Result<Option<Vec<u32>>, store::Error> {
         if term.len() > 1024 {
             return Err(store::Error::Limit);
         }
-        self.api.json(json!({"op":"subject","kid":self.principal.kid,"folder":self.keys.get(p).ok_or(store::Error::Missing)?,"term":term})).map(Some)
+        let folder = self.keys.get(p).ok_or(store::Error::Missing)?;
+        if field == Field::Subject {
+            return self
+                .api
+                .json(json!({"op":"subject","kid":self.principal.kid,"folder":folder,"term":term}))
+                .map(Some);
+        }
+        // null: a message in the folder doesn't have the field kept, so SEARCH reads the headers. An API older than
+        // this gateway refuses the op (422); the headers are read then too.
+        match self.api.json::<Option<Vec<u32>>>(json!({"op":"search","kid":self.principal.kid,"folder":folder,"field":field.name(),"term":term})) {
+            Err(store::Error::Denied) => Ok(None),
+            other => other,
+        }
     }
+
     fn list_fresh(&mut self) -> Result<(), store::Error> {
         // Cached LOGIN data can predate a folder edit. Read only folder metadata;
         // LIST must not download a selected folder or advance its MODSEQ checkpoint.
@@ -966,7 +1026,7 @@ impl MailStore for Store {
             Ok(())
         }
     }
-    fn header(&self, _: &str, e: &Entry) -> Result<Entry, store::Error> {
+    fn header(&self, p: &str, e: &Entry) -> Result<Entry, store::Error> {
         self.budget()?;
         if let Some((raw, _)) = self.page.borrow().get(&e.uid) {
             let mut e = e.clone();
@@ -978,10 +1038,9 @@ impl MailStore for Store {
             entry.raw = raw.clone();
             return Ok(entry);
         }
-        let h = self.handles.get(&e.uid).ok_or(store::Error::Missing)?;
         let raw = self
             .api
-            .call(json!({"op":"body","handle":h,"kid":self.principal.kid,"headers":true}))
+            .call(self.body(p, e.uid, true)?)
             .map_err(|_| store::Error::Unavailable)?;
         let mut entry = e.clone();
         entry.raw = raw.into();
@@ -994,16 +1053,25 @@ impl MailStore for Store {
         }
         Ok(entry)
     }
-    fn materialize(&self, _: &str, e: &Entry) -> Result<Entry, store::Error> {
+    fn materialize(&self, p: &str, e: &Entry) -> Result<Entry, store::Error> {
         if let Some((raw, true)) = self.page.borrow().get(&e.uid) {
             let mut e = e.clone();
             e.raw = raw.clone();
             return Ok(e);
         }
-        let h = self.handles.get(&e.uid).ok_or(store::Error::Missing)?;
+        // One body at a time per command, out of the task's budget for bodies; the previous one is let go first.
+        drop(self.body_permit.borrow_mut().take());
+        let permit = tokio::runtime::Handle::current()
+            .block_on(crate::admission::Reservation::take(
+                self.api.bodies.clone(),
+                None,
+                u32::try_from(e.size.div_ceil(1024).max(1)).map_err(|_| store::Error::Limit)?,
+            ))
+            .ok_or(store::Error::Limit)?;
+        *self.body_permit.borrow_mut() = Some(permit);
         let raw = self
             .api
-            .call(json!({"op":"body","handle":h,"kid":self.principal.kid}))
+            .call(self.body(p, e.uid, false)?)
             // 509: the API's fair-use download cap for this inbox (migration 246).
             .map_err(|s| {
                 if s == 509 {
@@ -1186,7 +1254,7 @@ impl MailStore for Store {
                 if i > 0 {
                     std::thread::yield_now();
                 }
-                self.deadline = Instant::now() + Duration::from_secs(5);
+                self.deadline = Instant::now() + COMMAND;
                 arg["uids"] = Value::Array(batch.to_vec());
                 if let Some(t) = &ticket {
                     arg["ticket"] = batch_ticket(t, i);
@@ -1226,23 +1294,87 @@ fn batch_ticket(t: &Value, i: usize) -> Value {
     let derived = Sha256::digest(format!("{nonce}:{i}").as_bytes());
     json!({"nonce": hex::encode(&derived[..16]), "issued": t["issued"]})
 }
+/// A Store for one command whose long responses go to a sink as they are built.
+struct Streaming<'a> {
+    store: &'a mut Store,
+    sink: std::cell::RefCell<Sink<'a>>,
+}
+impl MailStore for Streaming<'_> {
+    fn flush(&self, out: &mut Vec<u8>) -> Result<(), store::Error> {
+        if !(self.sink.borrow_mut())(out) {
+            return Err(store::Error::Unavailable);
+        }
+        out.clear();
+        Ok(())
+    }
+    fn prefetch(&self, p: &str, uids: &[u32]) -> Result<usize, store::Error> {
+        self.store.prefetch(p, uids)
+    }
+    fn indexed(&self, p: &str, f: Field, t: &str) -> Result<Option<Vec<u32>>, store::Error> {
+        self.store.indexed(p, f, t)
+    }
+    fn list_fresh(&mut self) -> Result<(), store::Error> {
+        self.store.list_fresh()
+    }
+    fn select(&mut self, p: &str) -> Result<(), store::Error> {
+        self.store.select(p)
+    }
+    fn header(&self, p: &str, e: &Entry) -> Result<Entry, store::Error> {
+        self.store.header(p, e)
+    }
+    fn budget(&self) -> Result<(), store::Error> {
+        self.store.budget()
+    }
+    fn materialize(&self, p: &str, e: &Entry) -> Result<Entry, store::Error> {
+        self.store.materialize(p, e)
+    }
+    fn folders(&self) -> Vec<String> {
+        self.store.folders()
+    }
+    fn folder(&self, p: &str) -> Result<&Folder, store::Error> {
+        self.store.folder(p)
+    }
+    fn edit_folder(&mut self, p: &str, op: FolderOp<'_>) -> Result<(), store::Error> {
+        self.store.edit_folder(p, op)
+    }
+    fn change(&mut self, p: &str, c: Change<'_>) -> Result<Applied, store::Error> {
+        self.store.change(p, c)
+    }
+}
 impl Submitter for Store {
+    /// DATA goes to a disk spool as it arrives, so a 36 MiB message isn't held in memory.
+    fn begin(&mut self) -> bool {
+        self.spool = crate::upload::Spool::new().ok();
+        self.spool.is_some()
+    }
+    fn data(&mut self, chunk: &[u8]) -> bool {
+        self.spool.as_mut().is_some_and(|s| s.write(chunk))
+    }
     /// The message streams to the API as the request body, with the envelope in x-bane-submit; both are signed, and the
     /// signature names the kind (api/src/protocol-admission.ts).
     fn submit(&mut self, s: Submission<'_>) -> Result<Sent, SubmitError> {
+        let spool = self.spool.take();
         let api = &self.api;
         let kid = self.principal.kid.as_str();
         let _work = api
             .admit(Some(kid), true)
             .map_err(|status| submit_error(status, ""))?;
+        let (body, hash, size) = match spool {
+            Some(spool) if s.spooled => spool.finish().map_err(|_| SubmitError::Unavailable)?,
+            _ if s.spooled => return Err(SubmitError::Unavailable),
+            _ => (
+                reqwest::Body::from(s.raw.to_vec()),
+                hex::encode(Sha256::digest(s.raw)),
+                s.raw.len(),
+            ),
+        };
+        if size != s.size {
+            return Err(SubmitError::Unavailable);
+        }
         let meta = STANDARD.encode(
-            serde_json::to_vec(
-                &json!({"kid":kid,"from":s.sender,"to":s.recipients,"size":s.raw.len()}),
-            )
-            .map_err(|_| SubmitError::Unavailable)?,
+            serde_json::to_vec(&json!({"kid":kid,"from":s.sender,"to":s.recipients,"size":size}))
+                .map_err(|_| SubmitError::Unavailable)?,
         );
-        let body = s.raw.to_vec();
-        let hash = hex::encode(Sha256::digest(&body));
         let scope = hex::encode(Sha256::digest(kid.to_ascii_lowercase().as_bytes()));
         let ts = chrono::Utc::now().timestamp();
         let mut mac = Hmac::<Sha256>::new_from_slice(api.key.as_bytes())
@@ -1262,7 +1394,7 @@ impl Submitter for Store {
             .header("x-bane-content", hash)
             .header("x-bane-timestamp", ts.to_string())
             .header("x-bane-signature", hex::encode(mac.finalize().into_bytes()))
-            .header("content-length", body.len())
+            .header("content-length", size)
             .timeout(UPLOAD)
             .body(body);
         tokio::runtime::Handle::current().block_on(async {
@@ -1404,9 +1536,9 @@ mod auth_tests {
         let c = store("c", "other", "other_owner");
         let second_workspace = store("d", "w2", "owner");
         let sibling = store("a", "w", "owner");
-        let responses = Arc::new(tokio::sync::Semaphore::new(6));
+        let responses = Arc::new(tokio::sync::Semaphore::new(64));
         let mut concurrent = vec![];
-        for session in [&a, &sibling, &a] {
+        for session in [&a, &sibling].repeat(8) {
             concurrent.push(
                 Reservation::take(
                     responses.clone(),
@@ -1421,11 +1553,11 @@ mod auth_tests {
         drop(concurrent);
         type Resource = fn(&Shares) -> &Arc<tokio::sync::Semaphore>;
         for (resource, global) in [
-            ((|s| &s.responses) as Resource, 6),
-            (|s| &s.data, 4),
-            (|s| &s.uploads, 8),
-            (|s| &s.views, 192 * 1024),
-            (|s| &s.reads, 4),
+            ((|s| &s.responses) as Resource, 64),
+            (|s| &s.data, 32),
+            (|s| &s.uploads, 32),
+            (|s| &s.views, 512 * 1024),
+            (|s| &s.reads, 64),
         ] {
             let lanes = a.lanes.pools(resource);
             for (level, waiting_store) in [(2, &b), (3, &second_workspace)] {
@@ -1601,6 +1733,8 @@ mod tests {
         /// Every streamed submission (its envelope and message), and what the API answers it and a folder edit.
         submits: Mutex<Vec<(Value, Vec<u8>)>>,
         answer: Mutex<(u16, String)>,
+        /// Answer snapshots that ask for no handles without them, as a current API does.
+        no_handles: AtomicBool,
     }
     fn script() -> Arc<Script> {
         Arc::new(Script {
@@ -1610,6 +1744,7 @@ mod tests {
             fail_call: 0.into(),
             submits: Mutex::default(),
             answer: Mutex::new((200, "{}".into())),
+            no_handles: false.into(),
         })
     }
     /// A request header, by its name in lower case.
@@ -1667,8 +1802,13 @@ mod tests {
                 if script.down.load(Ordering::SeqCst) {
                     return (503, "{}".into());
                 }
+                let handle = if p["handles"] == false && script.no_handles.load(Ordering::SeqCst) {
+                    Value::Null
+                } else {
+                    json!("h")
+                };
                 let entries = if p["path"] == "INBOX" && p["since"] == 0 {
-                    json!([{"uid":1,"modseq":2,"date":"2026-01-01T00:00:00+00:00","size":5,"flags":[],"handle":"h"}])
+                    json!([{"uid":1,"modseq":2,"date":"2026-01-01T00:00:00+00:00","size":5,"flags":[],"handle":handle}])
                 } else {
                     json!([])
                 };
@@ -1697,6 +1837,11 @@ mod tests {
                 (200, json!({"pairs": pairs, "validity": 4}).to_string())
             }
             Some("edit") => script.answer.lock().unwrap().clone(),
+            // A body by folder and UID (no handle in the snapshot), and a field search the store can't answer.
+            Some("body") if p["folder"] == "inbox" && p["uid"] == 1 && p.get("handle").is_none() => {
+                (200, "Hello".into())
+            }
+            Some("search") => (200, "null".into()),
             _ => (422, "{}".into()),
         }
     }
@@ -1784,6 +1929,7 @@ mod tests {
                 &account,
                 &mut stale,
                 store::Date::default(),
+                None,
             )
             .unwrap();
         assert!(r.bytes.ends_with(b"a OK Completed\r\n"));
@@ -1847,6 +1993,7 @@ mod tests {
                     &account,
                     &mut stale,
                     store::Date::default(),
+                    None,
                 )
                 .unwrap();
             String::from_utf8_lossy(&r.bytes).into_owned()
@@ -2003,6 +2150,8 @@ mod tests {
                 sender: "x@example.invalid",
                 recipients: &recipients,
                 raw,
+                size: raw.len(),
+                spooled: false,
                 date: store::Date::default(),
             }) {
                 Ok(sent) => sent.reply().to_owned(),
@@ -2044,6 +2193,37 @@ mod tests {
         assert!(matches!(edit("ALREADYEXISTS"), store::Error::Exists));
         assert!(matches!(edit("FOLDER_LIMIT"), store::Error::Limit));
         assert!(matches!(edit("INVALID_PATH"), store::Error::Cannot));
+
+        // DATA spooled to disk streams from there, the same request as from memory.
+        *script.answer.lock().unwrap() = (200, json!({"id":"email_8","sentCopy":true}).to_string());
+        assert!(store.begin());
+        for piece in raw.chunks(7) {
+            assert!(store.data(piece));
+        }
+        let sent = store
+            .submit(Submission {
+                principal: &account,
+                sender: "x@example.invalid",
+                recipients: &recipients,
+                raw: &raw[..10],
+                size: raw.len(),
+                spooled: true,
+                date: store::Date::default(),
+            })
+            .map(|s| s.reply());
+        assert_eq!(sent.ok(), Some("250 2.0.0 Submission accepted"));
+        assert_eq!(
+            script.submits.lock().unwrap().last().unwrap().1,
+            raw.to_vec()
+        );
+
+        // Without a handle in the snapshot a body is read by folder and UID; a field search the store can't answer
+        // (null) reads the headers instead.
+        script.no_handles.store(true, Ordering::SeqCst);
+        store.select("INBOX").unwrap();
+        let e = store.folder("INBOX").unwrap().entries[0].clone();
+        assert_eq!(&*store.materialize("INBOX", &e).unwrap().raw, b"Hello");
+        assert_eq!(store.indexed("INBOX", Field::From, "x").unwrap(), None);
     }
 
     /// A locked-out name is refused without asking the API, and the refusal is marked as a lockout, so the shell can say
@@ -2102,6 +2282,7 @@ mod tests {
                 &account,
                 &mut false,
                 store::Date::default(),
+                None,
             )
         })
         .unwrap();

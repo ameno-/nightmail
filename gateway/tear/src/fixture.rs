@@ -124,7 +124,7 @@ impl Fixture {
                 Back::Remote {
                     apis,
                     hints: vec![Hints::default(), Hints::default()],
-                    uploads: (0..2).map(|_| Arc::new(Semaphore::new(8))).collect(),
+                    uploads: (0..2).map(|_| Arc::new(Semaphore::new(32))).collect(),
                 }
             }
         };
@@ -184,6 +184,7 @@ impl Fixture {
                     api: api.clone(),
                     principal: Mutex::new(None),
                     unavailable: false.into(),
+                    locked: false.into(),
                     limits: Arc::default(),
                     ip: "127.0.0.1"
                         .parse()
@@ -298,7 +299,7 @@ impl Fixture {
             (Back::Remote { .. }, Some(rc)) => {
                 rc.store.deadline = Instant::now() + Duration::from_secs(5);
                 rc.store
-                    .imap(&mut conn.imap, bytes, &rc.login, &mut rc.stale, now)
+                    .imap(&mut conn.imap, bytes, &rc.login, &mut rc.stale, now, None)
                     .map_err(drop)
             }
             (Back::Remote { .. }, None) => Err(()),
@@ -509,7 +510,7 @@ impl Fixture {
             api.online.store(true, std::sync::atomic::Ordering::Release);
             apis[instance] = Arc::new(api);
             hints[instance] = Hints::default();
-            uploads[instance] = Arc::new(Semaphore::new(8));
+            uploads[instance] = Arc::new(Semaphore::new(32));
         }
     }
     fn notify(&mut self, instance: Option<usize>, channel: &str) {

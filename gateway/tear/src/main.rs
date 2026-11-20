@@ -34,9 +34,9 @@
 //!   a commit lands between the cache fill and the second session's use.
 //! - [C6] copy of a message into the selected folder itself (a new UID appears mid-view).
 //! - [C7] up to four sessions hold spooled APPEND literals (`append-begin`) at once against
-//!   the credential (3), inbox (3) and workspace (4) upload lanes and the process pool (8);
+//!   the credential (8), inbox (8) and workspace (16) upload lanes and the process pool (32);
 //!   a busy lane answers `NO [LIMIT]` after its 2 s wait (a paused clock here).
-//! - [C8] SMTP: concurrent DATA phases against the DATA lanes (2 per credential and inbox).
+//! - [C8] SMTP: concurrent DATA phases against the DATA lanes (8 per credential and inbox).
 //!
 //! **Crashes, aborts, retries and duplicates**
 //!
@@ -766,8 +766,7 @@ const REGRESSIONS: &[(&str, &[&str])] = &[
             "A noop",
         ],
     ),
-    // Three spooled APPENDs fill the credential and inbox upload lanes; the fourth gets
-    // NO [LIMIT] until one completes.
+    // Four spooled APPENDs of one credential at once: its upload lanes (8) hold them all.
     (
         "remote-uploads",
         &[
@@ -779,7 +778,8 @@ const REGRESSIONS: &[(&str, &[&str])] = &[
             "D append INBOX",
         ],
     ),
-    // Two sessions of one credential in DATA fill its lane; the third gets 452.
+    // Three sessions of one credential in DATA at once: its DATA lane (8) holds them all, and each
+    // submission streams from its own spool.
     (
         "smtp-remote",
         &[
@@ -793,7 +793,8 @@ const REGRESSIONS: &[(&str, &[&str])] = &[
             "C auth",
             "C pipeline",
             "A body own",
-            "C pipeline",
+            "B body own",
+            "C body own",
         ],
     ),
     // A STORE on a folder another session deleted after this snapshot: the API refuses it.

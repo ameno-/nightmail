@@ -51,10 +51,24 @@ pub struct Submission<'a> {
     pub principal: &'a dyn Identity,
     pub sender: &'a str,
     pub recipients: &'a [String],
+    /// The message, or when it was spooled (Submitter::begin) its first HEAD bytes.
     pub raw: &'a [u8],
+    pub size: usize,
+    pub spooled: bool,
     pub date: Date,
 }
+/// What a spooled message keeps in memory: its header block, which the sender check reads.
+pub const HEAD: usize = 64 << 10;
 pub trait Submitter {
+    /// DATA begins. True when the submitter keeps the message outside memory (a disk spool) and takes it through
+    /// `data`; the core then keeps only its first HEAD bytes.
+    fn begin(&mut self) -> bool {
+        false
+    }
+    /// The next bytes of a spooled message, dot-unstuffed. False when they can't be kept.
+    fn data(&mut self, _chunk: &[u8]) -> bool {
+        false
+    }
     fn submit(&mut self, input: Submission<'_>) -> Result<Sent, SubmitError>;
 }
 /// Never delivers. Counters belong to this synthetic inbox, not to the socket, login alias or protocol.
@@ -143,12 +157,18 @@ fn remove_bcc(raw: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     }
 }
 
+struct Body {
+    bytes: Vec<u8>,
+    size: usize,
+    spooled: bool,
+    failed: bool,
+}
 enum Phase {
     Command,
     Plain,
     User,
     Pass(Zeroizing<Vec<u8>>),
-    Data(Vec<u8>),
+    Data(Body),
     Oversize,
 }
 
@@ -203,14 +223,18 @@ impl Smtp {
         match std::mem::replace(&mut self.phase, Phase::Command) {
             Phase::Data(mut body) => {
                 if line == b"." {
-                    let r = if !owned_headers(&body, account) {
+                    let r = if body.failed {
+                        Reply::one(&SubmitError::Unavailable.to_string())
+                    } else if !owned_headers(&body.bytes, account) {
                         Reply::one("553 5.7.1 Header sender not owned")
                     } else {
                         let s = Submission {
                             principal: account,
                             sender: self.from.as_deref().unwrap_or(""),
                             recipients: &self.rcpt,
-                            raw: &body,
+                            raw: &body.bytes,
+                            size: body.size,
+                            spooled: body.spooled,
                             date,
                         };
                         match submit.submit(s) {
@@ -222,10 +246,17 @@ impl Smtp {
                     return r;
                 }
                 let chunk = bytes.strip_prefix(b".").unwrap_or(bytes);
-                self.phase = if body.len() + chunk.len() > MAX_SIZE {
+                self.phase = if body.size + chunk.len() > MAX_SIZE {
                     Phase::Oversize
                 } else {
-                    body.extend_from_slice(chunk);
+                    body.size += chunk.len();
+                    if body.spooled {
+                        body.failed |= !submit.data(chunk);
+                        let keep = HEAD.saturating_sub(body.bytes.len()).min(chunk.len());
+                        body.bytes.extend_from_slice(&chunk[..keep]);
+                    } else {
+                        body.bytes.extend_from_slice(chunk);
+                    }
                     Phase::Data(body)
                 };
                 return Reply::default();
@@ -350,7 +381,12 @@ impl Smtp {
                 Reply::one("250 2.1.5 Recipient accepted")
             }
             C::Data if !self.rcpt.is_empty() => {
-                self.phase = Phase::Data(vec![]);
+                self.phase = Phase::Data(Body {
+                    bytes: vec![],
+                    size: 0,
+                    spooled: submit.begin(),
+                    failed: false,
+                });
                 Reply::one("354 End with <CRLF>.<CRLF>")
             }
             _ => Reply::one("503 5.5.1 Bad sequence or unsupported command"),
@@ -412,6 +448,8 @@ mod tests {
                 sender: "",
                 recipients: &["reader@example.invalid".into()],
                 raw: b"Subject: test\r\n\r\nfixture",
+                size: 25,
+                spooled: false,
                 date: t.parse().unwrap(),
             })
         };
@@ -446,6 +484,8 @@ mod tests {
                 sender: "",
                 recipients: &vec!["reader@example.invalid".to_owned(); n],
                 raw: b"Subject: test\r\n\r\nfixture",
+                size: 25,
+                spooled: false,
                 date: t.parse().unwrap(),
             })
         };
@@ -503,6 +543,67 @@ mod tests {
             step(".\r\n"),
             "250 2.0.0 Submission accepted; no Sent copy kept: the inbox is full\r\n"
         );
+    }
+    /// A submitter that spools DATA gets every byte, dot-unstuffed, and the core keeps only the header block.
+    #[test]
+    fn spooled_data_keeps_only_the_head_in_memory() {
+        #[derive(Default)]
+        struct Spool {
+            bytes: Vec<u8>,
+            head: usize,
+            size: usize,
+        }
+        impl Submitter for Spool {
+            fn begin(&mut self) -> bool {
+                true
+            }
+            fn data(&mut self, chunk: &[u8]) -> bool {
+                self.bytes.extend_from_slice(chunk);
+                true
+            }
+            fn submit(&mut self, s: Submission<'_>) -> Result<Sent, SubmitError> {
+                assert!(s.spooled);
+                (self.head, self.size) = (s.raw.len(), s.size);
+                Ok(Sent { copy: true })
+            }
+        }
+        let a = Account::new(
+            "mbx_test".into(),
+            vec!["x@example.invalid".into()],
+            "fixture".into(),
+            false,
+        );
+        let mut smtp = Smtp::new(true);
+        let mut spool = Spool::default();
+        let date: Date = "2025-01-17T00:00:00Z".parse().unwrap();
+        let mut step = |line: &[u8], s: &mut Spool| {
+            String::from_utf8(smtp.step(line, &a, s, date).bytes).unwrap()
+        };
+        step(b"EHLO client.invalid\r\n", &mut spool);
+        step(
+            b"AUTH PLAIN AHhAZXhhbXBsZS5pbnZhbGlkAGZpeHR1cmU=\r\n",
+            &mut spool,
+        );
+        step(b"MAIL FROM:<x@example.invalid>\r\n", &mut spool);
+        step(b"RCPT TO:<r@example.invalid>\r\n", &mut spool);
+        assert!(step(b"DATA\r\n", &mut spool).starts_with("354"));
+        let mut expected = b"From: x@example.invalid\r\n\r\n".to_vec();
+        step(b"From: x@example.invalid\r\n", &mut spool);
+        step(b"\r\n", &mut spool);
+        let line = [b'a'; 998];
+        for _ in 0..200 {
+            step(&[&line[..], b"\r\n"].concat(), &mut spool);
+            expected.extend_from_slice(&line);
+            expected.extend_from_slice(b"\r\n");
+        }
+        step(b"..stuffed\r\n", &mut spool);
+        expected.extend_from_slice(b".stuffed\r\n");
+        assert_eq!(
+            step(b".\r\n", &mut spool),
+            "250 2.0.0 Submission accepted\r\n"
+        );
+        assert_eq!(spool.bytes, expected);
+        assert_eq!((spool.head, spool.size), (HEAD, expected.len()));
     }
     #[test]
     fn scrub_only_bcc_headers_including_folded_lines() {

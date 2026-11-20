@@ -17,6 +17,10 @@ use imap_codec::imap_types::{
 };
 use std::collections::BTreeMap;
 const FLAGS: &str = "\\Answered \\Flagged \\Deleted \\Seen \\Draft";
+/// A FETCH response is handed to the store to send once it holds this much.
+const FLUSH: usize = 256 << 10;
+/// What one SEARCH may read of headers and bodies, counted per scan.
+const SEARCH_BYTES: usize = 256 << 20;
 fn path<'a>(m: &'a Mailbox<'_>) -> Result<&'a str, Error> {
     match m {
         Mailbox::Inbox => Ok("INBOX"),
@@ -589,6 +593,11 @@ impl Imap {
                                 if items.contains(&Item::Flags) {
                                     sel.view[i].1 = e.modseq
                                 }
+                                // Send a long response as it is built, one message at a time, rather than
+                                // holding all of it (MailStore::flush).
+                                if r.bytes.len() >= FLUSH {
+                                    s.flush(&mut r.bytes)?;
+                                }
                             }
                         }
                     }
@@ -668,11 +677,9 @@ impl Imap {
                             return Ok(None);
                         }
                         let f = s.folder(&p)?;
-                        if let [imap_codec::imap_types::search::SearchKey::Subject(q)] =
-                            criteria.as_ref()
-                            && let Ok(term) = str::from_utf8(q.as_ref())
-                            && !term.is_empty()
-                            && let Some(hits) = s.subject(&p, term)?
+                        if let [key] = criteria.as_ref()
+                            && let Some((field, term)) = search::indexed(key)
+                            && let Some(hits) = s.indexed(&p, field, term)?
                         {
                             let mut line = String::from("* SEARCH");
                             for u in hits {
@@ -701,12 +708,12 @@ impl Imap {
                             if criteria
                                 .as_ref()
                                 .iter()
-                                .all(|k| search::subject_plan(k, &mut terms))
+                                .all(|k| search::index_plan(k, &mut terms))
                                 && !terms.is_empty()
                             {
-                                for &term in &terms {
-                                    if let Some(uids) = s.subject(&p, term)? {
-                                        hits.insert(term, uids);
+                                for &(field, term) in &terms {
+                                    if let Some(uids) = s.indexed(&p, field, term)? {
+                                        hits.insert((field, term), uids);
                                     }
                                 }
                                 if hits.len() == terms.len() {
@@ -748,7 +755,7 @@ impl Imap {
                             .iter()
                             .map(search::scan_count)
                             .sum::<usize>();
-                        let mut bytes_left = 64usize << 20;
+                        let mut bytes_left = SEARCH_BYTES;
                         let mut next_page = 0;
                         for (i, (u, _)) in sel.view.iter().enumerate() {
                             if need != search::Need::Meta && sel.view.len() > 8 && i == next_page {
@@ -1018,6 +1025,79 @@ mod tests {
                 other => self.0.change(path, other),
             }
         }
+    }
+
+    /// A store that sends long responses on as they are built (MailStore::flush).
+    struct Flushing(Memory, std::cell::RefCell<Vec<Vec<u8>>>);
+    impl MailStore for Flushing {
+        fn flush(&self, out: &mut Vec<u8>) -> Result<(), Error> {
+            self.1.borrow_mut().push(std::mem::take(out));
+            Ok(())
+        }
+        fn folders(&self) -> Vec<String> {
+            self.0.folders()
+        }
+        fn folder(&self, path: &str) -> Result<&Folder, Error> {
+            self.0.folder(path)
+        }
+        fn edit_folder(&mut self, path: &str, op: FolderOp<'_>) -> Result<(), Error> {
+            self.0.edit_folder(path, op)
+        }
+        fn change(&mut self, path: &str, change: Change<'_>) -> Result<Applied, Error> {
+            self.0.change(path, change)
+        }
+    }
+
+    /// A FETCH goes to the store in pieces of whole messages once it holds 256 KiB, and the pieces and what is left
+    /// are exactly the response a store that keeps it whole returns; no limit applies to the command as a whole.
+    #[test]
+    fn a_long_fetch_is_handed_on_a_message_at_a_time() {
+        let account = Account::new("mbx_test".into(), vec![], "x".into(), true);
+        let now = Date::default();
+        let mut plain = Memory::default();
+        let body = vec![b'x'; 200 << 10];
+        for i in 0..5 {
+            let raw = [format!("Subject: {i}\r\n\r\n").as_bytes(), &body].concat();
+            plain
+                .change(
+                    "INBOX",
+                    Change::Append {
+                        raw: &raw,
+                        date: now,
+                        flags: Flags::new(),
+                        source: crate::store::Origin::Client { now },
+                    },
+                )
+                .unwrap();
+        }
+        let fetch = |store: &mut dyn MailStore| {
+            let mut imap = Imap::new(true);
+            imap.authenticated = true;
+            imap.step(b"a EXAMINE INBOX\r\n", &account, store, now);
+            imap.step(b"b FETCH 1:5 (UID BODY.PEEK[])\r\n", &account, store, now)
+                .bytes
+        };
+        let whole = fetch(&mut plain);
+        let mut streamed = Flushing(plain, Default::default());
+        let rest = fetch(&mut streamed);
+        let pieces = streamed.1.into_inner();
+        assert_eq!(
+            pieces.len(),
+            2,
+            "two pieces of two messages, then the fifth"
+        );
+        assert!(
+            pieces
+                .iter()
+                .all(|p| p.starts_with(b"* ") && p.ends_with(b")\r\n"))
+        );
+        assert_eq!([pieces.concat(), rest.clone()].concat(), whole);
+        let rest = String::from_utf8_lossy(&rest);
+        assert!(
+            rest.starts_with("* 5 FETCH") && rest.ends_with(" Completed\r\n"),
+            "{}",
+            &rest[rest.len() - 40..]
+        );
     }
 
     /// Chunked mutations (gateway/tear, 1,000-UID batches): a STORE that stops partway

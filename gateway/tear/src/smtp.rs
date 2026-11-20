@@ -335,11 +335,11 @@ impl Model {
         if x.rcpt == 0 {
             return 503;
         }
-        // The shell reserves a DATA permit (Remote: credential, inbox and workspace lanes of 2
-        // and a process pool of 4; Memory: the pool only). None: 452 and the core drops the
+        // The shell reserves a DATA permit (Remote: credential and inbox lanes of 8, workspace 16,
+        // and a process pool of 32; Memory: the pool only). None: 452 and the core drops the
         // transaction (refuse_data).
         let busy = self.sessions.iter().filter(|o| o.up && o.data).count();
-        let limit = if self.remote { 2 } else { 4 };
+        let limit = if self.remote { 8 } else { 32 };
         let x = &mut self.sessions[s];
         if busy >= limit {
             x.from = false;
@@ -523,7 +523,7 @@ impl Fixture {
             }
         };
         let mut f = Self {
-            data_pool: Arc::new(tokio::sync::Semaphore::new(4)),
+            data_pool: Arc::new(tokio::sync::Semaphore::new(32)),
             back,
             conns: (0..sessions).map(|_| None).collect(),
             clock: 0,
@@ -540,6 +540,7 @@ impl Fixture {
                 api: api.clone(),
                 principal: Mutex::new(None),
                 unavailable: false.into(),
+                locked: false.into(),
                 limits: Arc::default(),
                 ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             }),

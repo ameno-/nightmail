@@ -1821,6 +1821,55 @@ test('mail gateway: APPEND, keywords and folders follow the inbox, not defaults'
   assert.deepEqual(await edit('create','Last'),[200,undefined]);
   assert.deepEqual(await edit('create','One more'),[409,'FOLDER_LIMIT']);
 });
+// A current gateway keeps no body handle per message: it reads a body by folder and UID, and SEARCH FROM, TO and CC
+// from the addresses the store keeps decoded (null when a message in the folder lacks them, so it reads headers).
+test('mail gateway: bodies by folder and UID, and SEARCH FROM, TO and CC from the kept addresses',async t=>{
+  if(!fixtureWorker)return t.skip('requires isolated loopback storage and simulated SES');
+  const {drizzle}=await import('drizzle-orm/node-postgres');
+  const db=await fixtureDatabase(t),pool=new pg.Pool({connectionString:FIXTURE_DATABASE_URL,max:1,connectionTimeoutMillis:1000});
+  t.after(()=>pool.end());
+  const wid=unique('imap'),bid=unique('mbx'),kid='app_'+randomUUID(),address=`box@${wid}.invalid`,key=randomUUID();
+  const rt={...fixtureWorker.runtime,db:drizzle(pool),config:{...fixtureWorker.runtime.config,workspaceId:wid,mailGatewayToken:key}};
+  await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
+  await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,$3,$4,'active')",[bid,wid,address.split('@')[1],REGION]);
+  await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,$3,'inbox','forever')",[bid,wid,address]);
+  await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')",[wid,address,bid]);
+  await db.query('INSERT INTO inbox_state(inbox_id,workspace_id,protocol_passwords) VALUES($1,$2,1)',[bid,wid]);
+  await db.query("INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols) VALUES($1,$2,'fixture',$1,ARRAY['imap'])",[kid,bid]);
+  const path='/internal/v1/mail',app=(await import('./src/app.js')).createApp(),hash=(s:string|Uint8Array)=>createHash('sha256').update(s).digest('hex');
+  const call=async(body:Json)=>{
+    const raw=JSON.stringify(body),ts=String(Math.floor(Date.now()/1000)),scope=hash(kid),digest=hash(raw);
+    return app.fetch(new Request('http://127.0.0.1'+path,{method:'POST',body:raw,headers:{'x-bane-content':digest,'x-bane-timestamp':ts,'x-bane-scope':scope,'x-bane-signature':createHmac('sha256',key).update(['POST',path,ts,digest,scope].join('\n')).digest('hex')}}),rt);
+  };
+  const rpc=async(body:Json)=>{const res=await call(body);return {status:res.status,body:await res.json() as Json};};
+  const append=async(raw:Buffer)=>{
+    const meta=Buffer.from(JSON.stringify({kid,folder:'inbox',date:new Date().toISOString(),flags:[],size:raw.length})).toString('base64'),ts=String(Math.floor(Date.now()/1000)),scope=hash(kid),digest=hash(raw);
+    const res=await app.fetch(new Request('http://127.0.0.1'+path,{method:'POST',body:raw,duplex:'half',headers:{'x-bane-append':meta,'content-length':String(raw.length),'x-bane-content':digest,'x-bane-timestamp':ts,'x-bane-scope':scope,
+      'x-bane-signature':createHmac('sha256',key).update(['POST',path,ts,digest,scope,hash(meta)].join('\n')).digest('hex')}} as RequestInit),rt);
+    return (await res.json() as Json).pairs[0][1] as number;
+  };
+  const raw=Buffer.from('From: Ana Sender <ana@example.invalid>\r\nTo: Bob <bob@example.invalid>\r\nCc: =?utf-8?q?Car=C3=B6l?= <carol@example.invalid>\r\nSubject: Report\r\n\r\nBody text\r\n');
+  const uid=await append(raw);
+  // Snapshots carry body handles only when asked; a body reads by folder and UID, whole or its header block.
+  const entry=async(handles?:boolean)=>(await rpc({op:'snapshot',kid,path:'INBOX',...handles===undefined?{}:{handles}})).body.entries[0];
+  assert.equal(typeof (await entry()).handle,'string');
+  assert.equal((await entry(false)).handle,null);
+  const body=await call({op:'body',kid,folder:'inbox',uid});assert.equal(body.status,200);assert.ok(Buffer.from(await body.arrayBuffer()).equals(raw));
+  const head=await call({op:'body',kid,folder:'inbox',uid,headers:true});assert.equal(Buffer.from(await head.arrayBuffer()).toString(),raw.toString().split('\r\n\r\n')[0]+'\r\n\r\n');
+  assert.equal((await call({op:'body',kid,folder:'inbox',uid:uid+1})).status,404);
+  assert.equal((await call({op:'body',kid,folder:'sent',uid})).status,404);
+  // SEARCH FROM, TO and CC: a substring of the decoded name or address, any case.
+  const search=async(field:string,term:string)=>(await rpc({op:'search',kid,folder:'inbox',field,term})).body;
+  assert.deepEqual([await search('from','ana sender'),await search('from','EXAMPLE.invalid'),await search('to','bob@'),await search('cc','caröl'),await search('cc','bob'),await search('subject','repo')],[[uid],[uid],[uid],[uid],[],[uid]]);
+  // A client APPEND stored before its addresses were kept: the store can't answer, so the gateway reads the headers.
+  await db.query("UPDATE mail_messages SET verdicts=verdicts-'fields' WHERE workspace_id=$1",[wid]);
+  assert.equal(await search('to','bob'),null);
+  assert.deepEqual(await search('subject','repo'),[uid]);
+  // Revoked: no body and no search.
+  await db.query('SELECT inbox_revoke_password($1,$2,$3)',[wid,bid,kid]);
+  assert.equal((await call({op:'body',kid,folder:'inbox',uid})).status,404);
+  assert.equal((await rpc({op:'search',kid,folder:'inbox',field:'from',term:'ana'})).status,403);
+});
 // Migration 346: the gateway closes a send-only key's sessions and drops its cached sign-ins when this names the key.
 test('send-only SMTP: revoking a key, or changing what it may send, tells the gateway; using or renaming it does not', async t => {
   const listener = await fixtureDatabase(t), db = await fixtureDatabase(t), heard: string[] = [];

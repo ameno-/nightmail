@@ -41,6 +41,45 @@ impl Upload {
     }
 }
 
+/// SMTP DATA, whose length isn't known up front, on disk while it arrives: an anonymous file, its SHA-256 and size.
+/// The connection owns it; dropping it removes the file.
+pub struct Spool {
+    file: std::io::BufWriter<std::fs::File>,
+    hash: Sha256,
+    pub size: usize,
+}
+impl Spool {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            file: std::io::BufWriter::with_capacity(64 << 10, tempfile::tempfile()?),
+            hash: Sha256::new(),
+            size: 0,
+        })
+    }
+    pub fn write(&mut self, data: &[u8]) -> bool {
+        use std::io::Write;
+        if self.file.write_all(data).is_err() {
+            return false;
+        }
+        self.hash.update(data);
+        self.size += data.len();
+        true
+    }
+    /// The message as a request body, its SHA-256 and its size.
+    pub fn finish(self) -> Result<(reqwest::Body, String, usize)> {
+        use std::io::Seek;
+        let mut file = self.file.into_inner().map_err(|e| e.into_error())?;
+        file.rewind()?;
+        Ok((
+            reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(
+                tokio::fs::File::from_std(file),
+            )),
+            hex::encode(self.hash.finalize()),
+            self.size,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
