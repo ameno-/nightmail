@@ -90,8 +90,19 @@ pub trait MailStore {
     fn prefetch(&self, _path: &str, uids: &[u32]) -> Result<usize, Error> {
         Ok(uids.len())
     }
-    fn subject(&self, _path: &str, _term: &str) -> Result<Option<Vec<u32>>, Error> {
+    /// UIDs whose decoded header field contains `term` (any case), from the store's own index; None: no index, so
+    /// SEARCH reads the headers.
+    fn indexed(
+        &self,
+        _path: &str,
+        _field: crate::search::Field,
+        _term: &str,
+    ) -> Result<Option<Vec<u32>>, Error> {
         Ok(None)
+    }
+    /// A long response so far, for the store to send on now (it takes the bytes); a store that can't keeps them.
+    fn flush(&self, _out: &mut Vec<u8>) -> Result<(), Error> {
+        Ok(())
     }
     fn list_fresh(&mut self) -> Result<(), Error> {
         Ok(())

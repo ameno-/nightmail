@@ -19,7 +19,8 @@ pub struct Shares {
 impl Shares {
     pub fn new(responses: usize, data: usize, uploads: usize, view_mib: usize) -> Self {
         Self {
-            reads: Arc::new(Semaphore::new(2)),
+            // API calls a lane makes at once: as many as the responses it may build.
+            reads: Arc::new(Semaphore::new(responses)),
             responses: Arc::new(Semaphore::new(responses)),
             data: Arc::new(Semaphore::new(data)),
             uploads: Arc::new(Semaphore::new(uploads)),
@@ -49,6 +50,9 @@ impl Lanes {
             .collect()
     }
 }
+/// How long work waits for a pool before it is refused: a response or an API call, and an upload (APPEND, DATA).
+pub const WAIT: Duration = Duration::from_secs(30);
+pub const UPLOAD_WAIT: Duration = Duration::from_secs(60);
 impl Reservation {
     /// FIFO within each share; a busy credential waits without holding an inbox or global permit.
     pub async fn take(
@@ -56,7 +60,15 @@ impl Reservation {
         shares: Option<[Arc<Semaphore>; 4]>,
         n: u32,
     ) -> Option<Self> {
-        tokio::time::timeout(Duration::from_secs(2), async move {
+        Self::take_within(global, shares, n, WAIT).await
+    }
+    pub async fn take_within(
+        global: Arc<Semaphore>,
+        shares: Option<[Arc<Semaphore>; 4]>,
+        n: u32,
+        wait: Duration,
+    ) -> Option<Self> {
+        tokio::time::timeout(wait, async move {
             let mut permits = Vec::with_capacity(5);
             if let Some(lanes) = shares {
                 for pool in lanes {

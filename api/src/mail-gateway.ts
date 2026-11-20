@@ -2,7 +2,7 @@ import { gatewayLane } from './protocol-admission.js';
 /** Private protocol RPC. No OpenAPI/MCP registration. Caller cannot select a workspace,
  * inbox or bucket: the active protocol credential or API-signed object grant supplies it. */
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 import { ApiError, type App, type Runtime } from './core.js';
 import { boundRequestBody } from './request-body.js';
@@ -26,6 +26,8 @@ const read = z.object({
   path: name.nullable(),
   since: z.number().int().nonnegative().default(0),
   after: z.number().int().nonnegative().default(0),
+  // A current gateway reads bodies by folder and UID (body below) and keeps no per-message handle.
+  handles: z.boolean().default(true),
 });
 const edit = z.object({
   op: z.literal('edit'),
@@ -46,18 +48,20 @@ const mutate = z.object({
   flags: z.array(z.string().max(64)).max(64),
   mode: z.enum(['add', 'remove', 'replace']),
 });
-const body = z.object({
-  op: z.literal('body'),
-  kid: token,
-  handle: z.string().max(8192),
-  headers: z.boolean().optional(),
-});
+const body = z.union([
+  z.object({ op: z.literal('body'), kid: token, handle: z.string().max(8192), headers: z.boolean().optional() }),
+  z.object({ op: z.literal('body'), kid: token, folder: name, uid: z.number().int().positive(), headers: z.boolean().optional() }),
+]);
 const subjectSearch = z.object({
   op: z.literal('subject'),
   kid: token,
   folder: name,
   term: z.string().min(1).max(1024),
 });
+/** SEARCH by a header the store keeps decoded: Subject, From, To or Cc, as a substring, any case. null: a message in
+ *  the folder doesn't have the field kept (a client APPEND stored before APPEND kept its addresses), so the gateway
+ *  reads the headers itself. */
+const fieldSearch = subjectSearch.extend({ op: z.literal('search'), field: z.enum(['subject', 'from', 'to', 'cc']) });
 // An older gateway's submission: base64 inside the JSON, at most 8 MiB. A current one streams it (protocol-submit.ts).
 const submit = z.object({
   op: z.literal('submit'),
@@ -72,7 +76,7 @@ const projections = z.object({
   folder: name,
   uids: z.array(z.number().int().positive()).min(1).max(256),
 });
-const rpc = z.discriminatedUnion('op', [login, read, edit, mutate, body, subjectSearch, submit, projections]);
+const rpc = z.union([login, read, edit, mutate, body, subjectSearch, fieldSearch, submit, projections]);
 const mac = (key: string, value: string) => createHmac('sha256', key).update(value).digest('hex');
 function equal(a: string, b: string) {
   return /^[a-f0-9]{64}$/.test(a) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -81,6 +85,8 @@ export const principal = (runtime: Runtime, protocol: 'imap' | 'smtp', identity:
   sql`SELECT b.workspace_id AS w,b.id AS b,p.id AS k FROM inbox_app_passwords p JOIN mailboxes b ON b.id=p.inbox_id WHERE ${identity} AND p.revoked_at IS NULL AND ${protocol}=ANY(p.protocols) AND b.kind='inbox' AND b.retention_mode='forever' AND b.delete_after IS NULL AND NOT EXISTS(SELECT FROM mail_grant_objects g WHERE g.kind='protocol' AND g.workspace_id=b.workspace_id AND g.resource=p.id AND NOT mail_receiving_grant(b.workspace_id,g.grant_id,${receivingPolicy(runtime.config)}::jsonb))`;
 const folders = sql`(SELECT jsonb_agg(jsonb_build_object('key',f.role,'path',inbox_folder_path(f),'next',f.uid_next,'validity',f.uid_validity,'highest',f.highest_modseq,'subscribed',f.subscribed,'total',f.total,'unseen',f.unseen) ORDER BY role) FROM inbox_folders f WHERE f.inbox_id=a.b)`;
 const fields = ['flagged', 'answered', 'draft', 'forwarded', 'junk', 'notJunk', 'mdnSent'] as const;
+/** Snapshot entries per page: a 100,000-message folder selects in ten pages. */
+const PAGE = 10000;
 /** An IMAP keyword is any RFC 3501 atom (printable ASCII but ( ) { % * " \ ] and space), at most 64 characters;
  *  delivery's own labels are not keywords. Migration 356 applies the same rule in SQL. */
 export const KEYWORD = /^[!#$&'+-[^-z|}~]{1,64}$/;
@@ -137,17 +143,30 @@ export function registerMailGateway(app: App) {
       return c.json(rows[0]);
     }
     if (p.op === 'body') {
-      const [d, s] = p.handle.split('.');
-      if (!d || !s || !equal(s, mac(runtime.config.authSecret, 'mailgw-body:' + d))) throw bad();
-      const v = JSON.parse(Buffer.from(d, 'base64url').toString()) as ObjectRef;
-      if (v.kid !== p.kid) throw bad();
-      if (v.exp < Date.now()) {
-        // Recheck only this immutable object. Do not rebuild a large folder just to renew a grant.
+      let v: ObjectRef;
+      if ('uid' in p) {
+        // One message by folder and UID, read under the credential now (no handle).
         const auth = principal(runtime, 'imap', sql`p.id=${p.kid}`);
-        const found = await runtime.db.execute(
-          sql`WITH a AS (${auth}) SELECT FROM a JOIN mailbox_messages l ON l.mailbox_id=a.b AND l.workspace_id=a.w JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=a.w WHERE l.held_reason IS NULL AND m.id=${v.mid} AND m.raw_key=${v.key} AND m.raw_bucket=${v.bucket}`,
+        const { rows: [found] } = await runtime.db.execute<ObjectRef>(
+          sql`WITH a AS (${auth}) SELECT a.w,${p.kid}::text AS kid,m.id AS mid,m.raw_key AS key,m.raw_bucket AS bucket,m.region,(m.mime->>'headerLength')::int AS header,coalesce(m.size_bytes,0) AS size,0 AS exp
+            FROM a JOIN inbox_entries e ON e.inbox_id=a.b AND e.role=${p.folder} AND e.uid=${p.uid} JOIN mailbox_messages l ON l.mailbox_id=e.inbox_id AND l.message_id=e.message_id
+            JOIN mail_messages m ON m.id=e.message_id AND m.workspace_id=a.w WHERE l.held_reason IS NULL AND m.raw_key IS NOT NULL AND m.raw_bucket IS NOT NULL`,
         );
-        if (!found.rowCount) throw bad();
+        if (!found) throw new ApiError(404, 'MISSING_BODY', 'Body unavailable.');
+        v = found;
+      } else {
+        const [d, s] = p.handle.split('.');
+        if (!d || !s || !equal(s, mac(runtime.config.authSecret, 'mailgw-body:' + d))) throw bad();
+        v = JSON.parse(Buffer.from(d, 'base64url').toString()) as ObjectRef;
+        if (v.kid !== p.kid) throw bad();
+        if (v.exp < Date.now()) {
+          // Recheck only this immutable object. Do not rebuild a large folder just to renew a grant.
+          const auth = principal(runtime, 'imap', sql`p.id=${p.kid}`);
+          const found = await runtime.db.execute(
+            sql`WITH a AS (${auth}) SELECT FROM a JOIN mailbox_messages l ON l.mailbox_id=a.b AND l.workspace_id=a.w JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=a.w WHERE l.held_reason IS NULL AND m.id=${v.mid} AND m.raw_key=${v.key} AND m.raw_bucket=${v.bucket}`,
+          );
+          if (!found.rowCount) throw bad();
+        }
       }
       if(p.headers){
         const {bytes,end}=await objectProjection(runtime,v.w,v);
@@ -181,6 +200,20 @@ export function registerMailGateway(app: App) {
       if (!row) throw bad();
       return c.json(await previewPage(runtime, row.w, row.items, writer(false)));
     }
+    if (p.op === 'search') {
+      const term = sql`lower(${p.term})`, has = (text: SQL) => sql`strpos(lower(${text}),${term})>0`;
+      const match = p.field === 'subject' ? has(sql`m.subject`) : p.field === 'from' ? has(sql`coalesce(m.from_name,'')||' '||m.from_address`)
+        : sql`EXISTS(SELECT FROM jsonb_array_elements(m.${sql.identifier(p.field)}) x WHERE ${has(sql`coalesce(x->>'name','')||' '||coalesce(x->>'address','')`)})`;
+      const unkept = p.field === 'subject' ? sql`false` : sql`EXISTS(SELECT FROM inbox_entries e JOIN mail_messages m ON m.id=e.message_id AND m.workspace_id=a.w WHERE e.inbox_id=a.b AND e.role=${p.folder} AND m.verdicts->>'origin'='client-append' AND NOT m.verdicts ? 'fields')`;
+      const row = (
+        await runtime.db.execute<{ uids: number[]; unkept: boolean }>(
+          sql`WITH a AS (${auth}) SELECT ${unkept} AS unkept,ARRAY(SELECT e.uid::float8 FROM inbox_entries e JOIN mailbox_messages l ON l.mailbox_id=e.inbox_id AND l.message_id=e.message_id JOIN mail_messages m ON m.id=e.message_id AND m.workspace_id=a.w WHERE e.inbox_id=a.b AND l.held_reason IS NULL AND e.role=${p.folder} AND ${match} ORDER BY uid LIMIT 100001) uids FROM a`,
+        )
+      ).rows[0];
+      if (!row) throw bad();
+      if (row.uids.length > 100000) throw new ApiError(413, 'SEARCH_LIMIT', 'Narrow the search.');
+      return c.json(row.unkept ? null : row.uids);
+    }
     if (p.op === 'subject') {
       const row = (
         await runtime.db.execute<{ uids: number[] }>(
@@ -209,13 +242,13 @@ export function registerMailGateway(app: App) {
       };
       const r = (
         await runtime.db.execute<{ w: string; folders: unknown; entries: E[]; gone: { uid: number }[]; floor: string }>(
-          sql`WITH a AS (${auth}) SELECT a.w,${folders} folders,(SELECT changes_floor::text FROM inbox_state WHERE inbox_id=a.b) floor,coalesce((SELECT jsonb_agg(x ORDER BY uid) FROM (SELECT v.uid FROM inbox_vanished v JOIN inbox_folders f USING(inbox_id,role) WHERE ${p.since}::bigint>0 AND v.inbox_id=a.b AND inbox_folder_path(f)=${p.path} AND v.modseq>${p.since} AND v.uid>${p.after} ORDER BY uid LIMIT 2049)x),'[]') AS gone,coalesce((SELECT jsonb_agg(to_jsonb(x) ORDER BY uid) FROM (SELECT e.uid,e.modseq,e.internal_date AS date,l.flags bits,l.read seen,e.deleted,l.labels,coalesce(m.size_bytes,0) size,m.raw_key key,m.raw_bucket bucket,m.region,m.id mid,(m.mime->>'headerLength')::int header FROM inbox_folders f JOIN inbox_entries e USING(inbox_id,role) JOIN mailbox_messages l ON l.mailbox_id=e.inbox_id AND l.message_id=e.message_id JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=a.w WHERE e.inbox_id=a.b AND inbox_folder_path(f)=${p.path} AND l.held_reason IS NULL AND e.uid>${p.after} AND e.modseq>${p.since} ORDER BY uid LIMIT 2049)x),'[]') AS entries FROM a`,
+          sql`WITH a AS (${auth}) SELECT a.w,${folders} folders,(SELECT changes_floor::text FROM inbox_state WHERE inbox_id=a.b) floor,coalesce((SELECT jsonb_agg(x ORDER BY uid) FROM (SELECT v.uid FROM inbox_vanished v JOIN inbox_folders f USING(inbox_id,role) WHERE ${p.since}::bigint>0 AND v.inbox_id=a.b AND inbox_folder_path(f)=${p.path} AND v.modseq>${p.since} AND v.uid>${p.after} ORDER BY uid LIMIT ${PAGE + 1})x),'[]') AS gone,coalesce((SELECT jsonb_agg(to_jsonb(x) ORDER BY uid) FROM (SELECT e.uid,e.modseq,e.internal_date AS date,l.flags bits,l.read seen,e.deleted,l.labels,coalesce(m.size_bytes,0) size,m.raw_key key,m.raw_bucket bucket,m.region,m.id mid,(m.mime->>'headerLength')::int header FROM inbox_folders f JOIN inbox_entries e USING(inbox_id,role) JOIN mailbox_messages l ON l.mailbox_id=e.inbox_id AND l.message_id=e.message_id JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=a.w WHERE e.inbox_id=a.b AND inbox_folder_path(f)=${p.path} AND l.held_reason IS NULL AND e.uid>${p.after} AND e.modseq>${p.since} ORDER BY uid LIMIT ${PAGE + 1})x),'[]') AS entries FROM a`,
         )
       ).rows[0];
       if (!r) throw bad();
       const next = Math.min(
-        r.entries.length > 2048 ? r.entries[2047]!.uid : Infinity,
-        r.gone.length > 2048 ? r.gone[2047]!.uid : Infinity,
+        r.entries.length > PAGE ? r.entries[PAGE - 1]!.uid : Infinity,
+        r.gone.length > PAGE ? r.gone[PAGE - 1]!.uid : Infinity,
       );
       const gone = r.gone.filter((v) => v.uid <= next).map((v) => v.uid);
       return c.json({
@@ -237,7 +270,7 @@ export function registerMailGateway(app: App) {
               ...(e.deleted ? ['\\Deleted'] : []),
             ],
             handle:
-              e.key && e.bucket
+              p.handles && e.key && e.bucket
                 ? handle(runtime, {
                     w: r.w,
                     kid: p.kid,

@@ -147,21 +147,52 @@ pub fn scan_count(k: &K<'_>) -> usize {
     }
 }
 
-/// Lift SUBJECT predicates to the store even when nested under Boolean operators.
+/// A header field a store can index (MailStore::indexed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Field {
+    Subject,
+    From,
+    To,
+    Cc,
+}
+impl Field {
+    pub fn name(self) -> &'static str {
+        match self {
+            Field::Subject => "subject",
+            Field::From => "from",
+            Field::To => "to",
+            Field::Cc => "cc",
+        }
+    }
+}
+/// The indexed field and term of a key, if it has one.
+pub fn indexed<'a>(k: &'a K<'_>) -> Option<(Field, &'a str)> {
+    let (field, q) = match k {
+        K::Subject(q) => (Field::Subject, q),
+        K::From(q) => (Field::From, q),
+        K::To(q) => (Field::To, q),
+        K::Cc(q) => (Field::Cc, q),
+        _ => return None,
+    };
+    str::from_utf8(q.as_ref())
+        .ok()
+        .filter(|t| !t.is_empty())
+        .map(|t| (field, t))
+}
+/// Lift SUBJECT, FROM, TO and CC predicates to the store even when nested under Boolean operators.
 /// Date/flag/UID predicates already have an authoritative local snapshot.
-pub fn subject_plan<'a>(k: &'a K<'_>, terms: &mut std::collections::BTreeSet<&'a str>) -> bool {
+pub fn index_plan<'a>(
+    k: &'a K<'_>,
+    terms: &mut std::collections::BTreeSet<(Field, &'a str)>,
+) -> bool {
+    if let Some(term) = indexed(k) {
+        terms.insert(term);
+        return terms.len() <= 8;
+    }
     match k {
-        K::Subject(q) => str::from_utf8(q.as_ref()).ok().is_some_and(|t| {
-            if t.is_empty() {
-                false
-            } else {
-                terms.insert(t);
-                terms.len() <= 8
-            }
-        }),
-        K::And(v) => v.as_ref().iter().all(|k| subject_plan(k, terms)),
-        K::Or(a, b) => subject_plan(a, terms) && subject_plan(b, terms),
-        K::Not(q) => subject_plan(q, terms),
+        K::And(v) => v.as_ref().iter().all(|k| index_plan(k, terms)),
+        K::Or(a, b) => index_plan(a, terms) && index_plan(b, terms),
+        K::Not(q) => index_plan(q, terms),
         _ => need(k) == Need::Meta,
     }
 }
@@ -171,13 +202,14 @@ pub fn planned(
     seq: u32,
     last: u32,
     max: u32,
-    hits: &std::collections::BTreeMap<&str, Vec<u32>>,
+    hits: &std::collections::BTreeMap<(Field, &str), Vec<u32>>,
 ) -> bool {
+    if let Some(term) = indexed(k) {
+        return hits
+            .get(&term)
+            .is_some_and(|uids| uids.binary_search(&e.uid).is_ok());
+    }
     match k {
-        K::Subject(q) => str::from_utf8(q.as_ref())
-            .ok()
-            .and_then(|t| hits.get(t))
-            .is_some_and(|uids| uids.binary_search(&e.uid).is_ok()),
         K::And(v) => v
             .as_ref()
             .iter()

@@ -83,7 +83,13 @@ export async function streamedAppend(c: Ctx, encoded: string, digest: string) {
         )
       ).rows[0]!.r;
       if (r.error) throw new ApiError(409, r.error === 'OVERQUOTA' ? 'OVERQUOTA' : 'APPEND_REFUSED', 'Append refused.');
-      if (r.pairs[0]?.[0] === 0) await savePreview(tx, mid, key, prefix, p.size);
+      if (r.pairs[0]?.[0] === 0) {
+        await savePreview(tx, mid, key, prefix, p.size);
+        // Keep the addresses decoded, as received mail does, so SEARCH FROM, TO and CC read them from the store
+        // (mail-gateway.ts search); verdicts.fields marks a message that has them.
+        const people = (list?: { name?: string; address?: string }[]) => JSON.stringify((list ?? []).flatMap(a => a.address ? [{ name: a.name || null, address: a.address.slice(0, 998) }] : []).slice(0, 256));
+        await tx.execute(sql`UPDATE mail_messages SET from_name=${m?.from?.name?.slice(0, 998) || null},"to"=${people(m?.to)}::jsonb,cc=${people(m?.cc)}::jsonb,verdicts=verdicts||'{"fields":true}' WHERE workspace_id=${who.w} AND id=${mid}`);
+      }
       settled = true;
       return r;
     });

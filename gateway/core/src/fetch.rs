@@ -266,8 +266,12 @@ pub enum Error {
     #[error("FETCH response limit; request a partial")]
     Limit,
 }
+/// One message's FETCH response at most: its whole 40 MiB (wire::MAX_APPEND) and the items beside it. A command
+/// can send any number of these (MailStore::flush).
+const MESSAGE_LIMIT: usize = crate::wire::MAX_APPEND + (1 << 20);
 pub fn render(out: &mut Vec<u8>, seq: usize, e: &Entry, items: &[Item<'_>]) -> Result<(), Error> {
     let mut mime = None;
+    let start = out.len();
     out.extend(format!("* {seq} FETCH (").bytes());
     for (i, item) in items.iter().enumerate() {
         if i != 0 {
@@ -345,7 +349,7 @@ pub fn render(out: &mut Vec<u8>, seq: usize, e: &Entry, items: &[Item<'_>]) -> R
                     } else {
                         &data
                     };
-                    if out.len() + slice.len() > (16 << 20) + 4096 {
+                    if out.len() - start + slice.len() > MESSAGE_LIMIT {
                         return Err(Error::Limit);
                     }
                     out.extend(format!(" {{{}}}\r\n", slice.len()).bytes());
@@ -357,7 +361,7 @@ pub fn render(out: &mut Vec<u8>, seq: usize, e: &Entry, items: &[Item<'_>]) -> R
             }
             _ => return Err(Error::Unsupported),
         };
-        if out.len() + text.len() > 16 << 20 {
+        if out.len() - start + text.len() > MESSAGE_LIMIT {
             return Err(Error::Limit);
         }
         out.extend(text.bytes());

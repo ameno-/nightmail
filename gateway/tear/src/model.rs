@@ -110,7 +110,7 @@ impl Config {
     pub const BATCH: usize = 1000;
     /// Upload lanes: per credential, per inbox and per workspace (one process's shares), and
     /// the process-wide pool. A busy lane makes the APPEND answer `NO [LIMIT]`.
-    pub const UPLOADS: [usize; 4] = [3, 3, 4, 8];
+    pub const UPLOADS: [usize; 4] = [8, 8, 16, 32];
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

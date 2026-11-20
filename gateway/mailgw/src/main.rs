@@ -283,10 +283,11 @@ impl Gateway {
                 let bytes = match event {
                     Event::AppendBody { len, sync } => {
                         let store = backend.as_mut().context("missing upload owner")?;
-                        let permit = admission::Reservation::take(
+                        let permit = admission::Reservation::take_within(
                             self.uploads.clone(),
                             Some(store.lanes.pools(|s| &s.uploads)),
                             1,
+                            admission::UPLOAD_WAIT,
                         )
                         .await;
                         if permit.is_none() {
@@ -366,13 +367,20 @@ impl Gateway {
                     tokio::task::block_in_place(|| -> Result<Reply> {
                         let now = chrono::Utc::now().fixed_offset();
                         if let Some(store) = backend.as_mut() {
-                            store.deadline = std::time::Instant::now() + Duration::from_secs(5);
+                            store.deadline = std::time::Instant::now() + remote::COMMAND;
                             Ok(match &mut core {
                                 // Store::imap refreshes a stale snapshot, steps the core and
-                                // finishes the command (drops an unclaimed APPEND spool).
-                                Core::Imap(i) => store
-                                    .imap(i, &bytes, identity, &mut stale, now)
-                                    .unwrap_or_else(snapshot_bye),
+                                // finishes the command (drops an unclaimed APPEND spool). A long
+                                // response goes to the client as it is built.
+                                Core::Imap(i) => {
+                                    let handle = tokio::runtime::Handle::current();
+                                    let mut sink = |out: &[u8]| {
+                                        handle.block_on(write(&mut stream, out)).is_ok()
+                                    };
+                                    store
+                                        .imap(i, &bytes, identity, &mut stale, now, Some(&mut sink))
+                                        .unwrap_or_else(snapshot_bye)
+                                }
                                 Core::Smtp(s) => {
                                     let reply = s.step(&bytes, identity, store, now);
                                     store.finish_command();
@@ -396,8 +404,13 @@ impl Gateway {
                 if matches!(&core,Core::Smtp(s) if s.receiving_data()) {
                     if data_permit.is_none() {
                         let shares = backend.as_ref().map(|s| s.lanes.pools(|s| &s.data));
-                        let Some(permit) =
-                            admission::Reservation::take(self.smtp_data.clone(), shares, 1).await
+                        let Some(permit) = admission::Reservation::take_within(
+                            self.smtp_data.clone(),
+                            shares,
+                            1,
+                            admission::UPLOAD_WAIT,
+                        )
+                        .await
                         else {
                             if let Core::Smtp(s) = &mut core {
                                 s.refuse_data();
@@ -596,10 +609,11 @@ async fn refuse(stream: &mut Stream, reply: &[u8]) {
         timeout(Duration::from_secs(2), drain).await.ok();
     }
 }
+/// A reply, in pieces that each have IO to go out: a long response ends on 30 s without progress, not on its total.
 async fn write(stream: &mut Stream, data: &[u8]) -> Result<()> {
-    if !data.is_empty() {
+    for piece in data.chunks(256 << 10) {
         timeout(IO, async {
-            stream.write_all(data).await?;
+            stream.write_all(piece).await?;
             stream.flush().await
         })
         .await??;
@@ -692,9 +706,11 @@ async fn main() -> Result<()> {
         events: Arc::default(),
         stop: watch::channel(false).0,
         sockets: Arc::new(Semaphore::new(1024)),
-        uploads: Arc::new(Semaphore::new(8)),
-        smtp_data: Arc::new(Semaphore::new(4)),
-        responses: Arc::new(Semaphore::new(6)),
+        // Responses stream and DATA and APPEND spool to disk, so these bound work, not memory (remote.rs Api's
+        // views and bodies do).
+        uploads: Arc::new(Semaphore::new(32)),
+        smtp_data: Arc::new(Semaphore::new(32)),
+        responses: Arc::new(Semaphore::new(64)),
         handshakes: Semaphore::new(32),
         per_inbox: Mutex::default(),
         limit,

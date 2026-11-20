@@ -1,6 +1,6 @@
 mod fetch;
 pub mod imap;
-mod search;
+pub mod search;
 pub mod session;
 pub mod smtp;
 pub mod store;
