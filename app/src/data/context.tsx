@@ -112,6 +112,7 @@ function SignedOutPage({ title, children }: { title: string; children: ReactNode
 }
 // A hosted sign-in nothing admitted (not staff, no invitation): the API put its verified address on the waitlist and
 // left the address in a short-lived cookie for this screen (api/src/account-login.ts). Without it, the screen says "you".
+// The address is the person's own and shown in full (lib/private-address.ts lists this exception).
 function waitlistAddress() {
   const cookie = document.cookie.split(';').map(part => part.trim()).find(part => /^(?:__Host-)?nightmail\.waitlist=/.test(part))
   try { return cookie ? decodeURIComponent(cookie.slice(cookie.indexOf('=') + 1)) || null : null } catch { return null }
@@ -119,7 +120,7 @@ function waitlistAddress() {
 function WaitlistPage({ busy, error, onSwitch }: { busy: boolean; error: unknown; onSwitch: () => void }) {
   const [email] = useState(waitlistAddress)
   return <SignedOutPage title={`${productName} isn’t open to the public yet`}>
-    <p>We’ll email {email ? <PrivateAddress value={email} /> : 'you'} when it opens.</p>
+    <p>We’ll email {email ? <bdi data-own-address="">{email}</bdi> : 'you'} when it opens.</p>
     {error ? <Alert tone="danger">{errorText(error)}</Alert> : null}
     <Button variant="primary" loading={busy} onClick={onSwitch} data-analytics="sign-in/waitlist-switch">Use a different account</Button>
     <nav className="signed-out__links" aria-label={productName}><Link to="/">Homepage</Link><Link to="/docs">Docs</Link></nav>

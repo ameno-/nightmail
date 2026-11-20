@@ -301,7 +301,7 @@ let liveSaves = 0;
 const maskedLeaks = () => {
   const SEEDED = /[A-Za-z0-9._%+*-]+@(?:[a-z0-9-]+\.)*(?:northwind\.example|lumenlabs\.example|fieldnotes\.example|driftwood\.example|example\.net|example\.com)\b/gi;
   const mailbox = value => value.slice(0, value.lastIndexOf('@')).replace(/\*/g, '') !== '';
-  const exempt = el => !!el.closest('input, textarea, select, option, datalist, [contenteditable=""], [contenteditable="true"], pre, code, [role=dialog], [role=alertdialog]');
+  const exempt = el => !!el.closest('input, textarea, select, option, datalist, [contenteditable=""], [contenteditable="true"], pre, code, [role=dialog], [role=alertdialog], [data-own-address]');
   const found = [], note = (what, value) => { if (found.length < 5) found.push(`${what} spells out ${value.slice(0, 2)}…`); };
   for (const el of document.querySelectorAll('.private-address:not([data-revealed])')) {
     const text = el.querySelector('.private-address__value')?.textContent ?? el.textContent;
