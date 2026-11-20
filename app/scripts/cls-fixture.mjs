@@ -701,6 +701,11 @@ export async function seed(fx) {
   await standing(db, 'ws_northwind', { score: 86.4, limit: null, step: 'notice', since: ago(90), factors: [factor('complaints', 'Complaints', 30, 0.0003, 93.1), factor('content', 'Spam screen', 20, null, null), factor('bounces', 'Bounces', 15, 0.009, 91.1), factor('hygiene', 'List quality', 15, 0.012, 97.5), factor('auth', 'Authentication', 10, 0.85, 85), factor('engagement', 'Engagement', 10, 0.0031, 93.9)],
     reasons: [{ code: 'COMPLAINT_NOTICE', metric: 'complaints', value: 0.0011, count: 1, threshold: 0, minimum: 1, window: '24h', step: 'notice', message: '1 accepted email was marked as spam in 24 hours.' }] });
   await db.query("INSERT INTO platform_operators(user_id,role,reason) VALUES('user_dana','operator','CLS fixture')");
+  // The waitlist (Operator · waitlist): refused sign-ins to email when Nightmail opens, one without a name.
+  await db.query(`INSERT INTO nightmail_waitlist(email,name,attempts,first_at,last_at) VALUES
+    ('mara.quinn@example.net','Mara Quinn',3,now()-interval '6 days',now()-interval '2 hours'),('theo@example.net','Theo Brandt',1,now()-interval '1 day',now()-interval '1 day'),
+    ('ines.alvarez@example.net','Inés Álvarez',2,now()-interval '9 days',now()-interval '3 days'),('build-bot@example.net',NULL,1,now()-interval '4 days',now()-interval '4 days'),
+    ('kwame.mensah@example.net','Kwame Mensah',5,now()-interval '12 days',now()-interval '5 days'),('yuki.sato@example.net','Yuki Sato',1,now()-interval '7 days',now()-interval '7 days')`);
   // Dana's UI notes (features/ui-notes): one on Overview's title and one whose element is gone (a pin and the tray's
   // moved entry in notes mode), and others for the notes list. No screenshots: there is no object store here.
   const note = (id, body, kind, status, path, selector, minutes) => db.query(`INSERT INTO ui_notes(id,author_id,updated_by,body,kind,severity,status,url,path,route,context,element,created_at,resolved_at)

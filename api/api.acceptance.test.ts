@@ -932,7 +932,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     ACCOUNT_CLIENT_PRIVATE_KEY:JSON.stringify({...rp.privateKey.export({format:'jwk'}),kid:'rp'}), BANE_ROOT_SECRET:'local-fixture-'.repeat(4), MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', AUTH_STAFF_GOOGLE_DOMAINS:'example.org'}),
     db:drizzle(db), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} };
   const {PROVIDER_IDENTITY_CLAIM} = await import('./src/account-policy.js');
-  let nonce = '', email = approved, verified = true, subject = randomUUID(), useUserInfo = false;
+  let nonce = '', email = approved, verified = true, subject = randomUUID(), useUserInfo = false, givenName: string | undefined;
   // The provider identity behind the sign-in (Google Workspace domain); email never admits anyone.
   let providerName = 'google', providerHd: string | null = 'example.org', providerVerified = true;
   const upstream = () => providerHd ? {[PROVIDER_IDENTITY_CLAIM]:{provider:providerName,sub:'g-'+subject,email,email_verified:providerVerified,hd:providerHd}} : {};
@@ -981,7 +981,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
         if (!proof) { exchanges.refused++; return Response.json({error:'invalid_dpop_proof'},{status:400}); }
         if (proof.nonce !== dpopNonce) { exchanges.nonce++; return Response.json({error:'use_dpop_nonce'},{status:400,headers:{'dpop-nonce':dpopNonce}}); }
         boundJkt = proof.jkt; exchanges.issued++;
-        const now=Math.floor(Date.now()/1000),body=[{alg:'ES256',kid:'op'},{iss:issuer,aud:'dashboard',iat:now,exp:now+300,sub:subject,nonce,acr:tokenAcr,...(useUserInfo?{}:{email,email_verified:verified,...upstream()})}]
+        const now=Math.floor(Date.now()/1000),body=[{alg:'ES256',kid:'op'},{iss:issuer,aud:'dashboard',iat:now,exp:now+300,sub:subject,nonce,acr:tokenAcr,...(givenName?{name:givenName}:{}),...(useUserInfo?{}:{email,email_verified:verified,...upstream()})}]
           .map(v=>Buffer.from(JSON.stringify(v)).toString('base64url')).join('.');
         return Response.json({access_token:'fixture',token_type:'DPoP',id_token:body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:keys.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url')});
       }
@@ -1008,22 +1008,41 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const subjects=[subject];
   cleanup(t,async()=>{await db.query('DELETE FROM nightmail_users WHERE id IN (SELECT user_id FROM nightmail_oidc_identities WHERE issuer=$1 AND subject=ANY($2))',[issuer,subjects]);});
   const attempt = async () => (await db.query('SELECT acr,provider,provider_hd,outcome FROM nightmail_signin_attempts WHERE issuer=$1 AND subject=$2',[issuer,subject])).rows[0];
+  // The waitlist (migration 366), by address. The suite's database is shared: only this test's addresses are read or removed.
+  const waitlist=[approved,`${approved.slice(0,8)}-second@example.net`];
+  cleanup(t,async()=>{await db.query('DELETE FROM nightmail_waitlist WHERE email=ANY($1)',[waitlist.map(address=>address.toLowerCase())]);});
+  const waitlisted = async (address:string) => (await db.query('SELECT email,name,attempts FROM nightmail_waitlist WHERE email=lower($1)',[address])).rows;
+  const waitlistCookie = (response:Response) => response.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.waitlist='));
   // Staff sign-up needs the provider identity of a staff Google Workspace domain. Nothing else admits a new subject:
   // no claim, another provider, another domain. Each refusal is recorded by subject for the operator.
   // Exactly the account service's staff rule: Google, a verified Google address, and hd in AUTH_STAFF_GOOGLE_DOMAINS.
+  // Hosted and not invited, a refusal puts the verified address on the waitlist and says so; the screen reads the
+  // address from a short-lived cookie the page can read. It is never a session.
   for (const [name,hd,googleVerified] of [['google',null,true],['github','example.org',true],['google','other.example',true],['google','Example.org',true],['google','example.org',false]] as const) {
     providerName=name;providerHd=hd;providerVerified=googleVerified;
-    assert.equal((await login()).headers.get('location'),origin+'/?auth=error',`${name}/${hd}/${googleVerified}`);
+    const refused=await login();
+    assert.equal(refused.headers.get('location'),origin+'/?auth=waitlist',`${name}/${hd}/${googleVerified}`);
     assert.deepEqual(await attempt(),{acr:googleAcr,provider:hd===null?null:name,provider_hd:hd,outcome:'not_approved'});
+    const notice=waitlistCookie(refused)!;
+    assert.ok(notice.startsWith(`__Host-nightmail.waitlist=${encodeURIComponent(approved)};`) && /Max-Age=600/.test(notice) && /Secure/.test(notice) && !/HttpOnly/i.test(notice),notice);
+    assert.ok(!refused.headers.getSetCookie().some(c=>c.startsWith('__Host-nightmail.session_token=')));
   }
   // Every code exchange proved a DPoP key and fetched the server's nonce first (production failed with invalid_dpop_proof).
   assert.deepEqual(exchanges,{refused:0,nonce:5,issued:5});
+  // One row per address, every attempt counted, whatever the address's case or the subject; the name when one is given.
+  assert.deepEqual(await waitlisted(approved),[{email:approved,name:null,attempts:5}]);
+  const firstSubject=subject;subject=randomUUID();subjects.push(subject);email=approved.toUpperCase();givenName='Avery Example';
+  assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist');
+  assert.deepEqual(await waitlisted(approved),[{email:approved,name:'Avery Example',attempts:6}]);
+  subject=firstSubject;email=approved;givenName=undefined;
   // The address is not an identity input: an unverified one neither blocks a staff admission nor its session.
   providerName='google';providerHd='example.org';providerVerified=true;verified=false;
   // The dashboard reopens as the account that just signed in (a browser can hold several).
   const landed=(response:Response)=>{const url=new URL(response.headers.get('location')!);assert.match(url.searchParams.get('account')??'',/^[0-9a-f-]{36}$/);url.searchParams.delete('account');return url.href;};
   const result=await login();assert.equal(landed(result),origin+'/');
   assert.deepEqual(await attempt(),{acr:googleAcr,provider:'google',provider_hd:'example.org',outcome:'signed_in:staff'});
+  assert.ok(!waitlistCookie(result));
+  assert.deepEqual(await waitlisted(approved),[{email:approved,name:'Avery Example',attempts:6}],'An admitted sign-in neither adds nor counts an attempt');
   assert.equal((await db.query('SELECT u.email_verified FROM nightmail_users u JOIN nightmail_oidc_identities i ON i.user_id=u.id WHERE i.issuer=$1 AND i.subject=$2',[issuer,subject])).rows[0].email_verified,false);
   verified=true;
   const session=result.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))!.split(';')[0]!;
@@ -1033,10 +1052,29 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const members=await (await request('/v1/workspaces/current/members','GET',session)).json() as {data:{userId:string;email:string}[]};
   assert.deepEqual(members.data.map(m=>[m.userId,m.email]),[[me.id,approved]]);
   assert.equal((await db.query('SELECT FROM auth_user WHERE id=$1',[me.id])).rowCount,0);
+  // The waitlist is for staff: no credential and a customer's own session are refused; an operator lists it with full
+  // addresses, newest attempt first, searched by address or name and paged by cursor.
+  type Waitlist = {data:{email:string;name:string|null;attempts:number;firstAt:string;lastAt:string}[];nextCursor:string|null;total:number};
+  const listWaitlist = async (query:string, cookie=session) => { const response=await request(`/v1/operator/waitlist${query}`,'GET',cookie); return {status:response.status,body:await response.json() as Waitlist & {error?:{code:string}}}; };
+  for (const cookie of ['',session]) { const refusedList=await listWaitlist('',cookie); assert.deepEqual([refusedList.status,refusedList.body.error?.code],[403,'OPERATOR_REQUIRED']); }
+  await db.query("INSERT INTO nightmail_waitlist(email,name,first_at,last_at) VALUES($1,NULL,now()-interval '2 days',now()-interval '1 day')",[waitlist[1]]);
+  await db.query("INSERT INTO platform_operators(user_id,role,reason) VALUES($1,'operator:read','waitlist acceptance fixture')",[me.id]);
+  const tag=approved.slice(0,8), entry=(row:Waitlist['data'][number])=>[row.email,row.name,row.attempts];
+  const listed=await listWaitlist(`?q=${tag}`);
+  assert.equal(listed.status,200);
+  assert.deepEqual([listed.body.data.map(entry),listed.body.total,listed.body.nextCursor],[[[approved,'Avery Example',6],[waitlist[1],null,1]],2,null]);
+  assert.ok(listed.body.data.every(row=>Date.parse(row.firstAt)<=Date.parse(row.lastAt)));
+  assert.deepEqual((await listWaitlist(`?q=${encodeURIComponent('Avery Example')}`)).body.data.filter(row=>row.email.startsWith(tag)).map(entry),[[approved,'Avery Example',6]]);
+  const first=await listWaitlist(`?q=${tag}&limit=1`);
+  assert.deepEqual([first.body.data.map(entry),first.body.total],[[[approved,'Avery Example',6]],2]);
+  const second=await listWaitlist(`?q=${tag}&limit=1&cursor=${encodeURIComponent(first.body.nextCursor!)}`);
+  assert.deepEqual([second.body.data.map(entry),second.body.nextCursor],[[[waitlist[1],null,1]],null]);
+  await db.query('DELETE FROM platform_operators WHERE user_id=$1',[me.id]);
   const oldInvitation=randomUUID();
   await db.query("INSERT INTO workspace_invitations(id,workspace_id,email,role,status,expires_at,inviter_id) VALUES($1,$2,$3,'member','pending',now()+interval '1 hour',$4)",[oldInvitation,me.workspaceId,approved,me.id]);
   email=`changed-${approved}`;useUserInfo=true;
   const changed=await login();const newSession=changed.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))!.split(';')[0]!;
+  assert.deepEqual([await waitlisted(email),(await waitlisted(approved)).length],[[],1],'An admitted, verified sign-in adds nothing');
   assert.equal((await request('/v1/me','GET',session)).status,401);
   runtime.config.accountClient!.requiredAcr=googleAcr;
   const sessionCount = async () => (await db.query('SELECT count(*) FROM nightmail_sessions WHERE issuer=$1 AND subject=$2',[issuer,subject])).rows[0].count;
@@ -1062,6 +1100,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   assert.equal((await request('/v1/me','GET',unverifiedSession)).status,200);
   verified=true;subject=randomUUID();subjects.push(subject);email=approved;
   const reassigned=await login();const reassignedSession=reassigned.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))!.split(';')[0]!;
+  assert.deepEqual(await waitlisted(approved),[],'Admitted with its verified address, it leaves the waitlist');
   assert.equal((await request(`/v1/workspaces/invitations/${oldInvitation}/accept`,'POST',reassignedSession,{})).status,200);
   assert.equal((await request('/api/auth/sign-out','POST',reassignedSession)).status,200);
   assert.equal((await request('/v1/me','GET',reassignedSession)).status,401);
@@ -1070,8 +1109,8 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   // A seat bound by subject (scripts/cutover-fresh-start.ts --owner-sub): a refused subject the operator bound to a
   // user lands in that user's workspace with its role. Addresses never decide: the same address under another
   // subject gets nothing.
-  subject=randomUUID();subjects.push(subject);email=`seat-${randomUUID()}@example.org`;providerHd=null;
-  assert.equal((await login()).headers.get('location'),origin+'/?auth=error');
+  subject=randomUUID();subjects.push(subject);email=`seat-${randomUUID()}@example.org`;providerHd=null;waitlist.push(email);
+  assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist');
   assert.deepEqual(await attempt(),{acr:googleAcr,provider:null,provider_hd:null,outcome:'not_approved'});
   const seatId=randomUUID();
   await db.query("INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,'Seat',NULL,false)",[seatId]);
@@ -1081,6 +1120,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const seatSession=seated.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))!.split(';')[0]!;
   const seatMe=await (await request('/v1/me','GET',seatSession)).json() as {id:string;workspaceId:string;role:string;email:string};
   assert.deepEqual([seatMe.id,seatMe.workspaceId,seatMe.role,seatMe.email],[seatId,me.workspaceId,'admin',email]);
+  assert.deepEqual(await waitlisted(email),[]);
   // Dashboard analytics (docs/analytics.md): a signed-out page's session rides in its return URL. The callback links it
   // to the account in one sign_in row and redirects without it, so the browser never opens a URL that carries it.
   const objects=new Map<string,Uint8Array>();
@@ -1093,7 +1133,9 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   assert.equal(objects.size,1);
   delete runtime.analyticsStorage;
   subject=randomUUID();subjects.push(subject);
+  // Its address is a verified user's now, so nothing promises to write to it: the refusal is the plain one.
   assert.equal((await login()).headers.get('location'),origin+'/?auth=error','The same verified address under another subject is refused');
+  assert.deepEqual(await waitlisted(email),[]);
   // Workspace creation follows the sign-in's staff status, not the address.
   const created=await request('/v1/workspaces','POST',seatSession,{name:'Not staff'});
   assert.equal(created.status,403);assert.equal(((await created.json()) as {error:{code:string}}).error.code,'SIGNUP_NOT_APPROVED');

@@ -1,15 +1,17 @@
 import { useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { Plus } from 'lucide-react'
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, Checkbox, ControlSkeleton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, Input, PageHeader, SectionHeader, Select, SkeletonText, StatusBadge, Switch, Tabs, Textarea, useToast, type Column, type MenuItem, type Tone, ErrorText, MutationError } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useSession } from '../../data/context'
 import { ApiError, type SenderScoreFactor, type StandingReason, type StandingStep } from '../../data/types'
-import { isoTime, operatorApi, type OperatorAction, type OperatorCampaign, type OperatorDomain, type OperatorMember, type OperatorQueueItem, type OperatorTimelineItem, type OperatorWorkspace, type TimelineKind } from '../../data/operator'
+import { isoTime, operatorApi, type OperatorAction, type OperatorCampaign, type OperatorDomain, type OperatorMember, type OperatorQueueItem, type OperatorTimelineItem, type OperatorWorkspace, type TimelineKind, type WaitlistEntry } from '../../data/operator'
 import { label, number, shortDateTime } from '../../lib/format'
+import { downloadCsv } from '../../lib/download'
+import { errorText } from '../../data/types'
 import { factorFormats } from '../score'
-import { actionColumnDefs, ActionsTrigger, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, memberColumnDefs, useOperatorTabs, OperatorWorkspaceSkeleton, QueueToolbar, queueColumnDefs, timelineColumnDefs } from './skeletons'
+import { actionColumnDefs, ActionsTrigger, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, memberColumnDefs, operatorView, useOperatorTabs, OperatorWorkspaceSkeleton, QueueToolbar, queueColumnDefs, timelineColumnDefs, waitlistColumnDefs, WaitlistToolbar } from './skeletons'
 import { useDebounced } from '../../lib/pagination'
 
 // The operator console (lazy, /operator): Nightmail staff with a platform role review flagged Hosted workspaces and act on
@@ -30,14 +32,14 @@ const StepBadge = ({ step }: { step: StandingStep }) => <StatusBadge status={ste
 export function OperatorPage() {
   const role = useOperatorRole()
   const [params, setParams] = useSearchParams()
-  const view = params.get('view') === 'actions' ? 'actions' : 'queue'
+  const view = operatorView(params.toString())
   const navigate = useNavigate(), tabs = useOperatorTabs()
   if (!role) return <NotFound />
   return <>
     <PageHeader title="Operator" />
     <div className="op-page">
-      <Tabs value={view} label="Operator views" items={tabs} onValueChange={value => value === 'notes' ? navigate('/operator/notes') : setParams(previous => { const next = new URLSearchParams(previous); if (value === 'actions') next.set('view', 'actions'); else next.delete('view'); return next }, { replace: true })} />
-      {view === 'queue' ? <Queue /> : <Actions />}
+      <Tabs value={view} label="Operator views" items={tabs} onValueChange={value => value === 'notes' ? navigate('/operator/notes') : setParams(previous => { const next = new URLSearchParams(previous); if (value === 'queue') next.delete('view'); else next.set('view', value); return next }, { replace: true })} />
+      {view === 'queue' ? <Queue /> : view === 'waitlist' ? <Waitlist /> : <Actions />}
     </div>
   </>
 }
@@ -95,6 +97,50 @@ function Actions() {
       ['When', when(shown.at)], ['Workspace', <Link to={`/operator/workspaces/${encodeURIComponent(shown.workspaceId)}`}>{shown.workspaceId}</Link>],
       ['Reason', shown.reason], ['Ticket', shown.ticketRef], ['Via', shown.via], ['Request', shown.requestId ? <span className="op-muted-id">{shown.requestId}</span> : null],
     ]} />}
+  </>
+}
+
+// The waitlist: verified sign-ins nothing admitted yet, to email when Nightmail opens. Addresses are masked like every
+// other; the CSV export has them in full.
+const waitlistColumns: Column<WaitlistEntry>[] = [
+  { ...def(waitlistColumnDefs, 'email'), render: row => <span className="op-email"><PrivateAddress value={row.email} /></span> },
+  { ...def(waitlistColumnDefs, 'name'), render: row => <span className="op-cell" title={row.name ?? undefined}>{row.name || '—'}</span>, cardRender: row => row.name || 'No name' },
+  { ...def(waitlistColumnDefs, 'first'), render: row => <At value={row.firstAt} />, cardRender: row => `first ${when(row.firstAt)}` },
+  { ...def(waitlistColumnDefs, 'last'), render: row => <At value={row.lastAt} /> },
+  { ...def(waitlistColumnDefs, 'attempts'), render: row => number(row.attempts), cardRender: row => `${number(row.attempts)} ${row.attempts === 1 ? 'attempt' : 'attempts'}` },
+]
+function Waitlist() {
+  const toast = useToast()
+  const [search, setSearch] = useState('')
+  const q = useDebounced(search.trim())
+  const list = useInfiniteQuery({
+    queryKey: ['operator', 'waitlist', q], initialPageParam: undefined as string | undefined, placeholderData: keepPreviousData,
+    queryFn: ({ pageParam, signal }) => operatorApi.waitlist({ q: q || undefined, cursor: pageParam }, signal), getNextPageParam: page => page.nextCursor ?? undefined,
+  })
+  const rows = (list.data?.pages ?? []).flatMap(page => page.items), total = list.data?.pages[0]?.total
+  const [exporting, setExporting] = useState(false)
+  // Everyone the search lists, every page, not only the rows loaded so far.
+  async function exportCsv() {
+    setExporting(true)
+    try {
+      const all: WaitlistEntry[] = []
+      for (let cursor: string | undefined, first = true; first || cursor; first = false) {
+        const page = await operatorApi.waitlist({ q: q || undefined, cursor, limit: 1000 })
+        all.push(...page.items); cursor = page.nextCursor ?? undefined
+      }
+      downloadCsv('nightmail-waitlist.csv', [['Email', 'Name', 'First attempt (UTC)', 'Last attempt (UTC)', 'Attempts'], ...all.map(row => [row.email, row.name ?? '', isoTime(row.firstAt), isoTime(row.lastAt), row.attempts])])
+    } catch (error) { toast(errorText(error, 'Couldn’t export the waitlist.'), 'error') }
+    finally { setExporting(false) }
+  }
+  return <>
+    <WaitlistToolbar search={search} onSearch={setSearch} onExport={() => void exportCsv()} exporting={exporting} exportable={rows.length > 0} />
+    {list.isError && !list.data ? <ErrorState error={list.error} onRetry={() => void list.refetch()} /> : <>
+      <DataTable className="op-table" loading={list.isPending} skeletonRows={6} rows={rows} rowKey={row => row.email} columns={waitlistColumns}
+        empty={<EmptyState title={q ? 'No one matches' : 'No one on the waitlist yet'} action={q ? <Button onClick={() => setSearch('')}>Clear search</Button> : undefined} />} />
+      {rows.length > 0 && total !== undefined && <p className="op-total muted">{number(total)} {total === 1 ? 'person' : 'people'}</p>}
+      {list.hasNextPage && <Button className="op-more" loading={list.isFetchingNextPage} onClick={() => void list.fetchNextPage()}>Load more</Button>}
+      {list.isError && list.data && <Alert tone="danger"><ErrorText error={list.error} /></Alert>}
+    </>}
   </>
 }
 

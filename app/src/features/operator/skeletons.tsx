@@ -1,5 +1,5 @@
 import { forwardRef, type ReactNode } from 'react'
-import { ChevronDown } from 'lucide-react'
+import { ChevronDown, Download } from 'lucide-react'
 import { useLocation } from 'react-router'
 import { useSession } from '../../data/context'
 import { Button, type ButtonProps, LoadingRegion, PageHeader, SearchField, SectionHeader, Select, Skeleton, TableSkeleton, Tabs, type SkeletonColumn } from '../../components/ui'
@@ -56,6 +56,14 @@ export const timelineColumnDefs: SkeletonColumn[] = [
   { key: 'detail', label: 'Detail', card: 'line' },
   { key: 'at', label: 'When', width: 160, card: 'line' },
 ]
+// The waitlist (?view=waitlist): a phone's card shows the address, its latest attempt, the name and the count.
+export const waitlistColumnDefs: SkeletonColumn[] = [
+  { key: 'email', label: 'Email', width: '34%', card: 'title' },
+  { key: 'name', label: 'Name', card: 'line' },
+  { key: 'first', label: 'First attempt', width: 176, card: 'inline' },
+  { key: 'last', label: 'Last attempt', width: 176, card: 'aside' },
+  { key: 'attempts', label: 'Attempts', width: 96, align: 'right', card: 'inline' },
+]
 
 // UI notes (/operator/notes): staff's design and bug notes on the dashboard. The screenshot and selection columns are
 // for the table; a phone's card shows the note, its status, page, type and age.
@@ -89,7 +97,9 @@ export function OperatorNotesSkeleton() {
   </>
 }
 
-const baseTabs = [{ value: 'queue', label: 'Review queue' }, { value: 'actions', label: 'Actions' }]
+const baseTabs = [{ value: 'queue', label: 'Review queue' }, { value: 'actions', label: 'Actions' }, { value: 'waitlist', label: 'Waitlist' }]
+/** The tab a /operator address opens: ?view=actions or ?view=waitlist, else the review queue. */
+export const operatorView = (search: string) => { const view = new URLSearchParams(search).get('view'); return view === 'actions' || view === 'waitlist' ? view : 'queue' }
 const notesTabs = [...baseTabs, { value: 'notes', label: 'UI notes' }]
 /** UI notes has a tab only for the people the API allows (GET /v1/me uiNotes). */
 export const useOperatorTabs = () => useSession()?.identity?.uiNotes === true ? notesTabs : baseTabs
@@ -103,13 +113,20 @@ export function QueueToolbar({ search = '', step = '', onSearch, onStep, disable
     <Select aria-label="Filter by step" value={step} onValueChange={value => onStep?.(value)} disabled={disabled || search.trim() !== ''} options={stepOptions} />
   </div></div>
 }
+// Search spans addresses and names; the export downloads everyone the search lists, addresses in full.
+export function WaitlistToolbar({ search = '', onSearch, onExport, exporting = false, exportable = false, disabled = false }: { search?: string; onSearch?: (value: string) => void; onExport?: () => void; exporting?: boolean; exportable?: boolean; disabled?: boolean }) {
+  return <div className="data-toolbar op-waitlist-tools"><div className="cluster">
+    <SearchField className="search-box--list" aria-label="Search the waitlist" placeholder="Search addresses and names" value={search} disabled={disabled} onChange={event => onSearch?.(event.target.value)} />
+  </div><Button className="op-export" aria-label="Export as CSV" title="Download everyone listed as a CSV file" disabled={disabled || !exportable} loading={exporting} onClick={onExport}><Download size={16} aria-hidden="true" /><span>Export CSV</span></Button></div>
+}
 export function OperatorQueueSkeleton({ view = 'queue' }: { view?: string }) {
   return <>
     <PageHeader title="Operator" />
-    <LoadingRegion label="Loading the review queue"><div className="op-page">
+    <LoadingRegion label={view === 'waitlist' ? 'Loading the waitlist' : 'Loading the review queue'}><div className="op-page">
       <Tabs value={view} onValueChange={() => {}} disabled items={useOperatorTabs()} label="Operator views" />
       {view === 'queue' && <QueueToolbar disabled />}
-      <TableSkeleton columns={view === 'queue' ? queueColumnDefs : actionColumnDefs} rows={6} />
+      {view === 'waitlist' && <WaitlistToolbar disabled />}
+      <TableSkeleton columns={view === 'queue' ? queueColumnDefs : view === 'waitlist' ? waitlistColumnDefs : actionColumnDefs} rows={6} />
     </div></LoadingRegion>
   </>
 }
@@ -135,5 +152,5 @@ export function OperatorRouteSkeleton({ operator }: { operator: 'operator' | 'op
   const { pathname, search } = useLocation(), uiNotes = useSession()?.identity?.uiNotes === true
   if (!operator) return null
   if (pathname === '/operator/notes') return uiNotes ? <OperatorNotesSkeleton /> : null
-  return pathname.startsWith('/operator/workspaces/') ? <OperatorWorkspaceSkeleton actions={operator === 'operator'} /> : <OperatorQueueSkeleton view={new URLSearchParams(search).get('view') === 'actions' ? 'actions' : 'queue'} />
+  return pathname.startsWith('/operator/workspaces/') ? <OperatorWorkspaceSkeleton actions={operator === 'operator'} /> : <OperatorQueueSkeleton view={operatorView(search)} />
 }

@@ -28,6 +28,7 @@ Nightmail handles personal data in two different roles.
 | **Credentials** | API keys, MCP grants, agent tokens, inbox keys and app passwords. Keys are stored as hashes; we can't read them back. | You |
 | **Sessions** | A session cookie, valid for up to 7 days. Sessions don't record your IP address or browser. | Your browser |
 | **Sign-in attempts** | Issuer, account ID, sign-in method and provider, email and name, outcome and time. Kept 30 days; refused sign-in requests 90 days. | Sign-in service |
+| **Waitlist** | If we refuse a Google sign-in because Nightmail isn't open to you yet: the email address and name from that sign-in, when you first and last tried, and how many times. Used only to tell you when Nightmail opens. Kept until we've emailed you that it's open, or 1 year after your last attempt. | Sign-in service and Google |
 | **Activity (audit trail)** | Who did what in a workspace (for example, created a key or changed a role), when, the reason, the request ID, your network (shortened to the first three parts of an IPv4 address, or a /48 for IPv6) and browser family. Never secrets or message content. | Our systems |
 | **Billing** | Stripe customer ID; card brand, last four digits, expiry and fingerprint; top-ups, refunds, disputes, balance and usage history. **Stripe holds your full card number; we never see it.** | You and Stripe |
 | **Usage** | How much each workspace sends, receives and stores, and its sender score and standing | Our systems |
@@ -36,7 +37,7 @@ Nightmail handles personal data in two different roles.
 | **Dashboard usage** | Pages you open, what you click, dialogs, form errors and error messages in the dashboard, tied to your account and workspace IDs. Never what you type, email addresses or message content. Nothing is stored on your device, and nothing is recorded when your browser sends Do Not Track or Global Privacy Control. Kept 400 days and used to improve the product. | Your browser |
 | **Technical logs** | Request logs (method, path, status, timing and error codes), and connection logs from the IMAP and SMTP gateway, which may include the connecting IP address. Request logs are kept about 3 days; gateway logs 30 days. | Our systems |
 
-**Cookies.** Nightmail uses a session cookie (up to 7 days) and a short-lived sign-in cookie (10 minutes). The Nightmail website and dashboard use **no analytics or advertising cookies**, and dashboard usage records store nothing on your device.
+**Cookies.** Nightmail uses a session cookie (up to 7 days) and short-lived sign-in cookies (10 minutes). After a refused sign-in, one of them holds your email address so the page can show where we'll write to you. The Nightmail website and dashboard use **no analytics or advertising cookies**, and dashboard usage records store nothing on your device.
 
 ## 3. Data in our customers' mail
 
@@ -157,6 +158,7 @@ Nightmail stores and processes data mainly in the **United States**. Cloudflare 
 | Billing ledger and payment records | 7 years, including after a workspace is closed |
 | Stripe webhook events | 90 days |
 | Sign-in attempts | 30 days; refused sign-in requests 90 days |
+| Waitlist | Until we've emailed you that Nightmail is open, or 1 year after your last sign-in attempt |
 | Sessions | Until they expire (up to 7 days) |
 | Request logs | About 3 days; IMAP and SMTP gateway logs 30 days |
 | Dashboard usage | 400 days |

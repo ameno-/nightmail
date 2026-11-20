@@ -121,6 +121,8 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   await drain('access_requests', batch(sql`access_requests`, sql`last_requested_at < now() - interval '90 days'`));
   // Refused sign-ins an operator has not acted on in 30 days (one row per subject).
   await drain('nightmail_signin_attempts', batch(sql`nightmail_signin_attempts`, sql`last_at < now() - interval '30 days'`));
+  // The waitlist keeps an address a year after its last attempt at most (migration 366).
+  await drain('nightmail_waitlist', batch(sql`nightmail_waitlist`, sql`last_at < now() - interval '1 year'`));
   for (const table of ['auth_state_slots','nightmail_dpop_proofs','nightmail_sessions','nightmail_login_flows']) {
     await drain(table,batch(sql`${sql.identifier(table)}`,sql`expires_at <= now()`));
   }

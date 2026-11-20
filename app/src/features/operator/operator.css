@@ -37,6 +37,8 @@
 @media (hover: hover) { .op-reason:hover { text-decoration-color: currentColor; } }
 .op-siblings { display: flex; flex-wrap: wrap; gap: var(--space-8) var(--space-16); margin: 0; padding: 0; list-style: none; font-size: var(--text-sm); }
 .op-more { align-self: flex-start; margin-top: var(--space-12); }
+/* The waitlist: its count under the table, and the export at the toolbar's end (its icon alone on a phone). */
+.op-total { margin: calc(var(--space-12) - var(--page-gap)) 0 0; font-size: var(--text-sm); line-height: var(--leading-sm); font-variant-numeric: tabular-nums; }
 .op-dialog-fields { display: flex; flex-direction: column; gap: var(--space-16); }
 .op-dialog-fields .ui-textarea { min-height: 88px; }
 .op-dialog-fields .op-add-date { align-self: flex-start; }
@@ -73,4 +75,8 @@
   .data-toolbar > .ui-button.op-bulk { display: none; }
   .op-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 var(--space-16); }
   .op-rows > div { grid-template-columns: 112px minmax(0, 1fr); }
+  .data-toolbar.op-waitlist-tools { flex-wrap: nowrap; gap: var(--space-8); }
+  .data-toolbar.op-waitlist-tools > .cluster { flex: 1 1 auto; width: auto; }
+  .ui-button.op-export { flex: none; width: var(--control-height); padding: 0; }
+  .ui-button.op-export > span { display: none; }
 }

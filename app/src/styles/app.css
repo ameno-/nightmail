@@ -118,6 +118,10 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 .signed-out__body > .ui-alert { text-align: start; }
 .signed-out__link { align-self: center; color: var(--color-muted); text-decoration: underline; text-underline-offset: .18em; }
 .signed-out__link:hover { color: var(--color-text); }
+.signed-out__body [data-own-address] { overflow-wrap: anywhere; }
+.signed-out__links { display: flex; justify-content: center; gap: var(--space-24); }
+.signed-out__links a { color: var(--color-muted); text-decoration: underline; text-underline-offset: .18em; }
+.signed-out__links a:hover { color: var(--color-text); }
 .between { justify-content: space-between; }
 .nowrap { white-space: nowrap; }
 .text-warning { color: var(--color-warning); }
