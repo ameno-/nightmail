@@ -19722,6 +19722,88 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     }));
   });
 
+  test('probation follows standing: in good standing a responsive email goes out as written and is screened whole, hidden copy included; a new, growing or capped sender gets the screened copy',async t=>{
+    // A subtest, as the other classifier scenarios, so its fetch mock is lifted before the fixture's own.
+    await simulatedSesFixture(t,async({runtime,db,local})=>t.test('standing copy',async t=>{
+      const {runDispatcher,initialGate}=await import('./src/dispatcher.js'),{SESv2Client,GetAccountCommand}=await import('@aws-sdk/client-sesv2'),{screenedHtml}=await import('./src/screened-html.js');
+      const wid=runtime.config.workspaceId,acct='112223330021',origin='https://screen.synthetic.invalid';
+      const key=ok(await local('POST','/v1/api-keys',{name:'standing copy',permissions:['send','read']}),201), auth={authorization:`Bearer ${key.secret}`};
+      Object.assign(runtime.config,{multiTenant:true,hostedScreen:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'},screen:{endpoint:origin,apiKey:'fixture',model:'fixture',mode:'reject',threshold:0.7}});
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[REGION,acct,`arn:aws:sns:${REGION}:${acct}:fixture`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`,[wid,REGION,acct]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('standing.invalid',$1,$1,'verified')`,[wid]);
+      const store=new Map<string,{body:Uint8Array;contentType:string}>();
+      runtime.storage={put:async(key,body,contentType)=>{store.set(key,{body,contentType});},get:async key=>store.get(key)??null,delete:async()=>{}};
+      const svg=ok(await local('POST','/v1/attachments',{filename:'logo.svg',contentType:'image/svg+xml',content:Buffer.from('<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/></svg>').toString('base64'),disposition:'inline',contentId:'logo'}),201).id as string;
+      const screened=new Map<string,string>(), delivered=new Map<string,{html?:string;files?:string[]}>();
+      t.mock.method(globalThis,'fetch',async(url:RequestInfo|URL,init?:RequestInit)=>{assert.equal(String(url),origin);const {subject,body}=JSON.parse(String(init?.body)).state.email;screened.set(subject,(screened.get(subject)??'')+body);return Response.json({answers:{spam:{noul:body.toLowerCase().includes('samplemarker')?0.99:0.01}}});});
+      t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>{if(cmd instanceof GetAccountCommand)return {SendingEnabled:true,SendQuota:{MaxSendRate:10000,Max24HourSend:100000,SentLast24Hours:0}};const c=cmd.input.Content.Simple;delivered.set(c.Subject.Data,{html:c.Body.Html?.Data,files:c.Attachments?.map((a:any)=>a.FileName)});return {MessageId:randomUUID()};});
+      // Each stage as the standing job records it (src/standing.ts): graded, no daily limit, at ok and past the growth pace is good standing.
+      const stage=async(set:string)=>{
+        await db.query(`INSERT INTO sender_standing(workspace_id,phase,first_recipients,score,target,quality,band_limit,daily_limit,computed_at,evidence_at) VALUES($1,'graded',100,92,92,92,NULL,NULL,now(),now())
+          ON CONFLICT(workspace_id) DO UPDATE SET phase='graded',score=92,band_limit=NULL,daily_limit=NULL,step='ok',growth_until=NULL,growth_cap=NULL,version=sender_standing.version+1`,[wid]);
+        if (set) await db.query(`UPDATE sender_standing SET ${set} WHERE workspace_id=$1`,[wid]);
+      };
+      const probation=async()=>ok(await local('GET','/v1/sender-score',undefined,'live',auth)).standing.probation;
+      const copy='Your appointment is confirmed for Tuesday at ten. Reply to this message if you need to change the time or the place.';
+      const corpus=screenCorpus(), responsive={hybridOutlook:corpus.hybridOutlook!.html,darkMode:corpus.darkMode!.html};
+      type Draft={subject:string;html:string;attachments?:string[]};
+      const common:Draft[]=[...Object.entries(responsive).map(([subject,html])=>({subject,html})),{subject:'imageOnly',html:'<img src="https://cdn.brand.example/hero.png" width="600" height="400"><p>Click here</p>'},
+        {subject:'svgInline',html:`<img src="cid:logo" alt="Receipt" width="120" height="40"><p>${copy}</p>`,attachments:[svg]}];
+      const send=async(name:string,mail:Draft[])=>{
+        const ids=ok(await local('POST','/v1/emails/batch',{emails:mail.map(m=>({from:'a@standing.invalid',to:'success@simulator.amazonses.com',...m,subject:`${name} ${m.subject}`}))},'live',auth),202).data.map((x:Json)=>x.id);
+        await runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:30,lanes:1,gate:initialGate()});
+        const rows=(await db.query('SELECT subject,status,error_code FROM sending_emails WHERE id=ANY($1)',[ids])).rows as {subject:string;status:string;error_code:string|null}[];
+        return Object.fromEntries(rows.map(r=>[r.subject.slice(name.length+1),r.error_code??r.status]));
+      };
+      // A new sender (its evaluation), a growing one (the growth pace after it) and one whose score or a warning sets a
+      // daily limit are on probation: every message is delivered as the copy the screen read, responsive and dark-mode
+      // rules left out, with the image-to-text rule and the attachment allowlist.
+      for (const [name,set,reason] of [['evaluation',"phase='calibrating',score=NULL,band_limit=10000,daily_limit=10000",'evaluation'],['growing',"growth_until=now()+interval '48 hours',growth_cap=1000",'growth'],
+        ['capped','band_limit=500,daily_limit=500','standing'],['warned',"step='warn',band_limit=10000,daily_limit=10000",'standing']] as const) {
+        await stage(set);
+        assert.equal(await probation(),reason,name);
+        assert.deepEqual(await send(name,common),{hybridOutlook:'accepted',darkMode:'accepted',imageOnly:'CONTENT_IMAGE_ONLY',svgInline:'ATTACHMENT_TYPE_UNSCREENABLE'},name);
+        for (const [subject,html] of Object.entries(responsive)) {
+          const sent=delivered.get(`${name} ${subject}`)!;
+          assert.equal(sent.html,screenedHtml(html),`${name} ${subject}: the screened copy`);
+          assert.ok(!/@media|<style/.test(sent.html!),`${name} ${subject}: no responsive or dark-mode rules`);
+        }
+        assert.ok(!screened.get(`${name} hybridOutlook`)!.includes('Tap the button above'),'The mobile-only block is left out of the copy and so of its screen.');
+      }
+      // Good standing, recorded by the standing job with no operator involved: the same messages go out as written, media
+      // queries, dark-mode rules and SVG logo included, and the image rule no longer applies.
+      await stage('');
+      assert.equal(await probation(),null);
+      assert.deepEqual(await send('good',common),{hybridOutlook:'accepted',darkMode:'accepted',imageOnly:'accepted',svgInline:'accepted'});
+      for (const [subject,html] of Object.entries(responsive)) assert.equal(delivered.get(`good ${subject}`)!.html,html,`${subject}: delivered as written`);
+      assert.ok(/@media only screen and \(max-width:480px\)/.test(delivered.get('good hybridOutlook')!.html!) && /prefers-color-scheme: dark/.test(delivered.get('good darkMode')!.html!));
+      assert.deepEqual(delivered.get('good svgInline')!.files,['logo.svg']);
+      // How hidden copy stays screened when the markup is kept (src/screen.ts readHtml): the screen reads every text node
+      // whatever CSS does to it, so a block only a media query, dark mode, Outlook or the hidden attribute's override shows
+      // is read as plain copy (the mobile-only line left out under probation is screened here); it reads what style sheets
+      // draw in any media query (generated content, with its var() and attr() values, and counter-style symbols); and it
+      // reads elements clients hide by default once CSS displays them (a title, a style sheet), and form values. A marker
+      // in any of these places is refused before SES.
+      assert.ok(screened.get('good hybridOutlook')!.includes('Tap the button above'),'The mobile-only block is screened.');
+      const hidden:Draft[]=[
+        {subject:'mobileOnly',html:`<style>.m{display:none;max-height:0;overflow:hidden}@media (max-width:480px){.m{display:block!important;max-height:none!important}}</style><p>${copy}</p><div class="m">SampleMarker</div>`},
+        {subject:'darkOnly',html:`<style>.d{display:none}@media (prefers-color-scheme: dark){.d{display:block!important}}[data-ogsc] .d{display:block!important}</style><p>${copy}</p><div class="d" style="display:none;mso-hide:all">SampleMarker</div>`},
+        {subject:'darkDrawn',html:`<style>@media (prefers-color-scheme: dark){.o::after{content:"Sample\\4D arker"}}</style><p class="o">${copy}</p>`},
+        {subject:'attrDrawn',html:`<style>@media (max-width:480px){.n::before{content:attr(data-a) attr(data-b)}}</style><p class="n" data-a="Sample" data-b="Marker">${copy}</p>`},
+        {subject:'variable',html:`<style>:root{--a:"Sample"}.o::before{content:var(--a) var(--b,"Marker")}</style><p class="o">${copy}</p>`},
+        {subject:'counterStyle',html:`<style>@counter-style s{system:cyclic;symbols:Sample\\4D arker}ol{list-style:s}</style><ol><li>${copy}</li></ol>`},
+        {subject:'shownTitle',html:`<style>title{display:block}</style><title>SampleMarker</title><p>${copy}</p>`},
+        {subject:'shownSheet',html:`<style style="display:block">SampleMarker</style><p>${copy}</p>`},
+        {subject:'outlook',html:`<!--[if mso]><p>SampleMarker</p><![endif]--><p>${copy}</p>`},
+        {subject:'formValue',html:`<p>${copy}</p><input value="SampleMarker" readonly>`},
+        {subject:'hiddenAttribute',html:`<p>${copy}</p><div hidden>SampleMarker</div>`}];
+      assert.deepEqual(await send('good',hidden),Object.fromEntries(hidden.map(m=>[m.subject,'CONTENT_REJECTED_SPAM'])));
+      // What no client draws stays out of it: an ordinary comment, a template, a sheet's selectors.
+      assert.deepEqual(await send('good',[{subject:'notes',html:`<!-- SampleMarker --><template><p>SampleMarker</p></template><style>.samplemarker{color:red}</style><p>${copy}</p>`}]),{notes:'accepted'});
+    }));
+  });
+
   // A Hosted probation workspace on live SES (SDK stubbed) with a classifier stub that flags SampleMarker and counts
   // requests, for the screened-text limit and campaign screen scenarios.
   async function hostedScreenFixture(t: TestContext, runtime: import('./src/core.js').Runtime, db: pg.Client, acct: string, domain: string, flag = /samplemarker/) {
@@ -20393,6 +20475,55 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       ok(await local('POST', `/v1/operator/campaigns/${c.id}/release`, { reason: 'Reviewed the list source with the customer' }));
       assert.equal((await view()).state, 'sending');
       assert.equal((await db.query(`SELECT count(*)::int AS n FROM hosted_operator_audit WHERE workspace_id=$1 AND action='operator-release-campaign'`, [wid])).rows[0].n, 1);
+    });
+  });
+
+  test('campaign list probe follows standing: in good standing a list mailed cleanly goes out without the probe or its wait; a growing sender, a list never mailed cleanly and one grown past the probe share are probed', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
+      const wid = runtime.config.workspaceId, pool = '111122223334', domain = 'clean-list.example', from = `news@${domain}`;
+      Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [domain, wid]);
+      // Good standing as the standing job records it: graded, no daily limit, at ok, past the growth pace.
+      await db.query(`INSERT INTO sender_standing(workspace_id,phase,first_recipients,score,target,quality,band_limit,daily_limit,computed_at,evidence_at) VALUES($1,'graded',100,92,92,92,NULL,NULL,now(),now())`, [wid]);
+      const list = ok(await local('POST', '/v1/lists', { name: unique('clean') }), 201);
+      const add = (first: number, last: number) => db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||md5($1||n),$1,'clean-'||n||'@example.net','subscribed' FROM generate_series($3::int,$4::int)n RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`, [wid, list.id, first, last]);
+      const launch = async (subject: string) => {
+        const c = ok(await local('POST', '/v1/campaigns', { name: subject, from, subject, html: '<p>Fixture.</p>', audience: { listId: list.id } }), 201);
+        ok(await local('POST', `/v1/campaigns/${c.id}/send`, { revision: c.revision }), 202);
+        await run('campaign.run');
+        return { id: c.id as string, view: async () => ok(await local('GET', `/v1/campaigns/${c.id}`)).delivery };
+      };
+      await add(1, 150);
+      // Never mailed cleanly: even in good standing the first campaign to the list sends the probe and waits for it.
+      const first = await launch('First issue');
+      assert.equal((await first.view()).expanded, 100);
+      await db.query(`UPDATE sending_emails SET status=CASE WHEN review_ordinal<=2 THEN 'bounced' ELSE 'delivered' END,provider_id='clean-'||id WHERE campaign_id=$1`, [first.id]);
+      await run('campaign.run');
+      assert.equal((await first.view()).waiting.reason, 'list_probe');
+      await db.query(`UPDATE sending_campaigns SET probe_wait_until=now()-interval '1 second',waiting_until=now()-interval '1 second' WHERE id=$1`, [first.id]);
+      await db.query(`UPDATE jobs SET available_at=now() WHERE id=$1`, [`campaign.run:${first.id}`]);
+      await run('campaign.run');
+      assert.equal((await first.view()).expanded, 150, 'The probe passed (2 of 100 bounced): the rest is released.');
+      // Delivered with 2 bounces in 150, and done: the list is now mailed cleanly.
+      await db.query(`UPDATE sending_emails SET status='delivered',provider_id='clean-'||id WHERE campaign_id=$1 AND status<>'bounced'`, [first.id]);
+      await db.query(`UPDATE sending_campaigns SET state='done' WHERE id=$1`, [first.id]);
+      // The next campaign to it releases everyone at once: no probe, no ten-minute wait.
+      const second = await launch('Second issue');
+      assert.deepEqual([(await second.view()).expanded, (await second.view()).waiting], [150, null]);
+      assert.ok((await db.query(`SELECT probe_cleared_at FROM sending_campaigns WHERE id=$1`, [second.id])).rows[0].probe_cleared_at, 'The skipped probe is recorded as cleared.');
+      // A growing sender (the growth pace after its evaluation) is probed again, however clean the list.
+      await db.query(`UPDATE sender_standing SET growth_until=now()+interval '48 hours',growth_cap=1000 WHERE workspace_id=$1`, [wid]);
+      assert.equal((await launch('Growing issue').then(c => c.view())).expanded, 100);
+      // So is a sender below good standing: a daily limit set by the score or frozen by a warning.
+      await db.query(`UPDATE sender_standing SET growth_until=NULL,growth_cap=NULL,band_limit=10000,daily_limit=10000 WHERE workspace_id=$1`, [wid]);
+      assert.equal((await launch('Capped issue').then(c => c.view())).expanded, 100);
+      // Back in good standing, a list that grew by more than the probe's share since it was mailed is probed: 200 now, 150 then.
+      await db.query(`UPDATE sender_standing SET band_limit=NULL,daily_limit=NULL WHERE workspace_id=$1`, [wid]);
+      await add(151, 200);
+      assert.equal((await launch('Grown issue').then(c => c.view())).expanded, 100);
     });
   });
 

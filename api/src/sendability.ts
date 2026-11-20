@@ -126,7 +126,7 @@ export async function checkMail(mail:CheckMail, ctx:CheckContext={}): Promise<Ch
     if (bytes>=102400) size('gmail-clip','warning',45,'Gmail may clip the message',`${bytes} bytes of HTML before delivery-time rewriting.`, 'Keep decoded HTML below about 102 KB and place essential links early.',{htmlBytes:bytes});
     // Probation dispatch screens the rewritten copy. Image-only mail cannot reach that step; measure the submitted copy instead.
     let measured=signals.content, basis='submitted';
-    if (html && ctx.domain?.pool==='probation') try {
+    if (html && ctx.domain?.probation) try {
       const rewritten=screenedHtml(html,mail.previewText); measured=screenTextSignals((await readHtml(rewritten)).text,mail.text).content; basis='probation copy';
     } catch (e) { if (!(e instanceof ApiError && e.code==='CONTENT_IMAGE_ONLY')) throw e; }
     const limit=ctx.screenLimitBytes??24*1024, screenedBytes=Buffer.byteLength(measured), left=limit-screenedBytes, near=left<limit*0.1;

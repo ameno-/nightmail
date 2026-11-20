@@ -79,6 +79,125 @@ function completeBodies(content: string, links: string, limitBytes: number, scop
 function host(value: string) {
   try { return new URL(value.startsWith('//') ? 'https:'+value : value).hostname.toLowerCase(); } catch { return ''; }
 }
+// ----- What style sheets draw ------------------------------------------------------------------------------------------
+// A sender off probation keeps its markup (src/dispatcher.ts prepareMail), so its screen reads what CSS can put on screen
+// in any media query or color scheme: the strings its declarations draw (generated content, quotes, list markers,
+// counter-style symbols, custom properties), with var() and attr() resolved; the hosts its url()s and imports load; and
+// elements a client hides by default (style, script, title, xml) that a rule or their own style may display.
+type CssRule = { prelude: string; decls: [string, string][] };
+/** Past the string literal that starts at i: its closing quote, the end of its line, or the end of the text. */
+function stringEnd(css: string, i: number) {
+  for (let j = i + 1; j < css.length; j++) { if (css[j] === '\\') j++; else if (css[j] === css[i] || css[j] === '\n') return j + 1; }
+  return css.length;
+}
+/** Every rule's selector and declarations, those inside at-rules included; root collects bare declarations (a style attribute's). */
+function cssRules(css: string): CssRule[] {
+  const root: CssRule = { prelude: '', decls: [] }, rules = [root], stack = [root];
+  let buffer = '', parens = 0;
+  const flush = () => { const text = buffer.trim(), colon = text.indexOf(':'); buffer = ''; if (colon > 0 && !text.startsWith('@')) stack.at(-1)!.decls.push([text.slice(0, colon).trim().toLowerCase(), text.slice(colon + 1).trim()]); };
+  for (let i = 0; i < css.length; i++) {
+    const c = css[i]!;
+    if (c === '"' || c === "'") { const end = stringEnd(css, i); buffer += css.slice(i, end); i = end - 1; }
+    else if (c === '\\') { buffer += css.slice(i, i + 2); i++; }
+    else if (c === '/' && css[i + 1] === '*') { const end = css.indexOf('*/', i + 2); i = end < 0 ? css.length : end + 1; buffer += ' '; }
+    else if (c === '(' || (c === ')' && parens)) { parens += c === '(' ? 1 : -1; buffer += c; }
+    else if (parens) buffer += c;
+    else if (c === '{') { const rule: CssRule = { prelude: buffer.trim(), decls: [] }; buffer = ''; rules.push(rule); stack.push(rule); }
+    else if (c === '}') { flush(); if (stack.length > 1) stack.pop(); }
+    else if (c === ';') flush();
+    else buffer += c;
+  }
+  flush();
+  return rules;
+}
+const codePoint = (n: number) => n === 0 || n > 0x10ffff || (n >= 0xd800 && n <= 0xdfff) ? '\ufffd' : String.fromCodePoint(n);
+const unescapeCss = (s: string) => s.replace(/\\(?:([0-9a-fA-F]{1,6})[ \t\n\r\f]?|\r\n|[\n\r\f]|([\s\S]))/g, (_, hex?: string, char?: string) => hex ? codePoint(parseInt(hex, 16)) : char ?? '');
+type Piece = { text: string } | { ident: string } | { attr: string } | { variable: string; fallback?: string };
+const IDENT = /-?(?:[_a-zA-Z\u0080-\uffff]|\\[0-9a-fA-F]{1,6}\s?|\\[^\n0-9a-fA-F])(?:[-\w\u0080-\uffff]|\\[0-9a-fA-F]{1,6}\s?|\\[^\n0-9a-fA-F])*/y, CALL = /([-\w]+)\(/y;
+/** A declaration's value as the pieces that can draw text: strings, identifiers, attr() and var() references. */
+function pieces(value: string): Piece[] {
+  const out: Piece[] = [];
+  for (let i = 0; i < value.length;) {
+    const c = value[i]!;
+    if (c === '"' || c === "'") { const end = stringEnd(value, i); out.push({ text: unescapeCss(value.slice(i + 1, value[end - 1] === c && end - 1 > i ? end - 1 : end)) }); i = end; continue; }
+    CALL.lastIndex = i;
+    const call = CALL.exec(value);
+    if (call) {
+      let j = i + call[0].length, depth = 1;
+      for (; j < value.length && depth; j++) { if (value[j] === '"' || value[j] === "'") j = stringEnd(value, j) - 1; else if (value[j] === '(') depth++; else if (value[j] === ')') depth--; }
+      const name = call[1]!.toLowerCase(), argument = value.slice(i + call[0].length, depth ? j : j - 1).trim(), comma = argument.indexOf(',');
+      if (name === 'attr') out.push({ attr: argument.split(/[\s,]/)[0]!.toLowerCase() });
+      else if (name === 'var') out.push({ variable: (comma < 0 ? argument : argument.slice(0, comma)).trim(), ...(comma < 0 ? {} : { fallback: argument.slice(comma + 1) }) });
+      else if (name !== 'url') out.push(...pieces(argument));
+      i = j; continue;
+    }
+    IDENT.lastIndex = i;
+    const ident = IDENT.exec(value);
+    if (ident) { out.push({ ident: unescapeCss(ident[0]) }); i += ident[0].length; continue; }
+    i++;
+  }
+  return out;
+}
+// Properties whose strings name fonts, files or grid areas: never drawn as text.
+const UNDRAWN = new Set(['font', 'font-family', 'src', 'font-feature-settings', 'font-variation-settings', 'font-language-override', 'font-palette', 'grid-template-areas', 'grid-template', 'grid', 'will-change']);
+// Counter styles draw their symbols, identifiers included.
+const SYMBOLS = new Set(['symbols', 'additive-symbols', 'prefix', 'suffix', 'pad', 'negative']);
+const CSS_STEPS = 1_000_000, VARIANTS = 8, VAR_DEPTH = 4;
+// What a url() loads is read as a host (the sheets' and style attributes' own pass), never as text.
+const withoutUrls = (value: string) => value.replace(/\burl\(\s*(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[^)]*)\s*\)/gi, 'url()');
+/** The style sheets and style attributes of a message, read for what they can draw and load (see above). */
+function cssReader(sheets: string[], styles: string[], hosts: Set<string>) {
+  const rules = sheets.flatMap(sheet => cssRules(sheet)), inline = styles.flatMap(style => cssRules(style)[0]!.decls);
+  for (const sheet of sheets) for (const m of normalize(sheet.replace(/\/\*[\s\S]*?\*\//g, ' ')).matchAll(/(?:https?:)?\/\/[^\s,)'"<>]+/gi)) { const h = host(m[0]); if (h) hosts.add(h); }
+  const decls = [...rules.flatMap(rule => rule.decls), ...inline].map(([name, value]): [string, string] => [name, withoutUrls(value)]), properties = new Map<string, string[]>();
+  for (const [name, value] of decls) if (name.startsWith('--')) properties.set(name, [...properties.get(name) ?? [], value]);
+  let steps = 0;
+  const evaluate = (value: string, element: Map<string, string> | null, idents: boolean, depth = 0): string[] => {
+    let variants = [''];
+    const append = (texts: string[]) => { variants = variants.flatMap(v => texts.map(t => v + t)).slice(0, VARIANTS); };
+    if ((steps += value.length) > CSS_STEPS) throw unreadable();
+    for (const piece of pieces(value)) {
+      if (++steps > CSS_STEPS) throw unreadable();
+      if ('text' in piece) append([piece.text]);
+      else if ('ident' in piece) { if (idents) append([piece.ident + ' ']); }
+      else if ('attr' in piece) append([element?.get(piece.attr) ?? '']);
+      else {
+        const values = depth < VAR_DEPTH ? properties.get(piece.variable)?.slice(0, VARIANTS) : undefined;
+        append(values?.length ? values.flatMap(v => evaluate(v, element, idents, depth + 1)) : piece.fallback !== undefined ? evaluate(piece.fallback, element, idents, depth + 1) : ['']);
+      }
+    }
+    return variants;
+  };
+  const drawn = decls.filter(([name, value]) => !UNDRAWN.has(name) && (/["']|\b(?:attr|var)\(/i.test(value) || (SYMBOLS.has(name) && value.trim())));
+  const attributed = [...properties.values()].flat().some(v => /\battr\(/i.test(v));
+  const perElement = drawn.filter(([, value]) => /\battr\(/i.test(value) || (attributed && /\bvar\(/i.test(value)));
+  const names = new Set([...decls.flatMap(([, value]) => [...value.matchAll(/\battr\(\s*([-\w]+)/gi)].map(m => m[1]!.toLowerCase()))]);
+  const texts = new Set(drawn.filter(d => !perElement.includes(d)).flatMap(([name, value]) => evaluate(value, null, SYMBOLS.has(name))).map(t => t.trim()).filter(Boolean));
+  // Rules that may display an element: a display other than none, or all (which resets it), on a selector whose subject
+  // (its last compound, without pseudo-elements) has no type or that type, and only classes and an id the element has.
+  const subjects = rules.filter(rule => rule.prelude && !rule.prelude.startsWith('@') && displays(rule.decls)).flatMap(rule => rule.prelude.split(',').flatMap(selector => {
+    if (/::|:(?:before|after|first-line|first-letter)\b/i.test(selector)) return [];
+    const subject = selector.replace(/\[[^\]]*\]|\([^)]*\)/g, '').trim().split(/[\s>+~]+/).at(-1)!.toLowerCase();
+    return [{ tag: /^[a-z][\w-]*/.exec(subject)?.[0], classes: [...subject.matchAll(/\.([-\w]+)/g)].map(m => m[1]!), ids: [...subject.matchAll(/#([-\w]+)/g)].map(m => m[1]!) }];
+  }));
+  return {
+    texts,
+    /** What attr() draws for this element: every declaration that reads one of its attributes, with them resolved. */
+    attributes: (attrs: { name: string; value: string }[]) => {
+      if (!perElement.length || !attrs.some(a => names.has(a.name))) return [];
+      const element = new Map(attrs.map(a => [a.name, a.value]));
+      return perElement.flatMap(([name, value]) => evaluate(value, element, SYMBOLS.has(name))).map(t => t.trim()).filter(Boolean);
+    },
+    /** Whether CSS may display an element a client hides by default. */
+    shown: (tag: string, attrs: { name: string; value: string }[]) => {
+      const style = attrs.find(a => a.name === 'style')?.value, classes = new Set((attrs.find(a => a.name === 'class')?.value ?? '').toLowerCase().split(/\s+/)), id = attrs.find(a => a.name === 'id')?.value.toLowerCase();
+      return (style !== undefined && displays(cssRules(style)[0]!.decls)) || subjects.some(s => (!s.tag || s.tag === tag) && s.classes.every(c => classes.has(c)) && s.ids.every(i => i === id));
+    },
+  };
+}
+const displays = (decls: [string, string][]) => decls.some(([name, value]) => name === 'all' || (name === 'display' && !/^none\s*(?:!\s*important)?$/i.test(value)));
+// Elements a client does not display unless CSS says so.
+const UNDISPLAYED = new Set(['style', 'script', 'title', 'xml']);
 const INLINE=new Set(['a','abbr','b','bdi','bdo','big','cite','code','data','del','dfn','em','font','i','ins','kbd','label','mark','q','s','samp','small','span','strike','strong','sub','sup','time','tt','u','var','wbr','img','input','button','select','textarea','output','meter','progress','picture','source','svg','text','tspan','math','mi','mo','mn','ruby','rt','rp','nobr']);
 /**
  * An HTML body as the screen reads it: the text a client lays out, every host it links or loads, anchors whose text
@@ -95,6 +214,14 @@ export async function readHtml(html: string, visit?: (tag: string) => void) {
   // glued, the way a recipient reads a word laid out across adjacent cells.
   const lines:string[]=[], aside:string[]=[], rows:string[][]=[]; let line='';
   const flush=()=>{ if(line.trim()) lines.push(line); line=''; };
+  // The sheets and style attributes a client applies: in the flow and inside conditional comments, not in a template.
+  const sheets:string[]=[], styles:string[]=[];
+  const collect=(node:typeof fragment.childNodes[number])=>{
+    if ('tagName' in node) { if (node.tagName==='style') sheets.push(node.childNodes.map(child=>'value' in child ? child.value : '').join('')); for (const a of node.attrs) if (a.name==='style') styles.push(a.value); }
+    if ('childNodes' in node) for (const child of node.childNodes) collect(child);
+  };
+  for (const child of fragment.childNodes) collect(child);
+  const css=cssReader(sheets,styles,hosts);
   const walk=(node:typeof fragment.childNodes[number], anchor:string)=>{
     if ('value' in node) {
       line+=node.value;
@@ -109,7 +236,9 @@ export async function readHtml(html: string, visit?: (tag: string) => void) {
     if (!('tagName' in node)) { for (const child of children) walk(child,anchor); return; }
     const tag=node.tagName;
     visit?.(tag);
-    if (['style','script','template','head','title','xml'].includes(tag)) return;
+    // Hidden text is read like any other: what CSS hides in one client, media query or color scheme shows in another.
+    // A template's content is never drawn; style sheets, scripts, the title and Office XML only when CSS displays them.
+    if (tag==='template' || tag==='head' || (UNDISPLAYED.has(tag) && !css.shown(tag,node.attrs))) return;
     let display='';
     for (const a of node.attrs) {
       if (['href','src','srcset','background','action','style'].includes(a.name)) {
@@ -118,20 +247,25 @@ export async function readHtml(html: string, visit?: (tag: string) => void) {
       }
       if (a.name==='style') display=/(?:^|;)\s*display\s*:\s*([a-z-]+)/i.exec(a.value)?.[1]?.toLowerCase() ?? '';
       if (['alt','title'].includes(a.name) && a.value.trim()) aside.push(a.value);
+      // Text form controls draw: a field's value and placeholder, an option's label.
+      if (((['value','placeholder'].includes(a.name) && (tag==='input' || tag==='textarea')) || (a.name==='label' && (tag==='option' || tag==='optgroup'))) && a.value.trim()) aside.push(a.value);
     }
+    aside.push(...css.attributes(node.attrs));
     if (tag==='img') images.push({ alt: node.attrs.some(a=>a.name==='alt' && !!a.value.trim()) });
     const inline=display ? display.startsWith('inline') : INLINE.has(tag);
     if (!inline) flush();
     const start=lines.length;
     if (tag==='tr') rows.push([]);
     for (const child of children) walk(child,anchor);
+    // A frame's srcdoc (bounded-html.ts), for a client that shows frames.
+    if (tag==='iframe' && 'content' in node) for (const child of (node as unknown as { content: typeof fragment }).content.childNodes) walk(child,anchor);
     if (!inline) flush();
     if (tag==='td' || tag==='th') rows[rows.length-1]?.push(lines.slice(start).join(' '));
     if (tag==='tr') { const cells=rows.pop()!; if (cells.length>1 && cells.some(cell=>cell.trim() && cell.trim().length<=4)) aside.push(cells.join('')); }
   };
   for (const child of fragment.childNodes) walk(child,'');
   flush();
-  return { text: [...lines,...aside].join('\n'), hosts, mismatches, links, images };
+  return { text: [...lines,...aside,...css.texts].join('\n'), hosts, mismatches, links, images };
 }
 export function screenTextSignals(visible: string, text?: string, rawPart?: string) {
   // Preserve order and repetitions in mandatory input; deduplicating sentences

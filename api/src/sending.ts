@@ -22,7 +22,7 @@ import { regionalSending, sendingConnections, type SendingBinding } from './doma
 import { lockSendScope, type SendScope } from './send-scope.js';
 import { assertRegionEnabled, regionPattern } from './ses-region-state.js';
 import { forDelivery, type ReadyConnection } from './provider-credentials.js';
-import { bulkFlags, hostedCost } from './hosted-sending.js';
+import { bulkFlags, hostedCost, probationReason, type ProbationReason } from './hosted-sending.js';
 import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { CustomHeaders } from './custom-headers.js';
 import { EmailThread, joinReplies, mailboxMail, sentThreadId, threadBlock, threadView, type RawThread } from './thread-view.js';
@@ -2139,11 +2139,12 @@ export async function rebuildCampaignEmail(runtime: Runtime, a: Actor, stub: Ema
 }
 // Accepted means provider acceptance evidence; bounce and complaint rates are over accepted mail. Suppressed mail
 // (ineligible at claim time, or dropped by SES Auto Validation before sending) is neither accepted nor bounced.
-async function campaignHealth(db: DbExecutor, a: Actor, campaignId: string, hosted = false, probe?: number): Promise<{ code: string; message: string } | null> {
-  const [row] = (await db.execute<{ accepted: number; bounced: number; complained: number }>(sql`SELECT
+const campaignOutcomes = (wid: string, campaign: SQL) => sql`SELECT
     count(*) FILTER (WHERE status <> 'suppressed' AND (provider_id IS NOT NULL OR status IN ('accepted','sent','delivered','bounced','complained','delayed')))::int AS accepted,
-    count(*) FILTER (WHERE status = 'bounced')::int AS bounced, count(*) FILTER (WHERE status = 'complained')::int AS complained
-    FROM sending_emails WHERE workspace_id = ${a.workspaceId} AND campaign_id = ${campaignId}`)).rows;
+    count(*) FILTER (WHERE status = 'bounced')::int AS bounced, count(*) FILTER (WHERE status = 'complained')::int AS complained, max(created_at) AS last
+    FROM sending_emails WHERE workspace_id = ${wid} AND campaign_id = ${campaign}`;
+async function campaignHealth(db: DbExecutor, a: Actor, campaignId: string, hosted = false, probe?: number): Promise<{ code: string; message: string } | null> {
+  const [row] = (await db.execute<{ accepted: number; bounced: number; complained: number }>(campaignOutcomes(a.workspaceId, sql`${campaignId}`))).rows;
   const percent = (part: number, whole: number) => `${(100 * part / whole).toFixed(2)}%`;
   if (probe !== undefined && row!.accepted && (row!.bounced / row!.accepted > PROBE.bounceRate || row!.complained >= PROBE.complaints))
     return { code: 'LIST_QUALITY', message: `Quarantined: the first ${row!.accepted} recipients (the list probe) had ${row!.bounced} hard bounces (${percent(row!.bounced, row!.accepted)}; the line is ${PROBE.bounceRate * 100}%) and ${row!.complained} spam complaints (the line is ${PROBE.complaints}). Bounced addresses were suppressed. Remove contacts you have not mailed before, or confirm the list's source, then resume.` };
@@ -2154,15 +2155,34 @@ async function campaignHealth(db: DbExecutor, a: Actor, campaignId: string, host
     return { code: 'COMPLAINT_RATE_HIGH', message: `Paused automatically: ${percent(row!.complained, row!.accepted)} of ${row!.accepted} accepted emails were marked as spam (limit ${AUTO_PAUSE.complaintRate * 100}%). Review the audience before resuming.` };
   return null;
 }
+/**
+ * Whether this campaign's list was mailed cleanly, so a sender in good standing skips its list probe: an earlier
+ * campaign from the workspace to the same list or segment finished in the last 90 days without a quarantine, reached at
+ * least 90% as many recipients as this one has (a list that grew by more than the probe's share since is probed again),
+ * and stayed within the probe's bounce line and the automatic pause's complaint line. Only the latest three are read.
+ */
+const CLEAN_LIST = { days: 90, coverage: 0.9, candidates: 3 } as const;
+async function listMailedCleanly(db: DbExecutor, a: Actor, row: RunRow) {
+  const { listId = null, segmentId = null } = row.reviewDraft!.audience;
+  const [found] = (await db.execute<{ clean: boolean }>(sql`SELECT EXISTS (SELECT FROM (
+      SELECT c.id FROM sending_campaigns c WHERE c.workspace_id=${a.workspaceId} AND c.id<>${row.id} AND c.state='done' AND NOT c.simulated AND c.quarantines=0 AND NOT c.delivered_only
+        AND c.draft->'audience'->>'listId' IS NOT DISTINCT FROM ${listId}::text AND c.draft->'audience'->>'segmentId' IS NOT DISTINCT FROM ${segmentId}::text
+        AND c.updated_at>now()-make_interval(days=>${CLEAN_LIST.days}::int) ORDER BY c.updated_at DESC LIMIT ${CLEAN_LIST.candidates}
+    ) c CROSS JOIN LATERAL (${campaignOutcomes(a.workspaceId, sql`c.id`)}) m
+    WHERE m.last>now()-make_interval(days=>${CLEAN_LIST.days}::int) AND m.accepted>=${Math.ceil(CLEAN_LIST.coverage * row.total)}::int
+      AND m.bounced<=m.accepted*${PROBE.bounceRate}::numeric AND m.complained<=m.accepted*${AUTO_PAUSE.complaintRate}::numeric) AS clean`)).rows;
+  return found!.clean;
+}
 // The campaign row with its frozen snapshot and the cached regional limits: one read per step of the run job.
-type RunAccount = NonNullable<Actor['dispatchAccount']> & { pauseReason: string | null; generation:number; trusted: boolean };
+type RunAccount = NonNullable<Actor['dispatchAccount']> & { pauseReason: string | null; generation:number; trusted: boolean; probation: ProbationReason | null };
 type RunRow = typeof campaigns.$inferSelect & { reviewVersion: number | null; reviewDraft: CampaignDraft | null; reviewRendered: { html?: string; text?: string } | null; reviewHash: string | null; reviewScreen: CampaignScreen | null; rate: number; max24: number; sent24: number; quotaCheckedAt: string | null; dbNow: string; account: RunAccount | null };
 async function readRun(runtime: Runtime, a: Actor, campaignId: string): Promise<RunRow | undefined> {
   const limits = limitsTable(runtime), region = sql`${campaignReviews.draft}->>'region'`;
   const [row] = await runtime.db.select({ ...getTableColumns(campaigns), reviewVersion: campaignReviews.rendererVersion, reviewDraft: campaignReviews.draft, reviewRendered: campaignReviews.rendered, reviewHash: campaignReviews.contentHash, reviewScreen: campaignReviews.screen,
     autoPause: runtime.config.multiTenant ? sql<boolean>`${campaigns.autoPause} OR ${sharedConnection(a.workspaceId)}` : campaigns.autoPause,
     account: runtime.config.multiTenant ? sql<RunAccount>`(SELECT jsonb_build_object('aws_account_id', aws_account_id, 'kind', kind, 'pauseReason', pause_reason,'generation',generation,
-      'trusted', ${!!runtime.config.trustedPool} AND coalesce(pool_tier='trusted' AND legacy_names=false, false)) FROM ${sendingConnections(runtime)} WHERE workspace_id=${a.workspaceId} AND region=${region})` : sql<null>`NULL`,
+      'trusted', ${!!runtime.config.trustedPool} AND coalesce(pool_tier='trusted' AND legacy_names=false, false),'probation',${probationReason(sql`${a.workspaceId}::text`)})
+      FROM ${sendingConnections(runtime)} WHERE workspace_id=${a.workspaceId} AND region=${region})` : sql<null>`NULL`,
     rate: sql<number>`coalesce((SELECT max_send_rate FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)`,
     max24: sql<number>`coalesce((SELECT max_24_hour_send FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)`,
     sent24: sql<number>`coalesce((SELECT sent_last_24_hours FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)`,
@@ -2171,6 +2191,8 @@ async function readRun(runtime: Runtime, a: Actor, campaignId: string): Promise<
   }).from(campaigns).leftJoin(campaignReviews, eq(campaignReviews.id, campaigns.reviewId)).where(campaignWhere(a, campaignId));
   return row;
 }
+/** Whether a campaign's copies go out as the probation copy (src/dispatcher.ts prepareMail decides the same per message). */
+const onProbation = (row: RunRow) => !!row.account && !row.account.trusted && row.account.probation !== null;
 const staleReview = () => new ApiError(409,'SENDER_BINDING_CHANGED','The reviewed sending binding is no longer ready.');
 /** A campaign's message as admission sees it at preparation and release: its reviewed sender, region and binding. */
 const reviewedMail = (draft: CampaignDraft): AdmissionMail & { from: string; binding?: SendingBinding } => ({ host: draft.from.split('@')[1]!.toLowerCase(), from: draft.from,
@@ -2295,7 +2317,7 @@ const screenRef = (a: Actor, row: RunRow): CampaignScreenRef => ({ workspaceId: 
 // refusal, and the review gets its budget: enough requests to screen every recipient's copy on its own, and a few retries.
 async function screenCampaignStep(runtime: Runtime, a: Actor, row: RunRow) {
   const limits = runtime.config.screenLimits, screen = await loadScreen();
-  const fresh: CampaignScreen = { contentHash: row.reviewHash!, probation: !row.account?.trusted, template: null, screenedThrough: 0, recipients: 0, rejected: 0, failures: 0, quarantined: false };
+  const fresh: CampaignScreen = { contentHash: row.reviewHash!, probation: onProbation(row), template: null, screenedThrough: 0, recipients: 0, rejected: 0, failures: 0, quarantined: false };
   const state = row.reviewScreen?.contentHash === row.reviewHash ? row.reviewScreen! : await saveScreen(runtime, a, row, fresh);
   await runtime.db.execute(sql`UPDATE sending_campaign_reviews SET screen_budget=${(row.total + 10) * screen.chunksFor(limits.campaignBytes)} WHERE workspace_id=${a.workspaceId} AND id=${row.reviewId} AND screen_budget IS NULL`);
   const own = await campaignCopy(runtime, row.reviewDraft!, row.reviewRendered!, row.reviewVersion!);
@@ -2317,7 +2339,7 @@ async function screenCampaignStep(runtime: Runtime, a: Actor, row: RunRow) {
 async function screenAhead(runtime: Runtime, a: Actor, row: RunRow, state: CampaignScreen, through: number): Promise<CampaignScreen> {
   const draft = row.reviewDraft!, rendered = row.reviewRendered!, threshold = runtime.config.screen!.threshold, started = Date.now(), ref = screenRef(a, row), screen = await loadScreen();
   const assets = await attachmentRows(runtime.db, a, draft.attachments);
-  const probationCopy = row.account?.trusted ? undefined : (await import('./screened-html.js')).probationCopy;
+  const probationCopy = onProbation(row) ? (await import('./screened-html.js')).probationCopy : undefined;
   // Copies that are the same up to their recipient share one screen: by a digest of the copy, never the copy itself.
   const forms = new Map<string, Promise<CopyVerdict>>();
   const verdictOf = async (recipient: ReviewedRecipient) => {
@@ -2479,8 +2501,15 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     if (paused.rows.length) log('warn', { code: 'CAMPAIGN_AUTO_PAUSED', campaignId: row.id, reason: unhealthy.code });
     return 'done' as const;
   };
-  // The list probe: release only the probe, wait for its feedback, then check it before releasing the rest.
-  const probe = hosted && row.autoPause && !row.simulated && !row.probeClearedAt && row.total > probeSize(row.total) ? probeSize(row.total) : null;
+  // The list probe: release only the probe, wait for its feedback, then check it before releasing the rest. A sender in
+  // good standing skips it for a list it mailed cleanly: decided once, before the first release, and recorded as cleared.
+  // The automatic pause below still applies to every campaign.
+  let probe = hosted && row.autoPause && !row.simulated && !row.probeClearedAt && row.total > probeSize(row.total) ? probeSize(row.total) : null;
+  if (probe !== null && row.expanded === 0 && row.account?.probation === null && await listMailedCleanly(runtime.db, a, row)) {
+    await runtime.db.execute(clearProbe(ref));
+    log('info', { code: 'CAMPAIGN_PROBE_SKIPPED', campaignId: row.id });
+    probe = null;
+  }
   let probeLeft = Number.POSITIVE_INFINITY;
   if (probe !== null && row.expanded >= probe) {
     if (buffered!.campaign > 0) throw new JobDeferred(new Date(nowMs + drainDelayMs(buffered!.campaign, row.rate)).toISOString(), payload);

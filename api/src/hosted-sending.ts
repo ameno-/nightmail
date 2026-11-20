@@ -21,6 +21,17 @@ export function hostedAllowance(config: Config, wid: string, incoming: number, m
   return sql<HostedAllowance | null>`(SELECT allowance FROM ${fn}(${wid},${incoming},${marketing},${config.hostedSendCaps.firstWeek},NULL,NULL,${config.dispatch.dailyHeadroomPercent}))`;
 }
 /**
+ * Why a Hosted workspace is still on probation, as an expression over its stored standing (src/standing.ts):
+ * 'evaluation' until its first grade (no standing yet included), 'growth' during the growth pace after it, 'standing'
+ * while the score, a freeze or a strike sets a daily limit or a ladder step from warn up applies; NULL in good standing.
+ * Probation keeps the checks for new senders: the delivered HTML is the copy the screen read, with the image and
+ * attachment rules (src/screened-html.ts), and a campaign's list probe. Senders leave it by themselves on good standing.
+ */
+export type ProbationReason = 'evaluation' | 'growth' | 'standing';
+export const probationReason = (wid: SQL) => sql<ProbationReason | null>`nullif(coalesce((SELECT CASE WHEN s.phase<>'graded' THEN 'evaluation'
+  WHEN s.growth_until>now() THEN 'growth' WHEN s.daily_limit IS NOT NULL OR s.step NOT IN ('ok','notice') THEN 'standing' ELSE '' END
+  FROM sender_standing s WHERE s.workspace_id=${wid}),'evaluation'),'')`;
+/**
  * The stream a marketing hold stops, as an expression over a sending_emails row: marketing mail and every campaign
  * row. Admission, campaign release and dispatch (owner selection and the final election) use the same rule.
  */

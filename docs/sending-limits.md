@@ -2,7 +2,7 @@
 
 Hosted Nightmail gives each workspace a **sender score** (0–100) from the quality of what it sends. A sender in good standing has **no daily limit**: only a per-minute pace that protects the shared pool. A daily limit appears only when the signals go bad, and tightens as the score falls. Nightmail stays out of the way unless something goes wrong: it **warns** first, then **holds marketing**, and **pauses** only for problems that put the shared pool at risk. These thresholds are public; how Nightmail detects abuse is not.
 
-Everything here is in the API: `GET /v1/sender-score` (score, factors, `limit`, `standing`), the `account.standing.changed` webhook event, and `connection.standing` on `GET /v1/me`. Self-hosted and bring-your-own-AWS installations get the score for display only.
+Everything here is in the API: `GET /v1/sender-score` (score, factors, `limit`, `standing`, and `standing.probation` for the checks below), the `account.standing.changed` webhook event, and `connection.standing` on `GET /v1/me`. Self-hosted and bring-your-own-AWS installations get the score for display only.
 
 ## Score → daily limit
 
@@ -80,13 +80,28 @@ Bounces alone hold marketing; they stop everything only when **transactional mai
 - A resume never restarts the limit at 100 a day. The 50% is of the limit before the resume (the frozen one), for 48 hours, even if the score has meanwhile earned no limit; another resume in that window keeps it there. Each pause leaves a **strike** for 90 days; the second caps the limit at 50% for 7 days, and the third needs a review for any resume.
 - The owner action is `POST /v1/sender-score/release` (dashboard sessions, owners and admins); `standing.selfService` in `GET /v1/sender-score` says whether it is available, and when.
 
+## Checks for new senders
+
+A workspace in its evaluation, in the growth pace, or below good standing (a daily limit set by the score, a freeze or a strike, or a step from warn up) is on **probation**: `standing.probation` in `GET /v1/sender-score` is `evaluation`, `growth` or `standing`. Until then Hosted adds these checks; they end by themselves on good standing, with nothing to request:
+
+- **Delivered as screened.** Each message goes out as the copy the content screen read: style sheet rules are inlined, `@media`, dark-mode and other rules a client applies only sometimes are left out, and blocks the light, desktop rendering hides are dropped. Responsive emails arrive in their desktop layout.
+- **Words beside images.** A 200 × 200 logo needs none; every further 600 × 300 px of images needs 25 words (422 `CONTENT_IMAGE_ONLY`).
+- **Attachments of a standard type** whose name, declared type and bytes agree, and inline images as PNG, JPEG, GIF, WebP or BMP (422 `ATTACHMENT_TYPE_UNSCREENABLE` or `ATTACHMENT_CONTENT_MISMATCH`).
+- **The list probe** below, on every campaign over 100 recipients.
+
+Every message is screened either way. In good standing it goes out as written, and the screen reads all of it: text that CSS hides or that only a media query, dark mode or Outlook shows, what style sheets draw (generated content, with its `var()` and `attr()` values), and elements that CSS displays though clients hide them by default.
+
 ## Campaign list probe
 
-A Hosted campaign with more than 100 recipients sends a **probe** first: the first `min(500, 10%)` recipients, at least 100. Release waits until the probe has gone out and ten more minutes for its feedback (`delivery.waiting.reason` is `list_probe`). More than 3% hard bounces or 2 complaints **quarantines** the campaign (paused, `LIST_QUALITY`); bounced addresses are suppressed and owners get an email. After the probe, a campaign still pauses at more than 2% bounces after 1,000 accepted or more than 0.08% complaints after 2,000. The owner can resume a quarantined campaign once; a second quarantine needs a review (409 `QUARANTINE_REVIEW_REQUIRED`). A quarantine never pauses the account.
+A Hosted campaign with more than 100 recipients from a sender on probation, or to a list never mailed cleanly, sends a **probe** first: the first `min(500, 10%)` recipients, at least 100. Release waits until the probe has gone out and ten more minutes for its feedback (`delivery.waiting.reason` is `list_probe`). More than 3% hard bounces or 2 complaints **quarantines** the campaign (paused, `LIST_QUALITY`); bounced addresses are suppressed and owners get an email. The owner can resume a quarantined campaign once; a second quarantine needs a review (409 `QUARANTINE_REVIEW_REQUIRED`). A quarantine never pauses the account.
+
+A sender in good standing sends to a list it **mailed cleanly** without the probe or its wait: an earlier campaign to the same list or segment finished in the last 90 days without a quarantine, reached at least 90% as many recipients as this one has (a list that grew by more since is probed again), and stayed within 3% hard bounces and 0.08% complaints. This is decided once, before the first recipient is released.
+
+Every campaign, probed or not, still pauses at more than 2% bounces after 1,000 accepted or more than 0.08% complaints after 2,000.
 
 ## Content screen: how much text
 
-Hosted mail is screened for smuggled advertising and scams before it is delivered. The screen reads the HTML's text (with its `alt` and `title` text), then the text part, then any raw MIME, each in full, and the hosts the message links to or loads from. It reads long mail in overlapping windows of about 5 to 8 KB, every window with the message's link hosts, so a 64 KiB message is read whole in at most 14 classifier requests and a 128 KiB campaign copy in at most 28.
+Hosted mail is screened for smuggled advertising and scams before it is delivered. The screen reads the HTML's text (with its `alt` and `title` text, form values and what its style sheets draw), then the text part, then any raw MIME, each in full, and the hosts the message links to or loads from. It reads long mail in overlapping windows of about 5 to 8 KB, every window with the message's link hosts, so a 64 KiB message is read whole in at most 14 classifier requests and a 128 KiB campaign copy in at most 28.
 
 | What | Limit | When it is checked |
 | --- | --- | --- |
