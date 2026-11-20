@@ -52,7 +52,7 @@ export const PRICING = { currency: 'USD', perThousand: Number(RATES.emailUc) * 1
 
 export function registerUsage(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/usage', operationId: 'getUsage', tags: ['Metrics'], security, summary: 'Plan, pricing and sending limits',
-    description: 'Hosted only. Pricing and whether billing charges yet, this month\'s sent and received counts against their free allowances, 3,000 each, counted separately (received only for credentials that may read all received mail), and the rolling daily sending limit (none in good standing) with the evaluation before it. Workspace-wide: keys restricted to domains get 403. ' + DASHBOARD_CACHE_NOTE,
+    description: 'Hosted only. Pricing and whether billing charges yet, this month\'s sent and received counts against their free allowances, ' + RATES.freeSentEmails.toLocaleString('en-US') + ' each, counted separately (received only for credentials that may read all received mail), and the rolling daily sending limit (none in good standing) with the evaluation before it. Workspace-wide: keys restricted to domains get 403. ' + DASHBOARD_CACHE_NOTE,
     responses: { 200: response(Usage), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
     const a = actor(c, 'read');

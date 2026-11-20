@@ -67,10 +67,10 @@ export const TV_TEXT = [
 ]
 export const FINE = {
   api: "*Accepted means queued, not delivered.",
-  price: "*$0.20 per 1,000 sent or received. Prepaid. 3,000 + 3,000 free every month.",
+  price: "*$0.20 per 1,000 sent or received. Prepaid. 5,000 + 5,000 free every month.",
   campaigns: "*New workspaces start at 100 recipients a day. Unsubscribe link included.",
   tracking: "*Open tracking isn't always accurate.",
-  inbox: "*Received mail counts toward your free 3,000.",
+  inbox: "*Received mail has its own free 5,000.",
   rule: "*Forwarding needs the recipient's OK first. Gary said OK.",
   ai: "*AI scores can be wrong. Opt-in. $0.10 per 1,000.",
   agent: "*Hosted limits apply.",
