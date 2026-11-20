@@ -1,9 +1,9 @@
 import { METHOD_ACR } from './config.js';
 import type { Config } from './core.js';
 
-// Who may sign up, decided by the sign-in itself and never by the account's own email address: Anomaly account can
-// assert a verified address that the method used to sign in never vouched for (a GitHub-made account that later links
-// a personal Google account signs in with acr=google and its GitHub-verified work address).
+// Who may sign up, decided by the sign-in itself and never by an email address: Anomaly account can assert a
+// verified address that the method used to sign in never vouched for (a GitHub-made account that later links a
+// personal Google account signs in with acr=google and its GitHub-verified work address).
 //
 // Anomaly account's claim for the provider identity behind this sign-in: {provider, sub, email, email_verified, hd?}
 // from the provider used for this sign-in, omitted when there is none. Requested as an essential ID-token claim.
@@ -28,20 +28,21 @@ export function acceptedMethods(acr: readonly string[] | undefined) {
   return names?.length && names.every(Boolean) ? [...new Set(names)].sort().join(' or ') : null;
 }
 
-/** The staff domain the provider behind this sign-in vouches for: a Google account's Workspace domain (hd, compared
- * exactly), or the domain of GitHub's address, which the account service passes on only when it is the GitHub
- * account's primary, verified address. Nothing for another provider, or without the provider's verified address. */
-function providerDomain(upstream: ProviderIdentity) {
-  if (!upstream.emailVerified) return null;
-  if (upstream.provider === 'google') return upstream.hd;
-  if (upstream.provider === 'github') return upstream.email?.slice(upstream.email.lastIndexOf('@') + 1).toLowerCase() || null;
-  return null;
+/** Hosted staff, exactly as the account service defines it: a Google sign-in whose Google account has a verified
+ * address and belongs to a staff Google Workspace domain (hd, compared exactly). Only Google proves Workspace
+ * membership: a GitHub sign-in is never staff, whatever its address. */
+export function isStaffSignIn(config: Pick<Config, 'multiTenant' | 'staffGoogleDomains'>, acr: unknown, upstream: ProviderIdentity | null) {
+  return config.multiTenant && acr === METHOD_ACR.google
+    && upstream?.provider === 'google' && upstream.emailVerified === true && !!upstream.hd && config.staffGoogleDomains.includes(upstream.hd);
 }
 
-/** Hosted staff, exactly as the account service defines it: a GitHub or Google sign-in (the acr names the provider
- * whose identity the claim carries) whose provider vouches for a staff domain (AUTH_STAFF_DOMAINS). */
-export function isStaffSignIn(config: Pick<Config, 'multiTenant' | 'staffDomains'>, acr: unknown, upstream: ProviderIdentity | null) {
-  if (!config.multiTenant || !upstream || !Object.hasOwn(METHOD_ACR, upstream.provider) || acr !== METHOD_ACR[upstream.provider as keyof typeof METHOD_ACR]) return false;
-  const domain = providerDomain(upstream);
-  return !!domain && config.staffDomains.includes(domain);
+const googleMail = new Set(['gmail.com', 'googlemail.com']);
+/** The address whose mailbox this sign-in proves the person reads now, for what is bound to an address (an invitation,
+ * an emailed support request): a Google sign-in's own verified address when Google hosts that mailbox (a Workspace
+ * account, or Gmail). GitHub, or a Google account on another provider's address, shows only that an address was
+ * verified once. */
+export function provenMailbox(acr: unknown, upstream: ProviderIdentity | null) {
+  if (acr !== METHOD_ACR.google || upstream?.provider !== 'google' || !upstream.emailVerified || !upstream.email) return null;
+  const email = upstream.email.toLowerCase();
+  return upstream.hd || googleMail.has(email.slice(email.lastIndexOf('@') + 1)) ? email : null;
 }

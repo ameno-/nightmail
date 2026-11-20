@@ -816,6 +816,8 @@ function seedPool(topics:Map<string,Json>,region:string,account:string,endpoint:
 }
 type Key = { id: string; secret: string };
 const cleanups = new WeakMap<TestContext, Array<() => Promise<void>>>();
+// An operator's fixture session signed in with Google Workspace: staff tools need that (src/operator.ts).
+const staffSession = (db: { query: (text: string, values: unknown[]) => Promise<unknown> }, ...userIds: string[]) => db.query('UPDATE nightmail_sessions SET staff=true WHERE user_id=ANY($1)', [userIds]);
 function cleanup(t: TestContext, action: () => Promise<void>) {
   let stack = cleanups.get(t);
   if (!stack) {
@@ -929,7 +931,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const approved = `${randomUUID()}@example.org`, keys = generateKeyPairSync('ec',{namedCurve:'P-256'});
   const rp = generateKeyPairSync('ec',{namedCurve:'P-256'});
   const runtime: import('./src/core.js').Runtime = { config:loadConfig({PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, ACCOUNT_CLIENT_ID:'dashboard',
-    ACCOUNT_CLIENT_PRIVATE_KEY:JSON.stringify({...rp.privateKey.export({format:'jwk'}),kid:'rp'}), BANE_ROOT_SECRET:'local-fixture-'.repeat(4), MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', AUTH_STAFF_DOMAINS:'example.org'}),
+    ACCOUNT_CLIENT_PRIVATE_KEY:JSON.stringify({...rp.privateKey.export({format:'jwk'}),kid:'rp'}), BANE_ROOT_SECRET:'local-fixture-'.repeat(4), MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', AUTH_STAFF_GOOGLE_DOMAINS:'example.org'}),
     db:drizzle(db), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} };
   const {PROVIDER_IDENTITY_CLAIM} = await import('./src/account-policy.js');
   let nonce = '', email = approved, verified = true, subject = randomUUID(), useUserInfo = false, givenName: string | undefined;
@@ -973,9 +975,10 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
         pushed = new URLSearchParams(String(init?.body));
         assert.equal(pushed.get('client_id'),'dashboard');
         assert.ok(pushed.get('client_assertion'));
-        // One required method is asked for; with several, none is, and the account service offers its own choice.
-        const required = runtime.config.accountRequiredAcr!;
-        assert.deepEqual(JSON.parse(pushed.get('claims')!),{id_token:{...required.length === 1 ? {acr:{essential:true,values:required}} : {},[PROVIDER_IDENTITY_CLAIM]:{essential:true}}});
+        // One required method is asked for; with several, none is, and the account service offers its own choice. Staff
+        // tools ask for Google.
+        const required = runtime.config.accountRequiredAcr!, asked = askFor ? [askFor] : required.length === 1 ? required : null;
+        assert.deepEqual(JSON.parse(pushed.get('claims')!),{id_token:{...asked ? {acr:{essential:true,values:asked}} : {},[PROVIDER_IDENTITY_CLAIM]:{essential:true}}});
         assert.equal(pushed.get('acr_values'),null);
         assert.equal(pushed.get('scope'),'openid profile email');
         assert.ok(pushed.get('state'));assert.ok(pushed.get('nonce'));assert.ok(pushed.get('code_challenge'));
@@ -1004,9 +1007,10 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const request = (path:string, method:string, cookie='', body?:object) => app.fetch(new Request(origin+path,{method,headers:{origin,cookie,'content-type':'application/json','x-nightmail-client-ip':`192.0.2.${peer}`},body:body?JSON.stringify(body):undefined}),runtime);
   // The account service sends the browser back with response_mode=query: a cross-site top-level GET, without Origin.
   const navigate = (path:string, cookie='') => app.fetch(new Request(origin+path,{method:'GET',headers:{cookie,referer:issuer+'/','sec-fetch-site':'cross-site','sec-fetch-mode':'navigate','x-nightmail-client-ip':`192.0.2.${peer}`}}),runtime);
-  async function login(authorizationError?:string, callbackURL=origin+'/') {
-    peer++; pushed=undefined;
-    const start=await request('/api/auth/sign-in/account','POST','',{callbackURL});
+  let askFor: string | null = null;
+  async function login(authorizationError?:string, callbackURL=origin+'/', method?:'google') {
+    peer++; pushed=undefined; askFor=method ? googleAcr : null;
+    const start=await request('/api/auth/sign-in/account','POST','',{callbackURL,...method ? {method} : {}});
     assert.equal(start.status,200); const front=new URL((await start.json() as {url:string}).url).searchParams;
     if (runtime.config.accountRequiredAcr) assert.deepEqual([...front],[['client_id','dashboard'],['request_uri','urn:fixture:request']]);
     else assert.deepEqual(JSON.parse(front.get('claims')!),{id_token:{[PROVIDER_IDENTITY_CLAIM]:{essential:true}}});
@@ -1028,7 +1032,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const waitlistCookie = (response:Response) => response.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.waitlist='));
   // Staff sign-up needs the provider identity of a staff domain. Nothing else admits a new subject: no claim, a provider
   // the acr doesn't name, another domain, an address the provider didn't verify. Each refusal is recorded by subject.
-  // Exactly the account service's staff rule for Google: a verified Google address, and hd in AUTH_STAFF_DOMAINS.
+  // Exactly the account service's staff rule: Google, a verified Google address, and hd in AUTH_STAFF_GOOGLE_DOMAINS.
   // Hosted and not invited, a refusal puts the verified address on the waitlist and says so; the screen reads the
   // address from a short-lived cookie the page can read. It is never a session.
   for (const [name,hd,googleVerified] of [[null,null,true],['github','example.org',true],['google','other.example',true],['google','Example.org',true],['google','example.org',false]] as const) {
@@ -1160,51 +1164,80 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   assert.equal(created.status,403);assert.equal(((await created.json()) as {error:{code:string}}).error.code,'SIGNUP_NOT_APPROVED');
 
   // GitHub and Google, as hosted: sign-in asks for no method, so the account service offers both, and the acr names
-  // the one used. The same rule admits through either: a staff domain the provider vouches for, or an invitation, and
-  // only with a verified address.
+  // the one used. Staff is a Google Workspace sign-in only. Hosted, nothing is admitted without a verified address.
   runtime.config.accountRequiredAcr=[githubAcr,googleAcr];
   const use=(method:'github'|'google')=>{providerName=method;tokenAcr=method==='github'?githubAcr:googleAcr;providerHd=null;providerEmail=null;providerVerified=true;};
   const fresh=(address:string)=>{subject=randomUUID();subjects.push(subject);email=address;waitlist.push(address);verified=true;};
+  const accountOf=(response:Response)=>new URL(response.headers.get('location')!).searchParams.get('account');
+  const sessionOf=(response:Response)=>response.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))!.split(';')[0]!;
+  const errorOf=async(response:Response)=>[response.status,((await response.json()) as {error?:{code:string}}).error?.code];
+  use('google');providerHd='example.org';fresh(`staff-${randomUUID()}@example.org`);
+  const staffIn=await login(), staffSubject=subject, staffEmail=email, staffUser=accountOf(staffIn)!, staffSession=sessionOf(staffIn);
+  assert.equal(landed(staffIn),origin+'/');
+  assert.deepEqual(await attempt(),{acr:googleAcr,provider:'google',provider_hd:'example.org',outcome:'signed_in:staff'});
   for (const method of ['github','google'] as const) {
-    use(method);
-    fresh(`${method}-${randomUUID()}@example.org`);if (method==='google') providerHd='example.org';
-    assert.equal(landed(await login()),origin+'/',`${method}: a verified staff address gets in`);
-    assert.deepEqual(await attempt(),{acr:tokenAcr,provider:method,provider_hd:providerHd,outcome:'signed_in:staff'});
-    fresh(`${method}-${randomUUID()}@example.org`);if (method==='google') providerHd='example.org';verified=false;
+    use(method);if (method==='google') providerHd='example.org';fresh(`${method}-${randomUUID()}@example.org`);verified=false;
     assert.equal((await login()).headers.get('location'),origin+'/?auth=error',`${method}: an unverified address is refused`);
     assert.equal((await attempt()).outcome,'email_unverified');
     assert.deepEqual(await waitlisted(email),[]);
-    fresh(`${method}-${randomUUID()}@example.net`);if (method==='google') providerHd='other.example';
+    use(method);if (method==='google') providerHd='other.example';fresh(`${method}-${randomUUID()}@example.net`);
     assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist',`${method}: another domain is waitlisted`);
     assert.equal((await attempt()).outcome,'not_approved');
   }
-  // GitHub vouches only for its primary, verified address: without one, a staff address on the account isn't staff.
-  use('github');providerVerified=false;fresh(`github-${randomUUID()}@example.org`);
+  // Review 1: GitHub proves no Workspace membership. Its verified address at the staff domain (a former colleague's,
+  // say) is not staff: no account, no workspace, the waitlist. Nor is a Google account outside a Workspace.
+  use('github');fresh(`former-${randomUUID()}@example.org`);
   assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist');
   assert.deepEqual(await attempt(),{acr:githubAcr,provider:'github',provider_hd:null,outcome:'not_approved'});
+  assert.equal((await db.query('SELECT FROM nightmail_oidc_identities WHERE issuer=$1 AND subject=$2',[issuer,subject])).rowCount,0);
+  use('google');fresh(`consumer-${randomUUID()}@example.org`);
+  assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist');
   // A method the installation doesn't list is refused before anything else.
-  use('github');tokenAcr='urn:anomaly:acr:passkey';fresh(`github-${randomUUID()}@example.org`);
+  use('github');tokenAcr='urn:anomaly:acr:passkey';fresh(`other-${randomUUID()}@example.org`);
   assert.equal((await login()).headers.get('location'),origin+'/?auth=method_required');
-  // An invitation works through GitHub too, with the verified address it names.
-  use('github');const invitee=`invited-${randomUUID()}@example.net`, invitationId=randomUUID(), invited=origin+'/?invitation='+invitationId;
-  await db.query("INSERT INTO workspace_invitations(id,workspace_id,email,role,status,expires_at,inviter_id) VALUES($1,$2,$3,'member','pending',now()+interval '1 hour',$4)",[invitationId,me.workspaceId,invitee,me.id]);
-  fresh(invitee);verified=false;
-  assert.equal((await login(undefined,invited)).headers.get('location'),origin+'/?auth=error','An unverified address follows no invitation');
-  assert.equal((await attempt()).outcome,'email_unverified');
-  verified=true;
-  assert.equal(landed(await login(undefined,invited)),invited);
+  // Review 3: an invitation needs a mailbox the sign-in proves now, a Google-hosted one (Gmail or Workspace). GitHub's
+  // verified address doesn't prove it, even matching the invitation and following its link; nor does a Google account
+  // on another provider's address.
+  const staffWorkspace=((await (await request('/v1/me','GET',staffSession)).json()) as {workspaceId:string}).workspaceId;
+  const invite=async(address:string)=>{const id=randomUUID();await db.query("INSERT INTO workspace_invitations(id,workspace_id,email,role,status,expires_at,inviter_id) VALUES($1,$2,$3,'member','pending',now()+interval '1 hour',$4)",[id,staffWorkspace,address,staffUser]);return {id,url:origin+'/?invitation='+id};};
+  for (const [method,address] of [['github',`invited-${randomUUID()}@example.net`],['google',`invited-${randomUUID()}@example.net`]] as const) {
+    use(method);const link=await invite(address);fresh(address);
+    assert.equal((await login(undefined,link.url)).headers.get('location'),origin+'/?auth=error',method);
+    assert.equal((await attempt()).outcome,'invitation');
+  }
+  use('google');const gmail=`invited-${randomUUID()}@gmail.com`, gmailInvite=await invite(gmail);fresh(gmail);
+  const joined=await login(undefined,gmailInvite.url);
+  assert.equal(landed(joined),gmailInvite.url);
   assert.equal((await attempt()).outcome,'signed_in:invitation');
-  // One account, two methods: the account service names it by one subject whichever signs in, so it stays one user,
-  // even when GitHub's own address is a personal one. Another account (another subject) is another user.
-  use('google');providerHd='example.org';fresh(`both-${randomUUID()}@example.org`);
-  const accountOf=(response:Response)=>new URL(response.headers.get('location')!).searchParams.get('account');
-  const viaGoogle=accountOf(await login());
-  use('github');providerEmail=`personal-${randomUUID()}@example.net`;
-  assert.equal(accountOf(await login()),viaGoogle,'Same subject, same user');
-  assert.equal((await attempt()).outcome,'signed_in');
-  subject=randomUUID();subjects.push(subject);providerEmail=null;
-  const other=accountOf(await login());
-  assert.ok(other && other!==viaGoogle,'Another subject is never linked by address');
+  assert.deepEqual(await (await request(`/v1/workspaces/invitations/${gmailInvite.id}/accept`,'POST',sessionOf(joined),{})).json(),{workspaceId:staffWorkspace});
+  // The same person signed in with GitHub (one subject, one user) can't redeem one: it is asked to sign in with Google.
+  await db.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[staffWorkspace,accountOf(joined)]);
+  const again=await invite(gmail);
+  use('github');const viaGithub=await login();
+  assert.equal(accountOf(viaGithub),accountOf(joined),'One subject, one user, whichever method');
+  assert.deepEqual(await errorOf(await request(`/v1/workspaces/invitations/${again.id}/accept`,'POST',sessionOf(viaGithub),{})),[403,'MAILBOX_SIGN_IN_REQUIRED']);
+  // Review 2: an operator whose account also has GitHub linked (one subject) gets a member session through GitHub: no
+  // Operator, no support sign-in, no new workspace, until that session signs in with Google.
+  await db.query("INSERT INTO platform_operators(user_id,role,reason) VALUES($1,'operator:read','sign-in methods acceptance fixture')",[staffUser]);
+  use('github');subject=staffSubject;email=staffEmail;providerEmail=`personal-${randomUUID()}@example.net`;
+  const operatorViaGithub=await login();
+  assert.equal(accountOf(operatorViaGithub),staffUser);
+  const githubSession=sessionOf(operatorViaGithub);
+  const githubMe=await (await request('/v1/me','GET',githubSession)).json() as {id:string;operator:string|null;staffSignIn:boolean};
+  assert.deepEqual([githubMe.id,githubMe.operator,githubMe.staffSignIn],[staffUser,null,true]);
+  assert.deepEqual(await errorOf(await request('/v1/operator/waitlist','GET',githubSession)),[403,'OPERATOR_REQUIRED']);
+  assert.deepEqual(await errorOf(await request(`/v1/operator/support/staff-sign-in?return=${encodeURIComponent('https://support.example.org/staff/callback')}`,'GET',githubSession)),[403,'OPERATOR_REQUIRED']);
+  assert.deepEqual(await errorOf(await request('/v1/workspaces','POST',githubSession,{name:'Through GitHub'})),[403,'SIGNUP_NOT_APPROVED']);
+  // Sign in with Google: the account service is asked for Google, and that session is staff again.
+  use('google');providerHd='example.org';
+  const stepUp=await login(undefined,origin+'/operator','google');
+  assert.equal(landed(stepUp),origin+'/operator');
+  const googleSession=sessionOf(stepUp), back=await (await request('/v1/me','GET',googleSession)).json() as {operator:string|null;staffSignIn:boolean};
+  assert.deepEqual([back.operator,back.staffSignIn],['operator:read',false]);
+  assert.equal((await request('/v1/operator/waitlist','GET',googleSession)).status,200);
+  // A separate account (another subject) with a verified user's address is refused, never linked to that user.
+  use('github');subject=randomUUID();subjects.push(subject);email=staffEmail;
+  assert.equal((await login()).headers.get('location'),origin+'/?auth=error');
   runtime.config.accountRequiredAcr=[googleAcr];
 });
 
@@ -1219,7 +1252,7 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
   const origin = 'https://dashboard.example.org', issuer = 'https://accounts-switch.example.org', googleAcr = 'urn:anomaly:acr:google';
   const keys = generateKeyPairSync('ec',{namedCurve:'P-256'}), rp = generateKeyPairSync('ec',{namedCurve:'P-256'});
   const runtime: import('./src/core.js').Runtime = { config:loadConfig({PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, ACCOUNT_CLIENT_ID:'dashboard',
-    ACCOUNT_CLIENT_PRIVATE_KEY:JSON.stringify({...rp.privateKey.export({format:'jwk'}),kid:'rp'}), BANE_ROOT_SECRET:'local-fixture-'.repeat(4), MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:googleAcr, AUTH_STAFF_DOMAINS:'example.org'}),
+    ACCOUNT_CLIENT_PRIVATE_KEY:JSON.stringify({...rp.privateKey.export({format:'jwk'}),kid:'rp'}), BANE_ROOT_SECRET:'local-fixture-'.repeat(4), MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:googleAcr, AUTH_STAFF_GOOGLE_DOMAINS:'example.org'}),
     db:drizzle(db), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} };
   type Person = { subject: string; email: string; id?: string; workspace?: string };
   let person: Person = {subject:'', email:''}, nonce = '', tokenAcr = googleAcr, peer = 0, pushed: URLSearchParams | undefined;
@@ -2821,6 +2854,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
             error(await setLimit(b.cookie,{limit:500,reason:'Raising my own domain limit'}),403,'OPERATOR_REQUIRED');
             error(await setLimit(a.cookie,{limit:500,reason:'Raising my own domain limit'}),403,'OPERATOR_REQUIRED');
             await pool.query(`INSERT INTO platform_operators(user_id,role,reason) VALUES($1,'operator','Synthetic domain-limit operator')`,[operatorId]);
+            await pool.query('UPDATE nightmail_sessions SET staff=true WHERE user_id=$1',[operatorId]);
             error(await setLimit(a.cookie,{limit:102,reason:'short'}),422,'VALIDATION_FAILED');
             error(await setLimit(a.cookie,{limit:0,reason:'Agency needs more domains'}),422,'VALIDATION_FAILED');
             assert.deepEqual(ok(await setLimit(a.cookie,{limit:102,reason:'Agency needs more domains',ticketRef:'T-9'})).domainLimit,{used:100,limit:102,custom:true});
@@ -6535,7 +6569,7 @@ describe('Hosted MCP OAuth and tools', () => {
 
   test('Hosted MCP members and invitations: an owner\'s or admin\'s own sign-in lists, invites below owner and revokes by address; listings never carry an invitation link; keys, agent tokens, members and other workspaces are refused', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, request, local }) => {
-      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffDomains: [] });
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
       const wid = runtime.config.workspaceId, base = '/v1/workspaces/current', { mintResourceToken } = await import('./scripts/fixture-issuer.js');
       const admin = await sessionFixture(t), member = await sessionFixture(t), guest = await sessionFixture(t), other = unique('other-ws');
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [other]);
@@ -6679,7 +6713,7 @@ describe('Hosted MCP OAuth and tools', () => {
       PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
     const app = createApp(), runtime = instance.runtime, wid = unique('invitation-race');
-    Object.assign(runtime.config, { multiTenant: true, workspaceId: wid, allowedSubjects: [], staffDomains: [] });
+    Object.assign(runtime.config, { multiTenant: true, workspaceId: wid, allowedSubjects: [], staffGoogleDomains: [] });
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [wid]);
     await ensureRegionSettings(runtime.db, runtime.config);
     const admin = await sessionFixture(t);
@@ -6733,7 +6767,7 @@ describe('Hosted MCP OAuth and tools', () => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const hex = () => (randomUUID() + randomUUID()).replaceAll('-', ''), sha = (v: string) => createHash('sha256').update(v).digest('hex');
       const signing = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json;
-      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffDomains: [],
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [],
         support: { url: 'https://support.example.com/start', signingKey: { kty: 'OKP', crv: 'Ed25519', d: signing.d, x: signing.x } } });
       const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
       const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
@@ -6821,6 +6855,7 @@ describe('Hosted MCP OAuth and tools', () => {
 
       // Operators: everything about a workspace or a user, and each read is itself on the trail.
       await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'audit trail acceptance fixture')`, [operator.userId]);
+      await staffSession(db, operator.userId);
       const trail = ok(await send('GET', `/v1/operator/workspaces/${wid}/audit?include=enforcement,billing&action=api_key.`, session(operator)));
       assert.deepEqual(trail.data.map((e: Json) => e.action), ['api_key.revoke', 'api_key.create']);
       assert.equal(trail.data[1].requestId, createdRequest); assert.equal(trail.data[1].actor.email, manager!.email);
@@ -7001,7 +7036,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const conversation = () => `conv_${Array.from(crypto.getRandomValues(new Uint8Array(26)), b => base32[b & 31]).join('')}`;
       const signing = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json;
       const supportBox = `mbx_${hex().slice(0, 32)}`, salesBox = `mbx_${hex().slice(0, 32)}`, acmeBox = `mbx_${hex().slice(0, 32)}`;
-      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffDomains: [],
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [],
         support: { url: 'https://support.example.com/start', signingKey: { kty: 'OKP', crv: 'Ed25519', d: signing.d, x: signing.x }, addressIds: [supportBox] } });
       const { createApp, createOpenApiApp } = await import('./src/app.js'), app = createApp();
       const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
@@ -7029,6 +7064,7 @@ describe('Hosted MCP OAuth and tools', () => {
         [unique('mem'), acme, owner.userId, unique('mem'), admin.userId, unique('mem'), member.userId, unique('mem'), beta, unique('mem'), other, outsider.userId]);
       await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[owner, admin, member, outsider, lonely, operator].map(f => f.userId)]);
       await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support conversations acceptance fixture')`, [operator.userId]);
+      await staffSession(db, operator.userId);
       await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'member')`, [unique('mem'), home, operator.userId]);
       const supportDomain = `sup-${hex().slice(0, 10)}.example`, acmeDomain = `acme-${hex().slice(0, 10)}.example`, thread = unique('thread'), acmeThread = unique('thread');
       await db.query('INSERT INTO mail_threads(id, workspace_id) VALUES ($1, $2), ($3, $4)', [thread, home, acmeThread, acme]);
@@ -7418,7 +7454,7 @@ describe('Hosted MCP OAuth and tools', () => {
       S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
     const runtime = instance.runtime, app = createApp(), db = await fixtureDatabase(t), made: string[] = [];
-    Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffDomains: [] });
+    Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
     cleanup(t, async () => { await db.query('DELETE FROM support_conversations WHERE id = ANY($1)', [made]); });
     const base32 = 'abcdefghijklmnopqrstuvwxyz234567';
     const conversation = () => { const id = `conv_${Array.from(crypto.getRandomValues(new Uint8Array(26)), b => base32[b & 31]).join('')}`; made.push(id); return id; };
@@ -7495,7 +7531,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const random = (n: number) => Array.from(crypto.getRandomValues(new Uint8Array(n)), b => base32[b & 31]).join('');
       const conversation = () => `conv_${random(26)}`, msg = () => `msg_${random(16)}`, ticketId = () => `tkt_${random(16)}`;
       const signing = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json;
-      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffDomains: [],
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [],
         support: { url: 'https://support.example.com/start', signingKey: { kty: 'OKP', crv: 'Ed25519', d: signing.d, x: signing.x }, addressIds: [] } });
       const { createApp } = await import('./src/app.js'), app = createApp();
       const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
@@ -7518,6 +7554,7 @@ describe('Hosted MCP OAuth and tools', () => {
         [unique('mem'), acme, owner.userId, unique('mem'), member.userId, unique('mem'), beta, unique('mem'), home, operator.userId, unique('mem'), reader.userId]);
       await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[owner, member, operator, reader].map(f => f.userId)]);
       await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator', 'support inbox acceptance fixture'), ($2, 'operator:read', 'support inbox acceptance fixture')`, [operator.userId, reader.userId]);
+      await staffSession(db, operator.userId, reader.userId);
       const chat = async (f: SessionFixture, workspace = acme, body: Json = {}) => {
         const handoff = ok(await send('POST', '/v1/contact-support', session(f, workspace), body), 201), id = conversation();
         ok(reply(await platform.registerConversation({ conversationId: id, evidence: { kind: 'handoff', token: handoff.token } })), 201);
@@ -7773,7 +7810,7 @@ describe('Hosted MCP OAuth and tools', () => {
 
   test('UI notes: only allowlisted operators (UI_NOTES_SUBJECTS) leave notes with screenshots behind five-minute links; a notes key reads and resolves them and nothing else; other operators get 404, customers 403; every change is audited', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
-      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffDomains: [] });
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
       // The attachments bucket, in memory: the screenshot objects are checked directly.
       const objects = new Map<string, { body: Uint8Array; contentType: string }>();
       const env: import('./src/core.js').Runtime = { ...runtime, storage: { put: async (key, body, contentType) => { objects.set(key, { body: new Uint8Array(body), contentType }); }, get: async key => objects.get(key) ?? null, delete: async key => { objects.delete(key); } } };
@@ -7787,6 +7824,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN }), bearer = (token: string) => ({ authorization: `Bearer ${token}` });
       const operator = await sessionFixture(t), reader = await sessionFixture(t), owner = await sessionFixture(t), other = await sessionFixture(t);
       await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator', 'UI notes acceptance fixture'), ($2, 'operator:read', 'UI notes acceptance fixture'), ($3, 'operator', 'UI notes acceptance fixture')`, [operator.userId, reader.userId, other.userId]);
+      await staffSession(db, operator.userId, reader.userId, other.userId);
       // Only `operator` is allowlisted, by issuer subject (seedSession binds the subject to the user ID). `other` is an
       // operator too, and `reader` is listed but only operator:read: both must see nothing of the feature.
       const issuer = process.env.ACCOUNT_ISSUER ?? 'https://account.anoma.ly';
@@ -7967,7 +8005,7 @@ describe('Hosted MCP OAuth and tools', () => {
 
   test('Support deliverability reads: weighted, one-workspace aggregates with rates, caps, redaction, findings and content consent', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
-      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffDomains: [], support: { url: 'https://support.example.com/start' } });
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start' } });
       const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
       const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
         const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
@@ -7982,6 +8020,7 @@ describe('Hosted MCP OAuth and tools', () => {
         [unique('mem'), other, outsider.userId, unique('mem'), second, manager!.userId, unique('mem'), ops, operator.userId]);
       await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[operator.userId, outsider.userId]]);
       await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support deliverability acceptance fixture')`, [operator.userId]);
+      await staffSession(db, operator.userId);
       const mint = async (body: Json) => { const grant = ok(await send('POST', '/v1/operator/support/grants', session(operator), { reason: 'Customer asked why mail goes to spam', ...body }), 201); secrets.add(grant.token); return grant; };
       const handoff = ok(await local('POST', '/v1/contact-support', { shareContent: true, message: 'Gmail puts our newsletter in spam' }), 201);
       const content = await mint({ userId: manager!.userId, ticketRef: 'D-1', verification: 'handoff', handoffId: handoff.id });
@@ -8194,7 +8233,7 @@ describe('Hosted MCP OAuth and tools', () => {
     // whole minute and keys the 60-second cache, so two reads either side of a minute boundary missed it (dev, Nov 17).
     t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
     await simulatedSesFixture(t, async ({ runtime, db }) => {
-      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffDomains: [], support: { url: 'https://support.example.com/start' }, observability: undefined });
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start' }, observability: undefined });
       const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
       const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
         const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
@@ -8209,6 +8248,7 @@ describe('Hosted MCP OAuth and tools', () => {
         [unique('mem'), other, outsider.userId, unique('mem'), second, manager!.userId, unique('mem'), ops, operator.userId]);
       await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[operator.userId, outsider.userId]]);
       await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support request logs acceptance fixture')`, [operator.userId]);
+      await staffSession(db, operator.userId);
       const mint = async (body: Json) => { const grant = ok(await send('POST', '/v1/operator/support/grants', session(operator), { reason: 'Customer asked why their sends fail', verification: 'dmarc', ...body }), 201); secrets.add(grant.token); return grant; };
       const grant = await mint({ userId: manager!.userId, ticketRef: 'L-1', workspaceIds: [wid] }), both = await mint({ userId: manager!.userId, ticketRef: 'L-2' });
       const support = bearer(grant.token), get = async (path: string, who = support) => ok(await send('GET', path, who));
@@ -8355,7 +8395,7 @@ describe('Hosted MCP OAuth and tools', () => {
   test('Support staff sign-in: an operator session gets a 2-minute staff token for the support site; only the binding verifies it, and only while they are an operator', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const jwk = (generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json), key = { kty: 'OKP' as const, crv: 'Ed25519' as const, d: jwk.d as string, x: jwk.x as string };
-      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffDomains: [], support: { url: 'https://support.example.com/start', signingKey: key } });
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start', signingKey: key } });
       const app = (await import('./src/app.js')).createApp();
       const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
         const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
@@ -8367,6 +8407,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const platform = supportPlatform(async req => app.fetch(req, { ...runtime, platformCaller: 'bane-support' }), () => runtime.config);
       const operator = await sessionFixture(t), member = await sessionFixture(t);
       await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support staff sign-in acceptance fixture')`, [operator.userId]);
+      await staffSession(db, operator.userId);
       const callback = 'https://support.example.com/staff/callback';
       const signIn = (to: string, who = operator) => send('GET', `/v1/operator/support/staff-sign-in?return=${encodeURIComponent(to)}`, session(who));
 
@@ -12953,7 +12994,7 @@ describe('Dashboard API capabilities', () => {
       const first = await list('limit=1');
       assert.equal(error(await local('GET', `/v1/logs?limit=1&direction=sent&cursor=${first.nextCursor}`), 422).code, 'INVALID_CURSOR');
       // A dashboard member (hosted workspaces have members) reads mail on live addresses only, without delivery details or the spam verdict.
-      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffDomains: [] });
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
       const { rows: [{ role }] } = await db.query('SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2', [wid, manager!.userId]);
       await db.query("UPDATE workspace_members SET role = 'member' WHERE workspace_id = $1 AND user_id = $2", [wid, manager!.userId]);
       const member = await list('limit=10'), memberSpam = await list('status=spam'), memberClean = await list('status=received');
@@ -13091,7 +13132,7 @@ describe('Dashboard API capabilities', () => {
       assert.deepEqual(shape(ok(await local('GET', `/v1/inbound/messages/${r1}?includeThread=true&addressId=${boxA}`)).thread), { id: thread, count: 2, messages: whole.messages.slice(1, 3) });
       // A dashboard member reads mail on live addresses: not unrouted r0, the snippet of an ordinary reply without its
       // unsubscribe token, and nothing of the hidden thread, though it reads the owner's reply into it.
-      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffDomains: [] });
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
       const { rows: [{ role }] } = await db.query('SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2', [wid, manager!.userId]);
       await db.query("UPDATE workspace_members SET role = 'member' WHERE workspace_id = $1 AND user_id = $2", [wid, manager!.userId]);
       try {
@@ -29676,7 +29717,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
 test('Audit trail: sensitive actions each write one redacted row', async t => {
   await simulatedSesFixture(t, async ({ runtime, db, local }) => {
-    const selfHosted = { multiTenant: false, allowedSubjects: runtime.config.allowedSubjects, staffDomains: runtime.config.staffDomains }, hosted = { multiTenant: true, allowedSubjects: [], staffDomains: [] };
+    const selfHosted = { multiTenant: false, allowedSubjects: runtime.config.allowedSubjects, staffGoogleDomains: runtime.config.staffGoogleDomains }, hosted = { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] };
     Object.assign(runtime.config, hosted);
     const { SESv2Client } = await import('@aws-sdk/client-sesv2');
     t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {

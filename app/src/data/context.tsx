@@ -26,6 +26,8 @@ import { isKnownPath } from '../lib/routes'
 // The tab's account and workspace. logout signs out of this tab's account only; another connected account takes its place.
 type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>
   switchAccount: (id: string, path?: string, workspace?: string) => Promise<void>; addAccount: (path?: string) => void; signOutAccount: (id?: string) => Promise<void>; signOutAll: () => Promise<void>
+  /** Staff tools need this account's Google sign-in (Identity.staffSignIn): signs in again with Google, back to this page. */
+  signInForStaff: () => void
   notice: string | null; dismissNotice: () => void }
 const homeChunk = chunk(() => import('../features/home'))
 export const loadHome = homeChunk.preload
@@ -325,7 +327,8 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   // used by that click only; a pointer down that never becomes a click is dropped after a few seconds.
   const signIn = useRef<{ at: number; url: Promise<string> } | null>(null)
   // select: the account service shows its account chooser first (the waitlist screen's "Use a different account").
-  function accountUrl(select = false) {
+  // method: it asks for that sign-in (staff tools need Google).
+  function accountUrl(select = false, method?: 'google') {
     // Assign path components rather than resolving an untrusted redirect parameter. Signing in from the homepage, or
     // from an address the dashboard doesn't have, opens Overview.
     const callback = new URL(window.location.origin), path = window.location.pathname
@@ -337,7 +340,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     // account and removes it before the browser opens the page (docs/analytics.md).
     const session = analytics().signInSession()
     if (session) callback.searchParams.set(ANALYTICS_SESSION_PARAM, session)
-    return request<{url: string}>('/api/auth/sign-in/account', {method: 'POST', body: {callbackURL: callback.href, ...select ? {prompt: 'select_account'} : {}}}).then(result => {
+    return request<{url: string}>('/api/auth/sign-in/account', {method: 'POST', body: {callbackURL: callback.href, ...select ? {prompt: 'select_account'} : {}, ...method ? {method} : {}}}).then(result => {
       const url = new URL(result.url)
       if (url.protocol !== 'https:') throw new Error('Invalid sign-in redirect.')
       return url.href
@@ -350,11 +353,11 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     url.catch(() => { if (signIn.current?.url === url) signIn.current = null })
   }
   const login = () => startLogin(false)
-  async function startLogin(select: boolean) {
+  async function startLogin(select: boolean, method?: 'google') {
     setBusy(true); setAuthError(null)
     const pending = signIn.current
     signIn.current = null
-    try { const url = await (!select && pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl(select)); expectAccount(); analytics().flush(); window.location.assign(url) }
+    try { const url = await (!select && !method && pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl(select, method)); expectAccount(); analytics().flush(); window.location.assign(url) }
     catch (error) { setAuthError(error); setBusy(false) }
   }
   const signedOut = identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED'
@@ -377,7 +380,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   // the invitation itself is readable. It gets the same review; nothing joins until the recipient clicks Join.
   const invitee = signedOut && invitation !== null && review.data?.status === 'pending'
   const reviewing = !publicRoute && invitation !== null && ((identity.data && !identity.isError) || invitee || (signedOut && review.isFetching))
-  return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, notice, dismissNotice: () => setNotice(null)}}>
+  return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, signInForStaff: () => void startLogin(false, 'google'), notice, dismissNotice: () => setNotice(null)}}>
     <Analytics identity={identity.data && !identity.isError ? identity.data : null} signedOut={signedOut} />
     {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
     : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending ? <BootLoader /> : authResult === 'waitlist' && window.location.pathname === '/' ? <WaitlistPage busy={busy} error={authError} onSwitch={() => void startLogin(true)} />

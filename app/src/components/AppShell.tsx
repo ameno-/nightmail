@@ -199,7 +199,7 @@ export function AppShell() {
     }
   }
   // Members see every page: owner and admin ones carry a lock and open a short note on who can use them.
-  const links: readonly NavItem[] = [...navigation, ...session?.identity?.operator ? [operatorLink] : []]
+  const links: readonly NavItem[] = [...navigation, ...session?.identity?.operator || session?.identity?.staffSignIn ? [operatorLink] : []]
   const locked = (path: string) => !access.canAdminister && adminOnly.has(path)
   const scoreHost = (scoreAbout.open || scoreAboutMounted) && <Suspense fallback={null}><ScoreAboutHost /></Suspense>
   const connectHost = (connecting || connectMounted) && <Suspense fallback={null}><ConnectAgentHost /></Suspense>

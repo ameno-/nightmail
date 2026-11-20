@@ -8,12 +8,17 @@
   },
   "app/src/components/LegalLinks.tsx": {
    "grade": [
-    "8: by continuing you agree to the terms of service and privacy "
+    "9: by continuing you agree to the terms of service and privacy "
    ]
   },
   "app/src/features/inbound/trace.tsx": {
    "length/placeholder": [
-    "76: from: ana@example.org to: support@acme.com subject: invoice "
+    "75: from: ana@example.org to: support@acme.com subject: invoice "
+   ]
+  },
+  "app/src/features/operator/skeletons.tsx": {
+   "length/heading": [
+    "13: sign in with google to use staff tools"
    ]
   }
  }

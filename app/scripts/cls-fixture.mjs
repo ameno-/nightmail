@@ -722,6 +722,8 @@ export async function seed(fx) {
   const rae = await fx.signIn('rae', 'rae@harborsupply.example', 'Rae Lind', { id: 'ws_harbor', name: 'Harbor Supply' });
   // Rae is an operator too, but not in UI_NOTES_SUBJECTS: no UI notes anywhere for her (cls.mjs checks).
   await db.query("INSERT INTO platform_operators(user_id,role,reason) VALUES('user_rae','operator','CLS fixture: an operator without UI notes')");
+  // Both signed in with Google Workspace: staff tools need that session (api/src/operator.ts).
+  await db.query("UPDATE nightmail_sessions SET staff=true WHERE user_id IN ('user_dana','user_rae')");
   const harborConn = await hosted(db, 'ws_harbor');
   await domain(db, 'ws_harbor', harborConn, 'harborsupply.example', { mailFrom: true });
   await rae.api('POST', '/v1/api-keys', { name: 'Production', permissions: ['send'], domains: [] }, 201);

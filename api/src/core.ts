@@ -22,6 +22,8 @@ export interface Actor {
    * agent tokens and the keys it created), or the operator who made a UI notes key (src/ui-notes.ts).
    */
   userId?: string;
+  /** A dashboard session's sign-in proved hosted staff (a Google Workspace sign-in, account-policy.ts). Staff tools need it. */
+  staff?: boolean;
   role?: string; receivingConsent?:boolean; grantId?:string; tokenId?:string;
   // Number of emails queued per region, for a bounded post-commit wake.
   dispatchTargets?: Map<string, { count: number; priority: boolean }>;
@@ -68,8 +70,8 @@ export interface Config {
   accountRequiredAcr?: string[];
   /** Self-hosted access policy: exact issuer subjects. Identity is (issuer, subject); addresses never admit anyone. */
   allowedSubjects: string[];
-  /** Hosted staff: domains of the sign-in's provider identity (see account-policy.ts). */
-  staffDomains: string[];
+  /** Hosted staff: Google Workspace domains of the sign-in's provider identity (see account-policy.ts). */
+  staffGoogleDomains: string[];
   /** Hosted: the issuer subjects allowed to use staff UI notes (src/ui-notes.ts); empty turns the feature off. */
   uiNotesSubjects?: { issuer: string; subject: string }[];
   /** Dashboard usage analytics (src/analytics.ts, DASHBOARD_ANALYTICS=on): off unless set. */

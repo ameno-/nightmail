@@ -9,6 +9,7 @@ const optional = <T extends z.ZodType>(schema: T) => z.preprocess(v => v === '' 
 const accountId = z.string().regex(/^\d{12}$/);
 // The account service's authentication context for each sign-in method it offers (its acr_values_supported).
 export const METHOD_ACR = { google: 'urn:anomaly:acr:google', github: 'urn:anomaly:acr:github' } as const;
+export const GOOGLE_ACR = METHOD_ACR.google;
 const methodAcrs: readonly string[] = Object.values(METHOD_ACR);
 const REMOVED_ALLOWLISTS = ['AUTH_ALLOWED_EMAILS', 'AUTH_ALLOWED_DOMAINS']; // Refused at startup when self-hosted, never read. premerge-identity: allowed
 const values = z.object({
@@ -38,9 +39,8 @@ const values = z.object({
   AUTH_ALLOWED_SUBJECTS: z.string().default(''),
   // Self-hosted: subjects that become owners of 'default' at their first sign-in, or * for every allowed subject.
   DEFAULT_WORKSPACE_OWNERS: z.string().trim().default('*'),
-  // Hosted staff: the domains whose people may sign up and create workspaces, read from the sign-in's provider
-  // identity (account-policy.ts): a Google Workspace domain (hd), or the domain of GitHub's verified primary address.
-  AUTH_STAFF_DOMAINS: z.string().default(''),
+  // Hosted staff: Google Workspace domains (the provider identity's hd claim) that may sign up and create workspaces.
+  AUTH_STAFF_GOOGLE_DOMAINS: z.string().default(''),
   // Hosted: who may use staff UI notes (src/ui-notes.ts), as "issuer subject" pairs separated by commas. They must also
   // hold the operator role. Empty turns the feature off: its routes answer 404 and the dashboard shows none of it.
   UI_NOTES_SUBJECTS: z.string().default(''),
@@ -181,9 +181,9 @@ export function loadConfig(input: Record<string, unknown>): Config {
     throw new ApiError(503, 'CONFIG_INVALID', `${REMOVED_ALLOWLISTS.join(' and ')} were removed. List issuer subjects in AUTH_ALLOWED_SUBJECTS (scripts/list-signin-attempts.ts shows them).`);
   const allowedSubjects = list(v.AUTH_ALLOWED_SUBJECTS);
   const defaultWorkspaceOwners = v.MULTI_TENANT === 'true' ? [] : v.DEFAULT_WORKSPACE_OWNERS === '*' ? '*' : list(v.DEFAULT_WORKSPACE_OWNERS);
-  const staffDomains = list(v.AUTH_STAFF_DOMAINS).map(d => d.toLowerCase());
-  if (staffDomains.some(d => !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(d))) throw new ApiError(503, 'CONFIG_INVALID', 'Use exact domains in AUTH_STAFF_DOMAINS, without wildcards or URLs.');
-  if (staffDomains.length && !methodsOnly) throw new ApiError(503, 'CONFIG_INVALID', `AUTH_STAFF_DOMAINS needs ACCOUNT_REQUIRED_ACR to list sign-in methods (${methodAcrs.join(', ')}).`);
+  const staffGoogleDomains = list(v.AUTH_STAFF_GOOGLE_DOMAINS).map(d => d.toLowerCase());
+  if (staffGoogleDomains.some(d => !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(d))) throw new ApiError(503, 'CONFIG_INVALID', 'Use exact Google Workspace domains in AUTH_STAFF_GOOGLE_DOMAINS, without wildcards or URLs.');
+  if (staffGoogleDomains.length && !requiredAcr?.includes(GOOGLE_ACR)) throw new ApiError(503, 'CONFIG_INVALID', `AUTH_STAFF_GOOGLE_DOMAINS needs ACCOUNT_REQUIRED_ACR to include ${GOOGLE_ACR}.`);
   const uiNotesSubjects = v.MULTI_TENANT !== 'true' ? [] : list(v.UI_NOTES_SUBJECTS).map(pair => {
     const [issuer, subject, extra] = pair.split(/\s+/);
     if (!issuer || !subject || extra !== undefined || !/^https:\/\/[^/\s]+$/.test(issuer) || subject.length > 255) throw new ApiError(503, 'CONFIG_INVALID', 'UI_NOTES_SUBJECTS lists "https://issuer subject" pairs separated by commas.');
@@ -221,7 +221,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     byoV2: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL, byoEventsOrigin: v.BYO_EVENTS_ORIGIN,
     hostedSendCaps: { firstWeek: v.HOSTED_SEND_CAP_FIRST_WEEK },
     domainConnect,
-    allowedSubjects, staffDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr, uiNotesSubjects, dashboardAnalytics: v.DASHBOARD_ANALYTICS === 'on',
+    allowedSubjects, staffGoogleDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr, uiNotesSubjects, dashboardAnalytics: v.DASHBOARD_ANALYTICS === 'on',
     accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly', oauthScopePrefix: v.OAUTH_SCOPE_PREFIX, previousOrigins, byoStackPrefix: v.BYO_STACK_PREFIX,
     accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG } : undefined,
     encryptionKey: deriveEncryptionKey(v.NIGHTMAIL_ROOT_SECRET),

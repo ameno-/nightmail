@@ -33,9 +33,9 @@
     "ACCOUNT_REQUIRED_ACR": "urn:anomaly:acr:github urn:anomaly:acr:google",
     // MCP asks for nightmail:* scopes, on both hosts; bane:* grants are still accepted until the cutover.
     "OAUTH_SCOPE_PREFIX": "nightmail",
-    // Staff sign-up, from the sign-in's provider identity and never the account's own address: the Google Workspace
-    // domain (hd), or the domain of GitHub's verified primary address (api/src/account-policy.ts).
-    "AUTH_STAFF_DOMAINS": "anoma.ly",
+    // Staff sign-up: the Google Workspace domain (hd) of the sign-in's provider identity, never an address. Only a
+    // Google sign-in is staff; GitHub signs in members and existing users.
+    "AUTH_STAFF_GOOGLE_DOMAINS": "anoma.ly",
     // Staff UI notes (src/ui-notes.ts): off on dev until Ryan's account.dev.anoma.ly subject is listed here.
     "UI_NOTES_SUBJECTS": "",
     // Dashboard usage analytics (docs/analytics.md): batches go to the ANALYTICS bucket, never Postgres. "off" discards them.
