@@ -34,7 +34,7 @@
 // another button, see it `still` (reduced motion: the same layout, one frame drawn).
 //
 // Dialogs (`dialog`): once the page has settled, the control whose text starts with `dialog` opens its dialog (a bottom
-// sheet on a phone), and the measurement covers the load and the open dialog together.
+// sheet on a phone), and the measurement covers the load and the open dialog together, once its entrance has ended.
 //
 // Every measurement also checks the masked addresses on its page (lib/private-address.ts): nothing of a seeded address
 // beyond its first two characters is in the page's text, a title, a label or a link before it is revealed, and on a
@@ -389,7 +389,12 @@ async function measure(browser, job, fx) {
     if (job.dialog) {
       const opened = await page.evaluate(label => { const el = [...document.querySelectorAll('button')].find(el => el.getClientRects().length && el.textContent.trim().startsWith(label)); el?.click(); return Boolean(el); }, job.dialog);
       if (!opened) problems.push(`no control “${job.dialog}”`);
-      else await page.waitForSelector('[role=dialog][data-state=open]', { timeout: 10_000 }).catch(() => problems.push(`“${job.dialog}” opened no dialog`));
+      else {
+        const dialog = await page.waitForSelector('[role=dialog][data-state=open]', { timeout: 10_000 }).catch(() => { problems.push(`“${job.dialog}” opened no dialog`); return null; });
+        // The page can go idle before the dialog's 200 ms entrance ends, whose transform then still moves what the
+        // masked address check hovers by a fraction of a pixel (the route editor, Nov 20).
+        await dialog?.evaluate(el => Promise.race([Promise.all(el.getAnimations({ subtree: true }).filter(a => a.effect?.getTiming().iterations !== Infinity).map(a => a.finished.catch(() => {}))), new Promise(done => setTimeout(done, 5000))]));
+      }
       await settle(page, net);
     }
     if (job.mode === 'in-app') {
