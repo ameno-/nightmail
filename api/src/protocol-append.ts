@@ -7,7 +7,9 @@ import { boundMailBucket, mailKey, withMailObjects, readMailBytes } from './mail
 import { parseInboundMime } from './mailbox-ingest.js';
 import {savePreview} from './protocol-preview.js';
 
-const MAX = 8 * 1024 * 1024;
+/** A client's APPEND (drafts, Sent copies, imports): up to 40 MiB, as much as received mail can be. It streams to the
+ *  mail store; migration 356's mailgw_append checks the same bound. */
+const MAX = 40 * 1024 * 1024;
 const metadata = z
   .object({
     kid: z.string().max(120),
@@ -50,7 +52,8 @@ export async function streamedAppend(c: Ctx, encoded: string, digest: string) {
       },
     }),
   );
-  const quota = sql`SELECT FROM inbox_state s JOIN mailboxes b ON b.id=s.inbox_id WHERE s.inbox_id=${who.b} AND s.messages<coalesce(b.quota_messages,100000) AND s.bytes+${p.size}<=coalesce(b.quota_bytes,1073741824)`;
+  // A quota is only what the inbox sets (null: none), as for received mail. Over it, the gateway answers [OVERQUOTA].
+  const quota = sql`SELECT FROM inbox_state s JOIN mailboxes b ON b.id=s.inbox_id WHERE s.inbox_id=${who.b} AND (b.quota_messages IS NULL OR s.messages<b.quota_messages) AND (b.quota_bytes IS NULL OR s.bytes+${p.size}<=b.quota_bytes)`;
   if (!(await rt.db.execute(quota)).rowCount) throw new ApiError(409, 'OVERQUOTA', 'Append quota exceeded.');
   // Upload before the transaction: a slow or stalled client must not hold the inbox_state lock (which ingest, flags
   // and expunge also take) or a pooled connection. The UID is published only by the short transaction below.
@@ -79,7 +82,7 @@ export async function streamedAppend(c: Ctx, encoded: string, digest: string) {
           sql`SELECT mailgw_append(${who.w},${who.b},${p.folder},${mid},${id('thr')},${m?.messageId ?? null},${m?.subject ?? ''},${m?.from?.address ?? ''},'',${p.date}::timestamptz,${p.size},${bucket},${key},${header === null ? null : JSON.stringify({ headerLength: header })}::jsonb,${sql.param(p.flags)}::text[]) r`,
         )
       ).rows[0]!.r;
-      if (r.error) throw new ApiError(409, 'APPEND_REFUSED', 'Append refused.');
+      if (r.error) throw new ApiError(409, r.error === 'OVERQUOTA' ? 'OVERQUOTA' : 'APPEND_REFUSED', 'Append refused.');
       if (r.pairs[0]?.[0] === 0) await savePreview(tx, mid, key, prefix, p.size);
       settled = true;
       return r;

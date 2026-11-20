@@ -11,11 +11,13 @@ export const PARSE_LIMIT=6*MiB;
 // One top-level header field, with its folds: the first 12 characters of its name in lower case, and its text (latin1) on demand.
 type HeaderField = { name: string; size: number; firstLine: () => string; text: () => string };
 // Drops each top-level header field that `drop` picks, working on byte offsets: never reserializes MIME, DKIM headers,
-// attachments or the body. Returns the input itself when nothing is dropped.
-function dropHeaderFields(bytes:Uint8Array,drop:(field:HeaderField)=>boolean) {
+// attachments or the body. Returns the input itself when nothing is dropped. `inPlace` writes into the input instead of
+// a copy: the kept fields move up against the body, and the result is a view of the input's last bytes.
+function dropHeaderFields(bytes:Uint8Array,drop:(field:HeaderField)=>boolean,inPlace=false) {
   const raw=Buffer.from(bytes.buffer,bytes.byteOffset,bytes.byteLength);
   let pos=0,kept=0;
   let copy:Buffer|undefined,written=0;
+  const keptFields:[number,number][]=[];
   while(pos<raw.length) {
     const start=pos;
     let end=raw.indexOf(10,pos); if (end===pos || (end===pos+1 && raw[pos]===13)) break;
@@ -25,14 +27,20 @@ function dropHeaderFields(bytes:Uint8Array,drop:(field:HeaderField)=>boolean) {
     const fieldEnd=pos;
     const field={ name: raw.toString('latin1',start,Math.min(firstEnd,start+12)).toLowerCase(), size: fieldEnd-start,
       firstLine: () => raw.toString('latin1',start,firstEnd), text: () => raw.toString('latin1',start,fieldEnd) };
-    if (drop(field)) { copy??=Buffer.allocUnsafe(raw.length);written+=raw.copy(copy,written,kept,start);kept=fieldEnd; }
+    if (drop(field)) { if (inPlace) { keptFields.push([kept,start]); copy=raw; } else { copy??=Buffer.allocUnsafe(raw.length);written+=raw.copy(copy,written,kept,start); } kept=fieldEnd; }
   }
   if (!copy) return bytes;
+  if (inPlace) {
+    // Last field first: each moves right, past every field before it.
+    let to=kept;
+    for (const [start,end] of keptFields.reverse()) { to-=end-start; raw.copyWithin(to,start,end); }
+    return raw.subarray(to);
+  }
   return copy.subarray(0,written+raw.copy(copy,written,kept));
 }
 const blindField=(f:HeaderField)=>(f.name.startsWith('bcc') || f.name.startsWith('resent-bcc')) && /^(?:bcc|resent-bcc)[ \t]*:/i.test(f.firstLine());
-/** Removes top-level Bcc and Resent-Bcc fields, so blind recipients are never stored: received mail (workspaceMime) and an SMTP submission's Sent copy (protocol-content.ts) both strip them here. */
-export const stripBlindRecipients=(bytes:Uint8Array)=>dropHeaderFields(bytes,blindField);
+/** Removes top-level Bcc and Resent-Bcc fields, so blind recipients are never stored: received mail (workspaceMime) and an SMTP submission's Sent copy (protocol-content.ts) both strip them here. A submission is stripped in place (its buffer is the submission's own), so a large one isn't held twice. */
+export const stripBlindRecipients=(bytes:Uint8Array,inPlace=false)=>dropHeaderFields(bytes,blindField,inPlace);
 
 type ParsedAddress = { address?: string; name?: string };
 /**
@@ -50,8 +58,6 @@ export function submissionParties(m: { from?: ParsedAddress; sender?: ParsedAddr
   return { from, senders: from && count('from') === 1 && count('sender') <= 1 && senders.every(a => a?.includes('@')) ? [...new Set(senders as string[])] : null,
     to, cc, bcc: envelope.to.filter(a => !to.includes(a) && !cc.includes(a)) };
 }
-/** The shared SES path rebuilds the MIME, which a signed or encrypted message can't survive. */
-export const unrepresentableMime = (raw: Uint8Array) => /^content-type:\s*(application\/(?:pkcs7|pgp)|multipart\/(?:signed|encrypted))/im.test(Buffer.from(raw.buffer, raw.byteOffset, Math.min(raw.byteLength, 65536)).toString('latin1'));
 
 // AWS's receiving-email-notifications-examples shows the SES-added first Received field can end
 // in "for recipient@example.com;". Remove that field (including folds) when not ours. The S3

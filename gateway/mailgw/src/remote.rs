@@ -6,7 +6,7 @@ use hmac::{Hmac, Mac};
 use mailgw_core::{
     imap::Imap,
     session::{Identity, Protocol, Reply},
-    smtp::{Submission, SubmitError, Submitter},
+    smtp::{Sent, Submission, SubmitError, Submitter},
     store::{self, Applied, Change, Entry, Flags, Folder, FolderOp, MailStore, Mode},
 };
 use serde::Deserialize;
@@ -168,8 +168,17 @@ impl Api {
         self.call_before(p, None)
     }
     fn call_before(&self, p: Value, deadline: Option<Instant>) -> Result<Vec<u8>, u16> {
+        self.call_coded(p, deadline).map_err(|(status, _)| status)
+    }
+    /// A credential's call waits for its call rate, and a heavy one (a large response or a submission) for a slot of
+    /// the task's and the credential's lanes.
+    fn admit(
+        &self,
+        kid: Option<&str>,
+        heavy: bool,
+    ) -> Result<Option<crate::admission::Reservation>, u16> {
         let mut inbox_work = None;
-        if let Some(kid) = p.get("kid").and_then(Value::as_str) {
+        if let Some(kid) = kid {
             let start = Instant::now();
             loop {
                 let mut gates = self.gates.lock().map_err(|_| 503u16)?;
@@ -187,22 +196,31 @@ impl Api {
                 }
             }
         }
-        let _work = if matches!(
-            p["op"].as_str(),
-            Some("snapshot" | "body" | "projections" | "subject" | "submit")
-        ) {
-            Some(
-                tokio::runtime::Handle::current()
-                    .block_on(crate::admission::Reservation::take(
-                        self.heavy.clone(),
-                        Some(inbox_work.ok_or(403u16)?),
-                        1,
-                    ))
-                    .ok_or(429u16)?,
+        if !heavy {
+            return Ok(None);
+        }
+        Ok(Some(
+            tokio::runtime::Handle::current()
+                .block_on(crate::admission::Reservation::take(
+                    self.heavy.clone(),
+                    Some(inbox_work.ok_or(403u16)?),
+                    1,
+                ))
+                .ok_or(429u16)?,
+        ))
+    }
+    /// A signed call. A refusal carries the API's error code, when it gave one.
+    fn call_coded(&self, p: Value, deadline: Option<Instant>) -> Result<Vec<u8>, (u16, String)> {
+        let _work = self
+            .admit(
+                p.get("kid").and_then(Value::as_str),
+                matches!(
+                    p["op"].as_str(),
+                    Some("snapshot" | "body" | "projections" | "subject" | "submit")
+                ),
             )
-        } else {
-            None
-        };
+            .map_err(|status| (status, String::new()))?;
+        let unavailable = |_| (503u16, String::new());
         let scope = hex::encode(Sha256::digest(
             p.get("kid")
                 .or_else(|| p.get("user"))
@@ -211,10 +229,11 @@ impl Api {
                 .to_ascii_lowercase()
                 .as_bytes(),
         ));
-        let b = serde_json::to_vec(&p).map_err(|_| 500u16)?;
+        let b = serde_json::to_vec(&p).map_err(|_| (500u16, String::new()))?;
         let hash = hex::encode(Sha256::digest(&b));
         let ts = chrono::Utc::now().timestamp().to_string();
-        let mut mac = Hmac::<Sha256>::new_from_slice(self.key.as_bytes()).map_err(|_| 500u16)?;
+        let mut mac = Hmac::<Sha256>::new_from_slice(self.key.as_bytes())
+            .map_err(|_| (500u16, String::new()))?;
         mac.update(format!("POST\n/internal/v1/mail\n{ts}\n{hash}\n{scope}").as_bytes());
         let req = self
             .client
@@ -229,25 +248,25 @@ impl Api {
             req.timeout(
                 deadline
                     .checked_duration_since(Instant::now())
-                    .ok_or(503u16)?,
+                    .ok_or((503u16, String::new()))?,
             )
         } else {
             req
         };
         tokio::runtime::Handle::current().block_on(async {
-            let mut r = req.send().await.map_err(|_| 503u16)?;
+            let mut r = req.send().await.map_err(unavailable)?;
             if !r.status().is_success() {
-                return Err(r.status().as_u16());
+                return Err(refusal(r).await);
             }
             let mut out = vec![];
-            while let Some(chunk) = r.chunk().await.map_err(|_| 503u16)? {
+            while let Some(chunk) = r.chunk().await.map_err(unavailable)? {
                 let cap = if p["headers"].as_bool() == Some(true) {
                     40 << 20
                 } else {
                     48 << 20
                 };
                 if out.len() + chunk.len() > cap {
-                    return Err(413);
+                    return Err((413, String::new()));
                 }
                 out.extend_from_slice(&chunk)
             }
@@ -255,12 +274,11 @@ impl Api {
         })
     }
     fn json<T: serde::de::DeserializeOwned>(&self, p: Value) -> Result<T, store::Error> {
-        serde_json::from_slice(&self.call(p).map_err(|s| match s {
-            403 | 409 | 422 => store::Error::Denied,
-            404 => store::Error::Missing,
-            413 => store::Error::Limit,
-            _ => store::Error::Unavailable,
-        })?)
+        serde_json::from_slice(
+            &self
+                .call_coded(p, None)
+                .map_err(|(status, code)| store_error(status, &code))?,
+        )
         .map_err(|_| store::Error::Unavailable)
     }
     pub fn current(&self, p: &Principal) -> bool {
@@ -342,6 +360,53 @@ impl Api {
             c.insert(k, (Instant::now(), principal.clone()));
         }
         Ok(principal)
+    }
+}
+/// How long an upload to the API (an APPEND or an SMTP submission, up to 40 MiB) may take.
+const UPLOAD: Duration = Duration::from_secs(120);
+/// A refusal's status and the API's error code (`{"error":{"code":…}}`), from at most 8 KiB of its body.
+async fn refusal(mut r: reqwest::Response) -> (u16, String) {
+    let status = r.status().as_u16();
+    let mut body = vec![];
+    while body.len() <= 8192
+        && let Ok(Some(chunk)) = r.chunk().await
+    {
+        body.extend_from_slice(&chunk)
+    }
+    let code = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|v| v["error"]["code"].as_str().map(str::to_owned))
+        .unwrap_or_default();
+    (status, code)
+}
+/// The IMAP answer to a refused call: the API's code where it names one, else its status.
+fn store_error(status: u16, code: &str) -> store::Error {
+    match code {
+        "ALREADYEXISTS" => store::Error::Exists,
+        "OVERQUOTA" => store::Error::OverQuota,
+        "FOLDER_LIMIT" => store::Error::Limit,
+        "INVALID_PATH" | "PROTECTED_FOLDER" | "INVALID_FLAG" => store::Error::Cannot,
+        _ => match status {
+            403 | 409 | 422 => store::Error::Denied,
+            404 => store::Error::Missing,
+            413 => store::Error::Limit,
+            _ => store::Error::Unavailable,
+        },
+    }
+}
+/// The SMTP answer to a refused submission.
+fn submit_error(status: u16, code: &str) -> SubmitError {
+    match (status, code) {
+        (_, "SEALED_MESSAGE_SIZE") => SubmitError::SealedTooLarge,
+        (_, "SEALED_MAIL_UNAVAILABLE") => SubmitError::SealedUnavailable,
+        // The API refused the request's signature: one older than this gateway, while a deploy is in progress. The
+        // client keeps the message and tries again.
+        (403, "PROTOCOL_DENIED") => SubmitError::Unavailable,
+        (413, _) => SubmitError::TooLarge,
+        (402, _) => SubmitError::Balance,
+        (429, _) => SubmitError::Cap,
+        (400..500, _) => SubmitError::Rejected,
+        _ => SubmitError::Unavailable,
     }
 }
 pub struct Login {
@@ -1066,14 +1131,16 @@ impl MailStore for Store {
                             .header("x-bane-timestamp", ts.to_string())
                             .header("x-bane-signature", hex::encode(mac.finalize().into_bytes()))
                             .header("content-length", size)
+                            .timeout(UPLOAD)
                             .body(body)
                             .send()
                             .await
                             .map_err(|_| store::Error::Unavailable)?;
                         if !r.status().is_success() {
-                            return Err(match r.status().as_u16() {
-                                409 | 413 | 429 => store::Error::Limit,
-                                403 | 422 => store::Error::Denied,
+                            return Err(match refusal(r).await {
+                                (_, code) if code == "OVERQUOTA" => store::Error::OverQuota,
+                                (409 | 413 | 429, _) => store::Error::Limit,
+                                (403 | 422, _) => store::Error::Denied,
                                 _ => store::Error::Unavailable,
                             });
                         }
@@ -1155,20 +1222,60 @@ fn batch_ticket(t: &Value, i: usize) -> Value {
     json!({"nonce": hex::encode(&derived[..16]), "issued": t["issued"]})
 }
 impl Submitter for Store {
-    fn submit(&mut self, s: Submission<'_>) -> Result<(), SubmitError> {
-        self.api.call(json!({"op":"submit","kid":self.principal.kid,"from":s.sender,"to":s.recipients,"content":STANDARD.encode(s.raw)})).map(drop).map_err(|status| match status {
-            413 => SubmitError::TooLarge,
-            507 => SubmitError::InboxFull,
-            402 => SubmitError::Balance,
-            429 => SubmitError::Cap,
-            400..500 => SubmitError::Rejected,
-            _ => SubmitError::Unavailable,
+    /// The message streams to the API as the request body, with the envelope in x-bane-submit; both are signed, and the
+    /// signature names the kind (api/src/protocol-admission.ts).
+    fn submit(&mut self, s: Submission<'_>) -> Result<Sent, SubmitError> {
+        let api = &self.api;
+        let kid = self.principal.kid.as_str();
+        let _work = api
+            .admit(Some(kid), true)
+            .map_err(|status| submit_error(status, ""))?;
+        let meta = STANDARD.encode(
+            serde_json::to_vec(
+                &json!({"kid":kid,"from":s.sender,"to":s.recipients,"size":s.raw.len()}),
+            )
+            .map_err(|_| SubmitError::Unavailable)?,
+        );
+        let body = s.raw.to_vec();
+        let hash = hex::encode(Sha256::digest(&body));
+        let scope = hex::encode(Sha256::digest(kid.to_ascii_lowercase().as_bytes()));
+        let ts = chrono::Utc::now().timestamp();
+        let mut mac = Hmac::<Sha256>::new_from_slice(api.key.as_bytes())
+            .map_err(|_| SubmitError::Unavailable)?;
+        mac.update(
+            format!(
+                "POST\n/internal/v1/mail\n{ts}\n{hash}\n{scope}\nsubmit\n{}",
+                hex::encode(Sha256::digest(meta.as_bytes()))
+            )
+            .as_bytes(),
+        );
+        let request = api
+            .client
+            .post(&api.url)
+            .header("x-bane-submit", meta)
+            .header("x-bane-scope", scope)
+            .header("x-bane-content", hash)
+            .header("x-bane-timestamp", ts.to_string())
+            .header("x-bane-signature", hex::encode(mac.finalize().into_bytes()))
+            .header("content-length", body.len())
+            .timeout(UPLOAD)
+            .body(body);
+        tokio::runtime::Handle::current().block_on(async {
+            let r = request.send().await.map_err(|_| SubmitError::Unavailable)?;
+            if !r.status().is_success() {
+                let (status, code) = refusal(r).await;
+                return Err(submit_error(status, &code));
+            }
+            let v: Value = r.json().await.map_err(|_| SubmitError::Unavailable)?;
+            Ok(Sent {
+                copy: v["sentCopy"].as_bool().unwrap_or(true),
+            })
         })
     }
 }
 pub struct Offline;
 impl Submitter for Offline {
-    fn submit(&mut self, _: Submission<'_>) -> Result<(), SubmitError> {
+    fn submit(&mut self, _: Submission<'_>) -> Result<Sent, SubmitError> {
         Err(SubmitError::Unavailable)
     }
 }
@@ -1486,8 +1593,57 @@ mod tests {
         mutations: Mutex<Vec<Mutation>>,
         /// Fail the mutate call with this 1-based index (before committing).
         fail_call: AtomicUsize,
+        /// Every streamed submission (its envelope and message), and what the API answers it and a folder edit.
+        submits: Mutex<Vec<(Value, Vec<u8>)>>,
+        answer: Mutex<(u16, String)>,
     }
-    fn reply(script: &Script, body: &[u8]) -> (u16, String) {
+    fn script() -> Arc<Script> {
+        Arc::new(Script {
+            down: false.into(),
+            snapshots: 0.into(),
+            mutations: Mutex::default(),
+            fail_call: 0.into(),
+            submits: Mutex::default(),
+            answer: Mutex::new((200, "{}".into())),
+        })
+    }
+    /// A request header, by its name in lower case.
+    fn header<'a>(head: &'a str, name: &str) -> &'a str {
+        head.lines()
+            .find_map(|l| {
+                l.split_once(':')
+                    .filter(|(n, _)| n.eq_ignore_ascii_case(name))
+            })
+            .map_or("", |(_, v)| v.trim())
+    }
+    fn reply(script: &Script, head: &str, body: &[u8]) -> (u16, String) {
+        let meta = header(head, "x-bane-submit");
+        if !meta.is_empty() {
+            // Checked as api/src/protocol-admission.ts checks it.
+            let mut mac = Hmac::<Sha256>::new_from_slice("k".repeat(32).as_bytes()).unwrap();
+            mac.update(
+                format!(
+                    "POST\n/internal/v1/mail\n{}\n{}\n{}\nsubmit\n{}",
+                    header(head, "x-bane-timestamp"),
+                    header(head, "x-bane-content"),
+                    header(head, "x-bane-scope"),
+                    hex::encode(Sha256::digest(meta.as_bytes()))
+                )
+                .as_bytes(),
+            );
+            if hex::encode(mac.finalize().into_bytes()) != header(head, "x-bane-signature")
+                || hex::encode(Sha256::digest(body)) != header(head, "x-bane-content")
+            {
+                return (403, "{}".into());
+            }
+            let envelope = serde_json::from_slice(&STANDARD.decode(meta).unwrap()).unwrap();
+            script
+                .submits
+                .lock()
+                .unwrap()
+                .push((envelope, body.to_vec()));
+            return script.answer.lock().unwrap().clone();
+        }
         let p: Value = serde_json::from_slice(body).unwrap_or_default();
         let meta = |next: u32, highest: u64| {
             json!([{"key":"inbox","path":"INBOX","validity":1,"next":next,"highest":highest,"subscribed":true,"total":1,"unseen":1},
@@ -1535,6 +1691,7 @@ mod tests {
                 };
                 (200, json!({"pairs": pairs, "validity": 4}).to_string())
             }
+            Some("edit") => script.answer.lock().unwrap().clone(),
             _ => (422, "{}".into()),
         }
     }
@@ -1555,17 +1712,13 @@ mod tests {
                     let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
                         continue;
                     };
-                    let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
-                    let len: usize = head
-                        .lines()
-                        .find_map(|l| l.strip_prefix("content-length:"))
-                        .and_then(|v| v.trim().parse().ok())
-                        .unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..end]).into_owned();
+                    let len: usize = header(&head, "content-length").parse().unwrap_or(0);
                     if buf.len() < end + 4 + len {
                         continue;
                     }
                     let body: Vec<u8> = buf.drain(..end + 4 + len).skip(end + 4).collect();
-                    let (status, text) = reply(&script, &body);
+                    let (status, text) = reply(&script, &head, &body);
                     let out = format!(
                         "HTTP/1.1 {status} X\r\ncontent-length: {}\r\n\r\n{text}",
                         text.len()
@@ -1593,12 +1746,7 @@ mod tests {
             .build()
             .unwrap();
         let _enter = rt.enter();
-        let script = Arc::new(Script {
-            down: false.into(),
-            snapshots: 0.into(),
-            mutations: Mutex::default(),
-            fail_call: 0.into(),
-        });
+        let script = script();
         let l = rt
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
             .unwrap();
@@ -1650,12 +1798,7 @@ mod tests {
             .build()
             .unwrap();
         let _enter = rt.enter();
-        let script = Arc::new(Script {
-            down: false.into(),
-            snapshots: 0.into(),
-            mutations: Mutex::default(),
-            fail_call: 0.into(),
-        });
+        let script = script();
         let l = rt
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
             .unwrap();
@@ -1749,12 +1892,7 @@ mod tests {
             .build()
             .unwrap();
         let _enter = rt.enter();
-        let script = Arc::new(Script {
-            down: false.into(),
-            snapshots: 0.into(),
-            mutations: Mutex::default(),
-            fail_call: 0.into(),
-        });
+        let script = script();
         let l = rt
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
             .unwrap();
@@ -1826,6 +1964,81 @@ mod tests {
         script.mutations.lock().unwrap().clear();
         store.change("INBOX", Change::Expunge(None)).unwrap();
         assert_eq!(script.mutations.lock().unwrap()[0].1, [1]);
+    }
+
+    /// A submission streams the message as the body, its envelope in x-bane-submit, signed as the API checks it
+    /// (api/src/protocol-admission.ts). The reply says when the inbox had no room for the Sent copy; a refused
+    /// signature (an older API while a deploy runs) is a temporary failure; a refused folder edit answers its own code.
+    #[test]
+    fn a_submission_streams_signed_and_refusals_answer_their_codes() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = rt.enter();
+        let script = script();
+        let l = rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+        rt.spawn(serve(l, script.clone()));
+        let mut store = Store::new(
+            Arc::new(Api::new(url, "k".repeat(32)).unwrap()),
+            principal(),
+        )
+        .unwrap();
+        let account =
+            mailgw_core::session::Account::new("box_test".into(), vec![], "x".into(), true);
+        let raw = b"From: x@example.invalid\r\nSubject: Hi\r\n\r\nHello\r\n";
+        let recipients = ["r@example.invalid".to_owned()];
+        let mut submit = |answer: (u16, Value)| {
+            *script.answer.lock().unwrap() = (answer.0, answer.1.to_string());
+            match store.submit(Submission {
+                principal: &account,
+                sender: "x@example.invalid",
+                recipients: &recipients,
+                raw,
+                date: store::Date::default(),
+            }) {
+                Ok(sent) => sent.reply().to_owned(),
+                Err(e) => e.to_string(),
+            }
+        };
+        let refused = |code: &str| json!({"error":{"code":code}});
+        assert_eq!(
+            submit((200, json!({"id":"email_1","sentCopy":true}))),
+            "250 2.0.0 Submission accepted"
+        );
+        assert_eq!(
+            submit((200, json!({"id":"email_2","sentCopy":false}))),
+            "250 2.0.0 Submission accepted; no Sent copy kept: the inbox is full"
+        );
+        assert!(submit((403, refused("PROTOCOL_DENIED"))).starts_with("451 4.3.0"));
+        assert!(submit((403, refused("CREDENTIAL_REVOKED"))).starts_with("550 5.7.1 Rejected"));
+        assert!(submit((422, refused("SEALED_MAIL_UNAVAILABLE"))).starts_with("550 5.7.1 Signed"));
+        assert!(submit((413, refused("SEALED_MESSAGE_SIZE"))).starts_with("552 5.3.4 Signed"));
+        assert!(submit((413, refused("MESSAGE_SIZE"))).starts_with("552 5.3.4 Message"));
+        let submits = script.submits.lock().unwrap().clone();
+        assert_eq!(
+            submits.len(),
+            7,
+            "every submission passed the signature check"
+        );
+        assert_eq!(
+            submits[0],
+            (
+                json!({"kid":"kid_test","from":"x@example.invalid","to":["r@example.invalid"],"size":raw.len()}),
+                raw.to_vec()
+            )
+        );
+
+        let mut edit = |code: &str| {
+            *script.answer.lock().unwrap() = (409, refused(code).to_string());
+            store.edit_folder("New", FolderOp::Create).unwrap_err()
+        };
+        assert!(matches!(edit("ALREADYEXISTS"), store::Error::Exists));
+        assert!(matches!(edit("FOLDER_LIMIT"), store::Error::Limit));
+        assert!(matches!(edit("INVALID_PATH"), store::Error::Cannot));
     }
 
     /// Found by gateway/tear (witness with one credential: B append Work, A append Work,

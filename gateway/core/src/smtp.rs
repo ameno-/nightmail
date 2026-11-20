@@ -7,7 +7,16 @@ use mail_parser::{HeaderName, MessageParser};
 use smtp_proto::{AUTH_LOGIN, AUTH_PLAIN, MAIL_BODY_7BIT, MAIL_BODY_8BITMIME, Request as C};
 use zeroize::Zeroizing;
 
-pub const MAX_SIZE: usize = 8 << 20;
+/// The largest message on the wire (SIZE): 25 MiB of attachments, base64 with line breaks, is about 34.3 MiB, and the
+/// rest leaves room for the text and headers. The API's limit is the same (`api/src/mailbox-ingest.ts` SMTP_WIRE_LIMIT).
+pub const MAX_SIZE: usize = 36 << 20;
+/// Recipients per transaction, the minimum RFC 5321 4.5.3.1.8 asks a server to take. The API sends them to SES in
+/// messages of up to 50.
+pub const MAX_RECIPIENTS: usize = 100;
+/// An accepted submission. `copy` is false when the inbox had no room for its Sent copy: it was sent without one.
+pub struct Sent {
+    pub copy: bool,
+}
 #[derive(Debug, thiserror::Error)]
 pub enum SubmitError {
     #[error("451 4.7.1 Send limit reached")]
@@ -20,10 +29,23 @@ pub enum SubmitError {
     Unavailable,
     #[error("552 5.3.4 Message exceeds submission size limits")]
     TooLarge,
-    #[error("552 5.2.2 Inbox storage quota exceeded")]
-    InboxFull,
+    /// A signed or encrypted message goes out as written, so it can't be larger than 8 MiB.
+    #[error("552 5.3.4 Signed or encrypted messages can be at most 8 MiB")]
+    SealedTooLarge,
+    /// A signed or encrypted message goes out as written, which a new sender can do once its first messages are evaluated.
+    #[error("550 5.7.1 Signed or encrypted mail is not available for this sender yet")]
+    SealedUnavailable,
     #[error("550 5.7.1 Rejected")]
     Rejected,
+}
+impl Sent {
+    pub fn reply(&self) -> &'static str {
+        if self.copy {
+            "250 2.0.0 Submission accepted"
+        } else {
+            "250 2.0.0 Submission accepted; no Sent copy kept: the inbox is full"
+        }
+    }
 }
 pub struct Submission<'a> {
     pub principal: &'a dyn Identity,
@@ -33,7 +55,7 @@ pub struct Submission<'a> {
     pub date: Date,
 }
 pub trait Submitter {
-    fn submit(&mut self, input: Submission<'_>) -> Result<(), SubmitError>;
+    fn submit(&mut self, input: Submission<'_>) -> Result<Sent, SubmitError>;
 }
 /// Never delivers. Counters belong to this synthetic inbox, not to the socket, login alias or protocol.
 pub struct Sink<'a> {
@@ -57,7 +79,7 @@ impl Caps {
     }
 }
 impl Submitter for Sink<'_> {
-    fn submit(&mut self, s: Submission<'_>) -> Result<(), SubmitError> {
+    fn submit(&mut self, s: Submission<'_>) -> Result<Sent, SubmitError> {
         use chrono::Datelike;
         let now = s.date.to_utc();
         let day = now.timestamp().div_euclid(86400);
@@ -91,7 +113,7 @@ impl Submitter for Sink<'_> {
             .map_err(|_| SubmitError::Unavailable)?;
         c.day.1 += recipients;
         c.month.1 += recipients;
-        Ok(())
+        Ok(Sent { copy: true })
     }
 }
 
@@ -192,7 +214,7 @@ impl Smtp {
                             date,
                         };
                         match submit.submit(s) {
-                            Ok(()) => Reply::one("250 2.0.0 Submission accepted"),
+                            Ok(sent) => Reply::one(sent.reply()),
                             Err(e) => Reply::one(&e.to_string()),
                         }
                     };
@@ -318,7 +340,7 @@ impl Smtp {
                 if to.flags != 0 || to.orcpt.is_some() || to.rrvs != 0 {
                     return Reply::one("555 5.5.4 Unsupported parameter");
                 }
-                if self.rcpt.len() >= 50 {
+                if self.rcpt.len() >= MAX_RECIPIENTS {
                     return Reply::one("452 4.5.3 Too many recipients");
                 }
                 if !to.address.is_ascii() || !to.address.contains('@') {
@@ -442,6 +464,45 @@ mod tests {
             Err(SubmitError::Cap)
         ));
         assert_eq!(m.folder("Sent").unwrap().entries.len(), 2);
+    }
+    /// RFC 5321 4.5.3.1.8: a transaction takes at least 100 recipients; the 101st is told to wait for the next one.
+    /// SIZE advertises the API's 36 MiB, and an accepted message without a Sent copy says so.
+    #[test]
+    fn a_transaction_takes_100_recipients_and_says_when_no_copy_was_kept() {
+        struct NoCopy;
+        impl Submitter for NoCopy {
+            fn submit(&mut self, s: Submission<'_>) -> Result<Sent, SubmitError> {
+                assert_eq!(s.recipients.len(), MAX_RECIPIENTS);
+                Ok(Sent { copy: false })
+            }
+        }
+        let a = Account::new(
+            "mbx_test".into(),
+            vec!["x@example.invalid".into()],
+            "fixture".into(),
+            false,
+        );
+        let mut smtp = Smtp::new(true);
+        let date: Date = "2025-01-17T00:00:00Z".parse().unwrap();
+        let mut step = |line: &str| {
+            let r = smtp.step(line.as_bytes(), &a, &mut NoCopy, date);
+            String::from_utf8(r.bytes).unwrap()
+        };
+        assert!(step("EHLO client.invalid\r\n").contains("250-SIZE 37748736\r\n"));
+        assert!(step("AUTH PLAIN AHhAZXhhbXBsZS5pbnZhbGlkAGZpeHR1cmU=\r\n").starts_with("235"));
+        assert!(step("MAIL FROM:<x@example.invalid>\r\n").starts_with("250"));
+        for i in 0..MAX_RECIPIENTS {
+            assert!(step(&format!("RCPT TO:<r{i}@example.invalid>\r\n")).starts_with("250"));
+        }
+        assert!(step("RCPT TO:<late@example.invalid>\r\n").starts_with("452 4.5.3"));
+        assert!(step("DATA\r\n").starts_with("354"));
+        step("From: x@example.invalid\r\n");
+        step("\r\n");
+        step("Hello\r\n");
+        assert_eq!(
+            step(".\r\n"),
+            "250 2.0.0 Submission accepted; no Sent copy kept: the inbox is full\r\n"
+        );
     }
     #[test]
     fn scrub_only_bcc_headers_including_folded_lines() {

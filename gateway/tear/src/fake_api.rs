@@ -188,17 +188,7 @@ impl Fake {
         let Some(m) = self.messages.get(&e.mid) else {
             return vec![];
         };
-        let mut out: Vec<String> = m
-            .labels
-            .iter()
-            .filter(|l| {
-                l.len() <= 64
-                    && l.chars()
-                        .all(|c| c.is_ascii_alphanumeric() || "_$-".contains(c))
-                    && !RESERVED.contains(&l.as_str())
-            })
-            .cloned()
-            .collect();
+        let mut out: Vec<String> = m.labels.iter().filter(|l| keyword(l)).cloned().collect();
         out.extend(
             NAMES
                 .iter()
@@ -503,7 +493,11 @@ impl Fake {
                     }
                 }
             }
-            "submit" => self.submit(p),
+            // Only an older gateway submits inside the JSON; this one streams (handle).
+            "submit" => match STANDARD.decode(p["content"].as_str().unwrap_or_default()) {
+                Ok(raw) => self.submit(p, raw),
+                Err(_) => err(422, "INVALID_REQUEST"),
+            },
             "projections" => self.projections(p),
             "subject" => ok(json!([])),
             _ => err(422, "INVALID_REQUEST"),
@@ -583,7 +577,7 @@ impl Fake {
                     || x.ends_with('/')
                     || x.contains("//")
                     || x.chars().any(char::is_control)
-                    || x.split('/').count() > 8
+                    || x.split('/').count() > 16
                     || ["inbox", "sent", "drafts", "junk", "archive", "trash"]
                         .contains(&x.to_ascii_lowercase().as_str())
             })
@@ -593,7 +587,7 @@ impl Fake {
         }
         let at = (action != "create").then(|| self.index(fid));
         if let Some(None) = at {
-            return err(409, "NOT_FOUND");
+            return err(404, "NOT_FOUND");
         }
         if matches!(action, "create" | "rename")
             && self.folders.iter().any(|f| f.custom.as_deref() == path)
@@ -602,7 +596,7 @@ impl Fake {
         }
         match (action, at.flatten()) {
             ("create", _) => {
-                if self.folders.len() >= 200 {
+                if self.folders.len() >= 1000 {
                     return err(409, "FOLDER_LIMIT");
                 }
                 let role = format!("fld_{:032x}", self.next_role);
@@ -712,14 +706,7 @@ impl Fake {
             .filter(|x| !x.starts_with('\\') && !NAMES.iter().any(|n| n.eq_ignore_ascii_case(x)))
             .cloned()
             .collect();
-        if labels.iter().any(|x| {
-            x.is_empty()
-                || x.len() > 64
-                || !x
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "_$-".contains(c))
-                || RESERVED.contains(&x.as_str())
-        }) {
+        if !labels.iter().all(|x| keyword(x)) {
             return err(422, "INVALID_FLAG");
         }
         let uids: Option<Vec<u32>> = p["uids"].as_array().map(|a| {
@@ -811,7 +798,7 @@ impl Fake {
         }
         ok(Value::Array(rows))
     }
-    fn submit(&mut self, p: &Value) -> (u16, Vec<u8>) {
+    fn submit(&mut self, p: &Value, raw: Vec<u8>) -> (u16, Vec<u8>) {
         let to: Vec<String> = p["to"]
             .as_array()
             .map(|a| {
@@ -820,9 +807,6 @@ impl Fake {
                     .collect()
             })
             .unwrap_or_default();
-        let Ok(raw) = STANDARD.decode(p["content"].as_str().unwrap_or_default()) else {
-            return err(422, "INVALID_REQUEST");
-        };
         let from = p["from"].as_str().unwrap_or_default();
         let header = header_from(&raw);
         let owned = |a: &str| ADDRESSES.iter().any(|x| x.eq_ignore_ascii_case(a));
@@ -845,7 +829,7 @@ impl Fake {
         }
         *self.ledger.entry(day).or_default() += n;
         self.submitted.push((from.to_owned(), to, raw));
-        ok(json!({"accepted": n}))
+        ok(json!({"id": format!("email_{}", self.submitted.len()), "sentCopy": true}))
     }
     fn append(&mut self, meta: &Value, raw: Vec<u8>) -> (u16, Vec<u8>) {
         let kid = meta["kid"].as_str().unwrap_or_default();
@@ -888,7 +872,7 @@ impl Fake {
         let labels = flags
             .iter()
             .filter(|x| !NAMES.contains(&x.as_str()) && *x != "\\Seen" && *x != "\\Deleted")
-            .filter(|x| !x.starts_with('\\') && !RESERVED.contains(&x.as_str()))
+            .filter(|x| keyword(x))
             .cloned()
             .collect();
         let mid = self.new_message(raw, seen, bits, labels);
@@ -1103,6 +1087,15 @@ async fn serve_connection(
     }
 }
 
+/// An IMAP keyword: an RFC 3501 atom of at most 64 characters, not one of delivery's labels (api/src/mail-gateway.ts KEYWORD).
+fn keyword(x: &str) -> bool {
+    !x.is_empty()
+        && x.len() <= 64
+        && x.chars()
+            .all(|c| c.is_ascii_graphic() && !"(){%*\"\\]".contains(c))
+        && !RESERVED.contains(&x)
+}
+
 fn handle(request: &str, h: &BTreeMap<String, String>, body: Vec<u8>) -> (u16, Vec<u8>) {
     let mut guard = STATE.lock().unwrap_or_else(|p| p.into_inner());
     let Some(fake) = guard.as_mut() else {
@@ -1125,10 +1118,15 @@ fn handle(request: &str, h: &BTreeMap<String, String>, body: Vec<u8>) -> (u16, V
         get("x-bane-signature"),
         get("x-bane-scope"),
     );
-    let meta = h.get("x-bane-append");
+    // A streamed body's metadata: an APPEND's, or an SMTP submission's, whose signature names its kind.
+    let submission = h.get("x-bane-submit");
+    let meta = h.get("x-bane-append").or(submission);
     let mut mac = Hmac::<Sha256>::new_from_slice(KEY.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
     let mut signed = format!("POST\n/internal/v1/mail\n{ts}\n{hash}\n{scope}");
     if let Some(m) = meta {
+        if submission.is_some() {
+            signed.push_str("\nsubmit");
+        }
         signed.push('\n');
         signed.push_str(&hex::encode(Sha256::digest(m.as_bytes())));
     }
@@ -1149,16 +1147,22 @@ fn handle(request: &str, h: &BTreeMap<String, String>, body: Vec<u8>) -> (u16, V
         else {
             return err(422, "INVALID_REQUEST");
         };
-        let expected = hex::encode(Sha256::digest(
-            meta["kid"].as_str().unwrap_or_default().as_bytes(),
-        ));
+        let kid = meta["kid"].as_str().unwrap_or_default();
+        let expected = hex::encode(Sha256::digest(if submission.is_some() {
+            kid.to_ascii_lowercase().into_bytes()
+        } else {
+            kid.as_bytes().to_vec()
+        }));
         if expected != scope {
-            fake.violations.push("append scope mismatch".into());
+            fake.violations.push("streamed scope mismatch".into());
         }
         if h.get("content-length").and_then(|v| v.parse::<u64>().ok()) != meta["size"].as_u64()
             && !h.contains_key("transfer-encoding")
         {
             return err(422, "INVALID_LENGTH");
+        }
+        if submission.is_some() {
+            return fake.submit(&meta, body);
         }
         return fake.append(&meta, body);
     }

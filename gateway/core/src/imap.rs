@@ -123,7 +123,8 @@ impl Imap {
     }
     pub fn capabilities(&self) -> String {
         format!(
-            "IMAP4rev1 IDLE UIDPLUS MOVE SPECIAL-USE LITERAL+ NAMESPACE ENABLE UNSELECT ID APPENDLIMIT=8388608{}",
+            "IMAP4rev1 IDLE UIDPLUS MOVE SPECIAL-USE LITERAL+ NAMESPACE ENABLE UNSELECT ID APPENDLIMIT={}{}",
+            wire::MAX_APPEND,
             if !self.tls {
                 " STARTTLS LOGINDISABLED"
             } else if !self.authenticated {

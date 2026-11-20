@@ -315,7 +315,7 @@ impl Model {
         if !x.from {
             return 503;
         }
-        if x.rcpt >= 50 {
+        if x.rcpt as usize >= mailgw_core::smtp::MAX_RECIPIENTS {
             return 452;
         }
         if !ok {

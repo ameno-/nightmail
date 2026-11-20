@@ -95,7 +95,7 @@ export interface DispatcherReport { claimed: number; sent: number; deferred: num
 // The lease carries routing/claim metadata, not a batch of multi-MiB bodies. Use the
 // logical size: pg_column_size can report the much smaller compressed TOAST value.
 const INLINE_SNAPSHOT_BYTES = 64 * 1024;
-const contentFields = sql`ARRAY['text','html','raw','template']`;
+const contentFields = sql`ARRAY['text','html','raw','mime','template']`;
 const mailColumns = Object.entries(getTableColumns(emails)).map(([key, column]) => key === 'snapshot'
   ? sql`CASE WHEN measured.bytes > ${INLINE_SNAPSHOT_BYTES} THEN leased.snapshot - ${contentFields} ELSE leased.snapshot END AS snapshot`
   : sql`leased.${sql.identifier(column.name)}${column.columnType.startsWith('PgTimestamp') ? sql`::text` : sql``} AS ${sql.identifier(key)}`);
@@ -433,6 +433,9 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
   }
   let s = mail.snapshot;
   if(leased.owner.tenantName && s.raw) throw new ApiError(422,'SHARED_RAW_UNSUPPORTED','Hosted sending requires structured SES content.');
+  // A mail app's signed or encrypted message goes out as written (protocol-submit.ts sealedPassthrough): on Hosted only
+  // from a sender past its evaluation, since a probation sender's mail goes out as the copy the screen read.
+  if(leased.owner.tenantName && s.mime && !leased.owner.trusted) throw new ApiError(422,'SEALED_MAIL_UNAVAILABLE','Signed and encrypted mail goes out as written, which a sender can do once its first messages are evaluated.');
   const hosted=Boolean(leased.owner.tenantName && runtime.config.hostedScreen), probation=!isSimulatedSes(runtime) && hosted && !leased.owner.trusted;
   let screened=false;
   if (!isSimulatedSes(runtime) && (hosted || (s.screen && s.kind==='transactional'))) {
@@ -467,8 +470,8 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
     parts.push({ FileName: filename, RawContent: body, ContentType: contentType, ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(row.contentId ? { ContentId: row.contentId } : {}) });
   }
   sizeCheck(s, rows);
-  const content: SendEmailCommandInput['Content'] = s.raw
-    ? { Raw: { Data: new TextEncoder().encode(s.raw) } }
+  const content: SendEmailCommandInput['Content'] = s.mime || s.raw
+    ? { Raw: { Data: new TextEncoder().encode(s.mime ?? s.raw) } }
     // Inline images are built as multipart/related raw MIME (Simple places them beside the body). Raw MIME is
     // base64-encoded again inside SES's JSON body, about 3.2 times the files at once, so a message with more than the
     // lane budget of files goes as Simple content, as Hosted mail always does.
@@ -934,11 +937,11 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
         // Read only after reserving the page. Do not attach the body to the lease:
         // that array outlives this send, even when its byte reservation is released.
         const m=item.mail;
-        const {rows:[body]}=await base.db.execute<{text:string|null;html:string|null;raw:string|null;template:EmailSnapshot['template']|null}>(sql`
-          SELECT snapshot->>'text' AS text,snapshot->>'html' AS html,snapshot->>'raw' AS raw,snapshot->'template' AS template
+        const {rows:[body]}=await base.db.execute<{text:string|null;html:string|null;raw:string|null;mime:string|null;template:EmailSnapshot['template']|null}>(sql`
+          SELECT snapshot->>'text' AS text,snapshot->>'html' AS html,snapshot->>'raw' AS raw,snapshot->>'mime' AS mime,snapshot->'template' AS template
           FROM sending_emails WHERE workspace_id=${m.workspaceId} AND id=${m.id} AND dispatch_version=${m.dispatchVersion} AND status='queued'`);
         if (!body) { counters.skipped++;return; }
-        const snapshot={...m.snapshot,text:body.text??undefined,html:body.html??undefined,raw:body.raw??undefined,template:body.template??undefined};
+        const snapshot={...m.snapshot,text:body.text??undefined,html:body.html??undefined,raw:body.raw??undefined,mime:body.mime??undefined,template:body.template??undefined};
         return await prepareMail({...item,mail:{...m,snapshot}}, loadAttachments,gate);
       }
       return await prepareMail(item, loadAttachments,gate);

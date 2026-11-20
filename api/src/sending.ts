@@ -411,7 +411,7 @@ async function visibleEmailContent(runtime: Runtime,a: Actor,row: typeof emails.
   const visible = (value: string | undefined) => value === undefined ? null : manage ? value : redactCapabilityText(value);
   // Sealed Nightmail notices (forward confirmations) carry a capability meant only for the recipient: withheld from every reader.
   if (row.snapshot.sealed) { const { sealCapabilities } = await import('./mailbox-send.js'); return EmailContent.parse({ untrustedContent, subject: s.subject, html: s.html === undefined ? null : sealCapabilities(s.html), text: s.text === undefined ? null : sealCapabilities(s.text), raw: null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated }); }
-  return EmailContent.parse({ untrustedContent, subject: visible(s.subject), html: visible(s.html), text: visible(s.text), raw: manage ? s.raw ?? null : null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated });
+  return EmailContent.parse({ untrustedContent, subject: visible(s.subject), html: visible(s.html), text: visible(s.text), raw: manage ? s.raw ?? s.mime ?? null : null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated });
 }
 function visibleEmailEvent(a: Actor, row: z.input<typeof Event>) {
   return Event.parse({ ...row, data: a.permissions.includes('manage') ? row.data : redactCapabilityData(row.data) });
@@ -997,7 +997,7 @@ async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emai
   return claimedSend(call, a, input, async () => { await renderTemplates(call.runtime, a, out, batch); return { out }; }, { batch, scheduledAt });
 }
 /** A message an app submitted over SMTP with a send-only key (protocol-relay.ts), as POST /v1/emails/send takes it. */
-export type RelayedMessage = { from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; subject: string; text?: string; html?: string; attachments: string[]; headers: { name: string; value: string }[] };
+export type RelayedMessage = { from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; subject: string; text?: string; html?: string; attachments: string[]; headers: { name: string; value: string }[]; mime?: string };
 /**
  * A relayed message built as sendEmail builds one. SMTP's envelope decides who gets it, and every recipient may be Bcc
  * (a To-less message), which sendEmail's schema refuses: it checks them together as To, then the copy takes the
@@ -1005,10 +1005,12 @@ export type RelayedMessage = { from: string; fromName?: string; to: string[]; cc
  * message, so the bodies keep no JSON part cap.
  */
 async function relayedMessage(runtime: Runtime, input: RelayedMessage) {
-  const parsed = ProtocolSendInput.safeParse({ ...input, to: [...input.to, ...input.cc, ...input.bcc], cc: [], bcc: [] });
+  const { mime, ...fields } = input;
+  const parsed = ProtocolSendInput.safeParse({ ...fields, to: [...input.to, ...input.cc, ...input.bcc], cc: [], bcc: [] });
   if (!parsed.success) throw new ApiError(422, 'VALIDATION_FAILED', parsed.error.issues[0]?.message ?? 'Message fields are invalid.', parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean).join(', '));
   const out = await directMessages(runtime, [parsed.data], false), message = out[0]!;
   if (message.invalid) throw message.invalid;
+  if (mime) passThrough(message.snapshot, mime, message.marketing);
   Object.assign(message.snapshot, { to: input.to, cc: input.cc, bcc: input.bcc });
   return { parsed: parsed.data, out };
 }
@@ -1024,9 +1026,13 @@ export async function checkRelayed(runtime: Runtime, a: Actor, input: RelayedMes
  * the key through `credential` (as a bearer key's request does) and writes the email. Its attachments were uploaded by
  * the key, as POST /v1/attachments would.
  */
-export async function admitRelayed(runtime: Runtime, input: RelayedMessage, credential: SQL, authorize: (key: Principal) => Actor) {
-  const { parsed, out } = await relayedMessage(runtime, input);
-  return await admitSends({ runtime, path: '/v1/emails/send' }, parsed, out, { credential, authorize }, { batch: false }) as SendReceipt;
+export async function admitRelayed(runtime: Runtime, inputs: RelayedMessage[], credential: SQL, authorize: (key: Principal) => Actor): Promise<SendReceipt[]> {
+  // An envelope past SES's 50 recipients arrives in parts (protocol-relay.ts): admitted together, as a batch is.
+  const each: Awaited<ReturnType<typeof relayedMessage>>[] = [];
+  for (const input of inputs) each.push(await relayedMessage(runtime, input));
+  const out = each.flatMap(e => e.out), batch = out.length > 1;
+  const receipt = await admitSends({ runtime, path: '/v1/emails/send' }, batch ? { emails: each.map(e => e.parsed) } : each[0]!.parsed, out, { credential, authorize }, { batch });
+  return 'data' in receipt ? receipt.data : [receipt];
 }
 // Auth middleware calls this only for ordinary bearer keys, after the request size gate. Malformed inputs, mailbox
 // tracking, provider-rendered templates and replies by In-Reply-To (whose thread depends on what the key can read,
@@ -1136,7 +1142,13 @@ export async function storeAttachmentBytes(runtime: Runtime, a: Pick<Actor,'work
   const upload=attachmentUpload(runtime,a,validateAttachment(parsed.data,bytes),bytes,await bytesDigest(bytes),uploadedBy);
   try {await upload.put();return await runtime.db.transaction(upload.finish);}finally{await upload.refund();}
 }
-export type MailboxSendRequest = { protocolEnvelope?:boolean; from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region?: string; subject: string; html?: string; text?: string; attachments: string[]; tracking?: boolean; screen?: boolean; sealed?: boolean; headers: { Name: string; Value: string }[] };
+/** A mail app's signed or encrypted submission goes out as its own bytes (protocol-submit.ts sealedPassthrough). Nothing
+ *  can be added to them, so not as bulk mail, which is held and sent as marketing. */
+function passThrough(snapshot: EmailSnapshot, mime: string, bulk: boolean) {
+  if (bulk) throw new ApiError(422, 'UNSUPPORTED_MESSAGE', 'Signed or encrypted mail can’t be sent as bulk mail.');
+  snapshot.mime = mime;
+}
+export type MailboxSendRequest = { protocolEnvelope?:boolean; mime?: string; from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region?: string; subject: string; html?: string; text?: string; attachments: string[]; tracking?: boolean; screen?: boolean; sealed?: boolean; headers: { Name: string; Value: string }[] };
 /** Queues one transactional email from a mailbox through the send admission and dispatch pipeline, with extra MIME
  * headers. Only sendFromMailbox calls it, under the send locks it holds. */
 export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, held: SendScope, a: Actor, request: MailboxSendRequest, replyAuthors: string[] | null) {
@@ -1150,6 +1162,7 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, held: 
   const [isBulk] = bulkFlags([{ kind: 'transactional', to: request.to, cc: request.cc, bcc: request.bcc, subject: request.subject, html: request.html, text: request.text,
     headers: [...(parsed.data.headers ?? []), ...request.headers.map(h => ({ name: h.Name, value: h.Value }))] }]);
   const snapshot = await prepare(parsed.data, null);
+  if (request.mime) passThrough(snapshot, request.mime, !!isBulk);
   const cfg = runtime.config, oversize = cfg.screen && !isSimulatedSes(runtime) && cfg.hostedScreen ? await screenRefusal(runtime, snapshot) : undefined;
   const message: Outgoing = { snapshot, recipients: hostedCost(request.to, request.cc, request.bcc), marketing: !!isBulk, oversize };
   // The mailbox rules admitted this sender and these attachments; the sending log's reader rule is for other callers.

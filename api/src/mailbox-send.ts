@@ -31,7 +31,10 @@ const MAX_TOTAL_ATTACHMENT_BYTES = SEND_LIMITS.attachmentBytes;
 // Local parts that never read replies (RFC 3834 recommends not auto-replying to these).
 export const NO_REPLY = /^(?:no-?reply|do-?not-?reply|donotreply|mailer-daemon|postmaster|bounces?)(?:[+._-].*)?@/i;
 
-export type AttachmentInput = { content: string; filename: string; contentType?: string; disposition?: 'attachment' | 'inline'; contentId?: string } | { id: string };
+/** Inline base64 content, an upload or received file by ID, or a file decoded only when it is stored (a mail app's
+ *  submission, protocol-submit.ts submittedFile), so a message's files are held one at a time. */
+export type AttachmentInput = { content: string; filename: string; contentType?: string; disposition?: 'attachment' | 'inline'; contentId?: string } | { id: string }
+  | { bytes: () => Uint8Array; filename: string; contentType: string; disposition: 'attachment' | 'inline'; contentId?: string };
 type ResolvedAttachment = typeof sendingAttachments.$inferSelect;
 const ownsUpload = (wid: string, file: ResolvedAttachment) => file.sourceTemplateAssetId
   ? file.storageKey === `${wid}/templates/assets/${file.sourceTemplateAssetId}`
@@ -50,7 +53,10 @@ export async function resolveAttachments(runtime:Runtime, mailbox:Pick<MailboxRo
     admitted(runtime,(await runtime.db.execute<{s:Admitted|Refused}>(sql`SELECT ${check} AS s`)).rows[0]!.s,scope.workspaceId);
   }
   for(const item of items){
-    if ('content' in item){
+    if ('bytes' in item){
+      const { storeAttachmentBytes } = await wrapModuleLoad(() => import('./sending.js'));
+      out.push(await storeAttachmentBytes(runtime,scope,{filename:item.filename,contentType:item.contentType,disposition:item.disposition,contentId:item.contentId},item.bytes()));
+    } else if ('content' in item){
       const { storeAttachmentBytes } = await wrapModuleLoad(() => import('./sending.js'));
       const metadata={filename:item.filename,contentType:item.contentType??'application/octet-stream',contentId:item.contentId,disposition:item.disposition},bytes=decodeBase64(item.content,'attachments');
       validateAttachment({...metadata,disposition:metadata.disposition??'attachment'},bytes,MAX_JSON_ATTACHMENT_BYTES);
@@ -176,8 +182,11 @@ export function referencesHeader(ids: string[]) {
 }
 
 export type OutgoingMessage = {
-  /** Set only by the credential-fenced internal protocol submission route. */
-  protocolArchive?:{mid:string;key:string;bucket:string;bytes:number;mime:ReturnType<typeof mimeIndex>;clientId:string|null};
+  /** Set only by the credential-fenced internal protocol submission route. `stored` false: the inbox has no room for
+   *  the Sent copy, so the message is sent without one (no membership, no stored files, nothing charged to the inbox). */
+  protocolArchive?:{mid:string;key:string;bucket:string;bytes:number;mime:ReturnType<typeof mimeIndex>;clientId:string|null;stored:boolean};
+  /** A signed or encrypted submission, sent as these bytes (protocol-submit.ts sealedPassthrough). */
+  mime?: string;
   mailbox: MailboxRow; actor: Actor; scope: Scope; from: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[];
   subject: string; text?: string; html?: string; attachments: ResolvedAttachment[];
   fromName?: string; region?: string; tracking?: boolean; screen?: boolean;
@@ -211,11 +220,19 @@ async function enforceLimits(tx: DbExecutor, message: OutgoingMessage) {
   if (message.threadId && counts!.thread >= limits.perThreadPer10Minutes) throw new ApiError(429, 'THREAD_LOOP_SUSPECTED', `This mailbox sent ${counts!.thread} messages in this conversation in the last 10 minutes. Wait before replying again.`, undefined, true);
 }
 
+/** A message's recipients in SES-sized parts of 50: To, then Cc, then Bcc. */
+export function envelopeParts(message: Pick<OutgoingMessage,'to'|'cc'|'bcc'>) {
+  const all=[...message.to.map(a=>['to',a] as const),...message.cc.map(a=>['cc',a] as const),...message.bcc.map(a=>['bcc',a] as const)],parts=[];
+  for(let i=0;i<all.length;i+=50){const part=all.slice(i,i+50),of=(k:string)=>part.filter(([kind])=>kind===k).map(([,a])=>a);parts.push({to:of('to'),cc:of('cc'),bcc:of('bcc')});}
+  return parts;
+}
 /** Queues an email from a mailbox through the sending pipeline and stores it in the conversation. Runs inside the caller's transaction. */
 export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message: OutgoingMessage) {
   const recipients = [...message.to, ...message.cc, ...message.bcc];
   if (!recipients.length) throw new ApiError(422, 'RECIPIENT_REQUIRED', 'Add at least one recipient.', 'to');
-  if (recipients.length > 50) throw new ApiError(422, 'TOO_MANY_RECIPIENTS', 'At most 50 recipients across to, cc and bcc.', 'to');
+  // A mail app's envelope takes up to 100 (protocol-submit.ts SMTP_RECIPIENTS); it goes out in messages of 50 below.
+  const most = message.protocolArchive ? 100 : 50;
+  if (recipients.length > most) throw new ApiError(422, 'TOO_MANY_RECIPIENTS', `At most ${most} recipients across to, cc and bcc.`, 'to');
   // Only a reply to an existing thread can carry this internal exemption. Snapshot its
   // actual inbound authors, not Reply-To, copied recipients, or a caller's threading headers.
   const [locked] = await tx.select({box:mailboxes,replyAuthors:message.threadId ? sql<string[]>`ARRAY(
@@ -256,11 +273,16 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   ];
   const fromName = message.fromName ?? message.mailbox.displayName;
   // The send admission decision first, under the send locks held here: a refused sender is answered before the
-  // mailbox domain's own setup. Nothing it wrote survives a later refusal: the transaction rolls back.
-  const { emailId } = await queueMailboxEmail(runtime, tx, held, message.actor, { protocolEnvelope:!!message.protocolArchive,from: message.from, fromName: fromName ?? undefined, to: message.to, cc: message.cc, bcc: message.bcc, replyTo: message.replyTo, region: regionalSending(runtime)?message.region:domain?.region, subject: message.subject, html: message.html, text: message.text, attachments: sendingIds, headers, tracking: message.tracking, screen: message.screen, sealed: message.sealed }, locked.replyAuthors);
+  // mailbox domain's own setup. Nothing it wrote survives a later refusal: the transaction rolls back. SES takes 50
+  // recipients a message, so a larger envelope goes as several emails, To and Cc first: up to 50 of them see each other
+  // in the headers SES writes. The mailbox message follows the first email's delivery.
+  const emailIds:string[]=[];
+  for (const part of envelopeParts(message)) emailIds.push((await queueMailboxEmail(runtime, tx, held, message.actor, { protocolEnvelope:!!message.protocolArchive,from: message.from, fromName: fromName ?? undefined, ...part, replyTo: message.replyTo, region: regionalSending(runtime)?message.region:domain?.region, subject: message.subject, html: message.html, text: message.text, mime: message.mime, attachments: sendingIds, headers, tracking: message.tracking, screen: message.screen, sealed: message.sealed }, locked.replyAuthors)).emailId);
+  const emailId=emailIds[0]!;
+  const stored=message.protocolArchive?.stored??true;
   if (!domain?.bucket) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_READY', 'The mailbox domain has no receiving setup; enable it again.');
   if (!regionalSending(runtime) && message.region && domain.region !== message.region) throw new ApiError(422, 'MAILBOX_REGION_MISMATCH', 'Tracked mail must use the mailbox region.', 'region');
-  const files=await Promise.all(message.attachments.map(async(file,index)=>{
+  const files=!stored?[]:await Promise.all(message.attachments.map(async(file,index)=>{
     const attachmentId=`matt_${(await digest(`${messageRowId}:${index}`)).slice(0,32)}`;
     return {id:attachmentId,...message.scope,messageId:messageRowId,filename:file.filename,contentType:file.contentType,sizeBytes:file.size,contentId:file.contentId,disposition:file.disposition as 'inline'|'attachment',sha256:file.checksum,sourceId:file.id,bucket:domain.bucket!,storageKey:sentMailKey(message.scope.workspaceId,domain.bucket!,lifecycle==='ephemeral'?current.id:null,messageRowId,attachmentId)};
   }));
@@ -270,7 +292,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   await tx.update(mailThreads).set({ messageCount: sql`${mailThreads.messageCount} + 1`, lastMessageAt: sql`greatest(${mailThreads.lastMessageAt}, ${now}::timestamptz)` }).where(eq(mailThreads.id, threadId));
   const address = (value: string): MailAddress => ({ name: null, address: value });
   const [row] = await tx.insert(mailMessages).values({
-    lifecycle,rawBucket:message.protocolArchive?.bucket??(current.kind==='inbox'?domain.bucket:null),...(message.protocolArchive?{rawKey:message.protocolArchive.key,sizeBytes:message.protocolArchive.bytes,mime:message.protocolArchive.mime,messageId:message.protocolArchive.clientId}:{}),
+    lifecycle,rawBucket:!stored?null:message.protocolArchive?.bucket??(current.kind==='inbox'?domain.bucket:null),...(message.protocolArchive?{messageId:message.protocolArchive.clientId,...stored?{rawKey:message.protocolArchive.key,sizeBytes:message.protocolArchive.bytes,mime:message.protocolArchive.mime}:{}}:{}),
     id: messageRowId, ...message.scope, direction: 'outbound', threadId, region: domain.region, domainId: domain.id, sendingEmailId: emailId, senderMailboxId: message.mailbox.id,
     inReplyTo: message.inReplyTo, references: message.references, subject: message.subject, fromAddress: message.from, fromName,
     to: message.to.map(address), cc: message.cc.map(address), bcc: message.bcc.map(address), replyTo: message.replyTo.map(address), envelopeFrom: message.from, envelopeTo: recipients,
@@ -281,8 +303,8 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
     await tx.insert(mailAttachments).values(files);
     await tx.insert(attachmentLinks).values(files.map(f=>({...message.scope,attachmentId:f.sourceId,ownerType:'mailbox' as const,ownerId:f.id})));
   }
-  await attachToMailboxes(tx, message.scope, row!, [message.mailbox.id]);
-  if(current.kind==='inbox'&&(!message.protocolArchive||files.length))await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES(${'archive:'+messageRowId},'mail.archiveSent',${message.scope.workspaceId},jsonb_build_object('messageId',${messageRowId}::text))`);
+  if(stored)await attachToMailboxes(tx, message.scope, row!, [message.mailbox.id]);
+  if(stored&&current.kind==='inbox'&&(!message.protocolArchive||files.length))await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES(${'archive:'+messageRowId},'mail.archiveSent',${message.scope.workspaceId},jsonb_build_object('messageId',${messageRowId}::text))`);
   const queued = await recordEvents(tx, message.scope.workspaceId, [{ type: 'message.queued', mailboxId: message.mailbox.id, threadId, messageId: row!.id, data: { to: message.to, subject: message.subject, emailId } }]);
   return { message: row!, runnable: queued };
 }

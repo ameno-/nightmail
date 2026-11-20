@@ -109,7 +109,23 @@ export function s3MailObjects(wid: string, client: S3Client, bucket: string): Ma
     },
   };
 }
-/** Sandbox mail on Node, where no receiving bucket exists: whole objects (a stream is read into one first). */
+/** The bytes of `body` from `offset`, `length` of them; the rest is never read. */
+function slice(body: ReadableStream<Uint8Array>, { offset, length }: { offset: number; length: number }) {
+  const reader = body.getReader();
+  let at = 0;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const { done, value } = await reader.read();
+      const from = Math.max(0, offset - at), to = Math.min(value?.length ?? 0, offset + length - at);
+      if (value && to > from) controller.enqueue(value.subarray(from, to));
+      at += value?.length ?? 0;
+      if (done || at >= offset + length) { controller.close(); await reader.cancel().catch(() => {}); }
+    },
+    cancel: reason => reader.cancel(reason),
+  });
+}
+/** Sandbox mail on Node, where no receiving bucket exists: whole objects written (a stream is read into one first),
+ *  read as streams, so a Sent copy or APPEND larger than an attachment reads back. */
 function storageMailObjects(wid: string, storage: Storage): MailObjects {
   return {
     async put(key, body, contentType) {
@@ -118,6 +134,10 @@ function storageMailObjects(wid: string, storage: Storage): MailObjects {
     },
     async get(key, range) {
       assertMailKey(wid, key);
+      if (storage.stream) {
+        const object = await storage.stream(key);
+        return object && (range ? slice(object.body, range) : object.body);
+      }
       const object = await storage.get(key);
       return object && new Blob([range ? object.body.slice(range.offset, range.offset + range.length) : object.body] as BlobPart[]).stream();
     },
