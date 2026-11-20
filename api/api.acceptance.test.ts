@@ -17428,7 +17428,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(u.hostname,'cloudformation-custom-resource-response-useast2.s3.us-east-2.amazonaws.com');assert.equal(init?.method,'PUT');assert.equal(new Headers(init?.headers).get('content-type'),null);
       answers.push(JSON.parse(new TextDecoder().decode(init!.body as Uint8Array)));return new Response(null);
     });
-    let propagating=true,stackStatus='CREATE_COMPLETE';
+    // The stack as CloudFormation reports it through the role: its parameters, status and Connection resource.
+    let propagating=true,cfDenied=false,stackStatus='CREATE_IN_PROGRESS',resourceStatus='CREATE_IN_PROGRESS',physical:string|undefined;
+    const prefix=params.get('param_ResourcePrefix')!,denial=()=>Object.assign(new Error('fixture denial'),{name:'AccessDenied'});
     t.mock.method(STSClient.prototype,'send',async function(this:InstanceType<typeof STSClient>,cmd:any){
       const key=(await this.config.credentials()).accessKeyId,i=cmd.input;assert.equal(cmd.constructor.name,'AssumeRoleCommand');
       if(i.RoleArn===`arn:aws:iam::${platform}:role/nightmail-byo-broker`){assert.equal(key,'stack-fixture-platform');assert.equal(i.RoleSessionName,'nightmail-broker');return {Credentials:{AccessKeyId:'stack-fixture-broker',SecretAccessKey:'fixture-only',SessionToken:'broker',Expiration:new Date(Date.now()+3600000)}};}
@@ -17437,9 +17439,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       return {AssumedRoleUser:{Arn:`arn:aws:sts::${account}:assumed-role/${stack}/${i.RoleSessionName}`},Credentials:{AccessKeyId:'stack-fixture-customer',SecretAccessKey:'fixture-only',SessionToken:i.Policy,Expiration:new Date(Date.now()+900000)}};
     });
     t.mock.method(CloudFormationClient.prototype,'send',async function(this:InstanceType<typeof CloudFormationClient>,cmd:any){
-      assert.equal(cmd.constructor.name,'DescribeStacksCommand');assert.equal(cmd.input.StackName,stackId);
-      const policy=JSON.parse((await this.config.credentials()).sessionToken!);assert.ok(iamAllows(policy.Statement,'cloudformation:DescribeStacks',stackId,{'aws:RequestedRegion':'us-east-2'}));
-      return {Stacks:[{StackId:stackId,StackStatus:stackStatus,Outputs:[{OutputKey:'TemplateVersion',OutputValue:'6.0'}]}]};
+      const policy=JSON.parse((await this.config.credentials()).sessionToken!),allows=(action:string)=>assert.ok(iamAllows(policy.Statement,action,stackId,{'aws:RequestedRegion':'us-east-2'}),action);
+      if(cmd.constructor.name==='DescribeStackResourceCommand'){
+        assert.equal(cmd.input.StackName,stackId);assert.equal(cmd.input.LogicalResourceId,'Connection');allows('cloudformation:DescribeStackResource');if(cfDenied || propagating)throw denial();
+        return {StackResourceDetail:{StackId:stackId,LogicalResourceId:'Connection',PhysicalResourceId:physical,ResourceType:'Custom::NightmailConnection',ResourceStatus:resourceStatus}};
+      }
+      assert.equal(cmd.constructor.name,'DescribeStacksCommand');assert.ok([stackId,stack].includes(cmd.input.StackName));allows('cloudformation:DescribeStacks');
+      // A deleted or changed role denies even sessions issued before.
+      if(cfDenied || propagating)throw denial();
+      return {Stacks:[{StackId:stackId,StackStatus:stackStatus,Parameters:Object.entries({ExternalId:external,ConnectionId:cid,WorkspaceId:wid,ResourcePrefix:prefix}).map(([ParameterKey,ParameterValue])=>({ParameterKey,ParameterValue})),Outputs:[{OutputKey:'TemplateVersion',OutputValue:'6.0'}]}]};
     });
     const publish=async(message:string,type='Notification',topicArn=topic)=>{
       const signed:Record<string,string>=type==='Notification'?{Message:message,MessageId:randomUUID(),Timestamp:new Date().toISOString(),TopicArn:topicArn,Type:type}
@@ -17462,31 +17470,65 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     ok(await publish(request('Create',{ResourceProperties:{ConnectionId:'conn_'+'0'.repeat(32),TemplateVersion:'6.0'}})),202);assert.equal(last().Status,'FAILED');assert.match(last().Reason,/Connect AWS/);
     ok(await publish(request('Delete',{ResourceProperties:{ConnectionId:'conn_'+'0'.repeat(32),TemplateVersion:'6.0'},PhysicalResourceId:'conn_'+'0'.repeat(32)})),202);assert.equal(last().Status,'SUCCESS');
     error(await publish(JSON.parse(JSON.stringify(request('Create')).replace('cloudformation-custom-resource-response-useast2.s3.us-east-2.amazonaws.com','example.com'))),400,'STACK_REQUEST_INVALID');assert.equal(answers.length,2);
-    // A renamed stack is refused with what to do.
-    ok(await publish(request('Create',{StackId:stackId.replace(stack,'Nightmail-ffffffffffffffffffff')})),202);assert.equal(await run(),'done');assert.equal(last().Status,'FAILED');assert.match(last().Reason,new RegExp('Name the stack '+stack));
-    // The reason shows in setup too, not only in the AWS console.
+    // Signed but malformed: another logical resource, or an Update or Delete without its physical ID.
+    error(await publish(request('Create',{LogicalResourceId:'Other'})),400,'STACK_REQUEST_INVALID');error(await publish(request('Delete')),400,'STACK_REQUEST_INVALID');
+    // What needs no AWS call is answered at once and queues nothing: a renamed stack (the reason shows in setup too, not
+    // only in the AWS console), and a workspace that isn't allowlisted.
+    ok(await publish(request('Create',{StackId:stackId.replace(stack,'Nightmail-ffffffffffffffffffff')})),202);assert.equal(last().Status,'FAILED');assert.match(last().Reason,new RegExp('Name the stack '+stack));
     assert.match(ok(await api(wid,'GET','/v1/connection')).connection.stack.error,new RegExp('Name the stack '+stack));
+    await db.query('UPDATE workspaces SET byo_v2_enabled=false WHERE id=$1',[wid]);ok(await publish(request('Create')),202);assert.match(last().Reason,/isn't turned on/);await db.query('UPDATE workspaces SET byo_v2_enabled=true WHERE id=$1',[wid]);
+    const stackJobs=async()=>(await db.query("SELECT payload FROM jobs WHERE type='byo.stack' AND workspace_id=$1",[wid])).rows;
+    assert.equal((await stackJobs()).length,0);
+    // Anyone may publish: a connection queues at most three requests at a time, each keeping only the fields it needs.
+    // These name the connection's stack with invented IDs while its role works: none binds, and none is answered.
+    for(let i=0;i<5;i++)ok(await publish(JSON.stringify({...JSON.parse(request('Create',{StackId:stackId.replace(/[0-9a-f-]{36}$/,randomUUID())})),Padding:'x'.repeat(50_000),ResourceProperties:{ConnectionId:cid,TemplateVersion:'6.0',Padding:'x'.repeat(50_000)}})),202);
+    const flood=await stackJobs();assert.equal(flood.length,3);assert.ok(flood.every(j=>JSON.stringify(j.payload).length<2000 && !('Padding' in j.payload.request) && !('Padding' in j.payload.request.ResourceProperties)));
+    propagating=false;const quiet=answers.length;for(let i=0;i<3;i++)assert.equal(await run(),'done');
+    assert.equal(answers.length,quiet);assert.equal((await row()).aws_account_id,null);assert.equal((await row()).stack_id,null);
     // The genuine stack: one job however often SNS delivers it, retried while the new role isn't usable yet.
-    const create=request('Create');ok(await publish(create),202);ok(await publish(create),202);
+    propagating=true;const create=request('Create');ok(await publish(create),202);ok(await publish(create),202);
     assert.equal((await db.query("SELECT FROM jobs WHERE type='byo.stack' AND status='pending' AND workspace_id=$1",[wid])).rowCount,1);
     const before=answers.length;assert.equal(await run(),'deferred');assert.equal(answers.length,before);
     propagating=false;assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.equal(last().PhysicalResourceId,cid);
     const bound=await row();assert.equal(bound.aws_account_id,account);assert.equal(bound.role_arn,role);assert.equal(bound.stack_id,stackId);assert.equal(bound.stack_template_version,'6.0');assert.equal(bound.state,'scanning');assert.equal(bound.stack_error,null);
     assert.ok((await db.query("SELECT FROM jobs WHERE workspace_id=$1 AND type='byo.scan'",[wid])).rowCount);
-    // Update: a stack can't move to another connection; otherwise the version comes from the stack itself.
-    ok(await publish(request('Update',{PhysicalResourceId:cid,OldResourceProperties:{ConnectionId:'conn_'+'f'.repeat(32)}})),202);assert.equal(await run(),'done');assert.equal(last().Status,'FAILED');
+    // A connection proved without its stack (verifyConnection) binds only the stack that reports itself as this one.
+    await db.query('UPDATE provider_connections SET stack_id=NULL WHERE id=$1',[cid]);
+    ok(await publish(request('Create',{StackId:stackId.replace(/[0-9a-f-]{36}$/,randomUUID())})),202);assert.equal(await run(),'done');assert.equal((await row()).stack_id,null);
+    ok(await publish(request('Create')),202);assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.equal((await row()).stack_id,stackId);
+    stackStatus='CREATE_COMPLETE';resourceStatus='CREATE_COMPLETE';physical=cid;
+    // Update: the version comes from the stack itself, and rolling back an update that tried to move the stack is answered.
     await db.query('UPDATE provider_connections SET stack_template_version=NULL WHERE id=$1',[cid]);
     ok(await publish(request('Update',{PhysicalResourceId:cid,OldResourceProperties:{ConnectionId:cid}})),202);assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.equal(last().PhysicalResourceId,cid);assert.equal((await row()).stack_template_version,'6.0');
-    // Delete: another stack's is acknowledged and ignored; ours only while the stack itself says it's being deleted.
-    ok(await publish(request('Delete',{PhysicalResourceId:cid,StackId:stackId.replace(/[0-9a-f-]{36}$/,randomUUID())})),202);assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.equal((await row()).stack_deleted_at,null);
+    ok(await publish(request('Update',{PhysicalResourceId:cid,OldResourceProperties:{ConnectionId:'conn_'+'f'.repeat(32)}})),202);assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');
+    // Delete: another stack's, or another connection's resource, is acknowledged and changes nothing.
+    ok(await publish(request('Delete',{PhysicalResourceId:cid,StackId:stackId.replace(/[0-9a-f-]{36}$/,randomUUID())})),202);assert.equal(last().Status,'SUCCESS');
+    ok(await publish(request('Delete',{PhysicalResourceId:'conn_'+'e'.repeat(32)})),202);assert.equal(last().Status,'SUCCESS');assert.equal((await stackJobs()).filter(j=>j.payload.request.RequestType==='Delete').length,0);
+    // Ours, while the stack and its resource say nothing is being deleted: ignored, and not answered.
     const forged=answers.length;ok(await publish(request('Delete',{PhysicalResourceId:cid})),202);assert.equal(await run(),'done');assert.equal(answers.length,forged);assert.equal((await row()).stack_deleted_at,null);
-    stackStatus='DELETE_IN_PROGRESS';ok(await publish(request('Delete',{PhysicalResourceId:cid})),202);assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.ok((await row()).stack_deleted_at);
-    // A typed account must match the stack's, and the platform's own account is never connected.
+    // AccessDenied, from the role or only its stack reads, says nothing about the stack: the connection stays as it is,
+    // and at the deadline CloudFormation is told why (so the role isn't deleted under a connection that may still use it).
+    const expire=()=>db.query("UPDATE jobs SET payload=jsonb_set(payload,'{deadline}','0') WHERE type='byo.stack' AND status='pending' AND workspace_id=$1",[wid]);
+    stackStatus='DELETE_IN_PROGRESS';resourceStatus='DELETE_IN_PROGRESS';propagating=true;ok(await publish(request('Delete',{PhysicalResourceId:cid})),202);
+    assert.equal(await run(),'deferred');propagating=false;cfDenied=true;assert.equal(await run(),'deferred');assert.equal(answers.length,forged);
+    await expire();assert.equal(await run(),'done');assert.equal(last().Status,'FAILED');assert.match(last().Reason,/couldn't read this stack/);cfDenied=false;
+    assert.equal((await row()).stack_deleted_at,null);assert.equal((await row()).state,'scanning');
+    // An update that removes the Connection resource keeps the role, and the connection.
+    stackStatus='UPDATE_COMPLETE_CLEANUP_IN_PROGRESS';ok(await publish(request('Delete',{PhysicalResourceId:cid})),202);assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.match(last().Reason,/keeps its role/);assert.equal((await row()).stack_deleted_at,null);
+    // A failed create rolling back after its answer was lost: CloudFormation's own physical ID, and the role goes too.
+    stackStatus='ROLLBACK_IN_PROGRESS';physical='Nightmail-Connection-1A2B3C4D5E6F';ok(await publish(request('Delete',{PhysicalResourceId:physical})),202);assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.ok((await row()).stack_deleted_at);
+    // The stack itself being deleted.
+    await db.query('UPDATE provider_connections SET stack_deleted_at=NULL WHERE id=$1',[cid]);stackStatus='DELETE_IN_PROGRESS';physical=cid;
+    ok(await publish(request('Delete',{PhysicalResourceId:cid})),202);assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.ok((await row()).stack_deleted_at);
+    // A typed account must match the stack's, and the platform's own account is never connected; nor can a stack move
+    // to another connection. Each is answered at once.
     const typed=ok(await api(wid2,'POST','/v1/connection',{kind:'byo',awsAccountId:other}),202),stack2=new URLSearchParams(new URL(typed.quickCreateUrl).hash.split('?')[1]).get('stackName')!;
     for(const [inAccount,reason] of [[platform,/own AWS account/],[account,new RegExp(`chose AWS account ${other}.*stack is in ${account}`)]] as const){
       ok(await publish(request('Create',{StackId:`arn:aws:cloudformation:us-east-2:${inAccount}:stack/${stack2}/${randomUUID()}`,ResourceProperties:{ConnectionId:typed.id,TemplateVersion:'6.0'}})),202);
-      assert.equal(await run(),'done');assert.equal(last().Status,'FAILED');assert.match(last().Reason,reason);
+      assert.equal(last().Status,'FAILED');assert.match(last().Reason,reason);
     }
+    ok(await publish(request('Update',{PhysicalResourceId:cid,ResourceProperties:{ConnectionId:typed.id,TemplateVersion:'6.0'},OldResourceProperties:{ConnectionId:cid}})),202);assert.equal(last().Status,'FAILED');assert.match(last().Reason,/can't move/);
+    assert.equal((await db.query("SELECT FROM jobs WHERE type='byo.stack' AND workspace_id=$1",[wid2])).rowCount,0);
     assert.equal((await row(typed.id)).aws_account_id,null);
   });
 
@@ -25423,6 +25465,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       ...['iam:GetRole','iam:ListRoleTags','iam:GetRolePolicy'].map(a=>[a,`arn:aws:iam::${account}:role/${stack}`,{'aws:RequestedRegion':'us-east-1'}] as Call),
       // An update is prepared from Nightmail's own published templates; only the customer runs it.
       ['cloudformation:DescribeStacks',`arn:aws:cloudformation:us-east-2:${account}:stack/${stack}/guid`,{'aws:RequestedRegion':'us-east-2'}],
+      ['cloudformation:DescribeStackResource',`arn:aws:cloudformation:us-east-2:${account}:stack/${stack}/guid`,{'aws:RequestedRegion':'us-east-2'}],
       ['cloudformation:CreateChangeSet',`arn:aws:cloudformation:us-east-2:${account}:stack/${stack}/guid`,{'aws:RequestedRegion':'us-east-2','cloudformation:TemplateUrl':`https://nightmail-byo-templates-${platform}.s3.us-east-2.amazonaws.com/byo/6.1.yaml`,'cloudformation:ChangeSetName':'nightmail-update-6-1'}],
       ['ses:CreateContactList',ses+`contact-list/${prefix}-subscribers`,tagging],['ses:CreateConfigurationSet',ses+`configuration-set/${prefix}-notifications`,tagging],['sns:CreateTopic',`arn:aws:sns:${region}:${account}:${prefix}-inbound`,tagging],
       ['ses:UpdateContactList',ses+`contact-list/${prefix}-subscribers`,mine],

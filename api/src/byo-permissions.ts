@@ -46,7 +46,7 @@ export function byoSessionStatements(purpose: ByoPurpose, s: ByoScope): Statemen
     // The stack is always in us-east-2 (the template asserts it); Nightmail reads its status and outputs.
     case 'stack':
       if (!s.stack || !/^Nightmail-[0-9a-f]{20}$/.test(s.stack)) throw new ApiError(409, 'BYO_SESSION_SCOPE_REQUIRED', 'A purpose-scoped regional AWS session is required.');
-      return [{ Effect: 'Allow', Action: ['cloudformation:DescribeStacks'], Resource: `arn:aws:cloudformation:us-east-2:${s.account}:stack/${s.stack}/*`, Condition: { StringEquals: { 'aws:RequestedRegion': 'us-east-2' } } }];
+      return [{ Effect: 'Allow', Action: ['cloudformation:DescribeStacks', 'cloudformation:DescribeStackResource'], Resource: `arn:aws:cloudformation:us-east-2:${s.account}:stack/${s.stack}/*`, Condition: { StringEquals: { 'aws:RequestedRegion': 'us-east-2' } } }];
   }
 }
 export const byoSessionPolicy = (purpose: ByoPurpose, scope: ByoScope) => JSON.stringify({ Version: '2012-10-17', Statement: byoSessionStatements(purpose, scope) });
