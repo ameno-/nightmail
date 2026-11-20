@@ -9,7 +9,7 @@ import type { Agent, WorkspaceMembership } from '../../data/types'
 import { roleLabel, useMembershipCache, workspaceApi } from '../../data/workspaces'
 import { label, number } from '../../lib/format'
 import { useSenderScore } from '../score'
-import { limitSummary, useSendingLimit } from '../overview/setup'
+import { inEvaluation, limitSummary, useSendingLimit } from '../overview/setup'
 import { openScoreAbout } from '../../lib/score-about'
 import { useCompactShell } from '../../lib/media'
 import { AdminOnly } from './admin-only'
@@ -109,7 +109,7 @@ function SendingRows() {
   const connection = useApiDef(queries.connection())
   const summary = useSession()?.identity?.connection
   const limit = useSendingLimit()
-  const evaluating = useSenderScore().data?.limit?.source === 'calibrating'
+  const evaluating = inEvaluation(useSenderScore().data)
   const current = connection.data, kind = current?.kind ?? summary?.kind, region = current?.region ?? summary?.region
   return <>
     <div className="settings-rows">

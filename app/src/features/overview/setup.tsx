@@ -29,7 +29,9 @@ function useSendingLimitRead() {
   return { limit: hosted ? (live.data ?? identity)?.connection?.sendingLimit ?? null : null, pending: hosted && live.isPending }
 }
 
-// `evaluating`: the limit is the evaluation (the sender score's limit source is 'calibrating'), once rather than a day.
+// The limit is the evaluation, once rather than a day: no score yet and no override, or no standing stored before the first send.
+export const inEvaluation = (report: SenderScore | undefined) => report?.state === 'warmup' && (report.limit?.source ?? 'calibrating') === 'calibrating'
+
 export function limitSummary(limit: SendingLimit, evaluating = false) {
   if (limit.cap === null) return 'No daily limit: only the per-minute pace applies.'
   if (evaluating) return `Evaluation: ${number(limit.used)} of the first ${number(limit.cap)} recipients sent, once. Their results take about an hour.`
@@ -49,7 +51,7 @@ export function DailyLimit({ report }: { report: SenderScore | undefined }) {
   const growth = cap === null ? report?.limit?.growth ?? null : null, none = growth ? `Growing: up to ${number(growth.hourly)} this hour` : 'None'
   const notes = limitNotes(report)
   // The evaluation is its first recipients, once, not a day; the label stays while the score that says so loads.
-  const evaluating = cap !== null && report?.limit?.source === 'calibrating'
+  const evaluating = cap !== null && inEvaluation(report)
   const limitText = cap === null ? '' : evaluating ? `Evaluation: ${number(left)} of the first ${number(cap)} left` : `${number(left)} of ${number(cap)} left`
   return <section className="daily-limit" aria-label="Daily limit">
     <button type="button" className="limit-row" onClick={() => setExplaining(true)} title={cap === null ? limitSummary(limit) : `${limitSummary(limit, evaluating)} Includes simulator addresses.`} aria-label={cap === null ? `No daily limit${growth ? `, growing: up to ${number(growth.hourly)} this hour` : ''}. How limits work` : `Daily limit: ${limitText}. How limits work`}>
