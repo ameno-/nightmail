@@ -188,7 +188,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
       </section>
     </div>
     {open && (!initial || !linkedDomains.isPending) && <CreateKeyDialog open onOpenChange={setOpen} initial={initial} onCreated={setSecret} onConnectAgent={() => setConnecting(true)} />}
-    <ConnectAgentDialog open={connecting} onOpenChange={setConnecting} onCreateKey={() => setOpen(true)} />
+    <ConnectAgentDialog open={connecting} onOpenChange={setConnecting} />
     <SecretDialog secret={secret?.secret ?? null} title={secret?.title ?? 'Key created'} description={secret?.description} onClose={() => setSecret(null)}>{secret?.sendExample && <KeySendExample apiKey={secret.secret} />}{secret?.agent && <McpKeySetup secret={secret.secret} env={apiKeyEnv} />}{secret?.mail && <MailSettings username={secret.mail.username} imap={secret.mail.imap} smtp={secret.mail.smtp} />}</SecretDialog>
     <KeyDetails row={viewing} fields={viewing ? details(viewing) : []} onClose={() => setViewing(null)} onRevoke={row => { setViewing(null); setRevoking(row) }} onEdit={key => { setViewing(null); setEditing(key) }} />
     {editing && editReady && <EditKeyDialog apiKey={editing} onClose={() => setEditing(null)} />}

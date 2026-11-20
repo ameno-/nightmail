@@ -1,6 +1,6 @@
 import { Component, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate, useNavigationType } from 'react-router'
-import { BookOpen, Ellipsis, Globe, Inbox, KeyRound, LayoutGrid, Lock, ScrollText, Send, Settings, ShieldCheck, Users } from 'lucide-react'
+import { BookOpen, Ellipsis, Globe, Inbox, KeyRound, LayoutGrid, Lock, Plug, ScrollText, Send, Settings, ShieldCheck, Users } from 'lucide-react'
 import { useRegion, useSession, useWorkspaceAccess } from '../data/context'
 import { sidebarPaths, usePrefetchQueries, usePrefetchRoute, useRouteIntent } from '../data/prefetch'
 import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
@@ -8,6 +8,7 @@ import { label, number, percent } from '../lib/format'
 import { chunk, ChunkFallback } from '../lib/preloadable'
 import { queries } from '../data/queries'
 import { useScoreAbout } from '../lib/score-about'
+import { openConnectAgent, useConnectAgentOpen } from '../lib/connect-agent'
 import { Alert, Button, EmptyState, ErrorState, Select, Sheet, Skeleton, SkeletonText, useToast } from './ui'
 import { useCompactShell } from '../lib/media'
 import { RouteSkeleton } from './RouteSkeleton'
@@ -29,6 +30,10 @@ const score = chunk(() => import('../features/score'))
 const SidebarScore = score.page(module => module.SidebarScore)
 // The sender score explainer: one dialog for every place the score appears, loaded when first opened.
 const ScoreAboutHost = score.page(module => module.ScoreAboutHost)
+// Connect an agent: one dialog for the whole shell, its code loaded when the sidebar item is pointed at or first opened.
+const connectAgent = chunk(() => import('../features/docs/connect-agent'))
+const ConnectAgentHost = connectAgent.page(module => module.ConnectAgentHost)
+const preloadConnectAgent = () => { void connectAgent.preload().catch(() => {}) }
 // UI notes mode (Nightmail staff with the operator role): its code loads only while the mode is on, as a fixed overlay.
 const UiNotesLayer = chunk(() => import('../features/ui-notes')).page(module => module.UiNotesLayer)
 
@@ -54,6 +59,9 @@ export function AppShell() {
   // the whole visit that stays open across pages.
   const support = useSupportChat({ hosted: access.multiTenant, staff: Boolean(session?.identity?.operator || session?.identity?.billing?.free) })
   const [scoreAboutMounted, setScoreAboutMounted] = useState(false)
+  const connecting = useConnectAgentOpen()
+  const [connectMounted, setConnectMounted] = useState(false)
+  useEffect(() => { if (connecting) setConnectMounted(true) }, [connecting])
   const toast = useToast()
   // Only for the people the API allows (GET /v1/me uiNotes): nobody else gets the shortcut, its listeners or its code.
   const canNote = session?.identity?.uiNotes === true
@@ -194,8 +202,9 @@ export function AppShell() {
   const links: readonly NavItem[] = [...navigation, ...session?.identity?.operator ? [operatorLink] : []]
   const locked = (path: string) => !access.canAdminister && adminOnly.has(path)
   const scoreHost = (scoreAbout.open || scoreAboutMounted) && <Suspense fallback={null}><ScoreAboutHost /></Suspense>
+  const connectHost = (connecting || connectMounted) && <Suspense fallback={null}><ConnectAgentHost /></Suspense>
   const context = <>
-    {access.multiTenant && <AccountSwitcher />}
+    {access.multiTenant && <AccountSwitcher onConnectAgent={openConnectAgent} />}
     {access.canAdminister && !access.multiTenant && <Select id="sidebar-view-region" aria-label="Viewing region" value={current?.region ?? ''} onValueChange={changeRegion} options={enabled.map(region => ({ value: region.region, label: region.region }))} disabled={regions.isPending || !enabled.length} placeholder={regions.isPending ? 'Loading regions…' : 'No enabled regions'} />}
     {access.canAdminister && !access.multiTenant && regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
   </>
@@ -211,7 +220,7 @@ export function AppShell() {
     </> : discovery.isFetching ? <><div className="quota-label"><span>Checking SES…</span><Skeleton width={28} /></div><Skeleton height={3} /><SkeletonText lineHeight={18} /></> : needsProvisioning ? null : <><span>SES · {discovery.isError ? 'Check failed' : label(current?.discoveryStatus ?? 'not_discovered')}</span><Link to="/settings">Set up SES</Link></>}</div>
     {access.multiTenant && <div className="sidebar-score-slot"><SidebarScore /></div>}
   </>
-  const overlays = <>{support.mode && <SupportHost chat={support} />}{notesOn && <UiNotesLayer />}</>
+  const overlays = <>{connectHost}{support.mode && <SupportHost chat={support} />}{notesOn && <UiNotesLayer />}</>
   const main = <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
     <SetupBanner />
     <StandingBanner />
@@ -233,7 +242,7 @@ export function AppShell() {
     </header>
     {scoreHost}
     {main}
-    <TabBar links={links} intent={intent} footer={footer} locked={locked} />
+    <TabBar links={links} intent={intent} footer={footer} locked={locked} connect={!access.multiTenant} />
     {overlays}
   </div>
   return <div className={support.mode ? 'app-shell app-shell--support' : 'app-shell'}>
@@ -244,7 +253,7 @@ export function AppShell() {
       <div className="sidebar-context">{context}</div>
       {/* Members see every page: owner and admin ones carry a lock and explain who can use them. */}
       <nav className="main-navigation" aria-label="Main navigation">{links.map(([path, title]) => <NavLink key={path} to={path} {...locked(path) ? lockedProps : intent(path)}>{title}{locked(path) && <Lock size={12} aria-label="Owners and admins only" />}</NavLink>)}</nav>
-      <div className="sidebar-footer">{footer}</div>
+      <div className="sidebar-footer"><button type="button" className="sidebar-connect" onPointerEnter={preloadConnectAgent} onFocus={preloadConnectAgent} onClick={openConnectAgent}>Connect an agent<Plug aria-hidden="true" /></button>{footer}</div>
     </aside>
     {scoreHost}
     {main}
@@ -269,7 +278,8 @@ class PageErrorBoundary extends Component<{ resetKey: string; children: ReactNod
 // instead of leaving the page; a page picked in it replaces that entry, so Back from there returns to the page below.
 const issued = new Set<string>()
 const lockedProps = { title: 'Owners and admins only', 'data-locked': true }
-function TabBar({ links, intent, footer, locked }: { links: readonly NavItem[]; intent: ReturnType<typeof useRouteIntent>; footer: ReactNode; locked: (path: string) => boolean }) {
+// `connect`: Connect an agent closes More and opens. Hosted, it is in the account menu instead (AccountSwitcher).
+function TabBar({ links, intent, footer, locked, connect }: { links: readonly NavItem[]; intent: ReturnType<typeof useRouteIntent>; footer: ReactNode; locked: (path: string) => boolean; connect: boolean }) {
   const location = useLocation(), navigate = useNavigate(), moreButton = useRef<HTMLButtonElement>(null)
   // Only an entry opened in this visit counts: a reload on it shows the page, not a stale sheet.
   const token = (location.state as { more?: string } | null)?.more
@@ -284,7 +294,8 @@ function TabBar({ links, intent, footer, locked }: { links: readonly NavItem[]; 
       <button ref={moreButton} type="button" className="tab-bar__item" aria-haspopup="dialog" aria-expanded={open} aria-current={inMore ? 'page' : undefined} data-active={inMore || open || undefined} onClick={show}><span className="tab-bar__icon" aria-hidden="true"><Ellipsis /></span><span className="tab-bar__label">More</span></button>
     </nav>
     <Sheet open={open} onOpenChange={next => { if (!next) close() }} title="More" hideTitle className="more-sheet" returnFocus={moreButton}>
-      <nav className="more-sheet__links" aria-label="More pages">{more.map(([path, title]) => <NavLink key={path} className="more-sheet__link" to={path} replace {...locked(path) ? lockedProps : intent(path)}><span className="more-sheet__icon" aria-hidden="true">{icons[path]}</span>{title}{locked(path) && <Lock className="more-sheet__lock" size={14} aria-label="Owners and admins only" />}</NavLink>)}</nav>
+      <nav className="more-sheet__links" aria-label="More pages">{more.map(([path, title]) => <NavLink key={path} className="more-sheet__link" to={path} replace {...locked(path) ? lockedProps : intent(path)}><span className="more-sheet__icon" aria-hidden="true">{icons[path]}</span>{title}{locked(path) && <Lock className="more-sheet__lock" size={14} aria-label="Owners and admins only" />}</NavLink>)}
+        {connect && <button type="button" className="more-sheet__link" onPointerDown={preloadConnectAgent} onClick={() => { close(); openConnectAgent() }}><span className="more-sheet__icon" aria-hidden="true"><Plug /></span>Connect an agent</button>}</nav>
       <div className="more-sheet__footer">{footer}</div>
     </Sheet>
   </>

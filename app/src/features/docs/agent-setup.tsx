@@ -1,13 +1,12 @@
-import { useState, type ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { Download } from 'lucide-react'
-import { Field, SectionHeader, Select } from '../../components/ui'
+import { SectionHeader } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { isMailbox } from '../../lib/private-address'
 import type { Domain } from '../../data/types'
 import { recordsFor } from '../settings/domain-records'
-import { mcpClientNames, type McpClient } from '../../../../api/src/mcp-clients'
-import { McpClientSetup, mcpAccess, useMcpScope, useMcpUrl, type McpAccess } from './connect-agent'
+import { McpSignInSetup } from './connect-agent'
 import './developer.css'
 import { apiKeyEnv, productName, productSlug, sdkPackage } from '../../../../api/src/brand'
 
@@ -84,29 +83,12 @@ export function AgentPrompt({ prompt, compact = false }: { prompt: string | null
   </section>
 }
 
-// What each access level lets an agent do, for the docs page's access choice (the dashboard's labels stand alone).
-const accessHints: Record<McpAccess, string> = {
-  read: 'Reads mail, logs and settings. Can’t send or change anything.',
-  send: 'Also sends email, which may reach real recipients.',
-  manage: 'Also changes configuration: domains, routes, rules and keys.',
-}
-
-// The hosted MCP server, set up with OAuth: the same snippets as Connect an agent in the dashboard (connect-agent.tsx).
-// `compact` (onboarding) is the URL, the client tabs and their steps, without the docs' paragraph on the two sign-ins.
-export function McpSetup({ chooseAccess = false, compact = false }: { chooseAccess?: boolean; compact?: boolean }) {
-  const [client, setClient] = useState<McpClient>('opencode')
-  const [access, setAccess] = useState<McpAccess>(chooseAccess ? 'read' : 'manage')
-  const scope = useMcpScope(access)
-  const serverUrl = useMcpUrl()
+// The hosted MCP server, set up as you: the same URL and one-line setups as Connect an agent (connect-agent.tsx).
+// `compact` (onboarding) is the setup alone, without the docs' paragraph on the three ways to connect.
+export function McpSetup({ compact = false }: { compact?: boolean }) {
   return <section id="mcp" className="section stack developer-section" aria-label="MCP server">
     <SectionHeader title="MCP server" />
-    <div className="developer-url"><code>{serverUrl ?? ''}</code>{serverUrl && <CopyAction value={serverUrl} label="Copy MCP URL" variant="ghost" size="sm" compact className="developer-copy-icon" />}</div>
-    {!compact && <p className="muted developer-copy">Add this URL as a remote (HTTP) server in your MCP client. There are three ways to connect. <strong>As you</strong>: the client opens your browser, you sign in with your Anomaly account (Google) and approve what it may do; no key to copy. <strong>With an API key</strong>: the key in the config’s Authorization header gives the agent exactly that key’s access in its workspace, with no browser; Create key shows the setup. <strong>One agent inbox</strong>: an API key for that inbox in the config limits the agent to it; create it in the dashboard with Connect an agent (API keys, or any agent inbox).</p>}
-    {chooseAccess && <div className="developer-access">
-      <Field label="Access it asks for" htmlFor="developer-mcp-access" hint={client === 'opencode' ? accessHints[access] : `${mcpClientNames[client]} asks for read access; you can approve more in the browser.`}>
-        <Select id="developer-mcp-access" value={access} onValueChange={value => setAccess(value as McpAccess)} disabled={client !== 'opencode'} options={mcpAccess.map(({ value, label }) => ({ value, label }))} />
-      </Field>
-    </div>}
-    <McpClientSetup client={client} onClient={setClient} url={serverUrl} auth={{ scope }} />
+    {!compact && <p className="muted developer-copy">Add this URL as a remote (HTTP) server in your MCP client. There are three ways to connect. <strong>As you</strong>: the client opens your browser, you sign in with your Anomaly account (Google) and approve what it may do; no key to copy. <strong>With an API key</strong>: the key in the config’s Authorization header gives the agent exactly that key’s access in its workspace, with no browser; Create key shows the setup. <strong>One agent inbox</strong>: an API key for that inbox in the config limits the agent to it; make it with Connect an agent → For one inbox, or from any agent inbox.</p>}
+    <McpSignInSetup />
   </section>
 }
