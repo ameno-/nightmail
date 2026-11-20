@@ -21199,8 +21199,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Sign-in: only SMTP, only as apikey, and only a key that can send and nothing else, limited to domains or addresses.
       const signedIn = await login(smtp.secret);
       assert.equal(signedIn.status, 200, JSON.stringify(signedIn.body));
-      assert.deepEqual(signedIn.body, { kid: smtp.id, inbox: smtp.id, workspace: wid, account: 'unsponsored', addresses: [], domains: ['relay.example'], anySender: false, folders: [] });
+      assert.deepEqual(signedIn.body, { kid: smtp.id, inbox: smtp.id, workspace: wid, account: 'unsponsored', addresses: [], domains: ['relay.example'], anySender: false, folders: [], expiresInMs: null });
       assert.deepEqual((await login(addressKey.secret)).body.addresses, ['alerts@relay.example', 'ops@relay.example']);
+      // An expiring key's sign-in says how long it has left, so the gateway's cached sign-in and open session end then.
+      ok(await local('PATCH', `/v1/api-keys/${smtp.id}`, { expiresAt: new Date(Date.now() + 3_600_000).toISOString() }));
+      const left = (await login(smtp.secret)).body.expiresInMs;
+      assert.ok(left > 3_590_000 && left <= 3_600_000, String(left));
       // Past its expiry a key signs in no more; a later expiry brings it back.
       await db.query("UPDATE api_keys SET expires_at=now()-interval '1 second' WHERE id=$1", [smtp.id]);
       assert.deepEqual(await refusal(login(smtp.secret)), [403, 'PROTOCOL_DENIED']);

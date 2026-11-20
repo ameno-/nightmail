@@ -33,9 +33,9 @@ type Kind = NonNullable<ReturnType<typeof relayKind>>;
 function sendOnlyKey(runtime: Runtime, kind: Kind, match: SQL) {
   const cfg = runtime.config, budget = sql`${cfg.apiRateLimitPerMinute}::int AS max_requests`;
   return kind === 'api_key'
-    ? sql`SELECT k.id,k.workspace_id,k.id AS key_id,k.permissions,k.domains,${budget} FROM api_keys k WHERE ${match} AND k.revoked_at IS NULL
+    ? sql`SELECT k.id,k.workspace_id,k.id AS key_id,k.permissions,k.domains,k.expires_at,${budget} FROM api_keys k WHERE ${match} AND k.revoked_at IS NULL
         AND (k.expires_at IS NULL OR k.expires_at>now()) AND k.permissions ? 'send' AND NOT k.permissions ?| ARRAY['read','manage'] AND k.domains<>'[]'::jsonb AND ${tieAllows(cfg, sql`k.workspace_id`, sql`k.id`, 'api_key')}`
-    : sql`SELECT k.id,k.workspace_id,k.id AS key_id,k.permissions,'[]'::jsonb AS domains,k.mailbox_ids,${budget} FROM mailbox_keys k WHERE ${match} AND k.revoked_at IS NULL
+    : sql`SELECT k.id,k.workspace_id,k.id AS key_id,k.permissions,'[]'::jsonb AS domains,k.mailbox_ids,k.expires_at,${budget} FROM mailbox_keys k WHERE ${match} AND k.revoked_at IS NULL
         AND (k.expires_at IS NULL OR k.expires_at>now()) AND k.inbox_id IS NULL
         AND k.permissions ? 'send' AND NOT k.permissions ?| ARRAY['read','modify','create'] AND ${tieAllows(cfg, sql`k.workspace_id`, sql`k.id`, 'key')}`;
 }
@@ -46,14 +46,16 @@ const sendable = sql`SELECT lower(b.address) FROM mailbox_addresses b JOIN mailb
 const owns = (kind: Kind, addresses: string[]) => kind === 'key' ? sql`NOT EXISTS (SELECT FROM unnest(${sql.param(addresses)}::text[]) r WHERE r NOT IN (${sendable}))` : sql`true`;
 
 /** The gateway's principal for an SMTP sign-in with a send-only key, or null. Its senders: the key's domains, or its
- *  addresses; past 1,000 addresses the gateway leaves the check to submission (anySender). */
+ *  addresses; past 1,000 addresses the gateway leaves the check to submission (anySender). expiresInMs: how long the key
+ *  has left, if it expires; the gateway reuses the login and keeps the session open no longer than that. */
 export async function relayLogin(runtime: Runtime, user: string, password: string, protocol: 'imap' | 'smtp') {
   if (protocol !== 'smtp' || user.toLowerCase() !== RELAY_USER) return null;
   const kind: Kind = ADDRESS_KEY.test(password) ? 'key' : 'api_key';
   const addresses = kind === 'key' ? sql`(SELECT DISTINCT a FROM (${sendable} LIMIT 1001) x(a))` : sql`(SELECT NULL::text a WHERE false)`;
   const { rows: [row] } = await runtime.db.execute(sql`WITH k AS MATERIALIZED (${sendOnlyKey(runtime, kind, sql`k.hash=${await digest(password)}`)})
     SELECT k.id AS kid,k.id AS inbox,k.workspace_id AS workspace,coalesce('sponsor:'||w.quota_sponsor,'unsponsored') AS account,
-      CASE WHEN s.n<=1000 THEN s.list ELSE '[]'::jsonb END AS addresses,k.domains,s.n>1000 AS "anySender",'[]'::jsonb AS folders
+      CASE WHEN s.n<=1000 THEN s.list ELSE '[]'::jsonb END AS addresses,k.domains,s.n>1000 AS "anySender",'[]'::jsonb AS folders,
+      floor(extract(epoch FROM k.expires_at-clock_timestamp())*1000)::float8 AS "expiresInMs"
     FROM k LEFT JOIN workspaces w ON w.id=k.workspace_id
     CROSS JOIN LATERAL (SELECT count(*)::int n,coalesce(jsonb_agg(a ORDER BY a),'[]') list FROM ${addresses} s) s`);
   return row ?? null;
