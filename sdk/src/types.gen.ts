@@ -3871,13 +3871,13 @@ export type CreateInboundAddress = {
      */
     sendLimits?: {
         /**
-         * Deprecated and not enforced. 0 turns sending off; any other number has no effect.
+         * Deprecated and not enforced: any whole number from 0 is accepted. 0 turns sending off; any other number has no effect.
          *
          * @deprecated
          */
         perHour?: number;
         /**
-         * Deprecated and not enforced. 0 turns sending off; any other number has no effect.
+         * Deprecated and not enforced: any whole number from 0 is accepted. 0 turns sending off; any other number has no effect.
          *
          * @deprecated
          */
@@ -3907,13 +3907,13 @@ export type UpdateInboundAddress = {
      */
     sendLimits?: {
         /**
-         * Deprecated and not enforced. 0 turns sending off; any other number has no effect.
+         * Deprecated and not enforced: any whole number from 0 is accepted. 0 turns sending off; any other number has no effect.
          *
          * @deprecated
          */
         perHour?: number;
         /**
-         * Deprecated and not enforced. 0 turns sending off; any other number has no effect.
+         * Deprecated and not enforced: any whole number from 0 is accepted. 0 turns sending off; any other number has no effect.
          *
          * @deprecated
          */

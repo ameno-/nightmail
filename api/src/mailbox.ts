@@ -406,8 +406,8 @@ function registerAddresses(app: App) {
     aliases: z.array(z.string().trim().toLowerCase().max(254).regex(ADDRESS)).max(50).default([]), rules: z.array(z.string().max(254)).max(20).default([]).describe('Wildcard address patterns, e.g. support+*@acme.com or *@help.acme.com.'),
     metadata: z.record(z.string(), z.unknown()).refine(value => JSON.stringify(value).length <= 16384, 'Metadata must be at most 16 KB.').default({}),
     sendLimits: z.object({
-      perHour: z.number().int().min(0).max(10000).openapi({ deprecated: true, description: 'Deprecated and not enforced. 0 turns sending off; any other number has no effect.' }),
-      perDay: z.number().int().min(0).max(100000).openapi({ deprecated: true, description: 'Deprecated and not enforced. 0 turns sending off; any other number has no effect.' }),
+      perHour: z.number().int().min(0).openapi({ deprecated: true, description: 'Deprecated and not enforced: any whole number from 0 is accepted. 0 turns sending off; any other number has no effect.' }),
+      perDay: z.number().int().min(0).openapi({ deprecated: true, description: 'Deprecated and not enforced: any whole number from 0 is accepted. 0 turns sending off; any other number has no effect.' }),
       perRecipientPerHour: z.number().int().min(0).max(1000), perThreadPer10Minutes: z.number().int().min(0).max(1000),
     }).partial().strict().optional()
       .describe(`Override the loop guards. Defaults: perRecipientPerHour ${DEFAULT_SEND_LIMITS.perRecipientPerHour}, perThreadPer10Minutes ${DEFAULT_SEND_LIMITS.perThreadPer10Minutes}. 0 blocks sending. There is no hourly or daily cap per address.`),

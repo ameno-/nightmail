@@ -22628,7 +22628,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         ok(await reply(sender.id,mail.thread_id,'fixture@example.net',mail.id),202);
       });
       await t.test('addresses: no hourly or daily send cap; the loop guards and a 0 still refuse',async()=>{
-        const desk=ok(await local('POST','/v1/inbound/addresses',{address:'desk@'+host}),201),addressPath=`/v1/inbound/addresses/${desk.id}`;
+        // Console (opencode-console, email-opensend.ts) creates and updates its addresses with sendLimits {perHour, perDay}
+        // from its own rate limits: they answer 2xx with the same shape, are stored as given and limit nothing.
+        const consoleBody={displayName:'Support',metadata:{workspaceID:'wrk_fixture',inboxID:'inb_fixture'}},guards={perRecipientPerHour:20,perThreadPer10Minutes:10};
+        const desk=ok(await local('POST','/v1/inbound/addresses',{address:'desk@'+host,...consoleBody,sendLimits:{perHour:2000,perDay:10000}}),201),addressPath=`/v1/inbound/addresses/${desk.id}`;
+        assert.deepEqual(desk.sendLimits,{perHour:2000,perDay:10000,...guards});
         const mail=await deliver('desk-in',[desk.address],false,true,'desk-in',false,{dmarcVerdict:{status:'PASS'}});
         const send=(to:string)=>local('POST','/v1/inbound/threads',{addressId:desk.id,to:[to],subject:'Update',text:'Test'},'live',{'idempotency-key':unique('idem')});
         const reply=()=>local('POST',`/v1/inbound/threads/${mail.thread_id}/reply`,{addressId:desk.id,replyToMessageId:mail.id,text:'Test'},'live',{'idempotency-key':unique('idem')});
@@ -22638,7 +22642,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const seedThread=ok(await send('seed@example.net'),202).threadId;
         await seed(900,'3 hours',seedThread);await seed(100,'30 minutes',seedThread);
         ok(await send('fresh@example.net'),202);ok(await reply(),202);
-        assert.deepEqual(ok(await local('GET',addressPath)).sendLimits,{perHour:100,perDay:1000,perRecipientPerHour:20,perThreadPer10Minutes:10},'perHour and perDay are still shown, unenforced');
+        for(const sendLimits of [{perHour:200,perDay:2000},{perHour:10000,perDay:100000},{perHour:50000,perDay:1000000}])
+          assert.deepEqual(ok(await local('PATCH',addressPath,{...consoleBody,sendLimits})).sendLimits,{...sendLimits,...guards});
+        assert.deepEqual(ok(await local('GET',addressPath)).sendLimits,{perHour:50000,perDay:1000000,...guards},'perHour and perDay are still shown, unenforced');
+        const fresh=ok(await local('POST','/v1/inbound/addresses',{address:'fresh-desk@'+host}),201);
+        assert.deepEqual(fresh.sendLimits,{perHour:100,perDay:1000,...guards},'never set, they show the former defaults');
         // The loop guards still refuse: 20 to one recipient in an hour, and 10 in one conversation in 10 minutes.
         await seed(20,'5 minutes',seedThread,'loop@example.net');error(await send('loop@example.net'),429,'RECIPIENT_SEND_LIMIT');
         await seed(9,'1 minute',mail.thread_id);error(await reply(),429,'THREAD_LOOP_SUSPECTED');

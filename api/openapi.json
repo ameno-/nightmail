@@ -12612,16 +12612,14 @@
               "perHour": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 10000,
                 "deprecated": true,
-                "description": "Deprecated and not enforced. 0 turns sending off; any other number has no effect."
+                "description": "Deprecated and not enforced: any whole number from 0 is accepted. 0 turns sending off; any other number has no effect."
               },
               "perDay": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 100000,
                 "deprecated": true,
-                "description": "Deprecated and not enforced. 0 turns sending off; any other number has no effect."
+                "description": "Deprecated and not enforced: any whole number from 0 is accepted. 0 turns sending off; any other number has no effect."
               },
               "perRecipientPerHour": {
                 "type": "integer",
@@ -12693,16 +12691,14 @@
               "perHour": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 10000,
                 "deprecated": true,
-                "description": "Deprecated and not enforced. 0 turns sending off; any other number has no effect."
+                "description": "Deprecated and not enforced: any whole number from 0 is accepted. 0 turns sending off; any other number has no effect."
               },
               "perDay": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 100000,
                 "deprecated": true,
-                "description": "Deprecated and not enforced. 0 turns sending off; any other number has no effect."
+                "description": "Deprecated and not enforced: any whole number from 0 is accepted. 0 turns sending off; any other number has no effect."
               },
               "perRecipientPerHour": {
                 "type": "integer",
