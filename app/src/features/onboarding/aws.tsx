@@ -9,6 +9,7 @@ import { connectionApi } from '../../data/connections'
 import { domainPattern, normalizeDomain } from '../../lib/domain'
 import { ApiError, errorText, type ByoCandidate, type ByoRegion, type ProviderConnection } from '../../data/types'
 import { productName } from '../../../../api/src/brand'
+import { cleanupStatus, DisconnectDetails } from '../settings/aws-disconnect'
 
 // Connect AWS for a connected account (role template 6.0): the stack reports itself, the account is checked, then the
 // owner picks what sends. Every state keeps the same title and one status row, so moving on never shifts the page.
@@ -23,6 +24,8 @@ const account = (id: string) => id.replace(/(\d{4})(\d{4})(\d{4})/, '$1 $2 $3')
 type Props = { connection: ProviderConnection | null; onBack: () => void; onHosted: () => void; onChosen: (domain: string | null) => void }
 export function ConnectAwsRegional({ connection, onBack, onHosted, onChosen }: Props) {
   const scan = connection?.scan
+  // Disconnecting: the cleanup runs, and onboarding starts over once the connection is gone.
+  if (connection?.state === 'disconnecting') return <Status title="Disconnecting your AWS account" state="provisioning" text={cleanupStatus(connection.cleanup)}>{connection.cleanup?.summary && <div className="onb-rise" style={rise(2)}><DisconnectDetails summary={connection.cleanup.summary} /></div>}</Status>
   if (!connection?.awsAccountId || connection.state === 'ready') return <WaitForStack connection={connection} onBack={onBack} onHosted={onHosted} />
   const settingUp = scan?.regions.some(region => region.sendingState === 'provisioning' || region.pending.length > 0)
   if (!scan || scan.state === 'scanning') return <Status title="Connect your AWS account" state="provisioning" text={`Account ${account(connection.awsAccountId)} connected. Checking ${scan?.cursor.checked ?? 0} of ${scan?.cursor.total ?? 0} regions…`} />

@@ -1,6 +1,6 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { request } from './live'
-import type { ConnectionKind, Identity, ProviderConnection } from './types'
+import type { ConnectionKind, DisconnectSummary, Identity, ProviderConnection } from './types'
 
 // Multi-tenant sending connection. Owner/admin dashboard sessions only.
 const path = '/v1/connection'
@@ -8,7 +8,8 @@ export const connectionApi = {
   get: async (signal?: AbortSignal) => (await request<{ connection: ProviderConnection | null }>(path, { signal })).connection,
   create: (input: { kind: ConnectionKind; region?: string }) => request<ProviderConnection>(path, { method: 'POST', body: input }),
   verify: (awsAccountId: string) => request<ProviderConnection>(`${path}/verify`, { method: 'POST', body: { awsAccountId } }),
-  remove: () => request<{ deleted: true }>(path, { method: 'DELETE' }),
+  // A connected AWS account answers with its cleanup and what stays in the account; any other connection is gone at once.
+  remove: () => request<{ deleted: true } | { operationId: string; summary: DisconnectSummary }>(path, { method: 'DELETE' }),
   // A connected AWS account: import domains found in it, add a new one in a region, and ask AWS for production access.
   importDomains: (revision: number, candidateIds: string[]) => request<{ operationId: string; regions: string[] }>(`${path}/imports`, { method: 'POST', body: { revision, candidateIds, confirm: true } }),
   addDomain: (name: string, region: string) => request<{ operationId: string; regions: string[] }>('/v1/domains', { method: 'POST', body: { name, region } }),

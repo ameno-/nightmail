@@ -33,7 +33,7 @@ const labels: Record<string, string> = {
   // Rule actions keep the ritual. IDs from before rituals were renamed rules: they name stored audit events.
   'ritual.save': 'Saved a rule', 'ritual.delete': 'Deleted a rule', 'ritual.apply': 'Applied rules', 'ritual.attach': 'Attached a rule', 'ritual.restore': 'Restored rules', 'ritual.omens': 'Changed where AI decisions read mail', 'ritual.recipe': 'Saved a rule from a recipe', 'ritual.enable': 'Turned on a rule', 'ritual.disable': 'Turned off a rule',
   'routing.apply': 'Applied routing', 'routing.restore': 'Restored routing', 'route.create': 'Added a route', 'route.update': 'Updated a route', 'route.delete': 'Deleted a route',
-  'connection.create': 'Connected sending', 'connection.delete': 'Disconnected sending', 'connection.verify': 'Verified the sending connection', 'connection.production_access': 'Requested SES production access',
+  'connection.create': 'Connected sending', 'connection.delete': 'Disconnected sending', 'connection.verify': 'Verified the sending connection', 'connection.production_access': 'Requested SES production access', 'connection.cleanup': 'Left AWS resources after disconnecting',
   'region.configure': 'Configured a region', 'region.provision': 'Provisioned a region', 'region.auto_validation': 'Changed auto-validation',
   'campaign.pause': 'Paused a campaign', 'campaign.resume': 'Resumed a campaign', 'campaign.cancel': 'Cancelled a campaign', 'audience.bulk_apply': 'Changed contacts in bulk',
   'sending.pause': 'Paused sending', 'sending.resume': 'Resumed sending',
