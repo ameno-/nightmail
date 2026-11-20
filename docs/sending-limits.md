@@ -85,17 +85,27 @@ Bounces alone hold marketing; they stop everything only when **transactional mai
 A workspace in its evaluation, in the growth pace, or below good standing (a daily limit set by the score, a freeze or a strike, or a step from warn up) is on **probation**: `standing.probation` in `GET /v1/sender-score` is `evaluation`, `growth` or `standing`. Until then Hosted adds these checks; they end by themselves on good standing, with nothing to request:
 
 - **Delivered as screened.** Each message goes out as the copy the content screen read: style sheet rules are inlined, `@media`, dark-mode and other rules a client applies only sometimes are left out, and blocks the light, desktop rendering hides are dropped. Responsive emails arrive in their desktop layout.
-- **Words beside images.** A 200 × 200 logo needs none; every further 600 × 300 px of images needs 25 words (422 `CONTENT_IMAGE_ONLY`).
-- **Attachments of a standard type** whose name, declared type and bytes agree, and inline images as PNG, JPEG, GIF, WebP or BMP (422 `ATTACHMENT_TYPE_UNSCREENABLE` or `ATTACHMENT_CONTENT_MISMATCH`).
+- **Attachments of a standard type** whose name, declared type and bytes agree (422 `ATTACHMENT_TYPE_UNSCREENABLE` or `ATTACHMENT_CONTENT_MISMATCH`).
 - **The list probe** below, on every campaign over 100 recipients.
 
-Every message is screened either way. In good standing it goes out as written, and the screen reads all of it: text that CSS hides or that only a media query, dark mode or Outlook shows, what style sheets draw (generated content, with its `var()` and `attr()` values), and elements that CSS displays though clients hide them by default.
+Every message is screened either way. In good standing it goes out as written, and the screen reads all of it: text that CSS hides or that only a media query, dark mode or Outlook shows, what style sheets draw (generated content, with its `var()` and `attr()` values, however escaped), and elements that CSS displays though clients hide them by default. CSS too complex to read within the screen's budget is refused (422 `CONTENT_TOO_LARGE_TO_SCREEN`).
+
+The screen reads no picture, so every sender keeps the picture rules, in good standing too:
+
+- **Words beside images.** A 200 × 200 logo needs none; every further 600 × 300 px of images needs 25 words (422 `CONTENT_IMAGE_ONLY`). For a message delivered as written, every picture it can show counts, including images that are hidden, only some clients show, backgrounds and images its style sheets draw.
+- **No SVG**, and inline images only as PNG, JPEG, GIF, WebP or BMP whose bytes match (422 `ATTACHMENT_TYPE_UNSCREENABLE`).
 
 ## Campaign list probe
 
-A Hosted campaign with more than 100 recipients from a sender on probation, or to a list never mailed cleanly, sends a **probe** first: the first `min(500, 10%)` recipients, at least 100. Release waits until the probe has gone out and ten more minutes for its feedback (`delivery.waiting.reason` is `list_probe`). More than 3% hard bounces or 2 complaints **quarantines** the campaign (paused, `LIST_QUALITY`); bounced addresses are suppressed and owners get an email. The owner can resume a quarantined campaign once; a second quarantine needs a review (409 `QUARANTINE_REVIEW_REQUIRED`). A quarantine never pauses the account.
+A Hosted campaign with more than 100 recipients sends a **probe** first: the first `min(500, 10%)` recipients, at least 100. Release waits until the probe has gone out and ten more minutes for its feedback (`delivery.waiting.reason` is `list_probe`). More than 3% hard bounces or 2 complaints **quarantines** the campaign (paused, `LIST_QUALITY`); bounced addresses are suppressed and owners get an email. The owner can resume a quarantined campaign once; a second quarantine needs a review (409 `QUARANTINE_REVIEW_REQUIRED`). A quarantine never pauses the account.
 
-A sender in good standing sends to a list it **mailed cleanly** without the probe or its wait: an earlier campaign to the same list or segment finished in the last 90 days without a quarantine, reached at least 90% as many recipients as this one has (a list that grew by more since is probed again), and stayed within 3% hard bounces and 0.08% complaints. This is decided once, before the first recipient is released.
+A sender in good standing skips the probe when its recipients were **mailed cleanly**: one of its last three campaigns finished in the last 90 days without a quarantine and, judged by recipient address (any list or segment):
+
+- delivered to at least 90% of this campaign's recipients (an address it bounced, drew a complaint from, never mailed or has no result for counts against it);
+- has mature feedback for them: at least 90% delivered or bounced, and ten minutes since the last result;
+- stayed within 3% hard bounces and 0.08% complaints for them.
+
+Over 10,000 recipients, an evenly spaced sample of 10,000 is read. This is decided once, before the first recipient is released. If the sender falls below good standing while such a campaign is sending, release stops: what was already released is checked as a probe (it leaves the queue, ten minutes pass, then the same lines) before the rest goes out.
 
 Every campaign, probed or not, still pauses at more than 2% bounces after 1,000 accepted or more than 0.08% complaints after 2,000.
 

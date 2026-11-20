@@ -11,7 +11,8 @@
 // 300 characters of plain text, which is screened like the rest. Text the markup would draw without screened words
 // (list markers with letters or chosen numbers, list items without text) is left out, images count by their declared
 // size against the words beside them, and the bidi controls, directions and layout properties that reorder what a
-// client draws are removed from every textual field and element. Trusted senders keep their markup.
+// client draws are removed from every textual field and element. Senders off probation keep their markup; the image rule
+// and the picture checks on attachments (hostedCopy, shownAttachment) apply to them too, as the screen reads no picture.
 import { defaultTreeAdapter, html as spec, serializeOuter, type DefaultTreeAdapterMap } from 'parse5';
 import { boundedHtmlFragment } from './bounded-html.js';
 import { ApiError } from './core.js';
@@ -105,10 +106,30 @@ export function screenedAttachment(filename: string, contentType: string, bytes:
   if (inline && !RASTER.has(expected.family!)) throw unscreenable('inline attachments must be PNG, JPEG, GIF, WebP or BMP images');
   return { filename: screenedName(filename), contentType: type === 'application/octet-stream' ? expected.types[0]! : contentType };
 }
+/** Bytes that open as SVG markup. */
+const svgBytes = (bytes: Uint8Array) => { let head = ''; for (const byte of bytes.subarray(0, 4096)) head += String.fromCharCode(byte); return /<svg[\s>/]/i.test(head); };
+/**
+ * What every Hosted sender may attach, on probation or not, since the screen reads no picture: no SVG (by type, name or
+ * content), and inline (cid:) parts only as raster images whose extension, declared type and bytes agree. The rest of
+ * the allowlist (screenedAttachment) is for probation.
+ */
+export function shownAttachment(filename: string, contentType: string, bytes: Uint8Array, inline: boolean) {
+  const name = screenedName(filename).replace(/[. ]+$/, ''), extension = name.includes('.') ? name.split('.').pop()!.toLowerCase() : '', type = contentType.split(';')[0]!.trim().toLowerCase();
+  const unscreenable = (why: string) => new ApiError(422, 'ATTACHMENT_TYPE_UNSCREENABLE', `Hosted sending cannot screen ${name}: ${why}.`);
+  if (type === 'image/svg+xml' || extension === 'svg' || extension === 'svgz' || svgBytes(bytes)) throw unscreenable('SVG images are not delivered');
+  if (!inline) return;
+  const expected = own(ATTACHMENT_TYPES, extension);
+  if (!expected?.family || !RASTER.has(expected.family) || signature(bytes) !== expected.family || (type !== 'application/octet-stream' && !expected.types.includes(type)))
+    throw unscreenable('inline attachments must be PNG, JPEG, GIF, WebP or BMP images');
+}
 /** A record's own entry, never an inherited one: tag, attribute and property names come from the message. */
 const own = <T>(record: Record<string, T>, key: string): T | undefined => Object.hasOwn(record, key) ? record[key] : undefined;
 
 // ----- Values ------------------------------------------------------------------------------------------------------
+
+const codePoint = (n: number) => n === 0 || n > 0x10ffff || (n >= 0xd800 && n <= 0xdfff) ? '\ufffd' : String.fromCodePoint(n);
+/** CSS text with its escapes decoded, as a client's tokenizer reads them (\61 is a). */
+export const unescapeCss = (s: string) => s.replace(/\\(?:([0-9a-fA-F]{1,6})(?:\r\n|[ \t\n\r\f])?|\r\n|[\n\r\f]|([\s\S]))/g, (_, hex?: string, char?: string) => hex ? codePoint(parseInt(hex, 16)) : char ?? '');
 
 type Rgb = [number, number, number];
 const NAMED = new Map<string, Rgb>(('aliceblue:f0f8ff antiquewhite:faebd7 aqua:00ffff aquamarine:7fffd4 azure:f0ffff beige:f5f5dc bisque:ffe4c4 black:000000 blanchedalmond:ffebcd blue:0000ff blueviolet:8a2be2 brown:a52a2a burlywood:deb887 cadetblue:5f9ea0 chartreuse:7fff00 chocolate:d2691e coral:ff7f50 cornflowerblue:6495ed cornsilk:fff8dc crimson:dc143c cyan:00ffff darkblue:00008b darkcyan:008b8b darkgoldenrod:b8860b darkgray:a9a9a9 darkgreen:006400 darkgrey:a9a9a9 darkkhaki:bdb76b darkmagenta:8b008b darkolivegreen:556b2f darkorange:ff8c00 darkorchid:9932cc darkred:8b0000 darksalmon:e9967a darkseagreen:8fbc8f darkslateblue:483d8b darkslategray:2f4f4f darkslategrey:2f4f4f darkturquoise:00ced1 darkviolet:9400d3 deeppink:ff1493 deepskyblue:00bfff dimgray:696969 dimgrey:696969 dodgerblue:1e90ff firebrick:b22222 floralwhite:fffaf0 forestgreen:228b22 fuchsia:ff00ff gainsboro:dcdcdc ghostwhite:f8f8ff gold:ffd700 goldenrod:daa520 gray:808080 green:008000 greenyellow:adff2f grey:808080 honeydew:f0fff0 hotpink:ff69b4 indianred:cd5c5c indigo:4b0082 ivory:fffff0 khaki:f0e68c lavender:e6e6fa lavenderblush:fff0f5 lawngreen:7cfc00 lemonchiffon:fffacd lightblue:add8e6 lightcoral:f08080 lightcyan:e0ffff lightgoldenrodyellow:fafad2 lightgray:d3d3d3 lightgreen:90ee90 lightgrey:d3d3d3 lightpink:ffb6c1 lightsalmon:ffa07a lightseagreen:20b2aa lightskyblue:87cefa lightslategray:778899 lightslategrey:778899 lightsteelblue:b0c4de lightyellow:ffffe0 lime:00ff00 limegreen:32cd32 linen:faf0e6 magenta:ff00ff maroon:800000 mediumaquamarine:66cdaa mediumblue:0000cd mediumorchid:ba55d3 mediumpurple:9370db mediumseagreen:3cb371 mediumslateblue:7b68ee mediumspringgreen:00fa9a mediumturquoise:48d1cc mediumvioletred:c71585 midnightblue:191970 mintcream:f5fffa mistyrose:ffe4e1 moccasin:ffe4b5 navajowhite:ffdead navy:000080 oldlace:fdf5e6 olive:808000 olivedrab:6b8e23 orange:ffa500 orangered:ff4500 orchid:da70d6 palegoldenrod:eee8aa palegreen:98fb98 paleturquoise:afeeee palevioletred:db7093 papayawhip:ffefd5 peachpuff:ffdab9 peru:cd853f pink:ffc0cb plum:dda0dd powderblue:b0e0e6 purple:800080 rebeccapurple:663399 red:ff0000 rosybrown:bc8f8f royalblue:4169e1 saddlebrown:8b4513 salmon:fa8072 sandybrown:f4a460 seagreen:2e8b57 seashell:fff5ee sienna:a0522d silver:c0c0c0 skyblue:87ceeb slateblue:6a5acd slategray:708090 slategrey:708090 snow:fffafa springgreen:00ff7f steelblue:4682b4 tan:d2b48c teal:008080 thistle:d8bfd8 tomato:ff6347 turquoise:40e0d0 violet:ee82ee wheat:f5deb3 white:ffffff whitesmoke:f5f5f5 yellow:ffff00 yellowgreen:9acd32')
@@ -414,6 +435,13 @@ const UA_SCALE: Record<string, number> = { small: 1 / 1.2, sub: 1 / 1.2, sup: 1 
 const PREHEADER_STYLE = 'display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all';
 const hides = (style: string) => /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0(?:\.0+)?|max-height\s*:\s*0(?:px)?|font-size\s*:\s*[01](?:\.\d+)?(?:px|pt)?)\s*(?:;|$)/i.test(style);
 
+/** The area a client draws a picture at: per side the larger of the attribute and the style, full width when neither is declared. */
+function drawnArea(attribute: (name: string) => string | undefined, style: (name: string) => string | undefined) {
+  const length = (v: string | undefined) => v === undefined ? undefined : /%$/.test(v) ? Math.round(parseFloat(v) * 6) : /^\d+$/.test(v) ? Number(v) : px(v);
+  const side = (name: 'width' | 'height') => { const sizes = [length(style(name)), length(attribute(name))].filter((n): n is number => n !== undefined); return sizes.length ? Math.max(...sizes) : undefined; };
+  const width = side('width'), height = side('height');
+  return (width ?? 600) * (height ?? (width === undefined ? 400 : Math.round(width * 2 / 3)));
+}
 type State = { fontPx: number; color: Rgb; background: Rgb };
 export function screenedHtml(html: string, previewText?: string): string {
   let copy = pass(html, previewText);
@@ -436,15 +464,32 @@ export function probationCopy<T extends { subject: string; text?: string; fromNa
   for (const key of ['subject', 'text', 'fromName', 'previewText'] as const) { const value = copy[key]; if (value !== undefined) copy = { ...copy, [key]: screenedText(value) }; }
   return copy.html ? { ...copy, html: screenedHtml(copy.html, copy.previewText) } : copy;
 }
+/**
+ * The image rule for a message delivered as written (a sender off probation): the words the light desktop reading
+ * shows, against every picture the markup can draw in some client, which the probation copy would have left out:
+ * images however hidden or dropped, inside conditional comments and inline SVG, backgrounds, and images style sheets draw.
+ */
+export function assertKeptImages(html: string) {
+  const stats: HtmlStats = { words: 0, imageArea: 0, images: 0, hiddenWords: 0, recoloredWords: 0 };
+  pass(html, undefined, stats, true);
+  if (stats.imageArea > IMAGE_FREE_PIXELS + stats.words * IMAGE_PIXELS_PER_WORD) throw imageOnly();
+}
+/** A Hosted message as it is delivered: on probation the copy the screen read, otherwise as written under the image rule. */
+export function hostedCopy<T extends { subject: string; text?: string; fromName?: string; previewText?: string; html?: string }>(s: T, probation: boolean): T {
+  if (probation) return probationCopy(s);
+  if (s.html) assertKeptImages(s.html);
+  return s;
+}
 export function screenedHtmlStats(html: string) {
   const stats: HtmlStats = { words: 0, imageArea: 0, images: 0, hiddenWords: 0, recoloredWords: 0 };
   pass(html, undefined, stats);
   const required = Math.max(0, Math.ceil((stats.imageArea - IMAGE_FREE_PIXELS) / IMAGE_PIXELS_PER_WORD));
   return { ...stats, wordsRequiredByImages: required, imageRulePasses: stats.words >= required };
 }
-function pass(html: string, previewText?: string, stats?: HtmlStats): string {
+// `kept`: the markup is delivered as written (assertKeptImages), so the pictures this reading leaves out still count.
+function pass(html: string, previewText?: string, stats?: HtmlStats, kept = false): string {
   if (html.length > 512 * 1024) throw tooLarge();
-  const document = boundedHtmlFragment(html, 'document');
+  const document = boundedHtmlFragment(html, 'document', { clients: kept });
   if (!document) throw tooLarge();
   const root = document.childNodes.find((node): node is Element => isElement(node) && node.tagName === 'html')!;
   const part = (tag: 'head' | 'body') => {
@@ -455,10 +500,37 @@ function pass(html: string, previewText?: string, stats?: HtmlStats): string {
   };
   const head = part('head'), body = part('body');
   const sheets: string[] = [];
-  const collect = (parent: Parent) => { for (const node of parent.childNodes) if (isElement(node) && node.namespaceURI === HTML) { if (node.tagName === 'style') sheets.push(node.childNodes.map(child => isText(child) ? child.value : '').join('')); else collect(node); } };
+  const collect = (parent: Parent) => { for (const node of parent.childNodes) if (isElement(node) && node.namespaceURI === HTML) { if (node.tagName === 'style') sheets.push(node.childNodes.map(child => isText(child) ? child.value : '').join('')); else collect(node); } else if (!isElement(node) && 'childNodes' in node) collect(node as unknown as Parent); };
   collect(root);
   const styles = inliner(sheets, survey(root));
   let seenText = false, words = 0, imageArea = 0;
+  // Kept markup: an element's own background image, and every picture under a node this reading leaves out.
+  const attribute = (element: Element, name: string) => element.attrs.find(a => a.name === name)?.value;
+  const background = (element: Element) => {
+    if (!kept) return 0;
+    const own = new Map(declarations(stripComments(unescapeCss(attribute(element, 'style') ?? ''))).map(d => [d.property, d.value.toLowerCase()]));
+    const drawn = attribute(element, 'background')?.trim() || ['background', 'background-image'].some(p => /(?:url|image-set)\(/.test(own.get(p) ?? ''));
+    return drawn ? drawnArea(name => attribute(element, name), name => own.get(name)) : 0;
+  };
+  const pictures = (node: Node | Parent): number => {
+    if (!kept) return 0;
+    let area = 0;
+    if ('tagName' in node) {
+      const element = node as Element, tag = element.tagName, own = new Map(declarations(stripComments(attribute(element, 'style') ?? '')).map(d => [d.property, d.value.toLowerCase()]));
+      if (tag === 'script' || tag === 'style' || tag === 'template') return 0;
+      area += background(element);
+      if (tag === 'img' || tag === 'image' || tag === 'svg' || (tag === 'input' && attribute(element, 'type')?.toLowerCase() === 'image') || (/:(?:imagedata|image|fill)$/.test(tag) && element.attrs.some(a => a.name === 'src')))
+        area += drawnArea(name => attribute(element, name), name => own.get(name));
+      if (tag === 'svg') return area;
+    }
+    if ('childNodes' in node) for (const child of node.childNodes) area += pictures(child);
+    return area;
+  };
+  // Pictures style sheets draw, at full width each: a client may apply any of their rules.
+  if (kept) for (const sheet of sheets) {
+    const css = unescapeCss(stripComments(sheet)).replace(/@import[^;]*;?/gi, ' ').replace(/@font-face\s*{[^}]*}/gi, ' ');
+    imageArea += (css.match(/\b(?:url|image-set)\(/gi)?.length ?? 0) * 600 * 400;
+  }
   const wordsIn = (node: Node): number => isText(node) ? visibleWords(node.value) : isElement(node) ? node.childNodes.reduce((n, child) => n + wordsIn(child), 0) : 0;
   const detach = (node: Node) => defaultTreeAdapter.detachNode(node);
   const attributes = (element: Element, allowed: Record<string, (value: string) => string | undefined>) => {
@@ -517,7 +589,7 @@ function pass(html: string, previewText?: string, stats?: HtmlStats): string {
         }
         i++; continue;
       }
-      if (!isElement(node) || node.namespaceURI !== HTML || DROPPED.has(node.tagName) || node.attrs.some(a => a.name === 'data-bane-preview' || a.name === 'data-opensend-preview')) { detach(node); continue; }
+      if (!isElement(node) || node.namespaceURI !== HTML || DROPPED.has(node.tagName) || node.attrs.some(a => a.name === 'data-bane-preview' || a.name === 'data-opensend-preview')) { imageArea += pictures(node); detach(node); continue; }
       const merged = styles(node), style = merged.map(d => `${d.property}:${d.value}`).join(';');
       const text = node.childNodes.every(isText) ? node.childNodes.map(child => (child as DefaultTreeAdapterMap['textNode']).value).join('') : undefined;
       if (!seenText && (node.tagName === 'div' || node.tagName === 'p') && hides(style) && text?.trim() && text.normalize('NFKC').replace(/\p{Cf}/gu, '').replace(/\s+/g, ' ').trim().length <= 300) {
@@ -526,8 +598,9 @@ function pass(html: string, previewText?: string, stats?: HtmlStats): string {
         seenText = true; i++; continue;
       }
       // Not displayed in the light scheme: left out with its content, as a client would.
-      if (node.attrs.some(a => a.name === 'hidden') || merged.find(d => d.property === 'display')?.value.trim().toLowerCase() === 'none') { if (stats) stats.hiddenWords += wordsIn(node); detach(node); continue; }
+      if (node.attrs.some(a => a.name === 'hidden') || merged.find(d => d.property === 'display')?.value.trim().toLowerCase() === 'none') { if (stats) stats.hiddenWords += wordsIn(node); imageArea += pictures(node); detach(node); continue; }
       if (stats && hides(style)) stats.hiddenWords += wordsIn(node);
+      imageArea += background(node);
       const allowed = own(KEPT, node.tagName);
       if (!allowed) {
         // Unwrap: the children take the element's place and are read in turn.
@@ -541,10 +614,7 @@ function pass(html: string, previewText?: string, stats?: HtmlStats): string {
         // The size a client draws it at: the larger of the attribute and the style (a minimum could only enlarge it,
         // so none is kept), a full-width picture when neither is declared.
         for (const property of ['min-width', 'min-height']) declared.delete(property);
-        const length = (v: string | undefined) => v === undefined ? undefined : /%$/.test(v) ? Math.round(parseFloat(v) * 6) : /^\d+$/.test(v) ? Number(v) : px(v);
-        const side = (name: 'width' | 'height') => { const sizes = [length(declared.get(name)), length(node.attrs.find(a => a.name === name)?.value)].filter((n): n is number => n !== undefined); return sizes.length ? Math.max(...sizes) : undefined; };
-        const width = side('width'), height = side('height');
-        imageArea += (width ?? 600) * (height ?? (width === undefined ? 400 : Math.round(width * 2 / 3)));
+        imageArea += drawnArea(name => node.attrs.find(a => a.name === name)?.value, name => declared.get(name));
         if (stats) stats.images++;
       }
       const applied = [...declared].map(([property, value]) => `${property}:${value}`).join(';');
@@ -568,6 +638,7 @@ function pass(html: string, previewText?: string, stats?: HtmlStats): string {
     if (head.childNodes.length) defaultTreeAdapter.insertBefore(head, charset, head.childNodes[0]!); else defaultTreeAdapter.appendChild(head, charset);
   }
   const merged = styles(body);
+  imageArea += background(body);
   attributes(body, { bgcolor: ATTRIBUTES.bgcolor!, lang: ATTRIBUTES.lang! });
   const { state, style } = styled(body, { fontPx: 16, color: [0, 0, 0], background: [255, 255, 255] }, merged);
   if (style) body.attrs.push({ name: 'style', value: style });

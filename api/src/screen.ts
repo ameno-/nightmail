@@ -1,6 +1,6 @@
 import { ApiError, digest, type Runtime } from './core.js';
 import type { EmailSnapshot } from './db/sending.js';
-import { VISIBLE_WORDS } from './screened-html.js';
+import { unescapeCss, VISIBLE_WORDS } from './screened-html.js';
 import { formattedSender } from './sending.js';
 import { SEND_LIMITS } from './send-limits.js';
 
@@ -83,18 +83,25 @@ function host(value: string) {
 // A sender off probation keeps its markup (src/dispatcher.ts prepareMail), so its screen reads what CSS can put on screen
 // in any media query or color scheme: the strings its declarations draw (generated content, quotes, list markers,
 // counter-style symbols, custom properties), with var() and attr() resolved; the hosts its url()s and imports load; and
-// elements a client hides by default (style, script, title, xml) that a rule or their own style may display.
+// elements a client hides by default (style, script, title, xml) that a rule or their own style may display. CSS is read
+// as a client tokenizes it: identifiers, function names, property names and attribute names with their escapes decoded
+// (\61ttr( is attr(), data-\63opy is data-copy), and the same tokens decide what draws and what it draws. Past a budget
+// (distinct variants, var() depth, work) the message is refused as unreadable, never read in part.
 type CssRule = { prelude: string; decls: [string, string][] };
 /** Past the string literal that starts at i: its closing quote, the end of its line, or the end of the text. */
 function stringEnd(css: string, i: number) {
   for (let j = i + 1; j < css.length; j++) { if (css[j] === '\\') j++; else if (css[j] === css[i] || css[j] === '\n') return j + 1; }
   return css.length;
 }
+// An identifier as CSS tokenizes it, escapes included: custom property names (--x) too.
+const IDENT = /(?:--|-?(?:[_a-zA-Z\u0080-\uffff]|\\[0-9a-fA-F]{1,6}(?:\r\n|[ \t\n\r\f])?|\\[^\n\r\f0-9a-fA-F]))(?:[-\w\u0080-\uffff]|\\[0-9a-fA-F]{1,6}(?:\r\n|[ \t\n\r\f])?|\\[^\n\r\f0-9a-fA-F])*/y;
+/** A declaration's name as a client reads it: escapes decoded, case folded except for a custom property's. */
+const propertyName = (raw: string) => { const name = unescapeCss(raw.trim()); return name.startsWith('--') ? name : name.toLowerCase(); };
 /** Every rule's selector and declarations, those inside at-rules included; root collects bare declarations (a style attribute's). */
 function cssRules(css: string): CssRule[] {
   const root: CssRule = { prelude: '', decls: [] }, rules = [root], stack = [root];
   let buffer = '', parens = 0;
-  const flush = () => { const text = buffer.trim(), colon = text.indexOf(':'); buffer = ''; if (colon > 0 && !text.startsWith('@')) stack.at(-1)!.decls.push([text.slice(0, colon).trim().toLowerCase(), text.slice(colon + 1).trim()]); };
+  const flush = () => { const text = buffer.trim(), colon = text.indexOf(':'); buffer = ''; if (colon > 0 && !text.startsWith('@')) stack.at(-1)!.decls.push([propertyName(text.slice(0, colon)), text.slice(colon + 1).trim()]); };
   for (let i = 0; i < css.length; i++) {
     const c = css[i]!;
     if (c === '"' || c === "'") { const end = stringEnd(css, i); buffer += css.slice(i, end); i = end - 1; }
@@ -110,31 +117,55 @@ function cssRules(css: string): CssRule[] {
   flush();
   return rules;
 }
-const codePoint = (n: number) => n === 0 || n > 0x10ffff || (n >= 0xd800 && n <= 0xdfff) ? '\ufffd' : String.fromCodePoint(n);
-const unescapeCss = (s: string) => s.replace(/\\(?:([0-9a-fA-F]{1,6})[ \t\n\r\f]?|\r\n|[\n\r\f]|([\s\S]))/g, (_, hex?: string, char?: string) => hex ? codePoint(parseInt(hex, 16)) : char ?? '');
-type Piece = { text: string } | { ident: string } | { attr: string } | { variable: string; fallback?: string };
-const IDENT = /-?(?:[_a-zA-Z\u0080-\uffff]|\\[0-9a-fA-F]{1,6}\s?|\\[^\n0-9a-fA-F])(?:[-\w\u0080-\uffff]|\\[0-9a-fA-F]{1,6}\s?|\\[^\n0-9a-fA-F])*/y, CALL = /([-\w]+)\(/y;
-/** A declaration's value as the pieces that can draw text: strings, identifiers, attr() and var() references. */
+type Piece = { text: string } | { ident: string } | { attr: string; fallback?: Piece[] } | { variable: string; fallback?: Piece[] };
+/** The end of a function's arguments that start at i: its closing parenthesis (strings and escapes skipped), or the end. */
+function argumentsEnd(value: string, i: number) {
+  for (let depth = 1; i < value.length; i++) {
+    const c = value[i]!;
+    if (c === '\\') i++;
+    else if (c === '"' || c === "'") i = stringEnd(value, i) - 1;
+    else if (c === '(') depth++;
+    else if (c === ')' && !--depth) return i;
+  }
+  return value.length;
+}
+/** The first top-level comma of a function's arguments, or -1. */
+function topComma(value: string) {
+  for (let i = 0, depth = 0; i < value.length; i++) {
+    const c = value[i]!;
+    if (c === '\\') i++;
+    else if (c === '"' || c === "'") i = stringEnd(value, i) - 1;
+    else if (c === '(') depth++;
+    else if (c === ')') depth--;
+    else if (c === ',' && !depth) return i;
+  }
+  return -1;
+}
+/** The identifier at the start of a function's arguments, decoded, or ''. */
+function leadingIdent(value: string) {
+  const i = value.length - value.trimStart().length;
+  IDENT.lastIndex = i;
+  const m = IDENT.exec(value);
+  return m ? unescapeCss(m[0]) : '';
+}
+/** A declaration's value as the tokens that can draw text: strings, identifiers, attr() and var() with their fallbacks. */
 function pieces(value: string): Piece[] {
   const out: Piece[] = [];
   for (let i = 0; i < value.length;) {
     const c = value[i]!;
     if (c === '"' || c === "'") { const end = stringEnd(value, i); out.push({ text: unescapeCss(value.slice(i + 1, value[end - 1] === c && end - 1 > i ? end - 1 : end)) }); i = end; continue; }
-    CALL.lastIndex = i;
-    const call = CALL.exec(value);
-    if (call) {
-      let j = i + call[0].length, depth = 1;
-      for (; j < value.length && depth; j++) { if (value[j] === '"' || value[j] === "'") j = stringEnd(value, j) - 1; else if (value[j] === '(') depth++; else if (value[j] === ')') depth--; }
-      const name = call[1]!.toLowerCase(), argument = value.slice(i + call[0].length, depth ? j : j - 1).trim(), comma = argument.indexOf(',');
-      if (name === 'attr') out.push({ attr: argument.split(/[\s,]/)[0]!.toLowerCase() });
-      else if (name === 'var') out.push({ variable: (comma < 0 ? argument : argument.slice(0, comma)).trim(), ...(comma < 0 ? {} : { fallback: argument.slice(comma + 1) }) });
-      else if (name !== 'url') out.push(...pieces(argument));
-      i = j; continue;
-    }
     IDENT.lastIndex = i;
     const ident = IDENT.exec(value);
-    if (ident) { out.push({ ident: unescapeCss(ident[0]) }); i += ident[0].length; continue; }
-    i++;
+    if (!ident) { i++; continue; }
+    const name = unescapeCss(ident[0]), after = i + ident[0].length;
+    if (value[after] !== '(') { out.push({ ident: name }); i = after; continue; }
+    // A function: its name decoded and folded, its arguments read by the same rules.
+    const close = argumentsEnd(value, after + 1), argument = value.slice(after + 1, close), comma = topComma(argument), fn = name.toLowerCase();
+    const fallback = comma < 0 ? undefined : pieces(argument.slice(comma + 1));
+    if (fn === 'attr') out.push({ attr: leadingIdent(argument).toLowerCase(), ...(fallback ? { fallback } : {}) });
+    else if (fn === 'var') out.push({ variable: leadingIdent(argument), ...(fallback ? { fallback } : {}) });
+    else if (fn !== 'url') out.push(...pieces(argument));
+    i = close + 1;
   }
   return out;
 }
@@ -142,42 +173,78 @@ function pieces(value: string): Piece[] {
 const UNDRAWN = new Set(['font', 'font-family', 'src', 'font-feature-settings', 'font-variation-settings', 'font-language-override', 'font-palette', 'grid-template-areas', 'grid-template', 'grid', 'will-change']);
 // Counter styles draw their symbols, identifiers included.
 const SYMBOLS = new Set(['symbols', 'additive-symbols', 'prefix', 'suffix', 'pad', 'negative']);
-const CSS_STEPS = 1_000_000, VARIANTS = 8, VAR_DEPTH = 4;
-// What a url() loads is read as a host (the sheets' and style attributes' own pass), never as text.
-const withoutUrls = (value: string) => value.replace(/\burl\(\s*(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|[^)]*)\s*\)/gi, 'url()');
+const CSS_STEPS = 1_000_000, VARIANTS = 64, VAR_DEPTH = 16;
 /** The style sheets and style attributes of a message, read for what they can draw and load (see above). */
 function cssReader(sheets: string[], styles: string[], hosts: Set<string>) {
   const rules = sheets.flatMap(sheet => cssRules(sheet)), inline = styles.flatMap(style => cssRules(style)[0]!.decls);
-  for (const sheet of sheets) for (const m of normalize(sheet.replace(/\/\*[\s\S]*?\*\//g, ' ')).matchAll(/(?:https?:)?\/\/[^\s,)'"<>]+/gi)) { const h = host(m[0]); if (h) hosts.add(h); }
-  const decls = [...rules.flatMap(rule => rule.decls), ...inline].map(([name, value]): [string, string] => [name, withoutUrls(value)]), properties = new Map<string, string[]>();
-  for (const [name, value] of decls) if (name.startsWith('--')) properties.set(name, [...properties.get(name) ?? [], value]);
+  // Hosts as written and with escapes decoded: an escaped url() or import loads the same host.
+  for (const sheet of [...sheets, ...styles]) {
+    const css = sheet.replace(/\/\*[\s\S]*?\*\//g, ' ');
+    for (const text of [css, unescapeCss(css)]) for (const m of normalize(text).matchAll(/(?:https?:)?\/\/[^\s,)'"<>]+/gi)) { const h = host(m[0]); if (h) hosts.add(h); }
+  }
   let steps = 0;
-  const evaluate = (value: string, element: Map<string, string> | null, idents: boolean, depth = 0): string[] => {
+  const parsed = new Map<string, Piece[]>();
+  const tokens = (value: string) => { let p = parsed.get(value); if (!p) { if ((steps += value.length) > CSS_STEPS) throw unreadable(); parsed.set(value, p = pieces(value)); } return p; };
+  const decls = [...rules.flatMap(rule => rule.decls), ...inline], properties = new Map<string, string[]>();
+  for (const [name, value] of decls) if (name.startsWith('--')) properties.set(name, [...properties.get(name) ?? [], value]);
+  // What a run of tokens refers to, var() followed through the custom properties: whether it can draw text, and whether
+  // that text reads an element's attributes. A cycle or a chain past the depth budget is unreadable.
+  const refers = (list: Piece[], idents: boolean, seen: string[] = []): { draws: boolean; attributes: boolean } => {
+    let draws = false, attributes = false;
+    for (const piece of list) {
+      if (++steps > CSS_STEPS) throw unreadable();
+      if ('text' in piece) draws = true;
+      else if ('ident' in piece) draws ||= idents;
+      else {
+        if ('attr' in piece) { draws = true; attributes = true; }
+        else for (const value of properties.get(piece.variable) ?? []) {
+          if (seen.includes(piece.variable) || seen.length >= VAR_DEPTH) throw unreadable();
+          const inner = refers(tokens(value), idents, [...seen, piece.variable]);
+          draws ||= inner.draws; attributes ||= inner.attributes;
+        }
+        if (piece.fallback) { const inner = refers(piece.fallback, idents, seen); draws ||= inner.draws; attributes ||= inner.attributes; }
+      }
+    }
+    return { draws, attributes };
+  };
+  const evaluate = (list: Piece[], element: Map<string, string> | null, idents: boolean, seen: string[] = []): string[] => {
     let variants = [''];
-    const append = (texts: string[]) => { variants = variants.flatMap(v => texts.map(t => v + t)).slice(0, VARIANTS); };
-    if ((steps += value.length) > CSS_STEPS) throw unreadable();
-    for (const piece of pieces(value)) {
+    const append = (texts: string[]) => {
+      variants = [...new Set(variants.flatMap(v => texts.map(t => v + t)))];
+      if (variants.length > VARIANTS) throw unreadable();
+    };
+    for (const piece of list) {
       if (++steps > CSS_STEPS) throw unreadable();
       if ('text' in piece) append([piece.text]);
       else if ('ident' in piece) { if (idents) append([piece.ident + ' ']); }
-      else if ('attr' in piece) append([element?.get(piece.attr) ?? '']);
+      else if ('attr' in piece) { const value = element?.get(piece.attr); append(value !== undefined ? [value] : piece.fallback ? evaluate(piece.fallback, element, idents, seen) : ['']); }
       else {
-        const values = depth < VAR_DEPTH ? properties.get(piece.variable)?.slice(0, VARIANTS) : undefined;
-        append(values?.length ? values.flatMap(v => evaluate(v, element, idents, depth + 1)) : piece.fallback !== undefined ? evaluate(piece.fallback, element, idents, depth + 1) : ['']);
+        const values = properties.get(piece.variable);
+        if (values?.length && (seen.includes(piece.variable) || seen.length >= VAR_DEPTH)) throw unreadable();
+        append(values?.length ? values.flatMap(v => evaluate(tokens(v), element, idents, [...seen, piece.variable])) : piece.fallback ? evaluate(piece.fallback, element, idents, seen) : ['']);
       }
     }
     return variants;
   };
-  const drawn = decls.filter(([name, value]) => !UNDRAWN.has(name) && (/["']|\b(?:attr|var)\(/i.test(value) || (SYMBOLS.has(name) && value.trim())));
-  const attributed = [...properties.values()].flat().some(v => /\battr\(/i.test(v));
-  const perElement = drawn.filter(([, value]) => /\battr\(/i.test(value) || (attributed && /\bvar\(/i.test(value)));
-  const names = new Set([...decls.flatMap(([, value]) => [...value.matchAll(/\battr\(\s*([-\w]+)/gi)].map(m => m[1]!.toLowerCase()))]);
-  const texts = new Set(drawn.filter(d => !perElement.includes(d)).flatMap(([name, value]) => evaluate(value, null, SYMBOLS.has(name))).map(t => t.trim()).filter(Boolean));
+  const drawn: { list: Piece[]; idents: boolean; attributes: boolean }[] = [];
+  for (const [name, value] of decls) {
+    if (UNDRAWN.has(name)) continue;
+    const list = tokens(value), idents = SYMBOLS.has(name), { draws, attributes } = refers(list, idents);
+    if (draws) drawn.push({ list, idents, attributes });
+  }
+  const names = new Set<string>();
+  const collect = (list: Piece[]) => { for (const piece of list) if ('attr' in piece || 'variable' in piece) { if ('attr' in piece) names.add(piece.attr); if (piece.fallback) collect(piece.fallback); } };
+  for (const value of new Set([...decls.map(([, value]) => value)])) collect(tokens(value));
+  const perElement = drawn.filter(d => d.attributes);
+  // Every declaration once without attributes (an element without them draws attr()'s fallback), then per element below.
+  const texts = new Set(drawn.flatMap(d => evaluate(d.list, null, d.idents)).map(t => t.trim()).filter(Boolean));
   // Rules that may display an element: a display other than none, or all (which resets it), on a selector whose subject
   // (its last compound, without pseudo-elements) has no type or that type, and only classes and an id the element has.
+  // A subject with an escape could name anything, so it may display any of them.
   const subjects = rules.filter(rule => rule.prelude && !rule.prelude.startsWith('@') && displays(rule.decls)).flatMap(rule => rule.prelude.split(',').flatMap(selector => {
     if (/::|:(?:before|after|first-line|first-letter)\b/i.test(selector)) return [];
     const subject = selector.replace(/\[[^\]]*\]|\([^)]*\)/g, '').trim().split(/[\s>+~]+/).at(-1)!.toLowerCase();
+    if (subject.includes('\\')) return [{ tag: undefined, classes: [], ids: [] }];
     return [{ tag: /^[a-z][\w-]*/.exec(subject)?.[0], classes: [...subject.matchAll(/\.([-\w]+)/g)].map(m => m[1]!), ids: [...subject.matchAll(/#([-\w]+)/g)].map(m => m[1]!) }];
   }));
   return {
@@ -186,7 +253,7 @@ function cssReader(sheets: string[], styles: string[], hosts: Set<string>) {
     attributes: (attrs: { name: string; value: string }[]) => {
       if (!perElement.length || !attrs.some(a => names.has(a.name))) return [];
       const element = new Map(attrs.map(a => [a.name, a.value]));
-      return perElement.flatMap(([name, value]) => evaluate(value, element, SYMBOLS.has(name))).map(t => t.trim()).filter(Boolean);
+      return perElement.flatMap(d => evaluate(d.list, element, d.idents)).map(t => t.trim()).filter(Boolean);
     },
     /** Whether CSS may display an element a client hides by default. */
     shown: (tag: string, attrs: { name: string; value: string }[]) => {
@@ -195,7 +262,7 @@ function cssReader(sheets: string[], styles: string[], hosts: Set<string>) {
     },
   };
 }
-const displays = (decls: [string, string][]) => decls.some(([name, value]) => name === 'all' || (name === 'display' && !/^none\s*(?:!\s*important)?$/i.test(value)));
+const displays = (decls: [string, string][]) => decls.some(([name, value]) => name === 'all' || (name === 'display' && !/^none\s*(?:!\s*important)?$/i.test(unescapeCss(value))));
 // Elements a client does not display unless CSS says so.
 const UNDISPLAYED = new Set(['style', 'script', 'title', 'xml']);
 const INLINE=new Set(['a','abbr','b','bdi','bdo','big','cite','code','data','del','dfn','em','font','i','ins','kbd','label','mark','q','s','samp','small','span','strike','strong','sub','sup','time','tt','u','var','wbr','img','input','button','select','textarea','output','meter','progress','picture','source','svg','text','tspan','math','mi','mo','mn','ruby','rt','rp','nobr']);

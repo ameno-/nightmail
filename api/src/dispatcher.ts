@@ -438,9 +438,13 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
   // A mail app's signed or encrypted message goes out as written (protocol-submit.ts sealedPassthrough): on Hosted only
   // from a sender past its evaluation, since a probation sender's mail goes out as the copy the screen read.
   if(leased.owner.tenantName && s.mime && !leased.owner.trusted) throw new ApiError(422,'SEALED_MAIL_UNAVAILABLE','Signed and encrypted mail goes out as written, which a sender can do once its first messages are evaluated.');
-  // Probation (src/screened-html.ts) is for senders still being evaluated, growing or below good standing; the trusted
-  // tier is an operator's exemption from it. Everyone else's message goes out as submitted, screened whole (src/screen.ts readHtml).
-  const hosted=Boolean(leased.owner.tenantName && runtime.config.hostedScreen), probation=!isSimulatedSes(runtime) && hosted && !leased.owner.trusted && !!leased.owner.probation;
+  // What Hosted delivers (src/screened-html.ts hostedCopy): on probation (a sender still being evaluated, growing or below
+  // good standing) the copy the screen read, with the attachment allowlist; otherwise the message as written, screened
+  // whole (src/screen.ts readHtml), under the image rule and the picture checks on attachments, which apply to every sender
+  // because the screen reads no picture. The trusted tier is an operator's exemption from all of it.
+  const hosted=Boolean(leased.owner.tenantName && runtime.config.hostedScreen);
+  const rules=isSimulatedSes(runtime) || !hosted || leased.owner.trusted ? null : leased.owner.probation ? 'probation' : 'standard';
+  const delivery=rules ? await import('./screened-html.js') : undefined;
   let screened=false;
   if (!isSimulatedSes(runtime) && (hosted || (s.screen && s.kind==='transactional'))) {
     const required=hosted && (!leased.owner.trusted || s.kind==='marketing');
@@ -453,10 +457,9 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
     // Probation mail goes out as the copy the screen reads: every textual field without the bidi controls that
     // reorder it, the markup reduced to what a client shows as text, the campaign preheader added back from its own
     // field. Senders in good standing and the trusted tier keep their message.
-    const probationCopy = probation ? (await import('./screened-html.js')).probationCopy : undefined;
-    if (probationCopy) s = probationCopy(s);
+    if (delivery) s = delivery.hostedCopy(s, rules==='probation');
     if (review) {
-      const [verdict] = await campaignVerdicts(runtime, { workspaceId: mail.workspaceId, campaignId: mail.campaignId!, reviewId: mail.reviewId! }, [probationCopy ? probationCopy(keyed!) : keyed!], Date.now() + MAX_PRE_SEND_MS);
+      const [verdict] = await campaignVerdicts(runtime, { workspaceId: mail.workspaceId, campaignId: mail.campaignId!, reviewId: mail.reviewId! }, [rules==='probation' ? delivery!.probationCopy(keyed!) : keyed!], Date.now() + MAX_PRE_SEND_MS);
       if (!verdict) throw new ApiError(503,'CONTENT_SCREEN_UNAVAILABLE','This copy has no verdict yet; deferring without calling SES.',undefined,true);
       if ('refused' in verdict) throw verdict.refused;
       // The release counted every released recipient's verdict toward reputation (src/sending.ts screenAhead).
@@ -469,8 +472,10 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
   rows ??= checkedDispatchAttachments(s.attachments, await loadAttachments(mail));
   for (const row of rows) {
     const body = await verifiedAttachment(runtime, row);
-    // A probation attachment goes out under a name a client shows as is, as a type its extension and bytes agree with.
-    const { filename, contentType } = probation ? (await import('./screened-html.js')).screenedAttachment(row.filename, row.contentType, body, row.disposition === 'inline') : row;
+    // A probation attachment goes out under a name a client shows as is, as a type its extension and bytes agree with;
+    // any other sender's is checked only for pictures (no SVG, inline parts as raster images).
+    if (rules==='standard') delivery!.shownAttachment(row.filename, row.contentType, body, row.disposition === 'inline');
+    const { filename, contentType } = rules==='probation' ? delivery!.screenedAttachment(row.filename, row.contentType, body, row.disposition === 'inline') : row;
     parts.push({ FileName: filename, RawContent: body, ContentType: contentType, ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(row.contentId ? { ContentId: row.contentId } : {}) });
   }
   sizeCheck(s, rows);

@@ -93,6 +93,8 @@ export const campaigns = pgTable('sending_campaigns', {
   waitingReason: text('waiting_reason').$type<'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe'>(), waitingUntil: time('waiting_until'),
   // Hosted list probe (migration 231): when release may continue after the probe, when it was cleared, and how many quarantines this launch had.
   probeWaitUntil: time('probe_wait_until'), probeClearedAt: time('probe_cleared_at'), quarantines: smallint('quarantines').notNull().default(0),
+  // When a sender in good standing skipped the probe (migration 357): kept apart from a probe that went out and passed.
+  probeSkippedAt: time('probe_skipped_at'),
   // After an owner resumed a failed list probe: the rest is released only to contacts the workspace delivered to before.
   deliveredOnly: boolean('delivered_only').notNull().default(false),
   createdAt: time('created_at').notNull().defaultNow(), updatedAt: time('updated_at').notNull().defaultNow(),
