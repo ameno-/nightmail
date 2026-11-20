@@ -86,13 +86,13 @@ A Hosted campaign with more than 100 recipients sends a **probe** first: the fir
 
 ## Content screen: how much text
 
-Hosted mail is screened for smuggled advertising and scams before it is delivered. The screen reads the HTML's text (with its `alt` and `title` text), then the text part, then any raw MIME, each in full, and the hosts the message links to or loads from.
+Hosted mail is screened for smuggled advertising and scams before it is delivered. The screen reads the HTML's text (with its `alt` and `title` text), then the text part, then any raw MIME, each in full, and the hosts the message links to or loads from. It reads long mail in overlapping windows of about 5 to 8 KB, every window with the message's link hosts, so a 64 KiB message is read whole in at most 14 classifier requests and a 128 KiB campaign copy in at most 28.
 
 | What | Limit | When it is checked |
 | --- | --- | --- |
-| A message (`POST /v1/emails/send`, each item of `/v1/emails/batch`, replies and inbox sends) | **24,576 UTF-8 bytes** of screened text (24 KiB), 60 distinct link hosts | On submission |
-| A campaign's own copy, placeholders unresolved, and a campaign test | **49,152 UTF-8 bytes** (48 KiB) | On send, schedule or test |
-| Each recipient's copy of a campaign | 49,152 bytes; a copy over it is refused alone | Before it is released |
+| A message (`POST /v1/emails/send`, each item of `/v1/emails/batch`, replies and inbox sends) | **65,536 UTF-8 bytes** of screened text (64 KiB), 150 distinct link hosts (3,000 bytes of host names) | On submission |
+| A campaign's own copy, placeholders unresolved, and a campaign test | **131,072 UTF-8 bytes** (128 KiB) | On send, schedule or test |
+| Each recipient's copy of a campaign | 131,072 bytes; a copy over it is refused alone | Before it is released |
 
 Every recipient's copy of a campaign is screened before it is released, exactly as a single message is, but each distinct copy only once: recipients whose personalized copies are exactly the same as delivered share one verdict, and a copy is sent only under a verdict for its exact content. A campaign personalized with first names costs one screen per distinct first name; one with a unique value per recipient costs one per recipient, as a single message would. The campaign's own copy is screened first: if it is refused, the campaign fails before anyone is sent to. A copy the screen refuses is never sent (`CONTENT_REJECTED_SPAM`, counted in the score like any refused message), and when refused copies pass 5% and 10 recipients the campaign pauses once for you to review.
 

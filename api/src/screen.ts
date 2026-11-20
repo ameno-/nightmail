@@ -2,6 +2,7 @@ import { ApiError, digest, type Runtime } from './core.js';
 import type { EmailSnapshot } from './db/sending.js';
 import { VISIBLE_WORDS } from './screened-html.js';
 import { formattedSender } from './sending.js';
+import { SEND_LIMITS } from './send-limits.js';
 
 // Opt-in content screen for live transactional mail (`screen: true`): asks Jev, TypeSafe AI's decision
 // model (directly or through OpenCode's inference gateway, per JEV_ENDPOINT), how likely a message is advertising smuggled into a transactional template (for example a
@@ -9,9 +10,11 @@ import { formattedSender } from './sending.js';
 
 const MAX_BODY = 8000;
 // Link signals (every host a message links or loads, and link labels that name another host) repeat in each request.
-const MAX_SIGNALS = 60, MAX_SIGNAL_BYTES = 1000, OVERLAP = 256;
+const MAX_SIGNALS = SEND_LIMITS.screen.linkHosts, MAX_SIGNAL_BYTES = SEND_LIMITS.screen.linkHostBytes, OVERLAP = 256;
 /** Requests the longest text a limit admits needs: windows of a request less the most signals, overlapping by 256 bytes
- *  and a few bytes less at UTF-8 boundaries. 24 KiB (the message limit) takes 4; 48 KiB (a campaign copy's) takes 8. */
+ *  and a few bytes less at UTF-8 boundaries. With the most signals (3,000 bytes) a window holds 4,999 bytes of text and
+ *  each later one 4,737 new, so 64 KiB (the message limit) takes at most 14 and 128 KiB (a campaign copy's) 28. A message
+ *  with few hosts gets wider windows (its own signals, not the most, are subtracted) and needs fewer: about 9 and 18. */
 export const chunksFor = (limitBytes: number) => { const width = MAX_BODY - MAX_SIGNAL_BYTES - 1; return 1 + Math.ceil(Math.max(0, limitBytes - width) / (width - OVERLAP - 6)); };
 const TTL_MS = 60 * 60 * 1000;
 const MAX_ENTRIES = 5000;
@@ -52,7 +55,7 @@ export const tooLarge = (screenedBytes: number, limitBytes: number, scope: 'mess
   refused(`The screened text is ${bytes(screenedBytes)} UTF-8 bytes; Hosted sending screens at most ${bytes(limitBytes)} per ${scope}. It counts the HTML's text (with its alt and title text), the text part and raw MIME. Shorten the copy by ${bytes(screenedBytes - limitBytes)} bytes.`,
     { screenedBytes, limitBytes }, index);
 const tooManyHosts = (linkHosts: number, index?: number) =>
-  refused(`The message links to or loads ${linkHosts} distinct hosts (counting link labels that name another host); Hosted sending screens at most ${MAX_SIGNALS}. Link to fewer domains.`,
+  refused(`The message links to or loads ${linkHosts} distinct hosts (counting link labels that name another host); Hosted sending screens at most ${MAX_SIGNALS}, with ${bytes(MAX_SIGNAL_BYTES)} bytes of host names in all. Link to fewer domains.`,
     { linkHosts, linkHostLimit: MAX_SIGNALS }, index);
 // Repeat link signals and a little preceding context in each window. Split on
 // UTF-8 boundaries; a clean result is meaningful only after the last window.

@@ -7,6 +7,7 @@ import type { DefaultTreeAdapterMap } from 'parse5';
 import { boundedHtmlFragment } from './bounded-html.js';
 import { sanitizeBlockStyle } from './block-style.js';
 import { productName } from './brand.js';
+import { SEND_LIMITS } from './send-limits.js';
 
 type Node = DefaultTreeAdapterMap['node'];
 type Element = DefaultTreeAdapterMap['element'];
@@ -84,13 +85,12 @@ Tests use \`data\`, then \`defaults\`. Values are escaped automatically.
 
 On Hosted sending, every recipient's copy is screened before it is sent, but each distinct copy only
 once: personalizing with a handful of values (first names, plans, cities) costs a screen per distinct
-copy, not per recipient. The campaign's own copy and each copy may hold 49,152 bytes of screened
+copy, not per recipient. The campaign's own copy and each copy may hold ${SEND_LIMITS.screen.campaignBytes.toLocaleString('en-US')} bytes of screened
 text (the HTML's text, alt and title text, plus the text part).
 
-Templates are reusable concrete campaign drafts, not personalization presets. Template subject,
-preview text and HTML must contain literal example content and cannot contain \`{{placeholder}}\`
-syntax. After creating a campaign from a template, replace its example content and add campaign
-personalization only when the specific campaign needs it.
+Templates are reusable campaign drafts and may use the same placeholders in their subject and HTML.
+A campaign created from a template copies them: give it a default for each one (other than
+\`{{email}}\`) before it launches, then edit the rest of its copy as that campaign needs.
 
 ## Unsubscribe
 

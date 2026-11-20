@@ -20,9 +20,6 @@ import './campaigns.css'
 import { useSingleFlight } from '../../lib/single-flight'
 import { usePhone } from '../../lib/media'
 
-// Templates hold concrete example content; personalization belongs to the campaign made from them.
-const placeholder = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/
-const placeholderHint = (value: string | undefined) => { const match = value ? placeholder.exec(value) : null; return match ? `Templates use example text, not {{${match[1]}}}. Write an example here; add personalization in the campaign.` : '' }
 // Only the draft schema's fields: the composer also returns inline attachment ids, which the API rejects as unknown keys.
 const templateDraft = (draft: CampaignTemplateDraft): CampaignTemplateDraft => ({ name: draft.name.trim(), description: draft.description ?? '', subject: draft.subject.trim(), previewText: draft.previewText ?? '', fromName: draft.fromName ?? '', replyTo: draft.replyTo ?? [], html: draft.html ?? '', attachments: draft.attachments ?? [], ...(draft.unsubscribePageUrl ? { unsubscribePageUrl: draft.unsubscribePageUrl } : {}) })
 
@@ -123,29 +120,25 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
   const savingRef = useRef(false)
   const { start, pending: starting, unavailable } = useStartFromTemplate()
   const archived = Boolean(template.archivedAt)
-  const subjectHint = placeholderHint(draft.subject), previewHint = placeholderHint(draft.previewText)
   const refreshLists = () => cache.invalidateQueries({queryKey: ['nightmail', 'templates'], refetchType: 'none'})
   const remember = (value: CampaignTemplate) => cache.setQueryData(['nightmail', 'template', value.id], value)
   const changed = useCallback(() => { version.current++; setDirty(true); setError('') }, [])
   function change<K extends keyof CampaignTemplateDraft>(key: K, value: CampaignTemplateDraft[K]) { const next = {...draftRef.current, [key]: value}; draftRef.current = next; setDraft(next); changed() }
   useEffect(() => {
-    if (!dirty || error || saving || savingRef.current || !ready || assetBusy || composerBusy || archived || !draft.name.trim() || subjectHint || previewHint) return
+    if (!dirty || error || saving || savingRef.current || !ready || assetBusy || composerBusy || archived || !draft.name.trim()) return
     const timer = window.setTimeout(() => void save(), 800)
     return () => window.clearTimeout(timer)
-  }, [dirty, error, saving, ready, assetBusy, composerBusy, archived, draft.name, subjectHint, previewHint])
+  }, [dirty, error, saving, ready, assetBusy, composerBusy, archived, draft.name])
   useEffect(() => { const warn = (event: BeforeUnloadEvent) => { if (dirty || savingRef.current) { event.preventDefault(); event.returnValue = '' } }; window.addEventListener('beforeunload', warn); return () => window.removeEventListener('beforeunload', warn) }, [dirty])
   function fail(message: string) { setError(message); toast(message, 'error') }
   async function save(): Promise<CampaignTemplate | null> {
     if (savingRef.current || !ready || archived) return null
-    const blocked = !draftRef.current.name.trim() ? 'Name: enter a template name.' : placeholderHint(draftRef.current.subject) ? `Subject: ${placeholderHint(draftRef.current.subject)}` : placeholderHint(draftRef.current.previewText) ? `Inbox preview: ${placeholderHint(draftRef.current.previewText)}` : ''
-    if (blocked) { fail(blocked); return null }
+    if (!draftRef.current.name.trim()) { fail('Name: enter a template name.'); return null }
     savingRef.current = true; setSaving(true); setError('')
     const submittedVersion = version.current
     try {
       const content = await composer.current?.prepare()
       if (!content) throw new Error('The editor is still loading. Try again in a moment.')
-      const bodyHint = placeholderHint(content.html)
-      if (bodyHint) throw new Error(`Body: ${bodyHint}`)
       const submitted = templateDraft({...draftRef.current, html: content.html, attachments: [...new Set([...(draftRef.current.attachments ?? []), ...(content.inlineAttachmentIds ?? [])])]})
       const updated = await api.templates.update(template.id, template.revision, submitted)
       remember(updated)
@@ -193,14 +186,12 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
       <div className="campaign-compose-metadata">
         <div className="campaign-compose-row"><label htmlFor="template-name">Name</label><Input id="template-name" placeholder="Template name" value={draft.name} disabled={archived} aria-invalid={!draft.name.trim() || undefined} onChange={event => change('name', event.target.value)} /></div>
         <div className="campaign-compose-row"><label htmlFor="template-description">Purpose</label><Input id="template-description" placeholder="When to use it" value={draft.description} disabled={archived} onChange={event => change('description', event.target.value)} /></div>
-        <div className="campaign-compose-row campaign-compose-subject"><label htmlFor="template-subject">Subject</label><Input id="template-subject" placeholder="Example subject" value={draft.subject} disabled={archived} aria-invalid={Boolean(subjectHint) || undefined} aria-describedby={subjectHint ? 'template-subject-hint' : undefined} onChange={event => change('subject', event.target.value)} /></div>
-        {subjectHint && <p id="template-subject-hint" className="campaign-compose-feedback ui-field__error" role="alert">{subjectHint}</p>}
-        <div className="campaign-compose-row"><label htmlFor="template-preview">Inbox preview</label><Input id="template-preview" placeholder="Shown after the subject" value={draft.previewText ?? ''} disabled={archived} aria-invalid={Boolean(previewHint) || undefined} aria-describedby={previewHint ? 'template-preview-hint' : undefined} onChange={event => change('previewText', event.target.value)} /></div>
-        {previewHint && <p id="template-preview-hint" className="campaign-compose-feedback ui-field__error" role="alert">{previewHint}</p>}
+        <div className="campaign-compose-row campaign-compose-subject"><label htmlFor="template-subject">Subject</label><Input id="template-subject" placeholder="Example subject" value={draft.subject} disabled={archived} onChange={event => change('subject', event.target.value)} /></div>
+        <div className="campaign-compose-row"><label htmlFor="template-preview">Inbox preview</label><Input id="template-preview" placeholder="Shown after the subject" value={draft.previewText ?? ''} disabled={archived} onChange={event => change('previewText', event.target.value)} /></div>
         <div className="campaign-compose-row"><label htmlFor="template-from">From name</label><Input id="template-from" placeholder="Sender name, e.g. Acme" value={draft.fromName ?? ''} disabled={archived} onChange={event => change('fromName', event.target.value)} /></div>
         <div className="campaign-compose-row"><label htmlFor="template-reply">Reply to</label><Input id="template-reply" placeholder="reply@example.com" value={draft.replyTo.join(', ')} disabled={archived} onChange={event => change('replyTo', event.target.value.split(',').map(value => value.trim()).filter(Boolean))} /></div>
       </div>
-      <ChunkFallback.Provider value={<ComposerSkeleton />}><EmailComposer ref={composer} attachmentApi={api.templateAssets} attachmentIds={draft.attachments} initialHtml={draft.html ?? ''} disabled={archived} onReady={() => setReady(true)} onDirty={changed} onBusy={setComposerBusy} onAttach={() => attachments.current?.open()} /></ChunkFallback.Provider>
+      <ChunkFallback.Provider value={<ComposerSkeleton />}><EmailComposer ref={composer} personalize attachmentApi={api.templateAssets} attachmentIds={draft.attachments} initialHtml={draft.html ?? ''} disabled={archived} onReady={() => setReady(true)} onDirty={changed} onBusy={setComposerBusy} onAttach={() => attachments.current?.open()} /></ChunkFallback.Provider>
       <CampaignAttachments ref={attachments} attachmentApi={api.templateAssets} ids={draft.attachments} persisted={template.draft.attachments} onChange={ids => change('attachments', ids)} onBusy={setAssetBusy} disabled={archived || saving || composerBusy} />
     </div></div></section>
     {previewOpen && <TemplatePreviewDialog template={template} onOpenChange={setPreviewOpen} />}

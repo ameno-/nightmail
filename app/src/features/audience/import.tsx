@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { useApiMutation } from '../../data/context'
 import type { ImportPreview } from '../../data/types'
@@ -6,7 +6,7 @@ import { Alert, Button, Checkbox, DataTable, Dialog, Field, Input, Select, field
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { evidenceRequired, ListPicker, nameTitle, number } from './shared'
 import { AddressText } from '../../components/AddressText'
-import { parseCsv } from './csv'
+import { csvRows } from './csv'
 
 // Columns the API imports, plus Last name, which only feeds Full name (the API has no last-name field). Headings are
 // matched without case, spaces, dashes or underscores, so `first_name`, `First Name` and `firstname` all map.
@@ -19,59 +19,124 @@ const targets = [
   { value: 'country', label: 'Country', aliases: ['country', 'countrycode'] },
 ]
 const COMBINED = '\u0000first-last'
-const MAX_ROWS = 50_000
+// A file of up to 1,000,000 rows and 100 MiB goes up in parts the API takes (POST /v1/contact-imports: 50,000 rows and
+// 5 MiB each), each previewed and then committed in order; rows keep the file's numbers. A later part's row that repeats
+// an earlier part's email is skipped here, as the API skips a repeat within one import.
+const MAX_ROWS = 1_000_000, MAX_FILE_BYTES = 100 * 1024 * 1024, PART_ROWS = 50_000, PART_BYTES = 5 * 1024 * 1024 - 65_536
 const sample = 'email,name,first_name,plan,country\nada@example.com,Ada Lovelace,Ada,pro,GB\ngrace@example.com,Grace Hopper,Grace,free,US\n'
 const sampleHref = `data:text/csv;charset=utf-8,${encodeURIComponent(sample)}`
 const quote = (value: string) => /[",\r\n]|^\s|\s$/.test(value) ? `"${value.replaceAll('"', '""')}"` : value
 const plural = (count: number, word: string) => `${number(count)} ${word}${count === 1 ? '' : 's'}`
+const utf8Bytes = (value: string) => { let bytes = value.length; for (let i = 0; i < value.length; i++) { const code = value.charCodeAt(i); if (code >= 0x80) bytes += code >= 0x800 && (code < 0xd800 || code > 0xdfff) ? 2 : 1 } return bytes }
 
-// Full name from first and last name: the CSV gets one more column holding "first last" (a contact without either
-// keeps no name). Blank rows are skipped exactly as the API skips them, so row numbers in the preview still match the file.
-function withFullName(csv: string, mapping: Record<string, string>, headers: string[]) {
-  const [header, ...data] = parseCsv(csv)
-  let column = 'Full name'
-  for (let n = 2; headers.includes(column); n++) column = `Full name (${n})`
-  const first = headers.indexOf(mapping.firstName), last = headers.indexOf(mapping.lastName)
-  const join = (row: string[]) => [first >= 0 ? row[first] : '', last >= 0 ? row[last] : ''].map(value => value?.trim() ?? '').filter(Boolean).join(' ')
-  return { csv: [[...header, column], ...data.map(row => [...row, join(row)])].map(row => row.map(quote).join(',')).join('\n'), column }
+type Issue = ImportPreview['errors'][number]
+type Part = { csv: string; rows: number[]; skipped: Issue[] }
+/** What the parts' previews found together: their IDs in order, the valid rows, the first ten of them and of the errors. */
+type Review = { ids: string[]; total: number; rows: ImportPreview['rows']; errors: Issue[]; errorCount: number }
+type Imported = { imported: number; subscribed: number; errors: Issue[]; errorCount: number }
+
+// The mapping the API gets and the file's parts. Full name from first and last name is one more column holding "first
+// last" (a contact without either keeps no name).
+function importParts(text: string, mapping: Record<string, string>) {
+  const rows = csvRows(text), header: string[] = rows.next().value || [], headings = header.map(h => h.trim())
+  const selected = Object.fromEntries(Object.entries(mapping).filter(([key, value]) => value && key !== 'lastName' && value !== COMBINED))
+  let column = ''
+  if (mapping.name === COMBINED) { column = 'Full name'; for (let n = 2; headings.includes(column); n++) column = `Full name (${n})`; selected.name = column }
+  const first = headings.indexOf(mapping.firstName), last = headings.indexOf(mapping.lastName), email = headings.indexOf(mapping.email)
+  const fullName = (row: string[]) => [first >= 0 ? row[first] : '', last >= 0 ? row[last] : ''].map(value => value?.trim() ?? '').filter(Boolean).join(' ')
+  const line = (cells: string[]) => cells.map(quote).join(',')
+  const top = line(column ? [...header, column] : header), topBytes = utf8Bytes(top)
+  function* parts(): Generator<Part> {
+    const earlier = new Set<string>(), current = new Set<string>()
+    let lines: string[] = [], numbers: number[] = [], skipped: Issue[] = [], bytes = topBytes, row = 1
+    for (const cells of rows) {
+      row++
+      const key = (cells[email] ?? '').trim().toLowerCase(), text = line(column ? [...cells, fullName(cells)] : cells), size = utf8Bytes(text) + 1
+      if (lines.length && (lines.length >= PART_ROWS || bytes + size > PART_BYTES)) {
+        yield { csv: `${top}\n${lines.join('\n')}`, rows: numbers, skipped }
+        for (const seen of current) earlier.add(seen)
+        current.clear(); lines = []; numbers = []; skipped = []; bytes = topBytes
+      }
+      if (key && earlier.has(key)) { skipped.push({ row, field: 'email', message: 'Duplicate normalized email within this import.' }); continue }
+      lines.push(text); numbers.push(row); bytes += size
+      if (key) current.add(key)
+    }
+    yield { csv: lines.length ? `${top}\n${lines.join('\n')}` : '', rows: numbers, skipped }
+  }
+  return { mapping: selected, parts: parts() }
 }
+const firstIssues = (issues: Issue[]) => issues.sort((a, b) => a.row - b.row).slice(0, 10)
 
 export function ImportContactsDialog({ listId: initialListId = '', onClose }: { listId?: string; onClose: () => void }) {
   const [listId, setListId] = useState(initialListId)
-  const [csv, setCsv] = useState(''), [headers, setHeaders] = useState<string[]>([])
+  // The file's text stays out of the mutations' inputs: each write's input is serialized to guard against a double submit.
+  const source = useRef(''), committed = useRef(new Map<string, ImportPreview>())
+  const [csv, setCsv] = useState(false), [rowCount, setRowCount] = useState(0), [headers, setHeaders] = useState<string[]>([])
   const [mapping, setMapping] = useState<Record<string, string>>({}), [fileError, setFileError] = useState<unknown>(null), [reading, setReading] = useState(false)
   const [consent, setConsent] = useState(false), [evidence, setEvidence] = useState(''), [checked, setChecked] = useState(false)
-  const [preview, setPreview] = useState<ImportPreview | null>(null), [result, setResult] = useState<ImportPreview | null>(null)
-  const review = useApiMutation((api, input: { csv: string; mapping: Record<string, string>; listId?: string }) => api.imports.preview(input), undefined, false, false)
-  const commit = useApiMutation((api, input: { id: string; evidence?: string }) => api.imports.commit(input.id, input.evidence ? { consent: { status: 'subscribed', evidence: input.evidence } } : undefined))
-  function resetPreview() { setPreview(null); review.reset(); commit.reset() }
+  const [preview, setPreview] = useState<Review | null>(null), [result, setResult] = useState<Imported | null>(null), [progress, setProgress] = useState('')
+  // Consent belongs to the whole import: once a part is in, the rest commit with the same choice.
+  const [started, setStarted] = useState(false)
+  const review = useApiMutation(async (api, input: { mapping: Record<string, string>; listId?: string }) => {
+    const { mapping: selected, parts } = importParts(source.current, input.mapping)
+    const found: Review = { ids: [], total: 0, rows: [], errors: [], errorCount: 0 }
+    const note = (issues: Issue[]) => { found.errorCount += issues.length; found.errors = firstIssues([...found.errors, ...issues]) }
+    let done = 0
+    for (const part of parts) {
+      note(part.skipped)
+      done += part.rows.length + part.skipped.length
+      if (!part.csv) continue
+      const answer = await api.imports.preview({ csv: part.csv, mapping: selected, ...(input.listId ? { listId: input.listId } : {}) })
+      const fileRow = (row: number) => part.rows[row - 2] ?? row
+      found.ids.push(answer.id); found.total += answer.rows.length
+      found.rows.push(...answer.rows.slice(0, 10 - found.rows.length).map(item => ({ ...item, row: fileRow(item.row) })))
+      note(answer.errors.map(issue => ({ ...issue, row: fileRow(issue.row) })))
+      if (done < rowCount) setProgress(`Checked ${number(done)} of ${number(rowCount)} rows`)
+    }
+    return found
+  }, undefined, false, false)
+  // Parts commit in order. One that failed is retried from where it stopped: a committed part isn't sent again.
+  const commit = useApiMutation(async (api, input: { ids: string[]; evidence?: string }) => {
+    let imported = 0, subscribed = 0
+    for (const [index, id] of input.ids.entries()) {
+      let answer = committed.current.get(id)
+      if (!answer) { answer = await api.imports.commit(id, input.evidence ? { consent: { status: 'subscribed', evidence: input.evidence } } : undefined); committed.current.set(id, answer); setStarted(true) }
+      imported += answer.imported; subscribed += answer.subscribed ?? 0
+      if (index + 1 < input.ids.length) setProgress(`Imported part ${index + 1} of ${input.ids.length}`)
+    }
+    return { imported, subscribed }
+  })
+  function resetPreview() { setPreview(null); setProgress(''); setStarted(false); committed.current.clear(); review.reset(); commit.reset() }
   async function readFile(file?: File) {
     if (!file) return
-    resetPreview(); setCsv(''); setHeaders([]); setFileError(null); setReading(true)
+    resetPreview(); source.current = ''; setCsv(false); setRowCount(0); setHeaders([]); setFileError(null); setReading(true)
     try {
-      if (file.size > 5 * 1024 * 1024) throw new Error('This file is larger than 5 MiB. Split it into smaller files.')
-      const raw = await file.text(), rows = parseCsv(raw), heading = rows[0].map(h => h.trim())
-      if (rows.length - 1 > MAX_ROWS) throw new Error(`This file has ${number(rows.length - 1)} rows. Import at most ${number(MAX_ROWS)} at a time.`)
+      if (file.size > MAX_FILE_BYTES) throw new Error('This file is larger than 100 MiB. Split it into smaller files.')
+      const raw = await file.text(), rows = csvRows(raw), first: string[] = rows.next().value || [], heading = first.map(h => h.trim())
+      let count = 0
+      while (!rows.next().done) count++
+      if (!count) throw new Error('Choose a CSV with a header and at least one contact row.')
+      if (count > MAX_ROWS) throw new Error(`This file has ${number(count)} rows. Import at most ${number(MAX_ROWS)} at a time.`)
       if (heading.some(h => !h)) throw new Error('Every column needs a heading in the first row.')
       if (new Set(heading).size !== heading.length) throw new Error('Give every column a different heading in the first row.')
-      setCsv(raw); setHeaders(heading)
+      source.current = raw; setCsv(true); setRowCount(count); setHeaders(heading)
       const detected = Object.fromEntries(targets.map(target => [target.value, heading.find(h => target.aliases.includes(h.toLowerCase().replace(/[ _-]/g, ''))) ?? '']))
       if (!detected.name && (detected.firstName || detected.lastName)) detected.name = COMBINED
       setMapping(detected)
     } catch (cause) { setFileError(cause) } finally { setReading(false) }
   }
   async function submitPreview() {
-    const selected = Object.fromEntries(Object.entries(mapping).filter(([key, value]) => value && key !== 'lastName' && value !== COMBINED))
-    let input = { csv, mapping: selected }
-    if (mapping.name === COMBINED) {
-      try { const derived = withFullName(csv, mapping, headers); input = { csv: derived.csv, mapping: { ...selected, name: derived.column } } } catch (cause) { setFileError(cause); return }
-    }
-    try { setPreview(await review.mutateAsync({ ...input, ...(listId ? { listId } : {}) })) } catch { /* Shown inline. */ }
+    try { setPreview(await review.mutateAsync({ mapping, ...(listId ? { listId } : {}) })) } catch { /* Shown inline. */ }
+    finally { setProgress('') }
   }
   async function submitImport() {
     setChecked(true)
     if (!preview || (consent && !evidence.trim())) return
-    try { setResult(await commit.mutateAsync({ id: preview.id, evidence: consent ? evidence.trim() : undefined })) } catch { /* Shown inline. */ }
+    try {
+      const done = await commit.mutateAsync({ ids: preview.ids, evidence: consent ? evidence.trim() : undefined })
+      setResult({ ...done, errors: preview.errors, errorCount: preview.errorCount })
+    } catch { /* Shown inline. */ }
+    finally { setProgress('') }
   }
   const busy = reading || review.isPending || commit.isPending
   const locked = busy || Boolean(preview)
@@ -83,10 +148,10 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
     return <Dialog open onOpenChange={open => { if (!open) onClose() }} title="Import complete" footer={<>{!consent && imported > 0 && <Link className="ui-button ui-button--secondary ui-button--md" to={unknownHref} onClick={onClose}>Review unknown contacts</Link>}<Button variant="primary" onClick={onClose}>Done</Button></>}><div className="stack">
       <Alert tone="success">{plural(imported, 'contact')} imported{consent ? ` · ${number(subscribed)} marked subscribed${subscribed < imported ? ` · ${number(imported - subscribed)} kept their earlier consent` : ''}` : ''}.</Alert>
       {!consent && imported > 0 && <Alert tone="info">They can’t receive campaigns until they consent. Once they do, choose Review unknown contacts, then Mark as subscribed.</Alert>}
-      {result.errors.length > 0 && <RejectedRows errors={result.errors} skipped />}
+      {result.errorCount > 0 && <RejectedRows errors={result.errors} count={result.errorCount} skipped />}
     </div></Dialog>
   }
-  return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }} title="Import contacts" footer={<><Button disabled={busy} onClick={onClose}>Cancel</Button>{preview ? <Button variant="primary" loading={commit.isPending} disabled={busy || !preview.rows.length} onClick={() => void submitImport()}>{preview.rows.length ? `Import ${plural(preview.rows.length, 'contact')}` : 'Nothing to import'}</Button> : <Button variant="primary" loading={busy} disabled={!csv || !mapping.email} onClick={() => void submitPreview()}>Preview import</Button>}</>}>
+  return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }} title="Import contacts" footer={<><Button disabled={busy} onClick={onClose}>Cancel</Button>{preview ? <Button variant="primary" loading={commit.isPending} disabled={busy || !preview.total} onClick={() => void submitImport()}>{preview.total ? `Import ${plural(preview.total, 'contact')}` : 'Nothing to import'}</Button> : <Button variant="primary" loading={busy} disabled={!csv || !mapping.email} onClick={() => void submitPreview()}>Preview import</Button>}</>}>
     <div className="stack">
       <div className="stack audience-import-fields" hidden={Boolean(preview)}>
         {/* The columns are the mapping below once a file is read; the row and size limits are the file's errors. */}
@@ -99,19 +164,20 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
       {preview && <>
         {/* The first 10 rows; the import button counts them all. */}
         <div className="cluster audience-review-bar"><Button size="sm" disabled={busy} onClick={resetPreview}>Change mapping</Button></div>
-        {preview.rows.length > 0 && <DataTable className="audience-import-preview" rows={preview.rows.slice(0, 10)} rowKey={row => String(row.row)} columns={[{ key: 'row', label: 'Row', width: '16%', card: 'aside', render: row => row.row, cardRender: row => `Row ${row.row}` }, { key: 'email', label: 'Email', width: '50%', card: 'title', render: row => <span className="audience-cell-text"><PrivateAddress value={row.email} /></span> }, { key: 'name', label: 'Full name', width: '34%', card: 'line', render: row => <span className="audience-cell-text" title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : '—'}</span> }]} />}
-        {preview.errors.length > 0 && <RejectedRows errors={preview.errors} />}
+        {preview.rows.length > 0 && <DataTable className="audience-import-preview" rows={preview.rows} rowKey={row => String(row.row)} columns={[{ key: 'row', label: 'Row', width: '16%', card: 'aside', render: row => row.row, cardRender: row => `Row ${row.row}` }, { key: 'email', label: 'Email', width: '50%', card: 'title', render: row => <span className="audience-cell-text"><PrivateAddress value={row.email} /></span> }, { key: 'name', label: 'Full name', width: '34%', card: 'line', render: row => <span className="audience-cell-text" title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : '—'}</span> }]} />}
+        {preview.errorCount > 0 && <RejectedRows errors={preview.errors} count={preview.errorCount} />}
       </>}
       <div className="audience-consent">
         {/* The consequence is in the label; opt-outs and suppressions stay, and the result says how many kept their consent. */}
-        <Checkbox checked={consent} disabled={busy} onCheckedChange={value => { setConsent(value); setChecked(false) }} label="Mark as subscribed: these people agreed to receive marketing email" />
-        {consent && <Field label="How did they agree?" htmlFor="import-evidence" error={checked && !evidence.trim() ? evidenceRequired : fieldError(commit.error, 'consent.evidence')}><Input id="import-evidence" autoFocus maxLength={2000} placeholder="Signed up on our website" disabled={busy} value={evidence} onChange={event => setEvidence(event.target.value)} /></Field>}
+        <Checkbox checked={consent} disabled={busy || started} onCheckedChange={value => { setConsent(value); setChecked(false) }} label="Mark as subscribed: these people agreed to receive marketing email" />
+        {consent && <Field label="How did they agree?" htmlFor="import-evidence" error={checked && !evidence.trim() ? evidenceRequired : fieldError(commit.error, 'consent.evidence')}><Input id="import-evidence" autoFocus maxLength={2000} placeholder="Signed up on our website" disabled={busy || started} value={evidence} onChange={event => setEvidence(event.target.value)} /></Field>}
       </div>
+      {progress && <p className="muted" role="status">{progress}</p>}
       <MutationError error={error} />
     </div>
   </Dialog>
 }
 
-function RejectedRows({ errors, skipped = false }: { errors: ImportPreview['errors']; skipped?: boolean }) {
-  return <Alert tone="warning" title={`${plural(errors.length, 'row')} ${skipped ? 'skipped' : 'will be skipped'}`}>{errors.slice(0, 10).map((issue, index) => <div key={index}>Row {issue.row}: {issue.message}</div>)}{errors.length > 10 && <div>and {number(errors.length - 10)} more</div>}</Alert>
+function RejectedRows({ errors, count, skipped = false }: { errors: Issue[]; count: number; skipped?: boolean }) {
+  return <Alert tone="warning" title={`${plural(count, 'row')} ${skipped ? 'skipped' : 'will be skipped'}`}>{errors.slice(0, 10).map((issue, index) => <div key={index}>Row {issue.row}: {issue.message}</div>)}{count > 10 && <div>and {number(count - 10)} more</div>}</Alert>
 }

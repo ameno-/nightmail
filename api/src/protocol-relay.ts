@@ -7,6 +7,7 @@ import { tieAllows } from './approval-ties.js';
 import { submittedHeaders } from './custom-headers.js';
 import { parseInboundMime, SMTP_WIRE_LIMIT } from './mailbox-ingest.js';
 import { submissionParties, unrepresentableMime } from './mailbox-mime.js';
+import { SEND_LIMITS } from './send-limits.js';
 
 /**
  * Send-only SMTP for apps. An app signs in to the mail gateway's SMTP with the username `apikey` and, as the password,
@@ -80,7 +81,7 @@ export async function relaySubmit(c: Ctx, p: Submission) {
   if (!sender || !senders || !key.owned || senders.some(a => !senderDomainAllowed(key.domains, a.split('@')[1]!)))
     throw new ApiError(403, 'SENDER_NOT_OWNED', 'Send from an address this key may use.');
   if (unrepresentableMime(raw)) throw new ApiError(422, 'UNSUPPORTED_MESSAGE', 'This MIME submission cannot be represented by the sending adapter.');
-  if (m.attachments.length > 20) throw new ApiError(422, 'VALIDATION_FAILED', 'At most 20 attachments.', 'attachments');
+  if (m.attachments.length > SEND_LIMITS.attachments) throw new ApiError(422, 'VALIDATION_FAILED', `At most ${SEND_LIMITS.attachments} attachments.`, 'attachments');
   const message = (attachments: string[]) => ({
     from: sender, ...m.from?.name ? { fromName: m.from.name } : {}, to, cc, bcc, replyTo: (m.replyTo ?? []).flatMap(a => a.address ? [a.address] : []),
     subject: m.subject || '(no subject)', ...m.text?.trim() ? { text: m.text } : m.html ? {} : { text: ' ' }, ...m.html ? { html: m.html } : {},

@@ -18,7 +18,7 @@ import { errorText } from '../../data/types'
 // API. Opening converts block HTML to editor blocks; saving converts blocks back.
 type Draft = { html: string; inlineAttachmentIds?: string[] }
 export type EmailComposerRef = { prepare: () => Promise<Draft> }
-// personalize offers {{placeholder}} insertions; templates hold literal example content and leave it off.
+// personalize offers {{placeholder}} insertions.
 type Props = { attachmentIds?: string[]; attachmentApi?: AttachmentApi; initialHtml: string; disabled?: boolean; personalize?: boolean; onReady: () => void; onDirty: () => void; onAttach?: () => void; onBusy?: (busy: boolean) => void }
 const linkForms = '[data-re-link-selector-form], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form]'
 
@@ -306,7 +306,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
         <Button size="sm" variant="ghost" disabled={inactive} aria-pressed={inspectorOpen} onClick={() => setInspectorOpen(value => !value)}><SlidersHorizontal size={16} />Design</Button>
         {busy && <span className="muted" role="status">Preparing…</span>}
         <div className="cluster composer-history"><IconButton size="sm" label="Undo" disabled={inactive} onClick={() => command(e => e.chain().focus().undo().run())}><Undo2 size={16} /></IconButton><IconButton size="sm" label="Redo" disabled={inactive} onClick={() => command(e => e.chain().focus().redo().run())}><Redo2 size={16} /></IconButton></div>
-        <input ref={fileInput} type="file" hidden accept="image/png,image/jpeg,image/webp,image/avif" onChange={event => void insertImage(event.target.files?.[0])} />
+        <input ref={fileInput} type="file" hidden accept="image/png,image/jpeg,image/gif,image/webp,image/avif" onChange={event => void insertImage(event.target.files?.[0])} />
       </div>
     </div>
     {error && <Alert tone="danger">{error}</Alert>}
