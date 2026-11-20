@@ -22,7 +22,7 @@ const stages = {
     extraQueues: { webhooks: "a25aa21928d846c4a5531b7e523901a8", "feedback-dlq": "94a4269c23644e93851be3b28bb55b72" } as Record<string, string>,
   },
   production: {
-    account: "009882681002", origin: "https://bane.mx", legacyOrigin: "https://bane.mx", prefix: "bane-prod", worker: "bane-production",
+    account: "009882681002", origin: "https://nightmail.dev", legacyOrigin: "https://bane.mx", prefix: "bane-prod", worker: "bane-production",
     cloudflareAccountId: "15d29c8639fd3733b1b5486a2acfd968",
     media: { domain: "media.nightmail.dev", zoneId: "bf500df4b73f1a5182243551e85019ee", origins: ["https://nightmail.dev", "https://bane.mx"] },
     queues: { work: "753a4b880016464c833b836a63663684", feedback: "34426f99502941fbbed927a059517b7c" },
