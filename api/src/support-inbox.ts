@@ -21,6 +21,18 @@ import { CONVERSATION_ID, type InboxState, type OutboxReply } from './support-pl
 // (POST <support site>/hooks/nightmail-wake): it pulls the reply through the binding and delivers it. Staff can reply only
 // while the support platform has pulled the outbox in the last 10 minutes, so no reply waits for a platform that is gone.
 // Transcripts are deleted 90 days after their conversation closes (src/maintenance.ts).
+//
+// Needs you, the inbox's default view, is what only a person can move forward. A conversation needs staff when nobody
+// marked it done since anything new happened (a message, a failed delivery, more blocked work, a ticket, a pause) and at
+// least one of these holds:
+// - ticket: its ticket is open (the agent escalated what it could not resolve);
+// - blocked: the support platform has work for it that it could not finish;
+// - failed: its latest answer or staff reply failed to send;
+// - paused: the agent is paused (by staff, or after an emailed ticket), the conversation is open, and staff owe the
+//   next message (someone other than staff wrote last).
+// Most urgent first: a P1 ticket, then a customer nobody else will answer (they wrote last and the agent is paused or
+// blocked, or the last answer failed), then a P2 ticket, then the rest; within each, the longest waiting first. Agent
+// handling is every other open conversation whose agent is active. Each operator also keeps their own read marker.
 
 const MESSAGE_ID = /^msg_[a-z2-7]{16}$/;
 const BASE32 = 'abcdefghijklmnopqrstuvwxyz234567';
@@ -37,6 +49,7 @@ const Delivery = z.enum(['queued', 'sent', 'failed', 'held']);
 const Tool = z.object({ label: z.string().trim().min(1).max(80), ok: z.boolean() }).strict();
 const Ticket = z.object({ id: z.string(), type: z.string().nullable(), severity: z.string().nullable(), resolvedAt: z.string().nullable() });
 const ConversationParam = z.object({ id: z.string().regex(CONVERSATION_ID) });
+const TRIAGE_REASONS = ['ticket', 'blocked', 'failed', 'paused'] as const;
 
 const Message = z.object({
   id: z.string(), seq: z.number().int(), author: Author, kind: z.string().nullable(), text: z.string(),
@@ -58,6 +71,14 @@ const Item = z.object({
   lastAuthor: Author.nullable(), needsReply: z.boolean().describe('Not closed, and the customer wrote last.'),
   messageCount: z.number().int(), queuedReplies: z.number().int(), turns: z.number().int(), costUsd: z.number(),
   blockedWork: z.number().int().describe('Work the support platform could not finish for this conversation.'),
+  firstLine: z.string().nullable().describe('The first line of the customer’s first message: what a conversation without a subject is about.'),
+  needsYou: z.object({
+    reasons: z.array(z.enum(TRIAGE_REASONS)).min(1).describe('ticket: its ticket is open; blocked: the support platform could not finish work for it; failed: its latest answer or staff reply failed to send; paused: the agent is paused and staff owe the next message.'),
+    urgent: z.boolean().describe('A P1 ticket, or a customer nobody else will answer.'),
+    since: z.string().describe('When it started waiting on staff.'),
+  }).nullable().describe('Why staff must handle it (the needs_you view), or null.'),
+  done: z.object({ at: z.string(), userId: z.string(), name: z.string().nullable() }).nullable().describe('Staff marked it done and nothing new has happened since.'),
+  unread: z.boolean().describe('It has messages the signed-in operator has not read.'),
   createdAt: z.string(), lastMessageAt: z.string().nullable(), closedAt: z.string().nullable(),
 }).openapi('SupportInboxConversation');
 const Detail = z.object({
@@ -91,15 +112,37 @@ type ItemRow = { id: string; channel: 'chat' | 'email'; mode: z.infer<typeof Ite
   pending_address: string | null; user_id: string | null; user_name: string | null; user_email: string | null; workspace_id: string | null; workspace_name: string | null;
   ticket_id: string | null; ticket_type: string | null; ticket_severity: string | null; ticket_resolved_at: string | null; agent_state: 'active' | 'paused'; paused_by: string | null;
   paused_by_name: string | null; paused_at: string | null; messages: number; turns: number; cost_usd: number | string; blocked_work: number; created_at: string; last_message_at: string | null;
-  closed_at: string | null; activity_at: string; last_author: z.infer<typeof Author> | null; queued: number };
+  closed_at: string | null; activity_at: string; last_author: z.infer<typeof Author> | null; queued: number; opening: string | null; done_at: string | null; done_by: string | null; done_by_name: string | null;
+  unread: boolean; needs_you: boolean; urgency: number; since: string | null } & Record<`why_${(typeof TRIAGE_REASONS)[number]}`, boolean>;
 const itemColumns = sql`c.id, c.channel, c.mode, c.verification, c.status, c.subject, c.pending_address, c.user_id, u.name AS user_name, u.email AS user_email,
   c.workspace_id, w.name AS workspace_name, c.ticket_id, c.ticket_type, c.ticket_severity, c.ticket_resolved_at::text AS ticket_resolved_at,
   c.agent_state, c.paused_by, p.name AS paused_by_name, c.paused_at::text AS paused_at, c.messages, c.turns, c.cost_usd, c.blocked_work,
   c.created_at::text AS created_at, c.last_message_at::text AS last_message_at, c.closed_at::text AS closed_at, coalesce(c.last_message_at, c.created_at)::text AS activity_at,
-  last.author AS last_author, (SELECT count(*)::int FROM support_messages q WHERE q.conversation_id = c.id AND q.delivery = 'queued') AS queued`;
-const itemFrom = sql`support_conversations c LEFT JOIN nightmail_users u ON u.id = c.user_id LEFT JOIN workspaces w ON w.id = c.workspace_id
+  last.author AS last_author, (SELECT count(*)::int FROM support_messages q WHERE q.conversation_id = c.id AND q.delivery = 'queued') AS queued,
+  opening.text AS opening, c.done_at::text AS done_at, c.done_by, (SELECT name FROM nightmail_users WHERE id = c.done_by) AS done_by_name,
+  c.messages > coalesce(rd.seq, 0) AS unread, triage.needs_you, triage.urgency, triage.since::text AS since,
+  why.ticket AS why_ticket, why.blocked AS why_blocked, why.failed AS why_failed, why.paused AS why_paused`;
+// One conversation as the inbox lists it to one operator (`me`: their read marker), with its triage (Needs you, above).
+const itemFrom = (me: string) => sql`support_conversations c LEFT JOIN nightmail_users u ON u.id = c.user_id LEFT JOIN workspaces w ON w.id = c.workspace_id
   LEFT JOIN nightmail_users p ON p.id = c.paused_by
-  LEFT JOIN LATERAL (SELECT m.author FROM support_messages m WHERE m.conversation_id = c.id ORDER BY m.seq DESC LIMIT 1) last ON true`;
+  LEFT JOIN support_inbox_reads rd ON rd.conversation_id = c.id AND rd.user_id = ${me}
+  LEFT JOIN LATERAL (SELECT m.author FROM support_messages m WHERE m.conversation_id = c.id ORDER BY m.seq DESC LIMIT 1) last ON true
+  LEFT JOIN LATERAL (SELECT left(m.text, 400) AS text FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer' ORDER BY m.seq LIMIT 1) opening ON true
+  LEFT JOIN LATERAL (SELECT a.delivery = 'failed' AS failed, a.created_at FROM support_messages a
+    WHERE a.conversation_id = c.id AND a.author IN ('agent','staff') AND a.delivery IN ('queued','sent','failed') ORDER BY a.seq DESC LIMIT 1) answer ON true
+  LEFT JOIN LATERAL (SELECT min(m.created_at) AS at FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer'
+    AND m.seq > coalesce((SELECT max(o.seq) FROM support_messages o WHERE o.conversation_id = c.id AND o.author <> 'customer'), 0)) waiting ON true
+  CROSS JOIN LATERAL (SELECT c.ticket_id IS NOT NULL AND c.ticket_resolved_at IS NULL AS ticket, c.blocked_work > 0 AS blocked, coalesce(answer.failed, false) AS failed,
+    c.agent_state = 'paused' AND c.status <> 'closed' AND last.author IS DISTINCT FROM 'staff' AS paused) why
+  CROSS JOIN LATERAL (SELECT c.done_at IS NULL AND (why.ticket OR why.blocked OR why.failed OR why.paused) AS needs_you,
+    CASE WHEN why.ticket AND c.ticket_severity = 'P1' THEN 1 WHEN why.failed OR (last.author = 'customer' AND (why.paused OR why.blocked)) THEN 2
+      WHEN why.ticket AND c.ticket_severity = 'P2' THEN 3 ELSE 4 END AS urgency,
+    least(CASE WHEN why.ticket THEN coalesce(c.ticket_at, c.created_at) END, CASE WHEN why.paused THEN coalesce(waiting.at, c.paused_at) END,
+      CASE WHEN why.failed THEN answer.created_at END, CASE WHEN why.blocked THEN coalesce(c.last_message_at, c.created_at) END) AS since) triage`;
+/** The conversations Needs you and Agent handling can hold: open ones, and closed ones with an open ticket, blocked work or a transcript (failed deliveries). */
+const triageCandidates = sql`(c.status <> 'closed' OR c.closed_at > now() - interval '90 days' OR c.blocked_work > 0 OR (c.ticket_id IS NOT NULL AND c.ticket_resolved_at IS NULL))`;
+const handling = sql`c.status <> 'closed' AND c.agent_state = 'active' AND NOT triage.needs_you`;
+const firstLine = (text: string | null) => text?.split('\n').map(line => line.trim()).find(Boolean)?.slice(0, 200) ?? null;
 const ticketOf = (r: { ticket_id: string | null; ticket_type: string | null; ticket_severity: string | null; ticket_resolved_at: string | null }) =>
   r.ticket_id ? { id: r.ticket_id, type: r.ticket_type, severity: r.ticket_severity, resolvedAt: isoTime(r.ticket_resolved_at) } : null;
 const item = (r: ItemRow): z.infer<typeof Item> => ({
@@ -109,14 +152,19 @@ const item = (r: ItemRow): z.infer<typeof Item> => ({
   agentState: r.agent_state, pausedAt: isoTime(r.paused_at),
   pausedBy: r.agent_state !== 'paused' ? null : r.paused_by === 'ticket' ? { kind: 'ticket', userId: null, name: null } : { kind: 'staff', userId: r.paused_by, name: r.paused_by_name },
   lastAuthor: r.last_author, needsReply: r.status !== 'closed' && r.last_author === 'customer',
-  messageCount: r.messages, queuedReplies: r.queued, turns: r.turns, costUsd: Number(r.cost_usd), blockedWork: r.blocked_work,
+  messageCount: r.messages, queuedReplies: r.queued, turns: r.turns, costUsd: Number(r.cost_usd), blockedWork: r.blocked_work, firstLine: firstLine(r.opening),
+  needsYou: r.needs_you ? { reasons: TRIAGE_REASONS.filter(reason => r[`why_${reason}`]), urgent: r.urgency <= 2, since: isoTime(r.since)! } : null,
+  done: r.done_at && r.done_by ? { at: isoTime(r.done_at)!, userId: r.done_by, name: r.done_by_name } : null, unread: r.unread,
   createdAt: isoTime(r.created_at)!, lastMessageAt: isoTime(r.last_message_at), closedAt: isoTime(r.closed_at),
 });
-async function one(db: DbExecutor, id: string) {
-  const { rows: [row] } = await db.execute<ItemRow>(sql`SELECT ${itemColumns} FROM ${itemFrom} WHERE c.id = ${id}`);
+async function one(db: DbExecutor, id: string, me: string) {
+  const { rows: [row] } = await db.execute<ItemRow>(sql`SELECT ${itemColumns} FROM ${itemFrom(me)} WHERE c.id = ${id}`);
   return row ? item(row) : notFound('Support conversation');
 }
 const replyAvailable = sql`coalesce((SELECT polled_at > now() - ${REPLY_WINDOW} FROM support_outbox_polls WHERE id = 1), false)`;
+/** One operator has read a conversation through `seq` (an expression over the conversation's row): an upsert that never moves their marker back. Returns the marker. */
+const markRead = (me: string, id: string, seq: SQL) => sql`INSERT INTO support_inbox_reads(user_id, conversation_id, seq) SELECT ${me}, id, ${seq} FROM support_conversations WHERE id = ${id}
+  ON CONFLICT (user_id, conversation_id) DO UPDATE SET seq = greatest(support_inbox_reads.seq, excluded.seq), read_at = now() RETURNING seq`;
 
 type MessageRow = { id: string; seq: number; author: z.infer<typeof Author>; kind: string | null; text: string; tools: { label: string; ok: boolean }[]; attachments: string[];
   staff_user_id: string | null; staff_name: string | null; delivery: z.infer<typeof Delivery> | null; delivered_at: string | null; created_at: string };
@@ -208,8 +256,10 @@ export function registerSupportInbox(app: App) {
           FROM jsonb_to_recordset(${JSON.stringify(fresh)}::jsonb) AS m(id text, seq int, author text, kind text, text text, tools jsonb, attachments jsonb, delivery text, at timestamptz)
           ON CONFLICT (id) DO NOTHING RETURNING id`);
         if (inserted.length !== fresh.length) throw conflict();
+        // Something new: a conversation staff marked done comes back to Needs you if it needs them.
         await tx.execute(sql`UPDATE support_conversations SET messages = messages + ${fresh.length},
-            last_message_at = greatest(last_message_at, (SELECT max(created_at) FROM support_messages WHERE conversation_id = ${id} AND seq > ${conv!.messages}))
+            last_message_at = greatest(last_message_at, (SELECT max(created_at) FROM support_messages WHERE conversation_id = ${id} AND seq > ${conv!.messages})),
+            done_at = NULL, done_by = NULL
           WHERE id = ${id}`);
       }
       const numbered = new Map(fresh.map(m => [m.id, m.seq]));
@@ -236,8 +286,12 @@ export function registerSupportInbox(app: App) {
     responses: { 200: response(State), ...errors } }), async c => {
     await supportPlatformOnly(c);
     const id = c.req.valid('param').id, body = c.req.valid('json'), ticket = body.ticket ?? null, pause = body.pauseForTicket === true;
+    // A new ticket, more blocked work or a pause is something new: it undoes staff's Done.
+    const reopen = sql`(ticket_id IS NULL AND ${ticket?.id ?? null}::text IS NOT NULL) OR coalesce(${body.blockedWork ?? null}::int, blocked_work) > blocked_work OR (${pause} AND agent_state = 'active')`;
     const { rows } = await c.env.db.execute(sql`UPDATE support_conversations SET
         subject = coalesce(${body.subject ?? null}, subject),
+        ticket_at = CASE WHEN ticket_id IS NULL AND ${ticket?.id ?? null}::text IS NOT NULL THEN now() ELSE ticket_at END,
+        done_at = CASE WHEN ${reopen} THEN NULL ELSE done_at END, done_by = CASE WHEN ${reopen} THEN NULL ELSE done_by END,
         ticket_id = coalesce(ticket_id, ${ticket?.id ?? null}),
         ticket_type = coalesce(${ticket?.type ?? null}, ticket_type), ticket_severity = coalesce(${ticket?.severity ?? null}, ticket_severity),
         status = CASE WHEN ${ticket?.id ?? null}::text IS NOT NULL AND status = 'open' THEN 'ticketed' ELSE status END,
@@ -275,10 +329,12 @@ export function registerSupportInbox(app: App) {
     responses: { 200: response(z.object({ id: z.string(), delivery: z.enum(['sent', 'failed']), deliveredAt: z.string().nullable() })), ...errors } }), async c => {
     await supportPlatformOnly(c);
     const { id, messageId } = c.req.valid('param'), status = c.req.valid('json').status;
+    // A reply that failed brings the conversation back to Needs you.
     const { rows: [row] } = await c.env.db.execute<{ id: string; delivery: 'sent' | 'failed'; delivered_at: string | null; changed: boolean }>(sql`WITH changed AS (
         UPDATE support_messages SET delivery = ${status}, delivered_at = CASE WHEN ${status} = 'sent' THEN now() END
         WHERE id = ${messageId} AND conversation_id = ${id} AND author = 'staff' AND delivery IN ('queued','failed')
-        RETURNING id, delivery, delivered_at)
+        RETURNING id, delivery, delivered_at), reopened AS (
+        UPDATE support_conversations SET done_at = NULL, done_by = NULL WHERE id = ${id} AND ${status} = 'failed' AND done_at IS NOT NULL AND EXISTS (SELECT FROM changed))
       SELECT id, delivery, delivered_at::text AS delivered_at, true AS changed FROM changed
       UNION ALL SELECT id, delivery, delivered_at::text, false FROM support_messages WHERE id = ${messageId} AND conversation_id = ${id} AND author = 'staff' AND NOT EXISTS (SELECT FROM changed)`);
     if (!row) notFound('Staff reply');
@@ -289,29 +345,42 @@ export function registerSupportInbox(app: App) {
   // ---------- operators: the inbox ----------
 
   app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'get', path: '/v1/operator/support-inbox', operationId: 'operatorListSupportConversations',
-    description: 'Every support conversation, most recent activity first. replyAvailable: whether staff can reply now (the support platform pulled replies in the last 10 minutes).',
+    description: 'Every support conversation, most recent activity first (needs_you: most urgent and longest waiting first). replyAvailable: whether staff can reply now (the support platform pulled replies in the last 10 minutes). counts: how many conversations need you and how many the agent is handling.',
     request: { query: z.object({
-      view: z.enum(['all', 'tickets', 'needs_reply', 'paused', 'attention']).default('all').describe('tickets: an unresolved ticket; needs_reply: not closed, the customer wrote last; paused: the agent is paused; attention: blocked work.'),
+      view: z.enum(['all', 'needs_you', 'agent', 'tickets', 'needs_reply', 'paused', 'attention']).default('all')
+        .describe('needs_you: what staff must handle (see needsYou); agent: open conversations the agent is handling on its own; tickets: an unresolved ticket; needs_reply: not closed, the customer wrote last; paused: the agent is paused; attention: blocked work.'),
       channel: z.enum(['chat', 'email']).optional(), status: z.enum(['open', 'ticketed', 'closed']).optional(),
       q: z.string().trim().min(1).max(200).optional().describe('A conversation, ticket or user ID, or part of a name, address or subject.'),
       cursor: z.string().max(2000).optional(), limit: z.coerce.number().int().min(1).max(100).default(50),
     }) },
-    responses: { 200: response(z.object({ data: z.array(Item), nextCursor: z.string().nullable(), replyAvailable: z.boolean() })), ...errors } }), async c => {
-    await staff(c, 'operator:read');
+    responses: { 200: response(z.object({ data: z.array(Item), nextCursor: z.string().nullable(), replyAvailable: z.boolean(),
+      counts: z.object({ needsYou: z.number().int(), agent: z.number().int() }).describe('The needs_you and agent views’ sizes, whatever this request’s filters.') })), ...errors } }), async c => {
+    const operator = await staff(c, 'operator:read'), me = operator.userId;
     const q = c.req.valid('query'), binding = `support-inbox:${q.view}:${q.channel ?? ''}:${q.status ?? ''}:${q.q ?? ''}`, after = readCursor(q.cursor, binding);
-    const pattern = q.q ? `%${q.q.replace(/[\\%_]/g, m => '\\' + m)}%` : null;
+    const pattern = q.q ? `%${q.q.replace(/[\\%_]/g, m => '\\' + m)}%` : null, triaged = q.view === 'needs_you';
     const filters: SQL[] = [{
-      all: sql`true`, tickets: sql`c.ticket_id IS NOT NULL AND c.ticket_resolved_at IS NULL`, needs_reply: sql`c.status <> 'closed' AND last.author = 'customer'`,
+      all: sql`true`, needs_you: sql`${triageCandidates} AND triage.needs_you`, agent: handling,
+      tickets: sql`c.ticket_id IS NOT NULL AND c.ticket_resolved_at IS NULL`, needs_reply: sql`c.status <> 'closed' AND last.author = 'customer'`,
       paused: sql`c.agent_state = 'paused'`, attention: sql`c.blocked_work > 0`,
     }[q.view]];
     if (q.channel) filters.push(sql`c.channel = ${q.channel}`);
     if (q.status) filters.push(sql`c.status = ${q.status}`);
     if (q.q) filters.push(sql`(c.id = ${q.q} OR c.ticket_id = ${q.q} OR c.user_id = ${q.q} OR c.pending_address ILIKE ${pattern} OR u.email ILIKE ${pattern} OR u.name ILIKE ${pattern} OR c.subject ILIKE ${pattern})`);
-    if (after) filters.push(sql`(coalesce(c.last_message_at, c.created_at), c.id) < (${after.at}::timestamptz, ${after.id})`);
-    const { rows } = await c.env.db.execute<ItemRow & { available: boolean }>(sql`SELECT ${itemColumns}, ${replyAvailable} AS available FROM ${itemFrom}
-      WHERE ${sql.join(filters, sql` AND `)} ORDER BY coalesce(c.last_message_at, c.created_at) DESC, c.id DESC LIMIT ${q.limit + 1}`);
-    const available = rows[0]?.available ?? (await c.env.db.execute<{ available: boolean }>(sql`SELECT ${replyAvailable} AS available`)).rows[0]!.available;
-    return c.json({ data: rows.slice(0, q.limit).map(item), nextCursor: nextCursor(rows.map(r => ({ id: r.id, createdAt: r.activity_at })), q.limit, binding), replyAvailable: available }, 200);
+    // Needs you pages by (urgency, waiting since, ID): the cursor carries the urgency with the ID.
+    if (after && triaged) {
+      const [, urgency, id] = /^([1-4]):(conv_[a-z2-7]{26})$/.exec(after.id) ?? [];
+      if (!id) throw new ApiError(422, 'INVALID_CURSOR', 'Use the returned cursor with the same filters.', 'cursor');
+      filters.push(sql`(triage.urgency, triage.since, c.id) > (${Number(urgency)}::int, ${after.at}::timestamptz, ${id})`);
+    } else if (after) filters.push(sql`(coalesce(c.last_message_at, c.created_at), c.id) < (${after.at}::timestamptz, ${after.id})`);
+    const order = triaged ? sql`triage.urgency, triage.since, c.id` : sql`coalesce(c.last_message_at, c.created_at) DESC, c.id DESC`;
+    const [{ rows }, { rows: [counts] }] = await Promise.all([
+      c.env.db.execute<ItemRow & { available: boolean }>(sql`SELECT ${itemColumns}, ${replyAvailable} AS available FROM ${itemFrom(me)}
+        WHERE ${sql.join(filters, sql` AND `)} ORDER BY ${order} LIMIT ${q.limit + 1}`),
+      c.env.db.execute<{ needs_you: number; agent: number; available: boolean }>(sql`SELECT count(*) FILTER (WHERE triage.needs_you)::int AS needs_you,
+          count(*) FILTER (WHERE ${handling})::int AS agent, ${replyAvailable} AS available FROM ${itemFrom(me)} WHERE ${triageCandidates}`),
+    ]);
+    const next = nextCursor(rows.map(r => triaged ? { id: `${r.urgency}:${r.id}`, createdAt: r.since! } : { id: r.id, createdAt: r.activity_at }), q.limit, binding);
+    return c.json({ data: rows.slice(0, q.limit).map(item), nextCursor: next, replyAvailable: counts!.available, counts: { needsYou: counts!.needs_you, agent: counts!.agent } }, 200);
   });
 
   app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'get', path: '/v1/operator/support-inbox/{id}', operationId: 'operatorGetSupportConversation',
@@ -324,7 +393,7 @@ export function registerSupportInbox(app: App) {
     const { rows: [row] } = await c.env.db.execute<{ item: ItemRow; evidence: Json; thread_id: string | null; content_workspace_id: string | null; page: string | null; messages: MessageRow[];
       user: Json | null; workspaces: Json[]; conversations: (Json & { ticket_id: string | null; ticket_type: string | null; ticket_severity: string | null; ticket_resolved_at: string | null })[];
       activity: Json[]; notes: Json[]; available: boolean }>(sql`WITH conv AS (SELECT * FROM support_conversations WHERE id = ${id}), logged AS (${viewed})
-      SELECT (SELECT row_to_json(i) FROM (SELECT ${itemColumns} FROM ${itemFrom} WHERE c.id = conv.id) i) AS item,
+      SELECT (SELECT row_to_json(i) FROM (SELECT ${itemColumns} FROM ${itemFrom(operator.userId)} WHERE c.id = conv.id) i) AS item,
         conv.evidence, conv.thread_id, conv.content_workspace_id, (SELECT page FROM support_handoffs WHERE conversation_id = conv.id) AS page,
         (SELECT coalesce(json_agg(m ORDER BY m.seq), '[]') FROM (SELECT m.id, m.seq, m.author, m.kind, m.text, m.tools, m.attachments, m.staff_user_id, su.name AS staff_name, m.delivery,
           m.delivered_at::text AS delivered_at, m.created_at::text AS created_at FROM support_messages m LEFT JOIN nightmail_users su ON su.id = m.staff_user_id
@@ -366,13 +435,13 @@ export function registerSupportInbox(app: App) {
   });
 
   // Every staff change is one transaction with its internal audit row, and repeats safely with an Idempotency-Key.
-  type Locked = { status: string; user_id: string | null; agent_state: string; ticket_id: string | null; ticket_resolved_at: string | null };
+  type Locked = { status: string; user_id: string | null; agent_state: string; ticket_id: string | null; ticket_resolved_at: string | null; done_at: string | null };
   const changeHeaders = z.object({ 'idempotency-key': z.string().min(1).max(200).optional() });
   async function change<T>(c: Ctx, id: string, action: string, work: (tx: DbExecutor, operator: OperatorIdentity, conversation: Locked) => Promise<{ result: T; message?: string }>, body?: unknown) {
     const operator = await staff(c, 'operator');
     let subject: string | null = null, messageId: string | undefined;
     return mutate(c, operator, '', body, async tx => {
-      const { rows: [conversation] } = await tx.execute<Locked>(sql`SELECT status, user_id, agent_state, ticket_id, ticket_resolved_at::text AS ticket_resolved_at
+      const { rows: [conversation] } = await tx.execute<Locked>(sql`SELECT status, user_id, agent_state, ticket_id, ticket_resolved_at::text AS ticket_resolved_at, done_at::text AS done_at
         FROM support_conversations WHERE id = ${id} FOR NO KEY UPDATE`);
       if (!conversation) notFound('Support conversation');
       subject = conversation!.user_id;
@@ -393,10 +462,11 @@ export function registerSupportInbox(app: App) {
       if (!(await tx.execute<{ available: boolean }>(sql`SELECT ${replyAvailable} AS available`)).rows[0]!.available)
         throw new ApiError(409, 'SUPPORT_REPLY_UNAVAILABLE', 'The support platform has not collected replies in the last 10 minutes, so this reply could not be delivered. Try again once it is back.');
       const messageId = newMessageId();
+      // The reply is new (it undoes Done), and its author has read everything up to it.
       const { rows: [row] } = await tx.execute<MessageRow>(sql`WITH c AS (
           UPDATE support_conversations SET messages = messages + 1, last_message_at = now(), agent_state = 'paused', paused_by = ${operator.userId},
-            paused_at = CASE WHEN agent_state = 'paused' AND paused_by = ${operator.userId} THEN paused_at ELSE now() END
-          WHERE id = ${id} RETURNING messages)
+            paused_at = CASE WHEN agent_state = 'paused' AND paused_by = ${operator.userId} THEN paused_at ELSE now() END, done_at = NULL, done_by = NULL
+          WHERE id = ${id} RETURNING messages), seen AS (${markRead(operator.userId, id, sql`(SELECT messages FROM c)`)})
         INSERT INTO support_messages(id, conversation_id, seq, author, kind, text, staff_user_id, delivery) SELECT ${messageId}, ${id}, c.messages, 'staff', 'reply', ${body.text}, ${operator.userId}, 'queued' FROM c
         RETURNING ${messageColumns}`);
       return { result: message(row!), message: messageId };
@@ -413,19 +483,19 @@ export function registerSupportInbox(app: App) {
     return c.json(await change(c, id, 'support.pause', async (tx, operator, conversation) => {
       if (conversation.status === 'closed') throw closedConversation();
       if (conversation.agent_state === 'paused') throw new ApiError(409, 'ALREADY_PAUSED', 'The agent is already paused here.');
-      await tx.execute(sql`UPDATE support_conversations SET agent_state = 'paused', paused_by = ${operator.userId}, paused_at = now() WHERE id = ${id}`);
-      return { result: await one(tx, id) };
+      await tx.execute(sql`UPDATE support_conversations SET agent_state = 'paused', paused_by = ${operator.userId}, paused_at = now(), done_at = NULL, done_by = NULL WHERE id = ${id}`);
+      return { result: await one(tx, id, operator.userId) };
     }), 200);
   });
   app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'post', path: '/v1/operator/support-inbox/{id}/resume', operationId: 'operatorResumeSupportAgent',
     description: 'Hand the conversation back to the agent (the operator role): it answers the customer’s next message.',
     request: { params: ConversationParam, headers: changeHeaders }, responses: { 200: response(Item), ...errors } }), async c => {
     const id = c.req.valid('param').id;
-    return c.json(await change(c, id, 'support.resume', async (tx, _operator, conversation) => {
+    return c.json(await change(c, id, 'support.resume', async (tx, operator, conversation) => {
       if (conversation.status === 'closed') throw closedConversation();
       if (conversation.agent_state !== 'paused') throw new ApiError(409, 'NOT_PAUSED', 'The agent is not paused here.');
       await tx.execute(sql`UPDATE support_conversations SET agent_state = 'active', paused_by = NULL, paused_at = NULL WHERE id = ${id}`);
-      return { result: await one(tx, id) };
+      return { result: await one(tx, id, operator.userId) };
     }), 200);
   });
   app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'post', path: '/v1/operator/support-inbox/{id}/resolve', operationId: 'operatorResolveSupportTicket',
@@ -436,8 +506,34 @@ export function registerSupportInbox(app: App) {
       if (!conversation.ticket_id) throw new ApiError(409, 'SUPPORT_NO_TICKET', 'This conversation has no ticket.');
       if (conversation.ticket_resolved_at) throw new ApiError(409, 'ALREADY_RESOLVED', 'This ticket is already resolved.');
       await tx.execute(sql`UPDATE support_conversations SET ticket_resolved_at = now(), ticket_resolved_by = ${operator.userId} WHERE id = ${id}`);
-      return { result: await one(tx, id) };
+      return { result: await one(tx, id, operator.userId) };
     }), 200);
+  });
+  app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'post', path: '/v1/operator/support-inbox/{id}/done', operationId: 'operatorMarkSupportConversationDone',
+    description: 'Mark the conversation done (the operator role): it leaves Needs you, and its open ticket, if any, is resolved. Anything new (a message, a failed delivery, more blocked work, a ticket or a pause) brings it back.',
+    request: { params: ConversationParam, headers: changeHeaders }, responses: { 200: response(Item), ...errors } }), async c => {
+    const id = c.req.valid('param').id;
+    return c.json(await change(c, id, 'support.done', async (tx, operator, conversation) => {
+      if (conversation.done_at) throw new ApiError(409, 'ALREADY_DONE', 'This conversation is already marked done.');
+      await tx.execute(sql`UPDATE support_conversations SET done_at = now(), done_by = ${operator.userId},
+          ticket_resolved_by = CASE WHEN ticket_id IS NOT NULL AND ticket_resolved_at IS NULL THEN ${operator.userId} ELSE ticket_resolved_by END,
+          ticket_resolved_at = CASE WHEN ticket_id IS NOT NULL AND ticket_resolved_at IS NULL THEN now() ELSE ticket_resolved_at END
+        WHERE id = ${id}`);
+      return { result: await one(tx, id, operator.userId) };
+    }), 200);
+  });
+  app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'put', path: '/v1/operator/support-inbox/{id}/read', operationId: 'operatorMarkSupportConversationRead',
+    description: 'Mark the conversation read (through its first seq messages; default all of them) or unread, for the signed-in operator alone (operator:read is enough). Reading never moves the marker back.',
+    request: { params: ConversationParam, body: json(z.object({ read: z.boolean(), seq: z.number().int().min(0).max(1_000_000).optional().describe('The messages read: the transcript’s length when it was shown.') }).strict()) },
+    responses: { 200: response(z.object({ id: z.string(), unread: z.boolean() })), ...errors } }), async c => {
+    const operator = await staff(c, 'operator:read'), id = c.req.valid('param').id, body = c.req.valid('json');
+    const mark = body.read ? markRead(operator.userId, id, sql`least(coalesce(${body.seq ?? null}::int, messages), messages)`)
+      : sql`INSERT INTO support_inbox_reads(user_id, conversation_id, seq) SELECT ${operator.userId}, id, 0 FROM support_conversations WHERE id = ${id}
+          ON CONFLICT (user_id, conversation_id) DO UPDATE SET seq = 0, read_at = now() RETURNING seq`;
+    const { rows: [row] } = await c.env.db.execute<{ messages: number; seq: number }>(sql`WITH mark AS (${mark})
+      SELECT (SELECT messages FROM support_conversations WHERE id = ${id}) AS messages, mark.seq FROM mark`);
+    if (!row) notFound('Support conversation');
+    return c.json({ id, unread: row!.messages > row!.seq }, 200);
   });
   app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'post', path: '/v1/operator/support-inbox/{id}/wake', operationId: 'operatorWakeSupportConversation',
     description: 'Retry now (the operator role): wake the support platform for this conversation, with nothing but its ID. woken: false when no support site is configured or it did not answer.',

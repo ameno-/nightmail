@@ -138,6 +138,9 @@ export const KEEP = [
   { why: 'safety', file: 'features/operator/index.tsx', text: /^A strike stays on record\.$/ },
   { why: 'safety', file: 'features/operator/index.tsx', text: /^Campaigns pause and new marketing is refused\.$/ },
   { why: 'safety', file: 'features/operator/index.tsx', text: /^The workspace moves to Warn until it clears\.$/ },
+  { why: 'safety', file: 'features/support-inbox/index.tsx', text: /^It stops answering this customer until someone hands back\.$/ },
+  { why: 'safety', file: 'features/support-inbox/index.tsx', text: /^It answers the customer’s next message\.$/ },
+  { why: 'safety', file: 'features/support-inbox/index.tsx', text: /^The customer isn’t told\.$/ },
 ];
 for (const k of KEEP) if (!KEEP_WHY[k.why]) throw new Error(`copy-lint KEEP: “${k.why}” is not a kept category (${Object.keys(KEEP_WHY).join(', ')})`);
 // State, not explanation: a loading line, or a short “No … yet” where a list or value would be.
