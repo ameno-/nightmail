@@ -89,7 +89,9 @@ export function AccountSwitcher() {
     { key: 'sign-out', text: 'Sign out of this account', label: 'Sign out of this account', icon: <LogOut />, onSelect: () => void run(() => session!.signOutAccount(self.id), 'Couldn’t sign out.') },
     ...accounts.length > 1 ? [{ key: 'sign-out-all', text: 'Sign out of all accounts', label: 'Sign out of all accounts', icon: <LogOut />, destructive: true, onSelect: () => void run(() => session!.signOutAll(), 'Couldn’t sign out.') }] : [],
   ])
-  const trigger = <button ref={triggerRef} type="button" id="sidebar-workspace" className="ui-input ui-select-trigger account-switcher" disabled={busy}
+  // Names and workspaces are people's data: analytics (lib/analytics.ts) records these controls by name alone.
+  const named = (entry: Entry) => 'account/' + entry.key.split(':')[0]
+  const trigger = <button ref={triggerRef} type="button" id="sidebar-workspace" className="ui-input ui-select-trigger account-switcher" disabled={busy} data-private data-analytics="account/switcher"
     aria-label={`${self.name || 'Account'}, ${workspace?.name ?? 'workspace'}. Switch account or workspace`} title={[workspace?.name, self.name].filter(Boolean).join(' · ')} onPointerEnter={intent} onPointerDown={intent} onFocus={intent} onClick={phone ? () => void openSheet() : undefined}>
     <span className="account-switcher__workspace">{workspace?.name ?? 'Workspace'}</span>
     <span><ChevronDown size={14} aria-hidden="true" /></span>
@@ -103,8 +105,8 @@ export function AccountSwitcher() {
   if (phone) return <>
     {trigger}
     <Sheet open={open} onOpenChange={setOpen} title="Accounts" className="ui-action-sheet account-sheet" returnFocus={triggerRef}>
-      {sections.map((section, index) => <div key={index} className="ui-action-sheet__items" role="group">{section.map(entry =>
-        <button key={entry.key} type="button" disabled={entry.disabled && !entry.heading} aria-disabled={entry.disabled || undefined} aria-current={entry.checked || (entry.heading && entry.disabled) ? 'true' : undefined}
+      {sections.map((section, index) => <div key={index} className="ui-action-sheet__items" role="group" data-private>{section.map(entry =>
+        <button key={entry.key} type="button" data-analytics={named(entry)} disabled={entry.disabled && !entry.heading} aria-disabled={entry.disabled || undefined} aria-current={entry.checked || (entry.heading && entry.disabled) ? 'true' : undefined}
           className={['ui-action-sheet__item', entry.heading && 'account-sheet__account', entry.destructive && 'ui-action-sheet__item--danger', !entry.heading && !entry.icon && 'account-sheet__workspace'].filter(Boolean).join(' ')}
           onClick={() => { if (entry.disabled) return; setOpen(false); setTimeout(entry.onSelect, 0) }}>
           {entry.icon && <span className="ui-menu-icon">{entry.icon}</span>}
@@ -118,10 +120,10 @@ export function AccountSwitcher() {
   return <>
     <DropdownPrimitive.Root open={open} onOpenChange={next => { setOpen(next); if (next) intent() }}>
       <DropdownPrimitive.Trigger asChild>{trigger}</DropdownPrimitive.Trigger>
-      <DropdownPrimitive.Portal><DropdownPrimitive.Content align="start" sideOffset={4} className="ui-popover ui-menu account-menu" aria-label="Accounts and workspaces"><div className="ui-popover-scroll">
+      <DropdownPrimitive.Portal><DropdownPrimitive.Content align="start" sideOffset={4} className="ui-popover ui-menu account-menu" aria-label="Accounts and workspaces" data-private><div className="ui-popover-scroll">
         {sections.map((section, index) => <DropdownPrimitive.Group key={index} className="account-menu__group">{section.map(entry => entry.heading && entry.disabled
           ? <DropdownPrimitive.Label key={entry.key} className="ui-menu-item account-menu__account" aria-current="true">{entry.label}</DropdownPrimitive.Label>
-          : <DropdownPrimitive.Item key={entry.key} disabled={entry.disabled} onSelect={entry.onSelect}
+          : <DropdownPrimitive.Item key={entry.key} disabled={entry.disabled} onSelect={entry.onSelect} data-analytics={named(entry)}
             className={['ui-menu-item', entry.heading ? 'account-menu__account' : entry.icon ? 'account-menu__action' : 'account-menu__workspace', entry.destructive && 'ui-menu-item--danger'].filter(Boolean).join(' ')}>
             {entry.icon && <span className="ui-menu-icon">{entry.icon}</span>}{entry.label}{entry.checked && <Check className="account-menu__check" size={14} aria-label="Current workspace" />}
           </DropdownPrimitive.Item>)}</DropdownPrimitive.Group>)}

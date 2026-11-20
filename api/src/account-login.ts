@@ -6,6 +6,7 @@ import { setCookie } from 'hono/cookie';
 import { onboardNewUser, pendingInvitation } from './workspaces.js';
 import { isStaffSignIn, PROVIDER_IDENTITY_CLAIM, providerIdentity, type ProviderIdentity } from './account-policy.js';
 import { clientIpHeader, productName, requestHeader } from './brand.js';
+import { ANALYTICS_SESSION_PARAM } from './analytics-events.js';
 
 const verifiedEmail = z.email().max(320);
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
@@ -384,6 +385,12 @@ export async function accountBrowserRoute(c: Ctx) {
       setCookie(c,cookieName(runtime,'account'),userId,cookieOptions(runtime,SESSION_SECONDS));
       const target = new URL(returnUrl);
       target.searchParams.set('account', userId);
+      // A signed-out page's analytics session (docs/analytics.md): linked to the account here, and never shown to the browser.
+      const analyticsSession = target.searchParams.get(ANALYTICS_SESSION_PARAM);
+      if (analyticsSession !== null) {
+        target.searchParams.delete(ANALYTICS_SESSION_PARAM);
+        await (await import('./analytics.js')).recordSignIn(runtime, analyticsSession, userId, target.pathname);
+      }
       return c.redirect(target.href,303);
     } catch (error) {
       const issue = error instanceof AccountLimit ? {reason:'account_limit'} : loginIssue(error, runtime.config.accountClient?.requiredAcr);

@@ -71,7 +71,7 @@ export function NewInboxDialog({ open, onOpenChange }: { open: boolean; onOpenCh
     </Dialog>
     <ConnectAgentDialog open={open && connecting} onOpenChange={next => { if (!next) { setConnecting(false); close() } }} inboxId={created.id} />
   </>
-  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) onOpenChange(next) }} title="New agent inbox" footer={<><Button disabled={create.isPending} onClick={close}>Cancel</Button><Button variant="primary" type="submit" form="agent-inbox-create" loading={create.isPending} disabled={domains.isPending}>Create inbox</Button></>}>
+  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) onOpenChange(next) }} title="New agent inbox" analytics="inboxes/create" footer={<><Button disabled={create.isPending} onClick={close}>Cancel</Button><Button variant="primary" type="submit" form="agent-inbox-create" loading={create.isPending} disabled={domains.isPending}>Create inbox</Button></>}>
     <form id="agent-inbox-create" className="stack" onSubmit={submit} noValidate>
       <MutationError error={create.error} />
       {noHost && <Alert tone="info">No domain receives mail yet, so this is a sandbox inbox for test mail only. For a real address, add a domain in <Link to="/domains">Domains</Link> and publish its receiving MX record.</Alert>}
@@ -103,7 +103,7 @@ export function AgentInboxesPage() {
     <PageHeader title="Agent inboxes" backTo="/receiving?kind=inbox" actions={<>
       <Input className="receiving-search" type="search" aria-label="Search inboxes" placeholder="Search address or name" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} />
       {canAdminister && <ConnectAgentButton />}
-      {canAdminister && <Button variant="primary" onClick={() => setCreating(true)}>New agent inbox</Button>}
+      {canAdminister && <Button variant="primary" onClick={() => setCreating(true)} data-analytics="inboxes/create">New agent inbox</Button>}
     </>} />
     {inboxes.error ? <ErrorState error={inboxes.error} onRetry={() => void inboxes.refetch()} /> : <>
       <DataTable loading={inboxes.isPending} skeletonRows={4} rows={inboxes.data ?? []} rowKey={row => row.id} rowHref={row => `${route}/${row.id}`}

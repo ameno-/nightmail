@@ -1,5 +1,6 @@
 import { Component, Suspense, useEffect, type ErrorInfo, type ReactNode } from 'react'
-import { Navigate, Route, Routes, Link, useLocation, useParams, type Params } from 'react-router'
+import { Navigate, Route, Routes, Link, createRoutesFromChildren, useLocation, useParams, type Params } from 'react-router'
+import { setAnalyticsRoutes } from './components/Analytics'
 import { AppShell } from './components/AppShell'
 import { BootLoader } from './components/BootLoader'
 import { Button, EmptyState } from './components/ui'
@@ -141,7 +142,10 @@ function useRememberDashboardReady() {
 }
 export function App() {
   useRememberDashboardReady()
-  return <AppErrorBoundary><Routes><Route path="legal/:doc?" element={<ChunkFallback.Provider value={<BootLoader />}><Suspense fallback={<BootLoader />}><LegalPage /></Suspense></ChunkFallback.Provider>} /><Route path="onboarding" element={<OnboardingRoute />} /><Route index element={<RootPage />} /><Route element={<DashboardGate />}>
+  return <AppErrorBoundary><Routes>{routes}</Routes></AppErrorBoundary>
+}
+// The route table, also given to analytics so a page view names its template (/domains/:id), never its path.
+const routes = <><Route path="legal/:doc?" element={<ChunkFallback.Provider value={<BootLoader />}><Suspense fallback={<BootLoader />}><LegalPage /></Suspense></ChunkFallback.Provider>} /><Route path="onboarding" element={<OnboardingRoute />} /><Route index element={<RootPage />} /><Route element={<DashboardGate />}>
     <Route path="overview" element={<OverviewPage />} />
     <Route path="logs" element={<LogsPage />} /><Route path="logs/received/:id" element={<Moved to={params => `/logs/${encodeURIComponent(params.id ?? '')}`} />} /><Route path="logs/:id" element={<LogDetailPage />} />
     <Route path="receiving/endpoints" element={<Navigate replace to="/receiving?tab=endpoints" />}/><Route path="receiving/rituals/*" element={<RitualsRedirect />} /><Route path="receiving/rules/new" element={<NewRulePage />} /><Route path="receiving/rules/new/script" element={<RulesPage />} /><Route path="receiving/rules/new/:recipe" element={<NewRecipeRoute />} /><Route path="receiving/rules/:key" element={<RuleRoute />} /><Route path="receiving/rules/:key/code" element={<RulesPage />} /><Route path="receiving/rules" element={<Navigate replace to="/receiving?tab=rules" />} /><Route path="receiving/routing" element={<Navigate replace to="/receiving" />} /><Route path="receiving/trace" element={<TracePage />} /><Route path="receiving" element={<ReceivingPage />} /><Route path="receiving/inbox" element={<InboundPage />} /><Route path="receiving/addresses/:id" element={<InboundAddressDetailPage />} /><Route path="receiving/webhooks" element={<WebhooksListRedirect />} /><Route path="receiving/webhooks/:id" element={<InboundWebhookDetailPage />} />
@@ -163,5 +167,5 @@ export function App() {
     <Route path="docs/*" element={<DocsPage />} /><Route path="developer" element={<Moved to={() => '/docs'} />} />
     <Route path="operator" element={<OperatorPage />} /><Route path="operator/notes" element={<OperatorNotesPage />} /><Route path="operator/workspaces/:id" element={<OperatorWorkspacePage />} />
     <Route path="*" element={<EmptyState headingAs="h1" title="Page not found" action={<Link to="/overview">Return to overview</Link>} />} />
-  </Route></Routes></AppErrorBoundary>
-}
+  </Route></>
+setAnalyticsRoutes(createRoutesFromChildren(routes))

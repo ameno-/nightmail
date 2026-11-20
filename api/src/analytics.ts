@@ -1,9 +1,10 @@
 import { z } from 'zod';
 import { ApiError, digest, log, type App, type Runtime, type Storage } from './core.js';
 import { clientIpHeader } from './brand.js';
-import { ANALYTICS_EVENT_TYPES, ANALYTICS_LIMITS, ANALYTICS_PATH, FUNNEL_STEPS, VALIDITY_REASONS, VIEWPORTS, analyticsName, fieldName, operationTemplate, routeTemplate, scrubLabel } from './analytics-events.js';
+import { ANALYTICS_EVENT_TYPES, ANALYTICS_LIMITS, ANALYTICS_PATH, FUNNEL_STEPS, VALIDITY_REASONS, VIEWPORTS, analyticsId, analyticsName, fieldName, operationTemplate, routeTemplate, scrubLabel } from './analytics-events.js';
 
-// Dashboard usage analytics (docs/analytics.md). The dashboard posts batches here with sendBeacon; each accepted batch
+// Dashboard usage analytics (docs/analytics.md). The dashboard keeps nothing on the device: its session ID lives in the
+// page's memory, and a signed-in page names the account and workspace. It posts batches here with sendBeacon; each accepted batch
 // becomes one NDJSON object under raw/, and the hourly upkeep compacts every settled hour into one gzip object under
 // events/. Nothing here reads or writes Postgres: the analytics bucket (Workers: ANALYTICS, else the installation's own
 // bucket under analytics/) is the whole store, so a burst of clicks never spends a database connection.
@@ -20,7 +21,7 @@ const DAY_MS = 86_400_000;
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,40}$/);
 const Envelope = z.object({
   v: z.literal(1),
-  sid: id, vid: id,
+  sid: id,
   ws: z.string().max(64).nullish(), uid: z.string().max(64).nullish(),
   app: z.string().max(40).nullish(), vp: z.enum(VIEWPORTS),
   events: z.array(z.unknown()).min(1).max(ANALYTICS_LIMITS.events),
@@ -34,7 +35,7 @@ const Event = z.object({
   ms: z.number().int().min(0).max(7 * DAY_MS).nullish(), step: z.enum(FUNNEL_STEPS).nullish(),
 });
 export type AnalyticsRow = {
-  v: 1; id: string; received: string; t: string; seq: number; sid: string; vid: string; ws: string | null; uid: string | null; app: string | null; vp: typeof VIEWPORTS[number];
+  v: 1; id: string; received: string; t: string; seq: number; sid: string; ws: string | null; uid: string | null; app: string | null; vp: typeof VIEWPORTS[number] | null;
   type: typeof ANALYTICS_EVENT_TYPES[number]; route: string; ref: string | null; target: string | null; name: string | null; role: string | null; label: string | null;
   field: string | null; reason: string | null; code: string | null; op: string | null; status: number | null; ms: number | null; step: string | null;
 };
@@ -48,16 +49,13 @@ const ELEMENT_EVENTS = new Set(['click', 'dialog_open', 'dialog_close', 'form_su
 export function analyticsRows(body: unknown, now: number): { rows: AnalyticsRow[]; dropped: number } {
   const envelope = Envelope.safeParse(body);
   if (!envelope.success) throw new ApiError(422, 'VALIDATION_FAILED', 'The analytics batch is invalid.');
-  const { sid, vid, ws, uid, app, vp, events } = envelope.data, received = new Date(now).toISOString();
-  const base = { v: 1 as const, received, sid, vid, vp,
-    ws: ws && /^(?:ws_[0-9a-f]{32}|default)$/.test(ws) ? ws : null,
-    uid: uid && /^[A-Za-z0-9-]{8,64}$/.test(uid) ? uid : null,
-    app: app && /^[0-9a-z]{1,40}$/.test(app) ? app : null };
+  const { sid, ws, uid, app, vp, events } = envelope.data, received = new Date(now).toISOString();
+  const base = { v: 1 as const, received, sid, vp, ws: workspaceId(ws), uid: userId(uid), app: app && /^[0-9a-z]{1,40}$/.test(app) ? app : null };
   const rows: AnalyticsRow[] = [];
   for (const raw of events) {
     const parsed = Event.safeParse(raw), event = parsed.success ? parsed.data : null;
     const route = event && routeTemplate(event.route);
-    if (!event || !route || (event.type === 'track' && !event.step) || (event.type === 'api_error' && !event.code)) continue;
+    if (!event || !route || event.type === 'sign_in' || (event.type === 'track' && !event.step) || (event.type === 'api_error' && !event.code)) continue;
     const name = analyticsName(event.name), role = typeof event.role === 'string' && /^[a-z]{1,16}$/.test(event.role) ? event.role : null;
     const label = name ? null : scrubLabel(event.label);
     rows.push({ ...base, id: event.id, t: new Date(Math.abs(event.t - now) > DAY_MS ? now : event.t).toISOString(), seq: event.seq, type: event.type, route,
@@ -68,10 +66,32 @@ export function analyticsRows(body: unknown, now: number): { rows: AnalyticsRow[
   return { rows, dropped: events.length - rows.length };
 }
 
+const workspaceId = (value: unknown) => typeof value === 'string' && /^(?:ws_[0-9a-f]{32}|default)$/.test(value) ? value : null;
+const userId = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(value) ? value : null;
+
 /** Where analytics objects live: the Worker's ANALYTICS bucket, else the installation's own bucket. */
 export const analyticsStore = (runtime: Runtime): Storage => runtime.analyticsStorage ?? runtime.storage;
 const hourPath = (ms: number) => { const iso = new Date(ms).toISOString(); return 'dt=' + iso.slice(0, 10) + '/h=' + iso.slice(11, 13); };
 const encoder = new TextEncoder(), decoder = new TextDecoder();
+async function writeBatch(runtime: Runtime, rows: AnalyticsRow[], now: number) {
+  const key = ANALYTICS_ROOT + 'raw/' + hourPath(now) + '/' + now + '-' + crypto.randomUUID().replaceAll('-', '').slice(0, 16) + '.ndjson';
+  await analyticsStore(runtime).put(key, encoder.encode(rows.map(row => JSON.stringify(row)).join('\n') + '\n'), 'application/x-ndjson');
+}
+
+/**
+ * The one event that links a signed-out page's session (its events carry no account) to the account that signed in
+ * from it: written by the sign-in callback, which knows both, with the session ID the page put in its return URL.
+ * Best-effort: a failure here never fails the sign-in.
+ */
+export async function recordSignIn(runtime: Runtime, session: unknown, user: string, route: string) {
+  const sid = analyticsId(session), uid = userId(user);
+  if (!runtime.config.dashboardAnalytics || !sid || !uid) return;
+  const now = Date.now(), at = new Date(now).toISOString();
+  try {
+    await writeBatch(runtime, [{ v: 1, id: crypto.randomUUID().replaceAll('-', ''), received: at, t: at, seq: 0, sid, ws: null, uid, app: null, vp: null, type: 'sign_in',
+      route: routeTemplate(route) ?? '/', ref: null, target: null, name: null, role: null, label: null, field: null, reason: null, code: null, op: null, status: null, ms: null, step: null }], now);
+  } catch { log('warn', { code: 'ANALYTICS_SIGN_IN_UNRECORDED' }); }
+}
 
 // A per-process cap in front of the Workers rate-limit binding (runtime.allowAnalytics), which Node doesn't have.
 const counts = new Map<string, number>();
@@ -90,7 +110,8 @@ export function registerAnalytics(app: App) {
   // origin, counts batches per client address before reading a byte, and stores nothing it hasn't checked.
   app.post(ANALYTICS_PATH, async c => {
     const runtime = c.env, { config } = runtime;
-    if (!config.dashboardAnalytics) throw new ApiError(404, 'NOT_FOUND', 'Route not found.');
+    // Off (DASHBOARD_ANALYTICS): the dashboard sends nothing, and anything that arrives anyway is discarded unread.
+    if (!config.dashboardAnalytics) return c.body(null, 204);
     const origin = c.req.header('origin');
     if (!origin || ![config.publicUrl, ...config.previousOrigins ?? []].includes(origin)) throw new ApiError(403, 'ORIGIN_NOT_ALLOWED', 'Analytics are accepted only from this installation’s dashboard.');
     // Do Not Track and Global Privacy Control: the dashboard sends nothing then, and a batch that says so is dropped.
@@ -103,10 +124,8 @@ export function registerAnalytics(app: App) {
     try { body = JSON.parse(decoder.decode(bytes)); } catch { throw new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.'); }
     const now = Date.now(), { rows, dropped } = analyticsRows(body, now);
     if (dropped) log('warn', { requestId: c.get('requestId'), code: 'ANALYTICS_EVENTS_DROPPED', dropped, accepted: rows.length });
-    if (rows.length) {
-      const key = ANALYTICS_ROOT + 'raw/' + hourPath(now) + '/' + now + '-' + crypto.randomUUID().replaceAll('-', '').slice(0, 16) + '.ndjson';
-      await analyticsStore(runtime).put(key, encoder.encode(rows.map(row => JSON.stringify(row)).join('\n') + '\n'), 'application/x-ndjson');
-    }
+    // A bucket that can't take the batch loses it: the dashboard never retries, and this isn't a database outage.
+    if (rows.length) await writeBatch(runtime, rows, now).catch(() => { throw new ApiError(503, 'ANALYTICS_UNAVAILABLE', 'Analytics storage is unavailable.', undefined, true); });
     return c.body(null, 204);
   });
 }

@@ -71,7 +71,7 @@ export interface Config {
   staffGoogleDomains: string[];
   /** Hosted: the issuer subjects allowed to use staff UI notes (src/ui-notes.ts); empty turns the feature off. */
   uiNotesSubjects?: { issuer: string; subject: string }[];
-  /** Dashboard usage analytics (src/analytics.ts, NIGHTMAIL_DASHBOARD_ANALYTICS): off unless set. */
+  /** Dashboard usage analytics (src/analytics.ts, DASHBOARD_ANALYTICS=on): off unless set. */
   dashboardAnalytics?: boolean;
   /** Self-hosted: subjects (or '*') that become owners of 'default' at their first sign-in. */
   defaultWorkspaceOwners: '*' | string[];

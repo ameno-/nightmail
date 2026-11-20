@@ -13,6 +13,7 @@ import { TOUCH, matches, usePhone, useTouch } from '../../lib/media';
 import { SkeletonText, PaginationSkeleton, ControlSkeleton } from './skeleton';
 import { Sheet, SheetOpenEffects, useSheetDrag } from './sheet';
 import { isDuplicateSubmission } from '../../lib/single-flight';
+import { useDialogAnalytics, useFieldErrorAnalytics } from '../Analytics';
 
 const cx = (...values: (string | false | null | undefined)[]) => values.filter(Boolean).join(' ');
 export type Tone = 'neutral' | 'success' | 'warning' | 'danger' | 'info';
@@ -42,6 +43,7 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<H
 export function Field({ label, htmlFor, error, hint, children }: { label: ReactNode; htmlFor?: string; error?: ReactNode; hint?: ReactNode; children: ReactNode }) {
   const generatedId = useId();
   const onlyChild = Children.count(children) === 1 && isValidElement(children) && children.type !== Fragment && !(typeof children.type === 'string' && ['div', 'span', 'section'].includes(children.type)) ? children as ReactElement<{ id?: string; 'aria-describedby'?: string; 'aria-invalid'?: boolean }> : null;
+  useFieldErrorAnalytics(error, label, htmlFor ?? onlyChild?.props.id);
   const id = htmlFor ?? onlyChild?.props.id ?? generatedId;
   const descriptionId = `${id}-description`;
   return <div data-component="Field" className="ui-field"><label className="ui-field__label" htmlFor={id}>{label}</label>{onlyChild ? cloneElement(onlyChild, { id, 'aria-invalid': error ? true : onlyChild.props['aria-invalid'], 'aria-describedby': [onlyChild.props['aria-describedby'], error || hint ? descriptionId : null].filter(Boolean).join(' ') || undefined }) : children}{(error || hint) && <div id={descriptionId} className={cx('ui-field__hint', Boolean(error) && 'ui-field__error')} role={error ? 'alert' : undefined}>{error || hint}</div>}</div>;
@@ -140,8 +142,10 @@ export function Tabs({ value, onValueChange, items, label = 'Sections', disabled
 // What a dialog focuses when it opens with a form in it: the first text field, never the close button (a phone's
 // keyboard would open for it, so a touch screen focuses the dialog itself).
 const DIALOG_FIELD = '.ui-dialog__body :is(input:not([type=hidden], [type=file], [type=checkbox], [type=radio], [type=button], [type=submit], [disabled]), textarea:not([disabled]), select:not([disabled]), [role=combobox]:not([disabled]))';
-export type DialogProps = { open: boolean; onOpenChange: (open: boolean) => void; title: ReactNode; description?: ReactNode; children: ReactNode; footer?: ReactNode; className?: string; sensitive?: boolean; dismissible?: boolean };
-export function Dialog({ open, onOpenChange, title, description, children, footer, className, sensitive, dismissible = true }: DialogProps) {
+/** `analytics`: the dialog's name in dashboard analytics (lib/analytics.ts), when its title isn't plain text or holds data. */
+export type DialogProps = { open: boolean; onOpenChange: (open: boolean) => void; title: ReactNode; description?: ReactNode; children: ReactNode; footer?: ReactNode; className?: string; sensitive?: boolean; dismissible?: boolean; analytics?: string };
+export function Dialog({ open, onOpenChange, title, description, children, footer, className, sensitive, dismissible = true, analytics }: DialogProps) {
+  useDialogAnalytics(open, title, analytics);
   const returnFocus = useRef<HTMLElement | null>(null);
   const descriptionId = useId();
   // On a phone the dialog is a bottom sheet: in thumb reach, above the keyboard, swiped down to close.

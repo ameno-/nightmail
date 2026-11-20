@@ -114,6 +114,6 @@ export default defineConfig({
   plugins: [slimReactEmail, legalMarkdown, react(), fileHeaders(), publicOrigin, brandedBootScript(), commercialPage()],
   server: {
     host: '127.0.0.1', port: 5173, strictPort: true,
-    proxy: Object.fromEntries(['/v1', '/api/auth', '/mcp', '/.well-known', '/unsubscribe', '/health', '/openapi.json'].map(path => [path, {target: 'http://127.0.0.1:8793', changeOrigin: false}])),
+    proxy: Object.fromEntries(['/v1', '/api/auth', '/mcp', '/.well-known', '/unsubscribe', '/health', '/openapi.json', '/internal'].map(path => [path, {target: 'http://127.0.0.1:8793', changeOrigin: false}])),
   },
 })

@@ -17,6 +17,9 @@ import { resourceOf, staleAfterWrite } from './invalidation'
 import { useGuardedMutation } from '../lib/single-flight'
 import { SignInConsent } from '../components/LegalLinks'
 import { productName } from '../../../api/src/brand'
+import { ANALYTICS_SESSION_PARAM } from '../../../api/src/analytics-events'
+import { analytics } from '../lib/analytics'
+import { Analytics } from '../components/Analytics'
 
 // The tab's account and workspace. logout signs out of this tab's account only; another connected account takes its place.
 type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>
@@ -303,6 +306,10 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     callback.search = window.location.search
     callback.hash = window.location.hash
     callback.searchParams.delete('auth')
+    // Analytics: this signed-out page's session rides in the return URL to the sign-in callback, which links it to the
+    // account and removes it before the browser opens the page (docs/analytics.md).
+    const session = analytics().signInSession()
+    if (session) callback.searchParams.set(ANALYTICS_SESSION_PARAM, session)
     return request<{url: string}>('/api/auth/sign-in/account', {method: 'POST', body: {callbackURL: callback.href}}).then(result => {
       const url = new URL(result.url)
       if (url.protocol !== 'https:') throw new Error('Invalid sign-in redirect.')
@@ -319,7 +326,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     setBusy(true); setAuthError(null)
     const pending = signIn.current
     signIn.current = null
-    try { const url = await (pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl()); expectAccount(); window.location.assign(url) }
+    try { const url = await (pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl()); expectAccount(); analytics().flush(); window.location.assign(url) }
     catch (error) { setAuthError(error); setBusy(false) }
   }
   const signedOut = identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED'
@@ -345,12 +352,13 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   const invitee = signedOut && invitation !== null && review.data?.status === 'pending'
   const reviewing = !publicRoute && invitation !== null && ((identity.data && !identity.isError) || invitee || (signedOut && review.isFetching))
   return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, notice, dismissNotice: () => setNotice(null)}}>
+    <Analytics identity={identity.data && !identity.isError ? identity.data : null} signedOut={signedOut} />
     {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
     : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage start={{ signedIn: false, onSignIn: login, onSignInIntent: prepareLogin, busy }} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title={productName} /><div className="stack" style={{maxWidth: 520}}>
       {signedOut ? <>
         <h2>Sign in to {productName}</h2>
         {authNotice}
-        <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin}>Continue to sign in</Button>
+        <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin} data-analytics="sign-in/continue">Continue to sign in</Button>
         <SignInConsent className="muted" />
       </> : <>
         <h2>Couldn’t check your session</h2>

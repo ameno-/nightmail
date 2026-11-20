@@ -101,7 +101,7 @@ function DomainsList() {
   return <div className="stack">
     <PageHeader title="Domains" actions={<>
       {multiTenant && (quota ? <span className="muted domains-count">{`${quota.used.toLocaleString('en-US')} of ${quota.limit.toLocaleString('en-US')} domains`}</span> : domains.isPending && <DomainCountSkeleton />)}
-      <Button variant="primary" onClick={openCreate}>Add domain</Button>
+      <Button variant="primary" onClick={openCreate} data-analytics="domains/add">Add domain</Button>
     </>} />
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
       <DataTable className="domains-table" loading={domains.isPending || (inbound.isPending && !inbound.error)} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} rowHref={row => `/domains/${row.id}`} onRowIntent={row => void warm([queries.domain(row.id)])} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
@@ -114,7 +114,7 @@ function DomainsList() {
       ]} />
       {domains.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={10} total={domains.data.total} nextCursor={domains.data.nextCursor} onPageChange={next => setPageState({ regionId, page: next })} />}
     </>}
-    <Dialog open={open} onOpenChange={next => { if (!create.isPending) setOpen(next) }} title="Add domain" footer={<><Button disabled={create.isPending} onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="add-domain">Add domain</Button></>}>
+    <Dialog open={open} onOpenChange={next => { if (!create.isPending) setOpen(next) }} title="Add domain" analytics="domains/add" footer={<><Button disabled={create.isPending} onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="add-domain">Add domain</Button></>}>
       <form id="add-domain" className="stack" onSubmit={submit} noValidate>
         {quota && quota.used >= quota.limit && !create.error && <Alert tone="warning">{`This workspace has ${quota.used.toLocaleString('en-US')} of its ${quota.limit.toLocaleString('en-US')} domains. Remove one, or ask support for a higher limit.`}</Alert>}
         <MutationError error={create.error} />
@@ -189,7 +189,7 @@ function DomainDetail() {
   const sesUrl = `https://${current.regionId}.console.aws.amazon.com/ses/home?region=${encodeURIComponent(current.regionId)}#/identities/${encodeURIComponent(current.name)}`
   return <div className="stack">
     <PageHeader title={current.name} backTo="/domains" actions={<>
-      <Button loading={verify.isPending} onClick={() => void checkNow()}>Check now</Button>
+      <Button loading={verify.isPending} onClick={() => void checkNow()} data-analytics="domains/check">Check now</Button>
       {!hosted && <a className="ui-button ui-button--secondary ui-button--md" href={sesUrl} target="_blank" rel="noreferrer">Open in SES</a>}
       {multiTenant && <Button variant="danger" onClick={() => { remove.reset(); setDeleteOpen(true) }}>Delete domain</Button>}
     </>} />

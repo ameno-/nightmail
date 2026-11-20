@@ -192,10 +192,10 @@ export default {
     const pathname = getPath(request);
     if (pathname === '/health' && (request.method === 'GET' || request.method === 'HEAD') && !requestHeaderNames('environment').some(name => request.headers.has(name))) {
       const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;
-      const multiTenant = ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true';
+      const multiTenant = ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true', analytics = (env as unknown as { DASHBOARD_ANALYTICS?: unknown }).DASHBOARD_ANALYTICS === 'on';
       // The installation's canonical origin (PUBLIC_URL), never the request's Host; omitted if PUBLIC_URL isn't a URL.
       let origin: string | undefined; try { origin = new URL(String((env as { PUBLIC_URL?: unknown }).PUBLIC_URL)).origin; if (origin === 'null') origin = undefined; } catch { origin = undefined; }
-      return fastSecure(new Response(request.method==='HEAD'?null:JSON.stringify({status:'ok',service:healthService,multiTenant,...(origin ? { origin } : {})}), { headers: { 'content-type': 'application/json; charset=UTF-8', 'cache-control': 'no-store', 'x-request-id': requestId } }));
+      return fastSecure(new Response(request.method==='HEAD'?null:JSON.stringify({status:'ok',service:healthService,multiTenant,...(origin ? { origin } : {}),analytics}), { headers: { 'content-type': 'application/json; charset=UTF-8', 'cache-control': 'no-store', 'x-request-id': requestId } }));
     }
     const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/') || pathname.startsWith('/docs/tags/'));
     const assets = (env as unknown as { ASSETS?: Fetcher }).ASSETS;
