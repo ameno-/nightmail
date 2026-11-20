@@ -500,6 +500,7 @@ impl Fake {
             },
             "projections" => self.projections(p),
             "subject" => ok(json!([])),
+            "quota" => self.quota(p),
             _ => err(422, "INVALID_REQUEST"),
         }
     }
@@ -529,7 +530,10 @@ impl Fake {
             }
             _ => vec![],
         };
+        // `changed: false`: expunges alone (QRESYNC).
+        let changed = p["changed"].as_bool() != Some(false);
         let mut entries: Vec<FEntry> = folder
+            .filter(|_| changed)
             .map(|i| {
                 let mut v: Vec<FEntry> = self.folders[i]
                     .entries
@@ -725,6 +729,17 @@ impl Fake {
             .cloned()
             .collect();
         picked.sort_by_key(|e| e.uid);
+        // UNCHANGEDSINCE (flags only): entries changed after it are left alone and answered as modified.
+        let unchanged_since = p["unchangedsince"].as_u64().filter(|_| action == "flags");
+        let mut modified = vec![];
+        if let Some(n) = unchanged_since {
+            picked.retain(|e| {
+                if e.modseq > n {
+                    modified.push(e.uid)
+                }
+                e.modseq <= n
+            });
+        }
         let mut pairs = vec![];
         for e in picked {
             let (add, remove) = if action == "flags" {
@@ -760,7 +775,31 @@ impl Fake {
                 pairs.push(json!([e.uid, u]));
             }
         }
+        if unchanged_since.is_some() {
+            return ok(json!({"pairs": pairs, "validity": validity, "modified": modified}));
+        }
         ok(json!({"pairs": pairs, "validity": validity}))
+    }
+    /// The inbox's use, with no limits set; with a folder, its \Deleted entries and their bytes.
+    fn quota(&self, p: &Value) -> (u16, Vec<u8>) {
+        let size = |mid: &u64| self.messages.get(mid).map_or(0, |m| m.raw.len());
+        let mut q = json!({"bytes": self.messages.keys().map(size).sum::<usize>(),
+            "messages": self.messages.len(), "quotaBytes": null, "quotaMessages": null});
+        if let Some(f) = p["folder"].as_str() {
+            let marked: Vec<&FEntry> = self
+                .index(f)
+                .map(|i| {
+                    self.folders[i]
+                        .entries
+                        .iter()
+                        .filter(|e| e.deleted)
+                        .collect()
+                })
+                .unwrap_or_default();
+            q["deleted"] = json!({"messages": marked.len(),
+                "bytes": marked.iter().map(|e| size(&e.mid)).sum::<usize>()});
+        }
+        ok(q)
     }
     /// `previewPage`: per requested UID still in the folder, the whole message when it fits
     /// in 2048 bytes (`complete`), else its exact header block, else nothing.

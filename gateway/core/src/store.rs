@@ -61,7 +61,9 @@ pub enum Change<'a> {
         flags: Flags,
         source: Origin,
     },
-    Flags(&'a [u32], Mode, Flags),
+    /// With a MODSEQ (STORE UNCHANGEDSINCE, RFC 7162 3.1.3), messages changed after it are left alone and named in
+    /// Applied::modified.
+    Flags(&'a [u32], Mode, Flags, Option<u64>),
     Transfer(&'a [u32], &'a str, bool),
     Expunge(Option<&'a [u32]>),
 }
@@ -81,9 +83,19 @@ pub enum FolderOp<'a> {
     Rename(&'a str),
     Subscribe(bool),
 }
+/// An inbox's storage (bytes) and messages, used and allowed (RFC 9208); None: no limit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Quota {
+    pub bytes: u64,
+    pub messages: u64,
+    pub max_bytes: Option<u64>,
+    pub max_messages: Option<u64>,
+}
 pub struct Applied {
     pub validity: u32,
     pub pairs: Vec<(u32, u32)>,
+    /// The UIDs a conditional flag change left alone.
+    pub modified: Vec<u32>,
 }
 
 pub trait MailStore {
@@ -119,17 +131,35 @@ pub trait MailStore {
     fn materialize(&self, _path: &str, entry: &Entry) -> Result<Entry, Error> {
         Ok(entry.clone())
     }
+    /// The UIDs expunged from a folder after a MODSEQ (RFC 7162 QRESYNC), or None when the store can't tell.
+    fn vanished(&self, _path: &str, _since: u64) -> Result<Option<Vec<u32>>, Error> {
+        Ok(None)
+    }
+    /// The inbox's quota (RFC 9208), or None when the store can't tell.
+    fn quota(&self) -> Result<Option<Quota>, Error> {
+        Ok(None)
+    }
+    /// A folder's \Deleted messages and their bytes when the store doesn't hold its messages (STATUS DELETED and
+    /// DELETED-STORAGE); None: they are counted from the folder's own.
+    fn deleted(&self, _path: &str) -> Result<Option<(u64, u64)>, Error> {
+        Ok(None)
+    }
     fn folders(&self) -> Vec<String>;
     fn folder(&self, path: &str) -> Result<&Folder, Error>;
     fn edit_folder(&mut self, path: &str, op: FolderOp<'_>) -> Result<(), Error>;
     /// Atomic, with one inbox-wide MODSEQ. Returns the destination UID mapping for UIDPLUS.
     fn change(&mut self, path: &str, change: Change<'_>) -> Result<Applied, Error>;
 }
+/// What the memory store keeps in all.
+const MEMORY_BYTES: usize = 128 << 20;
 pub struct Memory {
     folders: BTreeMap<String, Folder>,
     seq: u64,
     validity: u32,
     submitted: BTreeMap<String, (Date, u32)>,
+    /// Expunged (UID, MODSEQ) per folder, oldest first, for QRESYNC. At most 5000 are kept; the first number is the
+    /// MODSEQ of the newest one dropped, below which the list is incomplete.
+    gone: BTreeMap<String, (u64, Vec<(u32, u64)>)>,
 }
 impl Default for Memory {
     fn default() -> Self {
@@ -138,6 +168,7 @@ impl Default for Memory {
             seq: 1,
             validity: 0,
             submitted: Default::default(),
+            gone: BTreeMap::new(),
         };
         for (i, name) in ["INBOX", "Sent", "Drafts", "Archive", "Junk", "Trash"]
             .into_iter()
@@ -170,6 +201,15 @@ impl Default for Memory {
 impl Memory {
     pub fn revision(&self) -> u64 {
         self.seq
+    }
+    fn bury(&mut self, path: &str, uids: impl IntoIterator<Item = u32>, seq: u64) {
+        let (floor, list) = self.gone.entry(path.into()).or_default();
+        list.extend(uids.into_iter().map(|u| (u, seq)));
+        if list.len() > 5000 {
+            let cut = list.len() - 5000;
+            *floor = list[cut - 1].1;
+            list.drain(..cut);
+        }
     }
 }
 impl MailStore for Memory {
@@ -231,18 +271,40 @@ impl MailStore for Memory {
                     }
                     let f = self.folders.remove(path).ok_or(Error::Missing)?;
                     self.folders.insert(to.into(), f);
+                    if let Some(g) = self.gone.remove(path) {
+                        self.gone.insert(to.into(), g);
+                    }
                 } else {
                     self.folders.remove(path);
+                    self.gone.remove(path);
                 }
             }
         }
         Ok(())
+    }
+    /// The fixture's own bound on what it keeps (Change::Append).
+    fn quota(&self) -> Result<Option<Quota>, Error> {
+        let entries = || self.folders.values().flat_map(|f| &f.entries);
+        Ok(Some(Quota {
+            bytes: entries().map(|e| e.raw.len() as u64).sum(),
+            messages: entries().count() as u64,
+            max_bytes: Some(MEMORY_BYTES as u64),
+            max_messages: None,
+        }))
+    }
+    fn vanished(&self, path: &str, since: u64) -> Result<Option<Vec<u32>>, Error> {
+        self.folder(path)?;
+        let Some((floor, list)) = self.gone.get(path) else {
+            return Ok(Some(vec![]));
+        };
+        Ok((since >= *floor).then(|| list.iter().filter(|g| g.1 > since).map(|g| g.0).collect()))
     }
     fn change(&mut self, path: &str, change: Change<'_>) -> Result<Applied, Error> {
         let f = self.folder(path)?;
         let mut result = Applied {
             validity: f.validity,
             pairs: vec![],
+            modified: vec![],
         };
         self.seq += 1;
         let seq = self.seq;
@@ -289,7 +351,7 @@ impl MailStore for Memory {
                     .map(|e| e.raw.len())
                     .sum::<usize>()
                     + raw.len()
-                    > 128 << 20
+                    > MEMORY_BYTES
                 {
                     return Err(Error::Limit);
                 }
@@ -316,7 +378,14 @@ impl MailStore for Memory {
                     self.submitted.insert(id, (now, uid));
                 }
             }
-            Change::Flags(uids, mode, flags) => {
+            Change::Flags(uids, mode, flags, unchanged_since) => {
+                let held = &self.folder(path)?.entries;
+                let (uids, modified): (Vec<u32>, Vec<u32>) = uids.iter().partition(|u| {
+                    held.iter()
+                        .find(|e| e.uid == **u)
+                        .is_none_or(|e| unchanged_since.is_none_or(|n| e.modseq <= n))
+                });
+                result.modified = modified;
                 let ids: BTreeSet<_> = self
                     .folder(path)?
                     .entries
@@ -349,11 +418,17 @@ impl MailStore for Memory {
             }
             Change::Expunge(uids) => {
                 let f = self.folders.get_mut(path).ok_or(Error::Missing)?;
+                let mut removed = vec![];
                 f.entries.retain(|e| {
-                    !(e.flags.contains("\\Deleted")
-                        && uids.is_none_or(|list| list.contains(&e.uid)))
+                    let expunge = e.flags.contains("\\Deleted")
+                        && uids.is_none_or(|list| list.contains(&e.uid));
+                    if expunge {
+                        removed.push(e.uid)
+                    }
+                    !expunge
                 });
                 f.highest = seq;
+                self.bury(path, removed, seq);
             }
             Change::Transfer(uids, to, moving) => {
                 let mut copies: Vec<_> = self
@@ -382,6 +457,8 @@ impl MailStore for Memory {
                     let src = self.folders.get_mut(path).ok_or(Error::Missing)?;
                     src.entries.retain(|e| !uids.contains(&e.uid));
                     src.highest = seq;
+                    let moved: Vec<_> = result.pairs.iter().map(|p| p.0).collect();
+                    self.bury(path, moved, seq);
                 }
             }
         }
@@ -422,6 +499,7 @@ mod tests {
                 &[copied],
                 Mode::Add,
                 Flags::from(["\\Seen".into(), "\\Deleted".into()]),
+                None,
             ),
         )
         .unwrap();

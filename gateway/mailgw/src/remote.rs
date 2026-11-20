@@ -8,7 +8,7 @@ use mailgw_core::{
     search::Field,
     session::{Identity, Protocol, Reply},
     smtp::{Sent, Submission, SubmitError, Submitter},
-    store::{self, Applied, Change, Entry, Flags, Folder, FolderOp, MailStore, Mode},
+    store::{self, Applied, Change, Entry, Flags, Folder, FolderOp, MailStore, Mode, Quota},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -718,10 +718,12 @@ impl Store {
             if let Err(e) = self.refresh() {
                 self.dirty = true;
                 self.finish_command();
-                let Ok(cmd) = mailgw_core::wire::imap(bytes) else {
+                // The tag alone: a command imap-codec can't parse whole (an extended LIST, SEARCH RETURN) still
+                // gets its NO.
+                let Some(tag) = mailgw_core::wire::tag(bytes) else {
                     return Err(e);
                 };
-                return Ok(Reply::one(&format!("{} NO {e}", cmd.tag.inner())));
+                return Ok(Reply::one(&format!("{tag} NO {e}")));
             }
             *stale = false
         }
@@ -986,7 +988,75 @@ impl MailStore for Store {
             other => other,
         }
     }
+    /// The snapshot op's expunges since a MODSEQ, paged by UID like `reload`. It is asked for no changed messages; an
+    /// API older than this gateway sends them anyway and they are dropped. Below the API's floor it no longer has
+    /// every expunge, so the answer is unknown.
+    fn vanished(&self, p: &str, since: u64) -> Result<Option<Vec<u32>>, store::Error> {
+        let mut gone = vec![];
+        let mut after = 0;
+        loop {
+            let page: Snapshot = self.api.json(json!({"op":"snapshot","kid":self.principal.kid,"path":p,"since":since,"after":after,"handles":false,"changed":false}))?;
+            if since < page.floor {
+                return Ok(None);
+            }
+            gone.extend(page.gone);
+            match page.more {
+                None => return Ok(Some(gone)),
+                Some(next) if next > after && Instant::now() < self.deadline => after = next,
+                Some(_) => return Err(store::Error::Limit),
+            }
+        }
+    }
 
+    /// An API older than this gateway refuses the quota op (422): no quota root then.
+    fn quota(&self) -> Result<Option<Quota>, store::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            bytes: u64,
+            messages: u64,
+            quota_bytes: Option<u64>,
+            quota_messages: Option<u64>,
+        }
+        match self
+            .api
+            .json::<Wire>(json!({"op":"quota","kid":self.principal.kid}))
+        {
+            Ok(w) => Ok(Some(Quota {
+                bytes: w.bytes,
+                messages: w.messages,
+                max_bytes: w.quota_bytes,
+                max_messages: w.quota_messages,
+            })),
+            Err(store::Error::Denied) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+    /// A folder other than the selected one holds no messages here: the API counts its \Deleted ones. An older API
+    /// can't, and they count as none.
+    fn deleted(&self, p: &str) -> Result<Option<(u64, u64)>, store::Error> {
+        #[derive(Deserialize)]
+        struct Deleted {
+            messages: u64,
+            bytes: u64,
+        }
+        #[derive(Deserialize)]
+        struct Wire {
+            deleted: Option<Deleted>,
+        }
+        if self.selected.as_deref() == Some(p) {
+            return Ok(None);
+        }
+        let folder = self.keys.get(p).ok_or(store::Error::Missing)?;
+        match self
+            .api
+            .json::<Wire>(json!({"op":"quota","kid":self.principal.kid,"folder":folder}))
+        {
+            Ok(Wire { deleted: Some(d) }) => Ok(Some((d.messages, d.bytes))),
+            Ok(_) | Err(store::Error::Denied) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
     fn list_fresh(&mut self) -> Result<(), store::Error> {
         // Cached LOGIN data can predate a folder edit. Read only folder metadata;
         // LIST must not download a selected folder or advance its MODSEQ checkpoint.
@@ -1114,10 +1184,15 @@ impl MailStore for Store {
         let folder = self.keys.get(p).ok_or(store::Error::Missing)?;
         let mut arg = json!({"op":"mutate","kid":self.principal.kid,"folder":folder,"flags":[],"mode":"add","to":null,"uids":null});
         match c {
-            Change::Flags(uids, mode, flags) => {
+            Change::Flags(uids, mode, flags, unchanged_since) => {
                 arg["action"] = json!("flags");
                 arg["flags"] = json!(flags);
                 arg["uids"] = json!(uids);
+                // An API older than this gateway ignores the condition; the core's own check of the snapshot
+                // stands then.
+                if let Some(n) = unchanged_since {
+                    arg["unchangedsince"] = json!(n);
+                }
                 arg["mode"] = json!(match mode {
                     Mode::Add => "add",
                     Mode::Remove => "remove",
@@ -1225,6 +1300,7 @@ impl MailStore for Store {
                     return Ok(Applied {
                         pairs: a.pairs,
                         validity: a.validity,
+                        modified: vec![],
                     });
                 }
                 return Err(store::Error::Denied);
@@ -1234,10 +1310,13 @@ impl MailStore for Store {
         struct AppliedWire {
             validity: u32,
             pairs: Vec<(u32, u32)>,
+            #[serde(default)]
+            modified: Vec<u32>,
         }
         let mut out = Applied {
             validity: 0,
             pairs: vec![],
+            modified: vec![],
         };
         let arg_is_copy = arg["action"] == "copy";
         if let Some(Value::Array(uids)) = arg.get_mut("uids") {
@@ -1262,7 +1341,8 @@ impl MailStore for Store {
                 match self.api.json::<AppliedWire>(arg.clone()) {
                     Ok(a) => {
                         out.validity = a.validity;
-                        out.pairs.extend(a.pairs)
+                        out.pairs.extend(a.pairs);
+                        out.modified.extend(a.modified)
                     }
                     // Nothing committed yet (that we know of): the plain error.
                     Err(e) if i == 0 => return Err(e),
@@ -1276,7 +1356,8 @@ impl MailStore for Store {
         } else {
             let a: AppliedWire = self.api.json(arg)?;
             out.validity = a.validity;
-            out.pairs = a.pairs
+            out.pairs = a.pairs;
+            out.modified = a.modified
         }
         self.settle();
         if arg_is_copy {
@@ -1312,6 +1393,15 @@ impl MailStore for Streaming<'_> {
     }
     fn indexed(&self, p: &str, f: Field, t: &str) -> Result<Option<Vec<u32>>, store::Error> {
         self.store.indexed(p, f, t)
+    }
+    fn vanished(&self, p: &str, since: u64) -> Result<Option<Vec<u32>>, store::Error> {
+        self.store.vanished(p, since)
+    }
+    fn quota(&self) -> Result<Option<Quota>, store::Error> {
+        self.store.quota()
+    }
+    fn deleted(&self, p: &str) -> Result<Option<(u64, u64)>, store::Error> {
+        self.store.deleted(p)
     }
     fn list_fresh(&mut self) -> Result<(), store::Error> {
         self.store.list_fresh()
@@ -1735,6 +1825,8 @@ mod tests {
         answer: Mutex<(u16, String)>,
         /// Answer snapshots that ask for no handles without them, as a current API does.
         no_handles: AtomicBool,
+        /// Answer as an API older than the quota op, `changed` and `unchangedsince`: refuse the op, ignore the options.
+        old_api: AtomicBool,
     }
     fn script() -> Arc<Script> {
         Arc::new(Script {
@@ -1745,6 +1837,7 @@ mod tests {
             submits: Mutex::default(),
             answer: Mutex::new((200, "{}".into())),
             no_handles: false.into(),
+            old_api: false.into(),
         })
     }
     /// A request header, by its name in lower case.
@@ -1807,12 +1900,20 @@ mod tests {
                 } else {
                     json!("h")
                 };
-                let entries = if p["path"] == "INBOX" && p["since"] == 0 {
+                let old = script.old_api.load(Ordering::SeqCst);
+                let since = p["since"].as_u64().unwrap_or(0);
+                let entries = if p["path"] == "INBOX" && (since == 0 || old && p["changed"] == false) {
                     json!([{"uid":1,"modseq":2,"date":"2026-01-01T00:00:00+00:00","size":5,"flags":[],"handle":handle}])
                 } else {
                     json!([])
                 };
-                let body = json!({"folders": meta(2, 2), "entries": entries, "gone": [], "floor": 0, "more": null});
+                // UID 3 went away after any MODSEQ, when expunges are asked for alone or an older API sends them all.
+                let gone = if since > 0 && (p["changed"] == false || old) {
+                    json!([3])
+                } else {
+                    json!([])
+                };
+                let body = json!({"folders": meta(2, 2), "entries": entries, "gone": gone, "floor": 0, "more": null});
                 (200, body.to_string())
             }
             Some("mutate") => {
@@ -1834,7 +1935,19 @@ mod tests {
                 } else {
                     vec![]
                 };
+                // UNCHANGEDSINCE: every UID but 1 changed after it.
+                if p.get("unchangedsince").is_some() && !script.old_api.load(Ordering::SeqCst) {
+                    let modified: Vec<u64> = uids.iter().copied().filter(|u| *u > 1).collect();
+                    return (200, json!({"pairs": pairs, "validity": 4, "modified": modified}).to_string());
+                }
                 (200, json!({"pairs": pairs, "validity": 4}).to_string())
+            }
+            Some("quota") if !script.old_api.load(Ordering::SeqCst) => {
+                let mut q = json!({"bytes":2048,"messages":2,"quotaBytes":1048576,"quotaMessages":null});
+                if p["folder"] == "archive" {
+                    q["deleted"] = json!({"messages":1,"bytes":5});
+                }
+                (200, q.to_string())
             }
             Some("edit") => script.answer.lock().unwrap().clone(),
             // A body by folder and UID (no handle in the snapshot), and a field search the store can't answer.
@@ -1935,6 +2048,72 @@ mod tests {
         assert!(r.bytes.ends_with(b"a OK Completed\r\n"));
         assert_eq!(script.snapshots.load(Ordering::SeqCst), before + 1);
         assert_eq!(store.folder("Archive").unwrap().next, 2);
+    }
+
+    /// The quota op, a folder's \Deleted count, UNCHANGEDSINCE and expunges asked for alone, against a current API and
+    /// an older one (which refuses the op and ignores the options); and a command imap-codec can't parse whole still
+    /// gets a tagged NO when the refresh before it fails.
+    #[test]
+    fn newer_ops_and_options_fall_back_on_an_older_api() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = rt.enter();
+        let script = script();
+        let l = rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+        rt.spawn(serve(l, script.clone()));
+        let api = Arc::new(Api::new(url, "k".repeat(32)).unwrap());
+        let mut store = Store::new(api, principal()).unwrap();
+        store.select("INBOX").unwrap();
+        let flags = mailgw_core::store::Flags::from(["\\Seen".to_owned()]);
+        let conditional = |store: &mut Store| {
+            store
+                .change(
+                    "INBOX",
+                    Change::Flags(&[1, 2, 3], Mode::Add, flags.clone(), Some(5)),
+                )
+                .unwrap()
+                .modified
+        };
+
+        let quota = store.quota().unwrap().unwrap();
+        assert_eq!((quota.bytes, quota.max_bytes), (2048, Some(1 << 20)));
+        assert_eq!(quota.max_messages, None);
+        assert_eq!(store.deleted("Archive").unwrap(), Some((1, 5)));
+        assert_eq!(
+            store.deleted("INBOX").unwrap(),
+            None,
+            "selected: counted here"
+        );
+        assert_eq!(conditional(&mut store), [2, 3]);
+        assert_eq!(store.vanished("INBOX", 2).unwrap(), Some(vec![3]));
+
+        script.old_api.store(true, Ordering::SeqCst);
+        assert_eq!(store.quota().unwrap(), None);
+        assert_eq!(store.deleted("Archive").unwrap(), None);
+        assert!(conditional(&mut store).is_empty());
+        assert_eq!(store.vanished("INBOX", 2).unwrap(), Some(vec![3]));
+
+        let mut core = Imap::new(true);
+        core.authenticated = true;
+        let account =
+            mailgw_core::session::Account::new("box_test".into(), vec![], "x".into(), true);
+        script.down.store(true, Ordering::SeqCst);
+        let r = store
+            .imap(
+                &mut core,
+                b"a LIST (SUBSCRIBED) \"\" \"*\"\r\n",
+                &account,
+                &mut true,
+                store::Date::default(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(r.bytes, b"a NO [UNAVAILABLE] Backend unavailable\r\n");
     }
 
     /// Found by gateway/tear (witness: B idle, fail-snapshot, hint, B wake, A create Work,
@@ -2065,7 +2244,7 @@ mod tests {
         store
             .change(
                 "INBOX",
-                Change::Flags(&uids, mailgw_core::store::Mode::Add, flags.clone()),
+                Change::Flags(&uids, mailgw_core::store::Mode::Add, flags.clone(), None),
             )
             .unwrap();
         assert_eq!(sizes(0), [1000, 1000, 500]);
@@ -2075,7 +2254,7 @@ mod tests {
         let before = script.snapshots.load(Ordering::SeqCst);
         let r = store.change(
             "INBOX",
-            Change::Flags(&uids, mailgw_core::store::Mode::Add, flags),
+            Change::Flags(&uids, mailgw_core::store::Mode::Add, flags, None),
         );
         assert!(matches!(r, Err(store::Error::Partial)));
         assert_eq!(sizes(3), [1000, 1000]);

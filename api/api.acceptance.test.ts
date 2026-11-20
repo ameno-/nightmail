@@ -1870,6 +1870,67 @@ test('mail gateway: bodies by folder and UID, and SEARCH FROM, TO and CC from th
   assert.equal((await call({op:'body',kid,folder:'inbox',uid})).status,404);
   assert.equal((await rpc({op:'search',kid,folder:'inbox',field:'from',term:'ana'})).status,403);
 });
+// IMAP QUOTA reads the inbox's limits and use, and a folder's \Deleted messages for STATUS; QRESYNC asks a snapshot for
+// expunges alone; STORE UNCHANGEDSINCE leaves entries changed after its MODSEQ alone and answers them as modified.
+test('mail gateway: quota, deleted counts, expunges alone and a conditional flag change',async t=>{
+  if(!fixtureWorker)return t.skip('requires isolated loopback storage and simulated SES');
+  const {drizzle}=await import('drizzle-orm/node-postgres');
+  const db=await fixtureDatabase(t),pool=new pg.Pool({connectionString:FIXTURE_DATABASE_URL,max:1,connectionTimeoutMillis:1000});
+  t.after(()=>pool.end());
+  const wid=unique('imap'),bid=unique('mbx'),kid='app_'+randomUUID(),address=`box@${wid}.invalid`,key=randomUUID();
+  const rt={...fixtureWorker.runtime,db:drizzle(pool),config:{...fixtureWorker.runtime.config,workspaceId:wid,mailGatewayToken:key}};
+  await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
+  await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,$3,$4,'active')",[bid,wid,address.split('@')[1],REGION]);
+  await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,$3,'inbox','forever')",[bid,wid,address]);
+  await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')",[wid,address,bid]);
+  await db.query('INSERT INTO inbox_state(inbox_id,workspace_id,protocol_passwords) VALUES($1,$2,1)',[bid,wid]);
+  await db.query("INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols) VALUES($1,$2,'fixture',$1,ARRAY['imap'])",[kid,bid]);
+  const path='/internal/v1/mail',app=(await import('./src/app.js')).createApp(),hash=(s:string|Uint8Array)=>createHash('sha256').update(s).digest('hex');
+  const rpc=async(body:Json)=>{
+    const raw=JSON.stringify(body),ts=String(Math.floor(Date.now()/1000)),scope=hash(kid),digest=hash(raw);
+    const res=await app.fetch(new Request('http://127.0.0.1'+path,{method:'POST',body:raw,headers:{'x-bane-content':digest,'x-bane-timestamp':ts,'x-bane-scope':scope,'x-bane-signature':createHmac('sha256',key).update(['POST',path,ts,digest,scope].join('\n')).digest('hex')}}),rt);
+    return {status:res.status,body:await res.json() as Json};
+  };
+  const append=async(raw:Buffer)=>{
+    const meta=Buffer.from(JSON.stringify({kid,folder:'inbox',date:new Date().toISOString(),flags:[],size:raw.length})).toString('base64'),ts=String(Math.floor(Date.now()/1000)),scope=hash(kid),digest=hash(raw);
+    const res=await app.fetch(new Request('http://127.0.0.1'+path,{method:'POST',body:raw,duplex:'half',headers:{'x-bane-append':meta,'content-length':String(raw.length),'x-bane-content':digest,'x-bane-timestamp':ts,'x-bane-scope':scope,
+      'x-bane-signature':createHmac('sha256',key).update(['POST',path,ts,digest,scope,hash(meta)].join('\n')).digest('hex')}} as RequestInit),rt);
+    return (await res.json() as Json).pairs[0][1] as number;
+  };
+  const mail=(subject:string)=>Buffer.from(`From: a@example.invalid\r\nSubject: ${subject}\r\n\r\nBody\r\n`);
+  const one=await append(mail('one')),two=await append(mail('two'));
+  // Limits are what the inbox sets (null: none); use is what APPEND checks against them.
+  const use=async()=>(await db.query('SELECT messages::float8 AS messages,bytes::float8 AS bytes FROM inbox_state WHERE inbox_id=$1',[bid])).rows[0];
+  assert.deepEqual((await rpc({op:'quota',kid})).body,{...await use(),quotaBytes:null,quotaMessages:null});
+  await db.query('UPDATE mailboxes SET quota_bytes=1048576,quota_messages=1000 WHERE id=$1',[bid]);
+  assert.deepEqual((await rpc({op:'quota',kid})).body,{...await use(),quotaBytes:1048576,quotaMessages:1000});
+  // A folder's \Deleted messages and their bytes.
+  const flag=(uids:number[],flags:string[],mode='add',extra:Json={})=>rpc({op:'mutate',kid,action:'flags',folder:'inbox',to:null,uids,flags,mode,...extra});
+  assert.equal((await flag([one],['\\Deleted'])).status,200);
+  assert.deepEqual((await rpc({op:'quota',kid,folder:'inbox'})).body.deleted,{messages:1,bytes:mail('one').length});
+  assert.deepEqual((await rpc({op:'quota',kid,folder:'sent'})).body.deleted,{messages:0,bytes:0});
+  // Expunges since a MODSEQ alone (changed: false), without the messages changed since.
+  const snapshot=(extra:Json={})=>rpc({op:'snapshot',kid,path:'INBOX',...extra}).then(r=>r.body);
+  const since=(await snapshot()).folders.find((f:Json)=>f.path==='INBOX').highest;
+  assert.equal((await rpc({op:'mutate',kid,action:'expunge',folder:'inbox',to:null,uids:[one],flags:[],mode:'add'})).status,200);
+  assert.equal((await flag([two],['\\Seen'])).status,200);
+  const all=await snapshot({since}),gone=await snapshot({since,changed:false});
+  assert.deepEqual([all.gone,all.entries.map((e:Json)=>e.uid)],[[one],[two]]);
+  assert.deepEqual([gone.gone,gone.entries],[[one],[]]);
+  // UNCHANGEDSINCE: an entry changed after it stays as it was and comes back modified; at its MODSEQ it changes.
+  const modseq=(await snapshot()).entries.find((e:Json)=>e.uid===two).modseq;
+  const early=await flag([two,999],['\\Flagged'],'add',{unchangedsince:modseq-1});
+  assert.deepEqual([early.status,early.body.modified],[200,[two]]);
+  const flagsOf=async()=>(await snapshot()).entries.find((e:Json)=>e.uid===two).flags.sort();
+  assert.deepEqual(await flagsOf(),['\\Seen']);
+  const now=await flag([two],['\\Flagged'],'add',{unchangedsince:modseq});
+  assert.deepEqual([now.status,now.body.modified],[200,[]]);
+  assert.deepEqual(await flagsOf(),['\\Flagged','\\Seen']);
+  assert.equal((await flag([two],['\\Flagged'],'remove')).body.modified,undefined,'without the condition the answer is as before');
+  // Revoked: no quota.
+  await db.query('SELECT inbox_revoke_password($1,$2,$3)',[wid,bid,kid]);
+  assert.equal((await rpc({op:'quota',kid})).status,403);
+});
 // Migration 346: the gateway closes a send-only key's sessions and drops its cached sign-ins when this names the key.
 test('send-only SMTP: revoking a key, or changing what it may send, tells the gateway; using or renaming it does not', async t => {
   const listener = await fixtureDatabase(t), db = await fixtureDatabase(t), heard: string[] = [];
