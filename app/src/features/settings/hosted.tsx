@@ -150,7 +150,7 @@ function ScoreRow() {
   const { data: report } = useSenderScore()
   const compact = useCompactShell()
   return <Row title="Sender score">
-    {!report ? <span className="settings-score"><Skeleton width={96} height={20} /></span> : <button type="button" onClick={() => openScoreAbout()} className="settings-score">{report.state !== 'graded' ? <><span>Not graded yet</span><span className="muted">{number(report.emails.firstEmails)}/{number(report.needed)} real emails</span></> : compact ? <><b>{Math.round(report.score!)}</b><span className="settings-score__grade">{report.grade}</span></> : <span>Breakdown</span>}<ChevronRight size={14} aria-hidden="true" /></button>}
+    {!report ? <span className="settings-score settings-score--late"><Skeleton width={96} height={20} /></span> : <button type="button" onClick={() => openScoreAbout()} className="settings-score settings-score--late">{report.state !== 'graded' ? <><span>Not graded yet</span><span className="muted">{number(report.emails.firstEmails)}/{number(report.needed)} real emails</span></> : compact ? <><b>{Math.round(report.score!)}</b><span className="settings-score__grade">{report.grade}</span></> : <span>Breakdown</span>}<ChevronRight size={14} aria-hidden="true" /></button>}
   </Row>
 }
 function DisconnectRow({ kind }: { kind: 'shared' | 'byo' | undefined }) {
