@@ -6151,7 +6151,7 @@ export const getOverviewSetup = <ThrowOnError extends boolean = false>(options?:
 });
 
 /**
- * What happened in this workspace and who did it: members, roles and invitations, API keys, inbox keys and app passwords, domains, webhooks, endpoints, routes and rules, settings, exports and deletions, and each time Nightmail support viewed the workspace with a support grant. Newest first. Owners and admins only; secrets and message content are never recorded.
+ * What happened in this workspace and who did it: members, roles and invitations, API keys, inbox keys and app passwords, domains, webhooks, endpoints, routes and rules, settings, exports and deletions, and each time Nightmail support viewed the workspace with a support grant. Newest first. Owners and admins, in the dashboard or over their own MCP sign-in approved for manage; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED. Secrets and message content are never recorded.
  */
 export const listActivity = <ThrowOnError extends boolean = false>(options?: Options<ListActivityData, ThrowOnError>): RequestResult<ListActivityResponses, ListActivityErrors, ThrowOnError> => (options?.client ?? client).get<ListActivityResponses, ListActivityErrors, ThrowOnError>({
     security: [{

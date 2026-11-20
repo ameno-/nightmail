@@ -419,22 +419,25 @@ export function lastingRoute(method: string, path: string) {
     || (verb !== 'GET' && /^\/v1\/inbound\/domains\/[^/]+(?:\/(?:enable|disable|hosts(?:\/[^/]+)?|subdomains(?:\/[^/]+)?))?$/.test(path)) || (verb === 'POST' && /^\/v1\/domains\/[^/]+\/receiving-host$/.test(path));
 }
 /**
- * Members and invitations (listing members, and listing, creating and revoking invitations): an owner or admin in
- * person. That is a signed-in dashboard session, or their own MCP sign-in (a person's approval, checked against their
- * role now) with read to list and manage to change. Never an API key, a key an approval made or a temporary agent
+ * Members and invitations (listing members, and listing, creating and revoking invitations) and the workspace's
+ * Activity: an owner or admin in person. That is a signed-in dashboard session, or their own MCP sign-in (a person's
+ * approval, checked against their role now) with read to list members and invitations and manage to change them or to
+ * read Activity, which names every member and credential. Never an API key, a key an approval made or a temporary agent
  * token: a membership outlasts every one of them. Why it refuses this actor, or null; the MCP listing asks the same of
  * memberAdminRoute's operations. Changing a member's role and removing a member stay with the dashboard (dashboardSession).
  */
 export function memberAdminRefusal(a: Actor | undefined, change: boolean): ApiError | null {
   const signIn = a?.credential === 'mcp' && a.keyId.startsWith('mcp_'), need: Required = { person: 'admin' };
-  if (!a || (a.credential !== 'dashboard' && !signIn)) return denied('DASHBOARD_AUTH_REQUIRED', 'Members and invitations are managed by an owner or admin in person: a signed-in dashboard session or their own MCP sign-in. API keys and agent tokens cannot.', need);
+  if (!a || (a.credential !== 'dashboard' && !signIn)) return denied('DASHBOARD_AUTH_REQUIRED', 'Members, invitations and Activity are for an owner or admin in person: a signed-in dashboard session or their own MCP sign-in. API keys and agent tokens cannot.', need);
   if (a.role !== 'owner' && a.role !== 'admin') return denied('PERMISSION_DENIED', 'Workspace administration requires an owner or admin.', need);
   const permission = change ? 'manage' : 'read';
   if (signIn && !a.permissions.includes('manage') && !a.permissions.includes(permission)) return denied('PERMISSION_DENIED', `This operation requires ${permission} permission.`, { ...need, level: change ? 'write' : 'read' });
   return null;
 }
-/** memberAdminRefusal's routes: listing members, and listing, creating and revoking invitations. */
-export const memberAdminRoute = (method: string, path: string) => path === '/v1/workspaces/current/invitations' || (method.toUpperCase() === 'GET' && path === '/v1/workspaces/current/members');
+/** memberAdminRefusal's routes: listing members, listing, creating and revoking invitations, and reading Activity. */
+export const memberAdminRoute = (method: string, path: string) => path === '/v1/workspaces/current/invitations' || (method.toUpperCase() === 'GET' && (path === '/v1/workspaces/current/members' || path === '/v1/activity'));
+/** Whether memberAdminRefusal asks a sign-in for manage here: every change, and reading Activity. */
+export const memberAdminManage = (method: string, path: string) => method.toUpperCase() !== 'GET' || path === '/v1/activity';
 /** notMember (app.ts): whether REST refuses this actor the route because it is a workspace member. */
 export const memberRefused = (actor: Pick<Actor, 'role'> | undefined, method: string, path: string) => actor?.role === 'member' && ownerRoute(method, path);
 /** Hosted workspace administration: a signed-in dashboard session, and with `manage` an owner or admin. Not found when self-hosted. */

@@ -14,6 +14,7 @@ import { manageKeys } from './auth.js';
 import { actor, admits, dashboardSession, errors, memberRefused, response, security, type App } from './core.js';
 import { apiKeys } from './db/core.js';
 import { webhooks } from './db/operations.js';
+import { byoWorkspace } from './domain-claims.js';
 import { emails } from './db/sending.js';
 import { workspaceInvitations } from './db/workspaces.js';
 import { DomainPage, domainPage, domainReader, workspaceActor } from './operations.js';
@@ -46,7 +47,7 @@ export function registerOverviewSetup(app: App) {
     // listDomains' quota (hosted, unrestricted credentials), counted here so the read stays one statement of counts.
     const quota = domains !== null && c.env.config.multiTenant && !a.domains.length;
     const row = (await c.env.db.execute<Counts>(sql`/* overview-setup: counts */ SELECT
-      ${quota ? sql`(SELECT json_build_object('used',count(*)::int,'limit',workspace_domain_limit(${w})) FROM domain_claims WHERE workspace_id=${w})` : sql`NULL::json`} AS domain_quota,
+      ${quota ? sql`(SELECT json_build_object('used',count(*)::int,'limit',workspace_domain_limit(${w})) FROM domain_claims WHERE workspace_id=${w} HAVING NOT ${byoWorkspace(w)})` : sql`NULL::json`} AS domain_quota,
       ${keys ? sql`(SELECT count(*)::int FROM ${apiKeys} WHERE ${and(eq(apiKeys.workspaceId, w), isNull(apiKeys.revokedAt))})` : sql`NULL::int`} AS api_keys,
       EXISTS (SELECT FROM ${emails} WHERE ${mailWhere(a)}) AS any_email,
       ${hooks ? sql`(SELECT count(*)::int FROM ${webhooks} WHERE ${eq(webhooks.workspaceId, w)})` : sql`NULL::int`} AS webhooks,

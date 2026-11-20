@@ -22,16 +22,17 @@ export function useDomainStep(workspaceId: string | undefined) {
   return useSyncExternalStore(subscribe, () => workspaceId ? readDomainStep(workspaceId) : null)
 }
 
-// Hosted workspaces need a ready sending connection (summarised in /v1/me) before the dashboard opens.
-export type OnboardingStage = { step: 'sending' } | { step: 'setup-required' } | { step: 'domain'; domainId: string } | { step: 'agent'; domainId: string } | null
+// Hosted workspaces need a ready sending connection (summarised in /v1/me) before the dashboard opens for an owner or
+// admin, who sets it up. Members open the dashboard at once, with a banner until it is ready (SetupBanner).
+export type OnboardingStage = { step: 'sending' } | { step: 'domain'; domainId: string } | { step: 'agent'; domainId: string } | null
 const agentPrefix = 'agent:'
 export const agentStep = (domainId: string) => `${agentPrefix}${domainId}`
 export const finishedStep = 'done'
 export function onboardingStage(identity: Identity | null | undefined, domainStep: string | null): OnboardingStage {
   if (!identity?.multiTenant) return null
-  const admin = identity.role === 'owner' || identity.role === 'admin'
-  if (identity.connection?.state !== 'ready') return { step: admin ? 'sending' : 'setup-required' }
-  if (!admin || domainStep === finishedStep) return null
+  if (identity.role !== 'owner' && identity.role !== 'admin') return null
+  if (identity.connection?.state !== 'ready') return { step: 'sending' }
+  if (domainStep === finishedStep) return null
   if (domainStep === null) return identity.connection.domains?.total === 0 ? { step: 'domain', domainId: '' } : null
   return domainStep.startsWith(agentPrefix) ? { step: 'agent', domainId: domainStep.slice(agentPrefix.length) } : { step: 'domain', domainId: domainStep }
 }

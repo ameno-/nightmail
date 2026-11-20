@@ -166,12 +166,12 @@ function RechargeDialog({ settings, hasCard, enable, capped, Row, onClose }: { s
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<unknown>(null)
   const cents = { threshold: parseDollars(form.threshold), amount: parseDollars(form.amount), cap: parseDollars(form.cap) }
-  const invalid = { threshold: cents.threshold === null || cents.threshold < 500 || cents.threshold > 100_000, amount: cents.amount === null || cents.amount < 2000 || cents.amount > 100_000,
-    cap: cents.cap === null || cents.cap < (cents.amount ?? 0) || cents.cap > 1_000_000 }
+  const invalid = { threshold: cents.threshold === null || cents.threshold < 500 || cents.threshold > 100_000, amount: cents.amount === null || cents.amount < 2000 || cents.amount > 1_000_000,
+    cap: cents.cap === null || cents.cap < (cents.amount ?? 0) || cents.cap > 25_000_000 }
   const valid = !invalid.threshold && !invalid.amount && !invalid.cap
   const changed = form.threshold !== initial.threshold || form.amount !== initial.amount || form.cap !== initial.cap
   // Each amount's range shows once the value is outside it.
-  const rows = [['threshold', 'When balance falls below', '$5 to $1,000'], ['amount', 'Add', '$20 to $1,000 each time'], ['cap', 'Monthly limit', '$20 to $10,000, at least the Add amount']] as const
+  const rows = [['threshold', 'When balance falls below', '$5 to $1,000'], ['amount', 'Add', '$20 to $10,000 each time'], ['cap', 'Monthly limit', '$20 to $250,000, at least the Add amount']] as const
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (!valid || !hasCard || (!enable && !changed)) return

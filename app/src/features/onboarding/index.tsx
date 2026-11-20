@@ -82,7 +82,7 @@ export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> 
   </div>
 }
 
-type View = 'loading' | 'choose' | 'connect' | 'domain' | 'imported' | 'records' | 'agent' | 'admin' | 'error'
+type View = 'loading' | 'choose' | 'connect' | 'domain' | 'imported' | 'records' | 'agent' | 'error'
 const hostedSteps = ['Choose', 'Add domain', 'First email']
 const awsSteps = ['Choose', 'Connect AWS', 'Add domain', 'First email']
 // The loader and a failed load sit in step 1, so the indicator is already in place when the choice appears.
@@ -165,7 +165,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
     })()
   }
   const flow: ConnectionKind | null = sending ? picked ?? current?.kind ?? null : identity?.connection?.kind ?? null
-  const ready = stage.step !== 'sending' && stage.step !== 'setup-required'
+  const ready = stage.step !== 'sending'
   if (sending && flow === 'byo' && awsPhase === 'idle') setAwsPhase('connecting')
   if (sending && flow !== 'byo' && awsPhase === 'connecting') setAwsPhase('idle')
   if (awsPhase === 'connecting' && (ready || current?.state === 'ready')) setAwsPhase('connected')
@@ -182,8 +182,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
     ready={stage.step === 'domain'}
     onAdded={id => setDomainStep(workspaceId, id)} onFinish={finish} />
   let view: View, content: ReactNode
-  if (stage.step === 'setup-required') { view = 'admin'; content = <AdminSetupRequired /> }
-  else if (stage.step === 'agent') { view = 'agent'; content = <AgentSetup domainId={stage.domainId} onFinish={finish} /> }
+  if (stage.step === 'agent') { view = 'agent'; content = <AgentSetup domainId={stage.domainId} onFinish={finish} /> }
   else if (stage.step === 'domain' && stage.domainId) { view = 'records'; content = <DomainSetup domainId={stage.domainId} onContinue={() => setDomainStep(workspaceId, agentStep(stage.domainId))} onMissing={() => setDomainStep(workspaceId, '')} /> }
   else if (awsPhase === 'connecting' || awsPhase === 'connected') {
     view = 'connect'
@@ -225,18 +224,6 @@ function StepIndicator({ steps, current }: { steps: string[]; current: number })
       </li>
     })}
   </ol>
-}
-
-function AdminSetupRequired() {
-  const client = useQueryClient()
-  const [checking, setChecking] = useState(false)
-  async function check() { setChecking(true); try { await client.refetchQueries({ queryKey: ['identity'], exact: true }) } finally { setChecking(false) } }
-  return <div className="onboarding onboarding--narrow onboarding--center">
-    <div className="onboarding-intro onb-rise" style={rise(0)}>
-      <h1 className="onboarding-title">An admin must set up sending</h1>
-    </div>
-    <div className="onb-rise" style={rise(1)}><Button loading={checking} onClick={() => void check()}>Check again</Button></div>
-  </div>
 }
 
 function connectionError(error: unknown) {

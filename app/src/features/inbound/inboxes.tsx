@@ -20,7 +20,7 @@ const DAY = 86_400_000
 const day = (ms: number) => date(new Date(ms).toISOString(), { month: 'short', day: 'numeric', timeZone: 'UTC' })
 // Each lifetime says when the inbox and its mail are deleted: it receives for that long, holds new mail one more day,
 // then is erased (deleteAfter on the inbox).
-const lifetimes = (now: number) => [['3600', '1 hour'], ['86400', '24 hours'], ['604800', '7 days'], ['2592000', '30 days']].map(([value, label]) => ({ value: value!, label: `${label}, deleted ${day(now + Number(value) * 1000 + DAY)}` }))
+const lifetimes = (now: number) => [['600', '10 minutes'], ['3600', '1 hour'], ['86400', '24 hours'], ['259200', '3 days'], ['604800', '7 days'], ['2592000', '30 days']].map(([value, label]) => ({ value: value!, label: `${label}, deleted ${day(now + Number(value) * 1000 + DAY)}` }))
 const statusTone: Record<InboxStatus, Tone> = { active: 'success', expired: 'warning', deleting: 'neutral' }
 const statusLabel: Record<InboxStatus, string> = { active: 'Active', expired: 'Expired', deleting: 'Deleting' }
 // The MX record's host is the receiving host: reply.example.com on hosted Nightmail, the domain itself otherwise.

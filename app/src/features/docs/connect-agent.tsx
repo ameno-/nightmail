@@ -2,7 +2,7 @@
 // same config, built by api/src/mcp-clients.ts (which createInboxConnection uses too).
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
-import { Alert, Button, Checkbox, Dialog, Field, Select, Tabs } from '../../components/ui'
+import { Alert, Button, Checkbox, Dialog, Field, SearchField, Select, Tabs } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApiQuery, usePublicOrigin, useSession, useWorkspaceAccess } from '../../data/context'
@@ -13,6 +13,7 @@ import { mcpClientNames, mcpClients, mcpClientSteps, mcpServerUrl, mcpSnippet, t
 import { SecretField } from '../inbound/shared'
 import './developer.css'
 import { useSingleFlight } from '../../lib/single-flight'
+import { useDebounced } from '../../lib/pagination'
 
 /** What an agent signed in with OAuth asks for. Only OpenCode lets the config choose; other clients ask for read. The
  *  docs explain each level (agent-setup.tsx); in the dashboard the labels say it. */
@@ -75,16 +76,24 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId, onCreateKey }:
   const [mode, setMode] = useState<'oauth' | 'apiKey' | 'key'>('oauth')
   const [access, setAccess] = useState<McpAccess>('read')
   const [inbox, setInbox] = useState('')
+  const [query, setQuery] = useState('')
+  const [picked, setPicked] = useState<Inbox | null>(null)
   const [reply, setReply] = useState(false)
   const [result, setResult] = useState<Connection | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const inboxes = useApiQuery(['agent-inboxes', 'connect'], (_api, signal) => request<{ data: Inbox[] }>('/v1/inboxes?status=active&limit=100', { signal }).then(r => r.data), { enabled: open && canAdminister })
+  // A page of 100 active inboxes; past that, a search over address and name finds the rest. The inbox the dialog was
+  // opened from, and the one last picked, stay in the list whatever the search shows.
+  const search = useDebounced(query.trim())
+  const inboxes = useApiQuery(['agent-inboxes', 'connect', search], (_api, signal) => request<{ data: Inbox[]; nextCursor: string | null }>(`/v1/inboxes?status=active&limit=100${search ? `&q=${encodeURIComponent(search)}` : ''}`, { signal }), { enabled: open && canAdminister, keepPrevious: true })
+  const opened = useApiQuery(['agent-inbox', inboxId], (_api, signal) => request<Inbox>(`/v1/inboxes/${encodeURIComponent(inboxId!)}`, { signal }), { enabled: open && canAdminister && !!inboxId })
   useEffect(() => {
     if (!open) return
-    setClient('opencode'); setMode(inboxId && canAdminister ? 'key' : 'oauth'); setAccess('read'); setInbox(inboxId ?? ''); setReply(false); setResult(null); setError('')
+    setClient('opencode'); setMode(inboxId && canAdminister ? 'key' : 'oauth'); setAccess('read'); setInbox(inboxId ?? ''); setQuery(''); setPicked(null); setReply(false); setResult(null); setError('')
   }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
-  const active = (inboxes.data ?? []).filter(box => box.status === 'active')
+  const kept = [picked, opened.data].filter((box): box is Inbox => !!box && box.status === 'active')
+  const active = [...kept, ...(inboxes.data?.data ?? [])].filter((box, i, all) => box.status === 'active' && all.findIndex(other => other.id === box.id) === i)
+  const searchable = !!search || !!query || !!inboxes.data?.nextCursor
   const chosen = inbox || active[0]?.id || ''
   const label = (box: Inbox) => <>{box.name ? `${box.name} · ` : null}<PrivateAddress value={box.address} /></>
   // Single flight: each call makes a new idempotency key, so a second click before the first answers would make a second key.
@@ -114,8 +123,9 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId, onCreateKey }:
         {mode === 'apiKey' ? null : mode === 'oauth' ? <Field label="Access it asks for">
           <Select value={client === 'opencode' ? access : 'read'} onValueChange={value => setAccess(value as McpAccess)} disabled={client !== 'opencode'} options={mcpAccess.map(({ value, label }) => ({ value, label }))} />
         </Field> : <>
-          {inboxes.isPending || active.length ? <Field label="Inbox">
-            <Select mask value={chosen} onValueChange={setInbox} disabled={inboxes.isPending} placeholder="Loading inboxes…" options={active.map(box => ({ value: box.id, label: label(box) }))} />
+          {searchable && <SearchField aria-label="Search inboxes" placeholder="Search address or name" value={query} onChange={event => setQuery(event.target.value)} />}
+          {inboxes.isPending || active.length || searchable ? <Field label="Inbox" hint={search && !inboxes.isFetching && !inboxes.data?.data.length ? 'No active inbox matches.' : undefined}>
+            <Select mask value={chosen} onValueChange={id => { setInbox(id); setPicked(active.find(box => box.id === id) ?? null) }} disabled={inboxes.isPending} placeholder="Loading inboxes…" options={active.map(box => ({ value: box.id, label: label(box) }))} />
           </Field> : <div className="connect-agent__empty"><span>No active agent inboxes</span><Link className="ui-button ui-button--secondary ui-button--sm" to="/receiving/inboxes" onClick={close}>Create an agent inbox</Link></div>}
           <Checkbox checked={reply} onCheckedChange={setReply} label="Let it reply to senders (the inbox needs replies on)" />
           {/* Before the key exists: only the client, so the config made with the key is for the right one. */}
