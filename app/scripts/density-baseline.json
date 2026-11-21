@@ -10,11 +10,11 @@
    "findings": []
   },
   "API keys · create key dialog · desktop": {
-   "score": 7,
+   "score": 8,
    "findings": []
   },
   "API keys · create key dialog · phone": {
-   "score": 7,
+   "score": 8,
    "findings": []
   },
   "API keys · desktop": {
@@ -46,7 +46,7 @@
    "findings": []
   },
   "Campaign editor · desktop": {
-   "score": 39,
+   "score": 38,
    "findings": []
   },
   "Campaign review · desktop": {
@@ -110,15 +110,15 @@
    "findings": []
   },
   "Logs · desktop": {
-   "score": 9,
+   "score": 21,
    "findings": []
   },
   "Logs · phone": {
-   "score": 32,
+   "score": 35,
    "findings": []
   },
   "Logs · received · desktop": {
-   "score": 7,
+   "score": 17,
    "findings": []
   },
   "New campaign · desktop": {
@@ -190,15 +190,23 @@
    "findings": []
   },
   "Operator · phone": {
+   "score": 7,
+   "findings": []
+  },
+  "Operator · waitlist · desktop": {
+   "score": 6,
+   "findings": []
+  },
+  "Operator · waitlist · phone": {
    "score": 6,
    "findings": []
   },
   "Operator · workspace · desktop": {
-   "score": 29,
+   "score": 30,
    "findings": []
   },
   "Operator · workspace · phone": {
-   "score": 27,
+   "score": 28,
    "findings": []
   },
   "Overview · connect agent dialog · desktop": {
@@ -210,7 +218,7 @@
    "findings": []
   },
   "Overview · desktop": {
-   "score": 23,
+   "score": 22,
    "findings": []
   },
   "Overview · phone": {
@@ -226,11 +234,11 @@
    "findings": []
   },
   "Overview · sender score dialog · desktop": {
-   "score": 16,
+   "score": 14,
    "findings": []
   },
   "Overview · sender score dialog · phone": {
-   "score": 16,
+   "score": 14,
    "findings": []
   },
   "Overview · sending limits dialog · desktop": {
@@ -242,23 +250,39 @@
    "findings": []
   },
   "Overview · setup · desktop": {
-   "score": 18,
+   "score": 19,
    "findings": []
   },
   "Received email · desktop": {
    "score": 10,
    "findings": []
   },
+  "Received email · from its thread · desktop": {
+   "score": 25,
+   "findings": []
+  },
+  "Received email · from its thread · phone": {
+   "score": 12,
+   "findings": []
+  },
   "Received email · phone": {
    "score": 10,
    "findings": []
   },
+  "Received email · thread · desktop": {
+   "score": 25,
+   "findings": []
+  },
+  "Received email · thread · phone": {
+   "score": 12,
+   "findings": []
+  },
   "Receiving · address · desktop": {
-   "score": 38,
+   "score": 39,
    "findings": []
   },
   "Receiving · address · phone": {
-   "score": 28,
+   "score": 29,
    "findings": []
   },
   "Receiving · agent inbox · desktop": {
@@ -278,11 +302,15 @@
    "findings": []
   },
   "Receiving · desktop": {
-   "score": 16,
+   "score": 19,
    "findings": []
   },
   "Receiving · endpoints · desktop": {
-   "score": 13,
+   "score": 12,
+   "findings": []
+  },
+  "Receiving · endpoints · phone": {
+   "score": 12,
    "findings": []
   },
   "Receiving · inbox · desktop": {
@@ -302,7 +330,7 @@
    "findings": []
   },
   "Receiving · new agent inbox dialog · desktop": {
-   "score": 12,
+   "score": 11,
    "findings": []
   },
   "Receiving · new rule · desktop": {
@@ -317,8 +345,12 @@
    "score": 16,
    "findings": []
   },
+  "Receiving · new workspace · desktop": {
+   "score": 13,
+   "findings": []
+  },
   "Receiving · phone": {
-   "score": 11,
+   "score": 14,
    "findings": []
   },
   "Receiving · recipe form · desktop": {
@@ -358,7 +390,7 @@
    "findings": []
   },
   "Receiving · trace · desktop": {
-   "score": 19,
+   "score": 20,
    "findings": []
   },
   "Receiving · webhook · desktop": {
@@ -382,7 +414,7 @@
    "findings": []
   },
   "Sent email · desktop": {
-   "score": 31,
+   "score": 30,
    "findings": []
   },
   "Sent email · junk-like · desktop": {
@@ -395,6 +427,18 @@
   },
   "Sent email · phone": {
    "score": 6,
+   "findings": []
+  },
+  "Sent email · thread sheet · phone": {
+   "score": 13,
+   "findings": []
+  },
+  "Sent email · thread · desktop": {
+   "score": 46,
+   "findings": []
+  },
+  "Sent email · thread · phone": {
+   "score": 7,
    "findings": []
   },
   "Settings · MCP connection · desktop": {
@@ -489,8 +533,12 @@
    "score": 15,
    "findings": []
   },
+  "Settings · sending · AWS · phone": {
+   "score": 15,
+   "findings": []
+  },
   "Settings · sending · desktop": {
-   "score": 7,
+   "score": 6,
    "findings": []
   },
   "Settings · webhook · desktop": {
