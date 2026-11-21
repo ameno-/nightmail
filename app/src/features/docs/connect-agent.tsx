@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
 import { ArrowUpRight, Check } from 'lucide-react'
 import { Alert, Button, Checkbox, Dialog, ErrorState, Field, SearchField, Select, Tabs } from '../../components/ui'
+import { usePhone } from '../../lib/media'
 import { CopyAction } from '../../components/motion'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApiDef, useApiQuery, usePublicOrigin, useSession, useWorkspaceAccess } from '../../data/context'
@@ -28,21 +29,27 @@ const signInTabs = mcpSignInClients.map(value => ({ value, label: mcpSignInNames
 export function useMcpUrl() { const origin = usePublicOrigin(); return origin ? mcpServerUrl(origin) : null }
 
 /**
- * Signed in as you: the one MCP URL with its copy button, a tab for each client and that client's one-line setup (a
- * command, an install link or its connector settings) with the steps after it. The agent asks for the scopes the server
- * names, so it gets your own access; there is nothing to choose first. Every tab shares one cell, so the height holds,
- * and until the address is known the same layout waits hidden.
+ * Signed in as you: the one MCP URL with its copy button, a tab for each client (a picker on a phone, where eight tabs
+ * don't fit) and that client's one-line setup (a command, an install link or its connector settings) with the steps after
+ * it. The agent asks for the scopes the server names, so it gets your own access; there is nothing to choose first. Every
+ * tab shares one cell, so the height holds, and until the address is known the same layout waits hidden. `urlLine={false}`
+ * shows the URL only for the clients it is pasted into, since every command and install link already carries it.
+ * `client` and `onClient` share the chosen client with the caller.
  */
-export function McpSignInSetup({ label = 'Agent' }: { label?: string }) {
+export function McpSignInSetup({ label = 'Agent', urlLine = true, client: shared, onClient }: { label?: string; urlLine?: boolean; client?: McpSignInClient; onClient?: (client: McpSignInClient) => void }) {
   const url = useMcpUrl()
-  const [client, setClient] = useState<McpSignInClient>('opencode')
+  const [own, setOwn] = useState<McpSignInClient>('opencode')
+  const client = shared ?? own, setClient = onClient ?? setOwn
+  const phone = usePhone()
   const shown = url ?? mcpServerUrl('https://example.com')
+  const urlRow = <div className="developer-url connect-agent__url" data-pending={!url || undefined} inert={!url}><code>{shown}</code><CopyAction value={shown} label="Copy MCP URL" variant="ghost" size="sm" compact className="developer-copy-icon" /></div>
   return <div className="stack connect-agent__setup" aria-busy={!url || undefined}>
-    <div className="developer-url connect-agent__url" data-pending={!url || undefined} inert={!url}><code>{shown}</code><CopyAction value={shown} label="Copy MCP URL" variant="ghost" size="sm" compact className="developer-copy-icon" /></div>
-    <Tabs label={label} value={client} onValueChange={value => setClient(value as McpSignInClient)} items={signInTabs} />
+    {urlLine && urlRow}
+    {phone ? <Select aria-label={label} value={client} onValueChange={value => setClient(value as McpSignInClient)} options={signInTabs} /> : <Tabs label={label} value={client} onValueChange={value => setClient(value as McpSignInClient)} items={signInTabs} />}
     <div className="developer-client-panels" data-pending={!url || undefined} inert={!url}>{mcpSignInClients.map(value => {
       const setup = mcpSignIn(value, shown), web = setup.link?.href.startsWith('https:')
       return <div key={value} className="stack developer-client-panel connect-agent__panel" data-active={value === client || undefined} inert={value !== client}>
+        {!urlLine && !setup.command && (!setup.link || web) && urlRow}
         {setup.link && <a className="ui-button ui-button--secondary ui-button--md connect-agent__open" href={setup.link.href} {...web ? { target: '_blank', rel: 'noopener noreferrer' } : {}}>{setup.link.label}{web && <ArrowUpRight size={14} aria-hidden="true" />}</a>}
         {setup.command && <div className="developer-snippet">
           <pre className="developer-code connect-agent__command" tabIndex={0} aria-label={`${mcpSignInNames[value]} command`}><code>{setup.command}</code></pre>
@@ -125,7 +132,7 @@ type Connection = { id: string | null; config: object; nextStep: string; key: st
 
 /**
  * Connect an agent: as you, signed in with OAuth, in any client (McpSignInSetup), with your agents listed below as they
- * connect. For one inbox, a secondary step (owners and admins) makes an API key for that inbox that can't reach anything
+ * connect. Limit to one inbox, a secondary step (owners and admins) makes an API key for that inbox that can't reach anything
  * else, inside a ready config. Opened from an inbox, that step and inbox are chosen. Every open starts fresh.
  */
 export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: boolean; onOpenChange: (open: boolean) => void; inboxId?: string }) {
@@ -133,6 +140,8 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
   const url = useMcpUrl()
   const [view, setView] = useState<'agent' | 'inbox'>('agent')
   const [client, setClient] = useState<McpClient>('opencode')
+  // The client chosen for signing in carries over to the inbox's config when that config supports it.
+  const [signIn, setSignIn] = useState<McpSignInClient>('opencode')
   const [inbox, setInbox] = useState('')
   const [query, setQuery] = useState('')
   const [picked, setPicked] = useState<Inbox | null>(null)
@@ -148,7 +157,7 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
   const opened = useApiQuery(['agent-inbox', inboxId], (_api, signal) => request<Inbox>(`/v1/inboxes/${encodeURIComponent(inboxId!)}`, { signal }), { enabled: open && canAdminister && !!inboxId })
   useEffect(() => {
     if (!open) return
-    setView(inboxId && canAdminister ? 'inbox' : 'agent'); setClient('opencode'); setInbox(inboxId ?? ''); setQuery(''); setPicked(null); setReply(false); setResult(null); setError('')
+    setView(inboxId && canAdminister ? 'inbox' : 'agent'); setClient('opencode'); setSignIn('opencode'); setInbox(inboxId ?? ''); setQuery(''); setPicked(null); setReply(false); setResult(null); setError('')
   }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   const kept = [picked, opened.data].filter((box): box is Inbox => !!box && box.status === 'active')
   const active = [...kept, ...(inboxes.data?.data ?? [])].filter((box, i, all) => box.status === 'active' && all.findIndex(other => other.id === box.id) === i)
@@ -170,17 +179,18 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
   const close = () => { if (!busy) onOpenChange(false) }
   const footer = !inboxView ? <>
       <Link className="ui-button ui-button--ghost ui-button--md connect-agent__aside" to={guides.mcp} onClick={close}>Docs</Link>
-      {canAdminister && <Button variant="ghost" className="connect-agent__aside" onClick={() => setView('inbox')}>For one inbox</Button>}
+      {canAdminister && <Button variant="ghost" className="connect-agent__aside" onClick={() => { if ((mcpClients as readonly string[]).includes(signIn)) setClient(signIn as McpClient); setView('inbox') }}>Limit to one inbox</Button>}
       <Button variant="primary" onClick={close}>Done</Button>
     </>
     : result ? <Button variant="primary" onClick={close}>Done</Button>
     : <><Button disabled={busy} onClick={() => { setView('agent'); setError('') }}>Back</Button><Button variant="primary" loading={busy} disabled={!chosen} onClick={() => void create()}>Create API key</Button></>
   return <Dialog open={open} onOpenChange={next => { if (!next) close() }} title={inboxView ? 'Connect an agent to one inbox' : 'Connect an agent'} analytics="Connect an agent" className="connect-agent-dialog" sensitive={!!result} footer={footer}>
-    {!inboxView ? <div className="stack connect-agent"><McpSignInSetup /><ConnectedAgents onLeave={close} /></div> : <div className="stack">
+    {!inboxView ? <div className="stack connect-agent"><McpSignInSetup urlLine={false} client={signIn} onClient={setSignIn} /><ConnectedAgents onLeave={close} /></div> : <div className="stack">
       {!result && <>
         {searchable && <SearchField aria-label="Search inboxes" placeholder="Search address or name" value={query} onChange={event => setQuery(event.target.value)} />}
-        {inboxes.isPending || active.length || searchable ? <Field label="Inbox" hint={search && !inboxes.isFetching && !inboxes.data?.data.length ? 'No active inbox matches.' : undefined}>
-          <Select mask value={chosen} onValueChange={id => { setInbox(id); setPicked(active.find(box => box.id === id) ?? null) }} disabled={inboxes.isPending} placeholder="Loading inboxes…" options={active.map(box => ({ value: box.id, label: label(box) }))} />
+        {inboxes.error && !inboxes.data && !active.length ? <ErrorState error={inboxes.error} onRetry={() => void inboxes.refetch()} />
+          : inboxes.isPending || active.length || searchable ? <Field label="Inbox" hint={search && !inboxes.isFetching && !inboxes.data?.data.length ? 'No active inbox matches.' : undefined}>
+          <Select mask aria-label="Inbox" value={chosen} onValueChange={id => { setInbox(id); setPicked(active.find(box => box.id === id) ?? null) }} disabled={inboxes.isPending} placeholder="Loading inboxes…" options={active.map(box => ({ value: box.id, label: label(box) }))} />
         </Field> : <div className="connect-agent__empty"><span>No active agent inboxes</span><Link className="ui-button ui-button--secondary ui-button--sm" to="/receiving/inboxes" onClick={close}>Create an agent inbox</Link></div>}
         <Checkbox checked={reply} onCheckedChange={setReply} label="Let it reply to senders (the inbox needs replies on)" />
         {/* Before the key exists: only the client, so the config made with the key is for the right one. */}
