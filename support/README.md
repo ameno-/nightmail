@@ -63,7 +63,7 @@ Run these from `support/` with the stage's Cloudflare account. Ryan's work profi
    - create an API key limited to that address, read and reply (`POST /v1/api-keys` with `access: {"type":"addresses","addressIds":["mbx_…"],"mail":["read","send"]}`): this is `BANE_SUPPORT_INBOX_KEY`;
    - create a webhook (Nightmail format, `include: ["message"]`) to `https://support.bane.mx/hooks/bane-inbound` (dev: `support.dev.bane.mx`). Its `whsec_…` is `BANE_INBOUND_WEBHOOK_SECRET`;
    - add a route for the address to `["inbox:support", "webhook:<that webhook>"]`. Keep the root catch-all at `store`.
-5. **The intake addresses** `abuse@`, `privacy@` and `legal@bane.mx` (dev: `@dev.bane.mx`), in the same platform workspace. These go straight to typed tickets and never reach the agent (`src/intake.ts`):
+5. **The intake addresses** `abuse@`, `privacy@` and `legal@bane.mx` (dev: `@dev.bane.mx`), in the same platform workspace. These go straight to typed tickets and never reach the agent (`src/intake.ts`). A ticket names only the sender address and its DMARC verdict, never an account:
    - create the three inbound addresses, and one API key limited to those three, read and reply. This is `BANE_INTAKE_INBOX_KEY`;
    - create a second webhook (Nightmail format, `include: ["message"]`) to `https://support.bane.mx/hooks/bane-intake`. Its `whsec_…` is `BANE_INTAKE_WEBHOOK_SECRET`;
    - add a route for each address to its own inbox and the shared webhook, such as `abuse@bane.mx` → `["inbox:abuse", "webhook:<that webhook>"]` (an inbox is per address, so there's no single `inbox:intake`). The team reads full messages and non-image attachments in those inboxes;
@@ -117,10 +117,11 @@ They make no network or model calls. `test/*.local.ts` scripts, which are git-ig
 Email never reads an account: questions about one are for Help, where the person is signed in. Each email conversation is bound to the first address that writes in it. Nightmail still registers every message (`registerConversation` with the message ID; the staff inbox needs the row), and its `mode` only decides the reply.
 
 - **Every later message is checked again.** It must come from that address and still verify the same way. Anything else (another sender, a message that no longer verifies, a closed conversation) goes to a conversation of its own.
-- **`member` and `non_member`** (the sender passed DMARC): the agent's general answer. The conversation makes no stamped request (no scope, no `<account>`, no account tool, no content access), and `<customer>` says only that this is email. The Worker adds "For anything about your account, sign in to Nightmail and press Help" with Nightmail's link after the output gate, frozen with the answer, so a retry sends the same email once.
+- **`non_member`** (the sender passed DMARC; Nightmail binds no account to email, and a `member` from an earlier Nightmail is treated the same): the agent's general answer. The conversation makes no stamped request (no scope, no `<account>`, no account tool, no content access), and `<customer>` says only that this is email. The Worker adds "For anything about your account, sign in to Nightmail and press Help" with Nightmail's link after the output gate, frozen with the answer, so a retry sends the same email once.
 - **`pending_signin` and `unverified`:** one fixed reply, the same either way (so it never says whether an account exists), pointing to sign in and press Help. No model call, and nothing waits. A confirm link from an earlier reply opens a page that says the same and changes nothing; answers an earlier release parked for a sign-in or confirmation are held, never sent.
 - **Mail at a chat** (a reply in its ticket's follow-up thread) goes to an email conversation of its own for that thread and sender, and never touches the chat, its transcript or its ticket.
 - **Tickets from email** name no customer account, only the address that wrote; a chat's ticket names the chat's person.
+- **Answers an earlier build wrote** (queued before this one, possibly from an account) are never sent: held as drafts for the team when the object loads. Only a fixed reply, or a general answer this build composed (marked as such), is ever sent.
 - **Links in email replies** must point to Nightmail's own sites, or the reply is held.
 
 ## Work and the sweep

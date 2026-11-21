@@ -117,8 +117,25 @@ return [
   ...[['d', 'msg_legacy_grant', 3600000], ['e', 'msg_legacy_lapsed', -60000]].map(([x, id, left]) => ['conv_legacy_' + x, { ...base, threadId: 'thr_legacy_' + x, userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada Lovelace', role: 'owner', verified: 'dmarc',
     workspace: { id: 'ws_acme', name: 'Acme Prod' }, workspaces: [{ id: 'ws_acme', name: 'Acme Prod', role: 'owner' }] }, [[id, 'confirmed', 1]], { expiresAt: now + left }]),
 ]; };
+// As an earlier (stamped) build left a conversation: registered for Ada, an answer written from her account, not sent.
+const WORK_TABLE = \`CREATE TABLE IF NOT EXISTS _support_work (id TEXT PRIMARY KEY, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending'
+  CHECK(state IN ('pending','blocked','parked','done','held','dead')), due_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, payload TEXT NOT NULL,
+  result TEXT NOT NULL DEFAULT '{}', parent TEXT, last_error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, mirrored_at INTEGER)\`;
+function priorBuild(ctx, env, now) {
+  if (!ctx.id.equals(env.CONVERSATION.idFromName('conv_prior_a')) || ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE name='_support_meta'").toArray().length) return;
+  const sql = ctx.storage.sql, text = 'Hi Ada,\\n\\nAcme Prod sent 1,000 emails this week; 61 bounced at Gmail.\\n\\nNightmail support (AI)';
+  sql.exec('CREATE TABLE _support_meta (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL)');
+  sql.exec('INSERT INTO _support_meta VALUES (1, ?)', JSON.stringify({ conversationId: 'conv_prior_a', channel: 'email', status: 'open', userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada Lovelace', role: 'owner',
+    workspace: { id: 'ws_acme', name: 'Acme Prod' }, workspaces: [{ id: 'ws_acme', name: 'Acme Prod', role: 'owner' }], verified: 'dmarc', contentAccess: false, page: null, handoffMessage: null, requestIds: [],
+    threadId: 'thr_prior', greeted: false, turns: 1, inputTokens: 0, outputTokens: 0, costUsd: 0, ticketId: null, lastActivity: now, closedAt: null, registered: true, mode: 'member' }));
+  sql.exec(WORK_TABLE);
+  sql.exec("INSERT INTO _support_work (id, kind, state, due_at, payload, result, created_at, updated_at) VALUES ('msg:msg_prior_1', 'message', 'done', ?1, ?2, '{}', ?1, ?1)", now, JSON.stringify({ messageId: 'msg_prior_1', threadId: 'thr_prior', deliveryId: 'wh_prior' }));
+  sql.exec("INSERT INTO _support_work (id, kind, state, due_at, payload, result, parent, created_at, updated_at) VALUES ('answer:msg_prior_1', 'answer', 'pending', ?1, ?2, ?3, 'msg:msg_prior_1', ?1, ?1)", now,
+    JSON.stringify({ messageId: 'msg_prior_1', threadId: 'thr_prior', sender: 'ada@acme.test', dmarc: 'PASS', route: { addressId: 'adr_support', key: 'reply-msg_prior_1' } }), JSON.stringify({ allowed: true, model: text, text }));
+}
 export class SupportConversation extends Conversation {
   constructor(ctx, env) {
+    priorBuild(ctx, env, Date.now());
     for (const [name, meta, rows, grant] of legacy(Date.now())) {
       if (!ctx.id.equals(env.CONVERSATION.idFromName(name)) || ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE name='_support_meta'").toArray().length) continue;
       if (grant) {
@@ -486,17 +503,22 @@ describe('support Worker', () => {
     assert.equal((await (await mf.getD1Database('DB', 'support')).prepare('SELECT status FROM conversations WHERE id = ?').bind(chat.id).first<{ status: string }>())?.status, 'closed');
   }, 180_000);
 
-  test('the model never sees internal IDs (non-empty activity): not in <account>, not in the account_context result', async () => {
+  test('the model never sees support, agent or person IDs: prior support views, grants and agent tokens, in <account>, account_context and get_audit', async () => {
     const chat = await chatIn(mf, handoff('usr_ivy')), before = recorded.length;
     chat.send({ type: 'user.message', clientMessageId: 'i1', text: 'Show my account summary' });
     await chat.until(f => f.type === 'message.end' && f.text === 'Your account looks fine.', 60_000);
+    chat.send({ type: 'user.message', clientMessageId: 'i2', text: 'Show my audit trail' });
+    await chat.until(f => f.type === 'message.end' && f.text === 'Here is your recent activity.', 60_000);
     const sent = recorded.slice(before).map(r => JSON.stringify(r.body));
-    // Both paths carried the summary, its activity included: this conversation's support.view and a colleague's change.
-    assert.ok(sent.some(body => body.includes('<account read=') && body.includes('support.view') && body.includes('domain.verify')), 'The prefetched summary, with its activity.');
-    assert.ok(sent.some(body => body.includes('tool_result') && body.includes('domain.verify') && body.includes('ivy@other.test')), 'The account_context result, with its activity.');
-    // Nightmail returns them (user.id, subject.userId, summary.member, actor.id): the projection removes every one.
-    for (const id of ['usr_ivy', 'usr_colleague', chat.id]) assert.ok(!sent.some(body => body.includes(id)), `${id} reached the model`);
-    assert.ok(sent.some(body => body.includes('dom_ws_acme') && body.includes('req_' + 'c'.repeat(32))), 'IDs the tools need are kept.');
+    // Every path carried the activity: the prefetched summary, and the account_context and get_audit results.
+    assert.ok(sent.some(body => body.includes('<account read=') && body.includes('support.view') && body.includes('api_key.create')), 'The prefetched summary, with its activity.');
+    assert.ok(sent.some(body => body.includes('tool_result') && body.includes('domain.verify') && body.includes('ivy@other.test')), 'The account_context result.');
+    assert.ok(sent.some(body => body.includes('Here is your recent activity') || (body.includes('tool_result') && body.includes('Deploy bot'))), 'The get_audit result.');
+    // Nightmail returns them: this and an earlier conversation's ID (support actor and summary.ticket), the person
+    // (user.id, subject.userId, summary.member), a colleague, a grant and its handoff, an agent token, a key, a UUID.
+    const internal = ['usr_ivy', 'usr_colleague', chat.id, `conv_${'p'.repeat(26)}`, `sgr_${'c3'.repeat(16)}`, `sho_${'d4'.repeat(16)}`, `agt_${'a1'.repeat(16)}`, `key_${'b2'.repeat(16)}`, '7f3e2a10-4b5c-4d6e-8f70-8192a3b4c5d6'];
+    for (const id of internal) assert.ok(!sent.some(body => body.includes(id)), `${id} reached the model`);
+    assert.ok(sent.some(body => body.includes('dom_ws_acme') && body.includes('req_' + 'c'.repeat(32)) && body.includes('ws_acme')), 'Workspace, domain and request IDs the tools need are kept.');
     chat.ws.close();
   }, 180_000);
 
@@ -652,21 +674,17 @@ describe('support Worker', () => {
     assert.ok(!calls.some(c => c[0] === 'api' && c[2] === '/v1/inbound/threads/thr_auto/reply'), 'No reply to an auto-reply.');
   }, 60_000);
 
-  test('M1, M2: a verified thread binds its address and account; a spoof or another sender never reaches its session', async () => {
-    // msg_mail_1 verified ada in thr_mail_1 (the email test above). A message from her address with DMARC FAIL:
+  test('M1, M2: a thread is its sender’s; a spoof gets the fixed reply and another sender a conversation of its own', async () => {
+    // msg_mail_1 passed DMARC from ada in thr_mail_1 (the email test above). A message from her address with DMARC FAIL:
     const before = recorded.length, reads = (await fakeCalls()).filter(c => c[0] === 'request').length;
     const replied = (await replies('thr_mail_1')).length;
     assert.equal((await signedHook('msg_nodmarc_spoof', 'thr_mail_1')).status, 200);
     const spoofReply = await eventually(async () => (await replies('thr_mail_1')).find(c => c[3].replyToMessageId === 'msg_nodmarc_spoof'));
-    assert.ok(spoofReply, 'The spoof gets a reply from its own, unverified conversation.');
-    assert.equal(spoofReply[3].text, HELP_REPLY, 'Only the fixed Help reply.');
+    assert.ok(spoofReply, 'The spoof gets a reply.');
+    assert.equal(spoofReply[3].text, HELP_REPLY, 'Only the fixed Help reply: each message is judged on its own, and email binds no account.');
     assert.equal(recorded.length, before, 'No model turn for the spoofed message (M1).');
     assert.equal((await fakeCalls()).filter(c => c[0] === 'request').length, reads, 'No account read for it.');
-    // Nightmail refused it for the customer's conversation (it doesn't verify as her), so it went to one of its own.
-    const registered = (await fakeCalls()).filter(c => c[0] === 'registerConversation' && c[2].messageId === 'msg_nodmarc_spoof').map(c => c[1]);
-    assert.equal(registered.length, 2, 'Registered in the thread’s conversation (refused), then in its own.');
     const db = await mf.getD1Database('DB', 'support');
-    assert.ok((await db.prepare("SELECT count(*) AS n FROM conversations WHERE thread_id LIKE 'thr_mail_1#%'").first<{ n: number }>())!.n >= 1, 'Routed to a conversation of its own.');
     assert.equal((await db.prepare("SELECT count(*) AS n FROM tickets WHERE ask LIKE '%refund my top-up%'").first<{ n: number }>())!.n, 0, 'No ticket in the customer’s name.');
     // M2: another sender (DMARC PASS on their own domain, no Nightmail account) in the same thread.
     assert.equal((await signedHook('msg_stranger_1', 'thr_mail_1', 'stranger@else.test')).status, 200);
@@ -1319,6 +1337,28 @@ describe('support Worker', () => {
       assert.equal((await fakeCalls(instance)).filter(c => c[0] === 'closeConversation' && c[1] === chat.id).length, 4);
     });
 
+    test('an answer an earlier build wrote is never sent: held as a draft at load, and a fresh general answer still goes once', async () => {
+      // conv_prior_a, as an earlier build left it (CONVERSATION_ENTRY): registered, with an answer to msg_prior_1 written
+      // from Ada's account and not sent yet. No general-mode marker.
+      await setInbox({ id: 'conv_prior_a', channel: 'email' });
+      const now = Date.now();
+      await (await db()).prepare("INSERT INTO conversations (id, channel, thread_id, created_at, updated_at) VALUES ('conv_prior_a', 'email', 'thr_prior', ?, ?)").bind(now, now).run();
+      let run = await drive('conv_prior_a', { expire: 'answer:msg_prior_1', tick: true });
+      assert.equal(states(run)['answer:msg_prior_1'], 'held');
+      run = await drive('conv_prior_a', { expire: 'answer:msg_prior_1', tick: true });
+      assert.equal(states(run)['answer:msg_prior_1'], 'held', 'A retry changes nothing.');
+      assert.equal((await sends('reply-msg_prior_1')).length, 0, 'Never sent under its key.');
+      assert.ok(!(await fakeCalls(instance)).some(c => c[0] === 'api' && String(c[3]?.text ?? '').includes('61 bounced')), 'Nor under any other.');
+      const held = await eventually(async () => (await inboxOf('conv_prior_a'))?.messages.find((m: any) => m.delivery === 'held'));
+      assert.match(held?.text ?? '', /61 bounced/, 'The team sees it as a held draft.');
+      // A new message in the same conversation gets this build's general answer, once.
+      await hook('msg_prior_2', 'thr_prior', 'ada@acme.test');
+      run = await drive('conv_prior_a', { tick: true });
+      assert.equal(states(run)['answer:msg_prior_2'], 'done');
+      await drive('conv_prior_a', { tick: true });
+      assert.deepEqual((await sends('reply-msg_prior_2')).map(c => [c[6], c[3].text]), [[202, GENERAL]]);
+    });
+
     test('mail on a chat ticket’s follow-up thread opens its own email conversation and never touches the chat’s ticket', async () => {
       const chat = await chatIn(instance);
       chat.send({ type: 'user.message', clientMessageId: 'f1', text: 'Can I get a refund of my duplicate top-up?' });
@@ -1514,7 +1554,7 @@ describe('support Worker', () => {
     assert.equal(ack[4], `Bearer bane_mbx_${'8'.repeat(64)}`, 'With the intake key, not the support key.');
     const team = (await fakeCalls()).find(c => c[0] === 'api' && c[2] === '/v1/inbound/threads' && c[3].subject === `[Nightmail abuse] ${ticket.id}: Spam from your customer (P3)`);
     assert.ok(team, 'The team gets "[Nightmail abuse] …".');
-    assert.ok(team[3].text.startsWith('NOT A CUSTOMER (DMARC PASS)') && team[3].text.includes('Sender (DMARC pass, no account): reporter@isp.test') && team[3].text.includes('invoice.pdf (application/pdf, 1 KB)') && /bounce screenshot\.png \(image\/png/.test(team[3].text), team[3].text);
+    assert.ok(team[3].text.startsWith('UNVERIFIED SENDER (DMARC PASS)') && team[3].text.includes('Sender (DMARC pass): reporter@isp.test') && team[3].text.includes('invoice.pdf (application/pdf, 1 KB)') && /bounce screenshot\.png \(image\/png/.test(team[3].text), team[3].text);
     const stored = await (await mf.getR2Bucket('UPLOADS', 'support')).list({ prefix: `conversations/${ticket.conversation_id}/` });
     assert.equal(stored.objects.length, 1, 'The image is stored (checked and stripped); the PDF is not.');
     // Same thread, same sender: added to the ticket, no second acknowledgement.
@@ -1539,6 +1579,21 @@ describe('support Worker', () => {
     // The support webhook's secret doesn't open the intake endpoint, and vice versa.
     const wrong = await mf.dispatchFetch(`${SUPPORT}/hooks/bane-intake`, { method: 'POST', body: '{}', headers: { 'webhook-id': 'x', 'webhook-timestamp': String(Math.floor(Date.now() / 1000)), 'webhook-signature': `v1,${createHmac('sha256', Buffer.from(WEBHOOK_SECRET.slice(6), 'base64')).update(`x.${Math.floor(Date.now() / 1000)}.{}`).digest('base64')}` } });
     assert.equal(wrong.status, 401);
+  }, 120_000);
+
+  test('an intake ticket from a DMARC-passing account address names no customer', async () => {
+    const lookups = (await fakeCalls()).filter(c => c[0] === 'verifyEmail').length, db0 = await mf.getD1Database('DB', 'support');
+    const accounts = async () => (await db0.prepare("SELECT key, n FROM daily_counters WHERE key LIKE 'user:%' ORDER BY key").all<{ key: string; n: number }>()).results;
+    const before = await accounts();
+    assert.equal((await signedHook('msg_privacy_acct_1', 'thr_privacy_acct', 'ada@acme.test', { intake: true, to: 'privacy@dev.bane.mx' })).status, 200);
+    const db = await mf.getD1Database('DB', 'support');
+    const ticket = await eventually(async () => await db.prepare("SELECT * FROM tickets WHERE title = 'My data'").first<any>() ?? undefined);
+    // Ada's account owns the address and her mail passed DMARC: the ticket still names only the sender, as contact data.
+    assert.deepEqual(JSON.parse(ticket.customer), { verified: false, sender: 'ada@acme.test', dmarc: 'PASS' });
+    const team = await eventually(async () => (await fakeCalls()).find(c => c[0] === 'api' && c[2] === '/v1/inbound/threads' && String(c[3].subject).includes(ticket.id)));
+    assert.ok(team[3].text.startsWith('UNVERIFIED SENDER (DMARC PASS)') && !/Customer:|Workspaces:|usr_ada|Acme Prod|Ada Lovelace/.test(team[3].text), team[3].text);
+    assert.equal((await fakeCalls()).filter(c => c[0] === 'verifyEmail').length, lookups, 'No account lookup.');
+    assert.deepEqual(await accounts(), before, 'Its caps count the sender, never an account.');
   }, 120_000);
 
   test('R2 (the reviewer’s PoC V1): a domain without DMARC gets every email answered with the fixed Help reply, each at once, nothing waiting', async () => {

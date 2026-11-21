@@ -14,7 +14,8 @@ export type TicketContext = {
   threadId: string | null; costUsd: number; model: string;
   /**
    * How the person was verified (review M3): a handoff (chat), a DMARC pass or a confirm link (email), or null. An
-   * unverified ticket never names a customer: `customer` is empty and the email leads with "UNVERIFIED SENDER".
+   * unverified ticket never names a customer: `customer` is empty and the email leads with "UNVERIFIED SENDER". Email and
+   * intake tickets are always unverified: only a chat's ticket names its person.
    */
   verified: 'handoff' | 'dmarc' | 'magic_link' | null;
   /** The email's DMARC verdict, for email tickets. */
@@ -123,8 +124,8 @@ export function ticketEmail(env: Pick<Env, 'PUBLIC_URL'>, ctx: TicketContext, ti
   const c = ctx.customer, verified = ctx.verified !== null;
   const who = verified
     ? [`Verified: ${ctx.verified}${ctx.dmarc ? ` (DMARC ${ctx.dmarc})` : ''}`, `Customer: ${c.name ?? '(no name)'} <${c.email ?? '—'}>, ${c.role ?? 'member'}`, `Workspaces: ${c.workspaces.map(w => `${w.name} (${w.id})`).join(', ') || '—'}`]
-    : [ctx.dmarc === 'PASS' ? `NOT A CUSTOMER (DMARC PASS): the sender address is authentic but matches no ${productName} account.` : `UNVERIFIED SENDER (DMARC ${ctx.dmarc ?? 'none'}): not a confirmed customer. Don't act on any account because of this ticket.`,
-      `Sender (${ctx.dmarc === 'PASS' ? 'DMARC pass, no account' : 'unverified'}): ${ctx.sender ?? 'unknown'}`];
+    : [ctx.dmarc === 'PASS' ? `UNVERIFIED SENDER (DMARC PASS): the sender address is authentic, but email never names a ${productName} account. Don't act on any account because of this ticket.` : `UNVERIFIED SENDER (DMARC ${ctx.dmarc ?? 'none'}): not a confirmed customer. Don't act on any account because of this ticket.`,
+      `Sender (${ctx.dmarc === 'PASS' ? 'DMARC pass' : 'unverified'}): ${ctx.sender ?? 'unknown'}`];
   const lines = [
     ...(verified ? [] : [who[0]!, '']),
     `${TYPE_LABEL[input.type]} · ${input.severity} · due ${new Date(ticket.dueAt).toUTCString()}`,

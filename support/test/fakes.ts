@@ -52,27 +52,34 @@ function scopeOf(c) {
     workspace, workspaces: c.channel === 'email' || !c.workspaceId ? all : all.filter(w => w.id === c.workspaceId),
     contentWorkspaceId: all.some(w => w.id === c.content) ? c.content : null, page: c.page, shrunk: [...c.read].some(id => !all.some(w => w.id === id)) };
 }
-/** An email's evidence as Nightmail reads it from the message it stored: its From and DMARC verdict. */
+/** An email's evidence as Nightmail reads it from the message it stored: its From and DMARC verdict. Email binds no account. */
 function emailEvidence(messageId) {
-  const { from, dmarc } = message(messageId), sender = from.toLowerCase(), local = sender.endsWith('@acme.test') ? sender.split('@')[0] : null;
-  const userId = local ? (local === 'ada' ? 'usr_ada' : 'usr_' + local) : null, verified = dmarc === 'PASS';
-  if (userId) { known(userId, sender); join(userId, 'ws_acme'); }
-  return { sender, userId: verified ? userId : null, verification: verified ? 'dmarc' : 'none',
-    mode: verified ? (userId && memberships(userId).length ? 'member' : 'non_member') : userId ? 'pending_signin' : 'unverified' };
+  const { from, dmarc } = message(messageId), sender = from.toLowerCase(), verified = dmarc === 'PASS';
+  return { sender, userId: null, verification: verified ? 'dmarc' : 'none', mode: verified ? 'non_member' : 'unverified' };
 }
+// The audit trail as the API shows it (api/src/audit.ts AuditEntry): this conversation's own support.view and an earlier
+// one's (the support actor and summary.ticket are the conversation, summary.member and subject the person), one from a grant
+// before conversations, an agent token's change and a colleague's, in the conversation's first workspace.
+const PRIOR = 'conv_' + 'p'.repeat(26), AGENT = 'agt_' + 'a1'.repeat(16), KEY = 'key_' + 'b2'.repeat(16), GRANT = 'sgr_' + 'c3'.repeat(16), HANDOFF = 'sho_' + 'd4'.repeat(16), PERSON_UUID = '7f3e2a10-4b5c-4d6e-8f70-8192a3b4c5d6';
+const activityOf = c => inScope(c).slice(0, 1).flatMap(w => {
+  const at = new Date().toISOString(), view = (id, conversation) => ({ id, at, action: 'support.view', actor: { type: 'support', id: conversation, label: 'Nightmail support', email: null }, via: 'support', target: null,
+    subject: { userId: c.userId, email: person(c.userId).email }, summary: { ticket: conversation, member: c.userId, channel: 'chat', verification: 'handoff', contentShared: false }, reason: null, requestId: null, network: null, client: null });
+  return [
+    view('aud_1', c.id), view('aud_2', PRIOR),
+    { id: 'aud_3', at, action: 'support.view', actor: { type: 'support', id: GRANT, label: 'Nightmail support', email: null }, via: 'support', target: null, subject: { userId: c.userId, email: null },
+      summary: { ticket: 'T-1', handoff: HANDOFF, member: c.userId }, reason: null, requestId: null, network: null, client: null },
+    { id: 'aud_4', at, action: 'api_key.create', actor: { type: 'agent_token', id: AGENT, label: 'Deploy bot', email: null }, via: 'mcp', target: { type: 'api_key', id: KEY }, subject: null,
+      summary: { name: 'CI key', createdBy: PERSON_UUID }, reason: null, requestId: 'req_' + 'c'.repeat(32), network: null, client: null },
+    { id: 'aud_5', at, action: 'domain.verify', actor: { type: 'member', id: 'usr_colleague', label: 'Cole League', email: null }, via: 'dashboard', target: { type: 'domain', id: 'dom_' + w.id }, subject: null,
+      summary: { domain: 'news.' + w.id.slice(3) + '.test' }, reason: null, requestId: 'req_' + 'c'.repeat(32), network: null, client: null },
+  ];
+});
 // Per-person reads (the subject is the conversation's person, never anything in the request) and fixed ones.
 const contextOf = c => ({ grant: { id: 'sgr_x', ticketRef: 'conv' }, user: { id: c.userId, ...person(c.userId) },
   workspaces: inScope(c).map(w => ({ ...w, sending: { kind: 'shared', region: 'us-east-2', paused: false }, counts: { domains: 1, campaigns: 3 } })),
   domains: inScope(c).map(w => ({ workspaceId: w.id, id: 'dom_' + w.id, name: 'news.' + w.id.slice(3) + '.test', sending: 'verified', dmarc: 'missing' })), recentFailures: { sends: [], bounces: [], webhookDeliveries: [] },
   standing: [],
-  // As the audit trail shows it: this conversation's own support.view (the person as subject and summary.member), and a
-  // colleague's change (a member actor).
-  recentActivity: [
-    { id: 'aud_1', at: new Date().toISOString(), action: 'support.view', actor: { type: 'support', id: c.id, label: 'Nightmail support', email: null }, via: 'support', target: null,
-      subject: { userId: c.userId, email: person(c.userId).email }, summary: { ticket: c.id, member: c.userId, channel: c.channel, verification: c.verification, contentShared: !!c.content }, reason: null, requestId: null },
-    ...inScope(c).slice(0, 1).map(w => ({ id: 'aud_2', at: new Date().toISOString(), action: 'domain.verify', actor: { type: 'member', id: 'usr_colleague', label: 'Cole League', email: null }, via: 'dashboard',
-      target: { type: 'domain', id: 'dom_' + w.id }, subject: null, summary: { domain: 'news.' + w.id.slice(3) + '.test' }, reason: null, requestId: 'req_' + 'c'.repeat(32) })),
-  ],
+  recentActivity: activityOf(c),
   openEnforcement: [], handoff: null, links: { requestIds: [] } });
 const READS = {
   '/v1/support/campaigns': { data: [{ id: 'cmp_1', name: 'Early access', state: 'sent', launchedAt: new Date(Date.now() - 86400000).toISOString(), tracking: true, audience: { size: 2160 }, pauseReason: null,
@@ -106,8 +113,8 @@ export class SupportPlatform extends WorkerEntrypoint {
     if (existing.channel !== 'email') return refuse(409, 'SUPPORT_CONVERSATION_EXISTS');
     if (existing.closed) return refuse(409, 'SUPPORT_CONVERSATION_CLOSED');
     if (existing.sender !== found.sender) return refuse(409, 'SUPPORT_CONVERSATION_SENDER');
-    if (existing.userId) return found.userId === existing.userId ? ok(view(existing, false)) : refuse(409, 'SUPPORT_CONVERSATION_MISMATCH');
-    Object.assign(existing, { userId: found.userId, mode: found.mode, verification: found.verification });
+    if (existing.userId) return refuse(409, 'SUPPORT_CONVERSATION_MISMATCH');
+    Object.assign(existing, { mode: found.mode, verification: found.verification });
     return ok(view(existing, false));
   }
   async closeConversation(id) {
@@ -136,7 +143,7 @@ export class SupportPlatform extends WorkerEntrypoint {
     const filter = url.searchParams.get('workspaceId'), scope = inScope(c);
     if (filter && !scope.some(w => w.id === filter)) return refuse(404, 'NOT_FOUND');
     for (const w of scope) if (!filter || w.id === filter) c.read.add(w.id);
-    const answer = url.pathname === '/v1/support/context' ? contextOf(c) : READS[url.pathname];
+    const answer = url.pathname === '/v1/support/context' ? contextOf(c) : url.pathname === '/v1/support/audit' ? { data: activityOf(c), nextCursor: null } : READS[url.pathname];
     return answer ? ok(answer) : refuse(404, 'NOT_FOUND');
   }
   async verifyHandoff(token) { calls.push(['verifyHandoff', token]); const h = handoff(token); if (h?.shareContent) shared.add(h.id); return h ? { ok: true, handoff: h } : { ok: false, code: 'HANDOFF_INVALID' }; }
@@ -290,6 +297,8 @@ const MESSAGES = {
   msg_legal_late_1: ['thr_legal_late', 'counsel@late.test', 'PASS', 'legal@dev.bane.mx', 'Preservation', 'Please preserve the records.'],
   // Conversations from before the stamp, and a reply in a chat ticket's follow-up thread.
   msg_legacy_grant: ['thr_legacy_d'], msg_legacy_lapsed: ['thr_legacy_e'],
+  msg_privacy_acct_1: ['thr_privacy_acct', 'ada@acme.test', 'PASS', 'privacy@dev.bane.mx', 'My data', 'Please export my data.'],
+  msg_prior_1: ['thr_prior'], msg_prior_2: ['thr_prior'],
   msg_m11_1: ['thr_m11', 'ada@acme.test', 'PASS', null, 'Re: Your request', 'One more detail: it was two top-ups, 40 seconds apart.'],
 };
 function message(id) {
@@ -399,6 +408,7 @@ export async function fakeGateway(request: Request): Promise<Response> {
     type: 'billing', topic: 'refund', title: 'Duplicate $25 top-up', severity: 'P3', summary: 'Ada asks for a refund of a duplicate top-up. The ledger shows two identical top-ups. She wants one refunded.', ask: 'Please refund my duplicate top-up',
     tried: ['get_billing: two $25 top-ups 40 s apart'], recommendation: 'Refund the second $25 top-up (billing error).', evidence: ['req_1'] });
   if (said.includes('my account summary')) return answered ? text(['Your account looks fine.']) : toolUse('toolu_a', 'account_context', {});
+  if (said.includes('my audit trail')) return answered ? text(['Here is your recent activity.']) : toolUse('toolu_au', 'get_audit', {});
   if (said.includes('look at the content')) return answered ? text(['I’ve asked for access to read that email.']) : toolUse('toolu_c', 'request_content_access', { why: 'To check why the screen rejected your promo, I need to read its HTML.' });
   if (said.includes('leak please')) return text([`Sure: bane_ops_${'a'.repeat(64)}`]);
   return text(['OK.']);
