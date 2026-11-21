@@ -21,7 +21,7 @@
 .rcv-targets { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-4) var(--space-12); min-width: 0; }
 .rcv-target { display: inline-flex; align-items: center; gap: var(--space-6); white-space: nowrap; }
 .rcv-target[data-muted] { color: var(--color-muted); }
-.rcv-via { color: var(--color-faint); font-size: var(--text-xs); }
+.rcv-via { margin-left: var(--space-6); color: var(--color-faint); font-size: var(--text-xs); }
 .rcv-chain { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-4); }
 /* One line in a list row: the first rule and how many more, cut short rather than wrapped. */
 .rcv-chain[data-line], .rcv-table .rcv-chain { flex-wrap: nowrap; max-width: 100%; min-width: 0; }
@@ -197,7 +197,8 @@ html:not([data-privacy='off']) .trace-to.private-field:not(:hover, :focus)::plac
   .rcv-foot { flex-wrap: wrap; }
 }
 /* A card's one line: its first rule (+ how many more), then where its mail goes; it clips at the card's edge. */
-.rcv-card-to { display: inline-flex; align-items: center; gap: var(--space-8); min-width: 0; overflow: hidden; mask-image: linear-gradient(90deg, #000 calc(100% - 20px), transparent); }
+.rcv-card-to { display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.rcv-card-to > span[aria-hidden] { margin-right: var(--space-8); }
 .rcv-card-to__ritual { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--text-sm); }
 .rcv-card-to > span[aria-hidden] { color: var(--color-faint); }
 .rcv-card-to .rcv-targets { flex-wrap: nowrap; }
@@ -227,8 +228,17 @@ html:not([data-privacy='off']) .trace-to.private-field:not(:hover, :focus)::plac
 .routing-choices .settings-cell-stack > * { min-width: 0; max-width: 100%; }
 .routing-choices .ui-check-field { min-width: 0; max-width: 100%; }
 .routing-choices .ui-check-field > label { flex: 1 1 0; min-width: 0; }
-.rcv-to { display: block; min-width: 0; overflow: hidden; mask-image: linear-gradient(90deg, #000 calc(100% - 20px), transparent); }
-.rcv-to > .rcv-targets { flex-wrap: nowrap; }
+/* Destinations on one line, cut with an ellipsis only when they don't fit (a fade cut the last letters of every row). */
+.rcv-to { display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.rcv-to > .rcv-targets, .rcv-card-to .rcv-targets { display: inline; }
+:is(.rcv-to, .rcv-card-to) .rcv-target { display: inline; margin-right: var(--space-12); }
+:is(.rcv-to, .rcv-card-to) .rcv-target > .rcv-icon { margin-right: var(--space-6); vertical-align: -2px; }
+/* A rule in plain words on one line, and how many more. */
+.rcv-rules { display: flex; align-items: baseline; gap: var(--space-6); min-width: 0; }
+.rcv-rules__first { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rcv-rules > .muted { flex: none; font-family: var(--font-mono); font-size: var(--text-xs); }
+.rcv-rules .recipe-blank { padding: 0; background: none; }
+.addr-rule { min-width: 0; overflow: hidden; color: var(--color-text); text-overflow: ellipsis; white-space: nowrap; }
 .addr-step li > .rcv-match { flex: 0 1 auto; }
 .rcv-step__body .cluster > .ui-button--ghost:first-child { margin-inline-start: calc(-1 * var(--button-pad-x, 11px)); }
 @media (max-width: 640px) {
@@ -252,3 +262,63 @@ html:not([data-privacy='off']) .trace-to.private-field:not(:hover, :focus)::plac
 .addr-root > .ui-tabs + .mailbox-page .mailbox-toolbar { padding-top: 0; }
 .addr-facts { max-width: 640px; }
 .addr-danger { padding-top: var(--space-16); border-top: 1px solid var(--color-border-muted); }
+
+/* Kinds: one line at every width, whole labels with their counts; the row scrolls sideways when they don't fit. */
+.rcv-kinds { display: flex; flex: 1 1 auto; gap: var(--space-4); min-width: 0; margin-left: calc(-1 * var(--space-8)); padding: var(--focus-reach, 3px) var(--focus-reach, 3px) var(--focus-reach, 3px) var(--space-8); overflow-x: auto; scrollbar-width: none; }
+.rcv-kinds::-webkit-scrollbar { display: none; }
+.rcv-kind { display: inline-flex; flex: none; align-items: center; gap: var(--space-6); height: var(--control-height); padding: 0 var(--space-8); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--color-muted); font: inherit; font-size: var(--text-sm); white-space: nowrap; cursor: pointer; transition: background var(--motion-duration), color var(--motion-duration); }
+@media (hover: hover) and (pointer: fine) { .rcv-kind:hover { background: var(--color-hover); color: var(--color-text); } }
+.rcv-kind[aria-pressed='true'] { background: var(--color-active-bg); color: var(--color-text); }
+.rcv-kind:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
+.rcv-kind__count { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.rcv-toolbar > .rcv-kinds + .rcv-toolbar__end { margin-left: auto; }
+.rcv-last { display: inline-flex; align-items: baseline; justify-content: flex-end; gap: var(--space-8); font-family: var(--font-mono); font-size: var(--text-xs); white-space: nowrap; }
+.rcv-last .rcv-unread { font-family: var(--font-body); font-size: var(--text-xs); }
+
+/* The list and, beside it from 1180 px, the chosen address's flow. */
+.rcv-browse { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-24); align-items: start; }
+.rcv-browse[data-docked] { grid-template-columns: minmax(0, 1fr) 360px; }
+.rcv-browse__list { display: flex; flex-direction: column; gap: var(--space-12); min-width: 0; }
+.rcv-browse > .flow-panel { position: sticky; top: 0; padding-left: var(--space-24); border-left: 1px solid var(--color-border-muted); }
+.rcv-browse__list > .flow-panel { padding-top: var(--space-16); border-top: 1px solid var(--color-border-muted); }
+.rcv-table tr[data-selected] > td { background: var(--color-active-bg); }
+
+/* The flow: Receive, Process, Deliver, each a hairline box, joined by a short line with an arrowhead. Neutral; a test
+   ticks what the email took and quiets the rest. */
+.flow { display: grid; margin: 0; padding: 0; list-style: none; }
+.flow-stage { position: relative; display: grid; gap: var(--space-4); padding: var(--space-8) var(--space-12); border: 1px solid var(--color-border-muted); border-radius: var(--radius-md); background: var(--color-surface); transition: border-color 160ms ease-out; }
+.flow-stage + .flow-stage { margin-top: 24px; }
+.flow-stage + .flow-stage::before { content: ''; position: absolute; left: 50%; top: -25px; width: 1px; height: 18px; background: var(--color-border-strong); }
+.flow-stage + .flow-stage::after { content: ''; position: absolute; left: calc(50% - 4px); top: -8px; border: 4px solid transparent; border-top: 5px solid var(--color-border-strong); border-bottom: 0; }
+.flow-stage__head { display: flex; align-items: center; gap: var(--space-6); height: 20px; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.flow-stage__body { display: grid; }
+.flow-item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-8); min-height: 40px; padding-block: var(--space-4); transition: opacity 160ms ease-out; }
+.flow-item + .flow-item { border-top: 1px solid var(--color-border-muted); }
+.flow-item:not(:has(> .flow-item__icon)) { grid-template-columns: minmax(0, 1fr) auto; }
+.flow-item__icon { display: inline-grid; place-items: center; width: 16px; }
+.flow-item__text { display: grid; min-width: 0; }
+.flow-item__main { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: var(--text-sm); line-height: 20px; }
+.flow-item__note { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-muted); font-size: var(--text-xs); line-height: 16px; }
+.flow-item__aside { display: inline-flex; flex: none; align-items: center; font-size: var(--text-xs); }
+.flow-item__tick { color: var(--color-text); }
+.flow-item .rcv-match { max-width: 100%; }
+.flow-code { font-family: var(--font-mono); font-size: var(--text-xs); }
+.flow-via { margin-left: var(--space-8); color: var(--color-faint); font-size: var(--text-xs); }
+.flow[data-tested] .flow-item[data-hit='no'] { opacity: .45; }
+.flow[data-tested] .flow-stage:has([data-hit='yes']) { border-color: var(--color-border-strong); }
+
+/* The panel: its actions, the sample a test sends, then the flow. */
+.flow-panel { display: grid; align-content: start; gap: var(--space-12); min-width: 0; }
+.flow-panel__actions { display: flex; flex-wrap: wrap; gap: var(--space-8); }
+.flow-test { display: grid; gap: var(--space-8); }
+.flow-sample > summary { width: fit-content; max-width: 100%; overflow: hidden; color: var(--color-muted); font-size: var(--text-sm); line-height: 20px; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.flow-sample__subject { color: var(--color-text); }
+.flow-sample__fields { padding-top: var(--space-12); }
+.addr-flow { max-width: 480px; }
+.flow-skeleton { display: grid; gap: 24px; }
+.flow-skeleton > span { display: block; height: 70px; border-radius: var(--radius-md); background: var(--color-layer-1); animation: ui-pulse 1.2s ease-in-out infinite alternate; }
+@media (max-width: 640px) {
+  .rcv-kinds { flex: none; margin-inline: calc(-1 * var(--bleed, 0px)); padding-inline: var(--bleed, 0px); }
+  .rcv-toolbar > .rcv-kinds + .rcv-toolbar__end { margin-left: 0; }
+  .rcv-kind { height: 36px; }
+}

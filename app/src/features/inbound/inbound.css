@@ -5,6 +5,10 @@
 .mailbox-page { display: flex; flex: 1; min-height: 0; flex-direction: column; }
 /* Kept mounted behind an address's other tabs (its unsent reply with it): its display must not override hidden. */
 .mailbox-page[hidden] { display: none; }
+/* An address's Mail: search on its own line, the view picker and New message under it. */
+.addr-root .mailbox-toolbar { flex-wrap: wrap; }
+.addr-root .mailbox-toolbar .mailbox-search { flex: 1 1 100%; }
+.mailbox-toolbar .mailbox-view { flex: 1 1 auto; width: auto; min-width: 0; }
 .mailbox-layout { display: grid; flex: 1; min-height: 0; grid-template-columns: minmax(280px, 360px) minmax(0, 1fr); }
 .mailbox-list { display: flex; flex-direction: column; min-height: 0; padding-right: var(--space-16); border-right: 1px solid var(--color-border-muted); }
 .mailbox-list .ui-tabs { flex: none; padding-top: var(--space-8); }

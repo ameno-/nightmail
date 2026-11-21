@@ -20,13 +20,14 @@ export const guides = {
 } as const
 
 export type KindFilter = 'all' | 'address' | 'pattern' | 'catch_all' | 'inbox' | 'auto'
-export const kinds: Record<KindFilter, { label: string }> = {
-  all: { label: 'All' },
-  address: { label: 'Addresses' },
-  pattern: { label: 'Wildcards' },
-  catch_all: { label: 'Catch-alls' },
-  inbox: { label: 'Agent inboxes' },
-  auto: { label: 'Auto-created' },
+// Exact, not Addresses: the tab is Addresses, and counts every kind.
+export const kinds: Record<KindFilter, { label: string; empty: string }> = {
+  all: { label: 'All', empty: 'No addresses yet' },
+  address: { label: 'Exact', empty: 'No addresses yet' },
+  pattern: { label: 'Wildcards', empty: 'No wildcards yet' },
+  catch_all: { label: 'Catch-alls', empty: 'No catch-alls yet' },
+  inbox: { label: 'Agent inboxes', empty: 'No agent inboxes yet' },
+  auto: { label: 'Auto-created', empty: 'No auto-created addresses yet' },
 }
 
 // What a row is, in a few words, under its address.
@@ -44,11 +45,11 @@ export const outcomes = {
   create_address: 'New address per recipient',
 } as const
 
-// The three steps every flow is drawn in.
+// The three steps every flow is drawn in, named as the tabs are: one name per step on every screen.
 export const steps = {
-  receive: { title: 'Receive' },
-  process: { title: 'Process', empty: 'No rule' },
-  deliver: { title: 'Deliver' },
+  receive: { title: 'Address' },
+  process: { title: 'Rules', empty: 'No rule' },
+  deliver: { title: 'Destinations' },
 } as const
 
 export const catchAllSetting = {
