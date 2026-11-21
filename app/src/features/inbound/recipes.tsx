@@ -34,7 +34,7 @@ const LIST = '/receiving?tab=rules'
 type FieldType = 'slack' | 'discord' | 'chat' | 'forward' | 'webhook' | 'meaning' | 'label' | 'senders'
 type RecipeField = { name: string; type: FieldType; label: string; placeholder: string | null; hint: string | null }
 type Recipe = { id: string; group: string; name: string; description: string; sentence: string; fields: RecipeField[]; decisions: boolean }
-type Catalog = { groups: { id: string; title: string }[]; data: Recipe[]; decisionPricePerThousand: string }
+type Catalog = { groups: { id: string; title: string }[]; data: Recipe[] }
 const useRecipes = (enabled = true) => useApiQuery(['rule-recipes'], (_api, signal) => request<Catalog>('/v1/rules/recipes', { signal }), { enabled })
 
 const icons: Record<string, LucideIcon> = {
@@ -190,7 +190,7 @@ export function NewRulePage() {
         </section>}
         {c.groups.map(g => {
           const recipes = c.data.filter(r => r.group === g.id)
-          // A tile is its name under the group's heading. An AI recipe's price per email checked is on its form, above Save.
+          // A tile is its name under the group's heading. An AI recipe's form says, above Save, that it's free and what the AI reads.
           return <section key={g.id} className="recipe-group" aria-labelledby={`recipes-${g.id}`}>
             <h2 id={`recipes-${g.id}`}>{g.title}</h2>
             <div className="recipe-tiles">{recipes.map(r => <Link key={r.id} className="recipe-tile" to={`/receiving/rules/new/${r.id}${suffix}`}>
@@ -258,7 +258,7 @@ function RecipeForm({ recipeId, ritualKey }: { recipeId?: string; ritualKey?: st
   if (existing && isSplitRule(existing)) return <Navigate replace to={splitPath(existing, options.data)} />
   if (!recipe) return <div className="stack inbound-stack">{header()}<EmptyState title={`No recipe named ${id}`} action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rules/new">New rule</Link>} /></div>
   const preset = params.get('address')
-  return <RecipeEditor key={existing?.key ?? recipe.id} recipe={recipe} price={catalog.data.decisionPricePerThousand} existing={existing} overview={overview.data}
+  return <RecipeEditor key={existing?.key ?? recipe.id} recipe={recipe} existing={existing} overview={overview.data}
     addresses={options.data} preset={preset} header={header} back={back}
     refresh={() => client.invalidateQueries({ predicate: query => staleAfterWrite(query.queryKey, false) })} />
 }
@@ -289,8 +289,8 @@ const freeName = (base: string, taken: Set<string>) => { const stem = slug(base)
 const splitSenders = (text: string) => [...new Set(text.split(/[\s,;]+/).map(s => s.trim().toLowerCase()).filter(Boolean))]
 type Made = { name: string; type: EndpointType; status: OverviewEndpoint['status']; target: string }
 
-function RecipeEditor({ recipe, price, existing, overview, addresses, preset, header, back, refresh }: {
-  recipe: Recipe; price: string; existing?: OverviewRule; overview: Overview; addresses: AddressOption[]; preset: string | null
+function RecipeEditor({ recipe, existing, overview, addresses, preset, header, back, refresh }: {
+  recipe: Recipe; existing?: OverviewRule; overview: Overview; addresses: AddressOption[]; preset: string | null
   header: (actions?: ReactNode) => ReactNode; back: string; refresh: () => Promise<unknown>
 }) {
   const navigate = useNavigate(), toast = useToast()
@@ -390,7 +390,7 @@ function RecipeEditor({ recipe, price, existing, overview, addresses, preset, he
   return <div className="stack inbound-stack recipe-page">
     {header(existing && <Link className="ui-button ui-button--secondary ui-button--md" to={codePath(existing.key)}>Edit as code</Link>)}
     <form className="recipe-form" onSubmit={submit} noValidate>
-      {recipe.decisions && <p className="recipe-price"><Sparkles size={14} aria-hidden="true" /><span>${price} per 1,000 emails checked{domains.length ? <> · reads mail at {domains.join(', ')}</> : null}</span></p>}
+      {recipe.decisions && <p className="recipe-ai"><Sparkles size={14} aria-hidden="true" /><span>AI rules are free{domains.length ? <> · reads mail at {domains.join(', ')}</> : null}</span></p>}
       <Field label="Runs on mail to" error={targetsError || undefined}>
         <div className="recipe-targets">
           {targets.map(t => <span key={t} className="recipe-target"><PrivateAddress value={labelOf(t)} /><IconButton size="sm" label="Remove address" onClick={() => setTargets(targets.filter(x => x !== t))} disabled={busy}><X size={13} aria-hidden="true" /></IconButton></span>)}

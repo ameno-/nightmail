@@ -108,7 +108,7 @@ export const guides: Guide[] = [
       </Section>
       <Section title="Ready-made rules">
         <p><Link to="/receiving/rules/new">Receiving → Rules → New rule</Link> lists ready-made rules by what they do: tell your team, pass it on, keep out junk, sort with AI. Pick one, fill in one or two fields (a Slack channel, the senders to block) and choose its addresses; Save turns it on. A Slack, Discord or webhook URL you paste there becomes an endpoint, stored encrypted.</p>
-        <p>Each one writes an ordinary rule, shown in the list as its sentence, like <em>Post new mail to support in Slack</em>, with when it last matched and a switch that turns it off without detaching it. <strong>Edit as code</strong> opens its script; saving a change there makes it your own script. The AI ones cost $0.10 per 1,000 emails checked.</p>
+        <p>Each one writes an ordinary rule, shown in the list as its sentence, like <em>Post new mail to support in Slack</em>, with when it last matched and a switch that turns it off without detaching it. <strong>Edit as code</strong> opens its script; saving a change there makes it your own script. AI rules are free.</p>
       </Section>
       <Section title="Writing a script">
         <p>For anything else, <Link to="/receiving/rules/new/script">Receiving → Rules → New rule → Write code</Link>. The editor checks it as you type and completes <code>email.</code>, <code>ctx.</code> and your endpoint names. <strong>Try it on an email</strong> runs your draft on a real or sample email without saving or sending anything. <strong>Save</strong> (⌘S) keeps the script; the bar at the bottom of the page says whether there are unsaved changes, and leaving asks first.</p>

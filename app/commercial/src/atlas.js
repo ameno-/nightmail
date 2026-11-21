@@ -72,7 +72,7 @@ export const FINE = {
   tracking: "*Open tracking isn't always accurate.",
   inbox: "*Received mail has its own free 5,000.",
   rule: "*Forwarding needs the recipient's OK first. Gary said OK.",
-  ai: "*AI scores can be wrong. Opt-in. $0.10 per 1,000.",
+  ai: "*AI scores can be wrong. Opt-in. Free.",
   agent: "*Hosted limits apply.",
 }
 const MONO = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 :.,-–—·%°×+#@/!?'\"“”()<>_=$*&abcdefghijklmnopqrstuvwxyz{}→…✓"

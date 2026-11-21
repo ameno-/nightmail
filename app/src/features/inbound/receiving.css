@@ -338,7 +338,6 @@ html[data-privacy='on'] .trace-to.private-field:not(:hover, :focus)::placeholder
 .builder-condition { display: grid; gap: var(--space-8); padding-block: var(--space-8); }
 .builder-condition .ui-field__label:has(.sr-only) { display: none; }
 .builder-slot { gap: var(--space-8); padding-block: var(--space-4); }
-.builder-note { margin: 0; color: var(--color-muted); font-size: var(--text-xs); line-height: 16px; }
 .builder-option { display: inline-flex; align-items: center; gap: var(--space-6); }
 @media (max-width: 640px) {
   .flow-fork__ways { grid-template-columns: minmax(0, 1fr); }

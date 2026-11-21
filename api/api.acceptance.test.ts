@@ -10520,7 +10520,7 @@ describe('Billing: metering, gate and settlement', () => {
       assert.deepEqual([await month(db, sends, '2027-01-01'), await month(db, receives, '2027-01-01')],
         [{ sent: 5000, received: 5000, unchargedSent: 0, unchargedReceived: 0 }, { sent: 1, received: 0, unchargedSent: 0, unchargedReceived: 0 }]);
 
-      // Rate version 2 prices November 2026 on; October and earlier keep version 1, 3,000 and 3,000. October's 3,001st send
+      // Rate version 3 (5,000 and 5,000, as version 2 was) prices November 2026 on; October and earlier keep version 1, 3,000 and 3,000. October's 3,001st send
       // was charged, and a refund of it settled now gives back one email's price, as October was charged.
       const october = unique('free-october'), november = unique('free-november');
       await meter(october, '2026-10-31 23:00Z', 'send', 3001); await meter(october, '2026-10-31 23:00Z', 'receive', 3000);
@@ -10530,7 +10530,7 @@ describe('Billing: metering, gate and settlement', () => {
       await refundInto(db, october, '2026-10-31 23:00Z', 'send', -1);
       assert.deepEqual(await priced(october, 'later'), ['-20000', -1, 0]);
       assert.deepEqual((await db.query(`SELECT detail->>'usageMonth' AS m, detail->'rateVersion' AS v FROM billing_ledger WHERE workspace_id = ANY($1) ORDER BY id`, [[october, november]])).rows,
-        [{ m: '2026-10', v: 1 }, { m: '2026-11', v: 2 }, { m: '2026-10', v: 1 }]);
+        [{ m: '2026-10', v: 1 }, { m: '2026-11', v: 3 }, { m: '2026-10', v: 1 }]);
 
       // The gate prices sends against the sent allowance only. This month: free sends used, every received email left.
       const live = unique('free-live'), gate = async () => (await db.query('SELECT billing_gate($1, 1) AS g', [live])).rows[0].g;
@@ -10546,9 +10546,10 @@ describe('Billing: metering, gate and settlement', () => {
       assert.deepEqual([g.ok, g.requiredUc, g.freeSentLeft, g.freeReceivedLeft], [true, '0', 5000, 0]);
       await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'receive',1)`, [live]);
       assert.deepEqual([(await gate()).openUc, (await gate()).freeSentLeft], ['20000', 5000], 'The 5,001st received is charged; the sends stay free.');
-      // What the API publishes (RATES) is this month's version.
+      // What the API publishes (RATES) is this month's version, the price of an AI decision included.
       const { RATES } = await import('./src/billing/money.js');
-      assert.deepEqual((await db.query(`SELECT (billing_rates_in((date_trunc('month', now() AT TIME ZONE 'UTC'))::date)).*`)).rows[0], { version: RATES.version, free_sent: RATES.freeSentEmails, free_received: RATES.freeReceivedEmails });
+      assert.deepEqual((await db.query(`SELECT (billing_rates_in((date_trunc('month', now() AT TIME ZONE 'UTC'))::date)).*, billing_rate_uc('omen', 1::smallint, now())::text AS omen_uc`)).rows[0],
+        { version: RATES.version, free_sent: RATES.freeSentEmails, free_received: RATES.freeReceivedEmails, omen_uc: String(RATES.omenUc) });
     });
   });
 
@@ -10582,6 +10583,71 @@ describe('Billing: metering, gate and settlement', () => {
       // Once: run again, it posts nothing.
       const before = await state();
       await db.query(migration);
+      assert.deepEqual(await state(), before);
+    });
+  });
+
+  test('rate version 3 prices AI decisions at $0 from November 2026 and still counts them; migration 380 gives back what November\'s settled decisions were charged, once, promotional credit first, and October keeps version 1', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      // The migration reads every workspace's usage: for this transaction, these tables hold only this test's.
+      for (const table of ['billing_usage_hourly', 'billing_months', 'billing_forgiven']) await db.query(`CREATE TEMP TABLE ${table} (LIKE public.${table} INCLUDING ALL) ON COMMIT DROP`);
+      const f = await billingFixture(runtime, db, local, request), paid = f.wid;
+      const [promo, free, october] = ['promo', 'free', 'october'].map(n => unique(`decisions-${n}`));
+      const at = await clock(db, '2026-11-20T12:00:00Z');
+      // As it was before 380: rate version 2, AI decisions at $0.10 per 1,000 in November too.
+      const read = (name: string) => readFile(new URL(`./migrations/${name}.sql`, import.meta.url), 'utf8');
+      const [v2, v3] = await Promise.all([read('367_billing_rate_version_two'), read('380_billing_rate_version_three')]);
+      await db.query(v2);
+      await charging(db, null, true); await db.query(`UPDATE billing_config SET mode='enforce'`); await charging(db, free, false);
+      const meter = (wid: string, hour: string, q: number, name = 'omen') => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1,$2::timestamptz,$3,$4)
+        ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, hour, name, q]);
+      const post = (wid: string, kind: string, paidUc: number, promoUc = 0) => db.query(`SELECT billing_post($1,$2,$2||':'||$1,$3,$4,'{}','system')`, [wid, kind, paidUc, promoUc]);
+      await post(paid, 'topup', 100_000_000); await post(promo, 'topup', 100_000_000); await post(promo, 'grant', 0, 50_000); await post(october, 'topup', 100_000_000);
+      // Settled at version 2: 7 decisions cost 70,000 µ¢; 9 cost 90,000, 50,000 of it promotional; a free workspace's 4
+      // cost nothing and were worth 40,000; October's 3 cost 30,000 at version 1, and the same workspace's 2 in November 20,000.
+      await meter(paid, '2026-11-05 10:00Z', 7); await meter(paid, '2026-11-05 10:00Z', 10, 'send');
+      await meter(promo, '2026-11-06 10:00Z', 9); await meter(free, '2026-11-07 10:00Z', 4);
+      await meter(october, '2026-10-31 23:00Z', 3); await meter(october, '2026-11-02 00:00Z', 2);
+      for (const wid of [paid, promo, free, october]) await settle(db, wid, later);
+      const state = async () => (await db.query(`SELECT m.workspace_id AS w, to_char(m.month, 'YYYY-MM') AS month, m.other_uc::int AS other, m.uncharged_other_uc::int AS uncharged,
+          m.posted_uc::int AS posted, m.promo_uc::int AS promo_paid, a.balance_uc::int AS balance, a.promo_uc::int AS promo
+        FROM billing_months m JOIN billing_accounts a USING (workspace_id) WHERE m.workspace_id = ANY($1) ORDER BY array_position($1, m.workspace_id), m.month`, [[paid, promo, free, october]])).rows;
+      assert.deepEqual(await state(), [
+        { w: paid, month: '2026-11', other: 70_000, uncharged: 0, posted: 70_000, promo_paid: 0, balance: 99_930_000, promo: 0 },
+        { w: promo, month: '2026-11', other: 90_000, uncharged: 0, posted: 90_000, promo_paid: 50_000, balance: 99_960_000, promo: 0 },
+        { w: free, month: '2026-11', other: 0, uncharged: 40_000, posted: 0, promo_paid: 0, balance: 0, promo: 0 },
+        { w: october, month: '2026-10', other: 30_000, uncharged: 0, posted: 30_000, promo_paid: 0, balance: 99_950_000, promo: 0 },
+        { w: october, month: '2026-11', other: 20_000, uncharged: 0, posted: 20_000, promo_paid: 0, balance: 99_950_000, promo: 0 }]);
+
+      await db.query(v3);
+      // November's charged decisions come back (promo first, up to what promo paid), the free workspace's leave what its
+      // month would have cost, and October keeps version 1.
+      assert.deepEqual(await state(), [
+        { w: paid, month: '2026-11', other: 0, uncharged: 0, posted: 0, promo_paid: 0, balance: 100_000_000, promo: 0 },
+        { w: promo, month: '2026-11', other: 0, uncharged: 0, posted: 0, promo_paid: 0, balance: 100_000_000, promo: 50_000 },
+        { w: free, month: '2026-11', other: 0, uncharged: 0, posted: 0, promo_paid: 0, balance: 0, promo: 0 },
+        { w: october, month: '2026-10', other: 30_000, uncharged: 0, posted: 30_000, promo_paid: 0, balance: 99_970_000, promo: 0 },
+        { w: october, month: '2026-11', other: 0, uncharged: 0, posted: 0, promo_paid: 0, balance: 99_970_000, promo: 0 }]);
+      const back = (await db.query(`SELECT workspace_id AS w, paid_uc::int AS paid, promo_uc::int AS promo, detail FROM billing_ledger WHERE workspace_id = ANY($1) AND source_id LIKE '%:rates-3'
+        ORDER BY array_position($1, workspace_id)`, [[paid, promo, free, october]])).rows;
+      assert.deepEqual(back.map(r => [r.w, r.paid, r.promo, r.detail.costUc, r.detail.usageMonth, r.detail.rateVersion, r.detail.meters.omen.payable]),
+        [[paid, 70_000, 0, '-70000', '2026-11', 3, -7], [promo, 40_000, 50_000, '-90000', '2026-11', 3, -9], [october, 20_000, 0, '-20000', '2026-11', 3, -2]]);
+      assert.equal((await db.query('SELECT billing_position($1) AS p', [free])).rows[0].p.monthWouldBeUc, '0');
+
+      // From now on November's decisions are counted and settle at $0; October's keep version 1's price.
+      assert.deepEqual((await db.query(`SELECT billing_rate_uc('omen', 1::smallint, '2026-10-31 23:00Z')::int AS october, billing_rate_uc('omen', 1::smallint, '2026-11-05 10:00Z')::int AS november,
+        (billing_rates_in('2026-11-01')).version AS version`)).rows[0], { october: 10_000, november: 0, version: 3 });
+      await meter(paid, '2026-11-19 10:00Z', 5); await meter(paid, '2026-11-20 12:00Z', 1000);
+      assert.equal((await f.position()).openUc, '0', 'Unsettled decisions owe nothing.');
+      await at('2026-11-20T12:00:01Z');   // A usage row's key carries the time it was posted.
+      const settled = await settle(db, paid, later), [row] = (await db.query('SELECT detail FROM billing_ledger WHERE id = ANY($1::bigint[])', [settled.entryIds])).rows;
+      assert.deepEqual([settled.costUc, row.detail.meters.omen, row.detail.rateVersion], ['0', { quantity: 5, payable: 5, costUc: 0 }, 3]);
+      assert.deepEqual(ok(await local('GET', '/v1/billing/ledger?limit=2')).data.map((e: Json) => [e.amount, e.description]),
+        [['0', 'Usage Nov 19, 10:00–11:00 UTC: 5 AI decisions'], ['70000', 'Usage 2026-11: AI decisions refunded, as AI rules are free']]);
+
+      // Once: run again, it gives back nothing.
+      const before = await state();
+      await db.query(v3);
       assert.deepEqual(await state(), before);
     });
   });
@@ -11151,7 +11217,7 @@ describe('Billing: metering, gate and settlement', () => {
     await simulatedSesFixture(t, async ({ db }) => {
       let seed = 20261117;
       const random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648), pick = <T>(xs: T[]) => xs[Math.floor(random() * xs.length)]!;
-      const hours = Array.from({ length: 48 }, (_, i) => new Date(Date.UTC(2026, 9, 31, 0) + i * 3_600_000).toISOString());   // October 31 and November 1: rate versions 1 and 2
+      const hours = Array.from({ length: 48 }, (_, i) => new Date(Date.UTC(2026, 9, 31, 0) + i * 3_600_000).toISOString());   // October 31 and November 1: rate versions 1 and 3
       await charging(db, null, true);
       for (let round = 0; round < 12; round++) {
         const wid = unique('billing-order'), changes: [string, boolean][] = [];
@@ -11173,7 +11239,8 @@ describe('Billing: metering, gate and settlement', () => {
           } else await settle(db, wid, random() < 0.5 ? later : `'${pick(hours)}'::timestamptz`);
         }
         await settle(db, wid, later);
-        // The price of each month from what was metered, by whether its hour was charged, at its own free allowance.
+        // The price of each month from what was metered, by whether its hour was charged, at its own rates: version 1's
+        // 3,000 free and AI decisions at $0.10 per 1,000 in October, version 3's 5,000 free and free decisions in November.
         const totals = new Map<string, { send: number; receive: number; omen: number }>();
         for (const [key, units] of metered) {
           const [hour, meter] = key.split('|') as [string, 'send' | 'receive' | 'omen'];
@@ -11181,7 +11248,7 @@ describe('Billing: metering, gate and settlement', () => {
           const m = hour.slice(0, 7), tot = totals.get(m) ?? { send: 0, receive: 0, omen: 0 };
           tot[meter] += units; totals.set(m, tot);
         }
-        const owed = [...totals.entries()].reduce((n, [m, x]) => { const free = m >= '2026-11' ? 5000 : 3000; return n + 20000 * (Math.max(0, x.send - free) + Math.max(0, x.receive - free)) + 10000 * x.omen; }, 0);
+        const owed = [...totals.entries()].reduce((n, [m, x]) => { const [free, omen] = m >= '2026-11' ? [5000, 0] : [3000, 10000]; return n + 20000 * (Math.max(0, x.send - free) + Math.max(0, x.receive - free)) + omen * x.omen; }, 0);
         const { b } = (await db.query('SELECT (balance_uc + promo_uc)::text AS b FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
         assert.equal(BigInt(b), 100000000000n - BigInt(owed), `round ${round}`);
         assert.equal((await db.query(`SELECT count(*)::int AS n FROM billing_usage_hourly WHERE workspace_id=$1 AND quantity<>settled_quantity`, [wid])).rows[0].n, 0);
@@ -14851,6 +14918,7 @@ describe('Billing: API, MCP and notices', () => {
       const owner = ok(await local('GET', '/v1/billing'));
       assert.deepEqual([owner.enforcement, owner.mode, owner.state, owner.balance.paid, owner.balance.promo], ['enforce', 'prepaid', { sending: 'ok', receiving: 'ok', autoRecharge: 'off' }, '2575200000', '500000000']);
       assert.deepEqual([owner.free.emails.limit, owner.prices.emailPerThousand, owner.topUpUrl], [5000, '0.20', `${PUBLIC_ORIGIN}/settings#billing`]);
+      assert.deepEqual([owner.prices.decisionPerThousand, owner.prices.omenPerThousand], ['0.00', '0.00'], 'AI decisions are free; the deprecated prices stay.');
       // One allowance per direction; emails repeats sent for older clients.
       assert.deepEqual([owner.free.sent, owner.free.received, owner.free.emails, owner.prices.freeSentEmails, owner.prices.freeReceivedEmails],
         [{ limit: 5000, used: 0, left: 5000 }, { limit: 5000, used: 0, left: 5000 }, owner.free.sent, 5000, 5000]);
@@ -15107,6 +15175,13 @@ describe('Billing: API, MCP and notices', () => {
       const { setOperator } = await import('./scripts/set-operator.js');
       await setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic support helper']);
       assert.equal(ok(await local('GET', base)).account, null);
+      // AI decisions are free, so staff watch their volume here: this UTC month's and the last 24 hours'.
+      await db.query('SAVEPOINT decisions');
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'omen',7),
+        ($1,date_trunc('hour',now(),'UTC') - interval '1 day','omen',5),($1,date_trunc('hour',now(),'UTC'),'send',9)`, [wid]);
+      const { same } = (await db.query(`SELECT date_trunc('hour',now(),'UTC') - interval '1 day' >= date_trunc('month',now(),'UTC') AS same`)).rows[0];
+      assert.deepEqual(ok(await local('GET', base)).decisions, { month: same ? 12 : 7, day: 7 });
+      await db.query('ROLLBACK TO SAVEPOINT decisions');
       error(await local('POST', `${base}/credits`, { amountCents: 1000, reason: 'Goodwill after an outage' }, 'live', once('refused-3')), 403, 'OPERATOR_REQUIRED');
       await setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Bane operator']);
 
@@ -25933,7 +26008,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const path = '/v1/rules', recipes = path + '/recipes';
         const catalog = await call('GET', recipes);
         assert.deepEqual(catalog.groups.map((g: Json) => g.id), ['notify', 'pass', 'junk', 'ai']);
-        assert.equal(catalog.decisionPricePerThousand, '0.10');
+        assert.equal(catalog.decisionPricePerThousand, '0.00', 'AI rules are free; the deprecated price stays.');
         assert.deepEqual(catalog.data.filter((r: Json) => r.decisions).map((r: Json) => r.id), ['label-by-meaning', 'alert-by-meaning']);
         assert.deepEqual(catalog.data.find((r: Json) => r.id === 'slack').fields, [{ name: 'channel', type: 'slack', label: 'Slack channel', placeholder: null, hint: null }]);
         await call('POST', '/v1/endpoints', { type: 'slack', name: 'recipe-chat', url: 'https://hooks.slack.com/services/T0RECIPE/B0RECIPE/synthetic' }, 201);
@@ -26266,7 +26341,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.deepEqual((await call('POST', path + '/check', { source: broken.rules[0].source, key: 'broken' })).diagnostics[0].rule, 'broken');
         // Recipes, templates and typings: decisions, and omens only on the aliases.
         const recipes = await call('GET', path + '/recipes'), recipesThen = await call('GET', legacy + '/recipes');
-        assert.deepEqual([recipes.decisionPricePerThousand, recipes.omenPricePerThousand, recipesThen.omenPricePerThousand, recipesThen.decisionPricePerThousand], ['0.10', undefined, '0.10', undefined]);
+        assert.deepEqual([recipes.decisionPricePerThousand, recipes.omenPricePerThousand, recipesThen.omenPricePerThousand, recipesThen.decisionPricePerThousand], ['0.00', undefined, '0.00', undefined]);
         assert.deepEqual([recipes.data.filter((r: Json) => r.decisions).map((r: Json) => r.id), recipesThen.data.filter((r: Json) => r.omens).map((r: Json) => r.id)], [['label-by-meaning', 'alert-by-meaning'], ['label-by-meaning', 'alert-by-meaning']]);
         // Each name's typings declare its own words and type-check its own templates (TypeScript itself checks them): the
         // alias answers the declarations from before the rename, and the rule ones also declare omens and Omen, deprecated,

@@ -79,6 +79,7 @@ export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; child
         <div className="usage-prices">
           <dl>
             <div><dt>Email</dt><dd>{pricing ? `${money(pricing.perThousand)} per 1,000, sent or received` : <Skeleton width={200} height={16} />}</dd></div>
+            <div><dt>AI rules</dt><dd>Free</dd></div>
             <div><dt>Free each month</dt><dd>{pricing ? `${number(pricing.freeSentEmails)} sent, ${number(pricing.freeReceivedEmails)} received` : <Skeleton width={160} height={16} />}</dd></div>
             <div><dt>Stored past 90 days</dt><dd>{pricing && b ? `${gigabytes(pricing.freeStorageBytes)} free, then ${usd(priceUc(b.prices.storagePerGbMonth))} per GB-month` : <Skeleton width={220} height={16} />}</dd></div>
           </dl>

@@ -12,7 +12,7 @@ import { Link, useNavigate } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, ConfirmDialog, Dialog, Field, Input, Select, type SelectOption } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { useApiDef, useApiQuery } from '../../data/context'
+import { useApiDef } from '../../data/context'
 import { queries } from '../../data/queries'
 import { request } from '../../data/live'
 import { staleAfterWrite } from '../../data/invalidation'
@@ -199,7 +199,6 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   useEffect(() => { if (open && split && base && !base.rule && !plan) setPlan({ ...base.plan, split: true, condition: split, otherwise: base.plan.then }) }, [open, split, base, plan])
   // Rules the builder doesn't draw (ready-made ones, scripts) keep running beside it.
   const others = (opened?.entry.rules ?? entry?.rules ?? []).filter(key => key !== base?.rule?.key).length
-  const catalog = useApiQuery(['rule-recipes'], (_api, signal) => request<{ decisionPricePerThousand: string }>('/v1/rules/recipes', { signal }), { enabled: open && draft.condition === 'ai' })
   const set = (patch: Partial<Plan>) => { setPlan({ ...draft, ...patch }); setProblem(null); setErrors({}) }
   const refresh = () => client.invalidateQueries({ predicate: query => staleAfterWrite(query.queryKey, false) })
   const dirty = step !== 'done' && (plan !== null || form.address !== initial || !!form.displayName || !!form.lifetime || !!form.publicAddress)
@@ -437,7 +436,6 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
           {draft.condition !== 'attachment' && <Field label={<span className="sr-only">{conditions.find(c => c.value === draft.condition)!.label}</span>} htmlFor="builder-value" error={errors.value}>
             <Input id="builder-value" value={draft.value} placeholder={conditions.find(c => c.value === draft.condition)!.placeholder} autoComplete="off" onChange={e => set({ value: e.target.value })} aria-invalid={!!errors.value || undefined} />
           </Field>}
-          {draft.condition === 'ai' && <p className="builder-note">Checked by AI · ${catalog.data?.decisionPricePerThousand ?? '0.10'} per 1,000 emails</p>}
         </div>}
         {others > 0 && stepsPath && <FlowItem><Link to={stepsPath} onClick={leaveTo(stepsPath)}>{others} more {others === 1 ? 'rule' : 'rules'}</Link></FlowItem>}
       </FlowStage>

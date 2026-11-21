@@ -68,7 +68,7 @@ The list is complete: routing targets and rule targets always show, and webhooks
 **New address** asks for the address (and, folded away, its lifetime and reply-as address), then where its mail goes, drawn as the flow is:
 
 - **One destination:** picked from its inbox, another inbox, a destination (Slack, Discord, a webhook, a forward), stored with no inbox, dropped, or a new inbox, Slack, Discord, webhook or forward made right there. Slack's and Discord's fields say where their URL comes from.
-- **Split it two ways:** a rule checks one thing (the subject mentions, the email mentions, the sender is, it has an attachment, or it looks like something, which the AI checks at $0.10 per 1,000 emails) and the flow forks: **If yes** to one destination, **Otherwise** to another.
+- **Split it two ways:** a rule checks one thing (the subject mentions, the email mentions, the sender is, it has an attachment, or it looks like something, which the AI checks for free) and the flow forks: **If yes** to one destination, **Otherwise** to another.
 
 Save shows the result, titled with the address, with **Test**. New address turns away an address that exists (with **Open it**), and a `*` (a catch-all or wildcard) gets a button to that route's editor. Closing it with something typed asks first.
 

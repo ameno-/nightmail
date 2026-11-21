@@ -6523,7 +6523,7 @@ export const getBilling = <ThrowOnError extends boolean = false>(options?: Optio
 /**
  * Metered usage by day, hour or month
  *
- * Hosted only. Metered quantities per meter and period, UTC, the same counts billing prices (sent recipients, received messages, emails checked by AI decisions, stored bytes). Received mail and AI decisions are listed only for credentials that may read every received message (owners, admins and manage credentials). At most 400 days, or 31 days by the hour.
+ * Hosted only. Metered quantities per meter and period, UTC: the counts billing prices (sent recipients, received messages, stored bytes) and the emails AI decisions checked, which are free. Received mail and AI decisions are listed only for credentials that may read every received message (owners, admins and manage credentials). At most 400 days, or 31 days by the hour.
  */
 export const getBillingUsage = <ThrowOnError extends boolean = false>(options?: Options<GetBillingUsageData, ThrowOnError>): RequestResult<GetBillingUsageResponses, GetBillingUsageErrors, ThrowOnError> => (options?.client ?? client).get<GetBillingUsageResponses, GetBillingUsageErrors, ThrowOnError>({
     security: [

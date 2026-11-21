@@ -520,7 +520,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const keptStore=stores(keptReceipt);
   const mightKeep=initiallyKept||possibleKept;
   const readStarted=performance.now();
-  let copied:Awaited<ReturnType<typeof copyWorkspaceRaw>>;const bill:{position:BillingPosition|null}={position:null};
+  let copied:Awaited<ReturnType<typeof copyWorkspaceRaw>>;
   try {
     copied=await copyWorkspaceRaw(s3,receipt.region,receipt.bucket,sourceKey,store.rawKey,receipt.recipients,initiallyKept?'kept':'raw',receipt.notification.stagingEtag as string|undefined,async size=>{
       reserveMime(size);
@@ -546,8 +546,8 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
       }
       // Charged ahead: the job runs again when those bytes have refilled, and then finds them reserved.
       if(reserved.rows[0]!.due) throw new JobDeferred(reserved.rows[0]!.due);
-      const billing=bill.position=reserved.rows[0]!.billing;
-      // BYO workspaces pay SES themselves and are never held; their storage and AI decisions still bill and stop.
+      const billing=reserved.rows[0]!.billing;
+      // BYO workspaces pay SES themselves and are never held; their storage still bills.
       if(billing?.receiveHeld && receipt.binding?.kind!=='byo')throw new BillingHold();
     }, store.r2 ? store.objects : undefined);
   } catch (error) {
@@ -615,7 +615,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   verdicts.forwardEligible=forwardEligibility(message,email?.headers.map(h=>h.key)??[]);
   try {
     if(receipt.routing)Object.assign(verdicts,{ritualVerified:verifiedAuthor});
-    if(receipt.routing?.programs){const {ritualPipeline,projectEmail}=await import('./ritual-pipeline.js');const evaluated=await ritualPipeline(runtime,scope.workspaceId,receipt.routing,projectEmail(message,attachments,verifiedAuthor),undefined,false,receipt.createdAt,{omens:bill.position?.omens!==false});plan=evaluated.plan;Object.assign(verdicts,{ritualScores:evaluated.answers},evaluated.omenCalls?{omenCalls:evaluated.omenCalls}:{},evaluated.acted.length?{ritualsActed:evaluated.acted}:{});}
+    if(receipt.routing?.programs){const {ritualPipeline,projectEmail}=await import('./ritual-pipeline.js');const evaluated=await ritualPipeline(runtime,scope.workspaceId,receipt.routing,projectEmail(message,attachments,verifiedAuthor),undefined,false,receipt.createdAt);plan=evaluated.plan;Object.assign(verdicts,{ritualScores:evaluated.answers},evaluated.omenCalls?{omenCalls:evaluated.omenCalls}:{},evaluated.acted.length?{ritualsActed:evaluated.acted}:{});}
     if(!initiallyKept&&keptRoute(plan)){
       if(unverifiedKept)throw new JobDeferred(new Date(Date.now()+60000).toISOString());
       if(!copied.large)await keptStore.objects.put(keptStore.rawKey,raw,'message/rfc822');

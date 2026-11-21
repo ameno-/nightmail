@@ -408,7 +408,7 @@ export type RitualRecipe = {
   /** What it does, with {field} where each parameter goes. */
   sentence: string;
   fields: RecipeField[];
-  /** Asks the AI about each email (a decision), billed per email checked. */
+  /** Asks the AI about each email (a decision, free). */
   decisions: boolean;
   stage: RecipeStage;
   /** false: not in listRuleRecipes (the dashboard's two-way rules, built by its address builder); createRuleFromRecipe takes it. */

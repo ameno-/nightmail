@@ -3233,7 +3233,9 @@ export type RuleRecipes = {
     }>;
     data: Array<RuleRecipe>;
     /**
-     * USD per 1,000 emails an AI decision checks.
+     * Deprecated: AI decisions are free, so this is always "0.00".
+     *
+     * @deprecated
      */
     decisionPricePerThousand: string;
 };
@@ -3249,7 +3251,7 @@ export type RuleRecipe = {
     sentence: string;
     fields: Array<RuleRecipeField>;
     /**
-     * Asks the AI about each email (an AI decision), billed per email checked. Saving one lets the AI read mail at those addresses’ domains.
+     * Asks the AI about each email (an AI decision). AI rules are free. Saving one lets the AI read mail at those addresses’ domains.
      */
     decisions: boolean;
 };
@@ -3275,7 +3277,9 @@ export type RitualRecipes = {
     }>;
     data: Array<RitualRecipe>;
     /**
-     * USD per 1,000 emails an AI decision checks.
+     * Deprecated: AI decisions are free, so this is always "0.00".
+     *
+     * @deprecated
      */
     omenPricePerThousand: string;
 };
@@ -3291,7 +3295,7 @@ export type RitualRecipe = {
     sentence: string;
     fields: Array<RitualRecipeField>;
     /**
-     * Asks the AI about each email (an AI decision), billed per email checked. Saving one lets the AI read mail at those addresses’ domains.
+     * Asks the AI about each email (an AI decision). AI rules are free. Saving one lets the AI read mail at those addresses’ domains.
      */
     omens: boolean;
 };
@@ -6835,11 +6839,13 @@ export type BillingSummary = {
          */
         emailPerThousand: string;
         /**
-         * USD per 1,000 emails an AI decision checks.
+         * Deprecated: AI decisions are free, so this is always "0.00".
+         *
+         * @deprecated
          */
         decisionPerThousand: string;
         /**
-         * Deprecated: decisionPerThousand.
+         * Deprecated: decisionPerThousand, always "0.00".
          *
          * @deprecated
          */
@@ -6891,7 +6897,7 @@ export type BillingUsagePoint = {
     start: string;
     meter: 'send' | 'receive' | 'omen' | 'storage' | 'byo_send' | 'byo_receive';
     /**
-     * send: recipients; receive: messages; omen: emails checked by AI decisions (the meter keeps its name from before the rename); storage: billable byte-days beyond the free GB; byo_*: reported only, $0.
+     * send: recipients; receive: messages; omen: emails checked by AI decisions, which are free (the meter keeps its name from before the rename); storage: billable byte-days beyond the free GB; byo_*: reported only, $0.
      */
     quantity: string;
 };
