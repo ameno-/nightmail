@@ -17623,8 +17623,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   });
 
   test('BYO stack callback: a stack connects itself once its role is proved, and only its own stack updates or deletes it',async t=>{
-    const [{nodeRuntime},{createApp},{regionalByoJobs},{JobDeferred},{ensureRegionSettings},{STSClient},{CloudFormationClient},{setByoV2}]=await Promise.all([
-      import('./src/adapters/node.js'),import('./src/app.js'),import('./src/byo-regional.js'),import('./src/jobs.js'),import('./src/ses-region-state.js'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-cloudformation'),import('./scripts/set-byo-v2.js')]);
+    const [{nodeRuntime},{createApp},{regionalByoJobs,queueByoHealth},{JobDeferred},{ensureRegionSettings},{STSClient},{CloudFormationClient},{SESv2Client},{setByoV2}]=await Promise.all([
+      import('./src/adapters/node.js'),import('./src/app.js'),import('./src/byo-regional.js'),import('./src/jobs.js'),import('./src/ses-region-state.js'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-cloudformation'),import('@aws-sdk/client-sesv2'),import('./scripts/set-byo-v2.js')]);
     const db=await fixtureDatabase(t),user=await sessionFixture(t),account='333344445555',other='666677778888',platform='000044445555',endpoint='https://byo-acceptance.bane.dev/v1/events/ses';
     const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'stack-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:`https://nightmail-byo-templates-${platform}.s3.us-east-2.amazonaws.com/byo/6.0.yaml`,BYO_EVENTS_ORIGIN:'https://events.byo-acceptance.bane.dev'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);runtime.snsCertificateState=new SnsCertificateState();
@@ -17656,12 +17656,19 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     t.mock.method(STSClient.prototype,'send',async function(this:InstanceType<typeof STSClient>,cmd:any){
       const key=(await this.config.credentials()).accessKeyId,i=cmd.input;assert.equal(cmd.constructor.name,'AssumeRoleCommand');
       if(i.RoleArn===`arn:aws:iam::${platform}:role/nightmail-byo-broker`){assert.equal(key,'stack-fixture-platform');assert.equal(i.RoleSessionName,'nightmail-broker');return {Credentials:{AccessKeyId:'stack-fixture-broker',SecretAccessKey:'fixture-only',SessionToken:'broker',Expiration:new Date(Date.now()+3600000)}};}
-      assert.equal(key,'stack-fixture-broker');assert.equal(i.SourceIdentity,cid);assert.match(i.RoleSessionName,/^nightmail-(?:scan|stack)$/);
+      assert.equal(key,'stack-fixture-broker');assert.equal(i.SourceIdentity,cid);assert.match(i.RoleSessionName,/^nightmail-(?:scan|stack|update|quota)$/);
       if(propagating || i.RoleArn!==role || i.ExternalId!==external)throw Object.assign(new Error('fixture denial'),{name:'AccessDenied'});
       return {AssumedRoleUser:{Arn:`arn:aws:sts::${account}:assumed-role/${stack}/${i.RoleSessionName}`},Credentials:{AccessKeyId:'stack-fixture-customer',SecretAccessKey:'fixture-only',SessionToken:i.Policy,Expiration:new Date(Date.now()+900000)}};
     });
+    const changeSets:Json[]=[];
     t.mock.method(CloudFormationClient.prototype,'send',async function(this:InstanceType<typeof CloudFormationClient>,cmd:any){
       const policy=JSON.parse((await this.config.credentials()).sessionToken!),allows=(action:string)=>assert.ok(iamAllows(policy.Statement,action,stackId,{'aws:RequestedRegion':'us-east-2'}),action);
+      if(cmd.constructor.name==='CreateChangeSetCommand'){
+        // Only Nightmail's newest published template, under its update prefix, and the customer still runs it.
+        assert.equal(cmd.input.StackName,stackId);assert.ok(iamAllows(policy.Statement,'cloudformation:CreateChangeSet',stackId,{'aws:RequestedRegion':'us-east-2','cloudformation:TemplateUrl':cmd.input.TemplateURL,'cloudformation:ChangeSetName':cmd.input.ChangeSetName}));
+        assert.equal(iamAllows(policy.Statement,'cloudformation:ExecuteChangeSet',stackId,{'aws:RequestedRegion':'us-east-2'}),false);
+        changeSets.push(cmd.input);return {Id:`arn:aws:cloudformation:us-east-2:${account}:changeSet/${cmd.input.ChangeSetName}/${randomUUID()}`};
+      }
       if(cmd.constructor.name==='DescribeStackResourceCommand'){
         assert.equal(cmd.input.StackName,stackId);assert.equal(cmd.input.LogicalResourceId,'Connection');allows('cloudformation:DescribeStackResource');if(cfDenied || propagating)throw denial();
         return {StackResourceDetail:{StackId:stackId,LogicalResourceId:'Connection',PhysicalResourceId:physical,ResourceType:'Custom::NightmailConnection',ResourceStatus:resourceStatus}};
@@ -17670,6 +17677,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // A deleted or changed role denies even sessions issued before.
       if(cfDenied || propagating)throw denial();
       return {Stacks:[{StackId:stackId,StackStatus:stackStatus,Parameters:Object.entries({ExternalId:external,ConnectionId:cid,WorkspaceId:wid,ResourcePrefix:prefix}).map(([ParameterKey,ParameterValue])=>({ParameterKey,ParameterValue})),Outputs:[{OutputKey:'TemplateVersion',OutputValue:'6.0'}]}]};
+    });
+    let sending=true,production=true;
+    t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){
+      assert.equal(cmd.constructor.name,'GetAccountCommand');const policy=JSON.parse((await this.config.credentials()).sessionToken!);assert.ok(iamAllows(policy.Statement,'ses:GetAccount','*',{'aws:RequestedRegion':await this.config.region()}));
+      return {SendingEnabled:sending,EnforcementStatus:'HEALTHY',ProductionAccessEnabled:production,SendQuota:{Max24HourSend:50000,MaxSendRate:14,SentLast24Hours:3}};
     });
     const publish=async(message:string,type='Notification',topicArn=topic)=>{
       const signed:Record<string,string>=type==='Notification'?{Message:message,MessageId:randomUUID(),Timestamp:new Date().toISOString(),TopicArn:topicArn,Type:type}
@@ -17723,6 +17735,24 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await db.query('UPDATE provider_connections SET stack_template_version=NULL WHERE id=$1',[cid]);
     ok(await publish(request('Update',{PhysicalResourceId:cid,OldResourceProperties:{ConnectionId:cid}})),202);assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.equal(last().PhysicalResourceId,cid);assert.equal((await row()).stack_template_version,'6.0');
     ok(await publish(request('Update',{PhysicalResourceId:cid,OldResourceProperties:{ConnectionId:'conn_'+'f'.repeat(32)}})),202);assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');
+    // Update: a change set of the stack itself, from the newest template with every parameter kept; nothing runs until the customer does.
+    await db.query('UPDATE provider_connections SET stack_template_version=NULL WHERE id=$1',[cid]);
+    assert.equal(ok(await api(wid,'GET','/v1/connection')).connection.stack.updateAvailable,true);
+    const update=ok(await api(wid,'POST','/v1/connection/stack/update'));assert.equal(update.version,'6.0');assert.match(update.consoleUrl,/^https:\/\/us-east-2\.console\.aws\.amazon\.com\/cloudformation\/home\?region=us-east-2#\/stacks\/changesets\/changes\?stackId=/);
+    assert.equal(changeSets.length,1);assert.equal(changeSets[0].TemplateURL,`https://nightmail-byo-templates-${platform}.s3.us-east-2.amazonaws.com/byo/6.0.yaml`);assert.match(changeSets[0].ChangeSetName,/^nightmail-update-6-0-/);
+    assert.deepEqual(changeSets[0].Parameters,['ExternalId','ConnectionId','WorkspaceId','ResourcePrefix'].map(ParameterKey=>({ParameterKey,UsePreviousValue:true})));assert.deepEqual(changeSets[0].Capabilities,['CAPABILITY_NAMED_IAM']);
+    await db.query("UPDATE provider_connections SET stack_template_version='6.0' WHERE id=$1",[cid]);error(await api(wid,'POST','/v1/connection/stack/update'),409,'STACK_UP_TO_DATE');
+    // Health: hourly, per connection; a paused or sandboxed region and an unusable role are each reported, and nothing in AWS changes.
+    assert.ok(await queueByoHealth(runtime)>=1);assert.equal(await queueByoHealth(runtime),0,'One check per connection per hour');
+    const health=async()=>{const j=(await db.query("SELECT id,payload FROM jobs WHERE workspace_id=$1 AND type='byo.health' ORDER BY created_at DESC LIMIT 1",[wid])).rows[0];await regionalByoJobs['byo.health']!(runtime,j.payload,{workspaceId:wid,id:j.id,attempts:1});return ok(await api(wid,'GET','/v1/connection')).connection.health;};
+    await db.query("UPDATE provider_connection_regions SET sending_state='ready' WHERE connection_id=$1 AND region='us-east-2'",[cid]);
+    assert.deepEqual((await health()).issues,[]);
+    sending=false;production=false;
+    assert.deepEqual((await health()).issues.map((i:Json)=>[i.code,i.region]),[['SENDING_PAUSED','us-east-2'],['PRODUCTION_ACCESS_LOST','us-east-2']]);
+    assert.match(ok(await api(wid,'GET','/v1/me')).connection.attention,/paused sending/);
+    assert.equal((await db.query("SELECT scan_facts->>'sendingEnabled' AS s FROM provider_connection_regions WHERE connection_id=$1 AND region='us-east-2'",[cid])).rows[0].s,'false');
+    propagating=true;assert.deepEqual((await health()).issues.map((i:Json)=>i.code),['ROLE_UNREACHABLE']);propagating=false;sending=true;production=true;
+    assert.deepEqual((await health()).issues,[]);assert.equal(ok(await api(wid,'GET','/v1/me')).connection.attention,undefined);
     // Delete: another stack's, or another connection's resource, is acknowledged and changes nothing.
     ok(await publish(request('Delete',{PhysicalResourceId:cid,StackId:stackId.replace(/[0-9a-f-]{36}$/,randomUUID())})),202);assert.equal(last().Status,'SUCCESS');
     ok(await publish(request('Delete',{PhysicalResourceId:'conn_'+'e'.repeat(32)})),202);assert.equal(last().Status,'SUCCESS');assert.equal((await stackJobs()).filter(j=>j.payload.request.RequestType==='Delete').length,0);
@@ -25727,7 +25757,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   });
 
   test('BYO contract: every session the code asks for is allowed by every supported role template',async()=>{
-    const {byoSessionStatements,BYO_TEMPLATE_VERSIONS}=await import('./src/byo-permissions.js'),{setupResources}=await import('./src/ses-setup.js');
+    const {byoSessionStatements,BYO_TEMPLATE_VERSIONS,byoTemplateUrl}=await import('./src/byo-permissions.js'),{setupResources}=await import('./src/ses-setup.js'),templateUrl=byoTemplateUrl('009882681002','6.0');
     const account='123456789012',connection=`conn_${'ab'.repeat(16)}`,region='eu-west-1',claim=randomUUID(),prefix=setupResources(connection,'byo').topicName.slice(0,-9);
     const params:Record<string,string>={PlatformAccount:'009882681002','AWS::AccountId':account,'AWS::Region':'us-east-2',ResourcePrefix:prefix,ConnectionId:connection,WorkspaceId:`ws_${'cd'.repeat(16)}`,EventsHost:'events.nightmail.dev','AWS::StackName':'Nightmail-'+connection.slice(-20),ExternalId:'external'};
     // A pattern in a session policy stands for the resources it names: check one of each.
@@ -25736,18 +25766,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const feedback=(kind:'Resource'|'Request')=>({[`aws:${kind}Tag/nightmail:owner`]:'nightmail',[`aws:${kind}Tag/nightmail:installation-id`]:connection,[`aws:${kind}Tag/nightmail:purpose`]:'ses-feedback'});
     const own=Object.fromEntries(Object.entries(tags).map(([k,v])=>['aws:ResourceTag/nightmail:'+k,v])),create={...Object.fromEntries(Object.entries(tags).map(([k,v])=>['aws:RequestTag/nightmail:'+k,v])),'aws:TagKeys':Object.keys(tags).map(k=>'nightmail:'+k)};
     // The request facts AWS adds: tags of the identity and the request for domain calls, and the subscription endpoint.
-    const context=(action:string,resource:string)=>({'aws:RequestedRegion':region,'ses:ApiVersion':'2','ses:OpenTrackingEnabled':'true','ses:ClickTrackingEnabled':'true',
+    const context=(action:string,resource:string)=>({'aws:RequestedRegion':region,'ses:ApiVersion':'2','ses:OpenTrackingEnabled':'true','ses:ClickTrackingEnabled':'true','cloudformation:TemplateUrl':templateUrl,'cloudformation:ChangeSetName':'nightmail-update-6-0-x',
       ...(action==='sns:Subscribe'?{'sns:Protocol':'https','sns:Endpoint':'https://events.nightmail.dev/v1/events/ses'}:{}),
       ...(resource.includes(':identity/')?{...(action==='ses:CreateEmailIdentity'?{}:own),...(['ses:CreateEmailIdentity','ses:TagResource'].includes(action)?create:{})}
         // Nightmail's own configuration sets and topic carry this connection's tags from creation on.
         :resource!=='*'?{...feedback('Resource'),...(['ses:CreateConfigurationSet','sns:CreateTopic','ses:TagResource','sns:TagResource'].includes(action)?{...feedback('Request'),'aws:TagKeys':['nightmail:owner','nightmail:installation-id','nightmail:purpose']}:{})}:{})});
-    const purposes=['scan','provision','cleanup','send','template','quota','verify','read','delete','mailfrom','stack','account'] as const,templates=await byoTemplates();
+    const purposes=['scan','provision','cleanup','send','template','quota','verify','read','delete','mailfrom','stack','account','update'] as const,templates=await byoTemplates();
     // The code knows exactly the published versions.
     assert.deepEqual(templates,BYO_TEMPLATE_VERSIONS.map(v=>`byo-templates/${v}.yaml`));
     let checked=0;
     for(const file of templates){
       const role=byoRoleStatements(await byoTemplate(file,params,[region]));
-      for(const purpose of purposes)for(const s of byoSessionStatements(purpose,{region,account,connectionId:connection,domain:'example.com',template:'bane-pilot',stack:params['AWS::StackName']}))
+      for(const purpose of purposes)for(const s of byoSessionStatements(purpose,{region,account,connectionId:connection,domain:'example.com',template:'bane-pilot',stack:params['AWS::StackName'],templateUrl,changeSet:'nightmail-update-6-0-x'}))
         for(const action of s.Action)for(const resource of [s.Resource].flat().map(sample)){
           checked++;assert.ok(iamAllows(role,action,resource,context(action,resource)),`${file}: the ${purpose} session's ${action} on ${resource} isn't allowed by the role`);
         }

@@ -550,6 +550,10 @@
               "verified"
             ],
             "description": "Domains claimed in this workspace and how many can send."
+          },
+          "attention": {
+            "type": "string",
+            "description": "A connected AWS account's most pressing health finding, for a banner; absent when nothing needs attention."
           }
         },
         "required": [
@@ -16113,6 +16117,21 @@
                 ],
                 "description": "The role template version the stack reports."
               },
+              "latest": {
+                "type": "string",
+                "description": "The newest published role template."
+              },
+              "updateAvailable": {
+                "type": "boolean",
+                "description": "updateConnectionStack can prepare an update to the newest template."
+              },
+              "features": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Features the stack's template grants."
+              },
               "deleted": {
                 "type": "boolean",
                 "description": "The stack was deleted in AWS."
@@ -16127,10 +16146,51 @@
             },
             "required": [
               "version",
+              "latest",
+              "updateAvailable",
+              "features",
               "deleted",
               "error"
             ],
             "description": "A connected AWS account's CloudFormation stack (regional bring-your-own AWS only)."
+          },
+          "health": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "checkedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "issues": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "region": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "checkedAt",
+              "issues"
+            ],
+            "description": "The connected account's last health check: what needs attention."
           },
           "scan": {
             "type": "object",
@@ -16598,7 +16658,8 @@
           "roleArn",
           "templateVersion",
           "quickCreateUrl",
-          "stack"
+          "stack",
+          "health"
         ]
       },
       "ConnectionRegions": {
@@ -16722,6 +16783,26 @@
           "confirm"
         ],
         "additionalProperties": false
+      },
+      "ConnectionStackUpdate": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "changeSetId": {
+            "type": "string"
+          },
+          "consoleUrl": {
+            "type": "string",
+            "format": "uri"
+          }
+        },
+        "required": [
+          "version",
+          "changeSetId",
+          "consoleUrl"
+        ]
       },
       "PublicStats": {
         "type": "object",
@@ -74836,6 +74917,152 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request POST \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/connection/regions/us-east-1/production-access\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"websiteUrl\": \"https://example.com\",\n  \"useCase\": \"We send receipts and account notices to our own customers, who signed up for them.\",\n  \"mailType\": \"TRANSACTIONAL\",\n  \"confirm\": true\n}'"
+          }
+        ]
+      }
+    },
+    "/v1/connection/stack/update": {
+      "post": {
+        "operationId": "updateConnectionStack",
+        "tags": [
+          "Workspaces"
+        ],
+        "security": [
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "description": "Prepare an update of the connected account's stack to the newest published role template, keeping every parameter. Returns the AWS console page of the change set, which the customer reviews and runs; nothing changes until they do.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionStackUpdate"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-nightmail-permission": {
+          "person": "admin",
+          "credential": "dashboard",
+          "text": "People only: an owner or admin in a signed-in dashboard session. Never an API key."
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { updateConnectionStack } from '@nightmail/sdk';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await updateConnectionStack({\n  client,\n  throwOnError: true,\n});\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url \"${NIGHTMAIL_ORIGIN}/v1/connection/stack/update\" \\\n  --header \"Origin: $NIGHTMAIL_ORIGIN\" \\\n  --cookie \"$NIGHTMAIL_COOKIE_JAR\""
           }
         ]
       }
