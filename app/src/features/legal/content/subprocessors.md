@@ -22,7 +22,7 @@ These providers process personal data for Nightmail on behalf of **Anomaly Innov
 ## Other recipients
 
 - **Anomaly account (account.anoma.ly)** is Anomaly's own sign-in service. It shares your name, email address, account identifiers and sign-in method with Nightmail.
-- **Google** is a sign-in provider behind your Anomaly account; Google's own privacy policy applies to your Google account.
+- **GitHub** and **Google** are the sign-in providers behind your Anomaly account; each one's own privacy policy applies to your account there.
 - **Domain tools.** Nightmail looks up public DNS records (through Cloudflare's resolver) and domain registration data (RDAP) for customer domains. If you use one-click DNS setup (Domain Connect), you're sent to your DNS provider.
 - **Services customers connect.** Webhooks, Slack and Discord endpoints, forwarding addresses, MCP clients, mail clients and a customer's own AWS account receive data because the customer chose them. They aren't our subprocessors.
 

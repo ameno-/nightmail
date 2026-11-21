@@ -840,7 +840,9 @@ type SessionFixture = { userId: string; sessionId: string; token: string; cookie
 let authDb: pg.Client | undefined;
 let manager: SessionFixture | undefined;
 let fixtureWorker: ReturnType<typeof import('./src/adapters/node.js').nodeRuntime> | undefined;
-async function seedSession(db: pg.Client, options: { email?: string; hostedDomain?: string | null; verified?: boolean; linked?: boolean; userId?: string } = {}): Promise<SessionFixture> {
+// staff: the session signed in with Google Workspace, as Nightmail staff do; staff tools (src/operator.ts) and hosted
+// workspace creation need it. Any other session is an ordinary member's.
+async function seedSession(db: pg.Client, options: { email?: string; hostedDomain?: string | null; verified?: boolean; linked?: boolean; userId?: string; staff?: boolean } = {}): Promise<SessionFixture> {
   const userId = options.userId ?? unique('acceptance-user');
   const sessionId = unique('acceptance-session');
   const token = createHash('sha256').update(randomUUID()).digest('base64url');
@@ -855,7 +857,7 @@ async function seedSession(db: pg.Client, options: { email?: string; hostedDomai
     const issuer = process.env.ACCOUNT_ISSUER ?? 'https://account.anoma.ly';
     await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$2,$3,$4)',[userId,'Synthetic acceptance operator',email,options.verified??true]);
     await db.query('INSERT INTO nightmail_oidc_identities VALUES($1,$2,$3)',[issuer,userId,userId]);
-    await db.query("INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES($1,$2,$3,$2,$4,now()+interval '1 hour')",[createHash('sha256').update(token).digest('hex'),userId,issuer,email]);
+    await db.query("INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,verified_email,staff,expires_at) VALUES($1,$2,$3,$2,$4,$5,now()+interval '1 hour')",[createHash('sha256').update(token).digest('hex'),userId,issuer,email,options.staff??false]);
     await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,'default','owner')",[randomUUID(),userId]);
     await db.query('COMMIT');
   } catch (cause) {
@@ -873,7 +875,8 @@ async function sessionFixture(t: TestContext, options: Parameters<typeof seedSes
 before(async () => {
   authDb = new pg.Client({ connectionString: FIXTURE_DATABASE_URL, connectionTimeoutMillis: 5_000, statement_timeout: 5_000 });
   await authDb.connect();
-  manager = await seedSession(authDb, { email: AUTH_EMAIL, userId: AUTH_SUBJECT, hostedDomain: null });
+  // The synthetic acceptance operator, signed in with Google Workspace as staff are.
+  manager = await seedSession(authDb, { email: AUTH_EMAIL, userId: AUTH_SUBJECT, hostedDomain: null, staff: true });
   const identity = ok(await http('GET', '/v1/me', MANAGER));
   assert.equal(identity.id, manager.userId, 'Fixture DB, session secret and API must match; no machine keys may be provisioned otherwise.');
   assert.equal(identity.email, AUTH_EMAIL);
@@ -933,12 +936,22 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     db:drizzle(db), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} };
   const {PROVIDER_IDENTITY_CLAIM} = await import('./src/account-policy.js');
   let nonce = '', email = approved, verified = true, subject = randomUUID(), useUserInfo = false, givenName: string | undefined;
-  // The provider identity behind the sign-in (Google Workspace domain); email never admits anyone.
-  let providerName = 'google', providerHd: string | null = 'example.org', providerVerified = true;
-  const upstream = () => providerHd ? {[PROVIDER_IDENTITY_CLAIM]:{provider:providerName,sub:'g-'+subject,email,email_verified:providerVerified,hd:providerHd}} : {};
+  // The provider identity behind the sign-in, as the account service sends it (null: no claim): Google's address,
+  // whether Google verified it and the Workspace domain (hd); GitHub's address only when it is the primary, verified one.
+  // The account's own address never admits anyone.
+  let providerName: 'google' | 'github' | null = 'google', providerHd: string | null = 'example.org', providerVerified = true, providerEmail: string | null = null;
+  const upstream = () => {
+    if (!providerName) return {};
+    const vouched = providerName === 'github' ? providerVerified ? {email:providerEmail ?? email,email_verified:true} : {} : {email:providerEmail ?? email,email_verified:providerVerified};
+    return {[PROVIDER_IDENTITY_CLAIM]:{provider:providerName,sub:`${providerName}-${subject}`,...vouched,...providerHd ? {hd:providerHd} : {}}};
+  };
+  // Hosted installations accept only the account service's methods, listed by acr and separated by spaces.
+  const config = (acr:string) => loadConfig({PUBLIC_URL:origin, BANE_ROOT_SECRET:'local-fixture-'.repeat(4), MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:acr});
+  assert.deepEqual(config('urn:anomaly:acr:github urn:anomaly:acr:google').accountRequiredAcr,['urn:anomaly:acr:github','urn:anomaly:acr:google']);
+  for (const acr of ['','1','urn:anomaly:acr:google 2','urn:anomaly:acr:google  urn:anomaly:acr:github']) assert.throws(() => config(acr),{code:'CONFIG_INVALID'},acr);
   // The first half exercises an installation without a required context; hosted config always sets one.
-  runtime.config.accountClient!.requiredAcr=undefined;
-  const googleAcr = 'urn:anomaly:acr:google';
+  runtime.config.accountRequiredAcr=undefined;
+  const googleAcr = 'urn:anomaly:acr:google', githubAcr = 'urn:anomaly:acr:github';
   let tokenAcr: string | undefined = googleAcr, peer = 0, pushed: URLSearchParams | undefined;
   // The account service's DPoP rules for a first-party client (packages/server/src/tokens.ts and dpop.ts): the code
   // exchange needs a proof (invalid_dpop_proof) carrying the server's nonce (use_dpop_nonce), the access token is bound
@@ -957,13 +970,17 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   t.mock.method(globalThis,'fetch',async (url: string|URL, init?: RequestInit) => {
     assert.equal(new URL(url).origin,issuer);
     switch(new URL(url).pathname) {
-      case '/.well-known/openid-configuration': return Response.json({issuer,authorization_endpoint:issuer+'/authorize',token_endpoint:issuer+'/token',jwks_uri:issuer+'/keys',userinfo_endpoint:issuer+'/userinfo',pushed_authorization_request_endpoint:runtime.config.accountClient?.requiredAcr ? issuer+'/par' : undefined,
+      case '/.well-known/openid-configuration': return Response.json({issuer,authorization_endpoint:issuer+'/authorize',token_endpoint:issuer+'/token',jwks_uri:issuer+'/keys',userinfo_endpoint:issuer+'/userinfo',pushed_authorization_request_endpoint:runtime.config.accountRequiredAcr ? issuer+'/par' : undefined,
         response_modes_supported:['query'],dpop_signing_alg_values_supported:['ES256','EdDSA']});
       case '/par': {
         pushed = new URLSearchParams(String(init?.body));
         assert.equal(pushed.get('client_id'),'dashboard');
         assert.ok(pushed.get('client_assertion'));
-        assert.deepEqual(JSON.parse(pushed.get('claims')!),{id_token:{acr:{essential:true,values:[googleAcr]},[PROVIDER_IDENTITY_CLAIM]:{essential:true}}});
+        // One required method is asked for; with several, none is, and the account service offers its own choice. Staff
+        // tools ask for Google.
+        const required = runtime.config.accountRequiredAcr!, asked = askFor ? [askFor] : required.length === 1 ? required : null;
+        assert.deepEqual(JSON.parse(pushed.get('claims')!),{id_token:{...asked ? {acr:{essential:true,values:asked}} : {},[PROVIDER_IDENTITY_CLAIM]:{essential:true}}});
+        assert.equal(pushed.get('acr_values'),null);
         assert.equal(pushed.get('scope'),'openid profile email');
         assert.ok(pushed.get('state'));assert.ok(pushed.get('nonce'));assert.ok(pushed.get('code_challenge'));
         return Response.json({request_uri:'urn:fixture:request',expires_in:60},{status:201});
@@ -991,11 +1008,12 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const request = (path:string, method:string, cookie='', body?:object) => app.fetch(new Request(origin+path,{method,headers:{origin,cookie,'content-type':'application/json','x-nightmail-client-ip':`192.0.2.${peer}`},body:body?JSON.stringify(body):undefined}),runtime);
   // The account service sends the browser back with response_mode=query: a cross-site top-level GET, without Origin.
   const navigate = (path:string, cookie='') => app.fetch(new Request(origin+path,{method:'GET',headers:{cookie,referer:issuer+'/','sec-fetch-site':'cross-site','sec-fetch-mode':'navigate','x-nightmail-client-ip':`192.0.2.${peer}`}}),runtime);
-  async function login(authorizationError?:string, callbackURL=origin+'/') {
-    peer++; pushed=undefined;
-    const start=await request('/api/auth/sign-in/account','POST','',{callbackURL});
+  let askFor: string | null = null;
+  async function login(authorizationError?:string, callbackURL=origin+'/', method?:'google') {
+    peer++; pushed=undefined; askFor=method ? googleAcr : null;
+    const start=await request('/api/auth/sign-in/account','POST','',{callbackURL,...method ? {method} : {}});
     assert.equal(start.status,200); const front=new URL((await start.json() as {url:string}).url).searchParams;
-    if (runtime.config.accountClient?.requiredAcr) assert.deepEqual([...front],[['client_id','dashboard'],['request_uri','urn:fixture:request']]);
+    if (runtime.config.accountRequiredAcr) assert.deepEqual([...front],[['client_id','dashboard'],['request_uri','urn:fixture:request']]);
     else assert.deepEqual(JSON.parse(front.get('claims')!),{id_token:{[PROVIDER_IDENTITY_CLAIM]:{essential:true}}});
     const params = pushed ?? front;
     nonce=params.get('nonce')!;assert.equal(params.get('code_challenge_method'),'S256');
@@ -1013,16 +1031,16 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   cleanup(t,async()=>{await db.query('DELETE FROM nightmail_waitlist WHERE email=ANY($1)',[waitlist.map(address=>address.toLowerCase())]);});
   const waitlisted = async (address:string) => (await db.query('SELECT email,name,attempts FROM nightmail_waitlist WHERE email=lower($1)',[address])).rows;
   const waitlistCookie = (response:Response) => response.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.waitlist='));
-  // Staff sign-up needs the provider identity of a staff Google Workspace domain. Nothing else admits a new subject:
-  // no claim, another provider, another domain. Each refusal is recorded by subject for the operator.
+  // Staff sign-up needs the provider identity of a staff domain. Nothing else admits a new subject: no claim, a provider
+  // the acr doesn't name, another domain, an address the provider didn't verify. Each refusal is recorded by subject.
   // Exactly the account service's staff rule: Google, a verified Google address, and hd in AUTH_STAFF_GOOGLE_DOMAINS.
   // Hosted and not invited, a refusal puts the verified address on the waitlist and says so; the screen reads the
   // address from a short-lived cookie the page can read. It is never a session.
-  for (const [name,hd,googleVerified] of [['google',null,true],['github','example.org',true],['google','other.example',true],['google','Example.org',true],['google','example.org',false]] as const) {
+  for (const [name,hd,googleVerified] of [[null,null,true],['github','example.org',true],['google','other.example',true],['google','Example.org',true],['google','example.org',false]] as const) {
     providerName=name;providerHd=hd;providerVerified=googleVerified;
     const refused=await login();
     assert.equal(refused.headers.get('location'),origin+'/?auth=waitlist',`${name}/${hd}/${googleVerified}`);
-    assert.deepEqual(await attempt(),{acr:googleAcr,provider:hd===null?null:name,provider_hd:hd,outcome:'not_approved'});
+    assert.deepEqual(await attempt(),{acr:googleAcr,provider:name,provider_hd:hd,outcome:'not_approved'});
     const notice=waitlistCookie(refused)!;
     assert.ok(notice.startsWith(`__Host-nightmail.waitlist=${encodeURIComponent(approved)};`) && /Max-Age=600/.test(notice) && /Secure/.test(notice) && !/HttpOnly/i.test(notice),notice);
     assert.ok(!refused.headers.getSetCookie().some(c=>c.startsWith('__Host-nightmail.session_token=')));
@@ -1035,16 +1053,22 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist');
   assert.deepEqual(await waitlisted(approved),[{email:approved,name:'Avery Example',attempts:6}]);
   subject=firstSubject;email=approved;givenName=undefined;
-  // The address is not an identity input: an unverified one neither blocks a staff admission nor its session.
+  // Hosted, a new subject needs a verified address whatever the method: a staff sign-in without one is refused before
+  // staff or an invitation is considered, plainly (there is no address to write to), and creates nothing.
   providerName='google';providerHd='example.org';providerVerified=true;verified=false;
+  const unverifiedStaff=await login();
+  assert.equal(unverifiedStaff.headers.get('location'),origin+'/?auth=error');
+  assert.ok(!unverifiedStaff.headers.getSetCookie().some(c=>c.startsWith('__Host-nightmail.session_token=')));
+  assert.deepEqual(await attempt(),{acr:googleAcr,provider:'google',provider_hd:'example.org',outcome:'email_unverified'});
+  assert.equal((await db.query('SELECT FROM nightmail_oidc_identities WHERE issuer=$1 AND subject=$2',[issuer,subject])).rowCount,0);
+  assert.deepEqual(await waitlisted(approved),[{email:approved,name:'Avery Example',attempts:6}],'An unverified sign-in neither adds nor counts an attempt');
+  verified=true;
   // The dashboard reopens as the account that just signed in (a browser can hold several).
   const landed=(response:Response)=>{const url=new URL(response.headers.get('location')!);assert.match(url.searchParams.get('account')??'',/^[0-9a-f-]{36}$/);url.searchParams.delete('account');return url.href;};
   const result=await login();assert.equal(landed(result),origin+'/');
   assert.deepEqual(await attempt(),{acr:googleAcr,provider:'google',provider_hd:'example.org',outcome:'signed_in:staff'});
   assert.ok(!waitlistCookie(result));
-  assert.deepEqual(await waitlisted(approved),[{email:approved,name:'Avery Example',attempts:6}],'An admitted sign-in neither adds nor counts an attempt');
-  assert.equal((await db.query('SELECT u.email_verified FROM nightmail_users u JOIN nightmail_oidc_identities i ON i.user_id=u.id WHERE i.issuer=$1 AND i.subject=$2',[issuer,subject])).rows[0].email_verified,false);
-  verified=true;
+  assert.deepEqual(await waitlisted(approved),[],'Admitted with its verified address, it leaves the waitlist');
   const session=result.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))!.split(';')[0]!;
   const me=await (await request('/v1/me','GET',session)).json() as {id:string;workspaceId:string;workspaces:{id:string;name:string}[]};
   // A staff sign-up starts its own workspace, named after the person (#92's naming).
@@ -1057,7 +1081,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   type Waitlist = {data:{email:string;name:string|null;attempts:number;firstAt:string;lastAt:string}[];nextCursor:string|null;total:number};
   const listWaitlist = async (query:string, cookie=session) => { const response=await request(`/v1/operator/waitlist${query}`,'GET',cookie); return {status:response.status,body:await response.json() as Waitlist & {error?:{code:string}}}; };
   for (const cookie of ['',session]) { const refusedList=await listWaitlist('',cookie); assert.deepEqual([refusedList.status,refusedList.body.error?.code],[403,'OPERATOR_REQUIRED']); }
-  await db.query("INSERT INTO nightmail_waitlist(email,name,first_at,last_at) VALUES($1,NULL,now()-interval '2 days',now()-interval '1 day')",[waitlist[1]]);
+  await db.query("INSERT INTO nightmail_waitlist(email,name,first_at,last_at,attempts) VALUES($1,NULL,now()-interval '2 days',now()-interval '1 day',1),($2,'Avery Example',now()-interval '1 day',now(),6)",[waitlist[1],approved]);
   await db.query("INSERT INTO platform_operators(user_id,role,reason) VALUES($1,'operator:read','waitlist acceptance fixture')",[me.id]);
   const tag=approved.slice(0,8), entry=(row:Waitlist['data'][number])=>[row.email,row.name,row.attempts];
   const listed=await listWaitlist(`?q=${tag}`);
@@ -1076,7 +1100,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const changed=await login();const newSession=changed.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))!.split(';')[0]!;
   assert.deepEqual([await waitlisted(email),(await waitlisted(approved)).length],[[],1],'An admitted, verified sign-in adds nothing');
   assert.equal((await request('/v1/me','GET',session)).status,401);
-  runtime.config.accountClient!.requiredAcr=googleAcr;
+  runtime.config.accountRequiredAcr=[googleAcr];
   const sessionCount = async () => (await db.query('SELECT count(*) FROM nightmail_sessions WHERE issuer=$1 AND subject=$2',[issuer,subject])).rows[0].count;
   const before = await sessionCount();
   for (const wrong of [undefined,'urn:anomaly:acr:passkey']) {
@@ -1109,7 +1133,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   // A seat bound by subject (scripts/cutover-fresh-start.ts --owner-sub): a refused subject the operator bound to a
   // user lands in that user's workspace with its role. Addresses never decide: the same address under another
   // subject gets nothing.
-  subject=randomUUID();subjects.push(subject);email=`seat-${randomUUID()}@example.org`;providerHd=null;waitlist.push(email);
+  subject=randomUUID();subjects.push(subject);email=`seat-${randomUUID()}@example.org`;providerName=null;providerHd=null;waitlist.push(email);
   assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist');
   assert.deepEqual(await attempt(),{acr:googleAcr,provider:null,provider_hd:null,outcome:'not_approved'});
   const seatId=randomUUID();
@@ -1139,6 +1163,83 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   // Workspace creation follows the sign-in's staff status, not the address.
   const created=await request('/v1/workspaces','POST',seatSession,{name:'Not staff'});
   assert.equal(created.status,403);assert.equal(((await created.json()) as {error:{code:string}}).error.code,'SIGNUP_NOT_APPROVED');
+
+  // GitHub and Google, as hosted: sign-in asks for no method, so the account service offers both, and the acr names
+  // the one used. Staff is a Google Workspace sign-in only. Hosted, nothing is admitted without a verified address.
+  runtime.config.accountRequiredAcr=[githubAcr,googleAcr];
+  const use=(method:'github'|'google')=>{providerName=method;tokenAcr=method==='github'?githubAcr:googleAcr;providerHd=null;providerEmail=null;providerVerified=true;};
+  const fresh=(address:string)=>{subject=randomUUID();subjects.push(subject);email=address;waitlist.push(address);verified=true;};
+  const accountOf=(response:Response)=>new URL(response.headers.get('location')!).searchParams.get('account');
+  const sessionOf=(response:Response)=>response.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))!.split(';')[0]!;
+  const errorOf=async(response:Response)=>[response.status,((await response.json()) as {error?:{code:string}}).error?.code];
+  use('google');providerHd='example.org';fresh(`staff-${randomUUID()}@example.org`);
+  const staffIn=await login(), staffSubject=subject, staffEmail=email, staffUser=accountOf(staffIn)!, staffSession=sessionOf(staffIn);
+  assert.equal(landed(staffIn),origin+'/');
+  assert.deepEqual(await attempt(),{acr:googleAcr,provider:'google',provider_hd:'example.org',outcome:'signed_in:staff'});
+  for (const method of ['github','google'] as const) {
+    use(method);if (method==='google') providerHd='example.org';fresh(`${method}-${randomUUID()}@example.org`);verified=false;
+    assert.equal((await login()).headers.get('location'),origin+'/?auth=error',`${method}: an unverified address is refused`);
+    assert.equal((await attempt()).outcome,'email_unverified');
+    assert.deepEqual(await waitlisted(email),[]);
+    use(method);if (method==='google') providerHd='other.example';fresh(`${method}-${randomUUID()}@example.net`);
+    assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist',`${method}: another domain is waitlisted`);
+    assert.equal((await attempt()).outcome,'not_approved');
+  }
+  // Review 1: GitHub proves no Workspace membership. Its verified address at the staff domain (a former colleague's,
+  // say) is not staff: no account, no workspace, the waitlist. Nor is a Google account outside a Workspace.
+  use('github');fresh(`former-${randomUUID()}@example.org`);
+  assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist');
+  assert.deepEqual(await attempt(),{acr:githubAcr,provider:'github',provider_hd:null,outcome:'not_approved'});
+  assert.equal((await db.query('SELECT FROM nightmail_oidc_identities WHERE issuer=$1 AND subject=$2',[issuer,subject])).rowCount,0);
+  use('google');fresh(`consumer-${randomUUID()}@example.org`);
+  assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist');
+  // A method the installation doesn't list is refused before anything else.
+  use('github');tokenAcr='urn:anomaly:acr:passkey';fresh(`other-${randomUUID()}@example.org`);
+  assert.equal((await login()).headers.get('location'),origin+'/?auth=method_required');
+  // Review 3: an invitation needs a mailbox the sign-in proves now, a Google-hosted one (Gmail or Workspace). GitHub's
+  // verified address doesn't prove it, even matching the invitation and following its link; nor does a Google account
+  // on another provider's address.
+  const staffWorkspace=((await (await request('/v1/me','GET',staffSession)).json()) as {workspaceId:string}).workspaceId;
+  const invite=async(address:string)=>{const id=randomUUID();await db.query("INSERT INTO workspace_invitations(id,workspace_id,email,role,status,expires_at,inviter_id) VALUES($1,$2,$3,'member','pending',now()+interval '1 hour',$4)",[id,staffWorkspace,address,staffUser]);return {id,url:origin+'/?invitation='+id};};
+  for (const [method,address] of [['github',`invited-${randomUUID()}@example.net`],['google',`invited-${randomUUID()}@example.net`]] as const) {
+    use(method);const link=await invite(address);fresh(address);
+    assert.equal((await login(undefined,link.url)).headers.get('location'),origin+'/?auth=error',method);
+    assert.equal((await attempt()).outcome,'invitation');
+  }
+  use('google');const gmail=`invited-${randomUUID()}@gmail.com`, gmailInvite=await invite(gmail);fresh(gmail);
+  const joined=await login(undefined,gmailInvite.url);
+  assert.equal(landed(joined),gmailInvite.url);
+  assert.equal((await attempt()).outcome,'signed_in:invitation');
+  assert.deepEqual(await (await request(`/v1/workspaces/invitations/${gmailInvite.id}/accept`,'POST',sessionOf(joined),{})).json(),{workspaceId:staffWorkspace});
+  // The same person signed in with GitHub (one subject, one user) can't redeem one: it is asked to sign in with Google.
+  await db.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[staffWorkspace,accountOf(joined)]);
+  const again=await invite(gmail);
+  use('github');const viaGithub=await login();
+  assert.equal(accountOf(viaGithub),accountOf(joined),'One subject, one user, whichever method');
+  assert.deepEqual(await errorOf(await request(`/v1/workspaces/invitations/${again.id}/accept`,'POST',sessionOf(viaGithub),{})),[403,'MAILBOX_SIGN_IN_REQUIRED']);
+  // Review 2: an operator whose account also has GitHub linked (one subject) gets a member session through GitHub: no
+  // Operator, no support sign-in, no new workspace, until that session signs in with Google.
+  await db.query("INSERT INTO platform_operators(user_id,role,reason) VALUES($1,'operator:read','sign-in methods acceptance fixture')",[staffUser]);
+  use('github');subject=staffSubject;email=staffEmail;providerEmail=`personal-${randomUUID()}@example.net`;
+  const operatorViaGithub=await login();
+  assert.equal(accountOf(operatorViaGithub),staffUser);
+  const githubSession=sessionOf(operatorViaGithub);
+  const githubMe=await (await request('/v1/me','GET',githubSession)).json() as {id:string;operator:string|null;staffSignIn:boolean};
+  assert.deepEqual([githubMe.id,githubMe.operator,githubMe.staffSignIn],[staffUser,null,true]);
+  assert.deepEqual(await errorOf(await request('/v1/operator/waitlist','GET',githubSession)),[403,'OPERATOR_REQUIRED']);
+  assert.deepEqual(await errorOf(await request(`/v1/operator/support/staff-sign-in?return=${encodeURIComponent('https://support.example.org/staff/callback')}`,'GET',githubSession)),[403,'OPERATOR_REQUIRED']);
+  assert.deepEqual(await errorOf(await request('/v1/workspaces','POST',githubSession,{name:'Through GitHub'})),[403,'SIGNUP_NOT_APPROVED']);
+  // Sign in with Google: the account service is asked for Google, and that session is staff again.
+  use('google');providerHd='example.org';
+  const stepUp=await login(undefined,origin+'/operator','google');
+  assert.equal(landed(stepUp),origin+'/operator');
+  const googleSession=sessionOf(stepUp), back=await (await request('/v1/me','GET',googleSession)).json() as {operator:string|null;staffSignIn:boolean};
+  assert.deepEqual([back.operator,back.staffSignIn],['operator:read',false]);
+  assert.equal((await request('/v1/operator/waitlist','GET',googleSession)).status,200);
+  // A separate account (another subject) with a verified user's address is refused, never linked to that user.
+  use('github');subject=randomUUID();subjects.push(subject);email=staffEmail;
+  assert.equal((await login()).headers.get('location'),origin+'/?auth=error');
+  runtime.config.accountRequiredAcr=[googleAcr];
 });
 
 // Several accounts in one browser (account switcher): one session cookie per connected account, each request acts as
@@ -1522,7 +1623,7 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     for(const extra of [{aud:issuer},{iss:resource},{exp:now-60}]) assert.equal((await run(token(extra))).status,401);
     assert.equal((await run(token({iat:now+300,jti:randomUUID()}))).status,401,'A token issued in the future is refused');
     // Google-only covers MCP: every access token, refreshed ones included, must carry the configured acr.
-    runtime.config.accountRequiredAcr='urn:anomaly:acr:google';
+    runtime.config.accountRequiredAcr=['urn:anomaly:acr:google'];
     for(const acr of [undefined,'urn:anomaly:acr:passkey','urn:anomaly:acr:github','urn:anomaly:acr:google ']) {
       const refused=await run(token({acr,jti:randomUUID()}));
       assert.equal(refused.status,401);
@@ -1531,6 +1632,13 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
       assert.equal(body.jsonrpc,'2.0');assert.equal(body.error.code,-32000);assert.match(body.error.message,/Google/);
     }
     assert.deepEqual(await (await run(token({acr:'urn:anomaly:acr:google',jti:randomUUID()}))).json(),['read']);
+    // Hosted accepts GitHub and Google: either method's token works; anything else is refused and the challenge names both.
+    runtime.config.accountRequiredAcr=['urn:anomaly:acr:github','urn:anomaly:acr:google'];
+    for(const acr of ['urn:anomaly:acr:github','urn:anomaly:acr:google']) assert.deepEqual(await (await run(token({acr,jti:randomUUID()}))).json(),['read'],acr);
+    const otherMethod=await run(token({acr:'urn:anomaly:acr:passkey',jti:randomUUID()}));
+    assert.equal(otherMethod.status,401);
+    assert.match(otherMethod.headers.get('www-authenticate')!,/acr_values="urn:anomaly:acr:github urn:anomaly:acr:google"$/);
+    assert.match(((await otherMethod.json()) as {error:{message:string}}).error.message,/GitHub or Google/);
     runtime.config.accountRequiredAcr=undefined;
     // The address is not an identity input: an unverified one leaves the admitted subject's MCP access alone.
     await db.query('UPDATE nightmail_users SET email_verified=false WHERE id=$1',[manager.userId]);
@@ -2747,6 +2855,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
             error(await setLimit(b.cookie,{limit:500,reason:'Raising my own domain limit'}),403,'OPERATOR_REQUIRED');
             error(await setLimit(a.cookie,{limit:500,reason:'Raising my own domain limit'}),403,'OPERATOR_REQUIRED');
             await pool.query(`INSERT INTO platform_operators(user_id,role,reason) VALUES($1,'operator','Synthetic domain-limit operator')`,[operatorId]);
+            await pool.query('UPDATE nightmail_sessions SET staff=true WHERE user_id=$1',[operatorId]);
             error(await setLimit(a.cookie,{limit:102,reason:'short'}),422,'VALIDATION_FAILED');
             error(await setLimit(a.cookie,{limit:0,reason:'Agency needs more domains'}),422,'VALIDATION_FAILED');
             assert.deepEqual(ok(await setLimit(a.cookie,{limit:102,reason:'Agency needs more domains',ticketRef:'T-9'})).domainLimit,{used:100,limit:102,custom:true});
@@ -6674,7 +6783,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const service = async (method: string, path: string, body?: Json): Promise<Reply> => { const r = await platform.call<Json>(method, path, body); return { status: r.status, body: r.body, headers: new Headers(r.requestId ? { 'x-request-id': r.requestId } : {}) }; };
       const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
       const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
-      const admin = await sessionFixture(t), member = await sessionFixture(t), operator = await sessionFixture(t), outsider = await sessionFixture(t);
+      const admin = await sessionFixture(t), member = await sessionFixture(t), operator = await sessionFixture(t, { staff: true }), outsider = await sessionFixture(t);
       const other = unique('other-ws'), ops = unique('ops-ws');
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2)', [other, ops]);
       await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'admin'),($4,$2,$5,'member'),($6,$7,$8,'member'),($9,$10,$11,'owner')`,
@@ -6948,7 +7057,7 @@ describe('Hosted MCP OAuth and tools', () => {
 
       // Acme has an owner, an admin and a member; the member also owns Beta; the outsider owns Other. The support
       // addresses live in the platform workspace.
-      const owner = await sessionFixture(t), admin = await sessionFixture(t), member = await sessionFixture(t), outsider = await sessionFixture(t), lonely = await sessionFixture(t), operator = await sessionFixture(t);
+      const owner = await sessionFixture(t), admin = await sessionFixture(t), member = await sessionFixture(t), outsider = await sessionFixture(t), lonely = await sessionFixture(t), operator = await sessionFixture(t, { staff: true });
       const acme = unique('acme-ws'), beta = unique('beta-ws'), other = unique('other-ws'), home = unique('platform-ws');
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2),($3,$3,$3),($4,$4,$4)', [acme, beta, other, home]);
       await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$2,$5,'admin'),($6,$2,$7,'member'),($8,$9,$7,'owner'),($10,$11,$12,'owner')`,
@@ -7437,7 +7546,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const inbox = '/v1/operator/support-inbox';
 
       // Acme's owner (who also administers Beta) and member; an operator and a read-only operator in the platform workspace.
-      const owner = await sessionFixture(t), member = await sessionFixture(t), operator = await sessionFixture(t), reader = await sessionFixture(t);
+      const owner = await sessionFixture(t), member = await sessionFixture(t), operator = await sessionFixture(t, { staff: true }), reader = await sessionFixture(t, { staff: true });
       const acme = unique('acme-ws'), beta = unique('beta-ws'), home = unique('platform-ws');
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2),($3,$3,$3)', [acme, beta, home]);
       await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$2,$5,'member'),($6,$7,$3,'admin'),($8,$9,$10,'member'),($11,$9,$12,'member')`,
@@ -7711,7 +7820,7 @@ describe('Hosted MCP OAuth and tools', () => {
         return { status: res.status, body: parsed, headers: res.headers };
       };
       const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN }), bearer = (token: string) => ({ authorization: `Bearer ${token}` });
-      const operator = await sessionFixture(t), reader = await sessionFixture(t), owner = await sessionFixture(t), other = await sessionFixture(t);
+      const operator = await sessionFixture(t, { staff: true }), reader = await sessionFixture(t, { staff: true }), owner = await sessionFixture(t), other = await sessionFixture(t, { staff: true });
       await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator', 'UI notes acceptance fixture'), ($2, 'operator:read', 'UI notes acceptance fixture'), ($3, 'operator', 'UI notes acceptance fixture')`, [operator.userId, reader.userId, other.userId]);
       // Only `operator` is allowlisted, by issuer subject (seedSession binds the subject to the user ID). `other` is an
       // operator too, and `reader` is listed but only operator:read: both must see nothing of the feature.
@@ -7902,7 +8011,7 @@ describe('Hosted MCP OAuth and tools', () => {
       };
       const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN }), bearer = (token: string) => ({ authorization: `Bearer ${token}` });
       // Grants come from an operator's dashboard session (the support platform mints them the same way).
-      const operator = await sessionFixture(t), outsider = await sessionFixture(t), other = unique('other-ws'), second = unique('second-ws'), ops = unique('ops-ws');
+      const operator = await sessionFixture(t, { staff: true }), outsider = await sessionFixture(t), other = unique('other-ws'), second = unique('second-ws'), ops = unique('ops-ws');
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2),($3,$3,$3)', [other, second, ops]);
       await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$5,$6,'member'),($7,$8,$9,'member')`,
         [unique('mem'), other, outsider.userId, unique('mem'), second, manager!.userId, unique('mem'), ops, operator.userId]);
@@ -8129,7 +8238,7 @@ describe('Hosted MCP OAuth and tools', () => {
       };
       const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN }), bearer = (token: string) => ({ authorization: `Bearer ${token}` });
       const rid = () => `req_${randomUUID().replaceAll('-', '')}`;
-      const operator = await sessionFixture(t), outsider = await sessionFixture(t), other = unique('other-ws'), second = unique('second-ws'), ops = unique('ops-ws');
+      const operator = await sessionFixture(t, { staff: true }), outsider = await sessionFixture(t), other = unique('other-ws'), second = unique('second-ws'), ops = unique('ops-ws');
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2),($3,$3,$3)', [other, second, ops]);
       await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$5,$6,'member'),($7,$8,$9,'member')`,
         [unique('mem'), other, outsider.userId, unique('mem'), second, manager!.userId, unique('mem'), ops, operator.userId]);
@@ -8291,7 +8400,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
       const { supportPlatform, supportPlatformAllows, signSupportToken } = await import('./src/support-platform.js');
       const platform = supportPlatform(async req => app.fetch(req, { ...runtime, platformCaller: 'bane-support' }), () => runtime.config);
-      const operator = await sessionFixture(t), member = await sessionFixture(t);
+      const operator = await sessionFixture(t, { staff: true }), member = await sessionFixture(t);
       await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support staff sign-in acceptance fixture')`, [operator.userId]);
       const callback = 'https://support.example.com/staff/callback';
       const signIn = (to: string, who = operator) => send('GET', `/v1/operator/support/staff-sign-in?return=${encodeURIComponent(to)}`, session(who));

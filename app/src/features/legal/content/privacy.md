@@ -23,12 +23,12 @@ Nightmail handles personal data in two different roles.
 
 | What | Details | Source |
 | --- | --- | --- |
-| **Identity** | Name, email address, and the account identifier from Anomaly's sign-in service (account.anoma.ly). For Google sign-ins: Google's account ID, whether the email is verified, and the Google Workspace domain if there is one. | You, through the sign-in service and Google |
+| **Identity** | Name, email address, and the account identifier from Anomaly's sign-in service (account.anoma.ly). You sign in there with GitHub or Google. From the one you use: its account ID, its email address and whether it's verified, and for Google the Google Workspace domain if there is one. | You, through the sign-in service and GitHub or Google |
 | **Workspaces** | Workspaces you belong to, your role (owner, admin or member), and invitations (email address and role) | You and other members |
 | **Credentials** | API keys, MCP grants, agent tokens, inbox keys and app passwords. Keys are stored as hashes; we can't read them back. | You |
 | **Sessions** | A session cookie, valid for up to 7 days. Sessions don't record your IP address or browser. | Your browser |
 | **Sign-in attempts** | Issuer, account ID, sign-in method and provider, email and name, outcome and time. Kept 30 days; refused sign-in requests 90 days. | Sign-in service |
-| **Waitlist** | If we refuse a Google sign-in because Nightmail isn't open to you yet: the email address and name from that sign-in, when you first and last tried, and how many times. Used only to tell you when Nightmail opens. Kept until we've emailed you that it's open, or 1 year after your last attempt. | Sign-in service and Google |
+| **Waitlist** | If we refuse a sign-in because Nightmail isn't open to you yet: the email address and name from that sign-in, when you first and last tried, and how many times. Used only to tell you when Nightmail opens. Kept until we've emailed you that it's open, or 1 year after your last attempt. | Sign-in service, and GitHub or Google |
 | **Activity (audit trail)** | Who did what in a workspace (for example, created a key or changed a role), when, the reason, the request ID, your network (shortened to the first three parts of an IPv4 address, or a /48 for IPv6) and browser family. Never secrets or message content. | Our systems |
 | **Billing** | Stripe customer ID; card brand, last four digits, expiry and fingerprint; top-ups, refunds, disputes, balance and usage history. **Stripe holds your full card number; we never see it.** | You and Stripe |
 | **Usage** | How much each workspace sends, receives and stores, and its sender score and standing | Our systems |

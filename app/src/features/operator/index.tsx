@@ -11,7 +11,7 @@ import { label, number, shortDateTime } from '../../lib/format'
 import { downloadCsv } from '../../lib/download'
 import { errorText } from '../../data/types'
 import { factorFormats } from '../score'
-import { actionColumnDefs, ActionsTrigger, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, memberColumnDefs, operatorView, useOperatorTabs, OperatorWorkspaceSkeleton, QueueToolbar, queueColumnDefs, timelineColumnDefs, waitlistColumnDefs, WaitlistToolbar } from './skeletons'
+import { actionColumnDefs, ActionsTrigger, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, memberColumnDefs, operatorView, useOperatorTabs, OperatorWorkspaceSkeleton, StaffOnly, QueueToolbar, queueColumnDefs, timelineColumnDefs, waitlistColumnDefs, WaitlistToolbar } from './skeletons'
 import { useDebounced } from '../../lib/pagination'
 
 // The operator console (lazy, /operator): Nightmail staff with a platform role review flagged Hosted workspaces and act on
@@ -20,7 +20,7 @@ import { useDebounced } from '../../lib/pagination'
 // UI notes (/operator/notes) live in ./notes and load with this chunk.
 export { OperatorNotesPage } from './notes'
 const useOperatorRole = () => useSession()?.identity?.operator ?? null
-const NotFound = () => <EmptyState headingAs="h1" title="Page not found" action={<Link to="/overview">Return to overview</Link>} />
+const NotFound = StaffOnly
 const def = (defs: typeof queueColumnDefs, key: string) => defs.find(column => column.key === key)!
 const when = (value: string | null | undefined) => value ? `${shortDateTime(isoTime(value))} UTC` : '—'
 const At = ({ value }: { value: string | null | undefined }) => <span className="nowrap">{when(value)}</span>

@@ -24,6 +24,9 @@ export async function operatorActor(c: Ctx, level: OperatorRole): Promise<Operat
   const { userId, email } = dashboardSession(c);
   const role = await operatorRole(c.env.db, userId);
   if (!role || (level === 'operator' && role !== 'operator')) throw new ApiError(403, 'OPERATOR_REQUIRED', level === 'operator' ? 'This action needs the operator role.' : `This area is for ${productName} operators.`);
+  // The role is used only from a session whose own sign-in proved staff (Google Workspace, account-policy.ts). The same
+  // person signed in with GitHub is an ordinary member session until they sign in with Google.
+  if (a.staff !== true) throw new ApiError(403, 'STAFF_SIGN_IN_REQUIRED', 'Sign in with Google to use staff tools.');
   return { userId, email, role };
 }
 

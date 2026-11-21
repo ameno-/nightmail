@@ -4,8 +4,9 @@ import { z } from 'zod';
 import { ApiError, digest, log, type Actor, type Ctx, type DbExecutor, type Runtime } from './core.js';
 import { setCookie } from 'hono/cookie';
 import { onboardNewUser, pendingInvitation } from './workspaces.js';
-import { isStaffSignIn, PROVIDER_IDENTITY_CLAIM, providerIdentity, type ProviderIdentity } from './account-policy.js';
+import { acceptedMethods, isStaffSignIn, provenMailbox, PROVIDER_IDENTITY_CLAIM, providerIdentity, type ProviderIdentity } from './account-policy.js';
 import { clientIpHeader, productName, requestHeader } from './brand.js';
+import { METHOD_ACR } from './config.js';
 import { ANALYTICS_SESSION_PARAM } from './analytics-events.js';
 
 const verifiedEmail = z.email().max(320);
@@ -15,11 +16,12 @@ class NotAdmitted extends Error { constructor(readonly reason: string) { super(r
 /** A refused hosted sign-in whose verified address is now on the waitlist: the refusal screen names it. */
 class Waitlisted extends Error { constructor(readonly email: string) { super('waitlist'); } }
 
-function loginIssue(error: unknown, requiredAcr?: string) {
+function loginIssue(error: unknown, requiredAcr?: string[]) {
   const issuerError = error instanceof oidc.AuthorizationResponseError || error instanceof oidc.ResponseBodyError ? error.error : undefined;
   if (error instanceof AuthenticationMethodRequired || issuerError === 'unmet_authentication_requirements') {
-    if (requiredAcr === 'urn:anomaly:acr:google') return {reason:'google_required', message:`${productName} requires Google sign-in. Try again and choose Google at Anomaly account.`};
-    return {reason:'method_required', message:'Sign in again using the authentication method required by this installation.'};
+    const methods = acceptedMethods(requiredAcr);
+    if (methods === 'Google') return {reason:'google_required', message:`${productName} requires Google sign-in. Try again and choose Google at Anomaly account.`};
+    return {reason:'method_required', message:methods ? `Sign in again with ${methods} at Anomaly account.` : 'Sign in again using the authentication method required by this installation.'};
   }
   if (issuerError === 'interaction_required') return {reason:'interaction_required', message:'Your identity provider needs you to complete sign-in. Try again and follow its prompts.'};
 }
@@ -80,7 +82,7 @@ async function connectedAccounts(runtime: Runtime, jar: Jar, db: DbExecutor = ru
   return { accounts, dead: jar.slots.filter(s => !live.has(s.hash)).map(s => s.slot) };
 }
 
-export async function beginAccountLogin(runtime: Runtime, returnUrl: URL, peer: string, prompt?: 'select_account') {
+export async function beginAccountLogin(runtime: Runtime, returnUrl: URL, peer: string, prompt?: 'select_account', method?: 'google') {
   const origin = new URL(runtime.config.publicUrl).origin;
   if (returnUrl.origin !== origin || returnUrl.username || returnUrl.password) throw loginFailed();
   const slots = await runtime.db.execute(sql`SELECT reserve_auth_state(${await digest(peer)}) AS ok`);
@@ -92,11 +94,16 @@ export async function beginAccountLogin(runtime: Runtime, returnUrl: URL, peer: 
     state, nonce, code_challenge_method:'S256', code_challenge:await oidc.calculatePKCECodeChallenge(verifier) });
   // Adding an account: the account service shows its chooser, and Nightmail learns only the account picked there.
   if (prompt) params.set('prompt', prompt);
-  const requiredAcr = runtime.config.accountClient?.requiredAcr;
-  // The required authentication context, and the provider identity behind the sign-in when staff sign-up is on.
+  // The required authentication context, and the provider identity behind the sign-in (hosted: staff and what is bound
+  // to an address are decided from it). The account service asks for a requested context's first method only, so an
+  // installation that accepts several (hosted: GitHub and Google) requests none: the account service offers every
+  // method it has, and the callback checks the one used. Staff tools ask for Google (`method`), the only proof of staff.
+  const requiredAcr = runtime.config.accountRequiredAcr;
+  if (method && requiredAcr && !requiredAcr.includes(METHOD_ACR[method])) throw loginFailed();
+  const asked = method ? [METHOD_ACR[method]] : requiredAcr?.length === 1 ? requiredAcr : undefined;
   const idToken: Record<string, unknown> = {};
-  if (requiredAcr) idToken.acr = {essential:true, values:[requiredAcr]};
-  if (runtime.config.staffGoogleDomains.length) idToken[PROVIDER_IDENTITY_CLAIM] = {essential:true};
+  if (asked) idToken.acr = {essential:true, values:asked};
+  if (runtime.config.multiTenant || runtime.config.staffGoogleDomains.length) idToken[PROVIDER_IDENTITY_CLAIM] = {essential:true};
   if (Object.keys(idToken).length) params.set('claims', JSON.stringify({id_token:idToken}));
   if (metadata.pushed_authorization_request_endpoint) {
     const response = await oidc.pushedAuthorizationRequest(metadata, client, authentication, params, options);
@@ -158,7 +165,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   });
   await oidc.validateApplicationLevelSignature(metadata, response, options);
   const claims = oidc.getValidatedIdTokenClaims(tokens)!;
-  const requiredAcr = runtime.config.accountClient?.requiredAcr;
+  const requiredAcr = runtime.config.accountRequiredAcr;
   const needUserInfo = (claims.email === undefined || claims.email_verified === undefined || !providerIdentity(claims)) && !!metadata.userinfo_endpoint;
   const bound = tokens.token_type === 'dpop' ? { DPoP } : {};
   const profile = needUserInfo
@@ -167,16 +174,20 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   const address = verifiedEmail.safeParse(profile.email).data ?? null;
   const emailAtLogin = profile.email_verified === true ? address : null;
   const upstream = providerIdentity(claims) ?? providerIdentity(profile as Record<string, unknown>);
-  if (requiredAcr && claims.acr !== requiredAcr) {
+  if (requiredAcr && (typeof claims.acr !== 'string' || !requiredAcr.includes(claims.acr))) {
     await recordAttempt(runtime, claims, upstream, address, 'method_required');
     throw new AuthenticationMethodRequired();
   }
   const returnUrl = new URL(flow.return_url);
   if (returnUrl.origin !== new URL(runtime.config.publicUrl).origin) throw loginFailed();
   const invitation = returnUrl.pathname === '/' ? returnUrl.searchParams.get('invitation') : null;
-  // Identity is (issuer, subject). An email address is display and contact data only: it never admits a person
-  // and never links a subject to an existing user.
+  // Identity is (issuer, subject). An email address is display and contact data only: it never links a subject to an
+  // existing user. The account service gives an account one subject whichever of its linked methods (GitHub, Google)
+  // signs in, so a person who uses both stays one user here; an account it keeps apart is another user.
   const staff = isStaffSignIn(runtime.config, claims.acr, upstream);
+  // What is bound to an address (an invitation; the session's verified_email, which accepting one and claiming an emailed
+  // support request read) needs a sign-in that proves its mailbox now: hosted, only a Google-hosted mailbox does.
+  const mailbox = runtime.config.multiTenant ? provenMailbox(claims.acr, upstream) : emailAtLogin;
   const session = oidc.generateRandomState();
   let admitted = 'signed_in', slot = 0, userId = '';
   try {
@@ -188,9 +199,12 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
         // A new subject is admitted only by a sub-bound decision: hosted staff (the provider identity, see
         // account-policy.ts), the invitation link it followed, or a self-hosted subject allowlist. Operators bind
         // anyone else by subject (scripts/cutover-fresh-start.ts --owner-sub, or a nightmail_oidc_identities row).
-        // Only the invitation path reads the address: it must be the verified invitation target.
+        // Only the invitation path reads the address: it must be the invitation target, in a mailbox this sign-in proves
+        // (provenMailbox: a Google-hosted one, so never through GitHub). Hosted, nothing is
+        // admitted without a verified address, whichever method signed in.
+        if (runtime.config.multiTenant && !emailAtLogin) throw new NotAdmitted('email_unverified');
         const selfHosted = !runtime.config.multiTenant && runtime.config.allowedSubjects.includes(claims.sub);
-        const invited = runtime.config.multiTenant && !staff && !!invitation && !!emailAtLogin && await pendingInvitation(db, emailAtLogin, invitation);
+        const invited = runtime.config.multiTenant && !staff && !!invitation && !!mailbox && await pendingInvitation(db, mailbox, invitation);
         if (!staff && !invited && !selfHosted) throw new NotAdmitted(invitation ? 'invitation' : 'not_approved');
         userId = crypto.randomUUID();
         const name = typeof claims.name === 'string' && claims.name.trim() ? claims.name.slice(0,200) : address ?? `${productName} user`;
@@ -202,7 +216,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
         admitted = `signed_in:${staff ? 'staff' : invited ? 'invitation' : 'subject'}`;
         log('info', { code: 'SIGN_IN_USER_CREATED', userId, subject: claims.sub, admission: admitted });
         if (runtime.config.multiTenant) {
-          if (!await onboardNewUser(db,{id:userId,email:emailAtLogin,name},staff,runtime.config.regions[0]!,invitation)) throw new NotAdmitted('invitation');
+          if (!await onboardNewUser(db,{id:userId,email:staff ? emailAtLogin : mailbox,name},staff,runtime.config.regions[0]!,invitation)) throw new NotAdmitted('invitation');
         } else if (runtime.config.defaultWorkspaceOwners === '*' || runtime.config.defaultWorkspaceOwners.includes(claims.sub)) {
           await db.execute(sql`INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES(${crypto.randomUUID()},${userId},'default','owner')`);
         }
@@ -225,7 +239,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
       slot = same[0]?.slot ?? free!;
       if (same.length) await db.execute(sql`DELETE FROM nightmail_sessions WHERE token_hash=ANY(${sql.param(same.map(account => account.hash))}::text[])`);
       await db.execute(sql`INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,verified_email,staff,expires_at) VALUES
-        (${await digest(session)},${userId},${claims.iss},${claims.sub},${emailAtLogin ?? null},${staff},now()+interval '7 days')`);
+        (${await digest(session)},${userId},${claims.iss},${claims.sub},${mailbox ?? null},${staff},now()+interval '7 days')`);
     });
   } catch (error) {
     if (!(error instanceof NotAdmitted)) throw error;
@@ -296,9 +310,9 @@ export async function accountSessionActor(runtime: Runtime, headers: Headers): P
   const jar = await sessionJar(runtime, headers);
   if (!jar.slots.length) return null;
   const selected = requestHeader(headers, 'workspace');
-  const {rows:[m]} = await runtime.db.execute<{id:string;email:string;name:string;workspace:string;role:string}>(sql`
+  const {rows:[m]} = await runtime.db.execute<{id:string;email:string;name:string;workspace:string;role:string;staff:boolean}>(sql`
     WITH active AS MATERIALIZED (${activeSession(runtime, jar)}),
-    member AS (SELECT u.id,u.email,u.name,m.workspace_id AS workspace,m.role FROM active s JOIN nightmail_users u ON s.user_id=u.id
+    member AS (SELECT u.id,u.email,u.name,m.workspace_id AS workspace,m.role,s.staff FROM active s JOIN nightmail_users u ON s.user_id=u.id
       JOIN workspace_members m ON m.user_id=u.id WHERE m.role IN ('owner','admin','member')
       ${runtime.config.multiTenant ? sql`` : sql`AND m.role IN ('owner','admin') AND ${JSON.stringify(runtime.config.allowedSubjects)}::jsonb ? s.subject`}
       ${selected && runtime.config.multiTenant ? sql`AND m.workspace_id=${selected}` : sql``}
@@ -312,7 +326,7 @@ export async function accountSessionActor(runtime: Runtime, headers: Headers): P
     if (selected && runtime.config.multiTenant) throw new ApiError(403,'WORKSPACE_ACCESS_DENIED','This workspace is not available to your session.');
     return null;
   }
-  return { keyId:`user_${m.id}`, email:m.email, name:m.name, workspaceId:m.workspace, role:m.role, permissions:m.role==='member'?['read','send']:['manage'], domains:[],credential:'dashboard' };
+  return { keyId:`user_${m.id}`, email:m.email, name:m.name, workspaceId:m.workspace, role:m.role, permissions:m.role==='member'?['read','send']:['manage'], domains:[],credential:'dashboard', staff:m.staff };
 }
 
 /**
@@ -377,7 +391,8 @@ export async function accountBrowserRoute(c: Ctx) {
     return input.data as z.infer<T>;
   };
   if (path === '/api/auth/sign-in/account' && c.req.method === 'POST') {
-    const input = z.object({ callbackURL:z.url().max(2048), prompt:z.literal('select_account').optional() }).strict().safeParse(await c.req.json().catch(()=>null));
+    // method: staff tools ask for a Google sign-in (account-policy.ts), the only proof of staff.
+    const input = z.object({ callbackURL:z.url().max(2048), prompt:z.literal('select_account').optional(), method:z.literal('google').optional() }).strict().safeParse(await c.req.json().catch(()=>null));
     if (!input.success) throw new ApiError(422,'AUTH_INPUT_INVALID','Supply the dashboard return URL.');
     // A tab on an earlier origin signs in on the current one: it goes to the current origin's root, a constant built
     // from config alone (nothing of the request, so it can't be steered elsewhere). No flow starts on the earlier
@@ -385,8 +400,8 @@ export async function accountBrowserRoute(c: Ctx) {
     if (servedOrigin(runtime, c.req.url) !== origin) return c.json({url:`${origin}/`});
     // A sixth account is refused before the account service is asked, on every sign-in; the callback checks again.
     if ((await connectedAccounts(runtime, await jar())).accounts.length >= MAX_ACCOUNTS) throw new ApiError(409,'ACCOUNT_LIMIT',`A browser can connect at most ${MAX_ACCOUNTS} accounts. Sign out of one to add another.`);
-    const start = await beginAccountLogin(runtime,new URL(input.data.callbackURL),c.req.header(clientIpHeader) ?? 'unknown',input.data.prompt).catch(error=>{
-      const issue = loginIssue(error, runtime.config.accountClient?.requiredAcr);
+    const start = await beginAccountLogin(runtime,new URL(input.data.callbackURL),c.req.header(clientIpHeader) ?? 'unknown',input.data.prompt,input.data.method).catch(error=>{
+      const issue = loginIssue(error, runtime.config.accountRequiredAcr);
       if (issue) throw new ApiError(403,'SIGN_IN_DENIED',issue.message);
       throw error;
     });
@@ -413,7 +428,7 @@ export async function accountBrowserRoute(c: Ctx) {
       }
       return c.redirect(target.href,303);
     } catch (error) {
-      const issue = error instanceof AccountLimit ? {reason:'account_limit'} : error instanceof Waitlisted ? {reason:'waitlist'} : loginIssue(error, runtime.config.accountClient?.requiredAcr);
+      const issue = error instanceof AccountLimit ? {reason:'account_limit'} : error instanceof Waitlisted ? {reason:'waitlist'} : loginIssue(error, runtime.config.accountRequiredAcr);
       // The waitlist screen names the address it joined: readable by the page, for as long as a sign-in cookie lives.
       if (error instanceof Waitlisted) setCookie(c,cookieName(runtime,'waitlist'),error.email,{...cookieOptions(runtime,600),httpOnly:false});
       // What failed, never a token or a claim: the error class, the issuer's error code and the library's message.

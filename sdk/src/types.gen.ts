@@ -7166,9 +7166,13 @@ export type GetCurrentIdentityResponses = {
          */
         workspaces: Array<Workspace> | null;
         /**
-         * Nightmail staff only: the platform operator role of this dashboard session (it opens /operator). Null for everyone else.
+         * Nightmail staff only: the platform operator role of this dashboard session (it opens /operator). Null for everyone else, and for a session that didn't sign in with Google.
          */
         operator?: 'operator' | 'operator:read' | null;
+        /**
+         * Nightmail staff only: true when this person holds an operator role but this session didn't sign in with Google, which staff tools need. False otherwise.
+         */
+        staffSignIn?: boolean;
         /**
          * Nightmail staff only: this session may use staff UI notes. False for everyone else.
          */

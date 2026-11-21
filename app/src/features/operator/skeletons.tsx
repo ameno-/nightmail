@@ -1,9 +1,18 @@
 import { forwardRef, type ReactNode } from 'react'
 import { ChevronDown, Download } from 'lucide-react'
-import { useLocation } from 'react-router'
+import { Link, useLocation } from 'react-router'
 import { useSession } from '../../data/context'
-import { Button, type ButtonProps, LoadingRegion, PageHeader, SearchField, SectionHeader, Select, Skeleton, TableSkeleton, Tabs, type SkeletonColumn } from '../../components/ui'
+import { Button, type ButtonProps, EmptyState, LoadingRegion, PageHeader, SearchField, SectionHeader, Select, Skeleton, TableSkeleton, Tabs, type SkeletonColumn } from '../../components/ui'
 import './operator.css'
+
+// Not an operator: no such page. An operator signed in with GitHub: staff tools need this account's Google sign-in
+// (api/src/account-policy.ts), one button away.
+export function StaffOnly() {
+  const session = useSession()
+  return session?.identity?.staffSignIn
+    ? <EmptyState headingAs="h1" title="Sign in with Google to use staff tools" action={<Button variant="primary" onClick={session.signInForStaff}>Sign in with Google</Button>} />
+    : <EmptyState headingAs="h1" title="Page not found" action={<Link to="/overview">Return to overview</Link>} />
+}
 
 // The operator console's column definitions (card slots included), shared by the route skeleton and the loaded tables.
 export const queueColumnDefs: SkeletonColumn[] = [

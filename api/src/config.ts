@@ -7,7 +7,10 @@ import { SEND_LIMITS } from './send-limits.js';
 
 const optional = <T extends z.ZodType>(schema: T) => z.preprocess(v => v === '' ? undefined : v, schema.optional());
 const accountId = z.string().regex(/^\d{12}$/);
-export const GOOGLE_ACR = 'urn:anomaly:acr:google';
+// The account service's authentication context for each sign-in method it offers (its acr_values_supported).
+export const METHOD_ACR = { google: 'urn:anomaly:acr:google', github: 'urn:anomaly:acr:github' } as const;
+export const GOOGLE_ACR = METHOD_ACR.google;
+const methodAcrs: readonly string[] = Object.values(METHOD_ACR);
 const REMOVED_ALLOWLISTS = ['AUTH_ALLOWED_EMAILS', 'AUTH_ALLOWED_DOMAINS']; // Refused at startup when self-hosted, never read. premerge-identity: allowed
 const values = z.object({
   NIGHTMAIL_ROOT_SECRET: z.string().min(32),
@@ -29,8 +32,9 @@ const values = z.object({
   // The name a new v4 BYO connection gives its CloudFormation stack and IAM role (<prefix>-<id>). Regional (v5)
   // connections are always Nightmail-<id>: the broker role may assume only those. Existing connections keep their stack's name.
   BYO_STACK_PREFIX: z.enum(['Bane', 'Nightmail']).default('Bane'),
-  // Kept distinct from a missing value: self-hosted installations opt out with an explicit empty value.
-  ACCOUNT_REQUIRED_ACR: z.union([z.literal(''), z.string().max(256).regex(/^\S+$/)]).optional(),
+  // The acr values a sign-in may carry, separated by spaces (one is enough). Kept distinct from a missing value:
+  // self-hosted installations opt out with an explicit empty value.
+  ACCOUNT_REQUIRED_ACR: z.union([z.literal(''), z.string().max(512).regex(/^\S+(?: \S+)*$/)]).optional(),
   // Self-hosted access: exact issuer subjects (never addresses). Find them with scripts/list-signin-attempts.ts.
   AUTH_ALLOWED_SUBJECTS: z.string().default(''),
   // Self-hosted: subjects that become owners of 'default' at their first sign-in, or * for every allowed subject.
@@ -148,10 +152,11 @@ export function loadConfig(input: Record<string, unknown>): Config {
   if (!parsed.success) throw new ApiError(503, 'CONFIG_INVALID', `Missing or invalid server configuration: ${parsed.error.issues.map(i => i.path.join('.')).join(', ')}.`);
   const v = parsed.data;
   if (Boolean(v.ACCOUNT_CLIENT_ID) !== Boolean(v.ACCOUNT_CLIENT_PRIVATE_KEY)) throw new ApiError(503,'CONFIG_INVALID','Set both ACCOUNT_CLIENT_ID and ACCOUNT_CLIENT_PRIVATE_KEY.');
-  // Hosted sign-in and MCP are Google-only. A missing, empty or misspelled value must stop the
-  // installation instead of silently accepting every authentication method.
-  if (v.MULTI_TENANT==='true' && v.ACCOUNT_REQUIRED_ACR!==GOOGLE_ACR) throw new ApiError(503,'CONFIG_INVALID',`Hosted installations require ACCOUNT_REQUIRED_ACR=${GOOGLE_ACR}.`);
-  const requiredAcr = v.ACCOUNT_REQUIRED_ACR || undefined;
+  // Hosted sign-in and MCP accept only the account service's GitHub and Google sign-ins. A missing, empty or misspelled
+  // value must stop the installation instead of silently accepting every authentication method.
+  const requiredAcr = v.ACCOUNT_REQUIRED_ACR ? [...new Set(v.ACCOUNT_REQUIRED_ACR.split(' '))] : undefined;
+  const methodsOnly = !!requiredAcr?.every(acr => methodAcrs.includes(acr));
+  if (v.MULTI_TENANT==='true' && !methodsOnly) throw new ApiError(503,'CONFIG_INVALID',`Hosted installations require ACCOUNT_REQUIRED_ACR to list sign-in methods (${methodAcrs.join(', ')}), separated by spaces.`);
   let aws: Config['aws'] = v.AWS_ACCESS_KEY_ID && v.AWS_SECRET_ACCESS_KEY ? { accessKeyId:v.AWS_ACCESS_KEY_ID, secretAccessKey:v.AWS_SECRET_ACCESS_KEY, sessionToken:v.AWS_SESSION_TOKEN } : undefined;
   if (v.AWS_RUNTIME_CREDENTIALS !== undefined) {
     try { aws = z.object({accessKeyId:z.string().min(1), secretAccessKey:z.string().min(1)}).strict().parse(JSON.parse(v.AWS_RUNTIME_CREDENTIALS)); }
@@ -178,7 +183,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
   const defaultWorkspaceOwners = v.MULTI_TENANT === 'true' ? [] : v.DEFAULT_WORKSPACE_OWNERS === '*' ? '*' : list(v.DEFAULT_WORKSPACE_OWNERS);
   const staffGoogleDomains = list(v.AUTH_STAFF_GOOGLE_DOMAINS).map(d => d.toLowerCase());
   if (staffGoogleDomains.some(d => !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(d))) throw new ApiError(503, 'CONFIG_INVALID', 'Use exact Google Workspace domains in AUTH_STAFF_GOOGLE_DOMAINS, without wildcards or URLs.');
-  if (staffGoogleDomains.length && requiredAcr !== GOOGLE_ACR) throw new ApiError(503, 'CONFIG_INVALID', `AUTH_STAFF_GOOGLE_DOMAINS needs ACCOUNT_REQUIRED_ACR=${GOOGLE_ACR}.`);
+  if (staffGoogleDomains.length && !requiredAcr?.includes(GOOGLE_ACR)) throw new ApiError(503, 'CONFIG_INVALID', `AUTH_STAFF_GOOGLE_DOMAINS needs ACCOUNT_REQUIRED_ACR to include ${GOOGLE_ACR}.`);
   const uiNotesSubjects = v.MULTI_TENANT !== 'true' ? [] : list(v.UI_NOTES_SUBJECTS).map(pair => {
     const [issuer, subject, extra] = pair.split(/\s+/);
     if (!issuer || !subject || extra !== undefined || !/^https:\/\/[^/\s]+$/.test(issuer) || subject.length > 255) throw new ApiError(503, 'CONFIG_INVALID', 'UI_NOTES_SUBJECTS lists "https://issuer subject" pairs separated by commas.');
@@ -218,7 +223,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     domainConnect,
     allowedSubjects, staffGoogleDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr, uiNotesSubjects, dashboardAnalytics: v.DASHBOARD_ANALYTICS === 'on',
     accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly', oauthScopePrefix: v.OAUTH_SCOPE_PREFIX, previousOrigins, byoStackPrefix: v.BYO_STACK_PREFIX,
-    accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG, requiredAcr } : undefined,
+    accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG } : undefined,
     encryptionKey: deriveEncryptionKey(v.NIGHTMAIL_ROOT_SECRET),
     previousEncryptionKey: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET ? deriveEncryptionKey(v.PREVIOUS_NIGHTMAIL_ROOT_SECRET) : v.ENCRYPTION_KEY,
     publicUrl: url.origin, sesFeedbackUrl: v.SES_FEEDBACK_URL, regions, liveEnabled: v.ENABLE_LIVE_SES === 'true',

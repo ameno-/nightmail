@@ -3,6 +3,7 @@ import { Buffer } from 'node:buffer';
 import { sql } from 'drizzle-orm';
 import { digest, log, type Actor, type Runtime, type DbExecutor, type Permission } from './core.js';
 import { oauthScopePrefixes, productName, requestedScopes } from './brand.js';
+import { acceptedMethods } from './account-policy.js';
 
 const permissions: Permission[] = ['read', 'send', 'manage'];
 const descriptions: Record<Permission, string> = { read: 'Read workspace data.', send: 'Send email from the workspace.', manage: 'Manage workspace mail and resources.' };
@@ -163,7 +164,8 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   // `detail` replaces only the JSON-RPC message; the challenge header keeps its fixed description.
   function denied(status: 401 | 403, error = status === 401 ? 'invalid_token' : 'insufficient_scope', extra = '', detail?: string) {
     const scheme = /^dpop /i.test(request.headers.get('authorization') ?? '') ? 'DPoP' : 'Bearer';
-    const message = error === 'insufficient_user_authentication' ? `${productName} requires Google sign-in. Reconnect this MCP client and choose Google at Anomaly account.`
+    const methods = acceptedMethods(runtime.config.accountRequiredAcr);
+    const message = error === 'insufficient_user_authentication' ? methods ? `${productName} requires ${methods} sign-in. Reconnect this MCP client and choose ${methods} at Anomaly account.` : 'Reconnect this MCP client using the sign-in method this installation requires.'
       : status === 401 ? 'Reconnect and authorize this MCP client at the account service.' : `This client has no active ${productName} approval for the requested access.`;
     return Response.json({jsonrpc:'2.0', error:{code:-32000, message:detail ?? message}, id:null}, {status, headers: { 'cache-control':'no-store', 'www-authenticate':`${scheme} error="${error}", error_description="${message}", resource_metadata="${metadata}", scope="${requestedScopes(runtime.config).join(' ')}"${extra}` }});
   }
@@ -181,9 +183,9 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   // The dashboard's sign-in requirement applies to every access token, refreshed ones included:
   // the issuer copies the authentication context of the original sign-in into each token it mints.
   const requiredAcr = runtime.config.accountRequiredAcr;
-  if (requiredAcr && claims.acr !== requiredAcr) {
+  if (requiredAcr && (typeof claims.acr !== 'string' || !requiredAcr.includes(claims.acr))) {
     log('warn', { code: 'MCP_ACR_REFUSED', client: String(claims.client_id).slice(0, 200), acr: typeof claims.acr === 'string' ? claims.acr.slice(0, 100) : null });
-    return denied(401, 'insufficient_user_authentication', `, acr_values="${requiredAcr}"`);
+    return denied(401, 'insufficient_user_authentication', `, acr_values="${requiredAcr.join(' ')}"`);
   }
   const scopes = new Set(typeof claims.scope === 'string' ? claims.scope.split(' ') : []);
   const allowed = permissions.filter(p => oauthScopePrefixes.some(prefix => scopes.has(`${prefix}:${p}`)));
