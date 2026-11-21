@@ -126,36 +126,10 @@ html[data-privacy='on'] .private-field:not(:hover, :focus)::placeholder { color:
 .between { justify-content: space-between; }
 .nowrap { white-space: nowrap; }
 .text-warning { color: var(--color-warning); }
-.chart-legend { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-16); color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
-.chart-legend > span { display: flex; align-items: center; gap: var(--space-6); }
-.chart-legend i { width: 8px; height: 2px; border-radius: 0; }
-.legend-sent { background: var(--color-accent-data); }
-.legend-bounces { background: var(--color-warning-marker); }
-.legend-complaints { background: var(--color-complaint); }
-.activity-chart { position: relative; width: 100%; min-height: 232px; flex: 1; }
-.activity-chart > svg { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
-/* Charts: a hairline grid, muted mono axes, thin neutral bars; colour only on outcomes and on anomaly bands. */
+/* Charts: a hairline grid and muted mono axes. */
 .chart-label { fill: var(--color-faint); font-family: var(--font-mono); font-size: 10.5px; font-variant-numeric: tabular-nums; }
-.chart-label--date { fill: var(--color-faint); }
 .chart-grid { stroke: var(--color-border-muted); shape-rendering: crispEdges; }
 .chart-grid--base { stroke: var(--color-border); }
-.chart-line { fill: none; stroke-width: 1.5; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
-.chart-line--bounces { stroke: var(--color-warning-marker); stroke-width: 1.25; }
-.chart-line--complaints { stroke: var(--color-complaint); stroke-width: 1.25; }
-.chart-bar { fill: color-mix(in oklch, var(--color-accent-data) 62%, transparent); }
-.chart-bar--active { fill: var(--color-accent-data); }
-/* Light: the bars and the bounce line in their solid, darker forms, so the marks hold 3:1 against the plot. */
-:root:not([data-theme='dark']) .chart-bar { fill: var(--color-accent-data); }
-:root:not([data-theme='dark']) .chart-bar--active { fill: color-mix(in oklch, var(--color-accent-data) 75%, var(--color-text)); }
-:root:not([data-theme='dark']) .chart-line--bounces { stroke: var(--color-warning); }
-:root:not([data-theme='dark']) .legend-bounces { background: var(--color-warning); }
-/* An hour whose bounces or complaints crossed their warning line: a faint red band over the plot, a mark on the axis. */
-.chart-anomaly { fill: color-mix(in srgb, var(--color-danger-marker) 9%, transparent); }
-.chart-anomaly-mark { fill: var(--color-danger-marker); }
-.chart-crosshair { stroke: var(--color-faint); pointer-events: none; shape-rendering: crispEdges; }
-.chart-tooltip { position: absolute; right: var(--space-40); top: var(--space-8); display: flex; flex-direction: column; gap: var(--space-6); min-width: 200px; padding: var(--space-12); border: 0; border-radius: var(--radius-sm); background: var(--color-layer-1); box-shadow: var(--shadow-popover); font-size: var(--text-xs); pointer-events: none; }
-.chart-tooltip span { display: flex; justify-content: space-between; gap: var(--space-24); color: var(--color-muted); }
-.chart-tooltip b, .chart-tooltip strong { color: var(--color-text); font-family: var(--font-mono); font-weight: var(--font-weight-regular); }
 .search-box { display: flex; align-items: center; position: relative; width: 392px; max-width: 100%; min-width: 220px; flex-shrink: 1; }
 .search-box > svg { position: absolute; left: var(--space-12); color: var(--color-muted); pointer-events: none; }
 .search-box .ui-input { padding-left: var(--space-32); width: min(392px, 100%); }

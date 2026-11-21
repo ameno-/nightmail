@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
 import { useApiDef, useRegion, useWorkspaceAccess } from '../../data/context'
@@ -6,7 +6,7 @@ import { queries } from '../../data/queries'
 import { useRegionCatalog, useRegionDiscovery } from '../../data/regions'
 import { accountStatus, ratePercent, rateStatus } from '../../lib/reputation'
 import { campaignEditable, type ChartPoint, type LogEntry, type Overview, type SesDiscovery, type TimeRange } from '../../data/types'
-import { DataTable, EmptyState, ErrorState, Meter, MetricRow, PageHeader, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
+import { DataTable, EmptyState, ErrorState, PageHeader, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
 import { Crossfade, useMorph, useTween } from '../../components/motion'
 import { date, label, number, percent } from '../../lib/format'
 import { NextSteps, SidebarScore, StandingCard, useNextSteps, useSenderScore } from '../score'
@@ -19,7 +19,7 @@ import { composer } from '../campaigns/composer-chunk'
 import { DailyLimit, SetupRail, useSendingLimitPending, useSetupSteps } from './setup'
 import { useCompactShell, useMediaQuery } from '../../lib/media'
 
-// Overview: four facts with their own series, the activity chart and the latest emails (down to the card's bottom) on
+// Overview: four figure tiles, the activity chart and the latest emails (down to the card's bottom) on
 // the left; a detail column on the right with the standing card (Warn and up), setup (until the first email), the
 // daily limit, up to three next steps and the recent campaigns. The sender score is the sidebar's card.
 // Every async block reserves its final size, and refetches keep the previous data on screen. A new range or stream keeps
@@ -47,9 +47,6 @@ export function OverviewPage() {
   const stacked = useMediaQuery('(max-width: 960px)')
   const setup = useSetupSteps()
   const held = stacked && setup.loading
-  // The range the figures on screen are for: while a new range loads, the chart keeps labelling the old one.
-  const [shownRange, setShownRange] = useState(range)
-  if (data && !query.isPlaceholderData && shownRange !== range) setShownRange(range)
   // Latest emails and the figures above it must agree: when a new email (or a new outcome for one) shows in the list,
   // the figures are read again. The API keys its dashboard cache on the same mail activity, so that read is current.
   const count = useLatestRowCount()
@@ -69,7 +66,7 @@ export function OverviewPage() {
         <Fragment key={held ? 'held' : 'ready'}>
           {query.isError && !data ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
             {data && !held ? <Facts data={data} stale={query.isPlaceholderData} /> : <FactsSkeleton />}
-            {data && !held ? <Chart data={data} range={shownRange} stale={query.isPlaceholderData} /> : <ChartSkeleton />}
+            {data && !held ? <Chart data={data} stale={query.isPlaceholderData} /> : <ChartSkeleton />}
           </>}
           <LatestEmails params={latestParams} held={held} />
         </Fragment>
@@ -113,39 +110,55 @@ function Aside({ setup, showSetup, campaigns }: { setup: ReturnType<typeof useSe
 const buckets = (points: ChartPoint[]) => `${points.length}:${points[0]?.at ?? ''}:${points.at(-1)?.at ?? ''}`
 const swap = 200
 
-// Four metric rows (label · series · mono value), two by two. A rate's rule is its meter against its warning line (5%
-// bounces, 0.1% complaints, with a tick there), coloured only once the rate reaches that line: a healthy week is grey.
-// Every number tweens (tabular figures, laid out from the right, so nothing beside it moves) and every series morphs or crossfades.
+// Four tiles. Emails and Delivered carry their buckets as columns; a rate carries a 20-cell gauge that ends at its
+// limit (5% bounces, 0.1% complaints; each cell a twentieth of it): navy below half the limit, amber from half, red at
+// it. Every number tweens (tabular figures; a hint is laid out from its right edge, so a new value moves nothing) and the
+// columns morph or crossfade.
 export const BOUNCE_LINE = 0.05, COMPLAINT_LINE = 0.001
-// An hour is marked only with enough mail for its rate to mean something: one bounce in four emails is not a trend.
+// An hour's rate counts only with enough mail for it to mean something: one bounce in four emails is not a trend.
 const BAND_VOLUME = 20
+type Zone = 'ok' | 'near' | 'over'
+const zone = (rate: number, limit: number): Zone => rate >= limit ? 'over' : rate >= limit / 2 ? 'near' : 'ok'
+const hourRate = (part: number, sent: number) => sent >= BAND_VOLUME ? part / sent : 0
+// A rate too small for two decimals keeps a third, so one complaint never reads as 0.00%.
+const rateText = (rate: number) => rate > 0 && rate < 0.0001 ? percent(rate, 3) : percent(rate)
+const limitText = (limit: number) => percent(limit, limit < 0.01 ? 1 : 0)
 function Facts({ data, stale }: { data: Overview; stale: boolean }) {
   const sent = useTween(data.sent, swap), delivered = useTween(data.sent ? data.delivered / data.sent : 0, swap), bounced = useTween(data.sent ? data.bounced / data.sent : 0, swap), complaints = useTween(data.sent ? data.complaints / data.sent : 0, swap)
   const deliveredCount = useTween(data.delivered, swap), bouncedCount = useTween(data.bounced, swap), complaintCount = useTween(data.complaints, swap)
   const change = useTween(data.previousSent ? (data.sent - data.previousSent) / data.previousSent : undefined, swap)
-  const bounceWarn = data.sent > 0 && data.bounced / data.sent >= BOUNCE_LINE, complaintWarn = data.sent > 0 && data.complaints / data.sent >= COMPLAINT_LINE
-  const facts = [
-    { title: factTitles[0], value: number(Math.round(sent)), aside: data.previousSent ? `${change >= 0 ? '+' : ''}${percent(change, 0)}` : '', series: data.points.map(p => p.sent), tone: 'sent' },
-    { title: factTitles[1], value: data.sent ? percent(delivered) : '—', aside: number(Math.round(deliveredCount)), series: data.points.map(p => p.delivered), tone: 'delivered' },
-    { title: factTitles[2], value: data.sent ? percent(bounced) : '—', aside: number(Math.round(bouncedCount)), series: data.points.map(p => p.bounced), tone: 'bounces', warn: bounceWarn, meter: <Meter value={data.sent ? bounced : 0} max={BOUNCE_LINE * 2} mark={data.sent ? BOUNCE_LINE : undefined} tone={bounceWarn ? 'warning' : 'neutral'} label="Bounce rate" title={`Warning at ${percent(BOUNCE_LINE, 0)}`} /> },
-    { title: factTitles[3], value: data.sent ? percent(complaints) : '—', aside: number(Math.round(complaintCount)), series: data.points.map(p => p.complaints), tone: 'complaints', warn: complaintWarn, meter: <Meter value={data.sent ? complaints : 0} max={COMPLAINT_LINE * 2} mark={data.sent ? COMPLAINT_LINE : undefined} tone={complaintWarn ? 'danger' : 'neutral'} label="Complaint rate" title={`Warning at ${percent(COMPLAINT_LINE, 1)}`} /> },
+  const tiles = [
+    { title: factTitles[0], hint: data.previousSent ? `${change >= 0 ? '+' : ''}${percent(change, 0)}` : '', value: number(Math.round(sent)), columns: data.points.map(p => p.sent), tone: 'sent' as const },
+    { title: factTitles[1], hint: number(Math.round(deliveredCount)), value: data.sent ? percent(delivered) : '—', columns: data.points.map(p => p.delivered), tone: 'delivered' as const },
+    { title: factTitles[2], hint: number(Math.round(bouncedCount)), value: data.sent ? rateText(bounced) : '—', rate: data.sent ? data.bounced / data.sent : 0, limit: BOUNCE_LINE },
+    { title: factTitles[3], hint: number(Math.round(complaintCount)), value: data.sent ? rateText(complaints) : '—', rate: data.sent ? data.complaints / data.sent : 0, limit: COMPLAINT_LINE },
   ]
-  return <div className="ov-facts" role="group" aria-label="Figures" data-stale={stale || undefined}>{facts.map(fact => <MetricRow key={fact.title} label={fact.title} hint={fact.aside}
-    spark={<Crossfade id={buckets(data.points)} className="ov-spark-stack"><Spark values={fact.series} tone={fact.tone} /></Crossfade>}
-    value={fact.value} tone={fact.warn ? 'warning' : undefined} meter={fact.meter} />)}</div>
+  return <div className="ov-tiles" role="group" aria-label="Figures" data-stale={stale || undefined}>{tiles.map(tile => <div key={tile.title} className="ov-tile" data-zone={tile.limit === undefined ? undefined : zone(tile.rate, tile.limit)}>
+    <div className="ov-tile__head"><span>{tile.title}</span><span className="ov-tile__hint"><span>{tile.hint}</span></span></div>
+    <div className="ov-tile__value">{tile.value}</div>
+    {tile.limit === undefined ? <Crossfade id={buckets(data.points)} className="ov-tile__columns"><Columns values={tile.columns} tone={tile.tone} /></Crossfade> : <div className="ov-tile__chart"><Gauge rate={tile.rate} limit={tile.limit} label={`${tile.title} rate`} /></div>}
+  </div>)}</div>
 }
-function Spark({ values: target, tone }: { values: number[]; tone: string }) {
+function Gauge({ rate, limit, label }: { rate: number; limit: number; label: string }) {
+  const lit = rate > 0 ? Math.min(20, Math.max(1, Math.ceil(rate / limit * 20))) : 0
+  return <>
+    <span className="ov-gauge" data-zone={zone(rate, limit)} role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={limit} aria-valuenow={rate} aria-valuetext={`${rateText(rate)} of a ${limitText(limit)} limit`}>{Array.from({ length: 20 }, (_, i) => <i key={i} data-on={i < lit || undefined} />)}</span>
+    <span className="ov-gauge__limit">{limitText(limit)} limit</span>
+  </>
+}
+// SVG, so a range with another count of buckets redraws the columns instead of moving boxes.
+function Columns({ values: target, tone }: { values: number[]; tone: 'sent' | 'delivered' }) {
   const values = useMorph(target, swap)
   const max = Math.max(1, ...values), slot = 100 / Math.max(1, values.length)
-  return <svg className={`ov-spark ov-spark--${tone}`} viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true">
-    {values.map((value, i) => { const h = Math.max(value ? 2 : 1, value / max * 24); return <rect key={i} className={value ? undefined : 'ov-spark__zero'} x={i * slot + slot * .18} width={slot * .64} y={24 - h} height={h} /> })}
+  return <svg className={`ov-columns ov-columns--${tone}`} viewBox="0 0 100 26" preserveAspectRatio="none" shapeRendering="crispEdges" aria-hidden="true">
+    {values.map((value, i) => { const h = value > 0 ? Math.max(5, value / max * 26) : 0; return h > 0 && <rect key={i} x={i * slot} width={slot * .78} y={26 - h} height={h} /> })}
   </svg>
 }
 
-function Chart({ data, range, stale }: { data: Overview; range: TimeRange; stale: boolean }) {
+function Chart({ data, stale }: { data: Overview; stale: boolean }) {
   return <section className="ov-chart" aria-label="Sending activity" data-stale={stale || undefined}>
-    <div className="ov-chart__head"><h2 className="ui-label ui-label--rule">Activity</h2></div>
-    <Crossfade id={data.sent ? buckets(data.points) : 'empty'} className="ov-chart__plot">{data.sent ? <ActivityChart points={data.points} range={range} /> : <EmptyState title="No emails in this period" />}</Crossfade>
+    <div className="ov-chart__head"><h2 className="ui-label ui-label--rule">Activity</h2><span className="ov-legend" aria-hidden="true"><span><i className="ov-key--sent" />Emails</span><span><i className="ov-key--bounces" />Bounced</span><span><i className="ov-key--complaints" />Complaints</span></span></div>
+    <Crossfade id={data.sent ? buckets(data.points) : 'empty'} className="ov-chart__plot">{data.sent ? <ActivityChart data={data} /> : <EmptyState title="No emails in this period" />}</Crossfade>
   </section>
 }
 
@@ -188,83 +201,117 @@ function ReputationSummary({ report, regionId }: { report: SesDiscovery | undefi
 
 // Three whole-number steps so every gridline label is a distinct integer.
 function niceMax(value: number) { const raw = Math.max(1, value) / 3, base = 10 ** Math.floor(Math.log10(raw)), step = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].map(m => m * base).find(m => m >= raw && Number.isInteger(m)) ?? Math.ceil(raw); return step * 3 }
-// New counts over the same buckets morph the bars, the lines and their scales (200 ms); the scale labels crossfade.
-function ActivityChart({ points: target, range }: { points: ChartPoint[]; range: TimeRange }) {
+const HOUR = 3_600_000, DAY = 86_400_000
+const bucketOf = (points: ChartPoint[]) => points.length > 1 ? Date.parse(points[1].at) - Date.parse(points[0].at) : HOUR
+const clock = (at: string) => date(at, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })
+const day = (at: string) => date(at, { month: 'short', day: 'numeric', timeZone: 'UTC' })
+const bucketLabel = (points: ChartPoint[], i: number) => bucketOf(points) >= DAY ? day(points[i].at) : `${day(points[i].at)}, ${clock(points[i].at)} UTC`
+// Time ticks on whole steps (3 h, 6 h, a day…) at least minGap apart; midnight is labelled with its date.
+function ticks(points: ChartPoint[], plotWidth: number, minGap: number) {
+  if (points.length < 2) return points.length ? [0] : []
+  const bucket = bucketOf(points), slot = plotWidth / points.length
+  const steps = bucket >= DAY ? [1, 2, 3, 5, 7, 10, 15].map(d => d * DAY) : [1, 2, 3, 4, 6, 12, 24, 48].map(h => h * HOUR)
+  const step = steps.find(s => s / bucket * slot >= minGap) ?? steps[steps.length - 1]
+  return points.flatMap((point, i) => Date.parse(point.at) % step === 0 ? [i] : [])
+}
+const tickLabel = (points: ChartPoint[], i: number) => bucketOf(points) >= DAY || Date.parse(points[i].at) % DAY === 0 ? day(points[i].at) : clock(points[i].at)
+// Monotone cubic segments through the points (one "C" command per gap): the curve passes through every value without
+// overshooting a peak or dipping under zero, and a flat run stays flat.
+function monotone(xs: number[], ys: number[]) {
+  const slopes = ys.slice(1).map((y, i) => (y - ys[i]) / (xs[i + 1] - xs[i]))
+  const tangents = ys.map((_, i) => i === 0 ? slopes[0] ?? 0 : i === ys.length - 1 ? slopes[i - 1] : slopes[i - 1] * slopes[i] <= 0 ? 0 : 2 * slopes[i - 1] * slopes[i] / (slopes[i - 1] + slopes[i]))
+  return slopes.map((_, i) => { const third = (xs[i + 1] - xs[i]) / 3; return `C ${xs[i] + third} ${ys[i] + tangents[i] * third} ${xs[i + 1] - third} ${ys[i + 1] - tangents[i + 1] * third} ${xs[i + 1]} ${ys[i + 1]}` })
+}
+// keep(i) drops the segment from point i to i + 1: the complaints line only rises where there is one, and never runs
+// along the baseline in red between them.
+function Line({ xs, ys, tone, keep = () => true }: { xs: number[]; ys: number[]; tone: 'sent' | 'bounces' | 'complaints'; keep?: (i: number) => boolean }) {
+  let path = '', end = -1
+  monotone(xs, ys).forEach((segment, i) => { if (!keep(i)) return; if (end !== i) path += `M ${xs[i]} ${ys[i]} `; path += segment + ' '; end = i + 1 })
+  return path ? <path d={path} className={`ov-line ov-line--${tone}`} /> : null
+}
+// The activity chart: emails as a navy line over a flat wash on the left scale; bounces and complaints as counts on a
+// small scale of their own in the lower half of the plot, so a handful of bounces still has a shape. Their latest values
+// label the lines' ends; while a bucket is hovered (or tapped and dragged on a phone) that scale shows as a short right
+// axis instead, and one readout follows the crosshair. An hour over the bounce limit, or with any complaint, has a dot
+// on its line. The window's first and last buckets are only partly counted (it starts and ends mid-hour), so the lines
+// leave them out rather than dip; they stay in the figures and the readout. New counts over the same buckets morph.
+function ActivityChart({ data }: { data: Overview }) {
+  const target = data.points
   const [active, setActive] = useState<number | null>(null)
-  // The hours are one tab stop (the last one focused, else the newest); the arrow keys, Home and End step between them.
+  // The buckets are one tab stop (the last one focused, else the newest); the arrow keys, Home and End step between them.
   const [stop, setStop] = useState<number | null>(null)
   const container = useRef<HTMLDivElement>(null)
-  const [size, setSize] = useState({ width: 1080, height: 196 })
+  const [width, setWidth] = useState(790)
   useLayoutEffect(() => {
     const element = container.current
     if (!element) return
-    const measure = ({ width, height }: DOMRectReadOnly) => setSize({ width: Math.max(1, width), height: Math.max(1, height) })
-    measure(element.getBoundingClientRect())
-    const observer = new ResizeObserver(([entry]) => measure(entry.contentRect))
+    setWidth(Math.max(1, element.getBoundingClientRect().width))
+    const observer = new ResizeObserver(([entry]) => setWidth(Math.max(1, entry.contentRect.width)))
     observer.observe(element)
     return () => observer.disconnect()
-  }, [target.length])
-  const count = target.length
-  const hasOutcomes = target.every(point => Number.isFinite(point.bounced) && Number.isFinite(point.complaints))
-  const maxSent = niceMax(Math.max(...target.map(p => p.sent)))
-  // The outcomes' scale reaches at least a tenth of the busiest hour (twice the bounce line), so a peak on it means a high
-  // rate, not one bounce: a lone bounce stays a small bump instead of a spike to the top.
-  const maxException = niceMax(Math.max(...target.map(p => Math.max(p.bounced ?? 0, p.complaints ?? 0)), Math.max(...target.map(p => p.sent)) * BOUNCE_LINE * 2))
-  const shown = useMorph([...target.map(p => p.sent), ...target.map(p => p.bounced ?? NaN), ...target.map(p => p.complaints ?? NaN), maxSent, maxException], 200)
-  if (!count) return <EmptyState title="No activity" />
-  const points = target.map((p, i) => ({ ...p, sent: shown[i], bounced: shown[count + i], complaints: shown[2 * count + i] }))
-  const sentScale = shown[3 * count], exceptionScale = shown[3 * count + 1]
-  const { width, height } = size
-  const left = 52, right = width - 64, top = 30, bottom = height - 42
-  const selectedPoint = active === null ? undefined : target[active]
-  const slot = (right - left) / points.length
-  const x = (i: number) => left + (i + 0.5) * slot
-  const barWidth = Math.max(1, Math.min(8, slot * 0.4))
-  const y = (value: number, max: number) => bottom - value / max * (bottom - top)
-  const line = (key: 'bounced' | 'complaints', max: number) => {
-    const values = points.map(p => y(p[key], max)), raw = target.map(p => p[key] ?? 0)
-    const slopes = values.slice(1).map((value, i) => value - values[i])
-    // Monotone cubic interpolation passes through every count without overshooting
-    // a peak or dipping below zero; opposite/flat slopes keep extrema horizontal.
-    const tangents = values.map((_, i) => {
-      if (i === 0) return slopes[0] ?? 0
-      if (i === values.length - 1) return slopes[i - 1]
-      const before = slopes[i - 1], after = slopes[i]
-      return before * after <= 0 ? 0 : 2 * before * after / (before + after)
-    })
-    // Only the stretches with something to show: an outcome's line rises from the baseline and returns to it, and never
-    // runs along it in red between them.
-    let path = '', open = false
-    for (let i = 1; i < values.length; i++) {
-      if (!raw[i - 1] && !raw[i]) { open = false; continue }
-      if (!open) { path += `M ${x(i - 1)} ${values[i - 1]} `; open = true }
-      path += `C ${x(i - 2 / 3)} ${values[i - 1] + tangents[i - 1] / 3} ${x(i - 1 / 3)} ${values[i] - tangents[i] / 3} ${x(i)} ${values[i]} `
-    }
-    return path
+  }, [])
+  const n = target.length
+  const shown = useMorph([...target.map(p => p.sent), ...target.map(p => p.bounced), ...target.map(p => p.complaints), niceMax(Math.max(...target.map(p => p.sent))), niceMax(Math.max(3, ...target.map(p => Math.max(p.bounced, p.complaints))))], swap)
+  if (!n) return <EmptyState title="No activity" />
+  const sent = shown.slice(0, n), bounced = shown.slice(n, 2 * n), complaints = shown.slice(2 * n, 3 * n), max = shown[3 * n], outcomeMax = shown[3 * n + 1]
+  const compact = width < 520, height = 196, top = 12, bottom = height - 24, left = compact ? 36 : 44, right = width - (compact ? 30 : 44)
+  const slot = (right - left) / n, xs = target.map((_, i) => left + (i + 0.5) * slot)
+  const ey = (value: number) => bottom - value / max * (bottom - top)
+  const band = (bottom - top) * .55, oy = (value: number) => bottom - value / outcomeMax * band
+  const firstPartial = n > 3 && Date.parse(data.periodStart) > Date.parse(target[0].at)
+  const lastPartial = n > 3 && Date.parse(data.periodEnd) < Date.parse(target[n - 1].at) + bucketOf(target)
+  const from = firstPartial ? 1 : 0, to = lastPartial ? n - 2 : n - 1, drawn = (i: number) => i >= from && i <= to
+  const span = (values: readonly number[]) => values.slice(from, to + 1)
+  const emailsY = sent.map(ey), bounceY = bounced.map(oy), complaintY = complaints.map(oy)
+  const marked = target.map((p, i) => ({ bounces: drawn(i) && hourRate(p.bounced, p.sent) >= BOUNCE_LINE, complaints: drawn(i) && p.complaints > 0 }))
+  // The end labels, kept 12px apart (thousands as 2.8k where a phone's gutter is narrow).
+  const endText = (value: number) => compact && value >= 1000 ? `${(value / 1000).toFixed(1).replace(/\.0$/, '')}k` : number(value)
+  const ends = ([['sent', emailsY[to], target[to].sent], ['bounces', bounceY[to], target[to].bounced], ['complaints', complaintY[to], target[to].complaints]] as const)
+    .map(([tone, y, value]) => ({ tone, y, text: endText(value) })).sort((a, b) => a.y - b.y)
+  for (let i = ends.length - 2; i >= 0; i--) ends[i].y = Math.min(ends[i].y, ends[i + 1].y - 12)
+  // A phone scrubs with a finger: tap or drag sideways (touch-action keeps vertical scrolling for the page).
+  const scrub = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === 'mouse') return
+    const box = event.currentTarget.getBoundingClientRect()
+    setActive(Math.max(0, Math.min(n - 1, Math.floor((event.clientX - box.left - left) / slot))))
   }
-  const hourly = range !== '30d'
-  const pointLabel = (at: string) => `${date(at, { month: 'short', day: 'numeric', ...(hourly ? { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' as const } : {}), timeZone: 'UTC' })} UTC`
-  // Up to six ticks after the first, fewer when the plot is too narrow for their labels.
-  const tickSteps = Math.max(1, Math.min(6, Math.floor((right - left) / 72)))
-  const tickIndices = [...new Set([0, ...Array.from({ length: tickSteps }, (_, i) => Math.round((i + 1) * (points.length - 1) / tickSteps))])]
-  // The legend is the scales' titles: Emails over the left scale, bounces and complaints over the right one.
-  return <div ref={container} className="activity-chart" onMouseLeave={() => setActive(null)}>
-    <div className="activity-chart__keys"><span className="chart-legend"><span><i className="legend-sent" />Emails</span></span>{hasOutcomes && <span className="chart-legend"><span><i className="legend-bounces" />Bounces</span><span><i className="legend-complaints" />Complaints</span></span>}</div>
-    <svg viewBox={`0 0 ${width} ${height}`} role="group" aria-label={`Emails created per ${hourly ? 'hour' : 'day'} on the left scale; outcomes for those emails on the right scale.`}>
-    {/* Hours with real volume whose bounces or complaints crossed their warning line, as bands behind everything else. */}
-    {hasOutcomes && target.map((p, i) => p.sent >= BAND_VOLUME && ((p.bounced ?? 0) / p.sent >= BOUNCE_LINE || (p.complaints ?? 0) / p.sent >= COMPLAINT_LINE) && <g key={`anomaly-${p.at}`}><rect x={left + i * slot} y={top} width={slot} height={bottom - top} className="chart-anomaly" /><rect x={left + i * slot} y={bottom + 2} width={slot} height={2} className="chart-anomaly-mark" /></g>)}
-    {[0, 1, 2, 3].map(i => <line key={i} x1={left} x2={right} y1={top + i * (bottom - top) / 3} y2={top + i * (bottom - top) / 3} className={i === 3 ? 'chart-grid chart-grid--base' : 'chart-grid'} />)}
-    <Crossfade as="g" id={`${maxSent}:${hasOutcomes ? maxException : ''}`}>{[0, 1, 2, 3].map(i => <g key={i}><text x={0} y={top + i * (bottom - top) / 3 + 4} className="chart-label">{number(Math.round(maxSent * (1 - i / 3)))}</text>{hasOutcomes && <text x={width - 2} y={top + i * (bottom - top) / 3 + 4} textAnchor="end" className="chart-label">{number(Math.round(maxException * (1 - i / 3)))}</text>}</g>)}</Crossfade>
-    {points.map((p, i) => p.sent > 0 && <rect key={p.at} x={x(i) - barWidth / 2} y={y(p.sent, sentScale)} width={barWidth} height={bottom - y(p.sent, sentScale)} rx={0} className={`chart-bar${active === i ? ' chart-bar--active' : ''}`} />)}{/* An outcome with nothing to show draws no line: a red rule along the baseline reads as trouble. */}
-    {hasOutcomes && target.some(p => p.bounced) && <path d={line('bounced', exceptionScale)} className="chart-line chart-line--bounces" />}{hasOutcomes && target.some(p => p.complaints) && <path d={line('complaints', exceptionScale)} className="chart-line chart-line--complaints" />}
-    {/* 24 h: the hour, and the date under the first tick and wherever the day changes, so 12:00 yesterday and 12:00
-        today never read as the same tick. 7 d: the date, then the hour. */}
-    {tickIndices.map((i, n) => { const day = date(points[i].at, { month: 'short', day: 'numeric', timeZone: 'UTC' }), dated = range === '24h' && (n === 0 || day !== date(points[tickIndices[n - 1]].at, { month: 'short', day: 'numeric', timeZone: 'UTC' }))
-      return <text key={i} x={x(i)} y={height - (range === '30d' ? 13 : 22)} textAnchor="middle" className="chart-label">{range === '24h' ? date(points[i].at, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' }) : day}{range === '7d' ? <tspan x={x(i)} dy={15}>{date(points[i].at, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })}</tspan> : dated ? <tspan x={x(i)} dy={15} className="chart-label--date">{day}</tspan> : null}</text> })}
-    {target.map((p, i) => {
-      const start = left + i * slot, end = start + slot
-      return <rect key={p.at} x={start} y={top} width={Math.max(0, end - start)} height={bottom - top} fill="transparent" data-point={i} tabIndex={i === Math.min(stop ?? count - 1, count - 1) ? 0 : -1} role="button" aria-label={`${pointLabel(p.at)}: ${number(p.sent)} created${hasOutcomes ? `, ${p.bounced} bounces, ${p.complaints} complaints` : ''}`} onMouseEnter={() => setActive(i)} onFocus={() => { setActive(i); setStop(i) }} onBlur={() => setActive(null)} onKeyDown={event => { const next = event.key === 'ArrowRight' ? Math.min(count - 1, i + 1) : event.key === 'ArrowLeft' ? Math.max(0, i - 1) : event.key === 'Home' ? 0 : event.key === 'End' ? count - 1 : null; if (next === null) return; event.preventDefault(); event.currentTarget.parentElement?.querySelector<SVGElement>(`[data-point="${next}"]`)?.focus() }} />
-    })}
-    {selectedPoint && active !== null && <line x1={x(active)} x2={x(active)} y1={top} y2={bottom} className="chart-crosshair" />}
-  </svg>{selectedPoint && <div className="chart-tooltip" role="status"><strong>{pointLabel(selectedPoint.at)}</strong><span>Emails <b>{number(selectedPoint.sent)}</b></span>{hasOutcomes && <><span>Bounces <b>{number(selectedPoint.bounced)}</b></span><span>Complaints <b>{number(selectedPoint.complaints)}</b></span></>}</div>}</div>
+  const dot = (x: number, y: number, tone: string, key: string) => <circle key={key} cx={x} cy={y} r={3.5} className={`ov-dot ov-dot--${tone}`} />
+  const point = active === null ? undefined : target[active]
+  return <div ref={container} className="ov-activity" onMouseLeave={() => setActive(null)} onPointerDown={scrub} onPointerMove={scrub}>
+    <svg viewBox={`0 0 ${width} ${height}`} role="group" aria-label="Emails per bucket on the left scale; bounces and complaints on their own scale">
+      {[0, 1, 2, 3].map(i => { const y = top + i * (bottom - top) / 3; return <g key={i}><line x1={left} x2={right} y1={y} y2={y} className={i === 3 ? 'chart-grid chart-grid--base' : 'chart-grid'} /><text x={left - 8} y={y + 3.5} textAnchor="end" className="chart-label">{number(Math.round(max * (1 - i / 3)))}</text></g> })}
+      <path d={`M ${xs[from]} ${bottom} L ${xs[from]} ${emailsY[from]} ${monotone(span(xs), span(emailsY)).join(' ')} L ${xs[to]} ${bottom} Z`} className="ov-wash" />
+      <Line xs={span(xs)} ys={span(emailsY)} tone="sent" />
+      <Line xs={span(xs)} ys={span(bounceY)} tone="bounces" />
+      <Line xs={span(xs)} ys={span(complaintY)} tone="complaints" keep={i => target[from + i].complaints > 0 || target[from + i + 1].complaints > 0} />
+      {marked.map((mark, i) => <g key={target[i].at}>{mark.bounces && dot(xs[i], bounceY[i], 'bounces', 'b')}{mark.complaints && dot(xs[i], complaintY[i], 'complaints', 'c')}</g>)}
+      {active === null
+        ? ends.map(end => <text key={end.tone} x={right + 8} y={end.y + 3.5} className={`chart-label ov-end ov-end--${end.tone}`}>{end.text}</text>)
+        : [0, 1, 2, 3].map(i => <text key={i} x={right + 8} y={oy(outcomeMax * (1 - i / 3)) + 3.5} className="chart-label ov-end ov-end--bounces">{number(Math.round(outcomeMax * (1 - i / 3)))}</text>)}
+      {active !== null && <g>
+        <line x1={xs[active]} x2={xs[active]} y1={top} y2={bottom} className="ov-crosshair" />
+        {drawn(active) && <>{dot(xs[active], emailsY[active], 'sent', 'e')}{dot(xs[active], bounceY[active], 'bounces', 'b')}{target[active].complaints > 0 && dot(xs[active], complaintY[active], 'complaints', 'c')}</>}
+      </g>}
+      {ticks(target, right - left, compact ? 60 : 72).map(i => <text key={i} x={xs[i]} y={height - 6} textAnchor="middle" className="chart-label">{tickLabel(target, i)}</text>)}
+      {target.map((p, i) => <rect key={p.at} x={left + i * slot} y={0} width={slot} height={bottom} fill="transparent" data-point={i} tabIndex={i === Math.min(stop ?? n - 1, n - 1) ? 0 : -1} role="button"
+        aria-label={`${bucketLabel(target, i)}: ${number(p.sent)} emails, ${p.sent ? percent(p.delivered / p.sent, 1) : '—'} delivered, ${p.bounced} bounced, ${p.complaints} complaints`}
+        onMouseEnter={() => setActive(i)} onFocus={() => { setActive(i); setStop(i) }} onBlur={() => setActive(null)}
+        onKeyDown={event => { const next = event.key === 'ArrowRight' ? Math.min(n - 1, i + 1) : event.key === 'ArrowLeft' ? Math.max(0, i - 1) : event.key === 'Home' ? 0 : event.key === 'End' ? n - 1 : null; if (next === null) return; event.preventDefault(); event.currentTarget.parentElement?.querySelector<SVGElement>(`[data-point="${next}"]`)?.focus() }} />)}
+    </svg>
+    {point && active !== null && <Readout point={point} label={bucketLabel(target, active)} style={readoutAt(xs[active], width, compact ? 164 : 204)} />}
+  </div>
+}
+// One readout beside the crosshair, on the side with room for it and never past the plot's edges.
+function readoutAt(x: number, width: number, readout: number): CSSProperties {
+  const after = x + 12
+  return { left: Math.max(0, Math.min(width - readout, after + readout <= width ? after : x - 12 - readout)), width: readout }
+}
+function Readout({ point: p, label, style }: { point: ChartPoint; label: string; style: CSSProperties }) {
+  const bounceRate = p.sent ? p.bounced / p.sent : 0
+  return <div className="ov-readout" role="status" style={style}><strong>{label}</strong>
+    <span><i className="ov-key--sent" />Emails<b>{number(p.sent)}</b></span>
+    <span><i className="ov-key--delivered" />Delivered<b>{p.sent ? percent(p.delivered / p.sent, 1) : '—'}</b></span>
+    <span><i className="ov-key--bounces" />Bounced<b>{number(p.bounced)}<em data-zone={zone(hourRate(p.bounced, p.sent), BOUNCE_LINE)}>{p.sent ? percent(bounceRate, 1) : '—'}</em></b></span>
+    <span><i className="ov-key--complaints" />Complaints<b>{number(p.complaints)}</b></span>
+  </div>
 }
