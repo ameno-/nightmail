@@ -11,7 +11,7 @@ import { loadMailboxSetupSdk, preparePoolReceiving } from './mailbox-setup.js';
 import { byoEnabled } from './byo-pilot.js';
 import { hostedAllowance, type HostedAllowance } from './hosted-sending.js';
 import { requirePlatformAccount } from './config.js';
-import { Accepted, Imports, InventoryFields, ProductionAccess, ProductionAccessState, RegionStatus, StackUpdate, disconnectV5, enrollV5, inventory, prepareStackUpdate, refreshScan, regionLabels, requestProductionAccess, selectImports, statuses, v5Link, type V5Connection } from './byo-regional.js';
+import { Accepted, DisconnectSummary, Imports, InventoryFields, ProductionAccess, ProductionAccessState, RegionStatus, StackUpdate, disconnectV5, enrollV5, inventory, prepareStackUpdate, refreshScan, regionLabels, requestProductionAccess, selectImports, statuses, v5Link, type V5Connection } from './byo-regional.js';
 import { BYO_TEMPLATE_VERSIONS, byoFeatures, versionAtLeast } from './byo-permissions.js';
 import { CONNECTION_STATES, TENANT_STATES, assertConnectionTransition, campaignActive, desiredTenantStatus, finishProvisioning, notProvisioning, poolReceives, poolSends, setPoolState, setTenantState, startProvisioning, queueTenantJob, type ConnectionState, type TenantState } from './states.js';
 
@@ -476,11 +476,11 @@ export function registerProviderConnections(app: App) {
     const account = c.req.valid('json').awsAccountId;
     try { return c.json(view(c.env, await provision(c.env, row, account, undefined, auditContext(c))), 200); } catch (e) { if (e instanceof ModuleLoadError) throw e; throw awsError(e); }
   });
-  app.openapi(createRoute({ method: 'delete', path, operationId: 'deleteConnection', tags, security, description: 'Refuses outstanding mail and campaigns. Regional BYO fences sending and queues verified cleanup of its sending sets and feedback topic. Poll getConnection for the remaining manifest; repeat DELETE to resume after fixing access or drift. Keeps identities, DNS and mailbox data. Remove the customer role stack last. Legacy connections retain AWS resources.', responses: { 200: response(z.object({ deleted: z.literal(true) })),202:response(z.object({operationId:z.string()})), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'delete', path, operationId: 'deleteConnection', tags, security, description: 'Refuses outstanding mail and campaigns. Regional BYO fences sending and queues verified cleanup of its sending sets and feedback topic. Poll getConnection for the remaining manifest; repeat DELETE to resume after fixing access or drift. Keeps identities, DNS and mailbox data. Remove the customer role stack last. Legacy connections retain AWS resources.', responses: { 200: response(z.object({ deleted: z.literal(true) })),202:response(z.object({operationId:z.string(),summary:DisconnectSummary}).openapi('ConnectionDisconnect')), ...errors } }), async c => {
     const wid = owner(c);
     try {
       const current=await get(c.env,wid);
-      if (current?.template_version==='v5') {const result=await disconnectV5(c.env,wid,current.id);c.get('actor').wakeJobs=1;return c.json(result,202);}
+      if (current?.template_version==='v5') {const result=await disconnectV5(c.env,wid,current.id,(db,conn)=>recordAudit(db,c,{action:'connection.delete',workspaceId:wid,target:{type:'connection',id:conn.id},before:{kind:'byo',region:conn.region,state:conn.state}}));c.get('actor').wakeJobs=1;return c.json(result,202);}
       await c.env.db.transaction(async db => {
         await getRegionSettings(db, wid, 'update'); // Serialize with send admission, which takes FOR SHARE on this row.
         const row = (await db.execute<Row & { pause_reason: string | null }>(sql`SELECT * FROM provider_connections pc WHERE workspace_id=${wid} AND ${notProvisioning()}

@@ -16986,13 +16986,17 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "summary": {
+                "$ref": "#/components/schemas/DisconnectSummary"
               }
             },
             "required": [
               "operationId",
               "lastError",
               "remaining",
-              "retain"
+              "retain",
+              "summary"
             ]
           }
         },
@@ -17009,6 +17013,125 @@
           "quickCreateUrl",
           "stack",
           "health"
+        ]
+      },
+      "DisconnectSummary": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "retained": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "domain": {
+                  "type": "string"
+                },
+                "region": {
+                  "type": "string"
+                },
+                "regionLabel": {
+                  "type": "string"
+                },
+                "createdByNightmail": {
+                  "type": "boolean",
+                  "description": "Nightmail created the identity; otherwise it was already in the account."
+                },
+                "records": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DisconnectDnsRecord"
+                  },
+                  "description": "DNS records of an identity Nightmail created, to remove with it."
+                }
+              },
+              "required": [
+                "domain",
+                "region",
+                "regionLabel",
+                "createdByNightmail",
+                "records"
+              ]
+            },
+            "description": "SES identities that stay in the AWS account. Delete one in the SES console, and its DNS records, once nothing sends from it."
+          },
+          "leftBehind": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "region": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "resource": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "region",
+                "kind",
+                "resource"
+              ]
+            },
+            "description": "Resources Nightmail created but couldn't remove: its role was gone, or they were changed in AWS."
+          },
+          "stack": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "consoleUrl": {
+                "type": "string",
+                "format": "uri"
+              }
+            },
+            "required": [
+              "name",
+              "consoleUrl"
+            ],
+            "description": "The Nightmail stack, to delete in the CloudFormation console once the cleanup finishes."
+          }
+        },
+        "required": [
+          "retained",
+          "leftBehind",
+          "stack"
+        ]
+      },
+      "DisconnectDnsRecord": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "CNAME",
+              "MX",
+              "TXT"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "type",
+          "name",
+          "value"
         ]
       },
       "ConnectionRegions": {
@@ -17151,6 +17274,21 @@
           "version",
           "changeSetId",
           "consoleUrl"
+        ]
+      },
+      "ConnectionDisconnect": {
+        "type": "object",
+        "properties": {
+          "operationId": {
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/DisconnectSummary"
+          }
+        },
+        "required": [
+          "operationId",
+          "summary"
         ]
       },
       "PublicStats": {
@@ -75016,15 +75154,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "operationId": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "operationId"
-                  ]
+                  "$ref": "#/components/schemas/ConnectionDisconnect"
                 }
               }
             }

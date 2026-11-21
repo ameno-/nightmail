@@ -1,0 +1,12 @@
+/* A connected AWS account's disconnect: progress, the stack to delete and the identities that stay. */
+.aws-disconnect__status { margin: 0 0 var(--space-8); }
+.aws-disconnect__section { display: grid; gap: var(--space-8); margin-top: var(--space-16); }
+.aws-disconnect__section h3 { margin: 0; font-size: var(--text-sm); font-weight: 600; }
+.aws-disconnect__status a { display: inline-flex; align-items: center; gap: var(--space-4); }
+.aws-disconnect__identity { display: grid; gap: var(--space-8); }
+.aws-disconnect__identity h4 { margin: 0; font-size: var(--text-sm); font-weight: 500; }
+.aws-disconnect__list { margin: var(--space-8) 0 0; padding-left: var(--space-16); overflow-wrap: anywhere; }
+.aws-disconnect__records { display: grid; gap: var(--space-4); margin: 0; padding: 0; list-style: none; }
+.aws-disconnect__records li { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; align-items: center; gap: var(--space-8); }
+.aws-disconnect__records code { overflow-wrap: anywhere; font-size: var(--text-xs); }
+.aws-disconnect__type { color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); }
