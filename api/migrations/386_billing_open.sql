@@ -9,7 +9,7 @@ SET LOCAL lock_timeout='2s';
 -- rows starts to hold some (a new row, or a settled one written again: a refund or late usage into an hour already
 -- settled), and the settler deletes it once none is left. Every reader of unsettled usage (the position, the settler,
 -- the mode switch, the hourly run's discovery and lag check) takes its hours from billing_open, then the same rows by
--- the same predicate as before, so what each one prices doesn't change. 383 drops the index, concurrently.
+-- the same predicate as before, so what each one prices doesn't change. 387 drops the index, concurrently.
 --
 -- An hour with unsettled usage is never missing from billing_open:
 -- - The trigger writes it in the transaction of the write that opens the hour, whatever wrote it (meters, refunds, the

@@ -6,7 +6,7 @@ const LAG_ALERT_MS = 3 * 3_600_000, BYO_FAIR_USE = 10_000_000;
 // Closed hours only, and at least five minutes closed: the Node runner's hourly tick is not aligned to :07 like the
 // Worker cron, and a writer that started before the boundary may still be upserting the previous hour's row.
 const CLOSED_HOURS = sql`date_trunc('hour', now() - interval '5 minutes', 'UTC')`;
-// Workspace-hours with unsettled usage: billing_open (migration 382) lists the hours, and their rows say which still hold some.
+// Workspace-hours with unsettled usage: billing_open (migration 386) lists the hours, and their rows say which still hold some.
 const OPEN_HOURS = sql`billing_open o WHERE EXISTS (SELECT FROM billing_usage_hourly u WHERE u.workspace_id=o.workspace_id AND u.hour=o.hour
   AND (u.quantity <> u.settled_quantity OR u.refunds <> '{}'))`;
 

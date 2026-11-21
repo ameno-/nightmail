@@ -11768,7 +11768,7 @@ describe('Billing: metering, gate and settlement', () => {
     });
   });
 
-  test('meter updates stay in place (382): the same sends, refunds, settlements and retries, switches and write-offs price exactly as the settler, position and mode switch before billing_open, and every hour with unsettled usage stays listed', async t => {
+  test('meter updates stay in place (386): the same sends, refunds, settlements and retries, switches and write-offs price exactly as the settler, position and mode switch before billing_open, and every hour with unsettled usage stays listed', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { settleClosedHours } = await import('./src/billing/cron.js');
       const at = await clock(db, '2027-01-31T19:00:00Z');
@@ -11777,7 +11777,7 @@ describe('Billing: metering, gate and settlement', () => {
       const paid = await hosted(db, 'billing-open-paid'), debtor = await hosted(db, 'billing-open-debtor'), free = await hosted(db, 'billing-open-free');
       const wids = [paid.wid, debtor.wid, free.wid].sort();
       await charging(db, free.wid, false);
-      // The settler, position and mode switch as they were before 382 (migrations 367, 380 and 314), in a schema of their
+      // The settler, position and mode switch as they were before 386 (migrations 367, 380 and 314), in a schema of their
       // own that comes first on the search path for the run with the code before.
       const path = (await db.query(`SELECT current_setting('search_path') AS p`)).rows[0].p as string, schema = 'billing_before_' + randomUUID().replaceAll('-', '');
       const use = (code: 'before' | 'after') => db.query(`SELECT set_config('search_path', $1, true)`, [code === 'before' ? `${schema}, ${path}` : path]);
