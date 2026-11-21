@@ -21594,15 +21594,15 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const abuseModule = await import('./src/abuse.js'), { sql } = await import('drizzle-orm'), { loadConfig } = await import('./src/config.js');
       const stored = async () => (await db.query('SELECT count(*)::int AS n FROM abuse_signals')).rows[0].n as number, before = await stored();
       // Off: self-hosted; hosted without the setting; hosted before its activation time. A sign-in notes nothing and
-      // the job does not run. Production's configuration leaves it unset.
+      // the job does not run. Production sets it but stays monitor-only: NIGHTMAIL_ABUSE_ENFORCE is never set there.
       const settings = (extra: Json) => loadConfig({ PUBLIC_URL: 'https://abuse.example', BANE_ROOT_SECRET: 'local-fixture-'.repeat(4), ...extra });
       const hosted = { MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google' };
       assert.deepEqual([settings({ NIGHTMAIL_ABUSE_MONITORING: '2026-11-23T00:00:00Z' }).abuseMonitoring, settings(hosted).abuseMonitoring, settings({ ...hosted, NIGHTMAIL_ABUSE_MONITORING: '2026-11-23T01:00:00+01:00' }).abuseMonitoring],
         [undefined, undefined, { since: '2026-11-23T00:00:00.000Z' }]);
       assert.throws(() => settings({ ...hosted, NIGHTMAIL_ABUSE_MONITORING: 'true' }), { code: 'CONFIG_INVALID' });
       assert.deepEqual([settings(hosted).abuseEnforce, settings({ ...hosted, NIGHTMAIL_ABUSE_ENFORCE: 'true' }).abuseEnforce], [false, true]);
-      const wrangler = async (file: string) => /^\s*"NIGHTMAIL_ABUSE_MONITORING"\s*:/m.test(await readFile(new URL(file, import.meta.url), 'utf8'));
-      assert.deepEqual([await wrangler('./wrangler.prod.jsonc'), await wrangler('./wrangler.dev.jsonc')], [false, true], 'Monitoring is off in production.');
+      const wrangler = async (file: string, key: string) => new RegExp(`^\\s*"${key}"\\s*:`, 'm').test(await readFile(new URL(file, import.meta.url), 'utf8'));
+      assert.deepEqual([await wrangler('./wrangler.prod.jsonc', 'NIGHTMAIL_ABUSE_MONITORING'), await wrangler('./wrangler.dev.jsonc', 'NIGHTMAIL_ABUSE_MONITORING'), await wrangler('./wrangler.prod.jsonc', 'NIGHTMAIL_ABUSE_ENFORCE')], [true, true, false], 'Monitoring is on in production, monitor-only.');
       const seen = { outcome: 'not_approved', email: 'off@abuse-off.example.com', provider: null, network: { ip: '198.51.100.7', userAgent: 'curl/8.1', asn: 'AS64500', country: 'US' } };
       for (const off of [{ multiTenant: false, abuseMonitoring: { since: '2020-01-01T00:00:00.000Z' } }, { multiTenant: true, abuseMonitoring: undefined }, { multiTenant: true, abuseMonitoring: { since: new Date(Date.now() + 3600_000).toISOString() } }]) {
         Object.assign(runtime.config, off);
