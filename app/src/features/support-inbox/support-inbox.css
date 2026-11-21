@@ -77,8 +77,8 @@
 .sinbox-panel { position: sticky; top: 0; min-width: 0; padding-left: var(--space-24); border-left: 1px solid var(--color-border-muted); }
 .sinbox-panel__body { display: flex; flex-direction: column; gap: var(--space-20); min-width: 0; }
 .sinbox-panel__body .ui-label { margin-bottom: var(--space-4); }
-.sinbox-kv { grid-template-columns: 96px minmax(0, 1fr); }
-.sinbox-kv :is(dt, dd) { border-bottom: 1px solid var(--color-border-muted); }
+.ui-kv.sinbox-kv { grid-template-columns: 96px minmax(0, 1fr); }
+.ui-kv.sinbox-kv :is(dt, dd) { border-bottom: 1px solid var(--color-border-muted); }
 .sinbox-address { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 var(--space-8); min-width: 0; }
 .sinbox-ticket { display: inline-flex; flex-wrap: wrap; gap: 0 var(--space-8); min-width: 0; }
 .sinbox-faint { color: var(--color-faint); }
