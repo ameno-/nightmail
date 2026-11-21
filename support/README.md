@@ -40,7 +40,7 @@ So the agent loop, history, streaming, retries and eviction recovery are OpenCod
 
 - one `support` agent (system prompt = `system.md` + `VOICE.md`, 25 steps);
 - our tools as a Promise plugin (`src/agent/opencode.ts`, `src/agent/tools.ts`), native rather than Code Mode;
-- session permissions that deny `*` and allow only our tools. The agent-level list alone leaks the built-in `skill` tool;
+- session permissions that deny `*` and allow only this turn's tools (`toolNames` in `tools.ts`: a chat's by role, an email's `reply` and `file_ticket`), updated on the session when the set changes. The agent-level list alone leaks the built-in `skill` tool;
 - a `fetch` that adds the gateway key and enforces the model pin;
 - title, summary and compaction turned off, so there are no extra or smaller-model calls.
 
@@ -101,6 +101,7 @@ The tests run the deployed bundle in Miniflare, as Console's agent tests do. `@c
 - a person removed from the workspace: the next turn ends the conversation without a model call;
 - the output gate;
 - the email path, from signature to registration to a general reply with the Help line and no stamped request; a DMARC failure that gets the fixed Help reply and no model call;
+- the reply tool: one reply per email (a second call refused), the same text after a crash with no second model call, the sender as the only recipient, the nudge then the busy reply when there is none, an email after an interrupted turn answered by its own reply; email turns offering only `reply` and `file_ticket`, and the email turn cap;
 - that the model never sees a person's or actor's account ID, in `<account>` or a tool result;
 - failing closed without the gateway key;
 - image checks: type by magic bytes, EXIF/XMP/text removed for PNG, JPEG and WebP, damage and oversize refused;
@@ -117,7 +118,8 @@ They make no network or model calls. `test/*.local.ts` scripts, which are git-ig
 Email never reads an account: questions about one are for Help, where the person is signed in. Each email conversation is bound to the first address that writes in it. Nightmail still registers every message (`registerConversation` with the message ID; the staff inbox needs the row), and its `mode` only decides the reply.
 
 - **Every later message is checked again.** It must come from that address and still verify the same way. Anything else (another sender, a message that no longer verifies, a closed conversation) goes to a conversation of its own.
-- **`non_member`** (the sender passed DMARC; Nightmail binds no account to email, and a `member` from an earlier Nightmail is treated the same): the agent's general answer. The conversation makes no stamped request (no scope, no `<account>`, no account tool, no content access), and `<customer>` says only that this is email. The Worker adds "For anything about your account, sign in to Nightmail and press Help" with Nightmail's link after the output gate, frozen with the answer, so a retry sends the same email once.
+- **`non_member`** (the sender passed DMARC; Nightmail binds no account to email, and a `member` from an earlier Nightmail is treated the same): the agent's general answer. The conversation makes no stamped request (no scope, no `<account>`, no account tool, no content access), `<customer>` says only that this is email, and the turn offers only `reply` and `file_ticket`.
+- **The answer is the `reply` tool's text.** The model calls it once; the call runs the output gate and freezes the email into the answer's work item, marked `mode: 'general'`, with "For anything about your account, sign in to Nightmail and press Help" and Nightmail's link added after the gate (a held reply freezes the fixed held note instead and files one ticket). A second call is refused, nothing the model writes as text is sent, and a retry sends the same email once. A turn that ends without a reply gets one hidden nudge, then the busy reply and a ticket. A turn cut off by an eviction is stopped when OpenCode resumes it, before the next turn starts.
 - **`pending_signin` and `unverified`:** one fixed reply, the same either way (so it never says whether an account exists), pointing to sign in and press Help. No model call, and nothing waits. A confirm link from an earlier reply opens a page that says the same and changes nothing; answers an earlier release parked for a sign-in or confirmation are held, never sent.
 - **Mail at a chat** (a reply in its ticket's follow-up thread) goes to an email conversation of its own for that thread and sender, and never touches the chat, its transcript or its ticket.
 - **Tickets from email** name no customer account, only the address that wrote; a chat's ticket names the chat's person.
@@ -147,7 +149,7 @@ Nightmail's staff Support inbox (`/support` in the dashboard, `api/src/support-i
 ## Limits and retention
 
 - **Daily caps** (`src/limits.ts`; override each with a `LIMIT_*` var). The budgets are separate, so one can't starve another:
-  - model turns: 1,500 a day, and 100 per person;
+  - model turns: 1,500 a day, 100 per chat person, and 5 per email sender address (`LIMIT_TURNS_PER_EMAIL_SENDER`);
   - tickets: a 60-a-day reserve for verified customers, 40 a day per intake address for everyone else, and 3 per customer or DMARC-passing sender;
   - mail: 20 a day per DMARC-passing sender, 30 per address for all unauthenticated mail together (a spoofed From can't spread across keys), and 2,000 in total.
 

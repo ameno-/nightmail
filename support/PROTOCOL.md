@@ -230,4 +230,4 @@ X-Filename: <URI-encoded file name, optional>
 
 ## 7. Testing without a model
 
-`support/test/fakes.ts` has the scripted model and the fake Nightmail the Worker's tests use. The model script decides its next move from the request: a reply with a tool step (`bounce_reasons`), a consent card ("look at the content"), a ticket ("refund") and a gated answer ("leak please"). `bun run test` in `support/` drives the real bundle through these, so the frame sequences in §3 are exactly what the tests assert.
+`support/test/fakes.ts` has the scripted model and the fake Nightmail the Worker's tests use. The model script decides its next move from the request: a reply with a tool step (`bounce_reasons`), a consent card ("look at the content"), a ticket ("refund") and a gated answer ("leak please"). A chat turn's request never offers `reply`, so its answer is the streamed text; an email turn answers through `reply` instead. `bun run test` in `support/` drives the real bundle through these, so the frame sequences in §3 are exactly what the tests assert.
