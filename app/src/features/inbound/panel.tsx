@@ -1,7 +1,7 @@
 // The flow panel: one address's Receive → Process → Deliver beside the list (a sheet on smaller screens), the same
 // diagram an address's page shows. Test sends a sample through the saved rules and marks the path it took; it replaces
 // Trace. An address typed in the search that has no row of its own shows where its mail would go, and creates it.
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { Link } from 'react-router'
 import { Button } from '../../components/ui'
 import { useApiDef } from '../../data/context'
@@ -15,7 +15,8 @@ export const mailOf = (entry: RouteEntry) => !entry.address || entry.kind === 'p
 export function FlowPanel({ entry, lookup, overview, onEdit, onCreate, mailLink = true }: { entry?: RouteEntry; lookup?: string; overview: Overview; onEdit: (entry: RouteEntry) => void; onCreate?: (address: string) => void; mailLink?: boolean }) {
   const test = useFlowTest()
   // Every address by its ID, for the names a lookup's path reaches (the list may be filtered to one).
-  const addresses = useApiDef(queries.inboundAddressOptions(), { enabled: !!lookup })
+  const addresses = useApiDef(queries.inboundAddressOptions())
+  const formId = useId()
   const [sample, setSample] = useState<Sample>(defaultSample)
   const address = entry ? testAddress(entry.match) : lookup ?? ''
   // A typed address with no row of its own is looked up at once: where its mail would go is a test.
@@ -32,9 +33,9 @@ export function FlowPanel({ entry, lookup, overview, onEdit, onCreate, mailLink 
       {lookup && onCreate && <Button variant="primary" onClick={() => onCreate(lookup)}>Create this address</Button>}
       {entry && <Button onClick={() => onEdit(entry)}>Edit</Button>}
       {mail && <Link className="ui-button ui-button--secondary ui-button--md" to={mail}>Mail</Link>}
-      <Button type="submit" form="flow-test" loading={test.pending}>Test</Button>
+      <Button type="submit" form={formId} loading={test.pending}>Test</Button>
     </div>
-    <TestBar address={address} test={test} sample={sample} onSample={setSample} />
-    {entry ? <EntryFlow entry={entry} overview={overview} outcome={outcome} /> : <OutcomeFlow address={address} overview={overview} outcome={addresses.data || addresses.error || !lookup ? outcome : null} error={test.address === address ? test.error : null} addresses={addresses.data ?? []} />}
+    <TestBar id={formId} address={address} test={test} sample={sample} onSample={setSample} />
+    {entry ? <EntryFlow entry={entry} overview={overview} outcome={outcome} boxes={addresses.data ?? []} /> : <OutcomeFlow address={address} overview={overview} outcome={addresses.data || addresses.error || !lookup ? outcome : null} error={test.address === address ? test.error : null} addresses={addresses.data ?? []} />}
   </section>
 }

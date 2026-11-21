@@ -8,7 +8,7 @@ import { PrivateAddress } from '../../components/PrivateAddress'
 import { request } from '../../data/live'
 import { errorText, type InboundAddress } from '../../data/types'
 import { kindNote, outcomes, steps } from './concepts'
-import { expiresIn, type Overview, type RouteEntry, type Target } from './overview'
+import { expiresIn, type Overview, type OverviewRule, type RouteEntry, type Target } from './overview'
 import { Match, TargetIcon, targetName } from './parts'
 import { RuleLine } from './recipes'
 import { endpointStatusLabel, endpointStatusTone } from './ritual-connections'
@@ -34,6 +34,18 @@ export function FlowStage({ kind, title = steps[kind].title, children }: { kind:
   return <li className="flow-stage" data-kind={kind}>
     <div className="flow-stage__head"><StageIcon kind={kind} /><span className="flow-stage__title">{title}</span></div>
     <div className="flow-stage__body">{children}</div>
+  </li>
+}
+/** Where a rule splits the mail: two destination slots side by side under a fork (one above the other on a phone),
+ *  each with its own label, "If yes" and "Otherwise". It stands in the flow where the Destinations stage would. */
+export function FlowFork({ labels, yes, no }: { labels: [string, string]; yes: ReactNode; no: ReactNode }) {
+  return <li className="flow-fork">
+    <div className="flow-fork__ways">
+      {[yes, no].map((slot, i) => <div key={i} className="flow-stage flow-fork__way" data-kind="deliver">
+        <div className="flow-stage__head"><StageIcon kind="deliver" /><span className="flow-stage__title">{labels[i]}</span></div>
+        <div className="flow-stage__body">{slot}</div>
+      </div>)}
+    </div>
   </li>
 }
 /** One line in a stage: an icon, what it is (a quieter note under it), and its status at the end, or a tick once a test took it. */
@@ -77,9 +89,32 @@ const reached = (t: Target, r: TraceRecipient) => t.type === 'inbox' ? !!t.id &&
   : t.type === 'store' || t.type === 'create_address' ? !r.dropped && !(r.inboxes ?? []).length && !(r.webhooks ?? []).length
   : !!t.id && (r.webhooks ?? []).includes(t.id)
 
-/** The flow of one address, catch-all or wildcard, from the overview's row; a test outcome marks the path taken. */
-export function EntryFlow({ entry, overview, outcome }: { entry: RouteEntry; overview: Overview; outcome?: TestOutcome | null }) {
+/** One side of a two-way rule as the flow draws it: its destination's name, icon and health, and whether a test took it. */
+type Side = { type: Target['type']; name: ReactNode; status: Target['status']; hit: (r: TraceRecipient) => boolean }
+function sideOf(param: string | undefined, entry: RouteEntry, overview: Overview, boxes: InboundAddress[]): Side {
+  if (!param || param === 'store') return { type: 'store', name: outcomes.store, status: null, hit: r => !r.dropped && !(r.inboxes ?? []).length && !(r.webhooks ?? []).length }
+  if (param === 'drop') return { type: 'drop', name: outcomes.drop, status: null, hit: r => !!r.dropped }
+  if (param.startsWith('inbox:')) {
+    const key = param.slice(6), box = entry.address?.key === key ? entry.address : boxes.find(b => b.key === key)
+    const name = box?.id === entry.address?.id ? 'Its inbox' : box ? box.displayName ? `${box.displayName} inbox` : <><PrivateAddress value={box.address} /> inbox</> : `The ${key} inbox`
+    return { type: 'inbox', name, status: null, hit: r => !!box && (r.inboxes ?? []).includes(box.id) }
+  }
+  const e = overview.endpoints.find(x => x.source === 'endpoint' && x.name === param)
+  return { type: e?.type ?? 'webhook', name: param, status: e?.status ?? null, hit: r => !!e && (r.webhooks ?? []).includes(e.id) }
+}
+export const isSplit = (rule?: Pick<OverviewRule, 'recipe'>) => !!rule?.recipe && (rule.recipe.id === 'split' || rule.recipe.id === 'split-by-meaning')
+
+/** The flow of one address, catch-all or wildcard, from the overview's row; a test outcome marks the path taken. An
+ *  address whose mail a two-way rule splits draws the fork the builder makes: its two destinations side by side. */
+export function EntryFlow({ entry, overview, outcome, boxes = [] }: { entry: RouteEntry; overview: Overview; outcome?: TestOutcome | null; boxes?: InboundAddress[] }) {
   const rules = new Map(overview.rules.map(r => [r.key, r]))
+  const split = entry.rules.map(key => rules.get(key)).find(isSplit)
+  const params = split?.recipe?.params ?? {}, one = (v: unknown) => typeof v === 'string' ? v : undefined
+  const ways = split && (split.recipe!.id === 'split-by-meaning' || params.test !== 'always') ? [sideOf(one(params.then), entry, overview, boxes), sideOf(one(params.otherwise), entry, overview, boxes)] : null
+  const single = split && !ways ? sideOf(one(params.then), entry, overview, boxes) : null
+  // What the fork (or the one way) delivers is said there; the rest of the address's destinations stay listed.
+  const drawn = (t: Target) => !!split && (t.via === split.key || t.type === 'store')
+  const rest = entry.to.filter(t => !drawn(t))
   const domain = overview.domains.find(d => d.name === entry.host)
   const r = outcome?.recipient ?? null, tested = !!r
   const acted = new Set((outcome?.rows ?? []).filter(row => row.actions.length > 0).map(row => row.key))
@@ -99,16 +134,21 @@ export function EntryFlow({ entry, overview, outcome }: { entry: RouteEntry; ove
         </FlowItem>
       }) : <FlowItem><span className="muted">{steps.process.empty}</span></FlowItem>}
     </FlowStage>
-    <FlowStage kind="deliver">
-      {entry.to.map(t => <FlowItem key={`${t.type}:${t.id}`} icon={<TargetIcon type={t.type} />} hit={r ? reached(t, r) : undefined}
+    {ways && <FlowFork labels={['If yes', 'Otherwise']} yes={<SideItem side={ways[0]!} r={r} />} no={<SideItem side={ways[1]!} r={r} />} />}
+    {(!ways || rest.length > 0) && <FlowStage kind="deliver" title={ways ? 'Also' : undefined}>
+      {single && <SideItem side={single} r={r} />}
+      {rest.map(t => <FlowItem key={`${t.type}:${t.id}`} icon={<TargetIcon type={t.type} />} hit={r ? reached(t, r) : undefined}
         aside={<Health status={t.status} />}>
         {t.type === 'inbox' && t.id !== entry.address?.id ? <><PrivateAddress value={t.name} /> inbox</> : t.type === 'inbox' ? 'Its inbox' : <PrivateAddress value={targetName(t, entry.address?.id)} />}
         {/* A rule's destination gets only the mail that rule sends it. */}
         {t.via && <span className="flow-via">via a rule</span>}
       </FlowItem>)}
       {entry.toTruncated && <FlowItem><span className="muted">+{entry.toTotal - entry.to.length} more webhooks</span></FlowItem>}
-    </FlowStage>
+    </FlowStage>}
   </Flow>
+}
+function SideItem({ side, r }: { side: Side; r: TraceRecipient | null }) {
+  return <FlowItem icon={<TargetIcon type={side.type} />} hit={r ? side.hit(r) : undefined} aside={<Health status={side.status} />}>{side.name}</FlowItem>
 }
 
 const glob = (pattern: string) => new RegExp('^' + pattern.split('*').map(part => part.replace(/[.+?^${}()|[\]\\]/g, c => '\\' + c)).join('.*') + '$')
@@ -172,21 +212,22 @@ export function useFlowTest() {
 }
 export type FlowTest = ReturnType<typeof useFlowTest>
 /** The sample a test sends: a refund request unless changed. One line until opened. */
-export function SampleFields({ sample, onChange, disabled }: { sample: Sample; onChange: (next: Sample) => void; disabled?: boolean }) {
+export function SampleFields({ sample, onChange, disabled, id = 'flow-sample' }: { sample: Sample; onChange: (next: Sample) => void; disabled?: boolean; id?: string }) {
   return <details className="flow-sample">
     <summary>Sample: <span className="flow-sample__subject">{sample.subject || '(no subject)'}</span></summary>
     <div className="stack flow-sample__fields">
-      <Field label="From" htmlFor="flow-sample-from"><Input id="flow-sample-from" value={sample.from} disabled={disabled} onChange={e => onChange({ ...sample, from: e.target.value })} autoComplete="off" /></Field>
-      <Field label="Subject" htmlFor="flow-sample-subject"><Input id="flow-sample-subject" value={sample.subject} disabled={disabled} onChange={e => onChange({ ...sample, subject: e.target.value })} autoComplete="off" /></Field>
-      <Field label="Text" htmlFor="flow-sample-text"><Textarea id="flow-sample-text" rows={3} value={sample.text} disabled={disabled} onChange={e => onChange({ ...sample, text: e.target.value })} /></Field>
+      <Field label="From" htmlFor={id + '-from'}><Input id={id + '-from'} value={sample.from} disabled={disabled} onChange={e => onChange({ ...sample, from: e.target.value })} autoComplete="off" /></Field>
+      <Field label="Subject" htmlFor={id + '-subject'}><Input id={id + '-subject'} value={sample.subject} disabled={disabled} onChange={e => onChange({ ...sample, subject: e.target.value })} autoComplete="off" /></Field>
+      <Field label="Text" htmlFor={id + '-text'}><Textarea id={id + '-text'} rows={3} value={sample.text} disabled={disabled} onChange={e => onChange({ ...sample, text: e.target.value })} /></Field>
     </div>
   </details>
 }
 /** Test: the sample it sends, and what went wrong when it didn't run. The Test button sits with the panel's actions. */
-export function TestBar({ address, test, sample, onSample }: { address: string; test: FlowTest; sample: Sample; onSample: (next: Sample) => void }) {
+export function TestBar({ address, test, sample, onSample, id = 'flow-test' }: { address: string; test: FlowTest; sample: Sample; onSample: (next: Sample) => void; id?: string }) {
   const submit = (event: FormEvent) => { event.preventDefault(); void test.run(address, sample) }
-  return <form className="flow-test" id="flow-test" onSubmit={submit}>
-    <SampleFields sample={sample} onChange={next => { onSample(next); test.clear() }} disabled={test.pending} />
+  // Its id names the form its Test button submits: two panels on one screen (the builder over the list) each have their own.
+  return <form className="flow-test" id={id} onSubmit={submit}>
+    <SampleFields id={id + '-sample'} sample={sample} onChange={next => { onSample(next); test.clear() }} disabled={test.pending} />
     {test.error && test.address === address && <Alert tone="danger">{test.error}</Alert>}
   </form>
 }

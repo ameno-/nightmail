@@ -22,7 +22,7 @@ function destinationsOf(addresses: InboundAddress[], webhooks: InboundWebhook[],
 }
 
 // One row per recipient rule, read as "mail to X goes to Y". Address rows are the implicit routes every inbox has.
-const TITLE = 'Where should this mail go?'
+export const TITLE = 'Where should this mail go?'
 
 /** Loads what a route can deliver to (inboxes, webhooks and forwards) and opens the editor for one route, or a new one for `match`. */
 export function RouteEditor({ match, route, to, onClose }: { match: string; route?: { id: string; enabled: boolean; to: string[] | 'drop' } | null; to?: string[]; onClose: () => void }) {

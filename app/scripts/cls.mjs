@@ -210,6 +210,8 @@ const pages = ids => [
   // Edit key: a row's menu, then Edit; the dialog opens once the key's domains have loaded.
   ['API keys · edit key dialog', '/api-keys', { menu: ['Actions for Production', 'Edit', 'Edit key'] }],
   ['Receiving · new address dialog', '/receiving', { dialog: 'New address' }],
+  // The address builder over the list, for the chosen address: its flow to change, read back from its route and rules.
+  ['Receiving · address builder dialog', `/receiving?open=${ids.address}`, { dialog: 'Edit' }],
   // Where its mail goes (the route editor) opens once its inboxes, webhooks and forwards have loaded.
   // Why a received message went where it did, from its conversation on the address's Mail tab.
   ['Receiving · why it went here dialog', `/receiving/addresses/${ids.address}?thread=${ids.supportThread}`, { dialog: 'Why it went here' }],

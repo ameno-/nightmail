@@ -63,6 +63,15 @@ A route can deliver to inboxes, webhooks and confirmed forwards (`forward:<name>
 
 The list is complete: routing targets and rule targets always show, and webhooks subscribed to an address's received mail show active ones first, then paused ones. An address with more than 50 subscribers shows the first 50 and says how many more there are, with a link to every one (the Destinations tab, filtered to that address).
 
+## New address and where its mail goes
+
+**New address** asks for the address (and, folded away, its lifetime and reply-as address), then **Where should this mail go?**, drawn as the flow is:
+
+- **One way:** one destination, picked from its inbox, another inbox, a destination (Slack, Discord, a webhook, a forward), keep it with no inbox, drop it, or a new Slack, Discord, webhook or forward made right there.
+- **Split it two ways:** a rule checks one thing (the subject mentions, the email mentions, the sender is, it has an attachment, or it looks like something, which the AI checks at $0.10 per 1,000 emails) and the flow forks: **If yes** to one destination, **Otherwise** to another.
+
+Save shows the result with **Test**. **Edit** on the flow panel, or on an address's Where mail goes tab, opens the same builder for that address; rules it doesn't draw keep running (**All rules** lists them). Saving composes the public API's own calls: `createInboundAddress`, `createEndpoint` for a new destination, a two-way rule (`createRuleFromRecipe` with `split` or `split-by-meaning`, see [rules.md](rules.md#recipes)) and the address's route. Each step adds before it removes, so no mail is lost halfway.
+
 ## The flow panel
 
 Choosing a row opens its flow, the same diagram everywhere: **Receive** (the address, and what else it catches: aliases, wildcards, or the catch-all) → **Process** (each rule as a sentence: a ready-made rule in its own words, a script as *Custom code rule*) → **Deliver** (each destination with its health: Ready, Awaiting recipient, Paused, Declined). From 1180 px it sits beside the list and shows the first row until another is chosen; below that it opens over the page, a full-height sheet on a phone.

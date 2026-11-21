@@ -110,15 +110,15 @@
    "findings": []
   },
   "Logs · desktop": {
-   "score": 21,
+   "score": 16,
    "findings": []
   },
   "Logs · phone": {
-   "score": 35,
+   "score": 33,
    "findings": []
   },
   "Logs · received · desktop": {
-   "score": 17,
+   "score": 7,
    "findings": []
   },
   "New campaign · desktop": {
@@ -275,6 +275,10 @@
   },
   "Received email · thread · phone": {
    "score": 12,
+   "findings": []
+  },
+  "Receiving · address builder dialog · desktop": {
+   "score": 8,
    "findings": []
   },
   "Receiving · address · desktop": {
@@ -639,7 +643,7 @@
    ]
   },
   "Support · customer sheet · phone": {
-   "score": 24,
+   "score": 22,
    "findings": []
   },
   "Support · desktop": {

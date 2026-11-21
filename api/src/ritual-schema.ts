@@ -393,9 +393,12 @@ export const recipeGroups: { id: RecipeGroup; title: string }[] = [
   { id: 'ai', title: 'Sort with AI' },
 ];
 /** slack, discord, chat (either), forward and webhook name an endpoint; meaning is what the AI looks for; label is one
- *  label; senders is a list of addresses and @domains. */
-export type RecipeFieldType = 'slack' | 'discord' | 'chat' | 'forward' | 'webhook' | 'meaning' | 'label' | 'senders';
-export type RecipeField = { name: string; type: RecipeFieldType; label: string; placeholder?: string; hint?: string };
+ *  label; senders is a list of addresses and @domains. The two-way rules (split, split-by-meaning) add test (what is
+ *  checked: always, from, subject, text or attachment), words (what it looks for: words, or senders for from) and
+ *  destination (inbox:<key>, an endpoint name, store or drop). */
+export type RecipeFieldType = 'slack' | 'discord' | 'chat' | 'forward' | 'webhook' | 'meaning' | 'label' | 'senders' | 'test' | 'words' | 'destination';
+/** optional: may be left out (words for always and attachment, otherwise for always). */
+export type RecipeField = { name: string; type: RecipeFieldType; label: string; placeholder?: string; hint?: string; optional?: boolean };
 export type RecipeParams = Record<string, string | string[]>;
 /** Where a recipe's attachment goes on an address: keep-out recipes first, then allow-lists, then the rest, and every
  *  recipe before the address's own scripts, so a script's "stop the rest" never silences a recipe. */
@@ -408,6 +411,8 @@ export type RitualRecipe = {
   /** Asks the AI about each email (a decision), billed per email checked. */
   decisions: boolean;
   stage: RecipeStage;
+  /** false: not in listRuleRecipes (the dashboard's two-way rules, built by its address builder); createRuleFromRecipe takes it. */
+  listed?: false;
   source: (params: Record<string, string>, lists: Record<string, string[]>, kind: (endpoint: string) => EndpointType | undefined) => string;
 };
 const chatPost = (name: string, kind: EndpointType | undefined, message: string) => `${endpointCall(name)}({ ${kind === 'discord' ? 'content' : 'text'}: \`${message}\` })`;
@@ -416,6 +421,45 @@ const SENDER = '`${email.from.address}: ${email.subject}`'.slice(1, -1);
 const fromAny = (senders: string[]) => senders.map(s => s.startsWith('@') ? `email.from.domain === ${JSON.stringify(s.slice(1))}` : `email.from.address === ${JSON.stringify(s)}`).join(' || ');
 const question = (meaning: string) => `Does this email look like ${meaning}?`;
 const askAi = (meaning: string) => `const asks = decisions(email, { match: ${JSON.stringify(question(meaning))} })`;
+
+// ---------------------------------------------------------------- two-way rules
+// "If <test>, send to <then>; otherwise to <otherwise>": what the dashboard's address builder draws as a fork. The
+// address they run on stores its mail without an inbox (its route is []), so each side gets exactly its destination:
+// an inbox through inbox.deliver, a Slack, Discord, webhook or forward endpoint (not for junk), kept (store) or dropped.
+export const splitTests = ['always', 'from', 'subject', 'text', 'attachment'] as const;
+export type SplitTest = (typeof splitTests)[number];
+const deliverTo = (destination: string, kind: (endpoint: string) => EndpointType | undefined) => {
+  if (destination === 'store') return 'return';
+  if (destination === 'drop') return 'drop("sorted out")';
+  if (destination.startsWith('inbox:')) return `inbox.deliver(${JSON.stringify(destination.slice(6))})`;
+  const type = kind(destination);
+  return `if (!ctx.junk) ${type === 'slack' || type === 'discord' ? chatPost(destination, type, SENDER) : `${endpointCall(destination)}()`}`;
+};
+const mentions = (field: string, words: string[]) => words.map(w => `${field}.toLowerCase().includes(${JSON.stringify(w)})`).join(' || ');
+const splitCondition = (test: string, words: string[]) =>
+  test === 'from' ? fromAny(words)
+  : test === 'subject' ? mentions('email.subject', words)
+  : test === 'text' ? `${mentions('email.subject', words)} || ${mentions('email.visibleText', words)}`
+  : 'email.attachments.length > 0';
+const fork = (condition: string, then: string, otherwise: string) => wrap(`if (${condition}) {\n  ${then}\n} else {\n  ${otherwise}\n}`);
+const sides = [{ name: 'then', type: 'destination' as const, label: 'Send to' }, { name: 'otherwise', type: 'destination' as const, label: 'Otherwise', optional: true }];
+export const splitRecipes: RitualRecipe[] = [
+  {
+    id: 'split', group: 'pass', name: 'Send mail two ways', stage: 2, decisions: false, listed: false,
+    description: 'Mail that matches goes one way, the rest another.',
+    sentence: 'If {test} {value}, send to {then}; otherwise to {otherwise}',
+    fields: [{ name: 'test', type: 'test', label: 'If' }, { name: 'value', type: 'words', label: 'Mentions', optional: true }, ...sides],
+    source: (p, l, kind) => p.test === 'always' ? wrap(deliverTo(p.then!, kind))
+      : fork(splitCondition(p.test!, l.value ?? []), deliverTo(p.then!, kind), deliverTo(p.otherwise!, kind)),
+  },
+  {
+    id: 'split-by-meaning', group: 'ai', name: 'Send mail two ways by meaning', stage: 2, decisions: true, listed: false,
+    description: `${productName}’s AI reads each email: what matches goes one way, the rest another.`,
+    sentence: 'If it looks like {meaning}, send to {then}; otherwise to {otherwise}',
+    fields: [{ name: 'meaning', type: 'meaning', label: 'Looks like', placeholder: 'a refund request' }, ...sides.map(f => ({ ...f, optional: undefined }))],
+    source: (p, _l, kind) => wrap(`${askAi(p.meaning!)}\nif (asks.match >= 0.7) {\n  ${deliverTo(p.then!, kind)}\n} else {\n  ${deliverTo(p.otherwise!, kind)}\n}`),
+  },
+];
 
 export const ritualRecipes: RitualRecipe[] = [
   {
@@ -488,6 +532,7 @@ export const ritualRecipes: RitualRecipe[] = [
     fields: [{ name: 'meaning', type: 'meaning', label: 'Looks like', placeholder: 'an outage report' }, { name: 'channel', type: 'chat', label: 'Slack or Discord channel' }],
     source: (p, _l, kind) => wrap(`if (ctx.junk) return\n${askAi(p.meaning!)}\nif (asks.match >= 0.7) ${chatPost(p.channel!, kind(p.channel!), SENDER)}`),
   },
+  ...splitRecipes,
 ];
 
 const ENDPOINT_FIELD: Partial<Record<RecipeFieldType, { types: EndpointType[]; noun: string }>> = {
@@ -510,8 +555,46 @@ export function buildRecipe(id: string, params: RecipeParams, kind: (endpoint: s
   const extra = Object.keys(params).find(name => !recipe.fields.some(f => f.name === name));
   if (extra) return { ok: false, field: `params.${extra}`, message: `${recipe.name} has no field ${extra}.` };
   const text: Record<string, string> = {}, lists: Record<string, string[]> = {}, out: RecipeParams = {};
+  const test = typeof params.test === 'string' ? params.test.trim().toLowerCase() : '';
   for (const field of recipe.fields) {
     const raw = params[field.name], at = `params.${field.name}`;
+    if (field.type === 'test') {
+      if (!(splitTests as readonly string[]).includes(test)) return { ok: false, field: at, message: `Choose what to check: ${splitTests.join(', ')}.` };
+      text[field.name] = out[field.name] = test;
+      continue;
+    }
+    if (field.type === 'words') {
+      // always and attachment check nothing in the message's words; from takes senders, subject and text words.
+      if (test === 'always' || test === 'attachment') {
+        if (raw !== undefined && (Array.isArray(raw) ? raw.length : String(raw).trim())) return { ok: false, field: at, message: `${test === 'always' ? 'Sending everything one way' : 'Has an attachment'} takes no words.` };
+        continue;
+      }
+      const entries = [...new Set((Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(test === 'from' ? /[\s,;]+/ : /[,;\n]+/) : []).map(s => s.trim().toLowerCase()).filter(Boolean))];
+      if (!entries.length) return { ok: false, field: at, message: test === 'from' ? 'Add at least one address or @domain.' : 'Add at least one word to look for.' };
+      if (entries.length > 20) return { ok: false, field: at, message: 'List at most 20.' };
+      const bad = test === 'from' ? entries.find(s => !SENDER_ENTRY.test(s)) : entries.find(s => s.length > 80);
+      if (bad) return { ok: false, field: at, message: test === 'from' ? `${bad} isn’t an address or @domain.` : 'Keep each word or phrase under 80 characters.' };
+      lists[field.name] = out[field.name] = entries;
+      continue;
+    }
+    if (field.type === 'destination') {
+      const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+      // One way only (always) has no otherwise.
+      if (field.optional && test === 'always') {
+        if (value) return { ok: false, field: at, message: 'Sending everything one way has no otherwise.' };
+        continue;
+      }
+      if (!value) return { ok: false, field: at, message: 'Choose where it goes.' };
+      if (value === 'store' || value === 'drop') { text[field.name] = out[field.name] = value; continue; }
+      if (value.startsWith('inbox:')) {
+        if (!/^inbox:[a-z0-9][a-z0-9_-]{0,63}$/.test(value)) return { ok: false, field: at, message: 'Name the inbox by its key, like inbox:support.' };
+        text[field.name] = out[field.name] = value;
+        continue;
+      }
+      if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(value) || !kind(value)) return { ok: false, field: at, message: `No inbox key or endpoint named ${value}. Use inbox:<key>, an endpoint name, store or drop.` };
+      text[field.name] = out[field.name] = value;
+      continue;
+    }
     if (field.type === 'senders') {
       const entries = [...new Set((Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(/[\s,;]+/) : []).map(s => s.trim().toLowerCase()).filter(Boolean))];
       if (!entries.length) return { ok: false, field: at, message: 'Add at least one address or @domain.' };

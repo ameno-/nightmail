@@ -25905,6 +25905,44 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await call('PUT', path, {});
         for (const name of ['recipe-chat', 'recipe-fwd']) await call('DELETE', `/v1/endpoints/${name}`);
       });
+      await t.test('rules: the two-way rules (split, split-by-meaning) send matching mail one way and the rest another, each side exactly its destination', async () => {
+        const path = '/v1/rules', recipes = path + '/recipes';
+        const desk = await call('POST', '/v1/inbound/addresses', { address: 'split@receive.example', key: 'split-desk' }, 201);
+        await call('POST', '/v1/endpoints', { type: 'webhook', name: 'split-hook', url: 'https://hooks.example.com/split' }, 201);
+        const hook = (await call('GET', '/v1/endpoints/split-hook')).id;
+        // Not in the catalog: the dashboard's address builder writes them, and createRuleFromRecipe takes them.
+        assert.ok(!(await call('GET', recipes)).data.some((r: Json) => r.id.startsWith('split')));
+        const refused = (params: Json) => local('POST', recipes, { recipe: 'split', params, addresses: [desk.id] });
+        error(await refused({ test: 'subject', then: 'split-hook', otherwise: 'inbox:split-desk' }), 422, 'INVALID_RECIPE');
+        error(await refused({ test: 'subject', value: 'refund', then: 'nope', otherwise: 'inbox:split-desk' }), 422, 'INVALID_RECIPE');
+        error(await refused({ test: 'always', then: 'split-hook', otherwise: 'store' }), 422, 'INVALID_RECIPE');
+        error(await refused({ test: 'sometimes', value: 'x', then: 'store', otherwise: 'drop' }), 422, 'INVALID_RECIPE');
+        error(await refused({ test: 'subject', value: 'refund', then: 'split-hook', otherwise: 'inbox:missing-box' }), 422, 'UNKNOWN_ENDPOINT');
+        const split = await call('POST', recipes, { recipe: 'split', params: { test: 'subject', value: 'Refund, Return', then: 'split-hook', otherwise: 'inbox:split-desk' }, addresses: [desk.id] }, 201);
+        const rule = (config: Json) => config.rules.find((r: Json) => r.key === split.key);
+        assert.deepEqual(rule(split.config).recipe, { id: 'split', params: { test: 'subject', value: ['refund', 'return'], then: 'split-hook', otherwise: 'inbox:split-desk' } });
+        // The address's own route is [] (stored, no inbox), so each side gets exactly its destination.
+        const route = await call('POST', '/v1/routing/routes', { match: desk.address, to: [] }, 201);
+        const send = async (subject: string, scores?: Json) => (await call('POST', path + '/test', { mime: `From: a@example.net\r\nTo: ${desk.address}\r\nSubject: ${subject}\r\n\r\nHello`, ...(scores ? { scores } : {}) })).recipients[0];
+        const refund = await send('Refund for order 4821'), hello = await send('Hello there');
+        assert.deepEqual([refund.inboxes, refund.webhooks], [[], [hook]]);
+        assert.deepEqual([hello.inboxes, hello.webhooks], [[desk.id], []]);
+        // One way only: everything to the webhook.
+        const always = await call('PUT', `${path}/scripts/${split.key}/recipe`, { params: { test: 'always', then: 'split-hook' } });
+        assert.deepEqual(rule(always.config).recipe.params, { test: 'always', then: 'split-hook' });
+        assert.deepEqual((await send('Hello again')).webhooks, [hook]);
+        // By meaning: the AI's answer picks the side (store keeps it, in no inbox), and the address's domain opts in.
+        const ai = await call('PUT', `${path}/scripts/${split.key}/recipe`, { recipe: 'split-by-meaning', params: { meaning: 'A refund request.', then: 'store', otherwise: 'inbox:split-desk' } });
+        assert.ok(ai.config.evaluateDomains.includes('receive.example'));
+        const question = 'Does this email look like a refund request?';
+        const yes = await send('Broken blender', { [question]: 1 }), no = await send('Broken blender', { [question]: 0 });
+        assert.deepEqual([yes.inboxes, yes.webhooks, yes.dropped], [[], [], false]);
+        assert.deepEqual([no.inboxes, no.webhooks], [[desk.id], []]);
+        await call('DELETE', `/v1/routing/routes/${route.id}`);
+        await call('PUT', path, {});
+        await call('DELETE', '/v1/endpoints/split-hook');
+        await call('DELETE', `/v1/inbound/addresses/${desk.id}`);
+      });
       await t.test('rules: omens(…) compiles to the plan decisions(…) does and ingests to the same verdicts; the /v1/rituals aliases answer as they did before the rename', async it => {
         const path = '/v1/rules', legacy = '/v1/rituals', prior = runtime.config.screen;
         const source = (fn: string) => `export default function route(email,ctx){\n  const r = ${fn}(email, { refund: "Is the sender asking for a refund?", urgent: { prompt: "Does this need a reply today?", type: "boolean", threshold: 0.8 } })\n  if (r.refund >= 0.7) label("refund")\n  if (r.urgent) endpoints["support-hook"]({ subject: "urgent" })\n}`;
