@@ -87,7 +87,7 @@ export function createSocketTransport({ origin, userId, workspaceId, resume }: {
   const key = storageKey(userId, workspaceId), lastKey = storageKey(userId, workspaceId, 'last')
   // A new page opens Help on a new conversation: the one from before is kept for "Continue last conversation" and never
   // shown on its own. One the person never wrote in is reused instead, so opening Help again doesn't start another.
-  // A support email's "continue in Nightmail" link (`resume`) opens its conversation, as asked.
+  // ?support=<conversationId> (`resume`) opens that chat conversation, as asked.
   if (resume) save(key, { conversationId: resume, written: true })
   else {
     const before = load(key)
@@ -113,8 +113,8 @@ export function createSocketTransport({ origin, userId, workspaceId, resume }: {
       } catch (error) {
         if (!(error instanceof StartError)) throw error
         if (conversationId && error.status === 404) { save(key, null); return open() }
-        // An email conversation continues by email (support/continue): the panel sends the person there.
-        if (conversationId && error.code === 'EMAIL_CONVERSATION') { save(key, null); throw error }
+        // An email conversation continues by email, never here: Help starts a conversation of its own.
+        if (conversationId && error.code === 'EMAIL_CONVERSATION') { save(key, null); return open() }
         if (tries === 0 && (error.code === 'HANDOFF_INVALID' || error.code === 'HANDOFF_USED')) continue
         throw error
       }

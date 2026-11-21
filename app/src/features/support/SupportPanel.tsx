@@ -1,5 +1,4 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type FormEvent, type KeyboardEvent, type RefObject } from 'react'
-import { useNavigate } from 'react-router'
 import { ArrowUp, Check, CircleAlert, History, Image as ImageIcon, ImagePlus, Square, UserRound, X } from 'lucide-react'
 import { Button, DropdownMenu, IconButton, Skeleton } from '../../components/ui'
 import { SheetOpenEffects, useSheetDrag } from '../../components/ui/sheet'
@@ -46,9 +45,6 @@ export function SupportPanel({ mode, open, onClose, onUnread, resume }: { mode: 
   }), [mode, userId, workspaceId])
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot)
   const panel = useRef<HTMLElement>(null), input = useRef<HTMLTextAreaElement>(null)
-  // A support email's link named an email conversation: it continues on its own page, signed in, by email.
-  const navigate = useNavigate()
-  useEffect(() => { if (state.reason === 'EMAIL_CONVERSATION' && resume) { onClose(); navigate(`/support/continue/${resume}`) } }, [state.reason])
   useEffect(() => { store.setVisible(open); if (open) store.start() }, [store, open])
   useEffect(() => { onUnread(state.unread) }, [state.unread])
   // Opening moves focus in (to the message box, or the panel itself on a touch screen, so the keyboard doesn't jump up);
