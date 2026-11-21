@@ -20,10 +20,11 @@ export function RegionStatus({ current }: { current?: RegionCatalogEntry }) {
 export const factTitles = ['Emails', 'Delivered', 'Bounced', 'Complaints'] as const
 // Latest emails are Logs' rows in a 790px column, so the table says what Logs says in fewer columns: the other party
 // is one column (who it went to, or who it came from; received mail is the one with the Received status), and the
-// direction and stream columns stay for phone cards only. Every address then gets room to read in full.
+// direction and stream columns stay for phone cards only. The address is masked by default, so it takes a fixed width
+// and the subject the rest.
 const logColumn = (key: string) => logColumns.find(column => column.key === key)!
 export const latestColumnDefs: SkeletonColumn[] = logColumnDefs.map(column => column.key === 'direction' || column.key === 'from' || column.key === 'stream' ? { ...column, table: false as const }
-  : column.key === 'status' ? { ...column, width: 160 } : column.key === 'to' ? { ...column, key: 'contact', label: 'To · from', width: '32%' } : column)
+  : column.key === 'status' ? { ...column, width: 160 } : column.key === 'to' ? { ...column, key: 'contact', label: 'To · from', width: 180 } : column)
 export const latestColumns: Column<LogEntry>[] = latestColumnDefs.map(column => ({ ...logColumn(column.key === 'contact' ? 'to' : column.key), ...column, render: column.key === 'contact' ? (row: LogEntry) => (row.direction === 'sent' ? logColumn('to') : logColumn('from')).render(row) : logColumn(column.key).render }))
 
 // Each skeleton has exactly the loaded block's dimensions (see overview.css), so swapping in the data moves nothing.

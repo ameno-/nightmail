@@ -1,7 +1,7 @@
 import { ApiError, type MailRoute, type RoutingTestResult, type Api, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type AudiencePreview, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxWebhookDelivery, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type ForwardEndpoint, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity, type OverviewSetup } from './types'
 
 import type { Agent, ApiKey, AppPassword, AuditEntry, CreatedAppPassword, DomainQuota } from './types'
-import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogEntry, SenderScore } from './types'
+import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogDirection, LogEntry, SenderScore } from './types'
 import { headerPrefix, productName } from '../../../api/src/brand'
 import { analytics } from '../lib/analytics'
 type Json = Record<string, any>
@@ -144,6 +144,7 @@ export function createLiveApi(): Api {
     for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192))
     return call<any>(path, 'POST', {filename: file.name, contentType: file.type || 'application/octet-stream', content: btoa(binary), ...(inline ? {disposition: 'inline', contentId: inline.contentId} : {})})
   }
+  const logFilters = (input: PageRequest & { direction?: LogDirection }) => ({ direction: input.direction === 'all' ? undefined : input.direction, region: input.regionId, campaignId: input.campaignId, kind: input.stream, status: input.status, search: input.search })
   async function page<T, X extends object = object>(path: string, input: PageRequest = {}, map: (r: Json) => T, filters: Json = {}, signal?: AbortSignal, extra?: (data: Json) => X): Promise<PageResult<T> & X> {
     const limit = Math.min(path === '/domains' ? 10 : 100, input.pageSize ?? 20)
     const key = JSON.stringify([path, limit, filters])
@@ -207,7 +208,14 @@ export function createLiveApi(): Api {
     // One read for Overview's setup and next steps; each part is null where its own list would refuse this session.
     setup: async signal => { const r = await call<Omit<OverviewSetup, 'domains'> & { domains: { data: Json[] } | null }>('/overview/setup', 'GET', undefined, signal); return { ...r, domains: r.domains ? r.domains.data.map(mapDomain) : null } } },
     logs: {
-      list: (input, signal) => page('/logs', input, mapLog, { direction: input.direction === 'all' ? undefined : input.direction, region: input.regionId, campaignId: input.campaignId, kind: input.stream, status: input.status, search: input.search }, signal),
+      list: (input, signal) => page('/logs', input, mapLog, logFilters(input), signal),
+      // The facets' counts: one row's page with counts for the same filters (the page itself is ignored).
+      counts: async (input, signal) => {
+        const params = new URLSearchParams({ limit: '1', counts: 'true' })
+        for (const [key, value] of Object.entries(logFilters(input))) if (value !== undefined && value !== '') params.set(key, String(value))
+        const { counts } = await call<{ counts: { status: Record<string, number>; kind: { transactional: number; marketing: number }; capped: { sent: boolean; received: boolean } } }>(`/logs?${params}`, 'GET', undefined, signal)
+        return { status: counts.status, stream: counts.kind, capped: counts.capped }
+      },
     },
     emails: {
       list: (input, signal) => page('/emails', input, mapEmail, { region: input.regionId, campaignId: input.campaignId, kind: input.stream, status: input.status, search: input.search, to: input.to, from: input.from }, signal),

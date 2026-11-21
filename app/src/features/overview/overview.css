@@ -18,7 +18,11 @@
 .ov-aside-skeleton > span:last-child { height: 120px; }
 
 /* Figures: four metric rows (label · series · mono value, components/ui/data.tsx), two by two, 40px each: 80px. */
-.ov-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--space-32); margin: 0; border-top: 1px solid var(--color-border-muted); --metric-spark: 96px; --metric-value: 80px; }
+.ov-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--space-32); margin: 0; border-top: 1px solid var(--color-border-muted); --metric-spark: 96px; --metric-value: 104px; }
+/* A rate below its warning line draws its meter in grey: a navy rule under a label reads as a selected tab. */
+.ov-facts .ui-meter.ui-tone--neutral > i { background: var(--color-series-strong); }
+/* The figures lead the page: larger than their labels. */
+.ov-facts .ui-metric__value { height: 24px; font-size: var(--text-lg); line-height: 24px; }
 .ov-spark { display: block; width: 100%; height: 20px; }
 .ov-spark-stack { display: block; width: 100%; height: 20px; }
 .ov-spark-stack .ov-spark { width: 100%; }
@@ -71,7 +75,7 @@
   /* The SES chip keeps its label and verdict; the rates (in its title and on Settings) don't fit beside the tabs. */
   .overview-reputation > .muted:last-child:not(:first-child) { display: none; }
   .ov-split { gap: var(--space-28); }
-  .ov-facts { grid-template-columns: minmax(0, 1fr); --metric-spark: 72px; --metric-height: 44px; }
+  .ov-facts { grid-template-columns: minmax(0, 1fr); --metric-spark: 72px; --metric-value: 104px; --metric-height: 44px; }
 }
 
 /* A new range or stream: the old figures stay up and dim once the new ones take over 100 ms, then brighten as they

@@ -36,7 +36,7 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
 .gauge-card--compact .gauge-dial { flex: none; width: 60px; height: 34px; }
 .gauge-card--compact:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 .gauge-stack { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
-.gauge-card--compact .gauge-eyebrow { font-size: 9px; line-height: 12px; letter-spacing: .14em; }
+.gauge-card--compact .gauge-eyebrow { font-size: var(--text-label); line-height: 14px; letter-spacing: .08em; }
 /* One 24px line in every state: the graded number keeps a fixed slot before its grade; ungraded or unread, a dash. */
 .gauge-readout { display: flex; align-items: baseline; gap: 8px; height: 24px; line-height: 24px; }
 .gauge-readout b { display: inline-block; min-width: 1.5em; font-family: var(--font-mono); font-size: 20px; line-height: 24px; font-weight: 400; letter-spacing: -.02em; }
@@ -88,11 +88,12 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
 .score-about .ui-dialog__body { display: flex; flex-direction: column; gap: var(--space-16); }
 /* The body scrolls; its blocks keep their full height instead of shrinking into each other. */
 .score-about .ui-dialog__body > * { flex-shrink: 0; }
-.score-about__status { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: var(--space-16); row-gap: var(--space-8); min-height: 56px; padding: var(--space-12) 0; border-block: 1px solid var(--color-border-muted); font-variant-numeric: tabular-nums; }
+.score-about__status { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: var(--space-16); row-gap: var(--space-8); min-height: 56px; padding: var(--space-12) 0; border-bottom: 1px solid var(--color-border-muted); font-variant-numeric: tabular-nums; }
 .score-about__status > b { min-width: 2ch; font-family: var(--font-mono); font-size: 30px; line-height: 32px; font-weight: 400; letter-spacing: -.03em; text-align: left; }
 .score-about__status-text { display: flex; flex-direction: column; gap: 2px; font-size: var(--text-sm); line-height: var(--leading-sm); }
 .score-about__status-text .muted { font-size: var(--text-xs); line-height: var(--leading-xs); }
-.score-about__grade { color: var(--grade-fill, inherit); font-family: var(--font-mono); }
+/* The grade is text, in the text colour: its hue is the gauge's, where it encodes the band. */
+.score-about__grade { font-family: var(--font-mono); }
 .score-about__status:has(.score-about__history) { grid-template-columns: auto minmax(0, 1fr) auto; }
 .score-about__history { display: flex; align-items: flex-end; gap: 2px; width: 98px; height: 20px; }
 .score-about__history > span { flex: 1; height: 100%; border-radius: 0; background: var(--color-series); transform-origin: bottom; }
@@ -112,6 +113,7 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
 .score-about__factors .ui-metric__unit { margin-left: var(--space-6); }
 .score-about__part-score { color: var(--tone-ink); }
 .score-about__part-score.ui-tone--neutral { color: var(--color-muted); }
+.score-about__out-of { color: var(--color-faint); }
 @media (max-width: 640px) { .score-about__factors { --metric-spark: 56px; --metric-value: 104px; } }
 /* How it's graded: what each part measures, its name leading its definition. */
 .score-about__bases { display: flex; flex-direction: column; gap: var(--space-4); margin: 0; text-wrap: pretty; }
