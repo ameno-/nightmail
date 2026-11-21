@@ -1,16 +1,18 @@
-// Trace: run an email through routes and rules with the dry run (testRules) and step through what happened:
-// each condition lights up true or false, AI decision answers fill in, then the actions and where the mail ends up.
-// Nothing is sent or saved. Steps are laid out up front and revealed in place, so the animation never moves the page.
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { Link, useLocation, useSearchParams } from 'react-router'
-import { Alert, Button, EmptyState, ErrorState, Field, Input, PageHeader, SkeletonText, Tabs, Textarea } from '../../components/ui'
+// A rule's Try it (rituals.tsx): run an email through the rules with the dry run (testRules) and step through what
+// happened: each condition lights up true or false, AI decision answers fill in, then the actions and where the mail
+// ends up. Nothing is sent or saved. Steps are laid out up front and revealed in place, so the animation never moves
+// the page. An address's Test is the flow panel's (flow.tsx); Trace, the page this was, is gone.
+import { useEffect, useMemo, useState } from 'react'
+import { Navigate, useLocation } from 'react-router'
+import { Button, ErrorState, Field, Input, SkeletonText, Tabs, Textarea } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { useApiDef, useApiQuery } from '../../data/context'
+import { useApiQuery } from '../../data/context'
 import { queries } from '../../data/queries'
 import { request } from '../../data/live'
 import { errorText } from '../../data/types'
 import { outcomes } from './concepts'
-import { useOverview, type Overview } from './overview'
+import { defaultSample } from './flow'
+import type { Overview } from './overview'
 import { Match, RitualIcon, TargetIcon } from './parts'
 import { MaskedText } from '../docs/agent-setup'
 import { when } from './shared'
@@ -23,13 +25,14 @@ export type TimelineStep =
   | { kind: 'action'; line: number; op: string; ref?: string; value?: string }
   | { kind: 'return'; line: number }
 export type TraceRow = { recipient: string; kind: string; key: string; scores: Record<string, number | boolean>; steps: number; lines: number[]; error: string | null; actions: { op: string; ref?: string; value?: string }[]; timeline: TimelineStep[] }
-export type TraceRecipient = { address: string; tier?: string; route?: string | null; inboxes?: string[]; webhooks?: string[]; labels?: string[]; junk?: boolean; dropped?: boolean; warnings?: string[] }
+export type TraceRecipient = { address: string; tier?: string; route?: string | null; inboxes?: string[]; webhooks?: string[]; labels?: string[]; junk?: boolean; dropped?: boolean; warnings?: string[]; domainDefault?: 'store' | 'create_address' }
 export type DryRun = { version: number; steps: number; trace: TraceRow[]; recipients: TraceRecipient[] }
 export type EmailChoice = { mode: 'recent'; messageId: string | null; to?: string } | { mode: 'sample'; to: string } | { mode: 'paste'; mime: string }
 
+/** The sample email Try it offers: the flow panel's Test sample (flow.tsx), signed. */
 export const sampleMime = (to: string) => [
-  'From: Dana Customer <dana@example.net>', `To: ${to}`, 'Subject: Refund for order 4821', 'Message-ID: <sample-4821@example.net>', 'Content-Type: text/plain; charset=utf-8', '',
-  'Hi, the blender arrived broken. Could I get a refund? Order 4821.', '', 'Thanks, Dana',
+  'From: Dana Customer <dana@example.net>', `To: ${to}`, `Subject: ${defaultSample.subject}`, 'Message-ID: <sample-4821@example.net>', 'Content-Type: text/plain; charset=utf-8', '',
+  defaultSample.text, '', 'Thanks, Dana',
 ].join('\r\n')
 /** The request body testRules takes for a choice, or null while the choice is incomplete. */
 export function traceInput(choice: EmailChoice, to?: string): { messageId?: string; mime?: string; to?: string[] } | null {
@@ -205,50 +208,8 @@ export function useDryRun() {
   return { result, error, pending, runId, run, clear: () => { setResult(null); setError(null) } }
 }
 
+/** /receiving/trace, from before Test moved into the flow panel: Receiving, the panel open on the address it was handed. */
 export function TracePage() {
-  const [params] = useSearchParams()
-  const options = useApiDef(queries.inboundAddressOptions())
-  // An address page hands its address over in the navigation state, so a link never spells it out; ?to= still works.
-  const preferred = (useLocation().state as { to?: string } | null)?.to ?? params.get('to') ?? undefined
-  const preferredId = options.data?.find(a => a.address === preferred)?.id
-  const overview = useOverview({ limit: 100 })
-  const saved = useApiQuery(['rule-config'], (_api, signal) => request<{ config: { rules: { key: string; source: string }[] } }>('/v1/rules', { signal }))
-  const addresses = (overview.data?.routes.data ?? []).filter(r => r.kind === 'address' && r.address).map(r => r.match)
-  const recent = useRecentMail()
-  const [picked, setChoice] = useState<EmailChoice | null>(null)
-  const choice = picked ?? defaultChoice(recent.data, preferred ?? addresses[0] ?? '')
-  // The form shows once recent mail and the routes are known, so its first paint is its final layout. Gated on the first
-  // answer (isFetched), not data or error: the picker retries a failed read when it mounts, and that retry clears the
-  // error, so a gate on the error unmounted the picker and remounted it in a loop of requests.
-  const ready = recent.isFetched && (overview.data !== undefined || !!overview.error)
-  const [to, setTo] = useState(preferred ?? '')
-  const dry = useDryRun()
-  const view = useRef<HTMLDivElement>(null)
-  // Recent mail is traced as mail to the address it arrived at, unless another address is given.
-  const input = traceInput(choice, choice.mode === 'sample' ? undefined : to || (choice.mode === 'recent' ? choice.to : undefined))
-  const sources = Object.fromEntries((saved.data?.config.rules ?? []).map(r => [r.key, r.source]))
-  async function submit(event: FormEvent) {
-    event.preventDefault()
-    if (!input) return
-    await dry.run(input)
-    requestAnimationFrame(() => view.current?.scrollIntoView({ behavior: reduced() ? 'auto' : 'smooth', block: 'start' }))
-  }
-  return <div className="stack inbound-stack">
-    <PageHeader title="Test" backTo={preferredId ? `/receiving/addresses/${preferredId}?tab=flow` : '/receiving'} />
-    {ready && <>
-    <form className="trace-form" onSubmit={submit}>
-      <EmailPicker value={choice} onChange={next => { setChoice(next); dry.clear() }} addresses={addresses} preferredTo={preferred} />
-      {choice.mode !== 'sample' && <Field label="Test it as mail to" htmlFor="trace-to">
-        <Input id="trace-to" className="private-field trace-to" list="trace-addresses" value={to} onChange={e => { setTo(e.target.value); dry.clear() }} placeholder="The message’s own recipients" autoComplete="off" />
-      </Field>}
-      {/* Rules run as saved, and AI decisions give their default answer; a rule's own Try it sets the answers. */}
-      <div className="cluster"><Button variant="primary" type="submit" loading={dry.pending} disabled={!input}>Run test</Button></div>
-    </form>
-    <div ref={view} className="trace-out">
-      {dry.error ? <Alert tone="danger" title="The test didn’t run">{dry.error}</Alert>
-        : dry.result ? <TraceView result={dry.result} sources={sources} overview={overview.data} inboxes={new Map((options.data ?? []).map(a => [a.id, a.address]))} runId={dry.runId} />
-        : <EmptyState title="Pick an email to test" />}
-    </div>
-    </>}
-  </div>
+  const to = (useLocation().state as { to?: string } | null)?.to
+  return <Navigate replace to={to ? `/receiving?q=${encodeURIComponent(to)}` : '/receiving'} />
 }

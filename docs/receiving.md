@@ -13,6 +13,7 @@ The API keeps its names; only the dashboard's words are these. The words below a
 - [Concepts](#concepts)
 - [Kinds of address](#kinds-of-address)
 - [What happens to mail](#what-happens-to-mail)
+- [The flow panel](#the-flow-panel)
 - [An address's page](#an-addresss-page)
 - [Catch-all](#catch-all)
 - [Test and Try it](#test-and-try-it)
@@ -31,7 +32,7 @@ Rules and destinations are described in full in [rules.md](rules.md); agent inbo
 
 ## Kinds of address
 
-The Addresses tab lists every kind in one table and filters by kind; a kind with nothing in it is left out. Each row is one line: **Address | Rules | Destinations | Unread | Last mail**. Rules are their plain sentences (the first, and how many more); an address without one offers **Add a rule**, on a phone too.
+The Addresses tab lists every kind in one table and filters by kind (one row of filters at every width, scrolling sideways on a phone; a kind with nothing in it is left out). Each row is one line: **Address | Rules | Destinations | Last mail** (Rules leaves the table while the flow panel sits beside it, since the panel says them). Rules are their plain sentences (the first, and how many more); an address without one offers **Add a rule**, on a phone too.
 
 | Filter | What it shows | Example |
 |---|---|---|
@@ -62,6 +63,18 @@ A route can deliver to inboxes, webhooks and confirmed forwards (`forward:<name>
 
 The list is complete: routing targets and rule targets always show, and webhooks subscribed to an address's received mail show active ones first, then paused ones. An address with more than 50 subscribers shows the first 50 and says how many more there are, with a link to every one (the Destinations tab, filtered to that address).
 
+## The flow panel
+
+Choosing a row opens its flow, the same diagram everywhere: **Receive** (the address, and what else it catches: aliases, wildcards, or the catch-all) → **Process** (each rule as a sentence: a ready-made rule in its own words, a script as *Custom code rule*) → **Deliver** (each destination with its health: Ready, Awaiting recipient, Paused, Declined). From 1180 px it sits beside the list and shows the first row until another is chosen; below that it opens over the page, a full-height sheet on a phone.
+
+| Action | What it does |
+|---|---|
+| **Test** | Sends a sample email (a refund request unless changed under *Sample*) through the saved rules with the dry run (`testRules`). What the email took is ticked; the rest goes quiet. Nothing is sent or saved, and an AI decision gives its default answer. |
+| **Edit** | Opens the address's Where mail goes tab to change it; a wildcard or catch-all opens "Where should this mail go?". |
+| **Mail** | The address's Mail tab. |
+
+Typing a full address in the search opens its row. One with no row of its own shows where its mail would go (a wildcard, the catch-all, or stored), from a test, with **Create this address**.
+
 ## An address's page
 
 An address's page has three tabs:
@@ -69,12 +82,12 @@ An address's page has three tabs:
 | Tab | What's there |
 |---|---|
 | **Mail** | Its conversations: search, the view picker (Inbox, Starred, Archive, Spam, Trash, All), reading, replying and New message. A message sent from another address opens on that address's page. |
-| **Where mail goes** | Address → Rules → Destinations: what it receives; the rules that run, in order, in plain words (attach, detach with Undo, New rule); where its mail is delivered (**Change**, "Where should this mail go?": Deliver to these destinations, store it or drop it). **Test** runs an email to it through its rules. |
+| **Where mail goes** | The flow panel's diagram, with Test. **Edit** opens its steps: the rules that run, in order, in plain words (attach, detach with Undo, New rule) and where its mail is delivered (**Change**, "Where should this mail go?": Deliver to these destinations, store it or drop it). |
 | **Settings** | Its domain and dates, display name, aliases and wildcards (edited here only), and Delete address. |
 
 Switching tabs keeps the open conversation and a reply being written.
 
-Mail is the first tab: opening an address shows its mail. Every address's received mail together is in Logs, filtered to Received; `/receiving/inbox` opens there, and `/receiving/inbox?address=…` opens that address's Mail tab.
+Mail is the first tab: opening an address shows its mail. On a received message, **Why it went here** replays it through today's rules (`testRules` with its message ID and its recorded AI answers) and draws the path it took. Every address's received mail together is in Logs, filtered to Received; `/receiving/inbox` opens there, and `/receiving/inbox?address=…` opens that address's Mail tab.
 
 ![An address's page](images/receiving/address.png)
 
@@ -93,11 +106,11 @@ An explicit `*@host` route takes precedence over the domain's catch-all. Domains
 
 ## Test and Try it
 
-**Test**, on an address's Where mail goes tab, runs an email through your routes and rules with the dry run (`testRules`). Pick recent mail, a sample email (when nothing has arrived yet, the sample stands in) or paste a message. Each rule's source appears with its conditions; one at a time they light up true or false, AI decision answers fill in, then the actions (`→ junk`, `→ Slack support`) and the result: which inboxes and endpoints get the mail, its labels, and whether it's junk.
+**Test** (the flow panel's) is described above. **Try it**, in the rule editor, runs an email through your routes and rules with the dry run (`testRules`). Pick recent mail, a sample email (when nothing has arrived yet, the sample stands in) or paste a message. Each rule's source appears with its conditions; one at a time they light up true or false, AI decision answers fill in, then the actions (`→ junk`, `→ Slack support`) and the result: which inboxes and endpoints get the mail, its labels, and whether it's junk.
 
-![Test: a rule's conditions evaluated true and false, the AI decision score, its actions and where the mail ends up](images/receiving/trace.png)
+![Try it: a rule's conditions evaluated true and false, the AI decision score, its actions and where the mail ends up](images/receiving/trace.png)
 
-**Try it** in the rule editor does the same for the rule you're writing, unsaved, as if it were attached to the address the email was sent to. Each AI decision gets a slider (default 0.5) for the answer the AI would give; the AI is never asked. Nothing is sent or saved in either. With reduced motion, the whole trace shows at once.
+It runs the rule you're writing, unsaved, as if it were attached to the address the email was sent to. Each AI decision gets a slider (default 0.5) for the answer the AI would give; the AI is never asked. Nothing is sent or saved in either. With reduced motion, the whole trace shows at once.
 
 ## Where everything is
 
@@ -117,10 +130,11 @@ Everything is at most two clicks from Receiving.
 | Subscribe a webhook to inbound events | Receiving → Destinations → the webhook |
 | See every webhook that gets an address's mail | Receiving → the address → Where mail goes → Deliver → more webhooks |
 | Create an agent inbox | Receiving → Addresses → Agent inboxes → New agent inbox |
-| Test what would happen to an email | Receiving → the address → Where mail goes → Test |
+| Test what would happen to an email | Receiving → the address (or type one) → Test |
+| See why a message went where it did | Receiving → the address → Mail → the message → Why it went here |
 | Set up receiving or change a catch-all | Domains → the domain |
 
-Older links keep working: `/receiving/routing` and `?tab=routes` open Addresses, `/receiving/endpoints`, `/receiving/webhooks` and `?tab=endpoints` open the Destinations tab, `/receiving/inbox` opens Logs' received mail (or with `?address=` that address's Mail tab), and every `/receiving/rituals…` link (and `?tab=rituals`) opens the same page under `/receiving/rules`.
+Older links keep working: `/receiving/routing` and `?tab=routes` open Addresses, `/receiving/endpoints`, `/receiving/webhooks` and `?tab=endpoints` open the Destinations tab, `/receiving/inbox` opens Logs' received mail (or with `?address=` that address's Mail tab), `/receiving/trace` opens Receiving, and every `/receiving/rituals…` link (and `?tab=rituals`) opens the same page under `/receiving/rules`.
 
 ## API, SDK and MCP
 

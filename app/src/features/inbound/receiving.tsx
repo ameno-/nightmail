@@ -4,12 +4,14 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { Check, X } from 'lucide-react'
-import { Button, ConfirmDialog, DataTable, DropdownMenu, EmptyState, ErrorState, FacetRail, IconButton, LoadingRegion, PageHeader, Pagination, SearchField, Select, SplitPane, StatusBadge, Tabs, useToast } from '../../components/ui'
+import { Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, IconButton, LoadingRegion, PageHeader, Pagination, SearchField, Select, StatusBadge, Tabs, useToast } from '../../components/ui'
 import { useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { request } from '../../data/live'
 import { errorText } from '../../data/types'
 import { number } from '../../lib/format'
+import { useMediaQuery } from '../../lib/media'
+import { FlowPanel, mailOf } from './panel'
 import { useCursorPagination, useSearchDraft } from '../../lib/pagination'
 import { CreateAddressDialog } from './addresses'
 import { concepts, kindNote, kinds, type KindFilter } from './concepts'
@@ -54,9 +56,6 @@ function note(r: RouteEntry) {
 const noteTitle = (r: RouteEntry) => r.kind === 'catch_all' || r.kind === 'route' || r.address?.origin === 'auto' ? undefined
   : [r.kind === 'inbox' ? kindNote.inbox : null, r.address?.displayName, expiresIn(r.address?.expiresAt)].filter(Boolean).join(' · ') || undefined
 const targetsTitle = (r: RouteEntry) => r.to.map(t => isMailbox(t.name) ? typeLabel[t.type] : targetName(t, r.address?.id)).join(', ')
-// Where a row leads: its address or its agent inbox (real links). Every other route, including a domain's default
-// catch-all, opens its own route editor here, never the domain's page (Back from there led to Domains, not Receiving).
-const hrefOf = (r: RouteEntry) => r.kind === 'inbox' && r.address ? `/receiving/inboxes/${r.address.id}` : r.address ? `/receiving/addresses/${r.address.id}` : null
 
 /** A new account: the three steps everything else builds on, each with the one action that starts it. */
 function GettingStarted({ overview, onCreate }: { overview: Overview; onCreate: () => void }) {
@@ -74,53 +73,89 @@ function GettingStarted({ overview, onCreate }: { overview: Overview; onCreate: 
   </ol>
 }
 
-function RoutesTab({ overview, fetching, filters, setFilter, page, onPage, onCreate, onEditRoute }: { overview: Overview; fetching: boolean; filters: { kind: KindFilter; domain: string; q: string }; setFilter: (patch: Partial<{ kind: KindFilter; domain: string; q: string }>) => void; page: number; onPage: (next: number) => void; onCreate: () => void; onEditRoute: (r: RouteEntry) => void }) {
+const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/
+/** The panel sits beside the list from this width; below it, it opens over the page (a full-height sheet on a phone). */
+const DOCKED = '(min-width: 1180px)'
+
+/** The kinds, one line at every width: whole labels with their counts, scrolling sideways when they don't fit. A kind
+ *  with nothing in it is left out, unless it's the one chosen. */
+function KindFilter({ overview, value, onChange }: { overview: Overview; value: KindFilter; onChange: (kind: KindFilter) => void }) {
+  const shown = (Object.keys(kinds) as KindFilter[]).filter(k => (overview.manage || ['all', 'address', 'inbox', 'auto'].includes(k)) && (k === 'all' || k === value || kindCount(overview.counts, k) > 0))
+  return <div className="rcv-kinds" role="group" aria-label="Kind">{shown.map(k => <button key={k} type="button" className="rcv-kind" aria-pressed={value === k} onClick={() => onChange(k)}>
+    <span>{kinds[k].label}</span><span className="rcv-kind__count">{number(kindCount(overview.counts, k))}</span>
+  </button>)}</div>
+}
+
+function AddressesTab({ overview, fetching, filters, setFilter, page, onPage, onCreate, onEditRoute }: { overview: Overview; fetching: boolean; filters: { kind: KindFilter; domain: string; q: string }; setFilter: (patch: Partial<{ kind: KindFilter; domain: string; q: string }>) => void; page: number; onPage: (next: number) => void; onCreate: (address?: string) => void; onEditRoute: (r: RouteEntry) => void }) {
   const { canAdminister } = useWorkspaceAccess()
+  const navigate = useNavigate()
+  const [params, setParams] = useSearchParams()
+  const docked = useMediaQuery(DOCKED)
   const [newInbox, setNewInbox] = useState(false)
   const [draft, type] = useSearchDraft(filters.q, value => setFilter({ q: value }))
   const hosts = receivingDomains(overview.domains)
   const total = kindCount(overview.counts, 'all')
   if (!overview.manage && !total && !filters.q) return <EmptyState title="No addresses to show" />
-  if (overview.manage && !hosts.length && !total) return <GettingStarted overview={overview} onCreate={onCreate} />
+  if (overview.manage && !hosts.length && !total) return <GettingStarted overview={overview} onCreate={() => onCreate()} />
   const rows = overview.routes.data
+  // A full address typed in the search opens its row, or, when it has none, where its mail would go.
+  const typed = filters.q.trim().toLowerCase(), complete = EMAIL.test(typed)
+  const exact = complete ? rows.find(r => r.match === typed || r.address?.address === typed || r.address?.aliases.includes(typed)) : undefined
+  const lookup = overview.manage && complete && !exact && hosts.some(d => typed.endsWith('@' + d.name)) ? typed : undefined
+  const chosen = rows.find(r => r.id === params.get('open'))
+  // Beside the list, the panel always shows one: the chosen row, the typed one, or the first.
+  const selected = chosen ?? exact ?? (docked && !lookup ? rows[0] : undefined)
+  const choose = (r: RouteEntry | null) => setParams(previous => { const next = new URLSearchParams(previous); if (r) next.set('open', r.id); else next.delete('open'); return next }, { replace: true })
+  const edit = (r: RouteEntry) => { const own = r.address && r.kind !== 'pattern'; if (own && r.kind === 'inbox') navigate(`/receiving/inboxes/${r.address!.id}`); else if (own) navigate(`/receiving/addresses/${r.address!.id}?tab=flow&edit=1`); else onEditRoute(r) }
+  const showPanel = overview.manage && (!!selected || !!lookup)
   const empty = filters.q ? 'Nothing matches' : kinds[filters.kind].empty
-  const open = (r: RouteEntry) => { if (!hrefOf(r)) onEditRoute(r) }
   const addRule = (r: RouteEntry) => overview.manage && r.address && r.kind !== 'pattern' ? <Link className="rcv-add" to={`/receiving/rules/new?address=${encodeURIComponent(r.address.id)}`} onClick={e => e.stopPropagation()}>Add a rule</Link> : null
-  // The kinds are the rail's facets, each with its count; below 1200 px they are a row over the table.
-  // A kind with nothing in it is left out, unless it's the one chosen.
-  const kindFacets = (Object.keys(kinds) as KindFilter[]).filter(k => (overview.manage || ['all', 'address', 'inbox', 'auto'].includes(k)) && (k === 'all' || k === filters.kind || kindCount(overview.counts, k) > 0))
-    .map(k => ({ key: k, label: kinds[k].label, count: kindCount(overview.counts, k), selected: filters.kind === k, onSelect: () => setFilter({ kind: k }) }))
-  return <div className="stack rcv-tab"><SplitPane className="rcv-split" collapse="row" rail={<FacetRail label="Show" groups={[{ key: 'kind', title: 'Kind', items: kindFacets }]} />}>
+  const panel = showPanel && <FlowPanel key={selected?.id ?? lookup} entry={lookup ? undefined : selected} lookup={lookup} overview={overview} onEdit={edit} onCreate={address => onCreate(address)} />
+  return <div className="stack rcv-tab">
     <div className="rcv-toolbar">
+      <KindFilter overview={overview} value={filters.kind} onChange={kind => setFilter({ kind })} />
       <div className="rcv-toolbar__end">
         {hosts.length > 1 && <Select className="rcv-domain" aria-label="Domain" value={filters.domain || 'all'} onValueChange={v => setFilter({ domain: v === 'all' ? '' : v })} options={[{ value: 'all', label: 'All domains' }, ...hosts.map(d => ({ value: d.name, label: d.name }))]} />}
-        <SearchField className="search-box--list" aria-label="Search addresses" placeholder="Search address or name" value={draft} onChange={e => type(e.target.value)} />
+        <SearchField className="search-box--list rcv-search" aria-label="Search or type an address" placeholder="Search or type an address" value={draft} onChange={e => type(e.target.value)} />
         {/* New address is the page's own action; agent inboxes add theirs while they are the filter. */}
         {canAdminister && filters.kind === 'inbox' && <div className="cluster"><ConnectAgentButton /><Button onClick={() => setNewInbox(true)}>New agent inbox</Button></div>}
       </div>
     </div>
-    <DataTable className="rcv-table" rows={rows} rowKey={r => r.id} rowHref={hrefOf} onRowClick={open} loading={false} minRows={Math.min(8, rows.length)}
-      empty={<EmptyState title={empty} action={!filters.q && filters.kind === 'address' && canAdminister ? <Button onClick={onCreate}>New address</Button> : undefined} />}
-      columns={[
-        // One line per address: what it receives, the rules that process it, where it is delivered, its last mail. A
-        // card: the address (its link) and its unread count or last mail, what it is, then where its mail goes.
-        { key: 'match', label: 'Address', width: '33%', render: r => <div className="rcv-cell"><RouteIcon entry={r} /><div className="settings-cell-stack"><Match value={r.match} host={!filters.domain} /><span className="muted receiving-clip" title={noteTitle(r)}>{note(r)}</span></div></div>,
-          cardRender: r => <span className="rcv-cell"><RouteIcon entry={r} /><Match value={r.match} host={!filters.domain} /></span> },
-        { key: 'note', label: 'Kind', table: false, card: 'line', render: r => note(r) },
-        // Rules in plain words; an address without one says how to add one, on a phone too.
-        { key: 'rules', label: 'Rules', width: '19%', card: 'hide', render: r => r.rules.length ? <RulesSummary keys={r.rules} rules={overview.rules} /> : addRule(r) ?? <span className="muted">—</span> },
-        { key: 'to', label: 'Destinations', width: '30%', card: 'line', render: r => <span className="rcv-to" title={targetsTitle(r)}><Targets to={r.to} total={r.toTotal} ownId={r.address?.id} max={2} /></span>, cardRender: r => <span className="rcv-card-to"><Targets to={r.to} total={r.toTotal} ownId={r.address?.id} max={2} />{!r.rules.length && addRule(r) && <><span aria-hidden="true">·</span>{addRule(r)}</>}</span> },
-        { key: 'unread', label: 'Unread', align: 'right', width: '8%', card: 'hide', render: r => r.address && r.kind !== 'pattern' ? (r.address.stats.unreadThreads ? <strong>{number(r.address.stats.unreadThreads)}</strong> : <span className="muted">0</span>) : <span className="muted">—</span> },
-        { key: 'last', label: 'Last mail', align: 'right', card: 'aside', render: r => r.address?.stats.lastMessageAt && r.kind !== 'pattern' ? ago(r.address.stats.lastMessageAt) : <span className="muted">—</span>,
-          cardRender: r => r.address && r.kind !== 'pattern' ? <>{r.address.stats.unreadThreads > 0 && <strong className="rcv-unread">{number(r.address.stats.unreadThreads)} new</strong>}{r.address.stats.lastMessageAt ? ago(r.address.stats.lastMessageAt) : null}</> : null },
-      ]} />
-    <div className="rcv-foot" data-busy={fetching || undefined}>
-      <span className="muted">{number(kindCount(overview.counts, filters.kind))} {kindCount(overview.counts, filters.kind) === 1 ? 'address' : 'addresses'}{filters.domain ? ` at ${filters.domain}` : ''}</span>
-      <Pagination page={page} pageSize={PAGE} total={kindCount(overview.counts, filters.kind)} nextCursor={overview.routes.nextCursor} onPageChange={onPage} />
+    <div className="rcv-browse" data-docked={(docked && showPanel) || undefined}>
+      <div className="rcv-browse__list">
+        <DataTable className="rcv-table" rows={rows} rowKey={r => r.id} selectedId={docked ? selected?.id : undefined} rowLabel={r => r.match}
+          onRowClick={overview.manage ? r => choose(r) : r => { const to = mailOf(r); if (to) navigate(to) }} loading={false} minRows={Math.min(8, rows.length)}
+          empty={docked && lookup ? <EmptyState title="No address yet" /> : <EmptyState title={empty} action={!filters.q && filters.kind === 'address' && canAdminister ? <Button onClick={() => onCreate()}>New address</Button> : undefined} />}
+          columns={[
+            // One line per address: what it receives, the rules that process it (beside the list, the panel says it),
+            // where it is delivered, and its last mail. A card: the address and its new mail, what it is, where it goes.
+            { key: 'match', label: 'Address', width: docked ? '44%' : '33%', render: r => <div className="rcv-cell"><RouteIcon entry={r} /><div className="settings-cell-stack"><Match value={r.match} host={!filters.domain} /><span className="muted receiving-clip" title={noteTitle(r)}>{note(r)}</span></div></div>,
+              cardRender: r => <span className="rcv-cell"><RouteIcon entry={r} /><Match value={r.match} host={!filters.domain} /></span> },
+            { key: 'note', label: 'Kind', table: false, card: 'line', render: r => note(r) },
+            // Rules in plain words; an address without one says how to add one, on a phone too.
+            ...(docked ? [] : [{ key: 'rules', label: 'Rules', width: '19%', card: 'hide' as const, render: (r: RouteEntry) => r.rules.length ? <RulesSummary keys={r.rules} rules={overview.rules} /> : addRule(r) ?? <span className="muted">—</span> }]),
+            { key: 'to', label: 'Destinations', width: docked ? '38%' : '30%', card: 'line', render: r => <span className="rcv-to" title={targetsTitle(r)}><Targets to={r.to} total={r.toTotal} ownId={r.address?.id} max={2} /></span>, cardRender: r => <span className="rcv-card-to"><Targets to={r.to} total={r.toTotal} ownId={r.address?.id} max={2} />{!r.rules.length && addRule(r) && <><span aria-hidden="true">·</span>{addRule(r)}</>}</span> },
+            { key: 'last', label: 'Last mail', align: 'right', card: 'aside', render: r => <LastMail entry={r} /> },
+          ]} />
+        <div className="rcv-foot" data-busy={fetching || undefined}>
+          <span className="muted">{number(kindCount(overview.counts, filters.kind))} {kindCount(overview.counts, filters.kind) === 1 ? 'address' : 'addresses'}{filters.domain ? ` at ${filters.domain}` : ''}</span>
+          <Pagination page={page} pageSize={PAGE} total={kindCount(overview.counts, filters.kind)} nextCursor={overview.routes.nextCursor} onPageChange={onPage} />
+        </div>
+        {!docked && lookup && panel}
+      </div>
+      {docked && panel}
     </div>
-  </SplitPane>
+    {/* Smaller screens: the chosen row's flow opens over the page, a full-height sheet on a phone. */}
+    <Dialog size="lg" open={!docked && !!chosen && overview.manage} onOpenChange={open => { if (!open) choose(null) }} title="Where its mail goes">{!docked && chosen && panel}</Dialog>
     <NewInboxDialog open={newInbox} onOpenChange={setNewInbox} />
   </div>
+}
+/** New mail and when the last arrived: "4 new · 7m". */
+function LastMail({ entry: r }: { entry: RouteEntry }) {
+  if (!r.address || r.kind === 'pattern') return <span className="muted">—</span>
+  const unread = r.address.stats.unreadThreads, at = r.address.stats.lastMessageAt
+  if (!unread && !at) return <span className="muted">—</span>
+  return <span className="rcv-last">{unread > 0 && <strong className="rcv-unread">{number(unread)} new</strong>}{at && <span>{ago(at)}</span>}</span>
 }
 
 const ENDPOINT_PAGE = 50
@@ -204,7 +239,8 @@ export function ReceivingPage() {
   const filters = { kind: kind in kinds ? kind : 'all' as KindFilter, domain: params.get('domain') ?? '', q: params.get('q') ?? '' }
   const pagination = useCursorPagination()
   const overview = useOverview({ ...kindQuery[filters.kind], domain: filters.domain || undefined, q: filters.q.trim() || undefined, cursor: pagination.cursor, limit: PAGE }, true)
-  const [creating, setCreating] = useState(false)
+  // New address, or Create this address from a typed one (its address filled in).
+  const [creating, setCreating] = useState<{ address: string } | null>(null)
   const [editing, setEditing] = useState<RouteEntry | null>(null)
   function update(patch: Record<string, string | null | undefined>) {
     // From the latest URL: a debounced search write must not undo a filter picked while it waited.
@@ -230,16 +266,16 @@ export function ReceivingPage() {
   return <div className="stack inbound-stack">
     {/* The page's one action. An address's mail is on its own page; every address's mail is in Logs. */}
     {/* Until a domain receives, the first-run steps carry the way in; a dead button here would only say no. */}
-    <PageHeader title="Receiving" actions={manage && (!data || receivingDomains(data.domains).length > 0) && <Button variant="primary" disabled={!data} onClick={() => setCreating(true)}>New address</Button>} />
+    <PageHeader title="Receiving" actions={manage && (!data || receivingDomains(data.domains).length > 0) && <Button variant="primary" disabled={!data} onClick={() => setCreating({ address: '' })}>New address</Button>} />
     {overview.error && !data ? <ErrorState error={overview.error} onRetry={() => void overview.refetch()} /> : !data || !counts ? <LoadingRegion label="Loading receiving"><div className="rcv-skeleton" aria-hidden="true"><span /><span /><span /><span /></div></LoadingRegion> : <div className="rcv-page">
       <Tabs label="Receiving" value={tab} onValueChange={value => update({ tab: value, kind: null, address: null })}
         items={[{ value: 'addresses', label: concepts.addresses.title, count: counts.addresses }, ...(data.manage ? [{ value: 'rules', label: concepts.rules.title, count: counts.rules }, { value: 'destinations', label: concepts.destinations.title, count: counts.destinations }] : [])]} />
       {tab === 'rules' && data.manage ? <RulesTab overview={data} refresh={() => overview.refetch()} />
         : tab === 'destinations' && data.manage ? <DestinationsTab overview={data} refresh={() => void overview.refetch()} />
-        : <RoutesTab overview={data} fetching={overview.isFetching} filters={filters} onCreate={() => setCreating(true)} onEditRoute={setEditing}
+        : <AddressesTab overview={data} fetching={overview.isFetching} filters={filters} onCreate={address => setCreating({ address: address ?? '' })} onEditRoute={setEditing}
           page={pagination.page} onPage={next => pagination.onPageChange(next, data.routes.nextCursor)} setFilter={patch => update(patch)} />}
     </div>}
-    {data && <CreateAddressDialog open={creating} onOpenChange={setCreating} domains={data.domains} />}
+    {data && <CreateAddressDialog open={!!creating} initial={creating?.address} onOpenChange={open => { if (!open) setCreating(null) }} domains={data.domains} />}
     {editing && <RouteEditor match={editing.match} route={editing.route} onClose={() => { setEditing(null); void overview.refetch() }} />}
   </div>
 }

@@ -5,6 +5,7 @@ import { Alert, Button, ConfirmDialog, Dialog, Disclosure, ErrorState, Field, Ic
 import { useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { date, number } from '../../lib/format'
 import { AddressMail } from './threads'
+import { FlowPanel } from './panel'
 import { request } from '../../data/live'
 import { errorText, type InboundAddress, type InboundAddressInput, type InboundAddressPatch, type MailboxDomain } from '../../data/types'
 import { AliasEditor, aliasState, commitAliases, type AliasState } from './aliases'
@@ -25,7 +26,7 @@ const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/
 const lifetimes = [{ value: '', label: 'Always' }, { value: '3600', label: '1 hour' }, { value: '86400', label: '1 day' }, { value: '604800', label: '7 days' }, { value: '2592000', label: '30 days' }]
 export const receivingDomains = <D extends Pick<MailboxDomain, 'status'>>(domains: D[]) => domains.filter(domain => !['off', 'disabled'].includes(domain.status))
 
-export function CreateAddressDialog({ open, onOpenChange, domains }: { open: boolean; onOpenChange: (open: boolean) => void; domains: Pick<MailboxDomain, 'id' | 'name' | 'status'>[] }) {
+export function CreateAddressDialog({ open, onOpenChange, domains, initial = '' }: { open: boolean; onOpenChange: (open: boolean) => void; domains: Pick<MailboxDomain, 'id' | 'name' | 'status'>[]; initial?: string }) {
   const navigate = useNavigate()
   const [address, setAddress] = useState('')
   const [displayName, setDisplayName] = useState('')
@@ -34,7 +35,7 @@ export function CreateAddressDialog({ open, onOpenChange, domains }: { open: boo
   const [errors, setErrors] = useState<Record<string, string>>({})
   const create = useApiMutation((api, input: InboundAddressInput) => api.inbound.createAddress(input), 'Address created')
   const receiving = receivingDomains(domains)
-  useEffect(() => { if (open) { create.reset(); setErrors({}); setAddress(''); setDisplayName(''); setPublicAddress(''); setLifetime('') } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (open) { create.reset(); setErrors({}); setAddress(initial); setDisplayName(''); setPublicAddress(''); setLifetime('') } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   async function submit(event: FormEvent) {
     event.preventDefault()
     const value = address.trim().toLowerCase()
@@ -191,6 +192,9 @@ export function InboundAddressDetailPage() {
     return query
   }, { replace: true })
   const overview = useOverview({ q: current?.address ?? '', kind: current?.kind === 'inbox' ? 'inbox' : 'address', limit: 5 }, false, canAdminister && !!current && tab === 'flow')
+  // Where its mail goes is the flow panel's diagram; Edit (or ?edit from the panel) opens its steps to change them.
+  const entry = overview.data?.routes.data.find(r => r.address?.id === id)
+  const [editing, setEditing] = useState(params.get('edit') !== null)
   const input = edited ?? (current ? formOf(current) : null)
   // Only a failed first load replaces the page: a later refetch that fails keeps the Settings form and its edits.
   if (address.error && !current) return <><PageHeader title="Address" backTo="/receiving" /><ErrorState error={address.error} onRetry={() => void address.refetch()} /></>
@@ -221,8 +225,10 @@ export function InboundAddressDetailPage() {
     <AddressMail addressId={id} hidden={tab !== 'mail'} />
     {tab === 'mail' ? null
       : !current || (tab === 'flow' && overview.data === undefined && !overview.error) ? <LoadingRegion label="Loading address"><div className="addr-skeleton" aria-hidden="true"><span /><span /><span /></div></LoadingRegion>
-      : tab === 'flow' ? <div className="stack addr-page"><AddressPath address={current} overview={overview} />
-        <div className="cluster"><Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/trace" state={{ to: current.address }}>Test</Link></div></div>
+      : tab === 'flow' ? <div className="stack addr-page">{editing || !entry || !overview.data
+        ? <><AddressPath address={current} overview={overview} />
+          {entry && <div className="cluster"><Button onClick={() => setEditing(false)}>Done</Button></div>}</>
+        : <div className="addr-flow"><FlowPanel entry={entry} overview={overview.data} onEdit={() => setEditing(true)} mailLink={false} /></div>}</div>
       : <div className="stack addr-page">
         <KeyValues className="addr-facts" items={[
           ['Domain', <Link key="d" to="/domains">{current.domain}</Link>],
