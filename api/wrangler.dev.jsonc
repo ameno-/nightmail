@@ -41,6 +41,8 @@
     "UI_NOTES_SUBJECTS": "",
     // Dashboard usage analytics (docs/analytics.md): batches go to the ANALYTICS bucket, never Postgres. "off" discards them.
     "DASHBOARD_ANALYTICS": "on",
+    // Abuse monitoring (src/abuse.ts) records from this instant on, never earlier. Remove to turn it off; expiry still runs.
+    "NIGHTMAIL_ABUSE_MONITORING": "2026-11-23T00:00:00Z",
     "ACCOUNT_CLIENT_ID": "bane-dev",
     "MULTI_TENANT": "true",
     "BYO_STACK_PREFIX": "Nightmail",

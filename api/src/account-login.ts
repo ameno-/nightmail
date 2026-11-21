@@ -123,8 +123,8 @@ export async function beginAccountLogin(runtime: Runtime, returnUrl: URL, peer: 
 // who may then bind that subject explicitly. The address and name are shown, never trusted.
 async function recordAttempt(runtime: Runtime, claims: oidc.IDToken, upstream: ProviderIdentity | null, address: string | null, outcome: string,
   observed?: { userId: string | null; created: boolean; email: string | null; network?: RequestNetwork }) {
-  // Hosted: what the sign-in shares with others (src/abuse.ts). Monitoring only; it never changes the outcome.
-  if (observed) await observeSignIn(runtime, { issuer: claims.iss, subject: claims.sub, outcome, provider: upstream, ...observed });
+  // Hosted, when monitoring is on (src/abuse.ts): one pseudonymised event is handed over. Nothing is awaited or written here.
+  if (observed) observeSignIn(runtime, { issuer: claims.iss, subject: claims.sub, outcome, provider: upstream, ...observed });
   const acr = typeof claims.acr === 'string' ? claims.acr.slice(0, 200) : null, name = typeof claims.name === 'string' ? claims.name.slice(0, 200) : null;
   if (outcome.startsWith('signed_in')) log('info', { code: 'SIGN_IN', outcome, subject: claims.sub, acr });
   else log('warn', { code: 'SIGN_IN_NOT_APPROVED', reason: outcome, subject: claims.sub, acr });

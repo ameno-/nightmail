@@ -184,7 +184,7 @@ export function registerWorkspaces(app: App) {
       if (!member) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with your OIDC account.');
       throw new ApiError(409, 'WORKSPACE_LIMIT', `You already own ${maxOwnedWorkspaces} workspaces, the most one account can have.`);
     });
-    await observeWorkspaceCreated(c.env, created.id, requestNetwork(c.req.raw.headers));
+    observeWorkspaceCreated(c.env, created.id, requestNetwork(c.req.raw.headers));
     return c.json(Workspace.parse({ ...created, role: 'owner' }), 201);
   });
   app.openapi(createRoute({ method: 'patch', path: base, operationId: 'renameCurrentWorkspace', tags, security, request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).strict()) }, responses: { 200: response(Workspace), ...errors } }), async c => {

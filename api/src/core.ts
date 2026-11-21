@@ -94,7 +94,9 @@ export interface Config {
   allowSesSandbox?: boolean;
   requireDmarcForBulk?: boolean;
   hostedScreen?: boolean;
-  /** NIGHTMAIL_ABUSE_ENFORCE. Reserved: abuse monitoring (src/abuse.ts) never blocks, and no code reads this yet. */
+  /** NIGHTMAIL_ABUSE_MONITORING: abuse monitoring (src/abuse.ts) records from this instant on. Undefined: off. */
+  abuseMonitoring?: { since: string };
+  /** NIGHTMAIL_ABUSE_ENFORCE. Reserved: abuse monitoring never blocks, and no code reads this yet. */
   abuseEnforce?: boolean;
   /** Hosted billing. stripe is undefined until STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are set (money routes answer 503 BILLING_NOT_CONFIGURED). */
   billing?: { stripe?: { secretKey: string; webhookSecret: string; automaticTax: boolean; apiBase: string } };
@@ -140,6 +142,9 @@ export interface Runtime {
   placementEdge?: { probesPerJob:number };
   wake?: (readyJobs?: number, immediate?: 'webhook'|'ingest') => Promise<void>;
   deferNudge?: (work: (runtime: Runtime) => Promise<void>) => void;
+  // Where a request hands an abuse-monitoring event (src/abuse.ts): the Worker sends it to a queue after the response.
+  // It is never awaited and opens no database connection. Absent (Node): a bounded in-process buffer.
+  abuseEvents?: (event: import('./abuse.js').AbuseEvent) => void | Promise<void>;
   // Nudges the long-lived dispatcher for one account/region after queued mail commits. Dispatch
   // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
   dispatch?: (region: string, accountId?: string, emails?: number, kind?: ReadyConnection['kind'], priority?: boolean) => Promise<void>;

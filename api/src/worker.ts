@@ -115,7 +115,10 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
       // fails lets the batch through; the per-process cap still applies.
       analyticsStorage: env.ANALYTICS ? r2Storage(env.ANALYTICS) : undefined,
       allowAnalytics: env.ANALYTICS_INGEST ? peer => env.ANALYTICS_INGEST!.limit({ key: `analytics:${peer}` }).then(r => r.success, () => true) : undefined,
-      placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1, immediate) => {
+      placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined,
+      // Abuse-monitoring events (src/abuse.ts) leave the request on the work queue, after the response and without a
+      // database connection. A send that fails is the event dropped.
+      abuseEvents: ctx ? event => { ctx.waitUntil(env.WAKE_QUEUE.send({ kind: 'abuse', event }).catch(() => { core.log('warn', { code: 'ABUSE_EVENT_DROPPED', reason: 'queue' }); })); } : undefined, wake: async (readyJobs = 1, immediate) => {
       if (immediate === 'webhook' && env.WEBHOOK_QUEUE) return workWake(env.WEBHOOK_QUEUE,concurrency)(readyJobs);
       if (immediate || readyJobs > concurrency) return notify(readyJobs);
       // Only orchestration singletons coalesce. Delay past the window so the signal cannot
@@ -290,6 +293,17 @@ export default {
       core.log('error', { code: 'UNKNOWN_QUEUE', queue: batch.queue });
       batch.retryAll();
       return;
+    }
+    // Abuse-monitoring events (src/abuse.ts) ride the work queue. This consumer writes them, never the request that
+    // produced them, and acknowledges each whatever happens: a write that fails or times out is the event dropped.
+    const observed = hooks ? [] : batch.messages.filter(message => (message.body as { kind?: unknown } | null)?.kind === 'abuse');
+    if (observed.length) {
+      try {
+        const { applyAbuseEvents } = await core.wrapModuleLoad(() => import('./abuse.js'));
+        await withRuntime(env, runtime => applyAbuseEvents(runtime, observed.map(message => (message.body as { event?: unknown }).event)));
+      } catch { core.log('warn', { code: 'ABUSE_EVENT_FAILED' }); }
+      for (const message of observed) message.ack();
+      if (observed.length === batch.messages.length) return;
     }
     const { drainJobs } = await core.wrapModuleLoad(() => import('./dispatch.js'));
     await withRuntime(env, async runtime => {

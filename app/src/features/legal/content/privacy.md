@@ -2,7 +2,7 @@
 title: Privacy Policy
 description: How Anomaly handles personal data in Nightmail: what we collect about customers, how we process the mail customers send and receive, screening and AI, retention, and your rights.
 updated: 20 November 2026
-effective: 13 November 2026
+effective: 20 November 2026
 ---
 
 This policy explains how **Anomaly Innovations, Inc.** ("Anomaly", "we", "us") handles personal data in **Nightmail**, the email service at nightmail.dev: its website, API, dashboard, SDK, MCP server, and IMAP and SMTP access.
@@ -26,10 +26,10 @@ Nightmail handles personal data in two different roles.
 | **Identity** | Name, email address, and the account identifier from Anomaly's sign-in service (account.anoma.ly). You sign in there with GitHub, with Google, with a link or code emailed to you, or with your email and a password. If you use GitHub or Google: its account ID, its email address and whether it's verified, and for Google the Google Workspace domain if there is one. | You, through the sign-in service (and GitHub or Google, if you use one) |
 | **Workspaces** | Workspaces you belong to, your role (owner, admin or member), and invitations (email address and role) | You and other members |
 | **Credentials** | API keys, MCP grants, agent tokens, inbox keys and app passwords. Keys are stored as hashes; we can't read them back. | You |
-| **Sessions** | A session cookie, valid for up to 7 days. Sessions don't record your IP address or browser; signing in keeps one-way codes of them (see **Abuse and fraud signals**). | Your browser |
+| **Sessions** | A session cookie, valid for up to 7 days. Sessions don't record your IP address or browser. Signing in keeps a keyed code of your network and your browser's family (see **Abuse and fraud signals**). | Your browser |
 | **Sign-in attempts** | Issuer, account ID, sign-in method and provider, email and name, outcome and time. Kept 30 days; refused sign-in requests 90 days. | Sign-in service |
 | **Waitlist** | If we refuse a sign-in because Nightmail isn't open to you yet: the email address and name from that sign-in, when you first and last tried, and how many times. Used only to tell you when Nightmail opens. Kept until we've emailed you that it's open, or 1 year after your last attempt. | Sign-in service (and GitHub or Google, if you use one) |
-| **Abuse and fraud signals** | When you sign in or create a workspace: one-way codes of your network (shortened as in the audit trail), your browser, your email address with any "+tag" removed, and the GitHub or Google account you signed in with; your network provider and country; and the domain of your email address when it's your own rather than a public mailbox provider's. When you pay: a one-way code of your card's fingerprint, the card's country, and whether a payment failed, was disputed or was flagged as fraud. We can't turn a code back into the original value. We use these to notice when several accounts belong to the same person or operation ([section 5.7](#linking-related-accounts)). | Your browser, the sign-in service, Stripe and our systems |
+| **Abuse and fraud signals** | Kept from **23 November 2026**, never for anything earlier. When you sign in or create a workspace: keyed codes of your network (shortened as in the audit trail), of your email address, of the mailbox it names where your provider documents how it reads addresses (for example, Gmail ignores dots and "+tags"), of your email domain when it's your own rather than a public mailbox provider's, and of the GitHub or Google account you signed in with; your network provider and country; your browser's family (for example, "Chrome 131 on macOS"); and three flags: a disposable email service, a "+tag" address, and a sign-in we refused. From your payments: a keyed code of each card's fingerprint. This also covers people whose sign-in we refuse. A keyed code shows whether two accounts share a value without showing the value. Because we hold the key, we can check whether a value we already know matches one. We use these only to notice when several accounts belong to the same person or operation ([section 5.7](#linking-related-accounts)). | Your browser, the sign-in service and our payment records |
 | **Activity (audit trail)** | Who did what in a workspace (for example, created a key or changed a role), when, the reason, the request ID, your network (shortened to the first three parts of an IPv4 address, or a /48 for IPv6) and browser family. Never secrets or message content. | Our systems |
 | **Billing** | Stripe customer ID; card brand, last four digits, expiry and fingerprint; top-ups, refunds, disputes, balance and usage history. **Stripe holds your full card number; we never see it.** | You and Stripe |
 | **Usage** | How much each workspace sends, receives and stores, and its sender score and standing | Our systems |
@@ -118,11 +118,13 @@ The classifier is **Jev**, from **TypeSafe AI**. Nightmail calls TypeSafe's API 
 
 ### 5.7 Linking related accounts
 
-- To notice one person or operation using several accounts (for example, to multiply the free allowance or to come back after a pause), we compare the abuse and fraud signals of accounts ([section 2](#data-about-our-customers)).
-- For workspaces that use Hosted sending, we also take **fingerprints** from a sample of the messages they send: a numeric summary of the wording, the domains the message links to, and one-way codes of its recipients. **We keep no message text**, and nobody can read the wording or identify a recipient from a fingerprint.
-- Anomaly staff who review abuse see which accounts and workspaces look related and which kinds of signal they share, never the values behind the codes.
-- **Nothing is blocked, paused or limited automatically** because accounts look related. A person decides, and a workspace can ask for a review as in [section 5.4](#people-and-automated-decisions).
-- We don't use these signals for anything else, and we don't share them.
+- **Why.** To notice one person or operation using several accounts: to send spam or commit payment fraud through more than one, to come back after a pause, or to multiply the free allowance.
+- **What we compare.** The abuse and fraud signals of accounts ([section 2](#data-about-our-customers)). For mail that Amazon accepted from Nightmail's shared (Hosted) sending pool, we also take **fingerprints** from a small sample of messages: a keyed numeric summary of the wording, and keyed codes of the domains the message links to and is sent from. We don't fingerprint mail sent through your own AWS account, mail that was scheduled, cancelled, suppressed or rejected, or anything sent before 23 November 2026.
+- **This compares customers with each other.** Signals and fingerprints from different workspaces are kept together so that equal values can be found. It's the one place where data taken from your workspace is compared with other customers'. No customer can see anything about another.
+- **What these records hold.** No message text, subject, recipient or address. A fingerprint can't be turned back into a message. Because we hold the key, we can tell whether a message or domain we already have matches one. The messages themselves stay in your sending log for 30 days, as before.
+- **Who sees it.** When accounts share signals, Anomaly staff who review abuse can see which accounts look related and which kinds of signal they share, never the values behind the codes.
+- **A person decides.** Nothing is blocked, paused or limited automatically because accounts look related. A workspace can ask for a review as in [section 5.4](#people-and-automated-decisions).
+- **Your choices.** You can ask what these records hold about your account, object to it, or ask us to erase it ([section 11](#your-rights)). We don't use these signals for anything else, and we don't sell them or share them outside Anomaly.
 
 ## 6. Support access
 
@@ -168,7 +170,7 @@ Nightmail stores and processes data mainly in the **United States**. Cloudflare 
 | Stripe webhook events | 90 days |
 | Sign-in attempts | 30 days; refused sign-in requests 90 days |
 | Waitlist | Until we've emailed you that Nightmail is open, or 1 year after your last sign-in attempt |
-| Abuse and fraud signals | Network and browser codes: 90 days after we last saw them. Email, sign-in account, card and domain signals, and payment flags: 1 year after we last saw them. Fingerprints of sent mail: 30 days. |
+| Abuse and fraud signals | 90 days after we last saw each one (for example, your last sign-in from that network), whether or not the workspace is still open. Fingerprints of sent mail: 30 days. An account keeps at most 100 values of each kind; older ones are dropped first. |
 | Sessions | Until they expire (up to 7 days) |
 | Request logs | About 3 days; IMAP and SMTP gateway logs 30 days |
 | Dashboard usage | 400 days |
@@ -181,7 +183,7 @@ When a workspace is closed, we delete its data as described in the [Terms of Ser
 - Data is encrypted in transit with TLS. IMAP and SMTP require TLS before you sign in: implicit TLS on ports 993 and 465, or STARTTLS on ports 143 and 587.
 - Stored data is encrypted at rest by our infrastructure providers (Amazon S3, Cloudflare R2 and PlanetScale).
 - Webhook secrets and endpoint URLs are encrypted in the database. API keys and support tokens are stored as hashes.
-- Customers' data is separated by workspace in every database query and storage path.
+- Customers' data is separated by workspace in every database query and storage path. The one exception is abuse monitoring ([section 5.7](#linking-related-accounts)), which compares keyed codes from different workspaces and which only staff who review abuse can read.
 - The audit trail can't be changed or deleted before its retention ends, even by administrators.
 - Support access, by the AI agent or a person, is limited to the workspaces of the person it's helping and lasts only while their request is open (for a person, at most 2 hours). It reads, changes nothing without that person's confirmation, and is logged.
 
@@ -193,6 +195,8 @@ Depending on where you live, you may have the right to access, correct, delete o
 
 To use these rights, email [privacy@nightmail.dev](mailto:privacy@nightmail.dev). We'll verify who you are and answer within the time the law requires (usually 30 or 45 days).
 
+**Abuse and fraud signals.** These rights cover the signals in [section 5.7](#linking-related-accounts). Once we've verified that the account is yours, we tell you which kinds of signal we hold about it and how many, never anything about another customer. If you ask, we erase them, and where we uphold an objection we stop recording them for your account. If we must keep recording to protect the service, we'll tell you why.
+
 **Data Processing Addendum.** Business customers who need one can request our Data Processing Addendum at [privacy@nightmail.dev](mailto:privacy@nightmail.dev).
 
 ## 12. Rights of people in our customers' mail
@@ -202,6 +206,7 @@ If you received mail sent through Nightmail, or sent mail to an address hosted o
 - **To unsubscribe,** use the link in the email. It works without contacting us.
 - **To access or delete your data,** contact the business that sent you the mail or owns the address you wrote to. They control your data.
 - **If you contact us** at [privacy@nightmail.dev](mailto:privacy@nightmail.dev), we'll forward your request to that business where we can identify it, and help them respond as our contracts require.
+- **Abuse monitoring** ([section 5.7](#linking-related-accounts)) keeps nothing about you as a recipient: no address, and no code made from one.
 - **To report spam or abuse,** email [abuse@nightmail.dev](mailto:abuse@nightmail.dev) with the full headers.
 
 ## 13. Children

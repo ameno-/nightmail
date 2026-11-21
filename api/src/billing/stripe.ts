@@ -13,7 +13,6 @@ import { ApiError, id, log, notFound, type Database, type DbExecutor, type Runti
 import { UC_PER_CENT } from './money.js';
 import type { AutoRechargeSettings, PaymentView } from './types.js';
 import { productName } from '../brand.js';
-import { observeBilling, observeCard } from '../abuse.js';
 
 /** The Stripe API version Nightmail is written against. Create the webhook endpoint with the same version. */
 export const STRIPE_API_VERSION = '2026-10-28.endive';
@@ -179,15 +178,13 @@ export async function creditAttempt(runtime: Runtime, attemptId: string, paid: P
  * card's (a lost or abandoned charge); those only clear the pending recharge.
  */
 export async function failAttempt(runtime: Runtime, attemptId: string, code: string, message: string | null, status: 'failed' | 'canceled' | 'expired' = 'failed', disable = status === 'failed'): Promise<string> {
-  let closed: string | undefined;
-  const result = await runtime.db.transaction(async tx => {
+  return runtime.db.transaction(async tx => {
     const locked = await lockAttempt(tx, attemptId);
     if (!locked) return 'missing';
     const { attempt: a, account } = locked;
     if (!OPEN.includes(a.status)) return a.status;
     await tx.execute(sql`UPDATE billing_payment_attempts SET status=${status}, failure_code=${code.slice(0, 100)}, failure_message=${message?.slice(0, 300) ?? null}, settled_at=now(), updated_at=now()
       WHERE id=${attemptId} AND status IN ${open}`);
-    closed = a.workspace_id;
     if (a.kind !== 'recharge') return status;
     if (!disable) {
       await tx.execute(sql`UPDATE billing_accounts SET recharge_pending_attempt=NULL, updated_at=now() WHERE workspace_id=${a.workspace_id} AND recharge_pending_attempt=${attemptId}`);
@@ -200,8 +197,6 @@ export async function failAttempt(runtime: Runtime, attemptId: string, code: str
     log('warn', { code: 'BILLING_RECHARGE_FAILED', workspaceId: a.workspace_id, attemptId, reason: code });
     return status;
   });
-  if (closed && status === 'failed') await observeBilling(runtime, closed, 'payment_failed');
-  return result;
 }
 
 // ---------- customers and cards ----------
@@ -223,10 +218,9 @@ export async function ensureCustomer(runtime: Runtime, workspaceId: string, bill
   return current!.stripe_customer;
 }
 
-type Card = { id: string; brand: string | null; last4: string | null; expMonth: number | null; expYear: number | null; fingerprint: string | null; country: string | null };
+type Card = { id: string; brand: string | null; last4: string | null; expMonth: number | null; expYear: number | null; fingerprint: string | null };
 const cardOf = (pm: StripeObject | null | undefined): Card | null => !pm || typeof pm !== 'object' || typeof pm.id !== 'string' ? null : {
   id: pm.id, brand: pm.card?.brand ?? pm.type ?? null, last4: pm.card?.last4 ?? null, expMonth: pm.card?.exp_month ?? null, expYear: pm.card?.exp_year ?? null, fingerprint: pm.card?.fingerprint ?? null,
-  country: typeof pm.card?.country === 'string' ? pm.card.country : null,
 };
 
 /**
@@ -244,13 +238,11 @@ export async function saveCard(runtime: Runtime, attemptId: string, source: { pa
   const invoice = source.invoice ? await stripeRequest(cfg, 'GET', `/v1/invoices/${encodeURIComponent(source.invoice)}`) : null;
   const card = cardOf(intent?.payment_method);
   const charge = intent?.latest_charge && typeof intent.latest_charge === 'object' ? intent.latest_charge : null;
-  let cardBlocked = false;
   const outcome = await runtime.db.transaction(async tx => {
     const locked = await lockAttempt(tx, attemptId);
     if (!locked) return null;
     const { attempt: a } = locked;
     const [{ blocked } = { blocked: false }] = card?.fingerprint ? await rows<{ blocked: boolean }>(tx, sql`SELECT EXISTS (SELECT FROM billing_blocked_cards WHERE fingerprint=${card.fingerprint}) AS blocked`) : [];
-    cardBlocked = blocked;
     await tx.execute(sql`UPDATE billing_payment_attempts SET card_brand=coalesce(${card?.brand ?? null},card_brand), card_last4=coalesce(${card?.last4 ?? null},card_last4),
       card_fingerprint=coalesce(${card?.fingerprint ?? null},card_fingerprint), receipt_url=coalesce(${charge?.receipt_url ?? null},receipt_url), stripe_charge=coalesce(stripe_charge,${charge?.id ?? null}),
       stripe_invoice=coalesce(stripe_invoice,${invoice?.id ?? null}), invoice_url=coalesce(${invoice?.hosted_invoice_url ?? null},invoice_url), invoice_pdf=coalesce(${invoice?.invoice_pdf ?? null},invoice_pdf), updated_at=now()
@@ -267,8 +259,6 @@ export async function saveCard(runtime: Runtime, attemptId: string, source: { pa
       WHERE workspace_id=${a.workspace_id} RETURNING stripe_customer, true AS changed`);
     return account?.stripe_customer ? { customer: account.stripe_customer, pm: card.id } : null;
   });
-  // Monitoring only (src/abuse.ts): the card's hashed fingerprint and country, after the payment's own work committed.
-  if (card) await observeCard(runtime, before.workspace_id, { fingerprint: card.fingerprint, country: card.country, blocked: cardBlocked });
   // Stripe's default card for the customer follows Nightmail's, so invoices fall back to the card Nightmail shows.
   if (outcome) await stripeRequest(cfg, 'POST', `/v1/customers/${encodeURIComponent(outcome.customer)}`, { invoice_settings: { default_payment_method: outcome.pm } }, `default:${outcome.customer}:${outcome.pm}`);
 }
@@ -705,7 +695,7 @@ async function blockCard(tx: DbExecutor, a: AttemptRow, reason: 'dispute' | 'ear
 }
 /** A dispute debits what the payment credited (at most the disputed amount), blocks the card and stops auto-recharge. */
 export async function openDispute(runtime: Runtime, attemptId: string, dispute: StripeObject) {
-  const workspaceId = await runtime.db.transaction(async tx => {
+  await runtime.db.transaction(async tx => {
     const locked = await lockAttempt(tx, attemptId);
     if (!locked) return;
     const { attempt: a } = locked;
@@ -715,9 +705,7 @@ export async function openDispute(runtime: Runtime, attemptId: string, dispute: 
       ${JSON.stringify({ attemptId, disputeId: dispute.id, reason: dispute.reason ?? null })}::jsonb, 'stripe')`);
     await blockCard(tx, a, 'dispute');
     log('error', { code: 'BILLING_DISPUTE_OPENED', workspaceId: a.workspace_id, attemptId, disputeId: dispute.id, amountCents: Number(dispute.amount) || 0 });
-    return a.workspace_id;
   });
-  if (workspaceId) await observeBilling(runtime, workspaceId, 'dispute');
 }
 /** A won dispute gives back exactly what the dispute debited; a lost one changes nothing more. */
 export async function closeDispute(runtime: Runtime, attemptId: string, dispute: StripeObject) {
@@ -733,12 +721,10 @@ export async function closeDispute(runtime: Runtime, attemptId: string, dispute:
 }
 /** Radar's early fraud warning: block the card and stop auto-recharge. The operator decides on a refund. */
 export async function fraudWarning(runtime: Runtime, attemptId: string, warning: StripeObject) {
-  const workspaceId = await runtime.db.transaction(async tx => {
+  await runtime.db.transaction(async tx => {
     const locked = await lockAttempt(tx, attemptId);
     if (!locked) return;
     await blockCard(tx, locked.attempt, 'early_fraud_warning');
     log('error', { code: 'BILLING_EARLY_FRAUD_WARNING', workspaceId: locked.attempt.workspace_id, attemptId, warningId: warning.id, fraudType: warning.fraud_type ?? null });
-    return locked.attempt.workspace_id;
   });
-  if (workspaceId) await observeBilling(runtime, workspaceId, 'fraud_warning');
 }

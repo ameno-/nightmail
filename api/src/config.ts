@@ -77,7 +77,10 @@ const values = z.object({
   NIGHTMAIL_ALLOW_SES_SANDBOX: z.enum(['true','false']).default('false'),
   NIGHTMAIL_REQUIRE_DMARC_FOR_BULK: z.enum(['true','false']).optional(),
   NIGHTMAIL_HOSTED_SCREEN: z.enum(['true','false']).default('true'),
-  // Hosted only. Reserved for a later release: abuse monitoring (src/abuse.ts) only observes, and nothing reads this.
+  // Hosted only: abuse monitoring (src/abuse.ts) is off until this names the instant it starts (RFC 3339, with Z or an
+  // offset). Nothing is recorded before it, or before the database first ran with it. Unset turns it off; expiry still runs.
+  NIGHTMAIL_ABUSE_MONITORING: optional(z.iso.datetime({ offset: true })),
+  // Hosted only. Reserved for a later release: monitoring only observes, and nothing reads this.
   NIGHTMAIL_ABUSE_ENFORCE: z.enum(['true','false']).default('false'),
   STRIPE_SECRET_KEY: optional(z.string().regex(/^(?:sk|rk)_(?:test|live)_[A-Za-z0-9_]+$/)),
   STRIPE_WEBHOOK_SECRET: optional(z.string().regex(/^whsec_[A-Za-z0-9_]+$/)),
@@ -220,6 +223,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     allowSesSandbox: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ALLOW_SES_SANDBOX==='true',
     requireDmarcForBulk: v.MULTI_TENANT === 'true' && (v.NIGHTMAIL_REQUIRE_DMARC_FOR_BULK ?? v.ENABLE_LIVE_SES) === 'true',
     hostedScreen: v.MULTI_TENANT==='true' && v.NIGHTMAIL_HOSTED_SCREEN==='true',
+    abuseMonitoring: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_MONITORING ? { since: new Date(v.NIGHTMAIL_ABUSE_MONITORING).toISOString() } : undefined,
     abuseEnforce: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_ENFORCE==='true',
     billing: v.MULTI_TENANT==='true' ? { stripe: v.STRIPE_SECRET_KEY && v.STRIPE_WEBHOOK_SECRET ? { secretKey: v.STRIPE_SECRET_KEY, webhookSecret: v.STRIPE_WEBHOOK_SECRET, automaticTax: v.STRIPE_AUTOMATIC_TAX === 'true', apiBase: v.STRIPE_API_BASE.replace(/\/$/, '') } : undefined } : undefined,
     placementShadow: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_PLACEMENT_SHADOW === 'true', placementDblZone: v.NIGHTMAIL_PLACEMENT_DBL_ZONE,
