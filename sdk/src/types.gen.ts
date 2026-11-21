@@ -1570,6 +1570,10 @@ export type CampaignStats = {
             denominator: number;
         };
     };
+    /**
+     * When counts, totals and rates were counted: they include every change made before then. state and delivery are always current.
+     */
+    computedAt: string;
 };
 
 export type CampaignContentGuide = {

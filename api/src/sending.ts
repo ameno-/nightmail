@@ -1,9 +1,9 @@
-import { cachedDashboardRead } from './dashboard-cache.js';
+import { cachedDashboardRead, mailRevision } from './dashboard-cache.js';
 import { boundRequestBody } from './request-body.js';
 import { checkBudget } from './auth.js';
 import { recordAudit, type AuditContext } from './audit.js';
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, asc, desc, eq, getTableColumns, gte, inArray, isNull, isNotNull, lt, or, sql, SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, isNotNull, lt, lte, or, sql, SQL } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
 import type { DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys } from './db/core.js';
@@ -26,7 +26,7 @@ import { bulkFlags, hostedCost, probationReason, type ProbationReason } from './
 import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { CustomHeaders } from './custom-headers.js';
 import { EmailThread, joinReplies, mailboxMail, sentThreadId, threadBlock, threadView, type RawThread } from './thread-view.js';
-import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
+import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, type CampaignStatsGroup, type StoredCampaignStats, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, mib, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
@@ -181,7 +181,7 @@ const Delivery = z.object({ total: z.number().int().describe('Fixed recipient co
   pausedAt: z.string().nullable(), pauseReason: Failure.nullable(),
   deliveredOnly: z.boolean().describe('After a resumed list-probe quarantine: the rest goes only to contacts this workspace delivered to before; the others are counted in canceled.'),
   waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota', 'list_probe', 'balance']), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest.') }).describe('The current launch: null until the campaign is sent or scheduled, and cleared by a new revision.').openapi('CampaignDelivery');
-function deliveryView(row: typeof campaigns.$inferSelect) {
+function deliveryView(row: Omit<typeof campaigns.$inferSelect, 'draft' | 'stats'>) {
   if (!row.reviewId) return null;
   const next = row.pacePerDay !== null && row.windowStartedAt ? new Date(Date.parse(row.windowStartedAt) + DAY_MS).toISOString() : null;
   return Delivery.parse({ total: row.total, prepared: row.prepared, expanded: row.expanded, canceled: row.canceled, error: row.error ?? null,
@@ -194,18 +194,28 @@ const CampaignStats = z.object({
   id: z.string(), name: z.string(), state: CampaignStateValue, tracking: z.boolean(), counts: CampaignCounts, delivery: Delivery.nullable(),
   totals: z.object({ accepted: z.number().int(), delivered: z.number().int(), bounced: z.number().int(), complained: z.number().int(), opened: z.number().int(), clicked: z.number().int(), failed: z.number().int(), deliveryDelayed: z.number().int(), simulated: z.number().int() }).describe('Lifetime distinct email counts from current state and stored events; outcomes overlap. Accepted excludes simulated mail; other outcomes include simulated events for simulated mail. Opens and clicks include bots and privacy proxies. Failed means rejected or rendering failed; suppressed, canceled and uncertain mail remain in counts.byStatus.'),
   rates: z.object({ delivery: CampaignRate.describe('Delivered / accepted. Receiving-server acceptance, not inbox placement.'), bounce: CampaignRate.describe('Bounced / accepted.'), complaint: CampaignRate.describe('Complained / accepted.'), open: CampaignRate.describe('Unique opened emails / delivered.'), click: CampaignRate.describe('Unique clicked emails / delivered, not click-to-open rate.') }),
+  computedAt: z.string().describe('When counts, totals and rates were counted: they include every change made before then. state and delivery are always current.'),
 }).describe('Lifetime campaign statistics, with no date cutoff or pagination. Done means dispatch finished, not delivery finished. Feedback is asynchronous; missing engagement does not prove nobody read or clicked. Simulated outcomes are never evidence of real delivery.').openapi('CampaignStats');
 /**
- * Lifetime statistics of campaigns (GET /v1/campaigns/{id}/stats, and the support reads in src/support-deliverability.ts):
- * one statement over the campaign and per-email event indexes for all of them. Grouping by current status keeps
- * progress and lifetime outcomes in the same snapshot without loading mail bodies.
+ * Background counts of campaign outcomes (campaignStatsJob), for campaigns of at least `from` recipients, whose stats a
+ * read could not aggregate within its limit. A step counts one page, a fixed range of review ordinals, so it costs the
+ * same however large the campaign; a job run takes steps for about `runMs`, then waits `pace` times as long as the run
+ * took (at least `pauseMs`) before the next: with the job's own claim and settle the count uses about 3% of one
+ * connection's database time, spread over the whole pass instead of a burst, and a larger campaign is simply counted
+ * less often (2,000,000 recipients: 400 steps, a pass every 7 minutes or so on a fast core, longer on a slower one). A pass starts at most every `everyMs` while the campaign sends and only when the workspace's mail
+ * changed; a finished campaign is counted once more, and when read after `readRefreshMs`. Exported for the tests.
  */
-export async function campaignStats(db: DbExecutor, a: Pick<Actor, 'workspaceId'>, rows: (typeof campaigns.$inferSelect)[]) {
-  const result = new Map<string, z.infer<typeof CampaignStats>>();
-  if (!rows.length) return result;
+export const CAMPAIGN_STATS = { from: 20_000, page: 5_000, runMs: 250, pace: 32, pauseMs: 1_000, everyMs: 60_000, readRefreshMs: 600_000 };
+const STATS_NOTE = `A campaign of at least ${CAMPAIGN_STATS.from.toLocaleString('en-US')} recipients is counted in the background: about once a minute while it sends (every few minutes for the largest, so counting stays a small share of the database's time), once more when it finishes, and again when read more than ${CAMPAIGN_STATS.readRefreshMs / 60_000} minutes later if anything changed. Its figures are the last count, so they can be minutes old; computedAt says when. A finished campaign keeps its figures after its emails leave the 30-day history.`;
+/**
+ * Outcome counts per (campaign, status, simulated) of the emails `where` selects, each email counted once per outcome
+ * over all its stored events, without loading mail bodies. Groups of disjoint sets of emails add up, so counts taken
+ * page by page equal one count over all of them.
+ */
+async function statsGroups(db: DbExecutor, a: Pick<Actor, 'workspaceId'>, where: SQL | undefined) {
   const distinct = (condition: SQL) => sql<number>`count(DISTINCT ${emails.id}) FILTER (WHERE ${condition})::int`;
   const outcome = (status: EmailStatus, type: string) => distinct(sql`${emails.status} = ${status} OR ${emailEvents.type} = ${type}`);
-  const grouped = await db.select({
+  return db.select({
     campaignId: emails.campaignId, status: emails.status, simulated: emails.simulated, count: sql<number>`count(DISTINCT ${emails.id})::int`,
     accepted: distinct(sql`NOT ${emails.simulated} AND ${emails.status} <> 'suppressed' AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${emailEvents.type} IN ('send', 'delivery', 'bounce', 'complaint', 'delivery_delay','non_permanent_bounce'))`),
     delivered: outcome('delivered', 'delivery'), bounced: outcome('bounced', 'bounce'), complained: outcome('complained', 'complaint'),
@@ -213,25 +223,125 @@ export async function campaignStats(db: DbExecutor, a: Pick<Actor, 'workspaceId'
     failed: distinct(sql`${emails.status} IN ('rejected', 'rendering_failed') OR ${emailEvents.type} IN ('reject', 'rendering_failure')`),
     deliveryDelayed: distinct(sql`${emails.status}='delayed' OR ${emailEvents.type} IN ('delivery_delay','non_permanent_bounce')`),
   }).from(emails).leftJoin(emailEvents, and(scope(emailEvents, a), eq(emails.id, emailEvents.emailId)))
-    .where(and(scope(emails, a), rows.length === 1 ? eq(emails.campaignId, rows[0]!.id) : inArray(emails.campaignId, rows.map(row => row.id)))).groupBy(emails.campaignId, emails.status, emails.simulated);
+    .where(and(scope(emails, a), where)).groupBy(emails.campaignId, emails.status, emails.simulated);
+}
+/** The stored count of the campaign's current launch, if any (an earlier launch's never applies). */
+const storedStats = (row: typeof campaigns.$inferSelect) => row.reviewId && row.stats?.reviewId === row.reviewId ? row.stats : null;
+const backgroundCounted = (row: typeof campaigns.$inferSelect) => row.total >= CAMPAIGN_STATS.from;
+/**
+ * Lifetime statistics of campaigns (GET /v1/campaigns/{id}/stats, and the support reads in src/support-deliverability.ts).
+ * A large campaign with a stored count reads it; the others are counted now, in one statement over the campaign and
+ * per-email event indexes for all of them. A stored count that saw more emails than are left is kept: the 30-day
+ * retention removed the rest, and a finished campaign's figures outlive its emails.
+ */
+export async function campaignStats(db: DbExecutor, a: Pick<Actor, 'workspaceId'>, rows: (typeof campaigns.$inferSelect)[]) {
+  const result = new Map<string, z.infer<typeof CampaignStats>>();
+  if (!rows.length) return result;
+  const live = rows.filter(row => !(backgroundCounted(row) && storedStats(row)));
+  const grouped = live.length ? await statsGroups(db, a, live.length === 1 ? eq(emails.campaignId, live[0]!.id) : inArray(emails.campaignId, live.map(row => row.id))) : [];
+  const countedAt = new Date().toISOString();
   for (const row of rows) {
-    const real = { accepted: 0, delivered: 0, bounced: 0, complained: 0, opened: 0, clicked: 0, failed: 0, deliveryDelayed: 0 };
-    const counts = emptyCounts(), totals = { ...real, simulated: 0 };
-    for (const item of grouped) {
-      if (item.campaignId !== row.id) continue;
-      counts.byStatus[item.status] += item.count; counts.total += item.count;
-      if (item.simulated) totals.simulated += item.count;
-      for (const key of Object.keys(real) as (keyof typeof real)[]) {
-        totals[key] += item[key];
-        if (!item.simulated) real[key] += item[key];
-      }
-    }
-    const rate = (numerator: number, denominator: number, enabled = true) => ({ numerator, denominator, value: denominator && enabled ? numerator / denominator : null });
-    result.set(row.id, { id: row.id, name: row.draft.name, state: row.state, tracking: row.draft.tracking, counts, delivery: deliveryView(row), totals,
-      rates: { delivery: rate(real.delivered, real.accepted), bounce: rate(real.bounced, real.accepted), complaint: rate(real.complained, real.accepted), open: rate(real.opened, real.delivered, row.draft.tracking), click: rate(real.clicked, real.delivered, row.draft.tracking) } });
+    const stored = storedStats(row), counted = grouped.filter(item => item.campaignId === row.id);
+    const kept = stored && (backgroundCounted(row) || stored.emails > counted.reduce((n, item) => n + item.count, 0));
+    result.set(row.id, statsView(row, kept ? stored.groups : counted, kept ? stored.computedAt : countedAt));
   }
   return result;
 }
+function statsView(row: typeof campaigns.$inferSelect, groups: CampaignStatsGroup[], computedAt: string): z.infer<typeof CampaignStats> {
+  const real = { accepted: 0, delivered: 0, bounced: 0, complained: 0, opened: 0, clicked: 0, failed: 0, deliveryDelayed: 0 };
+  const counts = emptyCounts(), totals = { ...real, simulated: 0 };
+  for (const item of groups) {
+    counts.byStatus[item.status] += item.count; counts.total += item.count;
+    if (item.simulated) totals.simulated += item.count;
+    for (const key of Object.keys(real) as (keyof typeof real)[]) {
+      totals[key] += item[key];
+      if (!item.simulated) real[key] += item[key];
+    }
+  }
+  const rate = (numerator: number, denominator: number, enabled = true) => ({ numerator, denominator, value: denominator && enabled ? numerator / denominator : null });
+  return { id: row.id, name: row.draft.name, state: row.state, tracking: row.draft.tracking, counts, delivery: deliveryView(row), totals,
+    rates: { delivery: rate(real.delivered, real.accepted), bounce: rate(real.bounced, real.accepted), complaint: rate(real.complained, real.accepted), open: rate(real.opened, real.delivered, row.draft.tracking), click: rate(real.clicked, real.delivered, row.draft.tracking) }, computedAt };
+}
+const addGroups = (sum: CampaignStatsGroup[], page: CampaignStatsGroup[]) => {
+  const next = sum.map(group => ({ ...group }));
+  for (const item of page) {
+    const { status, simulated, count, accepted, delivered, bounced, complained, opened, clicked, failed, deliveryDelayed } = item;
+    const group = next.find(g => g.status === status && g.simulated === simulated);
+    if (!group) { next.push({ status, simulated, count, accepted, delivered, bounced, complained, opened, clicked, failed, deliveryDelayed }); continue; }
+    for (const key of ['count', 'accepted', 'delivered', 'bounced', 'complained', 'opened', 'clicked', 'failed', 'deliveryDelayed'] as const) group[key] += item[key];
+  }
+  return next;
+};
+const campaignStatsJobId = (campaignId: string) => `campaign-stats:${campaignId}`;
+/** Starts the campaign's background count at `at` (now when null), unless one is already waiting or running. */
+const queueCampaignStats = (ref: { workspaceId: string; id: string }, at: string | null = null) => sql`INSERT INTO jobs(id,type,workspace_id,payload,available_at)
+  VALUES (${campaignStatsJobId(ref.id)},'sending.campaignStats',${ref.workspaceId},${JSON.stringify({ campaignId: ref.id })}::jsonb,coalesce(${at}::timestamptz,now()))
+  ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,payload=excluded.payload,available_at=excluded.available_at,lease_until=NULL,last_error=NULL
+  WHERE jobs.status IN ('completed','failed')`;
+/** A read restarts the count of a launched campaign never counted, or of a finished one counted `readRefreshMs` ago. */
+function statsDue(row: typeof campaigns.$inferSelect) {
+  if (!row.reviewId) return false;
+  const stored = storedStats(row);
+  if (!stored) return true;
+  return !stored.frozen && !(CAMPAIGN_ACTIVE as readonly string[]).includes(row.state) && Date.now() - Date.parse(stored.computedAt) >= CAMPAIGN_STATS.readRefreshMs;
+}
+type StatsPass = { reviewId: string; computedAt: string; revision: string; ordinal: number; groups: CampaignStatsGroup[] };
+/**
+ * One campaign's background count: a page of its emails by review ordinal (sending_emails_review_ordinal) per run, each
+ * its own short statement outside any transaction, the running sums carried in the job's payload between runs, stored on
+ * the campaign when the pass ends. Every email of a campaign belongs to its current review: the release is the only path
+ * that writes campaign mail, and a launch takes a new review only while nothing was released.
+ */
+const campaignStatsJob: JobHandler = retryDatabaseFailures(async (runtime, payload, job) => {
+  if (typeof payload.campaignId !== 'string') throw new ApiError(422, 'INVALID_JOB', 'A campaign count needs its campaign.');
+  const campaignId = payload.campaignId, a = { workspaceId: job.workspaceId }, at = (ms: number) => new Date(Date.now() + ms).toISOString(), started = Date.now();
+  const [row] = await runtime.db.select().from(campaigns).where(and(scope(campaigns, a), eq(campaigns.id, campaignId)));
+  // Deleted, or a draft again: nothing to count until a launch queues this again.
+  if (!row?.reviewId) return;
+  const active = (CAMPAIGN_ACTIVE as readonly string[]).includes(row.state), stored = storedStats(row);
+  let pass = payload.pass as StatsPass | undefined;
+  if (pass?.reviewId !== row.reviewId) pass = undefined;
+  if (!pass) {
+    if (stored?.frozen) return;
+    // While it sends, only a large campaign is counted (a small one is counted when read), and only once it released
+    // someone: until then wait for its schedule, looking again at least every 15 minutes in case it moved.
+    if (active && (row.expanded === 0 || !backgroundCounted(row))) {
+      const due = row.expanded === 0 && row.scheduledAt ? Date.parse(row.scheduledAt) - Date.now() : 0;
+      throw new JobDeferred(at(Math.min(Math.max(due, CAMPAIGN_STATS.everyMs), 15 * 60_000)), { campaignId });
+    }
+    // Nothing changed when the workspace has no newer email or email event; a finished campaign is counted once after
+    // it finished, so its figures are exact then.
+    const revision = await mailRevision(runtime, a.workspaceId);
+    if (stored && stored.revision === revision && (active || Date.parse(stored.computedAt) >= Date.parse(row.updatedAt))) {
+      if (active) throw new JobDeferred(at(CAMPAIGN_STATS.everyMs), { campaignId });
+      return;
+    }
+    // The database's clock, which also stamps updated_at, so "counted after it finished" never depends on this host's clock.
+    const { rows: [clock] } = await runtime.db.execute<{ at: string }>(sql`SELECT to_json(clock_timestamp())#>>'{}' AS at`);
+    pass = { reviewId: row.reviewId, computedAt: new Date(clock!.at).toISOString(), revision, ordinal: 0, groups: [] };
+  }
+  // Pages, each its own statement, until the run has used `runMs`: the job's own claim and settle are then a small part
+  // of each run.
+  while (pass.ordinal < row.expanded) {
+    const page = await statsGroups(runtime.db, a, and(eq(emails.campaignId, campaignId), eq(emails.reviewId, pass.reviewId), gt(emails.reviewOrdinal, pass.ordinal), lte(emails.reviewOrdinal, pass.ordinal + CAMPAIGN_STATS.page)));
+    pass = { ...pass, ordinal: pass.ordinal + CAMPAIGN_STATS.page, groups: addGroups(pass.groups, page) };
+    if (Date.now() - started >= CAMPAIGN_STATS.runMs) break;
+  }
+  // This run's database time, paid back as idle time before the next run or pass.
+  const pause = Math.max(CAMPAIGN_STATS.pauseMs, CAMPAIGN_STATS.pace * (Date.now() - started));
+  if (pass.ordinal < row.expanded) throw new JobDeferred(at(pause), { campaignId, pass });
+  const counted: StoredCampaignStats = { reviewId: pass.reviewId, computedAt: pass.computedAt, revision: pass.revision, emails: pass.groups.reduce((n, g) => n + g.count, 0), groups: pass.groups };
+  // A count never replaces one that saw more emails: the 30-day retention deleted those, so the stored figures stay, frozen.
+  const kept = await runtime.db.execute(sql`UPDATE sending_campaigns SET stats=${JSON.stringify(counted)}::jsonb WHERE workspace_id=${a.workspaceId} AND id=${campaignId} AND review_id=${pass.reviewId}
+    AND (stats->>'reviewId' IS DISTINCT FROM ${pass.reviewId} OR (stats->>'emails')::int <= ${counted.emails}) RETURNING id`);
+  if (!kept.rows.length) {
+    await runtime.db.execute(sql`UPDATE sending_campaigns SET stats=stats||'{"frozen":true}'::jsonb WHERE workspace_id=${a.workspaceId} AND id=${campaignId} AND stats->>'reviewId'=${pass.reviewId}`);
+    return;
+  }
+  if (active) throw new JobDeferred(new Date(Math.max(Date.parse(pass.computedAt) + CAMPAIGN_STATS.everyMs, Date.now() + pause)).toISOString(), { campaignId });
+  // A pass that started before the campaign finished is followed by one after it, so the finished figures are exact.
+  if (Date.parse(pass.computedAt) < Date.parse(row.updatedAt)) throw new JobDeferred(at(pause), { campaignId });
+});
 const CampaignState = Campaign.pick({ id: true, revision: true, updatedAt: true, state: true, scheduledAt: true, archivedAt: true }).describe('Compact state for draft sync polling. Compare all fields, not only revision: archival and delivery state can change without a new draft revision. Fetch the full campaign when state changes. No draft content or delivery counts.').openapi('CampaignState');
 const CampaignDraftSummary = CampaignDraftView.pick({ name: true, region: true, from: true, fromName: true, subject: true, previewText: true }).extend({ audience: AudienceSpec.pick({ listId: true, segmentId: true }).partial({ listId: true }).default({}) }).strict().openapi('CampaignDraftSummary');
 const CampaignSummary = Campaign.omit({ draft: true }).extend({ draft: CampaignDraftSummary }).describe('Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted.').openapi('CampaignSummary');
@@ -278,7 +388,7 @@ const campaignStateColumns = {
   state: campaigns.state, scheduledAt: campaigns.scheduledAt, archivedAt: campaigns.archivedAt,
 };
 // Project the bounded list draft in PostgreSQL, before driver JSON parsing or application allocation.
-const { draft: _draft, ...campaignRowColumns } = getTableColumns(campaigns);
+const { draft: _draft, stats: _stats, ...campaignRowColumns } = getTableColumns(campaigns);
 const campaignSummaryColumns = {
   ...campaignRowColumns,
   draft: sql<z.infer<typeof CampaignDraftSummary>>`jsonb_strip_nulls(jsonb_build_object(
@@ -291,7 +401,7 @@ function campaignUrl(runtime: Runtime, row: { id: string; state: CampaignState; 
   const url = new URL(`/campaigns/${encodeURIComponent(row.id)}/${campaignEditable(row) ? 'edit' : 'review'}`, runtime.config.publicUrl);
   return url.href;
 }
-type CampaignRow = Omit<typeof campaigns.$inferSelect, 'draft'> & { draft: unknown };
+type CampaignRow = Omit<typeof campaigns.$inferSelect, 'draft' | 'stats'> & { draft: unknown };
 /** How long campaign detail reuses a large active campaign's per-status counts. The dashboard polls detail every 3 s while a campaign sends, and each count reads every recipient's email record. */
 export const CAMPAIGN_PROGRESS_CACHE_SECONDS = 20;
 /** Below this many recipients the count is cheap, so detail stays exact. */
@@ -311,7 +421,7 @@ async function campaignViews<T extends CampaignRow>(runtime: Runtime, a: Actor, 
   return rows.map(row => {
     const counts = emptyCounts();
     for (const item of grouped) if (item.campaignId === row.id) { counts.byStatus[item.status] = Number(item.count); counts.total += Number(item.count); }
-    return { ...row, url: campaignUrl(runtime, row), counts, delivery: deliveryView(row as typeof campaigns.$inferSelect) };
+    return { ...row, url: campaignUrl(runtime, row), counts, delivery: deliveryView(row) };
   });
 }
 // Per-statement limits of the reads a dashboard repeats (budgetedRead): a list walk or aggregate gets 5 seconds; the
@@ -1538,8 +1648,10 @@ export function registerSending(app: App) {
     const views = await timed(c, 'campaign-counts-db', () => budgetedRead(c.env.db, db => campaignViews(c.env, a, [row], { origin: new URL(c.req.url).origin, detail: true }, db), readLimit(READ_LIMIT.campaign)));
     return c.json(Campaign.parse(views[0]!), 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/stats', operationId: 'getCampaignStats', description: 'Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Both rate counts exclude simulated emails. Rates are fractions, null for zero denominators; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Done means dispatch finished; asynchronous feedback can still change totals. ' + readLimitNote(READ_LIMIT.campaignStats), tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignStats), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/stats', operationId: 'getCampaignStats', description: 'Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Both rate counts exclude simulated emails. Rates are fractions, null for zero denominators; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Done means dispatch finished; asynchronous feedback can still change totals. ' + STATS_NOTE + ' ' + readLimitNote(READ_LIMIT.campaignStats), tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignStats), ...errors } }), async c => {
     const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
+    // Queued before the read, so one that runs out of time is answered from the count next time.
+    if (statsDue(row)) await c.env.db.execute(queueCampaignStats(campaignRef(a, row.id)));
     return c.json(CampaignStats.parse((await budgetedRead(c.env.db, db => campaignStats(db, a, [row]), readLimit(READ_LIMIT.campaignStats))).get(row.id)!), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaign-content-guide', operationId: 'getCampaignContentGuide', description: 'The complete campaign and template content vocabulary, personalization syntax, restrictions and examples as Markdown. Read it once before writing or editing html.', tags: ['Campaigns'], security, responses: { 200: response(CampaignContentGuide), ...errors } }), async c => {
@@ -1666,6 +1778,7 @@ export function registerSending(app: App) {
     if (campaign.pauseReason?.code === 'LIST_QUALITY') { await db.execute(clearProbe(ref)); await db.execute(restrictToDelivered(ref)); }
     if (campaign.state==='failed' && campaign.error?.code==='JOB_LEASE_EXHAUSTED') await reserveCampaign(c.env,db,await lockSendScope(db,a.workspaceId,{campaignId:campaign.id}),a,campaign.actorKeyId??a.keyId,0);
     await db.execute(queueCampaignRun(ref, campaign.requestId ? { requestId: campaign.requestId } : {}, next === 'scheduled' ? campaign.scheduledAt : null));
+    await db.execute(queueCampaignStats(ref));
     await recordAudit(db, c, { action: 'campaign.resume', workspaceId: a.workspaceId, target: { type: 'campaign', id: campaign.id }, before: { state: campaign.state }, after: { state: next } });
     a.wakeJobs = Math.max(a.wakeJobs ?? 0, 1);
   }));
@@ -1831,6 +1944,7 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
     pacePerDay: input.pacing?.perDay ?? null, autoPause: input.pacing?.autoPause ?? true, rateShare: input.pacing ? input.pacing.rateShare ?? 0.5 : null }));
   if (!moved.rows.length) throw new ApiError(409, 'CAMPAIGN_LOCKED', 'The campaign changed while it was being sent; fetch it and try again.');
   await db.execute(queueCampaignRun(ref, requestId ? { requestId } : {}));
+  await db.execute(queueCampaignStats(ref, input.scheduledAt ?? null));
   return { id: campaignId, state: 'preparing' as const, queued: counts.eligible, scheduledAt: input.scheduledAt ?? null, simulated: isSimulatedSes(runtime) };
 }
 async function bytesDigest(bytes: Uint8Array) { return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>)), n => n.toString(16).padStart(2, '0')).join(''); }
@@ -2758,7 +2872,7 @@ const runCampaign: JobHandler = async (runtime, payload, job) => {
 // Pre-migration email.dispatch job rows complete as no-ops: sending_emails.status drives the dispatcher (src/dispatcher.ts).
 const retiredDispatchJob: JobHandler = async () => {};
 // Job rows of the previous release's prepare/expand/finish chain continue as runs of the same campaign.
-export const jobHandlers: Record<string, JobHandler> = { 'sending.cancelPage':cancelPageJob, 'sending.release': releaseScheduled, 'email.dispatch': retiredDispatchJob, 'campaign.run': runCampaign, 'campaign.prepare': runCampaign, 'campaign.expand': runCampaign, 'campaign.finish': runCampaign };
+export const jobHandlers: Record<string, JobHandler> = { 'sending.cancelPage':cancelPageJob, 'sending.campaignStats': campaignStatsJob, 'sending.release': releaseScheduled, 'email.dispatch': retiredDispatchJob, 'campaign.run': runCampaign, 'campaign.prepare': runCampaign, 'campaign.expand': runCampaign, 'campaign.finish': runCampaign };
 /**
  * Nightmail's own notices (standing changes) from a platform workspace, through the ordinary admission path: one
  * transactional email per recipient, deduplicated by the idempotency key, charged to that workspace like any send.
