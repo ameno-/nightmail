@@ -15717,6 +15717,31 @@ describe('Operational configuration and public event boundaries', () => {
     error(await http('GET', `/v1/webhooks/${endpoint.id}`, key.secret), 404, 'NOT_FOUND');
   });
 
+  test('a webhook form saves only what it changed: a rename from a stale form keeps the events another editor saved', async t => {
+    // The dashboard's own update builder (app/src/features/settings/webhook-patch.ts), against the real API.
+    const { webhookEdits, webhookPatchBody } = await import('../app/src/features/settings/webhook-patch.js');
+    const key = await keyFixture(t);
+    const hook = await resource(t, key.secret, '/v1/webhooks', { url: `https://example.com/hooks/${unique('peer')}`, description: 'Delivery events', eventTypes: ['email.delivered', 'email.bounced'], paused: true });
+    const update = async (body: Json) => ok(await http('PATCH', `/v1/webhooks/${hook.id}`, key.secret, body));
+    // One form reads the webhook; another editor then subscribes it to complaints.
+    const read = { name: hook.description, url: '', events: hook.eventTypes };
+    const peer = { ...read, events: [...read.events, 'email.complained'] };
+    assert.deepEqual(webhookPatchBody(webhookEdits(peer, read)), { eventTypes: peer.events });
+    await update(webhookPatchBody(webhookEdits(peer, read)));
+    // The first form renames: it sends the name alone, so the complaints subscription stays.
+    const rename = webhookPatchBody(webhookEdits({ ...read, name: 'Renamed ' }, read));
+    assert.deepEqual(rename, { description: 'Renamed' });
+    const renamed = await update(rename);
+    assert.equal(renamed.description, 'Renamed');
+    assert.deepEqual([...renamed.eventTypes].sort(), ['email.bounced', 'email.complained', 'email.delivered']);
+    // Choosing the same events in another order, or leaving the URL field empty, is no change; a typed URL is.
+    assert.deepEqual(webhookEdits({ ...read, events: [...read.events].reverse() }, read), {});
+    assert.deepEqual(webhookPatchBody(webhookEdits({ ...read, url: ' https://example.com/hooks/moved ' }, read)), { url: 'https://example.com/hooks/moved' });
+    // A region scope is a set too, and All regions is null.
+    assert.deepEqual(webhookPatchBody(webhookEdits({ ...read, regionIds: 'all' }, { ...read, regionIds: ['us-east-1'] })), { regions: null });
+    assert.deepEqual(webhookEdits({ ...read, regionIds: ['eu-west-1', 'us-east-1'] }, { ...read, regionIds: ['us-east-1', 'eu-west-1'] }), {});
+  });
+
   test('both webhook kinds encrypt custom headers and expose only permission-appropriate metadata', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const logs = ['info','warn','error'].map(level => t.mock.method(console, level as 'info' | 'warn' | 'error', () => {}));

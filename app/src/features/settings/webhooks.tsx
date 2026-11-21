@@ -9,8 +9,9 @@ import { date, label, number, shortDateTime, time } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { AdminOnlyPage } from './admin-only'
 import { deliveryColumns, SettingsRouteSkeleton, WebhookBodySkeleton, webhookColumns } from './skeletons'
-import { headerDraftErrors, HeaderNames, headerPayload, WebhookHeadersField, type HeaderDraft } from './webhook-headers'
+import { headerDraftErrors, HeaderNames, headerPayload, headersChanged, WebhookHeadersField, type HeaderDraft } from './webhook-headers'
 import { productName } from '../../../../api/src/brand'
+import { webhookEdits, type WebhookFields } from './webhook-patch'
 
 const events: WebhookEvent[] = ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed', 'email.opened', 'email.clicked', 'contact.subscription_changed', 'account.standing.changed']
 // The same defaults as POST /v1/webhooks: every delivery outcome. Opens, clicks, subscription and standing changes are opt-in.
@@ -81,7 +82,7 @@ function NewWebhook() {
   const navigate = useNavigate()
   const { multiTenant } = useWorkspaceAccess()
   const regions = useRegionCatalog({ enabled: !multiTenant })
-  const save = useApiMutation((api, input: WebhookInput) => api.webhooks.save(input), 'Webhook created')
+  const save = useApiMutation((api, input: WebhookInput) => api.webhooks.create(input), 'Webhook created')
   // Hosted endpoints are created without a region scope, so they cover every region.
   const [input, setInput] = useState<WebhookInput>(() => multiTenant ? { name: '', url: '', events: [...defaultEvents] } : blankEndpoint)
   // The signing secret comes back once with the new webhook: show it before moving on to the webhook's page.
@@ -123,11 +124,19 @@ function ExistingWebhook({ id }: { id: string }) {
   return <WebhookEditor key={id} webhook={webhook.data} regions={regions.data?.data ?? []} refreshError={webhook.error} onRefresh={() => void webhook.refetch()} />
 }
 
-function WebhookEditor({ webhook, regions, refreshError, onRefresh }: { webhook: Webhook; regions: RegionCatalogEntry[]; refreshError: unknown; onRefresh: () => void }) {
+function WebhookEditor({ webhook: read, regions, refreshError, onRefresh }: { webhook: Webhook; regions: RegionCatalogEntry[]; refreshError: unknown; onRefresh: () => void }) {
   const navigate = useNavigate()
   const { multiTenant } = useWorkspaceAccess()
-  // Hosted users can't change the region scope, so their updates leave it out and keep the saved one.
-  const [input, setInput] = useState<WebhookInput>({ id: webhook.id, name: webhook.name, url: '', ...multiTenant ? {} : { regionIds: webhook.regionIds }, events: webhook.events })
+  const save = useApiMutation((api, value: { edits: Partial<WebhookFields>; headers?: WebhookInput['headers'] }) => api.webhooks.update(read.id, value.edits, value.headers), 'Webhook saved')
+  // The webhook as last read: the saved response until a newer read replaces it.
+  const webhook = save.data && (save.data.updatedAt ?? '') > (read.updatedAt ?? '') ? { ...read, ...save.data, deliveries: read.deliveries, nextCursor: read.nextCursor } : read
+  // The form holds only what the person changed; every other field shows the webhook as last read, so a change saved
+  // elsewhere (another tab, a teammate) shows up here and is never written back. Saving sends only the changes.
+  // Hosted users can't change the region scope, so it is never part of their form.
+  const saved: WebhookFields = { name: webhook.name, url: '', ...multiTenant ? {} : { regionIds: webhook.regionIds }, events: webhook.events }
+  const [edits, setEdits] = useState<Partial<WebhookFields>>({})
+  const input: WebhookInput = { id: webhook.id, ...saved, ...edits, events: (edits.events ?? saved.events) as WebhookEvent[] }
+  const setInput = (next: WebhookInput) => setEdits(webhookEdits(next, saved))
   const deliveryColumnSet = deliveryColumns(multiTenant)
   async function retryDelivery(delivery: WebhookDelivery) { try { await retry.mutateAsync({ id: webhook.id, deliveryId: delivery.id }); setHistory(null); historyPagination.reset() } catch { /* Shown inline. */ } }
   const [headers, setHeaders] = useState<HeaderDraft>(null)
@@ -144,7 +153,6 @@ function WebhookEditor({ webhook, regions, refreshError, onRefresh }: { webhook:
   const [opened, setInspected] = useState<WebhookDelivery | null>(null)
   const rows = history?.items ?? webhook.deliveries
   const inspected = opened && (rows.find(delivery => delivery.id === opened.id) ?? opened)
-  const save = useApiMutation((api, value: WebhookInput) => api.webhooks.save(value), 'Webhook saved')
   const status = useApiMutation((api, value: { id: string; status: 'active' | 'paused' }) => api.webhooks.setStatus(value.id, value.status), 'Webhook status updated')
   const rotate = useApiMutation((api, id: string) => api.webhooks.rotate(id), 'Signing secret rotated')
   // Reading the secret changes nothing, so it refreshes nothing.
@@ -163,14 +171,17 @@ function WebhookEditor({ webhook, regions, refreshError, onRefresh }: { webhook:
     catch (error) { setHistoryError(error) }
     finally { setHistoryBusy(false) }
   }
-  // The saved response is newer than the cached endpoint until the refetch lands.
-  const currentHeaders = save.data?.headers ?? webhook.headers
+  const currentHeaders = webhook.headers
+  // Nothing to save until something changed.
+  const dirty = Object.keys(edits).length > 0 || headersChanged(headers, currentHeaders)
   async function submit(event: FormEvent) {
     event.preventDefault()
     const nextErrors = { ...validate(input), ...headerDraftErrors(headers) }
     setErrors(nextErrors)
     if (Object.keys(nextErrors).length) return
-    try { await save.mutateAsync({ ...input, name: input.name.trim(), url: input.url.trim(), headers: headerPayload(headers, currentHeaders) }); setInput(value => ({ ...value, url: '' })); setHeaders(null) } catch { /* Shown inline. */ }
+    const changedHeaders = headerPayload(headers, currentHeaders)
+    if (!dirty) return
+    try { await save.mutateAsync({ edits, headers: changedHeaders }); setEdits({}); setHeaders(null) } catch { /* Shown inline. */ }
   }
   async function confirm() {
     if (action === 'pause' || action === 'resume') {await status.mutateAsync({ id: webhook.id, status: action === 'pause' ? 'paused' : 'active' }); setHistory(null); historyPagination.reset()}
@@ -180,8 +191,8 @@ function WebhookEditor({ webhook, regions, refreshError, onRefresh }: { webhook:
   const actionTitle = action === 'rotate' ? `Rotate ${webhook.name} signing secret?` : action === 'delete' ? `Delete ${webhook.name}?` : `${action === 'pause' ? 'Pause' : 'Resume'} ${webhook.name}?`
   const actionDescription = action === 'rotate' ? 'The current secret stops working at once, so update your server with the new one. To copy the current secret instead, use Reveal.' : action === 'delete' ? `${productName} stops calling this URL. Its delivery history is deleted too.` : action === 'pause' ? `${productName} stops calling this URL. Events from the pause are kept and delivered when you resume.` : `${productName} starts calling this URL again, including events held while it was paused.`
   return <div className="stack settings-page">
-    <PageHeader title={webhook.name} backTo="/settings#webhooks" actions={<><StatusBadge status={label(webhook.status)} /><Button disabled={pending} onClick={() => setAction(webhook.status === 'active' ? 'pause' : 'resume')}>{webhook.status === 'active' ? 'Pause' : 'Resume'}</Button><Button variant="primary" form="edit-webhook" type="submit" loading={save.isPending} disabled={pending}>Save changes</Button></>} />
-    <form id="edit-webhook" className="stack" onSubmit={submit} noValidate><MutationError error={save.error} /><EndpointFields input={input} savedUrl={save.data?.url ?? webhook.url} onChange={setInput} regions={regions} errors={errors} apiError={save.error} disabled={pending} headers={{ current: currentHeaders, draft: headers, onChange: setHeaders }} /></form>
+    <PageHeader title={webhook.name} backTo="/settings#webhooks" actions={<><StatusBadge status={label(webhook.status)} /><Button disabled={pending} onClick={() => setAction(webhook.status === 'active' ? 'pause' : 'resume')}>{webhook.status === 'active' ? 'Pause' : 'Resume'}</Button><Button variant="primary" form="edit-webhook" type="submit" loading={save.isPending} disabled={pending || !dirty}>Save changes</Button></>} />
+    <form id="edit-webhook" className="stack" onSubmit={submit} noValidate><MutationError error={save.error} /><EndpointFields input={input} savedUrl={webhook.url} onChange={setInput} regions={regions} errors={errors} apiError={save.error} disabled={pending} headers={{ current: currentHeaders, draft: headers, onChange: setHeaders }} /></form>
     <section className="section stack settings-rule"><SectionHeader title={<span className="settings-guide-title">Signing secret<SigningGuide /></span>} actions={<><Button loading={reveal.isPending} disabled={pending} onClick={async () => { try { setSecret({ value: (await reveal.mutateAsync(webhook.id)).secret, rotated: false }) } catch { /* Shown inline. */ } }}>Reveal</Button><Button disabled={pending} onClick={() => setAction('rotate')}>Rotate</Button><Button loading={test.isPending} disabled={pending || webhook.status === 'paused'} title={webhook.status === 'paused' ? 'Resume this webhook to test delivery' : 'Sends a sample email.delivered event, marked as a test'} onClick={async () => { try { await test.mutateAsync(webhook.id); setHistory(null); historyPagination.reset() } catch { /* Shown inline. */ } }}>Test webhook</Button></>} /><MutationError error={test.error ?? reveal.error} /></section>
     <section className="section stack settings-rule"><SectionHeader title="Delivery history" /><MutationError error={retry.error} />
       {refreshError ? <ErrorState error={refreshError} onRetry={onRefresh} /> : null}

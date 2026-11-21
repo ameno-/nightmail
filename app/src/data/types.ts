@@ -1,5 +1,6 @@
 import { productName } from '../../../api/src/brand.js'
 import type { Grade, Step } from '../../../api/src/standing-model.js'
+import type { WebhookFields } from '../features/settings/webhook-patch.js'
 export type RegionId = string
 export type ISODate = string
 export type Stream = 'transactional' | 'marketing'
@@ -248,7 +249,7 @@ export interface ReceivedEmailDetail extends ReceivedEmail {
   thread?: EmailThread | null
 }
 export interface WebhookDelivery { id: string; at: ISODate; regionId: RegionId; event: WebhookEvent; response: number | null; attempts: number; status: 'delivered' | 'retry_pending' | 'pending' | 'failed' | 'paused'; payload: Record<string, unknown>; /** A Test endpoint delivery, not real traffic. */ test?: boolean }
-export interface Webhook { id: string; name: string; url: string; regionIds: RegionId[] | 'all'; events: WebhookEvent[]; status: 'active' | 'paused'; secretHint: string; headers: WebhookHeaderView[]; deliveries: WebhookDelivery[]; nextCursor?: string | null; /** The signing secret: only in the response that created the webhook. */ secret?: string }
+export interface Webhook { id: string; name: string; url: string; regionIds: RegionId[] | 'all'; events: WebhookEvent[]; status: 'active' | 'paused'; secretHint: string; headers: WebhookHeaderView[]; deliveries: WebhookDelivery[]; nextCursor?: string | null; updatedAt?: string; /** The signing secret: only in the response that created the webhook. */ secret?: string }
 // An update without regionIds keeps the endpoint's saved region scope.
 export type WebhookInput = Pick<Webhook, 'name' | 'url' | 'events'> & { regionIds?: Webhook['regionIds']; id?: string; headers?: WebhookHeaderInput[] }
 // Plain-language copy with a next step for errors a new workspace can meet. The server's message stays in `detail`.
@@ -376,7 +377,7 @@ export interface Api {
     deleteRoute(id: string, signal?: AbortSignal): Promise<void>
     test(input: RoutingTestInput, signal?: AbortSignal): Promise<RoutingTestResult>
   }
-  webhooks: { list(signal?: AbortSignal, cursor?: string): Promise<CursorItems<Webhook>>; get(id: string, signal?: AbortSignal): Promise<Webhook>; save(input: WebhookInput, signal?: AbortSignal): Promise<Webhook>; setStatus(id: string, status: 'active' | 'paused', signal?: AbortSignal): Promise<Webhook>; test(id: string, signal?: AbortSignal): Promise<WebhookDelivery>; retry(id: string, deliveryId: string, signal?: AbortSignal): Promise<WebhookDelivery>; rotate(id: string, signal?: AbortSignal): Promise<{ secret: string }>; reveal(id: string, signal?: AbortSignal): Promise<{ secret: string }>; remove(id: string, signal?: AbortSignal): Promise<void> }
+  webhooks: { list(signal?: AbortSignal, cursor?: string): Promise<CursorItems<Webhook>>; get(id: string, signal?: AbortSignal): Promise<Webhook>; create(input: WebhookInput, signal?: AbortSignal): Promise<Webhook>; /** Only the changed fields (features/settings/webhook-patch.ts). */ update(id: string, edits: Partial<WebhookFields>, headers?: WebhookHeaderInput[], signal?: AbortSignal): Promise<Webhook>; setStatus(id: string, status: 'active' | 'paused', signal?: AbortSignal): Promise<Webhook>; test(id: string, signal?: AbortSignal): Promise<WebhookDelivery>; retry(id: string, deliveryId: string, signal?: AbortSignal): Promise<WebhookDelivery>; rotate(id: string, signal?: AbortSignal): Promise<{ secret: string }>; reveal(id: string, signal?: AbortSignal): Promise<{ secret: string }>; remove(id: string, signal?: AbortSignal): Promise<void> }
 }
 
 export interface SendingLimit { cap: number | null; used: number; resetAt: string | null; nextCap: number | null; nextCapAt: string | null }

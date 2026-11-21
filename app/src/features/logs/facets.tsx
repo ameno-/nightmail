@@ -18,6 +18,8 @@ export function logStatuses(direction: LogDirection, { campaign, canAdminister }
   const allowed = new Set([...direction === 'received' ? [] : sentStatuses, ...campaign || direction === 'sent' ? [] : canAdminister ? receivedStatuses : ['received']])
   return [...receivedStatuses, ...sentStatuses].filter(status => allowed.has(status))
 }
+/** Whether a status can be combined with the chosen stream: received mail has none. */
+export const withStream = (status: string, stream: string) => stream === 'all' || !receivedStatuses.includes(status)
 // Always a row of their own: the outcomes people come for. Every other status is in one Other row's menu.
 const PINNED = ['delivered', 'received', 'bounced', 'complained', 'scheduled', 'spam']
 
@@ -28,13 +30,17 @@ export function logFacetGroups(counts: LogCounts | undefined, filters: RailFilte
   // A direction with more matching mail than the API counts has lower bounds: they read 5,000+.
   const atLeast = (status: string) => Boolean(counts && (receivedStatuses.includes(status) ? counts.capped.received : counts.capped.sent))
   const choose = (status: string) => filters.setStatus?.(filters.status === status ? 'all' : status)
+  // Received mail has no stream: while one is chosen, Received and Spam keep their rows (nothing moves) but neither count
+  // nor choose, since choosing one would drop the stream and list mail the count left out.
+  const streamless = (status: string) => !withStream(status, filters.stream ?? 'all')
   const pinned = PINNED.filter(status => filters.statuses.includes(status)), others = filters.statuses.filter(status => !PINNED.includes(status))
   const chosen = filters.status && others.includes(filters.status) ? filters.status : null
   // Other opens the statuses with mail (all of them until the counts arrive), each with its count; none, and it is just a zero.
   const listed = others.filter(status => !counts || status === chosen || (count(status) ?? 0) > 0)
   const menu = filters.setStatus && listed.length ? listed.map(status => ({ label: counts ? `${label(status)} · ${number(count(status) ?? 0)}${atLeast(status) ? '+' : ''}` : label(status), onSelect: () => choose(status) })) : undefined
   const groups: FacetGroup[] = [{ key: 'status', title: 'Status', items: [
-    ...pinned.map(status => ({ key: status, label: label(status), tone: logTone({ status }), count: count(status), atLeast: atLeast(status), ...filters.setStatus && { selected: filters.status === status, onSelect: () => choose(status) } })),
+    ...pinned.map(status => streamless(status) ? { key: status, label: label(status), tone: logTone({ status }), count: null, title: 'Received mail has no stream' }
+      : { key: status, label: label(status), tone: logTone({ status }), count: count(status), atLeast: atLeast(status), ...filters.setStatus && { selected: filters.status === status, onSelect: () => choose(status) } }),
     ...others.length ? [{ key: 'other', label: chosen ? label(chosen) : 'Other', tone: chosen ? logTone({ status: chosen }) : 'neutral' as Tone, dot: Boolean(chosen),
       count: counts ? chosen ? count(chosen) : others.reduce((sum, status) => sum + (count(status) ?? 0), 0) : null, atLeast: atLeast(others[0]!), selected: Boolean(chosen), menuLabel: chosen ? `Other statuses: ${label(chosen)}` : 'Other statuses', menu }] : [],
   ] }]
