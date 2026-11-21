@@ -17,34 +17,71 @@
 .ov-aside-skeleton > span:first-child { height: 30px; }
 .ov-aside-skeleton > span:last-child { height: 120px; }
 
-/* Figures: four metric rows (label · series · mono value, components/ui/data.tsx), two by two, 40px each: 80px. */
-.ov-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--space-32); margin: 0; border-top: 1px solid var(--color-border-muted); --metric-spark: 96px; --metric-value: 104px; }
-/* A rate below its warning line draws its meter in grey: a navy rule under a label reads as a selected tab. */
-.ov-facts .ui-meter.ui-tone--neutral > i { background: var(--color-series-strong); }
-/* The figures lead the page: larger than their labels. */
-.ov-facts .ui-metric__value { height: 24px; font-size: var(--text-lg); line-height: 24px; }
-.ov-spark { display: block; width: 100%; height: 20px; }
-.ov-spark-stack { display: block; width: 100%; height: 20px; }
-.ov-spark-stack .ov-spark { width: 100%; }
-.ov-spark rect { fill: var(--color-track); }
-.ov-spark--sent rect { fill: var(--color-accent-data); }
-.ov-spark--delivered rect { fill: color-mix(in oklch, var(--color-success-marker) 70%, transparent); }
-.ov-spark--bounces rect { fill: var(--color-warning-marker); }
-.ov-spark--complaints rect { fill: var(--color-danger-marker); }
-.ov-spark rect.ov-spark__zero { fill: var(--color-layer-3); }
-.ov-spark--skeleton { display: block; border-radius: 2px; background: var(--color-layer-1); }
+/* Figures: four 104px tiles (two by two on a phone: 216px). A tile is its name and a hint, the figure, and either its
+   buckets as columns or, for a rate, a 20-cell gauge that ends at the limit named under it. Flat fills, no borders. */
+.ov-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-8); }
+.ov-tile { display: flex; flex-direction: column; min-width: 0; height: 104px; padding: var(--space-12); border-radius: var(--radius-sm); background: var(--color-layer-1); }
+.ov-tile__head { display: flex; align-items: baseline; gap: var(--space-8); height: 16px; color: var(--color-muted); font-size: var(--text-sm); line-height: 16px; white-space: nowrap; }
+/* The hint is laid out from the tile's right edge and pulled back by its own width, so a tweening count moves nothing. */
+.ov-tile__hint { position: relative; flex: 1; align-self: stretch; min-width: 0; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); font-variant-numeric: tabular-nums; }
+.ov-tile__hint > span { position: absolute; top: 0; left: 100%; transform: translateX(-100%); }
+.ov-tile__value { height: 28px; margin-top: var(--space-4); color: var(--color-text); font-family: var(--font-mono); font-size: 22px; line-height: 28px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ov-tile[data-zone='near'] .ov-tile__value { color: var(--color-warning); }
+.ov-tile[data-zone='over'] .ov-tile__value { color: var(--color-danger); }
+.ov-tile__chart { display: flex; flex-direction: column; justify-content: flex-end; height: 26px; margin-top: auto; }
+.ov-tile__columns { height: 26px; margin-top: auto; }
+.ov-tile__chart--loading { display: block; border-radius: 2px; background: var(--color-layer-2); animation: ui-pulse 1.2s ease-in-out infinite alternate; }
+.ov-columns { display: block; width: 100%; height: 26px; }
+.ov-columns--sent rect { fill: var(--color-accent-data); }
+.ov-columns--delivered rect { fill: var(--color-success-marker); }
+.ov-gauge { display: grid; grid-template-columns: repeat(20, minmax(0, 1fr)); gap: 2px; height: 12px; }
+.ov-gauge > i { background: color-mix(in oklch, var(--color-text) 10%, transparent); }
+.ov-gauge > i[data-on] { background: var(--color-accent-data); }
+.ov-gauge[data-zone='near'] > i[data-on] { background: var(--color-warning-marker); }
+.ov-gauge[data-zone='over'] > i[data-on] { background: var(--color-danger-marker); }
+.ov-gauge__limit { height: 10px; margin-top: var(--space-4); color: var(--color-faint); font-family: var(--font-mono); font-size: 10.5px; line-height: 10px; text-align: right; }
 .ov-split__aside .next-steps__title { color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); font-weight: 400; letter-spacing: var(--tracking-label); text-transform: uppercase; }
 
-/* Activity: a 20px head (its title) and a 196px plot. */
+/* Activity: a 20px head (its title and the lines' key) and a 196px plot. */
 .ov-chart { display: flex; flex-direction: column; gap: var(--space-4); }
 .ov-chart__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); height: 20px; }
 .ov-chart__head h2 { flex: 1; }
 .ov-chart__plot { position: relative; height: 196px; }
-.ov-chart__plot .activity-chart { position: absolute; inset: 0; min-height: 0; }
-/* The legend sits on the scales' title row: each series' key over its own scale. */
-.activity-chart__keys { position: absolute; inset: 0 0 auto; z-index: 1; display: flex; justify-content: space-between; gap: var(--space-16); height: 16px; line-height: 16px; pointer-events: none; }
-.activity-chart__keys > :last-child { margin-left: auto; }
-@media (max-width: 640px) { .activity-chart__keys .chart-legend { gap: var(--space-12); } }
+.ov-legend { display: flex; flex: none; align-items: center; gap: var(--space-16); color: var(--color-muted); font-size: var(--text-xs); white-space: nowrap; }
+.ov-legend > span { display: inline-flex; align-items: center; gap: var(--space-6); }
+.ov-legend i { width: 12px; height: 2px; }
+:is(.ov-legend, .ov-readout) .ov-key--sent { background: var(--color-accent-data); }
+:is(.ov-legend, .ov-readout) .ov-key--delivered { background: var(--color-success-marker); }
+:is(.ov-legend, .ov-readout) .ov-key--bounces { background: var(--color-warning-marker); }
+:is(.ov-legend, .ov-readout) .ov-key--complaints { background: var(--color-danger-marker); }
+/* The plot: emails over a flat navy wash, the outcomes on their own scale, dots ringed in the page colour. */
+.ov-activity { position: absolute; inset: 0; }
+.ov-activity > svg { display: block; width: 100%; height: 100%; overflow: visible; touch-action: pan-y; }
+.ov-activity [data-point]:focus-visible { outline: none; stroke: var(--color-accent-data); stroke-width: 1.5; }
+.ov-wash { fill: color-mix(in oklch, var(--color-accent-data) 10%, transparent); }
+.ov-line { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.ov-line--sent { stroke: var(--color-accent-data); stroke-width: 2.25; }
+.ov-line--bounces { stroke: var(--color-warning-marker); }
+.ov-line--complaints { stroke: var(--color-danger-marker); }
+.ov-dot { stroke: var(--color-surface); stroke-width: 2; }
+.ov-dot--sent { fill: var(--color-accent-data); }
+.ov-dot--bounces { fill: var(--color-warning-marker); }
+.ov-dot--complaints { fill: var(--color-danger-marker); }
+.ov-crosshair { stroke: var(--color-muted); shape-rendering: crispEdges; }
+.ov-activity .ov-end--sent { fill: var(--color-accent-data); }
+.ov-activity .ov-end--bounces { fill: var(--color-warning-marker); }
+.ov-activity .ov-end--complaints { fill: var(--color-danger-marker); }
+:root:not([data-theme='dark']) .ov-activity .ov-end--bounces { fill: var(--color-warning); }
+:root:not([data-theme='dark']) .ov-activity .ov-end--complaints { fill: var(--color-danger); }
+/* The readout beside the crosshair: flat, one hairline, no shadow. */
+.ov-readout { position: absolute; top: 0; z-index: 2; display: grid; gap: var(--space-4); padding: var(--space-8) var(--space-12) var(--space-12); border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); background: var(--color-layer-2); font-size: var(--text-xs); pointer-events: none; }
+.ov-readout strong { margin-bottom: var(--space-4); color: var(--color-text); font-family: var(--font-mono); font-size: var(--text-label); font-weight: 400; }
+.ov-readout span { display: flex; align-items: center; gap: var(--space-8); color: var(--color-muted); }
+.ov-readout i { flex: none; width: 8px; height: 8px; }
+.ov-readout b { display: flex; gap: var(--space-8); margin-left: auto; color: var(--color-text); font-family: var(--font-mono); font-weight: 400; font-variant-numeric: tabular-nums; }
+.ov-readout em { min-width: 40px; color: var(--color-faint); font-style: normal; text-align: right; }
+.ov-readout em[data-zone='near'] { color: var(--color-warning); }
+.ov-readout em[data-zone='over'] { color: var(--color-danger); }
 .ov-chart__plot .ui-empty-state { height: 100%; justify-content: center; padding: 0; }
 .ov-chart__plot--loading { border-radius: var(--radius-sm); background: var(--color-layer-1); animation: ui-pulse 1.2s ease-in-out infinite alternate; }
 
@@ -59,15 +96,19 @@
   .ov-latest .ui-section-header, .ov-campaigns__head { height: 44px; margin-bottom: 0; }
   :is(.ov-latest .ui-section-header, .ov-campaigns__head) .ui-button { height: 44px; }
   .ov-controls .ui-tab { min-width: 44px; }
+  .ov-legend { gap: var(--space-12); }
+  .ov-chart__head h2::after { display: none; }
+  .ov-readout { padding: var(--space-6) var(--space-8) var(--space-8); gap: 2px; font-size: 11px; }
+  .ov-readout span { gap: var(--space-6); }
+  .ov-readout em { min-width: 34px; }
 }
 
 @media (max-width: 1200px) {
   .ov-split { grid-template-columns: minmax(0, 1fr) 280px; gap: var(--space-28); }
-  .ov-facts { --metric-spark: 64px; }
 }
 @media (max-width: 960px) { .ov-split { grid-template-columns: minmax(0, 1fr); } }
-/* Phone: the controls take their own row (range tabs, then the stream filter filling the rest); the four facts are a
-   2 × 2 grid with smaller values. Heights stay fixed, as above. */
+/* Phone: the controls take their own row (range tabs, then the stream filter filling the rest); the four tiles are a
+   2 × 2 grid. Heights stay fixed, as above. */
 @media (max-width: 640px) {
   .page-surface > .ui-page-header:has(+ .ov-split) > .cluster:last-child, .ov-controls { flex: 1 1 100%; }
   .ov-controls .ui-tabs { flex: none; }
@@ -75,11 +116,10 @@
   /* The SES chip keeps its label and verdict; the rates (in its title and on Settings) don't fit beside the tabs. */
   .overview-reputation > .muted:last-child:not(:first-child) { display: none; }
   .ov-split { gap: var(--space-28); }
-  .ov-facts { grid-template-columns: minmax(0, 1fr); --metric-spark: 72px; --metric-value: 104px; --metric-height: 44px; }
+  .ov-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 /* A new range or stream: the old figures stay up and dim once the new ones take over 100 ms, then brighten as they
    arrive. Opacity only, so nothing moves. */
-.ov-facts, .ov-chart { transition: opacity 200ms var(--ease-swap); }
-.ov-facts[data-stale], .ov-chart[data-stale] { opacity: .6; transition: opacity 200ms var(--ease-swap) 100ms; }
-.ov-spark-stack { flex: none; }
+.ov-tiles, .ov-chart { transition: opacity 200ms var(--ease-swap); }
+.ov-tiles[data-stale], .ov-chart[data-stale] { opacity: .6; transition: opacity 200ms var(--ease-swap) 100ms; }

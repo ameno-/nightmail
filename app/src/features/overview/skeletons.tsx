@@ -2,7 +2,7 @@ import { ArrowUpRight } from 'lucide-react'
 import { useRegion, useSession, useWorkspaceAccess } from '../../data/context'
 import type { RegionCatalogEntry } from '../../data/types'
 import { label } from '../../lib/format'
-import { LoadingRegion, MetricRow, PageHeader, SectionHeader, Select, Skeleton, StatusBadge, TableSkeleton, Tabs, type Column, type SkeletonColumn } from '../../components/ui'
+import { LoadingRegion, PageHeader, SectionHeader, Select, Skeleton, StatusBadge, TableSkeleton, Tabs, type Column, type SkeletonColumn } from '../../components/ui'
 import type { LogEntry } from '../../data/types'
 import { logColumnDefs, logColumns } from '../logs/rows'
 import { useLatestRowCount } from './latest'
@@ -29,7 +29,9 @@ export const latestColumns: Column<LogEntry>[] = latestColumnDefs.map(column => 
 
 // Each skeleton has exactly the loaded block's dimensions (see overview.css), so swapping in the data moves nothing.
 export function FactsSkeleton() {
-  return <div className="ov-facts" aria-hidden="true">{factTitles.map(title => <MetricRow key={title} label={title} spark={<span className="ov-spark ov-spark--skeleton" />} value={<Skeleton width={56} height={16} />} />)}</div>
+  return <div className="ov-tiles" aria-hidden="true">{factTitles.map(title => <div key={title} className="ov-tile">
+    <div className="ov-tile__head"><span>{title}</span></div><div className="ov-tile__value"><Skeleton width={88} height={20} /></div><span className="ov-tile__chart ov-tile__chart--loading" />
+  </div>)}</div>
 }
 export function ChartSkeleton() {
   return <section className="ov-chart" aria-hidden="true"><div className="ov-chart__head"><h2 className="ui-label ui-label--rule">Activity</h2></div><div className="ov-chart__plot ov-chart__plot--loading" /></section>
