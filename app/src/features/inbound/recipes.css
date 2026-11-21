@@ -24,6 +24,8 @@
 .recipe-tile:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
 .recipe-tile--skeleton { border-color: transparent; background: var(--color-layer-1); animation: ui-pulse 1.2s ease-in-out infinite alternate; }
 .recipe-agent-link { justify-self: start; margin-inline-start: -11px; color: var(--color-muted); }
+.recipe-advanced .cluster > .recipe-agent-link + .recipe-agent-link { margin-inline-start: 0; }
+.recipe-advanced .recipe-agent-link > svg { margin-right: var(--space-6); }
 
 /* The recipe form: one column, as wide as a comfortable field. */
 .recipe-form { display: grid; gap: var(--space-16); max-width: 560px; }

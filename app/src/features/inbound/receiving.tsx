@@ -5,7 +5,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { Check, X } from 'lucide-react'
 import { Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, IconButton, LoadingRegion, PageHeader, Pagination, SearchField, Select, StatusBadge, Tabs, useToast } from '../../components/ui'
-import { useApiDef, useWorkspaceAccess } from '../../data/context'
+import { useApiDef, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { request } from '../../data/live'
 import { errorText, type InboundAddress } from '../../data/types'
@@ -13,7 +13,7 @@ import { number } from '../../lib/format'
 import { useMediaQuery } from '../../lib/media'
 import { FlowPanel, mailOf } from './panel'
 import { useCursorPagination, useSearchDraft } from '../../lib/pagination'
-import { AddressBuilder } from './builder'
+import { AddressBuilder, conditions, type Condition } from './builder'
 import { concepts, kindNote, kinds, type KindFilter } from './concepts'
 import { NewInboxDialog } from './inboxes'
 import { ConnectAgentButton } from '../docs/connect-agent'
@@ -161,6 +161,8 @@ function LastMail({ entry: r }: { entry: RouteEntry }) {
 
 const ENDPOINT_PAGE = 50
 const destinationType: Record<OverviewEndpoint['type'], string> = { webhook: 'Webhook', slack: 'Slack', discord: 'Discord', forward: 'Forward' }
+/** What a destination is and where it points: "Webhook · ••••/crm". A Slack or Discord target already names its kind. */
+const DestinationTarget = ({ e }: { e: Pick<OverviewEndpoint, 'type' | 'target'> }) => e.target.toLowerCase().startsWith(e.type) ? <PrivateAddress value={e.target} /> : <>{destinationType[e.type]} · <PrivateAddress value={e.target} /></>
 // What a webhook subscribes to, in words: received mail is "all new mail".
 const eventWord: Record<string, string> = { 'message.received': 'All new mail', 'message.junk': 'Junk', 'message.stored': 'Stored mail' }
 const eventWords = (types: string[]) => types.length === 1 ? eventWord[types[0]!] ?? types[0]! : types.includes('message.received') ? `All new mail +${types.length - 1}` : `${types.length} events`
@@ -206,9 +208,9 @@ function DestinationsTab({ overview, refresh }: { overview: Overview; refresh: (
       empty={address ? <EmptyState title="No webhook gets this address’s mail" /> : <EmptyState title="No destinations yet" action={<Button onClick={() => setCreating(true)}>New destination</Button>} />}
       columns={[
         // Its name, then what it is and where it points: "crm · Webhook · ••••/crm". Never the code that calls it.
-        { key: 'name', label: 'Destination', width: '40%', render: e => <div className="rcv-cell"><TargetIcon type={e.type} /><div className="settings-cell-stack"><span className="receiving-clip" title={e.name}>{e.name}</span><span className="muted receiving-clip">{destinationType[e.type]} · <PrivateAddress value={e.target} /></span></div></div>,
+        { key: 'name', label: 'Destination', width: '40%', render: e => <div className="rcv-cell"><TargetIcon type={e.type} /><div className="settings-cell-stack"><span className="receiving-clip" title={e.name}>{e.name}</span><span className="muted receiving-clip"><DestinationTarget e={e} /></span></div></div>,
           cardRender: e => <span className="rcv-cell"><TargetIcon type={e.type} />{e.name}</span> },
-        { key: 'target', label: 'Target', table: false, card: 'line', render: e => <>{destinationType[e.type]} · <PrivateAddress value={e.target} /></> },
+        { key: 'target', label: 'Target', table: false, card: 'line', render: e => <DestinationTarget e={e} /> },
         { key: 'used', label: 'Used by', width: '34%', card: 'line', render: e => used(e) || <span className="muted">Nothing yet</span> },
         { key: 'status', label: 'Status', width: '16%', card: 'aside', render: e => <StatusBadge status={endpointStatusLabel[e.status]} tone={endpointStatusTone[e.status]} /> },
         { key: 'actions', label: '', width: 52, align: 'right', render: e => e.source === 'inbound_webhook' ? <DropdownMenu label={`Actions for ${e.name}`} items={[{ label: 'Open', onSelect: () => navigate(webhookPage(e)!) }]} /> : <DropdownMenu label={`Actions for ${e.name}`} items={[
@@ -221,7 +223,7 @@ function DestinationsTab({ overview, refresh }: { overview: Overview; refresh: (
         ]} /> },
       ]} />}
     {list.data && <Pagination page={pagination.page} pageSize={ENDPOINT_PAGE} nextCursor={list.data.nextCursor} count={list.data.data.length} onPageChange={next => pagination.onPageChange(next, list.data?.nextCursor)} />}
-    <EndpointDialog open={creating} onOpenChange={setCreating} onCreated={e => { setCreating(false); setCreated(e); reload() }} />
+    <EndpointDialog open={creating} onOpenChange={setCreating} taken={overview.endpoints.map(e => e.name)} onCreated={e => { setCreating(false); setCreated(e); reload() }} />
     <EndpointDialog open={editOpen} editing={editing} onOpenChange={setEditOpen} onSaved={e => { setEditOpen(false); toast(`Saved ${e.name}.`, 'success'); reload() }} />
     <CreatedEndpointDialog created={created} onClose={() => setCreated(null)} />
     <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} danger title={`Delete ${deleting?.name ?? 'this destination'}?`} description="Rules and addresses that send to it stop delivering. This can’t be undone." confirmLabel="Delete destination"
@@ -244,6 +246,11 @@ export function ReceivingPage() {
   // New address (or Create this address, its address filled in), or an address's flow to change: one builder.
   const [creating, setCreating] = useState<{ address: string } | null>(null)
   const [building, setBuilding] = useState<InboundAddress | null>(null)
+  // ?build=<address ID>&split=<check> (New rule's "Send mail two ways") opens the builder for that address.
+  const buildId = params.get('build'), split = params.get('split') as Condition | null
+  const toBuild = useApiQuery(['inbound-address', buildId], (api, signal) => buildId ? api.inbound.address(buildId, signal) : Promise.resolve(null), { enabled: !!buildId })
+  const shown = building ?? toBuild.data ?? null
+  const closeBuilder = () => { setBuilding(null); if (buildId) setParams(previous => { const next = new URLSearchParams(previous); next.delete('build'); next.delete('split'); return next }, { replace: true }); void overview.refetch() }
   const [editing, setEditing] = useState<RouteEntry | null>(null)
   function update(patch: Record<string, string | null | undefined>) {
     // From the latest URL: a debounced search write must not undo a filter picked while it waited.
@@ -279,7 +286,7 @@ export function ReceivingPage() {
           page={pagination.page} onPage={next => pagination.onPageChange(next, data.routes.nextCursor)} setFilter={patch => update(patch)} />}
     </div>}
     {data && <AddressBuilder open={!!creating} initial={creating?.address} onOpenChange={open => { if (!open) setCreating(null) }} domains={data.domains} />}
-    {data && building && <AddressBuilder open address={building} onOpenChange={open => { if (!open) { setBuilding(null); void overview.refetch() } }} domains={data.domains} />}
+    {data && shown && <AddressBuilder open address={shown} split={!building && split && conditions.some(c => c.value === split) ? split : undefined} onOpenChange={open => { if (!open) closeBuilder() }} domains={data.domains} />}
     {editing && <RouteEditor match={editing.match} route={editing.route} onClose={() => { setEditing(null); void overview.refetch() }} />}
   </div>
 }

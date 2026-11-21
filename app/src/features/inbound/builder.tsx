@@ -105,7 +105,7 @@ type Step = 'address' | 'flow' | 'done'
  * The builder. New: the address, then where its mail goes, then the result with Test. Editing (address given): where its
  * mail goes, then the result. Wildcards and catch-alls keep "Where should this mail go?" (routing.tsx).
  */
-export function AddressBuilder({ open, onOpenChange, domains, initial = '', address, onSaved }: { open: boolean; onOpenChange: (open: boolean) => void; domains: Pick<MailboxDomain, 'id' | 'name' | 'status'>[] | Overview['domains']; initial?: string; address?: InboundAddress; onSaved?: (address: InboundAddress) => void }) {
+export function AddressBuilder({ open, onOpenChange, domains, initial = '', address, onSaved, split }: { open: boolean; onOpenChange: (open: boolean) => void; domains: Pick<MailboxDomain, 'id' | 'name' | 'status'>[] | Overview['domains']; initial?: string; address?: InboundAddress; onSaved?: (address: InboundAddress) => void; split?: Condition }) {
   const api = useApi(), client = useQueryClient()
   const receiving = receivingDomains(domains)
   const [step, setStep] = useState<Step>(address ? 'flow' : 'address')
@@ -122,6 +122,8 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const entry = overview.data?.routes.data.find(r => r.address?.id === saved?.id)
   const decoded = planOf(entry, overview.data, boxes.data ?? [])
   const [plan, setPlan] = useState<Plan | null>(null)
+  // Opened from New rule's "Send mail two ways": the address's flow, already split on that kind of check.
+  useEffect(() => { if (open && split && overview.data && !plan) setPlan({ ...decoded.plan, split: true, condition: split }) }, [open, split, overview.data]) // eslint-disable-line react-hooks/exhaustive-deps
   // Rules the builder doesn't draw (ready-made ones, scripts) keep running beside it.
   const others = (entry?.rules ?? []).filter(key => key !== decoded.rule?.key).length
   const draft = plan ?? decoded.plan
