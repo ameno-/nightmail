@@ -26,6 +26,8 @@ export interface ToolHost {
   read(path: string): Promise<unknown>;
   /** The workspace this conversation is about, when one is chosen. */
   workspaceId(): string | null;
+  /** Values no tool result shows the model (projection.ts): the conversation's own person and ID. */
+  hidden(): readonly string[];
   chooseWorkspace(workspaceId: string): Promise<string>;
   requestContentAccess(workspaceId: string, why: string): Promise<string>;
   fileTicket(input: TicketInput): Promise<string>;
@@ -75,7 +77,7 @@ function query(args: Record<string, unknown>, host: ToolHost, keys: readonly str
   return s ? `?${s}` : '';
 }
 const seg = (value: unknown) => encodeURIComponent(id(value));
-const read = (path: (a: Record<string, unknown>, h: ToolHost) => string) => async (args: Record<string, unknown>, host: ToolHost) => toolResult(await host.read(path(args, host)));
+const read = (path: (a: Record<string, unknown>, h: ToolHost) => string) => async (args: Record<string, unknown>, host: ToolHost) => toolResult(await host.read(path(args, host)), host.hidden());
 const fixed = (running: string, done: string) => () => ({ running, done });
 const providerName = (p: unknown) => typeof p === 'string' && p ? ({ gmail: 'Gmail', microsoft: 'Outlook', yahoo: 'Yahoo', apple: 'iCloud', proton: 'Proton', gmx: 'GMX' } as Record<string, string>)[p] ?? p : null;
 

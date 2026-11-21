@@ -8,8 +8,8 @@ import { productName } from '../../api/src/brand.js';
 // - `BANE` → the `SupportPlatform` entrypoint (api/src/support-platform.ts, its source of truth): verify a handoff,
 //   register and close a conversation, its stamped /v1/support/* requests (Nightmail derives the person from the
 //   conversation's row), and the staff inbox: mirror each conversation's transcript and state, read whether staff paused
-//   the agent, and pull and acknowledge staff replies. No token: the binding is the credential. The grant methods stay
-//   declared for conversations opened before the stamp, until their grants lapse.
+//   the agent, and pull and acknowledge staff replies. No token: the binding is the credential. Of the grant methods only
+//   revokeGrant is used: closing a conversation opened before the stamp revokes its grant.
 // - `BANE_API` → the default entrypoint, Nightmail's public API, as a customer of Nightmail would use it: the support@nightmail.dev
 //   inbound address's own API key (BANE_SUPPORT_INBOX_KEY, limited to that address) reads support mail and sends replies and ticket emails.
 
@@ -39,8 +39,7 @@ export type RegisteredConversation = { id: string; channel: 'chat' | 'email'; mo
 export type ScopeWorkspace = { id: string; name: string; role: 'owner' | 'admin' | 'member' };
 /** GET /v1/support/scope: who the conversation is for and what it can read now, read at the start of every turn. */
 export type Scope = {
-  /** signedInAt: when the person last signed in to continue it (a claim), also when it was already bound to them. */
-  conversation: { id: string; channel: 'chat' | 'email'; mode: Mode; verification: Verification; signedInAt?: string | null };
+  conversation: { id: string; channel: 'chat' | 'email'; mode: Mode; verification: Verification };
   user: { name: string | null; email: string | null };
   workspace: ScopeWorkspace | null; workspaces: ScopeWorkspace[]; contentWorkspaceId: string | null; page: string | null;
   /** The person lost a workspace this conversation read: end it without restating anything. */

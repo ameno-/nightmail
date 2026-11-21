@@ -39,7 +39,7 @@ Keep `conversationId`, `socketUrl` and `expiresAt` in `sessionStorage`, keyed by
 - the chat token expired (connect refused, or `expiresAt` passed);
 - the dashboard was opened with `?support=<conversationId>` for a chat conversation.
 
-An email conversation continues by email, never in the panel: `/chat/resume` answers `409 { error: { code: "EMAIL_CONVERSATION", continueUrl } }`, and the panel sends the person to `/support/continue/<conversationId>` (support emails link there), where signing in lets support answer the waiting email.
+An email conversation continues by email, never in the panel: `/chat/resume` answers `409 { error: { code: "EMAIL_CONVERSATION" } }`, and the panel starts a conversation of its own with `/chat/start`.
 
 The handoff's user must be the conversation's user (`403 { error: { code: "NOT_YOUR_CONVERSATION" } }` otherwise; a conversation with no user is nobody's). `404 { error: { code: "CONVERSATION_NOT_FOUND" } }` means it ended, or its access shrank: start a new one. `503 SUPPORT_UNAVAILABLE`: Nightmail couldn't confirm its access just now; try again.
 

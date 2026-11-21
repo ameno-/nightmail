@@ -48,7 +48,7 @@ const view = (c, created) => ({ id: c.id, channel: c.channel, mode: c.mode, veri
 const inScope = c => memberships(c.userId).filter(w => !c.workspaceId || w.id === c.workspaceId);
 function scopeOf(c) {
   const all = memberships(c.userId), workspace = c.workspaceId ? all.find(w => w.id === c.workspaceId) ?? null : null;
-  return { conversation: { id: c.id, channel: c.channel, mode: c.mode, verification: c.verification, signedInAt: c.signedInAt ?? null }, user: person(c.userId),
+  return { conversation: { id: c.id, channel: c.channel, mode: c.mode, verification: c.verification }, user: person(c.userId),
     workspace, workspaces: c.channel === 'email' || !c.workspaceId ? all : all.filter(w => w.id === c.workspaceId),
     contentWorkspaceId: all.some(w => w.id === c.content) ? c.content : null, page: c.page, shrunk: [...c.read].some(id => !all.some(w => w.id === id)) };
 }
@@ -64,7 +64,16 @@ function emailEvidence(messageId) {
 const contextOf = c => ({ grant: { id: 'sgr_x', ticketRef: 'conv' }, user: { id: c.userId, ...person(c.userId) },
   workspaces: inScope(c).map(w => ({ ...w, sending: { kind: 'shared', region: 'us-east-2', paused: false }, counts: { domains: 1, campaigns: 3 } })),
   domains: inScope(c).map(w => ({ workspaceId: w.id, id: 'dom_' + w.id, name: 'news.' + w.id.slice(3) + '.test', sending: 'verified', dmarc: 'missing' })), recentFailures: { sends: [], bounces: [], webhookDeliveries: [] },
-  standing: [], recentActivity: [], openEnforcement: [], handoff: null, links: { requestIds: [] } });
+  standing: [],
+  // As the audit trail shows it: this conversation's own support.view (the person as subject and summary.member), and a
+  // colleague's change (a member actor).
+  recentActivity: [
+    { id: 'aud_1', at: new Date().toISOString(), action: 'support.view', actor: { type: 'support', id: c.id, label: 'Nightmail support', email: null }, via: 'support', target: null,
+      subject: { userId: c.userId, email: person(c.userId).email }, summary: { ticket: c.id, member: c.userId, channel: c.channel, verification: c.verification, contentShared: !!c.content }, reason: null, requestId: null },
+    ...inScope(c).slice(0, 1).map(w => ({ id: 'aud_2', at: new Date().toISOString(), action: 'domain.verify', actor: { type: 'member', id: 'usr_colleague', label: 'Cole League', email: null }, via: 'dashboard',
+      target: { type: 'domain', id: 'dom_' + w.id }, subject: null, summary: { domain: 'news.' + w.id.slice(3) + '.test' }, reason: null, requestId: 'req_' + 'c'.repeat(32) })),
+  ],
+  openEnforcement: [], handoff: null, links: { requestIds: [] } });
 const READS = {
   '/v1/support/campaigns': { data: [{ id: 'cmp_1', name: 'Early access', state: 'sent', launchedAt: new Date(Date.now() - 86400000).toISOString(), tracking: true, audience: { size: 2160 }, pauseReason: null,
     stats: { counts: { total: 2160, byStatus: { delivered: 2140 } }, totals: { accepted: 2152, delivered: 2140, opened: 899, clicked: 64, bounced: 12, complained: 0 }, rates: {} } }] },
@@ -219,14 +228,7 @@ export default {
       if (c && reply) { c.outbox.push({ ...reply, createdAt: new Date().toISOString(), delivery: null }); c.paused = 'staff'; }
       return new Response(null, { status: 204 });
     }
-    // Test hooks: the person signs in and claims an email conversation (one already bound to them only records the
-    // sign-in); a membership ends or its role changes; content access is allowed; closing fails for a while.
-    if (url.pathname === '/__claim') {
-      const c = conversations.get((await request.json()).conversationId), userId = 'usr_' + c.sender.split('@')[0];
-      if (c.userId) c.signedInAt = new Date().toISOString();
-      else Object.assign(c, { userId, mode: memberships(userId).length ? 'member' : 'non_member', verification: 'signin', signedInAt: new Date().toISOString() });
-      return Response.json(view(c, false));
-    }
+    // Test hooks: a membership ends or its role changes; content access is allowed; closing fails for a while.
     if (url.pathname === '/__remove') { const { userId, workspaceId } = await request.json(); members.get(userId)?.delete(workspaceId); members.get(userId)?.set('!' + workspaceId, 'gone'); return new Response(null, { status: 204 }); }
     if (url.pathname === '/__role') { const { userId, workspaceId, role } = await request.json(); members.get(userId)?.set(workspaceId, role); return new Response(null, { status: 204 }); }
     if (url.pathname === '/__close') { closeFailures = (await request.json()).fail ?? 0; return new Response(null, { status: 204 }); }
@@ -286,13 +288,8 @@ const MESSAGES = {
   // The work ledger's cases.
   msg_rate_1: ['thr_rate_1', 'rate@else.test'], msg_rate_2: ['thr_rate_2', 'rate@else.test'],
   msg_legal_late_1: ['thr_legal_late', 'counsel@late.test', 'PASS', 'legal@dev.bane.mx', 'Preservation', 'Please preserve the records.'],
-  // The stamp's cases: a member who loses the workspace, a DMARC failure that waits for a sign-in, conversations from before.
-  msg_shrink_1: ['thr_shrink', 'dee@acme.test'], msg_shrink_2: ['thr_shrink', 'dee@acme.test'], msg_claim_1: ['thr_claim', 'sam@acme.test', 'FAIL'],
+  // Conversations from before the stamp, and a reply in a chat ticket's follow-up thread.
   msg_legacy_grant: ['thr_legacy_d'], msg_legacy_lapsed: ['thr_legacy_e'],
-  // The second round's cases: two threads of one unverified address, an answer whose sender lost access before it went,
-  // a conversation bound by a later DMARC pass and then signed in to, a sign-in found by the sweep, a ticket thread's reply.
-  msg_m4_a: ['thr_m4_a', 'mo@acme.test', 'FAIL'], msg_m4_b: ['thr_m4_b', 'mo@acme.test', 'FAIL'], msg_m6_1: ['thr_m6', 'gil@acme.test'],
-  msg_m10_1: ['thr_m10', 'tia@acme.test', 'FAIL'], msg_m10_2: ['thr_m10', 'tia@acme.test'], msg_sweep_1: ['thr_sweep', 'uma@acme.test', 'FAIL'],
   msg_m11_1: ['thr_m11', 'ada@acme.test', 'PASS', null, 'Re: Your request', 'One more detail: it was two top-ups, 40 seconds apart.'],
 };
 function message(id) {
@@ -335,6 +332,8 @@ async function route(request, url, body) {
 export type Recorded = { url: string; headers: Record<string, string>; body: any };
 export const recorded: Recorded[] = [];
 export const control = { failStatus: 0 };
+/** The scripted model's answer to an email once its account tool is refused: general, with no account data. */
+export const GENERAL_ANSWER = 'Hi,\n\nBounces at Gmail usually come from old or mistyped addresses: remove the ones that hard-bounce, and check your domain’s DKIM and DMARC records.\n\nNightmail support (AI)';
 
 const sse = (events: Array<[string, unknown]>) => new Response(events.map(([type, data]) => `event: ${type}\ndata: ${JSON.stringify({ type, ...(data as object) })}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } });
 const start = (id: string): [string, unknown] => ['message_start', { message: { id, type: 'message', role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, usage: { input_tokens: 1200, output_tokens: 1 } } }];
@@ -393,7 +392,8 @@ export async function fakeGateway(request: Request): Promise<Response> {
     if (used === 1) return toolUse('toolu_o2', 'list_domains', { workspaceId: 'ws_other' });
     return text(['I can only look at your own account.']);
   }
-  if (said.includes('A support email arrived')) return answered ? text(['Hi Ada,\n\nGmail hard-bounced 61 of 1,000 sends this week.\n\nNightmail support (AI)']) : toolUse('toolu_e', 'bounce_reasons', { provider: 'gmail' });
+  // Email reads no account: the tool is refused, and the answer is a general one.
+  if (said.includes('A support email arrived')) return answered ? text([JSON.stringify(blocks(body?.messages?.at(-1))).includes('Email answers are general') ? GENERAL_ANSWER : 'Hi Ada,\n\nGmail hard-bounced 61 of 1,000 sends this week.\n\nNightmail support (AI)']) : toolUse('toolu_e', 'bounce_reasons', { provider: 'gmail' });
   if (said.includes('Gmail bounces')) return answered ? text(['Gmail hard-bounced 61 of 1,000 sends (6.1%). Here’s what I’d do:\n\n1. Remove the import from Oct 25.']) : toolUse('toolu_b', 'bounce_reasons', { provider: 'gmail', days: 7 });
   if (said.includes('refund')) return answered ? text(['I’ve passed this to the Nightmail team. Someone will reply by email.']) : toolUse('toolu_t', 'file_ticket', {
     type: 'billing', topic: 'refund', title: 'Duplicate $25 top-up', severity: 'P3', summary: 'Ada asks for a refund of a duplicate top-up. The ledger shows two identical top-ups. She wants one refunded.', ask: 'Please refund my duplicate top-up',
