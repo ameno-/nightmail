@@ -6,7 +6,7 @@ import { lazy, Suspense, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { Archive, Ban, CodeXml, Forward, Hash, MessageSquare, ShieldAlert, Sparkles, Split, Star, Webhook, X, type LucideIcon } from 'lucide-react'
-import { Alert, Button, ConfirmDialog, DataTable, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, SecretInput, Select, Switch, Textarea, useToast, type SelectOption } from '../../components/ui'
+import { Alert, Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, SecretInput, Select, Switch, Textarea, useToast, type SelectOption } from '../../components/ui'
 import { FieldSkeleton, LoadingRegion, Skeleton } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApiDef, useApiQuery, useWorkspaceAccess } from '../../data/context'
@@ -21,14 +21,12 @@ import { useLiveVersion } from './live'
 import { ago, firstOverview, useOverview, type Overview, type OverviewEndpoint, type OverviewRule } from './overview'
 import { AwaitingConfirm, CreatedEndpointDialog, discordUrl, slackUrl, targetProblem, type Endpoint } from './ritual-connections'
 import { AskAgentLink } from './ritual-agent'
+import type { Condition } from './builder'
 import { addressOption, idempotencyFor } from './shared'
 import './inbound.css'
 import './receiving.css'
 import './recipes.css'
 
-// New rule's Split by words and Split by meaning open the address builder on an existing address, which only creates
-// for now: off until the builder edits existing addresses safely.
-const SPLIT_ENTRY = false
 const RulesPage = lazy(() => import('./rituals').then(m => ({ default: m.RulesPage })))
 const LIST = '/receiving?tab=rules'
 
@@ -42,12 +40,21 @@ const useRecipes = (enabled = true) => useApiQuery(['rule-recipes'], (_api, sign
 const icons: Record<string, LucideIcon> = {
   slack: Hash, discord: MessageSquare, forward: Forward, webhook: Webhook, 'junk-newsletters': Archive, 'block-senders': Ban,
   'allow-senders': Star, 'junk-failed-dmarc': ShieldAlert, 'label-by-meaning': Sparkles, 'alert-by-meaning': Sparkles,
+  split: Split, 'split-by-meaning': Sparkles,
 }
 const RecipeIcon = ({ id, size = 15 }: { id: string | null; size?: number }) => { const Icon = (id && icons[id]) || CodeXml; return <Icon className="rcv-icon" size={size} aria-hidden="true" /> }
 const rulePath = (key: string) => `/receiving/rules/${encodeURIComponent(key)}`
 // A rule named "new" shares its path with the add screen, so its editor is /new/code, which NewRecipeRoute serves.
 const codePath = (key: string) => `${rulePath(key)}/code`
 const editPath = (r: Pick<OverviewRule, 'key' | 'recipe'>) => r.recipe && r.key !== 'new' ? rulePath(r.key) : codePath(r.key)
+/** A two-way rule (the address builder's) is changed in the builder, on the one address it runs on; one that runs on
+ *  several, or none, in the editor. */
+const splitPath = (r: Pick<OverviewRule, 'key' | 'attachedTo'>, options: { id: string; address: string }[] | undefined) => {
+  const target = r.attachedTo.length === 1 ? r.attachedTo[0]! : null
+  const id = target && (target.startsWith('mbx_') ? target : options?.find(a => a.address === target)?.id)
+  return id ? `/receiving?tab=rules&build=${encodeURIComponent(id)}&rule=${encodeURIComponent(r.key)}` : codePath(r.key)
+}
+const isSplitRule = (r: Pick<OverviewRule, 'recipe'>) => r.recipe?.id === 'split' || r.recipe?.id === 'split-by-meaning'
 
 /** What a rule does, in a sentence with its blanks filled in. Its recipe's wording comes from the shared catalogue
  *  (ritual-schema.ts, the source listRuleRecipes serves), so the list needs no read beyond the overview. */
@@ -63,30 +70,32 @@ export function Sentence({ ritual }: { ritual: Pick<OverviewRule, 'key' | 'recip
   })}</>
 }
 /** A rule in plain words wherever it appears: a ready-made rule's sentence, or a script as Custom code rule and its name. */
-export function RuleLine({ rule, keyName }: { rule?: Pick<OverviewRule, 'key' | 'recipe'>; keyName: string }) {
-  if (rule?.recipe && (rule.recipe.id === 'split' || rule.recipe.id === 'split-by-meaning')) return <SplitSentence params={rule.recipe.params} meaning={rule.recipe.id === 'split-by-meaning'} />
+export function RuleLine({ rule, keyName, endpoints }: { rule?: Pick<OverviewRule, 'key' | 'recipe'>; keyName: string; endpoints?: Pick<OverviewEndpoint, 'name' | 'type'>[] }) {
+  if (rule?.recipe && (rule.recipe.id === 'split' || rule.recipe.id === 'split-by-meaning')) return <SplitSentence params={rule.recipe.params} meaning={rule.recipe.id === 'split-by-meaning'} endpoints={endpoints} />
   if (rule?.recipe) return <Sentence ritual={rule} />
   return <>Custom code rule <code className="recipe-code">{keyName}</code></>
 }
 /** An address's rules on one line: the first in plain words, and how many more. */
-export function RulesSummary({ keys, rules }: { keys: string[]; rules: OverviewRule[] }) {
+export function RulesSummary({ keys, rules, endpoints }: { keys: string[]; rules: OverviewRule[]; endpoints?: Pick<OverviewEndpoint, 'name' | 'type'>[] }) {
   const first = keys[0]
   if (!first) return null
-  return <span className="rcv-rules"><span className="rcv-rules__first"><RuleLine rule={rules.find(r => r.key === first)} keyName={first} /></span>{keys.length > 1 && <span className="muted">+{keys.length - 1}</span>}</span>
+  return <span className="rcv-rules"><span className="rcv-rules__first"><RuleLine rule={rules.find(r => r.key === first)} keyName={first} endpoints={endpoints} /></span>{keys.length > 1 && <span className="muted">+{keys.length - 1}</span>}</span>
 }
 /** A two-way rule (the address builder's) in words: "If the subject mentions refund, send to refunds; otherwise to the support inbox". */
 const testWords: Record<string, string> = { from: 'the sender is', subject: 'the subject mentions', text: 'the email mentions', attachment: 'it has an attachment' }
-const destinationWords = (value: string | string[] | undefined) => {
-  const v = typeof value === 'string' ? value : ''
-  return v === 'store' ? 'keep it' : v === 'drop' ? 'drop it' : v.startsWith('inbox:') ? `the ${v.slice(6)} inbox` : v
+// A Slack or Discord destination says so ("support in Slack"): its name alone could be an inbox's.
+const chatWords: Record<string, string> = { slack: 'Slack', discord: 'Discord' }
+const destinationWords = (value: string | string[] | undefined, endpoints?: Pick<OverviewEndpoint, 'name' | 'type'>[]) => {
+  const v = typeof value === 'string' ? value : '', chat = chatWords[endpoints?.find(e => e.name === v)?.type ?? '']
+  return v === 'store' ? 'keep it' : v === 'drop' ? 'drop it' : v.startsWith('inbox:') ? `the ${v.slice(6)} inbox` : chat ? `${v} in ${chat}` : v
 }
-function SplitSentence({ params, meaning }: { params: Record<string, string | string[]>; meaning: boolean }) {
+function SplitSentence({ params, meaning, endpoints }: { params: Record<string, string | string[]>; meaning: boolean; endpoints?: Pick<OverviewEndpoint, 'name' | 'type'>[] }) {
   const blank = (text: ReactNode) => <span className="recipe-blank">{text}</span>
   const words = (v: string | string[] | undefined) => Array.isArray(v) ? v.join(', ') : v ?? ''
-  if (!meaning && params.test === 'always') return <>Send all mail to {blank(destinationWords(params.then))}</>
+  if (!meaning && params.test === 'always') return <>Send all mail to {blank(destinationWords(params.then, endpoints))}</>
   const condition = meaning ? <>it looks like {blank(words(params.meaning))}</> : params.test === 'from' ? <>{testWords.from} {blank(<Senders list={[params.value ?? []].flat()} />)}</>
     : params.test === 'attachment' ? testWords.attachment : <>{testWords[words(params.test)] ?? words(params.test)} {blank(words(params.value))}</>
-  return <>If {condition}, send to {blank(destinationWords(params.then))}; otherwise to {blank(destinationWords(params.otherwise))}</>
+  return <>If {condition}, send to {blank(destinationWords(params.then, endpoints))}; otherwise to {blank(destinationWords(params.otherwise, endpoints))}</>
 }
 function Senders({ list }: { list: string[] }) {
   return <>{list.slice(0, 2).map((s, i) => <span key={s}>{i > 0 && ', '}<PrivateAddress value={s} /></span>)}{list.length > 2 && ` +${list.length - 2}`}</>
@@ -99,6 +108,8 @@ function Addresses({ list, max = 1 }: { list: string[]; max?: number }) {
 export function RulesTab({ overview, refresh }: { overview: Overview; refresh: () => Promise<unknown> }) {
   const navigate = useNavigate(), toast = useToast()
   useRecipes() // warms the add screen
+  const options = useApiDef(queries.inboundAddressOptions())
+  const pathOf = (r: OverviewRule) => isSplitRule(r) ? splitPath(r, options.data) : editPath(r)
   const [switching, setSwitching] = useState<Record<string, boolean>>({})
   const [deleting, setDeleting] = useState<OverviewRule | null>(null), [deleteOpen, setDeleteOpen] = useState(false)
   const toggle = useSingleFlight('rules.toggle', async (r: OverviewRule, enabled: boolean) => {
@@ -119,19 +130,19 @@ export function RulesTab({ overview, refresh }: { overview: Overview; refresh: (
     : r.lastMatchedAt ? <time dateTime={r.lastMatchedAt} title={new Date(r.lastMatchedAt).toLocaleString()}>{ago(r.lastMatchedAt)}</time>
     : <span className="muted" title="Not in the last 1,000 emails">Not lately</span>
   const runsOn = (r: OverviewRule) => r.addresses.length ? <Addresses list={r.addresses} />
-    : <Link className="rcv-add" to={r.recipe ? editPath(r) : `${codePath(r.key)}#attach`} onClick={e => e.stopPropagation()}>Not attached · attach</Link>
+    : <Link className="rcv-add" to={r.recipe && !isSplitRule(r) ? editPath(r) : `${codePath(r.key)}#attach`} onClick={e => e.stopPropagation()}>Not attached · attach</Link>
   return <div className="stack rcv-tab">
     {overview.rules.length > 0 && <div className="rcv-kindline"><Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rules/new">New rule</Link></div>}
-    <DataTable className="rcv-table recipe-table" rows={overview.rules} rowKey={r => r.key} rowHref={editPath}
+    <DataTable className="rcv-table recipe-table" rows={overview.rules} rowKey={r => r.key} rowHref={pathOf}
       empty={<EmptyState title="No rules yet" action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rules/new">New rule</Link>} />}
       columns={[
-        { key: 'what', label: 'Rule', width: '50%', card: 'title', render: r => <span className="recipe-row" data-off={!r.enabled || undefined}><RecipeIcon id={r.recipe?.id ?? null} /><span className="recipe-sentence"><Sentence ritual={r} /></span></span> },
+        { key: 'what', label: 'Rule', width: '50%', card: 'title', render: r => <span className="recipe-row" data-off={!r.enabled || undefined}><RecipeIcon id={r.recipe?.id ?? null} /><span className="recipe-sentence"><RuleLine rule={r} keyName={r.key} endpoints={overview.endpoints} /></span></span> },
         { key: 'on', label: 'Runs on', width: '24%', card: 'line', render: runsOn, cardRender: r => <span className="recipe-card-line">{runsOn(r)}<span aria-hidden="true">·</span>{last(r)}</span> },
         { key: 'last', label: 'Last matched', width: '13%', card: 'hide', render: last },
         { key: 'actions', label: '', align: 'right', card: 'end', render: r => <span className="recipe-controls">
           <Switch checked={switching[r.key] ?? r.enabled} disabled={r.key in switching} onCheckedChange={v => void toggle(r, v)} label={<span className="sr-only">Run {r.key}</span>} />
-          <DropdownMenu label={`Actions for ${r.key}`} title={<Sentence ritual={r} />} items={[
-            { label: 'Edit', onSelect: () => navigate(editPath(r)) },
+          <DropdownMenu label={`Actions for ${r.key}`} title={<RuleLine rule={r} keyName={r.key} endpoints={overview.endpoints} />} items={[
+            { label: 'Edit', onSelect: () => navigate(pathOf(r)) },
             ...(r.recipe ? [{ label: 'Edit as code', onSelect: () => navigate(codePath(r.key)) }] : []),
             { label: 'Delete', destructive: true, onSelect: () => { setDeleting(r); setDeleteOpen(true) } },
           ]} />
@@ -151,25 +162,30 @@ export function NewRulePage() {
   // The Receiving page's first read (usually cached by now): the prompts name the address rules run on most.
   const overview = useOverview(firstOverview, false, canAdminister)
   const [params] = useSearchParams()
+  const [choosing, setChoosing] = useState<Condition | null>(null)
   const address = params.get('address')
   const suffix = address ? `?address=${encodeURIComponent(address)}` : ''
   if (!canAdminister) return <div className="stack inbound-stack"><PageHeader title="New rule" backTo={LIST} /><EmptyState title={concepts.rules.adminOnly} /></div>
   const c = catalog.data && (overview.data || overview.error) && (options.data || options.error) ? catalog.data : undefined
   const used = (overview.data?.rules ?? []).flatMap(r => r.addresses)
   const agentAddress = (options.data ?? []).find(a => a.id === address)?.address ?? [...new Set(used)].sort((a, b) => used.filter(x => x === b).length - used.filter(x => x === a).length)[0] ?? null
-  // Splitting mail two ways is the address builder's: it opens for the address this came from, else the one rules run on most.
-  const buildFor = (options.data ?? []).find(a => a.id === address) ?? (options.data ?? []).find(a => a.address === agentAddress) ?? (options.data ?? []).find(a => a.kind !== 'inbox')
+  // Splitting mail two ways is the address builder's, on an address: the one this came from, else the one asked for.
+  const scoped = (options.data ?? []).find(a => a.id === address && a.kind !== 'inbox')
+  const splittable = (options.data ?? []).filter(a => a.kind !== 'inbox')
+  const splitTile = (condition: Condition, icon: ReactNode, name: string) => scoped
+    ? <Link className="recipe-tile" to={`/receiving?build=${encodeURIComponent(scoped.id)}&split=${condition}`}>{icon}<strong>{name}</strong></Link>
+    : <button type="button" className="recipe-tile" onClick={() => setChoosing(condition)}>{icon}<strong>{name}</strong></button>
   return <div className="stack inbound-stack recipe-page">
     <PageHeader title="New rule" backTo={LIST} />
     {catalog.error && !c ? <ErrorState error={catalog.error} onRetry={() => void catalog.refetch()} />
       : !c ? <LoadingRegion label="Loading recipes"><div className="recipe-groups" aria-hidden="true">{[2, 2, 4, 2].map((n, g) => <section key={g} className="recipe-group">
         <Skeleton width={120} height={14} /><div className="recipe-tiles">{Array.from({ length: n }, (_, i) => <span key={i} className="recipe-tile recipe-tile--skeleton" />)}</div></section>)}</div></LoadingRegion>
       : <div className="recipe-groups">
-        {SPLIT_ENTRY && buildFor && <section className="recipe-group" aria-labelledby="recipes-split">
+        {splittable.length > 0 && <section className="recipe-group" aria-labelledby="recipes-split">
           <h2 id="recipes-split">Split mail</h2>
           <div className="recipe-tiles">
-            <Link className="recipe-tile" to={`/receiving?build=${encodeURIComponent(buildFor.id)}&split=subject`}><Split className="rcv-icon" size={16} aria-hidden="true" /><strong>Split by words</strong></Link>
-            <Link className="recipe-tile" to={`/receiving?build=${encodeURIComponent(buildFor.id)}&split=ai`}><Sparkles className="rcv-icon" size={16} aria-hidden="true" /><strong>Split by meaning</strong></Link>
+            {splitTile('subject', <Split className="rcv-icon" size={16} aria-hidden="true" />, 'Split by words')}
+            {splitTile('ai', <Sparkles className="rcv-icon" size={16} aria-hidden="true" />, 'Split by meaning')}
           </div>
         </section>}
         {c.groups.map(g => {
@@ -188,7 +204,21 @@ export function NewRulePage() {
           <div className="cluster"><Link className="ui-button ui-button--ghost ui-button--sm recipe-agent-link" to="/receiving/rules/new/script"><CodeXml size={14} aria-hidden="true" />Write code</Link><AskAgentLink address={agentAddress} /></div>
         </section>
       </div>}
+    <SplitChooser condition={choosing} onClose={() => setChoosing(null)} addresses={splittable} />
   </div>
+}
+
+/** Split mail from New rule without an address: which address's mail, before the builder opens on it. */
+function SplitChooser({ condition, onClose, addresses }: { condition: Condition | null; onClose: () => void; addresses: { id: string; address: string; displayName?: string | null }[] }) {
+  const navigate = useNavigate()
+  const [chosen, setChosen] = useState('')
+  const go = (event: FormEvent) => { event.preventDefault(); if (chosen && condition) navigate(`/receiving?build=${encodeURIComponent(chosen)}&split=${condition}`) }
+  return <Dialog open={condition !== null} onOpenChange={open => { if (!open) { onClose(); setChosen('') } }} title="Which address?"
+    footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" type="submit" form="split-chooser" disabled={!chosen}>Next</Button></>}>
+    <form id="split-chooser" className="stack" onSubmit={go}>
+      <Field label="Split the mail of" htmlFor="split-chooser-address"><Select id="split-chooser-address" value={chosen} onValueChange={setChosen} placeholder="Choose an address" options={addresses.map(a => addressOption(a.id, a.address, a.displayName ?? undefined))} /></Field>
+    </form>
+  </Dialog>
 }
 
 /** /receiving/rules/new/:recipe: a recipe's form. "code" is the editor of a script named new (see codePath). */
@@ -225,6 +255,7 @@ function RecipeForm({ recipeId, ritualKey }: { recipeId?: string; ritualKey?: st
     <LoadingRegion label="Loading the form"><div className="recipe-form" aria-hidden="true">{ritualRecipes.find(r => r.id === recipeId)?.decisions && <Skeleton width="50%" height={14} />}<FieldSkeleton /><FieldSkeleton /></div></LoadingRegion></div>
   if (ritualKey && !existing) return <div className="stack inbound-stack">{header()}<EmptyState title={`No rule named ${ritualKey}`} action={<Link className="ui-button ui-button--secondary ui-button--md" to={LIST}>Rules</Link>} /></div>
   if (existing && !existing.recipe) return <Navigate replace to={codePath(existing.key)} />
+  if (existing && isSplitRule(existing)) return <Navigate replace to={splitPath(existing, options.data)} />
   if (!recipe) return <div className="stack inbound-stack">{header()}<EmptyState title={`No recipe named ${id}`} action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rules/new">New rule</Link>} /></div>
   const preset = params.get('address')
   return <RecipeEditor key={existing?.key ?? recipe.id} recipe={recipe} price={catalog.data.decisionPricePerThousand} existing={existing} overview={overview.data}

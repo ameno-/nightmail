@@ -54,5 +54,5 @@ export const steps = {
 
 export const catchAllSetting = {
   title: 'Catch-all',
-  options: { store: 'Store it, no inbox', create_address: 'Create an address' },
+  options: { store: outcomes.store, create_address: 'Create an address' },
 } as const

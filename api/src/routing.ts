@@ -18,7 +18,7 @@ const Destination = z.union([
   z.string().max(128).regex(/^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$/).describe('An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>).'),
   z.string().max(128).regex(/^(?:con_[a-zA-Z0-9_-]+|forward:[a-z0-9][a-z0-9-]{0,62})$/).describe('A forward endpoint (con_… or forward:<name>) its recipient confirmed: it gets the whole message, as a rule\'s endpoints.<name>() call sends it.'),
 ]).describe('An inbox (mbx_… or inbox:<key>), a webhook (mwh_… or webhook:<key>) or a confirmed forward (con_… or forward:<name>).');
-const RouteFields = z
+export const RouteFields = z
   .object({
     key: RoutingKey.nullable().optional(),
     match: Address.describe(
@@ -34,7 +34,7 @@ const RouteFields = z
     note: z.string().max(500).optional(),
   })
   .strict();
-const MailRoute = RouteFields.extend({
+export const MailRoute = RouteFields.extend({
   id: z.string(),
   key: RoutingKey.nullable(),
   to: RouteFields.shape.to.describe("Inbox, webhook and forward IDs, [] to keep, or 'drop'."),
@@ -43,7 +43,7 @@ const MailRoute = RouteFields.extend({
   note: z.string(),
   createdAt: z.string(),
 }).openapi('MailRoute');
-type Route = z.infer<typeof MailRoute>;
+export type Route = z.infer<typeof MailRoute>;
 type RouteInput = z.infer<typeof RouteFields>;
 const RoutingConfig = z.object({ version: z.number().int(), routes: z.array(MailRoute) }).openapi('RoutingConfig');
 const RoutingConfigFile = z
@@ -130,9 +130,12 @@ const RoutingTestResult = z
 const fail = (status: number, code: string, message: string, field?: string) => new ApiError(status, code, message, field);
 const columns = sql`id,key,match,destinations AS "to",subaddresses,enabled,note,created_at::text AS "createdAt"`;
 const hostOf = (match: string) => match.split('@')[1]!;
-const listRoutes = async (tx: DbExecutor, w: string) =>
+export const listRoutes = async (tx: DbExecutor, w: string) =>
   (await tx.execute<Route>(sql`SELECT ${columns} FROM mail_routes WHERE workspace_id=${w} ORDER BY match`)).rows;
-const currentVersion = async (tx: DbExecutor, w: string) =>
+/** The route whose match is exactly this address, as the read operations return it. */
+export const routeFor = async (tx: DbExecutor, w: string, match: string) =>
+  (await tx.execute<Route>(sql`SELECT ${columns} FROM mail_routes WHERE workspace_id=${w} AND match=${match}`)).rows[0] ?? null;
+export const currentVersion = async (tx: DbExecutor, w: string) =>
   (await tx.execute<{ v: number }>(sql`SELECT coalesce((SELECT version FROM mail_routing_state WHERE workspace_id=${w}),0) AS v`)).rows[0]!.v;
 /** Read one bounded slice of immutable identities and their version's diff in the same snapshot.
  * The first change AFTER v contains the exact before-image, even after older audit deltas expire. */
@@ -161,7 +164,7 @@ function findRoute(routes: Route[], ref: string) {
   if (!route) throw fail(404, 'NOT_FOUND', `Route ${ref} was not found. List routes with GET /v1/routing/routes.`);
   return route;
 }
-function makeRoute(fields: RouteInput, previous?: Route): Route {
+export function makeRoute(fields: RouteInput, previous?: Route): Route {
   return {
     id: previous?.id ?? id('rte'),
     createdAt: previous?.createdAt ?? new Date().toISOString(),
@@ -264,7 +267,7 @@ async function resolveDestinations(tx: DbExecutor, w: string, routes: Route[], l
 }
 
 /** Validates and writes a whole route set as one version: rows, one audit row per changed route, and the affected host plans. */
-async function save(
+export async function save(
   tx: DbExecutor,
   c: Ctx,
   w: string,
@@ -338,6 +341,16 @@ async function save(
     if (domain) await tx.execute(sql`SELECT mail_compile_routes(${w},${domain})`);
   return { version: next, diff, warnings };
 }
+/** A route or address-flow write's If-Match against the version it read: a stale one is refused and nothing changes. */
+export function checkVersion(c: Ctx, version: number) {
+  const expected = c.req.header('if-match')?.replace(/^W\//, '').replace(/^"(.*)"$/, '$1');
+  if (expected !== undefined && expected !== '*' && expected !== String(version))
+    throw fail(
+      409,
+      'VERSION_CONFLICT',
+      `Routing is at version ${version}, not ${expected}. Read GET /v1/routing again, reapply your change and send If-Match: "${version}".`,
+    );
+}
 /** Removes a deleted inbox or webhook from every route, as one routing version, or refuses without ?detach=true. */
 export async function detachDestination(tx: DbExecutor, c: Ctx, w: string, destination: string) {
   await lockMailboxLane(tx, w, 'address');
@@ -399,14 +412,8 @@ export function registerRouting(app: App) {
       await lockMailboxLane(tx, w, 'address');
       // Hold the approval before any route row: a removal disables an approval's routes after it has taken the approval.
       if (c.get('actor').grantId) await (await import('./rituals.js')).holdReceiving(tx, c);
-      const version = await currentVersion(tx, w),
-        expected = c.req.header('if-match')?.replace(/^W\//, '').replace(/^"(.*)"$/, '$1');
-      if (expected !== undefined && expected !== '*' && expected !== String(version))
-        throw fail(
-          409,
-          'VERSION_CONFLICT',
-          `Routing is at version ${version}, not ${expected}. Read GET /v1/routing again, reapply your change and send If-Match: "${version}".`,
-        );
+      const version = await currentVersion(tx, w);
+      checkVersion(c, version);
       const routes = await listRoutes(tx, w);
       return save(tx, c, w, version, routes, await change(routes, tx, version), options);
     });

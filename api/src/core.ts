@@ -415,8 +415,9 @@ export const ownerRoute = (method: string, path: string) => {
 export const unrestrictedRoute = (path: string) => /^\/v1\/(?:contacts|lists|segments|contact-imports|audience-query|settings|webhooks|metrics|sender-score|usage|billing|regions|app-passwords)(?:\/|$)/.test(path)
   || !['state', 'preview', 'preview-image', 'archive', undefined].includes(/^\/v1\/campaigns\/[^/]+\/([^/]+)$/.exec(path)?.[1]);
 // The routes of the guards above that handlers call, for the MCP listing (each verified against REST's answers for reads).
-/** receivingAdmin's routes: routing, rules (and their deprecated /v1/rituals aliases), endpoints and inbox connections. */
-export const receivingAdminRoute = (path: string) => /^\/v1\/(?:routing|rules|rituals|endpoints|inbox-connections)(?:\/|$)/.test(path);
+/** receivingAdmin's routes: routing, rules (and their deprecated /v1/rituals aliases), endpoints, inbox connections and an
+ *  address's flow (its route and rule together). */
+export const receivingAdminRoute = (path: string) => /^\/v1\/(?:routing|rules|rituals|endpoints|inbox-connections)(?:\/|$)|^\/v1\/inbound\/addresses\/[^/]+\/flow$/.test(path);
 /** keyAdminRefusal's routes: API keys, listing and revoking agent tokens, and the deprecated inbound key aliases. */
 export const keyAdminRoute = (method: string, path: string) => /^\/v1\/(?:api-keys|agent-tokens|inbound\/keys)(?:\/|$)/.test(path) && !agentTokenMintRoute(method, path);
 /** agentTokenMintRefusal's route: createAgentToken. */

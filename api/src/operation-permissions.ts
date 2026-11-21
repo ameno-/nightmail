@@ -141,7 +141,7 @@ export const OPERATION_PERMISSIONS: Record<string, OperationPermission> = {
   listInboundSubdomains: hostsRead, createInboundSubdomain: hostsChange, getInboundSubdomain: hostsRead, updateInboundSubdomain: hostsChange, removeInboundSubdomain: hostsChange,
   // Receiving addresses, conversations and received mail.
   listInboundAddresses: needs('inboxes', 'read', 'address'), createInboundAddress: needs('inboxes', 'write', 'workspace', admin), getInboundAddress: needs('inboxes', 'read', 'address'),
-  updateInboundAddress: needs('inboxes', 'write', 'workspace', admin), deleteInboundAddress: needs('inboxes', 'write', 'workspace', admin),
+  updateInboundAddress: needs('inboxes', 'write', 'workspace', admin), deleteInboundAddress: needs('inboxes', 'write', 'workspace', admin), setInboundAddressFlow: rulesChange,
   listInboundThreads: mailRead, createInboundThread: needs('sendEmail', 'on', 'address'), getInboundThread: mailRead, updateInboundThread: mailChange,
   listInboundMessages: mailRead, getInboundMessage: mailRead, getInboundAttachment: mailRead, downloadInboundAttachment: mailRead,
   listLogs: needs('sentMail', 'read', 'domain'), getInboundOverview: needs('inboxes', 'read', 'address'), listInboundEndpoints: hostsRead,

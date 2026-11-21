@@ -5,15 +5,16 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { Check, X } from 'lucide-react'
 import { Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, IconButton, LoadingRegion, PageHeader, Pagination, SearchField, Select, StatusBadge, Tabs, useToast } from '../../components/ui'
-import { useApiDef, useWorkspaceAccess } from '../../data/context'
+import { useApiDef, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { request } from '../../data/live'
-import { errorText } from '../../data/types'
+import { errorText, type InboundAddress } from '../../data/types'
 import { number } from '../../lib/format'
 import { useMediaQuery } from '../../lib/media'
 import { FlowPanel, mailOf } from './panel'
+import { splitOf } from './flow'
 import { useCursorPagination, useSearchDraft } from '../../lib/pagination'
-import { AddressBuilder } from './builder'
+import { AddressBuilder, builderFits, conditions, type Condition } from './builder'
 import { concepts, kindNote, kinds, type KindFilter } from './concepts'
 import { NewInboxDialog } from './inboxes'
 import { ConnectAgentButton } from '../docs/connect-agent'
@@ -55,6 +56,14 @@ function note(r: RouteEntry) {
 // The same line as text for a tooltip, when the cell clips it. An address never goes in: it stays masked until revealed.
 const noteTitle = (r: RouteEntry) => r.kind === 'catch_all' || r.kind === 'route' || r.address?.origin === 'auto' ? undefined
   : [r.kind === 'inbox' ? kindNote.inbox : null, r.address?.displayName, expiresIn(r.address?.expiresAt)].filter(Boolean).join(' · ') || undefined
+/** Where a row's mail goes, as the list says it. A two-way rule's address names its two sides first: its route
+ *  stores nothing more ("Stored, no inbox") unless a side keeps it. */
+const shownTargets = (r: RouteEntry, overview: Overview) => {
+  const split = splitOf(r, overview), p = split?.recipe?.params
+  if (!p || p.then === 'store' || p.otherwise === 'store') return { to: r.to, total: r.toTotal }
+  const to = [...r.to.filter(t => t.via === split!.key), ...r.to.filter(t => t.via !== split!.key && t.type !== 'store')]
+  return { to, total: r.toTotal - (r.to.length - to.length) }
+}
 const targetsTitle = (r: RouteEntry) => r.to.map(t => isMailbox(t.name) ? typeLabel[t.type] : targetName(t, r.address?.id)).join(', ')
 
 /** A new account: the three steps everything else builds on, each with the one action that starts it. */
@@ -86,7 +95,7 @@ function KindFilter({ overview, value, onChange }: { overview: Overview; value: 
   </button>)}</div>
 }
 
-function AddressesTab({ overview, fetching, filters, setFilter, page, onPage, onCreate, onEditRoute }: { overview: Overview; fetching: boolean; filters: { kind: KindFilter; domain: string; q: string }; setFilter: (patch: Partial<{ kind: KindFilter; domain: string; q: string }>) => void; page: number; onPage: (next: number) => void; onCreate: (address?: string) => void; onEditRoute: (r: RouteEntry) => void }) {
+function AddressesTab({ overview, fetching, filters, setFilter, page, onPage, onCreate, onEditRoute, onBuild }: { overview: Overview; fetching: boolean; filters: { kind: KindFilter; domain: string; q: string }; setFilter: (patch: Partial<{ kind: KindFilter; domain: string; q: string }>) => void; page: number; onPage: (next: number) => void; onCreate: (address?: string) => void; onEditRoute: (r: RouteEntry) => void; onBuild: (address: InboundAddress) => void }) {
   const { canAdminister } = useWorkspaceAccess()
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
@@ -106,8 +115,9 @@ function AddressesTab({ overview, fetching, filters, setFilter, page, onPage, on
   // Beside the list, the panel always shows one: the chosen row, the typed one, or the first.
   const selected = chosen ?? exact ?? (docked && !lookup ? rows[0] : undefined)
   const choose = (r: RouteEntry | null) => setParams(previous => { const next = new URLSearchParams(previous); if (r) next.set('open', r.id); else next.delete('open'); return next }, { replace: true })
-  // An address opens the builder (where its mail goes); an agent inbox its own page; a wildcard or catch-all its route.
-  const edit = (r: RouteEntry) => { const own = r.address && r.kind !== 'pattern'; if (own && r.kind === 'inbox') navigate(`/receiving/inboxes/${r.address!.id}`); else if (own) navigate(`/receiving/addresses/${r.address!.id}?tab=flow&edit=1`); else onEditRoute(r) }
+  // An address opens the builder when it can draw its flow, else its steps on its page; an agent inbox its own page; a
+  // wildcard or catch-all its route.
+  const edit = (r: RouteEntry) => { const own = r.address && r.kind !== 'pattern'; if (own && r.kind === 'inbox') navigate(`/receiving/inboxes/${r.address!.id}`); else if (own && builderFits(r, overview)) onBuild(r.address!); else if (own) navigate(`/receiving/addresses/${r.address!.id}?tab=flow&edit=1`); else onEditRoute(r) }
   const showPanel = overview.manage && (!!selected || !!lookup)
   const empty = filters.q ? 'Nothing matches' : kinds[filters.kind].empty
   const addRule = (r: RouteEntry) => overview.manage && r.address && r.kind !== 'pattern' ? <Link className="rcv-add" to={`/receiving/rules/new?address=${encodeURIComponent(r.address.id)}`} onClick={e => e.stopPropagation()}>Add a rule</Link> : null
@@ -134,8 +144,8 @@ function AddressesTab({ overview, fetching, filters, setFilter, page, onPage, on
               cardRender: r => <span className="rcv-cell"><RouteIcon entry={r} /><Match value={r.match} host={!filters.domain} /></span> },
             { key: 'note', label: 'Kind', table: false, card: 'line', render: r => note(r) },
             // Rules in plain words; an address without one says how to add one, on a phone too.
-            ...(docked ? [] : [{ key: 'rules', label: 'Rules', width: '19%', card: 'hide' as const, render: (r: RouteEntry) => r.rules.length ? <RulesSummary keys={r.rules} rules={overview.rules} /> : addRule(r) ?? <span className="muted">—</span> }]),
-            { key: 'to', label: 'Destinations', width: docked ? '38%' : '30%', card: 'line', render: r => <span className="rcv-to" title={targetsTitle(r)}><Targets to={r.to} total={r.toTotal} ownId={r.address?.id} max={2} /></span>, cardRender: r => <span className="rcv-card-to"><Targets to={r.to} total={r.toTotal} ownId={r.address?.id} max={2} />{!r.rules.length && addRule(r) && <><span aria-hidden="true">·</span>{addRule(r)}</>}</span> },
+            ...(docked ? [] : [{ key: 'rules', label: 'Rules', width: '19%', card: 'hide' as const, render: (r: RouteEntry) => r.rules.length ? <RulesSummary keys={r.rules} rules={overview.rules} endpoints={overview.endpoints} /> : addRule(r) ?? <span className="muted">—</span> }]),
+            { key: 'to', label: 'Destinations', width: docked ? '38%' : '30%', card: 'line', render: r => <span className="rcv-to" title={targetsTitle(r)}><Targets {...shownTargets(r, overview)} ownId={r.address?.id} max={2} /></span>, cardRender: r => <span className="rcv-card-to"><Targets {...shownTargets(r, overview)} ownId={r.address?.id} max={2} />{!r.rules.length && addRule(r) && <><span aria-hidden="true">·</span>{addRule(r)}</>}</span> },
             { key: 'last', label: 'Last mail', align: 'right', card: 'aside', render: r => <LastMail entry={r} /> },
           ]} />
         <div className="rcv-foot" data-busy={fetching || undefined}>
@@ -196,7 +206,7 @@ function DestinationsTab({ overview, refresh }: { overview: Overview; refresh: (
   }
   // A webhook opens its own page (events, deliveries, headers, secret), named or not.
   const webhookPage = (e: OverviewEndpoint) => e.type === 'webhook' ? `/receiving/webhooks/${e.id}` : null
-  const used = (e: OverviewEndpoint) => [e.routes ? `${number(e.routes)} ${e.routes === 1 ? 'address' : 'addresses'}` : null, e.rules.length ? `${e.rules.join(', ')} ${e.rules.length === 1 ? 'rule' : 'rules'}` : null, e.eventTypes.length ? eventWords(e.eventTypes) : null].filter(Boolean).join(' · ')
+  const used = (e: OverviewEndpoint) => [e.routes ? `${number(e.routes)} ${e.routes === 1 ? 'address' : 'addresses'}` : null, e.rules.length ? `${number(e.rules.length)} ${e.rules.length === 1 ? 'rule' : 'rules'}` : null, e.eventTypes.length ? eventWords(e.eventTypes) : null].filter(Boolean).join(' · ')
   return <div className="stack rcv-tab">
     <div className="rcv-kindline">
       {address && <span className="rcv-filter-chip">{(a => a ? <PrivateAddress value={a} /> : 'One address')(addresses.data?.find(item => item.id === address)?.address)}<IconButton size="sm" label="Show every destination" onClick={showAll}><X size={14} aria-hidden="true" /></IconButton></span>}
@@ -242,10 +252,15 @@ export function ReceivingPage() {
   const filters = { kind: kind in kinds ? kind : 'all' as KindFilter, domain: params.get('domain') ?? '', q: params.get('q') ?? '' }
   const pagination = useCursorPagination()
   const overview = useOverview({ ...kindQuery[filters.kind], domain: filters.domain || undefined, q: filters.q.trim() || undefined, cursor: pagination.cursor, limit: PAGE }, true)
-  // New address, or Create this address from a typed one (its address filled in).
   // New address (or Create this address, its address filled in), or an address's flow to change: one builder.
   const [creating, setCreating] = useState<{ address: string } | null>(null)
-  // The builder only creates: an existing address changes where its mail goes in the route editor on its page.
+  const [building, setBuilding] = useState<InboundAddress | null>(null)
+  // ?build=<address ID> opens the builder on that address: from a Rules row (&rule=<key>), or New rule's Split by words
+  // or meaning (&split=<check>), which split its mail on that check when it has no two-way rule yet.
+  const buildId = params.get('build'), splitParam = params.get('split') as Condition | null
+  const toBuild = useApiQuery(['inbound-address', buildId], (api, signal) => buildId ? api.inbound.address(buildId, signal) : Promise.resolve(null), { enabled: !!buildId })
+  const shown = building ?? toBuild.data ?? null
+  const closeBuilder = () => { setBuilding(null); if (buildId) setParams(previous => { const next = new URLSearchParams(previous); for (const k of ['build', 'split', 'rule']) next.delete(k); return next }, { replace: true }); void overview.refetch() }
   const [editing, setEditing] = useState<RouteEntry | null>(null)
   // A catch-all or wildcard typed into New address opens its route editor instead.
   const [pattern, setPattern] = useState<string | null>(null)
@@ -279,10 +294,11 @@ export function ReceivingPage() {
         items={[{ value: 'addresses', label: concepts.addresses.title, count: counts.addresses }, ...(data.manage ? [{ value: 'rules', label: concepts.rules.title, count: counts.rules }, { value: 'destinations', label: concepts.destinations.title, count: counts.destinations }] : [])]} />
       {tab === 'rules' && data.manage ? <RulesTab overview={data} refresh={() => overview.refetch()} />
         : tab === 'destinations' && data.manage ? <DestinationsTab overview={data} refresh={() => void overview.refetch()} />
-        : <AddressesTab overview={data} fetching={overview.isFetching} filters={filters} onCreate={address => setCreating({ address: address ?? '' })} onEditRoute={setEditing}
+        : <AddressesTab overview={data} fetching={overview.isFetching} filters={filters} onCreate={address => setCreating({ address: address ?? '' })} onEditRoute={setEditing} onBuild={setBuilding}
           page={pagination.page} onPage={next => pagination.onPageChange(next, data.routes.nextCursor)} setFilter={patch => update(patch)} />}
     </div>}
     {data && <AddressBuilder open={!!creating} initial={creating?.address} onOpenChange={open => { if (!open) setCreating(null) }} domains={data.domains} onPattern={setPattern} />}
+    {data && shown && <AddressBuilder open address={shown} rule={!building ? params.get('rule') ?? undefined : undefined} split={!building && splitParam && conditions.some(c => c.value === splitParam) ? splitParam : undefined} onOpenChange={open => { if (!open) closeBuilder() }} domains={data.domains} />}
     {editing && <RouteEditor match={editing.match} route={editing.route} onClose={() => { setEditing(null); void overview.refetch() }} />}
     {pattern && <RouteEditor match={pattern} route={data?.routes.data.find(r => r.match === pattern)?.route ?? null} onClose={() => { setPattern(null); void overview.refetch() }} />}
   </div>
