@@ -45,7 +45,7 @@ So the agent loop, history, streaming, retries and eviction recovery are OpenCod
 - a `fetch` that adds the gateway key and enforces the model pin;
 - title, summary and compaction turned off, so there are no extra or smaller-model calls.
 
-The DO talks to OpenCode only through `src/agent/harness.ts` (run a turn, stream events, report usage). **To upgrade**, bump `@opencode/sdk` and `@opencode/plugin` together, run `bun run test`, and check the event names in `opencode.ts` if it fails. The other options were weaker:
+The DO talks to OpenCode only through `src/agent/harness.ts` (run a turn, report its tool steps, return its text and usage; a chat answer reaches the panel only after the output gate has checked it). **To upgrade**, bump `@opencode/sdk` and `@opencode/plugin` together, run `bun run test`, and check the event names in `opencode.ts` if it fails. The other options were weaker:
 
 - the `packages/llm` / AI SDK route keeps no OpenCode agent or tool model;
 - a container would bring a cold start and a sandbox we don't need.

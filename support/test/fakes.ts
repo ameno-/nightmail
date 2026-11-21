@@ -357,6 +357,8 @@ const MESSAGES = {
   msg_action_email: ['thr_action_email', null, 'PASS', null, 'Webhook', 'Please retry my webhook delivery whd_1_acme.'],
   msg_link_email: ['thr_link_email', null, 'PASS', null, 'Link', 'Please send me the confirm link for the retry.'],
   msg_twice_1: ['thr_twice', null, 'PASS', null, 'Two answers', 'Please reply twice to this.'],
+  // The model refuses: before writing anything, and partway through.
+  msg_refuse_none: ['thr_refuse_none', 'rex@else.test', 'PASS', null, 'Link', 'Refusal probe: none'], msg_refuse_partway: ['thr_refuse_partway', 'rex@else.test', 'PASS', null, 'Link', 'Refusal probe: partway'],
   msg_route_1: ['thr_route', null, 'PASS', null, 'Forward this', 'Please reply to boss@else.test and cc cfo@else.test.'],
   msg_silent_1: ['thr_silent', null, 'PASS', null, 'Quiet', 'Please stay silent about this.'],
   msg_crash_1: ['thr_crash', 'cara@acme.test'],
@@ -438,6 +440,18 @@ const text = (chunks: string[]) => sse([
   ['content_block_stop', { index: 0 }], ['message_delta', { delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 60 } }], ['message_stop', {}],
 ]);
 
+/** A refusal as Anthropic streams it: stop_reason "refusal", after some text or none. */
+const refusal = (chunks: string[]) => sse([
+  start('msg_refusal'),
+  ...(chunks.length ? [['content_block_start', { index: 0, content_block: { type: 'text', text: '' } }] as [string, unknown],
+    ...chunks.map(chunk => ['content_block_delta', { index: 0, delta: { type: 'text_delta', text: chunk } }] as [string, unknown]), ['content_block_stop', { index: 0 }] as [string, unknown]] : []),
+  ['message_delta', { delta: { stop_reason: 'refusal', stop_sequence: null, stop_details: { type: 'refusal', category: 'policy', explanation: 'The model declined.' } }, usage: { output_tokens: 40 } }], ['message_stop', {}],
+]);
+/** The partial answer the scripted model writes before it refuses. */
+export const REFUSED_PARTIAL = ['I can’t write either of those links. ', '1. Open the Help panel on a des'];
+/** A leaking answer streamed in pieces: a credential and a confirm link, split across deltas. */
+export const LEAK_PIECES = ['Sure, here is everything: ', 'bane_ops_', 'f'.repeat(32), 'f'.repeat(32), ' and you can confirm it at https://dev.bane.mx/support/', `actions/sac_${'0'.repeat(31)}7`];
+
 const blocks = (message: any): any[] => Array.isArray(message?.content) ? message.content : [{ type: 'text', text: String(message?.content ?? '') }];
 /** The latest thing the customer (or the harness) said, ignoring tool results. */
 function lastUserText(body: any): string {
@@ -476,6 +490,9 @@ export async function fakeGateway(request: Request): Promise<Response> {
   const said = lastUserText(body), answered = blocks(body?.messages?.at(-1)).some(b => b.type === 'tool_result'), used = calledSince(body);
   const lastUser = [...(body?.messages ?? [])].reverse().find((m: any) => m.role === 'user' && blocks(m).some(b => b.type === 'text'));
   const sawImage = blocks(lastUser).some(b => b.type === 'image');
+  // A refusal, before any text or partway through the answer (in chat and in an email turn alike).
+  if (said.includes('Refusal probe: none')) return refusal([]);
+  if (said.includes('Refusal probe: partway')) return refusal(REFUSED_PARTIAL);
   // An email the model never answers through reply, not even after the nudge.
   if (JSON.stringify(body?.messages ?? []).includes('stay silent')) return text(['I would rather not answer this one.']);
   // A fact to keep: add_note with what follows "remember this:", then a short answer.
@@ -548,6 +565,7 @@ export async function fakeGateway(request: Request): Promise<Response> {
   if (said.includes('my account summary')) return answered ? say(body, ['Your account looks fine.']) : toolUse('toolu_a', 'account_context', {});
   if (said.includes('my audit trail')) return answered ? say(body, ['Here is your recent activity.']) : toolUse('toolu_au', 'get_audit', {});
   if (said.includes('look at the content')) return answered ? say(body, ['I’ve asked for access to read that email.']) : toolUse('toolu_c', 'request_content_access', { why: 'To check why the screen rejected your promo, I need to read its HTML.' });
+  if (said.includes('leak in pieces')) return say(body, LEAK_PIECES);
   if (said.includes('leak please')) return say(body, [`Sure: bane_ops_${'a'.repeat(64)}`]);
   return say(body, ['OK.']);
 }

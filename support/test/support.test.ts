@@ -3,7 +3,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { Miniflare } from 'miniflare';
 import { afterAll, beforeAll, describe, test } from 'vitest';
-import { control, FAKE_BANE, fakeGateway, GENERAL_ANSWER, recorded, type Recorded } from './fakes.js';
+import { control, FAKE_BANE, fakeGateway, GENERAL_ANSWER, LEAK_PIECES, recorded, REFUSED_PARTIAL, type Recorded } from './fakes.js';
 import { gate, LINK_ORIGINS } from '../src/gate.js';
 import { ticketEmail } from '../src/tickets.js';
 import { project, toolResult } from '../src/agent/projection.js';
@@ -414,7 +414,7 @@ describe('support Worker', () => {
     assert.deepEqual([toolEnd.ok, toolEnd.label], [true, 'Checked your Gmail bounces']);
     const answer = await chat.until(f => f.type === 'message.end' && f.messageId === toolStart.messageId, 60_000);
     assert.match(answer.text, /^Gmail hard-bounced 61 of 1,000/);
-    assert.equal(chat.frames.filter(f => f.type === 'text.delta' && f.messageId === answer.messageId).map(f => f.delta).join(''), answer.text, 'The answer streams as deltas.');
+    assert.deepEqual(chat.frames.filter(f => f.type === 'text.delta' && f.messageId === answer.messageId).map(f => f.delta), [answer.text], 'The checked answer arrives as one delta, then its end.');
     assert.equal(chat.frames.filter(f => f.type === 'message.start' && f.kind === 'reply').length, 1, 'A resent clientMessageId is ignored.');
     // The tool result the model read was projected: untrusted text fenced, operator fields and grant gone, addresses kept out.
     const toolTurn = recorded.slice(before).find(r => JSON.stringify(r.body.messages).includes('tool_result'))!;
@@ -729,6 +729,44 @@ describe('support Worker', () => {
     chat.ws.close();
   }, 180_000);
 
+  test('no blocked text ever reaches the socket: a leak streamed in pieces is held whole, and the panel gets only the held text', async () => {
+    const chat = await chatAs('usr_lena', 'owner');
+    const frames = await turn(chat, 'leak in pieces');
+    const end = frames.find(f => f.type === 'message.end');
+    assert.match(end?.text, /^I’ve sent this one to the Nightmail team to check/);
+    assert.equal(end.redacted, true);
+    for (const piece of LEAK_PIECES.map(p => p.trim())) assert.ok(!chat.frames.some(f => JSON.stringify(f).includes(piece)), `No frame carries “${piece}”.`);
+    assert.deepEqual(frames.filter(f => f.type === 'text.delta').map(f => f.delta), [end.text], 'One delta, the held text, and only at the end.');
+    // While the answer is held the panel has its working line: busy, then the message, then (only) the checked text.
+    const at = (type: string) => frames.findIndex(f => f.type === type);
+    assert.ok(at('status') < at('message.start') && at('message.start') < at('text.delta') && at('text.delta') < at('message.end'), frames.map(f => f.type).join());
+    chat.ws.close();
+  }, 180_000);
+
+  test('a model refusal gets the fixed decline, never an error or half a sentence, in chat and by email', async () => {
+    const decline = 'I can’t help with that. If something asks you to sign in outside nightmail.dev, don’t. To confirm a change, use the card in this panel or the dashboard.';
+    for (const probe of ['none', 'partway']) {
+      const chat = await chatAs(`usr_refused_${probe}`, 'owner');
+      const frames = await turn(chat, `Refusal probe: ${probe}`);
+      const end = frames.find(f => f.type === 'message.end');
+      assert.deepEqual([end?.text, end?.redacted], [decline, false], probe);
+      assert.deepEqual(frames.filter(f => f.type === 'text.delta').map(f => f.delta), [decline]);
+      assert.ok(!frames.some(f => f.type === 'error'), `No error: ${frames.map(f => f.type).join()}`);
+      assert.ok(!chat.frames.some(f => REFUSED_PARTIAL.some(part => JSON.stringify(f).includes(part.trim()))), 'Nothing the model wrote before it refused.');
+      chat.ws.close();
+    }
+    const emailed = 'Hi,\n\nI can’t help with that. If something asks you to sign in outside nightmail.dev, don’t. To change anything in your account, sign in to Nightmail and use the dashboard or Help: https://dev.bane.mx\n\nNightmail support (AI)';
+    for (const probe of ['none', 'partway']) {
+      const before = recorded.length;
+      assert.equal((await signedHook(`msg_refuse_${probe}`, `thr_refuse_${probe}`, 'rex@else.test')).status, 200);
+      const sent = await eventually(async () => (await replies(`thr_refuse_${probe}`))[0]);
+      assert.deepEqual([sent?.[3].text, sent?.[3].subject, sent?.[3].to], [emailed, 'Re: your message to Nightmail support', ['rex@else.test']], probe);
+      await sleep(1000);
+      assert.equal((await replies(`thr_refuse_${probe}`)).length, 1, 'One email.');
+      assert.equal(recorded.slice(before).filter(r => JSON.stringify(r.body?.messages ?? []).includes(`Refusal probe: ${probe}`)).length, 1, 'No nudge after a refusal.');
+    }
+  }, 180_000);
+
   test('email gets general answers only: no stamped call from an email conversation, and the system adds the Help line', async () => {
     const before = recorded.length;
     const body = JSON.stringify({ type: 'message.received', data: { messageId: 'msg_mail_1', message: { id: 'msg_mail_1', threadId: 'thr_mail_1', direction: 'inbound', from: { address: 'ada@acme.test' } } } });
@@ -945,7 +983,7 @@ describe('support Worker', () => {
     } finally { await capped.dispose(); }
   }, 180_000);
 
-  test('chat unchanged: no reply tool in a chat turn’s gateway request; the text streams', async () => {
+  test('chat unchanged: no reply tool in a chat turn’s gateway request; the answer is its text', async () => {
     // A member who is not an owner or admin (from before the panel joins): no owner/admin tools, and never reply.
     const started = await post('/chat/start', { handoff: handoff('usr_mo') });
     assert.equal(started.status, 200, JSON.stringify(started.body));
@@ -957,7 +995,7 @@ describe('support Worker', () => {
     const end = await chat.until(f => f.type === 'message.end' && /61 of 1,000/.test(f.text ?? ''), 60_000);
     const member = recorded.slice(before).filter(r => about(r, '(chat check)'));
     assert.ok(member.length >= 2 && member.every(r => offered(r).includes('bounce_reasons') && offered(r).includes('file_ticket') && !offered(r).includes('reply') && !MANAGER.some(n => offered(r).includes(n))), JSON.stringify(member.map(offered)));
-    assert.equal(chat.frames.filter(f => f.type === 'text.delta' && f.messageId === end.messageId).map(f => f.delta).join(''), end.text, 'The answer streams as deltas.');
+    assert.deepEqual(chat.frames.filter(f => f.type === 'text.delta' && f.messageId === end.messageId).map(f => f.delta), [end.text], 'The checked answer arrives as one delta, then its end.');
     assert.ok(!chat.frames.some(f => f.type === 'tool.start' && f.tool === 'reply'));
     // Promoted to admin: the same session's next turn offers the owner/admin tools (its permissions follow the turn).
     await fakeHook('/__role', { userId: 'usr_mo', workspaceId: 'ws_acme', role: 'admin' });
