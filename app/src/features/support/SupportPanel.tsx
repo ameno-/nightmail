@@ -1,13 +1,14 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type FormEvent, type KeyboardEvent, type RefObject } from 'react'
 import { ArrowUp, Check, CircleAlert, History, Image as ImageIcon, ImagePlus, Square, UserRound, X } from 'lucide-react'
-import { Button, DropdownMenu, IconButton } from '../../components/ui'
+import { Button, DropdownMenu, IconButton, Skeleton } from '../../components/ui'
 import { SheetOpenEffects, useSheetDrag } from '../../components/ui/sheet'
 import { useSession } from '../../data/context'
 import { TOUCH, matches, usePhone, useTouch } from '../../lib/media'
 import { Markdown, settled } from './markdown'
 import { createDemoTransport } from './demo'
 import { createSocketTransport, supportOrigin } from './socket'
-import { plural, supportStore, ticketTitle, type Attachment, type ChatMessage, type ChatState, type Part, type SupportStore } from './store'
+import { actionOutcome, actionTitle, plural, supportStore, ticketTitle, type ActionPart, type Attachment, type ChatMessage, type ChatState, type Part, type SupportStore } from './store'
+import { ActionSummary, actionTone } from './actions'
 import { IMAGE_TYPES, MAX_MESSAGE } from './protocol'
 import './support.css'
 import { NightmailMark } from '../../components/NightmailLogo'
@@ -155,7 +156,7 @@ function UserMessage({ message, onRetry }: { message: ChatMessage; onRetry: () =
 // place when it arrives. Steps never show their inputs: the labels are fixed text from the server.
 function AgentMessage({ message, store, closed }: { message: ChatMessage; store: SupportStore; closed: boolean }) {
   const lastPart = message.parts.at(-1)
-  const asking = message.parts.some(part => part.kind === 'consent' && (part.state === 'open' || part.state === 'allowing'))
+  const asking = message.parts.some(part => part.kind === 'consent' && (part.state === 'open' || part.state === 'allowing') || part.kind === 'action' && (!part.action || part.action.status === 'proposed'))
   const working = message.streaming && lastPart?.kind !== 'text' && !asking
   const running = [...message.parts].reverse().find(part => part.kind === 'tool' && part.state === 'running')
   const shown = message.parts.map((part, index) => ({ part, index })).filter(({ part }) => part.kind !== 'tool')
@@ -164,7 +165,8 @@ function AgentMessage({ message, store, closed }: { message: ChatMessage; store:
     {message.kind === 'staff' && <p className="support-message__author">{message.author || `The ${productName} team`}</p>}
     {shown.map(({ part, index }) => part.kind === 'text' ? <StreamText key={index} text={part.text} live={message.streaming} last={index === message.parts.length - 1} restored={message.restored} />
       : part.kind === 'consent' ? <ConsentCard key={index} part={part} closed={closed} onDecide={decision => decide(store, part.request.requestId, decision)} />
-      : part.kind === 'ticket' ? <TicketCard key={index} part={part} /> : null)}
+      : part.kind === 'ticket' ? <TicketCard key={index} part={part} />
+      : part.kind === 'action' ? <ActionCard key={part.request.actionId} part={part} store={store} /> : null)}
     {working && <AgentStatus label={running?.kind === 'tool' && running.label.trim() ? running.label : WORKING} />}
   </article>
 }
@@ -251,6 +253,34 @@ function ConsentCard({ part, closed, onDecide }: { part: Extract<Part, { kind: '
         {part.state === 'deny' ? `Not shared. ${productName} support won’t read your emails.` : <><Check size={14} strokeWidth={2.5} aria-hidden="true" />Allowed for this conversation</>}
       </p>
     </div>
+  </div>
+}
+
+// A change the agent proposed. The card shows Nightmail's own sentence for it, read with this session (never the agent's
+// words), and the buttons wait for it; Confirm has Nightmail make the change for this person, exactly as its own route
+// does, and the card then says what came of it from Nightmail's answer.
+function ActionCard({ part, store }: { part: ActionPart; store: SupportStore }) {
+  const { action, state } = part
+  const open = action?.status === 'proposed', deciding = state === 'confirming' || state === 'declining'
+  const outcome = action ? actionOutcome(action) : null
+  const decide = (decision: 'confirm' | 'decline') => {
+    void store.decideAction(part.request.actionId, decision)
+    if (!matches(TOUCH)) requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('#support-panel .support-composer__input')?.focus({ preventScroll: true }))
+  }
+  return <div className="support-card support-action" data-state={action?.status ?? state} role="group" aria-label="Confirm a change" aria-busy={state === 'loading' || undefined}>
+    <p className="support-card__title">{actionTitle(part.request.kind)}</p>
+    {action ? <p className="support-card__body"><ActionSummary action={action} /></p>
+      : state === 'loading' ? <div className="support-card__body support-action__loading" aria-hidden="true"><Skeleton width="94%" height={10} /><Skeleton width="58%" height={10} /></div> : null}
+    {part.error && <p className="support-card__error" role="alert">{part.error}</p>}
+    {(action || state === 'loading') && <div className="support-card__actions">
+      <div className="support-card__choice" data-active={!outcome || undefined} aria-hidden={outcome ? true : undefined}>
+        <Button variant="primary" size="sm" loading={state === 'confirming'} disabled={!open || deciding} tabIndex={outcome ? -1 : undefined} onClick={() => decide('confirm')}>Confirm</Button>
+        <Button size="sm" disabled={!open || deciding} tabIndex={outcome ? -1 : undefined} onClick={() => decide('decline')}>Not now</Button>
+      </div>
+      <p className="support-card__resolved" data-active={outcome ? true : undefined} data-tone={action ? actionTone(action) : undefined} aria-hidden={outcome ? undefined : true}>
+        {action?.status === 'done' && <Check size={14} strokeWidth={2.5} aria-hidden="true" />}{outcome}
+      </p>
+    </div>}
   </div>
 }
 

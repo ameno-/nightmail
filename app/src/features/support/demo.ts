@@ -1,10 +1,14 @@
 import type { ClientMessage, ServerMessage, SupportTransport, TransportEvent } from './protocol'
+import type { SupportAction, SupportActionKind } from '../../data/support'
+import { ApiError } from '../../data/types'
 import { productName } from '../../../../api/src/brand'
 
 // The demo transport: a scripted conversation over the same protocol messages as the support Worker, with no network.
 // The panel opens with its own line; then a deliverability investigation (Outlook bounces after an import → advice → a consent card, which ends the
 // answer as the protocol does → a content tip and a ticket offer); then the person drops a screenshot of the failing
-// re-import, the agent reads it and files a bug report with it. Whatever the person types moves the script on. The
+// re-import, the agent reads it and files a bug report with it. Whatever the person types moves the script on; a message
+// about a webhook instead finds a failed delivery and proposes retrying it (an action card, §4.4), and goes on once the
+// person decides. The
 // timings are the point: the panel is reviewed and screenshotted against them, so steps take a beat and text streams in
 // uneven chunks. Uploads are simulated with progress.
 //
@@ -16,6 +20,7 @@ type Step =
   | { consent: string; allow: Step[]; deny: Step[] }
   | { ticket: string; category?: string }
   | { pause: number }
+  | { action: SupportActionKind; template: string; labels: Record<string, string>; done: Step[]; declined: Step[] }
 
 const investigate: Step[] = [
   { pause: 300 },
@@ -45,6 +50,15 @@ const file: Step[] = [
   { say: `Done. I’ve passed this to the ${productName} team with everything we found, so you won’t need to explain it again.` },
   { ticket: 'deliverability' },
 ]
+const webhook = (workspace: string): Step[] => [
+  { pause: 300 },
+  { tool: 'webhook_deliveries', running: 'Checking your webhook deliveries…', done: 'Checked your webhook deliveries for the last 24 hours', ms: 1100 },
+  { say: 'Your endpoint ending **/hooks/nightmail** answered `503` three times to the **email.bounced** delivery from 09:14, then the retries ran out. It has answered `200` to everything since 09:40, so it’s back up.\n\nI can retry that delivery now. It goes out once you confirm.' },
+  { action: 'retry_webhook_delivery', template: 'Retry the email.bounced webhook delivery whd_7c1e9a40b25f4d6e8a13c0f2d9b8e571 to your sending webhook ending {endpoint}, in the workspace {workspace}. It is failed after 3 attempts.',
+    labels: { endpoint: '/hooks/nightmail', workspace },
+    done: [{ tool: 'webhook_delivery', running: 'Checking the retry…', done: 'Checked the retry', ms: 900 }, { say: 'Done. Your endpoint answered `200` this time, so that bounce has reached your system.' }],
+    declined: [{ say: 'Okay, nothing was retried. If you want it later, ask me again.' }] },
+]
 const later: Step[] = [{ pause: 500 }, { say: 'I’ve added that to the ticket, so the team sees it when they pick it up. Anything else I can check while you wait?' }]
 
 const random = (seed: number) => () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647 }
@@ -53,7 +67,9 @@ export function createDemoTransport({ firstName, workspace }: { firstName: strin
   const listeners = new Set<(event: TransportEvent) => void>()
   const emit = (event: TransportEvent) => { for (const listener of listeners) listener(event) }
   let seq = 0, conversation = 0, turn = 0, online = true, failNext = false, filed = false, cancelled = false
-  let busy = false, queue: { text: string; attachments: number }[] = [], consent: { requestId: string; allow: Step[]; deny: Step[] } | null = null
+  let busy = false, queue: { text: string; attachments: number }[] = [], consent: { requestId: string; allow: Step[]; deny: Step[] } | null = null, proposed = false
+  // The proposals, as Nightmail would keep them, with what the agent says once each is decided.
+  const actions = new Map<string, { action: SupportAction; done: Step[]; declined: Step[] }>()
   const timers = new Set<ReturnType<typeof setTimeout>>()
   const server = (message: Record<string, unknown>) => { if (online) emit({ type: 'server', message: { v: 1, seq: seq++, ...message } as ServerMessage }) }
   const wait = (ms: number) => new Promise<void>(resolve => { const timer = setTimeout(() => { timers.delete(timer); resolve() }, ms); timers.add(timer) })
@@ -93,6 +109,15 @@ export function createDemoTransport({ firstName, workspace }: { firstName: strin
         server({ type: 'consent.request', requestId, workspace, why: step.consent })
         consent = { requestId, allow: step.allow, deny: step.deny }
         break
+      } else if ('action' in step) {
+        // The answer ends by proposing; the agent carries on once the person decides (action.resolved).
+        const actionId = `sac_demo${String(seq).padStart(4, '0')}`, at = new Date()
+        const summary = step.template.replace(/\{([a-z]+)\}/g, (_, name: string) => JSON.stringify(step.labels[name] ?? ''))
+        actions.set(actionId, { done: step.done, declined: step.declined, action: { id: actionId, kind: step.action, status: 'proposed', summary, parts: { template: step.template, labels: step.labels }, workspaceId: workspace.id,
+          target: {}, url: `/support/actions/${actionId}`, result: null, error: null, createdAt: at.toISOString(), expiresAt: new Date(at.getTime() + 86_400_000).toISOString(), resolvedAt: null } })
+        proposed = true
+        server({ type: 'action.request', actionId, kind: step.action, summary })
+        break
       } else if ('ticket' in step) {
         filed = true
         server({ type: 'ticket.filed', ticketId: 'tkt_8F2KQ', ticketType: step.ticket, category: step.category ?? step.ticket, replyTo: `${firstName.slice(0, 1).toLowerCase()}…@acme.com`, expect: 'usually within one business day' })
@@ -125,11 +150,11 @@ export function createDemoTransport({ firstName, workspace }: { firstName: strin
   function reply() {
     if (busy) return
     const message = queue.shift()
-    void answer(() => filed ? later : turn++ === 0 ? investigate : message?.attachments ? screenshot : file, 'reply')
+    void answer(() => !proposed && /webhook/i.test(message?.text ?? '') ? webhook(workspace.name) : filed ? later : turn++ === 0 ? investigate : message?.attachments ? screenshot : file, 'reply')
   }
   async function start() {
     const id = ++conversation
-    clear(); turn = 0; filed = false; busy = false; queue = []; consent = null
+    clear(); turn = 0; filed = false; busy = false; queue = []; consent = null; proposed = false; actions.clear()
     emit({ type: 'connection', state: 'connecting' })
     await wait(450)
     if (id !== conversation) return
@@ -151,12 +176,30 @@ export function createDemoTransport({ firstName, workspace }: { firstName: strin
         server({ type: 'consent.resolved', requestId: message.requestId, decision: message.decision })
         void wait(350).then(() => answer(() => message.decision === 'allow' ? pending.allow : pending.deny, 'reply'))
       }
+      else if (message.type === 'action.resolved') {
+        const entry = actions.get(message.actionId)
+        if (entry && entry.action.status !== 'proposed') void wait(350).then(() => answer(() => entry.action.status === 'declined' ? entry.declined : entry.done, 'reply'))
+      }
       else if (message.type === 'cancel') cancelled = true
       else if (message.type === 'human.request' && !filed) void answer(() => file.slice(1), 'reply')
       else if (message.type === 'end') { clear(); conversation++; server({ type: 'closed', reason: 'ended' }); server({ type: 'status', busy: false }) }
       return true
     },
     async allowContent(requestId) { await wait(500); transport.send({ type: 'consent.respond', requestId, decision: 'allow', handoff: 'demo' }) },
+    async readAction(actionId) {
+      await wait(120)
+      const entry = actions.get(actionId)
+      if (!entry) throw new ApiError('Support action was not found.', 'NOT_FOUND', {}, undefined, 404)
+      return entry.action
+    },
+    async decideAction(actionId, decision) {
+      const entry = actions.get(actionId)
+      if (!entry) throw new ApiError('Support action was not found.', 'NOT_FOUND', {}, undefined, 404)
+      await wait(decision === 'confirm' ? 800 : 300)
+      if (entry.action.status === 'proposed') entry.action = { ...entry.action, status: decision === 'confirm' ? 'done' : 'declined', result: decision === 'confirm' ? { status: 'pending' } : null, resolvedAt: new Date().toISOString() }
+      transport.send({ type: 'action.resolved', actionId })
+      return entry.action
+    },
     // Progress in uneven steps over about a second, as a small screenshot on a good connection.
     upload(_file, onProgress, signal) {
       return new Promise((resolve, reject) => {

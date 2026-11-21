@@ -12,3 +12,19 @@ export const supportApi = {
     } })
   },
 }
+
+/** A change support proposed to the signed-in person (api/src/support-actions.ts): its sentence is
+ *  Nightmail's own, from its records, with each name a person typed apart in `parts.labels`. */
+export type SupportActionKind = 'retry_webhook_delivery' | 'test_webhook' | 'retry_inbound_delivery' | 'test_inbound_webhook' | 'redeliver_message' | 'pause_campaign'
+export type SupportAction = {
+  id: string; kind: SupportActionKind; status: 'proposed' | 'running' | 'done' | 'failed' | 'declined' | 'expired'; summary: string
+  parts: { template: string; labels: Record<string, string> }; workspaceId: string; target: Record<string, string>; url: string
+  result: Record<string, unknown> | null; error: { code: string; message: string } | null; createdAt: string; expiresAt: string; resolvedAt: string | null
+}
+// Only the person it was proposed to reads or decides it, with their own dashboard session; anyone else gets 404.
+const action = (id: string) => `/v1/support-actions/${encodeURIComponent(id)}`
+export const supportActionsApi = {
+  get: (id: string, signal?: AbortSignal) => request<SupportAction>(action(id), { signal }),
+  confirm: (id: string) => request<SupportAction>(`${action(id)}/confirm`, { method: 'POST' }),
+  decline: (id: string) => request<SupportAction>(`${action(id)}/decline`, { method: 'POST' }),
+}
