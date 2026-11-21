@@ -2,7 +2,7 @@
 // prompt's prices against these). It imports nothing.
 
 // The current rate version, from November 2026. The database prices each UTC month at its own version (billing_rates_in,
-// migrations 367 and 377): months before it had 3,000 sent and 3,000 received free and charged $0.10 per 1,000 AI
+// migrations 367 and 380): months before it had 3,000 sent and 3,000 received free and charged $0.10 per 1,000 AI
 // decisions. AI decisions are free (omenUc 0): still metered and counted, never charged.
 export const RATES = { version: 3, emailUc: 20_000n, omenUc: 0n, storageUcPerGbMonth: 25_000_000n, freeSentEmails: 5000, freeReceivedEmails: 5000, freeStorageBytes: 1_000_000_000n } as const;
 

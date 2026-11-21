@@ -105,7 +105,7 @@ function describe(kind: LedgerKind, detail: Record<string, unknown>) {
   switch (kind) {
     case 'usage': {
       // A month settled at an earlier rate version, posted again at the version that replaced it: the larger free
-      // allowance (migration 367), or free AI decisions (377).
+      // allowance (migration 367), or free AI decisions (380).
       const repriced = detail.repriced as { freeSent?: unknown; freeReceived?: unknown; decisionUc?: unknown } | undefined;
       if (repriced && typeof repriced === 'object') return 'decisionUc' in repriced ? `Usage ${detail.usageMonth}: AI decisions refunded, as AI rules are free`
         : `Usage ${detail.usageMonth}: repriced at ${count(repriced.freeSent)} sent and ${count(repriced.freeReceived)} received free`;

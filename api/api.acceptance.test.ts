@@ -10587,16 +10587,16 @@ describe('Billing: metering, gate and settlement', () => {
     });
   });
 
-  test('rate version 3 prices AI decisions at $0 from November 2026 and still counts them; migration 377 gives back what November\'s settled decisions were charged, once, promotional credit first, and October keeps version 1', async t => {
+  test('rate version 3 prices AI decisions at $0 from November 2026 and still counts them; migration 380 gives back what November\'s settled decisions were charged, once, promotional credit first, and October keeps version 1', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       // The migration reads every workspace's usage: for this transaction, these tables hold only this test's.
       for (const table of ['billing_usage_hourly', 'billing_months', 'billing_forgiven']) await db.query(`CREATE TEMP TABLE ${table} (LIKE public.${table} INCLUDING ALL) ON COMMIT DROP`);
       const f = await billingFixture(runtime, db, local, request), paid = f.wid;
       const [promo, free, october] = ['promo', 'free', 'october'].map(n => unique(`decisions-${n}`));
       const at = await clock(db, '2026-11-20T12:00:00Z');
-      // As it was before 377: rate version 2, AI decisions at $0.10 per 1,000 in November too.
+      // As it was before 380: rate version 2, AI decisions at $0.10 per 1,000 in November too.
       const read = (name: string) => readFile(new URL(`./migrations/${name}.sql`, import.meta.url), 'utf8');
-      const [v2, v3] = await Promise.all([read('367_billing_rate_version_two'), read('377_billing_rate_version_three')]);
+      const [v2, v3] = await Promise.all([read('367_billing_rate_version_two'), read('380_billing_rate_version_three')]);
       await db.query(v2);
       await charging(db, null, true); await db.query(`UPDATE billing_config SET mode='enforce'`); await charging(db, free, false);
       const meter = (wid: string, hour: string, q: number, name = 'omen') => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1,$2::timestamptz,$3,$4)
