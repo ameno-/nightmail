@@ -96,7 +96,14 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 .support-card__choice, .support-card__resolved { grid-area: 1 / 1; display: flex; align-items: center; gap: var(--space-8); margin: 0; transition: opacity 180ms ease-out, transform 240ms var(--ease-out-strong), filter 240ms var(--ease-out-strong), visibility 0s; }
 .support-card__choice:not([data-active]), .support-card__resolved:not([data-active]) { opacity: 0; transform: translateY(4px); filter: blur(2px); visibility: hidden; transition: opacity 140ms ease-out, transform 200ms ease-out, filter 200ms ease-out, visibility 0s 200ms; }
 .support-card__resolved { gap: var(--space-6); color: var(--color-muted); }
-.support-card__resolved[data-decision='allow'] { color: var(--color-success); }
+.support-card__resolved[data-decision='allow'], .support-card__resolved[data-tone='success'] { color: var(--color-success); }
+.support-card__resolved[data-tone='danger'] { color: var(--color-danger); }
+.support-card .support-card__error { margin-top: var(--space-6); color: var(--color-danger); font-size: var(--text-xs); line-height: var(--leading-xs); }
+/* A proposed change: the names a person typed, inside Nightmail's sentence, read as data (as the consent card's workspace). */
+.support-action__name { color: var(--color-text); font-weight: var(--font-weight-bold); }
+.support-action__loading { display: grid; gap: 8px; padding-block: 5px 3px; }
+.support-action-dialog__summary { margin: 0; overflow-wrap: anywhere; }
+.support-action-dialog__status { margin: var(--space-12) 0 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
 .support-ticket { display: flex; align-items: flex-start; gap: var(--space-12); }
 .support-ticket__mark { display: grid; flex: none; place-items: center; width: 18px; height: 18px; margin-top: 1px; border-radius: 50%; background: var(--color-success-bg); color: var(--color-success); box-shadow: inset 0 0 0 1px var(--color-success-border); animation: support-mark-in 320ms var(--ease-out-strong) 100ms both; }
 .support-message[data-restored] .support-ticket__mark { animation: none; }
