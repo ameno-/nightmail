@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useState, type FormEvent, type ReactNode, type RefObject } from 'react'
 import { Link } from 'react-router'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import { ChevronRight } from 'lucide-react'
@@ -18,6 +18,8 @@ export type Purpose = 'manage' | 'send' | 'read_send' | 'read' | 'addresses' | '
 type WorkspacePurpose = Extract<Purpose, 'manage' | 'send' | 'read_send' | 'read'>
 const workspacePermissions: Record<WorkspacePurpose, KeyPermission[]> = { manage: ['read', 'send', 'manage'], send: ['send'], read_send: ['read', 'send'], read: ['read'] }
 const isWorkspace = (purpose: Purpose | 'current'): purpose is WorkspacePurpose => purpose in workspacePermissions
+// Create key offers the three common choices first; the rest open under More.
+const common = new Set<Purpose | 'current'>(['manage', 'send', 'read'])
 // Each choice is named for what it reaches; what it can and can't do is in "What this key can do", which opens under
 // the form and follows the choices.
 const purposes: { value: Purpose; label: string; does: string }[] = [
@@ -60,7 +62,7 @@ export function CreateKeyDialog({ open, onOpenChange, onCreated, onConnectAgent,
   const form = kind && (kind !== 'smtp' || servers) ? forms[kind] : undefined
   const props = { open, onOpenChange, onPending: setPending, onCreated }
   return <Dialog open={open} onOpenChange={next => { if (!pending) onOpenChange(next) }} title={form?.title ?? 'Create key'}
-    footer={form ? <><Button disabled={pending} onClick={() => setKind(null)}>Back</Button><Button variant="primary" loading={pending} type="submit" form={form.id}>{form.submit}</Button></> : <Button onClick={() => onOpenChange(false)}>Cancel</Button>}>
+    footer={form && <><Button disabled={pending} onClick={() => setKind(null)}>Back</Button><Button variant="primary" loading={pending} type="submit" form={form.id}>{form.submit}</Button></>}>
     {kind === 'api' ? <ApiKeyForm {...props} initial={initial} />
       : kind === 'smtp' && servers ? <SmtpLoginForm {...props} />
       : kind === 'app' ? <AppPasswordForm {...props} />
@@ -105,6 +107,11 @@ function InboxChoice({ name, query, value, onChange, disabled, error, none }: { 
     {query.hasNextPage && !query.isError && <Button variant="ghost" loading={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>Load more inboxes</Button>}
     {error && <p id={`${name}-error`} className="ui-field__error" role="alert">{error}</p>}
   </fieldset>
+}
+
+/** A failed address read in an address choice's place, with the same retry as the domain list: never an empty list. */
+function AddressesFailed({ query }: { query: { error: unknown; refetch: () => unknown } }) {
+  return <div className="stack"><MutationError error={query.error} /><Button onClick={() => void query.refetch()}>Retry loading addresses</Button></div>
 }
 
 export const chooseAddress = 'Choose an address, or Every address.'
@@ -191,10 +198,12 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial, editing
   const [allAddresses, setAllAddresses] = useState(was?.type === 'addresses' && was.addressIds === null)
   const [addressIds, setAddressIds] = useState<string[]>(was?.type === 'addresses' ? was.addressIds ?? [] : [])
   const [inboxId, setInboxId] = useState(was?.inboxId ?? '')
-  const [mail, setMail] = useState<MailPermission[]>(was && was.type !== 'workspace' ? was.mail : ['read', 'modify'])
+  // A new key limited to mail starts read-only: organizing (which can delete an inbox) is chosen, never a default.
+  const [mail, setMail] = useState<MailPermission[]>(was && was.type !== 'workspace' ? was.mail : ['read'])
   const [expires, setExpires] = useState(Boolean(editing?.expiresAt))
   const [expiry, setExpiry] = useState(editing?.expiresAt ? utcInput(editing.expiresAt) : in30Days())
   const [expiryTouched, setExpiryTouched] = useState(false)
+  const [more, setMore] = useState(!common.has(purpose))
   const [errors, setErrors] = useState<Record<string, string>>({})
   const workspace = inWorkspace(purpose)
   const pending = write.isPending
@@ -306,6 +315,10 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial, editing
     ...expires ? [`Stops working at ${expiry.replace('T', ' ')} UTC${purpose === 'inbox' ? ', or when its inbox ends' : ''}.`] : purpose === 'inbox' ? ['Stops working when its inbox ends.'] : [],
   ]
   const formId = editing ? 'edit-key' : 'create-key'
+  const choice = (item: { value: FormPurpose; label: string }) => <label key={item.value} className="keys-choice">
+    <input type="radio" name="key-purpose" value={item.value} checked={purpose === item.value} onChange={() => { setPurpose(item.value); setErrors({}); write.reset() }} />
+    <span>{item.label}</span>
+  </label>
 
   return <>
     <form id={formId} className="stack" onSubmit={submit} noValidate>
@@ -313,16 +326,19 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial, editing
       <Field label="Name" htmlFor="key-name" error={nameError}><Input id="key-name" value={name} maxLength={100} onChange={event => setName(event.target.value)} autoFocus={!editing} required disabled={pending} placeholder={placeholder} /></Field>
       <fieldset className="keys-purpose" disabled={pending}>
         <legend className="ui-field__label">What it can reach</legend>
-        {choices.map(item => <label key={item.value} className="keys-choice">
-          <input type="radio" name="key-purpose" value={item.value} checked={purpose === item.value} onChange={() => { setPurpose(item.value); setErrors({}); write.reset() }} />
-          <span>{item.label}</span>
-        </label>)}
+        {editing ? choices.map(choice) : <>
+          {choices.filter(item => common.has(item.value)).map(choice)}
+          <details className="keys-more" open={more} onToggle={event => setMore(event.currentTarget.open)}>
+            <summary>More<ChevronRight size={14} aria-hidden="true" /></summary>
+            <div className="keys-more__choices">{choices.filter(item => !common.has(item.value)).map(choice)}</div>
+          </details>
+        </>}
       </fieldset>
       {workspace && <DomainChoice query={domainOptions} chosen={selectedDomains} onToggle={toggleDomain} disabled={pending} error={domainError} onLeave={() => onOpenChange(false)}
         every={{ checked: allDomains, onChange: checked => { setAllDomains(checked); setSelectedDomains([]); clearError('domains') } }} />}
       {purpose === 'addresses' && <AddressChoice id="key-address" options={shownAddresses} every={allAddresses} chosen={addressIds} disabled={pending} error={addressError}
         onEvery={checked => { setAllAddresses(checked); setAddressIds(checked ? [] : was?.type === 'addresses' ? was.addressIds ?? [] : []); clearError('addressIds') }} onToggle={toggleAddress}
-        empty={addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : !shownAddresses.length ? <Link className="keys-form-note" to="/receiving" onClick={() => onOpenChange(false)}>Create an address</Link> : undefined} />}
+        empty={addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : addresses.isError ? <AddressesFailed query={addresses} /> : !shownAddresses.length ? <Link className="keys-form-note" to="/receiving" onClick={() => onOpenChange(false)}>Create an address</Link> : undefined} />}
       {purpose === 'inbox' && <InboxChoice name="key-inbox" query={inboxes} value={chosenInbox} onChange={id => { setInboxId(id); clearError('inboxId') }} disabled={pending} error={inboxError}
         none={<Link to="/receiving/inboxes" onClick={() => onOpenChange(false)}>Create an agent inbox</Link>} />}
       {!workspace && <fieldset className="keys-purpose" disabled={pending}>
@@ -350,9 +366,9 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial, editing
 }
 
 /** Edit key: the API key form, prefilled from the key. Render only while open, so its choices start from the key. */
-export function EditKeyDialog({ apiKey, onClose }: { apiKey: ApiKey; onClose: () => void }) {
+export function EditKeyDialog({ apiKey, onClose, returnFocus }: { apiKey: ApiKey; onClose: () => void; returnFocus?: RefObject<HTMLElement | null> }) {
   const [pending, setPending] = useState(false)
-  return <Dialog open onOpenChange={next => { if (!next && !pending) onClose() }} title="Edit key"
+  return <Dialog open onOpenChange={next => { if (!next && !pending) onClose() }} title="Edit key" returnFocus={returnFocus}
     footer={<><Button disabled={pending} onClick={onClose}>Cancel</Button><Button variant="primary" loading={pending} type="submit" form="edit-key">Save</Button></>}>
     <ApiKeyForm open editing={apiKey} onOpenChange={next => { if (!next) onClose() }} onPending={setPending} onCreated={() => {}} />
   </Dialog>
@@ -453,7 +469,7 @@ function SmtpLoginForm({ open, onOpenChange, onPending, onCreated }: FormProps) 
       : <AddressChoice id="smtp-login-address" options={receiving} every={allAddresses} chosen={addressIds} disabled={pending} error={errors.addressIds || fieldError(create.error, 'access.addressIds')}
         onEvery={checked => { setAllAddresses(checked); setAddressIds([]); clearError('addressIds') }}
         onToggle={(id, checked) => { clearError('addressIds'); setAllAddresses(false); setAddressIds(current => checked ? [...new Set([...current, id])] : current.filter(item => item !== id)) }}
-        empty={addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : !receiving.length ? <Link className="keys-form-note" to="/receiving" onClick={() => onOpenChange(false)}>Create an address</Link> : undefined} />}
+        empty={addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : addresses.isError ? <AddressesFailed query={addresses} /> : !receiving.length ? <Link className="keys-form-note" to="/receiving" onClick={() => onOpenChange(false)}>Create an address</Link> : undefined} />}
     <Disclosure className="keys-can" title="What this login can do"><ul>
       <li>Sends from an app over SMTP, as {scope === 'domains' ? 'any address on these domains and their subdomains' : 'these addresses'}.</li>
       <li>Mail goes out like an API send: the same limits, suppressions and events.</li>

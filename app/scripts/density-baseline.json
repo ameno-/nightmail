@@ -214,7 +214,7 @@
    "findings": []
   },
   "Overview · connect agent sheet · phone": {
-   "score": 18,
+   "score": 15,
    "findings": []
   },
   "Overview · desktop": {
@@ -278,11 +278,27 @@
    "findings": []
   },
   "Receiving · address · desktop": {
-   "score": 39,
+   "score": 7,
    "findings": []
   },
   "Receiving · address · phone": {
-   "score": 29,
+   "score": 7,
+   "findings": []
+  },
+  "Receiving · address · settings · desktop": {
+   "score": 12,
+   "findings": []
+  },
+  "Receiving · address · settings · phone": {
+   "score": 12,
+   "findings": []
+  },
+  "Receiving · address · where mail goes · desktop": {
+   "score": 17,
+   "findings": []
+  },
+  "Receiving · address · where mail goes · phone": {
+   "score": 16,
    "findings": []
   },
   "Receiving · agent inbox · desktop": {
@@ -302,7 +318,15 @@
    "findings": []
   },
   "Receiving · desktop": {
-   "score": 19,
+   "score": 16,
+   "findings": []
+  },
+  "Receiving · destinations · desktop": {
+   "score": 10,
+   "findings": []
+  },
+  "Receiving · destinations · phone": {
+   "score": 10,
    "findings": []
   },
   "Receiving · endpoints · desktop": {
@@ -346,7 +370,7 @@
    "findings": []
   },
   "Receiving · new workspace · desktop": {
-   "score": 13,
+   "score": 11,
    "findings": []
   },
   "Receiving · phone": {
@@ -382,11 +406,15 @@
    "findings": []
   },
   "Receiving · rules · desktop": {
-   "score": 18,
+   "score": 16,
    "findings": []
   },
   "Receiving · rules · phone": {
-   "score": 18,
+   "score": 16,
+   "findings": []
+  },
+  "Receiving · test · desktop": {
+   "score": 20,
    "findings": []
   },
   "Receiving · trace · desktop": {

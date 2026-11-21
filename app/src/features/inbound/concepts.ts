@@ -1,11 +1,12 @@
-// The words Receiving uses, in one place. Names follow the API: routes, rules, endpoints, catch-all (catchAll), store.
-// What each one means is said once, in the Docs guides (docs/guides.tsx and docs/receiving.md), not on the screens.
+// The words Receiving uses, in one place. One model on every screen, in this order: an address is where mail is
+// received, a rule is where it is processed, a destination is where it is delivered. The API keeps its own names
+// (routes, rules, endpoints, catchAll, store); only the dashboard's words are these. What each one means is said once,
+// in the Docs guides (docs/guides.tsx and docs/receiving.md), not on the screens.
 
 export const concepts = {
-  routes: { title: 'Routes' },
+  addresses: { title: 'Addresses' },
   rules: { title: 'Rules', adminOnly: 'Owners and admins manage rules' },
-  endpoints: { title: 'Endpoints' },
-  trace: { title: 'Trace' },
+  destinations: { title: 'Destinations' },
 } as const
 
 // Where each concept is explained in full: the guides in Docs.
@@ -22,7 +23,7 @@ export type KindFilter = 'all' | 'address' | 'pattern' | 'catch_all' | 'inbox' |
 export const kinds: Record<KindFilter, { label: string }> = {
   all: { label: 'All' },
   address: { label: 'Addresses' },
-  pattern: { label: 'Patterns' },
+  pattern: { label: 'Wildcards' },
   catch_all: { label: 'Catch-alls' },
   inbox: { label: 'Agent inboxes' },
   auto: { label: 'Auto-created' },
@@ -31,7 +32,7 @@ export const kinds: Record<KindFilter, { label: string }> = {
 // What a row is, in a few words, under its address.
 export const kindNote = {
   route: 'No inbox of its own',
-  pattern: 'Pattern',
+  pattern: 'Wildcard',
   catch_all: 'Catch-all',
   inbox: 'Agent inbox',
   auto: 'Created by the catch-all',
@@ -43,11 +44,11 @@ export const outcomes = {
   create_address: 'New address per recipient',
 } as const
 
-// The three steps on an address's page.
+// The three steps every flow is drawn in.
 export const steps = {
-  route: { title: 'Route' },
-  rules: { title: 'Rules', empty: 'No rule yet' },
-  goesTo: { title: 'Goes to' },
+  receive: { title: 'Receive' },
+  process: { title: 'Process', empty: 'No rule' },
+  deliver: { title: 'Deliver' },
 } as const
 
 export const catchAllSetting = {

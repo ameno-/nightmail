@@ -8194,6 +8194,10 @@ describe('Hosted MCP OAuth and tools', () => {
           assert.deepEqual([(await order('needs_you')).includes(paused), (await order('agent')).includes(paused)], [false, false]);
           ok(reply(await platform.mirrorMessages(paused, [{ id: msg(), author: 'customer', text: 'Thanks, any news?' }])));
           assert.deepEqual((await ours('needs_you')).find((c: Json) => c.id === paused).needsYou.reasons, ['paused']);
+          // The support platform's notice that the agent is paused answers nobody: the customer is still waiting.
+          ok(reply(await platform.mirrorMessages(paused, [{ id: msg(), author: 'system', kind: 'notice', text: 'Someone from the team is handling this conversation and will reply here.' }])));
+          const noticed = (await ours('needs_you')).find((c: Json) => c.id === paused);
+          assert.deepEqual([noticed.lastAuthor, noticed.needsReply, noticed.needsYou.urgent], ['customer', true, true]);
 
           // Done: the operator role; it resolves an open ticket and is on the trail; only something new undoes it.
           error(await send('POST', `${inbox}/${p3}/done`, keyed(reader)), 403, 'OPERATOR_REQUIRED');

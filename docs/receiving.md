@@ -1,15 +1,21 @@
 # Receiving
 
-Receiving is where mail that arrives at your domains is routed, filtered and sent on. The dashboard uses the same names as the API: **routes**, **rules**, **endpoints** and the **catch-all**. The words below are the words on screen (`app/src/features/inbound/concepts.ts`); change both together.
+Receiving is where mail that arrives at your domains is received, processed and delivered. Every screen uses one model, in that order:
 
-![Receiving: the Routes tab, each route reading left to right from the address to its rules to where its mail goes](images/receiving/routes.png)
+- an **address** is where mail is received (the API's **routes**: addresses, wildcards, catch-alls and agent inboxes);
+- a **rule** is where it is processed;
+- a **destination** is where it is delivered (the API's **endpoints**: an inbox, Slack, Discord, a webhook or a forward).
+
+The API keeps its names; only the dashboard's words are these. The words below are the words on screen (`app/src/features/inbound/concepts.ts`); change both together.
+
+![Receiving: the Addresses tab, each address reading left to right from the address to its rules to where its mail goes](images/receiving/routes.png)
 
 - [Concepts](#concepts)
-- [Kinds of route](#kinds-of-route)
+- [Kinds of address](#kinds-of-address)
 - [What happens to mail](#what-happens-to-mail)
 - [An address's page](#an-addresss-page)
 - [Catch-all](#catch-all)
-- [Trace and Try it](#trace-and-try-it)
+- [Test and Try it](#test-and-try-it)
 - [Where everything is](#where-everything-is)
 - [API, SDK and MCP](#api-sdk-and-mcp)
 
@@ -17,63 +23,62 @@ Receiving is where mail that arrives at your domains is routed, filtered and sen
 
 | | What it is | Example |
 |---|---|---|
-| **Routes** | Every address that receives mail, and where its mail goes. | `support@acme.com → triage → Inbox, Slack support` |
-| **Rules** | Short scripts that run on a route's mail: label it, filter it, or send it on. | If the subject mentions a refund, label it and post it to Slack. |
-| **Endpoints** | Places mail can be sent: Slack, Discord, a webhook or a forward. A named one is called from rules; a route can deliver to a webhook or a forward, and a webhook can also subscribe to events. | `endpoints.support({ text: email.subject })` |
-| **Trace** | Dry-run an email through your routes and rules; nothing is sent or saved. | |
+| **Addresses** (routes) | Every address that receives mail, and where its mail goes. | `support@acme.com → triage → Inbox, Slack support` |
+| **Rules** | Short scripts that run on an address's mail: label it, filter it, or send it on. | If the subject mentions a refund, label it and post it to Slack. |
+| **Destinations** (endpoints) | Places mail can be delivered: Slack, Discord, a webhook or a forward. A rule calls one by name; an address can deliver to a webhook or a forward, and a webhook can also subscribe to events. | `endpoints.support({ text: email.subject })` |
 
-Rules and endpoints are described in full in [rules.md](rules.md); agent inboxes in [inboxes.md](inboxes.md).
+Rules and destinations are described in full in [rules.md](rules.md); agent inboxes in [inboxes.md](inboxes.md).
 
-## Kinds of route
+## Kinds of address
 
-The Routes tab lists every kind in one table and filters by kind. Each row reads **Route | Rules | Goes to | Unread | Last mail**.
+The Addresses tab lists every kind in one table and filters by kind. Each row is one line: **Address | Rules | Delivers to | Unread | Last mail**.
 
 | Filter | What it shows | Example |
 |---|---|---|
 | All | Every address that receives mail, and where its mail goes. | `support@acme.com → triage → Inbox, Slack support` |
-| Addresses | Each keeps its own threads in the Inbox; a route can send its mail elsewhere. | `support@acme.com` |
-| Patterns | A pattern catches many addresses with `*`. | `reply+*@acme.com` catches `reply+4821@acme.com` |
+| Addresses | Each keeps its own mail, on its page; it can send its mail elsewhere instead. | `support@acme.com` |
+| Wildcards | A wildcard (the API's pattern) catches many addresses with `*`. | `reply+*@acme.com` catches `reply+4821@acme.com` |
 | Catch-alls | What happens to mail for an address that doesn't exist. | `*@acme.com` |
 | Agent inboxes | Expiring addresses that agents and tests create and read over the API or MCP. | |
 | Auto-created | Addresses a catch-all created for new recipients. | |
 
-Under each address, a few words say what the row is: *No inbox of its own* (a route for an address without an inbox), *Pattern*, *Catch-all*, *Agent inbox* or *Created by the catch-all*.
+Under each address, a few words say what the row is: *No inbox of its own* (a route for an address without an inbox), *Wildcard*, *Catch-all*, *Agent inbox* or *Created by the catch-all*.
 
-A route that has no rule yet says so in its row (**No rule · add**), so what an address could do is always visible next to what it does.
+An address that has no rule yet says so in its row (**No rule · add**), so what an address could do is always visible next to what it does.
 
 ## What happens to mail
 
-**Goes to** lists where a route's mail ends up: routing first, then what its rules can send it to, marked *via* the rule (a rule may send only some mail there).
+**Delivers to** lists where an address's mail ends up: routing first, then what its rules can send it to, marked *via* the rule (a rule may send only some mail there).
 
 | On screen | Meaning | API (`to[].type`) |
 |---|---|---|
 | Inbox | The address keeps the thread. | `inbox` |
-| Webhook, Slack, Discord, Forward | An endpoint. | `webhook`, `slack`, `discord`, `forward` |
+| Webhook, Slack, Discord, Forward | A destination. | `webhook`, `slack`, `discord`, `forward` |
 | Stored, no inbox | Kept and readable over the API by message ID, but in no inbox. | `store` |
 | Dropped | Not stored. | `drop` |
 | New address per recipient | The domain's catch-all creates an address for each new recipient. | `create_address` |
 
 A route can deliver to inboxes, webhooks and confirmed forwards (`forward:<name>` or the endpoint's `con_…` ID), and a forward from a route sends each message whole, as a rule's call does ([rules.md](rules.md#forward-confirmation)). Slack and Discord posts are sent by a rule, which writes the message they post. A route refuses a forward its recipient hasn't confirmed; one they stop later stays on the route and gets nothing.
 
-The list is complete: routing targets and rule targets always show, and webhooks subscribed to an address's received mail show active ones first, then paused ones. An address with more than 50 subscribers shows the first 50 and says how many more there are, with a link to every one (Event webhooks, filtered to that address).
+The list is complete: routing targets and rule targets always show, and webhooks subscribed to an address's received mail show active ones first, then paused ones. An address with more than 50 subscribers shows the first 50 and says how many more there are, with a link to every one (the Destinations tab, filtered to that address).
 
 ## An address's page
 
-Opening a route shows the address as three steps, each with what you can do there:
+An address's page has three tabs:
 
-| Step | Line on screen | Actions | When empty |
-|---|---|---|---|
-| **Route** | Mail sent to these addresses. | Add alias, Add pattern | |
-| **Rules** | Run in order on every message. | Attach a rule, New rule, detach | No rule yet |
-| **Goes to** | Where the mail ends up. | Add an endpoint, Edit route | Only its inbox |
+| Tab | What's there |
+|---|---|
+| **Mail** | Its conversations: search, the views (Inbox, Starred, Archive, Spam, Trash, All), reading, replying and New message. |
+| **Where mail goes** | Receive → Process → Deliver: its addresses, aliases and wildcards; the rules that run, in order (attach, detach, New rule); where its mail is delivered (**Change**). **Test** runs an email to it through its rules. |
+| **Settings** | Its domain and dates, display name, aliases and wildcards, and Delete address. |
 
-![An address's page: Route, Rules and Goes to, with recent mail and settings below](images/receiving/address.png)
+Mail is the first tab: opening an address shows its mail. Every address's received mail together is in Logs, filtered to Received; `/receiving/inbox` opens there, and `/receiving/inbox?address=…` opens that address's Mail tab.
 
-Below the steps are its recent mail (open any thread in the Inbox) and its settings: display name, aliases and patterns. **Trace** in the header runs an email to this address through its route and rules.
+![An address's page](images/receiving/address.png)
 
 ## Catch-all
 
-Catch-all: what happens to mail for an address that doesn't exist on this domain. It is set per domain on its Domains page, and the Routes tab shows it as a Catch-alls row.
+Catch-all: what happens to mail for an address that doesn't exist on this domain. It is set per domain on its Domains page, and the Addresses tab shows it as a Catch-alls row.
 
 | Option | API (`catchAll`) |
 |---|---|
@@ -84,11 +89,11 @@ An explicit `*@host` route takes precedence over the domain's catch-all. Domains
 
 ![A domain's page: sending status, then receiving status, its addresses and the catch-all](images/receiving/domain.png)
 
-## Trace and Try it
+## Test and Try it
 
-**Trace** runs an email through your routes and rules with the dry run (`testRules`). Pick recent mail, a sample email (when nothing has arrived yet, the sample stands in) or paste a message. Each rule's source appears with its conditions; one at a time they light up true or false, AI decision answers fill in, then the actions (`→ junk`, `→ Slack support`) and the result: which inboxes and endpoints get the mail, its labels, and whether it's junk.
+**Test**, on an address's Where mail goes tab, runs an email through your routes and rules with the dry run (`testRules`). Pick recent mail, a sample email (when nothing has arrived yet, the sample stands in) or paste a message. Each rule's source appears with its conditions; one at a time they light up true or false, AI decision answers fill in, then the actions (`→ junk`, `→ Slack support`) and the result: which inboxes and endpoints get the mail, its labels, and whether it's junk.
 
-![Trace: a rule's conditions evaluated true and false, the AI decision score, its actions and where the mail ends up](images/receiving/trace.png)
+![Test: a rule's conditions evaluated true and false, the AI decision score, its actions and where the mail ends up](images/receiving/trace.png)
 
 **Try it** in the rule editor does the same for the rule you're writing, unsaved, as if it were attached to the address the email was sent to. Each AI decision gets a slider (default 0.5) for the answer the AI would give; the AI is never asked. Nothing is sent or saved in either. With reduced motion, the whole trace shows at once.
 
@@ -98,20 +103,22 @@ Everything is at most two clicks from Receiving.
 
 | Task | Where |
 |---|---|
-| See every address and where its mail goes | Receiving → Routes |
+| See every address and where its mail goes | Receiving → Addresses |
 | Create an address | Receiving → New address |
-| Add an alias or pattern, attach a rule, add an endpoint or a forward | Receiving → Routes → the address |
+| Read and answer an address's mail | Receiving → the address → Mail |
+| Read every address's mail | Logs → Received |
+| Add an alias or wildcard, attach a rule, change where its mail is delivered | Receiving → the address → Where mail goes |
 | Add a ready-made rule or write one | Receiving → Rules → New rule |
-| Turn a rule off, edit, trace or delete it | Receiving → Rules → its switch or ⋯ menu |
+| Turn a rule off, edit or delete it | Receiving → Rules → its switch or ⋯ menu |
 | Edit, attach or try a script | Receiving → Rules → the rule (Edit as code for a ready-made one) |
-| Create, test, pause or delete an endpoint | Receiving → Endpoints |
-| Subscribe a webhook to inbound events | Receiving → Endpoints → the webhook |
-| See every webhook that gets an address's mail | Receiving → Routes → the address → Goes to → more webhooks |
-| Create an agent inbox | Receiving → Routes → Agent inboxes → New agent inbox |
-| Test what would happen to an email | Receiving → Trace |
+| Create, test, pause or delete a destination | Receiving → Destinations |
+| Subscribe a webhook to inbound events | Receiving → Destinations → the webhook |
+| See every webhook that gets an address's mail | Receiving → the address → Where mail goes → Deliver → more webhooks |
+| Create an agent inbox | Receiving → Addresses → Agent inboxes → New agent inbox |
+| Test what would happen to an email | Receiving → the address → Where mail goes → Test |
 | Set up receiving or change a catch-all | Domains → the domain |
 
-Older links keep working: `/receiving/routing` opens Routes, `/receiving/endpoints` and `/receiving/webhooks` open the Endpoints tab, and every `/receiving/rituals…` link (and `?tab=rituals`) opens the same page under `/receiving/rules`.
+Older links keep working: `/receiving/routing` and `?tab=routes` open Addresses, `/receiving/endpoints`, `/receiving/webhooks` and `?tab=endpoints` open the Destinations tab, `/receiving/inbox` opens Logs' received mail (or with `?address=` that address's Mail tab), and every `/receiving/rituals…` link (and `?tab=rituals`) opens the same page under `/receiving/rules`.
 
 ## API, SDK and MCP
 
@@ -121,13 +128,13 @@ Access matches the other receiving reads: members and scoped keys see only their
 
 | Task | Operation (also the MCP tool name) |
 |---|---|
-| Everything on the Routes tab | `getInboundOverview` |
+| Everything on the Addresses tab | `getInboundOverview` |
 | Addresses, aliases and patterns | `listInboundAddresses`, `createInboundAddress`, `updateInboundAddress` (`aliases`, `rules`); deprecated, see below |
 | An address's mail and folders | `listInboxMessages`, `getInboxMessage`, `listInboxFolders`, `moveInboxMessage` and the other inbox mail operations, with the address ID |
 | Routes | `listRoutes`, `createRoute`, `updateRoute`, `deleteRoute`, `testRouting` |
 | Catch-all | `updateInboundDomain` (`catchAll`) |
 | Rules and Try it | `saveRule`, `attachRules`, `testRules` (trace rows carry a step-by-step `timeline`) |
-| Endpoints | `listInboundEndpoints` (every endpoint, named or not, a page at a time; `addressId` keeps the webhooks that get an address's received mail), `listEndpoints`, `createEndpoint`, `updateEndpoint`, `testEndpoint`, `deleteEndpoint` |
+| Destinations (endpoints) | `listInboundEndpoints` (every endpoint, named or not, a page at a time; `addressId` keeps the webhooks that get an address's received mail), `listEndpoints`, `createEndpoint`, `updateEndpoint`, `testEndpoint`, `deleteEndpoint` |
 | Inbound webhooks | `listInboundWebhooks` (`cursor`, `limit`, `addressId`, `eventType`), `getInboundWebhook`, `createInboundWebhook`, `updateInboundWebhook` |
 
 Every address is an inbox. It has folders, UIDs and one writer for its thread and message state, like an agent inbox, so the inbox mail and folder operations (`/v1/inboxes/{id}/messages`, `/v1/inboxes/{id}/folders`) take an address ID too. A temporary address (`ttlSeconds`) is an inbox whose lease is `expiresAt` alone: it stops receiving then and is kept. An address can still start threads and keep its own send limits, which an agent inbox can't. The address operations (`listInboundAddresses`, `createInboundAddress`, `getInboundAddress`, `updateInboundAddress`, `deleteInboundAddress`) are deprecated aliases until the domain cutover, which removes them and lets `/v1/inboxes` list and create addresses too. Until then `/v1/inboxes` and `getInbox` show agent inboxes only, because the `Inbox` response can't describe an address without a breaking change. Deleting an address releases it: its threads and folders go, and its stored mail is kept.

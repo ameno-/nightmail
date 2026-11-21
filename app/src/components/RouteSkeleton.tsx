@@ -1,4 +1,4 @@
-import { Link, useLocation } from 'react-router'
+import { useLocation } from 'react-router'
 import { OverviewRouteSkeleton } from '../features/overview/skeletons'
 import { EmailDetailSkeleton, LogsRouteSkeleton, ReceivedEmailSkeleton } from '../features/logs/skeletons'
 import { isReceivedId } from '../features/logs/rows'
@@ -35,11 +35,7 @@ export function RouteSkeleton() {
 function ReceivingRouteSkeleton() {
   const { canAdminister } = useWorkspaceAccess()
   return <div className="stack inbound-stack">
-    <PageHeader title="Receiving" actions={<>
-      {canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/trace">Trace</Link>}
-      {canAdminister && <Button disabled>New address</Button>}
-      <Link className="ui-button ui-button--primary ui-button--md" to="/receiving/inbox">Inbox</Link>
-    </>} />
+    <PageHeader title="Receiving" actions={canAdminister && <Button variant="primary" disabled>New address</Button>} />
     <LoadingRegion label="Loading receiving"><div className="rcv-skeleton" aria-hidden="true"><span /><span /><span /><span /></div></LoadingRegion>
   </div>
 }

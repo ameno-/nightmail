@@ -54,7 +54,8 @@ const GLOSSARY = [
   { use: 'balance, add credit', not: /\b(funds|top[- ]?ups?|wallet)\b/i },
   { use: 'address (receiving address when ambiguous)', not: /\binbound address(es)?\b|(?<!(current|existing|other|your own) )\bmailbox(es)?\b(?! (providers?|hosted))/i },
   { use: 'agent inbox', not: /\b(sandbox mailbox|temp(orary)? inbox|disposable inbox|throwaway inbox)\b/i },
-  { use: 'endpoint (or route, rule, AI decision: the API’s names)', not: /\b(destinations?|AI questions?|rituals?|omens?)\b/i, in: /^features\/inbound\// },
+  // Receiving's one model: an address receives, a rule processes, a destination delivers (the API's routes and endpoints).
+  { use: 'address, rule, destination or AI decision (the API keeps routes and endpoints)', not: /\b(endpoints?|routes?|AI questions?|rituals?|omens?)\b/i, in: /^features\/inbound\// },
   { use: 'webhook', not: /\bcallbacks?\b/i },
   { use: 'suppressed', not: /\b(blacklist(ed)?|blocklist(ed)?)\b/i },
   { use: 'subscribed', not: /\b(opted[- ]in|opt[- ]in)\b/i },

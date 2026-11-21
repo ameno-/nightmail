@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type RefObject } from 'react'
-import { Link, useSearchParams } from 'react-router'
+import { Navigate, useLocation, useSearchParams } from 'react-router'
 import { Archive, ArrowLeft, Inbox, Mail, MailOpen, Paperclip, Reply, Search, Star, Trash2, Undo2, X } from 'lucide-react'
 import { Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, Pagination, Select, SkeletonText, StatusBadge, Tabs, Textarea, useToast, fieldError, MutationError, ErrorText } from '../../components/ui'
 import { ReceivedEmailPreview } from '../../components/EmailPreview'
@@ -307,52 +307,62 @@ function NewThreadDialog({ open, onOpenChange, addresses, defaultAddress, onSent
   </Dialog>
 }
 
-export function InboundPage() {
+/** One address's mail (its page's Mail tab): its conversations beside the open one, with search, views and New message.
+ *  Received mail lives per address; every address's together is Logs, filtered to received. */
+export function AddressMail({ addressId }: { addressId: string }) {
   const [params, setParams] = useSearchParams()
-  const addressId = params.get('address') || undefined
   const view = (views.some(item => item.value === params.get('view')) ? params.get('view') : 'inbox') as InboundThreadView
   const threadId = params.get('thread')
   const [search, setSearch] = useState('')
   const [composing, setComposing] = useState(false)
   const pagination = useCursorPagination()
   const addressList = useApiDef(queries.inboundAddressOptions())
-  const missing = !!addressId && !!addressList.data && !addressList.data.some(address => address.id === addressId)
-  const linked = useApiQuery(['inbound-address', addressId ?? null, missing], (api, signal) => addressId && missing ? api.inbound.address(addressId, signal) : Promise.resolve(null))
+  const missing = !!addressList.data && !addressList.data.some(address => address.id === addressId)
+  const linked = useApiQuery(['inbound-address', addressId, missing], (api, signal) => missing ? api.inbound.address(addressId, signal) : Promise.resolve(null))
   const addresses = useMemo<Addresses>(() => new Map([...(addressList.data ?? []), ...(linked.data ? [linked.data] : [])].map(address => [address.id, address])), [addressList.data, linked.data])
   const own = useMemo(() => ownAddresses(addresses), [addresses])
   const q = search.trim()
   const threads = useApiDef(queries.inboundThreads(addressId, view, q, pagination.cursor), { interval: 30_000, keepPrevious: true })
-  const thread = useApiQuery(['inbound-thread', threadId, addressId ?? null], (api, signal) => threadId ? api.inbound.thread(threadId, { addressId }, signal) : Promise.resolve(null))
+  const thread = useApiQuery(['inbound-thread', threadId, addressId], (api, signal) => threadId ? api.inbound.thread(threadId, { addressId }, signal) : Promise.resolve(null))
   function change(changes: Record<string, string | null>) {
-    const next = new URLSearchParams(params)
-    for (const [name, value] of Object.entries(changes)) { if (value === null) next.delete(name); else next.set(name, value) }
-    setParams(next)
+    setParams(previous => {
+      const next = new URLSearchParams(previous)
+      for (const [name, value] of Object.entries(changes)) { if (value === null) next.delete(name); else next.set(name, value) }
+      return next
+    })
   }
-  const filterAddress = (value: string) => { pagination.reset(); change({ address: value || null, thread: null, message: null }) }
   return <div className="mailbox-page" data-thread-open={threadId ? true : undefined}>
-    <PageHeader title="Inbox" backTo="/receiving" actions={<Button variant="primary" disabled={!addresses.size} onClick={() => setComposing(true)}>New message</Button>} />
     <div className="mailbox-layout">
       <aside className="mailbox-list" aria-label="Conversations">
         <div className="mailbox-toolbar">
           <div className="search-box mailbox-search"><Search size={16} /><Input type="search" aria-label="Search conversations" placeholder="Search mail" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} /></div>
-          <Select className="address-select-trigger mailbox-address-filter" menuClassName="address-select" aria-label="Filter by address" value={addressId ?? ''} onValueChange={filterAddress} disabled={addressList.isPending} placeholder="All addresses"
-            options={[{ value: '', label: 'All addresses' }, ...[...addresses.values()].map(address => addressOption(address.id, address.address))]} />
+          <Button onClick={() => setComposing(true)} disabled={!addresses.has(addressId)}>New message</Button>
         </div>
-        <Tabs label="Conversation views" value={view} onValueChange={value => { pagination.reset(); change({ view: value, thread: null, message: null }) }} items={views} />
-        {addressList.error && <Alert tone="warning">Addresses could not be loaded, so they show as IDs.</Alert>}
+        <Tabs label="Conversation views" value={view} onValueChange={value => { pagination.reset(); change({ view: value === 'inbox' ? null : value, thread: null, message: null }) }} items={views} />
         {threads.error ? <ErrorState error={threads.error} onRetry={() => void threads.refetch()} /> : threads.isPending ? <div className="mailbox-thread-skeleton">{[0, 1, 2, 3].map(index => <div key={index}><SkeletonText width="40%" /><SkeletonText width="60%" /><SkeletonText width="85%" /></div>)}</div>
           : threads.data.length ? <>
             <ThreadList threads={threads.data} threadId={threadId} addresses={addresses} own={own} addressId={addressId} onSelect={id => change({ thread: id, message: null })} />
             {(pagination.page > 1 || threads.data.nextCursor) && <Pagination page={pagination.page} pageSize={50} nextCursor={threads.data.nextCursor} onPageChange={next => pagination.onPageChange(next, threads.data.nextCursor)} />}
-          </> : <EmptyState title={q ? 'No matching conversations' : `Nothing in ${views.find(item => item.value === view)!.label.toLowerCase()}`} action={!q && !addresses.size && !addressList.isPending ? <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving">Create an address</Link> : undefined} />}
+          </> : <EmptyState title={q ? 'No matching conversations' : view === 'inbox' ? 'No mail yet' : `Nothing in ${views.find(item => item.value === view)!.label.toLowerCase()}`} />}
       </aside>
       <div className="mailbox-reader">
         {!threadId ? <EmptyState title="Select a conversation" />
           : thread.error ? <ErrorState error={thread.error} onRetry={() => void thread.refetch()} />
           : thread.isPending || !thread.data ? <div className="mailbox-thread-skeleton"><SkeletonText width="50%" lineHeight={24} /><SkeletonText width="80%" /><SkeletonText width="70%" /></div>
-          : <Conversation thread={thread.data} addressId={addressId} addresses={addresses} focusMessage={params.get('message')} onBack={() => change({ thread: null, message: null })} onAddress={id => { pagination.reset(); change({ address: id }) }} />}
+          : <Conversation thread={thread.data} addressId={addressId} addresses={addresses} focusMessage={params.get('message')} onBack={() => change({ thread: null, message: null })} onAddress={() => undefined} />}
       </div>
     </div>
     <NewThreadDialog open={composing} onOpenChange={setComposing} addresses={[...addresses.values()]} defaultAddress={addressId} onSent={id => change({ thread: id, message: null })} />
   </div>
+}
+
+/** /receiving/inbox, the inbox of every address before mail moved to each address's page: with ?address= it opens that
+ *  address's Mail tab (thread, view and message kept), else Logs' received mail. */
+export function InboundPage() {
+  const location = useLocation()
+  const params = new URLSearchParams(location.search), address = params.get('address')
+  params.delete('address')
+  if (!address) return <Navigate replace to="/logs?view=received" />
+  params.set('tab', 'mail')
+  return <Navigate replace to={`/receiving/addresses/${encodeURIComponent(address)}?${params}${location.hash}`} />
 }

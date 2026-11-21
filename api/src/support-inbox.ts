@@ -68,7 +68,7 @@ const Item = z.object({
   ticket: Ticket.nullable(),
   agentState: z.enum(['active', 'paused']),
   pausedBy: z.object({ kind: z.enum(['staff', 'ticket']), userId: z.string().nullable(), name: z.string().nullable() }).nullable(), pausedAt: z.string().nullable(),
-  lastAuthor: Author.nullable(), needsReply: z.boolean().describe('Not closed, and the customer wrote last.'),
+  lastAuthor: Author.nullable().describe('Who wrote last, leaving out the support platform’s own notices (system).'), needsReply: z.boolean().describe('Not closed, and the customer wrote last.'),
   messageCount: z.number().int(), queuedReplies: z.number().int(), turns: z.number().int(), costUsd: z.number(),
   blockedWork: z.number().int().describe('Work the support platform could not finish for this conversation.'),
   firstLine: z.string().nullable().describe('The first line of the customer’s first message: what a conversation without a subject is about.'),
@@ -126,12 +126,12 @@ const itemColumns = sql`c.id, c.channel, c.mode, c.verification, c.status, c.sub
 const itemFrom = (me: string) => sql`support_conversations c LEFT JOIN nightmail_users u ON u.id = c.user_id LEFT JOIN workspaces w ON w.id = c.workspace_id
   LEFT JOIN nightmail_users p ON p.id = c.paused_by
   LEFT JOIN support_inbox_reads rd ON rd.conversation_id = c.id AND rd.user_id = ${me}
-  LEFT JOIN LATERAL (SELECT m.author FROM support_messages m WHERE m.conversation_id = c.id ORDER BY m.seq DESC LIMIT 1) last ON true
+  LEFT JOIN LATERAL (SELECT m.author FROM support_messages m WHERE m.conversation_id = c.id AND m.author <> 'system' ORDER BY m.seq DESC LIMIT 1) last ON true
   LEFT JOIN LATERAL (SELECT left(m.text, 400) AS text FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer' ORDER BY m.seq LIMIT 1) opening ON true
   LEFT JOIN LATERAL (SELECT a.delivery = 'failed' AS failed, a.created_at FROM support_messages a
     WHERE a.conversation_id = c.id AND a.author IN ('agent','staff') AND a.delivery IN ('queued','sent','failed') ORDER BY a.seq DESC LIMIT 1) answer ON true
   LEFT JOIN LATERAL (SELECT min(m.created_at) AS at FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer'
-    AND m.seq > coalesce((SELECT max(o.seq) FROM support_messages o WHERE o.conversation_id = c.id AND o.author <> 'customer'), 0)) waiting ON true
+    AND m.seq > coalesce((SELECT max(o.seq) FROM support_messages o WHERE o.conversation_id = c.id AND o.author NOT IN ('customer','system')), 0)) waiting ON true
   CROSS JOIN LATERAL (SELECT c.ticket_id IS NOT NULL AND c.ticket_resolved_at IS NULL AS ticket, c.blocked_work > 0 AS blocked, coalesce(answer.failed, false) AS failed,
     c.agent_state = 'paused' AND c.status <> 'closed' AND last.author IS DISTINCT FROM 'staff' AS paused) why
   CROSS JOIN LATERAL (SELECT c.done_at IS NULL AND (why.ticket OR why.blocked OR why.failed OR why.paused) AS needs_you,

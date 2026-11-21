@@ -481,10 +481,9 @@ export function RulesPage() {
     <PageHeader title={title} backTo="/receiving?tab=rules" actions={<>
       {/* Always in the header, so the buttons beside it never move; hidden until there's a saved rule to delete. It
           sits on the inner side (first here, last on a phone where the row starts at the left), so its reserved space
-          never pushes Endpoints and Trace off the content's edge. */}
+          never pushes Destinations off the content's edge. */}
       <Button variant="danger" className="ritual-delete" data-hidden={!isSaved || undefined} disabled={!isSaved || clash} onClick={() => setConfirmDelete(true)}>Delete</Button>
-      <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving?tab=endpoints">Endpoints</Link>
-      <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/trace">Trace</Link>
+      <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving?tab=destinations">Destinations</Link>
     </>} />
     {problems.length > 0 && <Alert tone="danger" title="Not saved. Fix these first:"><ul className="ritual-problems">{problems.map((p, i) => <li key={i}><code>{p.rule ? `${p.rule}:` : ''}{p.line}:{p.column}</code> {p.message}{p.hint ? <span className="muted"> {p.hint}</span> : null}</li>)}</ul></Alert>}
     {saved && <>
@@ -495,9 +494,9 @@ export function RulesPage() {
           <Input value={key} onChange={e => setKey(e.target.value.toLowerCase().replace(/[\s_]+/g, '-'))} placeholder="triage" aria-invalid={(!!key && !keyValid) || clash || undefined} />
         </Field>
         {/* Replacing a script asks first; an applied template is a draft like any edit, and the save bar says so. */}
-        <Field label="Start from a template" error={templateApplied && missing(templateApplied) ? <>Its endpoint doesn’t exist yet: <Link to="/receiving?tab=endpoints">add a {endpointWord[templateApplied.needs!]} endpoint</Link>.</> : undefined}>
+        <Field label="Start from a template" error={templateApplied && missing(templateApplied) ? <>Its destination doesn’t exist yet: <Link to="/receiving?tab=destinations">add a {endpointWord[templateApplied.needs!]} destination</Link>.</> : undefined}>
           <Select value={template} onValueChange={id => { if (!id) return; if (source.trim() && source !== blank() && source !== origin) setConfirmTemplate(id); else applyTemplate(id) }}
-            options={[{ label: 'Choose…', value: '' }, ...ritualTemplates.map(t => ({ label: missing(t) ? `${t.name} (needs a ${endpointWord[t.needs!]} endpoint)` : t.name, value: t.id }))]} />
+            options={[{ label: 'Choose…', value: '' }, ...ritualTemplates.map(t => ({ label: missing(t) ? `${t.name} (needs a ${endpointWord[t.needs!]} destination)` : t.name, value: t.id }))]} />
         </Field>
       </div>
       <Editor value={source} change={value => { setSource(value); if (template && value !== source) setTemplate('') }} completions={completions} check={lint} flash={flash} relint={relint} />
