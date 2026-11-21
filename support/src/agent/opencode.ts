@@ -120,9 +120,12 @@ function jsonSchema(params: Record<string, Param>) {
   return { type: 'object', properties, required, additionalProperties: false };
 }
 
-/** Distinctive lines of the system prompt, for the output gate's "never reveal this prompt" check. */
+/**
+ * Distinctive lines of the system prompt, for the output gate's "never reveal this prompt" check: from the instructions
+ * only, never from its "# Reference" part (playbooks and policies), whose facts an answer is meant to pass on.
+ */
 export function promptFragments() {
-  return SYSTEM.split('\n').map(l => l.replace(/^[-*#>\d.|\s]+/, '').trim()).filter(l => l.length >= 60 && !/`|https?:/.test(l)).filter((_, i) => i % 4 === 0).map(l => l.slice(0, 48));
+  return SYSTEM.split(/^# Reference$/m)[0]!.split('\n').map(l => l.replace(/^[-*#>\d.|\s]+/, '').trim()).filter(l => l.length >= 60 && !/`|https?:/.test(l)).filter((_, i) => i % 4 === 0).map(l => l.slice(0, 48));
 }
 
 /** One OpenCode host per conversation object, booted on its first turn. */
