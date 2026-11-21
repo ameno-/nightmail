@@ -6,9 +6,9 @@ const LAG_ALERT_MS = 3 * 3_600_000, BYO_FAIR_USE = 10_000_000;
 // Closed hours only, and at least five minutes closed: the Node runner's hourly tick is not aligned to :07 like the
 // Worker cron, and a writer that started before the boundary may still be upserting the previous hour's row.
 const CLOSED_HOURS = sql`date_trunc('hour', now() - interval '5 minutes', 'UTC')`;
-// Workspace-hours with unsettled usage: billing_open (migration 386) lists the hours, and their rows say which still hold some.
-const OPEN_HOURS = sql`billing_open o WHERE EXISTS (SELECT FROM billing_usage_hourly u WHERE u.workspace_id=o.workspace_id AND u.hour=o.hour
-  AND (u.quantity <> u.settled_quantity OR u.refunds <> '{}'))`;
+// Usage rows with unsettled usage: billing_open (migration 386) lists them, and the rows say which still hold some.
+const OPEN_ROWS = sql`billing_open o WHERE EXISTS (SELECT FROM billing_usage_hourly u WHERE u.workspace_id=o.workspace_id AND u.hour=o.hour
+  AND u.meter=o.meter AND u.rate_version=o.rate_version AND (u.quantity <> u.settled_quantity OR u.refunds <> '{}'))`;
 
 /**
  * Hourly (worker.ts `7 * * * *`, runner.ts hourly), Hosted only: once a UTC day the storage day, the unpaid scan, the
@@ -113,6 +113,10 @@ export async function billingDaily(runtime: Runtime): Promise<void> {
     IF to_regclass('billing_gateway_events') IS NOT NULL THEN
       DELETE FROM billing_gateway_events WHERE status IN ('processed','ignored') AND received_at < now() - interval '90 days';
     END IF; END $$`));
+  // Listings with nothing unsettled left behind (a writer that rolled back) go after a day, also for a workspace with no
+  // more usage, which the hourly run doesn't settle again. The settler's own check and locks decide each one.
+  await step('BILLING_OPEN_PRUNE_FAILED', () => runtime.db.execute(sql`SELECT billing_open_prune(workspace_id, date_trunc('hour', now(), 'UTC') - interval '1 day')
+    FROM (SELECT DISTINCT workspace_id FROM billing_open WHERE hour < date_trunc('hour', now(), 'UTC') - interval '1 day' ORDER BY 1) w`));
 }
 
 /** Settles every workspace with unsettled usage before the current hour, four at a time, within a 60 s budget. */
@@ -123,7 +127,7 @@ export async function settleClosedHours(runtime: Runtime, cutoff?: string): Prom
   // Pages by workspace: one the settler skips this run (busy, or every row held by a writer) never keeps the next
   // page from being reached.
   while (Date.now() < deadline) {
-    const { rows } = await runtime.db.execute<{ workspace_id: string }>(sql`SELECT DISTINCT o.workspace_id FROM ${OPEN_HOURS}
+    const { rows } = await runtime.db.execute<{ workspace_id: string }>(sql`SELECT DISTINCT o.workspace_id FROM ${OPEN_ROWS}
       AND o.hour<${at} AND o.workspace_id>${after} ORDER BY o.workspace_id LIMIT ${SETTLE_PAGE}`);
     const queue = rows.map(r => r.workspace_id);
     if (!queue.length) break;
@@ -138,7 +142,7 @@ export async function settleClosedHours(runtime: Runtime, cutoff?: string): Prom
     }));
   }
   log('info', { code: 'BILLING_SETTLED', workspaces, entries, busy, ms: Date.now() - started });
-  const { rows: [lag] } = await runtime.db.execute<{ oldest: string | null }>(sql`SELECT (extract(epoch FROM min(o.hour))*1000)::bigint::text AS oldest FROM ${OPEN_HOURS}`);
+  const { rows: [lag] } = await runtime.db.execute<{ oldest: string | null }>(sql`SELECT (extract(epoch FROM min(o.hour))*1000)::bigint::text AS oldest FROM ${OPEN_ROWS}`);
   if (lag?.oldest && Date.now() - Number(lag.oldest) > LAG_ALERT_MS) log('error', { code: 'BILLING_SETTLE_LAG', oldestOpenHour: new Date(Number(lag.oldest)).toISOString() });
   return { workspaces, entries, busy };
 }

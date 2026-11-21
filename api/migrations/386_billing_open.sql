@@ -5,21 +5,25 @@ SET LOCAL lock_timeout='2s';
 -- a new row version with new entries in both indexes, and left a dead one for autovacuum, while the workspace's next
 -- send waited on that row.
 --
--- billing_open lists instead the workspace-hours that may hold unsettled usage. A trigger writes an hour when one of its
--- rows starts to hold some (a new row, or a settled one written again: a refund or late usage into an hour already
--- settled), and the settler deletes it once none is left. Every reader of unsettled usage (the position, the settler,
--- the mode switch, the hourly run's discovery and lag check) takes its hours from billing_open, then the same rows by
--- the same predicate as before, so what each one prices doesn't change. 387 drops the index, concurrently.
+-- billing_open lists instead the usage rows that may hold unsettled usage, by the same key. A trigger lists a row when it
+-- starts to hold some (a new row, or a settled one written again: a refund or late usage into an hour already settled),
+-- and the settler deletes the listing once none is left. Every reader of unsettled usage (the position, the settler, the
+-- mode switch, the hourly run's discovery and lag check) takes its rows through billing_open, then reads them by the same
+-- predicate as before, so what each one prices doesn't change. 387 drops the index, concurrently.
 --
--- An hour with unsettled usage is never missing from billing_open:
--- - The trigger writes it in the transaction of the write that opens the hour, whatever wrote it (meters, refunds, the
---   storage day, an operator): both commit or neither does.
--- - A writer that finds the hour already listed locks it (FOR KEY SHARE) until it commits. The settler deletes an hour
---   only once it holds its row (FOR UPDATE SKIP LOCKED: it never waits, and an hour a writer holds stays for the next
---   run) and then, in a statement of its own, finds no unsettled usage there. A writer the settler didn't see waits for
---   the delete to commit and lists the hour again.
--- An hour listed with nothing left (a writer that rolled back, usage deleted by hand) costs one lookup until the
--- workspace's next settlement deletes it.
+-- A listing has the usage row's key, so the first writes of different meters in one hour (a send and a received
+-- message) never wait for each other, as before; writers of one meter already queue on its usage row. Keyed by hour
+-- alone, a mailbox send (meter, then the workspace's events lane) and an ingest (events lane, then meter) could deadlock.
+--
+-- A row with unsettled usage is never missing from billing_open:
+-- - The trigger lists it in the transaction of the write that opens it, whatever wrote it (meters, refunds, the storage
+--   day, an operator): both commit or neither does.
+-- - A writer that finds the row already listed locks the listing (FOR KEY SHARE) until it commits. The settler deletes a
+--   listing only once it holds it (FOR UPDATE SKIP LOCKED: it never waits, and a listing a writer holds stays for the
+--   next run) and then, in a statement of its own, finds the row settled. A writer the settler didn't see waits for the
+--   delete to commit and lists the row again.
+-- A listing with nothing left (a writer that rolled back, usage deleted by hand) costs one lookup until the workspace's
+-- next settlement or the daily run deletes it.
 --
 -- lock order: begin
 -- billing_usage_hourly (SHARE ROW EXCLUSIVE, which the triggers need), then nothing else: it waits for the meter writes
@@ -32,15 +36,19 @@ LOCK TABLE billing_usage_hourly IN SHARE ROW EXCLUSIVE MODE;
 CREATE TABLE IF NOT EXISTS billing_open (
   workspace_id text NOT NULL,
   hour timestamptz NOT NULL,
-  PRIMARY KEY (workspace_id, hour));
+  meter text NOT NULL,
+  rate_version smallint NOT NULL,
+  PRIMARY KEY (workspace_id, hour, meter, rate_version));
 
--- A usage row that starts to hold unsettled usage lists its hour, or holds the hour's listing until it commits.
+-- A usage row that starts to hold unsettled usage lists itself, or holds its listing until it commits.
 CREATE OR REPLACE FUNCTION billing_open_hour() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   LOOP
-    INSERT INTO billing_open (workspace_id, hour) VALUES (NEW.workspace_id, NEW.hour) ON CONFLICT DO NOTHING;
+    INSERT INTO billing_open (workspace_id, hour, meter, rate_version) VALUES (NEW.workspace_id, NEW.hour, NEW.meter, NEW.rate_version)
+      ON CONFLICT DO NOTHING;
     EXIT WHEN FOUND;
-    PERFORM FROM billing_open WHERE workspace_id = NEW.workspace_id AND hour = NEW.hour FOR KEY SHARE;
+    PERFORM FROM billing_open WHERE workspace_id = NEW.workspace_id AND hour = NEW.hour AND meter = NEW.meter AND rate_version = NEW.rate_version
+      FOR KEY SHARE;
     EXIT WHEN FOUND;   -- not found: a settlement deleted it after the insert looked, so list it again
   END LOOP;
   RETURN NULL;
@@ -50,27 +58,30 @@ CREATE OR REPLACE TRIGGER billing_usage_opened AFTER INSERT ON billing_usage_hou
   EXECUTE FUNCTION billing_open_hour();
 CREATE OR REPLACE TRIGGER billing_usage_reopened AFTER UPDATE ON billing_usage_hourly FOR EACH ROW
   WHEN ((NEW.quantity <> NEW.settled_quantity OR NEW.refunds <> '{}')
-    AND ((OLD.quantity = OLD.settled_quantity AND OLD.refunds = '{}') OR (OLD.workspace_id, OLD.hour) IS DISTINCT FROM (NEW.workspace_id, NEW.hour)))
+    AND ((OLD.quantity = OLD.settled_quantity AND OLD.refunds = '{}') OR (OLD.workspace_id, OLD.hour, OLD.meter, OLD.rate_version) IS DISTINCT FROM (NEW.workspace_id, NEW.hour, NEW.meter, NEW.rate_version)))
   EXECUTE FUNCTION billing_open_hour();
 
--- The hours open now.
-INSERT INTO billing_open (workspace_id, hour)
-  SELECT DISTINCT workspace_id, hour FROM billing_usage_hourly WHERE quantity <> settled_quantity OR refunds <> '{}' ORDER BY 1, 2
+-- The rows open now.
+INSERT INTO billing_open (workspace_id, hour, meter, rate_version)
+  SELECT workspace_id, hour, meter, rate_version FROM billing_usage_hourly WHERE quantity <> settled_quantity OR refunds <> '{}' ORDER BY 1, 2, 3, 4
   ON CONFLICT DO NOTHING;
 
--- The settler's last step: deletes a workspace's hours before cutoff that hold no unsettled usage. The delete is its own
--- statement, so under read committed its snapshot is taken after the locks and sees every writer that held one; under
--- an older snapshot it deletes nothing.
+-- The settler's last step: deletes a workspace's listings of hours before cutoff whose rows hold no unsettled usage. The
+-- delete is its own statement, so under read committed its snapshot is taken after the locks and sees every writer that
+-- held one; under an older snapshot it deletes nothing. The listings it holds stay where they are until it commits, so
+-- their row IDs name them.
 CREATE OR REPLACE FUNCTION billing_open_prune(wid text, cutoff timestamptz) RETURNS void LANGUAGE plpgsql AS $$
-DECLARE held timestamptz[];
+DECLARE held tid[];
 BEGIN
   IF current_setting('transaction_isolation') <> 'read committed' THEN RETURN; END IF;
-  SELECT array_agg(hour) INTO held FROM (SELECT hour FROM billing_open WHERE workspace_id=wid AND hour < cutoff ORDER BY hour FOR UPDATE SKIP LOCKED) h;
-  DELETE FROM billing_open o WHERE o.workspace_id=wid AND o.hour = ANY (held)
-    AND NOT EXISTS (SELECT FROM billing_usage_hourly u WHERE u.workspace_id=wid AND u.hour=o.hour AND (u.quantity <> u.settled_quantity OR u.refunds <> '{}'));
+  SELECT array_agg(t) INTO held FROM (SELECT ctid AS t FROM billing_open WHERE workspace_id=wid AND hour < cutoff
+    ORDER BY hour, meter, rate_version FOR UPDATE SKIP LOCKED) h;
+  DELETE FROM billing_open o WHERE o.ctid = ANY (held) AND o.workspace_id=wid
+    AND NOT EXISTS (SELECT FROM billing_usage_hourly u WHERE u.workspace_id=wid AND u.hour=o.hour AND u.meter=o.meter AND u.rate_version=o.rate_version
+      AND (u.quantity <> u.settled_quantity OR u.refunds <> '{}'));
 END $$;
 
--- 367's settler: its hours from billing_open, and the hours it leaves with nothing unsettled deleted.
+-- 367's settler: its rows through billing_open, and the listings it leaves with nothing unsettled deleted.
 CREATE OR REPLACE FUNCTION billing_settle(wid text, cutoff timestamptz) RETURNS jsonb LANGUAGE plpgsql AS $$
 DECLARE a billing_accounts; cfg billing_config; cut timestamptz := least(cutoff, date_trunc('hour', now(), 'UTC'));
   deltas billing_delta[]; counted billing_counted[]; n_rows int; p record; money bigint; take bigint; promo_left bigint; total bigint; recharging boolean;
@@ -82,7 +93,7 @@ BEGIN
   IF NOT FOUND THEN RETURN '{"busy":true}'; END IF;
   SELECT * INTO cfg FROM billing_config WHERE singleton;
   WITH open AS (SELECT u.hour, u.meter, u.rate_version, u.quantity, u.settled_quantity, u.refunds FROM billing_open o
-      JOIN billing_usage_hourly u ON u.workspace_id=o.workspace_id AND u.hour=o.hour
+      JOIN billing_usage_hourly u ON u.workspace_id=o.workspace_id AND u.hour=o.hour AND u.meter=o.meter AND u.rate_version=o.rate_version
       WHERE o.workspace_id=wid AND o.hour < cutoff AND (u.quantity <> u.settled_quantity OR u.refunds <> '{}')
         AND (u.hour < cut OR EXISTS (SELECT FROM jsonb_object_keys(u.refunds) k WHERE to_timestamp(ltrim(k, 's')::bigint) < cut))
       ORDER BY u.hour, u.meter, u.rate_version FOR UPDATE OF u SKIP LOCKED),
@@ -174,7 +185,7 @@ a AS (SELECT coalesce(b.mode,'prepaid') AS mode, coalesce(b.balance_uc,0) AS bal
       FROM (SELECT 1) one LEFT JOIN billing_accounts b ON b.workspace_id=wid),
 -- Every month with unsettled usage, and this month (a zero row in the current hour) for the allowances.
 priced AS (SELECT * FROM billing_priced(wid, ARRAY(SELECT c FROM billing_classify(wid, ARRAY(SELECT d FROM billing_open o
-    JOIN billing_usage_hourly u ON u.workspace_id=o.workspace_id AND u.hour=o.hour
+    JOIN billing_usage_hourly u ON u.workspace_id=o.workspace_id AND u.hour=o.hour AND u.meter=o.meter AND u.rate_version=o.rate_version
     CROSS JOIN LATERAL billing_row_deltas(u.hour, u.meter, u.rate_version, u.quantity - u.settled_quantity, u.refunds) d
     WHERE o.workspace_id=wid AND (u.quantity <> u.settled_quantity OR u.refunds <> '{}')), false) c)
   || ROW(date_trunc('hour', now(), 'UTC'), 'send', 0, 0, false, 0)::billing_counted)),
@@ -195,7 +206,7 @@ CREATE OR REPLACE FUNCTION billing_settle_switch(wid text) RETURNS jsonb LANGUAG
 BEGIN
   INSERT INTO billing_accounts(workspace_id) VALUES (wid) ON CONFLICT DO NOTHING;
   PERFORM 1 FROM billing_accounts WHERE workspace_id=wid FOR UPDATE;
-  PERFORM 1 FROM billing_open o JOIN billing_usage_hourly u ON u.workspace_id=o.workspace_id AND u.hour=o.hour
+  PERFORM 1 FROM billing_open o JOIN billing_usage_hourly u ON u.workspace_id=o.workspace_id AND u.hour=o.hour AND u.meter=o.meter AND u.rate_version=o.rate_version
     WHERE o.workspace_id=wid AND (u.quantity <> u.settled_quantity OR u.refunds <> '{}')
     ORDER BY u.hour, u.meter, u.rate_version FOR UPDATE OF u;
   RETURN billing_settle(wid, 'infinity');
@@ -206,7 +217,8 @@ DECLARE w text; n int := 0;
 BEGIN
   PERFORM pg_advisory_xact_lock(31401, 0);
   FOR w IN SELECT DISTINCT o.workspace_id FROM billing_open o WHERE EXISTS (SELECT FROM billing_usage_hourly u
-      WHERE u.workspace_id=o.workspace_id AND u.hour=o.hour AND (u.quantity <> u.settled_quantity OR u.refunds <> '{}')) ORDER BY 1 LOOP
+      WHERE u.workspace_id=o.workspace_id AND u.hour=o.hour AND u.meter=o.meter AND u.rate_version=o.rate_version
+        AND (u.quantity <> u.settled_quantity OR u.refunds <> '{}')) ORDER BY 1 LOOP
     PERFORM billing_settle_switch(w);
     n := n + 1;
   END LOOP;
