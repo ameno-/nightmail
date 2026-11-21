@@ -14,6 +14,7 @@ export const queries = {
   senderScore: () => def(['sender-score'], (api, signal) => api.senderScore.get(signal)),
   emails: (params: PageRequest) => def(['emails', params], (api, signal) => api.emails.list(params, signal)),
   logs: (params: PageRequest & { direction?: LogDirection }) => def(['logs', params], (api, signal) => api.logs.list(params, signal)),
+  logCounts: (params: PageRequest & { direction?: LogDirection }) => def(['logs', 'counts', params], (api, signal) => api.logs.counts(params, signal)),
   inboundDomains: () => def(['mailbox-domains'], (api, signal) => api.mailboxes.domains(signal)),
   inboundWebhooks: () => def(['inbound-webhooks'], (api, signal) => api.inbound.webhooks(signal)),
   forwardEndpoints: () => def(['forward-endpoints'], (api, signal) => api.inbound.forwards(signal)),

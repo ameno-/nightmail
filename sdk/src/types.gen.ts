@@ -4273,6 +4273,7 @@ export type LogPage = {
      * Whether received mail is included: false for direction=sent, with a sent-only filter, or when the credential cannot read inbound mail.
      */
     received: boolean;
+    counts?: LogCounts;
 };
 
 export type LogEntry = {
@@ -4342,6 +4343,32 @@ export type LogEntry = {
      * Received mail, administrators only: the SMTP envelope recipients.
      */
     envelopeTo: Array<string> | null;
+};
+
+/**
+ * With counts=true only.
+ */
+export type LogCounts = {
+    /**
+     * Matching emails per status (sent statuses, received and spam), with every filter but status. A status with none is left out.
+     */
+    status: {
+        [key: string]: number;
+    };
+    /**
+     * Matching sent emails per kind, with every filter but kind.
+     */
+    kind: {
+        transactional: number;
+        marketing: number;
+    };
+    /**
+     * Per direction: true when it has more than 50,000 matching emails. Its counts then cover that many of its newest and are lower bounds.
+     */
+    capped: {
+        sent: boolean;
+        received: boolean;
+    };
 };
 
 export type InboundOverview = {
@@ -24089,6 +24116,10 @@ export type ListLogsData = {
          */
         campaignId?: string;
         region?: string;
+        /**
+         * true adds counts: how many emails match each status and kind for these filters, whatever the cursor and limit.
+         */
+        counts?: 'true' | 'false';
     };
     url: '/v1/logs';
 };

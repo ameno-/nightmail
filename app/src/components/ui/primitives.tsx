@@ -323,11 +323,11 @@ export function Disclosure({ title, headingAs: Heading = 'h3', hint, id, default
 export function SectionHeader({ title, actions }: { title: ReactNode; actions?: ReactNode }) {
   return <div data-component="SectionHeader" className="ui-section-header"><h2>{title}</h2>{actions && <div className="cluster">{actions}</div>}</div>;
 }
-function statusTone(status: string): Tone {
+export function statusTone(status: string): Tone {
   const value = status.trim().toLowerCase().replaceAll(' ', '_');
   if (['delivered', 'sent', 'done', 'active', 'verified', 'enabled', 'subscribed', 'healthy', 'connected', 'completed', 'success', 'production'].includes(value)) return 'success';
-  if (['pending', 'preparing', 'scheduled', 'sending', 'paused', 'queued', 'warning', 'verifying', 'bounced', 'deferred', 'delivery_delayed', 'sandbox', 'probation', 'issue', 'attention'].includes(value)) return 'warning';
-  if (['failed', 'complaint', 'error', 'rejected', 'suppressed', 'shutdown'].includes(value)) return 'danger';
+  if (['pending', 'preparing', 'scheduled', 'sending', 'paused', 'queued', 'warning', 'verifying', 'bounced', 'deferred', 'delayed', 'delivery_delayed', 'sandbox', 'probation', 'issue', 'attention'].includes(value)) return 'warning';
+  if (['failed', 'complaint', 'complained', 'error', 'rejected', 'rendering_failed', 'suppressed', 'shutdown'].includes(value)) return 'danger';
   return 'neutral';
 }
 // A badge in a cell narrower than its label shortens the label with an ellipsis and says the whole of it on hover.

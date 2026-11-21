@@ -76,9 +76,10 @@ function bestStep(report: SenderScore | undefined, domains: Domain[]) {
   const weak = domains.find(d => d.status === 'verified' && !(d.dmarc && ['quarantine', 'reject'].includes(d.dmarc.status))) ?? domains[0]
   const target = worst.key === 'auth' && weak ? { text: `Add DMARC to ${weak.name}`, to: `/domains/${weak.id}` }
     : worst.key === 'auth' ? { text: 'Authenticate your domains', to: '/domains' }
-    : worst.key === 'content' ? { text: 'Review rejected messages', to: '/logs' }
+    // Logs opens filtered to what the step is about, so following it is one click.
+    : worst.key === 'content' ? { text: 'Review rejected messages', to: '/logs?view=sent&status=rejected' }
     : worst.key === 'hygiene' ? { text: 'Clean suppressed addresses from lists', to: '/audience' }
-    : { text: `Review ${worst.label.toLowerCase()} in Logs`, to: '/logs' }
+    : { text: `Review ${worst.label.toLowerCase()} in Logs`, to: worst.key === 'complaints' ? '/logs?view=sent&status=complained' : worst.key === 'bounces' ? '/logs?view=sent&status=bounced' : '/logs?view=sent&stream=marketing' }
   return { key: 'score', ...target, meta: `+${whole(gain)} pts` }
 }
 export type NextItem = { key: string; text: string; meta?: string; to: string }

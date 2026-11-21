@@ -72,7 +72,8 @@ export type SetupStep = { key: string; done: boolean; title: string; action?: Re
 // Hosted admins until the first email is sent: each step read from server state, not from this browser. Receiving is
 // not a step: once these are done, the next steps offer it (score/index.tsx).
 // `loading` is true until the setup read (shared with the next steps) settles, so the page can hold its layout until it knows.
-export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; current?: SetupStep; open?: SetupStep[] } {
+// A failed read is `error` (with `retry`): the steps' place says so, rather than looking like finished setup.
+export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; current?: SetupStep; open?: SetupStep[]; error?: unknown; retry?: () => void } {
   const { multiTenant, canAdminister } = useWorkspaceAccess()
   const identity = useSession()?.identity
   const client = useQueryClient()
@@ -87,7 +88,8 @@ export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; 
   }
   if (!enabled) return { loading: false, steps: null }
   if (setup.isPending) return { loading: true, steps: null }
-  if (setup.error || !setup.data.domains || !setup.data.apiKeys) return { loading: false, steps: null }
+  if (setup.error) return { loading: false, steps: null, error: setup.error, retry: () => void setup.refetch() }
+  if (!setup.data.domains || !setup.data.apiKeys) return { loading: false, steps: null }
   const items = setup.data.domains, keyed = setup.data.apiKeys.active > 0
   const verified = items.find(domain => domain.status === 'verified')
   // The setup read carries the ten newest domains; an older verified one still counts (the session's domain summary).
@@ -97,13 +99,13 @@ export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; 
   if (domainDone && keyed && sent && !testId) return { loading: false, steps: null }
   const steps: SetupStep[] = [
     { key: 'domain', done: domainDone, title: 'Verify a domain',
-      action: !domainDone && <Link className="ui-button ui-button--secondary ui-button--md" to={pending ? `/domains/${pending.id}` : '/domains'}>{pending ? 'View records' : 'Add domain'}</Link> },
+      action: !domainDone && <Link className="ui-button ui-button--primary ui-button--md" to={pending ? `/domains/${pending.id}` : '/domains'}>{pending ? 'View records' : 'Add domain'}</Link> },
     { key: 'key', done: keyed, title: 'Create an API key',
-      action: !keyed && <Link className="ui-button ui-button--secondary ui-button--md" to={verified ? `/api-keys?create=send&domain=${encodeURIComponent(verified.name)}` : '/api-keys?create=send'}>Create key</Link> },
+      action: !keyed && <Link className={`ui-button ui-button--${domainDone ? 'primary' : 'secondary'} ui-button--md`} to={verified ? `/api-keys?create=send&domain=${encodeURIComponent(verified.name)}` : '/api-keys?create=send'}>Create key</Link> },
     // The test send names its from and to addresses itself; with no verified domain in this read to test from, the code examples.
     { key: 'send', done: sent, title: 'Send your first email',
       note: testId ? <>Test email queued to {identity?.email && <PrivateAddress value={identity.email} />}. <Link to={`/logs/${encodeURIComponent(testId)}`}>View in Logs</Link></> : undefined,
-      action: !sent && (verified ? <TestSend domain={verified} onSent={sentTest} /> : <Link className="ui-button ui-button--secondary ui-button--md" to="/docs#quickstart">Code examples</Link>) },
+      action: !sent && (verified ? <TestSend domain={verified} onSent={sentTest} primary={keyed} /> : <Link className="ui-button ui-button--secondary ui-button--md" to="/docs#quickstart">Code examples</Link>) },
   ]
   // Sending a test needs only a verified domain (it uses this session, not a key), so its step opens beside the key step.
   const current = steps.find(step => !step.done)

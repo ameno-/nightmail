@@ -136,7 +136,7 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 .activity-chart > svg { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
 /* Charts: a hairline grid, muted mono axes, thin neutral bars; colour only on outcomes and on anomaly bands. */
 .chart-label { fill: var(--color-faint); font-family: var(--font-mono); font-size: 10.5px; font-variant-numeric: tabular-nums; }
-.chart-label--date { fill: var(--color-faint); opacity: .7; }
+.chart-label--date { fill: var(--color-faint); }
 .chart-grid { stroke: var(--color-border-muted); shape-rendering: crispEdges; }
 .chart-grid--base { stroke: var(--color-border); }
 .chart-line { fill: none; stroke-width: 1.5; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
@@ -144,6 +144,11 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 .chart-line--complaints { stroke: var(--color-complaint); stroke-width: 1.25; }
 .chart-bar { fill: color-mix(in oklch, var(--color-accent-data) 62%, transparent); }
 .chart-bar--active { fill: var(--color-accent-data); }
+/* Light: the bars and the bounce line in their solid, darker forms, so the marks hold 3:1 against the plot. */
+:root:not([data-theme='dark']) .chart-bar { fill: var(--color-accent-data); }
+:root:not([data-theme='dark']) .chart-bar--active { fill: color-mix(in oklch, var(--color-accent-data) 75%, var(--color-text)); }
+:root:not([data-theme='dark']) .chart-line--bounces { stroke: var(--color-warning); }
+:root:not([data-theme='dark']) .legend-bounces { background: var(--color-warning); }
 /* An hour whose bounces or complaints crossed their warning line: a faint red band over the plot, a mark on the axis. */
 .chart-anomaly { fill: color-mix(in srgb, var(--color-danger-marker) 9%, transparent); }
 .chart-anomaly-mark { fill: var(--color-danger-marker); }
@@ -198,7 +203,7 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 .email-sender .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
 .email-sender .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
 /* Direction: a quiet mono tag, Out for sent mail and In for received mail. */
-.log-direction { font-family: var(--font-mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--color-muted); }
+.log-direction { font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: .06em; text-transform: uppercase; color: var(--color-muted); }
 .log-direction[data-direction='received'] { color: var(--color-text); }
 .email-metadata { display: grid; grid-template-columns: 1fr 1.3fr .7fr; gap: var(--space-32); margin: 0; padding: 0 0 var(--space-24); }
 .email-detail-page { display: flex; flex: 1; min-height: 0; flex-direction: column; }
