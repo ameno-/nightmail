@@ -138,7 +138,7 @@ Everything is at most two clicks from Receiving.
 | Add an alias or wildcard, attach a rule, change where its mail is delivered | Receiving → the address → Where mail goes |
 | Add a ready-made rule or write one | Receiving → Rules → New rule |
 | Turn a rule off, edit or delete it | Receiving → Rules → its switch or ⋯ menu |
-| Edit, attach or try a script | Receiving → Rules → the rule (Edit as code for a ready-made one) |
+| Edit, attach or try a rule | Receiving → Rules → the rule |
 | Create, test, pause or delete a destination | Receiving → Destinations |
 | Subscribe a webhook to inbound events | Receiving → Destinations → the webhook |
 | See every webhook that gets an address's mail | Receiving → the address → Where mail goes → Deliver → more webhooks |

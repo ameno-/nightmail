@@ -1,4 +1,4 @@
-import { Link, useLocation, useNavigate, useParams } from 'react-router'
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { basicSetup } from 'codemirror'
@@ -9,28 +9,34 @@ import { RangeSetBuilder, StateEffect, StateField } from '@codemirror/state'
 import { Decoration, EditorView, type DecorationSet } from '@codemirror/view'
 import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/language'
 import { tags } from '@lezer/highlight'
-import { Alert, Button, Checkbox, ConfirmDialog, DataTable, Disclosure, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, SectionHeader, Select, Textarea, useToast, type Column } from '../../components/ui'
+import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, X } from 'lucide-react'
+import { Button, Checkbox, ConfirmDialog, Dialog, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, Select, Sheet, Skeleton, Textarea, useToast, type MenuItem } from '../../components/ui'
 import { request } from '../../data/live'
 import { ApiError, errorText } from '../../data/types'
-import { useApiDef, useWorkspaceAccess } from '../../data/context'
+import { useApiDef, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { staleAfterWrite } from '../../data/invalidation'
 import { queries } from '../../data/queries'
 import { useLeaveGuard } from '../../lib/leave-guard'
-import { ritualRecipes, ritualTemplates, RITUALS_PER_ADDRESS } from '../../../../api/src/ritual-schema'
+import { RITUALS_PER_ADDRESS } from '../../../../api/src/ritual-schema'
+import { usePhone, useTouch } from '../../lib/media'
 import { concepts } from './concepts'
-import { firstOverview, useOverview } from './overview'
+import { firstOverview, useOverview, type OverviewEndpoint } from './overview'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { defaultChoice, EmailPicker, TraceView, traceInput, useDryRun, useRecentMail, type EmailChoice } from './trace'
+import type { DryRun } from './trace'
+import { Match } from './parts'
 import './inbound.css'
 import './receiving.css'
 import { useSingleFlight } from '../../lib/single-flight'
 import { actorText, changedLines, diffLines, useLiveVersion, type ChangeActor, type DiffLine, type LiveChange } from './live'
-import { addressOption } from './shared'
-import { maskedParts } from '../../lib/private-address'
+import { addressOption, cleanName, openBuilder, rulePath, splitBuilderPath } from './shared'
+import { maskedParts, ownRecipient, type ReceivedRecipients } from '../../lib/private-address'
 const runNext = 'Run the next one too'
+// The workspace's sender lists and where AI decisions read mail: every rule's, opened from any rule's menu.
+const sharedSettings = 'Sender lists and AI access'
 const savedMeanwhile = (version: number) => `Version ${version} was saved meanwhile: load theirs or keep yours.`
 
 type Binding = { rule: string; target: string; continue: boolean }
+type Received = ReceivedRecipients & { id: string; from: { name: string | null; address: string }; subject: string; at: string }
 type Config = { rules: { key: string; source: string; recipe?: { id: string; params: unknown }; enabled?: boolean }[]; attachments: Binding[]; senderLists: Record<string, string[]>; evaluateDomains: string[]; evaluateRoutes: string[] }
 type Saved = { version: number; config: Config }
 type Problem = { rule?: string; line: number; column: number; endLine?: number; endColumn?: number; message: string; hint?: string }
@@ -38,8 +44,11 @@ type Check = { ok: boolean; diagnostics: Problem[]; calls: string[]; decisions: 
 type Completion = { label: string; detail: string; info: string; apply?: string; type: string }
 
 const KEY = /^[a-z0-9][a-z0-9-]{0,62}$/
-const blank = () => `export default function route(email, ctx) {\n  \n}\n`
-const starter = () => ritualTemplates.find(t => t.id === 'junk-newsletters')!.source()
+// A new rule: the function, and one line that shows the shape of a rule.
+const starter = () => `export default function route(email, ctx) {\n  // e.g. return junk("newsletter")\n  \n}\n`
+const LIST = '/receiving?tab=rules'
+/** A new rule's place in the draft's attachments until it has a name: no saved rule can be called this. */
+const DRAFT = ':new'
 const listsToText = (lists: Record<string, string[]>) => Object.entries(lists).map(([name, entries]) => `${name}: ${entries.join(', ')}`).join('\n')
 function textToLists(text: string): Record<string, string[]> {
   const out: Record<string, string[]> = {}
@@ -176,54 +185,106 @@ function DiffView({ parts }: { parts: DiffPart[] }) {
   </div>) : <p className="ritual-diff__title">No script changed.</p>}</div>
 }
 
+/** What one action does to an email, in a word or two. */
+function actionWords(a: { op: string; ref?: string; value?: string }, endpoints: OverviewEndpoint[]) {
+  if (a.ref?.startsWith('endpoint:')) {
+    const name = a.ref.slice(9), type = endpoints.find(x => x.source === 'endpoint' && x.name === name)?.type
+    return type === 'slack' || type === 'discord' ? '#' + name : type === 'forward' ? 'Forwarded to ' + name : name + ' webhook'
+  }
+  if (a.ref?.startsWith('inbox:')) return a.ref.slice(6) + ' inbox'
+  return ({ label: 'Labelled ' + (a.value ?? ''), junk: 'Junk', block: 'Rejected', drop: 'Dropped', allow: 'Kept out of junk' } as Record<string, string>)[a.op] ?? a.op
+}
+type Outcome = { words: string; ai?: number; error?: string }
+function outcomeOf(r: DryRun | undefined, key: string, endpoints: OverviewEndpoint[]): Outcome | null {
+  if (!r) return null
+  const row = r.trace.find(t => t.key === key)
+  if (!row) return { words: '' }
+  const ai = Object.values(row.scores).find((v): v is number => typeof v === 'number')
+  return { words: row.error ? 'Error' : row.actions.map(a => actionWords(a, endpoints)).join(', '), ai, ...(row.error ? { error: row.error } : {}) }
+}
+
+/** Where the rule runs: its addresses, each with the rules there in order (this one moves among them), whether the next
+ *  one still runs after it acts, and a way off. All of it is the page's draft until Save. */
+function RunsOn({ id, name, atts, change, targets }: { id: string; name: string; atts: Binding[]; change: (next: Binding[]) => void; targets: { value: string; label: string }[] }) {
+  const label = (value: string) => targets.find(t => t.value === value)?.label ?? value
+  // A label can't hold a PrivateAddress: it names an address as masked, by its first two characters.
+  const spoken = (value: string) => { const m = maskedParts(label(value)); return m ? m.shown + '…' : label(value) }
+  const mine = atts.flatMap((b, i) => b.rule === id ? [{ ...b, i }] : [])
+  const free = targets.filter(t => !mine.some(b => b.target === t.value) && atts.filter(b => b.target === t.value).length < RITUALS_PER_ADDRESS)
+  return <div className="rule-runs">
+    {mine.length > 0 && <ul role="list">{mine.map(b => {
+      const there = atts.map((x, j) => ({ x, j })).filter(({ x }) => x.target === b.target), at = there.findIndex(({ j }) => j === b.i)
+      const swap = (j: number | undefined) => { if (j === undefined) return; const a = [...atts]; [a[b.i], a[j]] = [a[j]!, a[b.i]!]; change(a) }
+      return <li key={b.target}>
+        <span className="rule-runs__address"><PrivateAddress value={label(b.target)} /></span>
+        <span className="rule-runs__actions">
+          <IconButton label={'Run earlier on ' + spoken(b.target)} disabled={at <= 0} onClick={() => swap(there[at - 1]?.j)}><ArrowUp size={14} aria-hidden="true" /></IconButton>
+          <IconButton label={'Run later on ' + spoken(b.target)} disabled={at >= there.length - 1} onClick={() => swap(there[at + 1]?.j)}><ArrowDown size={14} aria-hidden="true" /></IconButton>
+          <IconButton label={'Remove ' + spoken(b.target)} onClick={() => change(atts.filter((_, j) => j !== b.i))}><X size={14} aria-hidden="true" /></IconButton>
+        </span>
+        {there.length > 1 && <>
+          <span className="rule-runs__order" aria-label={'Runs ' + (at + 1) + ' of ' + there.length}>{there.map(({ x }, n) => <span key={x.rule} data-self={x.rule === id || undefined}>{n > 0 && <span aria-hidden="true"> → </span>}{x.rule === id ? name : x.rule}</span>)}</span>
+          <Checkbox checked={b.continue} onCheckedChange={v => change(atts.map((x, j) => j === b.i ? { ...x, continue: v } : x))} label={runNext} />
+        </>}
+      </li>
+    })}</ul>}
+    {free.length > 0 && <Select className="address-select-trigger" menuClassName="address-select" aria-label="Add an address" value="" placeholder={mine.length ? 'Add an address' : 'Choose an address'}
+      onValueChange={v => { if (v) change([...atts, { rule: id, target: v, continue: false }]) }} options={free.map(t => addressOption(t.value, t.label))} />}
+  </div>
+}
+
 /**
- * One rule at a time. The script, sender lists and AI decision hosts are a draft until Save (the bar at the bottom says
- * which, and leaving asks first). Where a rule runs is not part of the draft: attaching, detaching, reordering and
- * "Run the next one too" save at once, because a row that looks attached must be attached.
+ * One rule: the page is its code. The code, where it runs (its addresses and its order on each), on or off, and the
+ * workspace's sender lists and AI hosts are one draft; Save writes all of it as one version (applyRules, If-Match) and
+ * Undo goes back to the saved one. Problems are the editor's own marks. "Try on recent mail" runs the draft on recent
+ * mail, each email with the AI's answer from when it arrived, and only while it is open.
  */
-export function RulesPage() {
+export function RulePage() {
   const { canAdminister } = useWorkspaceAccess()
   const toast = useToast()
   const client = useQueryClient()
   const navigate = useNavigate()
-  // /receiving/rules/:key/code opens that rule; /receiving/rules/new/script starts one. A script named "new"
-  // opens at /receiving/rules/new/code (recipes.tsx, NewRecipeRoute).
+  const phone = usePhone(), touch = useTouch()
+  // /receiving/rules/:key opens that rule; /receiving/rules/new/script starts one. A rule named "new" opens at
+  // /receiving/rules/new/code (recipes.tsx, NewRecipeRoute).
   const route = useParams(), wanted = route.key ?? (route.recipe === 'code' ? 'new' : '')
   const routeLocation = useLocation()
+  const preset = useSearchParams()[0].get('address')
   const addresses = useApiDef(queries.inboundAddressOptions(), { enabled: canAdminister })
-  // The Receiving page's first read, usually cached: only its domains and endpoints are used here.
+  // The Receiving page's first read, usually cached: only its endpoints are used here, to name what the rule did.
   const overview = useOverview(firstOverview, false, canAdminister)
+  const recent = useApiQuery(['rule-recent'], (_api, signal) => request<{ data: Received[] }>('/v1/logs?direction=received&limit=24', { signal }).then(r => r.data), { enabled: canAdminister })
   const [saved, setSaved] = useState<Saved | null>(null)
   const [loadError, setLoadError] = useState<Error | null>(null)
-  const [key, setKey] = useState('')
-  // The saved rule on screen ('' for a new one): typing another saved rule's key is a clash, not a rename.
+  // The rule's key (a new rule's is typed over the code), and the saved rule on screen ('' for a new one).
+  const [key, setKey] = useState(wanted)
   const [opened, setOpened] = useState('')
+  const [missing, setMissing] = useState(false)
   const [source, setSource] = useState('')
-  // A new rule's starting script, so an untouched new rule has nothing to save or lose.
   const [origin, setOrigin] = useState('')
+  const [enabled, setEnabled] = useState(true)
+  const [atts, setAtts] = useState<Binding[]>([])
+  const [baseAtts, setBaseAtts] = useState<Binding[]>([])
   const [lists, setLists] = useState('')
   const [domains, setDomains] = useState('')
-  const [target, setTarget] = useState('')
-  const [next, setNext] = useState(false)
   const [completions, setCompletions] = useState<Completion[]>([])
-  const [check, setCheck] = useState<Check | null>(null)
   const [problems, setProblems] = useState<Problem[]>([])
   const [pending, setPending] = useState(false)
-  const [binding, setBinding] = useState(false)
-  const [template, setTemplate] = useState('')
-  const [confirmTemplate, setConfirmTemplate] = useState<string | null>(null)
+  const [removing, setRemoving] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
-  const recent = useRecentMail()
-  const [picked, setChoice] = useState<EmailChoice | null>(null)
-  const [as, setAs] = useState('')
-  const [answers, setAnswers] = useState<Record<string, number>>({})
-  const dry = useDryRun()
-  const tryRef = useRef<HTMLElement>(null)
+  const [confirmScript, setConfirmScript] = useState(false)
+  // #attach and #try links land with their part open.
+  const [runsOpen, setRunsOpen] = useState(routeLocation.hash === '#attach')
+  const [sharedOpen, setSharedOpen] = useState(false)
+  const [trying, setTrying] = useState(routeLocation.hash === '#try')
+  const [shown, setShown] = useState<string | null>(null)
+  const [results, setResults] = useState<Record<string, { src: string; result?: DryRun }>>({})
+  const [clean, setClean] = useState<Record<string, string>>({})
   // Live: saves made elsewhere (an agent over MCP, an API key, another tab) arrive while this page is open. With no
-  // local edits they land in place; with local edits they wait in `incoming` until you load theirs or keep yours.
+  // local edits they land in place; with local edits they wait in incoming until you load theirs or keep yours.
   const [remote, setRemote] = useState<LiveChange | null>(null)
   const [incoming, setIncoming] = useState<Incoming | null>(null)
-  const [updatedBy, setUpdatedBy] = useState<{ version: number; actor: ChangeActor | null } | null>(null)
+  const [landed, setLanded] = useState(0)
   const [flash, setFlash] = useState<Flash>()
   const [relint, setRelint] = useState(0)
   const [showDiff, setShowDiff] = useState(false)
@@ -233,14 +294,13 @@ export function RulesPage() {
   const keyRef = useRef(key)
   keyRef.current = key
 
-  /** Shows one rule from a saved config, or a new one ('', or a key no rule has yet, which it starts with); the
-   *  sender lists and AI decision hosts come with it. */
+  /** Shows one saved rule, or a new one (wanted is ''), from a saved config: the last saved state, which Undo returns to. */
   function open(s: Saved, wanted: string) {
     const r = s.config.rules.find(x => x.key === wanted)
-    const start = s.config.rules.length ? blank() : starter()
-    setKey(r?.key ?? (wanted || (s.config.rules.length ? '' : 'triage'))); setOpened(r?.key ?? ''); setSource(r?.source ?? start); setOrigin(r?.source ?? start)
-    setLists(listsToText(s.config.senderLists)); setDomains(domainsToText(s.config.evaluateDomains))
-    setTemplate(''); setProblems([]); dry.clear()
+    // A new rule from an address's New rule starts on that address.
+    const start = r || !preset ? s.config.attachments : [...s.config.attachments, { rule: DRAFT, target: preset, continue: false }]
+    setKey(r?.key ?? ''); setOpened(r?.key ?? ''); setMissing(!!wanted && !r); setSource(r?.source ?? starter()); setOrigin(r?.source ?? starter()); setEnabled(r?.enabled !== false)
+    setAtts(start); setBaseAtts(start); setLists(listsToText(s.config.senderLists)); setDomains(domainsToText(s.config.evaluateDomains)); setProblems([])
   }
   useEffect(() => {
     if (!canAdminister) return
@@ -249,30 +309,36 @@ export function RulesPage() {
     request<Saved>('/v1/rules', { signal: ac.signal }).then(s => { setSaved(s); open(s, wanted) }).catch(e => { if (!ac.signal.aborted) setLoadError(e as Error) })
     return () => ac.abort()
   }, [canAdminister]) // eslint-disable-line react-hooks/exhaustive-deps
-  // Another rule's path (the page stays mounted between them): open it, unless it is the one on screen (a new
-  // rule's first save, or a rename, moves to its own path).
+  // Another rule's path (the page stays mounted between them): open it, unless it is the one on screen (a new rule's
+  // first save moves to its own path).
   useEffect(() => { if (saved && wanted !== keyRef.current) open(saved, wanted) }, [wanted]) // eslint-disable-line react-hooks/exhaustive-deps
-  // #try and #attach links from Receiving land on their section once it exists.
-  useEffect(() => { if (saved && routeLocation.hash) requestAnimationFrame(() => document.getElementById(routeLocation.hash.slice(1))?.scrollIntoView({ block: 'start' })) }, [saved, routeLocation.hash])
 
-  const isSaved = !!saved?.config.rules.some(r => r.key === key)
-  // Renamed onto another rule's key: saving would replace that rule's script, so it is refused here.
-  const clash = isSaved && key !== opened
-  // The draft: this rule's script, the sender lists and AI decision hosts. Attachments are always the saved ones.
+  const rule = saved?.config.rules.find(r => r.key === opened)
+  // In the draft's attachments a new rule is DRAFT until it is saved; anywhere a key is needed before it has one, "draft".
+  const id = opened || DRAFT
+  const keyValid = KEY.test(key)
+  const ruleKey = opened || (keyValid ? key : 'draft')
+  // A new rule named like a saved one: saving would replace that rule's script, so it is refused here.
+  const clash = !opened && !!saved?.config.rules.some(r => r.key === key)
   const config = useMemo<Config | null>(() => saved && ({
     ...saved.config,
-    rules: isSaved ? saved.config.rules.map(r => r.key === key ? { ...r, source } : r) : [...saved.config.rules, ...(key ? [{ key, source }] : [])],
+    rules: opened ? saved.config.rules.map(r => r.key === opened ? { ...r, source, enabled } : r) : [...saved.config.rules, { key: ruleKey, source, enabled }],
+    attachments: atts.map(b => b.rule === DRAFT ? { ...b, rule: ruleKey } : b),
     senderLists: textToLists(lists),
     evaluateDomains: domains.split(',').map(x => x.trim().toLowerCase()).filter(Boolean),
-  }), [saved, isSaved, key, source, lists, domains])
-  const scriptChanged = isSaved ? saved!.config.rules.find(r => r.key === key)!.source !== source : source !== origin
+  }), [saved, opened, ruleKey, source, enabled, atts, lists, domains])
+  const scriptChanged = source !== origin
+  const enabledChanged = !!rule && enabled !== (rule.enabled !== false)
+  const attsChanged = JSON.stringify(atts) !== JSON.stringify(baseAtts)
   const listsChanged = !!saved && !!config && JSON.stringify(config.senderLists) !== JSON.stringify(saved.config.senderLists)
   const domainsChanged = !!saved && !!config && JSON.stringify(config.evaluateDomains) !== JSON.stringify(saved.config.evaluateDomains)
-  const dirty = !!saved && (scriptChanged || listsChanged || domainsChanged)
-  const keyValid = KEY.test(key)
+  const dirty = !!saved && !missing && (scriptChanged || enabledChanged || attsChanged || listsChanged || domainsChanged || (!opened && (!!key || !enabled)))
+  // A rule made from a recipe keeps it only while its source is what the recipe writes: saving other code makes it a
+  // script (the API drops the recipe). The address builder can then no longer change a split, so that save asks first.
+  const split = rule?.recipe?.id === 'split' || rule?.recipe?.id === 'split-by-meaning'
 
-  const live = useRef({ saved, dirty, key, source, isSaved })
-  live.current = { saved, dirty, key, source, isSaved }
+  const live = useRef({ saved, dirty, key, opened, source, atts })
+  live.current = { saved, dirty, key, opened, source, atts }
   useLiveVersion(canAdminister && !!saved, change => {
     setRemote(change)
     // A new or changed endpoint changes what a rule can call: new completions, and the script checked again.
@@ -282,53 +348,58 @@ export function RulesPage() {
   // and again 4 s later if that read fails.
   const [retry, setRetry] = useState(0)
   useEffect(() => {
-    if (!remote || !saved || pending || binding || remote.version <= Math.max(saved.version, incoming?.version ?? 0)) return
+    if (!remote || !saved || pending || removing || remote.version <= Math.max(saved.version, incoming?.version ?? 0)) return
     const ac = new AbortController()
     let again: ReturnType<typeof setTimeout> | undefined
     request<Saved>('/v1/rules', { signal: ac.signal }).then(s => land(s, remote.actor)).catch(() => { if (!ac.signal.aborted) again = setTimeout(() => setRetry(n => n + 1), 4000) })
     return () => { ac.abort(); clearTimeout(again) }
-  }, [remote, saved?.version, incoming?.version, pending, binding, retry]) // eslint-disable-line react-hooks/exhaustive-deps
-  // Your edits are gone (Discard, or undone by hand) while their version waits: it lands as if you hadn't edited.
+  }, [remote, saved?.version, incoming?.version, pending, removing, retry]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Your edits are gone (Undo, or undone by hand) while their version waits: it lands as if you hadn't edited.
   useEffect(() => {
     if (!incoming || dirty || pending) return
     const { actor, ...s } = incoming
     setIncoming(null); land(s, actor)
   }, [incoming, dirty, pending]) // eslint-disable-line react-hooks/exhaustive-deps
+  /** Their attachments, with a new rule's own (it is in nobody's saved config yet). */
+  const withMine = (theirs: Binding[], mine: Binding[]) => [...theirs, ...mine.filter(b => b.rule === DRAFT)]
   function land(s: Saved, actor: ChangeActor | null) {
-    const { saved: base, dirty, key, source, isSaved } = live.current
+    const { saved: base, dirty, key, opened, source, atts } = live.current
     if (!base || s.version <= base.version) return
     // Only routes moved: the version is still the If-Match for saving, so take it quietly.
     if (JSON.stringify(s.config) === JSON.stringify(base.config)) { setSaved(s); return }
     if (dirty) { setIncoming({ ...s, actor }); setShowDiff(false); setConfirmKeep(false); return }
-    setSaved(s); setIncoming(null); setUpdatedBy({ version: s.version, actor })
+    setSaved(s); setIncoming(null)
     const theirs = s.config.rules.find(r => r.key === key)
-    if (isSaved && !theirs) {
-      toast(`${whoSaved(actor)} deleted ${key}`, 'info')
-      navigate('/receiving?tab=rules', { replace: true })
+    if (opened && !theirs) {
+      toast(whoSaved(actor) + ' deleted ' + key, 'info')
+      navigate(LIST, { replace: true })
       return
     }
-    if (theirs) {
-      setOpened(key)
+    if (theirs && opened) {
       if (theirs.source !== source) { setSource(theirs.source); setFlash({ lines: changedLines(source, theirs.source), at: Date.now() }) }
-      setOrigin(theirs.source)
+      setOrigin(theirs.source); setEnabled(theirs.enabled !== false)
     }
-    setLists(listsToText(s.config.senderLists)); setDomains(domainsToText(s.config.evaluateDomains))
+    const next = withMine(s.config.attachments, atts)
+    setAtts(next); setBaseAtts(next); setLists(listsToText(s.config.senderLists)); setDomains(domainsToText(s.config.evaluateDomains))
+    // The page has no status line: a save made elsewhere says so once, and marks the lines it changed.
+    setLanded(s.version); toast(whoSaved(actor) + ' saved version ' + s.version, 'info')
   }
   /** Their version replaces your edits. */
   function loadTheirs() {
     if (!incoming) return
-    const { actor, ...s } = incoming, before = source
-    setSaved(s); setIncoming(null); setUpdatedBy({ version: s.version, actor })
-    open(s, s.config.rules.some(r => r.key === key) ? key : s.config.rules[0]?.key ?? '')
-    const theirs = s.config.rules.find(r => r.key === key)
+    const { actor: _actor, ...s } = incoming, before = source
+    setSaved(s); setIncoming(null)
+    const theirs = s.config.rules.find(r => r.key === opened)
+    if (opened && !theirs) { navigate(LIST, { replace: true }); return }
+    open(s, opened)
     if (theirs && theirs.source !== before) setFlash({ lines: changedLines(before, theirs.source), at: Date.now() })
   }
   // Keeping yours rebases the draft onto their version (its If-Match). What only they changed stays theirs; where
-  // both of you changed the same script, list or domains, yours replaces theirs, and that is confirmed first.
-  const baseScript = saved?.config.rules.find(r => r.key === key)?.source
+  // both of you changed the same thing, yours replaces theirs, and that is confirmed first.
   const theirScript = incoming?.config.rules.find(r => r.key === key)?.source
   const overlaps = !incoming || !saved ? [] : [
-    ...(scriptChanged && theirScript !== baseScript ? [theirScript === undefined ? `their deletion of ${key}` : baseScript === undefined ? `their rule named ${key}` : `their changes to ${key}`] : []),
+    ...(scriptChanged && theirScript !== rule?.source ? [theirScript === undefined ? 'their deletion of ' + key : rule ? 'their changes to ' + key : 'their rule named ' + key] : []),
+    ...(attsChanged && JSON.stringify(incoming.config.attachments) !== JSON.stringify(saved.config.attachments) ? ['where their rules run'] : []),
     ...(listsChanged && JSON.stringify(incoming.config.senderLists) !== JSON.stringify(saved.config.senderLists) ? ['their sender lists'] : []),
     ...(domainsChanged && JSON.stringify(incoming.config.evaluateDomains) !== JSON.stringify(saved.config.evaluateDomains) ? ['their AI decision hosts'] : []),
   ]
@@ -336,231 +407,166 @@ export function RulesPage() {
     if (!incoming) return
     if (overlaps.length && !confirmKeep) { setConfirmKeep(true); return }
     const { actor: _actor, ...s } = incoming
+    const theirs = s.config.rules.find(r => r.key === opened)
     if (!listsChanged) setLists(listsToText(s.config.senderLists))
     if (!domainsChanged) setDomains(domainsToText(s.config.evaluateDomains))
-    // Deleted in theirs: saving brings yours back as a new rule.
-    if (isSaved && !s.config.rules.some(r => r.key === key)) setOrigin(baseScript ?? origin)
+    if (theirs && !scriptChanged) setSource(theirs.source)
+    if (theirs && !enabledChanged) setEnabled(theirs.enabled !== false)
+    if (theirs) setOrigin(theirs.source)
+    // Deleted in theirs: saving brings yours back as a new rule of the same name.
+    const mine = opened && !theirs ? atts.map(b => b.rule === opened ? { ...b, rule: DRAFT } : b) : atts
+    if (opened && !theirs) setOpened('')
+    setAtts(attsChanged ? mine : withMine(s.config.attachments, mine)); setBaseAtts(withMine(s.config.attachments, baseAtts))
     setSaved(s); setIncoming(null); setConfirmKeep(false); setShowDiff(false)
-    toast(`Your edits now sit on version ${s.version}. Save to apply.`, 'success')
+    toast('Your edits now sit on version ' + s.version + '. Save to apply.', 'success')
   }
 
   const refresh = () => void client.invalidateQueries({ predicate: query => staleAfterWrite(query.queryKey, false) }).catch(() => {})
+  /** The checker's problems, for the editor's own marks. It reports where a problem starts; the squiggle runs under the
+   *  whole name there. */
   async function lint(text: string): Promise<Problem[]> {
     try {
       const r = await request<Check>('/v1/rules/check', { method: 'POST', body: { source: text, key: KEY.test(keyRef.current) ? keyRef.current : 'draft', senderLists: listsRef.current } })
-      setCheck(r)
-      return r.diagnostics
+      const lines = text.split('\n')
+      const marked = r.diagnostics.map(d => (d.endLine ?? d.line) !== d.line ? d : { ...d, endColumn: Math.max(d.endColumn ?? 0, d.column + Math.max(1, /^[\w$.]*/.exec((lines[d.line - 1] ?? '').slice(d.column - 1))![0].length)) })
+      setProblems(marked)
+      return marked
     } catch { return [] }
   }
-  /** Saves the draft (and any attachment to add with it). Resolves false when it didn't save; the reason is shown.
-   *  Single flight, like the writes below: a second Save or ⌘S before the first answers would send the same version again
-   *  and report a conflict next to the success; it gets the first one's result instead. */
-  const save = useSingleFlight('rituals.save', async (attachments?: Binding[]): Promise<boolean> => {
+  /** Saves the draft as one version. Resolves false when it didn't save; the reason is shown. Single flight: a second
+   *  Save or ⌘S before the first answers would send the same version again and report a conflict next to the success. */
+  const save = useSingleFlight('rules.save', async (): Promise<boolean> => {
     if (!saved || !config || !keyValid || clash) return false
     if (incoming) { toast(savedMeanwhile(incoming.version), 'error'); return false }
-    setPending(true); setProblems([])
+    setPending(true)
     try {
-      const s = await request<Saved>('/v1/rules', { method: 'PUT', body: { ...config, ...(attachments ? { attachments } : {}) }, ifMatch: saved.version })
-      setSaved(s); setOrigin(source); setOpened(key); refresh()
-      if (key !== wanted) navigate(`/receiving/rules/${encodeURIComponent(key)}/code`, { replace: true })
-      toast(`${key} saved · version ${s.version}`, 'success')
+      const s = await request<Saved>('/v1/rules', { method: 'PUT', body: config, ifMatch: saved.version })
+      setSaved(s); open(s, key); refresh()
+      if (key !== wanted) navigate(rulePath(key), { replace: true })
+      toast(key + ' saved · version ' + s.version, 'success')
       return true
     } catch (e) {
-      const details = (e instanceof ApiError ? e.details as Problem[] | undefined : undefined)
-      if (details?.length) setProblems(details)
-      toast(`Not saved: ${errorText(e)}`, 'error')
+      const first = e instanceof ApiError ? (e.details as Problem[] | undefined)?.[0] : undefined
+      toast('Not saved: ' + (first ? (first.rule && first.rule !== key ? first.rule + ', line ' : 'line ') + first.line + ': ' + first.message : errorText(e)), 'error')
       return false
     } finally { setPending(false) }
   })
-  /** Attach, detach, reorder and "Run the next one too" save at once; the draft script is left as it is. */
-  const saveBindings = useSingleFlight('rituals.attachments', async (attachments: Binding[], done: string) => {
+  const canSave = !!saved && !missing && (dirty || !opened) && keyValid && !clash && !pending && !incoming
+  const askSave = () => { if (!canSave) return; if (split && scriptChanged) setConfirmScript(true); else void save() }
+  const remove = useSingleFlight('rules.delete', async () => {
     if (!saved) return
-    if (incoming) { toast(savedMeanwhile(incoming.version), 'error'); return }
-    // A rule that was never saved can't be attached on its own: it is saved with its first attachment.
-    if (!isSaved && attachments.some(b => b.rule === key)) { if (await save(attachments)) setTarget(''); return }
-    setBinding(true)
+    // Marked as a write in flight, so the live view never reports this delete as someone else's.
+    setRemoving(true)
     try {
-      const s = await request<Saved>('/v1/rules/attachments', { method: 'PUT', body: { attachments }, ifMatch: saved.version })
-      setSaved(s); setTarget(''); refresh(); toast(done, 'success')
-    } catch (e) { toast(errorText(e), 'error') }
-    finally { setBinding(false) }
-  })
-  const remove = useSingleFlight('rituals.delete', async () => {
-    if (!saved) return
-    // Marked as a write in flight (binding), so the live view never reports this delete as someone else's.
-    setBinding(true)
-    try {
-      const s = await request<Saved>(`/v1/rules/scripts/${encodeURIComponent(key)}`, { method: 'DELETE', ifMatch: saved.version })
-      setSaved(s); refresh(); toast(`${key} deleted`, 'success')
-      navigate('/receiving?tab=rules', { replace: true })
-    } finally { setBinding(false) }
-  }, key)
-  const leaveGuard = useLeaveGuard(dirty, { what: `the changes to ${key || 'this rule'}`, save: () => save() })
-  // ⌘S / Ctrl+S saves the draft from anywhere on the page, the editor included. A new rule can be saved as it starts.
-  const saveRef = useRef(save)
-  saveRef.current = save
-  const canSave = (dirty || (!isSaved && !!key)) && keyValid && !clash && !pending && !incoming
+      const s = await request<Saved>('/v1/rules/scripts/' + encodeURIComponent(opened), { method: 'DELETE', ifMatch: saved.version })
+      setSaved(s); refresh(); toast(opened + ' deleted', 'success')
+      navigate(LIST, { replace: true })
+    } finally { setRemoving(false) }
+  }, opened)
+  const leaveGuard = useLeaveGuard(dirty, { what: 'the changes to ' + (key || 'this rule'), save: () => save() })
+  // ⌘S / Ctrl+S saves from anywhere on the page, the editor included; ⌘↵ opens and closes the results.
+  const keys = useRef({ askSave, trying })
+  keys.current = { askSave, trying }
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); if (canSave) void saveRef.current() } }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [canSave])
+    const onKey = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey)) return
+      if (event.key.toLowerCase() === 's') { event.preventDefault(); keys.current.askSave() }
+      else if (event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); setTrying(!keys.current.trying) }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [])
 
-  // Try runs only this rule, unsaved, as if it were attached to the address the email was sent to.
-  const choice = picked ?? defaultChoice(recent.data, (addresses.data ?? []).find(a => !a.expiresAt)?.address ?? '')
-  const recipient = (choice.mode === 'sample' ? choice.to : as || (choice.mode === 'recent' ? choice.to ?? '' : (choice.mime.match(/^to:\s*(?:.*<)?([^\s<>,]+@[^\s<>,]+)/im)?.[1] ?? ''))).trim().toLowerCase()
-  const decisions = check?.decisions ?? []
-  async function tryIt() {
-    if (!config || !key || !recipient.includes('@')) return
-    const input = traceInput(choice, choice.mode === 'sample' ? undefined : recipient)
-    if (!input) return
-    // The AI is never asked in a try: the answers set here stand in for it, keyed by question.
-    const scores = Object.fromEntries(decisions.filter(name => check?.questions[name]).map(name => [check!.questions[name]!, answers[name] ?? 0.5]))
-    // As if on: a rule turned off still tries.
-    await dry.run({ ...input, to: [recipient], config: { ...config, rules: config.rules.map(r => r.key === key ? { ...r, enabled: true } : r), attachments: [{ rule: key, target: recipient, continue: false }] }, ...(Object.keys(scores).length ? { scores } : {}) })
-    requestAnimationFrame(() => tryRef.current?.querySelector('.trace-out')?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' }))
-  }
-  // An endpoint template with no endpoint of its type falls back to a name that doesn't exist, so it says what it needs.
-  const endpointFor = (needs?: string) => completions.find(c => c.detail.startsWith(`${needs} ·`))?.label.replace(/^endpoints\.|^endpoints\["|"\]$/g, '')
-  const missing = (t: typeof ritualTemplates[number]) => !!t.needs && completions.length > 0 && !endpointFor(t.needs)
-  const endpointWord = { slack: 'Slack', discord: 'Discord', webhook: 'webhook', forward: 'forward' } as const
-  function applyTemplate(id: string) {
-    const t = ritualTemplates.find(x => x.id === id)
-    if (!t) return
-    setSource(t.source(endpointFor(t.needs)))
-    setTemplate(id); setConfirmTemplate(null); dry.clear()
-  }
-
-  const title = wanted || 'New script'
-  if (!canAdminister) return <div className="stack inbound-stack"><PageHeader title={title} backTo="/receiving?tab=rules" /><EmptyState title={concepts.rules.adminOnly} /></div>
-  if (loadError) return <div className="stack inbound-stack"><PageHeader title={title} backTo="/receiving?tab=rules" /><ErrorState error={loadError} onRetry={() => location.reload()} /></div>
-  const bindings = saved?.config.attachments ?? []
   const targets = (addresses.data ?? []).flatMap(a => [{ label: a.address, value: a.id }, ...a.aliases.map(alias => ({ label: alias, value: alias }))])
   const targetName = (value: string) => targets.find(t => t.value === value)?.label ?? value
-  // A label can't hold a PrivateAddress: it names an address as masked, by its first two characters.
-  const spoken = (value: string) => { const m = maskedParts(value); return m ? `${m.shown}…` : value }
-  // This rule's attachments, each with its place among the rules on that address. Moving one swaps it with the
-  // rule before or after it there; the rest of the list keeps its order.
-  type Row = Binding & { i: number; place: number; of: number; before?: number; after?: number }
-  const rows: Row[] = bindings.flatMap((b, i) => {
-    if (b.rule !== key) return []
-    const same = bindings.map((x, j) => ({ x, j })).filter(({ x }) => x.target === b.target), at = same.findIndex(({ j }) => j === i)
-    return [{ ...b, i, place: at + 1, of: same.length, before: same[at - 1]?.j, after: same[at + 1]?.j }]
-  })
-  const swap = (b: Row, j: number | undefined, by: number) => { if (j === undefined) return; const a = [...bindings]; [a[b.i], a[j]] = [a[j]!, a[b.i]!]; void saveBindings(a, `Moved ${b.rule} ${by < 0 ? 'up' : 'down'}`) }
-  // On a phone each attachment is a card: the address, then its place, with the row's actions in a menu.
-  const bindingColumns: Column<Row>[] = [
-    { key: 'target', label: 'Address', card: 'title', render: b => <PrivateAddress value={targetName(b.target)} /> },
-    { key: 'order', label: 'Order', width: 120, card: 'line', render: b => b.of > 1 ? `${b.place} of ${b.of}` : 'Only rule', cardRender: b => <>{b.of > 1 ? `Runs ${b.place} of ${b.of}` : 'Only rule here'}{b.continue ? ', then the next one' : ''}</> },
-    { key: 'continue', label: 'After it acts', width: 190, card: 'hide', render: b => <Checkbox checked={b.continue} disabled={binding} onCheckedChange={v => void saveBindings(bindings.map((x, i) => i === b.i ? { ...x, continue: v } : x), v ? `${b.rule} now lets the next rule run` : `${b.rule} now stops the next rule`)} label={runNext} /> },
-    { key: 'actions', label: '', width: 132, align: 'right', card: 'end', cardRender: b => <DropdownMenu label={`Actions for ${b.rule}`} title={<>{b.rule} on <PrivateAddress value={targetName(b.target)} /></>} items={[
-      { label: b.continue ? 'Stop the next one after it acts' : runNext, disabled: binding, onSelect: () => void saveBindings(bindings.map((x, i) => i === b.i ? { ...x, continue: !b.continue } : x), b.continue ? `${b.rule} now stops the next rule` : `${b.rule} now lets the next rule run`) },
-      ...(b.before !== undefined ? [{ label: 'Move up', disabled: binding, onSelect: () => swap(b, b.before, -1) }] : []),
-      ...(b.after !== undefined ? [{ label: 'Move down', disabled: binding, onSelect: () => swap(b, b.after, 1) }] : []),
-      { label: 'Detach', destructive: true, disabled: binding, onSelect: () => void saveBindings(bindings.filter((_, i) => i !== b.i), `Detached ${b.rule}`) },
-    ]} />, render: b => <span className="ritual-row-actions">
-      <IconButton label={`Move ${b.rule} up on ${spoken(targetName(b.target))}`} disabled={b.before === undefined || binding} onClick={() => swap(b, b.before, -1)}>↑</IconButton>
-      <IconButton label={`Move ${b.rule} down on ${spoken(targetName(b.target))}`} disabled={b.after === undefined || binding} onClick={() => swap(b, b.after, 1)}>↓</IconButton>
-      <IconButton label={`Detach ${b.rule}`} disabled={binding} onClick={() => void saveBindings(bindings.filter((_, i) => i !== b.i), `Detached ${b.rule}`)}>×</IconButton>
-    </span> },
+  const mine = atts.filter(b => b.rule === id).map(b => targetName(b.target))
+  const endpoints = overview.data?.endpoints ?? []
+  // Recent mail to its addresses (else any recent mail), one per conversation.
+  const emails = useMemo(() => {
+    const all = recent.data ?? [], seen = new Set<string>(), ours = all.filter(m => mine.includes(ownRecipient(m) ?? ''))
+    return (ours.length ? ours : all).filter(m => { const s = m.subject.replace(/^(re|fwd?):\s*/i, '').toLowerCase(); if (seen.has(s)) return false; seen.add(s); return true }).slice(0, 6)
+  }, [recent.data, mine.join()]) // eslint-disable-line react-hooks/exhaustive-deps
+  /** One email through the given config's version of this rule alone, on and as if on the address the email went to.
+   *  The AI is never asked: each stored email brings the answer it got when it arrived. */
+  const dryRun = (m: Received, on: Config, signal: AbortSignal) => {
+    const to = ownRecipient(m) ?? m.to[0] ?? ''
+    return request<DryRun>('/v1/rules/test', { method: 'POST', signal, body: { messageId: m.id, to: [to], config: { ...on, rules: on.rules.map(r => r.key === ruleKey ? { ...r, enabled: true } : r), attachments: [{ rule: ruleKey, target: to, continue: false }] } } })
+  }
+  const signature = JSON.stringify([source, ruleKey, lists, emails.map(m => m.id), !!saved, trying])
+  useEffect(() => {
+    if (!config || !emails.length || !trying) return
+    const ac = new AbortController()
+    const timer = setTimeout(() => {
+      for (const m of emails) dryRun(m, config, ac.signal).then(result => setResults(x => ({ ...x, [m.id]: { src: source, result } })), () => { if (!ac.signal.aborted) setResults(x => ({ ...x, [m.id]: { src: source } })) })
+    }, 350)
+    return () => { clearTimeout(timer); ac.abort() }
+  }, [signature]) // eslint-disable-line react-hooks/exhaustive-deps
+  const outcome = (m: string) => outcomeOf(results[m]?.result, ruleKey, endpoints)
+  const settled = emails.length > 0 && emails.every(m => results[m.id]?.src === source)
+  // What the saved rule does to each email: what an edit is compared with. Kept from a run of the saved code, or, when
+  // the results open on a draft that already differs, from one run of the saved rule.
+  useEffect(() => { if (opened && settled && !scriptChanged) setClean(Object.fromEntries(emails.map(m => [m.id, outcome(m.id)?.words ?? '']))) }, [settled, scriptChanged, opened, saved?.version]) // eslint-disable-line react-hooks/exhaustive-deps
+  const baseless = trying && !!rule && !!saved && scriptChanged && emails.some(m => !(m.id in clean))
+  useEffect(() => {
+    if (!baseless || !saved) return
+    const ac = new AbortController()
+    void Promise.all(emails.map(m => dryRun(m, saved.config, ac.signal).then(r => [m.id, outcomeOf(r, ruleKey, endpoints)?.words ?? ''] as const, () => [m.id, ''] as const)))
+      .then(rows => { if (!ac.signal.aborted) setClean(Object.fromEntries(rows)) })
+    return () => ac.abort()
+  }, [baseless]) // eslint-disable-line react-hooks/exhaustive-deps
+  const was = (m: string) => !!rule && settled && scriptChanged && m in clean && clean[m] !== (outcome(m)?.words ?? '') ? clean[m]! : null
+
+  const title = wanted || 'New rule'
+  if (!canAdminister) return <div className="stack inbound-stack"><PageHeader title={title} backTo={LIST} /><EmptyState title={concepts.rules.adminOnly} /></div>
+  if (loadError) return <div className="stack inbound-stack"><PageHeader title={title} backTo={LIST} /><ErrorState error={loadError} onRetry={() => location.reload()} /></div>
+  if (missing) return <div className="stack inbound-stack"><PageHeader title={title} backTo={LIST} /><EmptyState title={'No rule named ' + wanted} action={<Link className="ui-button ui-button--secondary ui-button--md" to={LIST}>Rules</Link>} /></div>
+  const ready = !!saved && !!addresses.data && recent.isFetched
+  const builder = split && opened ? splitBuilderPath(opened, atts.filter(b => b.rule === opened).map(b => b.target), addresses.data) : null
+  const items: MenuItem[] = [
+    ...(builder ? [{ label: openBuilder, onSelect: () => navigate(builder) }] : []),
+    { label: enabled ? 'Turn off' : 'Turn on', onSelect: () => setEnabled(!enabled) },
+    { label: sharedSettings, onSelect: () => setSharedOpen(true) },
+    ...(opened ? [{ label: 'Delete rule', destructive: true, onSelect: () => setConfirmDelete(true) }] : []),
   ]
-  const recipients = (addresses.data ?? []).filter(a => !a.expiresAt).map(a => a.address)
-  const attached = bindings.some(b => b.target === target && b.rule === key)
-  const recipe = isSaved ? saved?.config.rules.find(r => r.key === key)?.recipe : undefined, recipeName = recipe && ritualRecipes.find(r => r.id === recipe.id)?.name
-  const remoteStatus = !pending && saved && isSaved && !dirty && updatedBy?.version === saved.version ? `Updated by ${actorText(updatedBy.actor)} · version ${saved.version}` : null
-  // The save bar says what Save will do when it isn't plain: a renamed rule saves as a new one (the old one stays), and
-  // a change to a form-made rule makes it a script of your own.
-  const status = pending ? 'Saving…' : !saved ? '' : remoteStatus ?? (!isSaved ? (opened && key && key !== opened ? `Saves as a new rule · ${opened} stays` : `${key || 'This new rule'} isn’t saved yet`)
-    : dirty ? (recipeName && scriptChanged ? 'Unsaved · saving makes it your own script' : 'Unsaved changes') : `All changes saved · version ${saved.version}`)
   const changes = incoming && saved ? changesBetween(saved.config, incoming.config, key, scriptChanged ? source : null) : null
-  // Attaching: an address takes up to RITUALS_PER_ADDRESS rules, and one rule once.
-  const onTarget = bindings.filter(b => b.target === target).length
-  const attachError = attached ? `${key} already runs on this address.` : target && onTarget >= RITUALS_PER_ADDRESS ? `This address already runs ${RITUALS_PER_ADDRESS} rules, the most it takes.` : undefined
-  const templateApplied = ritualTemplates.find(t => t.id === template)
-  return <div className="stack inbound-stack ritual-page">
-    <PageHeader title={title} backTo="/receiving?tab=rules" actions={<>
-      {/* Always in the header, so the buttons beside it never move; hidden until there's a saved rule to delete. It
-          sits on the inner side (first here, last on a phone where the row starts at the left), so its reserved space
-          never pushes Destinations off the content's edge. */}
-      <Button variant="danger" className="ritual-delete" data-hidden={!isSaved || undefined} disabled={!isSaved || clash} onClick={() => setConfirmDelete(true)}>Delete</Button>
-      <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving?tab=destinations">Destinations</Link>
+  const problem = problems[0]
+  // The addresses it runs on, in a line that opens where it runs.
+  const first = mine.slice(0, 3), more = mine.length - first.length
+  const on = <button type="button" className="rule-on" disabled={!ready} onClick={() => setRunsOpen(true)}>
+    {!ready ? <Skeleton width={200} height={12} /> : <><span className="rule-on__text">{mine.length ? <>Mail to {first.map((address, i) => <span key={address}>{i > 0 && (i === first.length - 1 && !more ? ' and ' : ', ')}<span className="rule-on__address"><Match value={address} host={false} />@</span></span>)}{more > 0 && ' and ' + more + ' more'}</> : 'Choose an address'}</span><ChevronDown size={14} aria-hidden="true" /></>}
+  </button>
+  const name = opened || !saved ? <span title={opened || title}>{opened || title}{!!opened && !enabled && <span className="rule-off">Off</span>}</span>
+    : <input className="rule-name" value={key} size={Math.max(8, key.length)} placeholder="new-rule" aria-label="Rule name" aria-invalid={(!!key && !keyValid) || clash || undefined} title={key && !keyValid ? 'Lowercase letters, digits and hyphens' : clash ? 'A rule named ' + key + ' exists' : undefined}
+        autoFocus spellCheck={false} autoComplete="off" autoCapitalize="off" onChange={e => setKey(e.target.value.toLowerCase().replace(/[\s_]+/g, '-'))} />
+  const mail = !emails.length ? <p className="rule-mail__none">No mail yet</p> : <ul className="rule-mail" role="list" aria-label="Recent mail">{emails.map(m => {
+    const o = outcome(m.id), old = was(m.id), isOpen = shown === m.id
+    return <li key={m.id} data-acted={!!o?.words || undefined} data-changed={old !== null || undefined}>
+      <button type="button" className="rule-mail__row" aria-expanded={isOpen} onClick={() => setShown(isOpen ? null : m.id)}>
+        <span className="rule-mail__from">{cleanName(m.from.name) || <PrivateAddress value={m.from.address} />}</span>
+        <span className="rule-mail__subject">{m.subject || '(no subject)'}</span>
+        <span className="rule-mail__out">{old !== null && old !== '' && <s>{old}</s>}{o?.words}</span>
+      </button>
+      {isOpen && <p className="rule-mail__why">To <Match value={ownRecipient(m) ?? m.to[0] ?? ''} />{o?.ai !== undefined && <>. The AI was {Math.round(o.ai * 100)}% sure.</>}{o?.error && <> {o.error}</>}</p>}
+    </li>
+  })}</ul>
+  return <div className="stack inbound-stack rule-page" data-landed={landed === saved?.version || undefined}>
+    <PageHeader title={name} subtitle={phone ? undefined : on} backTo={LIST} actions={<>
+      <Button variant="ghost" className="rule-undo" data-hidden={!dirty || undefined} disabled={!dirty || pending} onClick={() => saved && open(saved, opened)}>Undo</Button>
+      <Button variant="primary" loading={pending} disabled={!canSave} onClick={askSave}>Save</Button>
+      <span className="rule-menu" data-hidden={!ready || undefined}><DropdownMenu label={'Actions for ' + (key || 'this rule')} items={items} /></span>
     </>} />
-    {problems.length > 0 && <Alert tone="danger" title="Not saved. Fix these first:"><ul className="ritual-problems">{problems.map((p, i) => <li key={i}><code>{p.rule ? `${p.rule}:` : ''}{p.line}:{p.column}</code> {p.message}{p.hint ? <span className="muted"> {p.hint}</span> : null}</li>)}</ul></Alert>}
-    {saved && <>
-      {/* With the config, so a form-made rule's way back to its form never arrives after the editor and pushes it down. */}
-      {recipeName && <div className="cluster"><Link className="ui-button ui-button--secondary ui-button--sm" to={`/receiving/rules/${encodeURIComponent(key)}`}>Edit as form</Link></div>}
-      <div className="ritual-pickers">
-        <Field label="Key" error={key && !keyValid ? 'Use lowercase letters, digits and hyphens, like refund-triage.' : clash ? `A rule named ${key} exists. Open it from Rules, or pick another key.` : undefined}>
-          <Input value={key} onChange={e => setKey(e.target.value.toLowerCase().replace(/[\s_]+/g, '-'))} placeholder="triage" aria-invalid={(!!key && !keyValid) || clash || undefined} />
-        </Field>
-        {/* Replacing a script asks first; an applied template is a draft like any edit, and the save bar says so. */}
-        <Field label="Start from a template" error={templateApplied && missing(templateApplied) ? <>Its destination doesn’t exist yet: <Link to="/receiving?tab=destinations">add a {endpointWord[templateApplied.needs!]} destination</Link>.</> : undefined}>
-          <Select value={template} onValueChange={id => { if (!id) return; if (source.trim() && source !== blank() && source !== origin) setConfirmTemplate(id); else applyTemplate(id) }}
-            options={[{ label: 'Choose…', value: '' }, ...ritualTemplates.map(t => ({ label: missing(t) ? `${t.name} (needs a ${endpointWord[t.needs!]} destination)` : t.name, value: t.id }))]} />
-        </Field>
-      </div>
-      <Editor value={source} change={value => { setSource(value); if (template && value !== source) setTemplate('') }} completions={completions} check={lint} flash={flash} relint={relint} />
-      <p className={check && !check.ok ? 'ritual-status ritual-error' : 'ritual-status muted'}>{check === null ? 'Checking…' : check.ok
-        ? <>No problems{check.calls.length ? <> · calls <code>{check.calls.join(', ')}</code></> : null}{check.decisions.length ? <> · AI decisions <code>{check.decisions.join(', ')}</code></> : null}</>
-        : (p => <>Line {p.line}, column {p.column}: {p.message}{p.hint ? ` ${p.hint}` : ''}{check.diagnostics.length > 1 ? ` (+${check.diagnostics.length - 1} more)` : ''}</>)(check.diagnostics[0]!)}</p>
-
-      {/* The sections below appear with the first check (it names the AI decisions to answer) and recent mail, so nothing shifts in later.
-          Gated on recent mail's first answer (isFetched), not data or error: the picker retries a failed read when it mounts, which
-          clears the error, so a gate on the error unmounted it and remounted it in a loop of requests. */}
-      {check !== null && recent.isFetched && <>
-      {/* A dry run, one click away: opens from its heading, or already open when a link lands on #try. */}
-      <section ref={tryRef} className="section ritual-try ritual-more" aria-label="Try it on an email">
-        {/* Runs this rule, unsaved, as if attached to the address the email went to; nothing is sent or saved, and AI decisions
-            give the answers set here. */}
-        <Disclosure id="try" title="Try it on an email" defaultOpen={routeLocation.hash === '#try'}>
-        <EmailPicker value={choice} onChange={next => { setChoice(next); dry.clear() }} addresses={recipients} />
-        <div className="ritual-try__options">
-          {choice.mode !== 'sample' && <Field label="As mail to" htmlFor="ritual-try-to"><Input id="ritual-try-to" className="private-field" list="trace-addresses" value={as} onChange={e => { setAs(e.target.value); dry.clear() }} placeholder={recipient || recipients[0] || 'support@acme.com'} autoComplete="off" /></Field>}
-          {decisions.map(name => <Field key={name} label={<>If AI decision <code>{name}</code> answers <strong className="ritual-try__score">{(answers[name] ?? 0.5).toFixed(2)}</strong></>} hint={check?.questions[name]}>
-            <input className="ritual-try__range" type="range" min={0} max={1} step={0.05} value={answers[name] ?? 0.5} onChange={e => { setAnswers({ ...answers, [name]: Number(e.target.value) }); dry.clear() }} aria-label={`Answer for ${name}`} />
-          </Field>)}
-        </div>
-        <div className="cluster"><Button variant="primary" loading={dry.pending} disabled={!key || !recipient.includes('@') || (check !== null && !check.ok)} onClick={() => void tryIt()}>Run {key || 'rule'}</Button>
-          {check && !check.ok && <span className="ritual-error">Fix the problem above first.</span>}</div>
-        <div className="trace-out">{dry.error ? <Alert tone="danger">{dry.error}</Alert> : dry.result && <TraceView result={dry.result} sources={{ [key]: source }} overview={overview.data} inboxes={new Map((addresses.data ?? []).map(a => [a.id, a.address]))} runId={dry.runId} />}</div>
-        </Disclosure>
-      </section>
-
-      <section id="attach" className="section section--bordered stack" aria-labelledby="ritual-attach">
-        {/* Rules on an address run in order (the Order column); the first that acts stops the rest unless its After it
-            acts box lets the next one run. The limit per address shows when an attach would pass it. */}
-        <SectionHeader title={<span id="ritual-attach">Runs on</span>} />
-        <DataTable columns={bindingColumns} rows={rows} rowKey={b => `${b.target}/${b.rule}`}
-          empty={<EmptyState title="Not attached yet" />} />
-        <div className="ritual-attach">
-          <Field label={`Attach ${key || 'this rule'} to`} error={attachError}><Select className="address-select-trigger" menuClassName="address-select" value={target} onValueChange={setTarget} placeholder="Choose an address" options={[{ label: 'Choose an address', value: '' }, ...targets.map(t => addressOption(t.value, t.label))]} /></Field>
-          <Checkbox checked={next} onCheckedChange={setNext} label={runNext} />
-          <Button loading={binding || (pending && !isSaved)} disabled={!target || !keyValid || clash || !!attachError || binding || pending} onClick={() => void saveBindings([...bindings, { rule: key, target, continue: next }], `Attached ${key}`)}>{isSaved ? 'Attach' : 'Save and attach'}</Button>
-        </div>
-      </section>
-
-      {/* Shared by every rule, not just this one. A list is one per line (vip: an address, @partner.example); AI decisions read
-          mail only at the hosts listed, and give their default answer everywhere else. The rules guide has both. */}
-      <section className="section ritual-settings ritual-more" aria-label="Shared sender lists and AI decisions">
-        <Disclosure title="Shared sender lists and AI decisions">
-        <Field label="Sender lists, one per line">
-          <Textarea className="ritual-lists private-field" rows={3} value={lists} onChange={e => setLists(e.target.value)} spellCheck={false} placeholder="vip: @partner.example" />
-        </Field>
-        <Field label="AI decisions can read mail at">
-          <Input value={domains} onChange={e => setDomains(e.target.value)} placeholder={`${(overview.data?.domains ?? []).find(d => d.status === 'active')?.name ?? 'reply.example.com'}, …`} />
-        </Field>
-        </Disclosure>
-      </section>
-
-      {/* Always on screen while editing, so the save state and Save are never scrolled away. It arrives with the
-          sections above, in its final place. */}
-      <div className="ritual-savebar" data-dirty={dirty || !isSaved || undefined} data-remote={remoteStatus ? true : undefined}>
-        {/* Saved elsewhere while you were editing: above the bar, over the page, so nothing on it moves. */}
-        {incoming && changes && <div className="ritual-incoming" role="group" aria-label={`Version ${incoming.version} saved elsewhere`}>
+    {phone && <div className="rule-on-row">{on}</div>}
+    <div className="rule-body">
+      <div className="rule-code">
+        {saved ? <Editor value={source} change={setSource} completions={completions} check={lint} flash={flash} relint={relint} /> : <div className="ritual-editor" aria-busy="true" />}
+        {/* Touch has no hover for the editor's message: the first problem lies over the editor's bottom edge. */}
+        {touch && problem && !incoming && <p className="rule-problem" role="status"><span>Line {problem.line}</span>{problem.message}{problem.hint ? ' ' + problem.hint : ''}</p>}
+        {/* Saved elsewhere while you were editing: over the editor, so nothing on the page moves. */}
+        {incoming && changes && <div className="ritual-incoming" role="group" aria-label={'Version ' + incoming.version + ' saved elsewhere'}>
           <p className="ritual-incoming__title"><strong>{whoSaved(incoming.actor)} saved version {incoming.version}</strong></p>
           <p className="ritual-incoming__detail muted">{(() => {
             // What you both changed, then what only they changed (theirs stays either way).
-            const both = overlaps.map(o => o.replace(/^their (deletion of |changes to |rule named )?/, ''))
+            const both = overlaps.map(o => o.replace(/^(where )?their (deletion of |changes to |rule named )?/, '$1'))
             const only = [...changes.parts.map(p => p.title.split(/[: ]/)[0]!), ...changes.other].filter(name => !both.includes(name))
             return <>{both.length ? <>You both changed {both.join(' and ')}.</> : <>Your edits don’t overlap with it.</>}{only.length ? <> It also changed {only.join(', ')}, which stays as they saved it.</> : null}</>
           })()}</p>
@@ -570,21 +576,32 @@ export function RulesPage() {
             <Button size="sm" variant="ghost" aria-expanded={showDiff} onClick={() => setShowDiff(!showDiff)}>{showDiff ? 'Hide diff' : 'View diff'}</Button>
             <Button size="sm" onClick={loadTheirs}>Load theirs</Button>
             {confirmKeep && <Button size="sm" variant="ghost" onClick={() => setConfirmKeep(false)}>Cancel</Button>}
-            <Button size="sm" variant={confirmKeep ? 'danger' : 'primary'} onClick={keepMine}>{confirmKeep ? 'Keep mine anyway' : 'Keep mine'}</Button>
+            <Button size="sm" variant={confirmKeep ? 'danger' : 'secondary'} onClick={keepMine}>{confirmKeep ? 'Keep mine anyway' : 'Keep mine'}</Button>
           </div>
         </div>}
-        <span className="ritual-savebar__state" role="status" aria-live="polite"><span className="ritual-savebar__dot" aria-hidden="true" /><span key={remoteStatus ?? 'local'} className={remoteStatus ? 'ritual-savebar__text ritual-savebar__text--remote' : 'ritual-savebar__text'}>{status}</span></span>
-        <div className="cluster">
-          <Button variant="ghost" className="ritual-savebar__discard" data-hidden={!dirty || undefined} disabled={!dirty || pending} onClick={() => open(saved, clash ? opened : isSaved ? key : '')}>Discard</Button>
-          <Button variant="primary" loading={pending} disabled={!canSave} onClick={() => void save()}>Save<kbd className="ritual-savebar__kbd" aria-hidden="true">⌘S</kbd></Button>
-        </div>
       </div>
-      </>}
-    </>}
+      {/* Closed, one quiet line and nothing is run. Open, recent mail with what the draft does to each email: under the
+          editor, which gives up the room, or in a sheet on a phone. */}
+      <div className="rule-try" data-open={trying || undefined}>
+        <button type="button" className="rule-try__button" aria-expanded={trying} aria-keyshortcuts="Meta+Enter" disabled={!ready} onClick={() => setTrying(!trying)}>Try on recent mail<ChevronUp size={14} aria-hidden="true" /></button>
+        {ready && trying && !phone && mail}
+        {ready && phone && <Sheet open={trying} onOpenChange={setTrying} title="Recent mail"><div className="rule-sheet">{mail}</div></Sheet>}
+      </div>
+    </div>
+    <Dialog open={runsOpen && ready} onOpenChange={setRunsOpen} title="Runs on" footer={<Button onClick={() => setRunsOpen(false)}>Done</Button>}>
+      <RunsOn id={id} name={key || 'this rule'} atts={atts} change={setAtts} targets={targets} />
+    </Dialog>
+    {/* Shared by every rule, not just this one. A list is one per line (vip: an address, @partner.example); AI decisions
+        read mail only at the hosts listed, and give their default answer everywhere else. */}
+    <Dialog open={sharedOpen} onOpenChange={setSharedOpen} title={sharedSettings} footer={<Button onClick={() => setSharedOpen(false)}>Done</Button>}>
+      <div className="stack rule-shared">
+        <Field label="Sender lists, one per line"><Textarea className="private-field" rows={4} value={lists} onChange={e => setLists(e.target.value)} spellCheck={false} placeholder="vip: @partner.example" /></Field>
+        <Field label="AI decisions can read mail at"><Input value={domains} onChange={e => setDomains(e.target.value)} placeholder={((overview.data?.domains ?? []).find(d => d.status === 'active')?.name ?? 'reply.example.com') + ', …'} /></Field>
+      </div>
+    </Dialog>
     {leaveGuard}
-    <ConfirmDialog open={confirmTemplate !== null} onOpenChange={value => { if (!value) setConfirmTemplate(null) }} title={`Replace the script with “${ritualTemplates.find(t => t.id === confirmTemplate)?.name ?? 'this template'}”?`}
-      description="Your script is replaced, but nothing is saved until you save. Discard brings back the saved version." confirmLabel="Replace script" onConfirm={() => { if (confirmTemplate) applyTemplate(confirmTemplate) }} />
-    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={`Delete ${key}?`} description={`It stops running on every address it’s attached to${bindings.some(b => b.rule === key) ? ` (${bindings.filter(b => b.rule === key).length})` : ''}. Earlier versions stay restorable over the API.`}
+    <ConfirmDialog open={confirmScript} onOpenChange={setConfirmScript} title={'Save ' + key + ' as code?'} description="The address builder can no longer change this split." confirmLabel="Save as code" onConfirm={async () => { await save() }} />
+    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={'Delete ' + key + '?'} description={'It stops running on every address it’s attached to' + (atts.some(b => b.rule === opened) ? ' (' + atts.filter(b => b.rule === opened).length + ')' : '') + '. Earlier versions stay restorable over the API.'}
       confirmLabel="Delete rule" danger onConfirm={remove} />
   </div>
 }

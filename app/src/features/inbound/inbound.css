@@ -169,16 +169,103 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 @media (max-width: 640px) { .routing-choices > .settings-choices { grid-template-columns: minmax(0, 1fr); } }
 .routing-delete { margin-inline-end: auto; color: var(--color-danger); }
 
-.ritual-editor { border: 1px solid var(--color-border); border-radius: var(--radius-sm); overflow: hidden; background: var(--color-surface); }
-.ritual-editor .cm-editor { font-size: var(--text-sm); }
-.ritual-editor .cm-content { min-height: 14rem; font-family: var(--font-mono); }
-.ritual-editor .cm-gutters { background: var(--color-surface); border-right: 1px solid var(--color-border-muted); color: var(--color-muted); }
+/* The rule page (rituals.tsx): the page is the code. It fills the window (a phone: the screen between the bars) and the
+   editor takes what the header leaves. No section labels, panel headers or status words: hierarchy is size and space,
+   and text is 15px (the code 14px, 13px on a phone). Navy is Save's alone; "changed" is one neutral fill on a mail row. */
+.stack.rule-page { flex: 1 1 0; gap: 0; min-height: 0; font-size: 15px; line-height: 22px; }
+/* The addresses sit on the title's line. */
+.rule-page .ui-page-header__text { flex-direction: row; align-items: baseline; gap: var(--space-16); }
+.rule-off { margin-left: var(--space-8); color: var(--color-muted); font-weight: var(--font-weight-regular); }
+.rule-undo[data-hidden], .rule-menu[data-hidden] { visibility: hidden; }
+.rule-menu { display: inline-flex; }
+/* A new rule's name is typed where the title is. */
+.rule-name { min-width: 0; max-width: 100%; margin: 0; padding: 0; border: 0; border-radius: 0; outline: 0; background: transparent; box-shadow: 0 1px 0 var(--color-border-strong); color: inherit; font: inherit; letter-spacing: inherit; }
+.rule-name::placeholder { color: var(--color-faint); opacity: 1; }
+.rule-name:focus { box-shadow: 0 1px 0 var(--color-text); }
+.rule-name[aria-invalid] { box-shadow: 0 1px 0 var(--color-danger); }
+.rule-on { display: inline-flex; align-items: center; gap: var(--space-6); max-width: 100%; min-height: 22px; margin: 0; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--color-muted); font: inherit; text-align: left; white-space: nowrap; cursor: pointer; }
+.rule-on:disabled { opacity: 1; cursor: default; }
+.rule-on__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.rule-on > svg { flex: none; }
+.rule-on__address { display: inline-flex; }
+.rule-on__address .rcv-match { font-family: inherit; font-size: inherit; letter-spacing: 0; }
+@media (hover: hover) and (pointer: fine) { .rule-on:hover:not(:disabled), .rule-try__button:hover:not(:disabled) { color: var(--color-text); } }
+.rule-body { display: grid; flex: 1 1 0; grid-template-rows: minmax(0, 1fr) auto; min-height: 380px; margin-top: var(--space-40); }
+.rule-code { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+/* The editor: no bar over it and no rule beside the line numbers. A long line wraps under its own text. */
+.ritual-editor { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; border-radius: var(--radius-lg); background: var(--color-surface); box-shadow: var(--shadow-raised); }
+.ritual-editor .cm-editor { flex: 1; height: 100%; min-height: 0; font-size: var(--text-md); }
+.ritual-editor .cm-content { padding-block: var(--space-16); font-family: var(--font-mono); line-height: 24px; }
+.ritual-editor .cm-line { padding-left: calc(6px + 6ch); text-indent: -6ch; }
+.ritual-editor .cm-gutters { border-right: 0; background: var(--color-surface); color: var(--color-faint); line-height: 24px; }
+.ritual-editor .cm-foldGutter { display: none !important; }
+.ritual-editor .cm-lineNumbers .cm-gutterElement { min-width: 36px; padding-inline: var(--space-12) var(--space-4); }
+/* A problem is the editor's own: a squiggle, its message on hover, one small dot by the line number. */
+.ritual-editor .cm-gutter-lint { width: 14px; }
+.ritual-editor .cm-lint-marker { width: 6px; height: 6px; margin: 9px 4px; border-radius: 50%; background: var(--color-danger); content: none; }
+.ritual-editor .cm-lint-marker > * { display: none; }
 .ritual-editor .cm-editor.cm-focused { outline: none; }
-.ritual-editor:focus-within { border-color: var(--color-focus); }
 .ritual-editor .cm-activeLine, .ritual-editor .cm-activeLineGutter { background: var(--color-hover); }
+.ritual-editor .cm-editor:not(.cm-focused) :is(.cm-activeLine, .cm-activeLineGutter) { background: transparent; }
 .ritual-editor .cm-selectionBackground, .ritual-editor .cm-focused .cm-selectionBackground { background: var(--color-active-bg) !important; }
 .ritual-editor .cm-cursor { border-left-color: var(--color-text); }
 .ritual-editor .cm-matchingBracket { background: var(--color-active-bg); outline: none; }
+/* Touch has no hover: the first problem's message lies over the editor's bottom edge. */
+.rule-problem { position: absolute; inset: auto 1px 1px; display: flex; gap: var(--space-12); margin: 0; padding: var(--space-12) var(--space-16); border-top: 1px solid var(--color-border-muted); border-radius: 0 0 var(--radius-lg) var(--radius-lg); background: var(--color-surface); font-size: var(--text-md); line-height: var(--leading-sm); }
+.rule-problem > span { flex: none; color: var(--color-danger); }
+/* Try on recent mail: one quiet line; open, the mail takes its room from the editor. */
+.rule-try { display: flex; flex-direction: column; min-width: 0; }
+.rule-try__button { display: inline-flex; align-items: center; align-self: flex-start; gap: var(--space-6); height: 44px; margin: 0; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--color-muted); font: inherit; cursor: pointer; }
+.rule-try__button:disabled { opacity: 1; cursor: default; }
+.rule-try__button > svg { transition: transform var(--motion-duration) ease-out; }
+.rule-try[data-open] .rule-try__button { color: var(--color-text); }
+.rule-try[data-open] .rule-try__button > svg { transform: rotate(180deg); }
+.rule-try > .rule-mail { max-height: 42dvh; margin-inline: calc(-1 * var(--space-12)); padding-inline: var(--space-12); overflow-y: auto; }
+.rule-mail { margin: 0; padding: 0; list-style: none; }
+.rule-mail > li { border-top: 1px solid var(--color-border-muted); }
+/* An email the draft treats differently from the saved rule: a fill that reaches a little past the text. */
+.rule-mail > li[data-changed] { background: var(--color-active-bg); box-shadow: calc(-1 * var(--space-12)) 0 var(--color-active-bg), var(--space-12) 0 var(--color-active-bg); }
+.rule-mail__row { display: flex; align-items: center; gap: var(--space-16); width: 100%; min-height: 48px; margin: 0; padding: 0; border: 0; background: none; color: var(--color-muted); font: inherit; text-align: left; cursor: pointer; }
+.rule-mail > li[data-acted] .rule-mail__row { color: var(--color-text); }
+.rule-mail__from { flex: none; width: 168px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rule-mail__subject { flex: 0 1 440px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rule-mail__out { flex: 1; min-width: 1px; color: var(--color-text); white-space: nowrap; }
+.rule-mail__out s { margin-right: var(--space-8); color: var(--color-faint); }
+.rule-mail__why { margin: -6px 0 var(--space-12); color: var(--color-muted); overflow-wrap: anywhere; }
+.rule-mail__why .rcv-match { font-size: inherit; }
+.rule-mail__none { margin: 0 0 var(--space-12); color: var(--color-muted); }
+@media (hover: hover) and (pointer: fine) { .rule-mail > li:has(> .rule-mail__row:hover):not([data-changed]) { background: var(--color-hover); box-shadow: calc(-1 * var(--space-12)) 0 var(--color-hover), var(--space-12) 0 var(--color-hover); } }
+.rule-sheet { font-size: 15px; line-height: 22px; }
+/* Runs on (its dialog): each address, the rules there in order, and whether the next one still runs. */
+.rule-runs { display: grid; gap: var(--space-16); }
+.rule-runs ul { display: grid; margin: 0; padding: 0; list-style: none; }
+.rule-runs li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-4) var(--space-12); padding-block: var(--space-12); border-top: 1px solid var(--color-border-muted); }
+.rule-runs li:first-child { padding-top: 0; border-top: 0; }
+.rule-runs__address { min-width: 0; overflow: hidden; }
+.rule-runs__actions { display: inline-flex; gap: var(--space-4); }
+.rule-runs__order { grid-column: 1 / -1; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--leading-sm); overflow-wrap: anywhere; }
+.rule-runs__order [data-self] { color: var(--color-text); }
+.rule-runs li > .ui-check-field { grid-column: 1 / -1; }
+.rule-shared textarea { font-family: var(--font-mono); font-size: var(--text-sm); }
+@media (max-width: 640px) {
+  .stack.rule-page { min-height: auto; }
+  /* The header stays one row: a long name shortens, and Undo takes its room from the name only while there is something to undo. */
+  .rule-page .ui-page-header { flex-wrap: nowrap; gap: var(--space-8); }
+  .rule-page .ui-page-header > .cluster:first-child { flex: 1; }
+  .rule-page .ui-page-header > .cluster:last-child { flex: none; flex-wrap: nowrap; }
+  .rule-page .ui-page-header h1 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rule-undo[data-hidden] { display: none; }
+  .rule-on-row { margin-top: var(--space-8); }
+  .rule-body { min-height: 300px; margin: var(--space-16) 0 calc(-1 * var(--space-12)); }
+  .ritual-editor .cm-editor { font-size: var(--text-sm); }
+  .ritual-editor .cm-line { padding-left: calc(6px + 2ch); text-indent: -2ch; }
+  .ritual-editor .cm-lineNumbers .cm-gutterElement { min-width: 28px; padding-inline: var(--space-8) var(--space-4); }
+  .rule-mail__row { display: grid; grid-template: 'from out' auto 'subject out' auto / minmax(0, 1fr) auto; align-content: center; row-gap: 2px; min-height: 68px; }
+  .rule-mail__from { grid-area: from; width: auto; }
+  .rule-mail__subject { grid-area: subject; }
+  .rule-mail__out { grid-area: out; }
+  .rule-mail__why { margin-top: -2px; }
+}
 /* CodeMirror parks a new tooltip at top: -10000px for one frame to measure it, then moves top/left into view; keeping
    that offscreen frame hidden preserves its measured box while stopping Blink from counting the move as a layout shift. */
 .cm-tooltip[style*="-10000px"] { visibility: hidden; }
@@ -188,48 +275,12 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 .cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] { background: var(--color-active-bg); color: var(--color-text); }
 .cm-completionDetail { color: var(--color-muted); }
 .cm-tooltip.cm-completionInfo { max-width: min(28rem, calc(100vw - 2rem)); padding: var(--space-8); }
-.ritual-pickers { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-16); }
-/* The dry run and the shared lists open from their headings; two in a row share one rule. */
-.ritual-more { margin-block: var(--space-8) 0; }
-.ritual-more + .ritual-more { margin-top: 0; }
-.ritual-more .ui-disclosure__body { gap: var(--space-12); padding-bottom: var(--space-24); }
-.ritual-settings .ui-disclosure__body { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-16); }
-.ritual-settings textarea { font-family: var(--font-mono); font-size: var(--text-sm); }
-@media (max-width: 760px) { .ritual-pickers, .ritual-settings .ui-disclosure__body { grid-template-columns: minmax(0, 1fr); } }
-.ritual-status { margin: calc(-1 * var(--space-8)) 0 0; font-size: var(--text-xs); line-height: var(--leading-xs); }
-.ritual-problems { display: grid; gap: var(--space-4); margin: 0; padding: 0; list-style: none; font-size: var(--text-sm); }
-.ritual-problems code { margin-inline-end: var(--space-8); color: var(--color-danger); }
-.ritual-attach { display: flex; align-items: flex-end; flex-wrap: wrap; gap: var(--space-16); }
-.ritual-attach > :first-child { flex: 1 1 18rem; min-width: 0; }
-.ritual-attach .ui-check-field { min-height: var(--control-height); }
-.ritual-row-actions { display: inline-flex; gap: var(--space-4); }
-.ritual-error { color: var(--color-danger); }
 .endpoint-recipient { margin: 0; font-size: var(--text-sm); }
-/* The save bar: in the page flow at the end (its space is reserved), stuck to the bottom of the view while scrolling. */
-/* Left-aligned, so toasts (bottom right) never cover Save. */
-.ritual-savebar { position: sticky; bottom: var(--space-16); z-index: 5; align-self: flex-start; width: min(560px, 100%); display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-height: 52px; padding: var(--space-8) var(--space-8) var(--space-8) var(--space-16); border-radius: var(--radius-lg); background: var(--color-layer-1); box-shadow: var(--shadow-popover); font-size: var(--text-sm); }
-.ritual-savebar__state { display: inline-flex; align-items: center; gap: var(--space-8); min-width: 0; color: var(--color-muted); }
-.ritual-savebar__dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--color-success); transition: background 200ms ease; }
-.ritual-savebar[data-dirty] .ritual-savebar__state { color: var(--color-text); }
-.ritual-savebar[data-dirty] .ritual-savebar__dot { background: var(--color-warning-marker); }
-.ritual-savebar__discard[data-hidden], .ritual-delete[data-hidden] { visibility: hidden; }
-@media (max-width: 640px) { .ritual-delete { order: 1; } }
-.ritual-savebar__kbd { margin-left: var(--space-8); font: inherit; font-size: var(--text-xs); opacity: .6; }
-@media (hover: none) { .ritual-savebar__kbd { display: none; } }
-/* Phone and tablet: above the bottom tab bar, full width. */
-.app-shell--compact .ritual-savebar { bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom) + var(--space-8)); width: 100%; }
-
 /* Live: what a save made elsewhere changed. Its lines take a flat tint that fades; the person's own typing never does. */
 .ritual-editor .cm-line.ritual-editor__changed { animation: ritual-changed 2.4s var(--ease-out-strong) both; }
 @keyframes ritual-changed { 0%, 25% { background-color: color-mix(in oklab, var(--color-info) 22%, transparent); } 100% { background-color: transparent; } }
-.ritual-savebar[data-remote] .ritual-savebar__dot { background: var(--color-info); }
-/* The buttons keep their size and place; a long state (“Updated by …” on a phone) wraps instead. */
-.ritual-savebar > .cluster { flex: none; }
-.ritual-savebar__text { min-width: 0; }
-.ritual-savebar__text--remote { animation: ritual-status-in 300ms var(--ease-out-strong); }
-@keyframes ritual-status-in { from { opacity: 0; filter: blur(2px); } }
-/* A version saved while you were editing: a card over the page just above the save bar, so nothing moves. */
-.ritual-incoming { position: absolute; left: 0; right: 0; bottom: calc(100% + var(--space-8)); display: grid; gap: var(--space-8); padding: var(--space-12) var(--space-12) var(--space-12) var(--space-16); border-radius: var(--radius-lg); background: var(--color-layer-1); box-shadow: var(--shadow-popover); color: var(--color-text); transform-origin: 50% 100%; animation: ritual-incoming-in 250ms var(--ease-out-strong); }
+/* A version saved while you were editing: a card over the editor's corner, so nothing on the page moves. */
+.ritual-incoming { position: absolute; right: var(--space-16); bottom: var(--space-16); z-index: 5; display: grid; gap: var(--space-8); width: min(520px, calc(100% - 2 * var(--space-16))); padding: var(--space-12) var(--space-12) var(--space-12) var(--space-16); border-radius: var(--radius-lg); background: var(--color-layer-1); box-shadow: var(--shadow-popover); color: var(--color-text); transform-origin: 100% 100%; animation: ritual-incoming-in 250ms var(--ease-out-strong); }
 @keyframes ritual-incoming-in { from { opacity: 0; transform: translateY(6px) scale(.98); } }
 .ritual-incoming p { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
 .ritual-incoming__title strong { font-weight: 600; }
@@ -262,7 +313,6 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 .ritual-agent__prompt { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-12); padding: var(--space-8) var(--space-4) var(--space-8) var(--space-12); border-radius: var(--radius-sm); background: var(--color-layer-1); font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
 @media (prefers-reduced-motion: reduce) {
   .ritual-incoming { animation: ui-appear 150ms ease-out; }
-  .ritual-savebar__text--remote { animation: ui-appear 150ms ease-out; }
 }
 
 

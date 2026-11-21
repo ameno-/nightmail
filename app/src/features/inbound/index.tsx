@@ -1,6 +1,7 @@
 import { Navigate, useLocation, useParams } from 'react-router'
+import { rulePath } from './shared'
 
-export { NewRecipeRoute, NewRulePage, RuleRoute } from './recipes'
+export { NewRecipeRoute, NewRulePage } from './recipes'
 
 export { InboundPage } from './threads'
 export { InboundAddressDetailPage } from './addresses'
@@ -29,10 +30,11 @@ export function LegacyMailboxWebhookRedirect() { const { id = '' } = useParams()
 export { AgentInboxPage, AgentInboxesPage } from './inboxes'
 
 // Rules were called rituals. /receiving/rituals was first the editor (?key= one rule, ?new=1 a new one), then the rules'
-// own paths under it: each old link lands on the same page under /receiving/rules, with its query and hash.
+// own paths under it: each old link lands on the same page under /receiving/rules, with its query and hash. A rule has
+// one page, its code: the former form page's path is that page's, and /code under it comes here (App.tsx).
 export function RitualsRedirect() {
   const location = useLocation(), search = new URLSearchParams(location.search), key = search.get('key'), rest = location.pathname.replace(/^\/receiving\/rituals\/?/, '')
   const to = rest ? `/receiving/rules/${rest}${location.search}${location.hash}`
-    : key ? `/receiving/rules/${encodeURIComponent(key)}/code${location.hash}` : search.get('new') ? '/receiving/rules/new' : '/receiving?tab=rules'
+    : key ? `${rulePath(key)}${location.hash}` : search.get('new') ? '/receiving/rules/new' : '/receiving?tab=rules'
   return <Navigate replace to={to} />
 }

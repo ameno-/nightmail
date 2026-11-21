@@ -680,7 +680,7 @@ export async function seed(fx) {
   await dana.api('POST', '/v1/endpoints', { type: 'forward', name: 'founders', address: 'founders@mail.northwind.example', preverify: true }, 201);
   // Ready-made rules (recipes) beside the two scripts, written by the API's own buildRecipe and saved in this one
   // config write (one audit row, so Settings → Activity measures what it did before): the Rules tab shows them as
-  // sentences, one turned off, and an edit opens the recipe's form (cls.mjs `Receiving · recipe rule`).
+  // sentences, one turned off, and an edit opens the rule's page, its code (cls.mjs `Receiving · recipe rule`).
   const apiDir = fileURLToPath(new URL('../../api/', import.meta.url));
   const { tsImport } = await import(pathToFileURL(createRequire(join(apiDir, 'package.json')).resolve('tsx/esm/api')).href);
   const { buildRecipe } = await tsImport(join(apiDir, 'src/ritual-schema.ts'), import.meta.url);

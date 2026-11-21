@@ -108,13 +108,13 @@ export const guides: Guide[] = [
       </Section>
       <Section title="Ready-made rules">
         <p><Link to="/receiving/rules/new">Receiving → Rules → New rule</Link> lists ready-made rules by what they do: tell your team, pass it on, keep out junk, sort with AI. Pick one, fill in one or two fields (a Slack channel, the senders to block) and choose its addresses; Save turns it on. A Slack, Discord or webhook URL you paste there becomes an endpoint, stored encrypted.</p>
-        <p>Each one writes an ordinary rule, shown in the list as its sentence, like <em>Post new mail to support in Slack</em>, with when it last matched and a switch that turns it off without detaching it. <strong>Edit as code</strong> opens its script; saving a change there makes it your own script. AI rules are free.</p>
+        <p>Each one writes an ordinary rule, shown in the list as its sentence, like <em>Post new mail to support in Slack</em>, with when it last matched and a switch that turns it off without detaching it. Opening one shows its code; saving a change there makes it your own script. AI rules are free.</p>
       </Section>
       <Section title="Writing a script">
-        <p>For anything else, <Link to="/receiving/rules/new/script">Receiving → Rules → New rule → Write code</Link>. The editor checks it as you type and completes <code>email.</code>, <code>ctx.</code> and your endpoint names. <strong>Try it on an email</strong> runs your draft on a real or sample email without saving or sending anything. <strong>Save</strong> (⌘S) keeps the script; the bar at the bottom of the page says whether there are unsaved changes, and leaving asks first.</p>
+        <p>For anything else, <Link to="/receiving/rules/new/script">Receiving → Rules → New rule → Write code</Link>. A rule’s page is its code. The editor checks it as you type and completes <code>email.</code>, <code>ctx.</code> and your endpoint names. <strong>Try on recent mail</strong> (⌘↵) runs your draft on recent emails without saving or sending anything. <strong>Save</strong> (⌘S) keeps the code, where it runs and whether it’s on, together; <strong>Undo</strong> goes back to the saved rule, and leaving asks first.</p>
       </Section>
       <Section title="Where it runs">
-        <p>A rule runs only on mail to the addresses it’s attached to. Attach it in the editor’s <strong>Runs on</strong> section or from an address’s page; attaching, detaching and reordering save at once. Up to {RITUALS_PER_ADDRESS} rules run on an address, in order. The first one that acts stops the rest, unless its <strong>Run the next one too</strong> is on; ready-made rules always have it on and run before your scripts.</p>
+        <p>A rule runs only on mail to the addresses it’s attached to. Choose its addresses on the line beside its name, or attach it from an address’s page. Up to {RITUALS_PER_ADDRESS} rules run on an address, in order. The first one that acts stops the rest, unless its <strong>Run the next one too</strong> is on; ready-made rules always have it on and run before your scripts.</p>
       </Section>
       <Section title="What it can do">
         <Table head={['Call', 'What it does']} rows={Object.values(builtins).map(b => [<code key="c">{b.signature}</code>, b.doc.replace('the AI', `${productName}’s AI`)])} />

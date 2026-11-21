@@ -20,8 +20,8 @@
 // $GITHUB_STEP_SUMMARY) and a screenshot per failing page with the shifted elements outlined.
 //
 // Live rules (`live`): on Driftwood's rules page, an agent's API key saves the open rule once the page has settled
-// (`apply`: the change lands in the editor and the save bar names who made it), or after a keystroke in the editor
-// (`conflict`: the card offering their version or yours opens above the save bar). The pages' long poll on
+// (`apply`: the change lands in the editor and a toast names who made it), or after a keystroke in the editor
+// (`conflict`: the card offering their version or yours opens over the editor's corner). The pages' long poll on
 // /v1/rules/version is always open by design, so it is left out of the network-idle wait.
 //
 // Support chat: the page loads, then the Help button opens the chat (the scripted demo conversation) and the agent's
@@ -102,16 +102,17 @@ const pages = ids => [
   ['Receiving · address · where mail goes', `/receiving/addresses/${ids.address}?tab=flow`, { from: `/receiving/addresses/${ids.address}`, click: 'Where mail goes' }],
   // Its Settings tab shares its name with the sidebar's Settings, so the in-app pass opens it through the router.
   ['Receiving · address · settings', `/receiving/addresses/${ids.address}?tab=settings`, { from: `/receiving/addresses/${ids.address}` }],
-  // Rules: the list (the Receiving tab), New rule's recipes, a recipe's form new and saved, and the script editor.
+  // Rules: the list (the Receiving tab), New rule's recipes, a recipe's form, and a rule's page, its code: a rule made
+  // from a recipe, a script, and a new one.
   ['Receiving · rules', '/receiving?tab=rules', { from: '/receiving', click: 'Rules' }],
   ['Receiving · new rule', '/receiving/rules/new', { from: '/receiving?tab=rules', click: 'New rule' }],
   ['Receiving · new rule · new workspace', '/receiving/rules/new', { user: 'nia' }],
   ['Receiving · recipe form', '/receiving/rules/new/slack', { from: '/receiving/rules/new', click: 'Post to Slack' }],
   ['Receiving · recipe rule', '/receiving/rules/label-by-meaning-support', { from: '/receiving?tab=rules', row: 'a refund request' }],
-  ['Receiving · rule editor', '/receiving/rules/triage/code', { from: '/receiving?tab=rules', row: 'triage' }],
+  ['Receiving · rule editor', '/receiving/rules/triage', { from: '/receiving?tab=rules', row: 'triage' }],
   ['Receiving · rule editor · new script', '/receiving/rules/new/script', { user: 'nia', from: '/receiving/rules/new', click: 'Write code' }],
-  ['Receiving · rules · live update', '/receiving/rules/triage/code', { user: 'kai', live: 'apply' }],
-  ['Receiving · rules · live conflict', '/receiving/rules/triage/code', { user: 'kai', live: 'conflict' }],
+  ['Receiving · rules · live update', '/receiving/rules/triage', { user: 'kai', live: 'apply' }],
+  ['Receiving · rules · live conflict', '/receiving/rules/triage', { user: 'kai', live: 'conflict' }],
   ['Receiving · agent inboxes', '/receiving/inboxes', { from: '/receiving' }],
   ['Receiving · agent inbox', `/receiving/inboxes/${ids.inbox}`, { from: '/receiving/inboxes' }],
   ['Receiving · webhook', `/receiving/webhooks/${ids.inboundWebhook}`, { from: '/receiving?tab=destinations' }],
@@ -243,7 +244,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Overview · range', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · flow panel', 'Receiving · typed address', 'Receiving · why it went here dialog', 'Receiving · address', 'Receiving · address · where mail goes', 'Receiving · address · settings', 'Receiving · agent inboxes', 'Receiving · destinations', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'Domain · custom MAIL FROM', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Receiving · inbox', 'Receiving · endpoints', 'Onboarding · AWS disconnecting', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Operator · abuse', 'Operator · abuse · cluster', 'Operator · abuse · alerts', 'Operator · abuse · Slack card', 'Support', 'Support · agent handling', 'Support · conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog', 'Domain · add custom MAIL FROM dialog', 'Domain · change custom MAIL FROM dialog']);
+const phonePages = new Set(['Overview', 'Overview · range', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · rule editor', 'Receiving · rule editor · new script', 'Receiving · flow panel', 'Receiving · typed address', 'Receiving · why it went here dialog', 'Receiving · address', 'Receiving · address · where mail goes', 'Receiving · address · settings', 'Receiving · agent inboxes', 'Receiving · destinations', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'Domain · custom MAIL FROM', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Receiving · inbox', 'Receiving · endpoints', 'Onboarding · AWS disconnecting', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Operator · abuse', 'Operator · abuse · cluster', 'Operator · abuse · alerts', 'Operator · abuse · Slack card', 'Support', 'Support · agent handling', 'Support · conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog', 'Domain · add custom MAIL FROM dialog', 'Domain · change custom MAIL FROM dialog']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -514,11 +515,11 @@ async function measure(browser, job, fx) {
       if (job.live === 'conflict') {
         await page.click('.ritual-editor .cm-line >> nth=2');
         await page.keyboard.press('End'); await page.keyboard.type(' // mine');
-        await page.waitForFunction(() => document.querySelector('.ritual-savebar')?.textContent.includes('Unsaved changes'), null, { timeout: 10_000 });
+        await page.waitForSelector('.rule-page .ui-page-header .ui-button--primary:not([disabled])', { timeout: 10_000 });
       }
       const saved = await fetch(fx.apiOrigin + '/v1/rules/scripts/triage', { method: 'PUT', headers: { authorization: `Bearer ${fx.liveKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ key: 'triage', source: liveSource(++liveSaves) }) });
       if (!saved.ok) problems.push(`the agent's save failed: ${saved.status}`);
-      else await page.waitForSelector(job.live === 'conflict' ? '.ritual-incoming' : '.ritual-savebar__text--remote', { timeout: 30_000 }).catch(() => problems.push(`no ${job.live === 'conflict' ? 'conflict card' : 'live update'} after the agent's save`));
+      else await page.waitForSelector(job.live === 'conflict' ? '.ritual-incoming' : '.rule-page[data-landed]', { timeout: 30_000 }).catch(() => problems.push(`no ${job.live === 'conflict' ? 'conflict card' : 'live update'} after the agent's save`));
       await settle(page, net);
       if (job.mode === 'load') { const read = await page.evaluate(() => window.__cls.read()); Object.assign(result, { cls: sharp(read.total), entries: read.entries }); }
     }

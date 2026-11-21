@@ -181,9 +181,6 @@ html[data-privacy='on'] .trace-to.private-field:not(:hover, :focus)::placeholder
 .addr-skeleton > span { display: block; height: 120px; border-radius: var(--radius-sm); background: var(--color-layer-1); animation: ui-pulse 1.2s ease-in-out infinite alternate; }
 .addr-skeleton > span:nth-child(2) { height: 200px; }
 .addr-skeleton > span:nth-child(3) { height: 240px; }
-.ritual-try__options { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 360px)); gap: var(--space-16); align-items: start; }
-.ritual-try__range { width: 100%; height: var(--control-height); margin: 0; accent-color: var(--color-contrast); }
-.ritual-try__score { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .rcv-filter-chip { display: inline-flex; align-items: center; gap: 2px; min-width: 0; max-width: 100%; height: var(--control-height); padding: 0 2px 0 10px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: var(--text-sm); }
 /* Phone: the kind filters scroll sideways in one row, the domain picker and search take full rows, and a route's card
    shows its rules then where its mail goes. */

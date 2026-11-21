@@ -19,6 +19,17 @@ export function when(value: string) {
   return at.toLocaleDateString('en-US', { month: 'short', day: 'numeric', ...(at.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' }) })
 }
 
+/** A rule's page. A rule named "new" shares its path with the add screen, so its page is /new/code (recipes.tsx, NewRecipeRoute). */
+export const rulePath = (key: string) => key === 'new' ? '/receiving/rules/new/code' : `/receiving/rules/${encodeURIComponent(key)}`
+/** The address builder on the one address a two-way rule (split, split-by-meaning) runs on; null when it runs on several, or none. */
+export function splitBuilderPath(key: string, attachedTo: string[], options: { id: string; address: string }[] | undefined) {
+  const target = attachedTo.length === 1 ? attachedTo[0]! : null
+  const id = target && (target.startsWith('mbx_') ? target : options?.find(a => a.address === target)?.id)
+  return id ? `/receiving?tab=rules&build=${encodeURIComponent(id)}&rule=${encodeURIComponent(key)}` : null
+}
+
+export const openBuilder = 'Open in the address builder'
+
 /** Reuse one Idempotency-Key while the operator retries the same payload; a changed payload gets a new key. */
 export function idempotencyFor(state: { key: string; body: string }, body: unknown) {
   const next = JSON.stringify(body)
