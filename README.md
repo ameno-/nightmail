@@ -92,7 +92,7 @@ keys need read/send/manage on the dedicated **E2E** workspace, not on a customer
 
 **Production freeze:** production jobs require `PROD_DEPLOY_ENABLED` to be the exact lowercase string `true` on the `production` GitHub environment. Unset it or set it to `false` to freeze releases.
 
-**Sign-in policy is committed, not a variable.** Identity is the issuer subject; no address or address domain admits anyone. `api/wrangler.<stage>.jsonc` sets `ACCOUNT_REQUIRED_ACR` (GitHub or Google) and `AUTH_STAFF_GOOGLE_DOMAINS` (staff sign-up by the Google Workspace domain of a Google sign-in's provider identity; GitHub is never staff). Everyone else joins by invitation or is bound by subject by an operator (`api/scripts/list-signin-attempts.ts`). The old `AUTH_ALLOWED_EMAILS`/`AUTH_ALLOWED_DOMAINS` GitHub variables are no longer read; delete them, and any Worker secret of those names.
+**Sign-in policy is committed, not a variable.** Identity is the issuer subject; no address or address domain admits anyone. `api/wrangler.<stage>.jsonc` sets `ACCOUNT_REQUIRED_ACR` (GitHub, Google, email link or password) and `AUTH_STAFF_GOOGLE_DOMAINS` (staff sign-up by the Google Workspace domain of a Google sign-in's provider identity; no other method is ever staff). Everyone else joins by invitation or is bound by subject by an operator (`api/scripts/list-signin-attempts.ts`). The old `AUTH_ALLOWED_EMAILS`/`AUTH_ALLOWED_DOMAINS` GitHub variables are no longer read; delete them, and any Worker secret of those names.
 
 **Local live E2E:** install API and SDK dependencies, build the SDK (`cd sdk && bun run build`), and privately export `BANE_E2E_API_KEY`. From `api/` run:
 

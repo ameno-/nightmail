@@ -948,7 +948,8 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   // Hosted installations accept only the account service's methods, listed by acr and separated by spaces.
   const config = (acr:string) => loadConfig({PUBLIC_URL:origin, BANE_ROOT_SECRET:'local-fixture-'.repeat(4), MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:acr});
   assert.deepEqual(config('urn:anomaly:acr:github urn:anomaly:acr:google').accountRequiredAcr,['urn:anomaly:acr:github','urn:anomaly:acr:google']);
-  for (const acr of ['','1','urn:anomaly:acr:google 2','urn:anomaly:acr:google  urn:anomaly:acr:github']) assert.throws(() => config(acr),{code:'CONFIG_INVALID'},acr);
+  assert.deepEqual(config('urn:anomaly:acr:github urn:anomaly:acr:google urn:anomaly:acr:email urn:anomaly:acr:password').accountRequiredAcr,['urn:anomaly:acr:github','urn:anomaly:acr:google','urn:anomaly:acr:email','urn:anomaly:acr:password']);
+  for (const acr of ['','1','urn:anomaly:acr:google 2','urn:anomaly:acr:google  urn:anomaly:acr:github','urn:anomaly:acr:magic']) assert.throws(() => config(acr),{code:'CONFIG_INVALID'},acr);
   // The first half exercises an installation without a required context; hosted config always sets one.
   runtime.config.accountRequiredAcr=undefined;
   const googleAcr = 'urn:anomaly:acr:google', githubAcr = 'urn:anomaly:acr:github';
@@ -1206,7 +1207,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     assert.equal((await login(undefined,link.url)).headers.get('location'),origin+'/?auth=error',method);
     assert.equal((await attempt()).outcome,'invitation');
   }
-  use('google');const gmail=`invited-${randomUUID()}@gmail.com`, gmailInvite=await invite(gmail);fresh(gmail);
+  use('google');const gmail=`invited-${randomUUID()}@gmail.com`, gmailInvite=await invite(gmail);fresh(gmail);const gmailSubject=subject;
   const joined=await login(undefined,gmailInvite.url);
   assert.equal(landed(joined),gmailInvite.url);
   assert.equal((await attempt()).outcome,'signed_in:invitation');
@@ -1239,6 +1240,41 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   // A separate account (another subject) with a verified user's address is refused, never linked to that user.
   use('github');subject=randomUUID();subjects.push(subject);email=staffEmail;
   assert.equal((await login()).headers.get('location'),origin+'/?auth=error');
+  // The account service's email sign-ins, an emailed link or code and an email with a password: ordinary sign-ins once
+  // listed, refused before. They carry no provider identity, so they are never staff and prove no mailbox for an invitation.
+  const emailMethods=['urn:anomaly:acr:email','urn:anomaly:acr:password'];
+  const viaEmail=(acr:string)=>{providerName=null;providerHd=null;providerEmail=null;providerVerified=true;tokenAcr=acr;};
+  viaEmail(emailMethods[0]!);fresh(`unlisted-${randomUUID()}@example.net`);
+  assert.equal((await login()).headers.get('location'),origin+'/?auth=method_required','Not listed: refused');
+  runtime.config.accountRequiredAcr=[githubAcr,googleAcr,...emailMethods];
+  for (const acr of emailMethods) {
+    // An existing user signs in as themselves, in an ordinary session: no staff tools and no new workspace; staff
+    // tools ask for a Google sign-in.
+    viaEmail(acr);subject=staffSubject;email=staffEmail;
+    const signedIn=await login();
+    assert.equal(accountOf(signedIn),staffUser,acr);
+    assert.deepEqual(await attempt(),{acr,provider:null,provider_hd:null,outcome:'signed_in'});
+    const emailSession=sessionOf(signedIn), emailMe=await (await request('/v1/me','GET',emailSession)).json() as {operator:string|null;staffSignIn:boolean};
+    assert.deepEqual([emailMe.operator,emailMe.staffSignIn],[null,true],acr);
+    assert.deepEqual(await errorOf(await request('/v1/operator/waitlist','GET',emailSession)),[403,'OPERATOR_REQUIRED']);
+    assert.deepEqual(await errorOf(await request('/v1/workspaces','POST',emailSession,{name:'Through email'})),[403,'SIGNUP_NOT_APPROVED']);
+    // A new, verified address at the staff domain is not staff: it is waitlisted, as any other address is.
+    viaEmail(acr);fresh(`email-${randomUUID()}@example.org`);
+    assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist',acr);
+    assert.deepEqual(await attempt(),{acr,provider:null,provider_hd:null,outcome:'not_approved'});
+    // An unverified address is refused, and isn't waitlisted.
+    viaEmail(acr);fresh(`email-${randomUUID()}@example.net`);verified=false;
+    assert.equal((await login()).headers.get('location'),origin+'/?auth=error',acr);
+    assert.equal((await attempt()).outcome,'email_unverified');
+    assert.deepEqual(await waitlisted(email),[]);
+    // No invitation: following its link admits no new subject, and the invited person's email session can't accept one.
+    viaEmail(acr);const address=`invited-${randomUUID()}@example.net`, link=await invite(address);fresh(address);
+    assert.equal((await login(undefined,link.url)).headers.get('location'),origin+'/?auth=error',acr);
+    assert.equal((await attempt()).outcome,'invitation');
+    viaEmail(acr);subject=gmailSubject;email=gmail;
+    const invitee=sessionOf(await login());
+    assert.deepEqual(await errorOf(await request(`/v1/workspaces/invitations/${again.id}/accept`,'POST',invitee,{})),[403,'MAILBOX_SIGN_IN_REQUIRED']);
+  }
   runtime.config.accountRequiredAcr=[googleAcr];
 });
 
@@ -1635,10 +1671,14 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     // Hosted accepts GitHub and Google: either method's token works; anything else is refused and the challenge names both.
     runtime.config.accountRequiredAcr=['urn:anomaly:acr:github','urn:anomaly:acr:google'];
     for(const acr of ['urn:anomaly:acr:github','urn:anomaly:acr:google']) assert.deepEqual(await (await run(token({acr,jti:randomUUID()}))).json(),['read'],acr);
+    assert.equal((await run(token({acr:'urn:anomaly:acr:email',jti:randomUUID()}))).status,401,'An email sign-in only once listed');
     const otherMethod=await run(token({acr:'urn:anomaly:acr:passkey',jti:randomUUID()}));
     assert.equal(otherMethod.status,401);
     assert.match(otherMethod.headers.get('www-authenticate')!,/acr_values="urn:anomaly:acr:github urn:anomaly:acr:google"$/);
     assert.match(((await otherMethod.json()) as {error:{message:string}}).error.message,/GitHub or Google/);
+    runtime.config.accountRequiredAcr=['urn:anomaly:acr:github','urn:anomaly:acr:google','urn:anomaly:acr:email','urn:anomaly:acr:password'];
+    for(const acr of ['urn:anomaly:acr:email','urn:anomaly:acr:password']) assert.deepEqual(await (await run(token({acr,jti:randomUUID()}))).json(),['read'],acr);
+    assert.match(((await (await run(token({acr:'urn:anomaly:acr:passkey',jti:randomUUID()}))).json()) as {error:{message:string}}).error.message,/GitHub, Google, email link or password/);
     runtime.config.accountRequiredAcr=undefined;
     // The address is not an identity input: an unverified one leaves the admitted subject's MCP access alone.
     await db.query('UPDATE nightmail_users SET email_verified=false WHERE id=$1',[manager.userId]);
