@@ -9,10 +9,9 @@
 .audience-page > .ui-alert { margin-top: var(--space-16); }
 .audience-summary { min-height: var(--space-20); gap: var(--space-8) var(--space-24); }
 .section > .audience-summary { margin-bottom: var(--space-12); }
+.audience-summary strong { font-family: var(--font-mono); font-weight: 400; font-variant-numeric: tabular-nums; }
 .audience-properties { gap: var(--space-24) var(--space-32); }
-.audience-properties dl { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: var(--space-12) var(--space-16); margin: 0; }
-.audience-properties dt, .audience-properties dd { margin: 0; overflow-wrap: anywhere; }
-.audience-properties dt { color: var(--color-muted); }
+.audience-properties .ui-facts { grid-template-columns: 140px minmax(0, 1fr); }
 .cluster.audience-links { gap: var(--space-8) var(--space-16); }
 .audience-editor { gap: var(--space-24); }
 .audience-editor > .section { margin: 0; padding-top: var(--space-24); border-top: 1px solid var(--color-border-muted); }
@@ -29,7 +28,6 @@
 .audience-import-fields[hidden] { display: none; }
 /* The contact page's summary address shortens to the line instead of running past it. */
 .audience-summary > .private-address .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.audience-properties dt::first-letter { text-transform: uppercase; }
 
 /* ListPicker: an input that searches lists by name, with the shared popover surface for its options. */
 .audience-list-picker { position: relative; min-width: 0; width: 100%; }
