@@ -2,7 +2,8 @@ import { forwardRef, type ReactNode } from 'react'
 import { ChevronDown, Download } from 'lucide-react'
 import { Link, useLocation } from 'react-router'
 import { useSession } from '../../data/context'
-import { Button, type ButtonProps, EmptyState, LoadingRegion, PageHeader, SearchField, SectionHeader, Select, Skeleton, TableSkeleton, Tabs, type SkeletonColumn } from '../../components/ui'
+import { Button, type ButtonProps, EmptyState, FacetRail, LoadingRegion, PageHeader, SearchField, SectionHeader, Select, Skeleton, SplitPane, TableSkeleton, Tabs, type FacetGroup, type SkeletonColumn, type Tone } from '../../components/ui'
+import type { AbuseBand } from '../../data/operator'
 import './operator.css'
 
 // Not an operator: no such page. An operator signed in with GitHub: staff tools need this account's Google sign-in
@@ -106,9 +107,76 @@ export function OperatorNotesSkeleton() {
   </>
 }
 
-const baseTabs = [{ value: 'queue', label: 'Review queue' }, { value: 'actions', label: 'Actions' }, { value: 'waitlist', label: 'Waitlist' }]
-/** The tab a /operator address opens: ?view=actions or ?view=waitlist, else the review queue. */
-export const operatorView = (search: string) => { const view = new URLSearchParams(search).get('view'); return view === 'actions' || view === 'waitlist' ? view : 'queue' }
+// Abuse (?view=abuse): clusters of related accounts by risk, and the alert outbox (&show=alerts). A phone's card shows
+// the reasons, the risk beside them, then the counts and when it last changed.
+export const clusterColumnDefs: SkeletonColumn[] = [
+  { key: 'risk', label: 'Risk', width: 132, card: 'aside' },
+  { key: 'why', label: 'Why', card: 'title' },
+  { key: 'accounts', label: 'Accounts', width: 96, align: 'right', card: 'inline' },
+  { key: 'workspaces', label: 'Workspaces', width: 112, align: 'right', card: 'inline' },
+  { key: 'changed', label: 'Changed', width: 168, card: 'line' },
+]
+export const alertColumnDefs: SkeletonColumn[] = [
+  { key: 'alert', label: 'Alert', card: 'title' },
+  { key: 'status', label: 'Slack', width: 132, card: 'aside' },
+  { key: 'workspaces', label: 'Workspaces', width: 112, align: 'right', card: 'inline' },
+  { key: 'created', label: 'Created', width: 168, card: 'line' },
+]
+// One cluster (/operator/abuse/:id): its workspaces with this month's free use, and its accounts.
+export const clusterWorkspaceColumnDefs: SkeletonColumn[] = [
+  { key: 'name', label: 'Workspace', width: '26%', card: 'title' },
+  { key: 'account', label: 'Account', width: 88, card: 'aside' },
+  { key: 'plan', label: 'Plan', width: 88, card: 'inline' },
+  { key: 'sent', label: 'Sent', width: 128, align: 'right', card: 'line' },
+  { key: 'received', label: 'Received', width: 128, align: 'right', card: 'line' },
+  { key: 'step', label: 'Step', width: 112, card: 'inline' },
+  { key: 'actions', label: '', width: 48, align: 'right', card: 'end' },
+]
+export const clusterAccountColumnDefs: SkeletonColumn[] = [
+  { key: 'key', label: 'Account', width: 88, card: 'aside' },
+  { key: 'who', label: 'Sign-in', card: 'title' },
+  { key: 'user', label: 'User', width: '34%', card: 'line' },
+]
+export const bandLabel: Record<AbuseBand, string> = { high: 'High', review: 'Review', watch: 'Watch', low: 'Low' }
+export const bandTone: Record<AbuseBand, Tone> = { high: 'danger', review: 'warning', watch: 'info', low: 'neutral' }
+export const abuseBands: AbuseBand[] = ['high', 'review', 'watch', 'low']
+/** What the Abuse tab shows: ?band=high narrows the clusters; ?show=alerts is the alert outbox. */
+export const abuseView = (search: string) => { const params = new URLSearchParams(search), band = params.get('band'); return { alerts: params.get('show') === 'alerts', band: abuseBands.includes(band as AbuseBand) ? band as AbuseBand : null } }
+// The rail beside the list: risk levels with their counts, and the outbox. Counts arrive with the list (a dash until then).
+export function abuseFacets({ band, alerts, counts, outbox, onBand, onAlerts }: { band: AbuseBand | null; alerts: boolean; counts?: Record<AbuseBand, number>; outbox?: number; onBand?: (band: AbuseBand | null) => void; onAlerts?: () => void }): FacetGroup[] {
+  const pick = (value: AbuseBand | null) => onBand ? () => onBand(value) : undefined
+  return [
+    { key: 'risk', title: 'Risk', items: [{ key: 'all', label: 'All', count: counts ? abuseBands.reduce((sum, key) => sum + counts[key], 0) : null, selected: !alerts && band === null, onSelect: pick(null) },
+      ...abuseBands.map(key => ({ key, label: bandLabel[key], tone: bandTone[key], count: counts ? counts[key] : null, selected: !alerts && band === key, onSelect: pick(key) }))] },
+    { key: 'outbox', title: 'Outbox', items: [{ key: 'alerts', label: 'Alerts', count: outbox ?? null, selected: alerts, onSelect: onAlerts }] },
+  ]
+}
+export function AbuseSkeleton({ search }: { search: string }) {
+  const view = abuseView(search)
+  return <SplitPane className="op-abuse" collapse="row" rail={<FacetRail label="Abuse views" groups={abuseFacets(view)} />}><TableSkeleton className="op-table" columns={view.alerts ? alertColumnDefs : clusterColumnDefs} rows={6} /></SplitPane>
+}
+export const clusterFacts = ['Risk', 'Score', 'Accounts', 'Workspaces', 'First seen', 'Changed'] as const
+// The cluster's rail on a wide window: the other clusters, to step through them. Rows are 40px in every state.
+export function ClusterRailSkeleton() {
+  return <ul className="op-cluster-rail" aria-hidden="true">{Array.from({ length: 6 }, (_, i) => <li key={i}><span className="op-cluster-rail__row"><Skeleton width={72} height={12} /><Skeleton width={96} height={10} /></span></li>)}</ul>
+}
+export function ClusterBodySkeleton() {
+  return <div className="op-page" aria-hidden="true">
+    <dl className="op-facts">{clusterFacts.map(title => <div key={title}><dt>{title}</dt><dd><Skeleton width={88} height={14} /></dd></div>)}</dl>
+    <div className="op-grid"><section className="op-section"><SectionHeader title="Why" /><Skeleton height={224} /></section><section className="op-section"><SectionHeader title="Links" /><Skeleton height={224} /></section></div>
+    <section className="op-section"><SectionHeader title="Workspaces" /><TableSkeleton className="op-table" columns={clusterWorkspaceColumnDefs} rows={3} /></section>
+  </div>
+}
+export function OperatorClusterSkeleton() {
+  return <>
+    <PageHeader title="Related accounts" backTo="/operator?view=abuse" />
+    <LoadingRegion label="Loading the cluster"><SplitPane className="op-cluster" rail={<ClusterRailSkeleton />}><ClusterBodySkeleton /></SplitPane></LoadingRegion>
+  </>
+}
+
+const baseTabs = [{ value: 'queue', label: 'Review queue' }, { value: 'abuse', label: 'Abuse' }, { value: 'actions', label: 'Actions' }, { value: 'waitlist', label: 'Waitlist' }]
+/** The tab a /operator address opens: ?view=abuse, ?view=actions or ?view=waitlist, else the review queue. */
+export const operatorView = (search: string) => { const view = new URLSearchParams(search).get('view'); return view === 'actions' || view === 'waitlist' || view === 'abuse' ? view : 'queue' }
 const notesTabs = [...baseTabs, { value: 'notes', label: 'UI notes' }]
 /** UI notes has a tab only for the people the API allows (GET /v1/me uiNotes). */
 export const useOperatorTabs = () => useSession()?.identity?.uiNotes === true ? notesTabs : baseTabs
@@ -128,14 +196,14 @@ export function WaitlistToolbar({ search = '', onSearch, onExport, exporting = f
     <SearchField className="search-box--list" aria-label="Search the waitlist" placeholder="Search addresses and names" value={search} disabled={disabled} onChange={event => onSearch?.(event.target.value)} />
   </div><Button className="op-export" aria-label="Export as CSV" title="Download everyone listed as a CSV file" disabled={disabled || !exportable} loading={exporting} onClick={onExport}><Download size={16} aria-hidden="true" /><span>Export CSV</span></Button></div>
 }
-export function OperatorQueueSkeleton({ view = 'queue' }: { view?: string }) {
+export function OperatorQueueSkeleton({ view = 'queue', search = '' }: { view?: string; search?: string }) {
   return <>
     <PageHeader title="Operator" />
-    <LoadingRegion label={view === 'waitlist' ? 'Loading the waitlist' : 'Loading the review queue'}><div className="op-page">
+    <LoadingRegion label={view === 'waitlist' ? 'Loading the waitlist' : view === 'abuse' ? 'Loading related accounts' : 'Loading the review queue'}><div className="op-page">
       <Tabs value={view} onValueChange={() => {}} disabled items={useOperatorTabs()} label="Operator views" />
       {view === 'queue' && <QueueToolbar disabled />}
       {view === 'waitlist' && <WaitlistToolbar disabled />}
-      <TableSkeleton columns={view === 'queue' ? queueColumnDefs : view === 'waitlist' ? waitlistColumnDefs : actionColumnDefs} rows={6} />
+      {view === 'abuse' ? <AbuseSkeleton search={search} /> : <TableSkeleton columns={view === 'queue' ? queueColumnDefs : view === 'waitlist' ? waitlistColumnDefs : actionColumnDefs} rows={6} />}
     </div></LoadingRegion>
   </>
 }
@@ -161,5 +229,6 @@ export function OperatorRouteSkeleton({ operator }: { operator: 'operator' | 'op
   const { pathname, search } = useLocation(), uiNotes = useSession()?.identity?.uiNotes === true
   if (!operator) return null
   if (pathname === '/operator/notes') return uiNotes ? <OperatorNotesSkeleton /> : null
-  return pathname.startsWith('/operator/workspaces/') ? <OperatorWorkspaceSkeleton actions={operator === 'operator'} /> : <OperatorQueueSkeleton view={operatorView(search)} />
+  if (pathname.startsWith('/operator/abuse/')) return <OperatorClusterSkeleton />
+  return pathname.startsWith('/operator/workspaces/') ? <OperatorWorkspaceSkeleton actions={operator === 'operator'} /> : <OperatorQueueSkeleton view={operatorView(search)} search={search} />
 }

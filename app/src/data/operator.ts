@@ -31,6 +31,21 @@ export interface OperatorTimelineItem { at: string; kind: TimelineKind; title: s
 export interface OperatorAction { at: string; workspaceId: string; action: string; operatorId: string | null; via: string | null; reason: string | null; ticketRef: string | null; requestId: string | null; before: unknown; after: unknown; details: unknown }
 /** One address on the waitlist: a verified sign-in nothing admitted yet (api/src/account-login.ts). */
 export interface WaitlistEntry { email: string; name: string | null; attempts: number; firstAt: string; lastAt: string }
+/** Abuse monitoring (/v1/operator/abuse/*): accounts and workspaces that share signals, scored for a person to review. */
+export type AbuseBand = 'low' | 'watch' | 'review' | 'high'
+export interface AbuseReason { code: string; points: number; count?: number }
+export interface AbuseCluster { id: string; score: number; band: AbuseBand; peak: number; accounts: number; workspaces: number; reasons: AbuseReason[]; firstAt: string; changedAt: string; scoredAt: string }
+export interface AbuseAccount { key: string; kind: 'user' | 'refused'; userId: string | null; email: string | null; name: string | null }
+export interface AbuseWorkspace { id: string; name: string; createdAt: string; account: string | null; plan: 'free' | 'paid' | 'exempt'; sent: { used: number; limit: number }; received: { used: number; limit: number }; step: StandingStep | null; dailyLimit: number | null; sending: string | null; paused: boolean }
+/** a and b are an account key (A1) or a workspace ID; kinds say what is shared and how many values, never a value. */
+export interface AbuseLink { a: string; b: string; owner: boolean; strength: 'owner' | 'strong' | 'partial'; kinds: { kind: string; shared: number }[] }
+export interface AbuseClusterDetail extends Omit<AbuseCluster, 'accounts' | 'workspaces'> { accounts: AbuseAccount[]; workspaces: AbuseWorkspace[]; links: AbuseLink[] }
+export interface AbuseClusterPage { items: AbuseCluster[]; nextCursor: string | null; counts: Record<AbuseBand, number>; alerts: number; monitoring: boolean }
+/** A Slack message as it is, or would be, posted: the blocks this page draws. */
+export interface SlackCard { text: string; blocks: { type: string; text?: { text: string }; fields?: { text: string }[]; elements?: { type: string; text?: { text: string } | string; url?: string }[] }[] }
+export interface AbuseAlert { id: string; clusterId: string; band: 'review' | 'high'; score: number; kind: 'new' | 'raised' | 'grew'; workspaces: number; status: 'stored' | 'sent' | 'failed'; attempts: number; createdAt: string; sentAt: string | null; payload: SlackCard }
+/** An action taken from the abuse view: the note stays in the staff audit; the workspace's own records get a fixed reason. */
+export type AbuseEvidence = { cluster: string; note: string; ticketRef?: string }
 export type OperatorReceipt = { ok: true; version: number | null; step: string | null }
 /** Every mutation carries why (10–1000 characters) and optionally the support ticket. */
 export type OperatorWhy = { reason: string; ticketRef?: string }
@@ -48,6 +63,7 @@ export function isoTime(value: string) {
 const base = '/v1/operator', id = encodeURIComponent
 const query = (values: Record<string, string | number | undefined>) => { const params = new URLSearchParams(); for (const [key, value] of Object.entries(values)) if (value !== undefined && value !== '') params.set(key, String(value)); const text = params.toString(); return text ? `?${text}` : '' }
 const why = ({ reason, ticketRef }: OperatorWhy) => ({ reason: reason.trim(), ...ticketRef?.trim() ? { ticketRef: ticketRef.trim() } : {} })
+const evidence = ({ cluster, note, ticketRef }: AbuseEvidence) => ({ evidence: { cluster, note: note.trim() }, ...ticketRef?.trim() ? { ticketRef: ticketRef.trim() } : {} })
 const write = (path: string, method: 'POST' | 'PUT', body: unknown, guard: OperatorGuard) => request<OperatorReceipt>(`${base}${path}`, { method, body, idempotencyKey: guard.idempotencyKey, ifMatch: guard.ifMatch })
 
 export const operatorApi = {
@@ -73,6 +89,17 @@ export const operatorApi = {
   limit: (workspaceId: string, input: OperatorWhy & { daily: number | null; expiresAt: string | null }, guard: OperatorGuard) => write(`/workspaces/${id(workspaceId)}/limit`, 'PUT', { daily: input.daily, expiresAt: input.daily === null ? null : input.expiresAt, ...why(input) }, guard),
   domainLimit: (workspaceId: string, input: OperatorWhy & { limit: number | null }, guard: OperatorGuard) => request<{ ok: true; domainLimit: OperatorDomainLimit }>(`${base}/workspaces/${id(workspaceId)}/domain-limit`, { method: 'PUT', body: { limit: input.limit, ...why(input) }, idempotencyKey: guard.idempotencyKey }),
   releaseCampaign: (campaignId: string, input: OperatorWhy, guard: OperatorGuard) => write(`/campaigns/${id(campaignId)}/release`, 'POST', why(input), guard),
+  abuseClusters: async (input: { band?: AbuseBand; cursor?: string; limit?: number }, signal?: AbortSignal): Promise<AbuseClusterPage> => {
+    const page = await request<{ data: AbuseCluster[] } & Omit<AbuseClusterPage, 'items'>>(`${base}/abuse/clusters${query({ band: input.band, cursor: input.cursor, limit: input.limit ?? 50 })}`, { signal })
+    return { items: page.data, nextCursor: page.nextCursor, counts: page.counts, alerts: page.alerts, monitoring: page.monitoring }
+  },
+  abuseCluster: (clusterId: string, signal?: AbortSignal) => request<AbuseClusterDetail>(`${base}/abuse/clusters/${id(clusterId)}`, { signal }),
+  abuseAlerts: async (input: { cursor?: string }, signal?: AbortSignal) => {
+    const page = await request<{ data: AbuseAlert[]; nextCursor: string | null; delivery: 'slack' | 'off' }>(`${base}/abuse/alerts${query({ cursor: input.cursor, limit: 50 })}`, { signal })
+    return { items: page.data, nextCursor: page.nextCursor, delivery: page.delivery }
+  },
+  abusePause: (workspaceId: string, input: AbuseEvidence, guard: OperatorGuard) => write(`/workspaces/${id(workspaceId)}/pause`, 'POST', evidence(input), guard),
+  abuseLimit: (workspaceId: string, input: AbuseEvidence & { daily: number }, guard: OperatorGuard) => write(`/workspaces/${id(workspaceId)}/limit`, 'PUT', { daily: input.daily, expiresAt: null, ...evidence(input) }, guard),
   billing: (workspaceId: string, signal?: AbortSignal) => request<OperatorBilling>(`${base}/billing/${id(workspaceId)}`, { signal }),
   /** Free (not billed): the workspace's own flag, or a person's (every workspace they own, bound to their sign-in). */
   workspaceFree: (workspaceId: string, input: FreeInput, guard: OperatorGuard) => request(`${base}/billing/${id(workspaceId)}/free`, { method: 'PUT', body: { free: input.free, ...input.free && input.until ? { until: input.until } : {}, ...why(input) }, idempotencyKey: guard.idempotencyKey }),

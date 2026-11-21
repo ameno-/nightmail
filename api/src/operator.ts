@@ -31,6 +31,25 @@ export async function operatorActor(c: Ctx, level: OperatorRole): Promise<Operat
 }
 
 const Reason = z.string().trim().min(10).max(1000).describe('Why, for the audit log and the customer timeline (at least 10 characters).');
+// An action taken from the abuse view (src/abuse-clusters.ts). What the workspace's own records, its support
+// conversations and its webhooks may carry is the fixed REVIEW_REASON; the cluster and the operator's note stay in the
+// staff-only audit row, so nothing about another customer can reach this one.
+const Evidence = z.object({ cluster: z.string().regex(/^acl_[0-9a-f]{24}$/), note: z.string().trim().min(10).max(1000).describe('Staff only: why, for the operator audit.') }).strict();
+const REVIEW_REASON = 'Account review by staff.';
+type Reasoned = { reason?: string; evidence?: z.infer<typeof Evidence> };
+/** The reason an action records where the workspace can be told of it, and what stays in the staff audit row. */
+function reasoned<T extends Reasoned>(body: T): Omit<T, 'reason' | 'evidence'> & { reason: string; internal?: { abuse: z.infer<typeof Evidence> } } {
+  const { reason, evidence, ...rest } = body;
+  if (evidence && reason !== undefined) throw new ApiError(422, 'VALIDATION_FAILED', 'Give evidence or a reason, not both: with evidence the recorded reason is fixed.', 'reason');
+  if (evidence) return { ...rest, reason: REVIEW_REASON, internal: { abuse: evidence } };
+  if (reason === undefined) throw new ApiError(422, 'VALIDATION_FAILED', 'Give a reason of at least 10 characters.', 'reason');
+  return { ...rest, reason };
+}
+/** Evidence names a cluster this workspace is in, or the action is refused. */
+async function evidenceFor(db: DbExecutor, workspaceId: string, internal: { abuse: z.infer<typeof Evidence> } | undefined) {
+  if (internal && !(await db.execute(sql`SELECT FROM abuse_cluster_members WHERE cluster_id=${internal.abuse.cluster} AND entity_type='workspace' AND entity_id=${workspaceId}`)).rows.length)
+    throw new ApiError(422, 'EVIDENCE_INVALID', 'This workspace is not in that cluster. Reload the cluster and try again.', 'evidence');
+}
 const TicketRef = z.string().trim().min(1).max(200).optional().describe('The support ticket ID or URL.');
 const WorkspaceParam = z.object({ id: z.string().min(1).max(100) });
 const Mutation = { 'Idempotency-Key': z.string().min(1).max(200).optional(), 'If-Match': z.string().regex(/^"?\d+"?$/).optional().describe('The standing version this action was decided on.') };
@@ -64,12 +83,12 @@ function readCursor(cursor?: string) {
   if (!Number.isFinite(Date.parse(at))) throw new ApiError(422, 'INVALID_CURSOR', 'Use nextCursor from the previous page.', 'cursor');
   return { at, key: cursor.slice(split + 1) };
 }
-export type OperatorAudit = { action: string; before?: unknown; after?: unknown; reason: string; ticketRef?: string };
+export type OperatorAudit = { action: string; before?: unknown; after?: unknown; reason: string; ticketRef?: string; /** Staff-only detail, kept in the audit row alone. */ internal?: Record<string, unknown> };
 /** What an Idempotency-Key is bound to: the method, path and body of the request that first used it. */
 export const operatorRequestHash = (c: Ctx, body: unknown) => createHash('sha256').update(JSON.stringify([c.req.method, c.req.path, body])).digest('hex');
 /** The audit row for one operator change. Call it inside the transaction that makes the change. */
 export const writeOperatorAudit = (tx: DbExecutor, c: Ctx, operator: OperatorIdentity, workspaceId: string, audit: OperatorAudit) => tx.execute(sql`INSERT INTO hosted_operator_audit(workspace_id,action,details,operator_id,via,reason,ticket_ref,request_id,before,after)
-  VALUES(${workspaceId},${audit.action},${JSON.stringify({ operatorRole: operator.role })}::jsonb,${operator.userId},'console',${audit.reason},${audit.ticketRef ?? null},${c.get('requestId') ?? null},
+  VALUES(${workspaceId},${audit.action},${JSON.stringify({ operatorRole: operator.role, ...audit.internal })}::jsonb,${operator.userId},'console',${audit.reason},${audit.ticketRef ?? null},${c.get('requestId') ?? null},
     ${JSON.stringify(audit.before ?? null)}::jsonb,${JSON.stringify(audit.after ?? null)}::jsonb)`);
 /**
  * Idempotency, If-Match and the audit row around one mutation, all in one transaction. Billing's operator tools use it
@@ -173,7 +192,8 @@ export function registerOperator(app: App) {
 
   const MutationBody = z.object({ reason: Reason, ticketRef: TicketRef }).strict();
   const done = z.object({ ok: z.literal(true), version: z.number().int().nullable(), step: z.string().nullable() });
-  const change = async (c: Ctx, wid: string, body: { reason: string; ticketRef?: string }, action: string, build: (current: NonNullable<Awaited<ReturnType<typeof standingOf>>>) => Omit<Change, 'workspaceId' | 'actor' | 'expectVersion'>) => {
+  const ReviewedBody = z.object({ reason: Reason.optional(), evidence: Evidence.optional(), ticketRef: TicketRef }).strict();
+  const change = async (c: Ctx, wid: string, body: { reason: string; ticketRef?: string; internal?: Record<string, unknown> }, action: string, build: (current: NonNullable<Awaited<ReturnType<typeof standingOf>>>) => Omit<Change, 'workspaceId' | 'actor' | 'expectVersion'>) => {
     const operator = await operatorActor(c, 'operator');
     await hostedWorkspace(c.env.db, wid);
     return mutate(c, operator, wid, body, async (tx, expectVersion) => {
@@ -182,12 +202,13 @@ export function registerOperator(app: App) {
       const result = await applyChange(tx, { workspaceId: wid, actor: { kind: 'operator', id: operator.userId, via: 'console' }, expectVersion, ...build(before!),
         details: { reason: body.reason, ...(body.ticketRef ? { ticketRef: body.ticketRef } : {}), ...build(before!).details } });
       const after = await standingOf(tx, wid);
-      return { result: { ok: true as const, version: result?.version ?? null, step: result?.step ?? null }, audit: { action, before, after, reason: body.reason, ticketRef: body.ticketRef } };
+      return { result: { ok: true as const, version: result?.version ?? null, step: result?.step ?? null }, audit: { action, before, after, reason: body.reason, ticketRef: body.ticketRef, internal: body.internal } };
     });
   };
-  app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'post', path: '/v1/operator/workspaces/{id}/pause', operationId: 'operatorPauseWorkspace', request: { params: WorkspaceParam, headers: z.object(Mutation), body: json(MutationBody) },
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'post', path: '/v1/operator/workspaces/{id}/pause', operationId: 'operatorPauseWorkspace', request: { params: WorkspaceParam, headers: z.object(Mutation), body: json(ReviewedBody) },
     responses: { 200: response(done), ...errors } }), async c => {
-    const body = c.req.valid('json'), wid = c.req.valid('param').id;
+    const body = reasoned(c.req.valid('json')), wid = c.req.valid('param').id;
+    await operatorActor(c, 'operator'); await evidenceFor(c.env.db, wid, body.internal);
     return c.json(await change(c, wid, body, 'operator-pause', current => {
       if (current.paused) throw new ApiError(409, 'ALREADY_PAUSED', 'This workspace is already paused.');
       // The reason is for the audit and the operator timeline; customers see that Nightmail paused it after a review.
@@ -213,12 +234,12 @@ export function registerOperator(app: App) {
   });
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'put', path: '/v1/operator/workspaces/{id}/limit', operationId: 'operatorSetLimit',
     request: { params: WorkspaceParam, headers: z.object(Mutation), body: json(z.object({ daily: z.number().int().min(1).max(10_000_000).nullable().describe('null returns the workspace to the score limit.'),
-      expiresAt: z.iso.datetime().nullable().optional().describe('When the override ends (at most a year ahead); omit or null for no expiry.'), reason: Reason, ticketRef: TicketRef }).strict()) },
+      expiresAt: z.iso.datetime().nullable().optional().describe('When the override ends (at most a year ahead); omit or null for no expiry.'), reason: Reason.optional(), evidence: Evidence.optional(), ticketRef: TicketRef }).strict()) },
     responses: { 200: response(done), ...errors } }), async c => {
-    const body = c.req.valid('json'), wid = c.req.valid('param').id;
+    const body = reasoned(c.req.valid('json')), wid = c.req.valid('param').id;
     if (body.expiresAt && (Date.parse(body.expiresAt) <= Date.now() || Date.parse(body.expiresAt) > Date.now() + 366 * 86_400_000)) throw new ApiError(422, 'INVALID_EXPIRY', 'Choose an expiry between now and a year from now.', 'expiresAt');
     const operator = await operatorActor(c, 'operator');
-    await hostedWorkspace(c.env.db, wid);
+    await hostedWorkspace(c.env.db, wid); await evidenceFor(c.env.db, wid, body.internal);
     return c.json(await mutate(c, operator, wid, body, async (tx, expectVersion) => {
       const current = await standingOf(tx, wid);
       if (expectVersion !== undefined && current && current.version !== expectVersion) throw new ApiError(412, 'STANDING_VERSION_CHANGED', `The standing changed since version ${expectVersion} (now ${current.version}).`);
@@ -230,7 +251,7 @@ export function registerOperator(app: App) {
       await tx.execute(sql`WITH s AS (UPDATE sender_standing SET sequence=sequence+1 WHERE workspace_id=${wid} RETURNING workspace_id,sequence,step)
         INSERT INTO standing_events(id,workspace_id,sequence,kind,from_step,to_step,actor,details) SELECT 'stev_'||replace(gen_random_uuid()::text,'-',''),workspace_id,sequence,'limit',step,step,
           ${JSON.stringify({ kind: 'operator', id: operator.userId, via: 'console' })}::jsonb,${JSON.stringify({ override: { from: before, to: { daily: body.daily, expiresAt: body.expiresAt ?? null } }, reason: body.reason })}::jsonb FROM s`);
-      return { result: { ok: true as const, version: current?.version ?? null, step: current?.step ?? null }, audit: { action: 'operator-set-limit', before, after: { daily: body.daily, expiresAt: body.expiresAt ?? null }, reason: body.reason, ticketRef: body.ticketRef } };
+      return { result: { ok: true as const, version: current?.version ?? null, step: current?.step ?? null }, audit: { action: 'operator-set-limit', before, after: { daily: body.daily, expiresAt: body.expiresAt ?? null }, reason: body.reason, ticketRef: body.ticketRef, internal: body.internal } };
     }), 200);
   });
   // The growth pace after the evaluation (src/standing-model.ts GROWTH): an operator lifts it for a known, legitimate

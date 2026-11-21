@@ -13,12 +13,14 @@ import { errorText } from '../../data/types'
 import { factorFormats } from '../score'
 import { actionColumnDefs, ActionsTrigger, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, memberColumnDefs, operatorView, useOperatorTabs, OperatorWorkspaceSkeleton, StaffOnly, QueueToolbar, queueColumnDefs, timelineColumnDefs, waitlistColumnDefs, WaitlistToolbar } from './skeletons'
 import { useDebounced } from '../../lib/pagination'
+import { AbuseView } from './abuse'
 
 // The operator console (lazy, /operator): Nightmail staff with a platform role review flagged Hosted workspaces and act on
 // them through the audited operator API. Impersonation-free: it reads standing, score, limits and evidence, never
 // message bodies, and every address is masked. `operator:read` sees everything and changes nothing.
 // UI notes (/operator/notes) live in ./notes and load with this chunk.
 export { OperatorNotesPage } from './notes'
+export { OperatorClusterPage } from './abuse'
 const useOperatorRole = () => useSession()?.identity?.operator ?? null
 const NotFound = StaffOnly
 const def = (defs: typeof queueColumnDefs, key: string) => defs.find(column => column.key === key)!
@@ -38,8 +40,8 @@ export function OperatorPage() {
   return <>
     <PageHeader title="Operator" />
     <div className="op-page">
-      <Tabs value={view} label="Operator views" items={tabs} onValueChange={value => value === 'notes' ? navigate('/operator/notes') : setParams(previous => { const next = new URLSearchParams(previous); if (value === 'queue') next.delete('view'); else next.set('view', value); return next }, { replace: true })} />
-      {view === 'queue' ? <Queue /> : view === 'waitlist' ? <Waitlist /> : <Actions />}
+      <Tabs value={view} label="Operator views" items={tabs} onValueChange={value => value === 'notes' ? navigate('/operator/notes') : setParams(previous => { const next = new URLSearchParams(previous); next.delete('band'); next.delete('show'); if (value === 'queue') next.delete('view'); else next.set('view', value); return next }, { replace: true })} />
+      {view === 'queue' ? <Queue /> : view === 'abuse' ? <AbuseView /> : view === 'waitlist' ? <Waitlist /> : <Actions />}
     </div>
   </>
 }
