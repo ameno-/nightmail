@@ -74,7 +74,7 @@ export function OperatorNotesPage() {
   return <>
     <PageHeader title="Operator" actions={canAct ? <Button onClick={() => setKeys(true)}>Agent keys</Button> : undefined} />
     <div className="op-page">
-      <Tabs value="notes" label="Operator views" items={tabs} onValueChange={value => { if (value !== 'notes') navigate(value === 'actions' ? '/operator?view=actions' : '/operator') }} />
+      <Tabs value="notes" label="Operator views" items={tabs} onValueChange={value => { if (value !== 'notes') navigate(value === 'queue' ? '/operator' : `/operator?view=${encodeURIComponent(value)}`) }} />
       <NotesToolbar search={search} status={status} kind={kind} onSearch={setSearch} onStatus={value => setParam('status', value)} onKind={value => setParam('kind', value)}
         actions={selected.size ? <DropdownMenu label="Selected notes" title={`${selected.size} selected`} trigger={bulkTrigger} items={bulkItems} /> : bulkTrigger} />
       {notes.isError && !notes.data ? <ErrorState error={notes.error} onRetry={() => void notes.refetch()} /> : <>

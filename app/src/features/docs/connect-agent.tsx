@@ -179,7 +179,7 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
   const close = () => { if (!busy) onOpenChange(false) }
   const footer = !inboxView ? <>
       <Link className="ui-button ui-button--ghost ui-button--md connect-agent__aside" to={guides.mcp} onClick={close}>Docs</Link>
-      {canAdminister && <Button variant="ghost" className="connect-agent__aside" onClick={() => { if ((mcpClients as readonly string[]).includes(signIn)) setClient(signIn as McpClient); setView('inbox') }}>Limit to one inbox</Button>}
+      {canAdminister && <Button variant="ghost" className="connect-agent__aside" onClick={() => { const setup = signIn === 'other' ? 'generic' : signIn; if ((mcpClients as readonly string[]).includes(setup)) setClient(setup as McpClient); setView('inbox') }}>Limit to one inbox</Button>}
       <Button variant="primary" onClick={close}>Done</Button>
     </>
     : result ? <Button variant="primary" onClick={close}>Done</Button>

@@ -14,7 +14,8 @@ export const contactColumns: SkeletonColumn[] = [
   { key: 'email', label: 'Email', width: '28%', skeleton: <AudienceCellSkeleton />, card: 'title' },
   { key: 'status', label: 'Status', width: '17%', skeleton: <SkeletonText width={92} />, card: 'aside' },
   { key: 'name', label: 'Name', width: '18%', card: 'line' },
-  { key: 'lists', label: 'Lists', width: '20%', card: 'inline' },
+  // A card puts the lists after the date (the created column's card line), so names arriving later move nothing.
+  { key: 'lists', label: 'Lists', width: '20%', card: 'hide' },
   { key: 'created', label: 'Added', width: '17%', skeleton: <SkeletonText width={95} />, card: 'inline' },
 ]
 export const memberColumns: SkeletonColumn[] = [contactColumns[0], contactColumns[1], { key: 'suppression', label: 'Suppression reason', width: '38%', card: 'line' }, contactColumns[4]]

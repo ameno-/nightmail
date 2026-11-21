@@ -85,17 +85,17 @@ export const settingsColumns = {
     { key: 'time', label: 'Time · UTC', width: '16%', skeleton: twoLines, card: 'title' },
     { key: 'region', label: 'Region', width: '14%', card: 'hide' },
     { key: 'event', label: 'Event', width: '16%', card: 'line' },
-    { key: 'status', label: 'Response / Status', width: '22%', skeleton: twoLines, card: 'aside' },
+    { key: 'status', label: 'Status', width: '22%', skeleton: twoLines, card: 'aside' },
     { key: 'attempts', label: 'Attempts', card: 'inline' },
     { key: 'actions', label: '', align: 'right', width: 220, skeleton: <ControlSkeleton width={85} />, card: 'end' },
   ],
-  // An activity card: what happened and when, then who did it to what, then where from.
+  // An activity card: what happened and when, then labelled lines for who (and where from) and the target.
   activity: [
     { key: 'when', label: 'When', width: 112, card: 'aside' },
-    { key: 'who', label: 'Who', width: '20%', card: 'line' },
+    { key: 'who', label: 'Who', width: '20%', card: 'field' },
     { key: 'action', label: 'Action', width: '22.5%', card: 'title' },
-    { key: 'target', label: 'Target', width: '22.5%', card: 'line' },
-    { key: 'from', label: 'From', card: 'line' },
+    { key: 'target', label: 'Target', width: '22.5%', card: 'field' },
+    { key: 'from', label: 'From', card: 'hide' },
   ],
 } satisfies Record<string, SkeletonColumn[]>
 // Hosted workspaces span every region, so their domains table has no Region column.

@@ -1,9 +1,9 @@
-import { useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Button, Checkbox, ConfirmDialog, CopyButton, DataTable, Dialog, EmptyState, KeyValues, ErrorState, Field, Input, SecretInput, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, StatusBadge, DropdownMenu, fieldError, MutationError, SecretDialog } from '../../components/ui'
 import { useApiMutation, useApiDef, useApiQuery, useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
-import type { RegionCatalogEntry, Webhook, WebhookDelivery, WebhookEvent, WebhookInput } from '../../data/types'
+import type { RegionCatalogEntry, Webhook, WebhookDelivery, WebhookEvent, WebhookInput, WebhookUpdate } from '../../data/types'
 import { useRegionCatalog } from '../../data/regions'
 import { date, label, number, shortDateTime, time } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
@@ -17,6 +17,10 @@ const events: WebhookEvent[] = ['email.sent', 'email.delivered', 'email.bounced'
 const defaultEvents: WebhookEvent[] = ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed']
 const blankEndpoint: WebhookInput = { name: '', url: '', regionIds: 'all', events: [...defaultEvents] }
 const column = (columns: ReturnType<typeof webhookColumns>, key: string) => columns.find(item => item.key === key)!
+// Two values are the same setting: lists compare as sets (an event list's order means nothing).
+const same = (a: unknown, b: unknown) => JSON.stringify(Array.isArray(a) ? [...a].sort() : a) === JSON.stringify(Array.isArray(b) ? [...b].sort() : b)
+// The endpoint's answer as a labelled value; a delivery still waiting has had none yet.
+const responseText = (delivery: WebhookDelivery) => delivery.response ? `Response ${delivery.response}` : delivery.status === 'pending' || delivery.status === 'retry_pending' ? 'No response yet' : 'No response'
 const eventLabel = (event: string) => event === 'account.standing.changed' ? 'Sending standing changed' : label(event.replace(/^email\./, '').replace('.', '_'))
 // The events a webhook gets, named rather than counted: "All events", or the first and how many more.
 const eventSummary = (list: WebhookEvent[]) => list.length === events.length ? 'All events' : `${eventLabel(list[0] ?? '')}${list.length > 1 ? ` +${number(list.length - 1)}` : ''}`
@@ -128,6 +132,17 @@ function WebhookEditor({ webhook, regions, refreshError, onRefresh }: { webhook:
   const { multiTenant } = useWorkspaceAccess()
   // Hosted users can't change the region scope, so their updates leave it out and keep the saved one.
   const [input, setInput] = useState<WebhookInput>({ id: webhook.id, name: webhook.name, url: '', ...multiTenant ? {} : { regionIds: webhook.regionIds }, events: webhook.events })
+  // What the draft started from. A field the operator hasn't touched follows the server (another editor's save lands in
+  // it), and Save sends only the fields that differ from it, so a rename can't put back an older event list.
+  const [base, setBase] = useState(() => ({ name: webhook.name, events: webhook.events, regionIds: webhook.regionIds }))
+  const remoteKey = JSON.stringify([webhook.name, webhook.events, webhook.regionIds])
+  useEffect(() => {
+    setInput(value => ({ ...value,
+      ...same(value.name, base.name) ? { name: webhook.name } : {},
+      ...same(value.events, base.events) ? { events: webhook.events } : {},
+      ...value.regionIds !== undefined && same(value.regionIds, base.regionIds) ? { regionIds: webhook.regionIds } : {} }))
+    setBase({ name: webhook.name, events: webhook.events, regionIds: webhook.regionIds })
+  }, [remoteKey]) // eslint-disable-line react-hooks/exhaustive-deps
   const deliveryColumnSet = deliveryColumns(multiTenant)
   async function retryDelivery(delivery: WebhookDelivery) { try { await retry.mutateAsync({ id: webhook.id, deliveryId: delivery.id }); setHistory(null); historyPagination.reset() } catch { /* Shown inline. */ } }
   const [headers, setHeaders] = useState<HeaderDraft>(null)
@@ -144,7 +159,7 @@ function WebhookEditor({ webhook, regions, refreshError, onRefresh }: { webhook:
   const [opened, setInspected] = useState<WebhookDelivery | null>(null)
   const rows = history?.items ?? webhook.deliveries
   const inspected = opened && (rows.find(delivery => delivery.id === opened.id) ?? opened)
-  const save = useApiMutation((api, value: WebhookInput) => api.webhooks.save(value), 'Webhook saved')
+  const save = useApiMutation((api, value: WebhookUpdate) => api.webhooks.save(value), 'Webhook saved')
   const status = useApiMutation((api, value: { id: string; status: 'active' | 'paused' }) => api.webhooks.setStatus(value.id, value.status), 'Webhook status updated')
   const rotate = useApiMutation((api, id: string) => api.webhooks.rotate(id), 'Signing secret rotated')
   // Reading the secret changes nothing, so it refreshes nothing.
@@ -170,7 +185,12 @@ function WebhookEditor({ webhook, regions, refreshError, onRefresh }: { webhook:
     const nextErrors = { ...validate(input), ...headerDraftErrors(headers) }
     setErrors(nextErrors)
     if (Object.keys(nextErrors).length) return
-    try { await save.mutateAsync({ ...input, name: input.name.trim(), url: input.url.trim(), headers: headerPayload(headers, currentHeaders) }); setInput(value => ({ ...value, url: '' })); setHeaders(null) } catch { /* Shown inline. */ }
+    const name = input.name.trim()
+    const update: WebhookUpdate = { id: webhook.id, url: input.url.trim(), headers: headerPayload(headers, currentHeaders),
+      ...name !== base.name ? { name } : {},
+      ...same(input.events, base.events) ? {} : { events: input.events },
+      ...input.regionIds === undefined || same(input.regionIds, base.regionIds) ? {} : { regionIds: input.regionIds } }
+    try { await save.mutateAsync(update); setInput(value => ({ ...value, url: '' })); setHeaders(null) } catch { /* Shown inline. */ }
   }
   async function confirm() {
     if (action === 'pause' || action === 'resume') {await status.mutateAsync({ id: webhook.id, status: action === 'pause' ? 'paused' : 'active' }); setHistory(null); historyPagination.reset()}
@@ -188,8 +208,9 @@ function WebhookEditor({ webhook, regions, refreshError, onRefresh }: { webhook:
       <DataTable minRows={3} rows={rows} rowKey={delivery => delivery.id} empty={<EmptyState title="No deliveries yet" />} columns={[
         { ...column(deliveryColumnSet, 'time'), render: (delivery: WebhookDelivery) => <div>{time(delivery.at)}<div className="muted">{date(delivery.at)}</div></div>, cardRender: (delivery: WebhookDelivery) => `${date(delivery.at, { month: 'short', day: 'numeric', timeZone: 'UTC' })} · ${time(delivery.at)}` },
         ...multiTenant ? [] : [{ ...column(deliveryColumnSet, 'region'), render: (delivery: WebhookDelivery) => delivery.regionId }],
-        { ...column(deliveryColumnSet, 'event'), render: (delivery: WebhookDelivery) => delivery.test ? <span className="settings-cell-stack"><span>Test</span><span className="muted">{eventLabel(delivery.event)}</span></span> : eventLabel(delivery.event), cardRender: (delivery: WebhookDelivery) => `${delivery.test ? 'Test · ' : ''}${eventLabel(delivery.event)} · ${delivery.response || 'No response'}` },
-        { ...column(deliveryColumnSet, 'status'), render: (delivery: WebhookDelivery) => <div className="settings-cell-stack"><div>{delivery.response || 'No response'}</div><StatusBadge status={label(delivery.status)} /></div>, cardRender: (delivery: WebhookDelivery) => <StatusBadge status={label(delivery.status)} /> },
+        { ...column(deliveryColumnSet, 'event'), // The event is its name (email.delivered), never a word that reads as the outcome; Status says how it went.
+        render: (delivery: WebhookDelivery) => <span className="settings-cell-stack"><code title={eventLabel(delivery.event)}>{delivery.event}</code>{delivery.test && <span className="muted">Test event</span>}</span>, cardRender: (delivery: WebhookDelivery) => <><code>{delivery.event}</code>{delivery.test && <span className="muted"> · test</span>}<span className="muted"> · {responseText(delivery)}</span></> },
+        { ...column(deliveryColumnSet, 'status'), render: (delivery: WebhookDelivery) => <div className="settings-cell-stack"><StatusBadge status={label(delivery.status)} /><span className="muted">{responseText(delivery)}</span></div>, cardRender: (delivery: WebhookDelivery) => <StatusBadge status={label(delivery.status)} /> },
         { ...column(deliveryColumnSet, 'attempts'), render: (delivery: WebhookDelivery) => number(delivery.attempts), cardRender: (delivery: WebhookDelivery) => `${number(delivery.attempts)} ${delivery.attempts === 1 ? 'attempt' : 'attempts'}` },
         { ...column(deliveryColumnSet, 'actions'), render: (delivery: WebhookDelivery) => <div className="cluster settings-row-actions">{['retry_pending', 'failed'].includes(delivery.status) && <Button disabled={pending || webhook.status === 'paused'} loading={retry.isPending && retry.variables?.deliveryId === delivery.id} onClick={() => void retryDelivery(delivery)}>Retry now</Button>}<Button variant="ghost" onClick={() => setInspected(delivery)}>Inspect</Button></div>,
           cardRender: (delivery: WebhookDelivery) => <DropdownMenu label={`Actions for the ${eventLabel(delivery.event)} delivery`} title={eventLabel(delivery.event)} items={[

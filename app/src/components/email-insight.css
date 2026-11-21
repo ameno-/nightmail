@@ -200,7 +200,7 @@
   --color-warning: #68552B; --color-warning-marker: #E7AF36; --color-warning-bg: #FEFAEC; --color-warning-border: #F7E5B5;
   --color-danger: #B82D35; --color-danger-marker: #D92E3C; --color-danger-bg: #FCECEB; --color-danger-border: #F2BBB7;
   --color-info-marker: #3250DF; --color-info-bg: #ECF1FE; --color-info-border: #C3D4FD; --color-neutral-marker: #737373;
-  --grade-aplus: #13804A; --grade-a: #2EAF5A; --grade-b: #3B5CF6; --grade-c: #E7AF36; --grade-d: #EE7B30; --grade-f: #D92E3C;
+  --grade-aplus: #13804A; --grade-a: #2EAF5A; --grade-b: oklch(.50 .08 262); --grade-c: #E7AF36; --grade-d: #EE7B30; --grade-f: #D92E3C;
   --shadow-button: 0 1px 1.5px rgb(0 0 0 / 10%), 0 0 0 .5px rgb(0 0 0 / 14%);
 }
 .ei--placeholder { gap: var(--space-8); }

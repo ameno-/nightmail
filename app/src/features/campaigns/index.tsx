@@ -37,13 +37,11 @@ import { localLabel, parseUtc, ScheduleField, scheduleError, utcLabel } from '..
 import { useSingleFlight } from '../../lib/single-flight'
 import { usePhone } from '../../lib/media'
 import { useLeaveGuard } from '../../lib/leave-guard'
+import { emailIsValid, replyToAddresses, replyToError } from './reply-to'
 
 // {{placeholders}} the campaign uses; email always resolves, everything else needs a contact value or a fallback.
 const placeholderPattern = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g
 export const placeholders = (...sources: (string | undefined)[]) => [...new Set(sources.flatMap(source => [...(source ?? '').matchAll(placeholderPattern)].map(match => match[1]!)))]
-const emailIsValid = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
-const replyToAddresses = (value: string) => value.split(',').map(address => address.trim()).filter(Boolean)
-const replyToError = (value: string) => { const addresses = replyToAddresses(value); return addresses.length > 10 ? 'Use at most 10 Reply-To addresses.' : addresses.some(address => !emailIsValid(address)) ? 'Enter valid Reply-To addresses separated by commas.' : '' }
 // The API's rule (outbound-content.ts unsubscribePageUrl), checked as typed so autosave never sends a page it refuses.
 const unsubscribePageError = (value = '') => {
   const text = value.trim()
@@ -54,6 +52,7 @@ const unsubscribePageError = (value = '') => {
   } catch { /* not a URL */ }
   return 'Enter an https:// address without a user name or password.'
 }
+const nobodyEligible = 'Nobody on this list can receive campaigns yet. Mark contacts as subscribed or choose another list.'
 const campaignRoute = (campaign: Pick<Campaign, 'id'>, view: 'edit' | 'review') => `/campaigns/${encodeURIComponent(campaign.id)}/${view}`
 function campaignReadinessError(campaign: Campaign) {
   const missing = [!campaign.name.trim() && 'a campaign name', !campaign.subject.trim() && 'a subject', !emailIsValid(campaign.fromEmail.trim()) && 'a valid sender email address', !campaign.listId && 'a recipient list', !campaign.html.trim() && 'email content'].filter(Boolean)
@@ -268,7 +267,8 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
     if (validation) { if (!automatic) reportError(validation); return }
     // An unchanged saved draft needs no new revision: open the test or review straight away.
     if (continuing && acceptedRef.current && !dirtyRef.current && !creation.current) {
-      if (next === 'test') setTestOpen(true)
+      // A saved draft can still miss its message (an empty body): say so rather than open a test the API refuses.
+      if (next === 'test') { if (campaignMessageReady(acceptedRef.current)) setTestOpen(true); else reportError(acceptedRef.current.html.trim() ? campaignReadinessError({ ...acceptedRef.current, listId: acceptedRef.current.listId || 'any' }) : 'Add some email content before sending a test.') }
       else navigate(campaignRoute(acceptedRef.current, 'review'))
       return
     }
@@ -613,7 +613,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
     if (!draft || sendMutation.isPending) return
     if (readinessError) { setError(readinessError); return }
     setError('')
-    if (audience.data && audience.data.eligible < 1) { setError('Nobody on this list can receive campaigns yet. Mark contacts as subscribed or choose another list.'); return }
+    if (audience.data && audience.data.eligible < 1) { setError(nobodyEligible); return }
     if (paceError) { setError(`Recipients per day: ${paceError}`); return }
     if (shareError) { setError(`Sending speed limit: ${shareError}`); return }
     const input: SendCampaignInput = { id: campaign.id, mode, revision: campaign.revision }
@@ -700,7 +700,9 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
         </div>
         {error && <Alert tone="danger">{error}</Alert>}
         {!canAdminister && <Alert tone="info">Only owners and admins can send or schedule campaigns.</Alert>}
-        <div className="campaign-delivery-actions"><Button variant="secondary" disabled={sendMutation.isPending} onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Back to draft</Button><Button variant="primary" loading={sendMutation.isPending} disabled={!canAdminister || Boolean(readinessError) || Boolean(audience.data && !audience.data.eligible)} onClick={requestConfirmation} data-analytics={mode === 'schedule' ? 'campaigns/schedule' : 'campaigns/send'}>{mode === 'schedule' ? 'Schedule campaign' : 'Send campaign now'}</Button></div>
+        <div className="campaign-delivery-actions"><Button variant="secondary" disabled={sendMutation.isPending} onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Back to draft</Button><Button variant="primary" loading={sendMutation.isPending} disabled={!canAdminister || Boolean(readinessError) || Boolean(audience.data && !audience.data.eligible)} onClick={requestConfirmation} data-analytics={mode === 'schedule' ? 'campaigns/schedule' : 'campaigns/send'}>{mode === 'schedule' ? 'Schedule campaign' : 'Send campaign now'}</Button>
+          {/* Why the button is off, after it, so the line arriving with the audience moves nothing. */}
+          {!readinessError && audience.data && !audience.data.eligible && <p className="campaign-delivery-reason">{nobodyEligible}</p>}</div>
         {/* Below the actions, so the result never moves them. */}
         {lowScore && <SendabilityWarning report={sendability.data!} action={<p className="campaign-sendability-link"><Link to={campaignRoute(campaign, 'edit')}>See all findings</Link></p>} />}
       </section>}

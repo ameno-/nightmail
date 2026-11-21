@@ -212,6 +212,8 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
 // with the dialog. Both tabs share one cell sized by the details, and the changes scroll inside it, so neither switching
 // tabs nor the history arriving moves the footer.
 const accessFacts = new Set(['Type', 'Access', 'Domains', 'Mail', 'Inbox', 'Client', 'Account', 'Agent approval'])
+// What identifies the key; the rest (created, last used, expires) is its dates.
+const keyFacts = new Set(['Key prefix', 'ID'])
 const stateOf = (row: Row) => row.kind === 'key' ? keyState(row.key) : row.kind === 'token' ? tokenState(row.token) : row.kind === 'agent' ? agentState(row.agent) : null
 function KeyDetails({ row, fields, onClose, onRevoke, onEdit }: { row: Row | null; fields: [string, ReactNode][]; onClose: () => void; onRevoke: (row: Row) => void; onEdit: (key: ApiKey) => void }) {
   const [tab, setTab] = useState('details')
@@ -234,8 +236,10 @@ function KeyDetails({ row, fields, onClose, onRevoke, onEdit }: { row: Row | nul
       <div className="keys-details" data-inactive={tab !== 'details' || undefined} inert={tab !== 'details'}>
         <h3 className="ui-label ui-label--rule">Permissions</h3>
         <KeyValues items={facts.filter(([label]) => accessFacts.has(label))} />
+        {life.some(([label]) => keyFacts.has(label)) && <><h3 className="ui-label ui-label--rule">Key</h3>
+        <KeyValues items={life.filter(([label]) => keyFacts.has(label))} /></>}
         <h3 className="ui-label ui-label--rule">Dates</h3>
-        <KeyValues items={life} />
+        <KeyValues items={life.filter(([label]) => !keyFacts.has(label))} />
       </div>
       {row?.kind === 'key' && <div className="keys-changes" data-inactive={tab !== 'changes' || undefined} inert={tab !== 'changes'}><KeyChanges keyId={row.key.id} /></div>}
     </div>

@@ -168,7 +168,7 @@ function ProductionAccessDialog({ open, onOpenChange, region, domain }: { open: 
   })
   const valid = /^https?:\/\/\S+\.\S+$/.test(website.trim()) && useCase.trim().length >= 40
   return <Dialog open={open} onOpenChange={value => { if (!ask.isPending) { ask.reset(); onOpenChange(value) } }} title={`Request production access in ${region?.regionLabel ?? 'this region'}`}
-    footer={<><Button variant="ghost" onClick={() => onOpenChange(false)} disabled={ask.isPending}>Cancel</Button><Button variant="primary" loading={ask.isPending} disabled={!valid} onClick={() => ask.mutate()}>Send to AWS</Button></>}>
+    footer={<><Button onClick={() => onOpenChange(false)} disabled={ask.isPending}>Cancel</Button><Button variant="primary" loading={ask.isPending} disabled={!valid} onClick={() => ask.mutate()}>Send to AWS</Button></>}>
     <div className="onboarding-access-form">
       <Field label="Website" htmlFor="aws-access-website"><Input id="aws-access-website" value={website} onChange={event => setWebsite(event.target.value)} placeholder="https://acme.com" disabled={ask.isPending} /></Field>
       <Field label="Mail type" htmlFor="aws-access-type"><Select id="aws-access-type" value={mailType} onValueChange={value => setMailType(value as 'TRANSACTIONAL' | 'MARKETING')} options={[{ value: 'TRANSACTIONAL', label: 'Transactional' }, { value: 'MARKETING', label: 'Marketing' }]} disabled={ask.isPending} /></Field>

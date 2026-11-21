@@ -96,7 +96,8 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-delivery { display: flex; flex-direction: column; gap: var(--space-16); padding-top: var(--space-24); border-top: 1px solid var(--color-border-muted); }
 .campaign-delivery > .ui-section-header { margin-bottom: calc(var(--space-12) - var(--space-16)); }
 .campaign-delivery > .ui-field .ui-input { max-width: 240px; }
-.campaign-delivery-actions { display: flex; flex-wrap: wrap; gap: var(--space-8); }
+.campaign-delivery-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); }
+.campaign-delivery-reason { flex: 1 1 240px; margin: 0 0 0 var(--space-8); color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
 @media (max-width: 1050px) {
   .campaign-review-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; grid-template-areas: 'recipients' 'message' 'delivery'; row-gap: var(--space-24); }
   .campaign-review-layout > * + * { padding-top: var(--space-24); border-top: 1px solid var(--color-border-muted); }

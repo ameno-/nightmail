@@ -251,6 +251,8 @@ export interface WebhookDelivery { id: string; at: ISODate; regionId: RegionId; 
 export interface Webhook { id: string; name: string; url: string; regionIds: RegionId[] | 'all'; events: WebhookEvent[]; status: 'active' | 'paused'; secretHint: string; headers: WebhookHeaderView[]; deliveries: WebhookDelivery[]; nextCursor?: string | null; /** The signing secret: only in the response that created the webhook. */ secret?: string }
 // An update without regionIds keeps the endpoint's saved region scope.
 export type WebhookInput = Pick<Webhook, 'name' | 'url' | 'events'> & { regionIds?: Webhook['regionIds']; id?: string; headers?: WebhookHeaderInput[] }
+/** An edit sends only what changed: a field left out keeps its saved value. */
+export type WebhookUpdate = Omit<WebhookInput, 'name' | 'events'> & { id: string; name?: string; events?: Webhook['events'] }
 // Plain-language copy with a next step for errors a new workspace can meet. The server's message stays in `detail`.
 // A dashboard session that meets these is a member: say who can do it instead of the key jargon behind the code.
 const ownersOnly = 'Only workspace owners and admins can do this. Ask one to do it, or to make you an admin.'
@@ -376,7 +378,7 @@ export interface Api {
     deleteRoute(id: string, signal?: AbortSignal): Promise<void>
     test(input: RoutingTestInput, signal?: AbortSignal): Promise<RoutingTestResult>
   }
-  webhooks: { list(signal?: AbortSignal, cursor?: string): Promise<CursorItems<Webhook>>; get(id: string, signal?: AbortSignal): Promise<Webhook>; save(input: WebhookInput, signal?: AbortSignal): Promise<Webhook>; setStatus(id: string, status: 'active' | 'paused', signal?: AbortSignal): Promise<Webhook>; test(id: string, signal?: AbortSignal): Promise<WebhookDelivery>; retry(id: string, deliveryId: string, signal?: AbortSignal): Promise<WebhookDelivery>; rotate(id: string, signal?: AbortSignal): Promise<{ secret: string }>; reveal(id: string, signal?: AbortSignal): Promise<{ secret: string }>; remove(id: string, signal?: AbortSignal): Promise<void> }
+  webhooks: { list(signal?: AbortSignal, cursor?: string): Promise<CursorItems<Webhook>>; get(id: string, signal?: AbortSignal): Promise<Webhook>; save(input: WebhookInput | WebhookUpdate, signal?: AbortSignal): Promise<Webhook>; setStatus(id: string, status: 'active' | 'paused', signal?: AbortSignal): Promise<Webhook>; test(id: string, signal?: AbortSignal): Promise<WebhookDelivery>; retry(id: string, deliveryId: string, signal?: AbortSignal): Promise<WebhookDelivery>; rotate(id: string, signal?: AbortSignal): Promise<{ secret: string }>; reveal(id: string, signal?: AbortSignal): Promise<{ secret: string }>; remove(id: string, signal?: AbortSignal): Promise<void> }
 }
 
 export interface SendingLimit { cap: number | null; used: number; resetAt: string | null; nextCap: number | null; nextCapAt: string | null }

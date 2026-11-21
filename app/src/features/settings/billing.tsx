@@ -195,8 +195,11 @@ function RechargeDialog({ settings, hasCard, enable, capped, Row, onClose }: { s
 }
 
 // History: the balance's ledger and the card payments, a page at a time. Both are cursor lists with card slots on phones.
-const ledgerText = (e: LedgerEntry) => `${e.description}${e.kind === 'topup' && e.expiresAt ? ` · Expires ${fullDay(e.expiresAt)}` : ''}`
-const ledgerDescription = (e: LedgerEntry) => <span className="billing-desc" title={ledgerText(e)}>{e.description}{e.kind === 'topup' && e.expiresAt && <span className="muted"> · Expires {fullDay(e.expiresAt)}</span>}</span>
+// An hourly usage line leads with its hour and ends with its counts: "Usage Nov 20, 20:00 · 2,330 emails, 44 AI decisions",
+// so a one-line cell keeps the numbers; the cell's title is the same text, whole.
+const shortDescription = (text: string) => text.replace(/^(Usage [A-Z][a-z]{2} \d{1,2}, \d{2}:\d{2})–\d{2}:\d{2} UTC: /, '$1 · ')
+const ledgerText = (e: LedgerEntry) => `${shortDescription(e.description)}${e.kind === 'topup' && e.expiresAt ? ` · Expires ${fullDay(e.expiresAt)}` : ''}`
+const ledgerDescription = (e: LedgerEntry) => <span className="billing-desc" title={ledgerText(e)}>{shortDescription(e.description)}{e.kind === 'topup' && e.expiresAt && <span className="muted"> · Expires {fullDay(e.expiresAt)}</span>}</span>
 const ledgerColumns: Column<LedgerEntry>[] = [
   { key: 'description', label: 'Description', render: e => <span className="billing-cell">{ledgerDescription(e)}{e.invoiceUrl && <InvoiceLink href={e.invoiceUrl} label="Invoice" />}</span>, cardRender: ledgerDescription, card: 'title' },
   { key: 'at', label: 'Date', width: 124, render: e => date(e.at, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' }), card: 'line' },

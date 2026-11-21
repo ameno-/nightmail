@@ -75,10 +75,11 @@ button.billing-balance__amount > svg { flex: none; color: var(--color-muted); tr
   .billing-balance__amount { font-size: 32px; }
   .billing-dollars { width: 104px; }
   .billing-choice { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  /* Cards: a description wraps (up to three lines) instead of ending in an ellipsis; the card grows to fit. */
+  /* Cards: a description wraps onto two lines instead of ending at one. */
   .billing-table .ui-card { height: auto; min-height: var(--table-row-height); }
   .billing-table .ui-card__head { height: auto; min-height: 20px; align-items: flex-start; white-space: normal; }
   .billing-table .ui-card__title { overflow: visible; text-wrap: pretty; }
-  .billing-table .billing-desc { display: block; overflow: visible; white-space: normal; }
+  /* Two lines for every description (longer ones end in an ellipsis, the full text is the title), so cards keep one height. */
+  .billing-table .billing-desc { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; min-height: 40px; line-height: 20px; overflow: hidden; white-space: normal; }
 }
 @media (prefers-reduced-motion: reduce) { .billing-choice__item, .billing-method, button.billing-balance__amount > svg { transition: none; } }

@@ -17,6 +17,8 @@ import { CampaignRouteSkeleton, ComposerSkeleton, templateColumns } from './skel
 import { CampaignsHeader } from './header'
 import { publishFirst } from './copy'
 import './campaigns.css'
+import { replyToAddresses, replyToError } from './reply-to'
+import { useLeaveGuard } from '../../lib/leave-guard'
 import { useSingleFlight } from '../../lib/single-flight'
 import { usePhone } from '../../lib/media'
 
@@ -118,6 +120,10 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
   const [error, setError] = useState('')
   const version = useRef(0)
   const savingRef = useRef(false)
+  // Reply to stays as typed (commas and spaces included); the draft gets the split addresses, and autosave waits while
+  // one of them isn't an address yet.
+  const [replyToText, setReplyToText] = useState(() => initial.draft.replyTo.join(', '))
+  const replyToValidation = replyToError(replyToText)
   const { start, pending: starting, unavailable } = useStartFromTemplate()
   const archived = Boolean(template.archivedAt)
   const refreshLists = () => cache.invalidateQueries({queryKey: ['nightmail', 'templates'], refetchType: 'none'})
@@ -125,15 +131,21 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
   const changed = useCallback(() => { version.current++; setDirty(true); setError('') }, [])
   function change<K extends keyof CampaignTemplateDraft>(key: K, value: CampaignTemplateDraft[K]) { const next = {...draftRef.current, [key]: value}; draftRef.current = next; setDraft(next); changed() }
   useEffect(() => {
-    if (!dirty || error || saving || savingRef.current || !ready || assetBusy || composerBusy || archived || !draft.name.trim()) return
+    if (!dirty || error || saving || savingRef.current || !ready || assetBusy || composerBusy || archived || !draft.name.trim() || replyToValidation) return
     const timer = window.setTimeout(() => void save(), 800)
     return () => window.clearTimeout(timer)
-  }, [dirty, error, saving, ready, assetBusy, composerBusy, archived, draft.name])
-  useEffect(() => { const warn = (event: BeforeUnloadEvent) => { if (dirty || savingRef.current) { event.preventDefault(); event.returnValue = '' } }; window.addEventListener('beforeunload', warn); return () => window.removeEventListener('beforeunload', warn) }, [dirty])
+  }, [dirty, error, saving, ready, assetBusy, composerBusy, archived, draft.name, replyToValidation])
+  // Back, the sidebar or a reload with an edit autosave hasn't sent yet asks first; Save and leave waits for a save
+  // already on its way, then saves what is left.
+  const leaveGuard = useLeaveGuard(dirty || saving, { what: 'this template', save: async () => {
+    while (savingRef.current) await new Promise(resolve => window.setTimeout(resolve, 50))
+    return (await save()) !== null
+  } })
   function fail(message: string) { setError(message); toast(message, 'error') }
   async function save(): Promise<CampaignTemplate | null> {
     if (savingRef.current || !ready || archived) return null
     if (!draftRef.current.name.trim()) { fail('Name: enter a template name.'); return null }
+    if (replyToError(draftRef.current.replyTo.join(', '))) { fail(`Reply to: ${replyToError(draftRef.current.replyTo.join(', '))}`); return null }
     savingRef.current = true; setSaving(true); setError('')
     const submittedVersion = version.current
     try {
@@ -189,11 +201,13 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
         <div className="campaign-compose-row campaign-compose-subject"><label htmlFor="template-subject">Subject</label><Input id="template-subject" placeholder="Example subject" value={draft.subject} disabled={archived} onChange={event => change('subject', event.target.value)} /></div>
         <div className="campaign-compose-row"><label htmlFor="template-preview">Inbox preview</label><Input id="template-preview" placeholder="Shown after the subject" value={draft.previewText ?? ''} disabled={archived} onChange={event => change('previewText', event.target.value)} /></div>
         <div className="campaign-compose-row"><label htmlFor="template-from">From name</label><Input id="template-from" placeholder="Sender name, e.g. Acme" value={draft.fromName ?? ''} disabled={archived} onChange={event => change('fromName', event.target.value)} /></div>
-        <div className="campaign-compose-row"><label htmlFor="template-reply">Reply to</label><Input id="template-reply" placeholder="reply@example.com" value={draft.replyTo.join(', ')} disabled={archived} onChange={event => change('replyTo', event.target.value.split(',').map(value => value.trim()).filter(Boolean))} /></div>
+        <div className="campaign-compose-row"><label htmlFor="template-reply">Reply to</label><Input id="template-reply" type="text" inputMode="email" autoCapitalize="none" spellCheck={false} placeholder="reply@example.com" value={replyToText} disabled={archived} aria-invalid={Boolean(replyToValidation) || undefined} aria-describedby={replyToValidation ? 'template-reply-error' : undefined} onChange={event => { setReplyToText(event.target.value); change('replyTo', replyToAddresses(event.target.value)) }} /></div>
+        {replyToValidation && <div id="template-reply-error" className="campaign-compose-feedback ui-field__error" role="alert">{replyToValidation}</div>}
       </div>
       <ChunkFallback.Provider value={<ComposerSkeleton />}><EmailComposer ref={composer} personalize attachmentApi={api.templateAssets} attachmentIds={draft.attachments} initialHtml={draft.html ?? ''} disabled={archived} onReady={() => setReady(true)} onDirty={changed} onBusy={setComposerBusy} onAttach={() => attachments.current?.open()} /></ChunkFallback.Provider>
       <CampaignAttachments ref={attachments} attachmentApi={api.templateAssets} ids={draft.attachments} persisted={template.draft.attachments} onChange={ids => change('attachments', ids)} onBusy={setAssetBusy} disabled={archived || saving || composerBusy} />
     </div></div></section>
+    {leaveGuard}
     {previewOpen && <TemplatePreviewDialog template={template} onOpenChange={setPreviewOpen} />}
     <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete template?" description="Campaigns already created from this template will not change." confirmLabel="Delete template" danger onConfirm={async () => { await api.templates.remove(template.id); cache.removeQueries({queryKey: ['nightmail', 'template', template.id], exact: true}); await refreshLists(); navigate('/campaigns/templates') }} />
   </div>
