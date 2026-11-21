@@ -30,7 +30,9 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-sync-status[data-state='offline'] .campaign-sync-dot { background: var(--color-danger); }
 .campaign-compose-page > .ui-alert { margin-bottom: var(--space-16); }
 /* The email paper stays light; the surrounding application retains its theme. */
-.campaign-compose-workspace { --color-surface: var(--color-email-surface); --color-canvas: #F3F3F3; --color-text: var(--color-email-text); --color-muted: #707070; --color-border: #E4E4E4; --color-accent: #315EFB; --color-active-bg: #F0F0F0; --color-on-accent: #FFFFFF; --color-focus: var(--color-muted); --color-info: #315EFB; --color-danger: #995168; --color-warning: #A85E30; display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; background: var(--color-canvas); color: var(--color-email-text); color-scheme: light; border-radius: var(--radius-sm); }
+/* The email sheet stays light in either theme, so it takes the light theme's accent set: its ghost buttons
+   (Inbox preview, Insert) keep readable ink on white in dark mode too. */
+.campaign-compose-workspace { --color-surface: var(--color-email-surface); --color-canvas: #F3F3F3; --color-text: var(--color-email-text); --color-muted: #707070; --color-border: #E4E4E4; --color-accent: oklch(.33 .07 263); --color-accent-hover: oklch(.29 .065 263); --color-accent-pressed: oklch(.26 .06 263); --color-accent-edge: transparent; --color-accent-text: oklch(.40 .08 263); --color-active-bg: #F0F0F0; --color-on-accent: #FFFFFF; --color-focus: var(--color-muted); --color-info: #315EFB; --color-danger: #995168; --color-warning: #A85E30; display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; background: var(--color-canvas); color: var(--color-email-text); color-scheme: light; border-radius: var(--radius-sm); }
 /* In dark mode only the email paper stays light: the desk around it follows the theme instead of a bright grey field. */
 :root[data-theme='dark'] .campaign-compose-workspace { background: #0D0D0D; }
 :root[data-theme='dark'] .campaign-compose-sheet { border-color: transparent; box-shadow: 0 0 0 1px rgb(255 255 255 / 8%); }
@@ -89,7 +91,6 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 /* A summary line is a metric row: the label, then its mono figure on the right, a hairline under it. */
 .campaign-summary-line { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); min-height: 32px; border-bottom: 1px solid var(--color-border-muted); }
 .campaign-summary-line > :last-child { font-family: var(--font-mono); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
-.campaign-summary-line > strong { color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); font-weight: 400; letter-spacing: var(--tracking-label); text-transform: uppercase; }
 .campaign-audience-source { min-height: 20px; margin: 0; overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 
 .campaign-delivery { display: flex; flex-direction: column; gap: var(--space-16); padding-top: var(--space-24); border-top: 1px solid var(--color-border-muted); }

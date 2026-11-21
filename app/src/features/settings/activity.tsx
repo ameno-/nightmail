@@ -4,6 +4,7 @@ import { Button, CopyButton, DataTable, Dialog, EmptyState, ErrorState, SectionH
 import { actionLabel, activityApi, activityAreas, type AuditEntry } from '../../data/activity'
 import { ago, shortDateTime } from '../../lib/format'
 import { PrivateAddress } from '../../components/PrivateAddress'
+import { AddressText } from '../../components/AddressText'
 import { maskedParts } from '../../lib/private-address'
 import { settingsColumns } from './skeletons'
 import { productName } from '../../../../api/src/brand'
@@ -101,8 +102,9 @@ export function ActivitySection() {
   </section>
 }
 
-// A summary value as one short line: strings as they are, everything else as compact JSON.
-const show = (value: unknown) => value === undefined ? '—' : typeof value === 'string' ? value : JSON.stringify(value)
+// A summary value as one short line: strings as they are, everything else as compact JSON. Any address in it is masked
+// like every address (an invitation's email, a member's), so a shared screen never spells one out.
+const show = (value: unknown): ReactNode => value === undefined ? '—' : <AddressText text={typeof value === 'string' ? value : JSON.stringify(value)} />
 function Changes({ summary }: { summary: Record<string, unknown> }) {
   const before = record(summary.before), after = record(summary.after)
   const rows: { key: string; value: ReactNode }[] = []

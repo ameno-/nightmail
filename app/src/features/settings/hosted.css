@@ -28,8 +28,6 @@
 .settings-row__label { display: flex; flex-direction: column; min-width: 0; }
 .settings-row__label > span { overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 .settings-row__label .muted { font-size: var(--text-xs); line-height: var(--leading-xs); }
-/* A row's value reads as data: plain figures and text in mono; controls keep their own type. */
-.settings-row__control > span:not([class*='ui-'], [class*='private-address'], :has(button, input, select, .ui-button)), .settings-row__control > :is(b, strong, code) { font-family: var(--font-mono); font-size: var(--text-xs); }
 .settings-row__control { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); min-width: 0; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .settings-inline { flex-wrap: nowrap; }
 /* A connected AWS account's health finding: the message, in the warning tone. */

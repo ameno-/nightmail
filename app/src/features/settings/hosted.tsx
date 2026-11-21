@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactNode } from 'react'
+import { useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useLocation } from 'react-router'
 import { ArrowUpRight, ChevronRight, Lock } from 'lucide-react'
 import { Button, ConfirmDialog, CopyButton, ErrorState, Input, SectionHeader, Select, Skeleton, StatusBadge, MutationError } from '../../components/ui'
@@ -45,10 +45,18 @@ export function HostedSettings() {
   const section = (requested === 'workspace' ? 'general' : items.find(item => item.key === requested)?.key) ?? 'general'
   const locked = (item: typeof items[number]) => !canAdminister && Boolean(item.admin)
   const current = items.find(item => item.key === section)!
+  // On a phone the rail is one scrolling row: the selected section's link scrolls into it (the page itself doesn't move).
+  const rail = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const row = rail.current, link = row?.querySelector<HTMLElement>('a[aria-current="page"]')
+    if (!row || !link || row.scrollWidth <= row.clientWidth) return
+    const box = row.getBoundingClientRect(), at = link.getBoundingClientRect()
+    if (at.left < box.left || at.right > box.right) row.scrollLeft += at.left - box.left - (box.width - at.width) / 2
+  }, [section])
   return <div className="hosted-settings">
     <nav className="settings-rail" aria-label="Settings">
       <h1 className="settings-rail__title">Settings</h1>
-      <div className="settings-rail__groups">{groups.map(group => <div key={group.title} className="settings-rail__group"><span className="settings-rail__group-title">{group.title}</span>
+      <div ref={rail} className="settings-rail__groups">{groups.map(group => <div key={group.title} className="settings-rail__group"><span className="settings-rail__group-title">{group.title}</span>
         {group.items.map(item => <Link key={item.key} to={`/settings#${item.key}`} replace aria-current={item.key === section ? 'page' : undefined} data-locked={locked(item) || undefined} title={locked(item) ? 'Owners and admins only' : undefined}>{item.label}{locked(item) && <Lock size={12} aria-label="Owners and admins only" />}</Link>)}
       </div>)}</div>
     </nav>

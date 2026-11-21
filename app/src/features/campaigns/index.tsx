@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { ChevronRight, MoreHorizontal } from 'lucide-react'
-import { Link, Navigate, useNavigate, useParams } from 'react-router'
+import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router'
 import { useApiDef, useApiMutation, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { priceUc, total, usd } from '../../data/billing'
@@ -59,6 +59,8 @@ function campaignReadinessError(campaign: Campaign) {
   const missing = [!campaign.name.trim() && 'a campaign name', !campaign.subject.trim() && 'a subject', !emailIsValid(campaign.fromEmail.trim()) && 'a valid sender email address', !campaign.listId && 'a recipient list', !campaign.html.trim() && 'email content'].filter(Boolean)
   return missing.length ? `Complete the draft before reviewing or sending: add ${missing.join(', ')}.` : ''
 }
+// A test goes to one address, so it needs a complete message but no recipient list (the API sends it without one).
+const campaignMessageReady = (campaign: Campaign) => Boolean(campaign.name.trim() && campaign.subject.trim() && emailIsValid(campaign.fromEmail.trim()) && campaign.html.trim())
 const olderCampaign = (candidate: Campaign, baseline: Campaign) => (candidate.revision ?? 1) < (baseline.revision ?? 1) || ((candidate.revision ?? 1) === (baseline.revision ?? 1) && Date.parse(candidate.updatedAt) < Date.parse(baseline.updatedAt))
 const campaignInput = (campaign: Campaign): CampaignInput => ({
   id: campaign.id, revision: campaign.revision, draft: campaign.draft, attachments: campaign.attachments, regionId: campaign.regionId,
@@ -140,6 +142,14 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   const [attachmentsBusy, setAttachmentsBusy] = useState(false)
   const [composerBusy, setComposerBusy] = useState(false)
   const handleComposerReady = useCallback(() => { readyRef.current = true; setComposerReady(true) }, [])
+  // Review's Edit message and Edit audience land on what they name: the message body or the recipient list, in view and focused.
+  const { hash } = useLocation()
+  useEffect(() => {
+    if (!composerReady || (hash !== '#message' && hash !== '#audience')) return
+    const target = hash === '#message' ? document.querySelector<HTMLElement>('.composer-canvas [contenteditable="true"]') : document.getElementById('campaign-list')
+    target?.scrollIntoView({ block: 'center', behavior: 'instant' })
+    target?.focus({ preventScroll: true })
+  }, [composerReady, hash])
   const [error, setError] = useState('')
   const [testOpen, setTestOpen] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(Boolean(initial?.previewText))
@@ -254,7 +264,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
       : continuing && !input.subject.trim() ? 'Enter a subject before continuing.'
       : (continuing || input.fromEmail.trim()) && !emailIsValid(input.fromEmail.trim()) ? invalidSender
       : !multiTenant && (!input.regionId.trim() || input.regionId.trim().length > 40) ? 'Enter a region identifier of 1–40 characters.'
-      : continuing && !input.listId ? 'Choose a recipient list before continuing.' : ''
+      : next === 'review' && !input.listId ? 'Choose a recipient list before continuing.' : ''
     if (validation) { if (!automatic) reportError(validation); return }
     // An unchanged saved draft needs no new revision: open the test or review straight away.
     if (continuing && acceptedRef.current && !dirtyRef.current && !creation.current) {
@@ -643,7 +653,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
     {scheduledView && <ScheduledBanner campaign={campaign} />}
     <div className="campaign-review-layout">
       <section className="campaign-fields campaign-recipients">
-        <SectionHeader title={campaignEditable(campaign) || scheduledView ? 'Recipients' : 'Delivery'} actions={draft ? <Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Edit audience</Button> : <div className="cluster">{cancellable && <CancelCampaignButton campaign={campaign} />}<Button variant="secondary" size="sm" onClick={refresh} disabled={refreshing} title="This page also updates by itself">Refresh</Button></div>} />
+        <SectionHeader title={campaignEditable(campaign) || scheduledView ? 'Recipients' : 'Delivery'} actions={draft ? <Button variant="ghost" onClick={() => navigate(`${campaignRoute(campaign, 'edit')}#audience`)}>Edit audience</Button> : <div className="cluster">{cancellable && <CancelCampaignButton campaign={campaign} />}<Button variant="secondary" size="sm" onClick={refresh} disabled={refreshing} title="This page also updates by itself">Refresh</Button></div>} />
         {/* Eligible recipients is matched contacts less the suppressed and not subscribed lines under it. */}
         {draft ? !campaign.listId ? <AudienceSource listId="" segmentId={null} /> : audience.isPending ? <CampaignAudienceSkeleton /> : audience.isError ? <ErrorState error={audience.error} onRetry={() => void audience.refetch()} /> : <>
           <AudienceSource listId={campaign.listId} segmentId={campaign.segmentId} />
@@ -667,7 +677,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
         </>}
       </section>
       <section className="campaign-fields campaign-message">
-        <SectionHeader title="Message" actions={draft ? <><Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Edit message</Button><Button variant="secondary" disabled={Boolean(readinessError)} onClick={() => setTestOpen(true)}>Send test</Button></> : undefined} />
+        <SectionHeader title="Message" actions={draft ? <><Button variant="ghost" onClick={() => navigate(`${campaignRoute(campaign, 'edit')}#message`)}>Edit message</Button><Button variant="secondary" disabled={!campaignMessageReady(campaign)} onClick={() => setTestOpen(true)}>Send test</Button></> : undefined} />
         <dl className="ui-facts campaign-message-details"><dt>From</dt><dd><NamedAddress name={campaign.fromName} address={campaign.fromEmail} /></dd>{campaign.replyTo.length > 0 && <><dt>Reply to</dt><dd><AddressList values={campaign.replyTo} /></dd></>}<dt>Subject</dt><dd>{campaign.subject}</dd>{campaign.previewText && <><dt>Inbox preview</dt><dd>{campaign.previewText}</dd></>}</dl>
         <CampaignRenderedPreview campaign={campaign} transform={previewHtml} />
       </section>
