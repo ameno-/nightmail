@@ -3,6 +3,7 @@ import { ApiError, type Runtime } from './core.js';
 import { log, logError } from './core.js';
 import { campaignActive } from './states.js';
 import { expireDomainClaims } from './operations.js';
+import { SEND_LIMITS } from './send-limits.js';
 
 // Rows per delete statement: small enough to finish well inside Hyperdrive's 60 s statement limit on 1 vCPU.
 const RETENTION_BATCH = 5000;
@@ -105,10 +106,21 @@ function expired(name: string, table: string, by: SQL, where: SQL, extra: Partia
 }
 const unordered = { unordered: true } as const;
 const at = (column: string) => sql`${sql.identifier(column)}`;
+/**
+ * The Idempotency-Keys retention deletes: a finished request's (a claim still waiting for its result is never touched) on
+ * exactly the routes that send email: POST /v1/emails/send and /batch (direct, batch, stored-template and scheduled sends,
+ * internal notices), /v1/campaigns/{id}/test, /v1/domains/{id}/test-send, /v1/inbound/threads and its /{threadId}/reply.
+ * An anchored pattern with one path segment per ID, so nothing near those can match. Every other key (creates, uploads,
+ * campaign launches, billing top-ups) is kept; the acceptance test "an Idempotency-Key expires only on a send route"
+ * classifies every route that takes one. Literal SQL: the partial indexes of migration 390 repeat these predicates
+ * exactly, which is what lets the planner use them. A scheduled send's key is apart: it waits longer.
+ */
+const SEND_PATH = sql.raw(`path ~ '^/v1/(emails/(send|batch)|campaigns/[^/]+/test|domains/[^/]+/test-send|inbound/threads(/[^/]+/reply)?)$'`);
+const SEND_KEYS = sql`result IS NOT NULL AND NOT (result ? 'scheduledAt') AND ${SEND_PATH}`, SCHEDULED_KEYS = sql`result ? 'scheduledAt' AND ${SEND_PATH}`;
 
 /**
- * Every retention step, in their usual order. Never erase contacts, consent, suppression, drafts, idempotency keys or
- * active scheduled work.
+ * Every retention step, in their usual order. Never erase contacts, consent, suppression, drafts or active scheduled
+ * work. Idempotency keys go only with the email log of a finished send (SEND_KEYS).
  */
 async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
   const cutoff = sql`now() - interval '30 days'`, { abuseExpired, linkExpired } = await import('./abuse.js');
@@ -192,6 +204,12 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
       ), links AS (
         DELETE FROM sending_attachment_links l USING gone e WHERE l.owner_type = 'email' AND l.owner_id = e.id AND l.workspace_id = e.workspace_id
       ) SELECT count(*)::int AS n FROM gone` },
+    // A send's Idempotency-Key leaves with its email's log: after 30 days the same key is a new request. A scheduled
+    // email's 30 days start when it goes, up to the schedule's horizon later, so its key waits that much longer. Two steps,
+    // each through its own index, so the scheduled keys never sit in the way of the others.
+    expired('sending_idempotency', 'sending_idempotency', at('created_at'), sql`created_at < ${cutoff} AND ${SEND_KEYS}`, sent),
+    expired('sending_idempotency_scheduled', 'sending_idempotency', at('created_at'),
+      sql`created_at < ${cutoff} - make_interval(secs => ${SEND_LIMITS.schedule.horizonSeconds}) AND ${SCHEDULED_KEYS}`, sent),
     // Retire lightweight preparation rows after terminal/obsolete work ages out. Never purge a campaign's current
     // snapshot or one with an outstanding reservation (including a failed launch).
     { name: 'sending_review_recipients', ...sent, statement: () => sql`WITH expired AS (

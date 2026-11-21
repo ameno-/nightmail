@@ -10383,6 +10383,104 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     error(await post(path, { to: 'other@example.invalid' }, key), 409, 'IDEMPOTENCY_CONFLICT');
     assert.equal((await db.query(`SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1 AND snapshot->>'testCampaignId'=$2`, [w, draft.id])).rows[0].n, 1);
   });
+  // Retention (maintenance.ts SEND_KEYS): a finished send's key goes with its email log after 30 days, and nothing else does.
+  // Retention (maintenance.ts SEND_PATH): which Idempotency-Keys expire. Every route that takes a key is classified here, so
+  // a new one fails this test until it is; a key of anything but a send must never expire, money and launches included.
+  test('retention: an Idempotency-Key expires only on a send route; every other route\'s key, and any path near one, is kept', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const [{ cleanup }, { readFile }, { AUTHENTICATED_CREATES, MAILBOX_CREATES }, { PgDialect }] = await Promise.all([import('./src/maintenance.js'), import('node:fs/promises'),
+        import('./src/idempotency.js'), import('drizzle-orm/pg-core')]);
+      const wid = runtime.config.workspaceId, spec = JSON.parse(await readFile(new URL('./openapi.json', import.meta.url), 'utf8'));
+      // Every route that claims a key: those that declare the header, the creates the middleware covers, and two that claim
+      // one without declaring it (the dashboard's test send, and the raw upload, which isn't in the spec).
+      const routes = new Map<string, string>([['uploadAttachmentBytes', '/v1/attachments/upload']]);
+      for (const [path, item] of Object.entries(spec.paths as Record<string, Record<string, Json>>)) for (const [method, op] of Object.entries(item)) {
+        const concrete = path.replace(/\{[^}]+\}/g, 'id1');
+        if ((op.parameters ?? []).some((p: Json) => p.in === 'header' && p.name === 'Idempotency-Key') || op.operationId === 'sendDomainTestEmail'
+          || (method === 'post' && [...AUTHENTICATED_CREATES, ...MAILBOX_CREATES].some(route => route.test(concrete)))) routes.set(op.operationId, concrete);
+      }
+      const expires = ['sendEmail', 'sendEmailBatch', 'testCampaign', 'sendDomainTestEmail', 'createInboundThread', 'replyToInboundThread'];
+      const kept = ['createAgentToken', 'createApiKey', 'updateApiKey', 'createContact', 'createContactList', 'createSegment', 'previewContactImport', 'createCampaignTemplate',
+        'uploadTemplateAsset', 'importTemplateImage', 'uploadAttachment', 'uploadAttachmentBytes', 'createCampaign', 'sendCampaign', 'scheduleCampaign', 'cancelCampaign', 'createWebhook',
+        'createRoute', 'createEndpoint', 'createInboxConnection', 'createInbox', 'createInboundSubdomain', 'createInboundAddress', 'createInboundKey', 'createInboundWebhook',
+        'createBillingTopUp', 'createBillingTopUpLink'];
+      assert.deepEqual([...routes.keys()].sort(), [...expires, ...kept].sort(), 'every route that takes an Idempotency-Key is classified');
+      // Paths one step off a send route.
+      const near = ['/v1/campaigns/id1/id2/test', '/v1/campaigns/test', '/v1/domains/id1/id2/test-send', '/v1/inbound/threads/id1', '/v1/inbound/threads/id1/id2/reply',
+        '/v1/inbound/threads/reply', '/v1/emails/send/id1', '/v1/emails/sendx', '/v1/emails/batch/', '/v2/emails/send', 'x/v1/emails/send'];
+      const keys = [...[...routes].map(([op, path]) => ({ key: op, path })), ...near.map(path => ({ key: path, path }))];
+      // Each finished, and past both windows: once as a plain result, once as a scheduled send's.
+      for (const { key, path } of keys) for (const [suffix, result] of [['', { id: 'fixture' }], [':scheduled', { id: 'fixture', scheduledAt: '2026-01-01T00:00:00.000Z' }]] as const)
+        await db.query(`INSERT INTO sending_idempotency(workspace_id,actor_key_id,path,request_key,request_hash,result,created_at) VALUES($1,'classify',$2,$3,'h',$4,now()-interval '91 days')`, [wid, path, key + suffix, result]);
+      const dialect = new PgDialect(), execute = runtime.db.execute.bind(runtime.db), deletes: { sql: string; params: unknown[] }[] = [];
+      const spy = t.mock.method(runtime.db, 'execute', async (query: Parameters<typeof execute>[0]) => {
+        const q = dialect.sqlToQuery((query as { getSQL(): import('drizzle-orm').SQL }).getSQL());
+        if (q.sql.includes('DELETE FROM "sending_idempotency"')) deletes.push(q);
+        return execute(query);
+      });
+      await cleanup(runtime); spy.mock.restore();
+      const left = new Set((await db.query("SELECT request_key FROM sending_idempotency WHERE workspace_id=$1 AND actor_key_id='classify'", [wid])).rows.map(row => row.request_key as string));
+      assert.deepEqual(keys.flatMap(({ key }) => [key, key + ':scheduled']).filter(key => !left.has(key)).sort(), expires.flatMap(op => [op, op + ':scheduled']).sort(),
+        'only the send routes\' keys expired, plain and scheduled');
+      // Each step reads its own partial index: the predicates in the code and in migration 390 are the same.
+      await db.query('SET LOCAL enable_seqscan = off');
+      try {
+        for (const index of ['sending_idempotency_expiry', 'sending_idempotency_scheduled_expiry']) {
+          const step = deletes.find(q => q.sql.includes("NOT (result ? 'scheduledAt')") === (index === 'sending_idempotency_expiry'))!;
+          const plan = (await db.query('EXPLAIN ' + step.sql, step.params)).rows.map(row => row['QUERY PLAN']).join('\n');
+          assert.ok(plan.includes(`using ${index} `) || plan.includes(`on ${index}`), `${index}:\n${plan}`);
+        }
+      } finally { await db.query('SET LOCAL enable_seqscan = on'); }
+    });
+  });
+  test('retention: a send\'s Idempotency-Key replays for 30 days, then goes with its email log; a running request and every other key stay', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const [{ cleanup }, { PgDialect }] = await Promise.all([import('./src/maintenance.js'), import('drizzle-orm/pg-core')]);
+      const wid = runtime.config.workspaceId, key = ok(await local('POST', '/v1/api-keys', { name: 'Key expiry', permissions: ['send', 'read', 'manage'] }), 201); secrets.add(key.secret);
+      const post = (path: string, body: Json, idem: string) => request('POST', path, key.secret, body, { 'Idempotency-Key': idem });
+      // Moves claims back in time, as if they had been made that many days earlier.
+      const age = (days: number, ...idems: string[]) => db.query('UPDATE sending_idempotency SET created_at=created_at-make_interval(days=>$3) WHERE workspace_id=$1 AND request_key=ANY($2)', [wid, idems, days]);
+      const keys = async () => (await db.query('SELECT request_key FROM sending_idempotency WHERE workspace_id=$1 ORDER BY request_key', [wid])).rows.map(r => r.request_key as string);
+      const single = mail(), batch = { emails: [mail(), mail()] }, scheduled = mail({ scheduledAt: new Date(Date.now() + 3_600_000).toISOString() });
+      const sent = ok(await post('/v1/emails/send', single, 'single'), 202), batched = ok(await post('/v1/emails/batch', batch, 'batch'), 202);
+      ok(await post('/v1/emails/send', scheduled, 'scheduled'), 202);
+      // Keys that aren't a send's: a create, and the money keys that share this table (a top-up and a top-up link).
+      const person = { email: address() }, contact = ok(await post('/v1/contacts', person, 'contact'), 201);
+      for (const path of ['/v1/billing/top-ups', '/v1/billing/top-up-links'])
+        await db.query("INSERT INTO sending_idempotency(workspace_id,actor_key_id,path,request_key,request_hash,result) VALUES($1,$2,$3,$4,'fixture',$5)", [wid, key.id, path, path.slice(12), { status: 201, body: { id: 'fixture' } }]);
+
+      await age(29, 'single', 'batch'); await cleanup(runtime);
+      assert.equal(ok(await post('/v1/emails/send', single, 'single'), 202).id, sent.id, 'At 29 days the key replays its receipt.');
+      assert.deepEqual(ok(await post('/v1/emails/batch', batch, 'batch'), 202), batched);
+      // Past 30 days a send's key goes. A scheduled send's waits until 30 days past the latest time it can go; the rest stay.
+      await age(2, 'single', 'batch'); await age(31, 'scheduled', 'contact', 'top-ups', 'top-up-links'); await cleanup(runtime);
+      assert.deepEqual(await keys(), ['contact', 'scheduled', 'top-up-links', 'top-ups']);
+      const replayed = await post('/v1/contacts', person, 'contact');
+      assert.deepEqual([ok(replayed, 201).id, replayed.headers.get('idempotent-replayed')], [contact.id, 'true'], 'A create\'s key still replays.');
+      const again = ok(await post('/v1/emails/send', single, 'single'), 202);
+      assert.notEqual(again.id, sent.id, 'Past 30 days the same key is a new send.');
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1 AND subject=$2', [wid, single.subject])).rows[0].n, 2);
+      await age(30, 'scheduled'); await cleanup(runtime);
+      assert.deepEqual(await keys(), ['contact', 'single', 'top-up-links', 'top-ups'], 'At 61 days the scheduled send\'s key goes too.');
+
+      // A running request: a campaign test commits its claim, without a result, before it renders. Retention running then,
+      // even with the claim 61 days old, leaves it; the test finishes and its key replays.
+      const draft = ok(await local('POST', '/v1/campaigns', { name: 'Key expiry', from: 'sender@example.com', subject: 'Key expiry', html: '<p>Key expiry</p>' }), 201);
+      const dialect = new PgDialect(), execute = runtime.db.execute.bind(runtime.db);
+      let during: { request_key: string; pending: boolean }[] | undefined;
+      t.mock.method(runtime.db, 'execute', async (query: Parameters<typeof execute>[0]) => {
+        const result = await execute(query), { sql: text, params } = dialect.sqlToQuery((query as { getSQL(): import('drizzle-orm').SQL }).getSQL());
+        if (!during && text.includes('idempotency_claim(') && params.includes('running')) {
+          await age(61, 'running'); await cleanup(runtime);
+          during = (await db.query("SELECT request_key, result IS NULL AS pending FROM sending_idempotency WHERE workspace_id=$1 AND request_key='running'", [wid])).rows;
+        }
+        return result;
+      });
+      const test = { to: address() }, tested = ok(await post(`/v1/campaigns/${draft.id}/test`, test, 'running'), 202);
+      assert.deepEqual(during, [{ request_key: 'running', pending: true }], 'Retention left the claim of the running request.');
+      assert.equal(ok(await post(`/v1/campaigns/${draft.id}/test`, test, 'running'), 202).id, tested.id);
+    });
+  });
   test('sends on a simulated deployment use the provider-parity lifecycle; exact retries reuse identity and conflicts do not create mail', async t => {
     const key = await keyFixture(t);
     const liveKey = await keyFixture(t, { permissions: ['read'] });
@@ -21227,6 +21325,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         audience_import_previews: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,created_at) SELECT 'aim_'||p.tag||p.day||'x'||i,p.wid,'[]','[]','preview',now()-interval '8 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aim_'||p.tag)"],
         sending_email_events: ["INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,created_at) SELECT 'event_'||md5(p.tag||p.day||'x'||i),p.wid,'email_'||p.tag,'dispatch_attempt',true,now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM sending_email_events,p WHERE email_id='email_'||p.tag"],
         sending_emails: ["INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at) SELECT 'email_'||md5(p.tag||p.day||'x'||i),p.wid,p.region,'fixture','a@example.org','[]','[]','[]',p.tag,'{}',true,'delivered',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM sending_emails,p WHERE workspace_id=p.wid AND subject=p.tag"],
+        sending_idempotency: ["INSERT INTO sending_idempotency(workspace_id,actor_key_id,path,request_key,request_hash,result,created_at) SELECT p.wid,'fixture','/v1/emails/send','idem_'||p.tag||p.day||'x'||i,'h',jsonb_build_object('id','email_'||p.tag||p.day||'x'||i),now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM sending_idempotency,p WHERE workspace_id=p.wid AND starts_with(request_key,'idem_'||p.tag)"],
+        sending_idempotency_scheduled: ["INSERT INTO sending_idempotency(workspace_id,actor_key_id,path,request_key,request_hash,result,created_at) SELECT p.wid,'fixture','/v1/emails/send','idems_'||p.tag||p.day||'x'||i,'h',jsonb_build_object('id','email_'||p.tag||p.day||'x'||i,'scheduledAt','2026-01-01T00:00:00.000Z'),now()-interval '61 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM sending_idempotency,p WHERE workspace_id=p.wid AND starts_with(request_key,'idems_'||p.tag)"],
         sending_review_recipients: [", v AS (INSERT INTO sending_campaign_reviews(id,workspace_id,campaign_id,revision,draft,content_hash,created_at) SELECT 'rev_'||p.tag||p.day,p.wid,'cmp_'||p.tag,p.day,'{}','x',now()-interval '31 days'-make_interval(days=>p.day) FROM p RETURNING id)\n    INSERT INTO sending_review_recipients(review_id,ordinal,recipient,recipient_bytes) SELECT v.id,i,'{}',1 FROM v,g","SELECT count(*) FROM sending_review_recipients,p WHERE starts_with(review_id,'rev_'||p.tag)"],
         review_attachment_links: [", v AS (INSERT INTO sending_campaign_reviews(id,workspace_id,campaign_id,revision,draft,content_hash,created_at) SELECT 'revl_'||p.tag||p.day||'x'||i,p.wid,'cmp_'||p.tag,100+p.day*10+i,'{}','x',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g RETURNING id,workspace_id)\n    INSERT INTO sending_attachment_links(workspace_id,attachment_id,owner_type,owner_id) SELECT v.workspace_id,'att_keep_'||p.tag,'review',v.id FROM v,p","SELECT count(*) FROM sending_attachment_links,p WHERE owner_type='review' AND starts_with(owner_id,'revl_'||p.tag)"],
         operation_delivery_attempts: ["INSERT INTO operation_delivery_attempts(id,workspace_id,delivery_id,duration_ms,created_at) SELECT 'opa_'||p.tag||p.day||'x'||i,p.wid,'d',1,now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM operation_delivery_attempts,p WHERE starts_with(id,'opa_'||p.tag)"],
@@ -21305,7 +21405,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       for (const mock of [clock, slow, ...logs]) mock.mock.restore();
 
       // Every 15 minutes the sent side alone, elected once per quarter hour, standing aside while the hourly run works.
-      const sent = ['sending_email_events', 'sending_emails', 'sending_review_recipients', 'operation_delivery_attempts', 'operation_deliveries_paused_expired', 'operation_deliveries',
+      const sent = ['sending_email_events', 'sending_emails', 'sending_idempotency', 'sending_idempotency_scheduled', 'sending_review_recipients', 'operation_delivery_attempts', 'operation_deliveries_paused_expired', 'operation_deliveries',
         'operation_events', 'operation_sns_receipts', 'operation_feedback_failures', 'jobs', 'jobs_attachment_deletes'];
       const held = async () => (await db.query("SELECT held FROM retention_state WHERE scope='sent'")).rows[0]?.held ?? {};
       await db.query("DELETE FROM retention_state WHERE scope='sent'");

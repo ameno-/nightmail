@@ -14,7 +14,7 @@ import { accessibleMessages, EmailThread, liveBox, threadBlock, threadView, visi
 import { htmlToPlain, replyText } from './mailbox-store.js';
 import { boundedHtmlFragment } from './bounded-html.js';
 import { archiveMailboxFiles, sendFromMailbox, finishMailboxArchive, type OutgoingMessage } from './mailbox-send.js';
-import { IdempotencyHeaders, idempotent, idempotentRequest } from './idempotency.js';
+import { idempotent, idempotentRequest, SendIdempotencyHeaders } from './idempotency.js';
 import { SuppressionReason } from './core.js';
 
 const base = '/v1/inbound/threads';
@@ -261,12 +261,12 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
 
 export function createInboundThreadRoute<T extends z.ZodType>(input: T) {
   return createRoute({ method: 'post', path: base, operationId: 'createInboundThread', tags, security, summary: 'Start a conversation from an inbound address',
-    request: { headers: IdempotencyHeaders, body: json(input) }, responses: { 202: response(Message, 'Queued, not yet delivered.'), ...errors } });
+    request: { headers: SendIdempotencyHeaders, body: json(input) }, responses: { 202: response(Message, 'Queued, not yet delivered.'), ...errors } });
 }
 export function replyToInboundThreadRoute<T extends z.ZodType>(input: T) {
   return createRoute({ method: 'post', path: `${base}/{threadId}/reply`, operationId: 'replyToInboundThread', tags, security, summary: 'Reply in a visible conversation',
     description: 'Replies to the newest visible message in either direction, breaking time ties by descending message ID. addressId restricts the target and sending address; provide it when the target is linked to more than one visible address. Set replyToMessageId to select an older visible message in this thread. For reviewed replies, pin both IDs and expectedRecipients. A recipient mismatch or a pending outbound parent without a provider Message-ID returns 409.',
-    request: { params: ThreadParams, headers: IdempotencyHeaders, body: json(input) }, responses: { 202: response(Message, 'Queued, not yet delivered.'), ...errors } });
+    request: { params: ThreadParams, headers: SendIdempotencyHeaders, body: json(input) }, responses: { 202: response(Message, 'Queued, not yet delivered.'), ...errors } });
 }
 export async function inboundReplyTarget(db: DbExecutor, value: MailboxAccess, filter: Filter & { threadId: string }) {
   const w = messageWindow(db, value, filter, 1);

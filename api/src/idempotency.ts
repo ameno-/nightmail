@@ -1,6 +1,7 @@
 import { z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { ApiError, digest, webhookUrlHint, type Ctx, type Database, type DbExecutor } from './core.js';
+import { SEND_LIMITS } from './send-limits.js';
 
 /**
  * Idempotency-Key: one protocol on sending_idempotency for every caller. The create middleware below, idempotent()
@@ -15,14 +16,18 @@ import { ApiError, digest, webhookUrlHint, type Ctx, type Database, type DbExecu
  * - a claim whose request may have committed without recording its result is 409 IDEMPOTENCY_OUTCOME_UNKNOWN.
  *
  * A key is scoped to its workspace, the caller's key and the request path. Callers choose what the hash covers: the
- * body for sends and campaigns, the body and the caller's authority for the middleware's creates.
+ * body for sends and campaigns, the body and the caller's authority for the middleware's creates. A finished send's
+ * key is deleted with its email log after at least 30 days (maintenance.ts SEND_KEYS); every other key is kept.
  */
-export const IdempotencyHeaders = z.object({
+const keyHeader = (lifetime: string) => z.object({
   'Idempotency-Key': z.string().optional().openapi({
     minLength: 1, maxLength: 200, pattern: '^[\\x21-\\x7E]+$', example: 'order-4821-receipt',
-    description: 'Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.',
+    description: `Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. ${lifetime} Without a key, every request is processed, so a retried send can deliver twice.`,
   }),
 });
+export const IdempotencyHeaders = keyHeader('They are retained indefinitely.');
+/** Sends: a key lives as long as the email log of what it sent (maintenance.ts SEND_KEYS), a scheduled send's 30 days past its latest time. */
+export const SendIdempotencyHeaders = keyHeader(`A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept ${30 + SEND_LIMITS.schedule.horizonSeconds / 86_400} days, after which a repeat is refused because its time has passed.`);
 // The OpenAPI constraints above are documentation: the handler validates the key itself, so a bad key is
 // INVALID_IDEMPOTENCY_KEY rather than a generic validation error.
 export const validIdempotencyKey = (key: string) => key.length <= 200 && /^[\x21-\x7e]+$/.test(key);
@@ -123,14 +128,14 @@ export async function idempotent<T extends Record<string, unknown>>(db: Database
  * 409 IDEMPOTENT_SECRET_WITHHELD naming what was created, so the caller can revoke it and create another instead of
  * getting a duplicate.
  */
-const AUTHENTICATED_CREATES = [
+export const AUTHENTICATED_CREATES = [
   /^\/v1\/(?:contacts|lists|segments|contact-imports|templates|template-assets|webhooks|api-keys|agent-tokens|endpoints|inbox-connections)$/,
   /^\/v1\/template-assets\/import$/,
   /^\/v1\/routing\/routes$/,
   // A retried top-up returns the same Checkout link or charge instead of starting a second payment.
   /^\/v1\/billing\/(?:top-ups|top-up-links)$/,
 ];
-const MAILBOX_CREATES = [/^\/v1\/inboxes$/, /^\/v1\/inbound\/(?:addresses|keys|webhooks)$/, /^\/v1\/inbound\/domains\/[^/]+\/subdomains$/];
+export const MAILBOX_CREATES = [/^\/v1\/inboxes$/, /^\/v1\/inbound\/(?:addresses|keys|webhooks)$/, /^\/v1\/inbound\/domains\/[^/]+\/subdomains$/];
 // Field names that hold credentials at any depth (createInbox nests its key under credential.secret).
 // "key" is not one: addresses and webhooks use it for their routing key.
 const SECRET_FIELDS = new Set(['secret', 'token', 'verificationToken', 'password']);
