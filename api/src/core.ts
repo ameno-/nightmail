@@ -310,6 +310,34 @@ export const ErrorSchema = z.object({ error: z.object({ code: z.string(), messag
     person: z.enum(['admin', 'owner']).optional().describe('A person, never a key: a signed-in dashboard session or their own MCP sign-in, with this role in the workspace (admin is an owner or admin). The workspace, its members, invitations and billing are a person\'s.'),
   }).optional().describe(`On a 403 permission refusal: what the request needs that this credential lacks. The ${requiredHeader} header says the same.`) }) }).openapi('ApiError');
 export const errors = Object.fromEntries([400, 401, 403, 404, 409, 413, 422, 429, 500, 503].map(status => [status, { description: 'Request failed; use error.code and requestId to diagnose.', content: { 'application/json': { schema: ErrorSchema } } }]));
+/**
+ * How long each statement of a read may run (budgetedRead), and the refusal past it. A dashboard read that needs longer
+ * holds one of the database's few connections for up to the proxy's 60 seconds, beside sending: past its limit it is
+ * refused instead, and the caller narrows it.
+ */
+export type ReadBudget = { seconds: number; refusal: () => ApiError };
+/** A list or aggregate the caller can narrow (Logs, listEmails, metrics, campaign counts, inbound lists). */
+export const readLimit = (seconds: number): ReadBudget => ({ seconds,
+  refusal: () => new ApiError(422, 'READ_TOO_LARGE', `This request is too broad to answer within ${seconds} seconds. Narrow the dates or filters.`) });
+/** The OpenAPI description of that refusal, for the routes that take a budget. */
+export const readLimitNote = (seconds: number) => `Each statement stops after ${seconds} seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.`;
+/**
+ * One read-only transaction whose every statement stops after the budget's seconds (SET LOCAL statement_timeout), so a
+ * slow read is refused (SQLSTATE 57014 becomes the budget's refusal) instead of holding its connection. Costs BEGIN,
+ * SET and COMMIT: three round trips on the read's own connection.
+ */
+export async function budgetedRead<T>(db: Runtime['db'], work: (tx: DbExecutor) => Promise<T>, budget: ReadBudget): Promise<T> {
+  if (!Number.isInteger(budget.seconds) || budget.seconds < 1) throw new Error('A read budget is a whole number of seconds.');
+  try {
+    return await db.transaction(async tx => {
+      await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${budget.seconds}s'`));
+      return work(tx);
+    }, { accessMode: 'read only' });
+  } catch (error) {
+    if ([error, (error as { cause?: unknown })?.cause].some(e => (e as { code?: string } | null)?.code === '57014')) throw budget.refusal();
+    throw error;
+  }
+}
 export const security: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
 export const IdParams = z.object({ id: z.string().min(1).max(120) });
 export const PageQuery = z.object({ cursor: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(100).default(25) });

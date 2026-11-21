@@ -41,7 +41,9 @@ const hostedMail = (multiTenant: boolean) => multiTenant ? sql`((e.feedback_topi
 /**
  * Public figures are materialized, never computed for a request: the minute cron (publicStatsTick) keeps one bucket
  * per creation minute in public_stats_minutes and writes the response to public_stats, which the route reads. A
- * failed refresh leaves the last good row in place. Each refresh reads only bounded ranges of sending_emails:
+ * failed refresh leaves the last good row in place. The figures come from public_stats_hours, which triggers keep equal
+ * to the hour's minute buckets (migration 382), so a refresh reads 720 hours rather than 43,200 minutes. Each refresh
+ * reads only bounded ranges of sending_emails:
  *  - the last 15 minutes, every refresh (mail settles within seconds to minutes);
  *  - a minute once more when it is a day old (scheduled sends, backlogs and late outcomes), then never again;
  *  - minutes with no bucket yet (first run, or the cron was down), newest first, sized to the time budget.
@@ -74,21 +76,25 @@ export async function refreshPublicStats(db: Pick<DbExecutor, 'execute'>, multiT
   await compute(minutes(TRAILING_MINUTES), sql`${ref} + interval '1 minute'`);
   // A minute is final once computed a day after it ended. Each refresh finalizes the minutes that have become old enough
   // since the last one, an hour at a time (normally just one minute). A recompute now makes them final, so this ends.
+  // The condition is public_stats_minutes_due's predicate, written the same way so the search reads that index.
   const dayOld = minutes(DAY_MINUTES + 1);
   while (Date.now() < deadline) {
     const [due] = (await db.execute<{ start: string | null }>(sql`SELECT min(minute)::text AS start FROM public_stats_minutes
-      WHERE minute >= ${oldest} AND minute <= ${dayOld} AND computed_at < minute + interval '1 day 1 minute'`)).rows;
+      WHERE minute >= ${oldest} AND minute <= ${dayOld} AND computed_at - minute < interval '1 day 1 minute'`)).rows;
     if (!due?.start) break;
     await compute(sql`${due.start}::timestamptz`, sql`least(${due.start}::timestamptz + interval '1 hour', ${dayOld} + interval '1 minute')`);
   }
   // Missing minutes, newest first. The span doubles while chunks are quick and halves when one is slow, so a quiet
   // installation fills 30 days in a few statements and a busy one in time-bounded steps over several minutes.
-  // Normally nothing is missing: one count over the primary key says so without probing each minute.
-  const complete = async () => (await db.execute<{ complete: boolean }>(sql`SELECT count(*) > extract(epoch FROM ${minutes(TRAILING_MINUTES + 1)} - ${oldest})::int / 60 AS complete
-    FROM public_stats_minutes WHERE minute >= ${oldest} AND minute <= ${minutes(TRAILING_MINUTES + 1)}`)).rows[0]?.complete;
+  // Normally nothing is missing: the whole hours' bucket counts and the buckets since say so without probing each minute.
+  const upTo = minutes(TRAILING_MINUTES + 1), upToHour = sql`date_trunc('hour', ${upTo}, 'UTC')`;
+  const complete = async () => (await db.execute<{ complete: boolean }>(sql`SELECT
+      (SELECT coalesce(sum(minutes), 0) FROM public_stats_hours WHERE hour >= ${oldest} AND hour < ${upToHour})
+      + (SELECT count(*) FROM public_stats_minutes WHERE minute >= ${upToHour} AND minute <= ${upTo})
+      > extract(epoch FROM ${upTo} - ${oldest})::int / 60 AS complete`)).rows[0]?.complete;
   for (let span = 60; Date.now() < deadline && !(await complete());) {
     const [gap] = (await db.execute<{ newest: string | null }>(sql`SELECT max(m)::text AS newest
-      FROM generate_series(${oldest}, ${minutes(TRAILING_MINUTES + 1)}, interval '1 minute') AS m
+      FROM generate_series(${oldest}, ${upTo}, interval '1 minute') AS m
       WHERE NOT EXISTS (SELECT FROM public_stats_minutes b WHERE b.minute = m)`)).rows;
     if (!gap?.newest) break;
     const started = Date.now();
@@ -97,34 +103,31 @@ export async function refreshPublicStats(db: Pick<DbExecutor, 'execute'>, multiT
     span = elapsed < 1000 ? Math.min(span * 2, MONTH_MINUTES) : elapsed > 4000 ? Math.max(span / 2, TRAILING_MINUTES) : span;
   }
   const regional = multiTenant ? sql`r IN (SELECT p.region FROM provider_pool_regions p WHERE ${poolSends()})` : sql`true`;
-  // Whole hours back from the last complete one: 0 is the hour that just ended.
-  const ago = sql`(extract(epoch FROM ${hour} - date_trunc('hour', minute, 'UTC')) / 3600)::int - 1`;
+  // Whole hours back from the last complete one: 0 is the hour that just ended. An hour's workspaces are distinct.
+  const ago = sql`(extract(epoch FROM ${hour} - hour) / 3600)::int - 1`;
   type Hour = { n: number; w: number };
-  const [row] = (await db.execute<{ accepted: string; delivered: string; bounced: string; workspaces: number; hourly: Record<string, Hour>; regions: string[]; latency_ms: number | null; latency_workspaces: number; through: string }>(sql`
-    WITH b AS (SELECT * FROM public_stats_minutes WHERE minute >= ${oldest} AND minute < ${hour}),
-    latency AS (
-      -- Admission (sending_emails.created_at) to the dispatcher's 'accepted' event (sending_email_events.created_at,
-      -- written when SES returns a MessageId). Campaign mail is paced and scheduled mail waits on purpose, so both are left out.
-      SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM a.accepted_at - d.created_at) * 1000) AS ms, count(DISTINCT d.workspace_id)::int AS workspaces
-      FROM (SELECT e.workspace_id, e.id, e.created_at FROM sending_emails e
-        WHERE e.created_at >= ${hour} - interval '24 hours' AND e.created_at < ${hour} AND ${settled} AND ${hostedMail(multiTenant)}
-          AND e.campaign_id IS NULL AND (e.scheduled_at IS NULL OR e.dispatch_version > 0)
-        ORDER BY e.created_at DESC LIMIT 5000) d
-      CROSS JOIN LATERAL (SELECT min(v.created_at) AS accepted_at FROM sending_email_events v
-        WHERE v.workspace_id = d.workspace_id AND v.email_id = d.id AND v.type = 'accepted') a
-      WHERE a.accepted_at >= d.created_at
-    )
+  const [row] = (await db.execute<{ accepted: string; delivered: string; bounced: string; workspaces: number; hourly: Record<string, Hour>; regions: string[]; through: string }>(sql`
+    WITH b AS (SELECT * FROM public_stats_hours WHERE hour >= ${oldest} AND hour < ${hour})
     SELECT coalesce(sum(accepted), 0)::bigint AS accepted, coalesce(sum(delivered), 0)::bigint AS delivered, coalesce(sum(bounced), 0)::bigint AS bounced,
       (SELECT count(DISTINCT w)::int FROM b, unnest(b.workspaces) AS w) AS workspaces,
-      (SELECT coalesce(jsonb_object_agg(ago, jsonb_build_object('n', n, 'w', coalesce(w, 0))), '{}'::jsonb) FROM
-        (SELECT ${ago} AS ago, sum(accepted)::int AS n FROM b WHERE minute >= ${hour} - interval '24 hours' GROUP BY 1) counts
-        LEFT JOIN (SELECT ${ago} AS ago, count(DISTINCT wid)::int AS w FROM b, unnest(b.workspaces) AS wid WHERE minute >= ${hour} - interval '24 hours' GROUP BY 1) senders USING (ago)) AS hourly,
+      (SELECT coalesce(jsonb_object_agg(${ago}, jsonb_build_object('n', accepted, 'w', cardinality(workspaces))), '{}'::jsonb) FROM b WHERE hour >= ${hour} - interval '24 hours') AS hourly,
       (SELECT coalesce(jsonb_agg(DISTINCT r ORDER BY r), '[]'::jsonb) FROM b, unnest(b.regions) AS r WHERE ${regional}) AS regions,
-      (SELECT ms FROM latency) AS latency_ms, coalesce((SELECT workspaces FROM latency), 0) AS latency_workspaces,
       to_char(${hour} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS through
     FROM b`)).rows;
   const r = row!, round = (n: number) => privacy.round ? coarse(n) : n;
   const available = r.workspaces >= privacy.workspaces;
+  // Admission (sending_emails.created_at) to the dispatcher's 'accepted' event (sending_email_events.created_at, written
+  // when SES returns a MessageId). Campaign mail is paced and scheduled mail waits on purpose, so both are left out.
+  // The sample reads mail, so it is taken only when the figures are published.
+  const [latency] = available ? (await db.execute<{ ms: number | null; workspaces: number }>(sql`
+    SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM a.accepted_at - d.created_at) * 1000) AS ms, count(DISTINCT d.workspace_id)::int AS workspaces
+    FROM (SELECT e.workspace_id, e.id, e.created_at FROM sending_emails e
+      WHERE e.created_at >= ${hour} - interval '24 hours' AND e.created_at < ${hour} AND ${settled} AND ${hostedMail(multiTenant)}
+        AND e.campaign_id IS NULL AND (e.scheduled_at IS NULL OR e.dispatch_version > 0)
+      ORDER BY e.created_at DESC LIMIT 5000) d
+    CROSS JOIN LATERAL (SELECT min(v.created_at) AS accepted_at FROM sending_email_events v
+      WHERE v.workspace_id = d.workspace_id AND v.email_id = d.id AND v.type = 'accepted') a
+    WHERE a.accepted_at >= d.created_at`)).rows : [];
   const hourly = Array.from({ length: 24 }, (_, index) => r.hourly[String(23 - index)] ?? { n: 0, w: 0 });
   const acceptedHourly = hourly.map(h => available && (h.n === 0 || h.w >= privacy.hourWorkspaces) ? round(h.n) : null);
   const delivered = Number(r.delivered), outcomes = delivered + Number(r.bounced);
@@ -134,7 +137,7 @@ export async function refreshPublicStats(db: Pick<DbExecutor, 'execute'>, multiT
     acceptedLastHour: acceptedHourly[23]!,
     acceptedHourly,
     deliveryRate: outcomes > 0 ? (privacy.round ? Math.round(delivered / outcomes * 1000) / 1000 : delivered / outcomes) : null,
-    medianSendLatencyMs: r.latency_ms === null || r.latency_workspaces < privacy.hourWorkspaces ? null : privacy.round ? Math.round(Number(r.latency_ms) / 10) * 10 : Math.round(Number(r.latency_ms)),
+    medianSendLatencyMs: latency?.ms == null || latency.workspaces < privacy.hourWorkspaces ? null : privacy.round ? Math.round(Number(latency.ms) / 10) * 10 : Math.round(Number(latency.ms)),
     regions: r.regions,
   } : { generatedAt: r.through, available, acceptedLast30Days: null, acceptedLastHour: null, acceptedHourly: Array(24).fill(null), deliveryRate: null, medianSendLatencyMs: null, regions: [] };
   await db.execute(sql`INSERT INTO public_stats (singleton, stats, generated_at) VALUES (true, ${JSON.stringify(stats)}::jsonb, ${at})
