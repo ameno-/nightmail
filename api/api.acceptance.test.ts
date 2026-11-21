@@ -9591,7 +9591,8 @@ describe('Hosted MCP OAuth and tools', () => {
       VALUES ($1,'default',$2,'synthetic-stats',$3,'sender@example.com','["recipient@example.com"]','[]','[]','Synthetic stats','{}',true,'delivered')`, [emailId, REGION, campaign.id]);
     for (const type of ['open', 'click', 'click']) await db.query("INSERT INTO sending_email_events (id, workspace_id, email_id, type, simulated) VALUES ($1,'default',$2,$3,true)", [unique('mcp-stats-event'), emailId, type]);
     const populated = await callTool(token, 'getCampaignStats', { campaignId: campaign.id });
-    assert.deepEqual(populated, ok(await http('GET', `/v1/campaigns/${campaign.id}/stats`, MANAGER)));
+    // The same figures; computedAt is the time of each read.
+    assert.deepEqual({ ...populated, computedAt: undefined }, { ...ok(await http('GET', `/v1/campaigns/${campaign.id}/stats`, MANAGER)), computedAt: undefined });
     assert.equal(populated.totals.delivered, 1);
     assert.equal(populated.totals.opened, 1);
     assert.equal(populated.totals.clicked, 1);
@@ -13514,7 +13515,9 @@ describe('Dashboard API capabilities', () => {
     assert.ok(Object.values(empty.totals).every(value => value === 0));
     assert.ok(Object.values(empty.rates).every((rate: any) => rate.value === null && rate.denominator === 0));
     error(await http('GET', path), 401);
-    assert.deepEqual(ok(await http('GET', path, testKey.secret)), empty);
+    // Counted when read: computedAt is the time of each read.
+    const { computedAt: _at, ...emptyFigures } = empty;
+    assert.deepEqual({ ...ok(await http('GET', path, testKey.secret)), computedAt: undefined }, { ...emptyFigures, computedAt: undefined });
     error(await http('GET', path, sendOnly.secret), 403, 'PERMISSION_DENIED');
     error(await http('GET', `/v1/campaigns/${unique('missing')}/stats`, live.secret), 404, 'NOT_FOUND');
 
@@ -20101,6 +20104,87 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  // GET /v1/campaigns/{id}/stats aggregated every email and stored event of a campaign in one statement: about a second
+  // per 200,000 recipients, past its 5-second limit for a campaign of millions, during its send and after it. A large
+  // campaign is now counted in the background, a fixed range of review ordinals per step with the sums carried by its job,
+  // and read from that count; the count of a finished campaign is exact and outlives its emails. The size threshold and
+  // the page are lowered here so 30 emails make a large campaign of five pages.
+  test('campaign stats: a large campaign is counted in bounded steps, read from that count, exact once finished and kept after its emails go',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local,run,jobs})=>{
+      const {CAMPAIGN_STATS,campaignStats}=await import('./src/sending.js'),{campaigns}=await import('./src/db/sending.js'),{eq}=await import('drizzle-orm');
+      const lowered={...CAMPAIGN_STATS};t.after(()=>{Object.assign(CAMPAIGN_STATS,lowered);});
+      Object.assign(CAMPAIGN_STATS,{from:10,page:7,budgetMs:0});
+      const wid=runtime.config.workspaceId,review=unique('review'),c=ok(await local('POST','/v1/campaigns',{name:'Large'}),201),path=`/v1/campaigns/${c.id}/stats`;
+      // Sending, 30 recipients released as the release writes them (review and ordinal), with up to three events each.
+      await db.query("UPDATE sending_campaigns SET state='sending',review_id=$2,actor_key_id='fixture',total=30,prepared=30,expanded=30 WHERE id=$1",[c.id,review]);
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,campaign_id,review_id,review_ordinal,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id)
+        SELECT 'email_'||md5($2||n),$1,$3,'fixture',$2,$4,n,'news@example.com',jsonb_build_array('reader-'||n||'@example.net'),'[]','[]','Large','{}',n%10=9,
+          (ARRAY['delivered','delivered','bounced','complained','delayed','rejected','suppressed','canceled','queued','delivered'])[1+n%10],CASE WHEN n%10<5 THEN 'p'||n END
+        FROM generate_series(1,30) n`,[wid,c.id,REGION,review]);
+      const events=(from:number,to:number,types:string[])=>db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,created_at)
+        SELECT 'event_'||md5($2||n||t),$1,'email_'||md5($2||n),t,n%10=9,clock_timestamp() FROM generate_series($3::int,$4::int) n,unnest($5::text[]) t`,[wid,c.id,from,to,types]);
+      await events(1,30,['delivery']);await events(1,20,['open']);await events(1,10,['click','reject']);
+      const job=async()=>(await jobs('sending.campaignStats'))[0];
+      const stored=async()=>(await runtime.db.select().from(campaigns).where(eq(campaigns.id,c.id)))[0]!;
+      // The old statement over every email and event, for the same rows.
+      const live=async()=>{const row=await stored();return (await campaignStats(runtime.db,{workspaceId:wid},[{...row,stats:null}])).get(c.id)!;};
+      const figures=({computedAt:_at,...rest}:Json)=>rest;
+
+      // 1. The first read has no count yet: it counts now, and queues the background count.
+      const first=ok(await local('GET',path));
+      assert.deepEqual(figures(first),figures(await live()));
+      assert.equal((await job())?.status,'pending');
+      // 2. Each run of the job reads one page (budget 0): ordinals 1-7, 8-14, 15-21, 22-28, then 29-30, which ends the pass.
+      const cursors:number[]=[];
+      for(let step=0;step<5;step++){await run('sending.campaignStats');cursors.push((await job()).payload.pass?.ordinal ?? -1);}
+      assert.deepEqual(cursors,[7,14,21,28,-1],'Five steps of at most 7 ordinals each, the sums carried by the job between them.');
+      const counted=(await stored()).stats!;
+      assert.deepEqual([counted.reviewId,counted.emails],[review,30]);
+      // While the campaign sends, its next count waits about a minute (four times its length if that is longer).
+      const next=await job();
+      assert.deepEqual([next.status,next.payload],['pending',{campaignId:c.id}]);
+      assert.ok(Date.parse(next.available_at)-Date.now()>=55_000);
+      // 3. A read of a large campaign answers from that count: no aggregate over its emails and events.
+      const q=t.mock.method(db,'query');let fromCount:Json;
+      try{fromCount=ok(await local('GET',path));}finally{q.mock.restore();}
+      const statements=q.mock.calls.map(call=>String((call.arguments[0] as any)?.text??call.arguments[0]));
+      t.diagnostic(`A read from the count: ${statements.length} statements.`);
+      assert.equal(statements.filter(s=>/count\(DISTINCT/i.test(s)).length,0,'No aggregate over the emails.');
+      assert.equal(fromCount!.computedAt,counted.computedAt);
+      assert.deepEqual(figures(fromCount!),figures(await live()));
+
+      // 4. Feedback after the count, then the campaign finishes: it is counted once more, and that count equals the old
+      // statement's result for the same rows.
+      await events(21,30,['open','click']);
+      await db.query("UPDATE sending_emails SET status='delivered' WHERE campaign_id=$1 AND status='queued'",[c.id]);
+      await db.query("UPDATE sending_campaigns SET state='done',updated_at=clock_timestamp() WHERE id=$1",[c.id]);
+      for(let step=0;step<5;step++)await run('sending.campaignStats');
+      assert.equal((await job()).status,'completed','A finished campaign is counted once more, then the job ends.');
+      const done=ok(await local('GET',path));
+      assert.ok(Date.parse(done.computedAt)>Date.parse(counted.computedAt));
+      assert.deepEqual(figures(done),figures(await live()),'The finished count equals the old statement over every email and event.');
+      // Every email has a delivery event; 3 are simulated and 3 suppressed; rejects on 1-10 plus rejected statuses 15 and 25.
+      assert.deepEqual(done.totals,{accepted:24,delivered:30,bounced:3,complained:3,opened:30,clicked:20,failed:12,deliveryDelayed:3,simulated:3});
+
+      // 5. The 30-day retention deletes its emails and their events. The figures stay; a later count that finds fewer
+      // emails replaces nothing and freezes them, so reads stop queueing counts.
+      await db.query('DELETE FROM sending_email_events WHERE workspace_id=$1',[wid]);
+      await db.query('DELETE FROM sending_emails WHERE campaign_id=$1',[c.id]);
+      assert.deepEqual(figures(ok(await local('GET',path))),figures(done));
+      CAMPAIGN_STATS.readRefreshMs=0;
+      ok(await local('GET',path));
+      for(let step=0;step<5;step++)await run('sending.campaignStats');
+      const frozen=(await stored()).stats!;
+      assert.deepEqual([frozen.frozen,frozen.emails,frozen.computedAt],[true,30,done.computedAt]);
+      assert.equal((await job()).status,'completed');
+      ok(await local('GET',path));
+      assert.equal((await job()).status,'completed','A frozen count is never queued again.');
+      // A small campaign (counted when read) also keeps a stored count that saw more emails than are left.
+      CAMPAIGN_STATS.from=lowered.from;
+      const small=ok(await local('GET',path));
+      assert.deepEqual([figures(small),small.computedAt],[figures(done),done.computedAt]);
+    });
+  });
   test('MX: outstanding mail is a queue bound: good standing queues a day of its pace, the evaluation, growth and a daily limit keep 10,000', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const wid = runtime.config.workspaceId, pool = '111122223333', domain = 'backlog.example', from = `sender@${domain}`;

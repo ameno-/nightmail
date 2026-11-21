@@ -78,6 +78,14 @@ export const attachmentLinks = pgTable('sending_attachment_links', {
   ...scope(), attachmentId: text('attachment_id').notNull().references(() => attachments.id), ownerType: text('owner_type').$type<'email' | 'campaign' | 'review'|'mailbox'>().notNull(), ownerId: text('owner_id').notNull(),
 }, t => [primaryKey({ columns: [t.workspaceId, t.attachmentId, t.ownerType, t.ownerId] }), index('sending_attachment_owner').on(t.workspaceId, t.ownerType, t.ownerId)]);
 export type CampaignFailure = { code: string; message: string };
+/** One (status, simulated) group of a campaign's emails with its outcome counts, as GET /v1/campaigns/{id}/stats counts them. */
+export type CampaignStatsGroup = { status: EmailStatus; simulated: boolean; count: number; accepted: number; delivered: number; bounced: number; complained: number; opened: number; clicked: number; failed: number; deliveryDelayed: number };
+/**
+ * A campaign's counted outcomes for one review (src/sending.ts campaignStatsJob). computedAt: when the count started (it
+ * includes every change made before then); revision: the workspace's mail revision then (dashboard-cache.ts mailRevision);
+ * emails: how many it counted; frozen: a later count found fewer, so the 30-day retention has begun and these stay.
+ */
+export type StoredCampaignStats = { reviewId: string; computedAt: string; revision: string; emails: number; groups: CampaignStatsGroup[]; frozen?: boolean };
 // One state (src/states.ts) plus the delivery cursors and settings of the current launch; `review_id` is the frozen
 // snapshot that launch took (sending_campaign_reviews + sending_review_recipients), and NULL for an unlaunched draft.
 export const campaigns = pgTable('sending_campaigns', {
@@ -98,6 +106,8 @@ export const campaigns = pgTable('sending_campaigns', {
   probeSkippedAt: time('probe_skipped_at'),
   // After an owner resumed a failed list probe: the rest is released only to contacts the workspace delivered to before.
   deliveredOnly: boolean('delivered_only').notNull().default(false),
+  // The last background count of its outcomes (migration 390).
+  stats: jsonb('stats').$type<StoredCampaignStats>(),
   createdAt: time('created_at').notNull().defaultNow(), updatedAt: time('updated_at').notNull().defaultNow(),
 }, t => [index('sending_campaigns_page').on(t.workspaceId, t.id), index('sending_campaigns_created_page').on(t.workspaceId, t.createdAt.desc(), t.id.desc()), index('sending_campaigns_archive_page').on(t.workspaceId, t.archivedAt, t.createdAt.desc(), t.id.desc())]);
 // The frozen snapshot a launch sends from: the draft and rendered base every recipient is interpolated into, and the
