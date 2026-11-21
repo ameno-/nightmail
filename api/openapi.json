@@ -33519,6 +33519,7 @@
     "/v1/emails": {
       "get": {
         "operationId": "listEmails",
+        "description": "Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "tags": [
           "Emails"
         ],
@@ -35892,7 +35893,7 @@
     "/v1/campaigns/{id}": {
       "get": {
         "operationId": "getCampaign",
-        "description": "The campaign with its full draft, per-status email counts and delivery progress. For every credential, counts may be up to 20 seconds old while a campaign of at least 10,000 recipients is preparing, scheduled, sending or paused; state and delivery are always current. Counts are exact for smaller campaigns, once a campaign is done, canceled or failed, and in the campaign that pause, resume and other changes return.",
+        "description": "The campaign with its full draft, per-status email counts and delivery progress. For every credential, counts may be up to 20 seconds old while a campaign of at least 10,000 recipients is preparing, scheduled, sending or paused; state and delivery are always current. Counts are exact for smaller campaigns, once a campaign is done, canceled or failed, and in the campaign that pause, resume and other changes return. Each statement stops after 3 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "tags": [
           "Campaigns"
         ],
@@ -36383,7 +36384,7 @@
     "/v1/campaigns/{id}/stats": {
       "get": {
         "operationId": "getCampaignStats",
-        "description": "Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Both rate counts exclude simulated emails. Rates are fractions, null for zero denominators; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Done means dispatch finished; asynchronous feedback can still change totals.",
+        "description": "Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Both rate counts exclude simulated emails. Rates are fractions, null for zero denominators; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Done means dispatch finished; asynchronous feedback can still change totals. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "tags": [
           "Campaigns"
         ],
@@ -43944,7 +43945,7 @@
     "/v1/metrics": {
       "get": {
         "operationId": "getMetrics",
-        "description": "Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity.",
+        "description": "Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "tags": [
           "Metrics"
         ],
@@ -68025,7 +68026,7 @@
           }
         ],
         "summary": "List visible conversations",
-        "description": "Newest visible activity first, then descending thread ID. addressId narrows all projected messages and IDs. q searches visible messages; view matches state on any visible address. all (default) includes trash. Pass nextCursor to continue.",
+        "description": "Newest visible activity first, then descending thread ID. addressId narrows all projected messages and IDs. q searches visible messages; view matches state on any visible address. all (default) includes trash. Pass nextCursor to continue. Each statement stops after 3 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "parameters": [
           {
             "schema": {
@@ -68783,7 +68784,7 @@
           }
         ],
         "summary": "Search received and sent messages",
-        "description": "Newest first; default inbound. Unassigned stored mail is visible only to a workspace administrator without an address filter.",
+        "description": "Newest first; default inbound. Unassigned stored mail is visible only to a workspace administrator without an address filter. Each statement stops after 3 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "parameters": [
           {
             "schema": {
@@ -69635,7 +69636,7 @@
           }
         ],
         "summary": "List sent and received mail together",
-        "description": "Sent and received mail in one list, newest first, with an opaque cursor bound to the filters. Sent mail is what listEmails returns (keys restricted to domains see their own domains); received mail is what listInboundMessages returns for the same credential: administrators see every received message, including unrouted mail, with delivery details; dashboard members see mail on receiving addresses; other credentials get sent mail only. kind, campaignId and a sent-mail status filter sent mail and leave received mail out; status=received or status=spam filter received mail and leave sent mail out.",
+        "description": "Sent and received mail in one list, newest first, with an opaque cursor bound to the filters. Sent mail is what listEmails returns (keys restricted to domains see their own domains); received mail is what listInboundMessages returns for the same credential: administrators see every received message, including unrouted mail, with delivery details; dashboard members see mail on receiving addresses; other credentials get sent mail only. kind, campaignId and a sent-mail status filter sent mail and leave received mail out; status=received or status=spam filter received mail and leave sent mail out. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "parameters": [
           {
             "schema": {

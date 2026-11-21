@@ -9,7 +9,7 @@ import type { DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys } from './db/core.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
 import { mergeSuppression } from './db/audience.js';
-import { SuppressionReason, SuppressionEventData, readCursor, nextCursor } from './core.js';
+import { SuppressionReason, SuppressionEventData, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
 import { actor, actorMailAccess, ApiError, AudienceSpec, denied, unrestrictedRequired, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
@@ -294,9 +294,9 @@ export const CAMPAIGN_PROGRESS_CACHE_SECONDS = 20;
 export const CAMPAIGN_PROGRESS_CACHE_MIN_RECIPIENTS = 10_000;
 const CAMPAIGN_PROGRESS_SCOPE = `while a campaign of at least ${CAMPAIGN_PROGRESS_CACHE_MIN_RECIPIENTS.toLocaleString('en-US')} recipients is preparing, scheduled, sending or paused`;
 const CAMPAIGN_PROGRESS_NOTE = `For every credential, counts may be up to ${CAMPAIGN_PROGRESS_CACHE_SECONDS} seconds old ${CAMPAIGN_PROGRESS_SCOPE}; state and delivery are always current. Counts are exact for smaller campaigns, once a campaign is done, canceled or failed, and in the campaign that pause, resume and other changes return.`;
-async function campaignViews<T extends CampaignRow>(runtime: Runtime, a: Actor, rows: T[], read?: { origin: string; detail?: boolean }) {
+async function campaignViews<T extends CampaignRow>(runtime: Runtime, a: Actor, rows: T[], read?: { origin: string; detail?: boolean }, db: DbExecutor = runtime.db) {
   if (!rows.length) return [];
-  const load = async () => runtime.db.select({ campaignId: emails.campaignId, status: emails.status, count: sql<number>`count(*)::int` }).from(emails).where(and(scope(emails, a), inArray(emails.campaignId, rows.map(row => row.id)))).groupBy(emails.campaignId, emails.status);
+  const load = async () => db.select({ campaignId: emails.campaignId, status: emails.status, count: sql<number>`count(*)::int` }).from(emails).where(and(scope(emails, a), inArray(emails.campaignId, rows.map(row => row.id)))).groupBy(emails.campaignId, emails.status);
   const cached = async (scope: unknown[], ttlSeconds?: number) => (await cachedDashboardRead(read!.origin, JSON.stringify(scope), load, ttlSeconds)).value;
   // Dashboard lists reuse counts for 60 s. Detail reuses a large active campaign's counts for every credential, keyed on its
   // snapshot (review), not updatedAt, which every release step moves; delivery cursors come from the row and stay current.
@@ -310,6 +310,9 @@ async function campaignViews<T extends CampaignRow>(runtime: Runtime, a: Actor, 
     return { ...row, url: campaignUrl(runtime, row), counts, delivery: deliveryView(row as typeof campaigns.$inferSelect) };
   });
 }
+// Per-statement limits of the reads a dashboard repeats (budgetedRead): a list walk or aggregate gets 5 seconds; the
+// campaign detail's status counts, polled every few seconds while it sends and read through one campaign's index, get 3.
+const READ_LIMIT = { emails: 5, campaign: 3, campaignStats: 5 } as const;
 export async function pageBinding(a: Actor, resource: string, query: Record<string, unknown>) {
   const { cursor: _cursor, limit: _limit, ...filters } = query;
   // This fixed field is part of the hash in already-issued email and campaign cursors.
@@ -1341,17 +1344,17 @@ export function registerSending(app: App) {
       throw error;
     }
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/emails', operationId: 'listEmails', tags: ['Emails'], security, request: { query: EmailQuery }, responses: { 200: response(page(Email)), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/emails', operationId: 'listEmails', description: readLimitNote(READ_LIMIT.emails), tags: ['Emails'], security, request: { query: EmailQuery }, responses: { 200: response(page(Email)), ...errors } }), async c => {
     const a = actor(c), q = c.req.valid('query'), binding = await pageBinding(a, 'emails', q), cursor = readCursor(q.cursor, binding);
     if (q.region) region(c.env, q.region);
     const search = q.search ? literalSearch(q.search) : null;
-    const rows = await c.env.db.select(emailColumns).from(emails).where(and(mailWhere(a),
+    const rows = await budgetedRead(c.env.db, db => db.select(emailColumns).from(emails).where(and(mailWhere(a),
       cursor ? sql`(${emails.createdAt}, ${emails.id}) < (${cursor.at}::timestamptz, ${cursor.id})` : undefined,
       q.campaignId ? eq(emails.campaignId, q.campaignId) : undefined, q.status === 'queued' ? inArray(emails.status, ['queued', 'scheduled']) : q.status ? eq(emails.status, q.status) : undefined,
       q.region ? eq(emails.region, q.region) : undefined, q.kind ? sql`${emails.snapshot}->>'kind' = ${q.kind}` : undefined,
       q.from ? gte(emails.createdAt, q.from) : undefined, q.to ? lt(emails.createdAt, q.to) : undefined,
       search ? sql`sending_log_text(${emails.id},${emails.campaignId},${emails.providerId},${emails.from},${emails.subject},${emails.to} || ${emails.cc} || ${emails.bcc}) ILIKE ${search}` : undefined,
-    )).orderBy(desc(emails.createdAt), desc(emails.id)).limit(q.limit + 1);
+    )).orderBy(desc(emails.createdAt), desc(emails.id)).limit(q.limit + 1), readLimit(READ_LIMIT.emails));
     return c.json({ data: rows.slice(0, q.limit).map(row => emailView(listedSubject(a, row))), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}', operationId: 'getEmail', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(Email), ...errors } }), async c => {
@@ -1526,14 +1529,14 @@ export function registerSending(app: App) {
     const views = await timed(c, 'campaign-counts-db', () => campaignViews(c.env, a, rows.slice(0, q.limit), { origin: new URL(c.req.url).origin }));
     return c.json({ data: views.map(row => CampaignSummary.parse(row)), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}', operationId: 'getCampaign', description: `The campaign with its full draft, per-status email counts and delivery progress. ${CAMPAIGN_PROGRESS_NOTE}`, tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(Campaign), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}', operationId: 'getCampaign', description: `The campaign with its full draft, per-status email counts and delivery progress. ${CAMPAIGN_PROGRESS_NOTE} ${readLimitNote(READ_LIMIT.campaign)}`, tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(Campaign), ...errors } }), async c => {
     const a = actor(c), row = await timed(c, 'campaign-db', () => findCampaign(c.env.db, a, c.req.valid('param').id));
-    const views = await timed(c, 'campaign-counts-db', () => campaignViews(c.env, a, [row], { origin: new URL(c.req.url).origin, detail: true }));
+    const views = await timed(c, 'campaign-counts-db', () => budgetedRead(c.env.db, db => campaignViews(c.env, a, [row], { origin: new URL(c.req.url).origin, detail: true }, db), readLimit(READ_LIMIT.campaign)));
     return c.json(Campaign.parse(views[0]!), 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/stats', operationId: 'getCampaignStats', description: 'Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Both rate counts exclude simulated emails. Rates are fractions, null for zero denominators; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Done means dispatch finished; asynchronous feedback can still change totals.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignStats), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/stats', operationId: 'getCampaignStats', description: 'Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Both rate counts exclude simulated emails. Rates are fractions, null for zero denominators; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Done means dispatch finished; asynchronous feedback can still change totals. ' + readLimitNote(READ_LIMIT.campaignStats), tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignStats), ...errors } }), async c => {
     const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
-    return c.json(CampaignStats.parse((await campaignStats(c.env.db, a, [row])).get(row.id)!), 200);
+    return c.json(CampaignStats.parse((await budgetedRead(c.env.db, db => campaignStats(db, a, [row]), readLimit(READ_LIMIT.campaignStats))).get(row.id)!), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaign-content-guide', operationId: 'getCampaignContentGuide', description: 'The complete campaign and template content vocabulary, personalization syntax, restrictions and examples as Markdown. Read it once before writing or editing html.', tags: ['Campaigns'], security, responses: { 200: response(CampaignContentGuide), ...errors } }), async c => {
     actor(c);

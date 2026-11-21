@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
-import { actor, ApiError, denied, errors, PageQuery, unrestrictedRequired, region, response, security, type Actor, type App, type MailboxAccess } from './core.js';
+import { actor, ApiError, budgetedRead, denied, errors, PageQuery, readLimit, readLimitNote, unrestrictedRequired, region, response, security, type Actor, type App, type DbExecutor, type MailboxAccess } from './core.js';
 import { emails } from './db/sending.js';
 import { mailMessages as messages } from './db/mailbox.js';
 import { readsDelivery, visibleAddresses } from './inbound-threads.js';
@@ -46,6 +46,8 @@ const LogEntry = z.object({
 // counts=true: how many emails match each filter value, the way a list's facets count. Each count reads at most COUNT_CAP
 // matching emails, newest first, so a large workspace costs bounded index scans, not a count of all its mail.
 const COUNT_CAP = 50_000;
+// Each statement of a Logs read (the page, or the page and its counts) stops after 5 seconds: READ_TOO_LARGE.
+const LOGS_READ = 5;
 const LogCounts = z.object({
   status: z.record(z.string(), z.number().int()).describe('Matching emails per status (sent statuses, received and spam), with every filter but status. A status with none is left out.'),
   kind: z.object({ transactional: z.number().int(), marketing: z.number().int() }).describe('Matching sent emails per kind, with every filter but kind.'),
@@ -88,7 +90,7 @@ type Row = { direction: 'sent' | 'received'; untrusted: boolean; id: string; at:
 
 export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess | null) {
   app.openapi(createRoute({ method: 'get', path: '/v1/logs', operationId: 'listLogs', tags: ['Emails'], security, summary: 'List sent and received mail together',
-    description: 'Sent and received mail in one list, newest first, with an opaque cursor bound to the filters. Sent mail is what listEmails returns (keys restricted to domains see their own domains); received mail is what listInboundMessages returns for the same credential: administrators see every received message, including unrouted mail, with delivery details; dashboard members see mail on receiving addresses; other credentials get sent mail only. kind, campaignId and a sent-mail status filter sent mail and leave received mail out; status=received or status=spam filter received mail and leave sent mail out.',
+    description: 'Sent and received mail in one list, newest first, with an opaque cursor bound to the filters. Sent mail is what listEmails returns (keys restricted to domains see their own domains); received mail is what listInboundMessages returns for the same credential: administrators see every received message, including unrouted mail, with delivery details; dashboard members see mail on receiving addresses; other credentials get sent mail only. kind, campaignId and a sent-mail status filter sent mail and leave received mail out; status=received or status=spam filter received mail and leave sent mail out. ' + readLimitNote(LOGS_READ),
     request: { query: LogQuery }, responses: { 200: response(LogPage), ...errors } }), async c => {
     const a = actor(c), q = c.req.valid('query');
     if (q.region) region(c.env, q.region);
@@ -130,7 +132,7 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
 
     // Facet counts: each facet's values under every other filter, so a count says what choosing that value would list.
     // Status counts take both sides (received mail only without kind or campaignId); kind counts take sent mail under the status.
-    const countLogs = async () => {
+    const countLogs = async (db: DbExecutor) => {
       const sentSide = q.direction !== 'received', receivedSide = q.direction !== 'sent' && !!access && !q.kind && !q.campaignId;
       const sentWhere = (...more: (SQL | undefined)[]) => and(mailWhere(a), q.campaignId ? sql`${emails.campaignId} = ${q.campaignId}` : undefined, q.region ? sql`${emails.region} = ${q.region}` : undefined,
         q.search ? sql`sending_log_text(${emails.id},${emails.campaignId},${emails.providerId},${emails.from},${emails.subject},${emails.to} || ${emails.cc} || ${emails.bcc}) ILIKE ${literalSearch(q.search)}` : undefined, ...more);
@@ -139,15 +141,15 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
       const kindIs = (kind: string) => sql`${emails.snapshot}->>'kind' = ${kind}`;
       const sentStatus = q.status && !onlyReceived ? sql`${emails.status} = ${q.status}` : undefined;
       const bounded = (inner: SQL) => sql`SELECT count(*)::int AS n FROM (${inner} LIMIT ${COUNT_CAP + 1}) w`;
-      const [statusRows, kindRows, receivedRow] = await Promise.all([
-        sentSide ? c.env.db.execute<{ status: string; n: number }>(sql`SELECT status, count(*)::int AS n FROM (SELECT ${emails.status} AS status FROM ${emails}
-          WHERE ${sentWhere(q.kind ? kindIs(q.kind) : undefined)} ORDER BY ${emails.createdAt} DESC LIMIT ${COUNT_CAP + 1}) w GROUP BY status`).then(result => result.rows) : [],
-        Promise.all((['transactional', 'marketing'] as const).map(kind => sentSide && !onlyReceived
-          ? c.env.db.execute<{ n: number }>(bounded(sql`SELECT 1 FROM ${emails} WHERE ${sentWhere(kindIs(kind), sentStatus)}`)).then(result => result.rows[0]?.n ?? 0) : 0)),
-        receivedSide && access ? c.env.db.execute<{ spam: number; total: number }>(sql`SELECT count(*) FILTER (WHERE spam)::int AS spam, count(*)::int AS total FROM (SELECT ${messages.spam} AS spam
+      // One after another on the read's one connection.
+      const statusRows = sentSide ? (await db.execute<{ status: string; n: number }>(sql`SELECT status, count(*)::int AS n FROM (SELECT ${emails.status} AS status FROM ${emails}
+          WHERE ${sentWhere(q.kind ? kindIs(q.kind) : undefined)} ORDER BY ${emails.createdAt} DESC LIMIT ${COUNT_CAP + 1}) w GROUP BY status`)).rows : [];
+      const kindRows: number[] = [];
+      for (const kind of ['transactional', 'marketing'] as const) kindRows.push(sentSide && !onlyReceived
+        ? (await db.execute<{ n: number }>(bounded(sql`SELECT 1 FROM ${emails} WHERE ${sentWhere(kindIs(kind), sentStatus)}`))).rows[0]?.n ?? 0 : 0);
+      const receivedRow = receivedSide && access ? (await db.execute<{ spam: number; total: number }>(sql`SELECT count(*) FILTER (WHERE spam)::int AS spam, count(*)::int AS total FROM (SELECT ${messages.spam} AS spam
           FROM ${messages} WHERE ${and(accessibleMessages(access, {}), sql`${messages.direction} = 'inbound'`, q.region ? sql`${messages.region} = ${q.region}` : undefined, q.search ? sql`mail_messages.search @@ websearch_to_tsquery('simple', ${q.search})` : undefined)}
-          ORDER BY ${messages.receivedAt} DESC LIMIT ${COUNT_CAP + 1}) w`).then(result => result.rows[0]) : undefined,
-      ]);
+          ORDER BY ${messages.receivedAt} DESC LIMIT ${COUNT_CAP + 1}) w`)).rows[0] : undefined;
       const status = Object.fromEntries(statusRows.map(row => [row.status, row.n]));
       // Only administrators see the spam verdict (as in the list): for anyone else every message they read is received.
       const spam = receivedRow && delivery ? receivedRow.spam : 0, clean = (receivedRow?.total ?? 0) - spam;
@@ -156,9 +158,11 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
       const [transactional, marketing] = kindRows;
       return { status, kind: { transactional, marketing }, capped: { sent: statusRows.reduce((sum, row) => sum + row.n, 0) > COUNT_CAP || kindRows.some(n => n > COUNT_CAP), received: (receivedRow?.total ?? 0) > COUNT_CAP } };
     };
-    const [{ rows }, counts] = await Promise.all([c.env.db.execute<Row>(access ? sql`WITH page AS MATERIALIZED (${merged}),
+    // The page, then its counts, on one connection, each statement within the limit.
+    const { rows, counts } = await budgetedRead(c.env.db, async db => ({ rows: (await db.execute<Row>(access ? sql`WITH page AS MATERIALIZED (${merged}),
         sizes AS (SELECT t.thread_id, ${threadSize(access, true, sql`t.thread_id`)} AS thread_count FROM (SELECT DISTINCT thread_id FROM page WHERE thread_id IS NOT NULL) t)
-      SELECT page.*, sizes.thread_count FROM page LEFT JOIN sizes USING (thread_id) ORDER BY page.sort_at DESC, page.direction DESC, page.id DESC` : merged), withCounts === 'true' ? countLogs() : undefined]);
+      SELECT page.*, sizes.thread_count FROM page LEFT JOIN sizes USING (thread_id) ORDER BY page.sort_at DESC, page.direction DESC, page.id DESC` : merged)).rows,
+      counts: withCounts === 'true' ? await countLogs(db) : undefined }), readLimit(LOGS_READ));
     const last = rows.length > q.limit ? rows[q.limit - 1] : undefined;
     return c.json({
       data: rows.slice(0, q.limit).map(row => ({

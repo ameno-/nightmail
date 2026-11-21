@@ -5,7 +5,7 @@ import type { S3Client } from '@aws-sdk/client-s3';
 import { readableMailboxKey, mailboxS3 } from './mailbox-setup.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, sql, type SQLWrapper } from 'drizzle-orm';
-import { actorMailAccess, ApiError, denied, errors, isoTime, json, lazyModule, page, response, security, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { actorMailAccess, ApiError, budgetedRead, denied, errors, isoTime, json, lazyModule, page, readLimit, readLimitNote, response, security, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { productName } from './brand.js';
 
 const loadS3Presign = lazyModule(() => Promise.all([import('@aws-sdk/client-s3'), import('@aws-sdk/s3-request-presigner')]));
@@ -157,11 +157,14 @@ async function deliveryLinks(runtime: Runtime, row: typeof messages.$inferSelect
   } finally { client?.destroy(); }
 }
 
+// The conversation and message lists page one workspace's mail, polled by open inbox views: each statement stops after
+// 3 seconds with READ_TOO_LARGE (a rare search over a large workspace) rather than hold a connection.
+const INBOUND_READ = 3;
 export function registerInboundThreadReads(app: App, access: (c: Ctx, permission: 'read') => MailboxAccess) {
   app.openapi(createRoute({ method: 'get', path: base, operationId: 'listInboundThreads', tags, security, summary: 'List visible conversations',
-    description: 'Newest visible activity first, then descending thread ID. addressId narrows all projected messages and IDs. q searches visible messages; view matches state on any visible address. all (default) includes trash. Pass nextCursor to continue.',
+    description: 'Newest visible activity first, then descending thread ID. addressId narrows all projected messages and IDs. q searches visible messages; view matches state on any visible address. all (default) includes trash. Pass nextCursor to continue. ' + readLimitNote(INBOUND_READ),
     request: { query: ListQuery }, responses: { 200: response(page(Thread).openapi('InboundThreadPage')), ...errors } }), async c => {
-    const q = c.req.valid('query'); return c.json(await threadPage(c.env.db, access(c, 'read'), q, q), 200);
+    const q = c.req.valid('query'), value = access(c, 'read'); return c.json(await budgetedRead(c.env.db, db => threadPage(db, value, q, q), readLimit(INBOUND_READ)), 200);
   });
   app.openapi(createRoute({ method: 'get', path: `${base}/{threadId}`, operationId: 'getInboundThread', tags, security, summary: 'Read a visible conversation',
     description: 'Returns the most recent visible messages (default 25, maximum 100), oldest first within the page. Ties use message ID. Pass nextCursor as cursor for the older page. Body previews are capped at 8192 characters; getInboundMessage retrieves stored text and attachment metadata. State and counts are scoped to visible addresses.',
@@ -197,11 +200,11 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
   const deliverySchema = z.object({addresses:z.array(z.object({id:Id,address:z.string()})),envelopeTo:z.array(z.string()),region:z.string().nullable(),spam:z.boolean(),to:z.array(Address)});
   const deliveryAddresses = visibleAddresses;
   const MessageListItem = Message.pick({ id:true, threadId:true, addressIds:true, direction:true, status:true, suppressionReason:true, subject:true, snippet:true, receivedAt:true, attachmentCount:true, from:true }).extend(deliverySchema.partial().shape);
-  app.openapi(createRoute({ method:'get', path:'/v1/inbound/messages', operationId:'listInboundMessages', tags, security, summary:'Search received and sent messages', description:'Newest first; default inbound. Unassigned stored mail is visible only to a workspace administrator without an address filter.',
+  app.openapi(createRoute({ method:'get', path:'/v1/inbound/messages', operationId:'listInboundMessages', tags, security, summary:'Search received and sent messages', description:'Newest first; default inbound. Unassigned stored mail is visible only to a workspace administrator without an address filter. '+readLimitNote(INBOUND_READ),
     request:{query:PageQuery.extend({ includeDelivery,region:z.string().max(40).optional(),threadId:Id.optional(),direction:z.enum(['inbound','outbound']).default('inbound'),q:z.string().trim().min(1).max(200).optional() })},responses:{200:response(page(MessageListItem).openapi('InboundMessagePage')),...errors} }), async c=>{
     const q=c.req.valid('query'),v=messageScope(c,q.includeDelivery),after=decodeCursor(q.cursor);
-    const rows=await c.env.db.select({ ...metadataFields,...(q.includeDelivery==='true' ? {region:messages.region,spam:messages.spam,to:messages.to,envelopeTo:messages.envelopeTo,addresses:deliveryAddresses(v,q)} : {}),fromAddress:messages.fromAddress,fromName:messages.fromName,addressIds:addressLinks(v,q),at:preciseTime(messages.receivedAt) }).from(messages).where(and(accessible(v,q),eq(messages.direction,q.direction),q.region?eq(messages.region,q.region):undefined,q.threadId?eq(messages.threadId,q.threadId):undefined,
-      q.q?sql`mail_messages.search @@ websearch_to_tsquery('simple',${q.q})`:undefined,after?sql`(${messages.receivedAt}, ${messages.id}) < (${after[0]}::timestamptz,${after[1]})`:undefined)).orderBy(desc(messages.receivedAt),desc(messages.id)).limit(q.limit+1);
+    const rows=await budgetedRead(c.env.db,db=>db.select({ ...metadataFields,...(q.includeDelivery==='true' ? {region:messages.region,spam:messages.spam,to:messages.to,envelopeTo:messages.envelopeTo,addresses:deliveryAddresses(v,q)} : {}),fromAddress:messages.fromAddress,fromName:messages.fromName,addressIds:addressLinks(v,q),at:preciseTime(messages.receivedAt) }).from(messages).where(and(accessible(v,q),eq(messages.direction,q.direction),q.region?eq(messages.region,q.region):undefined,q.threadId?eq(messages.threadId,q.threadId):undefined,
+      q.q?sql`mail_messages.search @@ websearch_to_tsquery('simple',${q.q})`:undefined,after?sql`(${messages.receivedAt}, ${messages.id}) < (${after[0]}::timestamptz,${after[1]})`:undefined)).orderBy(desc(messages.receivedAt),desc(messages.id)).limit(q.limit+1),readLimit(INBOUND_READ));
     const last=rows[q.limit-1];return c.json({data:rows.slice(0,q.limit).map(({at,fromName,fromAddress,...row})=>({...row,receivedAt:timestamp(at),from:{name:fromName,address:fromAddress}})),nextCursor:rows.length>q.limit&&last?encodeCursor(last.at,last.id):null},200);
   });
   const Attachment = z.object({id:Id,filename:z.string(),contentType:z.string(),size:z.number().int(),disposition:z.string(),contentId:z.string().nullable(),url:z.string().nullable().optional()});

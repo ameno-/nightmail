@@ -3,7 +3,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
 import { ApiError, denied, errors, hasSessionCookie, id, json, notFound, response, timed, webhookUrlHint, type App, type AppEnv, type Ctx, type DbExecutor, type SupportScope } from './core.js';
 import { AuditEntry, AuditFilters, auditContext, auditInsert, customerTrail, operatorRequired, requireOperator, userEmail } from './audit.js';
-import { budgetedRead } from './deliverability.js';
+import { supportRead } from './deliverability.js';
 import { GOOD_STANDING, limitRequest, type Step } from './standing-model.js';
 import { cached, registerSupportDeliverability } from './support-deliverability.js';
 import { ERROR_CODE, groupLines, LOG_RETENTION_DAYS, LOG_ROWS, LogsUnavailable, requestLines, ROUTE_TEMPLATE } from './support-logs.js';
@@ -445,7 +445,7 @@ export function registerSupport(app: App) {
     responses: { 200: response(z.object({ data: z.array(StandingDetail) })), ...errors } }), async c => {
     const list = scoped(c).ids, requested = c.req.valid('query').requestedLimit;
     type History = { workspace_id: string; phase: 'seed' | 'calibrating' | 'graded' | null; step: Step | null; daily: number | null; days: z.infer<typeof StandingDetail>['history']['days']; changes: z.infer<typeof StandingDetail>['history']['changes'] };
-    const { rows, history } = await budgetedRead(c.env.db, async tx => ({ rows: await standings(tx, list), history: list.length ? (await tx.execute<History>(sql`SELECT w.id AS workspace_id,
+    const { rows, history } = await supportRead(c.env.db, async tx => ({ rows: await standings(tx, list), history: list.length ? (await tx.execute<History>(sql`SELECT w.id AS workspace_id,
         s.phase, s.step, s.daily_limit AS daily,
         (SELECT coalesce(json_agg(json_build_object('day', d.day::text, 'score', d.score::float8, 'quality', d.quality::float8, 'limit', d.daily_limit, 'step', d.step, 'accepted', d.accepted, 'bounced', d.bounced,
           'complained', d.complained, 'rejected', d.rejected) ORDER BY d.day), '[]') FROM sender_score_daily d WHERE d.workspace_id = w.id AND d.day > (now() AT TIME ZONE 'UTC')::date - 60) AS days,

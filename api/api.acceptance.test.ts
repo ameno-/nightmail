@@ -2554,6 +2554,141 @@ describe('Public contract and authentication', () => {
     });
   });
 
+  test('public stats: hour totals publish exactly what the 30-day minute aggregate did, through gaps, a quiet week, a burst and late corrections', async t => {
+    const [{ drizzle }, { refreshPublicStats, PUBLIC_STATS_PRIVACY }] = await Promise.all([import('drizzle-orm/node-postgres'), import('./src/public-stats.js')]);
+    type Privacy = typeof PUBLIC_STATS_PRIVACY;
+    const db = await fixtureDatabase(t), tx = drizzle(db);
+    // The reference: the computation migration 382 replaced, as it was. One aggregate over every minute bucket in the
+    // 30 days, with the latency sample taken whether or not it is published, shaped the same way.
+    const legacy = async (asOf: string, multiTenant: boolean, privacy: Privacy) => {
+      const hour = `date_trunc('hour', $1::timestamptz, 'UTC')`, ago = `(extract(epoch FROM ${hour} - date_trunc('hour', minute, 'UTC')) / 3600)::int - 1`;
+      const hostedMail = multiTenant ? `((e.feedback_topic_arn IS NULL AND EXISTS (SELECT FROM provider_connections pc WHERE pc.workspace_id = e.workspace_id AND pc.kind = 'shared'))
+        OR EXISTS (SELECT FROM provider_feedback_history h WHERE h.topic_arn = e.feedback_topic_arn AND h.kind = 'shared'))` : 'true';
+      const regional = multiTenant ? "r IN (SELECT p.region FROM provider_pool_regions p WHERE p.sending_state='ready')" : 'true';
+      const r = (await db.query(`
+        WITH b AS (SELECT * FROM public_stats_minutes WHERE minute >= (${hour} - interval '30 days') AND minute < ${hour}),
+        latency AS (
+          SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM a.accepted_at - d.created_at) * 1000) AS ms, count(DISTINCT d.workspace_id)::int AS workspaces
+          FROM (SELECT e.workspace_id, e.id, e.created_at FROM sending_emails e
+            WHERE e.created_at >= ${hour} - interval '24 hours' AND e.created_at < ${hour} AND NOT e.simulated AND e.status NOT IN ('scheduled','queued','attempting') AND ${hostedMail}
+              AND e.campaign_id IS NULL AND (e.scheduled_at IS NULL OR e.dispatch_version > 0)
+            ORDER BY e.created_at DESC LIMIT 5000) d
+          CROSS JOIN LATERAL (SELECT min(v.created_at) AS accepted_at FROM sending_email_events v
+            WHERE v.workspace_id = d.workspace_id AND v.email_id = d.id AND v.type = 'accepted') a
+          WHERE a.accepted_at >= d.created_at
+        )
+        SELECT coalesce(sum(accepted), 0)::bigint AS accepted, coalesce(sum(delivered), 0)::bigint AS delivered, coalesce(sum(bounced), 0)::bigint AS bounced,
+          (SELECT count(DISTINCT w)::int FROM b, unnest(b.workspaces) AS w) AS workspaces,
+          (SELECT coalesce(jsonb_object_agg(ago, jsonb_build_object('n', n, 'w', coalesce(w, 0))), '{}'::jsonb) FROM
+            (SELECT ${ago} AS ago, sum(accepted)::int AS n FROM b WHERE minute >= ${hour} - interval '24 hours' GROUP BY 1) counts
+            LEFT JOIN (SELECT ${ago} AS ago, count(DISTINCT wid)::int AS w FROM b, unnest(b.workspaces) AS wid WHERE minute >= ${hour} - interval '24 hours' GROUP BY 1) senders USING (ago)) AS hourly,
+          (SELECT coalesce(jsonb_agg(DISTINCT r ORDER BY r), '[]'::jsonb) FROM b, unnest(b.regions) AS r WHERE ${regional}) AS regions,
+          (SELECT ms FROM latency) AS latency_ms, coalesce((SELECT workspaces FROM latency), 0) AS latency_workspaces,
+          to_char(${hour} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS through
+        FROM b`, [asOf])).rows[0];
+      const coarse = (n: number) => n < 100 ? Math.round(n / 10) * 10 : (() => { const step = 10 ** (Math.floor(Math.log10(n)) - 1); return Math.round(n / step) * step; })();
+      const round = (n: number) => privacy.round ? coarse(n) : n, available = r.workspaces >= privacy.workspaces;
+      const hourly = Array.from({ length: 24 }, (_, index) => r.hourly[String(23 - index)] ?? { n: 0, w: 0 });
+      const acceptedHourly = hourly.map(h => available && (h.n === 0 || h.w >= privacy.hourWorkspaces) ? round(h.n) : null);
+      const delivered = Number(r.delivered), outcomes = delivered + Number(r.bounced);
+      return available ? {
+        generatedAt: r.through, available, acceptedLast30Days: round(Number(r.accepted)), acceptedLastHour: acceptedHourly[23]!, acceptedHourly,
+        deliveryRate: outcomes > 0 ? (privacy.round ? Math.round(delivered / outcomes * 1000) / 1000 : delivered / outcomes) : null,
+        medianSendLatencyMs: r.latency_ms === null || r.latency_workspaces < privacy.hourWorkspaces ? null : privacy.round ? Math.round(Number(r.latency_ms) / 10) * 10 : Math.round(Number(r.latency_ms)),
+        regions: r.regions,
+      } : { generatedAt: r.through, available, acceptedLast30Days: null, acceptedLastHour: null, acceptedHourly: Array(24).fill(null), deliveryRate: null, medianSendLatencyMs: null, regions: [] };
+    };
+    const at = '2003-03-10T12:04:00.000Z', plus = (minutes: number) => new Date(Date.parse(at) + minutes * 60_000).toISOString();
+    const run = unique('public-hours'), pool = 'us-fixture-1', floors = { ...PUBLIC_STATS_PRIVACY, round: false }, era = [plus(-40 * 1440), plus(5 * 1440)];
+    // Each refresh is compared with the reference on the minute buckets it leaves, and the hour totals with those buckets
+    // (whichever statement wrote them: the fill, the trailing and day-old recomputes, or the deletes below). As before,
+    // no bucket is left missing, nor unfinalized once a day old.
+    const tick = async (asOf: string, multiTenant = false, privacy: Privacy = floors) => {
+      const stats = await refreshPublicStats(tx, multiTenant, { asOf, budgetMs: 60_000, privacy });
+      assert.deepEqual(stats, await legacy(asOf, multiTenant, privacy), `The figures at ${asOf} match the minute aggregate.`);
+      const [state] = (await db.query(`WITH m AS (SELECT * FROM public_stats_minutes WHERE minute >= $1 AND minute < $2),
+        totals AS (SELECT date_trunc('hour', minute, 'UTC') AS hour, count(*)::int AS minutes, sum(accepted) AS accepted, sum(delivered) AS delivered, sum(bounced) AS bounced FROM m GROUP BY 1),
+        regions AS (SELECT date_trunc('hour', minute, 'UTC') AS hour, array_agg(DISTINCT r ORDER BY r) AS regions FROM m, unnest(m.regions) AS r GROUP BY 1),
+        senders AS (SELECT date_trunc('hour', minute, 'UTC') AS hour, array_agg(DISTINCT w ORDER BY w) AS workspaces FROM m, unnest(m.workspaces) AS w GROUP BY 1)
+        SELECT (SELECT coalesce(jsonb_agg(to_jsonb(h) ORDER BY hour), '[]') FROM public_stats_hours h WHERE hour >= $1 AND hour < $2) AS hours,
+          (SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY hour), '[]') FROM (SELECT hour, minutes, accepted, delivered, bounced, coalesce(regions, '{}') AS regions,
+            coalesce(workspaces, '{}') AS workspaces FROM totals LEFT JOIN regions USING (hour) LEFT JOIN senders USING (hour)) x) AS minutes,
+          (SELECT count(*)::int FROM m WHERE minute >= date_trunc('hour', $3::timestamptz, 'UTC') - interval '30 days'
+            AND minute <= date_trunc('minute', $3::timestamptz, 'UTC') - interval '1441 minutes' AND computed_at < minute + interval '1 day 1 minute') AS due,
+          (SELECT count(*)::int FROM generate_series(date_trunc('hour', $3::timestamptz, 'UTC') - interval '30 days', date_trunc('minute', $3::timestamptz, 'UTC') - interval '16 minutes', interval '1 minute') AS g
+            WHERE NOT EXISTS (SELECT FROM public_stats_minutes WHERE minute = g)) AS missing`, [...era, asOf])).rows;
+      assert.deepEqual(state.hours, state.minutes, `The hour totals at ${asOf} equal their minute buckets.`);
+      assert.deepEqual([state.due, state.missing], [0, 0], `At ${asOf} the old refresh would find nothing left to recompute or fill.`);
+      return stats;
+    };
+    const bucket = async (minutes: number) => (await db.query("SELECT accepted FROM public_stats_minutes WHERE minute = date_trunc('minute', $1::timestamptz, 'UTC')", [plus(minutes)])).rows[0].accepted as number;
+    await db.query('BEGIN');
+    try {
+      await db.query("INSERT INTO provider_pool_regions(region, aws_account_id, sending_state) VALUES ($1, '000000000000', 'ready') ON CONFLICT DO NOTHING", [pool]);
+      // Fourteen workspaces in three regions: one email every 47 minutes for 31 days except a quiet week (13 to 20 days
+      // back), one every 7 minutes in the last 12 hours, up to three more from other senders in each hour before that,
+      // and a burst of 400 from all of them in six minutes five hours back. Statuses, outcomes, simulated, campaign and
+      // scheduled mail are mixed in. Most recent mail with a provider ID has an 'accepted' event; some has none, and
+      // some one dated before the email.
+      await db.query(`WITH mail AS (
+          SELECT n, $2::timestamptz - n * interval '47 minutes' AS created FROM generate_series(1, 949) AS n WHERE n * 47 NOT BETWEEN 13 * 1440 AND 20 * 1440
+          UNION ALL SELECT 1000 + n, $2::timestamptz - interval '3 minutes' - n * interval '7 minutes' FROM generate_series(0, 102) AS n
+          UNION ALL SELECT 2000 + n, $2::timestamptz - interval '5 hours' + n * interval '900 milliseconds' FROM generate_series(1, 400) AS n
+          UNION ALL SELECT 3000 + k * 10 + j, date_trunc('hour', $2::timestamptz) - k * interval '1 hour' + j * interval '9 minutes' FROM generate_series(13, 23) AS k, generate_series(1, k % 4) AS j),
+        emails AS (INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, scheduled_at, dispatch_version, created_at)
+          SELECT $1 || '-' || n, $1 || '-ws-' || n % 14, (ARRAY[$3, 'eu-fixture-1', 'ap-fixture-1'])[1 + n % 3], 'fixture', CASE WHEN n % 11 = 0 THEN $1 || '-campaign' END,
+            'sender@example.com', '["recipient@example.com"]', '[]', '[]', 'Private subject', '{}', n % 17 = 0 AND n < 3000, s.status,
+            CASE WHEN s.status NOT IN ('suppressed', 'rejected') THEN $1 || '-provider-' || n END,
+            CASE s.status WHEN 'delivered' THEN 3 | (n % 5 = 0)::int * 4 WHEN 'bounced' THEN 5 WHEN 'accepted' THEN 1 ELSE 0 END,
+            CASE WHEN n % 13 = 0 THEN created + interval '30 seconds' END, (n % 26 = 0)::int, created
+          FROM mail CROSS JOIN LATERAL (SELECT CASE WHEN n >= 3000 THEN 'delivered' ELSE (ARRAY['delivered', 'bounced', 'delivered', 'suppressed', 'accepted', 'delivered', 'rejected', 'delivered'])[1 + n % 8] END AS status) s
+          RETURNING id, workspace_id, simulated, created_at, provider_id)
+        INSERT INTO sending_email_events (id, workspace_id, email_id, type, simulated, created_at)
+        SELECT id || '-accepted', workspace_id, id, 'accepted', simulated,
+          created_at + CASE WHEN abs(hashtext(id)) % 23 = 0 THEN interval '-5 seconds' ELSE (80 + abs(hashtext(id)) % 1900) * interval '1 millisecond' END
+        FROM emails WHERE provider_id IS NOT NULL AND created_at >= $2::timestamptz - interval '26 hours' AND abs(hashtext(id)) % 19 <> 0`, [run, at, pool]);
+      // Mail that settles late: in the trailing window, three hours back, two days back, a direct send whose latency joins
+      // the sample, and one in a minute the cron next reaches exactly a day later (finalized only by the pass after that).
+      const late = { trailing: -5, hours: -180, days: -2 * 1440, latency: -30, edge: 185 };
+      for (const [name, minutes] of Object.entries(late)) await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, event_outcomes, dispatch_version, created_at)
+        VALUES ($1, $2, $3, 'fixture', 'sender@example.com', '["recipient@example.com"]', '[]', '[]', 'Private subject', '{}', false, 'queued', 0, 0, $4)`, [`${run}-late-${name}`, `${run}-ws-3`, pool, plus(minutes)]);
+
+      const first = await tick(at); // Fills 30 days of buckets from nothing.
+      assert.ok(first.available && first.medianSendLatencyMs !== null && first.acceptedHourly.includes(null) && first.acceptedHourly.some(n => n! > 0), 'The fixture exercises every figure.');
+      const counted: number[] = [];
+      for (const minutes of [late.trailing, late.hours, late.days]) counted.push(await bucket(minutes));
+      // The cron was down for two stretches, and one older bucket with mail in it is missing on its own; the late mail settles.
+      await db.query('DELETE FROM public_stats_minutes WHERE minute >= $1 AND minute < $2 OR minute >= $3 AND minute < $4 OR minute = $5',
+        [plus(-9 * 1440), plus(-9 * 1440 + 180), plus(-100), plus(-40), plus(-767 * 47)]);
+      const settle = (...names: string[]) => db.query("UPDATE sending_emails SET status = 'delivered', provider_id = id || '-provider', event_outcomes = 3 WHERE id = ANY ($1)", [names.map(name => `${run}-late-${name}`)]);
+      await settle('trailing', 'hours', 'days', 'latency');
+      await db.query("INSERT INTO sending_email_events (id, workspace_id, email_id, type, simulated, created_at) SELECT id || '-accepted', workspace_id, id, 'accepted', false, created_at + interval '650 milliseconds' FROM sending_emails WHERE id = $1", [`${run}-late-latency`]);
+      await tick(plus(2)); // Refills the gaps; the trailing window counts its late email.
+      assert.equal(await bucket(late.trailing), counted[0]! + 1);
+      await tick(plus(9)); // Still the hour's first 15 minutes: trailing buckets before 12:00 are published.
+      await tick(plus(9), false, PUBLIC_STATS_PRIVACY); // Rounded, as published.
+      await tick(plus(61)); // The next hour: the window moves and its oldest hour's buckets are deleted.
+      assert.equal(await bucket(late.hours), counted[1], 'Three hours back, the late email waits for its day-old pass.');
+      await tick(plus(1440 + 185)); // A day on: the day-old pass recomputes an hour at a time, and the gap since the last tick fills.
+      assert.deepEqual([await bucket(late.hours), await bucket(late.days)], [counted[1]! + 1, counted[2]], 'Counted at the day-old pass; never once final.');
+      const edge = await bucket(late.edge);
+      await settle('edge');
+      const last = plus(2 * 1440 + 186);
+      await tick(last); // That gap's newest minutes were a day old when filled: this pass finalizes them.
+      assert.equal(await bucket(late.edge), edge + 1);
+      // A hosted installation counts only its shared pool's mail (ten of the fourteen workspaces), recomputed from scratch.
+      for (let n = 0; n < 10; n++) {
+        await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [`${run}-ws-${n}`]);
+        await db.query("INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared','000000000000','ready')", [`${run}-ws-${n}`, pool]);
+      }
+      await db.query('DELETE FROM public_stats_minutes WHERE minute >= $1 AND minute < $2', era);
+      assert.deepEqual([(await tick(plus(9), true)).available, (await legacy(plus(9), true, floors)).regions], [true, [pool]]);
+      // Too few senders for the floor: nothing is published (and the latency sample isn't taken).
+      await db.query('DELETE FROM public_stats_minutes WHERE minute >= $1 AND minute < $2', era);
+      assert.equal((await tick(plus(9), false, { ...floors, workspaces: 20 })).available, false);
+    } finally { await db.query('ROLLBACK'); }
+  });
+
   test('an approved dashboard session creates scoped keys, listing never discloses secrets, revocation blocks reuse', async t => {
     const key = await keyFixture(t, { permissions: ['read'] });
     const db = await fixtureDatabase(t);
@@ -13915,6 +14050,44 @@ describe('Dashboard API capabilities', () => {
       const admin = { keyId: 'k', workspaceId: wid, admin: true, mailboxIds: null, permissions: ['read' as const] };
       const as = (credential: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken', role?: string) => readsDelivery({ workspaceId: wid, keyId: 'k', permissions: ['manage'], domains: [], credential, role }, admin);
       assert.deepEqual([as('dashboard', 'owner'), as('dashboard', 'member'), as('apiKey'), as('mcp', 'owner'), as('agentToken')], [true, false, true, false, false]);
+    });
+  });
+
+  test('dashboard reads: a statement past its time limit is refused with READ_TOO_LARGE within the limit; a normal read is unchanged', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId, [sent, received, thread] = ['sent', 'received', 'thread'].map(name => unique(`read-limit-${name}-`));
+      await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, created_at)
+        VALUES ($1, $2, $3, 'fixture', 'hello@limits.example', '["ada@example.net"]', '[]', '[]', 'Within the limit', '{"kind":"transactional"}', false, 'delivered', now() - interval '1 minute')`, [sent, wid, REGION]);
+      await db.query('INSERT INTO mail_threads(id, workspace_id) VALUES ($1, $2)', [thread, wid]);
+      await db.query(`INSERT INTO mail_messages(id, workspace_id, direction, thread_id, region, subject, from_address, "to", envelope_to, spam, received_at)
+        VALUES ($1, $2, 'inbound', $3, $4, 'Received mail', 'linus@example.org', '[]', '[]', false, now())`, [received, wid, thread, REGION]);
+      const timeout = async () => (await db.query('SHOW statement_timeout')).rows[0].statement_timeout;
+
+      // A normal read answers as before. Inside the fixture's transaction a budgeted read is a savepoint, so its SET LOCAL
+      // outlives it: that shows which limit the read ran under.
+      const page = ok(await local('GET', '/v1/logs?limit=10&counts=true'));
+      assert.deepEqual([page.data.map((row: Json) => row.id), page.counts.status, page.counts.kind], [[received, sent], { delivered: 1, received: 1 }, { transactional: 1, marketing: 0 }]);
+      assert.equal(await timeout(), '5s');
+      assert.deepEqual(ok(await local('GET', '/v1/inbound/messages')).data.map((row: Json) => row.id), [received]);
+      assert.equal(await timeout(), '3s');
+
+      // A slow statement: a row-security policy sleeps on this workspace's received mail, inside a savepoint that undoes it.
+      const workspace = (await db.query('SELECT quote_literal($1::text) AS q', [wid])).rows[0].q as string;
+      const tooBroad = async (path: string, seconds: number) => {
+        await db.query(`SAVEPOINT slow_read; SET LOCAL statement_timeout = '60s';
+          ALTER TABLE mail_messages ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
+          CREATE POLICY slow_read ON mail_messages USING (CASE WHEN workspace_id = ${workspace} THEN pg_sleep(30) IS NOT NULL ELSE true END)`);
+        try {
+          const started = performance.now(), reply = await local('GET', path), elapsed = performance.now() - started;
+          assert.equal(error(reply, 422, 'READ_TOO_LARGE').message, `This request is too broad to answer within ${seconds} seconds. Narrow the dates or filters.`);
+          assert.ok(elapsed > seconds * 1000 - 100 && elapsed < seconds * 1000 + 1000, `${path} answered after ${Math.round(elapsed)} ms`);
+          t.diagnostic(`READ-LIMIT ${path}: 422 after ${Math.round(elapsed)} ms`);
+        } finally { await db.query('ROLLBACK TO SAVEPOINT slow_read; RELEASE SAVEPOINT slow_read'); }
+      };
+      await tooBroad('/v1/logs?direction=received', 5);
+      await tooBroad('/v1/inbound/messages', 3);
+      // The policy and its locks went with the savepoint: the same read answers again.
+      assert.deepEqual(ok(await local('GET', '/v1/logs?direction=received')).data.map((row: Json) => row.id), [received]);
     });
   });
 

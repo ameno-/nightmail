@@ -15,7 +15,7 @@ import { chargeManualDelivery, claimedWithWebhooks, enqueue, JobDeferred, WEBHOO
 import { applyClaim, connectionReady, domainHosts, receivingSetup, type ReceivingSetup, hostGraceStart, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type HostEvidence, type HostStatus, type HostWrite, type IdentityFacts, type TenantState, PROOF_LABELS, proofRecordName, type ProofLabel } from './states.js';
 import { jobs } from './db/core.js';
 import { contacts, mergeSuppression } from './db/audience.js';
-import { lasting, RECEIVING_HOST_CHANGE, SuppressionEventData, WEBHOOK_CHANGE, webhookUrlHint, WebhookUrlHint, readCursor, nextCursor } from './core.js';
+import { lasting, RECEIVING_HOST_CHANGE, SuppressionEventData, WEBHOOK_CHANGE, webhookUrlHint, WebhookUrlHint, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
 import { workspaces } from './db/workspaces.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
@@ -1582,11 +1582,14 @@ function unsubscribePage(title: string, body: string) {
   return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><style>@font-face{font-family:Inter;src:url("/fonts/inter-variable.woff2") format("woff2");font-weight:100 900;font-style:normal;font-display:swap}body,body *{letter-spacing:-0.01em}</style><body style="font-family:Inter,Arial,sans-serif;letter-spacing:-0.01em;margin:48px;line-height:1.5"><main><h1 style="font-size:24px">${title}</h1>${body}</main></body></html>`;
 }
 function registerMetrics(app: App) {
+  // The window's aggregate is one statement that reads every email in it (a 30-day Overview reads all retained mail):
+  // it stops after 5 seconds with READ_TOO_LARGE rather than hold a connection.
+  const METRICS_READ = 5;
   const query = z.object({ region: z.string().optional(), from: z.string().datetime().optional(), to: z.string().datetime().optional(), stream: z.enum(['transactional', 'marketing']).optional(), granularity: z.enum(['day', 'hour']).default('day'), include: z.string().regex(/^(?:previous|streams)(?:,(?:previous|streams))*$/).optional().describe('Comma-separated extras computed in the same statement: previous (totals for the window of equal length ending at from) and streams (totals per stream for the window, ignoring the stream filter).') }).openapi('MetricsQuery');
   const bucket = z.object({ date: z.string(), count: z.number(), sent: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number() });
   const totalsSchema = z.object({ emails: z.number(), accepted: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number(), opened: z.number(), clicked: z.number(), failed: z.number(), deliveryDelayed: z.number(), simulated: z.number() });
   const schema = z.object({ basis: z.literal('created-cohort'), from: z.string(), to: z.string(), region: z.string().nullable(), stream: z.string().nullable(), totals: totalsSchema, daily: z.array(bucket), hourly: z.array(bucket).optional(), previous: z.object({ from: z.string(), to: z.string(), totals: totalsSchema }).optional().describe('Present with include=previous.'), streams: z.object({ transactional: totalsSchema, marketing: totalsSchema }).optional().describe('Present with include=streams.') }).openapi('Metrics');
-  app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', description: 'Operational created-cohort metrics, not invoicing or provider reputation. ' + DASHBOARD_CACHE_NOTE + ' Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity.', tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', description: 'Operational created-cohort metrics, not invoicing or provider reputation. ' + DASHBOARD_CACHE_NOTE + ' Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. ' + readLimitNote(METRICS_READ), tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
     const a = workspaceActor(c), q = c.req.valid('query'), end = q.to ?? now(), start = q.from ?? new Date(Date.parse(end) - 30 * 86400000).toISOString(); if (Date.parse(start) >= Date.parse(end) || Date.parse(end) - Date.parse(start) > 366 * 86400000) throw new ApiError(422, 'INVALID_DATE_RANGE', 'Metrics require an increasing range of at most 366 days.');
     const compute = async () => {
     if (q.region) region(await withRegionSettings(c.env,a.workspaceId),q.region);
@@ -1611,11 +1614,11 @@ function registerMetrics(app: App) {
     let rows: Row[], previous: { from: string; to: string; totals: ReturnType<typeof total> } | undefined, streams: { transactional: ReturnType<typeof total>; marketing: ReturnType<typeof total> } | undefined;
     if (!extras.size) {
       const filter = and(scoped(emails, a), gte(emails.createdAt, start), lt(emails.createdAt, end), q.region ? eq(emails.region, q.region) : undefined, q.stream ? sql`${emails.snapshot}->>'kind' = ${q.stream}` : undefined);
-      rows = (await c.env.db.execute<Row>(sql`
+      rows = (await budgetedRead(c.env.db, db => db.execute<Row>(sql`
       SELECT ${date} AS "date", ${counts({ status: sql`${emails.status}`, simulated: sql`${emails.simulated}`, providerId: sql`${emails.providerId}`, outcomes: sql`${emails.eventOutcomes}` })}
       FROM ${emails}
       WHERE ${filter}
-      GROUP BY 1 ORDER BY 1`)).rows;
+      GROUP BY 1 ORDER BY 1`), readLimit(METRICS_READ))).rows;
     } else {
       // One statement that never reads snapshot except through sending_emails_kind_created (workspace, snapshot->>'kind',
       // created_at); snapshot is TOASTed and detoasting it per row costs seconds. Every email is created as exactly one of
@@ -1634,7 +1637,7 @@ function registerMetrics(app: App) {
       const arm = (part: 'all' | 'kind', from: string) => sql`SELECT ${part}::text AS part, ${inWindow} AS cur, ${bucketOf} AS "date", ${measures}
         FROM ${emails} WHERE ${and(within(from), part === 'kind' ? sql`(${emails.snapshot}->>'kind') = ${kind === 'marketing' ? sql`'marketing'::text` : sql`'transactional'::text`}` : undefined)} GROUP BY 2, 3`;
       const arms = [...(needAll ? [arm('all', q.stream ? start : scanFrom)] : []), ...(needKind ? [arm('kind', q.stream ? scanFrom : start)] : [])];
-      const parts = (await c.env.db.execute<Row & { part: 'all' | 'kind'; cur: boolean }>(arms.length > 1 ? sql`${arms[0]} UNION ALL ${arms[1]}` : arms[0]!)).rows;
+      const parts = (await budgetedRead(c.env.db, db => db.execute<Row & { part: 'all' | 'kind'; cur: boolean }>(arms.length > 1 ? sql`${arms[0]} UNION ALL ${arms[1]}` : arms[0]!), readLimit(METRICS_READ))).rows;
       const sum = (list: Row[]) => list.reduce((acc, row) => { for (const key of Object.keys(acc) as Array<keyof typeof acc>) acc[key] += row[key]; return acc; }, total());
       const shown = parts.filter(row => row.part === (q.stream ? 'kind' : 'all'));
       const byDate = new Map<string, Row[]>();
