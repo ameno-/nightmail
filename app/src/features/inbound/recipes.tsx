@@ -104,7 +104,6 @@ export function RulesTab({ overview, refresh }: { overview: Overview; refresh: (
           <DropdownMenu label={`Actions for ${r.key}`} title={<Sentence ritual={r} />} items={[
             { label: 'Edit', onSelect: () => navigate(editPath(r)) },
             ...(r.recipe ? [{ label: 'Edit as code', onSelect: () => navigate(codePath(r.key)) }] : []),
-            { label: 'Trace', onSelect: () => navigate('/receiving/trace', { state: r.addresses[0] ? { to: r.addresses[0] } : null }) },
             { label: 'Delete', destructive: true, onSelect: () => { setDeleting(r); setDeleteOpen(true) } },
           ]} />
         </span> },

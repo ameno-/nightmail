@@ -91,10 +91,13 @@ const pages = ids => [
   ['Receiving', '/receiving', { from: '/overview' }],
   // A workspace with no receiving domain yet: the three steps that start it.
   ['Receiving · new workspace', '/receiving', { user: 'nia' }],
-  ['Receiving · endpoints', '/receiving?tab=endpoints', { from: '/receiving', click: 'Endpoints' }],
+  ['Receiving · destinations', '/receiving?tab=destinations', { from: '/receiving', click: 'Destinations' }],
+  // An address's page opens on its mail; Where mail goes and Settings are its other tabs.
   ['Receiving · address', `/receiving/addresses/${ids.address}`, { from: '/receiving' }],
-  ['Receiving · inbox', '/receiving/inbox', { from: '/receiving' }],
-  ['Receiving · trace', '/receiving/trace', { from: '/receiving' }],
+  ['Receiving · address · where mail goes', `/receiving/addresses/${ids.address}?tab=flow`, { from: `/receiving/addresses/${ids.address}`, click: 'Where mail goes' }],
+  // Its Settings tab shares its name with the sidebar's Settings, so the in-app pass opens it through the router.
+  ['Receiving · address · settings', `/receiving/addresses/${ids.address}?tab=settings`, { from: `/receiving/addresses/${ids.address}` }],
+  ['Receiving · test', '/receiving/trace', { from: `/receiving/addresses/${ids.address}?tab=flow` }],
   // Rules: the list (the Receiving tab), New rule's recipes, a recipe's form new and saved, and the script editor.
   ['Receiving · rules', '/receiving?tab=rules', { from: '/receiving', click: 'Rules' }],
   ['Receiving · new rule', '/receiving/rules/new', { from: '/receiving?tab=rules', click: 'New rule' }],
@@ -107,7 +110,7 @@ const pages = ids => [
   ['Receiving · rules · live conflict', '/receiving/rules/triage/code', { user: 'kai', live: 'conflict' }],
   ['Receiving · agent inboxes', '/receiving/inboxes', { from: '/receiving' }],
   ['Receiving · agent inbox', `/receiving/inboxes/${ids.inbox}`, { from: '/receiving/inboxes' }],
-  ['Receiving · webhook', `/receiving/webhooks/${ids.inboundWebhook}`, { from: '/receiving?tab=endpoints' }],
+  ['Receiving · webhook', `/receiving/webhooks/${ids.inboundWebhook}`, { from: '/receiving?tab=destinations' }],
   ['Campaigns', '/campaigns', { from: '/overview' }],
   ['Campaign editor', `/campaigns/${ids.campaign}/edit`, { from: '/campaigns' }],
   ['New campaign', '/campaigns/new', { from: '/campaigns', click: 'Create campaign' }],
@@ -196,8 +199,8 @@ const pages = ids => [
   // Edit key: a row's menu, then Edit; the dialog opens once the key's domains have loaded.
   ['API keys · edit key dialog', '/api-keys', { menu: ['Actions for Production', 'Edit', 'Edit key'] }],
   ['Receiving · new address dialog', '/receiving', { dialog: 'New address' }],
-  // The route editor opens once its inboxes, webhooks and forwards have loaded.
-  ['Receiving · route editor dialog', `/receiving/addresses/${ids.address}`, { dialog: 'Add a route' }],
+  // Where its mail goes (the route editor) opens once its inboxes, webhooks and forwards have loaded.
+  ['Receiving · route editor dialog', `/receiving/addresses/${ids.address}?tab=flow`, { dialog: 'Change' }],
   ['Receiving · new agent inbox dialog', '/receiving/inboxes', { dialog: 'New agent inbox' }],
   ['Receiving · ask your agent dialog', '/receiving/rules/new', { dialog: 'Ask your agent' }],
   ['Audience · import dialog', '/audience', { dialog: 'Import contacts' }],
@@ -207,7 +210,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Overview · range', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · endpoints', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
+const phonePages = new Set(['Overview', 'Overview · range', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · address', 'Receiving · address · where mail goes', 'Receiving · address · settings', 'Receiving · agent inboxes', 'Receiving · destinations', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },

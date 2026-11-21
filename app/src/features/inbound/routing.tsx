@@ -22,6 +22,7 @@ function destinationsOf(addresses: InboundAddress[], webhooks: InboundWebhook[],
 }
 
 // One row per recipient rule, read as "mail to X goes to Y". Address rows are the implicit routes every inbox has.
+const TITLE = 'Where should this mail go?'
 
 /** Loads what a route can deliver to (inboxes, webhooks and forwards) and opens the editor for one route, or a new one for `match`. */
 export function RouteEditor({ match, route, to, onClose }: { match: string; route?: { id: string; enabled: boolean; to: string[] | 'drop' } | null; to?: string[]; onClose: () => void }) {
@@ -29,7 +30,7 @@ export function RouteEditor({ match, route, to, onClose }: { match: string; rout
   const webhooks = useApiDef(queries.inboundWebhooks())
   const forwards = useApiDef(queries.forwardEndpoints())
   const error = (!addresses.data && addresses.error) || (!webhooks.data && webhooks.error) || (!forwards.data && forwards.error)
-  if (error) return <Dialog open onOpenChange={next => { if (!next) onClose() }} title={route ? 'Edit route' : 'Add route'} footer={<Button onClick={onClose}>Close</Button>}>
+  if (error) return <Dialog open onOpenChange={next => { if (!next) onClose() }} title={TITLE} footer={<Button onClick={onClose}>Close</Button>}>
     <ErrorState error={error} onRetry={() => { if (addresses.error) void addresses.refetch(); if (webhooks.error) void webhooks.refetch(); if (forwards.error) void forwards.refetch() }} />
   </Dialog>
   // The dialog opens once everything it lists has loaded, so nothing moves in it.
@@ -77,11 +78,11 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks, re
     </fieldset>
   }
   return <>
-    <Dialog open onOpenChange={next => { if (!next && !save.isPending) onClose() }} title={route ? 'Edit route' : draft.match ? 'Where should this mail go?' : 'Add route'}
+    <Dialog open onOpenChange={next => { if (!next && !save.isPending) onClose() }} title={TITLE}
       footer={<>
-        {route && <Button variant="ghost" className="routing-delete" disabled={save.isPending} onClick={() => setConfirmDelete(true)}>Delete route</Button>}
+        {route && <Button variant="ghost" className="routing-delete" disabled={save.isPending} onClick={() => setConfirmDelete(true)}>Remove</Button>}
         <Button disabled={save.isPending} onClick={onClose}>Cancel</Button>
-        <Button variant="primary" type="submit" form="routing-route" loading={save.isPending}>{route ? 'Save route' : 'Add route'}</Button>
+        <Button variant="primary" type="submit" form="routing-route" loading={save.isPending}>Save</Button>
       </>}>
       <form id="routing-route" className="stack" onSubmit={submit} noValidate>
         {/* An address, a pattern (reply+*@acme.com) or a whole domain (*@acme.com); the most specific route wins. */}
@@ -116,7 +117,7 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks, re
       if (hook) tick(hook.id)
     }} />
     <CreatedEndpointDialog created={created} onClose={() => setCreated(null)} writeRule={false} />
-    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} danger title="Delete route?" description="Its mail falls back to the next rule: its inbox, a pattern or the domain default." confirmLabel="Delete route" pending={remove.isPending}
+    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} danger title="Remove this?" description="Its mail falls back to its own inbox, a wildcard or the domain’s catch-all." confirmLabel="Remove" pending={remove.isPending}
       onConfirm={async () => { try { await remove.mutateAsync(); setConfirmDelete(false); onClose() } catch { /* The dialog stays open. */ } }} />
   </>
 }

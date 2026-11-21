@@ -97,7 +97,7 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
   const dropsHeaders = !!editing && editing.type === 'webhook' && type === 'webhook' && !!value
   // A new forward emails its recipient to confirm first, unless it's on a domain this workspace verified: Create says so.
   const confirms = !editing && type === 'forward' && !preverify
-  return <Dialog open={open} onOpenChange={next => { if (!busy) onOpenChange(next) }} title={editing ? `Edit ${editing.name}` : 'New endpoint'}
+  return <Dialog open={open} onOpenChange={next => { if (!busy) onOpenChange(next) }} title={editing ? `Edit ${editing.name}` : 'New destination'}
     footer={<><Button disabled={busy} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form={formId} loading={busy}>{editing ? 'Save' : confirms ? 'Email them to confirm' : 'Create'}</Button></>}>
     <form id={formId} className="stack" onSubmit={submit} noValidate>
       {typeOptions.length > 1 || editing ? <Field label="Type">
@@ -125,10 +125,10 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
   </Dialog>
 }
 
-/** Shown once after creating an endpoint: how rules call it, and a webhook's signing secret, which is never shown again. */
+/** Shown once after creating a destination (an endpoint): how rules call it, and a webhook's signing secret, which is never shown again. */
 export function CreatedEndpointDialog({ created, onClose, writeRule = true }: { created: (Endpoint & { secret?: string }) | null; onClose: () => void; writeRule?: boolean }) {
   const call = created ? `${created.call}${created.type === 'slack' ? '({ text: `New mail from ${email.from.address}` })' : created.type === 'discord' ? '({ content: `New mail from ${email.from.address}` })' : created.type === 'webhook' ? '({ subject: email.subject })' : '()'}` : ''
-  return <Dialog sensitive={Boolean(created?.secret)} open={!!created} onOpenChange={next => { if (!next) onClose() }} title={created?.status === 'pending' ? 'Confirmation sent' : 'Endpoint created'}
+  return <Dialog sensitive={Boolean(created?.secret)} open={!!created} onOpenChange={next => { if (!next) onClose() }} title={created?.status === 'pending' ? 'Confirmation sent' : 'Destination created'}
     footer={<><Button onClick={onClose}>Done</Button>{writeRule && created?.status !== 'pending' && <Link className="ui-button ui-button--primary ui-button--md" to="/receiving/rules/new" onClick={onClose}>New rule</Link>}</>}>
     {created && <div className="stack">
       <Field label="Call it from a rule"><div className="settings-copy-cell"><code>{call}</code><CopyButton value={call} label="Copy call" /></div></Field>

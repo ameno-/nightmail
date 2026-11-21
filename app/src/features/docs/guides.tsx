@@ -90,7 +90,7 @@ export const guides: Guide[] = [
         <ol className="docs-steps">
           <li>Open <Link to="/domains">Domains</Link>, choose the domain and publish its <strong>Receiving</strong> MX record at your DNS provider. {productName} turns receiving on once it resolves.</li>
           <li>In <Link to="/receiving">Receiving</Link>, choose <strong>New address</strong>, for example <code>support@reply.yourdomain.com</code>.</li>
-          <li>Send it a test email. It shows up in Receiving → Inbox within seconds.</li>
+          <li>Send it a test email. It shows up on the address’s Mail tab within seconds.</li>
           <li>Optional: add an <Link to="/docs/endpoints">endpoint</Link> (Slack, a webhook…) and a <Link to="/docs/rules">rule</Link> that chooses which mail goes there.</li>
         </ol>
       </Section>
@@ -126,7 +126,7 @@ export const guides: Guide[] = [
       </Section>
       <Section title={`AI decisions: questions for ${productName}’s AI`}>
         <p>Questions a rule asks {productName}’s AI about an email, answered 0 to 1. Ask with <code>decisions(email, {'{'} name: "question" {'}'})</code>; each name comes back as a score you compare, like <code>asks.refund &gt;= 0.7</code>. One request per email answers every question in every rule.</p>
-        <p>{productName}’s AI only reads mail at the receiving hosts you list under <strong>AI decisions can read mail at</strong> in the rule editor. Everywhere else, and in Try it and Trace, an AI decision gives its default answer instead; in Try it you set each answer with a slider to see what the rule would do.</p>
+        <p>{productName}’s AI only reads mail at the receiving hosts you list under <strong>AI decisions can read mail at</strong> in the rule editor. Everywhere else, and in Try it and Test, an AI decision gives its default answer instead; in Try it you set each answer with a slider to see what the rule would do.</p>
       </Section>
       <Section title="Sender lists">
         <p>Named lists of senders, edited below the rule: <code>vip: ceo@example.com, @partner.example</code>. Check one with <code>lists.has("vip", email.from.address)</code>; <code>@domain</code> covers everyone at that domain.</p>
@@ -137,7 +137,7 @@ export const guides: Guide[] = [
     id: 'endpoints', title: 'Endpoints and routes', summary: 'Where mail can go besides the Inbox, and the difference between a route and a rule.',
     body: () => <>
       <Section title="Endpoints">
-        <p>{endpointsLine} Create them in <Link to="/receiving?tab=endpoints">Receiving → Endpoints</Link>; each has a name rules call it by. Send a test from its ⋯ menu.</p>
+        <p>{endpointsLine} Create them in <Link to="/receiving?tab=destinations">Receiving → Destinations</Link>; each has a name rules call it by. Send a test from its ⋯ menu.</p>
         <Table head={['Type', 'Call it as', 'Notes']} rows={[
           ['Slack', <code key="c">{endpointPayloads.slack.signature('support')}</code>, 'An incoming webhook URL from Slack. Stored encrypted; mentions and link previews are off.'],
           ['Discord', <code key="c">{endpointPayloads.discord.signature('alerts')}</code>, 'A webhook URL from Discord. Stored encrypted; mentions are off.'],
@@ -146,7 +146,7 @@ export const guides: Guide[] = [
         ]} />
       </Section>
       <Section title="Routes or rules?">
-        <p>A <strong>route</strong> sends every message for an address, whole, to inboxes, webhooks and forwards. Every address has one: by default, its own Inbox. Edit it from the address’s page (<strong>Add a route</strong>) or from a route row.</p>
+        <p>A <strong>route</strong> sends every message for an address, whole, to inboxes, webhooks and forwards. Every address has one: by default, its own Inbox. Edit it from the address’s page (<strong>Where mail goes → Change</strong>) or from a catch-all or wildcard row.</p>
         <p>A <strong>rule</strong> chooses: which mail, and what to send. Slack and Discord posts are only sent by rules, because a channel post needs a message written for it. If a rule calls a webhook the route also delivers to, with a payload of its own, that webhook gets the rule’s payload instead of the whole message, once per message.</p>
       </Section>
       <Section title="Catch-all">
@@ -204,7 +204,7 @@ export const guides: Guide[] = [
     body: () => <Section title="Check the Webhook-Signature header">
       <p>{webhookSignatureGuide.text}</p>
       <Code label="webhook signature check">{webhookSignatureGuide.code}</Code>
-      <p>Find each webhook’s secret in <Link to="/settings#webhooks">Settings → Webhooks</Link>, and for received mail’s webhooks in <Link to="/receiving?tab=endpoints">Receiving → Endpoints</Link>.</p>
+      <p>Find each webhook’s secret in <Link to="/settings#webhooks">Settings → Webhooks</Link>, and for received mail’s webhooks in <Link to="/receiving?tab=destinations">Receiving → Destinations</Link>.</p>
     </Section>,
   },
 ]

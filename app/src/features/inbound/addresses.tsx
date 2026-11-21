@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { X } from 'lucide-react'
-import { Link, useNavigate, useParams } from 'react-router'
-import { Alert, Button, ConfirmDialog, Dialog, Disclosure, ErrorState, Field, IconButton, Input, LoadingRegion, PageHeader, SectionHeader, Select, SkeletonText, useToast, fieldError, MutationError } from '../../components/ui'
-import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
-import { queries } from '../../data/queries'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
+import { Alert, Button, ConfirmDialog, Dialog, Disclosure, ErrorState, Field, IconButton, Input, KeyValues, LoadingRegion, PageHeader, Select, SkeletonText, Tabs, useToast, fieldError, MutationError } from '../../components/ui'
+import { useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { date, number } from '../../lib/format'
+import { AddressMail } from './threads'
 import { request } from '../../data/live'
 import { errorText, type InboundAddress, type InboundAddressInput, type InboundAddressPatch, type MailboxDomain } from '../../data/types'
 import { AliasEditor, aliasState, commitAliases, type AliasState } from './aliases'
@@ -12,7 +12,6 @@ import { steps } from './concepts'
 import { typeLabel, useOverview } from './overview'
 import { Match, RitualIcon, TargetIcon, targetName } from './parts'
 import { RouteEditor } from './routing'
-import { when } from './shared'
 import '../settings/settings.css'
 import './inbound.css'
 import './receiving.css'
@@ -82,7 +81,7 @@ const sameList = (a: string[], b: string[]) => a.length === b.length && [...a].s
 
 type RuleConfig = { version: number; config: { attachments: { rule: string; target: string; continue: boolean }[] } }
 
-/** Route → Rules → Goes to for one address, with what can be done at each step right there. */
+/** Receive → Process → Deliver for one address, with what can be done at each step right there. */
 function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address: InboundAddress; overview: ReturnType<typeof useOverview>; onAddAlias: () => void; onAddPattern: () => void }) {
   const toast = useToast()
   const entry = overview.data?.routes.data.find(r => r.address?.id === address.id)
@@ -102,20 +101,20 @@ function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address:
   const available = (overview.data?.rules ?? []).filter(r => !attached.includes(r.key))
   return <div className="addr-path" aria-label="How mail to this address is handled">
     <section className="addr-step" id="route">
-      <h2>{steps.route.title}</h2>
+      <h2>{steps.receive.title}</h2>
       <ul>
         <li><Match value={address.address} /></li>
         {address.aliases.map(a => <li key={a}><Match value={a} /><span className="muted">alias</span></li>)}
-        {address.rules.map(r => <li key={r}><Match value={r} /><span className="muted">pattern</span></li>)}
+        {address.rules.map(r => <li key={r}><Match value={r} /><span className="muted">wildcard</span></li>)}
       </ul>
-      {!address.expiresAt && <div className="addr-step__actions"><Button size="sm" variant="ghost" onClick={onAddAlias}>Add alias</Button><Button size="sm" variant="ghost" onClick={onAddPattern}>Add pattern</Button></div>}
+      {!address.expiresAt && <div className="addr-step__actions"><Button size="sm" variant="ghost" onClick={onAddAlias}>Add alias</Button><Button size="sm" variant="ghost" onClick={onAddPattern}>Add wildcard</Button></div>}
     </section>
     <span className="addr-arrow" aria-hidden="true">→</span>
     <section className="addr-step" id="rules">
-      <h2>{steps.rules.title}</h2>
+      <h2>{steps.process.title}</h2>
       {!entry ? <SkeletonText width="50%" /> : attached.length ? <ul>{attached.map((k, i) => <li key={k}><RitualIcon /><Link to={`/receiving/rules/${encodeURIComponent(k)}`}><code>{k}</code></Link>{i < attached.length - 1 && <span className="addr-then">then</span>}<span className="addr-grow" />
         <IconButton size="sm" label={`Detach ${k}`} disabled={busy} onClick={() => void attach(list => list.filter(b => !(b.rule === k && b.target === address.id)), `${k} detached.`)}><X size={14} aria-hidden="true" /></IconButton></li>)}</ul>
-        : <p className="addr-step__empty">{steps.rules.empty}</p>}
+        : <p className="addr-step__empty">{steps.process.empty}</p>}
       <div className="addr-step__foot">
         {available.length > 0 && <div className="addr-step__actions">
           <Select aria-label="Rule to attach" value={ritual} onValueChange={setRitual} options={[{ value: '', label: 'Attach a rule…' }, ...available.map(r => ({ value: r.key, label: r.key }))]} />
@@ -126,12 +125,12 @@ function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address:
     </section>
     <span className="addr-arrow" aria-hidden="true">→</span>
     <section className="addr-step" id="goes-to">
-      <h2>{steps.goesTo.title}</h2>
+      <h2>{steps.deliver.title}</h2>
       {/* The list is where its mail goes, a route's changes included (no Inbox when the route sends it elsewhere,
           Dropped when it drops it); webhooks past the first 50 are one link away. */}
       {!entry ? <SkeletonText width="50%" /> : <ul>{entry.to.map(t => <li key={`${t.type}:${t.id}`}><TargetIcon type={t.type} /><span>{targetName(t, address.id)}</span>{(t.via || t.status === 'paused' || t.type !== 'inbox' || t.id !== address.id) && <span className="muted">{t.via ? `via ${t.via}` : t.status === 'paused' ? 'Paused' : typeLabel[t.type]}</span>}</li>)}
-        {entry.toTruncated && <li><Link to={`/receiving?tab=endpoints&address=${encodeURIComponent(address.id)}`}>{number(entry.toTotal - entry.to.length)} more {entry.toTotal - entry.to.length === 1 ? 'webhook' : 'webhooks'}</Link></li>}</ul>}
-      <div className="addr-step__actions"><Button size="sm" onClick={() => setRouting(true)}>{entry?.route ? 'Edit route' : 'Add a route'}</Button></div>
+        {entry.toTruncated && <li><Link to={`/receiving?tab=destinations&address=${encodeURIComponent(address.id)}`}>{number(entry.toTotal - entry.to.length)} more {entry.toTotal - entry.to.length === 1 ? 'webhook' : 'webhooks'}</Link></li>}</ul>}
+      <div className="addr-step__actions"><Button size="sm" onClick={() => setRouting(true)}>Change</Button></div>
     </section>
     {routing && <RouteEditor match={address.address} route={entry?.route} to={[address.id]} onClose={() => { setRouting(false); void overview.refetch() }} />}
   </div>
@@ -140,7 +139,7 @@ function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address:
 /** Wildcard patterns that also deliver here, such as reply+*@acme.com. */
 function PatternsField({ address, inputRef }: { address: InboundAddress; inputRef: React.RefObject<HTMLInputElement | null> }) {
   const [draft, setDraft] = useState('')
-  const save = useApiMutation((api, rules: string[]) => api.inbound.updateAddress(address.id, { rules } as InboundAddressPatch), 'Patterns saved', false, true, address.id)
+  const save = useApiMutation((api, rules: string[]) => api.inbound.updateAddress(address.id, { rules } as InboundAddressPatch), 'Wildcards saved', false, true, address.id)
   const rules = save.data?.rules ?? address.rules
   const domain = address.address.split('@')[1]
   async function add() {
@@ -149,26 +148,20 @@ function PatternsField({ address, inputRef }: { address: InboundAddress; inputRe
     try { await save.mutateAsync([...rules, full]); setDraft('') } catch { /* Shown below. */ }
   }
   return <div className="ui-field addr-patterns">
-    <label className="ui-field__label" htmlFor="address-pattern">Patterns</label>
-    {rules.length > 0 && <ul>{rules.map(r => <li key={r}><Match value={r} /><IconButton size="sm" label="Remove pattern" disabled={save.isPending} onClick={() => void save.mutateAsync(rules.filter(x => x !== r)).catch(() => undefined)}><X size={14} aria-hidden="true" /></IconButton></li>)}</ul>}
+    <label className="ui-field__label" htmlFor="address-pattern">Wildcards</label>
+    {rules.length > 0 && <ul>{rules.map(r => <li key={r}><Match value={r} /><IconButton size="sm" label="Remove wildcard" disabled={save.isPending} onClick={() => void save.mutateAsync(rules.filter(x => x !== r)).catch(() => undefined)}><X size={14} aria-hidden="true" /></IconButton></li>)}</ul>}
     <div className="addr-patterns__add"><Input ref={inputRef} id="address-pattern" value={draft} disabled={save.isPending} placeholder={`name+*@${domain}`} onChange={e => setDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void add() } }} autoComplete="off" spellCheck={false} />
       <Button disabled={!draft.trim() || save.isPending} loading={save.isPending} onClick={() => void add()}>Add</Button></div>
     {save.error && <div className="ui-field__hint ui-field__error" role="alert">{errorText(save.error)}</div>}
   </div>
 }
 
-function RecentMail({ address, threads }: { address: InboundAddress; threads: ReturnType<typeof useAddressThreads> }) {
-  if (threads.error) return <ErrorState error={threads.error} onRetry={() => void threads.refetch()} />
-  if (!threads.data) return <div aria-hidden="true"><SkeletonText width="60%" /></div>
-  if (!threads.data.length) return <p className="muted">No mail yet</p>
-  return <ul className="addr-recent">{threads.data.slice(0, 5).map(t => <li key={t.id}><Link to={`/receiving/inbox?address=${address.id}&thread=${t.id}`}><span className="addr-recent__subject" title={t.subject || undefined}>{t.subject || '(no subject)'}</span><span className="addr-recent__snippet muted" title={t.snippet || undefined}>{t.snippet}</span><time>{when(t.lastMessageAt)}</time></Link></li>)}</ul>
-}
-
-const useAddressThreads = (id: string) => useApiDef(queries.inboundThreads(id, 'inbox', '', undefined))
+type AddressTab = 'mail' | 'flow' | 'settings'
 
 export function InboundAddressDetailPage() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
+  const [params, setParams] = useSearchParams()
   const { canAdminister } = useWorkspaceAccess()
   const address = useApiQuery(['inbound-address', id], (api, signal) => api.inbound.address(id, signal))
   const save = useApiMutation((api, patch: InboundAddressPatch) => api.inbound.updateAddress(id, patch), 'Address saved', false, true, id)
@@ -177,12 +170,20 @@ export function InboundAddressDetailPage() {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const patternInput = useRef<HTMLInputElement>(null)
   const current = address.data
-  // The path and recent mail are separate reads; the page shows once all of them settle, so nothing moves in.
-  const overview = useOverview({ q: current?.address ?? '', kind: current?.kind === 'inbox' ? 'inbox' : 'address', limit: 5 }, false, canAdminister && !!current)
-  const threads = useAddressThreads(id)
-  const ready = !!current && (!canAdminister || overview.data !== undefined || !!overview.error) && (threads.data !== undefined || !!threads.error)
+  // Mail first: opening an address shows its mail. Where its mail goes and its settings are for owners and admins.
+  const asked = params.get('tab')
+  const tab: AddressTab = canAdminister && (asked === 'flow' || asked === 'settings') ? asked : 'mail'
+  const show = (next: AddressTab) => setParams(previous => {
+    const query = new URLSearchParams()
+    if (next !== 'mail') query.set('tab', next)
+    // A conversation's place in the URL belongs to the Mail tab.
+    else for (const key of ['view', 'thread', 'message']) { const value = previous.get(key); if (value) query.set(key, value) }
+    return query
+  }, { replace: true })
+  const overview = useOverview({ q: current?.address ?? '', kind: current?.kind === 'inbox' ? 'inbox' : 'address', limit: 5 }, false, canAdminister && !!current && tab === 'flow')
   const input = edited ?? (current ? formOf(current) : null)
-  if (address.error) return <><PageHeader title="Address" backTo="/receiving" /><ErrorState error={address.error} onRetry={() => void address.refetch()} /></>
+  // Only a failed first load replaces the page: a later refetch that fails keeps the Settings form and its edits.
+  if (address.error && !current) return <><PageHeader title="Address" backTo="/receiving" /><ErrorState error={address.error} onRetry={() => void address.refetch()} /></>
   const base = input?.base
   const dirty = !!base && !!input && (input.displayName.trim() !== (base.displayName ?? '') || !sameList(input.aliases.list, base.aliases) || !!input.aliases.draft.trim())
   async function submit(event: FormEvent) {
@@ -197,45 +198,38 @@ export function InboundAddressDetailPage() {
     setInput({ ...input, aliases: { list: aliases.list, draft: '', message: null } })
     try { setInput(formOf(await save.mutateAsync(patch))) } catch { /* Shown in the form. */ }
   }
-  // Opens the aliases and patterns first when the field is inside them.
+  // Opens the aliases and wildcards (on the Settings tab) first when the field is inside them.
   const focus = (target: () => HTMLElement | null) => { const el = target(); el?.closest('details')?.setAttribute('open', ''); el?.scrollIntoView({ block: 'center' }); el?.focus() }
-  return <div className="stack inbound-stack">
-    {/* The actions hold their place while the address loads, as the same buttons disabled (their labels give their exact
-        widths): on a phone they take a row of their own. */}
-    <PageHeader title={current ? <PrivateAddress value={current.address} /> : <SkeletonText width={240} lineHeight={28} />} backTo="/receiving" actions={current ? <>
-      {canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/trace" state={{ to: current.address }}>Trace</Link>}
-      <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/inbox?address=${encodeURIComponent(current.id)}`}>Open in Inbox</Link>
-      {canAdminister && <Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete</Button>}
-    </> : <>{canAdminister && <Button disabled>Trace</Button>}<Button disabled>Open in Inbox</Button>{canAdminister && <Button variant="danger" disabled>Delete</Button>}</>} />
-    {!ready ? <LoadingRegion label="Loading address"><div className="addr-skeleton" aria-hidden="true"><span /><span /><span /></div></LoadingRegion> : current && <div className="stack inbound-stack addr-page">
-      <dl className="settings-facts">
-        <div><dt>Domain</dt><dd><Link to="/domains">{current.domain}</Link></dd></div>
-        {current.publicAddress && current.publicAddress !== current.address && <div><dt>Sends as</dt><dd className="settings-break"><PrivateAddress value={current.publicAddress} /></dd></div>}
-        <div><dt>Created</dt><dd>{current.origin === 'auto' ? 'By the catch-all, ' : ''}{date(current.createdAt)}</dd></div>
-        {current.expiresAt && <div><dt>Expires</dt><dd>{date(current.expiresAt)}</dd></div>}
-      </dl>
-      {current.expiresAt && Date.parse(current.expiresAt) <= Date.now() && <Alert tone="info">This temporary address expired. It can’t receive or send, but its mail stays readable.</Alert>}
-      {canAdminister && <AddressPath address={current} overview={overview} onAddAlias={() => focus(() => document.getElementById('inbound-address-aliases'))} onAddPattern={() => focus(() => patternInput.current)} />}
-      <section className="section stack" aria-labelledby="address-recent">
-        {/* The thread count heads the list; its newest row is the last message. */}
-        <SectionHeader title={<span id="address-recent">Recent mail{current.stats.threads > 0 && <span className="muted"> · {number(current.stats.threads)} {current.stats.threads === 1 ? 'thread' : 'threads'}{current.stats.unreadThreads > 0 && `, ${number(current.stats.unreadThreads)} unread`}</span>}</span>} />
-        <RecentMail address={current} threads={threads} />
-      </section>
-      {canAdminister && <section className="section section--bordered stack">
-        <SectionHeader title="Settings" />
+  const focusSettings = (target: () => HTMLElement | null) => { show('settings'); requestAnimationFrame(() => requestAnimationFrame(() => focus(target))) }
+  const expired = !!current?.expiresAt && Date.parse(current.expiresAt) <= Date.now()
+  return <div className="stack inbound-stack addr-root" data-tab={tab}>
+    <PageHeader title={current ? <PrivateAddress value={current.address} /> : <SkeletonText width={240} lineHeight={28} />} backTo="/receiving" />
+    {canAdminister && <Tabs label="Address" value={tab} onValueChange={value => show(value as AddressTab)}
+      items={[{ value: 'mail', label: 'Mail', count: current ? current.stats.unreadThreads || undefined : undefined }, { value: 'flow', label: 'Where mail goes' }, { value: 'settings', label: 'Settings' }]} />}
+    {expired && <Alert tone="info">This temporary address expired. It can’t receive or send, but its mail stays readable.</Alert>}
+    {tab === 'mail' ? <AddressMail addressId={id} />
+      : !current || (tab === 'flow' && overview.data === undefined && !overview.error) ? <LoadingRegion label="Loading address"><div className="addr-skeleton" aria-hidden="true"><span /><span /><span /></div></LoadingRegion>
+      : tab === 'flow' ? <div className="stack addr-page"><AddressPath address={current} overview={overview} onAddAlias={() => focusSettings(() => document.getElementById('inbound-address-aliases'))} onAddPattern={() => focusSettings(() => patternInput.current)} />
+        <div className="cluster"><Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/trace" state={{ to: current.address }}>Test</Link></div></div>
+      : <div className="stack addr-page">
+        <KeyValues className="addr-facts" items={[
+          ['Domain', <Link key="d" to="/domains">{current.domain}</Link>],
+          ...(current.publicAddress && current.publicAddress !== current.address ? [['Sends as', <PrivateAddress key="s" value={current.publicAddress} />] as [string, ReactNode]] : []),
+          ['Created', `${current.origin === 'auto' ? 'By the catch-all, ' : ''}${date(current.createdAt)}`],
+          ...(current.expiresAt ? [['Expires', date(current.expiresAt)] as [string, ReactNode]] : []),
+        ]} />
         {input && <form className="stack inbound-settings-form" onSubmit={submit} noValidate>
           <MutationError error={save.error} />
           <Field label="Display name" htmlFor="inbound-address-display" error={fieldError(save.error, 'displayName')}><Input id="inbound-address-display" value={input.displayName} onChange={event => setInput({ ...input, displayName: event.target.value })} disabled={save.isPending} placeholder="Support" /></Field>
-          {/* The route above lists them; editing them is one click away (Add alias and Add pattern open it). A temporary
-              address can have neither, so it has no editor for them. */}
-          {!current.expiresAt && <Disclosure className="addr-more" title="Aliases and patterns" defaultOpen={!!fieldError(save.error, 'aliases')}>
+          {/* A temporary address can have neither aliases nor wildcards, so it has no editor for them. */}
+          {!current.expiresAt && <Disclosure className="addr-more" title="Aliases and wildcards" defaultOpen={!!fieldError(save.error, 'aliases') || current.aliases.length + current.rules.length > 0}>
             <AliasEditor id="inbound-address-aliases" address={current.address} saved={input.base.aliases} value={input.aliases} onChange={aliases => setInput({ ...input, aliases })} disabled={save.isPending} error={fieldError(save.error, 'aliases')} />
             <PatternsField key={current.updatedAt} address={current} inputRef={patternInput} />
           </Disclosure>}
           <div className="cluster form-actions"><Button variant="primary" type="submit" loading={save.isPending} disabled={!dirty}>Save changes</Button>{dirty && !save.isPending && <Button onClick={() => { setInput(null); save.reset() }}>Discard</Button>}</div>
         </form>}
-      </section>}
-    </div>}
-    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title="Delete this address?" description="Stored messages stay, without their read, star and archive state. New mail to it and its aliases follows the domain’s catch-all, and routes stop delivering here." confirmLabel="Delete address" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/receiving') }} />
+        <div className="addr-danger"><Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete address</Button></div>
+      </div>}
+    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title="Delete this address?" description="Its mail stays in Logs. New mail to it and its aliases follows the domain’s catch-all, and nothing else delivers here." confirmLabel="Delete address" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/receiving') }} />
   </div>
 }

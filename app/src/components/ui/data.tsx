@@ -27,7 +27,8 @@ export function MetricRow({ label, hint, spark, value, unit, tone, meter, classN
 }
 
 /** A facet: a value, its tone's dot and its count. Selectable when it has onSelect; `slot` reserves an empty row. */
-/** `series`: the data palette's hue for the value (sent, received, delivered, opened, clicked, bounced, complained); else its tone's. */
+/** `series`: the data palette's hue for the value (sent, received, delivered, opened, clicked, bounced, complained); else its tone's.
+ *  With neither, the value has no dot: colour only says how mail went. */
 export type Facet = { key: string; label?: ReactNode; count?: number | null; tone?: Tone; series?: string; selected?: boolean; onSelect?: () => void; slot?: boolean };
 export type FacetGroup = { key: string; title: ReactNode; items: Facet[] };
 /** The facets beside a list: each group a small caps title over its values, each value with its count. */
@@ -37,7 +38,7 @@ export function FacetRail({ groups, label = 'Facets' }: { groups: FacetGroup[]; 
       <h3 className="ui-facets__title">{group.title}</h3>
       <ul>{group.items.map(item => {
         if (item.slot) return <li key={item.key} className="ui-facet ui-facet--slot" aria-hidden="true" />;
-        const body = <><span className={cx('ui-facet__dot', `ui-tone--${item.tone ?? 'neutral'}`, item.series && `ui-series--${item.series}`)} aria-hidden="true" /><span className="ui-facet__label">{item.label}</span><span className="ui-facet__count">{item.count === null || item.count === undefined ? '–' : item.count.toLocaleString()}</span></>;
+        const body = <><span className={cx('ui-facet__dot', `ui-tone--${item.tone ?? 'neutral'}`, item.series && `ui-series--${item.series}`, !item.tone && !item.series && 'ui-facet__dot--none')} aria-hidden="true" /><span className="ui-facet__label">{item.label}</span><span className="ui-facet__count">{item.count === null || item.count === undefined ? '–' : item.count.toLocaleString()}</span></>;
         return <li key={item.key}>{item.onSelect ? <button type="button" className="ui-facet" aria-pressed={item.selected ?? false} data-empty={!item.count || undefined} onClick={item.onSelect}>{body}</button> : <span className="ui-facet" data-empty={!item.count || undefined}>{body}</span>}</li>;
       })}</ul>
     </section>)}
