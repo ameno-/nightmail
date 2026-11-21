@@ -27,7 +27,7 @@ const INTERNAL_HOST = /\b(?:[a-z0-9-]+\.)*(?:internal|invalid|local|svc\.cluster
 const INTERNAL_ID = /\b(?:ws|sgr|sho|dom|wh|key|mbk|usr|conv|tkt)_[0-9a-z]{16,}\b/g;
 /** People and systems the agent never names: Nightmail staff, internal tools. */
 const STAFF = /\b(?:Ryan Vogel|thdxr|R44VC0RP|Dax Raad|PlanetScale|Hyperdrive|platform_operators|support_grants|supportGate|operatorGate|SupportPlatform)\b/i;
-const FENCE = /<\/?untrusted>|<customer>|<\/customer>|<context>|<\/context>/i;
+const FENCE = /<\/?untrusted>|<customer>|<\/customer>|<context>|<\/context>|<notes\b|<\/notes>/i;
 
 export function gate(text: string, scope: GateScope): GateResult {
   const reasons: string[] = [];
