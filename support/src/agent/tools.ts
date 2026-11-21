@@ -35,6 +35,10 @@ export interface ToolHost {
   reply(text: string): Promise<string>;
   /** Chat only: keeps a note about this conversation's person for their later chats (Nightmail picks person and workspace). */
   note(text: string): Promise<string>;
+  /** Chat only, owners and admins: proposes one change the customer confirms signed in, on its card. Nothing runs here. */
+  propose(proposal: ActionProposal): Promise<string>;
+  /** Chat only, owners and admins: re-checks a domain's DNS now (no confirmation: it changes only the stored status). */
+  recheckDomain(domainId: string): Promise<string>;
 }
 /** The longest note Nightmail keeps (NOTE_MAX_LENGTH in api/src/support-notes.ts). */
 export const NOTE_MAX = 1000;
@@ -53,6 +57,46 @@ export type TicketInput = {
   tried: { tool: string; finding: string }[]; recommendation: string; evidence: Record<string, string[]>; details: TicketDetails;
 };
 export class ToolFailure extends Error {}
+
+/**
+ * The changes the agent can propose in chat (api/src/support-actions.ts), each with the IDs its body takes: built per kind,
+ * so nothing else the model passes reaches Nightmail. Nightmail writes what the customer confirms; nothing here confirms.
+ * `title` is what the model hears about one: fixed words for its kind, never Nightmail's sentence or the names in it.
+ */
+const ACTION_FIELDS: Record<string, { required: readonly ActionField[]; optional?: readonly ActionField[]; title: string }> = {
+  retry_webhook_delivery: { required: ['webhookId', 'deliveryId'], title: 'retry a webhook delivery' },
+  test_webhook: { required: ['webhookId'], title: 'send a test to a webhook' },
+  retry_inbound_delivery: { required: ['webhookId', 'deliveryId'], title: 'retry an inbound webhook delivery' },
+  test_inbound_webhook: { required: ['webhookId'], title: 'send a test to an inbound webhook' },
+  redeliver_message: { required: ['messageId'], optional: ['webhookId'], title: 'redeliver a received message' },
+  pause_campaign: { required: ['campaignId'], title: 'pause a campaign' },
+};
+type ActionField = 'webhookId' | 'deliveryId' | 'messageId' | 'campaignId';
+export const ACTION_KINDS = ['retry_webhook_delivery', 'test_webhook', 'retry_inbound_delivery', 'test_inbound_webhook', 'redeliver_message', 'pause_campaign'] as const;
+export type ActionKind = typeof ACTION_KINDS[number];
+export type ActionProposal = { kind: ActionKind } & Partial<Record<ActionField, string>>;
+/** What a kind does, in a few fixed words ("retry a webhook delivery"). */
+export const actionTitle = (kind: string) => ACTION_FIELDS[kind]?.title ?? 'a change';
+/** The IDs Nightmail's proposal body takes (its own pattern), checked here as well as by the tool's schema. */
+const ACTION_ID = '^[A-Za-z0-9_-]{1,120}$', ACTION_ID_PATTERN = new RegExp(ACTION_ID);
+const actionId = (value: unknown) => {
+  const s = String(value ?? '');
+  if (!ACTION_ID_PATTERN.test(s)) throw new ToolFailure('That ID is not valid. Use an ID from an earlier tool result for this customer.');
+  return s;
+};
+const present = (value: unknown) => value !== undefined && value !== null && value !== '';
+/** The model's propose_action arguments as the body for its kind: its required IDs, its optional one, and nothing else. */
+export function actionProposal(args: Record<string, unknown>): ActionProposal {
+  const kind = String(args.kind ?? '') as ActionKind, fields = (ACTION_KINDS as readonly string[]).includes(kind) ? ACTION_FIELDS[kind]! : null;
+  if (!fields) throw new ToolFailure(`Pick kind from: ${ACTION_KINDS.join(', ')}.`);
+  const body: ActionProposal = { kind };
+  for (const key of fields.required) {
+    if (!present(args[key])) throw new ToolFailure(`${kind} needs ${fields.required.join(' and ')}, from an earlier tool result for this customer.`);
+    body[key] = actionId(args[key]);
+  }
+  for (const key of fields.optional ?? []) if (present(args[key])) body[key] = actionId(args[key]);
+  return body;
+}
 
 const DAYS = /^\d{1,2}$/;
 const ID = '^[A-Za-z0-9_.:-]{1,120}$', ID_PATTERN = new RegExp(ID);
@@ -187,14 +231,27 @@ export const TOOLS: ToolSpec[] = [
   { name: 'add_note', description: `Keep a short note about this customer for a later support chat with them: a durable fact that would help next time, such as their setup, what was tried and what it showed, a preference, or something you or the ${productName} team promised. The customer never sees notes. Never put secrets, credentials, codes or keys in one, and never copy their messages or email content wholesale: write the fact in a sentence or two. At most one or two per conversation.`,
     params: { text: { type: 'string', description: `The note, under ${NOTE_MAX} characters, e.g. "Sends from news.acme.com through Cloudflare DNS; DKIM CNAMEs were proxied, fixed Nov 4."`, max: NOTE_MAX } },
     label: fixed('Noting that for next time…', 'Noted that for next time'), execute: (a, h) => h.note(String(a.text ?? '')) },
+  { name: 'propose_action', description: `Propose one change for the customer to confirm on a card in this chat, signed in to ${productName}: retry a failed webhook delivery (retry_webhook_delivery: webhookId, deliveryId), send a test event to a webhook (test_webhook: webhookId), the same for receiving webhooks (retry_inbound_delivery: webhookId, deliveryId; test_inbound_webhook: webhookId), redeliver a received message to its route's webhooks (redeliver_message: messageId, optionally webhookId for one endpoint), or pause a sending campaign (pause_campaign: campaignId). Take the IDs from earlier tool results, and propose only what they show would help. ${productName} writes what the customer sees, and nothing changes until they press Confirm on the card: never on your call, and never on anything they type. At most 3 open at once.`,
+    params: {
+      kind: { type: 'enum', values: ACTION_KINDS, description: 'The change' },
+      webhookId: { type: 'string', description: 'The webhook (retry and test kinds; optional for redeliver_message)', optional: true, max: 120, pattern: ACTION_ID },
+      deliveryId: { type: 'string', description: 'The failed delivery (retry kinds)', optional: true, max: 120, pattern: ACTION_ID },
+      messageId: { type: 'string', description: 'The received message (redeliver_message)', optional: true, max: 120, pattern: ACTION_ID },
+      campaignId: { type: 'string', description: 'The campaign (pause_campaign)', optional: true, max: 120, pattern: ACTION_ID },
+    },
+    label: fixed('Preparing a change for you to confirm…', 'Prepared a change for you to confirm'), execute: async (a, h) => h.propose(actionProposal(a)) },
+  { name: 'recheck_domain', description: `Re-check a sending domain's DNS now, as the customer's own Check now does, after they changed a record: ${productName} queues a verification and answers the stored status. It needs no confirmation and changes nothing but that status. Read domain_health again in a minute for the result.`,
+    params: { domainId: { type: 'string', description: 'The domain ID from list_domains', max: 120, pattern: ACTION_ID } },
+    label: fixed('Re-checking your domain’s DNS…', 'Re-checked your domain’s DNS'), execute: async (a, h) => h.recheckDomain(actionId(a.domainId)) },
 ];
 export const TOOL_NAMES = TOOLS.map(t => t.name);
 
 /**
  * Tools whose /v1/support routes Nightmail lets only owners and admins read (SUPPORT_CEILINGS in
- * api/src/support-conversations.ts): offered only when a workspace in scope has one of those roles.
+ * api/src/support-conversations.ts), and the changes only they may make: offered only in a chat whose workspace has one of
+ * those roles (never by email).
  */
-export const MANAGER_TOOLS: ReadonlySet<string> = new Set(['list_domains', 'domain_health', 'list_webhook_deliveries', 'get_billing', 'get_audit', 'api_errors', 'explain_request']);
+export const MANAGER_TOOLS: ReadonlySet<string> = new Set(['list_domains', 'domain_health', 'list_webhook_deliveries', 'get_billing', 'get_audit', 'api_errors', 'explain_request', 'propose_action', 'recheck_domain']);
 /** Email reads no account: its turns answer through reply and can file a ticket, nothing else. */
 const EMAIL_TOOLS: ReadonlySet<string> = new Set(['reply', 'file_ticket']);
 export type Turn = { channel: 'chat'; manager: boolean } | { channel: 'email' };
