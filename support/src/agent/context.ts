@@ -11,6 +11,8 @@ const esc = (s: unknown) => String(s ?? '').replace(/[<>]/g, '').slice(0, 200);
 export const firstName = (name: string | null | undefined) => (name ?? '').trim().split(/\s+/)[0]?.slice(0, 40) || null;
 
 export function customerBlock(c: Customer) {
+  // Email reads no account: no name, workspace or role reaches the agent, only that this is email.
+  if (c.channel === 'email') return '<customer>\nchannel: email\naccess: general answers only, no account data\n</customer>';
   const lines = [
     `channel: ${c.channel}`,
     `verified: ${c.verified ?? 'no — answer general questions only; no account data'}`,

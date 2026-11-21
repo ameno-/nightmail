@@ -172,16 +172,9 @@ export class SupportIntake extends DurableObject<Env> {
     const result = { admission: progress.admission };
     if (!progress.admission.ok) { await hold(progress.admission.reason); return { state: 'held', result }; }
     const automatic = message.automated === true || /^(?:mailer-daemon|postmaster|no-?reply|bounces?)@/i.test(sender);
-    // Who wrote: a DMARC pass that maps to a Nightmail user names them; anything else is shown as an unverified sender.
-    let verified: TicketContext['verified'] = null, customer: TicketContext['customer'] = { userId: null, email: null, name: null, role: null, workspaces: [] };
-    if (dmarc === 'PASS') {
-      const checked = await external(this.env.BANE.verifyEmail({ email: sender, evidence: { kind: 'dmarc', result: 'pass', aligned: true, messageId: message.messageId ?? messageId } }));
-      if (checked.status !== 200) throw new BaneError(checked.status, 'VERIFY_FAILED', 'verify-email failed', checked.requestId, checked.retryAfter);
-      if (checked.body.verified && checked.body.user) {
-        verified = 'dmarc';
-        customer = { userId: checked.body.user.id, email: sender, name: checked.body.user.name, role: checked.body.workspaces[0]?.role ?? null, workspaces: checked.body.workspaces.map(w => ({ id: w.id, name: w.name })) };
-      }
-    }
+    // Who wrote: only the address and its DMARC verdict, as contact data. An email never names an account, whoever owns
+    // the address: the ticket shows an unverified sender.
+    const verified: TicketContext['verified'] = null, customer: TicketContext['customer'] = { userId: null, email: null, name: null, role: null, workspaces: [] };
     const conversationId = await external(this.conversationId(threadId));
     // Attachments: images like screenshots (checked, stripped, 5 MB, 5 per thread); other files are listed only.
     const files = message.attachments ?? [], stored: { id: string; name: string; type: string; size: number; url: string }[] = [], listed: string[] = [];
@@ -223,9 +216,9 @@ export class SupportIntake extends DurableObject<Env> {
       tried: [], recommendation: `Read it in ${productName}’s inbox (${mailbox}@ thread ${threadId}) and reply there.${omitted ? ` ${omitted === 1 ? 'One attachment' : `${omitted} attachments`} could not be stored.` : ''}${listed.length ? ` Other attachments, not opened here: ${listed.join('; ')}.` : ''}${automatic ? ' It was sent automatically (no acknowledgement was sent).' : ''}`,
       evidence: { ids: [messageId] }, details: { topic: mailbox },
     };
-    const ctx: TicketContext = { conversationId, channel: 'email', threadId, costUsd: 0, model: 'none (intake)', attachments: stored, verified, dmarc, sender: verified ? null : sender, customer };
-    // Tickets come from separate budgets (R1): a verified customer's from the verified reserve, anyone else's from this
-    // address's own budget, so spoofed abuse@ mail can't use up legal@, privacy@ or a customer's escalation.
+    const ctx: TicketContext = { conversationId, channel: 'email', threadId, costUsd: 0, model: 'none (intake)', attachments: stored, verified, dmarc, sender, customer };
+    // Tickets come from separate budgets (R1): this address's own budget, by sender, so spoofed abuse@ mail can't use up
+    // legal@, privacy@ or a customer's escalation.
     const children: NewWork[] = [];
     // Two messages can be due before the first ticket item runs. Reserve only one ticket ID and budget slot per thread.
     if (!progress.ticket) {
@@ -233,7 +226,7 @@ export class SupportIntake extends DurableObject<Env> {
       const reserved = this.sql.exec<{ id: string }>("SELECT json_extract(result,'$.ticket.id') AS id FROM _support_work WHERE kind='message' AND json_extract(result,'$.ticket.id') IS NOT NULL LIMIT 1").toArray()[0]?.id;
       if (existing || reserved) progress.ticket = { id: existing?.id ?? reserved! };
       else {
-        const allowed = await external(ticketAllowed(this.env, { verifiedUserId: verified ? customer.userId : null, mailbox, sender, dmarcPass }, count));
+        const allowed = await external(ticketAllowed(this.env, { verifiedUserId: null, mailbox, sender, dmarcPass }, count));
         progress.ticket = allowed.ok ? { id: newId('tkt') } : { reason: allowed.reason };
       }
       save();

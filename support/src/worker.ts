@@ -1,6 +1,6 @@
 import { verifyWebhook } from './webhook.js';
 import type { Env } from './env.js';
-import { addressHash, chatToken, MissingSecret, newId, readChatToken, readConfirmToken } from './tokens.js';
+import { addressHash, chatToken, MissingSecret, newId, readChatToken } from './tokens.js';
 import { readAttachmentLink, readCapped, serveAttachment } from './attachments.js';
 import { MAX_IMAGE_BYTES } from './image.js';
 import { staff } from './staff.js';
@@ -13,8 +13,8 @@ export { SupportConversation } from './conversation.js';
 export { SupportIntake, INTAKE, type Mailbox } from './intake.js';
 
 // The support Worker (support/README.md): chat starts and resumes, the conversation WebSocket, Nightmail's inbound webhook
-// for support@nightmail.dev, and the "Confirm it's me" page. Every conversation is one SupportConversation Durable Object,
-// reached only by ID from this router, never through a client-named route.
+// for support@nightmail.dev, its content-free wakes, and the page an old confirm link opens. Every conversation is one
+// SupportConversation Durable Object, reached only by ID from this router, never through a client-named route.
 
 const CONVERSATIONS_PER_DAY = 10;
 const json = (body: unknown, status = 200, headers: HeadersInit = {}) => Response.json(body, { status, headers: { 'cache-control': 'no-store', ...headers } });
@@ -67,10 +67,12 @@ async function startChat(request: Request, env: Env): Promise<Response> {
       SELECT ?, 'chat', ?, ?, ?, ?, ?, ? WHERE (SELECT conversation_id FROM handoffs_used WHERE jti = ?) = ?`).bind(conversationId, handoff.userId, handoff.email, handoff.workspace.id, handoff.workspace.name, now, now, handoff.id, conversationId),
   ]);
   if (!claimed[1]?.meta.changes) return fail(409, 'HANDOFF_USED', 'This handoff already opened a conversation. Get a fresh one.', headers);
-  const opened = await conversation(env, conversationId).openChat({ conversationId, handoff });
+  // Nightmail registers the conversation from this same signed handoff: it binds the person and workspace, once.
+  const opened = await conversation(env, conversationId).openChat({ conversationId, handoff, token: body.handoff });
   if (!opened.ok) {
     await env.DB.prepare("UPDATE conversations SET status = 'closed', closed_at = ? WHERE id = ?").bind(Date.now(), conversationId).run();
     return opened.code === 'HANDOFF_USED' ? fail(409, 'HANDOFF_USED', 'This handoff already opened a conversation. Get a fresh one.', headers)
+      : opened.code === 'CONVERSATION_LIMIT' ? fail(429, 'RATE_LIMITED', `You have too many open support conversations. Continue an earlier one, or email ${addresses.support}.`, { ...headers, 'retry-after': '3600' }, { retryAfter: 3600 })
       : fail(503, 'SUPPORT_UNAVAILABLE', 'Support could not open your account just now. Try again in a minute.', headers);
   }
   const chat = await chatToken(env.SUPPORT_ROOT_SECRET, conversationId, handoff.userId);
@@ -85,13 +87,19 @@ async function resumeChat(request: Request, env: Env): Promise<Response> {
   const checked = await env.BANE.verifyHandoff(body.handoff);
   if (!checked.ok) return fail(401, 'HANDOFF_INVALID', 'That handoff is not valid or has expired. Get a fresh one and retry.', headers);
   if (checked.handoff.usedAt) return fail(409, 'HANDOFF_USED', 'This handoff was already used. Get a fresh one.', headers);
-  const row = await env.DB.prepare('SELECT user_id, status FROM conversations WHERE id = ?').bind(body.conversationId).first<{ user_id: string | null; status: string }>();
+  const row = await env.DB.prepare('SELECT channel, user_id, status FROM conversations WHERE id = ?').bind(body.conversationId).first<{ channel: string; user_id: string | null; status: string }>();
   if (!row || row.status === 'closed') return fail(404, 'CONVERSATION_NOT_FOUND', 'That conversation has ended. Start a new one.', headers);
-  if (row.user_id !== checked.handoff.userId) return fail(403, 'NOT_YOUR_CONVERSATION', 'This conversation belongs to someone else.', headers);
+  // An email conversation continues by email, never in the panel: the panel starts a conversation of its own instead.
+  if (row.channel === 'email') return fail(409, 'EMAIL_CONVERSATION', 'This conversation continues by email. Start a new one here.', headers);
+  if (!row.user_id || row.user_id !== checked.handoff.userId) return fail(403, 'NOT_YOUR_CONVERSATION', 'This conversation belongs to someone else.', headers);
+  // Still open and theirs in the conversation itself, with no less access than it last ran with: checked before a token is minted.
+  const admitted = await conversation(env, body.conversationId).admits({ userId: checked.handoff.userId });
+  if (!admitted.ok) return admitted.code === 'UNAVAILABLE' ? fail(503, 'SUPPORT_UNAVAILABLE', 'Support could not open your account just now. Try again in a minute.', headers)
+    : fail(404, 'CONVERSATION_NOT_FOUND', 'That conversation has ended. Start a new one.', headers);
   const claimed = await env.DB.prepare('INSERT INTO handoffs_used (jti, conversation_id, used_at) VALUES (?, ?, ?) ON CONFLICT (jti) DO NOTHING').bind(checked.handoff.id, body.conversationId, Date.now()).run();
   if (!claimed.meta.changes) return fail(409, 'HANDOFF_USED', 'This handoff was already used. Get a fresh one.', headers);
-  const renewed = await conversation(env, body.conversationId).renewGrant({ handoff: checked.handoff });
-  if (!renewed.ok) return fail(503, 'SUPPORT_UNAVAILABLE', 'Support could not renew access just now. Try again in a minute.', headers);
+  // Only a new chat token: account access never expires mid-conversation (Nightmail reads it from the conversation on
+  // every request), so there is nothing to renew.
   const chat = await chatToken(env.SUPPORT_ROOT_SECRET, body.conversationId, checked.handoff.userId);
   return json({ conversationId: body.conversationId, chatToken: chat.token, socketUrl: socketUrl(env, body.conversationId, chat.token), expiresAt: chat.expiresAt }, 200, headers);
 }
@@ -222,21 +230,12 @@ const page = (title: string, body: string, status = 200) => new Response(`<!doct
   { status, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; frame-ancestors 'none'", 'referrer-policy': 'no-referrer', 'x-frame-options': 'DENY' } });
 const escape = (s: string) => s.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 
-/** "Confirm it's me": GET shows a button (mail scanners prefetch links, so GET never confirms); POST confirms once. */
-async function confirm(request: Request, env: Env, token: string): Promise<Response> {
-  const read = await readConfirmToken(env.SUPPORT_ROOT_SECRET, token);
-  if (!read) return page('Link expired', `<h1>This link has expired</h1><p>Reply to the support email again and we’ll send a new one, or sign in to ${productName} and press Help.</p>`, 410);
-  if (request.method === 'GET') {
-    // Nothing from the email (its subject or text) is shown here: the sender may not be who they say (review M4).
-    if (!(await conversation(env, read.conversationId).confirmationPending(read.addressHash))) return page('Link expired', `<h1>This link has expired</h1><p>Sign in to ${productName} and press Help instead.</p>`, 410);
-    return page('Confirm it’s you', `<h1>Confirm it’s you</h1><p>${productName} support will read your ${productName} account to answer the email you sent to ${productName} support. Only press this if you wrote to ${productName} support yourself.</p>
-<form method="post"><button type="submit">Confirm it’s me</button></form><p class="muted">Didn’t write to ${productName} support? Close this page; nothing happens.</p>`);
-  }
-  const used = await env.DB.prepare('INSERT INTO confirmations (nonce, conversation_id, used_at) VALUES (?, ?, ?) ON CONFLICT (nonce) DO NOTHING').bind(read.nonce, read.conversationId, Date.now()).run();
-  if (!used.meta.changes) return page('Already confirmed', '<h1>Already confirmed</h1><p>You can close this page. We’ll reply by email.</p>');
-  const result = await conversation(env, read.conversationId).confirmEmail({ addressHash: read.addressHash });
-  return result.ok ? page('Confirmed', '<h1>Thanks, that’s confirmed</h1><p>We’ll reply to your email shortly. You can close this page.</p>')
-    : page('Couldn’t confirm', `<h1>We couldn’t confirm this</h1><p>Sign in to ${productName} and press Help, or reply to the email from your account address.</p>`, 409);
+/**
+ * A confirm link from an earlier support reply. Email no longer unlocks anything, so the page changes nothing and shows
+ * nothing from the email: it points to Help, where the person is signed in.
+ */
+function confirm(env: Env): Response {
+  return page('Continue in Help', `<h1>Continue in Help</h1><p>To get help with your ${productName} account, sign in to <a href="${new URL(env.BANE_ORIGIN).origin}">${productName}</a> and press Help. There’s nothing to confirm here; you can close this page.</p>`);
 }
 
 // Route templates for the request line, never the raw path: paths carry conversation and ticket IDs and confirm tokens,
@@ -273,7 +272,7 @@ async function route(request: Request, env: Env, url: URL, at: { route: string }
   if (request.method === 'POST' && path === '/hooks/bane-intake') { name('/hooks/bane-intake'); return intake(request, env); }
   if (request.method === 'POST' && path === '/hooks/nightmail-wake') { name('/hooks/nightmail-wake'); return wake(request, env, ctx); }
   const link = path.match(/^\/confirm\/([A-Za-z0-9_.-]{20,400})$/);
-  if (link && (request.method === 'GET' || request.method === 'POST')) { name('/confirm/:token'); return confirm(request, env, link[1]!); }
+  if (link && (request.method === 'GET' || request.method === 'POST')) { name('/confirm/:token'); return confirm(env); }
   return new Response(null, { status: 404 });
 }
 

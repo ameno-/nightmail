@@ -11,9 +11,11 @@ const EMAIL_PNG = Buffer.from(pngWithMetadata(80, 40)).toString('base64');
 export const FAKE_BANE = `
 import { WorkerEntrypoint } from 'cloudflare:workers';
 const calls = [];
-const used = new Set();
+const used = new Map(); // handoff id → the conversation it registered (or '' when a grant used it)
 const shared = new Set();
 let grants = 0;
+// closeConversation answers 503 this many more times (a test hook): a close Nightmail can't take yet.
+let closeFailures = 0;
 // The staff inbox (api/src/support-inbox.ts), in memory: a conversation exists once a test registers it (/__inbox), like
 // Nightmail's 404 for one it never registered; down makes every inbox call answer 503.
 const inbox = new Map();
@@ -21,18 +23,65 @@ let inboxDown = false;
 const missing = () => ok({ error: { code: 'NOT_FOUND' } }, 404), unavailable = () => ok({ error: { code: 'UNAVAILABLE' } }, 503);
 const inboxState = (id, c) => ({ id, status: c.status, agentState: c.paused ? 'paused' : 'active', pausedBy: c.paused || null, pausedAt: c.paused ? new Date().toISOString() : null, queuedReplies: c.outbox.filter(r => !r.delivery).length });
 const ok = (body, status = 200) => ({ status, body, requestId: 'req_' + '0'.repeat(32), retryAfter: null });
+const refuse = (status, code) => ok({ error: { code, message: code } }, status);
+// People and workspaces, as Nightmail keeps them: a handoff's user belongs to its workspace, and every @acme.test address
+// is a user in Acme Prod (Ada, plus the cases' rita@, dora@, victim@ …). Removing a membership is a test hook.
+const WORKSPACES = { ws_acme: 'Acme Prod', ws_other: 'Other' };
+const members = new Map(); // userId → Map(workspaceId → role)
+const people = new Map([['usr_ada', { name: 'Ada Lovelace', email: 'ada@acme.test' }]]);
+const person = userId => people.get(userId) ?? { name: null, email: null };
+const known = (userId, email) => { if (!people.has(userId)) people.set(userId, { name: userId[4].toUpperCase() + userId.slice(5), email }); };
+const join = (userId, workspaceId) => { if (!members.has(userId)) members.set(userId, new Map()); if (!members.get(userId).has(workspaceId) && !members.get(userId).has('!' + workspaceId)) members.get(userId).set(workspaceId, 'owner'); };
+const memberships = userId => [...(members.get(userId) ?? new Map())].filter(([id]) => !id.startsWith('!')).map(([id, role]) => ({ id, name: WORKSPACES[id] ?? id, role }));
 const handoff = token => {
   // Test handoffs are "handoff:<id>:<userId>:<workspaceId>:<share>".
   const [kind, id, userId, workspaceId, share] = token.split(':');
   if (kind !== 'handoff') return null;
-  return { id, kind: 'support', userId, email: userId === 'usr_ada' ? 'ada@acme.test' : 'bo@other.test', role: 'owner', workspace: { id: workspaceId, name: workspaceId === 'ws_acme' ? 'Acme Prod' : 'Other' },
+  known(userId, userId.slice(4) + '@other.test');
+  return { id, kind: 'support', userId, email: person(userId).email, role: 'owner', workspace: { id: workspaceId, name: WORKSPACES[workspaceId] ?? workspaceId },
     page: '/campaigns', requestIds: [], shareContent: share === 'share', issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 600000).toISOString(), usedAt: used.has(id) ? new Date().toISOString() : null, grantId: null, message: null };
 };
+// Registered conversations (api/src/support-conversations.ts): Nightmail decides whom each is for, and every stamped
+// request answers for that person only, whatever the request says.
+const conversations = new Map();
+const view = (c, created) => ({ id: c.id, channel: c.channel, mode: c.mode, verification: c.verification, status: c.closed ? 'closed' : 'open', workspaceId: c.workspaceId, contentShared: !!c.content, created });
+const inScope = c => memberships(c.userId).filter(w => !c.workspaceId || w.id === c.workspaceId);
+function scopeOf(c) {
+  const all = memberships(c.userId), workspace = c.workspaceId ? all.find(w => w.id === c.workspaceId) ?? null : null;
+  return { conversation: { id: c.id, channel: c.channel, mode: c.mode, verification: c.verification }, user: person(c.userId),
+    workspace, workspaces: c.channel === 'email' || !c.workspaceId ? all : all.filter(w => w.id === c.workspaceId),
+    contentWorkspaceId: all.some(w => w.id === c.content) ? c.content : null, page: c.page, shrunk: [...c.read].some(id => !all.some(w => w.id === id)) };
+}
+/** An email's evidence as Nightmail reads it from the message it stored: its From and DMARC verdict. Email binds no account. */
+function emailEvidence(messageId) {
+  const { from, dmarc } = message(messageId), sender = from.toLowerCase(), verified = dmarc === 'PASS';
+  return { sender, userId: null, verification: verified ? 'dmarc' : 'none', mode: verified ? 'non_member' : 'unverified' };
+}
+// The audit trail as the API shows it (api/src/audit.ts AuditEntry): this conversation's own support.view and an earlier
+// one's (the support actor and summary.ticket are the conversation, summary.member and subject the person), one from a grant
+// before conversations, an agent token's change and a colleague's, in the conversation's first workspace.
+const PRIOR = 'conv_' + 'p'.repeat(26), AGENT = 'agt_' + 'a1'.repeat(16), KEY = 'key_' + 'b2'.repeat(16), GRANT = 'sgr_' + 'c3'.repeat(16), HANDOFF = 'sho_' + 'd4'.repeat(16), PERSON_UUID = '7f3e2a10-4b5c-4d6e-8f70-8192a3b4c5d6';
+const activityOf = c => inScope(c).slice(0, 1).flatMap(w => {
+  const at = new Date().toISOString(), view = (id, conversation) => ({ id, at, action: 'support.view', actor: { type: 'support', id: conversation, label: 'Nightmail support', email: null }, via: 'support', target: null,
+    subject: { userId: c.userId, email: person(c.userId).email }, summary: { ticket: conversation, member: c.userId, channel: 'chat', verification: 'handoff', contentShared: false }, reason: null, requestId: null, network: null, client: null });
+  return [
+    view('aud_1', c.id), view('aud_2', PRIOR),
+    { id: 'aud_3', at, action: 'support.view', actor: { type: 'support', id: GRANT, label: 'Nightmail support', email: null }, via: 'support', target: null, subject: { userId: c.userId, email: null },
+      summary: { ticket: 'T-1', handoff: HANDOFF, member: c.userId }, reason: null, requestId: null, network: null, client: null },
+    { id: 'aud_4', at, action: 'api_key.create', actor: { type: 'agent_token', id: AGENT, label: 'Deploy bot', email: null }, via: 'mcp', target: { type: 'api_key', id: KEY }, subject: null,
+      summary: { name: 'CI key', createdBy: PERSON_UUID }, reason: null, requestId: 'req_' + 'c'.repeat(32), network: null, client: null },
+    { id: 'aud_5', at, action: 'domain.verify', actor: { type: 'member', id: 'usr_colleague', label: 'Cole League', email: null }, via: 'dashboard', target: { type: 'domain', id: 'dom_' + w.id }, subject: null,
+      summary: { domain: 'news.' + w.id.slice(3) + '.test' }, reason: null, requestId: 'req_' + 'c'.repeat(32), network: null, client: null },
+  ];
+});
+// Per-person reads (the subject is the conversation's person, never anything in the request) and fixed ones.
+const contextOf = c => ({ grant: { id: 'sgr_x', ticketRef: 'conv' }, user: { id: c.userId, ...person(c.userId) },
+  workspaces: inScope(c).map(w => ({ ...w, sending: { kind: 'shared', region: 'us-east-2', paused: false }, counts: { domains: 1, campaigns: 3 } })),
+  domains: inScope(c).map(w => ({ workspaceId: w.id, id: 'dom_' + w.id, name: 'news.' + w.id.slice(3) + '.test', sending: 'verified', dmarc: 'missing' })), recentFailures: { sends: [], bounces: [], webhookDeliveries: [] },
+  standing: [],
+  recentActivity: activityOf(c),
+  openEnforcement: [], handoff: null, links: { requestIds: [] } });
 const READS = {
-  '/v1/support/context': { grant: { id: 'sgr_x', ticketRef: 'conv' }, user: { id: 'usr_ada', name: 'Ada Lovelace', email: 'ada@acme.test' },
-    workspaces: [{ id: 'ws_acme', name: 'Acme Prod', role: 'owner', sending: { kind: 'shared', region: 'us-east-2', paused: false }, counts: { domains: 1, campaigns: 3 } }],
-    domains: [{ workspaceId: 'ws_acme', id: 'dom_1', name: 'news.acme.test', sending: 'verified', dmarc: 'missing' }], recentFailures: { sends: [], bounces: [], webhookDeliveries: [] },
-    standing: [], recentActivity: [], openEnforcement: [], handoff: null, links: { requestIds: [] } },
   '/v1/support/campaigns': { data: [{ id: 'cmp_1', name: 'Early access', state: 'sent', launchedAt: new Date(Date.now() - 86400000).toISOString(), tracking: true, audience: { size: 2160 }, pauseReason: null,
     stats: { counts: { total: 2160, byStatus: { delivered: 2140 } }, totals: { accepted: 2152, delivered: 2140, opened: 899, clicked: 64, bounced: 12, complained: 0 }, rates: {} } }] },
   '/v1/support/standing': { data: [{ workspaceId: 'ws_acme', standing: { step: 'normal', score: 93, dailyLimit: 10000 }, last24h: { delivered: 1980, bounced: 20 } }] },
@@ -41,6 +90,62 @@ const READS = {
   '/v1/support/deliverability/bounces': { data: [{ provider: 'gmail', type: 'bounce', count: 61, diagnostic: 'smtp; 550 5.1.1 user unknown at someone@gmail.com from 203.0.113.9' }], findings: [{ severity: 'serious', code: 'HARD_BOUNCES', message: '6.1% hard bounces at Gmail' }], grant: { token: 'never-shown' }, operatorId: 'op_secret' },
 };
 export class SupportPlatform extends WorkerEntrypoint {
+  async registerConversation({ conversationId, evidence }) {
+    calls.push(['registerConversation', conversationId, evidence]);
+    const existing = conversations.get(conversationId);
+    if (evidence.kind === 'handoff') {
+      const h = handoff(evidence.token);
+      if (!h) return refuse(422, 'HANDOFF_INVALID');
+      if (used.has(h.id)) return used.get(h.id) === conversationId ? ok(view(existing, false)) : refuse(409, 'SUPPORT_HANDOFF_USED');
+      if (existing) return refuse(409, 'SUPPORT_CONVERSATION_EXISTS');
+      used.set(h.id, conversationId);
+      join(h.userId, h.workspace.id);
+      const c = { id: conversationId, channel: 'chat', userId: h.userId, sender: null, mode: 'member', verification: 'handoff', workspaceId: h.workspace.id, content: h.shareContent ? h.workspace.id : null, closed: false, read: new Set(), page: h.page };
+      conversations.set(conversationId, c);
+      return ok(view(c, true), 201);
+    }
+    const found = emailEvidence(evidence.messageId);
+    if (!existing) {
+      const c = { id: conversationId, channel: 'email', userId: found.userId, sender: found.sender, mode: found.mode, verification: found.verification, workspaceId: null, content: null, closed: false, read: new Set(), page: null };
+      conversations.set(conversationId, c);
+      return ok(view(c, true), 201);
+    }
+    if (existing.channel !== 'email') return refuse(409, 'SUPPORT_CONVERSATION_EXISTS');
+    if (existing.closed) return refuse(409, 'SUPPORT_CONVERSATION_CLOSED');
+    if (existing.sender !== found.sender) return refuse(409, 'SUPPORT_CONVERSATION_SENDER');
+    if (existing.userId) return refuse(409, 'SUPPORT_CONVERSATION_MISMATCH');
+    Object.assign(existing, { mode: found.mode, verification: found.verification });
+    return ok(view(existing, false));
+  }
+  async closeConversation(id) {
+    calls.push(['closeConversation', id]);
+    if (closeFailures > 0) { closeFailures -= 1; return refuse(503, 'UNAVAILABLE'); }
+    const c = conversations.get(id);
+    if (!c) return refuse(404, 'NOT_FOUND');
+    c.closed = true;
+    return ok({ id, status: 'closed', closedAt: new Date().toISOString() });
+  }
+  /** A stamped request: [1] the path, [2] the conversation, as the log records it. */
+  async request(conversationId, method, path, body) {
+    calls.push(['request', path, conversationId, method, body ?? null]);
+    const c = conversations.get(conversationId);
+    if (!c || c.closed || !c.userId) return refuse(403, 'SUPPORT_GRANT_REQUIRED');
+    const url = new URL(path, 'https://internal.invalid');
+    if (url.pathname === '/v1/support/scope') {
+      if (method === 'POST') {
+        if (c.channel === 'chat' && body?.workspaceId !== c.workspaceId) return refuse(409, 'SUPPORT_SCOPE_FIXED');
+        if (!memberships(c.userId).some(w => w.id === body?.workspaceId)) return refuse(404, 'NOT_FOUND');
+        c.workspaceId = body.workspaceId;
+      }
+      return ok(scopeOf(c));
+    }
+    if (method !== 'GET') return refuse(403, 'SUPPORT_READ_ONLY');
+    const filter = url.searchParams.get('workspaceId'), scope = inScope(c);
+    if (filter && !scope.some(w => w.id === filter)) return refuse(404, 'NOT_FOUND');
+    for (const w of scope) if (!filter || w.id === filter) c.read.add(w.id);
+    const answer = url.pathname === '/v1/support/context' ? contextOf(c) : url.pathname === '/v1/support/audit' ? { data: activityOf(c), nextCursor: null } : READS[url.pathname];
+    return answer ? ok(answer) : refuse(404, 'NOT_FOUND');
+  }
   async verifyHandoff(token) { calls.push(['verifyHandoff', token]); const h = handoff(token); if (h?.shareContent) shared.add(h.id); return h ? { ok: true, handoff: h } : { ok: false, code: 'HANDOFF_INVALID' }; }
   async verifyEmail(body) {
     calls.push(['verifyEmail', body]);
@@ -50,7 +155,7 @@ export class SupportPlatform extends WorkerEntrypoint {
   }
   async mintGrant(body) {
     calls.push(['mintGrant', body]);
-    if (body.handoffId) { if (used.has(body.handoffId)) return ok({ error: { code: 'SUPPORT_HANDOFF_USED' } }, 409); used.add(body.handoffId); }
+    if (body.handoffId) { if (used.has(body.handoffId)) return ok({ error: { code: 'SUPPORT_HANDOFF_USED' } }, 409); used.set(body.handoffId, ''); }
     grants += 1;
     return ok({ id: 'sgr_' + String(grants).padStart(32, '0'), token: '${GRANT_TOKEN}', userId: body.userId, workspaceIds: body.workspaceIds ?? ['ws_acme'], ticketRef: body.ticketRef,
       contentShared: shared.has(body.handoffId), contentWorkspaceId: shared.has(body.handoffId) ? 'ws_acme' : null, expiresAt: new Date(Date.now() + 7200000).toISOString() }, 201);
@@ -130,6 +235,12 @@ export default {
       if (c && reply) { c.outbox.push({ ...reply, createdAt: new Date().toISOString(), delivery: null }); c.paused = 'staff'; }
       return new Response(null, { status: 204 });
     }
+    // Test hooks: a membership ends or its role changes; content access is allowed; closing fails for a while.
+    if (url.pathname === '/__remove') { const { userId, workspaceId } = await request.json(); members.get(userId)?.delete(workspaceId); members.get(userId)?.set('!' + workspaceId, 'gone'); return new Response(null, { status: 204 }); }
+    if (url.pathname === '/__role') { const { userId, workspaceId, role } = await request.json(); members.get(userId)?.set(workspaceId, role); return new Response(null, { status: 204 }); }
+    if (url.pathname === '/__close') { closeFailures = (await request.json()).fail ?? 0; return new Response(null, { status: 204 }); }
+    if (url.pathname === '/__content') { const c = conversations.get((await request.json()).conversationId); c.content = c.workspaceId; return new Response(null, { status: 204 }); }
+    if (url.pathname === '/__conversation') { const c = conversations.get(url.searchParams.get('id')); return Response.json(c ? { ...c, read: [...c.read] } : null); }
     // An outage refuses the request; a lost one (lost: true) carries it out, then the answer never arrives (the Worker
     // sees the error status, as when a connection drops after Nightmail committed).
     if (url.pathname === '/__outage') {
@@ -184,6 +295,11 @@ const MESSAGES = {
   // The work ledger's cases.
   msg_rate_1: ['thr_rate_1', 'rate@else.test'], msg_rate_2: ['thr_rate_2', 'rate@else.test'],
   msg_legal_late_1: ['thr_legal_late', 'counsel@late.test', 'PASS', 'legal@dev.bane.mx', 'Preservation', 'Please preserve the records.'],
+  // Conversations from before the stamp, and a reply in a chat ticket's follow-up thread.
+  msg_legacy_grant: ['thr_legacy_d'], msg_legacy_lapsed: ['thr_legacy_e'],
+  msg_privacy_acct_1: ['thr_privacy_acct', 'ada@acme.test', 'PASS', 'privacy@dev.bane.mx', 'My data', 'Please export my data.'],
+  msg_prior_1: ['thr_prior'], msg_prior_2: ['thr_prior'],
+  msg_m11_1: ['thr_m11', 'ada@acme.test', 'PASS', null, 'Re: Your request', 'One more detail: it was two top-ups, 40 seconds apart.'],
 };
 function message(id) {
   const [threadId = 'thr_other', from = 'ada@acme.test', dmarc = 'PASS', to = 'support@dev.bane.mx', subject = 'Bounces from Gmail?', body = 'Why are Gmail bounces up this week?'] = (MESSAGES[id] ?? []).map(v => v ?? undefined);
@@ -225,6 +341,8 @@ async function route(request, url, body) {
 export type Recorded = { url: string; headers: Record<string, string>; body: any };
 export const recorded: Recorded[] = [];
 export const control = { failStatus: 0 };
+/** The scripted model's answer to an email once its account tool is refused: general, with no account data. */
+export const GENERAL_ANSWER = 'Hi,\n\nBounces at Gmail usually come from old or mistyped addresses: remove the ones that hard-bounce, and check your domain’s DKIM and DMARC records.\n\nNightmail support (AI)';
 
 const sse = (events: Array<[string, unknown]>) => new Response(events.map(([type, data]) => `event: ${type}\ndata: ${JSON.stringify({ type, ...(data as object) })}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } });
 const start = (id: string): [string, unknown] => ['message_start', { message: { id, type: 'message', role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, usage: { input_tokens: 1200, output_tokens: 1 } } }];
@@ -276,11 +394,21 @@ export async function fakeGateway(request: Request): Promise<Response> {
       expected: 'A test delivery', actual: 'HTTP 500' });
     return text(['That’s a Nightmail bug: I’ve passed it to the Nightmail team.']);
   }
-  if (said.includes('A support email arrived')) return answered ? text(['Hi Ada,\n\nGmail hard-bounced 61 of 1,000 sends this week.\n\nNightmail support (AI)']) : toolUse('toolu_e', 'bounce_reasons', { provider: 'gmail' });
+  if (said.includes('someone else')) {
+    // Arguments a tool never declares (another user, conversation, grant), then another customer's workspace.
+    const used = (body?.messages ?? []).slice((body?.messages ?? []).indexOf(lastUser) + 1).flatMap((m: any) => blocks(m)).filter((b: any) => b.type === 'tool_use').length;
+    if (used === 0) return toolUse('toolu_o1', 'bounce_reasons', { provider: 'gmail', userId: 'usr_bo', conversationId: 'conv_' + 'b'.repeat(26), grant: 'nm_support_' + '9'.repeat(64), token: 'tok_other' });
+    if (used === 1) return toolUse('toolu_o2', 'list_domains', { workspaceId: 'ws_other' });
+    return text(['I can only look at your own account.']);
+  }
+  // Email reads no account: the tool is refused, and the answer is a general one.
+  if (said.includes('A support email arrived')) return answered ? text([JSON.stringify(blocks(body?.messages?.at(-1))).includes('Email answers are general') ? GENERAL_ANSWER : 'Hi Ada,\n\nGmail hard-bounced 61 of 1,000 sends this week.\n\nNightmail support (AI)']) : toolUse('toolu_e', 'bounce_reasons', { provider: 'gmail' });
   if (said.includes('Gmail bounces')) return answered ? text(['Gmail hard-bounced 61 of 1,000 sends (6.1%). Here’s what I’d do:\n\n1. Remove the import from Oct 25.']) : toolUse('toolu_b', 'bounce_reasons', { provider: 'gmail', days: 7 });
   if (said.includes('refund')) return answered ? text(['I’ve passed this to the Nightmail team. Someone will reply by email.']) : toolUse('toolu_t', 'file_ticket', {
     type: 'billing', topic: 'refund', title: 'Duplicate $25 top-up', severity: 'P3', summary: 'Ada asks for a refund of a duplicate top-up. The ledger shows two identical top-ups. She wants one refunded.', ask: 'Please refund my duplicate top-up',
     tried: ['get_billing: two $25 top-ups 40 s apart'], recommendation: 'Refund the second $25 top-up (billing error).', evidence: ['req_1'] });
+  if (said.includes('my account summary')) return answered ? text(['Your account looks fine.']) : toolUse('toolu_a', 'account_context', {});
+  if (said.includes('my audit trail')) return answered ? text(['Here is your recent activity.']) : toolUse('toolu_au', 'get_audit', {});
   if (said.includes('look at the content')) return answered ? text(['I’ve asked for access to read that email.']) : toolUse('toolu_c', 'request_content_access', { why: 'To check why the screen rejected your promo, I need to read its HTML.' });
   if (said.includes('leak please')) return text([`Sure: bane_ops_${'a'.repeat(64)}`]);
   return text(['OK.']);

@@ -5,7 +5,7 @@ import { log, logError } from './log.js';
 
 export type Flow = 'support' | 'intake';
 export type WorkState = 'pending' | 'blocked' | 'parked' | 'done' | 'held' | 'dead';
-export type NewWork = { id: string; kind: string; payload: object; state?: 'pending' | 'parked' };
+export type NewWork = { id: string; kind: string; payload: object; state?: 'pending' | 'parked'; dueAt?: number };
 export type WorkRow = { id: string; kind: string; payload: string; result: string; attempts: number; created_at: number };
 export type Outcome = { state?: 'done' | 'held' | 'parked'; result?: object; children?: NewWork[] };
 
@@ -56,7 +56,7 @@ export class WorkQueue {
   insert(item: NewWork, parent: string | null = null) {
     const now = Date.now();
     return this.sql.exec('INSERT INTO _support_work(id,kind,state,payload,parent,due_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING',
-      item.id, item.kind, item.state ?? 'pending', JSON.stringify(item.payload), parent, now, now, now).rowsWritten > 0;
+      item.id, item.kind, item.state ?? 'pending', JSON.stringify(item.payload), parent, item.dueAt ?? now, now, now).rowsWritten > 0;
   }
 
   checkpoint(id: string, result: object) {

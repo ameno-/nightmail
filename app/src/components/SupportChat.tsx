@@ -11,8 +11,8 @@ import { IconButton } from './ui'
 // Where it runs: ?support=demo (kept for the browser session; ?support=off clears it) get the
 // scripted demo conversation. Hosted workspaces get the live support Worker by the build's VITE_SUPPORT_CHAT: "true" for
 // everyone (dev deploys), "staff" for Nightmail staff (the operator role) and workspaces Anomaly made free, unset for no one
-// (production until it is rolled out). ?support=<conversationId> (a support email's "continue in Nightmail" link) opens the
-// panel on that conversation.
+// (production until it is rolled out). ?support=<conversationId> opens the panel on that chat conversation; an email
+// conversation continues by email, so Help opens a conversation of its own instead.
 const panel = chunk(() => import('../features/support'))
 const Panel = panel.page(module => module.SupportPanel)
 const modeKey = 'nightmail.support'

@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
-import { ApiError, dashboardSession, denied, errors, json, log, notFound, response, type App, type Ctx, type DbExecutor } from './core.js';
+import { ApiError, dashboardSession, errors, json, log, notFound, response, type App, type Ctx, type DbExecutor } from './core.js';
 import { auditContext, auditInsert, operatorContext, requireOperator } from './audit.js';
 import { CONVERSATION_ID, verifyHandoffToken, type RegisteredConversation } from './support-platform.js';
 import type { MailHeader, Verdicts } from './db/mailbox.js';
@@ -10,10 +10,10 @@ import { productName } from './brand.js';
 // conversation it holds; Nightmail alone decides who it is for, from evidence it checks itself:
 //
 // - chat: its own signed handoff (POST /v1/contact-support) and the unused handoff row, once, shared with grants;
-// - email: the stored From and DMARC verdict of a message it received at a support address (NIGHTMAIL_SUPPORT_ADDRESS_IDS);
-// - sign-in: the person's own dashboard session, when its verified address is the email conversation's sender (claim).
+// - email: the stored From and DMARC verdict of a message it received at a support address (NIGHTMAIL_SUPPORT_ADDRESS_IDS),
+//   which decide only how the support platform answers. An email conversation is never bound to an account.
 //
-// The support platform then reads through SupportPlatform.request(conversationId, …): the binding puts the conversation on
+// The support platform then reads a chat through SupportPlatform.request(conversationId, …): the binding puts the conversation on
 // the runtime, never in a header, query parameter or body, and supportGate (src/support.ts) answers for that user's live
 // memberships within the conversation's scope, each route only for the roles its dashboard counterpart admits.
 
@@ -81,7 +81,7 @@ export function sectionIds(c: Ctx, section: keyof typeof CONTEXT_SECTIONS, works
 /** A conversation's workspaces where it reads received mail as a member does: only mail on receiving addresses. */
 export const routedOnly = (c: Ctx, workspaces: { id: string; role: SupportRole }[]) => c.get('support')?.conversation ? workspaces.filter(w => w.role === 'member').map(w => w.id) : [];
 
-/** Open conversations per person, checked at registration and at a claim. */
+/** Open chats per person, checked at registration. */
 export const OPEN_CONVERSATIONS = 10;
 const Mode = z.enum(['member', 'non_member', 'pending_signin', 'unverified']);
 const Registered = z.object({
@@ -105,30 +105,33 @@ export const supportPlatformOnly = async (c: Ctx) => {
 const limitReached = () => new ApiError(429, 'SUPPORT_CONVERSATION_LIMIT', `This person already has ${OPEN_CONVERSATIONS} open support conversations. Close one first.`);
 const openCount = (userId: unknown) => sql`(SELECT count(*)::int FROM support_conversations WHERE user_id = ${userId} AND status <> 'closed')`;
 /**
- * Serializes admission for one person: every path that sets user_id (handoff, email, claim) takes this lock first, before
+ * Serializes admission for one person: registering a chat (the only path that sets user_id) takes this lock first, before
  * any conversation or handoff row, so its count is a later statement that sees every admission committed before it.
  */
 const admit = (tx: DbExecutor, userId: string) => tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${userId}, 39601))`);
 
 /**
  * What a message Nightmail received at a support address proves: its sender, and whether that From is the one literal
- * address SES's DMARC PASS vouches for. dkimAligned records whether a sole signature of the From domain passed too.
+ * address SES's DMARC PASS vouches for, as ingest judged it for every support address it reached (the link's
+ * reply_author_verified) and as the stored verdict says. Anything less, or ambiguous, proves nothing. dkimAligned records
+ * whether a sole signature of the From domain passed too. Email never names an account: whoever owns the address,
+ * a sender that proved it is `non_member` (general answers), anyone else `unverified`.
  */
 async function emailEvidence(db: DbExecutor, addressIds: string[], messageId: string) {
-  const { rows: [m] } = await db.execute<{ thread_id: string; from_address: string; verdicts: Verdicts; headers: MailHeader[]; user_id: string | null; memberships: number }>(sql`SELECT m.thread_id, m.from_address, m.verdicts, m.headers,
-      u.id AS user_id, (SELECT count(*)::int FROM workspace_members wm WHERE wm.user_id = u.id) AS memberships
-    FROM mail_messages m LEFT JOIN nightmail_users u ON lower(u.email) = lower(m.from_address) AND u.email_verified
-    WHERE m.id = ${messageId} AND m.direction = 'inbound' AND EXISTS (SELECT FROM mailbox_messages mm JOIN mailboxes b ON b.id = mm.mailbox_id AND b.workspace_id = mm.workspace_id
-      WHERE mm.message_id = m.id AND mm.workspace_id = m.workspace_id AND mm.mailbox_id = ANY(${sql.param(addressIds)}::text[]))`);
+  const { rows: [m] } = await db.execute<{ thread_id: string; from_address: string; verdicts: Verdicts; headers: MailHeader[]; author_verified: boolean | null }>(sql`SELECT m.thread_id, m.from_address, m.verdicts, m.headers,
+      links.author_verified
+    FROM mail_messages m
+    CROSS JOIN LATERAL (SELECT bool_and(mm.reply_author_verified) AS author_verified FROM mailbox_messages mm JOIN mailboxes b ON b.id = mm.mailbox_id AND b.workspace_id = mm.workspace_id
+      WHERE mm.message_id = m.id AND mm.workspace_id = m.workspace_id AND mm.direction = 'inbound' AND mm.mailbox_id = ANY(${sql.param(addressIds)}::text[])) links
+    WHERE m.id = ${messageId} AND m.direction = 'inbound' AND links.author_verified IS NOT NULL`);
   if (!m) return null;
   const { literalFrom, soleAlignedSignature } = await import('./mailbox-ingest.js');
   const from = m.from_address.trim().toLowerCase(), domain = from.split('@')[1] ?? '', field = (name: string) => m.headers.filter(h => h.name.toLowerCase() === name).map(h => h.value);
   const fromFields = field('from'), dmarc = m.verdicts?.dmarc ?? null;
-  const verified = /^[^\s@]+@[^\s@]+$/.test(from) && fromFields.length === 1 && literalFrom(fromFields[0]!, from) && dmarc === 'PASS';
+  const verified = /^[^\s@]+@[^\s@]+$/.test(from) && fromFields.length === 1 && literalFrom(fromFields[0]!, from) && dmarc === 'PASS' && m.author_verified === true;
   const dkimAligned = m.verdicts?.dkim === 'PASS' && soleAlignedSignature(field('dkim-signature'), domain);
-  const userId = verified ? m.user_id : null;
-  const mode: Row['mode'] = verified ? (userId && m.memberships > 0 ? 'member' : 'non_member') : m.user_id ? 'pending_signin' : 'unverified';
-  return { from, threadId: m.thread_id, userId, mode, verification: verified ? 'dmarc' as const : 'none' as const, evidence: { message: messageId, dmarc, dkimAligned } };
+  const mode: Row['mode'] = verified ? 'non_member' : 'unverified';
+  return { from, threadId: m.thread_id, mode, verification: verified ? 'dmarc' as const : 'none' as const, evidence: { message: messageId, dmarc, dkimAligned } };
 }
 
 export function registerSupportConversations(app: App) {
@@ -137,7 +140,7 @@ export function registerSupportConversations(app: App) {
   const ConversationParam = z.object({ id: z.string().regex(CONVERSATION_ID) });
 
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security: operatorSecurity, method: 'post', path: '/v1/operator/support/conversations', operationId: 'operatorRegisterSupportConversation',
-    description: 'The support platform registers a conversation (the binding only). Nightmail checks the evidence itself and decides who it is for. A handoff opens one conversation or one grant, once; an email registers again with each message, which may bind the sender but never another person.',
+    description: 'The support platform registers a conversation (the binding only). Nightmail checks the evidence itself and decides who it is for. A handoff opens one conversation or one grant, once, for its person; an email registers again with each message, from its one sender, and is never bound to an account.',
     request: { body: json(z.object({
       conversationId: z.string().regex(CONVERSATION_ID),
       evidence: z.discriminatedUnion('kind', [
@@ -193,34 +196,27 @@ export function registerSupportConversations(app: App) {
     const found = await emailEvidence(c.env.db, addressIds, body.evidence.messageId);
     if (!found) throw new ApiError(404, 'NOT_FOUND', 'Message was not found at a support address.');
     const details = { channel: 'email', message: body.evidence.messageId, dkimAligned: found.evidence.dkimAligned };
+    // An email conversation is never bound to an account (user_id stays null): nothing reads one, and the staff inbox
+    // ties it to no account, only to its sender's address. The per-person limit is a chat's only.
     const outcome = await c.env.db.transaction(async tx => {
-      if (found.userId) await admit(tx, found.userId);
       const { rows: [existing] } = await tx.execute<Row>(sql`SELECT ${columns} FROM support_conversations WHERE id = ${conversationId} FOR UPDATE`);
       if (!existing) {
-        if (found.userId && (await tx.execute<{ n: number }>(sql`SELECT ${openCount(found.userId)} AS n`)).rows[0]!.n >= OPEN_CONVERSATIONS) throw limitReached();
-        const { rows: [row] } = await tx.execute<Row>(sql`WITH c AS (
-            INSERT INTO support_conversations(id, channel, thread_id, user_id, pending_address, verification, evidence, mode)
-            VALUES (${conversationId}, 'email', ${found.threadId}, ${found.userId}, ${found.from}, ${found.verification}, ${JSON.stringify(found.evidence)}::jsonb, ${found.mode}) RETURNING ${columns}
-          ), logged AS (${audit(sql`c`, details)}) SELECT * FROM c`);
+        const { rows: [row] } = await tx.execute<Row>(sql`INSERT INTO support_conversations(id, channel, thread_id, pending_address, verification, evidence, mode)
+          VALUES (${conversationId}, 'email', ${found.threadId}, ${found.from}, ${found.verification}, ${JSON.stringify(found.evidence)}::jsonb, ${found.mode}) RETURNING ${columns}`);
         return { row: row!, created: true };
       }
       if (existing.channel !== 'email') throw new ApiError(409, 'SUPPORT_CONVERSATION_EXISTS', 'That conversation is a chat, not an email conversation.');
       if (existing.status === 'closed') throw new ApiError(409, 'SUPPORT_CONVERSATION_CLOSED', 'That conversation is closed. Give the message a conversation of its own.');
-      // One sender per conversation: another sender, or a message that no longer verifies as the bound person, gets a
-      // conversation of its own. A bound conversation is never rebound or downgraded.
+      // One sender per conversation: another sender gets a conversation of its own. One an earlier release bound to an
+      // account takes no new mail: it goes to a conversation of its own too.
       if (existing.pending_address !== found.from) throw new ApiError(409, 'SUPPORT_CONVERSATION_SENDER', 'This message is from another sender. Give it a conversation of its own.');
-      if (existing.user_id) {
-        if (found.userId !== existing.user_id) throw new ApiError(409, 'SUPPORT_CONVERSATION_MISMATCH', 'This message does not verify as the conversation’s customer. Give it a conversation of its own.');
-        return { row: existing, created: false };
-      }
-      if (found.userId && (await tx.execute<{ n: number }>(sql`SELECT ${openCount(found.userId)} AS n`)).rows[0]!.n >= OPEN_CONVERSATIONS) throw limitReached();
-      const { rows: [row] } = await tx.execute<Row>(sql`WITH c AS (
-          UPDATE support_conversations SET user_id = ${found.userId}, verification = ${found.verification}, mode = ${found.mode}, evidence = ${JSON.stringify(found.evidence)}::jsonb
-          WHERE id = ${conversationId} RETURNING ${columns}
-        ), logged AS (${audit(sql`c`, details)}) SELECT * FROM c`);
+      if (existing.user_id) throw new ApiError(409, 'SUPPORT_CONVERSATION_MISMATCH', 'This conversation was bound to an account. Give the message a conversation of its own.');
+      // Each message is judged on its own: its evidence decides the reply to it.
+      const { rows: [row] } = await tx.execute<Row>(sql`UPDATE support_conversations SET verification = ${found.verification}, mode = ${found.mode}, evidence = ${JSON.stringify(found.evidence)}::jsonb
+        WHERE id = ${conversationId} RETURNING ${columns}`);
       return { row: row!, created: false };
     });
-    log('info', { code: 'SUPPORT_CONVERSATION_REGISTERED', conversationId, channel: 'email', mode: outcome.row.mode });
+    log('info', { code: 'SUPPORT_CONVERSATION_REGISTERED', conversationId, channel: 'email', mode: outcome.row.mode, details });
     return c.json(view(outcome.row, outcome.created), outcome.created ? 201 : 200);
   });
 
@@ -235,44 +231,6 @@ export function registerSupportConversations(app: App) {
   });
 
   // ---------- the customer's own session ----------
-  const Claimed = z.object({ id: z.string(), mode: Mode });
-  app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'post', path: '/v1/support-conversations/{id}/claim', operationId: 'claimSupportConversation',
-    description: `Continue an emailed support request signed in: binds the conversation to you when your verified email is the address that wrote to ${productName} support. Anyone else gets 404.`,
-    request: { params: ConversationParam }, responses: { 200: response(Claimed), ...errors } }), async c => {
-    if (!c.env.config.multiTenant) return notFound('Endpoint');
-    // Like accepting an invitation: a signed-in person whose session's verified email is still theirs, with or without a
-    // workspace, from the dashboard's own origin. Never a bearer credential (refused inside) or the support platform.
-    if (c.env.platformCaller) throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' });
-    const { verifiedDashboardUser, requireDashboardOrigin } = await import('./dashboard-auth.js');
-    const { userId } = await verifiedDashboardUser(c.env, c.req.raw.headers, true);
-    requireDashboardOrigin(c.env, c.req.raw);
-    const conversationId = c.req.valid('param').id;
-    const context = { ...auditContext(c), actor: { type: 'member' as const, id: userId, userId, via: 'dashboard' as const } };
-    const claimed = await c.env.db.transaction(async tx => {
-      await admit(tx, userId);
-      // One binding, once: the row is locked, then changed only while it is still open, unbound and pending this
-      // person's current verified address. A claim that lost the race answers only if it is already theirs.
-      const { rows: [target] } = await tx.execute<Row>(sql`SELECT ${columns} FROM support_conversations WHERE id = ${conversationId} AND channel = 'email' AND status <> 'closed' FOR UPDATE`);
-      if (!target) return null;
-      if (target.user_id) return target.user_id === userId ? { id: target.id, mode: target.mode } : null;
-      const { rows: [row] } = await tx.execute<{ id: string | null; mode: z.infer<typeof Mode> | null; matches: boolean }>(sql`WITH me AS (
-          SELECT id, lower(email) AS email FROM nightmail_users WHERE id = ${userId} AND email_verified AND email IS NOT NULL
-        ), claimed AS (
-          UPDATE support_conversations s SET user_id = me.id, verification = 'signin', evidence = s.evidence || jsonb_build_object('claimedAt', now()),
-            mode = CASE WHEN EXISTS (SELECT FROM workspace_members WHERE user_id = me.id) THEN 'member' ELSE 'non_member' END
-          FROM me WHERE s.id = ${conversationId} AND s.channel = 'email' AND s.status <> 'closed' AND s.user_id IS NULL AND lower(s.pending_address) = me.email
-            AND ${openCount(sql`me.id`)} < ${OPEN_CONVERSATIONS} RETURNING s.id, s.mode
-        ), logged AS (${auditInsert(context, { action: 'support.claim', workspaceId: null, target: { type: 'support_conversation', id: conversationId }, ticketRef: conversationId, internal: true },
-          { where: sql`EXISTS (SELECT FROM claimed)` })})
-        SELECT (SELECT id FROM claimed) AS id, (SELECT mode FROM claimed) AS mode, EXISTS (SELECT FROM me WHERE me.email = lower(${target.pending_address})) AS matches`);
-      if (row?.id) return { id: row.id, mode: row.mode! };
-      if (row?.matches) throw limitReached();
-      return null;
-    });
-    if (!claimed) return notFound('Support conversation');
-    return c.json(claimed!, 200);
-  });
-
   app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'post', path: '/v1/support-conversations/{id}/content-access', operationId: 'shareSupportConversationContent',
     description: `Let ${productName} support read message content (email bodies) in your support chat’s workspace, for that chat only. Only the person the chat is for, while a member there.`,
     request: { params: ConversationParam }, responses: { 200: response(z.object({ id: z.string(), contentWorkspaceId: z.string() })), ...errors } }), async c => {
